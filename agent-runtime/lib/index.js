@@ -175,7 +175,7 @@ var AgentRuntime = class extends Service {
 			this.scopes.set(request.sessionId, scope);
 			let handle;
 			try {
-				const agentPreset = parent.session.header.agentPreset;
+				const agentPreset = request.agentPreset ?? parent.session.header.agentPreset;
 				handle = await this.ctx.agents.create({
 					sessionId: request.sessionId,
 					meta: {

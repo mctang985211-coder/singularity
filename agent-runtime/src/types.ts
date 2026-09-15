@@ -36,6 +36,12 @@ export interface SpawnRequest {
   readonly name: string
   readonly prompt: readonly ContentBlock[]
   readonly agentOptions?: AgentOptions
+  /**
+   * Preset id mounted for the child, overriding the inherit-the-parent
+   * default. Same semantics as {@link RootRequest.agentPreset}; a missing
+   * value keeps the parent's preset.
+   */
+  readonly agentPreset?: string
   readonly signal?: AbortSignal
 }
 
