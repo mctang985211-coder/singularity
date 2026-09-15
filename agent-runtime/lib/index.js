@@ -93,7 +93,7 @@ var AgentRuntime = class extends Service {
 				agentOptions: this.ctx.agentDefaultModel.currentSelection(),
 				setup: async (agentCtx) => {
 					await this.ctx.agentPresets.mount(agentCtx, agentPreset);
-					agentCtx.permissionPresets.set(agentCtx.agent.session, "danger-full-access");
+					this.ctx.permissionPresets.set(agentCtx.agent.session, "danger-full-access");
 					agentCtx.systemPrompt.section({
 						name: "singularity:root",
 						order: 70,
@@ -130,7 +130,7 @@ var AgentRuntime = class extends Service {
 					},
 					setup: async (agentCtx) => {
 						await this.ctx.agentPresets.mount(agentCtx, agentPreset);
-						agentCtx.permissionPresets.set(agentCtx.agent.session, "danger-full-access");
+						this.ctx.permissionPresets.set(agentCtx.agent.session, "danger-full-access");
 						agentCtx.systemPrompt.section({
 							name: "singularity:root",
 							order: 70,
@@ -189,7 +189,7 @@ var AgentRuntime = class extends Service {
 					signal: request.signal,
 					setup: async (agentCtx) => {
 						await this.ctx.agentPresets.mount(agentCtx, agentPreset);
-						agentCtx.permissionPresets.set(agentCtx.agent.session, "danger-full-access");
+						this.ctx.permissionPresets.set(agentCtx.agent.session, "danger-full-access");
 					}
 				});
 			} catch (error) {

@@ -118,7 +118,7 @@ export class AgentRuntime extends Service {
         agentOptions: this.ctx.agentDefaultModel.currentSelection(),
         setup: async agentCtx => {
           await this.ctx.agentPresets.mount(agentCtx, agentPreset)
-          agentCtx.permissionPresets.set(agentCtx.agent!.session, 'danger-full-access')
+          this.ctx.permissionPresets.set(agentCtx.agent!.session, 'danger-full-access')
           agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText() })
           agentCtx.tools.restrict({ allow: ROOT_TOOLS })
         },
@@ -146,7 +146,7 @@ export class AgentRuntime extends Service {
           agentOptions: { ...this.ctx.agentDefaultModel.currentSelection(), ...request.agentOptions },
           setup: async agentCtx => {
             await this.ctx.agentPresets.mount(agentCtx, agentPreset)
-            agentCtx.permissionPresets.set(agentCtx.agent!.session, 'danger-full-access')
+            this.ctx.permissionPresets.set(agentCtx.agent!.session, 'danger-full-access')
             agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText() })
             agentCtx.tools.restrict({ allow: ROOT_TOOLS })
           },
@@ -196,7 +196,7 @@ export class AgentRuntime extends Service {
           signal: request.signal,
           setup: async agentCtx => {
             await this.ctx.agentPresets.mount(agentCtx, agentPreset)
-            agentCtx.permissionPresets.set(agentCtx.agent!.session, 'danger-full-access')
+            this.ctx.permissionPresets.set(agentCtx.agent!.session, 'danger-full-access')
           },
         })
       } catch (error) {
