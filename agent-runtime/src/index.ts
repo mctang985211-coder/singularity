@@ -17,7 +17,16 @@ import { DEFAULT_ROOT } from '@dangosys/dsh-singularity-layout'
 import type { Agent, AgentHandle, ContentBlock, GraphEvent, GraphScope, RootRequest, SpawnRequest } from './types.ts'
 import { rootPromptText } from './prompts/root.prompts.ts'
 
-const ROOT_TOOLS = ['graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve']
+const ROOT_TOOLS = [
+  'graph_spawn',
+  'graph_mark_ready',
+  'hitl_ask',
+  'hitl_approve',
+  'task_read',
+  'task_decompose',
+  'task_status',
+  'task_verify',
+]
 export type {
   AgentOptions,
   CanvasNode,
@@ -116,9 +125,9 @@ export class AgentRuntime extends Service {
       const handle = await this.ctx.agents.resume({
         resumeSessionId: sessionId,
         agentOptions: this.ctx.agentDefaultModel.currentSelection(),
-        setup: async agentCtx => {
+        setup: async (agentCtx, agent) => {
           await this.ctx.agentPresets.mount(agentCtx, agentPreset)
-          this.ctx.permissionPresets.set(agentCtx.agent!.session, 'danger-full-access')
+          this.ctx.permissionPresets.set(agent.session, 'danger-full-access')
           agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText() })
           agentCtx.tools.restrict({ allow: ROOT_TOOLS })
         },
@@ -144,9 +153,9 @@ export class AgentRuntime extends Service {
           sessionId: request.sessionId,
           meta: { cwd: request.cwd, agentPreset },
           agentOptions: { ...this.ctx.agentDefaultModel.currentSelection(), ...request.agentOptions },
-          setup: async agentCtx => {
+          setup: async (agentCtx, agent) => {
             await this.ctx.agentPresets.mount(agentCtx, agentPreset)
-            this.ctx.permissionPresets.set(agentCtx.agent!.session, 'danger-full-access')
+            this.ctx.permissionPresets.set(agent.session, 'danger-full-access')
             agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText() })
             agentCtx.tools.restrict({ allow: ROOT_TOOLS })
           },
@@ -189,14 +198,22 @@ export class AgentRuntime extends Service {
       let handle: AgentHandle
       try {
         const agentPreset = request.agentPreset ?? parent.session.header.agentPreset!
+        const parentHeader = parent.session.header
         handle = await this.ctx.agents.create({
           sessionId: request.sessionId,
-          meta: { cwd: parent.session.header.cwd, agentPreset },
+          meta: {
+            cwd: parentHeader.cwd,
+            agentPreset,
+            parentSession: parentHeader.id,
+            isSeeded: false,
+            origin: 'subagent',
+            delegationDepth: (parentHeader.delegationDepth ?? 0) + 1,
+          },
           agentOptions: { ...this.ctx.agentDefaultModel.currentSelection(), ...request.agentOptions },
           signal: request.signal,
-          setup: async agentCtx => {
+          setup: async (agentCtx, agent) => {
             await this.ctx.agentPresets.mount(agentCtx, agentPreset)
-            this.ctx.permissionPresets.set(agentCtx.agent!.session, 'danger-full-access')
+            this.ctx.permissionPresets.set(agent.session, 'danger-full-access')
           },
         })
       } catch (error) {

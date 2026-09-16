@@ -1,0 +1,3 @@
+- insert:
+    - id: task
+      name: '@dangosys/dsh-singularity-task'

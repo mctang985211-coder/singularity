@@ -13,6 +13,8 @@ import { cleanPromptText } from '@dangosys/dsh-env-builder'
 import type {} from '@dangosys/dsh-singularity-graph'
 import type {} from '@dangosys/dsh-singularity-layout'
 import type {} from '@dangosys/dsh-singularity-agent-runtime'
+import type {} from '@dangosys/dsh-singularity-task-runtime'
+import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import type { CreateGraphRequest, GraphArchive, GraphRecord, GraphsEvent, GraphsSnapshot } from './types.ts'
 import { GraphsState } from './service/state.ts'
 import { setupPromptText } from './prompts/setup.prompts.ts'
@@ -45,6 +47,8 @@ function nextGraphId(existing: readonly string[]): string {
 }
 
 export class GraphsService extends Service {
+  // taskRuntime is resolved lazily at create() time: task-runtime injects
+  // graphs, so a hard inject here would deadlock the plugin loader.
   static inject = ['sessionPersistence', 'graph', 'layout', 'agentRuntime', 'envBuilder']
   private readonly ready: Promise<void>
   private readonly storeId = SessionId('graphs-registry')
@@ -162,6 +166,15 @@ export class GraphsService extends Service {
           scope: { graphStoreId, layoutStoreId },
         })
         rootAgentId = handle.agent.id
+        const taskRuntime = (this.ctx.get?.('taskRuntime') ?? this.ctx.taskRuntime) as Context['taskRuntime'] | undefined
+        if (taskRuntime === undefined) {
+          throw new Error('graphs: taskRuntime service is not loaded; cannot create the root task')
+        }
+        await taskRuntime.createRootTask(
+          rootTaskStoreId(handle.agent.id),
+          { objective: name, rootSessionId: handle.agent.id },
+          'graphs',
+        )
         this.ctx.envBuilder.store.attachSession(envId, handle.agent.id)
         attached = { envId, sessionId: handle.agent.id }
         this.ctx.envBuilder.store.select(envId)

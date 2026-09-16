@@ -65,6 +65,12 @@ importers:
       '@dangosys/dsh-singularity-graphs':
         specifier: workspace:*
         version: link:../graphs
+      '@dangosys/dsh-singularity-task':
+        specifier: workspace:*
+        version: link:../task
+      '@dangosys/dsh-singularity-task-runtime':
+        specifier: workspace:*
+        version: link:../task-runtime
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: link:../../../thirdparty/deepseek-harness/vendor/cordis
@@ -114,6 +120,15 @@ importers:
       '@dangosys/dsh-singularity-map':
         specifier: workspace:*
         version: link:../map
+      '@dangosys/dsh-singularity-task':
+        specifier: workspace:*
+        version: link:../task
+      '@dangosys/dsh-singularity-task-runtime':
+        specifier: workspace:*
+        version: link:../task-runtime
+      '@dangosys/dsh-singularity-verifier':
+        specifier: workspace:*
+        version: link:../verifier
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: link:../../../thirdparty/deepseek-harness/vendor/cordis
@@ -218,6 +233,12 @@ importers:
       '@dangosys/dsh-singularity-layout':
         specifier: workspace:*
         version: link:../layout
+      '@dangosys/dsh-singularity-task':
+        specifier: workspace:*
+        version: link:../task
+      '@dangosys/dsh-singularity-task-runtime':
+        specifier: workspace:*
+        version: link:../task-runtime
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: link:../../../thirdparty/deepseek-harness/vendor/cordis
@@ -301,6 +322,83 @@ importers:
       vite:
         specifier: ^7.3.1
         version: 7.3.6(@types/node@22.20.1)(jiti@2.7.0)(lightningcss@1.32.0)
+
+  task:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: link:../../../thirdparty/deepseek-harness/vendor/cordis
+        version: link:../../../thirdparty/deepseek-harness/vendor/cordis
+      '@deepseek-ai/dsh-session':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/core/session
+        version: link:../../../thirdparty/deepseek-harness/packages/core/session
+      '@deepseek-ai/dsh-session-persistence':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/session/session-persistence
+        version: link:../../../thirdparty/deepseek-harness/packages/session/session-persistence
+      '@types/node':
+        specifier: ^22.20.0
+        version: 22.20.1
+      tsdown:
+        specifier: ^0.15.0
+        version: 0.15.12(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.9.0
+        version: 5.9.3
+
+  task-runtime:
+    dependencies:
+      '@dangosys/dsh-singularity-task':
+        specifier: workspace:*
+        version: link:../task
+    devDependencies:
+      '@dangosys/dsh-singularity-agent-runtime':
+        specifier: link:../agent-runtime
+        version: link:../agent-runtime
+      '@dangosys/dsh-singularity-graphs':
+        specifier: link:../graphs
+        version: link:../graphs
+      '@deepseek-ai/cordis':
+        specifier: link:../../../thirdparty/deepseek-harness/vendor/cordis
+        version: link:../../../thirdparty/deepseek-harness/vendor/cordis
+      '@deepseek-ai/dsh-agent':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/core/agent
+        version: link:../../../thirdparty/deepseek-harness/packages/core/agent
+      '@deepseek-ai/dsh-session':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/core/session
+        version: link:../../../thirdparty/deepseek-harness/packages/core/session
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../thirdparty/deepseek-harness/vendor/schemastery
+        version: link:../../../thirdparty/deepseek-harness/vendor/schemastery
+      '@types/node':
+        specifier: ^22.20.0
+        version: 22.20.1
+      tsdown:
+        specifier: ^0.15.0
+        version: 0.15.12(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.9.0
+        version: 5.9.3
+
+  verifier:
+    dependencies:
+      '@dangosys/dsh-singularity-task':
+        specifier: workspace:*
+        version: link:../task
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: link:../../../thirdparty/deepseek-harness/vendor/cordis
+        version: link:../../../thirdparty/deepseek-harness/vendor/cordis
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../thirdparty/deepseek-harness/vendor/schemastery
+        version: link:../../../thirdparty/deepseek-harness/vendor/schemastery
+      '@types/node':
+        specifier: ^22.20.0
+        version: 22.20.1
+      tsdown:
+        specifier: ^0.15.0
+        version: 0.15.12(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.9.0
+        version: 5.9.3
 
 packages:
 

@@ -1,0 +1,3 @@
+- insert:
+    - id: task-runtime
+      name: '@dangosys/dsh-singularity-task-runtime'

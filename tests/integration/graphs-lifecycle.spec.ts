@@ -64,13 +64,20 @@ function harness() {
   }
   const detach = vi.spyOn(store, 'detachSession')
   const deleteEnv = vi.spyOn(store, 'delete')
+  const taskRuntime = {
+    createRootTask: vi.fn(async (_storeId: string, _options: { objective: string; rootSessionId: string }, _actor: string) => ({
+      taskId: 'task-root',
+      runId: 'run-root',
+    })),
+  }
   ctx.provide('sessionPersistence', { list: async () => [], create: async () => handle } as never)
   ctx.provide('envBuilder', { store } as never)
   ctx.provide('graph', graph as never)
   ctx.provide('layout', layout as never)
   ctx.provide('agentRuntime', runtime as never)
+  ctx.provide('taskRuntime', taskRuntime as never)
   const service = new GraphsService(ctx)
-  return { ctx, service, store, events, agents, append, runtime, graph, layout, detach, deleteEnv }
+  return { ctx, service, store, events, agents, append, runtime, graph, layout, detach, deleteEnv, taskRuntime }
 }
 
 describe('graphs creation lifecycle', () => {
@@ -87,7 +94,7 @@ describe('graphs creation lifecycle', () => {
   })
 
   it('uses the environment cwd and sends setup only after registry persistence completes', async () => {
-    const { service, store, append, events, runtime } = harness()
+    const { service, store, append, events, runtime, taskRuntime } = harness()
     const persisted = Promise.withResolvers<void>()
     append.mockImplementationOnce(async records => {
       await persisted.promise
@@ -106,6 +113,11 @@ describe('graphs creation lifecycle', () => {
         sessionId: graph.rootSessionId,
         scope: { graphStoreId: graph.graphStoreId, layoutStoreId: graph.layoutStoreId },
       }),
+    )
+    expect(taskRuntime.createRootTask).toHaveBeenCalledExactlyOnceWith(
+      `sg-t-${graph.rootSessionId}`,
+      { objective: graph.name, rootSessionId: graph.rootSessionId },
+      'graphs',
     )
     expect(events[0]).toMatchObject({ type: 'graphs/event', data: { kind: 'graph/add', graph } })
     expect(store.get(graph.envId).sessionIds).toEqual([graph.rootSessionId])

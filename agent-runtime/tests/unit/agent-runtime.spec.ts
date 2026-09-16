@@ -33,6 +33,7 @@ function context(roots: readonly SessionId[], status: 'idle' | 'running' = 'idle
         mounted.push(args)
       },
     },
+    permissionPresets: { set: vi.fn() },
     agents: {
       create: async (options: { sessionId: SessionId }) => {
         created.push(options.sessionId)
@@ -88,7 +89,9 @@ async function spawnContext() {
   const runtime = new AgentRuntime(state.ctx as never)
   const scope = { graphStoreId: 'graph', layoutStoreId: 'layout' }
   await runtime.ensureRoot(id('root'), scope)
-  Object.assign(state.root, { session: { header: { cwd: '/environment', agentPreset: 'standard' } } })
+  Object.assign(state.root, {
+    session: { header: { id: id('root'), cwd: '/environment', agentPreset: 'standard' } },
+  })
   const live = new Map<string, Agent>([['root', state.root]])
   const nodes = [{ id: id('root'), name: 'Root', status: 'idle' as const }]
   const dispose = vi.fn(async (sessionId: string) => {
@@ -251,11 +254,13 @@ describe('AgentRuntime root lifecycle', () => {
     const state = context([id('root')])
     const runtime = new AgentRuntime(state.ctx as never)
     await runtime.ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
-    Object.assign(state.root, { session: { header: { cwd: '/environment', agentPreset: 'standard' } } })
+    Object.assign(state.root, {
+      session: { header: { id: id('root'), cwd: '/environment', agentPreset: 'standard' } },
+    })
     const order: string[] = []
     const followup = vi.fn(() => order.push('prompt'))
     const child = { id: id('child'), followup }
-    const create = vi.fn(async (_options: { setup: (ctx: unknown) => Promise<void> }) => ({
+    const create = vi.fn(async (_options: { setup: (ctx: unknown, agent: unknown) => Promise<void> }) => ({
       agent: child,
       dispose: async () => {},
     }))
@@ -277,16 +282,54 @@ describe('AgentRuntime root lifecycle', () => {
       name: 'worker',
       prompt: [{ type: 'text', text: 'work' }],
     })
-    expect(create).toHaveBeenCalledWith(
-      expect.objectContaining({ meta: { cwd: '/environment', agentPreset: 'standard' }, setup: expect.any(Function) }),
-    )
-    const setPermission = vi.fn()
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      meta: {
+        cwd: '/environment',
+        agentPreset: 'standard',
+        parentSession: id('root'),
+        isSeeded: false,
+        origin: 'subagent',
+        delegationDepth: 1,
+      },
+      setup: expect.any(Function),
+    }))
     const childSession = {}
-    const childCtx = { agent: { session: childSession }, permissionPresets: { set: setPermission } }
-    await create.mock.calls[0][0].setup(childCtx)
-    expect(setPermission).toHaveBeenCalledExactlyOnceWith(childSession, 'danger-full-access')
+    const childCtx = {}
+    await create.mock.calls[0][0].setup(childCtx, { session: childSession })
+    expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(childSession, 'danger-full-access')
     expect(order).toEqual(['topology', 'bind', 'prompt'])
     expect(followup).toHaveBeenCalledOnce()
+  })
+
+  test('stamps a spawned child with its parent lineage and one delegation level deeper', async () => {
+    const state = context([id('root')])
+    const runtime = new AgentRuntime(state.ctx as never)
+    await runtime.ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
+    Object.assign(state.root, {
+      session: { header: { id: id('root'), cwd: '/environment', agentPreset: 'standard', delegationDepth: 2 } },
+    })
+    const child = { id: id('child'), followup: vi.fn() }
+    const create = vi.fn(async () => ({ agent: child, dispose: async () => {} }))
+    Object.assign(state.ctx.agents, { get: () => state.root, create })
+    Object.assign(state.ctx.graph, { commitIn: async () => {} })
+    Object.assign(state.ctx, { parallel: async () => {} })
+
+    await runtime.spawn(state.root, {
+      sessionId: id('child'),
+      name: 'worker',
+      prompt: [{ type: 'text', text: 'work' }],
+    })
+
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      meta: {
+        cwd: '/environment',
+        agentPreset: 'standard',
+        parentSession: id('root'),
+        isSeeded: false,
+        origin: 'subagent',
+        delegationDepth: 3,
+      },
+    }))
   })
 
   test('coalesces concurrent resumes and rejects a changed scope', async () => {
@@ -327,19 +370,26 @@ describe('AgentRuntime root lifecycle', () => {
     ])
     const restrict = vi.fn()
     const section = vi.fn()
-    const setPermission = vi.fn()
     const session = {}
     const agentCtx = {
-      agent: { session },
-      permissionPresets: { set: setPermission },
       tools: { restrict },
       systemPrompt: { section },
     }
-    await (state.resumeOptions[0] as { setup: (ctx: unknown) => Promise<void> }).setup(agentCtx)
+    const agent = { session }
+    await (state.resumeOptions[0] as { setup: (ctx: unknown, agent: unknown) => Promise<void> }).setup(agentCtx, agent)
     expect(state.mounted).toEqual([[agentCtx, 'standard']])
-    expect(setPermission).toHaveBeenCalledExactlyOnceWith(session, 'danger-full-access')
+    expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(session, 'danger-full-access')
     expect(restrict).toHaveBeenCalledWith({
-      allow: ['graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve'],
+      allow: [
+        'graph_spawn',
+        'graph_mark_ready',
+        'hitl_ask',
+        'hitl_approve',
+        'task_read',
+        'task_decompose',
+        'task_status',
+        'task_verify',
+      ],
     })
     expect(section).toHaveBeenCalledWith({
       name: 'singularity:root',
@@ -376,16 +426,14 @@ describe('AgentRuntime root lifecycle', () => {
     ])
     const restrict = vi.fn()
     const section = vi.fn()
-    const setPermission = vi.fn()
     const session = {}
     const agentCtx = {
-      agent: { session },
-      permissionPresets: { set: setPermission },
       tools: { restrict },
       systemPrompt: { section },
     }
-    await (state.createOptions[0] as { setup: (ctx: unknown) => Promise<void> }).setup(agentCtx)
-    expect(setPermission).toHaveBeenCalledExactlyOnceWith(session, 'danger-full-access')
+    const agent = { session }
+    await (state.createOptions[0] as { setup: (ctx: unknown, agent: unknown) => Promise<void> }).setup(agentCtx, agent)
+    expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(session, 'danger-full-access')
     expect(state.added).toEqual([['graph', { id: id('root'), name: 'Singularity', status: 'idle' }, true]])
   })
 })

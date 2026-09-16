@@ -1,0 +1,121 @@
+import { execFileSync } from 'node:child_process'
+import { mkdtemp, readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { isAbsolute, join } from 'node:path'
+import { describe, expect, test } from 'vitest'
+import type { AcceptanceCriterion, VerifyRequest } from '../../../task/src/types.ts'
+import { CommandVerifier } from '../../src/command-verifier.ts'
+
+function criterion(overrides: Partial<AcceptanceCriterion> = {}): AcceptanceCriterion {
+  return {
+    criterionId: 'c1',
+    description: 'exits zero',
+    verificationMode: 'deterministic',
+    requiredEvidence: [],
+    mandatory: true,
+    ...overrides,
+  }
+}
+
+async function setup() {
+  const evidenceRoot = await mkdtemp(join(tmpdir(), 'verifier-evidence-'))
+  const cwd = await mkdtemp(join(tmpdir(), 'verifier-cwd-'))
+  const verifier = new CommandVerifier(evidenceRoot)
+  const request = (criteria: AcceptanceCriterion[], timeoutMs?: number): VerifyRequest => ({
+    taskId: 't1',
+    runId: 'r1',
+    criteria,
+    cwd,
+    logDir: join(evidenceRoot, 'sg-t-root', 'r1'),
+    timeoutMs,
+  })
+  return { evidenceRoot, cwd, verifier, request }
+}
+
+describe('CommandVerifier', () => {
+  test('supports executable modes only', async () => {
+    const { verifier } = await setup()
+    expect(verifier.supports('deterministic')).toBe(true)
+    expect(verifier.supports('simulation')).toBe(true)
+    expect(verifier.supports('measurement')).toBe(true)
+    expect(verifier.supports('review')).toBe(false)
+    expect(verifier.supports('formal')).toBe(false)
+    expect(verifier.supports('composite')).toBe(false)
+  })
+
+  test('exit code 0 passes and merges stdout with stderr into a relative-referenced log', async () => {
+    const { evidenceRoot, verifier, request } = await setup()
+    const [result] = await verifier.verify(request([
+      criterion({ command: 'node -e "process.stdout.write(\'out\'); process.stderr.write(\'err\'); process.exit(0)"' }),
+    ]))
+    expect(result.status).toBe('pass')
+    expect(result.exitCode).toBe(0)
+    expect(result.verifierId).toBe('command')
+    expect(result.logRef).toBe('sg-t-root/r1/c1.log')
+    expect(isAbsolute(result.logRef!)).toBe(false)
+    const log = await readFile(join(evidenceRoot, result.logRef!), 'utf8')
+    expect(log).toContain('out')
+    expect(log).toContain('err')
+  })
+
+  test('non-zero exit code fails', async () => {
+    const { verifier, request } = await setup()
+    const [result] = await verifier.verify(request([criterion({ command: 'node -e "process.exit(1)"' })]))
+    expect(result.status).toBe('fail')
+    expect(result.exitCode).toBe(1)
+    expect(result.logRef).toBe('sg-t-root/r1/c1.log')
+  })
+
+  test('timeout kills the command and reports inconclusive', async () => {
+    const { verifier, request } = await setup()
+    const [result] = await verifier.verify(request(
+      [criterion({ command: 'node -e "setTimeout(() => {}, 30000)"' })],
+      200,
+    ))
+    expect(result.status).toBe('inconclusive')
+    expect(result.details).toContain('timeout')
+    expect(result.exitCode).toBeUndefined()
+  })
+
+  test('missing command is inconclusive and writes no log', async () => {
+    const { verifier, request } = await setup()
+    const [result] = await verifier.verify(request([criterion()]))
+    expect(result.status).toBe('inconclusive')
+    expect(result.details).toBe('criterion has no command')
+    expect(result.logRef).toBeUndefined()
+  })
+
+  test('criterion ids are sanitized for log file names', async () => {
+    const { verifier, request } = await setup()
+    const [result] = await verifier.verify(request([
+      criterion({ criterionId: 'build/test:one', command: 'node -e "process.exit(0)"' }),
+    ]))
+    expect(result.logRef).toBe('sg-t-root/r1/build_test_one.log')
+  })
+
+  test('a short timeout kills the command tree the shell forked, not just the shell', async () => {
+    const { verifier, request } = await setup()
+    const started = Date.now()
+    const [result] = await verifier.verify(request([criterion({ command: `${SLEEP_MARKER} && true` })], 300))
+    const elapsedMs = Date.now() - started
+
+    expect(result.status).toBe('inconclusive')
+    expect(result.details).toBe('timeout after 300ms')
+    expect(result.exitCode).toBeUndefined()
+    expect(elapsedMs).toBeLessThan(2000)
+    expect(liveProcesses(SLEEP_MARKER)).toEqual([])
+  })
+})
+
+/** A duration no other process shares, so the `ps` sweep cannot match a bystander. */
+const SLEEP_MARKER = 'sleep 4.183'
+
+function liveProcesses(marker: string): string[] {
+  try {
+    return execFileSync('ps', ['-eo', 'args'], { encoding: 'utf8' })
+      .split('\n')
+      .filter(line => line.includes(marker))
+  } catch {
+    return []
+  }
+}

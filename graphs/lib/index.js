@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SESSION_FORMAT_VERSION, SessionId, SessionSeq } from "@deepseek-ai/dsh-session";
 import { cleanPromptText } from "@dangosys/dsh-env-builder";
+import { rootTaskStoreId } from "@dangosys/dsh-singularity-task";
 
 //#region src/service/state.ts
 function copy(value) {
@@ -220,6 +221,12 @@ var GraphsService = class extends Service {
 					}
 				});
 				rootAgentId = handle.agent.id;
+				const taskRuntime = this.ctx.get?.("taskRuntime") ?? this.ctx.taskRuntime;
+				if (taskRuntime === void 0) throw new Error("graphs: taskRuntime service is not loaded; cannot create the root task");
+				await taskRuntime.createRootTask(rootTaskStoreId(handle.agent.id), {
+					objective: name,
+					rootSessionId: handle.agent.id
+				}, "graphs");
 				this.ctx.envBuilder.store.attachSession(envId, handle.agent.id);
 				attached = {
 					envId,

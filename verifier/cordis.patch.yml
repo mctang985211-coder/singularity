@@ -1,0 +1,3 @@
+- insert:
+    - id: verifier
+      name: '@dangosys/dsh-singularity-verifier'

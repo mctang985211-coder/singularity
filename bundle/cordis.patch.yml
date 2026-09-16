@@ -7,6 +7,12 @@
       name: '@dangosys/dsh-singularity-graphs'
     - id: layout
       name: '@dangosys/dsh-singularity-layout'
+    - id: task
+      name: '@dangosys/dsh-singularity-task'
+    - id: verifier
+      name: '@dangosys/dsh-singularity-verifier'
+    - id: task-runtime
+      name: '@dangosys/dsh-singularity-task-runtime'
     - id: agent-runtime
       name: '@dangosys/dsh-singularity-agent-runtime'
     - id: singularity-agent

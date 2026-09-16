@@ -33,7 +33,9 @@
   },
   "dependencies": {
     "@dangosys/dsh-singularity-agent-runtime": "workspace:*",
-    "@dangosys/dsh-singularity-graphs": "workspace:*"
+    "@dangosys/dsh-singularity-graphs": "workspace:*",
+    "@dangosys/dsh-singularity-task": "workspace:*",
+    "@dangosys/dsh-singularity-task-runtime": "workspace:*"
   },
   "license": "Apache-2.0",
   "devDependencies": {
