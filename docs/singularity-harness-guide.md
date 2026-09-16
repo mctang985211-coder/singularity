@@ -299,6 +299,16 @@ Evidence → Review → FailureLocalization → mutation proposal；分 L0–L3 
 细4 §22–27（ReviewRecord / 维度 / Diagnosis / lineage graph 形态）。实现上保持**轻**：每个 run 终态写一条
 ReviewRecord（无评分），失败才写 `localizedCause`，消费方现阶段只有人。
 
+**能力（capability）的交付形态（已裁决 2026-09-17）**：所有能力**都构建为独立的 MCP server**，供"认为自己需要 verify 的节点"按需消费；
+**以前的 verify 类插件（`ball-designer` / `chip-designer` / `verify-runner`）只作参考**——它们属老旧架构，已移出 harness 到
+`/home/ROXY/code/bb_work/legacy-harness-plugins/`（保留 prompt 供参考）。因此 `task-runtime` 现有能力表（含指向 `bb-verify` preset 的三条）
+**暂不改动**：现在还没到用 BB 验证 singularity 运行能力的阶段，那张表只是占位 + 参考，将来接 MCP server 时再重写。
+
+**采纳的上游 v3 能力（已裁决 2026-09-17）**：① **system prompt 作为 surface 节点 0、以 in-history 追加、每步重投影**
+（补 §4.2 缺口 6「契约每轮重注入 / 防 compaction 丢弃」；实施前先实测本网关是否接受中段 `role: system`）；
+② **持久化类型变更纪律**（照抄上游的 `persistence-schema.json` 指纹 + `persistence-changes/**` + 校验脚本，给我们四类自定义事件建登记）。
+其余 v3 新特性（`present`、`/export`、`mcp-resources`、`auto-review`、SSH 执行世界、终端控制器）列为备选，按需再上。
+
 ---
 
 ## 5. 怎么做（实现参考）
@@ -313,7 +323,7 @@ ReviewRecord（无评分），失败才写 `localizedCause`，消费方现阶段
 | 工具集与 system prompt 组装 | **agent preset**（内置 `standard` / `ptc` / `minimal` / `cordis`） | `agentPresets.mount(agentCtx, id)`；`default: standard` 已配在 web bundle |
 | 一次性委派（无验收） | `subagent`（自包含 prompt，返回结果） | 需要"做完就行"的活，不要上图 |
 | 批量扇出 / 多角度审计 | `workflow`（JS 编排脚本） | 脚本只有 agent / pipeline / parallel / phase / log |
-| 多轮 fresh-agent 迭代 | `ralph`（共享 workspace，结构化报告跨轮） | 仅当人明确要求时 |
+| 多轮 fresh-agent 迭代 | `ralph`（共享 workspace，结构化报告跨轮） | 仅当人明确要求时；**新版默认关**（base bundle 与 `standard` preset 都写 `disabled: true`，`packages/bundle/base/cordis.patch.yml:426-431`），要用得在 `$DSH_HOME/cordis.patch.yml` 或 `--patch` overlay 里加 `- id: tool-ralph` / `disabled: false` |
 | 后台任务 | `job_list / job_output(wait) / job_kill` + `ctx.jobs.start()` | 完成走 in-session 通知，不要轮询 |
 | 会话检索 / 追踪 / 回放 | `ctx.sessionQuery` 服务已挂（精确读 / 标题 / 血缘 trace 可用），但 base bundle 以 `openAt: never` 关闭了全文检索 | `packages/bundle/base/cordis.patch.yml:120-134` 管全文检索；5 个 `session_*` 模型工具已由 web profile patch 挂上（`config.yml` 文档 1 的 `tool-session-query` insert 行，按包路径挂），落在全局工具层：worker 直接可见，root 被 ROOT_TOOLS 白名单挡住。要开全文检索就改 `session-query-sqlite` 的 `openAt`。历史是 append-only 日志推导出来的，别另存对话历史 |
 | 长上下文 | `compaction-basic`（0.8/0.16）+ tool-result pruner + `/compact` | 别自己写摘要；契约 / 证据的正本不在 chat（在 task store / EvidenceStore），但**每轮重注入未实现**——见 §2.6.3 与 §4.2 缺口 6 |
@@ -324,7 +334,7 @@ ReviewRecord（无评分），失败才写 `localizedCause`，消费方现阶段
 | 目标 / 计划 / 待办 | `create_goal` / `/goal`（+ goal-round-driver 自动续跑）、`/plan`、`todo_write` | todo **无 owner / 依赖 / 验收**，不能当任务系统 |
 | 插件与配置 | profile + bundle patch（**按 row id 整段替换 config**，无深合并）+ `config.yml` 两文档 | `./dsh web --dump-config` 看真实插件树 |
 | 软依赖服务 | `ctx.get('name')` | 永远不要用 `ctx.<name>` 读未声明的服务 |
-| 启动环境管理 | `./dsh`（sync-api → api.env / settings.yaml → patch → UA 代理 → `NODE_USE_ENV_PROXY=1`） | 别在别处复制网关事实 |
+| 启动环境管理 | `./dsh`（sync-api → api.env / settings.yaml → patch → env 注入 → `NODE_USE_ENV_PROXY=1`） | 别在别处复制网关事实。本地 UA 代理只在 `config.yml` 的 `api:` 块写着 `proxy:` 时才起（`dsh:106-126`）；现在没写，运行时直连 upstream、经宿主网络代理（`https_proxy`）出网 |
 
 **必须自建、且只有这一小块**：Task / TaskRun 状态机、AcceptanceCriterion、Verifier 注册表、
 EvidenceBundle、capability 表 + admission、依赖驱动的顺序级联、TaskHandoff、composite 父验收。
@@ -362,7 +372,7 @@ root: task_read → task_decompose（reason + children：objective / acceptance 
 人: 需要决策时回答 hitl_ask / hitl_approve（root）或 ask_user_question（worker）
 ```
 
-监控与取证：任务事件在 `.dsh/sessions/_no-cwd/sg-t-<rootSessionId>/session.v2.jsonl.zstd`；
+监控与取证：任务事件在 `.dsh/sessions/_no-cwd/sg-t-<rootSessionId>/session.v3.jsonl.zstd`；
 验收日志在 `.dsh/task-evidence/<storeId>/<runId>/<criterionId>.log`；拓扑在 `/singularity/graph?graphId=…`。
 
 | 场景 | 能力名 | 验收命令（cwd=`<owner>/repo`） | 必需条件 |
@@ -385,7 +395,7 @@ run-verilator-regression / analyze-waveform / research`。**`bash`、`filesystem
 判"缺口"；worker 的 bash 由 `standard` 预设保证（实跑：worker 工具目录 77 个含 bash，且真在调用）。
 一个未登记的名字 = "这张表里没有" → 缺口 → 整批准入拒绝（除非该子任务声明 `decomposable: true`）。
 若将来真要接 `capability.tools` 授权，必须先有 `capability_list`：`tools.restrict` 对未知工具名**直接抛错**
-（`core/tools/src/index.ts:1081`），名字写错会让 worker 创建失败，比现在的整批拒绝更难排查。
+（`core/tools/src/index.ts:1094-1098`），名字写错会让 worker 创建失败，比现在的整批拒绝更难排查。
 `capability.skills` 同属空接缝：skill 目录只能按 preset / 自定义 root 分层，**没有按名字白名单裁 skill 的 API**
 （`skill/skill/src/index.ts:113-120`、`skill/skill-filesystem/src/index.ts:56-58`）。
 
@@ -486,7 +496,8 @@ fail-closed）。
 
 ### 5.6 上游升级注意（实测于 dsh-v0.1.3-alpha.2 → dsh-v0.1.6-alpha.1）
 
-升级 submodule 后走官方 `tools/scripts/install-all.sh` 重建即可，但有四处**必须**知道的差异：
+升级 submodule 后走官方 `tools/scripts/install-all.sh` 重建即可，但有若干处**必须**知道的差异（2026-09-17 按
+`c389f96bf3..0d1f50007f` 逐条重核，1–4 条仍成立）：
 
 1. **`llm-deepseek` 的协议默认值变了**：新版 `protocol` 默认 `messages`（打 `<baseURL>/messages`），而本网关只提供
    OpenAI 兼容的 `<baseURL>/chat/completions` → 症状是 `DeepSeek Messages request failed (404)`。
@@ -502,10 +513,43 @@ fail-closed）。
    → **旧的 v2 存储无法迁移**。处置：把含自定义事件的旧存储移出 `_dsh/sessions`（本次 69 个目录移到
    `.dsh/sessions-v2-legacy/`，可回退），让运行时从空状态起步；纯上游事件的会话日志不受影响、按需自动迁移。
    注意：我们的写入**已经带 `ignorable: true`**，所以**今后**的 v3 数据没有这个问题。
+5. **agent preset 的默认值不再是配置字面量**：`defaultId` 现在读 `selectionPolicy()`——settings 命名空间
+   `agent-presets` 的 `default` / `modeSelectionEnabled` 能盖掉 web bundle 里的 `default: standard`
+   （`packages/preset/agent-presets/src/index.ts:243-259`；web 把选择器本身也藏在这个 setting 后面）。
+   我们所有 spawn / createRoot 都显式传 id，所以只受"这个 id 不存在或坏了"影响：`mount()` 先 `resolve()`，
+   再对 `broken` 的预设抛错（`:365-410`、`:443-456`）。
+6. **启动严格性变了：可选插件坏了不再拖垮进程**。app-boot 只对 7 个 required entry id（`agent-loop` /
+   `webserver` / `modules` / `connection` / `headless-runner` / `acp` / `sdk-jsonrpc-server`）fail-closed，
+   其余"警告 + 继续"（`packages/boot/app-boot/src/index.ts:711-719,807-833`）。我们 profile 里绝大多数是自建
+   插件 → 一个实验插件坏掉时 3080 仍能起来；代价是**坏插件不再有响亮的失败**，要靠启动 warning 才看得见。
+7. **有 row id 被删/改名**：`code-runtime`（含 `-worker-thread`）→ `ptc-runtime` / `ptc-runtime-node`；
+   `workflow-worker-thread` → `workflow-ptc`；`e2b/*` 整族删除；`ui-sidebar-textpreview` →
+   `ui-sidebar-documentpreview`。patch 里写一个**不存在的 id 不会报错**：`applyEntryPatches` 只**警告并跳过**
+   （`vendor/include/src/index.ts:110-114`；`name` 与目标行不一致同样跳过，`:117-120`），只有 `insert:` 才会加行。
+   所以旧 overlay 里残留这些 id = 静默失效（只在启动 warning 里露一次），配合上面第 6 条"可选插件不再 fail-loud"
+   更容易漏。已核本仓 `config.yml`：只有 `tool-session-query` 一个 insert 行，不含上述 id。
+8. **新增两个我们直接能用的底座件**：`mcp-resources`（base bundle 已挂，给模型 3 个工具
+   `list_mcp_resource_templates / list_mcp_resources / read_mcp_resource`；`packages/bundle/base/cordis.patch.yml:471-472`、
+   `docs/tool-catalog.md:49-127`）；`present`（声明交付文件，`standard` / `ptc` / `cordis` preset 都挂；
+   `packages/preset/agent-presets/presets/standard/agent.cordis.yml:261-262`）。DX 上多了一条
+   `--dump-default-config`：只打印 bundle 层，不含用户层与 `--patch` overlay（`apps/cli/src/args.ts:148-149`）。
+9. **system prompt 现在是 surface 节点 0，它的改动能以 in-history 追加**：`system/message` 是 surface 事件，
+   agent-loop 每步重新投影（`packages/core/agent-loop/src/agent.ts:361-372`、
+   `packages/core/agent-loop/src/runtime-context.ts:56-98`）；surface 被换掉（含 compaction）后
+   `startsSeries` 成立，投影会把节点 0 重写成当前渲染结果、清空其后的 system 节点——即 **system prompt
+   不会被压缩吃掉**。这正是 §4.2 缺口 6 缺的那条机制：把 TaskSpec / 判据摘要做成 worker 的
+   `systemPrompt.section()`，由 loop 每步重渲染。**但**"in-history 追加"只在路由声明
+   `systemPromptUpdate: 'in-history'` 时成立（`packages/llm/llm-deepseek/src/config.ts:77`、
+   `packages/llm/llm-deepseek/src/protocols/messages/serialize.ts:56`），本网关走 `chat-completions`，
+   是否被网关接受**未实测**——先在 smoke 会话上验，别直接上 root。
 
 **残留（已上报未修）**：新版 `CreateAgentOptions` 新增 `parentAgent`（"omit for a root Agent"），我们的 `spawn`
 没传 → 上游按 `agents.roots()` / `isOwnedBy` 做门禁的插件（schedule / goal / user-questions）会把 worker 当顶层 agent。
-最小修法：spawn 时给 `ctx.agents.create` 传 `parentAgent: parent`。
+但**"最小修法 = 传 `parentAgent: parent`"要带上后半句**：`userQuestions.ask` 对"被别的 live agent 拥有的"调用方
+直接抛 `DELEGATED_CALLER`（`packages/interaction/user-questions/src/index.ts:101-107`），DSH 自己的子 agent 路径
+正是传 `parentAgent`（`packages/subagent/subagent-in-process-driver/src/index.ts:136`）。所以传了之后 **worker
+会失去 `ask_user_question`**（§5.5 现在把它算作 worker 的 HITL 通道）。要么先补 §4.2 缺口 2 的 `ask_parent`，
+要么把两者当一件事一起改。
 
 ---
 
@@ -517,7 +561,7 @@ fail-closed）。
 （bash / read / write / edit / grep / glob / skill / subagent / jobs / …）。
 **服务**：`task`（任务 store）、`verifier`（验收注册表）、`taskRuntime`（编排）、`graphs`、`agentRuntime`、
 `envBuilder`、`agentPresets`、`jobs`、`sessionQuery`、`permissions`、`sandbox`。
-**关键路径**：任务事件 `.dsh/sessions/_no-cwd/sg-t-*/session.v2.jsonl.zstd`；证据 `.dsh/task-evidence/`；
+**关键路径**：任务事件 `.dsh/sessions/_no-cwd/sg-t-*/session.v3.jsonl.zstd`；证据 `.dsh/task-evidence/`；
 环境 `environment/projectN/<owner>/<repo>`；网关事实 `config.yml` 第二文档。
 
 **素材文件**：`/home/ROXY/code/ref/docs/` 下五份（`初始想法.md` 唯一人类亲笔、权重最高；`细化想法1.md`
