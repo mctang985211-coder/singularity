@@ -169,6 +169,7 @@ var LayoutService = class extends Service {
 			writes: Promise.resolve()
 		};
 		entry.ready = this.open(entry);
+		entry.ready.then(void 0, () => {});
 		this.entries.set(id, entry);
 		return entry;
 	}

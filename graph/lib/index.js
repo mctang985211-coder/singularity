@@ -275,6 +275,7 @@ var GraphService = class extends Service {
 			writes: Promise.resolve()
 		};
 		store.ready = this.open(store);
+		store.ready.then(void 0, () => {});
 		this.stores.set(id, store);
 		return store;
 	}

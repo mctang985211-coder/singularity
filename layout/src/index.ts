@@ -129,6 +129,13 @@ export class LayoutService extends Service {
       writes: Promise.resolve(),
     }
     entry.ready = this.open(entry)
+    // The configured default store opens before any caller exists, so nothing is
+    // awaiting this promise yet. Keep a failed open observable to the caller that
+    // finally needs the store instead of letting it float to the process-level
+    // unhandled-rejection handler, which the harness treats as a fatal load
+    // failure: an unmigratable predecessor generation of one store must not
+    // decide whether the whole harness boots.
+    entry.ready.then(undefined, () => {})
     this.entries.set(id, entry)
     return entry
   }

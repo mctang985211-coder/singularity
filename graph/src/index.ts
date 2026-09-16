@@ -163,6 +163,13 @@ export class GraphService extends Service {
       writes: Promise.resolve(),
     }
     store.ready = this.open(store)
+    // The configured default store opens before any caller exists, so nothing is
+    // awaiting this promise yet. Keep a failed open observable to the caller that
+    // finally needs the store instead of letting it float to the process-level
+    // unhandled-rejection handler, which the harness treats as a fatal load
+    // failure: an unmigratable predecessor generation of one store must not
+    // decide whether the whole harness boots.
+    store.ready.then(undefined, () => {})
     this.stores.set(id, store)
     return store
   }
