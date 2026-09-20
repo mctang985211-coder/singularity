@@ -139,13 +139,15 @@ export const WORKER_BASELINE_LABELS: readonly string[] = [
  * `task_verify`) — L0 is the "every node, whatever it works on" layer, so a
  * worker keeps it whatever its capabilities declare.
  *
- * They are listed here individually, unlike the labels above, because all four
+ * They are listed here individually, unlike the labels above, because these tools
  * are registered on the GLOBAL layer rather than a capability or preset plane
  * (`agent-singularity/src/index.ts`): the grant filter only keeps an inherited
  * tool the allow-list names (`agent-runtime/src/grants.ts:99`), and there is no
  * label that could expand to them.
  *
- * Every entry cites the prompt line that needs it:
+ * Every entry cites the prompt or tool contract that needs it:
+ * - `capability_list`: `task_decompose` asks callers to discover valid capability
+ *   names before proposing children, including recursively spawned workers.
  * - `task_decompose` — "Call `task_decompose` instead, with a `reason` and the child task list" (`handoff.ts:87`),
  *   and for a `leaf` worker whose deployment runs with `Config.allowRuntimeDecomposition` on,
  *   the runtime-split rule (`handoff.ts:127`) that opens the same tool to it.
@@ -166,7 +168,7 @@ export const WORKER_BASELINE_LABELS: readonly string[] = [
  * admitted is the runtime's decision, not the tool plane's
  * (`Config.allowRuntimeDecomposition`, `index.ts:DEFAULT_ALLOW_RUNTIME_DECOMPOSITION`).
  */
-export const WORKER_BASELINE_TOOLS: readonly string[] = ['task_read', 'task_status', 'task_decompose', 'task_verify']
+export const WORKER_BASELINE_TOOLS: readonly string[] = ['task_read', 'task_status', 'task_decompose', 'task_verify', 'capability_list']
 
 /**
  * Every real tool name a capability worker keeps on top of what its

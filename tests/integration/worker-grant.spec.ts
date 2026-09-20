@@ -214,10 +214,10 @@ describe('worker capability grants', () => {
     const child = await h.spawn(grantOf({ capabilities: [{ capability: 'design-ball', tools: ['read', 'write', 'edit'], skills: [] }] }))
 
     const names = h.visible(child)
-    for (const kept of ['read', 'write', 'edit', 'bash', 'glob', 'grep', 'skill', 'task_decompose']) {
+    for (const kept of ['read', 'write', 'edit', 'bash', 'glob', 'grep', 'skill', 'task_decompose', 'capability_list']) {
       expect(names, kept).toContain(kept)
     }
-    for (const stripped of ['evolution_decide', 'evolution_propose', 'graph_spawn', 'hitl_ask', 'capability_list', 'task_review_pack', 'session_search', 'web_fetch']) {
+    for (const stripped of ['evolution_decide', 'evolution_propose', 'graph_spawn', 'hitl_ask', 'task_review_pack', 'session_search', 'web_fetch']) {
       expect(names, stripped).not.toContain(stripped)
     }
     // The exact-read tools are baselined; this deployment's full-text search is not.
@@ -249,21 +249,21 @@ describe('worker capability grants', () => {
     expect(keptNames).not.toContain('task_review_pack')
   })
 
-  it('keeps the four task-machinery baseline tools and none of the graph, HITL, or evolution surface', async () => {
+  it('keeps capability discovery for recursive decomposition without granting graph, HITL, or evolution tools', async () => {
     const h = await harness()
     const names = h.visible(await h.spawn(grantOf()))
 
     // A worker's own prompt tells it to re-read its contract and the tree, re-decompose, and self-check.
-    for (const kept of ['task_read', 'task_status', 'task_decompose', 'task_verify']) {
+    for (const kept of ['task_read', 'task_status', 'task_decompose', 'task_verify', 'capability_list']) {
       expect(names, kept).toContain(kept)
     }
     // Nodes grow by task_decompose through admission, never by reaching for the graph plane:
     // graph_spawn skips admission and returns the child's prose, and the platform surface
-    // (HITL, capability listing, review/diagnosis, evolution) stays the root's.
+    // (HITL, review/diagnosis, evolution) stays the root's.
     for (const stripped of [
       'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve',
       'evolution_propose', 'evolution_candidate', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
-      'capability_list', 'task_review_pack', 'task_diagnose',
+      'task_review_pack', 'task_diagnose',
     ]) {
       expect(names, stripped).not.toContain(stripped)
     }

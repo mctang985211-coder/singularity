@@ -1,5 +1,7 @@
 # Task Runtime Build Plan — 2026-09-16
 
+> Historical implementation plan. Its schemas, defaults, and out-of-scope list describe the 2026-09-16 build, not the current checkout. Current direction: [working guide](singularity-harness-guide.md); current tickets: [build plan](2026-09-20-vrtc-code-change-plan.md). Do not reimplement these completed tickets or use their inline types as the current API.
+
 Source documents (read first, they are the contract):
 
 - RFC (frozen): `/home/ROXY/code/ref/docs/细化想法4.md` — Architecture Freeze RFC v1.0
@@ -7,7 +9,7 @@ Source documents (read first, they are the contract):
 
 This plan decomposes the RFC's P0–P3 into engineering tickets for the
 `packages/singularity` workspace. It is the single handoff document for all
-implementation agents. KISS applies: build exactly what the RFC §47 MVP loop
+implementation agents for that historical round. KISS applied to the RFC §47 MVP loop
 needs, nothing more.
 
 ## 1. Scope

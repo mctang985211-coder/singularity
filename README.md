@@ -26,7 +26,7 @@ pnpm dsh plugin --profile web add /absolute/path/to/packages/singularity/bundle
 | `@dangosys/dsh-singularity-task` | task contract / instances / runs + event-sourced store |
 | `@dangosys/dsh-singularity-verifier` | verifier registry + EvidenceBundle |
 | `@dangosys/dsh-singularity-task-runtime` | orchestration / admission / capability / handoff / MCP server registry (spawn-level per-env mounts) |
-| `@dangosys/dsh-singularity-agent` | root tools: graph_spawn / mark_ready / HITL + task_read / capability_list / task_decompose / task_status / task_verify / task_review_pack / task_review_agent / task_diagnose + 9 evolution_* (propose / candidate / prepare / replay / gate / decide / apply / rollback / list) |
+| `@dangosys/dsh-singularity-agent` | root tools: graph_spawn / mark_ready / HITL + task_read / capability_list / task_decompose / task_status / task_verify / task_review_pack / task_review_agent / task_diagnose / escalate + 9 evolution_* (propose / candidate / prepare / replay / gate / decide / apply / rollback / list) |
 | `@dangosys/dsh-singularity-graph-web` | `/singularity/*` HTTP + SSE + map static |
 | `@dangosys/dsh-singularity-map` | xyflow map SPA + FocusPanel |
 | `@dangosys/dsh-singularity-canvas-view` | 对话 \| Singularity shell |
@@ -42,9 +42,11 @@ pnpm build
 
 ### Docs
 
-- `docs/singularity-harness-guide.md` — the working guide (what to build, current state, gaps).
-- `docs/2026-09-20-vrtc-code-change-plan.md` — temporary plan: code landing points for the VRTC-KISS gap rows (#20–#31 in the guide's §4.2).
-- `docs/persistence-changes/` — dated records for custom session-event changes.
+- [Working guide](docs/singularity-harness-guide.md): current direction, implementation limits, and Task/Skill responsibilities.
+- [Build plan](docs/2026-09-20-vrtc-code-change-plan.md): ordered tickets and acceptance criteria; updated 2026-09-21.
+- [Domain language](CONTEXT.md): Task, TaskRun, Capability, Skill, and Evidence.
+- [Historical guide](docs/history/2026-09-21-harness-guide-snapshot.md): old gap numbers and W/M execution records, not current build instructions.
+- [Persistence changes](docs/persistence-changes/README.md): custom session-event discipline.
 
 ### Persistence-type discipline
 
