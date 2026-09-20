@@ -37,8 +37,8 @@ async function mountAgent() {
   const approval = { request: vi.fn(async () => 'allowed-once') }
   const userQuestions = { ask: vi.fn(async () => ({ answers: [{ id: 'hitl-ask', selected: [], custom: 'buckyball' }] })) }
   const replayTask = vi.fn(async (_storeId: string, championTaskId: string, _options: unknown, _caller: string) => ({
-    taskId: 't-replay',
-    runId: 'r-replay',
+    taskId: `t-replay-${championTaskId}`,
+    runId: `r-replay-${championTaskId}`,
     status: 'verified',
     durationMs: 7,
     criteria: [{ criterionId: 'ac1-1', verdict: 'pass', command: 'true', exitCode: 0 }],
@@ -50,8 +50,8 @@ async function mountAgent() {
     ['agentRuntime', {}],
     ['task', {
       openStore: async () => ({
-        tasks: [{
-          taskId: 't-champ',
+        tasks: ['t-champ', 't-holdout'].map(taskId => ({
+          taskId,
           definitionRef: { taskType: 'subtask', version: 1 },
           parentTaskId: 't-root',
           objective: 'champion work',
@@ -60,18 +60,18 @@ async function mountAgent() {
           requestedCapabilities: ['research'],
           decompositionStatus: 'leaf',
           status: 'verified',
-          runIds: ['r-champ'],
+          runIds: [`r-${taskId}`],
           childTaskIds: [],
-        }],
-        reviews: [{
-          taskId: 't-champ',
-          runId: 'r-champ',
+        })),
+        reviews: ['t-champ', 't-holdout'].map(taskId => ({
+          taskId,
+          runId: `r-${taskId}`,
           outcome: 'verified',
           evidenceRefs: ['ev-champ'],
           anomalies: [],
           durationMs: 42,
           criteria: [{ criterionId: 'ac1-1', verdict: 'pass', command: 'true', exitCode: 0 }],
-        }],
+        })),
         evidence: [{ evidenceId: 'ev-champ' }],
         diagnoses: [], obligations: [],
       }),
@@ -331,7 +331,7 @@ it('drives a skill proposal to applied and rolledback through the plugin, produc
       mutation: { name: 'verify', content: '# new verify skill\n' },
     }, exec('root-1'))
     await prepare.execute({ proposalId: 'p-skill-1' }, exec('root-1'))
-    await replay.execute({ proposalId: 'p-skill-1', taskIds: ['t-champ'] }, exec('root-1'))
+    await replay.execute({ proposalId: 'p-skill-1', taskIds: ['t-champ'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))
     const gated = await gate.execute({
       proposalId: 'p-skill-1',
       targetFailureFixed: 'a', originalAcceptanceMaintained: 'b', existingRegressionMaintained: 'c',

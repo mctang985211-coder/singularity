@@ -1,5 +1,5 @@
 import { Context, Service } from "@deepseek-ai/cordis";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFile, cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -307,10 +307,11 @@ function compareReplaySides(champion, candidate) {
 		relation: "inconclusive"
 	};
 	const regressedCriterion = criteriaDiff.some((diff) => diff.champion === "pass");
+	const changedContract = criteriaDiff.some((diff) => diff.champion === void 0 || diff.candidate === void 0) || champion.criteria.some((before) => candidate.criteria.find((after) => after.criterionId === before.criterionId)?.command !== before.command);
 	return {
 		verdictMatch,
 		criteriaDiff,
-		relation: candidateRank < championRank || regressedCriterion ? "worse" : "not-worse"
+		relation: candidateRank < championRank || regressedCriterion ? "worse" : changedContract ? "inconclusive" : "not-worse"
 	};
 }
 /** The overall verdict over one group of comparisons: any regression wins; absent that, any inconclusive holds it back. */
@@ -318,16 +319,44 @@ function overallReplayVerdict(comparisons) {
 	if (comparisons.some((item) => item.relation === "worse")) return "worse";
 	if (comparisons.length === 0 || comparisons.some((item) => item.relation === "inconclusive")) return "inconclusive";
 	if (comparisons.every((item) => item.relation === "manual")) return "manual";
+	if (comparisons.some((item) => item.relation === "manual")) return "inconclusive";
 	return "not-worse";
 }
 function isRecord$2(value) {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
-function assertComparison(value, field) {
+function assertSide(value, field) {
+	if (!isRecord$2(value) || typeof value.taskId !== "string" || value.taskId.length === 0 || ![
+		"verified",
+		"failed",
+		"cancelled"
+	].includes(value.outcome) || !Array.isArray(value.criteria)) throw new Error(`evolution: replay report ${field} must carry a taskId, a valid outcome and criteria`);
+	const ids = /* @__PURE__ */ new Set();
+	for (const criterion of value.criteria) {
+		if (!isRecord$2(criterion) || typeof criterion.criterionId !== "string" || criterion.criterionId.length === 0 || ids.has(criterion.criterionId) || ![
+			"pass",
+			"fail",
+			"inconclusive"
+		].includes(criterion.verdict) || criterion.command !== void 0 && typeof criterion.command !== "string") throw new Error(`evolution: replay report ${field} has an invalid or duplicate criterion`);
+		ids.add(criterion.criterionId);
+	}
+	if (value.outcome === "verified" && ids.size === 0) throw new Error(`evolution: replay report ${field} verified outcome needs criterion evidence`);
+}
+function assertComparison(value, field, mode) {
 	if (!isRecord$2(value)) throw new Error(`evolution: replay report ${field} must be an object`);
 	if (typeof value.taskId !== "string" || value.taskId.length === 0) throw new Error(`evolution: replay report ${field}.taskId must be a non-empty string`);
 	if (!isRecord$2(value.champion) || typeof value.champion.outcome !== "string") throw new Error(`evolution: replay report ${field}.champion must carry an outcome`);
 	if (typeof value.relation !== "string" || !REPLAY_RELATIONS.includes(value.relation)) throw new Error(`evolution: replay report ${field}.relation must be one of ${REPLAY_RELATIONS.join(" / ")}`);
+	assertSide(value.champion, `${field}.champion`);
+	if (value.taskId !== value.champion.taskId) throw new Error(`evolution: replay report ${field} champion identity mismatch`);
+	if (mode === "manual") {
+		if (value.relation !== "manual" || value.candidate !== void 0) throw new Error(`evolution: replay report ${field} manual comparison cannot claim an executed candidate`);
+		return;
+	}
+	assertSide(value.candidate, `${field}.candidate`);
+	if (value.candidateTaskId !== value.candidate.taskId || value.candidate.taskId === value.taskId) throw new Error(`evolution: replay report ${field} candidate identity mismatch`);
+	const computed = compareReplaySides(value.champion, value.candidate);
+	if (value.relation !== computed.relation || value.verdictMatch !== computed.verdictMatch || JSON.stringify(value.criteriaDiff) !== JSON.stringify(computed.criteriaDiff)) throw new Error(`evolution: replay report ${field} comparison does not match its evidence`);
 }
 /**
 * Validate a report against the proposal it claims to serve. The v1 manual
@@ -351,11 +380,21 @@ function assertReplayReport(proposal, report) {
 	if (report.mode === "manual" && report.verdict !== "manual") throw new Error("evolution: a manual replay report must carry verdict \"manual\"");
 	if (report.mode === "executed" && report.verdict === "manual") throw new Error("evolution: an executed replay report cannot carry verdict \"manual\"");
 	if (!Array.isArray(report.observed)) throw new Error("evolution: replay report.observed must be an array");
-	report.observed.forEach((item, index) => assertComparison(item, `observed[${index}]`));
+	report.observed.forEach((item, index) => assertComparison(item, `observed[${index}]`, report.mode));
 	if (!isRecord$2(report.holdout) || typeof report.holdout.executed !== "boolean" || !Array.isArray(report.holdout.tasks)) throw new Error("evolution: replay report.holdout must be { executed: boolean, tasks: [] }");
-	report.holdout.tasks.forEach((item, index) => assertComparison(item, `holdout.tasks[${index}]`));
+	report.holdout.tasks.forEach((item, index) => assertComparison(item, `holdout.tasks[${index}]`, report.mode));
 	if (report.holdout.executed !== report.holdout.tasks.length > 0) throw new Error("evolution: replay report.holdout.executed must agree with its task list (empty = not run)");
 	if (report.mode === "executed" && report.observed.length === 0) throw new Error("evolution: an executed replay report needs at least one observed task comparison");
+	const comparisons = [...report.observed, ...report.holdout.tasks];
+	const taskIds = comparisons.map((item) => item.taskId);
+	const candidateIds = comparisons.flatMap((item) => item.candidate === void 0 ? [] : [item.candidate.taskId]);
+	if (new Set(taskIds).size !== taskIds.length || new Set(candidateIds).size !== candidateIds.length || candidateIds.some((id) => taskIds.includes(id))) throw new Error("evolution: replay report observed and holdout must use distinct champion and candidate tasks");
+	if (report.mode === "executed" && report.verdict !== overallReplayVerdict(comparisons)) throw new Error("evolution: replay report verdict does not match its comparisons");
+}
+/** A human approval cannot substitute for two independent, non-regressing replay groups. */
+function assertReplayPromotable(report) {
+	if (report.mode !== "executed") throw new Error("evolution: promotion requires executed replay evidence, not a manual report");
+	for (const [name, tasks] of [["observed", report.observed], ["holdout", report.holdout.tasks]]) if (overallReplayVerdict(tasks) !== "not-worse") throw new Error(`evolution: promotion requires non-empty ${name} replay with no regressions or inconclusive results`);
 }
 
 //#endregion
@@ -990,11 +1029,13 @@ var EvolutionService = class extends Service {
 		const rel = `${sandbox}/replay-report.json`;
 		const abs = resolveWithin(this.root, rel);
 		await mkdir(dirname(abs), { recursive: true });
-		await writeFile(abs, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+		const content = `${JSON.stringify(report, null, 2)}\n`;
+		await writeFile(abs, content, "utf8");
 		await this.append({
 			formatVersion: 1,
 			kind: "replayed",
 			proposalId,
+			reportDigest: createHash("sha256").update(content).digest("hex"),
 			report: rel,
 			verdict: report.verdict,
 			tasks: [...report.observed.map((item) => ({
@@ -1027,6 +1068,7 @@ var EvolutionService = class extends Service {
 			const report = current.replayed.report;
 			if (!answers.regressionEvidenceRefs.includes(report)) throw new Error(`evolution: a replayed candidate's regression evidence must cite the replay report "${report}"`);
 			if (!existsSync(resolveWithin(this.root, report))) throw new Error(`evolution: the replay report "${report}" no longer exists under the ledger root`);
+			await this.readRecordedReplay(current);
 		}
 		for (const ref of answers.regressionEvidenceRefs) {
 			if (current.replayed !== void 0 && ref === current.replayed.report) continue;
@@ -1058,6 +1100,7 @@ var EvolutionService = class extends Service {
 		if (!EVOLUTION_DECISIONS.includes(decision)) throw new Error(`evolution: decision must be one of ${EVOLUTION_DECISIONS.join(" / ")}`);
 		nonEmpty(approvalRef, "approvalRef");
 		if (note !== void 0) nonEmpty(note, "note");
+		if (decision === "PROMOTE") await this.checkPromotion(proposalId);
 		await this.append({
 			formatVersion: 1,
 			kind: "decided",
@@ -1088,6 +1131,7 @@ var EvolutionService = class extends Service {
 	async apply(proposalId, actor, approvalRef) {
 		const current = await this.assertNext(proposalId, "applied");
 		nonEmpty(approvalRef, "approvalRef");
+		await this.checkPromotion(proposalId);
 		const outcome = await this.writeProduction(current, "apply");
 		await this.append({
 			formatVersion: 1,
@@ -1102,6 +1146,21 @@ var EvolutionService = class extends Service {
 			...outcome,
 			proposal: await this.get(proposalId)
 		};
+	}
+	/** Preflight for tools before asking for approval; mutation methods repeat the check. */
+	async checkPromotion(proposalId) {
+		const proposal = await this.get(proposalId);
+		if (proposal.prepared?.mechanical !== true) return;
+		assertReplayPromotable(await this.readRecordedReplay(proposal));
+	}
+	async readRecordedReplay(proposal) {
+		const replay = proposal.replayed;
+		if (replay?.reportDigest === void 0) throw new Error("evolution: replay has no report digest; run a new candidate replay before promotion");
+		const content = await readFile(resolveWithin(this.root, replay.report), "utf8");
+		if (createHash("sha256").update(content).digest("hex") !== replay.reportDigest) throw new Error("evolution: replay report changed after recording; candidate must be evaluated again");
+		const report = JSON.parse(content);
+		assertReplayReport(proposal, report);
+		return report;
 	}
 	/**
 	* Move applied → rolledback: undo the apply. Champion captured → restore the
@@ -1411,10 +1470,12 @@ var EvolutionService = class extends Service {
 					if (typeof record.report !== "string" || record.report.length === 0) throw new Error(`evolution: replayed record for "${record.proposalId}" has no report path`);
 					if (!REPLAY_VERDICTS.includes(record.verdict)) throw new Error(`evolution: replayed record for "${record.proposalId}" has unknown verdict "${String(record.verdict)}"`);
 					if (!Array.isArray(record.tasks) || record.tasks.some((item) => !isRecord$1(item) || typeof item.taskId !== "string" || !REPLAY_RELATIONS.includes(item.relation) || typeof item.holdout !== "boolean")) throw new Error(`evolution: replayed record for "${record.proposalId}" has a malformed task summary`);
+					if (record.reportDigest !== void 0 && !/^[a-f0-9]{64}$/.test(record.reportDigest)) throw new Error(`evolution: replayed record for "${record.proposalId}" has an invalid report digest`);
 					current.replayed = {
 						report: record.report,
 						verdict: record.verdict,
-						tasks: record.tasks.map((item) => ({ ...item }))
+						tasks: record.tasks.map((item) => ({ ...item })),
+						...record.reportDigest === void 0 ? {} : { reportDigest: record.reportDigest }
 					};
 					break;
 				case "gated":
@@ -1766,12 +1827,12 @@ function sessionId$14(exec) {
 }
 /**
 * Why a decided PROMOTE proposal still cannot be applied, per boundary
-* (§2.7.7 / §2.9.2): L4 and the non-materialized surfaces are human-run.
+* L4 and non-materialized surfaces have no production executor yet.
 */
 function manualGuidance(proposal) {
-	if (proposal.level === "L4") return "L4 harness evolution is human-run by rule: a human edits the harness itself; evolution_apply never applies L4";
-	if (!APPLYABLE_TARGET_TYPES.includes(proposal.targetType)) return proposal.targetType === "task_definition" ? "task_definition has no production registry to write (the task store keeps denormalized instances only): a human edits the definition source; evolution_apply never applies it" : `${proposal.targetType} mutations are bookkeeping-only (mechanical: false): a human edits that surface by hand; the ledger keeps the record`;
-	if (proposal.prepared?.sandbox == null) return "this candidate carried no structured mutation, so nothing was materialized: apply it as a manual human edit";
+	if (proposal.level === "L4") return "L4 harness evolution has no executor in evolution_apply: supervisor implementation and validation must precede human review through the harness change workflow";
+	if (!APPLYABLE_TARGET_TYPES.includes(proposal.targetType)) return proposal.targetType === "task_definition" ? "task_definition has no production registry to write (the task store keeps denormalized instances only): a definition executor is still required before supervisor candidates can be promoted here" : `${proposal.targetType} mutations are bookkeeping-only (mechanical: false): an executor and target-specific validation are still required; the ledger keeps the record`;
+	if (proposal.prepared?.sandbox == null) return "this candidate carried no structured mutation, so nothing was materialized: create a new structured candidate, evaluate it, then request human review";
 	return null;
 }
 /** How fast each applied type takes effect, stated honestly in the output. */
@@ -1785,7 +1846,7 @@ function effectNote(proposal) {
 function defineEvolutionApplyTool(ctx) {
 	return defineTool({
 		name: "evolution_apply",
-		description: "Apply a PROMOTE-decided EvolutionProposal to production (status: applied). Only the three mechanical types (skill / agent_preset / capability) at L1–L3 with a materialized sandbox; task_definition, the five bookkeeping-only types, and L4 stay manual and are refused with instructions. Always asks a human through the native approval seam first — a second gate after evolution_decide — naming every production path it will write; a reject, cancel, or unavailable answerer writes nothing and leaves the proposal decided. skill and agent_preset take effect on write; a capability row is mirrored into the running registry and persists in config.yml. evolution_rollback restores the champion snapshot.",
+		description: "Apply a PROMOTE-decided EvolutionProposal to production (status: applied). Only the three mechanical types (skill / agent_preset / capability) at L1–L3 with a materialized sandbox; task_definition, the five bookkeeping-only types, and L4 lack executors and are refused with instructions. Always asks a human through the native approval seam first — a second gate after evolution_decide — naming every production path it will write; a reject, cancel, or unavailable answerer writes nothing and leaves the proposal decided. skill and agent_preset take effect on write; a capability row is mirrored into the running registry and persists in config.yml. evolution_rollback restores the champion snapshot.",
 		parameters: { proposalId: {
 			type: "string",
 			required: true,
@@ -1809,6 +1870,11 @@ function defineEvolutionApplyTool(ctx) {
 			if (proposal.decision !== "PROMOTE") return `evolution_apply rejected: proposal ${proposal.proposalId} was decided ${proposal.decision}; only a PROMOTE decision can be applied`;
 			const manual = manualGuidance(proposal);
 			if (manual !== null) return `evolution_apply rejected: ${manual}`;
+			try {
+				await ctx.evolution.checkPromotion(proposal.proposalId);
+			} catch (error) {
+				return `evolution_apply rejected: ${error instanceof Error ? error.message : String(error)}`;
+			}
 			const targets = applyTargets(proposal, ctx.evolution);
 			const reason = [
 				`Evolution apply for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,
@@ -1949,6 +2015,11 @@ function defineEvolutionDecideTool(ctx) {
 				return `evolution_decide rejected: ${error instanceof Error ? error.message : String(error)}`;
 			}
 			if (proposal.status !== "gated") return `evolution_decide rejected: proposal ${proposal.proposalId} is ${proposal.status}; only a gated proposal can be decided`;
+			if (args.decision === "PROMOTE") try {
+				await ctx.evolution.checkPromotion(proposal.proposalId);
+			} catch (error) {
+				return `evolution_decide rejected: ${error instanceof Error ? error.message : String(error)}`;
+			}
 			const gate = proposal.gate;
 			const reason = [
 				`Evolution decision for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,

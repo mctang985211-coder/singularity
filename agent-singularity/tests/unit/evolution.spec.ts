@@ -16,7 +16,7 @@ import { defineEvolutionPrepareTool } from '../../src/tools/evolution-prepare.ts
 import { defineEvolutionProposeTool } from '../../src/tools/evolution-propose.ts'
 import { defineEvolutionReplayTool } from '../../src/tools/evolution-replay.ts'
 import { defineEvolutionRollbackTool } from '../../src/tools/evolution-rollback.ts'
-import { compareReplaySides, overallReplayVerdict } from '../../src/replay.ts'
+import { assertReplayReport, compareReplaySides, overallReplayVerdict } from '../../src/replay.ts'
 
 function fixtureCtx() {
   return { reflect: { provide: () => {} }, effect: () => {} } as never
@@ -64,13 +64,18 @@ function replayReport(proposalId: string, targetType: ProposeInput['targetType']
     observed: [{
       taskId: 't-champion',
       candidateTaskId: 't-candidate',
-      champion: { taskId: 't-champion', runId: 'r-champion', outcome: 'verified', criteria: [] },
-      candidate: { taskId: 't-candidate', runId: 'r-candidate', outcome: 'verified', criteria: [] },
+      champion: { taskId: 't-champion', runId: 'r-champion', outcome: 'verified', criteria: [{ criterionId: 'ac1', verdict: 'pass' }] },
+      candidate: { taskId: 't-candidate', runId: 'r-candidate', outcome: 'verified', criteria: [{ criterionId: 'ac1', verdict: 'pass' }] },
       verdictMatch: true,
       criteriaDiff: [],
       relation: 'not-worse',
     }],
-    holdout: { executed: false, tasks: [] },
+    holdout: overrides.mode === 'manual' ? { executed: false, tasks: [] } : { executed: true, tasks: [{
+      taskId: 't-holdout', candidateTaskId: 't-holdout-candidate',
+      champion: { taskId: 't-holdout', outcome: 'verified', criteria: [{ criterionId: 'ac1', verdict: 'pass' }] },
+      candidate: { taskId: 't-holdout-candidate', outcome: 'verified', criteria: [{ criterionId: 'ac1', verdict: 'pass' }] },
+      verdictMatch: true, criteriaDiff: [], relation: 'not-worse',
+    }] },
     verdict: 'not-worse',
     ...overrides,
   }
@@ -533,8 +538,9 @@ describe('EvolutionService prepared state machine', () => {
     expect(replayed.status).toBe('replayed')
     expect(replayed.replayed).toEqual({
       report: 'sandbox/s1/replay-report.json',
+      reportDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
       verdict: 'not-worse',
-      tasks: [{ taskId: 't-champion', relation: 'not-worse', holdout: false }],
+      tasks: [{ taskId: 't-champion', relation: 'not-worse', holdout: false }, { taskId: 't-holdout', relation: 'not-worse', holdout: true }],
     })
     expect(JSON.parse(await readFile(join(root, 'sandbox', 's1', 'replay-report.json'), 'utf8')).proposalId).toBe('s1')
     await svc.gate('s1', gateAnswers([evidenceFile, 'sandbox/s1/replay-report.json']), 'root-1')
@@ -1140,9 +1146,9 @@ describe('replay comparison', () => {
     expect(result.verdictMatch).toBe(false)
   })
 
-  it('an added or removed criterion is a diff without a regression', () => {
+  it('an added criterion makes the contract comparison inconclusive', () => {
     const result = compareReplaySides(base, { ...base, criteria: [{ criterionId: 'ac1', verdict: 'pass' }, { criterionId: 'ac2', verdict: 'pass' }] })
-    expect(result.relation).toBe('not-worse')
+    expect(result.relation).toBe('inconclusive')
     expect(result.verdictMatch).toBe(false)
     expect(result.criteriaDiff).toEqual([{ criterionId: 'ac2', candidate: 'pass' }])
   })
@@ -1220,7 +1226,8 @@ const replayOutcome = {
 describe('evolution_replay tool', () => {
   async function preparedProposal(targetType: 'capability' | 'skill' | 'task_definition' | 'agent_preset') {
     const { svc, root } = await serviceWithRoots()
-    const replayTask = vi.fn(async () => ({ ...replayOutcome }))
+    let replayCount = 0
+    const replayTask = vi.fn(async () => ({ ...replayOutcome, taskId: replayCount++ === 0 ? 't-cand' : `t-cand-${replayCount}` }))
     const { ctx } = replayToolCtx(svc, replayTask)
     const proposeTool = defineEvolutionProposeTool(ctx)
     const candidateTool = defineEvolutionCandidateTool(ctx)
@@ -1299,6 +1306,7 @@ describe('evolution_replay tool', () => {
     expect(saved.status).toBe('replayed')
     expect(saved.replayed).toEqual({
       report: `sandbox/${id}/replay-report.json`,
+      reportDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
       verdict: 'not-worse',
       tasks: [{ taskId: 't-champ', relation: 'not-worse', holdout: false }],
     })
@@ -1500,6 +1508,106 @@ async function walkToDecided(
   await svc.gate(input.proposalId, gateAnswers([`sandbox/${input.proposalId}/replay-report.json`]), 'root-1')
   await svc.decide(input.proposalId, 'PROMOTE', 'root-1', 'approval:call-0')
 }
+
+describe('replay evidence integrity and promotion', () => {
+  it.each([false, true])('reads historical no-digest ledgers; applied=%s preserves rollback only', async applied => {
+    const { svc, root, skillRoot, presetRoot, configFile } = await serviceWithProduction()
+    await mkdir(join(skillRoot, 'verify'), { recursive: true })
+    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), 'champion')
+    await walkToDecided(svc, skillProposal, { name: 'verify', content: 'candidate' })
+    if (applied) await svc.apply('s1', 'root-1', 'approval:apply')
+    // Simulate the historical schema in an isolated fixture, never rewrite a live ledger.
+    const path = join(root, 'proposals.jsonl')
+    const records = (await readFile(path, 'utf8')).trim().split('\n').map(line => {
+      const record = JSON.parse(line)
+      delete record.reportDigest
+      return JSON.stringify(record)
+    })
+    await writeFile(path, `${records.join('\n')}\n`)
+    const reopened = new EvolutionService(fixtureCtx(), { root, skillRoot, presetRoot, configFile })
+    expect((await reopened.get('s1')).replayed!.reportDigest).toBeUndefined()
+    if (applied) {
+      await reopened.rollback('s1', 'root-1', 'approval:rollback')
+      expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe('champion')
+    } else {
+      await expect(reopened.apply('s1', 'root-1', 'approval:apply')).rejects.toThrow('no report digest')
+      expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe('champion')
+    }
+  })
+
+  it.each(['relation', 'verdict', 'identity', 'duplicate criterion', 'overlap'])(
+    'rejects inconsistent report %s', field => {
+      const report = replayReport('s1', 'skill')
+      const observed = report.observed[0]!
+      if (field === 'relation') observed.candidate.criteria[0]!.verdict = 'fail'
+      if (field === 'verdict') report.verdict = 'worse'
+      if (field === 'identity') observed.candidateTaskId = 'forged'
+      if (field === 'duplicate criterion') observed.candidate.criteria.push({ ...observed.candidate.criteria[0]! })
+      if (field === 'overlap') report.holdout.tasks = [observed]
+      expect(() => assertReplayReport(skillProposal, report)).toThrow()
+    },
+  )
+
+  it('holds changed commands and omitted failed criteria inconclusive', () => {
+    const champion = { taskId: 'before', outcome: 'failed' as const, criteria: [{ criterionId: 'a', verdict: 'fail' as const, command: 'test' }] }
+    expect(compareReplaySides(champion, { ...champion, criteria: [] }).relation).toBe('inconclusive')
+    expect(compareReplaySides(champion, { ...champion, criteria: [{ ...champion.criteria[0]!, command: 'true' }] }).relation).toBe('inconclusive')
+    expect(overallReplayVerdict([{ relation: 'manual' }, { relation: 'not-worse' }])).toBe('inconclusive')
+  })
+
+  it.each(['missing holdout', 'regressing holdout', 'manual'])(
+    'blocks %s before human approval while allowing rejection', async scenario => {
+      const { svc } = await serviceWithProduction()
+      const { ctx, approval } = toolCtx(svc)
+      const input = scenario === 'manual' ? presetProposal : skillProposal
+      const id = input.proposalId
+      await svc.propose(input, 'root-1')
+      await svc.candidate(id, VERSION_SET, 'root-1', scenario === 'manual'
+        ? { presetId: 'bb-verify', files: [{ path: 'agent.md', content: 'new' }] }
+        : { name: 'verify', content: 'new' })
+      await svc.prepare(id, 'root-1')
+      const report = replayReport(id, input.targetType, scenario === 'manual'
+        ? { mode: 'manual', manualReason: 'executor unavailable', observed: [], verdict: 'manual' }
+        : scenario === 'missing holdout' ? { holdout: { executed: false, tasks: [] } } : {})
+      if (scenario === 'regressing holdout') {
+        const comparison = report.holdout.tasks[0]!
+        comparison.candidate.outcome = 'failed'
+        comparison.candidate.criteria[0]!.verdict = 'fail'
+        Object.assign(comparison, compareReplaySides(comparison.champion as never, comparison.candidate as never))
+        report.verdict = 'worse'
+      }
+      await svc.replay(id, 'root-1', report)
+      await svc.gate(id, gateAnswers([`sandbox/${id}/replay-report.json`]), 'root-1')
+      expect(await defineEvolutionDecideTool(ctx).execute({ proposalId: id, decision: 'PROMOTE' }, exec('root-1'))).toContain('rejected:')
+      expect(approval.request).not.toHaveBeenCalled()
+      expect((await svc.get(id)).status).toBe('gated')
+      await svc.decide(id, 'REJECT', 'root-1', 'approval:reject')
+      expect((await svc.get(id)).decision).toBe('REJECT')
+    },
+  )
+
+  it.each(['gate', 'decide', 'apply'])(
+    'rejects report replacement at %s, including after service reopen', async stage => {
+      const { svc, root, skillRoot, presetRoot, configFile } = await serviceWithProduction()
+      await mkdir(join(skillRoot, 'verify'), { recursive: true })
+      await writeFile(join(skillRoot, 'verify', 'SKILL.md'), 'champion')
+      await svc.propose(skillProposal, 'root-1')
+      await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: 'candidate' })
+      await svc.prepare('s1', 'root-1')
+      await svc.replay('s1', 'root-1', replayReport('s1', 'skill'))
+      const refs = ['sandbox/s1/replay-report.json']
+      if (stage !== 'gate') await svc.gate('s1', gateAnswers(refs), 'root-1')
+      if (stage === 'apply') await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:decide')
+      await appendFile(join(root, refs[0]!), '\n')
+      const reopened = new EvolutionService(fixtureCtx(), { root, skillRoot, presetRoot, configFile })
+      const action = stage === 'gate' ? reopened.gate('s1', gateAnswers(refs), 'root-1')
+        : stage === 'decide' ? reopened.decide('s1', 'PROMOTE', 'root-1', 'approval:decide')
+          : reopened.apply('s1', 'root-1', 'approval:apply')
+      await expect(action).rejects.toThrow('changed after recording')
+      expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe('champion')
+    },
+  )
+})
 
 /** Everything after the first `---` line — document 2 must survive every edit byte for byte. */
 function doc2(text: string): string {
@@ -2147,7 +2255,7 @@ describe('evolution_apply / evolution_rollback tools', () => {
 
     await walkToDecided(svc, { ...skillProposal, proposalId: 's-l4', level: 'L4' }, { name: 'verify', content: '# new\n' })
     expect((await applyTool.execute({ proposalId: 's-l4' }, exec('root-1'))) as string)
-      .toContain('L4 harness evolution is human-run by rule')
+      .toContain('L4 harness evolution has no executor')
 
     await walkToDecided(svc, proposal, { baseVersion: 'v3', definition: { objective: 'x' } }, { taskDefinition: null })
     expect((await applyTool.execute({ proposalId: 'p1' }, exec('root-1'))) as string)

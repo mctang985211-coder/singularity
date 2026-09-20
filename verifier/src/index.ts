@@ -180,6 +180,15 @@ export class VerifierRegistry extends Service {
       results = verifier instanceof CompositeVerifier
         ? await verifier.verifyIn(storeId, { ...request, criteria: [criterion] })
         : await verifier.verify({ ...request, criteria: [criterion] })
+      // Plugins cross a runtime boundary: their TypeScript return type is not validation.
+      const result = Array.isArray(results) && results.length === 1 ? results[0] : undefined
+      if (result === undefined || result === null || typeof result !== 'object'
+        || result.criterionId !== criterion.criterionId || result.verifierId !== verifier.id
+        || !['pass', 'fail', 'inconclusive'].includes(result.status)
+        || (result.unknownKind !== undefined
+          && (result.status !== 'inconclusive' || !['task', 'verifier'].includes(result.unknownKind)))) {
+        throw new Error(`verifier "${verifier.id}" must return exactly one valid result for criterion "${criterion.criterionId}" with its own verifierId`)
+      }
     } catch (error) {
       // The judge itself broke — a verifier-side unknown, never a task failure.
       return [{

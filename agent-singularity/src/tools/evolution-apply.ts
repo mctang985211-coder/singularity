@@ -16,19 +16,19 @@ function sessionId(exec: ToolRunContext): string {
 
 /**
  * Why a decided PROMOTE proposal still cannot be applied, per boundary
- * (§2.7.7 / §2.9.2): L4 and the non-materialized surfaces are human-run.
+ * L4 and non-materialized surfaces have no production executor yet.
  */
 function manualGuidance(proposal: EvolutionProposal): string | null {
   if (proposal.level === 'L4') {
-    return 'L4 harness evolution is human-run by rule: a human edits the harness itself; evolution_apply never applies L4'
+    return 'L4 harness evolution has no executor in evolution_apply: supervisor implementation and validation must precede human review through the harness change workflow'
   }
   if (!APPLYABLE_TARGET_TYPES.includes(proposal.targetType)) {
     return proposal.targetType === 'task_definition'
-      ? 'task_definition has no production registry to write (the task store keeps denormalized instances only): a human edits the definition source; evolution_apply never applies it'
-      : `${proposal.targetType} mutations are bookkeeping-only (mechanical: false): a human edits that surface by hand; the ledger keeps the record`
+      ? 'task_definition has no production registry to write (the task store keeps denormalized instances only): a definition executor is still required before supervisor candidates can be promoted here'
+      : `${proposal.targetType} mutations are bookkeeping-only (mechanical: false): an executor and target-specific validation are still required; the ledger keeps the record`
   }
   if (proposal.prepared?.sandbox == null) {
-    return 'this candidate carried no structured mutation, so nothing was materialized: apply it as a manual human edit'
+    return 'this candidate carried no structured mutation, so nothing was materialized: create a new structured candidate, evaluate it, then request human review'
   }
   return null
 }
@@ -51,7 +51,7 @@ export function defineEvolutionApplyTool(ctx: Context) {
     description:
       'Apply a PROMOTE-decided EvolutionProposal to production (status: applied). Only the three mechanical types ' +
       '(skill / agent_preset / capability) at L1–L3 with a materialized sandbox; task_definition, the five ' +
-      'bookkeeping-only types, and L4 stay manual and are refused with instructions. Always asks a human through the ' +
+      'bookkeeping-only types, and L4 lack executors and are refused with instructions. Always asks a human through the ' +
       'native approval seam first — a second gate after evolution_decide — naming every production path it will ' +
       'write; a reject, cancel, or unavailable answerer writes nothing and leaves the proposal decided. skill and ' +
       'agent_preset take effect on write; a capability row is mirrored into the running registry and persists in ' +
@@ -80,6 +80,11 @@ export function defineEvolutionApplyTool(ctx: Context) {
       }
       const manual = manualGuidance(proposal)
       if (manual !== null) return `evolution_apply rejected: ${manual}`
+      try {
+        await ctx.evolution.checkPromotion(proposal.proposalId)
+      } catch (error) {
+        return `evolution_apply rejected: ${error instanceof Error ? error.message : String(error)}`
+      }
       const targets = applyTargets(proposal, ctx.evolution)
       const reason = [
         `Evolution apply for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,

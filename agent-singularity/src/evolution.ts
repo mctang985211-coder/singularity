@@ -21,13 +21,14 @@
 
 import { appendFile, cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
 import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
 import type { ReplayRelation, ReplayReport, ReplayVerdict } from './replay.ts'
-import { assertReplayReport, REPLAY_RELATIONS, REPLAY_VERDICTS } from './replay.ts'
+import { assertReplayPromotable, assertReplayReport, REPLAY_RELATIONS, REPLAY_VERDICTS } from './replay.ts'
 import { editCapabilityRow, readCapabilityRowSource, restoreCapabilityRowSource } from './config-edit.ts'
 import type { CapabilityRowResult } from './config-edit.ts'
 
@@ -261,6 +262,8 @@ export type EvolutionRecord =
       formatVersion: 1
       kind: 'replayed'
       proposalId: string
+      /** SHA-256 of the report bytes. Historical records may lack it; those cannot newly promote. */
+      reportDigest?: string
       /** Report path relative to the ledger root (`sandbox/<proposalId>/replay-report.json`). */
       report: string
       /** Overall verdict: whether the candidate is not worse than the champion. */
@@ -332,6 +335,8 @@ export interface ApplyOutcome {
 
 /** Folded view of one `replayed` record. */
 export interface ReplayedView {
+  /** SHA-256 recorded at replay; required for new promotion of a mechanical candidate. */
+  reportDigest?: string
   /** Report path relative to the ledger root (`sandbox/<proposalId>/replay-report.json`). */
   report: string
   verdict: ReplayVerdict
@@ -857,11 +862,13 @@ export class EvolutionService extends Service {
     const rel = `${sandbox}/replay-report.json`
     const abs = resolveWithin(this.root, rel)
     await mkdir(dirname(abs), { recursive: true })
-    await writeFile(abs, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
+    const content = `${JSON.stringify(report, null, 2)}\n`
+    await writeFile(abs, content, 'utf8')
     await this.append({
       formatVersion: 1,
       kind: 'replayed',
       proposalId,
+      reportDigest: createHash('sha256').update(content).digest('hex'),
       report: rel,
       verdict: report.verdict,
       tasks: [
@@ -881,7 +888,7 @@ export class EvolutionService extends Service {
    * a path on disk (relative to the repo root or absolute) or an id the
    * caller-side resolver knows (task-store evidence). Existence only; nothing
    * here executes anything. A replayed proposal must additionally cite its
-   * replay report path, and that report must still exist in the sandbox.
+   * replay report path; its contents must match the recorded digest and schema.
    */
   async gate(
     proposalId: string,
@@ -892,7 +899,7 @@ export class EvolutionService extends Service {
     const current = await this.assertNext(proposalId, 'gated')
     validateGateAnswers(answers)
     // A mechanical mutation reaches the gate only through a replay; the gate
-    // must cite the replay report, and the report must still sit in the sandbox.
+    // must cite the same report that was validated and recorded at replay.
     if (current.replayed !== undefined) {
       const report = current.replayed.report
       if (!answers.regressionEvidenceRefs.includes(report)) {
@@ -901,6 +908,7 @@ export class EvolutionService extends Service {
       if (!existsSync(resolveWithin(this.root, report))) {
         throw new Error(`evolution: the replay report "${report}" no longer exists under the ledger root`)
       }
+      await this.readRecordedReplay(current)
     }
     for (const ref of answers.regressionEvidenceRefs) {
       // The replay report is ledger-root-relative; its existence was checked above.
@@ -936,6 +944,7 @@ export class EvolutionService extends Service {
     }
     nonEmpty(approvalRef, 'approvalRef')
     if (note !== undefined) nonEmpty(note, 'note')
+    if (decision === 'PROMOTE') await this.checkPromotion(proposalId)
     await this.append({
       formatVersion: 1,
       kind: 'decided',
@@ -967,6 +976,7 @@ export class EvolutionService extends Service {
   async apply(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome> {
     const current = await this.assertNext(proposalId, 'applied')
     nonEmpty(approvalRef, 'approvalRef')
+    await this.checkPromotion(proposalId)
     const outcome = await this.writeProduction(current, 'apply')
     await this.append({
       formatVersion: 1,
@@ -978,6 +988,27 @@ export class EvolutionService extends Service {
       at: new Date().toISOString(),
     })
     return { ...outcome, proposal: await this.get(proposalId) }
+  }
+
+  /** Preflight for tools before asking for approval; mutation methods repeat the check. */
+  async checkPromotion(proposalId: string): Promise<void> {
+    const proposal = await this.get(proposalId)
+    if (proposal.prepared?.mechanical !== true) return
+    assertReplayPromotable(await this.readRecordedReplay(proposal))
+  }
+
+  private async readRecordedReplay(proposal: EvolutionProposal): Promise<ReplayReport> {
+    const replay = proposal.replayed
+    if (replay?.reportDigest === undefined) {
+      throw new Error('evolution: replay has no report digest; run a new candidate replay before promotion')
+    }
+    const content = await readFile(resolveWithin(this.root, replay.report), 'utf8')
+    if (createHash('sha256').update(content).digest('hex') !== replay.reportDigest) {
+      throw new Error('evolution: replay report changed after recording; candidate must be evaluated again')
+    }
+    const report: unknown = JSON.parse(content)
+    assertReplayReport(proposal, report)
+    return report
   }
 
   /**
@@ -1302,7 +1333,13 @@ export class EvolutionService extends Service {
           if (!Array.isArray(record.tasks) || record.tasks.some(item => !isRecord(item) || typeof item.taskId !== 'string' || !REPLAY_RELATIONS.includes(item.relation as ReplayRelation) || typeof item.holdout !== 'boolean')) {
             throw new Error(`evolution: replayed record for "${record.proposalId}" has a malformed task summary`)
           }
-          current.replayed = { report: record.report, verdict: record.verdict, tasks: record.tasks.map(item => ({ ...item })) }
+          if (record.reportDigest !== undefined && !/^[a-f0-9]{64}$/.test(record.reportDigest)) {
+            throw new Error(`evolution: replayed record for "${record.proposalId}" has an invalid report digest`)
+          }
+          current.replayed = {
+            report: record.report, verdict: record.verdict, tasks: record.tasks.map(item => ({ ...item })),
+            ...(record.reportDigest === undefined ? {} : { reportDigest: record.reportDigest }),
+          }
           break
         }
         case 'gated':

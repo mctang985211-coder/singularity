@@ -111,7 +111,11 @@ export function compareReplaySides(
     return { verdictMatch, criteriaDiff, relation: 'inconclusive' }
   }
   const regressedCriterion = criteriaDiff.some(diff => diff.champion === 'pass')
-  const relation: ReplayRelation = candidateRank < championRank || regressedCriterion ? 'worse' : 'not-worse'
+  const changedContract = criteriaDiff.some(diff => diff.champion === undefined || diff.candidate === undefined)
+    || champion.criteria.some(before => candidate.criteria.find(after => after.criterionId === before.criterionId)?.command !== before.command)
+  const relation: ReplayRelation = candidateRank < championRank || regressedCriterion
+    ? 'worse'
+    : changedContract ? 'inconclusive' : 'not-worse'
   return { verdictMatch, criteriaDiff, relation }
 }
 
@@ -120,6 +124,7 @@ export function overallReplayVerdict(comparisons: readonly Pick<ReplayTaskCompar
   if (comparisons.some(item => item.relation === 'worse')) return 'worse'
   if (comparisons.length === 0 || comparisons.some(item => item.relation === 'inconclusive')) return 'inconclusive'
   if (comparisons.every(item => item.relation === 'manual')) return 'manual'
+  if (comparisons.some(item => item.relation === 'manual')) return 'inconclusive'
   return 'not-worse'
 }
 
@@ -127,7 +132,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-function assertComparison(value: unknown, field: string): void {
+function assertSide(value: unknown, field: string): asserts value is ReplaySideSummary {
+  if (!isRecord(value) || typeof value.taskId !== 'string' || value.taskId.length === 0
+    || !['verified', 'failed', 'cancelled'].includes(value.outcome as string)
+    || !Array.isArray(value.criteria)) {
+    throw new Error(`evolution: replay report ${field} must carry a taskId, a valid outcome and criteria`)
+  }
+  const ids = new Set<string>()
+  for (const criterion of value.criteria) {
+    if (!isRecord(criterion) || typeof criterion.criterionId !== 'string' || criterion.criterionId.length === 0
+      || ids.has(criterion.criterionId) || !['pass', 'fail', 'inconclusive'].includes(criterion.verdict as string)
+      || (criterion.command !== undefined && typeof criterion.command !== 'string')) {
+      throw new Error(`evolution: replay report ${field} has an invalid or duplicate criterion`)
+    }
+    ids.add(criterion.criterionId)
+  }
+  if (value.outcome === 'verified' && ids.size === 0) {
+    throw new Error(`evolution: replay report ${field} verified outcome needs criterion evidence`)
+  }
+}
+
+function assertComparison(value: unknown, field: string, mode: 'executed' | 'manual'): asserts value is ReplayTaskComparison {
   if (!isRecord(value)) throw new Error(`evolution: replay report ${field} must be an object`)
   if (typeof value.taskId !== 'string' || value.taskId.length === 0) {
     throw new Error(`evolution: replay report ${field}.taskId must be a non-empty string`)
@@ -137,6 +162,23 @@ function assertComparison(value: unknown, field: string): void {
   }
   if (typeof value.relation !== 'string' || !REPLAY_RELATIONS.includes(value.relation as ReplayRelation)) {
     throw new Error(`evolution: replay report ${field}.relation must be one of ${REPLAY_RELATIONS.join(' / ')}`)
+  }
+  assertSide(value.champion, `${field}.champion`)
+  if (value.taskId !== value.champion.taskId) throw new Error(`evolution: replay report ${field} champion identity mismatch`)
+  if (mode === 'manual') {
+    if (value.relation !== 'manual' || value.candidate !== undefined) {
+      throw new Error(`evolution: replay report ${field} manual comparison cannot claim an executed candidate`)
+    }
+    return
+  }
+  assertSide(value.candidate, `${field}.candidate`)
+  if (value.candidateTaskId !== value.candidate.taskId || value.candidate.taskId === value.taskId) {
+    throw new Error(`evolution: replay report ${field} candidate identity mismatch`)
+  }
+  const computed = compareReplaySides(value.champion, value.candidate)
+  if (value.relation !== computed.relation || value.verdictMatch !== computed.verdictMatch
+    || JSON.stringify(value.criteriaDiff) !== JSON.stringify(computed.criteriaDiff)) {
+    throw new Error(`evolution: replay report ${field} comparison does not match its evidence`)
   }
 }
 
@@ -181,15 +223,35 @@ export function assertReplayReport(
     throw new Error('evolution: an executed replay report cannot carry verdict "manual"')
   }
   if (!Array.isArray(report.observed)) throw new Error('evolution: replay report.observed must be an array')
-  report.observed.forEach((item, index) => assertComparison(item, `observed[${index}]`))
+  report.observed.forEach((item, index) => assertComparison(item, `observed[${index}]`, report.mode as 'executed' | 'manual'))
   if (!isRecord(report.holdout) || typeof report.holdout.executed !== 'boolean' || !Array.isArray(report.holdout.tasks)) {
     throw new Error('evolution: replay report.holdout must be { executed: boolean, tasks: [] }')
   }
-  report.holdout.tasks.forEach((item, index) => assertComparison(item, `holdout.tasks[${index}]`))
+  report.holdout.tasks.forEach((item, index) => assertComparison(item, `holdout.tasks[${index}]`, report.mode as 'executed' | 'manual'))
   if (report.holdout.executed !== (report.holdout.tasks.length > 0)) {
     throw new Error('evolution: replay report.holdout.executed must agree with its task list (empty = not run)')
   }
   if (report.mode === 'executed' && report.observed.length === 0) {
     throw new Error('evolution: an executed replay report needs at least one observed task comparison')
+  }
+  const comparisons = [...report.observed, ...report.holdout.tasks] as ReplayTaskComparison[]
+  const taskIds = comparisons.map(item => item.taskId)
+  const candidateIds = comparisons.flatMap(item => item.candidate === undefined ? [] : [item.candidate.taskId])
+  if (new Set(taskIds).size !== taskIds.length || new Set(candidateIds).size !== candidateIds.length
+    || candidateIds.some(id => taskIds.includes(id))) {
+    throw new Error('evolution: replay report observed and holdout must use distinct champion and candidate tasks')
+  }
+  if (report.mode === 'executed' && report.verdict !== overallReplayVerdict(comparisons)) {
+    throw new Error('evolution: replay report verdict does not match its comparisons')
+  }
+}
+
+/** A human approval cannot substitute for two independent, non-regressing replay groups. */
+export function assertReplayPromotable(report: ReplayReport): void {
+  if (report.mode !== 'executed') throw new Error('evolution: promotion requires executed replay evidence, not a manual report')
+  for (const [name, tasks] of [['observed', report.observed], ['holdout', report.holdout.tasks]] as const) {
+    if (overallReplayVerdict(tasks) !== 'not-worse') {
+      throw new Error(`evolution: promotion requires non-empty ${name} replay with no regressions or inconclusive results`)
+    }
   }
 }

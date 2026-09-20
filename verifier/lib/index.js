@@ -324,6 +324,12 @@ var VerifierRegistry = class extends Service {
 				...request,
 				criteria: [criterion]
 			});
+			const result = Array.isArray(results) && results.length === 1 ? results[0] : void 0;
+			if (result === void 0 || result === null || typeof result !== "object" || result.criterionId !== criterion.criterionId || result.verifierId !== verifier.id || ![
+				"pass",
+				"fail",
+				"inconclusive"
+			].includes(result.status) || result.unknownKind !== void 0 && (result.status !== "inconclusive" || !["task", "verifier"].includes(result.unknownKind))) throw new Error(`verifier "${verifier.id}" must return exactly one valid result for criterion "${criterion.criterionId}" with its own verifierId`);
 		} catch (error) {
 			return [{
 				criterionId: criterion.criterionId,

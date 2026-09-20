@@ -414,6 +414,8 @@ type EvolutionRecord = {
   formatVersion: 1;
   kind: 'replayed';
   proposalId: string;
+  /** SHA-256 of the report bytes. Historical records may lack it; those cannot newly promote. */
+  reportDigest?: string;
   /** Report path relative to the ledger root (`sandbox/<proposalId>/replay-report.json`). */
   report: string;
   /** Overall verdict: whether the candidate is not worse than the champion. */
@@ -492,6 +494,8 @@ interface ApplyOutcome {
 }
 /** Folded view of one `replayed` record. */
 interface ReplayedView {
+  /** SHA-256 recorded at replay; required for new promotion of a mechanical candidate. */
+  reportDigest?: string;
   /** Report path relative to the ledger root (`sandbox/<proposalId>/replay-report.json`). */
   report: string;
   verdict: ReplayVerdict;
@@ -670,6 +674,9 @@ declare class EvolutionService extends Service {
    * the row into the running TaskRuntime afterwards.
    */
   apply(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome>;
+  /** Preflight for tools before asking for approval; mutation methods repeat the check. */
+  checkPromotion(proposalId: string): Promise<void>;
+  private readRecordedReplay;
   /**
    * Move applied → rolledback: undo the apply. Champion captured → restore the
    * snapshot (skill SKILL.md written back, preset directory replaced,

@@ -310,6 +310,28 @@ describe('VerifierRegistry metadata and selftest (KISS §4.3, VRTC plan 2.2)', (
 })
 
 describe('VerifierRegistry verifierRef dispatch (KISS §4.1, VRTC plan 1.4)', () => {
+  test.each([
+    ['no verdict', []],
+    ['non-array', null],
+    ['duplicate verdicts', [
+      { criterionId: 'c1', verifierId: 'broken', status: 'pass' },
+      { criterionId: 'c1', verifierId: 'broken', status: 'fail' },
+    ]],
+    ['wrong criterion', [{ criterionId: 'other', verifierId: 'broken', status: 'pass' }]],
+    ['forged verifier', [{ criterionId: 'c1', verifierId: 'command', status: 'pass' }]],
+    ['unknown status', [{ criterionId: 'c1', verifierId: 'broken', status: 'success' }]],
+    ['unknown pass', [{ criterionId: 'c1', verifierId: 'broken', status: 'pass', unknownKind: 'task' }]],
+  ])('malformed plugin output (%s) produces verifier UNKNOWN, never a pass', async (_label, output) => {
+    const { registry } = await setup({ task: task([criterion({ verifierRef: 'broken' })]) })
+    registry.register({ id: 'broken', supports: () => true, verify: async () => output as VerificationResult[] })
+    const bundle = await registry.verifyRun(STORE, 'r1')
+    expect(bundle.verifierResults).toHaveLength(1)
+    expect(bundle.verifierResults[0]).toMatchObject({
+      criterionId: 'c1', verifierId: 'broken', status: 'inconclusive', unknownKind: 'verifier',
+    })
+    expect(bundle.claims[0]).toMatchObject({ status: 'inconclusive', unknownKind: 'verifier' })
+  })
+
   test('a criterion with verifierRef dispatches to that verifier, not the mode winner', async () => {
     // The task pins the built-in 'command' while a later registration also
     // supports the mode — mode dispatch would pick the later one, so only the

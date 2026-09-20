@@ -40,6 +40,13 @@ export function defineEvolutionDecideTool(ctx: Context) {
       if (proposal.status !== 'gated') {
         return `evolution_decide rejected: proposal ${proposal.proposalId} is ${proposal.status}; only a gated proposal can be decided`
       }
+      if (args.decision === 'PROMOTE') {
+        try {
+          await ctx.evolution.checkPromotion(proposal.proposalId)
+        } catch (error) {
+          return `evolution_decide rejected: ${error instanceof Error ? error.message : String(error)}`
+        }
+      }
       const gate = proposal.gate!
       const reason = [
         `Evolution decision for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,

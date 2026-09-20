@@ -146,12 +146,12 @@ S1 的最小验证与能力契约是候选生产晋升的前置。S2 与 S3 按�
 | Evidence 依赖 | `requiresArtifact` 检查 store 中 evidence id / artifact id / kind 的存在性；缺失则 blocked + Obligation；不自动生成上游，也不验证匹配证据的通过状态、版本和适用性 | `orchestrate.ts:missingRequiredArtifacts` |
 | Obligation | 记录缺能力/缺产物；模板 coverage 由任务声明 capability 或文字提及匹配；不是义务已被证据满足，更不是防漏的硬闸 | `task-runtime/src/obligation.ts:checkObligationCoverage` |
 | 判决 | `pass/fail/inconclusive`；部分 unknown 有 task/verifier 分类；没有 PARTIAL 状态与剩余义务自动派发；未通过 mandatory 判据仍走失败路径 | `task/src/types.ts:VerificationResult`；`orchestrate.ts:unmetMandatory` |
-| Verifier 元数据 | 可选 owner/version/selftest；register 缺 selftest 只警告、不执行自测；元数据不等于已实现独立性隔离 | `verifier/src/index.ts:register` |
+| Verifier 边界 | 已校验单个判据返回数量、criterion/verifier 身份及判决；异常归为 UNKNOWN(verifier)。可选 selftest 仍只描述、不执行，尚无独立性隔离 | `verifier/src/index.ts:verifyCriterion`、`register` |
 | 父验收 | 默认 composite 只检查所有子任务 verified；没有 C2 覆盖映射、C3 假设满足性、C4 独立全局不变量 | `verifier/src/composite-verifier.ts:verifyIn` |
 | 预算 | wallTimeMs 在飞取消；tools/tokens 仅终态审计；attempts/noProgressRounds 仅声明 | `orchestrate.ts:awaitWorker`、`budgetBreaches`；`task-runtime/src/index.ts:Config` |
 | L4 上报 | root 的 `escalate` 工具与台账已有；模型主动调用，批准后才记 raised；运行时只输出提示，无自动触发、无处理结果/恢复闭环 | `agent-singularity/src/tools/escalate.ts`；`orchestrate.ts:escalationHint` |
 | blocked 恢复 | blocked 无恢复出边；TaskRetried 只接受 failed，父分解一次的限制仍在；补能力后不会自动续跑原图 | `task/src/service/state.ts`；`task-runtime/src/index.ts:decomposeAndRun` |
-| Review / Evolution | 有终态 ReviewRecord、Diagnosis、proposal/sandbox/replay/gate/approval/apply/rollback；不等于自动 Retro 或抗过拟合 gate | `orchestrate.ts:recordTerminalReview`；`agent-singularity/src/evolution.ts`、`replay.ts` |
+| Review / Evolution | 已有工具链；机械候选 PROMOTE/apply 要求 observed、holdout 各自非空且不退化，报告按明细重算并校验记录时摘要。未实现候选内容绑定、真实证据来源校验、分层指标或自动 Retro | `agent-singularity/src/evolution.ts:checkPromotion`；`replay.ts:assertReplayReport` |
 
 ### 4.2 优先修复的断层
 
@@ -163,7 +163,7 @@ S1 的最小验证与能力契约是候选生产晋升的前置。S2 与 S3 按�
 | G4 | 上报依赖模型调用且批准前不落账；任务阻塞、通知与人类决策混在一起 | S2-E / 旧 #27；已有工具不能标为待建 |
 | G5 | 三值判决、预算半接线，没有 PARTIAL/UNKNOWN 的任务级处置 | S2-R / 旧 #23、#24 |
 | G6 | 缺 skill 契约与知识型定位，L1/L2 又被排在其前面，形成建设依赖倒置 | S1-C → S3 / 旧 #29 |
-| G7 | Replay 总评与 gate 未形成强约束，分层指标和自动 Retro 未建 | S4 / 旧 #28 |
+| G7 | 已补报告自洽与机械晋升最低闸；候选内容/证据来源绑定、分层指标和自动 Retro 未建，当前不能宣称防止裁判弱化或过拟合 | S4 / 旧 #28 |
 | G8 | `task_decompose`/`escalate` 部分拒绝返回普通文本，上层不能可靠用工具错误信号判定 | S2-E / 旧 #33 |
 
 历史记录中的 M1–M9 为此前会话的实跑声明，保留于历史指南。本次回归结果见建设计划 S0；本次没有重跑 LLM、BB 构建仿真或生产 Evolution 链路。旧环境可用性、外部 bbdev 缺陷和部署阈值在使用前需重新读取对应部署，不能从旧日志推断当前状态。
@@ -205,6 +205,14 @@ pnpm vitest run --project integration packages/singularity
 4. **注释解释必要约束**：说明“一 worker 只能挂一个 preset”等原因；历史编号、完整论证与进度留在文档，避免每个函数携带一段历史报告。
 5. **测试可观察合同**：能力顺序改变不改变选择、冲突整批拒绝且零任务落库、replay 同样拒绝；不按私有函数数量或类层次写测试。
 6. **按职责变化拆模块**：`orchestrate.ts` 已超过千行，但不以行数为理由机械切文件。后续恢复工作应集中管理同一任务的运行/阻塞/恢复；终态观测与 Review 生成可独立收敛。每次只迁移一个职责，保证旧调用方同时更新。
+
+### 5.5 演进验证参考样本（2026-09-21）
+
+第二个样本是 `replay.ts` 的纯比较/报告校验与 `evolution.ts` 的晋升入口：工具在人审前预检，服务在决定及生产写入前复检。无 holdout、manual、退化或不可比较的报告可留档研究/拒绝，但不能机械晋升。坏 verifier 返回不得成为任务成功证据。
+
+报告 SHA-256 只保证 gate/decide/apply 读取的是记录时的报告；它不证明报告来自真实执行，也不固定 sandbox 文件。不同 task id 只是样本身份不重用的最低检查，不证明统计独立。相同失败结果仍可能“不退化”，所以最低闸不是“改进有效”的证明。下一步必须补候选内容摘要、原始 run/evidence 对照和按目标制定的改进指标。
+
+agent_preset 当前只生成 manual replay，因此暂不能通过机械 PROMOTE；应补沙箱 preset 执行器，而非绕过验证。缺摘要的旧 ledger 可读、已应用对象可回滚，但后续晋升需新建候选并重新评估。L4/未支持目标缺少执行器是实现缺口，不是要求人代写改进的永久规则。
 
 ## 6. 文档维护
 
