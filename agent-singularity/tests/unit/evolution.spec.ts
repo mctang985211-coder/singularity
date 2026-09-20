@@ -271,6 +271,29 @@ describe('evolution tools', () => {
     expect(missing).toContain('required without fromDiagnosis')
   })
 
+  it('evolution_propose rejects a targetType outside the frozen vocabulary', async () => {
+    const svc = await service()
+    const { ctx } = toolCtx(svc)
+    const tool = defineEvolutionProposeTool(ctx)
+    const rejected = (await tool.execute(
+      { ...proposal, targetType: 'prompt' },
+      exec('root-1'),
+    ).catch((error: Error) => String(error))) as string
+    expect(rejected).toContain('targetType')
+    expect(await svc.list()).toEqual([])
+  })
+
+  it('evolution tools reject a call carrying no agent identity', async () => {
+    const svc = await service()
+    const { ctx } = toolCtx(svc)
+    await expect(defineEvolutionProposeTool(ctx).execute({ ...proposal }, {} as never)).rejects.toThrow('missing agent id')
+    await expect(
+      defineEvolutionCandidateTool(ctx).execute({ proposalId: 'p1', versionSet: VERSION_SET }, {} as never),
+    ).rejects.toThrow('missing agent id')
+    await expect(defineEvolutionPrepareTool(ctx).execute({ proposalId: 'p1' }, {} as never)).rejects.toThrow('missing agent id')
+    expect(await svc.list()).toEqual([])
+  })
+
   it('evolution_candidate and evolution_gate move the proposal and stay ledger-only', async () => {
     const svc = await service()
     const { ctx } = toolCtx(svc)

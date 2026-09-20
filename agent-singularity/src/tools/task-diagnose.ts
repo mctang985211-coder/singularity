@@ -1,19 +1,50 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task'
-import type { Diagnosis } from '@dangosys/dsh-singularity-task'
+import type { Diagnosis, DiagnosisProposal, ProposalTargetType } from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
-const TARGET_TYPES = [
+const TARGET_TYPES: readonly ProposalTargetType[] = [
   'skill', 'tool', 'capability', 'task_definition', 'decomposition_policy',
   'agent_preset', 'workflow_policy', 'verifier', 'runtime_policy',
 ]
 
-function sessionId(exec: ToolRunContext): string {
+const TARGET_TYPE_SET: ReadonlySet<string> = new Set<string>(TARGET_TYPES)
+
+function isProposalTargetType(value: unknown): value is ProposalTargetType {
+  return typeof value === 'string' && TARGET_TYPE_SET.has(value)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * Validate the model-supplied proposals into the recorded shape. The tool
+ * schema rejects an out-of-vocabulary targetType at the arguments boundary;
+ * this check is what keeps the recorded `DiagnosisProposal` typed without
+ * asserting the model's string into the enum.
+ */
+function toProposals(value: unknown): DiagnosisProposal[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) throw new Error('task_diagnose: proposals must be an array')
+  return value.map((item: unknown, index: number) => {
+    if (!isRecord(item)) throw new Error(`task_diagnose: proposals[${index}] must be an object`)
+    if (!isProposalTargetType(item.targetType)) {
+      throw new Error(`task_diagnose: proposals[${index}].targetType must be one of ${TARGET_TYPES.join(' / ')}, got "${String(item.targetType)}"`)
+    }
+    if (typeof item.targetId !== 'string') throw new Error(`task_diagnose: proposals[${index}].targetId must be a string`)
+    if (typeof item.rationale !== 'string') throw new Error(`task_diagnose: proposals[${index}].rationale must be a string`)
+    return { targetType: item.targetType, targetId: item.targetId, rationale: item.rationale }
+  })
+}
+
+function sessionId(exec: ToolRunContext): SessionId {
   const id = exec.agent?.id
   if (typeof id !== 'string' || id.length === 0) throw new Error('task_diagnose: missing agent id')
   return id
@@ -65,7 +96,7 @@ export function defineTaskDiagnoseTool(ctx: Context) {
         evidenceRefs: args.evidenceRefs ?? [],
         reviewRefs: args.reviewRefs ?? [],
         confidence: args.confidence,
-        proposals: args.proposals ?? [],
+        proposals: toProposals(args.proposals),
         ...(args.relatedTaskIds === undefined ? {} : { relatedTaskIds: args.relatedTaskIds }),
       }
       try {

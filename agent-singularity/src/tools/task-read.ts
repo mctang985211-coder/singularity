@@ -1,5 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
@@ -8,7 +9,7 @@ import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
-function sessionId(exec: ToolRunContext): string {
+function sessionId(exec: ToolRunContext): SessionId {
   const id = exec.agent?.id
   if (typeof id !== 'string' || id.length === 0) throw new Error('task_read: missing agent id')
   return id

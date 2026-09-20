@@ -121,7 +121,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 详细票据见 [建设计划](2026-09-20-vrtc-code-change-plan.md)。以下是依赖顺序，不是任务执行 workflow。
 
-可先派发的确定性工程切片见 [执行 prompt](execution-prompts/README.md)：P1 类型闸 → P2 单文件 Skill 内容绑定 → P3 生产基线冲突检查。三项当前均待执行，必须逐项验收并同步本文；不替代 S2/S3 的自主修复与恢复闭环。
+可先派发的确定性工程切片见 [执行 prompt](execution-prompts/README.md)：P1 类型闸 → P2 单文件 Skill 内容绑定 → P3 生产基线冲突检查。P1 已于 2026-09-21 完成并同步本文；P2、P3 仍待执行，必须逐项验收并同步本文；不替代 S2/S3 的自主修复与恢复闭环。
 
 | 顺序 | 建设目标 | 完成条件 |
 |---|---|---|
@@ -154,6 +154,8 @@ S1 的最小验证与能力契约是候选生产晋升的前置。S2 与 S3 按�
 | L4 上报 | root 的 `escalate` 工具与台账已有；模型主动调用，批准后才记 raised；运行时只输出提示，无自动触发、无处理结果/恢复闭环 | `agent-singularity/src/tools/escalate.ts`；`orchestrate.ts:escalationHint` |
 | blocked 恢复 | blocked 无恢复出边；TaskRetried 只接受 failed，父分解一次的限制仍在；补能力后不会自动续跑原图 | `task/src/service/state.ts`；`task-runtime/src/index.ts:decomposeAndRun` |
 | Review / Evolution | 已有工具链；机械候选 PROMOTE/apply 要求 observed、holdout 各自非空且不退化，报告按明细重算并校验记录时摘要。未实现候选内容绑定、真实证据来源校验、分层指标或自动 Retro | `agent-singularity/src/evolution.ts:checkPromotion`；`replay.ts:assertReplayReport` |
+| root-agent 构建类型闸 | `agent-singularity` 的 `build` 为 `tsc --noEmit && tsdown`，类型错误即构建失败；工作区根 `pnpm build`（`pnpm -r run build`）经过同一检查。2026-09-21 前该包 `pnpm build` 只有 tsdown，不保证严格类型检查通过 | `agent-singularity/package.json` scripts.build |
+| 身份与枚举的类型来源 | 工具侧 `sessionId(exec)` 直接返回上游 `Agent.id` 的 `SessionId`，不再降级为 `string`；`DiagnosisProposal.targetType` 与 `evolution_propose` 的 targetType 由 `@dangosys/dsh-singularity-task` 的 `ProposalTargetType` 标注并经运行时校验，不是任意字符串断言 | `agent-singularity/src/tools/task-diagnose.ts:toProposals`；`src/tools/evolution-propose.ts:isProposalTargetType`；`src/evolution.ts:validateMutation` |
 
 ### 4.2 优先修复的断层
 
@@ -167,8 +169,11 @@ S1 的最小验证与能力契约是候选生产晋升的前置。S2 与 S3 按�
 | G6 | 缺 skill 契约与知识型定位，L1/L2 又被排在其前面，形成建设依赖倒置 | S1-C → S3 / 旧 #29 |
 | G7 | 已补报告自洽与机械晋升最低闸；候选内容/证据来源绑定、分层指标和自动 Retro 未建，当前不能宣称防止裁判弱化或过拟合 | S4 / 旧 #28 |
 | G8 | `task_decompose`/`escalate` 部分拒绝返回普通文本，上层不能可靠用工具错误信号判定 | S2-E / 旧 #33 |
+| G9 | 类型闸只覆盖 `agent-singularity`；其余 Singularity 包的 `build` 仍只有 tsdown，未接 `tsc --noEmit`，其严格类型状态未经本闸保证 | P1 范围外，待独立评估 |
 
 历史记录中的 M1–M9 为此前会话的实跑声明，保留于历史指南。本次回归结果见建设计划 S0；本次没有重跑 LLM、BB 构建仿真或生产 Evolution 链路。旧环境可用性、外部 bbdev 缺陷和部署阈值在使用前需重新读取对应部署，不能从旧日志推断当前状态。
+
+2026-09-21 的 P1 已关闭“root-agent 包 build 不执行严格类型检查”这一缺口：该包 `pnpm exec tsc --noEmit` 从 12 处错误降到 0，`build` 改为先 `tsc --noEmit` 再 `tsdown`，工作区根 `pnpm build` 同样经过。G9 是 P1 明确未做的剩余部分：类型闸没有推广到其他包，也未改变任何业务流程、审批次数、持久化格式或工具输入输出合同。G7 的候选内容/证据来源绑定仍待建，由 P2/P3 推进，不因 P1 完成而标记 S1-C/S4 完成。
 
 ## 5. 实现时的关键约束
 
@@ -192,6 +197,8 @@ S1 的最小验证与能力契约是候选生产晋升的前置。S2 与 S3 按�
 pnpm vitest run --project unit packages/singularity
 pnpm vitest run --project integration packages/singularity
 ```
+
+`agent-singularity` 的 `build` 是 `tsc --noEmit && tsdown`（2026-09-21 P1 起），因此 `pnpm build` 与该目录下的 `pnpm exec tsc --noEmit` 结果一致；工作区根 `pnpm build` 通过 `pnpm -r run build` 经过同一检查。构建会清理并重写 `lib/`，不要与清理 lib 的构建并行跑测试。修改该包 src 后必须先有零类型错误才能打包；不得用 `any`、`ts-ignore`、关闭 `strict` 或排除源文件来消除诊断。其余 Singularity 包尚未接入该闸（见 G9）。
 
 事件声明有变化时执行持久化 schema 纪律，见 [persistence-changes](persistence-changes/README.md)；纯工具白名单改动不改变事件 schema。`pnpm run verify-persistence` 校验声明指纹。
 

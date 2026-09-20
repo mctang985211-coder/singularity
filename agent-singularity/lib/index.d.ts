@@ -646,7 +646,7 @@ declare class EvolutionService extends Service {
    * a path on disk (relative to the repo root or absolute) or an id the
    * caller-side resolver knows (task-store evidence). Existence only; nothing
    * here executes anything. A replayed proposal must additionally cite its
-   * replay report path, and that report must still exist in the sandbox.
+   * replay report path; its contents must match the recorded digest and schema.
    */
   gate(proposalId: string, answers: GateAnswers, actor: string, refKnown?: (ref: string) => Promise<boolean>): Promise<EvolutionProposal>;
   /**

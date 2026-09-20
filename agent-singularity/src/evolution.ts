@@ -466,7 +466,11 @@ function resolveWithin(base: string, rel: string): string {
  * inside the sandbox; the five other types take any structured object and are
  * bookkeeping-only (mechanical: false).
  */
-function validateMutation(targetType: ProposalTargetType, mutation: unknown, baseVersion: string): void {
+function validateMutation(
+  targetType: ProposalTargetType,
+  mutation: unknown,
+  baseVersion: string,
+): asserts mutation is Record<string, unknown> {
   if (!isRecord(mutation)) throw new Error('evolution: mutation must be an object')
   switch (targetType) {
     case 'skill': {

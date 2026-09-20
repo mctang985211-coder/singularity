@@ -566,4 +566,50 @@ describe('task_diagnose', () => {
     const result = (await tool.execute(args, exec('root-1'))) as string
     expect(result).toBe('task_diagnose rejected: task: diagnosis "d1" already exists')
   })
+
+  it('rejects a proposal targetType outside the frozen vocabulary and persists nothing', async () => {
+    const { ctx } = fixture()
+    const tool = defineTaskDiagnoseTool(ctx as never)
+    const rejected = (await tool.execute(
+      { ...args, proposals: [{ targetType: 'prompt', targetId: 'x', rationale: 'y' }] },
+      exec('root-1'),
+    ).catch((error: Error) => String(error))) as string
+    expect(rejected).toContain('targetType')
+    expect(ctx.task.recordDiagnosisIn).not.toHaveBeenCalled()
+  })
+
+  it('rejects a proposals payload that is not an array of proposal objects and persists nothing', async () => {
+    const { ctx } = fixture()
+    const tool = defineTaskDiagnoseTool(ctx as never)
+    for (const proposals of ['text', [{ targetType: 'skill' }]]) {
+      const rejected = (await tool.execute(
+        { ...args, proposals },
+        exec('root-1'),
+      ).catch((error: Error) => String(error))) as string
+      expect(rejected).toContain('proposals')
+    }
+    expect(ctx.task.recordDiagnosisIn).not.toHaveBeenCalled()
+  })
+})
+
+describe('missing agent identity', () => {
+  it.each([
+    ['task_read', () => defineTaskReadTool(fixture().ctx as never), {}],
+    ['task_status', () => defineTaskStatusTool(fixture().ctx as never), {}],
+    ['task_verify', () => defineTaskVerifyTool(fixture().ctx as never), {}],
+    ['task_review_pack', () => defineTaskReviewPackTool(fixture().ctx as never), { taskId: 't-child-1' }],
+    ['task_diagnose', () => defineTaskDiagnoseTool(fixture().ctx as never), {
+      taskId: 't-child-1',
+      diagnosisId: 'd1',
+      observedFailure: 'f',
+      scope: 's',
+      localizedCause: 'c',
+      confidence: 'medium',
+    }],
+  ])('%s rejects a call with no agent identity', async (_name, make, args) => {
+    const tool = make()
+    for (const exec of [{}, { agent: { id: '' }, signal: new AbortController().signal }]) {
+      await expect(tool.execute(args, exec as never)).rejects.toThrow('missing agent id')
+    }
+  })
 })

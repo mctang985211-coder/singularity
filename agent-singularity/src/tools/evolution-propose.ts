@@ -1,5 +1,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task'
@@ -13,7 +14,13 @@ const TARGET_TYPES: readonly ProposalTargetType[] = [
   'agent_preset', 'workflow_policy', 'verifier', 'runtime_policy',
 ]
 
-function sessionId(exec: ToolRunContext): string {
+const TARGET_TYPE_SET: ReadonlySet<string> = new Set<string>(TARGET_TYPES)
+
+function isProposalTargetType(value: unknown): value is ProposalTargetType {
+  return typeof value === 'string' && TARGET_TYPE_SET.has(value)
+}
+
+function sessionId(exec: ToolRunContext): SessionId {
   const id = exec.agent?.id
   if (typeof id !== 'string' || id.length === 0) throw new Error('evolution_propose: missing agent id')
   return id
@@ -76,11 +83,14 @@ export function defineEvolutionProposeTool(ctx: Context) {
       } else if (targetType === undefined || targetId === undefined || rationale === undefined) {
         throw new Error('evolution_propose: targetType, targetId and rationale are required without fromDiagnosis')
       }
+      if (!isProposalTargetType(targetType)) {
+        throw new Error(`evolution_propose: targetType must be one of ${TARGET_TYPES.join(' / ')}, got "${String(targetType)}"`)
+      }
       try {
         const proposal = await ctx.evolution.propose(
           {
             proposalId: args.proposalId,
-            targetType: targetType as ProposalTargetType,
+            targetType,
             targetId,
             baseVersion: args.baseVersion,
             level: args.level,

@@ -322,18 +322,18 @@ function overallReplayVerdict(comparisons) {
 	if (comparisons.some((item) => item.relation === "manual")) return "inconclusive";
 	return "not-worse";
 }
-function isRecord$2(value) {
+function isRecord$3(value) {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function assertSide(value, field) {
-	if (!isRecord$2(value) || typeof value.taskId !== "string" || value.taskId.length === 0 || ![
+	if (!isRecord$3(value) || typeof value.taskId !== "string" || value.taskId.length === 0 || ![
 		"verified",
 		"failed",
 		"cancelled"
 	].includes(value.outcome) || !Array.isArray(value.criteria)) throw new Error(`evolution: replay report ${field} must carry a taskId, a valid outcome and criteria`);
 	const ids = /* @__PURE__ */ new Set();
 	for (const criterion of value.criteria) {
-		if (!isRecord$2(criterion) || typeof criterion.criterionId !== "string" || criterion.criterionId.length === 0 || ids.has(criterion.criterionId) || ![
+		if (!isRecord$3(criterion) || typeof criterion.criterionId !== "string" || criterion.criterionId.length === 0 || ids.has(criterion.criterionId) || ![
 			"pass",
 			"fail",
 			"inconclusive"
@@ -343,9 +343,9 @@ function assertSide(value, field) {
 	if (value.outcome === "verified" && ids.size === 0) throw new Error(`evolution: replay report ${field} verified outcome needs criterion evidence`);
 }
 function assertComparison(value, field, mode) {
-	if (!isRecord$2(value)) throw new Error(`evolution: replay report ${field} must be an object`);
+	if (!isRecord$3(value)) throw new Error(`evolution: replay report ${field} must be an object`);
 	if (typeof value.taskId !== "string" || value.taskId.length === 0) throw new Error(`evolution: replay report ${field}.taskId must be a non-empty string`);
-	if (!isRecord$2(value.champion) || typeof value.champion.outcome !== "string") throw new Error(`evolution: replay report ${field}.champion must carry an outcome`);
+	if (!isRecord$3(value.champion) || typeof value.champion.outcome !== "string") throw new Error(`evolution: replay report ${field}.champion must carry an outcome`);
 	if (typeof value.relation !== "string" || !REPLAY_RELATIONS.includes(value.relation)) throw new Error(`evolution: replay report ${field}.relation must be one of ${REPLAY_RELATIONS.join(" / ")}`);
 	assertSide(value.champion, `${field}.champion`);
 	if (value.taskId !== value.champion.taskId) throw new Error(`evolution: replay report ${field} champion identity mismatch`);
@@ -366,7 +366,7 @@ function assertComparison(value, field, mode) {
 * `manual` verdict — every other targetType must produce executed evidence.
 */
 function assertReplayReport(proposal, report) {
-	if (!isRecord$2(report)) throw new Error("evolution: replay report must be an object");
+	if (!isRecord$3(report)) throw new Error("evolution: replay report must be an object");
 	if (report.formatVersion !== 1) throw new Error("evolution: replay report formatVersion must be 1");
 	if (report.proposalId !== proposal.proposalId) throw new Error(`evolution: replay report proposalId "${String(report.proposalId)}" does not match "${proposal.proposalId}"`);
 	if (report.targetType !== proposal.targetType) throw new Error(`evolution: replay report targetType "${String(report.targetType)}" does not match "${proposal.targetType}"`);
@@ -381,7 +381,7 @@ function assertReplayReport(proposal, report) {
 	if (report.mode === "executed" && report.verdict === "manual") throw new Error("evolution: an executed replay report cannot carry verdict \"manual\"");
 	if (!Array.isArray(report.observed)) throw new Error("evolution: replay report.observed must be an array");
 	report.observed.forEach((item, index) => assertComparison(item, `observed[${index}]`, report.mode));
-	if (!isRecord$2(report.holdout) || typeof report.holdout.executed !== "boolean" || !Array.isArray(report.holdout.tasks)) throw new Error("evolution: replay report.holdout must be { executed: boolean, tasks: [] }");
+	if (!isRecord$3(report.holdout) || typeof report.holdout.executed !== "boolean" || !Array.isArray(report.holdout.tasks)) throw new Error("evolution: replay report.holdout must be { executed: boolean, tasks: [] }");
 	report.holdout.tasks.forEach((item, index) => assertComparison(item, `holdout.tasks[${index}]`, report.mode));
 	if (report.holdout.executed !== report.holdout.tasks.length > 0) throw new Error("evolution: replay report.holdout.executed must agree with its task list (empty = not run)");
 	if (report.mode === "executed" && report.observed.length === 0) throw new Error("evolution: an executed replay report needs at least one observed task comparison");
@@ -680,7 +680,7 @@ function nonEmpty(value, field) {
 	if (typeof value !== "string" || value.trim().length === 0) throw new Error(`evolution: ${field} must be a non-empty string`);
 	return value;
 }
-function isRecord$1(value) {
+function isRecord$2(value) {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function assertOnlyKeys(value, allowed, field) {
@@ -712,7 +712,7 @@ function resolveWithin(base, rel) {
 * bookkeeping-only (mechanical: false).
 */
 function validateMutation(targetType, mutation, baseVersion) {
-	if (!isRecord$1(mutation)) throw new Error("evolution: mutation must be an object");
+	if (!isRecord$2(mutation)) throw new Error("evolution: mutation must be an object");
 	switch (targetType) {
 		case "skill":
 			assertOnlyKeys(mutation, ["name", "content"], "skill mutation");
@@ -724,7 +724,7 @@ function validateMutation(targetType, mutation, baseVersion) {
 			assertSegment(mutation.presetId, "mutation.presetId");
 			if (!Array.isArray(mutation.files) || mutation.files.length === 0) throw new Error("evolution: mutation.files must be a non-empty array of { path, content }");
 			mutation.files.forEach((file, index) => {
-				if (!isRecord$1(file)) throw new Error(`evolution: mutation.files[${index}] must be an object`);
+				if (!isRecord$2(file)) throw new Error(`evolution: mutation.files[${index}] must be an object`);
 				assertOnlyKeys(file, ["path", "content"], `mutation.files[${index}]`);
 				assertSandboxPath(file.path, `mutation.files[${index}].path`);
 				nonEmpty(file.content, `mutation.files[${index}].content`);
@@ -733,7 +733,7 @@ function validateMutation(targetType, mutation, baseVersion) {
 		case "capability":
 			assertOnlyKeys(mutation, ["name", "entry"], "capability mutation");
 			nonEmpty(mutation.name, "mutation.name");
-			if (!isRecord$1(mutation.entry)) throw new Error("evolution: mutation.entry must be an object");
+			if (!isRecord$2(mutation.entry)) throw new Error("evolution: mutation.entry must be an object");
 			assertOnlyKeys(mutation.entry, [
 				"skills",
 				"tools",
@@ -757,7 +757,7 @@ function validateMutation(targetType, mutation, baseVersion) {
 			assertOnlyKeys(mutation, ["baseVersion", "definition"], "task_definition mutation");
 			const base = nonEmpty(mutation.baseVersion, "mutation.baseVersion");
 			if (base !== baseVersion) throw new Error(`evolution: mutation.baseVersion "${base}" must equal the proposal's baseVersion "${baseVersion}"`);
-			if (!isRecord$1(mutation.definition) || Object.keys(mutation.definition).length === 0) throw new Error("evolution: mutation.definition must be a non-empty object (the new version's definition fields)");
+			if (!isRecord$2(mutation.definition) || Object.keys(mutation.definition).length === 0) throw new Error("evolution: mutation.definition must be a non-empty object (the new version's definition fields)");
 			return;
 		}
 		default: return;
@@ -769,7 +769,7 @@ function validateMutation(targetType, mutation, baseVersion) {
 * checks a live append does.
 */
 function validateVersionSet(versionSet) {
-	if (!isRecord$1(versionSet)) throw new Error("evolution: versionSet must be an object");
+	if (!isRecord$2(versionSet)) throw new Error("evolution: versionSet must be an object");
 	const entries = Object.entries(versionSet);
 	if (entries.length === 0) throw new Error("evolution: versionSet must record at least one version");
 	for (const [key, value] of entries) {
@@ -786,7 +786,7 @@ function validateVersionSet(versionSet) {
 * rotate away.
 */
 function validateGateAnswers(answers) {
-	if (!isRecord$1(answers)) throw new Error("evolution: gate answers must be an object");
+	if (!isRecord$2(answers)) throw new Error("evolution: gate answers must be an object");
 	nonEmpty(answers.targetFailureFixed, "gate answer \"1. Target failure fixed?\"");
 	nonEmpty(answers.originalAcceptanceMaintained, "gate answer \"2. Original acceptance maintained?\"");
 	nonEmpty(answers.existingRegressionMaintained, "gate answer \"3. Existing regression maintained?\"");
@@ -861,7 +861,7 @@ function parseChampionEntry(text$21, name) {
 	const line = text$21.split("\n").map((item) => item.trim()).filter((item) => item.length > 0 && !item.startsWith("#")).at(-1);
 	if (line === void 0) throw new Error("evolution: the champion capability snapshot carries no entry line");
 	const parsed = JSON.parse(line);
-	if (!isRecord$1(parsed) || !(name in parsed) || !isRecord$1(parsed[name])) throw new Error(`evolution: the champion capability snapshot does not hold an entry for "${name}"`);
+	if (!isRecord$2(parsed) || !(name in parsed) || !isRecord$2(parsed[name])) throw new Error(`evolution: the champion capability snapshot does not hold an entry for "${name}"`);
 	return parsed[name];
 }
 /**
@@ -1059,7 +1059,7 @@ var EvolutionService = class extends Service {
 	* a path on disk (relative to the repo root or absolute) or an id the
 	* caller-side resolver knows (task-store evidence). Existence only; nothing
 	* here executes anything. A replayed proposal must additionally cite its
-	* replay report path, and that report must still exist in the sandbox.
+	* replay report path; its contents must match the recorded digest and schema.
 	*/
 	async gate(proposalId, answers, actor, refKnown) {
 		const current = await this.assertNext(proposalId, "gated");
@@ -1469,7 +1469,7 @@ var EvolutionService = class extends Service {
 				case "replayed":
 					if (typeof record.report !== "string" || record.report.length === 0) throw new Error(`evolution: replayed record for "${record.proposalId}" has no report path`);
 					if (!REPLAY_VERDICTS.includes(record.verdict)) throw new Error(`evolution: replayed record for "${record.proposalId}" has unknown verdict "${String(record.verdict)}"`);
-					if (!Array.isArray(record.tasks) || record.tasks.some((item) => !isRecord$1(item) || typeof item.taskId !== "string" || !REPLAY_RELATIONS.includes(item.relation) || typeof item.holdout !== "boolean")) throw new Error(`evolution: replayed record for "${record.proposalId}" has a malformed task summary`);
+					if (!Array.isArray(record.tasks) || record.tasks.some((item) => !isRecord$2(item) || typeof item.taskId !== "string" || !REPLAY_RELATIONS.includes(item.relation) || typeof item.holdout !== "boolean")) throw new Error(`evolution: replayed record for "${record.proposalId}" has a malformed task summary`);
 					if (record.reportDigest !== void 0 && !/^[a-f0-9]{64}$/.test(record.reportDigest)) throw new Error(`evolution: replayed record for "${record.proposalId}" has an invalid report digest`);
 					current.replayed = {
 						report: record.report,
@@ -2332,6 +2332,10 @@ const TARGET_TYPES$1 = [
 	"verifier",
 	"runtime_policy"
 ];
+const TARGET_TYPE_SET$1 = new Set(TARGET_TYPES$1);
+function isProposalTargetType$1(value) {
+	return typeof value === "string" && TARGET_TYPE_SET$1.has(value);
+}
 function sessionId$9(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_propose: missing agent id");
@@ -2421,6 +2425,7 @@ function defineEvolutionProposeTool(ctx) {
 				rationale = proposal.rationale;
 				sourceRefs.unshift(`diagnosis:${diagnosis.diagnosisId}`);
 			} else if (targetType === void 0 || targetId === void 0 || rationale === void 0) throw new Error("evolution_propose: targetType, targetId and rationale are required without fromDiagnosis");
+			if (!isProposalTargetType$1(targetType)) throw new Error(`evolution_propose: targetType must be one of ${TARGET_TYPES$1.join(" / ")}, got "${String(targetType)}"`);
 			try {
 				const proposal = await ctx.evolution.propose({
 					proposalId: args.proposalId,
@@ -2469,7 +2474,7 @@ function sessionId$8(exec) {
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_replay: missing agent id");
 	return id;
 }
-function isRecord(value) {
+function isRecord$1(value) {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 /** The terminal review record of a champion task's latest run — the comparison anchor. */
@@ -2513,11 +2518,11 @@ function sideFromOutcome(outcome) {
 * (objective / requiredCapabilities) fall back to the champion task's.
 */
 function candidateContract(definition, champion) {
-	if (!isRecord(definition)) throw new Error("evolution_replay: the sandbox task-definition.json must hold an object");
+	if (!isRecord$1(definition)) throw new Error("evolution_replay: the sandbox task-definition.json must hold an object");
 	const rawCriteria = definition.acceptanceCriteria;
 	if (!Array.isArray(rawCriteria) || rawCriteria.length === 0) throw new Error("evolution_replay: the candidate definition must carry a non-empty acceptanceCriteria array");
 	const acceptanceCriteria = rawCriteria.map((raw, index) => {
-		if (!isRecord(raw)) throw new Error(`evolution_replay: candidate acceptanceCriteria[${index}] must be an object`);
+		if (!isRecord$1(raw)) throw new Error(`evolution_replay: candidate acceptanceCriteria[${index}] must be an object`);
 		if (typeof raw.criterionId !== "string" || raw.criterionId.length === 0) throw new Error(`evolution_replay: candidate acceptanceCriteria[${index}].criterionId must be a non-empty string`);
 		const command = raw.command === void 0 ? void 0 : raw.command;
 		if (command !== void 0 && typeof command !== "string") throw new Error(`evolution_replay: candidate acceptanceCriteria[${index}].command must be a string`);
@@ -3004,6 +3009,34 @@ const TARGET_TYPES = [
 	"verifier",
 	"runtime_policy"
 ];
+const TARGET_TYPE_SET = new Set(TARGET_TYPES);
+function isProposalTargetType(value) {
+	return typeof value === "string" && TARGET_TYPE_SET.has(value);
+}
+function isRecord(value) {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+/**
+* Validate the model-supplied proposals into the recorded shape. The tool
+* schema rejects an out-of-vocabulary targetType at the arguments boundary;
+* this check is what keeps the recorded `DiagnosisProposal` typed without
+* asserting the model's string into the enum.
+*/
+function toProposals(value) {
+	if (value === void 0) return [];
+	if (!Array.isArray(value)) throw new Error("task_diagnose: proposals must be an array");
+	return value.map((item, index) => {
+		if (!isRecord(item)) throw new Error(`task_diagnose: proposals[${index}] must be an object`);
+		if (!isProposalTargetType(item.targetType)) throw new Error(`task_diagnose: proposals[${index}].targetType must be one of ${TARGET_TYPES.join(" / ")}, got "${String(item.targetType)}"`);
+		if (typeof item.targetId !== "string") throw new Error(`task_diagnose: proposals[${index}].targetId must be a string`);
+		if (typeof item.rationale !== "string") throw new Error(`task_diagnose: proposals[${index}].rationale must be a string`);
+		return {
+			targetType: item.targetType,
+			targetId: item.targetId,
+			rationale: item.rationale
+		};
+	});
+}
 function sessionId$5(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_diagnose: missing agent id");
@@ -3107,7 +3140,7 @@ function defineTaskDiagnoseTool(ctx) {
 				evidenceRefs: args.evidenceRefs ?? [],
 				reviewRefs: args.reviewRefs ?? [],
 				confidence: args.confidence,
-				proposals: args.proposals ?? [],
+				proposals: toProposals(args.proposals),
 				...args.relatedTaskIds === void 0 ? {} : { relatedTaskIds: args.relatedTaskIds }
 			};
 			try {

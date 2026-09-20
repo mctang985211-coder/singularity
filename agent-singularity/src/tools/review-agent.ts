@@ -81,7 +81,7 @@ interface RawJudgement {
   rationale?: unknown
 }
 
-function sessionId(exec: ToolRunContext): string {
+function sessionId(exec: ToolRunContext): SessionId {
   const id = exec.agent?.id
   if (typeof id !== 'string' || id.length === 0) throw new Error('task_review_agent: missing agent id')
   return id
