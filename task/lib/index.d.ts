@@ -48,11 +48,6 @@ interface TaskDefinition {
     maxDepth?: number;
     maxChildren?: number;
   };
-  budgetPolicy?: {
-    tokens?: number;
-    wallTimeMs?: number;
-    attempts?: number;
-  };
 }
 type TaskStatus = 'created' | 'admitted' | 'ready' | 'running' | 'blocked' | 'verifying' | 'verified' | 'failed' | 'cancelled';
 type DecompositionStatus = 'leaf' | 'decomposable' | 'decomposing' | 'decomposed';

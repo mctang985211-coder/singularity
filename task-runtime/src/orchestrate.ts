@@ -216,7 +216,11 @@ function unknownTag(result: VerificationResult): string {
   if (result.status !== 'inconclusive' || result.unknownKind === undefined) return ''
   return result.unknownKind === 'task'
     ? ' [unknown: task — the criterion was never tested]'
-    : ' [unknown: verifier — the verifier could not judge]'
+    : ` [unknown: verifier — the verifier could not judge] ${escalationHint(
+      `the verifier "${result.verifierId}" could not judge criterion "${result.criterionId}"`,
+      'the criterion was run and the judge itself failed',
+      'fix or replace the verifier, then re-verify the criterion',
+    )}`
 }
 
 function unmetMandatory(criteria: readonly AcceptanceCriterion[], results: readonly VerificationResult[]): UnmetCriterion[] {
@@ -470,9 +474,25 @@ function verifyWithDeadline(env: OrchestrateEnv, storeId: string, runId: RunId):
   return withTimeout(env.verifyRun(storeId, runId, { timeoutMs: env.verifyTimeoutMs }), env.verifyTimeoutMs, runId)
 }
 
+/**
+ * The L4 exit pointer (KISS §7, VRTC plan phase 3.1), appended to the feedback
+ * a root agent reads at each of the three trigger sites. The escalation ledger
+ * and its tool live on the root plane (agent-singularity): a card carries a
+ * human-approval gate that belongs on the root's tool surface, so the
+ * orchestrator only points at the exit — it never calls across planes and never
+ * blocks a cascade on a human answer.
+ */
+export function escalationHint(what: string, tried: string, suggested: string): string {
+  return `L4 exit (KISS §7): report this to a human with the escalate tool — what: ${what}; tried: ${tried}; suggested: ${suggested}`
+}
+
 /** The forced-exit reason for an in-flight budget exhaustion (KISS §5: named as a budget exhaustion, never as a criteria failure). */
 function budgetExhaustedReason(which: string, detail: string): string {
-  return `budget exhausted: ${which} (${detail}; this is a budget exhaustion, not a criteria failure)`
+  return `budget exhausted: ${which} (${detail}; this is a budget exhaustion, not a criteria failure) — ${escalationHint(
+    'the run cannot finish inside its wall-clock budget',
+    'the run was cancelled at the deadline',
+    'raise the budget, split the task, or accept the partial result',
+  )}`
 }
 
 /**
@@ -493,14 +513,22 @@ async function budgetBreaches(env: OrchestrateEnv, run: TaskRun): Promise<string
   if (budget.maxToolCalls !== undefined && observation.tools !== undefined) {
     const calls = observation.tools.calls.reduce((sum, call) => sum + call.count, 0)
     if (calls > budget.maxToolCalls) {
-      breaches.push(`budget exceeded: maxToolCalls (observed ${calls} tool calls over the limit ${budget.maxToolCalls}; post-hoc check at terminal time — the run was not stopped in flight)`)
+      breaches.push(`budget exceeded: maxToolCalls (observed ${calls} tool calls over the limit ${budget.maxToolCalls}; post-hoc check at terminal time — the run was not stopped in flight) — ${escalationHint(
+        'the run already spent more tool calls than its budget allows',
+        'the run finished before the breach was observable',
+        'raise the budget, split the task, or accept the overspend',
+      )}`)
     }
   }
   if (budget.tokens !== undefined && observation.tokens !== undefined) {
     const tokens = observation.tokens
     const total = tokens.uncachedInputTokens + tokens.outputTokens + tokens.cacheReadTokens + tokens.cacheWriteTokens
     if (total > budget.tokens) {
-      breaches.push(`budget exceeded: tokens (observed ${total} whole-session tokens over the limit ${budget.tokens}; post-hoc check at terminal time, session-scoped cumulative — the run was not stopped in flight)`)
+      breaches.push(`budget exceeded: tokens (observed ${total} whole-session tokens over the limit ${budget.tokens}; post-hoc check at terminal time, session-scoped cumulative — the run was not stopped in flight) — ${escalationHint(
+        'the run already spent more tokens than its budget allows',
+        'the run finished before the breach was observable',
+        'raise the budget, split the task, or accept the overspend',
+      )}`)
     }
   }
   return breaches
@@ -768,7 +796,7 @@ export async function runChildrenCascade(
           goal: `artifact/evidence "${item.ref}" required by task "${childTaskId}" criterion ${item.criterionId} does not exist in the task store`,
           criterion: `the task store holds evidence or an artifact named "${item.ref}" (evidence id, artifact kind, or artifact id)`,
           sourceTaskId: childTaskId,
-        })
+        }, env.actor)
       }
       outcomes[index] = { taskId: childTaskId, status: 'blocked' }
       remaining.delete(index)

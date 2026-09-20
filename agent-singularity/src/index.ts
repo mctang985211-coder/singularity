@@ -10,10 +10,12 @@ import type {} from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-task'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
 import { HitlService } from './hitl.ts'
+import { EscalationService } from './escalation.ts'
 import { EvolutionService } from './evolution.ts'
 import { defineApproveTool } from './tools/approve.ts'
 import { defineAskTool } from './tools/ask.ts'
 import { defineCapabilityListTool } from './tools/capability-list.ts'
+import { defineEscalateTool } from './tools/escalate.ts'
 import { defineEvolutionApplyTool } from './tools/evolution-apply.ts'
 import { defineEvolutionCandidateTool } from './tools/evolution-candidate.ts'
 import { defineEvolutionDecideTool } from './tools/evolution-decide.ts'
@@ -35,6 +37,9 @@ import { defineTaskVerifyTool } from './tools/task-verify.ts'
 
 export { HitlService } from './hitl.ts'
 export type { HitlAnswer, HitlKind, HitlPending } from './hitl.ts'
+export { EscalationService } from './escalation.ts'
+export type { Escalation, EscalationInput, EscalationRecord, EscalationTrigger } from './escalation.ts'
+export { ESCALATION_TRIGGERS } from './escalation.ts'
 export { EvolutionService } from './evolution.ts'
 export type {
   AgentPresetMutation,
@@ -80,6 +85,9 @@ export class SingularityAgent extends Service {
     // provides is invisible to the parent that mounted it — so the ledger's
     // service is provided on this fiber rather than through `ctx.plugin`.
     new EvolutionService(ctx)
+    // Same discipline for the escalation ledger: the `escalate` tool reads
+    // `ctx.escalation` from this fiber, and the parent never injects it.
+    new EscalationService(ctx)
     ctx.tools.register(defineMarkReadyTool(ctx))
     ctx.tools.register(defineSpawnTool(ctx))
     ctx.tools.register(defineAskTool(ctx))
@@ -101,6 +109,7 @@ export class SingularityAgent extends Service {
     ctx.tools.register(defineEvolutionApplyTool(ctx))
     ctx.tools.register(defineEvolutionRollbackTool(ctx))
     ctx.tools.register(defineEvolutionListTool(ctx))
+    ctx.tools.register(defineEscalateTool(ctx))
   }
 }
 

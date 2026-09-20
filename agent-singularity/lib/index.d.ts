@@ -53,6 +53,119 @@ declare class HitlService extends Service {
   private enqueue;
 }
 //#endregion
+//#region src/escalation.d.ts
+/** What raised the card. The three non-human values are the orchestrator's trigger sites (plan phase 3.1). */
+type EscalationTrigger = 'capability-gap' | 'budget-exhausted' | 'unknown-convergence' | 'human';
+declare const ESCALATION_TRIGGERS: readonly EscalationTrigger[];
+interface EscalationInput {
+  /** Caller-supplied id; omitted derives one (`esc-<uuid>`). */
+  escalationId?: string;
+  /** KISS §7 element 1: what is missing. */
+  what: string;
+  /** KISS §7 element 2: what was already tried. */
+  tried: string;
+  /** KISS §7 element 3: what is suggested. */
+  suggested: string;
+  trigger: EscalationTrigger;
+  /** The task the card is about, when it has one. */
+  sourceTaskId?: string;
+  /** Evidence / task / diagnosis refs behind the card. */
+  sourceRefs?: readonly string[];
+}
+/** Folded view of one card. */
+interface Escalation {
+  escalationId: string;
+  what: string;
+  tried: string;
+  suggested: string;
+  trigger: EscalationTrigger;
+  /** An open card awaits a human decision; the ledger records the card, never the decision. */
+  status: 'open';
+  sourceTaskId?: string;
+  sourceRefs: string[];
+  /** Human-review evidence: the approval call id of the escalate request that granted this record. */
+  approvalRef: string;
+  actor: string;
+  at: string;
+  /** One entry per ledger record — derived, never stored. */
+  history: {
+    status: 'open';
+    actor: string;
+    at: string;
+  }[];
+}
+/** One immutable ledger line. A state migration appends a new record; nothing is ever rewritten in place. */
+type EscalationRecord = {
+  formatVersion: 1;
+  kind: 'raised';
+  escalationId: string;
+  what: string;
+  tried: string;
+  suggested: string;
+  trigger: EscalationTrigger;
+  sourceTaskId?: string;
+  sourceRefs: string[];
+  approvalRef: string;
+  actor: string;
+  at: string;
+};
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    escalation: EscalationService;
+  }
+}
+/** Plugin config; every field optional — the constructor resolves the default. */
+interface Config$1 {
+  /**
+   * Directory of the ledger file `escalations.jsonl`. Omitted resolves to
+   * `$DSH_HOME`, falling back to `<repo root>/.dsh` when `DSH_HOME` is unset —
+   * the same derivation as the evolution ledger, whose file sits one level
+   * deeper at `.dsh/evolution/proposals.jsonl`.
+   */
+  root?: string;
+}
+/**
+ * The escalation ledger (plane separation: this store is independent of the
+ * task store and refers to it by id only). Append and replay share one fold,
+ * so a corrupt or duplicated line fails loudly instead of silently drifting.
+ * Writes are serialized; the file is opened per append, so closing the service
+ * is just draining the write queue.
+ */
+declare class EscalationService extends Service {
+  /** Absolute ledger directory resolved at construction. */
+  readonly root: string;
+  /** Repo root that relative paths resolve against. */
+  readonly repoRoot: string;
+  private records;
+  private readonly loaded;
+  private writes;
+  constructor(ctx: Context, config?: Config$1);
+  /** Ledger file path (`<root>/escalations.jsonl`). */
+  get file(): string;
+  /**
+   * Record one card. The caller (the `escalate` tool) must hold a human grant
+   * from `ctx.approval.request` first and pass its call id as `approvalRef`
+   * (`approval:<callId>`, the evolution_decide shape): a rejected, cancelled,
+   * or unavailable ask must never reach this method. Payload validation runs
+   * before anything touches disk.
+   */
+  raise(input: EscalationInput, actor: string, approvalRef: string): Promise<Escalation>;
+  /** Folded view of one card, or throws on an unknown id. */
+  get(escalationId: string): Promise<Escalation>;
+  /** Folded views, newest card first. */
+  list(): Promise<Escalation[]>;
+  /**
+   * Fold records into cards, enforcing the payload rules on every step: a
+   * `raised` line starts a new id, a repeated id is refused, and every field
+   * is re-validated, so an illegal line fails load exactly as it would fail
+   * append.
+   */
+  private fold;
+  private load;
+  /** Validate the staged fold first; memory commits only after the line is on disk. */
+  private append;
+}
+//#endregion
 //#region src/replay.d.ts
 /** Overall replay verdict: whether the candidate is not worse than the champion. */
 type ReplayVerdict = 'not-worse' | 'worse' | 'inconclusive' | 'manual';
@@ -624,4 +737,4 @@ declare class SingularityAgent extends Service {
   constructor(ctx: Context);
 }
 //#endregion
-export { APPLYABLE_TARGET_TYPES, type AgentPresetMutation, type ApplyOutcome, type ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, type CapabilityMutation, type ChampionSource, type ChampionState, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, type EvolutionDecision, type EvolutionLevel, type EvolutionProposal, type EvolutionRecord, EvolutionService, type EvolutionStatus, type GateAnswers, type HitlAnswer, type HitlKind, type HitlPending, HitlService, type ListFilter, MECHANICAL_TARGET_TYPES, type MechanicalMutation, type PrepareChampion, type PreparedView, type ProposeInput, REPLAY_RELATIONS, REPLAY_VERDICTS, type ReplayCriterionDiff, type ReplayCriterionSummary, type ReplayRelation, type ReplayReport, type ReplaySideSummary, type ReplayTaskComparison, type ReplayVerdict, type ReplayedView, SingularityAgent, SingularityAgent as default, type SkillMutation, type TaskDefinitionMutation, applyTargets, compareReplaySides, mutationMechanical, overallReplayVerdict };
+export { APPLYABLE_TARGET_TYPES, type AgentPresetMutation, type ApplyOutcome, type ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, type CapabilityMutation, type ChampionSource, type ChampionState, ESCALATION_TRIGGERS, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, type Escalation, type EscalationInput, type EscalationRecord, EscalationService, type EscalationTrigger, type EvolutionDecision, type EvolutionLevel, type EvolutionProposal, type EvolutionRecord, EvolutionService, type EvolutionStatus, type GateAnswers, type HitlAnswer, type HitlKind, type HitlPending, HitlService, type ListFilter, MECHANICAL_TARGET_TYPES, type MechanicalMutation, type PrepareChampion, type PreparedView, type ProposeInput, REPLAY_RELATIONS, REPLAY_VERDICTS, type ReplayCriterionDiff, type ReplayCriterionSummary, type ReplayRelation, type ReplayReport, type ReplaySideSummary, type ReplayTaskComparison, type ReplayVerdict, type ReplayedView, SingularityAgent, SingularityAgent as default, type SkillMutation, type TaskDefinitionMutation, applyTargets, compareReplaySides, mutationMechanical, overallReplayVerdict };

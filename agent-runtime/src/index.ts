@@ -47,6 +47,7 @@ const ROOT_TOOLS = [
   'evolution_apply',
   'evolution_rollback',
   'evolution_list',
+  'escalate',
 ]
 
 /**

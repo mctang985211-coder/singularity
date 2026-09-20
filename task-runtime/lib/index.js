@@ -585,7 +585,7 @@ function isAborted(signal) {
 */
 function unknownTag(result) {
 	if (result.status !== "inconclusive" || result.unknownKind === void 0) return "";
-	return result.unknownKind === "task" ? " [unknown: task — the criterion was never tested]" : " [unknown: verifier — the verifier could not judge]";
+	return result.unknownKind === "task" ? " [unknown: task — the criterion was never tested]" : ` [unknown: verifier — the verifier could not judge] ${escalationHint(`the verifier "${result.verifierId}" could not judge criterion "${result.criterionId}"`, "the criterion was run and the judge itself failed", "fix or replace the verifier, then re-verify the criterion")}`;
 }
 function unmetMandatory(criteria, results) {
 	return criteria.filter((criterion) => criterion.mandatory).flatMap((criterion) => {
@@ -790,9 +790,20 @@ async function withTimeout(work, timeoutMs, runId) {
 function verifyWithDeadline(env, storeId, runId) {
 	return withTimeout(env.verifyRun(storeId, runId, { timeoutMs: env.verifyTimeoutMs }), env.verifyTimeoutMs, runId);
 }
+/**
+* The L4 exit pointer (KISS §7, VRTC plan phase 3.1), appended to the feedback
+* a root agent reads at each of the three trigger sites. The escalation ledger
+* and its tool live on the root plane (agent-singularity): a card carries a
+* human-approval gate that belongs on the root's tool surface, so the
+* orchestrator only points at the exit — it never calls across planes and never
+* blocks a cascade on a human answer.
+*/
+function escalationHint(what, tried, suggested) {
+	return `L4 exit (KISS §7): report this to a human with the escalate tool — what: ${what}; tried: ${tried}; suggested: ${suggested}`;
+}
 /** The forced-exit reason for an in-flight budget exhaustion (KISS §5: named as a budget exhaustion, never as a criteria failure). */
 function budgetExhaustedReason(which, detail) {
-	return `budget exhausted: ${which} (${detail}; this is a budget exhaustion, not a criteria failure)`;
+	return `budget exhausted: ${which} (${detail}; this is a budget exhaustion, not a criteria failure) — ${escalationHint("the run cannot finish inside its wall-clock budget", "the run was cancelled at the deadline", "raise the budget, split the task, or accept the partial result")}`;
 }
 /**
 * The post-hoc half of the budget (see {@link BudgetConfig}): the members the
@@ -811,12 +822,12 @@ async function budgetBreaches(env, run) {
 	const breaches = [];
 	if (budget.maxToolCalls !== void 0 && observation.tools !== void 0) {
 		const calls = observation.tools.calls.reduce((sum, call) => sum + call.count, 0);
-		if (calls > budget.maxToolCalls) breaches.push(`budget exceeded: maxToolCalls (observed ${calls} tool calls over the limit ${budget.maxToolCalls}; post-hoc check at terminal time — the run was not stopped in flight)`);
+		if (calls > budget.maxToolCalls) breaches.push(`budget exceeded: maxToolCalls (observed ${calls} tool calls over the limit ${budget.maxToolCalls}; post-hoc check at terminal time — the run was not stopped in flight) — ${escalationHint("the run already spent more tool calls than its budget allows", "the run finished before the breach was observable", "raise the budget, split the task, or accept the overspend")}`);
 	}
 	if (budget.tokens !== void 0 && observation.tokens !== void 0) {
 		const tokens = observation.tokens;
 		const total = tokens.uncachedInputTokens + tokens.outputTokens + tokens.cacheReadTokens + tokens.cacheWriteTokens;
-		if (total > budget.tokens) breaches.push(`budget exceeded: tokens (observed ${total} whole-session tokens over the limit ${budget.tokens}; post-hoc check at terminal time, session-scoped cumulative — the run was not stopped in flight)`);
+		if (total > budget.tokens) breaches.push(`budget exceeded: tokens (observed ${total} whole-session tokens over the limit ${budget.tokens}; post-hoc check at terminal time, session-scoped cumulative — the run was not stopped in flight) — ${escalationHint("the run already spent more tokens than its budget allows", "the run finished before the breach was observable", "raise the budget, split the task, or accept the overspend")}`);
 	}
 	return breaches;
 }
@@ -1019,7 +1030,7 @@ async function runChildrenCascade(env, storeId, parentTask, parentRun, plans, re
 				goal: `artifact/evidence "${item.ref}" required by task "${childTaskId}" criterion ${item.criterionId} does not exist in the task store`,
 				criterion: `the task store holds evidence or an artifact named "${item.ref}" (evidence id, artifact kind, or artifact id)`,
 				sourceTaskId: childTaskId
-			});
+			}, env.actor);
 			outcomes[index] = {
 				taskId: childTaskId,
 				status: "blocked"
@@ -1922,7 +1933,8 @@ var TaskRuntime = class extends Service {
 				criterion: `capability "${missing}" resolves in the capability registry (capability_list shows it)`,
 				sourceTaskId: parentTaskId
 			}, actor);
-			throw new Error(`task-runtime: admission rejected decomposition of "${parentTaskId}": capability gap: ${detail}`);
+			const gapNames = [...new Set(rejected.flatMap(({ manifest }) => manifest.missing))];
+			throw new Error(`task-runtime: admission rejected decomposition of "${parentTaskId}": capability gap: ${detail}; ` + escalationHint(`capabilities [${gapNames.join(", ")}] are not granted by the capability registry`, "capability_list and the children's declared capabilities", "grant the capability in the registry, or mark the child decomposable"));
 		}
 		this.assertKnownVerifierRefs(criteria.flatMap((list, childIndex) => list.map((criterion) => ({
 			childIndex,
@@ -2302,4 +2314,4 @@ var TaskRuntime = class extends Service {
 var src_default = TaskRuntime;
 
 //#endregion
-export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, MCP_SERVER_REGISTRY, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, buildHandoff, checkDecomposition, checkObligationCoverage, src_default as default, findRepoRoot, loadObligationTemplates, manifestMcpServers, parseObligationTemplates, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };
+export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, MCP_SERVER_REGISTRY, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, buildHandoff, checkDecomposition, checkObligationCoverage, src_default as default, escalationHint, findRepoRoot, loadObligationTemplates, manifestMcpServers, parseObligationTemplates, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };

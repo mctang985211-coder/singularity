@@ -34,6 +34,7 @@ import {
   runChildrenCascade,
   runReplayTask,
   VerifierUnavailableError,
+  escalationHint,
   type BudgetConfig,
   type ChildOutcome,
   type ChildPlan,
@@ -76,7 +77,7 @@ export type {
   SpawnChildRequest,
   VerifyRunOptions,
 } from './orchestrate.ts'
-export { runChildrenCascade, runReplayTask, VerifierUnavailableError } from './orchestrate.ts'
+export { runChildrenCascade, runReplayTask, VerifierUnavailableError, escalationHint } from './orchestrate.ts'
 
 /** Local view of the verifier service (ticket C2 develops it in parallel): the
  * runtime resolves it softly from the context and never imports the package. */
@@ -618,7 +619,18 @@ export class TaskRuntime extends Service {
           }, actor)
         }
       }
-      throw new Error(`task-runtime: admission rejected decomposition of "${parentTaskId}": capability gap: ${detail}`)
+      // The obligations above are the in-plane signal (KISS §7: a gap is a
+      // normal state with a record); the L4 exit is a separate, human-facing
+      // card the root raises with `escalate`, so the rejection names it too.
+      const gapNames = [...new Set(rejected.flatMap(({ manifest }) => manifest.missing))]
+      throw new Error(
+        `task-runtime: admission rejected decomposition of "${parentTaskId}": capability gap: ${detail}; ` +
+        escalationHint(
+          `capabilities [${gapNames.join(', ')}] are not granted by the capability registry`,
+          'capability_list and the children\'s declared capabilities',
+          'grant the capability in the registry, or mark the child decomposable',
+        ),
+      )
     }
 
     this.assertKnownVerifierRefs(

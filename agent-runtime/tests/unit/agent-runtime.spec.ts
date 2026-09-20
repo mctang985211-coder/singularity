@@ -432,6 +432,7 @@ describe('AgentRuntime root lifecycle', () => {
         'evolution_apply',
         'evolution_rollback',
         'evolution_list',
+        'escalate',
       ],
     })
     expect(section).toHaveBeenCalledWith({

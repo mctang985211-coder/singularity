@@ -13,6 +13,7 @@ import {
   DEFAULT_VERIFY_TIMEOUT_MS,
   TaskRuntime,
   VerifierUnavailableError,
+  escalationHint,
   workerBaseline,
 } from '../../src/index.ts'
 import { WORKER_CONTRACT_OPEN } from '../../src/contract.ts'
@@ -482,7 +483,15 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(snapshot.obligations[0]!.goal).toContain(outcomes[0]!.taskId)
     expect(snapshot.obligations[0]!.criterion).toContain('"bemu_trace"')
     expect(snapshot.obligations[0]!.sourceTaskId).toBe(outcomes[0]!.taskId)
-    expect(taskEvents(h).map(item => item.kind)).toContain('ObligationRecorded')
+    const obligationEvents = taskEvents(h).filter(item => item.kind === 'ObligationRecorded')
+    expect(obligationEvents).toHaveLength(1)
+    expect(obligationEvents[0]!.taskId).toBe(outcomes[0]!.taskId)
+    // The obligation rides the caller's actor — the same `env.actor` the
+    // `TaskBlocked` sibling above is committed with. An actor-less
+    // `recordObligationIn` call drops the key from the event envelope entirely,
+    // so this equality is what catches that regression.
+    expect(obligationEvents[0]!.actor).toBe(ROOT_SESSION)
+    expect(obligationEvents[0]!.actor).toBe(artifactBlocked[0]!.actor)
 
     // The batch settles otherwise; the harness verifier passes the parent's
     // composite criterion unconditionally (the real composite verifier's
@@ -1433,7 +1442,14 @@ describe('TaskRuntime budget (KISS §5, VRTC plan 1.3)', () => {
     expect(outcomes.map(outcome => outcome.status)).toEqual(['failed', 'blocked'])
     // The exhausted agent was cancelled — a forced exit, not a silent degrade.
     expect(h.cancelled).toHaveLength(1)
-    const reason = 'budget exhausted: wallTimeMs (worker run exceeded its wall-clock limit of 50ms; this is a budget exhaustion, not a criteria failure)'
+    const reason = [
+      'budget exhausted: wallTimeMs (worker run exceeded its wall-clock limit of 50ms; this is a budget exhaustion, not a criteria failure)',
+      `— ${escalationHint(
+        'the run cannot finish inside its wall-clock budget',
+        'the run was cancelled at the deadline',
+        'raise the budget, split the task, or accept the partial result',
+      )}`,
+    ].join(' ')
     expect(runEventKinds(h, outcomes[0]!.runId!)).toEqual(['TaskStarted', 'TaskFailed', 'ReviewRecorded'])
     expect(taskEvents(h)
       .filter(item => item.kind === 'TaskFailed' && item.runId === outcomes[0]!.runId)
@@ -1466,7 +1482,11 @@ describe('TaskRuntime budget (KISS §5, VRTC plan 1.3)', () => {
     const snapshot = await h.task.snapshotIn(STORE)
     const record = snapshot.reviews.find(item => item.runId === outcomes[0]!.runId)!
     expect(record.anomalies).toEqual([
-      'budget exceeded: maxToolCalls (observed 3 tool calls over the limit 2; post-hoc check at terminal time — the run was not stopped in flight)',
+      `budget exceeded: maxToolCalls (observed 3 tool calls over the limit 2; post-hoc check at terminal time — the run was not stopped in flight) — ${escalationHint(
+        'the run already spent more tool calls than its budget allows',
+        'the run finished before the breach was observable',
+        'raise the budget, split the task, or accept the overspend',
+      )}`,
     ])
     // The root session's own log is empty, so the parent record stays clean.
     expect(snapshot.reviews.find(item => item.runId === rootRunId)!.anomalies).toEqual([])
@@ -1487,7 +1507,11 @@ describe('TaskRuntime budget (KISS §5, VRTC plan 1.3)', () => {
     expect(outcomes[0]!.status).toBe('verified')
     const record = (await h.task.snapshotIn(STORE)).reviews.find(item => item.runId === outcomes[0]!.runId)!
     expect(record.anomalies).toEqual([
-      'budget exceeded: tokens (observed 110 whole-session tokens over the limit 100; post-hoc check at terminal time, session-scoped cumulative — the run was not stopped in flight)',
+      `budget exceeded: tokens (observed 110 whole-session tokens over the limit 100; post-hoc check at terminal time, session-scoped cumulative — the run was not stopped in flight) — ${escalationHint(
+        'the run already spent more tokens than its budget allows',
+        'the run finished before the breach was observable',
+        'raise the budget, split the task, or accept the overspend',
+      )}`,
     ])
   })
 })
@@ -1615,7 +1639,11 @@ describe('TaskRuntime unknown-kind feedback (KISS §4.3, VRTC plan 2.1)', () => 
     expect(reasonOf(outcomes[0]!.runId!))
       .toBe('mandatory criteria not satisfied: ac1-1 inconclusive [unknown: task — the criterion was never tested] (timeout after 600000ms)')
     expect(reasonOf(outcomes[1]!.runId!))
-      .toBe('mandatory criteria not satisfied: ac2-1 inconclusive [unknown: verifier — the verifier could not judge] (verifier exploded)')
+      .toBe(`mandatory criteria not satisfied: ac2-1 inconclusive [unknown: verifier — the verifier could not judge] ${escalationHint(
+        'the verifier "fake-verifier" could not judge criterion "ac2-1"',
+        'the criterion was run and the judge itself failed',
+        'fix or replace the verifier, then re-verify the criterion',
+      )} (verifier exploded)`)
 
     // The review record carries the kind too, so E3 can be read without the bundle.
     const snapshot = await h.task.snapshotIn(STORE)

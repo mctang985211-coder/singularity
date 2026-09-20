@@ -31,7 +31,7 @@ import { workerBaseline } from '../../task-runtime/src/capability.ts'
 const ROOT_TOOLS = [
   'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'skill', 'task_decompose',
   'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
-  'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list',
+  'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
 
 /** The global-plane machinery every agent inherits: our own tools sit here, as they do in the deployment. `skill` rides the preset plane (PRESET_TOOLS), as `tool-skill` mounts it there. */
@@ -262,7 +262,7 @@ describe('worker capability grants', () => {
     // (HITL, capability listing, review/diagnosis, evolution) stays the root's.
     for (const stripped of [
       'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve',
-      'evolution_propose', 'evolution_candidate', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list',
+      'evolution_propose', 'evolution_candidate', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
       'capability_list', 'task_review_pack', 'task_diagnose',
     ]) {
       expect(names, stripped).not.toContain(stripped)

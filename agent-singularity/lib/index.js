@@ -1,9 +1,9 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import { randomUUID } from "node:crypto";
 import { appendFile, cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, checkObligationCoverage, findRepoRoot, loadObligationTemplates, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
@@ -37,12 +37,12 @@ var HitlService = class extends Service {
 		ctx.on("user-questions/request", async (request, next) => {
 			if (request.questions.length !== 1) return next();
 			const question = request.questions[0];
-			const text$20 = await this.enqueue(request.agent?.id ?? "unknown", "ask", question.question, request.signal);
-			if (text$20.kind !== "ask") throw new Error("hitl: expected ask answer");
+			const text$21 = await this.enqueue(request.agent?.id ?? "unknown", "ask", question.question, request.signal);
+			if (text$21.kind !== "ask") throw new Error("hitl: expected ask answer");
 			return { answers: [{
 				id: question.id,
 				selected: [],
-				custom: text$20.text
+				custom: text$21.text
 			}] };
 		}, { prepend: true });
 		ctx.on("approval/request", async (request) => {
@@ -66,16 +66,16 @@ var HitlService = class extends Service {
 		waiter.resolve(answer);
 		this.ctx.emit("hitl/change", this.list());
 	}
-	enqueue(sessionId$15, kind, prompt, callerSignal) {
+	enqueue(sessionId$16, kind, prompt, callerSignal) {
 		const signal = callerSignal === void 0 ? this.lifetime.signal : AbortSignal.any([callerSignal, this.lifetime.signal]);
 		signal.throwIfAborted();
-		if (typeof sessionId$15 !== "string" || sessionId$15.length === 0) throw new Error("hitl: missing session id");
+		if (typeof sessionId$16 !== "string" || sessionId$16.length === 0) throw new Error("hitl: missing session id");
 		const id = randomUUID();
 		const pending = {
 			id,
 			kind,
 			prompt,
-			sessionId: sessionId$15,
+			sessionId: sessionId$16,
 			createdAt: Date.now()
 		};
 		const abort = () => {
@@ -94,6 +94,169 @@ var HitlService = class extends Service {
 		});
 		this.ctx.emit("hitl/change", this.list());
 		return promise.finally(() => signal.removeEventListener("abort", abort));
+	}
+};
+
+//#endregion
+//#region src/escalation.ts
+const ESCALATION_TRIGGERS = [
+	"capability-gap",
+	"budget-exhausted",
+	"unknown-convergence",
+	"human"
+];
+function nonEmpty$1(value, field) {
+	if (typeof value !== "string" || value.trim().length === 0) throw new Error(`escalation: ${field} must be a non-empty string`);
+	return value;
+}
+/**
+* Payload validation shared by the write path (`raise`) and the fold, so a
+* hand-forged ledger line fails load exactly as it would fail append: the kind
+* must be known, the id non-empty, the three KISS §7 elements present, the
+* trigger one of the four, and the human-approval evidence real.
+*/
+function assertRaised(record) {
+	if (record.kind !== "raised") throw new Error(`escalation: unknown ledger kind "${String(record.kind)}"`);
+	nonEmpty$1(record.escalationId, "escalationId");
+	nonEmpty$1(record.what, "what");
+	nonEmpty$1(record.tried, "tried");
+	nonEmpty$1(record.suggested, "suggested");
+	if (!ESCALATION_TRIGGERS.includes(record.trigger)) throw new Error(`escalation: unknown trigger "${String(record.trigger)}"`);
+	if (!Array.isArray(record.sourceRefs) || record.sourceRefs.some((ref) => typeof ref !== "string" || ref.trim().length === 0)) throw new Error("escalation: sourceRefs must be an array of non-empty strings");
+	if (record.sourceTaskId !== void 0) nonEmpty$1(record.sourceTaskId, "sourceTaskId");
+	nonEmpty$1(record.approvalRef, "approvalRef");
+	nonEmpty$1(record.actor, "actor");
+	nonEmpty$1(record.at, "at");
+}
+/**
+* The escalation ledger (plane separation: this store is independent of the
+* task store and refers to it by id only). Append and replay share one fold,
+* so a corrupt or duplicated line fails loudly instead of silently drifting.
+* Writes are serialized; the file is opened per append, so closing the service
+* is just draining the write queue.
+*/
+var EscalationService = class extends Service {
+	/** Absolute ledger directory resolved at construction. */
+	root;
+	/** Repo root that relative paths resolve against. */
+	repoRoot;
+	records = [];
+	loaded;
+	writes = Promise.resolve();
+	constructor(ctx, config = {}) {
+		super(ctx, "escalation");
+		this.repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
+		const dshHome = process.env.DSH_HOME ?? join(this.repoRoot, ".dsh");
+		this.root = resolve(config.root ?? dshHome);
+		this.loaded = this.load();
+		ctx.effect(() => async () => {
+			await this.writes;
+		}, "escalation: drain writes");
+	}
+	/** Ledger file path (`<root>/escalations.jsonl`). */
+	get file() {
+		return join(this.root, "escalations.jsonl");
+	}
+	/**
+	* Record one card. The caller (the `escalate` tool) must hold a human grant
+	* from `ctx.approval.request` first and pass its call id as `approvalRef`
+	* (`approval:<callId>`, the evolution_decide shape): a rejected, cancelled,
+	* or unavailable ask must never reach this method. Payload validation runs
+	* before anything touches disk.
+	*/
+	async raise(input, actor, approvalRef) {
+		const record = {
+			formatVersion: 1,
+			kind: "raised",
+			escalationId: nonEmpty$1(input.escalationId ?? `esc-${randomUUID()}`, "escalationId"),
+			what: nonEmpty$1(input.what, "what"),
+			tried: nonEmpty$1(input.tried, "tried"),
+			suggested: nonEmpty$1(input.suggested, "suggested"),
+			trigger: input.trigger,
+			...input.sourceTaskId === void 0 ? {} : { sourceTaskId: nonEmpty$1(input.sourceTaskId, "sourceTaskId") },
+			sourceRefs: (input.sourceRefs ?? []).map((ref, index) => nonEmpty$1(ref, `sourceRefs[${index}]`)),
+			approvalRef: nonEmpty$1(approvalRef, "approvalRef"),
+			actor,
+			at: (/* @__PURE__ */ new Date()).toISOString()
+		};
+		if (!ESCALATION_TRIGGERS.includes(record.trigger)) throw new Error(`escalation: unknown trigger "${String(input.trigger)}"`);
+		await this.append(record);
+		return this.get(record.escalationId);
+	}
+	/** Folded view of one card, or throws on an unknown id. */
+	async get(escalationId) {
+		await this.loaded;
+		const escalation = this.fold(this.records).get(escalationId);
+		if (escalation === void 0) throw new Error(`escalation: unknown escalation "${escalationId}"`);
+		return escalation;
+	}
+	/** Folded views, newest card first. */
+	async list() {
+		await this.loaded;
+		return [...this.fold(this.records).values()].reverse();
+	}
+	/**
+	* Fold records into cards, enforcing the payload rules on every step: a
+	* `raised` line starts a new id, a repeated id is refused, and every field
+	* is re-validated, so an illegal line fails load exactly as it would fail
+	* append.
+	*/
+	fold(records) {
+		const escalations = /* @__PURE__ */ new Map();
+		for (const record of records) {
+			assertRaised(record);
+			if (escalations.has(record.escalationId)) throw new Error(`escalation: escalation "${record.escalationId}" already exists`);
+			escalations.set(record.escalationId, {
+				escalationId: record.escalationId,
+				what: record.what,
+				tried: record.tried,
+				suggested: record.suggested,
+				trigger: record.trigger,
+				status: "open",
+				...record.sourceTaskId === void 0 ? {} : { sourceTaskId: record.sourceTaskId },
+				sourceRefs: [...record.sourceRefs],
+				approvalRef: record.approvalRef,
+				actor: record.actor,
+				at: record.at,
+				history: [{
+					status: "open",
+					actor: record.actor,
+					at: record.at
+				}]
+			});
+		}
+		return escalations;
+	}
+	async load() {
+		let text$21;
+		try {
+			text$21 = await readFile(this.file, "utf8");
+		} catch (error) {
+			if (error.code === "ENOENT") return;
+			throw error;
+		}
+		const records = text$21.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
+			try {
+				return JSON.parse(line);
+			} catch {
+				throw new Error(`escalation: corrupt ledger line ${index + 1} in ${this.file}`);
+			}
+		});
+		for (const record of records) if (record.formatVersion !== 1) throw new Error(`escalation: unsupported ledger formatVersion "${String(record.formatVersion)}"`);
+		this.records = records;
+		this.fold(this.records);
+	}
+	/** Validate the staged fold first; memory commits only after the line is on disk. */
+	async append(record) {
+		await this.loaded;
+		const run = this.writes.then(async () => {
+			this.fold([...this.records, record]);
+			await mkdir(this.root, { recursive: true });
+			await appendFile(this.file, `${JSON.stringify(record)}\n`, "utf8");
+			this.records = [...this.records, record];
+		});
+		this.writes = run.then(() => void 0, () => void 0);
+		await run;
 	}
 };
 
@@ -201,13 +364,20 @@ function assertReplayReport(proposal, report) {
 function flowScalar(value) {
 	return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) ? value : JSON.stringify(value);
 }
-/** The row's flow value, keys in the mutation schema's fixed order: `{ skills: [verify], preset: bb-verify }`. */
+/**
+* The row's flow value, keys in the mutation schema's fixed order:
+* `{ skills: [verify], preset: bb-verify, mcpServers: [bbdev] }`. Every key of
+* `CapabilityConfig` renders, `mcpServers` included — a row that dropped it
+* would leave the runtime override granting a server plane the restarted
+* process no longer mounts.
+*/
 function flowEntry(entry) {
 	const parts = [];
 	if (entry.skills !== void 0) parts.push(`skills: [${entry.skills.map(flowScalar).join(", ")}]`);
 	if (entry.tools !== void 0) parts.push(`tools: [${entry.tools.map(flowScalar).join(", ")}]`);
 	if (entry.preset !== void 0) parts.push(`preset: ${flowScalar(entry.preset)}`);
 	if (entry.permission !== void 0) parts.push(`permission: ${flowScalar(entry.permission)}`);
+	if (entry.mcpServers !== void 0) parts.push(`mcpServers: [${entry.mcpServers.map(flowScalar).join(", ")}]`);
 	return `{ ${parts.join(", ")} }`;
 }
 /** The row key as written: a plain scalar when safe, else its JSON-quoted form. */
@@ -264,9 +434,9 @@ function entryEnd(lines, head, regionEnd, headerIndent) {
 * task-runtime entry, more than one (the error names every matching line —
 * refusing to guess which one governs), or no capabilities mapping.
 */
-function locateCapabilityRow(text$20, name) {
-	const eol = text$20.includes("\r\n") ? "\r\n" : "\n";
-	const lines = text$20.split(eol);
+function locateCapabilityRow(text$21, name) {
+	const eol = text$21.includes("\r\n") ? "\r\n" : "\n";
+	const lines = text$21.split(eol);
 	const docEnd = lines.findIndex((line) => line.trim() === "---");
 	const doc1End = docEnd === -1 ? lines.length : docEnd;
 	const itemIndices = [];
@@ -338,8 +508,8 @@ function locateCapabilityRow(text$20, name) {
 * beats re-rendering the registry entry, whose schema fills default arrays the
 * source text never spelled out.
 */
-function readCapabilityRowSource(text$20, name) {
-	const located = locateCapabilityRow(text$20, name);
+function readCapabilityRowSource(text$21, name) {
+	const located = locateCapabilityRow(text$21, name);
 	if (located.rowStart === -1) return null;
 	return located.lines.slice(located.rowStart, located.rowStart + located.rowSpan).join("\n");
 }
@@ -349,8 +519,8 @@ function readCapabilityRowSource(text$20, name) {
 * row is gone, insert the lines where a new row would go. Every other byte of
 * the file is preserved, exactly as with `editCapabilityRow`.
 */
-function restoreCapabilityRowSource(text$20, name, source) {
-	const { lines, eol, capIndex, capIndent, capCollapsed, rowStart, rowSpan, insertAt } = locateCapabilityRow(text$20, name);
+function restoreCapabilityRowSource(text$21, name, source) {
+	const { lines, eol, capIndex, capIndent, capCollapsed, rowStart, rowSpan, insertAt } = locateCapabilityRow(text$21, name);
 	const sourceLines = source.replace(/\r?\n$/, "").split("\n");
 	if (rowStart !== -1) {
 		lines.splice(rowStart, rowSpan, ...sourceLines);
@@ -379,8 +549,8 @@ function restoreCapabilityRowSource(text$20, name, source) {
 * than one (the error names every matching line — refusing to guess which one
 * governs), no capabilities mapping, or a removal names no existing row.
 */
-function editCapabilityRow(text$20, name, entry) {
-	const { lines, eol, capIndex, capIndent, capCollapsed, regionEnd, rowStart, rowSpan, insertAt, entryIndent } = locateCapabilityRow(text$20, name);
+function editCapabilityRow(text$21, name, entry) {
+	const { lines, eol, capIndex, capIndent, capCollapsed, regionEnd, rowStart, rowSpan, insertAt, entryIndent } = locateCapabilityRow(text$21, name);
 	const rowLine = `${" ".repeat(rowStart === -1 ? entryIndent : indentOf(lines[rowStart]))}${keySpelling(name)}: ${flowEntry(entry ?? {})}`;
 	if (entry !== null && rowStart !== -1) {
 		lines.splice(rowStart, rowSpan, rowLine);
@@ -479,16 +649,16 @@ function assertOnlyKeys(value, allowed, field) {
 }
 /** A single safe path segment (one directory name): no separators, never `.`/`..`, never absolute. */
 function assertSegment(value, field) {
-	const text$20 = nonEmpty(value, field);
-	if (text$20 === "." || text$20 === ".." || text$20.includes("/") || text$20.includes("\\") || isAbsolute(text$20)) throw new Error(`evolution: ${field} must be a single safe path segment, got "${text$20}"`);
-	return text$20;
+	const text$21 = nonEmpty(value, field);
+	if (text$21 === "." || text$21 === ".." || text$21.includes("/") || text$21.includes("\\") || isAbsolute(text$21)) throw new Error(`evolution: ${field} must be a single safe path segment, got "${text$21}"`);
+	return text$21;
 }
 /** A clean relative path: never absolute (posix or drive-letter), no `\`, no empty / `.` / `..` segments. */
 function assertSandboxPath(value, field) {
-	const text$20 = nonEmpty(value, field);
-	if (isAbsolute(text$20) || /^[A-Za-z]:[\\/]/.test(text$20) || text$20.includes("\\") || text$20.includes("\0")) throw new Error(`evolution: ${field} must be a relative path inside the sandbox, got "${text$20}"`);
-	if (text$20.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) throw new Error(`evolution: ${field} must be a clean relative path (no empty / "." / ".." segments), got "${text$20}"`);
-	return text$20;
+	const text$21 = nonEmpty(value, field);
+	if (isAbsolute(text$21) || /^[A-Za-z]:[\\/]/.test(text$21) || text$21.includes("\\") || text$21.includes("\0")) throw new Error(`evolution: ${field} must be a relative path inside the sandbox, got "${text$21}"`);
+	if (text$21.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) throw new Error(`evolution: ${field} must be a clean relative path (no empty / "." / ".." segments), got "${text$21}"`);
+	return text$21;
 }
 /** Resolve `rel` under `base`, refusing anything that would land outside — the sandbox confinement belt. */
 function resolveWithin(base, rel) {
@@ -648,8 +818,8 @@ function championEntryYaml(name, entry) {
 	].join("\n");
 }
 /** Read back the champion capability snapshot: the single JSON line under the `#` header, keyed by the capability name. */
-function parseChampionEntry(text$20, name) {
-	const line = text$20.split("\n").map((item) => item.trim()).filter((item) => item.length > 0 && !item.startsWith("#")).at(-1);
+function parseChampionEntry(text$21, name) {
+	const line = text$21.split("\n").map((item) => item.trim()).filter((item) => item.length > 0 && !item.startsWith("#")).at(-1);
 	if (line === void 0) throw new Error("evolution: the champion capability snapshot carries no entry line");
 	const parsed = JSON.parse(line);
 	if (!isRecord$1(parsed) || !(name in parsed) || !isRecord$1(parsed[name])) throw new Error(`evolution: the champion capability snapshot does not hold an entry for "${name}"`);
@@ -1008,24 +1178,24 @@ var EvolutionService = class extends Service {
 			}
 			case "capability": {
 				const { name, entry } = proposal.mutation;
-				const text$20 = await readFile(this.configFile, "utf8");
+				const text$21 = await readFile(this.configFile, "utf8");
 				let row;
 				let edited;
 				if (direction === "apply") {
 					row = entry;
-					edited = editCapabilityRow(text$20, name, row);
+					edited = editCapabilityRow(text$21, name, row);
 				} else if (champion === "missing") {
 					row = null;
-					edited = editCapabilityRow(text$20, name, null);
+					edited = editCapabilityRow(text$21, name, null);
 				} else if (proposal.prepared?.championSource === "config-text") {
 					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = restoreCapabilityRowSource(text$20, name, await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.source.txt`), "utf8"));
+					edited = restoreCapabilityRowSource(text$21, name, await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.source.txt`), "utf8"));
 				} else if (proposal.prepared?.championSource === "code-default") {
 					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = editCapabilityRow(text$20, name, null);
+					edited = editCapabilityRow(text$21, name, null);
 				} else {
 					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = editCapabilityRow(text$20, name, row);
+					edited = editCapabilityRow(text$21, name, row);
 				}
 				await writeFile(this.configFile, edited.text, "utf8");
 				return {
@@ -1062,14 +1232,14 @@ var EvolutionService = class extends Service {
 	* apply would.
 	*/
 	async capabilityRowSource(name) {
-		let text$20;
+		let text$21;
 		try {
-			text$20 = await readFile(this.configFile, "utf8");
+			text$21 = await readFile(this.configFile, "utf8");
 		} catch (error) {
 			if (error.code === "ENOENT") return null;
 			throw error;
 		}
-		return readCapabilityRowSource(text$20, name);
+		return readCapabilityRowSource(text$21, name);
 	}
 	/**
 	* Early state-machine check so a wrong-state call reports the transition
@@ -1274,14 +1444,14 @@ var EvolutionService = class extends Service {
 		return proposals;
 	}
 	async load() {
-		let text$20;
+		let text$21;
 		try {
-			text$20 = await readFile(this.file, "utf8");
+			text$21 = await readFile(this.file, "utf8");
 		} catch (error) {
 			if (error.code === "ENOENT") return;
 			throw error;
 		}
-		const records = text$20.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
+		const records = text$21.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
 			try {
 				return JSON.parse(line);
 			} catch {
@@ -1308,7 +1478,7 @@ var EvolutionService = class extends Service {
 
 //#endregion
 //#region src/tools/approve.ts
-const text$19 = (value) => [{
+const text$20 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -1323,7 +1493,7 @@ function defineApproveTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$19(v)
+			render: (_a, v) => text$20(v)
 		},
 		execute: async (args, exec) => {
 			if (args.prompt.trim().length === 0) throw new Error("hitl_approve: prompt is empty");
@@ -1347,7 +1517,7 @@ function defineApproveTool(ctx) {
 
 //#endregion
 //#region src/tools/ask.ts
-const text$18 = (value) => [{
+const text$19 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -1363,7 +1533,7 @@ function defineAskTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$18(v)
+			render: (_a, v) => text$19(v)
 		},
 		execute: async (args, exec) => {
 			if (args.prompt.trim().length === 0) throw new Error("hitl_ask: prompt is empty");
@@ -1382,7 +1552,7 @@ function defineAskTool(ctx) {
 
 //#endregion
 //#region src/tools/capability-list.ts
-const text$17 = (value) => [{
+const text$18 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -1412,7 +1582,7 @@ function defineCapabilityListTool(ctx) {
 		parameters: {},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$17(v)
+			render: (_a, v) => text$18(v)
 		},
 		execute: async () => {
 			const capabilities = ctx.taskRuntime.listCapabilities();
@@ -1442,6 +1612,143 @@ function defineCapabilityListTool(ctx) {
 				"mcpServers grant whole MCP servers (never single tools): each mounts as one mcp-client instance on the worker at spawn, bound to that run's environment checkout; a server that cannot start fails the spawn loudly.",
 				"permissions: a capability that declares none leaves the worker on the deployment default (danger-full-access); flipping the default is blocked until worker approvals reliably reach the canvas (#17 in the working guide)."
 			].join("\n");
+		}
+	});
+}
+
+//#endregion
+//#region src/tools/escalate.ts
+const text$17 = (value) => [{
+	type: "text",
+	text: value
+}];
+function sessionId$15(exec) {
+	const id = exec.agent?.id;
+	if (typeof id !== "string" || id.length === 0) throw new Error("escalate: missing agent id");
+	return id;
+}
+/** The three KISS §7 elements, named the way the refusal and the record name them. */
+const ELEMENTS = [
+	"what",
+	"tried",
+	"suggested"
+];
+/** One card as the approval reason shows it to the human. */
+function cardLines(card) {
+	return [
+		`trigger: ${card.trigger}`,
+		`what: ${card.what}`,
+		`tried: ${card.tried}`,
+		`suggested: ${card.suggested}`,
+		...card.sourceTaskId === void 0 ? [] : [`source task: ${card.sourceTaskId}`],
+		...card.sourceRefs === void 0 || card.sourceRefs.length === 0 ? [] : [`sourceRefs: [${card.sourceRefs.join(", ")}]`]
+	];
+}
+function renderEscalation$1(escalation) {
+	return [
+		`- ${escalation.escalationId} [${escalation.status}] ${escalation.trigger} — what: ${escalation.what}`,
+		`  tried: ${escalation.tried}`,
+		`  suggested: ${escalation.suggested}`,
+		`  source task: ${escalation.sourceTaskId ?? "(none)"} sourceRefs: [${escalation.sourceRefs.join(", ")}]`,
+		`  approval: ${escalation.approvalRef} by ${escalation.actor} at ${escalation.at}`
+	].join("\n");
+}
+function defineEscalateTool(ctx) {
+	return defineTool({
+		name: "escalate",
+		description: "Report work you cannot settle yourself to a human (KISS §7 L4): a capability gap, an exhausted budget, or an UNKNOWN(verifier) verdict. The card names what is missing, what was already tried, and what is suggested — an incomplete card is refused, because a human must be able to decide from it in ten minutes. The card is shown to the human through the native approval seam first and is recorded in the append-only escalation ledger (`.dsh/escalations.jsonl`) only after an explicit approve; a reject, cancel, or unavailable answerer records nothing. Set list to read the recorded cards back without asking a human.",
+		parameters: {
+			what: {
+				type: "string",
+				description: "What is missing — the gap, the exhausted budget, or the verdict that cannot be judged"
+			},
+			tried: {
+				type: "string",
+				description: "What was already tried before escalating"
+			},
+			suggested: {
+				type: "string",
+				description: "What you suggest the human do"
+			},
+			trigger: {
+				type: "string",
+				enum: ESCALATION_TRIGGERS,
+				description: "What raised the card"
+			},
+			escalationId: {
+				type: "string",
+				description: "Stable id for the card; omitted derives one. A repeated id is refused, so a retry after a failed raise stays idempotent"
+			},
+			sourceTaskId: {
+				type: "string",
+				description: "The task the card is about, when it has one"
+			},
+			sourceRefs: {
+				type: "array",
+				items: { type: "string" },
+				description: "Evidence / task / diagnosis refs behind the card"
+			},
+			list: {
+				type: "boolean",
+				description: "Read-only: list the recorded escalations instead of raising one"
+			}
+		},
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text$17(v)
+		},
+		execute: async (args, exec) => {
+			if (args.list === true) {
+				const escalations = await ctx.escalation.list();
+				if (escalations.length === 0) return "escalations: none recorded";
+				return [`escalations (${escalations.length}):`, ...escalations.map(renderEscalation$1)].join("\n");
+			}
+			const caller = sessionId$15(exec);
+			const agent = exec.agent;
+			if (agent === void 0) throw new Error("escalate: missing agent");
+			const missing = ELEMENTS.filter((element) => {
+				const value = args[element];
+				return typeof value !== "string" || value.trim().length === 0;
+			});
+			if (missing.length > 0) return [
+				`escalate rejected: incomplete L4 card — ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} missing`,
+				"a human must be able to decide in ten minutes from what is missing, what was tried, and what is suggested",
+				"nothing was recorded and no human was asked"
+			].join("; ");
+			if (args.trigger === void 0 || !ESCALATION_TRIGGERS.includes(args.trigger)) return `escalate rejected: trigger must be one of ${ESCALATION_TRIGGERS.join(" / ")}; nothing was recorded and no human was asked`;
+			const card = {
+				trigger: args.trigger,
+				what: args.what,
+				tried: args.tried,
+				suggested: args.suggested,
+				...args.escalationId === void 0 ? {} : { escalationId: args.escalationId },
+				...args.sourceTaskId === void 0 ? {} : { sourceTaskId: args.sourceTaskId },
+				...args.sourceRefs === void 0 ? {} : { sourceRefs: args.sourceRefs }
+			};
+			const reason = [
+				"L4 escalation — a human decision is required",
+				...cardLines(card),
+				"approving records the card in the escalation ledger; rejecting records nothing"
+			].join("\n");
+			const outcome = await ctx.approval.request({
+				agent,
+				toolName: "escalate",
+				callId: exec.callId,
+				reason,
+				signal: exec.signal
+			});
+			if (outcome !== "allowed-once") return `escalate: no escalation recorded — ${outcome === "rejected" ? "the human rejected it" : outcome === "cancelled" ? "the request was cancelled before the human decided" : "no approval answerer available"}; the work stays where it was`;
+			try {
+				const escalation = await ctx.escalation.raise(card, caller, `approval:${exec.callId}`);
+				return [
+					`escalation ${escalation.escalationId} recorded [${escalation.status}] trigger: ${escalation.trigger}`,
+					...cardLines(escalation),
+					"acceptance: all three elements present (what / tried / suggested) — a human can decide from this card in ten minutes",
+					`recorded after human approval ${escalation.approvalRef}; ledger: ${ctx.escalation.file}`
+				].join("\n");
+			} catch (error) {
+				return `escalate rejected: ${error instanceof Error ? error.message : String(error)}`;
+			}
 		}
 	});
 }
@@ -2415,9 +2722,9 @@ function defineMarkReadyTool(ctx) {
 			render: (_a, v) => text$7(v)
 		},
 		execute: async (_args, exec) => {
-			const sessionId$15 = exec.agent?.id;
-			if (sessionId$15 === void 0) throw new Error("graph_mark_ready: missing agent id");
-			const graph = await ctx.graphs.graphForSession(sessionId$15);
+			const sessionId$16 = exec.agent?.id;
+			if (sessionId$16 === void 0) throw new Error("graph_mark_ready: missing agent id");
+			const graph = await ctx.graphs.graphForSession(sessionId$16);
 			await ctx.graphs.markReady(graph.id);
 			return `graph ${graph.id} ready`;
 		}
@@ -2902,15 +3209,15 @@ function reviewAgentBudget() {
 * reads as zero; a corrupt line throws rather than silently undercounting.
 */
 async function countReviewAgentRuns(rootStoreId) {
-	let text$20;
+	let text$21;
 	try {
-		text$20 = await readFile(reviewAgentLedgerFile(), "utf8");
+		text$21 = await readFile(reviewAgentLedgerFile(), "utf8");
 	} catch (error) {
 		if (error.code === "ENOENT") return 0;
 		throw error;
 	}
 	let count = 0;
-	text$20.split("\n").forEach((line, index) => {
+	text$21.split("\n").forEach((line, index) => {
 		if (line.trim().length === 0) return;
 		let record;
 		try {
@@ -3511,6 +3818,7 @@ var SingularityAgent = class extends Service {
 		super(ctx, "singularityAgent");
 		ctx.plugin(HitlService);
 		new EvolutionService(ctx);
+		new EscalationService(ctx);
 		ctx.tools.register(defineMarkReadyTool(ctx));
 		ctx.tools.register(defineSpawnTool(ctx));
 		ctx.tools.register(defineAskTool(ctx));
@@ -3532,9 +3840,10 @@ var SingularityAgent = class extends Service {
 		ctx.tools.register(defineEvolutionApplyTool(ctx));
 		ctx.tools.register(defineEvolutionRollbackTool(ctx));
 		ctx.tools.register(defineEvolutionListTool(ctx));
+		ctx.tools.register(defineEscalateTool(ctx));
 	}
 };
 var src_default = SingularityAgent;
 
 //#endregion
-export { APPLYABLE_TARGET_TYPES, CHAMPION_SOURCES, CHAMPION_STATES, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EvolutionService, HitlService, MECHANICAL_TARGET_TYPES, REPLAY_RELATIONS, REPLAY_VERDICTS, SingularityAgent, applyTargets, compareReplaySides, src_default as default, mutationMechanical, overallReplayVerdict };
+export { APPLYABLE_TARGET_TYPES, CHAMPION_SOURCES, CHAMPION_STATES, ESCALATION_TRIGGERS, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EscalationService, EvolutionService, HitlService, MECHANICAL_TARGET_TYPES, REPLAY_RELATIONS, REPLAY_VERDICTS, SingularityAgent, applyTargets, compareReplaySides, src_default as default, mutationMechanical, overallReplayVerdict };

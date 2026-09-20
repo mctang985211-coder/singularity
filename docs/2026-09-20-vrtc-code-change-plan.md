@@ -28,10 +28,10 @@ Review/Diagnosis、Evolution 准入轨道都已建；缺的是 KISS 第 5.1、6�
 | 0 文档 | ✅ 完成 | W23（§4.2 #20–#31、§4.3 记录、§6/§5.2 事实修正） |
 | 1.1 `assumptions` 接线 | ✅ 完成 | W27（`DecomposeChildSpec.assumptions` `task-runtime/src/index.ts:185`；合并点 `orchestrate.ts:659`）；M7 实证（C 的 handoff.assumptions 恰三条） |
 | 1.2 证据依赖 `requiresArtifact` | ✅ 完成 | W27（`task/src/types.ts:25`；admission 形状校验 `admission.ts:73-76`；存在性判 spawn 前 `orchestrate.ts:194`）；M7 实证（探针 B 未 spawn 直接 blocked） |
-| 1.3 预算外置 + 强制出口 | ⬜ 待做 | 缺口 #23 未动 |
-| 1.4 `verifierRef` 向后兼容 | ⬜ 待做 | 随 2.1 一起做 |
-| 2.1 四值语义 / UNKNOWN 二分 | ⬜ 待做 | #24 未动 |
-| 2.2 Verifier owner/version/selftest | ⬜ 待做 | #25 未动 |
+| 1.3 预算外置 + 强制出口 | ✅ 完成（`wallTimeMs` 在飞强制；`maxToolCalls`/`tokens` post-hoc；`attempts`/`noProgressRounds` 只声明未强制） | W29（`Config.budget`/`noProgressRounds` `task-runtime/src/index.ts:238-246`、schema `:377-383`、默认值 `:270-277`；`budgetExhaustedReason` `orchestrate.ts:473-476`、`awaitWorker` `:526-551`、落点 `:853-862`/`:1147-1152`；post-hoc `budgetBreaches` `:486-507`）。ESCALATE 出口仍未建（阶段 3.1） |
+| 1.4 `verifierRef` 向后兼容 | ✅ 完成 | W29（`AcceptanceCriterion.verifierRef?` `task/src/types.ts:34`；未知 id 创建/分解期整批拒绝并列已注册 id `task-runtime/src/index.ts:624-627,1022-1040`；注册表按 id 取 verifier `verifier/src/index.ts:150-156`；档案 `docs/persistence-changes/2026-09-20-verifier-ref-unknown-kind.md`） |
+| 2.1 四值语义 / UNKNOWN 二分 | ✅ 完成（UNKNOWN 二分落地；`status` 仍三值、未升四值） | W29（`unknownKind?: 'task'/'verifier'` `task/src/types.ts:114,125,197`；command verifier 标 `task` `verifier/src/command-verifier.ts:96,103,106`；注册表标 `verifier` `verifier/src/index.ts:157-177,185-191`；编排器分渲染 `orchestrate.ts:215-220`） |
+| 2.2 Verifier owner/version/selftest | ✅ 完成（软：无 selftest 的注册记 warning 不拒绝） | W29（`Verifier` 元数据 `task/src/types.ts:629-642`、`VerifierSelftest` `:622-628`；`register()` warning `verifier/src/index.ts:93-97`；三个内置 verifier 已带 `command-verifier.ts:74-78`、`composite-verifier.ts:22-33`、`review-verifier.ts:7-19`） |
 | 3.1 L4 ESCALATE 出口 | ⬜ 待做 | #22/#27 未动 |
 | 3.2 L1/L2 组合与生成 | ⬜ 待做 | #27 未动 |
 | 3.3 Obligation 最小版 | ✅ 完成（登记 + 覆盖检查） | W27（`ObligationRecorded` `task/src/types.ts:692`；`task-runtime/src/obligation.ts`；出口 `task-status.ts:31,44`）；M7 实证（`obligations: 1 recorded`、`0/7 covered`）。全局调度器按计划不做 |

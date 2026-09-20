@@ -373,6 +373,15 @@ interface OrchestrateEnv {
   }): void;
 }
 /**
+ * The L4 exit pointer (KISS §7, VRTC plan phase 3.1), appended to the feedback
+ * a root agent reads at each of the three trigger sites. The escalation ledger
+ * and its tool live on the root plane (agent-singularity): a card carries a
+ * human-approval gate that belongs on the root's tool surface, so the
+ * orchestrator only points at the exit — it never calls across planes and never
+ * blocks a cascade on a human answer.
+ */
+declare function escalationHint(what: string, tried: string, suggested: string): string;
+/**
  * Sequential run cascade over one admitted batch of children (RFC §47 MVP):
  * the first child whose dependencies are all `verified` is handed off and
  * spawned; its run is verified, then readiness is re-evaluated. A child whose
@@ -913,4 +922,4 @@ declare class TaskRuntime extends Service {
   private liveAgent;
 }
 //#endregion
-export { type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BudgetConfig, type CapabilityConfig, type ChildOutcome, type ChildPlan, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DecomposeChildSpec, DecomposeSpec, type HandoffInit, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type PermissionSpec, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, ReplayTaskOptions, RunVerifier, type SessionObservation, type SpawnChildRequest, TOOL_LABELS, TaskRuntime, TaskRuntime as default, VerifierUnavailableError, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, type WorkerPromptOptions, buildHandoff, checkDecomposition, checkObligationCoverage, findRepoRoot, loadObligationTemplates, manifestMcpServers, parseObligationTemplates, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };
+export { type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BudgetConfig, type CapabilityConfig, type ChildOutcome, type ChildPlan, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DecomposeChildSpec, DecomposeSpec, type HandoffInit, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type PermissionSpec, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, ReplayTaskOptions, RunVerifier, type SessionObservation, type SpawnChildRequest, TOOL_LABELS, TaskRuntime, TaskRuntime as default, VerifierUnavailableError, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, type WorkerPromptOptions, buildHandoff, checkDecomposition, checkObligationCoverage, escalationHint, findRepoRoot, loadObligationTemplates, manifestMcpServers, parseObligationTemplates, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };

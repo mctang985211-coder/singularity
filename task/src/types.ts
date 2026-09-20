@@ -41,7 +41,6 @@ export interface TaskDefinition {                   // (§5.1)
   acceptanceCriteria: AcceptanceCriterion[]
   requiredCapabilities: string[]
   decompositionPolicy: { allowed: boolean; maxDepth?: number; maxChildren?: number }
-  budgetPolicy?: { tokens?: number; wallTimeMs?: number; attempts?: number }
 }
 
 export type TaskStatus =

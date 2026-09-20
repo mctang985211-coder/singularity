@@ -33,13 +33,20 @@ function flowScalar(value: string): string {
   return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) ? value : JSON.stringify(value)
 }
 
-/** The row's flow value, keys in the mutation schema's fixed order: `{ skills: [verify], preset: bb-verify }`. */
+/**
+ * The row's flow value, keys in the mutation schema's fixed order:
+ * `{ skills: [verify], preset: bb-verify, mcpServers: [bbdev] }`. Every key of
+ * `CapabilityConfig` renders, `mcpServers` included — a row that dropped it
+ * would leave the runtime override granting a server plane the restarted
+ * process no longer mounts.
+ */
 function flowEntry(entry: CapabilityConfig): string {
   const parts: string[] = []
   if (entry.skills !== undefined) parts.push(`skills: [${entry.skills.map(flowScalar).join(', ')}]`)
   if (entry.tools !== undefined) parts.push(`tools: [${entry.tools.map(flowScalar).join(', ')}]`)
   if (entry.preset !== undefined) parts.push(`preset: ${flowScalar(entry.preset)}`)
   if (entry.permission !== undefined) parts.push(`permission: ${flowScalar(entry.permission)}`)
+  if (entry.mcpServers !== undefined) parts.push(`mcpServers: [${entry.mcpServers.map(flowScalar).join(', ')}]`)
   return `{ ${parts.join(', ')} }`
 }
 
