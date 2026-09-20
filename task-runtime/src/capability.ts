@@ -217,7 +217,10 @@ export function resolveCapabilities(
       ...(entry.mcpServers !== undefined && entry.mcpServers.length > 0 ? { mcpServers: [...entry.mcpServers] } : {}),
     }
   }
-  return { capabilities, missing, closure: missing.length > 0 ? 'gap' : 'closed' }
+  const manifest: CapabilityManifest = { capabilities, missing, closure: missing.length > 0 ? 'gap' : 'closed' }
+  // Admission and replay both resolve here before persisting tasks.
+  resolvePreset(manifest)
+  return manifest
 }
 
 /**
@@ -236,12 +239,16 @@ export function capabilitySnapshot(manifest: CapabilityManifest): string[] {
   return [...granted].sort()
 }
 
-/** First preset named by a matched capability, else the configured default. */
+/** One worker mounts one preset. Conflicting declarations are a configuration error. */
 export function resolvePreset(manifest: CapabilityManifest, defaultPreset?: string): string | undefined {
-  for (const entry of Object.values(manifest.capabilities)) {
-    if (entry.preset !== undefined) return entry.preset
+  const declared = Object.entries(manifest.capabilities)
+    .filter(([, entry]) => entry.preset !== undefined)
+  const presets = new Set(declared.map(([, entry]) => entry.preset!))
+  if (presets.size > 1) {
+    const detail = declared.map(([name, entry]) => `${name} -> ${entry.preset}`).sort().join(', ')
+    throw new Error(`task-runtime: conflicting capability presets: ${detail}; one worker requires one preset`)
   }
-  return defaultPreset
+  return declared[0]?.[1].preset ?? defaultPreset
 }
 
 /** One permission preset's knob bundle, as `permissionPresets.resolve` reports it. */

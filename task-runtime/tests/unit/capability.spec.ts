@@ -158,12 +158,44 @@ describe('manifest flattening', () => {
     expect(capabilitySnapshot(manifest)).toEqual(['check', 'mcp:bbdev'])
   })
 
-  test('resolvePreset prefers the first capability preset, then the default', () => {
+  test('resolvePreset uses the declared preset, or the default when none is declared', () => {
     const withPreset = resolveCapabilities(['design-chip', 'verify-ball-functional'], DEFAULT_CAPABILITIES)
     expect(resolvePreset(withPreset, 'fallback')).toBe('bb-verify')
     const withoutPreset = resolveCapabilities(['design-chip'], DEFAULT_CAPABILITIES)
     expect(resolvePreset(withoutPreset, 'fallback')).toBe('fallback')
     expect(resolvePreset(withoutPreset)).toBeUndefined()
+  })
+
+  test('capabilities sharing a preset compose independently of requirement order', () => {
+    const registry = {
+      build: { preset: 'bb-verify', tools: ['bash'] },
+      verify: { preset: 'bb-verify', skills: ['verify'] },
+    }
+    for (const required of [['build', 'verify'], ['verify', 'build']]) {
+      const manifest = resolveCapabilities(required, registry)
+      expect(resolvePreset(manifest, 'standard')).toBe('bb-verify')
+      expect(capabilitySnapshot(manifest)).toEqual(['bash', 'verify'])
+    }
+  })
+
+  test('conflicting presets are rejected during resolution in either requirement order', () => {
+    const registry = { research: { preset: 'standard' }, verify: { preset: 'bb-verify' } }
+    for (const required of [['research', 'verify'], ['verify', 'research']]) {
+      expect(() => resolveCapabilities(required, registry)).toThrow(
+        'conflicting capability presets: research -> standard, verify -> bb-verify; one worker requires one preset',
+      )
+    }
+  })
+
+  test('a directly supplied manifest cannot hide a conflict behind the default preset', () => {
+    expect(() => resolvePreset({
+      capabilities: {
+        research: { skills: [], tools: [], preset: 'standard' },
+        verify: { skills: [], tools: [], preset: 'bb-verify' },
+      },
+      missing: [],
+      closure: 'closed',
+    }, 'standard')).toThrow(/conflicting capability presets/)
   })
 })
 

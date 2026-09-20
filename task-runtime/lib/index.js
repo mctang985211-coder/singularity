@@ -287,11 +287,13 @@ function resolveCapabilities(required, registry) {
 			...entry.mcpServers !== void 0 && entry.mcpServers.length > 0 ? { mcpServers: [...entry.mcpServers] } : {}
 		};
 	}
-	return {
+	const manifest = {
 		capabilities,
 		missing,
 		closure: missing.length > 0 ? "gap" : "closed"
 	};
+	resolvePreset(manifest);
+	return manifest;
 }
 /**
 * Flatten a manifest's granted skills and tools into a run's capability
@@ -308,10 +310,14 @@ function capabilitySnapshot(manifest) {
 	}
 	return [...granted].sort();
 }
-/** First preset named by a matched capability, else the configured default. */
+/** One worker mounts one preset. Conflicting declarations are a configuration error. */
 function resolvePreset(manifest, defaultPreset) {
-	for (const entry of Object.values(manifest.capabilities)) if (entry.preset !== void 0) return entry.preset;
-	return defaultPreset;
+	const declared = Object.entries(manifest.capabilities).filter(([, entry]) => entry.preset !== void 0);
+	if (new Set(declared.map(([, entry]) => entry.preset)).size > 1) {
+		const detail = declared.map(([name, entry]) => `${name} -> ${entry.preset}`).sort().join(", ");
+		throw new Error(`task-runtime: conflicting capability presets: ${detail}; one worker requires one preset`);
+	}
+	return declared[0]?.[1].preset ?? defaultPreset;
 }
 /**
 * Strictness order for conflicting capability permissions (strictest wins):

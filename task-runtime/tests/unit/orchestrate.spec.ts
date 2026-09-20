@@ -702,6 +702,26 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     ])
   })
 
+  test('conflicting presets reject the whole batch without persisting or spawning any child', async () => {
+    const h = harness({ config: { capabilities: {
+      research: { preset: 'standard' },
+      verify: { preset: 'bb-verify' },
+    } } })
+    const { taskId, runId } = await createRoot(h)
+    const before = await h.task.snapshotIn(STORE)
+    const eventsBefore = taskEvents(h)
+    await expect(h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [
+        childSpec('valid child', { requiredCapabilities: ['research'] }),
+        childSpec('conflicting child', { requiredCapabilities: ['research', 'verify'] }),
+      ],
+    })).rejects.toThrow(/conflicting capability presets: research -> standard, verify -> bb-verify/)
+    expect(h.spawned).toHaveLength(0)
+    expect(await h.task.snapshotIn(STORE)).toEqual(before)
+    expect(taskEvents(h)).toEqual(eventsBefore)
+  })
+
   test('an unknown tool label rejects the whole batch before anything is persisted or spawned', async () => {
     const h = harness({ config: { capabilities: { typo: { tools: ['filesytem'] } } } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
@@ -1824,6 +1844,25 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     expect(record!.outcome).toBe('failed')
     expect(record!.localizedCause).toContain('cd-1 fail')
     expect(record!.anomalies).toEqual(['evolution-replay:p6'])
+  })
+
+  test('replay uses the same preset conflict rule before creating a candidate task', async () => {
+    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const { championTaskId } = await champion(h)
+    const original = await h.task.taskIn(STORE, championTaskId)
+    const before = await h.task.snapshotIn(STORE)
+    const spawnCount = h.spawned.length
+    await expect(h.runtime.replayTask(STORE, championTaskId, {
+      lineage: 'evolution-replay:conflicting-presets',
+      contract: {
+        objective: original.objective,
+        acceptanceCriteria: original.acceptanceCriteria,
+        requiredCapabilities: ['research', 'verify'],
+      },
+      overlay: { capabilityOverrides: { verify: { preset: 'bb-verify' } } },
+    }, ROOT_SESSION)).rejects.toThrow(/conflicting capability presets/)
+    expect(await h.task.snapshotIn(STORE)).toEqual(before)
+    expect(h.spawned).toHaveLength(spawnCount)
   })
 
   test('rejects a non-terminal champion, an unknown task, and a capability gap under the overlay', async () => {
