@@ -340,6 +340,16 @@ interface PreparedView {
   championSource?: ChampionSource;
   /** Skill prepares only (P2): the content identity recorded for the materialized candidate `SKILL.md`. */
   skillContent?: SkillContentIdentity;
+  /**
+   * Skill prepares only (P3): the content identity of the production
+   * `skills/<name>/SKILL.md` as it stood at prepare — from the same single read
+   * that produced the champion snapshot, so snapshot and digest can never
+   * disagree. Absent on records written before the baseline was recorded, on
+   * `champion: 'missing'` prepares (nothing was there to digest), and on every
+   * non-skill targetType; a captured champion without it cannot prove its
+   * baseline and refuses a new apply.
+   */
+  skillBaseline?: SkillContentIdentity;
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
   files: string[];
 }
@@ -436,6 +446,14 @@ type EvolutionRecord = {
    * promoted without a fresh candidate and evaluation.
    */
   skillContent?: SkillContentIdentity;
+  /**
+   * Skill prepares only (P3): the content identity of the production
+   * `SKILL.md` as it stood at prepare. Absent on records written before the
+   * baseline was recorded and on every non-skill targetType; those old
+   * skill candidates cannot be newly applied without a fresh candidate and
+   * evaluation.
+   */
+  skillBaseline?: SkillContentIdentity;
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
   files: string[];
   actor: string;
@@ -659,7 +677,9 @@ declare class EvolutionService extends Service {
    * A skill candidate additionally records `skillContent` (P2): the name plus
    * the SHA-256 of the exact bytes of the file that was actually materialized
    * (read back from disk, never re-rendered from the mutation string), so
-   * replay, the gates, and apply can verify this exact content later.
+   * replay, the gates, and apply can verify this exact content later. The same
+   * single read of the production file also yields `skillBaseline` (P3), the
+   * digest the later apply compares the production target against.
    */
   prepare(proposalId: string, actor: string, champion?: PrepareChampion): Promise<EvolutionProposal>;
   /**
@@ -724,6 +744,11 @@ declare class EvolutionService extends Service {
    * text-level surgery on the one capabilities row in config.yml document 1 —
    * the runtime registry is NOT hot-reloaded by that edit; the tool mirrors
    * the row into the running TaskRuntime afterwards.
+   *
+   * A skill apply re-verifies the production baseline (P3) after the human
+   * grant and immediately before the write: the production target must still be
+   * the one prepare recorded. A direct service call therefore cannot bypass the
+   * check the tool already ran before asking for approval.
    */
   apply(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome>;
   /** Preflight for tools before asking for approval; mutation methods repeat the check. */
@@ -738,6 +763,23 @@ declare class EvolutionService extends Service {
    * longer match the recorded digest.
    */
   readSkillCandidate(proposalId: string): Promise<Buffer>;
+  /**
+   * The production-baseline check (P3), on the apply seams only: the
+   * evolution_apply tool runs it before asking a human, and `apply` runs it
+   * again immediately before the production write, so a baseline that moved
+   * while the human was deciding is still refused and a direct service call
+   * cannot bypass it. Nothing here writes, merges, or overwrites — a conflict
+   * only throws.
+   *
+   * `captured` requires a real regular file whose bytes still hash to the
+   * digest prepare recorded; `missing` requires the target to still be absent.
+   * A file that appeared, changed, disappeared, changed type (now a directory),
+   * or sits behind a symbolic link (the file itself or an ancestor) is a
+   * conflict. Only `targetType: skill` carries a baseline; every other
+   * targetType passes untouched.
+   */
+  checkProductionBaseline(proposalId: string): Promise<void>;
+  private assertProductionBaseline;
   private readVerifiedSkillCandidate;
   private readRecordedReplay;
   /**
@@ -783,7 +825,10 @@ declare class EvolutionService extends Service {
    * snapshot. Every path goes through `resolveWithin`, so a write can never
    * land outside the sandbox; production roots are read-only here. Capability
    * champions carry a `championSource` (W19): the rollback anchor is the
-   * config.yml row's verbatim source text when the row exists there.
+   * config.yml row's verbatim source text when the row exists there. A skill
+   * champion is read exactly once (P3): those bytes become both the snapshot
+   * and the recorded `skillBaseline` digest, so the two can never describe two
+   * different reads of the production file.
    */
   private materialize;
   /**

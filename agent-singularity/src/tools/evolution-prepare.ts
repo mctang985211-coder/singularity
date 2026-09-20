@@ -99,10 +99,18 @@ export function defineEvolutionPrepareTool(ctx: Context) {
               ? 'champion snapshot: captured under champion/ (code default, no config.yml row — rollback removes the applied row so the default governs again)'
               : 'champion snapshot: captured under champion/'
           : 'champion snapshot: none — champion: null (the production target does not exist yet)'
+        // P3: the production baseline the later apply compares against — the
+        // digest of the same single production read that produced the snapshot.
+        const baselineText = prepared.targetType === 'skill'
+          ? view.skillBaseline === undefined
+            ? 'production baseline: none — the production skill does not exist yet (an apply refuses if one appears)'
+            : `production baseline: ${view.skillBaseline.name} sha256:${view.skillBaseline.sha256.slice(0, 12)}… (an apply refuses if the production skill changed since this read)`
+          : null
         return [
           `proposal ${prepared.proposalId} [prepared] sandbox: ${ctx.evolution.root}/${view.sandbox}`,
           ...view.files.map(file => `  wrote ${file}`),
           championText,
+          ...(baselineText === null ? [] : [baselineText]),
           'sandbox only — production was not touched; next: evolution_replay (candidate vs champion), then evolution_gate',
         ].join('\n')
       } catch (error) {

@@ -717,14 +717,17 @@ function sha256Hex(bytes) {
 	return createHash("sha256").update(bytes).digest("hex");
 }
 /**
-* Read the file at `rel` under `root` as raw bytes, refusing anything but a
-* real regular file (P2): the entry itself and every ancestor between `root`
-* and it must not be a symbolic link, so a read can never land outside the
-* ledger root through a redirected path even though the lexical path stays
-* inside. A missing file, a directory in the file's place, or any other
-* non-regular entry fails loudly. Node standard fs only.
+* Walk `rel` under `root` one component at a time, refusing anything but real
+* entries: a symbolic link anywhere on the path, a non-regular entry where the
+* target should be, or a non-directory where a directory should be all fail
+* loudly, so a read can never land outside the root through a redirected path
+* even though the lexical path stays inside. A component that is simply absent
+* (ENOENT / ENOTDIR anywhere along the walk) is reported as `missing`, never
+* thrown — the ledger-root reader turns it into the loud error it always was,
+* and the production reader reads it as "the target does not exist". Node
+* standard fs only.
 */
-async function readVerifiedFile(root, rel) {
+async function walkVerified(root, rel) {
 	const abs = resolveWithin(root, rel);
 	const steps = relative(root, abs).split(sep);
 	let current = root;
@@ -735,13 +738,47 @@ async function readVerifiedFile(root, rel) {
 			stat = await lstat(current);
 		} catch (error) {
 			const code = error.code;
-			if (code === "ENOENT" || code === "ENOTDIR") throw new Error(`evolution: "${rel}" is missing under ${root} (${code === "ENOTDIR" ? "a path component is not a directory" : "no such file or directory"})`);
+			if (code === "ENOENT" || code === "ENOTDIR") return {
+				missing: true,
+				reason: code === "ENOTDIR" ? "a path component is not a directory" : "no such file or directory"
+			};
 			throw error;
 		}
 		if (stat.isSymbolicLink()) throw new Error(`evolution: "${current}" is a symbolic link; a candidate path and its ancestors must be real entries inside the ledger root`);
 		if (current === abs ? !stat.isFile() : !stat.isDirectory()) throw new Error(`evolution: "${current}" is not a regular ${current === abs ? "file" : "directory"}`);
 	}
-	return readFile(abs);
+	return {
+		missing: false,
+		abs
+	};
+}
+/**
+* Read the file at `rel` under `root` as raw bytes, refusing anything but a
+* real regular file (P2): the entry itself and every ancestor between `root`
+* and it must not be a symbolic link. A missing file, a directory in the
+* file's place, or any other non-regular entry fails loudly. Node standard fs
+* only.
+*/
+async function readVerifiedFile(root, rel) {
+	const walked = await walkVerified(root, rel);
+	if (walked.missing) throw new Error(`evolution: "${rel}" is missing under ${root} (${walked.reason})`);
+	return readFile(walked.abs);
+}
+/**
+* The production skill target as it stands right now (P3): null when nothing
+* is there, otherwise the exact bytes plus their SHA-256. Read through the same
+* component walk as the ledger root, so a production path that became a
+* directory, or that is a symbolic link (the file itself or an ancestor), is a
+* conflict the caller refuses — never a silent follow.
+*/
+async function readProductionSkill(skillRoot, name) {
+	const walked = await walkVerified(skillRoot, join(name, "SKILL.md"));
+	if (walked.missing) return null;
+	const bytes = await readFile(walked.abs);
+	return {
+		bytes,
+		sha256: sha256Hex(bytes)
+	};
 }
 /**
 * Validate a candidate's mutation against the proposal's targetType. The four
@@ -1016,7 +1053,9 @@ var EvolutionService = class extends Service {
 	* A skill candidate additionally records `skillContent` (P2): the name plus
 	* the SHA-256 of the exact bytes of the file that was actually materialized
 	* (read back from disk, never re-rendered from the mutation string), so
-	* replay, the gates, and apply can verify this exact content later.
+	* replay, the gates, and apply can verify this exact content later. The same
+	* single read of the production file also yields `skillBaseline` (P3), the
+	* digest the later apply compares the production target against.
 	*/
 	async prepare(proposalId, actor, champion = {}) {
 		const current = await this.assertNext(proposalId, "prepared");
@@ -1028,6 +1067,7 @@ var EvolutionService = class extends Service {
 		let championState = "none";
 		let championSource;
 		let skillContent;
+		let skillBaseline;
 		let files = [];
 		if (mechanical) {
 			if (current.targetType === "capability" && !("capabilityEntry" in champion)) throw new Error("evolution: preparing a capability mutation requires champion.capabilityEntry (pass null when the capability is new)");
@@ -1038,6 +1078,7 @@ var EvolutionService = class extends Service {
 			sandbox = `sandbox/${proposalId}`;
 			championState = written.champion;
 			championSource = written.championSource;
+			skillBaseline = written.skillBaseline;
 			files = written.files;
 			if (current.targetType === "skill") {
 				const { name } = mutation;
@@ -1056,6 +1097,7 @@ var EvolutionService = class extends Service {
 			champion: championState,
 			...championSource === void 0 ? {} : { championSource },
 			...skillContent === void 0 ? {} : { skillContent },
+			...skillBaseline === void 0 ? {} : { skillBaseline },
 			files,
 			actor,
 			at: (/* @__PURE__ */ new Date()).toISOString()
@@ -1203,11 +1245,17 @@ var EvolutionService = class extends Service {
 	* text-level surgery on the one capabilities row in config.yml document 1 —
 	* the runtime registry is NOT hot-reloaded by that edit; the tool mirrors
 	* the row into the running TaskRuntime afterwards.
+	*
+	* A skill apply re-verifies the production baseline (P3) after the human
+	* grant and immediately before the write: the production target must still be
+	* the one prepare recorded. A direct service call therefore cannot bypass the
+	* check the tool already ran before asking for approval.
 	*/
 	async apply(proposalId, actor, approvalRef) {
 		const current = await this.assertNext(proposalId, "applied");
 		nonEmpty(approvalRef, "approvalRef");
 		await this.checkPromotion(proposalId);
+		await this.checkProductionBaseline(proposalId);
 		const outcome = await this.writeProduction(current, "apply");
 		await this.append({
 			formatVersion: 1,
@@ -1241,6 +1289,46 @@ var EvolutionService = class extends Service {
 	*/
 	async readSkillCandidate(proposalId) {
 		return this.readVerifiedSkillCandidate(await this.get(proposalId));
+	}
+	/**
+	* The production-baseline check (P3), on the apply seams only: the
+	* evolution_apply tool runs it before asking a human, and `apply` runs it
+	* again immediately before the production write, so a baseline that moved
+	* while the human was deciding is still refused and a direct service call
+	* cannot bypass it. Nothing here writes, merges, or overwrites — a conflict
+	* only throws.
+	*
+	* `captured` requires a real regular file whose bytes still hash to the
+	* digest prepare recorded; `missing` requires the target to still be absent.
+	* A file that appeared, changed, disappeared, changed type (now a directory),
+	* or sits behind a symbolic link (the file itself or an ancestor) is a
+	* conflict. Only `targetType: skill` carries a baseline; every other
+	* targetType passes untouched.
+	*/
+	async checkProductionBaseline(proposalId) {
+		await this.assertProductionBaseline(await this.get(proposalId));
+	}
+	async assertProductionBaseline(proposal) {
+		if (proposal.targetType !== "skill") return;
+		const prepared = proposal.prepared;
+		if (prepared?.mechanical !== true || prepared.sandbox == null) return;
+		const { name } = proposal.mutation;
+		const target = `${this.skillRoot}/${name}/SKILL.md`;
+		const guidance = "create a new candidate from the current production state and re-evaluate it; an apply never overwrites a production skill it cannot verify";
+		let current;
+		try {
+			current = await readProductionSkill(this.skillRoot, name);
+		} catch (error) {
+			throw new Error(`evolution: the production skill "${target}" is no longer a readable regular file (${error.message.replace(/^evolution: /, "")}) — ${guidance}`);
+		}
+		if (prepared.champion === "missing") {
+			if (current !== null) throw new Error(`evolution: skill proposal "${proposal.proposalId}" was prepared with no production "${target}", but the file exists now (sha256 ${current.sha256}) — ${guidance}`);
+			return;
+		}
+		const identity = prepared.skillBaseline;
+		if (identity === void 0) throw new Error(`evolution: skill proposal "${proposal.proposalId}" records no production baseline identity (it was prepared before the baseline was recorded) — ${guidance}`);
+		if (current === null) throw new Error(`evolution: the production skill "${target}" recorded at prepare (sha256 ${identity.sha256}) no longer exists — ${guidance}`);
+		if (current.sha256 !== identity.sha256) throw new Error(`evolution: the production skill "${target}" changed since prepare (sha256 ${current.sha256} != ${identity.sha256}) — ${guidance}`);
 	}
 	async readVerifiedSkillCandidate(proposal) {
 		if (proposal.targetType !== "skill") throw new Error(`evolution: candidate content identity binds skill proposals only, not "${proposal.targetType}"`);
@@ -1424,7 +1512,10 @@ var EvolutionService = class extends Service {
 	* snapshot. Every path goes through `resolveWithin`, so a write can never
 	* land outside the sandbox; production roots are read-only here. Capability
 	* champions carry a `championSource` (W19): the rollback anchor is the
-	* config.yml row's verbatim source text when the row exists there.
+	* config.yml row's verbatim source text when the row exists there. A skill
+	* champion is read exactly once (P3): those bytes become both the snapshot
+	* and the recorded `skillBaseline` digest, so the two can never describe two
+	* different reads of the production file.
 	*/
 	async materialize(dir, proposal, mutation, champion) {
 		const files = [];
@@ -1438,15 +1529,19 @@ var EvolutionService = class extends Service {
 			case "skill": {
 				const { name, content } = mutation;
 				await write(`skills/${name}/SKILL.md`, content);
-				const championFile = join(this.skillRoot, name, "SKILL.md");
-				if (!existsSync(championFile)) return {
+				const production = await readProductionSkill(this.skillRoot, name);
+				if (production === null) return {
 					files,
 					champion: "missing"
 				};
-				await write(`champion/skills/${name}/SKILL.md`, await readFile(championFile, "utf8"));
+				await write(`champion/skills/${name}/SKILL.md`, production.bytes.toString("utf8"));
 				return {
 					files,
-					champion: "captured"
+					champion: "captured",
+					skillBaseline: {
+						name,
+						sha256: production.sha256
+					}
 				};
 			}
 			case "agent_preset": {
@@ -1567,6 +1662,10 @@ var EvolutionService = class extends Service {
 						if (current.targetType !== "skill") throw new Error(`evolution: prepared record for "${record.proposalId}" carries skillContent but targetType "${current.targetType}" is not skill`);
 						if (!isRecord$2(record.skillContent) || typeof record.skillContent.name !== "string" || record.skillContent.name.length === 0 || typeof record.skillContent.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(record.skillContent.sha256)) throw new Error(`evolution: prepared record for "${record.proposalId}" has a malformed skillContent identity`);
 					}
+					if (record.skillBaseline !== void 0) {
+						if (current.targetType !== "skill") throw new Error(`evolution: prepared record for "${record.proposalId}" carries skillBaseline but targetType "${current.targetType}" is not skill`);
+						if (!isRecord$2(record.skillBaseline) || typeof record.skillBaseline.name !== "string" || record.skillBaseline.name.length === 0 || typeof record.skillBaseline.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(record.skillBaseline.sha256)) throw new Error(`evolution: prepared record for "${record.proposalId}" has a malformed skillBaseline identity`);
+					}
 					current.prepared = {
 						sandbox: record.sandbox,
 						mechanical: record.mechanical,
@@ -1575,6 +1674,10 @@ var EvolutionService = class extends Service {
 						...record.skillContent === void 0 ? {} : { skillContent: {
 							name: record.skillContent.name,
 							sha256: record.skillContent.sha256
+						} },
+						...record.skillBaseline === void 0 ? {} : { skillBaseline: {
+							name: record.skillBaseline.name,
+							sha256: record.skillBaseline.sha256
 						} },
 						files: [...record.files]
 					};
@@ -1960,7 +2063,7 @@ function effectNote(proposal) {
 function defineEvolutionApplyTool(ctx) {
 	return defineTool({
 		name: "evolution_apply",
-		description: "Apply a PROMOTE-decided EvolutionProposal to production (status: applied). Only the three mechanical types (skill / agent_preset / capability) at L1–L3 with a materialized sandbox; task_definition, the five bookkeeping-only types, and L4 lack executors and are refused with instructions. Always asks a human through the native approval seam first — a second gate after evolution_decide — naming every production path it will write; a reject, cancel, or unavailable answerer writes nothing and leaves the proposal decided. skill and agent_preset take effect on write; a capability row is mirrored into the running registry and persists in config.yml. evolution_rollback restores the champion snapshot.",
+		description: "Apply a PROMOTE-decided EvolutionProposal to production (status: applied). Only the three mechanical types (skill / agent_preset / capability) at L1–L3 with a materialized sandbox; task_definition, the five bookkeeping-only types, and L4 lack executors and are refused with instructions. Always asks a human through the native approval seam first — a second gate after evolution_decide — naming every production path it will write; a reject, cancel, or unavailable answerer writes nothing and leaves the proposal decided. A skill apply additionally re-verifies the production baseline recorded at prepare (the production SKILL.md must still be those exact bytes, or still be absent) before the human is asked and again after the grant, and refuses a stale candidate instead of overwriting a production skill that changed. skill and agent_preset take effect on write; a capability row is mirrored into the running registry and persists in config.yml. evolution_rollback restores the champion snapshot.",
 		parameters: { proposalId: {
 			type: "string",
 			required: true,
@@ -1986,6 +2089,7 @@ function defineEvolutionApplyTool(ctx) {
 			if (manual !== null) return `evolution_apply rejected: ${manual}`;
 			try {
 				await ctx.evolution.checkPromotion(proposal.proposalId);
+				await ctx.evolution.checkProductionBaseline(proposal.proposalId);
 			} catch (error) {
 				return `evolution_apply rejected: ${error instanceof Error ? error.message : String(error)}`;
 			}
@@ -2329,7 +2433,8 @@ function defineEvolutionListTool(ctx) {
 					else {
 						const championText = view.champion === "captured" ? "champion snapshot captured" : "champion: null";
 						const contentText = view.skillContent === void 0 ? "" : `, candidate content ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}…`;
-						lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, ${championText}${contentText})`);
+						const baselineText = view.skillBaseline === void 0 ? "" : `, production baseline ${view.skillBaseline.name} sha256:${view.skillBaseline.sha256.slice(0, 12)}…`;
+						lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, ${championText}${contentText}${baselineText})`);
 					}
 				}
 				if (proposal.replayed !== void 0) {
@@ -2417,10 +2522,12 @@ function defineEvolutionPrepareTool(ctx) {
 				const view = prepared.prepared;
 				if (!view.mechanical) return [`proposal ${prepared.proposalId} [prepared] bookkeeping only — ${prepared.targetType} mutations are not mechanically applied (mechanical: false)`, "ledger entry only — nothing materialized; next: evolution_gate"].join("\n");
 				const championText = view.champion === "captured" ? view.championSource === "config-text" ? "champion snapshot: captured under champion/ (config.yml row source text — rollback restores it verbatim)" : view.championSource === "code-default" ? "champion snapshot: captured under champion/ (code default, no config.yml row — rollback removes the applied row so the default governs again)" : "champion snapshot: captured under champion/" : "champion snapshot: none — champion: null (the production target does not exist yet)";
+				const baselineText = prepared.targetType === "skill" ? view.skillBaseline === void 0 ? "production baseline: none — the production skill does not exist yet (an apply refuses if one appears)" : `production baseline: ${view.skillBaseline.name} sha256:${view.skillBaseline.sha256.slice(0, 12)}… (an apply refuses if the production skill changed since this read)` : null;
 				return [
 					`proposal ${prepared.proposalId} [prepared] sandbox: ${ctx.evolution.root}/${view.sandbox}`,
 					...view.files.map((file) => `  wrote ${file}`),
 					championText,
+					...baselineText === null ? [] : [baselineText],
 					"sandbox only — production was not touched; next: evolution_replay (candidate vs champion), then evolution_gate"
 				].join("\n");
 			} catch (error) {

@@ -24,6 +24,19 @@
  * and re-verify that file — so the chain cannot validate one file's content
  * and apply another's. Identity is not functional correctness, and it binds
  * skill candidates only.
+ *
+ * A skill promotion additionally pins the production baseline (P3): prepare
+ * records the SHA-256 of the production `skills/<name>/SKILL.md` from the same
+ * single read that produced the champion snapshot, and the apply seams
+ * (the tool's pre-approval precheck and the service entry immediately before
+ * the production write) re-read that file and refuse unless it still matches.
+ * A candidate prepared against a production skill that has since changed,
+ * disappeared, changed type, or moved behind a symbolic link is a conflict:
+ * nothing is written, no `applied` record is taken, and the caller is pointed
+ * at a new candidate evaluated against the new production state. The guarantee
+ * covers serial single-process calls and external changes between two calls —
+ * it is not a cross-process lock and does not make apply atomic against a
+ * writer that writes concurrently with it.
  * @module dsh-singularity-agent
  */
 
@@ -170,6 +183,16 @@ export interface PreparedView {
   championSource?: ChampionSource
   /** Skill prepares only (P2): the content identity recorded for the materialized candidate `SKILL.md`. */
   skillContent?: SkillContentIdentity
+  /**
+   * Skill prepares only (P3): the content identity of the production
+   * `skills/<name>/SKILL.md` as it stood at prepare — from the same single read
+   * that produced the champion snapshot, so snapshot and digest can never
+   * disagree. Absent on records written before the baseline was recorded, on
+   * `champion: 'missing'` prepares (nothing was there to digest), and on every
+   * non-skill targetType; a captured champion without it cannot prove its
+   * baseline and refuses a new apply.
+   */
+  skillBaseline?: SkillContentIdentity
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
   files: string[]
 }
@@ -272,6 +295,14 @@ export type EvolutionRecord =
        * promoted without a fresh candidate and evaluation.
        */
       skillContent?: SkillContentIdentity
+      /**
+       * Skill prepares only (P3): the content identity of the production
+       * `SKILL.md` as it stood at prepare. Absent on records written before the
+       * baseline was recorded and on every non-skill targetType; those old
+       * skill candidates cannot be newly applied without a fresh candidate and
+       * evaluation.
+       */
+      skillBaseline?: SkillContentIdentity
       /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
       files: string[]
       actor: string
@@ -485,14 +516,26 @@ function sha256Hex(bytes: Buffer): string {
 }
 
 /**
- * Read the file at `rel` under `root` as raw bytes, refusing anything but a
- * real regular file (P2): the entry itself and every ancestor between `root`
- * and it must not be a symbolic link, so a read can never land outside the
- * ledger root through a redirected path even though the lexical path stays
- * inside. A missing file, a directory in the file's place, or any other
- * non-regular entry fails loudly. Node standard fs only.
+ * Where a component walk under a root stopped (P3 splits the walk from the
+ * read so a caller that records "absent" can tell it apart from a path that
+ * changed type).
  */
-async function readVerifiedFile(root: string, rel: string): Promise<Buffer> {
+type VerifiedWalk =
+  | { missing: false; abs: string }
+  | { missing: true; reason: 'no such file or directory' | 'a path component is not a directory' }
+
+/**
+ * Walk `rel` under `root` one component at a time, refusing anything but real
+ * entries: a symbolic link anywhere on the path, a non-regular entry where the
+ * target should be, or a non-directory where a directory should be all fail
+ * loudly, so a read can never land outside the root through a redirected path
+ * even though the lexical path stays inside. A component that is simply absent
+ * (ENOENT / ENOTDIR anywhere along the walk) is reported as `missing`, never
+ * thrown — the ledger-root reader turns it into the loud error it always was,
+ * and the production reader reads it as "the target does not exist". Node
+ * standard fs only.
+ */
+async function walkVerified(root: string, rel: string): Promise<VerifiedWalk> {
   const abs = resolveWithin(root, rel)
   const steps = relative(root, abs).split(sep)
   let current = root
@@ -504,7 +547,7 @@ async function readVerifiedFile(root: string, rel: string): Promise<Buffer> {
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
       if (code === 'ENOENT' || code === 'ENOTDIR') {
-        throw new Error(`evolution: "${rel}" is missing under ${root} (${code === 'ENOTDIR' ? 'a path component is not a directory' : 'no such file or directory'})`)
+        return { missing: true, reason: code === 'ENOTDIR' ? 'a path component is not a directory' : 'no such file or directory' }
       }
       throw error
     }
@@ -515,7 +558,36 @@ async function readVerifiedFile(root: string, rel: string): Promise<Buffer> {
       throw new Error(`evolution: "${current}" is not a regular ${current === abs ? 'file' : 'directory'}`)
     }
   }
-  return readFile(abs)
+  return { missing: false, abs }
+}
+
+/**
+ * Read the file at `rel` under `root` as raw bytes, refusing anything but a
+ * real regular file (P2): the entry itself and every ancestor between `root`
+ * and it must not be a symbolic link. A missing file, a directory in the
+ * file's place, or any other non-regular entry fails loudly. Node standard fs
+ * only.
+ */
+async function readVerifiedFile(root: string, rel: string): Promise<Buffer> {
+  const walked = await walkVerified(root, rel)
+  if (walked.missing) {
+    throw new Error(`evolution: "${rel}" is missing under ${root} (${walked.reason})`)
+  }
+  return readFile(walked.abs)
+}
+
+/**
+ * The production skill target as it stands right now (P3): null when nothing
+ * is there, otherwise the exact bytes plus their SHA-256. Read through the same
+ * component walk as the ledger root, so a production path that became a
+ * directory, or that is a symbolic link (the file itself or an ancestor), is a
+ * conflict the caller refuses — never a silent follow.
+ */
+async function readProductionSkill(skillRoot: string, name: string): Promise<{ bytes: Buffer; sha256: string } | null> {
+  const walked = await walkVerified(skillRoot, join(name, 'SKILL.md'))
+  if (walked.missing) return null
+  const bytes = await readFile(walked.abs)
+  return { bytes, sha256: sha256Hex(bytes) }
 }
 
 /**
@@ -862,7 +934,9 @@ export class EvolutionService extends Service {
    * A skill candidate additionally records `skillContent` (P2): the name plus
    * the SHA-256 of the exact bytes of the file that was actually materialized
    * (read back from disk, never re-rendered from the mutation string), so
-   * replay, the gates, and apply can verify this exact content later.
+   * replay, the gates, and apply can verify this exact content later. The same
+   * single read of the production file also yields `skillBaseline` (P3), the
+   * digest the later apply compares the production target against.
    */
   async prepare(proposalId: string, actor: string, champion: PrepareChampion = {}): Promise<EvolutionProposal> {
     const current = await this.assertNext(proposalId, 'prepared')
@@ -878,6 +952,7 @@ export class EvolutionService extends Service {
     let championState: ChampionState = 'none'
     let championSource: ChampionSource | undefined
     let skillContent: SkillContentIdentity | undefined
+    let skillBaseline: SkillContentIdentity | undefined
     let files: string[] = []
     if (mechanical) {
       if (current.targetType === 'capability' && !('capabilityEntry' in champion)) {
@@ -892,6 +967,7 @@ export class EvolutionService extends Service {
       sandbox = `sandbox/${proposalId}`
       championState = written.champion
       championSource = written.championSource
+      skillBaseline = written.skillBaseline
       files = written.files
       if (current.targetType === 'skill') {
         const { name } = mutation as unknown as SkillMutation
@@ -907,6 +983,7 @@ export class EvolutionService extends Service {
       champion: championState,
       ...(championSource === undefined ? {} : { championSource }),
       ...(skillContent === undefined ? {} : { skillContent }),
+      ...(skillBaseline === undefined ? {} : { skillBaseline }),
       files,
       actor,
       at: new Date().toISOString(),
@@ -1084,11 +1161,17 @@ export class EvolutionService extends Service {
    * text-level surgery on the one capabilities row in config.yml document 1 —
    * the runtime registry is NOT hot-reloaded by that edit; the tool mirrors
    * the row into the running TaskRuntime afterwards.
+   *
+   * A skill apply re-verifies the production baseline (P3) after the human
+   * grant and immediately before the write: the production target must still be
+   * the one prepare recorded. A direct service call therefore cannot bypass the
+   * check the tool already ran before asking for approval.
    */
   async apply(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome> {
     const current = await this.assertNext(proposalId, 'applied')
     nonEmpty(approvalRef, 'approvalRef')
     await this.checkPromotion(proposalId)
+    await this.checkProductionBaseline(proposalId)
     const outcome = await this.writeProduction(current, 'apply')
     await this.append({
       formatVersion: 1,
@@ -1125,6 +1208,72 @@ export class EvolutionService extends Service {
    */
   async readSkillCandidate(proposalId: string): Promise<Buffer> {
     return this.readVerifiedSkillCandidate(await this.get(proposalId))
+  }
+
+  /**
+   * The production-baseline check (P3), on the apply seams only: the
+   * evolution_apply tool runs it before asking a human, and `apply` runs it
+   * again immediately before the production write, so a baseline that moved
+   * while the human was deciding is still refused and a direct service call
+   * cannot bypass it. Nothing here writes, merges, or overwrites — a conflict
+   * only throws.
+   *
+   * `captured` requires a real regular file whose bytes still hash to the
+   * digest prepare recorded; `missing` requires the target to still be absent.
+   * A file that appeared, changed, disappeared, changed type (now a directory),
+   * or sits behind a symbolic link (the file itself or an ancestor) is a
+   * conflict. Only `targetType: skill` carries a baseline; every other
+   * targetType passes untouched.
+   */
+  async checkProductionBaseline(proposalId: string): Promise<void> {
+    await this.assertProductionBaseline(await this.get(proposalId))
+  }
+
+  private async assertProductionBaseline(proposal: EvolutionProposal): Promise<void> {
+    if (proposal.targetType !== 'skill') return
+    const prepared = proposal.prepared
+    if (prepared?.mechanical !== true || prepared.sandbox == null) return
+    const { name } = proposal.mutation as unknown as SkillMutation
+    const target = `${this.skillRoot}/${name}/SKILL.md`
+    const guidance =
+      'create a new candidate from the current production state and re-evaluate it; ' +
+      'an apply never overwrites a production skill it cannot verify'
+    let current: { bytes: Buffer; sha256: string } | null
+    try {
+      current = await readProductionSkill(this.skillRoot, name)
+    } catch (error) {
+      throw new Error(
+        `evolution: the production skill "${target}" is no longer a readable regular file ` +
+        `(${(error as Error).message.replace(/^evolution: /, '')}) — ${guidance}`,
+      )
+    }
+    if (prepared.champion === 'missing') {
+      if (current !== null) {
+        throw new Error(
+          `evolution: skill proposal "${proposal.proposalId}" was prepared with no production "${target}", ` +
+          `but the file exists now (sha256 ${current.sha256}) — ${guidance}`,
+        )
+      }
+      return
+    }
+    const identity = prepared.skillBaseline
+    if (identity === undefined) {
+      throw new Error(
+        `evolution: skill proposal "${proposal.proposalId}" records no production baseline identity ` +
+        `(it was prepared before the baseline was recorded) — ${guidance}`,
+      )
+    }
+    if (current === null) {
+      throw new Error(
+        `evolution: the production skill "${target}" recorded at prepare (sha256 ${identity.sha256}) no longer exists — ${guidance}`,
+      )
+    }
+    if (current.sha256 !== identity.sha256) {
+      throw new Error(
+        `evolution: the production skill "${target}" changed since prepare ` +
+        `(sha256 ${current.sha256} != ${identity.sha256}) — ${guidance}`,
+      )
+    }
   }
 
   private async readVerifiedSkillCandidate(proposal: EvolutionProposal): Promise<Buffer> {
@@ -1340,14 +1489,17 @@ export class EvolutionService extends Service {
    * snapshot. Every path goes through `resolveWithin`, so a write can never
    * land outside the sandbox; production roots are read-only here. Capability
    * champions carry a `championSource` (W19): the rollback anchor is the
-   * config.yml row's verbatim source text when the row exists there.
+   * config.yml row's verbatim source text when the row exists there. A skill
+   * champion is read exactly once (P3): those bytes become both the snapshot
+   * and the recorded `skillBaseline` digest, so the two can never describe two
+   * different reads of the production file.
    */
   private async materialize(
     dir: string,
     proposal: EvolutionProposal,
     mutation: Record<string, unknown>,
     champion: PrepareChampion,
-  ): Promise<{ files: string[]; champion: 'captured' | 'missing'; championSource?: ChampionSource }> {
+  ): Promise<{ files: string[]; champion: 'captured' | 'missing'; championSource?: ChampionSource; skillBaseline?: SkillContentIdentity }> {
     const files: string[] = []
     const write = async (rel: string, content: string): Promise<void> => {
       const abs = resolveWithin(dir, rel)
@@ -1359,10 +1511,13 @@ export class EvolutionService extends Service {
       case 'skill': {
         const { name, content } = mutation as unknown as SkillMutation
         await write(`skills/${name}/SKILL.md`, content)
-        const championFile = join(this.skillRoot, name, 'SKILL.md')
-        if (!existsSync(championFile)) return { files, champion: 'missing' }
-        await write(`champion/skills/${name}/SKILL.md`, await readFile(championFile, 'utf8'))
-        return { files, champion: 'captured' }
+        // P3: one verified read of the production file yields the snapshot and
+        // the baseline digest together; a production path that is a symlink or
+        // not a regular file fails here instead of being followed.
+        const production = await readProductionSkill(this.skillRoot, name)
+        if (production === null) return { files, champion: 'missing' }
+        await write(`champion/skills/${name}/SKILL.md`, production.bytes.toString('utf8'))
+        return { files, champion: 'captured', skillBaseline: { name, sha256: production.sha256 } }
       }
       case 'agent_preset': {
         const { presetId, files: presetFiles } = mutation as unknown as AgentPresetMutation
@@ -1488,12 +1643,24 @@ export class EvolutionService extends Service {
               throw new Error(`evolution: prepared record for "${record.proposalId}" has a malformed skillContent identity`)
             }
           }
+          // P3: skillBaseline is optional (pre-baseline records fold without
+          // it) but when present it must be a real identity on a skill proposal.
+          if (record.skillBaseline !== undefined) {
+            if (current.targetType !== 'skill') {
+              throw new Error(`evolution: prepared record for "${record.proposalId}" carries skillBaseline but targetType "${current.targetType}" is not skill`)
+            }
+            if (!isRecord(record.skillBaseline) || typeof record.skillBaseline.name !== 'string' || record.skillBaseline.name.length === 0
+              || typeof record.skillBaseline.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(record.skillBaseline.sha256)) {
+              throw new Error(`evolution: prepared record for "${record.proposalId}" has a malformed skillBaseline identity`)
+            }
+          }
           current.prepared = {
             sandbox: record.sandbox,
             mechanical: record.mechanical,
             champion: record.champion,
             ...(record.championSource === undefined ? {} : { championSource: record.championSource }),
             ...(record.skillContent === undefined ? {} : { skillContent: { name: record.skillContent.name, sha256: record.skillContent.sha256 } }),
+            ...(record.skillBaseline === undefined ? {} : { skillBaseline: { name: record.skillBaseline.name, sha256: record.skillBaseline.sha256 } }),
             files: [...record.files],
           }
           break

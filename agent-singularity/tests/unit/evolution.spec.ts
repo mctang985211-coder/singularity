@@ -650,6 +650,8 @@ describe('EvolutionService sandbox materialization', () => {
       champion: 'captured',
       // P2: the identity is the SHA-256 of the exact materialized bytes
       skillContent: { name: 'verify', sha256: createHash('sha256').update('new skill text', 'utf8').digest('hex') },
+      // P3: the production baseline digest, from the same read as the snapshot
+      skillBaseline: { name: 'verify', sha256: createHash('sha256').update('old skill text', 'utf8').digest('hex') },
       files: ['skills/verify/SKILL.md', 'champion/skills/verify/SKILL.md'],
     })
     expect(await readFile(join(root, 'sandbox', 's1', 'skills', 'verify', 'SKILL.md'), 'utf8')).toBe('new skill text')
@@ -834,6 +836,8 @@ describe('EvolutionService replay compatibility', () => {
       champion: 'captured',
       // P2: the content identity survives the reopen unchanged
       skillContent: { name: 'verify', sha256: createHash('sha256').update('new', 'utf8').digest('hex') },
+      // P3: and so does the production baseline digest
+      skillBaseline: { name: 'verify', sha256: createHash('sha256').update('old', 'utf8').digest('hex') },
       files: ['skills/verify/SKILL.md', 'champion/skills/verify/SKILL.md'],
     })
   })
@@ -2417,6 +2421,374 @@ describe('skill candidate content binding (P2)', () => {
     }
     await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
     await expect(new EvolutionService(fixtureCtx(), { root }).list()).rejects.toThrow('carries skillContent but targetType "capability" is not skill')
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/* P3: the production baseline must not have moved. prepare records the  */
+/* SHA-256 of the production SKILL.md from the same single read that     */
+/* produced the champion snapshot; the apply seams compare the live      */
+/* production target against it and refuse a stale candidate instead of  */
+/* overwriting a production skill that changed. Serial single-process    */
+/* calls only — no cross-process lock, no atomic compare-and-swap.       */
+/* ------------------------------------------------------------------ */
+
+const P3_BASELINE = '# production verify skill\n'
+const P3_CANDIDATE_A = '# candidate A\n'
+const P3_CANDIDATE_B = '# candidate B\n'
+const P3_CONFLICT_GUIDANCE = 'create a new candidate from the current production state and re-evaluate it'
+const skillProductionFile = (skillRoot: string, name = 'verify') => join(skillRoot, name, 'SKILL.md')
+
+/** Walk a skill proposal under a fresh id to decided(PROMOTE) against the production state as it stands. */
+async function walkSkillToDecided(svc: EvolutionService, proposalId: string, content: string) {
+  await walkToDecided(svc, { ...skillProposal, proposalId }, { name: 'verify', content })
+}
+
+async function ledgerKinds(root: string): Promise<string[]> {
+  return (await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
+    .map(line => (JSON.parse(line) as { kind: string }).kind)
+}
+
+/** Rewrite a live ledger as a P2-era one: the prepared line loses `skillBaseline`, the field P3 added. */
+async function dropBaselineField(root: string) {
+  const path = join(root, 'proposals.jsonl')
+  const lines = (await readFile(path, 'utf8')).trim().split('\n').map(line => {
+    const record = JSON.parse(line)
+    if (record.kind === 'prepared') delete record.skillBaseline
+    return JSON.stringify(record)
+  })
+  await writeFile(path, `${lines.join('\n')}\n`)
+}
+
+/** A production skill root holding one real SKILL.md, the champion of every P3 fixture. */
+async function productionSkill(skillRoot: string, text: string = P3_BASELINE) {
+  await mkdir(join(skillRoot, 'verify'), { recursive: true })
+  await writeFile(skillProductionFile(skillRoot), text)
+}
+
+describe('production baseline check (P3)', () => {
+  it('P3-A: an unchanged champion with every P2 prerequisite applies and writes the verified candidate bytes', async () => {
+    const { svc, root, skillRoot } = await serviceWithProduction()
+    await productionSkill(skillRoot)
+    const identity = await prepareSkill(svc)
+    // the baseline is the digest of the production bytes, taken from the same
+    // single read that produced the champion snapshot — the two cannot disagree
+    const prepared = await svc.get('s1')
+    expect(prepared.prepared!.skillBaseline).toEqual({
+      name: 'verify',
+      sha256: createHash('sha256').update(P3_BASELINE, 'utf8').digest('hex'),
+    })
+    expect(await readFile(join(root, 'sandbox', 's1', 'champion', 'skills', 'verify', 'SKILL.md')))
+      .toEqual(Buffer.from(P3_BASELINE, 'utf8'))
+
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, identity))
+    await svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')
+    await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')
+    // the precheck the apply tool runs before asking a human passes untouched
+    await svc.checkProductionBaseline('s1')
+
+    const applied = await svc.apply('s1', 'root-1', 'approval:call-1')
+    expect(applied.targets).toEqual([join(skillRoot, 'verify', 'SKILL.md')])
+    expect(await readFile(skillProductionFile(skillRoot))).toEqual(Buffer.from(SKILL_CANDIDATE, 'utf8'))
+    expect((await svc.get('s1')).status).toBe('applied')
+    expect(await ledgerKinds(root)).toContain('applied')
+  })
+
+  it.each([
+    ['modified after prepare', 'rewritten in production\n'],
+    ['deleted after prepare', null],
+  ])('P3-B: production %s is refused at apply, tool and service alike, and keeps its new state', async (_label, next) => {
+    const { svc, root, skillRoot } = await serviceWithProduction()
+    await productionSkill(skillRoot)
+    const identity = await prepareSkill(svc)
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, identity))
+    await svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')
+    await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')
+    if (next === null) await rm(skillProductionFile(skillRoot))
+    else await writeFile(skillProductionFile(skillRoot), next)
+
+    // the tool refuses before the human is asked — no approval is burned
+    const { ctx, approval } = toolCtx(svc)
+    const viaTool = (await defineEvolutionApplyTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))) as string
+    expect(viaTool).toContain('evolution_apply rejected:')
+    expect(viaTool).toContain(P3_CONFLICT_GUIDANCE)
+    expect(approval.request).not.toHaveBeenCalled()
+
+    // and a direct service call cannot bypass the same check
+    await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow(
+      next === null ? /no longer exists/ : /changed since prepare/,
+    )
+    expect((await svc.get('s1')).status).toBe('decided')
+    expect((await svc.get('s1')).applied).toBeUndefined()
+    expect(await ledgerKinds(root)).not.toContain('applied')
+    // production keeps whatever it now holds: the modified bytes, or the absence
+    expect(existsSync(skillProductionFile(skillRoot))).toBe(next !== null)
+    if (next !== null) expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe(next)
+    // the candidate, its report and its history are preserved for a fresh proposal
+    expect(await svc.readSkillCandidate('s1')).toEqual(Buffer.from(SKILL_CANDIDATE, 'utf8'))
+    expect((await svc.get('s1')).history.map(entry => entry.status))
+      .toEqual(['proposed', 'candidate', 'prepared', 'replayed', 'gated', 'decided'])
+  })
+
+  it('P3-C: a file created after a missing-champion prepare is refused and preserved; a still-absent target applies', async () => {
+    const { svc, root, skillRoot } = await serviceWithProduction()
+    await walkSkillToDecided(svc, 's1', P3_CANDIDATE_A)
+    expect((await svc.get('s1')).prepared!.champion).toBe('missing')
+    expect((await svc.get('s1')).prepared!.skillBaseline).toBeUndefined()
+
+    // someone creates the production skill after the candidate was prepared
+    await productionSkill(skillRoot, '# a brand new production skill\n')
+    await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('was prepared with no production')
+    expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe('# a brand new production skill\n')
+    expect((await svc.get('s1')).status).toBe('decided')
+    expect(await ledgerKinds(root)).not.toContain('applied')
+
+    // the same shape with the target still absent applies normally
+    const { svc: other, skillRoot: otherRoot } = await serviceWithProduction()
+    await walkSkillToDecided(other, 's1', P3_CANDIDATE_B)
+    await other.checkProductionBaseline('s1')
+    const applied = await other.apply('s1', 'root-1', 'approval:call-1')
+    expect(applied.proposal.status).toBe('applied')
+    expect(await readFile(skillProductionFile(otherRoot))).toEqual(Buffer.from(P3_CANDIDATE_B, 'utf8'))
+  })
+
+  it('P3-D: a production target that became a directory, a file symlink, or an ancestor symlink is refused', async () => {
+    const { svc, dir, skillRoot } = await serviceWithProduction()
+    await productionSkill(skillRoot)
+    const identity = await prepareSkill(svc)
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, identity))
+    await svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')
+    await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')
+
+    const outside = join(dir, 'outside')
+    await mkdir(outside, { recursive: true })
+    await writeFile(join(outside, 'SKILL.md'), 'external content\n')
+
+    // 1. the SKILL.md path becomes a directory
+    await rm(skillProductionFile(skillRoot))
+    await mkdir(skillProductionFile(skillRoot))
+    await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('is no longer a readable regular file')
+    await expect(svc.checkProductionBaseline('s1')).rejects.toThrow('is no longer a readable regular file')
+    await rm(skillProductionFile(skillRoot), { recursive: true })
+
+    // 2. the SKILL.md path becomes a symbolic link to a file outside the skill root
+    await symlink(join(outside, 'SKILL.md'), skillProductionFile(skillRoot))
+    await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('is a symbolic link')
+    expect(await readFile(join(outside, 'SKILL.md'), 'utf8')).toBe('external content\n')
+    await rm(skillProductionFile(skillRoot))
+
+    // 3. an ancestor (the skill directory itself) becomes a symbolic link
+    await rm(join(skillRoot, 'verify'), { recursive: true, force: true })
+    await symlink(outside, join(skillRoot, 'verify'))
+    await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('is a symbolic link')
+    expect(await readFile(join(outside, 'SKILL.md'), 'utf8')).toBe('external content\n')
+
+    // every refusal left the proposal decided with no applied record
+    expect((await svc.get('s1')).status).toBe('decided')
+    expect(await ledgerKinds(svc.root)).not.toContain('applied')
+  })
+
+  it('P3-E: two candidates from one champion apply serially; the second is refused and the first result stands', async () => {
+    const { svc, root, skillRoot } = await serviceWithProduction()
+    await productionSkill(skillRoot)
+    await walkSkillToDecided(svc, 's1', P3_CANDIDATE_A)
+    await walkSkillToDecided(svc, 's2', P3_CANDIDATE_B)
+    // both were evaluated and approved against the same production baseline
+    expect((await svc.get('s1')).prepared!.skillBaseline).toEqual((await svc.get('s2')).prepared!.skillBaseline)
+
+    const { ctx, approval } = toolCtx(svc)
+    const first = (await defineEvolutionApplyTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))) as string
+    expect(first).toContain('proposal s1 [applied] L2 skill verify')
+    expect(approval.request).toHaveBeenCalledOnce()
+
+    const second = (await defineEvolutionApplyTool(ctx).execute({ proposalId: 's2' }, exec('root-1'))) as string
+    expect(second).toContain('evolution_apply rejected:')
+    expect(second).toContain('changed since prepare')
+    expect(second).toContain(P3_CONFLICT_GUIDANCE)
+    // the second never reaches the human: one approval for the whole serial run
+    expect(approval.request).toHaveBeenCalledOnce()
+
+    // production keeps the first result; the second candidate changed nothing
+    expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe(P3_CANDIDATE_A)
+    expect((await svc.get('s1')).status).toBe('applied')
+    const stale = await svc.get('s2')
+    expect(stale.status).toBe('decided')
+    expect(stale.applied).toBeUndefined()
+    expect(stale.prepared!.skillBaseline!.sha256).toBe(createHash('sha256').update(P3_BASELINE, 'utf8').digest('hex'))
+    expect(stale.history.map(entry => entry.status))
+      .toEqual(['proposed', 'candidate', 'prepared', 'replayed', 'gated', 'decided'])
+    expect(await svc.readSkillCandidate('s2')).toEqual(Buffer.from(P3_CANDIDATE_B, 'utf8'))
+    expect((await ledgerKinds(root)).filter(kind => kind === 'applied')).toHaveLength(1)
+  })
+
+  it('P3-F: a baseline that moved before the human review is refused without asking for approval', async () => {
+    const { svc, skillRoot } = await serviceWithProduction()
+    await productionSkill(skillRoot)
+    await walkSkillToDecided(svc, 's1', P3_CANDIDATE_A)
+    await writeFile(skillProductionFile(skillRoot), '# moved before the review\n')
+
+    const { ctx, approval } = toolCtx(svc)
+    const result = (await defineEvolutionApplyTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))) as string
+    expect(result).toContain('evolution_apply rejected:')
+    expect(result).toContain('changed since prepare')
+    expect(approval.request).not.toHaveBeenCalled()
+    expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe('# moved before the review\n')
+  })
+
+  it('P3-F: a baseline that moves while the approval is pending is refused by the recheck after the grant', async () => {
+    const { svc, root, skillRoot } = await serviceWithProduction()
+    await productionSkill(skillRoot)
+    await walkSkillToDecided(svc, 's1', P3_CANDIDATE_A)
+
+    // Controllable promises, no sleeps: the approval stub reports that the
+    // human is deciding, then waits for the test to release the grant.
+    let deciding: () => void = () => {}
+    let grant: () => void = () => {}
+    const humanDeciding = new Promise<void>(resolve => { deciding = resolve })
+    const granted = new Promise<void>(resolve => { grant = resolve })
+    const approval = {
+      request: vi.fn(async () => {
+        deciding()
+        await granted
+        return 'allowed-once' as const
+      }),
+    }
+    const base = toolCtx(svc)
+    const ctx = { ...(base.ctx as unknown as Record<string, unknown>), approval } as never
+    const applying = defineEvolutionApplyTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))
+
+    await humanDeciding
+    await writeFile(skillProductionFile(skillRoot), '# moved while the human was deciding\n')
+    grant()
+    const result = (await applying) as string
+
+    expect(approval.request).toHaveBeenCalledOnce()
+    expect(result).toContain('evolution_apply rejected:')
+    expect(result).toContain('changed since prepare')
+    expect((await svc.get('s1')).status).toBe('decided')
+    expect(await ledgerKinds(root)).not.toContain('applied')
+    // production keeps the externally edited bytes — no overwrite, no merge
+    expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe('# moved while the human was deciding\n')
+  })
+
+  it('P3-G: a reopened service identifies the same production-baseline conflict', async () => {
+    const { svc, root, skillRoot, presetRoot, configFile } = await serviceWithProduction()
+    await productionSkill(skillRoot)
+    await walkSkillToDecided(svc, 's1', P3_CANDIDATE_A)
+    await writeFile(skillProductionFile(skillRoot), '# moved across a restart\n')
+
+    const reopened = new EvolutionService(fixtureCtx(), { root, skillRoot, presetRoot, configFile })
+    await expect(reopened.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('changed since prepare')
+    await expect(reopened.checkProductionBaseline('s1')).rejects.toThrow('changed since prepare')
+    expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe('# moved across a restart\n')
+    const reloaded = await reopened.get('s1')
+    expect(reloaded.status).toBe('decided')
+    expect(reloaded.applied).toBeUndefined()
+    expect(reloaded.prepared!.skillBaseline).toEqual({
+      name: 'verify', sha256: createHash('sha256').update(P3_BASELINE, 'utf8').digest('hex'),
+    })
+    expect(reloaded.history.map(entry => entry.status))
+      .toEqual(['proposed', 'candidate', 'prepared', 'replayed', 'gated', 'decided'])
+  })
+
+  it('P3-G: a P2 content change is still refused next to the baseline check', async () => {
+    const { svc, root, skillRoot } = await serviceWithProduction()
+    await productionSkill(skillRoot)
+    const identity = await prepareSkill(svc)
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, identity))
+    await svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')
+    await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')
+    // the candidate bytes change while the production baseline stays identical
+    await writeFile(skillCandidateFile(root), 'rewritten candidate\n')
+    await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('no longer matches the content identity')
+    expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe(P3_BASELINE)
+    expect(await ledgerKinds(root)).not.toContain('applied')
+  })
+
+  it('P3-G: rollback keeps its overwrite semantics and restores the champion snapshot after a later external change', async () => {
+    const { svc, root, skillRoot } = await serviceWithProduction()
+    await productionSkill(skillRoot)
+    await walkSkillToDecided(svc, 's1', P3_CANDIDATE_A)
+    const applied = await svc.apply('s1', 'root-1', 'approval:call-1')
+    expect(applied.proposal.status).toBe('applied')
+
+    // an external edit lands after the apply; rollback still restores the
+    // prepare-time champion snapshot byte-for-byte (strategy unchanged by P3)
+    await writeFile(skillProductionFile(skillRoot), '# edited after the apply\n')
+    const rolledback = await svc.rollback('s1', 'root-1', 'approval:call-2')
+    expect(rolledback.proposal.status).toBe('rolledback')
+    expect(await readFile(skillProductionFile(skillRoot))).toEqual(Buffer.from(P3_BASELINE, 'utf8'))
+    expect((await svc.get('s1')).applied!.approvalRef).toBe('approval:call-1')
+    expect((await svc.get('s1')).rolledback!.approvalRef).toBe('approval:call-2')
+  })
+
+  it('P3-G: a record with no recorded baseline refuses a new apply instead of defaulting to match', async () => {
+    const { svc, root, skillRoot, presetRoot, configFile } = await serviceWithProduction()
+    await productionSkill(skillRoot)
+    await walkSkillToDecided(svc, 's1', P3_CANDIDATE_A)
+    // the P2-era shape: skillContent recorded, skillBaseline absent
+    await dropBaselineField(root)
+    const reopened = new EvolutionService(fixtureCtx(), { root, skillRoot, presetRoot, configFile })
+    expect((await reopened.get('s1')).prepared!.skillBaseline).toBeUndefined()
+
+    await expect(reopened.checkProductionBaseline('s1')).rejects.toThrow('records no production baseline identity')
+    await expect(reopened.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('records no production baseline identity')
+    const { ctx, approval } = toolCtx(reopened)
+    const viaTool = (await defineEvolutionApplyTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))) as string
+    expect(viaTool).toContain('evolution_apply rejected:')
+    expect(viaTool).toContain('records no production baseline identity')
+    expect(viaTool).toContain(P3_CONFLICT_GUIDANCE)
+    expect(approval.request).not.toHaveBeenCalled()
+
+    // production is untouched and no applied record was taken
+    expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe(P3_BASELINE)
+    expect(await ledgerKinds(root)).not.toContain('applied')
+    // the old ledger still reads, and its history is intact
+    expect((await reopened.get('s1')).status).toBe('decided')
+  })
+
+  it('P3-G: a missing-champion record without a baseline applies only while the target is still absent', async () => {
+    const { svc, root, skillRoot, presetRoot, configFile } = await serviceWithProduction()
+    await walkSkillToDecided(svc, 's1', P3_CANDIDATE_A)
+    await dropBaselineField(root)
+    const reopened = new EvolutionService(fixtureCtx(), { root, skillRoot, presetRoot, configFile })
+    // `champion: 'missing'` is the recorded proof that no production file
+    // existed, so the baseline check is satisfiable without a digest
+    expect((await reopened.get('s1')).prepared!.champion).toBe('missing')
+    await reopened.checkProductionBaseline('s1')
+    await reopened.apply('s1', 'root-1', 'approval:call-1')
+    expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe(P3_CANDIDATE_A)
+
+    // the same shape refuses as soon as a production file appeared
+    const { svc: other, skillRoot: otherRoot } = await serviceWithProduction()
+    await walkSkillToDecided(other, 's1', P3_CANDIDATE_B)
+    await productionSkill(otherRoot, '# appeared after prepare\n')
+    await dropBaselineField(other.root)
+    const legacy = new EvolutionService(fixtureCtx(), { root: other.root, skillRoot: otherRoot })
+    await expect(legacy.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('was prepared with no production')
+    expect(await readFile(skillProductionFile(otherRoot), 'utf8')).toBe('# appeared after prepare\n')
+  })
+
+  it('P3-G: a forged skillBaseline on a non-skill prepared record fails the fold', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evolution-forge-'))
+    const svc = new EvolutionService(fixtureCtx(), { root })
+    await svc.propose(capabilityProposal, 'root-1')
+    await svc.candidate('c1', VERSION_SET, 'root-1', capabilityMutation)
+    const forged = {
+      formatVersion: 1, kind: 'prepared', proposalId: 'c1', sandbox: 'sandbox/c1', mechanical: true,
+      champion: 'captured', files: ['x'], skillBaseline: { name: 'verify', sha256: 'd'.repeat(64) }, actor: 'x', at: 'now',
+    }
+    await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
+    await expect(new EvolutionService(fixtureCtx(), { root }).list()).rejects.toThrow('carries skillBaseline but targetType "capability" is not skill')
+
+    // a malformed digest on the right targetType fails the same way
+    const other = await mkdtemp(join(tmpdir(), 'evolution-forge-'))
+    const svc2 = new EvolutionService(fixtureCtx(), { root: other })
+    await svc2.propose(skillProposal, 'root-1')
+    await svc2.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: 'x' })
+    const malformed = { ...forged, proposalId: 's1', skillBaseline: { name: 'verify', sha256: 'not-a-digest' } }
+    await writeFile(join(other, 'proposals.jsonl'), `${JSON.stringify(malformed)}\n`, { flag: 'a' })
+    await expect(new EvolutionService(fixtureCtx(), { root: other }).list()).rejects.toThrow('malformed skillBaseline identity')
   })
 })
 

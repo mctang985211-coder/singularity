@@ -22,7 +22,7 @@
 
 DSH 提供 agent/session、skill 发现与加载、preset、MCP、上下文与原生审批。Singularity 负责任务契约、能力选择、证据、组合验收、缺口恢复与复盘。继续使用现有服务，不另造通用 skill loader 或全局调度平台。
 
-**当前阶段判断**：已有递归执行和证据记录的工程骨架；P3 能力保障与 KISS 的验证闭包尚未完成。Review/Evolution 有较完整的机械链路，不等于前置正确性条件已满足。下一阶段应补执行与验收的约束，不继续扩大 Evolution 自动化。
+**当前阶段判断**：已有递归执行和证据记录的工程骨架；KISS 的 P3（Capability Runtime）能力保障与验证闭包尚未完成（与 §3 的 P3 执行票不是同一件事）。Review/Evolution 有较完整的机械链路，不等于前置正确性条件已满足。下一阶段应补执行与验收的约束，不继续扩大 Evolution 自动化。
 
 ### 1.1 需要干预的建设倾向
 
@@ -121,7 +121,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 详细票据见 [建设计划](2026-09-20-vrtc-code-change-plan.md)。以下是依赖顺序，不是任务执行 workflow。
 
-可先派发的确定性工程切片见 [执行 prompt](execution-prompts/README.md)：P1 类型闸 → P2 单文件 Skill 内容绑定 → P3 生产基线冲突检查。P1、P2 已于 2026-09-21 完成并同步本文；P3 仍待执行，必须逐项验收并同步本文；不替代 S2/S3 的自主修复与恢复闭环。
+可先派发的确定性工程切片见 [执行 prompt](execution-prompts/README.md)：P1 类型闸 → P2 单文件 Skill 内容绑定 → P3 生产基线冲突检查。P1、P2、P3 已于 2026-09-21 完成并同步本文；三项都不替代 S2/S3 的自主修复与恢复闭环。
 
 | 顺序 | 建设目标 | 完成条件 |
 |---|---|---|
@@ -153,7 +153,7 @@ S1 的最小验证与能力契约是候选生产晋升的前置。S2 与 S3 按�
 | 预算 | wallTimeMs 在飞取消；tools/tokens 仅终态审计；attempts/noProgressRounds 仅声明 | `orchestrate.ts:awaitWorker`、`budgetBreaches`；`task-runtime/src/index.ts:Config` |
 | L4 上报 | root 的 `escalate` 工具与台账已有；模型主动调用，批准后才记 raised；运行时只输出提示，无自动触发、无处理结果/恢复闭环 | `agent-singularity/src/tools/escalate.ts`；`orchestrate.ts:escalationHint` |
 | blocked 恢复 | blocked 无恢复出边；TaskRetried 只接受 failed，父分解一次的限制仍在；补能力后不会自动续跑原图 | `task/src/service/state.ts`；`task-runtime/src/index.ts:decomposeAndRun` |
-| Review / Evolution | 已有工具链；机械候选 PROMOTE/apply 要求 observed、holdout 各自非空且不退化，报告按明细重算并校验记录时摘要。单文件 Skill 候选内容已绑定：prepare 记录实际物化 SKILL.md 的 SHA-256，replay 报告携带同一身份，`replayed` 记录写入前、晋升预检与 decide(PROMOTE)/apply 服务入口均复检候选文件（缺失/非普通文件/符号链接路径/内容变化即拒绝），apply 只写入已校验字节。未实现其他 targetType 的内容绑定、真实证据来源校验、分层指标或自动 Retro | `agent-singularity/src/evolution.ts:prepare`、`readSkillCandidate`、`checkPromotion`、`writeProduction`；`replay.ts:assertReplayReport` |
+| Review / Evolution | 已有工具链；机械候选 PROMOTE/apply 要求 observed、holdout 各自非空且不退化，报告按明细重算并校验记录时摘要。单文件 Skill 候选内容已绑定（P2）：prepare 记录实际物化 SKILL.md 的 SHA-256，replay 报告携带同一身份，`replayed` 记录写入前、晋升预检与 decide(PROMOTE)/apply 服务入口均复检候选文件，apply 只写入已校验字节。生产基线已固定（P3）：prepare 用同一次读取的生产文件得到 champion 快照与 `skillBaseline` 摘要，apply 工具在人审前、服务在实际写入前复检生产目标仍等于该基线（captured 要求普通文件摘要一致，missing 要求目标仍不存在；缺失/内容不同/类型改变/符号链接路径均明确拒绝），过期候选不写生产、不记 applied，也不自动覆盖或改写原 proposal。未实现其他 targetType 的内容绑定、真实证据来源校验、分层指标或自动 Retro | `agent-singularity/src/evolution.ts:prepare`、`readSkillCandidate`、`checkPromotion`、`checkProductionBaseline`、`writeProduction`；`replay.ts:assertReplayReport` |
 | root-agent 构建类型闸 | `agent-singularity` 的 `build` 为 `tsc --noEmit && tsdown`，类型错误即构建失败；工作区根 `pnpm build`（`pnpm -r run build`）经过同一检查。2026-09-21 前该包 `pnpm build` 只有 tsdown，不保证严格类型检查通过 | `agent-singularity/package.json` scripts.build |
 | 身份与枚举的类型来源 | 工具侧 `sessionId(exec)` 直接返回上游 `Agent.id` 的 `SessionId`，不再降级为 `string`；`DiagnosisProposal.targetType` 与 `evolution_propose` 的 targetType 由 `@dangosys/dsh-singularity-task` 的 `ProposalTargetType` 标注并经运行时校验，不是任意字符串断言 | `agent-singularity/src/tools/task-diagnose.ts:toProposals`；`src/tools/evolution-propose.ts:isProposalTargetType`；`src/evolution.ts:validateMutation` |
 
@@ -162,18 +162,18 @@ S1 的最小验证与能力契约是候选生产晋升的前置。S2 与 S3 按�
 | 编号 | 问题与影响 | 建设票 / 历史对应 |
 |---|---|---|
 | G1 | 父 composite 仅对子状态求合取，不能证明根目标；同环境执行 verifier 也不等于测试与阈值不可被修改 | S1-V / 旧 #25、#26 |
-| G2 | provider 未预检、run 级内容版本未固定；`closed` 被误用为可执行保证。多 preset 冲突已在解析期拒绝；单文件 Skill 候选的晋升链路内容身份已固定（P2），但 provider 预检与 run 解析快照仍未建 | S1-C / 旧 #29 |
+| G2 | provider 未预检、run 级内容版本未固定；`closed` 被误用为可执行保证。多 preset 冲突已在解析期拒绝；单文件 Skill 候选的晋升链路内容身份（P2）与生产基线（P3）已固定，但 provider 预检与 run 解析快照仍未建 | S1-C / 旧 #29 |
 | G3 | 缺产物只查存在且 blocked 无恢复，证据驱动生长断在登记之后 | S1-V、S2-R / 旧 #20、#21、#22 |
 | G4 | 上报依赖模型调用且批准前不落账；任务阻塞、通知与人类决策混在一起 | S2-E / 旧 #27；已有工具不能标为待建 |
 | G5 | 三值判决、预算半接线，没有 PARTIAL/UNKNOWN 的任务级处置 | S2-R / 旧 #23、#24 |
 | G6 | 缺 skill 契约与知识型定位，L1/L2 又被排在其前面，形成建设依赖倒置 | S1-C → S3 / 旧 #29 |
-| G7 | 已补报告自洽与机械晋升最低闸，以及单文件 Skill 候选内容绑定（P2）；证据来源绑定、分层指标和自动 Retro 未建，当前不能宣称防止裁判弱化或过拟合 | S4 / 旧 #28 |
+| G7 | 已补报告自洽、机械晋升最低闸、单文件 Skill 候选内容绑定（P2）与生产基线检查（P3）；证据来源绑定、分层指标和自动 Retro 未建，当前不能宣称防止裁判弱化或过拟合 | S4 / 旧 #28 |
 | G8 | `task_decompose`/`escalate` 部分拒绝返回普通文本，上层不能可靠用工具错误信号判定 | S2-E / 旧 #33 |
 | G9 | 类型闸只覆盖 `agent-singularity`；其余 Singularity 包的 `build` 仍只有 tsdown，未接 `tsc --noEmit`，其严格类型状态未经本闸保证 | P1 范围外，待独立评估 |
 
 历史记录中的 M1–M9 为此前会话的实跑声明，保留于历史指南。本次回归结果见建设计划 S0；本次没有重跑 LLM、BB 构建仿真或生产 Evolution 链路。旧环境可用性、外部 bbdev 缺陷和部署阈值在使用前需重新读取对应部署，不能从旧日志推断当前状态。
 
-2026-09-21 的 P1 已关闭“root-agent 包 build 不执行严格类型检查”这一缺口：该包 `pnpm exec tsc --noEmit` 从 12 处错误降到 0，`build` 改为先 `tsc --noEmit` 再 `tsdown`，工作区根 `pnpm build` 同样经过。G9 是 P1 明确未做的剩余部分：类型闸没有推广到其他包，也未改变任何业务流程、审批次数、持久化格式或工具输入输出合同。同日的 P2 已关闭 G7 中“候选内容绑定”的单文件 Skill 切片（范围见 §5.5）；证据来源绑定仍待建，由后续工作推进，不因 P1/P2 完成而标记 S1-C/S4 完成。
+2026-09-21 的 P1 已关闭“root-agent 包 build 不执行严格类型检查”这一缺口：该包 `pnpm exec tsc --noEmit` 从 12 处错误降到 0，`build` 改为先 `tsc --noEmit` 再 `tsdown`，工作区根 `pnpm build` 同样经过。G9 是 P1 明确未做的剩余部分：类型闸没有推广到其他包，也未改变任何业务流程、审批次数、持久化格式或工具输入输出合同。同日的 P2 已关闭 G7 中“候选内容绑定”的单文件 Skill 切片（范围见 §5.5）；P3 再关闭其中“生产基线没变”的切片。证据来源绑定仍待建，由后续工作推进，不因 P1/P2/P3 完成而标记 S1-C/S4 完成。
 
 ## 5. 实现时的关键约束
 
@@ -224,6 +224,10 @@ pnpm vitest run --project integration packages/singularity
 **单文件 Skill 候选内容已绑定（2026-09-21 P2）**：prepare 为实际物化的 `sandbox/<id>/skills/<name>/SKILL.md` 记录 SHA-256（精确字节，不 trim、不转换换行），与 proposal/target/skill 名称关联，重启可恢复；skill replay 报告携带同一身份，记录报告的服务入口校验它与 prepare 一致，并在写入 `replayed` 记录前重新读取候选文件复检；replay 执行前工具层也检查同一文件，运行时 overlay 指向被检查的沙箱候选而非生产 skill；人审前预检与 decide(PROMOTE)/apply 服务入口复检身份；apply 从文件读取待应用字节、校验摘要后写入这同一份已校验字节，不检查路径后重新读路径。候选缺失、内容不同、非普通文件、候选路径或其祖先为符号链接均明确拒绝；失败不写生产、不追加成功晋升状态。旧 ledger 无新字段仍可读，旧已应用对象仍可回滚；旧未应用 Skill 候选不能直接新晋升，错误提示要求新建候选并重新评估。
 
 范围边界：只覆盖 `targetType: skill` 的单个 `SKILL.md`。多文件 Skill、agent_preset、capability、task_definition 不携带该身份；真实证据来源认证、独立 verifier、supervisor 调度均未实现；内容身份不等于 Skill 功能正确。本保障针对正常 agent 工作流中持久存在的内容变化与 apply 的读写一致性，不覆盖恶意外部进程在 replay 期间瞬时改写又恢复、特权进程篡改 ledger、跨进程文件系统隔离。其余待补项：候选内容摘要之外的 manifest/run/evidence 身份、原始证据对照和按目标制定的改进指标；agent_preset 仍只生成 manual replay（应补沙箱 preset 执行器，而非绕过验证）；缺摘要的旧 ledger 可读、已应用对象可回滚，但后续晋升需新建候选并重新评估。L4/未支持目标缺少执行器是实现缺口，不是要求人代写改进的永久规则。
+
+**生产基线也已固定（2026-09-21 P3）**：这是与“候选内容没变”不同的第二项检查——前者保证 apply 写出的就是被评估过的那份候选字节（P2），后者保证被评估时的生产状态没有被别人改掉（P3）。prepare 对生产文件只读一次：同一份字节既写进 `champion/skills/<name>/SKILL.md` 快照，也算出 SHA-256 写进 `prepared` 记录的新可选字段 `skillBaseline: { name, sha256 }`（快照与摘要因此不可能互相矛盾）；生产文件原本不存在时记录 `champion: 'missing'`，不写摘要。apply 在人审前由工具调用 `checkProductionBaseline` 复检，人类批准后由服务入口在实际写入前再复检一次，直接调用服务同样经过：`captured` 要求生产目标是普通文件且摘要与记录一致，`missing` 要求目标仍不存在；文件缺失、内容不同、类型改变（例如变成目录）、文件或其祖先为符号链接都算冲突，明确拒绝。冲突时不改生产文件、不记 `applied`、不自动覆盖/merge/更新 champion/改写原 proposal，错误提示要求基于新生产状态创建新候选并重新评估；拒绝后原候选、报告与历史都保留，P2 的候选身份检查与既有 replay 闸继续生效。拒绝后 rollback 合同不变：rollback 仍按 champion 快照覆盖写回，P3 没有改这套策略。
+
+范围边界（P3）：只覆盖 `targetType: skill` 的单个 `SKILL.md`，且只保证**单进程串行调用**以及两次调用之间发生的外部修改。不实现跨进程锁、并发 compare-and-swap，也不保证任意外部写入者与 apply 同时写时的原子性；因此“串行应用两个基于同一 champion 的候选，第二个被拒绝”是确定验收的，“两个进程同时 apply”不是。旧 ledger 无 `skillBaseline` 仍可读、旧已应用对象仍可回滚；captured 但没有基线摘要的旧未应用候选拒绝新 apply（不能默认匹配），missing 的旧候选仅在目标仍不存在时可应用。P2/P3 合起来仍不证明证据来源真实、provider 预检存在或自动 Retro 已建；完整自进化框架未完成。
 
 ## 6. 文档维护
 

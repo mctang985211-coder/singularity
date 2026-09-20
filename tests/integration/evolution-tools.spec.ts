@@ -423,3 +423,72 @@ it('refuses a tampered skill candidate through the plugin, leaving production an
     vi.unstubAllEnvs()
   }
 })
+
+it('refuses a skill apply whose production baseline moved after prepare, through the plugin', async () => {
+  const { tools, home, approval } = await mountAgent()
+  try {
+    const championDir = join(home, 'skills', 'verify')
+    await mkdir(championDir, { recursive: true })
+    await writeFile(join(championDir, 'SKILL.md'), '# old verify skill\n')
+
+    const propose = tools.get('evolution_propose')!
+    const candidate = tools.get('evolution_candidate')!
+    const prepare = tools.get('evolution_prepare')!
+    const replay = tools.get('evolution_replay')!
+    const gate = tools.get('evolution_gate')!
+    const decide = tools.get('evolution_decide')!
+    const apply = tools.get('evolution_apply')!
+    const list = tools.get('evolution_list')!
+
+    await propose.execute({
+      proposalId: 'p-skill-3',
+      level: 'L2',
+      baseVersion: 'v1',
+      targetType: 'skill',
+      targetId: 'verify',
+      rationale: 'the skill never mentions empty-input fixtures',
+      sourceRefs: ['diagnosis:d1'],
+    }, exec('root-1'))
+    await candidate.execute({
+      proposalId: 'p-skill-3',
+      versionSet: { skill: 'v2' },
+      mutation: { name: 'verify', content: '# new verify skill\n' },
+    }, exec('root-1'))
+    const prepared = await prepare.execute({ proposalId: 'p-skill-3' }, exec('root-1'))
+    // P3: prepare records the production baseline digest on the ledger line
+    expect(prepared).toContain('production baseline: verify sha256:')
+    const preparedRecord = JSON.parse((await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n').at(-1)!)
+    expect(preparedRecord.skillBaseline).toEqual({
+      name: 'verify',
+      sha256: createHash('sha256').update('# old verify skill\n').digest('hex'),
+    })
+
+    await replay.execute({ proposalId: 'p-skill-3', taskIds: ['t-champ'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))
+    await gate.execute({
+      proposalId: 'p-skill-3',
+      targetFailureFixed: 'a', originalAcceptanceMaintained: 'b', existingRegressionMaintained: 'c',
+      noUnacceptableSideEffects: 'd', holdoutPerformanceAcceptable: 'e', resourceCostAcceptable: 'f',
+      regressionEvidenceRefs: ['sandbox/p-skill-3/replay-report.json', 'ev-champ'],
+    }, exec('root-1'))
+    await decide.execute({ proposalId: 'p-skill-3', decision: 'PROMOTE' }, exec('root-1'))
+
+    // the production skill changes after the candidate was prepared and approved
+    await writeFile(join(championDir, 'SKILL.md'), '# edited in production\n')
+    const rejected = await apply.execute({ proposalId: 'p-skill-3' }, exec('root-1'))
+    expect(rejected).toContain('evolution_apply rejected:')
+    expect(rejected).toContain('changed since prepare')
+    expect(rejected).toContain('create a new candidate from the current production state')
+    // the apply never reaches the human: only the decide approval was burned
+    expect(approval.request).toHaveBeenCalledTimes(1)
+    // production keeps the externally edited bytes
+    expect(await readFile(join(championDir, 'SKILL.md'), 'utf8')).toBe('# edited in production\n')
+    const ledger = (await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n')
+    expect(ledger.map(line => (JSON.parse(line) as { kind: string }).kind))
+      .toEqual(['proposed', 'candidate', 'prepared', 'replayed', 'gated', 'decided'])
+    const listed = await list.execute({ status: 'decided' })
+    expect(listed).toContain('p-skill-3 [decided PROMOTE]')
+    expect(listed).toContain('production baseline verify sha256:')
+  } finally {
+    vi.unstubAllEnvs()
+  }
+})

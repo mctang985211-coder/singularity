@@ -12,7 +12,7 @@
 |---|---|---|---|
 | [P1 类型闸](execution-prompts/01-root-agent-typecheck.md) | 已完成（2026-09-21，见 P1 节） | 已满足 | root-agent 严格类型检查零错误，build 实际执行类型检查 |
 | [P2 Skill 内容绑定](execution-prompts/02-skill-content-binding.md) | 已完成（2026-09-21，见 P2 节） | P1 验收通过：`agent-singularity` build 为 `tsc --noEmit && tsdown`，类型错误即失败 | 单文件 Skill prepare/replay/审核/apply 内容身份一致；旧记录读取与回滚保留 |
-| [P3 生产基线检查](execution-prompts/03-skill-champion-check.md) | 待执行 | P2 验收通过：候选内容身份字段、兼容规则与读取/检查入口见 P2 节交接，P3 必须复用该身份语义，不另建摘要体系 | 串行 apply 拒绝过期 Skill 候选，不覆盖变化的生产文件 |
+| [P3 生产基线检查](execution-prompts/03-skill-champion-check.md) | 已完成（2026-09-21，见 P3 节） | P2 验收通过：候选内容身份字段、兼容规则与读取/检查入口见 P2 节交接，P3 必须复用该身份语义，不另建摘要体系 | 串行 apply 拒绝过期 Skill 候选，不覆盖变化的生产文件 |
 
 这些是 S1-C/S4 的有限工程切片。P2 不证明证据来源真实，P3 不承诺跨进程原子更新；完成后不将整张 S 票标为完成。
 
@@ -20,11 +20,11 @@
 |---|---|---|---|
 | S0 | 已完成，验证结果见文末 | 无 | 文档去漂移、术语统一、worker 能力查询 |
 | S1-V | 部分：verifier 返回边界校验已建 | S0 | 可信验收、父级组合检查、有效产物引用 |
-| S1-C | 部分：多 preset 冲突已在解析期拒绝；单文件 Skill 候选的晋升链路内容身份已绑定（P2） | S0 | provider 预检、skill 分类契约、run 解析快照 |
+| S1-C | 部分：多 preset 冲突已在解析期拒绝；单文件 Skill 候选的晋升链路内容身份已绑定（P2），生产基线已在 apply 前复检（P3） | S0 | provider 预检、skill 分类契约、run 解析快照 |
 | S2-E | 部分：已有手动 L4 工具与 raised 台账 | S0 | 自动缺口记录、supervisor 交接、人审改进与例外上报、结构化拒绝 |
 | S2-R | 待建；已有 blocked/obligation 记录 | S1 最小切片、S2-E；与 S3 联合验收 | agent 补齐缺口后的系统恢复、预算与判决处置 |
 | S3 | 待建 | S1 最小切片、S2 交接/恢复协议；与 S2-R 联合验收 | L1 复用/组合与 L2 沙箱生成，验证后提交人审改进 |
-| S4 | 部分：报告自洽、摘要与机械晋升最低闸已建；单文件 Skill 候选内容绑定已完成（P2） | S3；验证底座可提前 | 结构化 Retro、分层指标、自动接受硬闸 |
+| S4 | 部分：报告自洽、摘要与机械晋升最低闸已建；单文件 Skill 候选内容绑定（P2）与生产基线检查（P3）已完成 | S3；验证底座可提前 | 结构化 Retro、分层指标、自动接受硬闸 |
 
 旧计划的阶段 1.1/1.2（assumptions/requiresArtifact）、1.4（verifierRef）、3.3（义务记录）已有代码；不重复建设。
 阶段 1.3 预算、2.1 四值判决、2.2 verifier selftest 只有部分完成。阶段 3.1 L4 已有工具，但无自动与恢复闭环。
@@ -87,6 +87,41 @@
 7. P2-D 反例探针：临时把 skill apply 改成“校验后重新读路径写入”，P2-D 测试失败（生产收到替换内容）；恢复实现后通过，探针不在最终 diff 中。
 
 给 P3 的前置条件：P2 的身份语义可直接复用——字段 `prepared.skillContent: { name, sha256 }`（可选，仅 skill）、报告字段 `candidateContent`；内容读取/检查入口是 `EvolutionService.readSkillCandidate(proposalId)` 与 `checkPromotion(proposalId)`（内部 `readVerifiedSkillCandidate` / `readVerifiedFile`，从 ledger root 逐级 lstat 拒绝符号链接与非普通文件）。P3 必须复用这套摘要与读取路径，不另建第二套摘要体系；P3 在此基础上补生产基线（champion 与当前生产内容）比对。S1-C/S4 仍为部分完成：P2 只绑定单文件 Skill 候选内容，不证明证据来源真实，也未建分层指标或自动 Retro。
+
+## P3：拒绝覆盖已变化的生产 Skill（2026-09-21 已完成）
+
+修改前回退点：Singularity `4c5308b`（外层 harness `a7df0ce6fd`）。基线工作区干净（外层仅 `thirdparty/deepseek-harness` 子模块内有未跟踪文件，未触碰）。
+
+实现范围（只对 `targetType: skill` 的单个 `SKILL.md` 固定生产基线；未扩展到多文件 Skill、preset、capability，未建全局版本服务，未实现跨进程锁或并发 compare-and-swap，未改 rollback 覆盖策略）：
+
+- **prepare 单次读取**：`evolution.ts` 的 skill `materialize` 分支改为对生产文件做一次校验读取（沿用 P2 的逐级 lstat 语义，从 `skillRoot` 逐级拒绝符号链接与非普通条目），同一份字节既写 champion 快照，也算出 SHA-256 写入 `prepared` 记录的新可选字段 `skillBaseline: { name, sha256 }`；快照与摘要不可能描述两次不同读取。生产文件不存在仍记 `champion: 'missing'` 且不写摘要。`readVerifiedFile` 拆出 `walkVerified`（缺失与类型改变分开上报），`readProductionSkill` 复用它读生产目标。
+- **apply 两次复检**：新增 `EvolutionService.checkProductionBaseline(proposalId)`（内部 `assertProductionBaseline`）：`captured` 要求生产目标是普通文件且摘要与 `skillBaseline` 一致，`missing` 要求目标仍不存在；文件缺失、内容不同、类型改变（变成目录）、文件或祖先为符号链接都是冲突。`evolution_apply` 工具在人审前调用它，`EvolutionService.apply` 在 `checkPromotion` 之后、实际写入之前再调用一次，直接调用服务同样经过；`decide(PROMOTE)` 的入口保持 P2 行为不变。
+- **冲突处理**：只抛错。不改生产文件、不追加 `applied`、不自动覆盖/merge/更新 champion/改写原 proposal；错误提示统一要求“基于新生产状态创建新候选并重新评估”。原候选、replay 报告与 history 全部保留，P2 候选身份检查与既有 replay 闸不受影响。
+- **可观测性**：`evolution_prepare` 输出生产基线短摘要；`evolution_list` 的 prepared 行同时显示候选内容身份与生产基线身份。
+- **兼容与旧 ledger**：无 `skillBaseline` 的旧 ledger 可读、旧已应用对象可回滚；`captured` 但没有基线摘要的旧未应用候选拒绝新 apply（不默认匹配），`champion: 'missing'` 的旧候选仅在目标仍不存在时可应用。fold 对误植到非 skill 的 `skillBaseline` 和畸形摘要显式拒绝。
+
+持久化记录：`docs/persistence-changes/2026-09-21-evolution-skill-baseline.md`（外部 `proposals.jsonl` 新增可选字段，非 SessionEventMap 根，四个事件根指纹不变）。
+
+测试锚：`agent-singularity/tests/unit/evolution.spec.ts` 的 `production baseline check (P3)` 组（P3-A 未变基线全链路；P3-B 修改/删除后用 it.each 覆盖工具预检与直接服务调用；P3-C missing 后出现文件被拒、仍缺失可应用；P3-D 目录/文件符号链接/祖先符号链接三类拒绝且链接目标不被写；P3-E 两个同 champion 候选串行 apply，第二个被拒且只烧一次审批；P3-F 人审前基线已变不弹审批、审批等待期用可控 promise 改基线后批准仍被复检拒绝；P3-G 重启复检、P2 内容变化负例、rollback 覆盖语义不变、无基线字段的旧 ledger 拒绝/可按 missing 应用、伪造字段 fold 失败），`tests/integration/evolution-tools.spec.ts`（插件路径下生产基线记录、拒绝时不弹审批、ledger 无 applied）。
+
+验证（2026-09-21，实际执行）：
+
+1. `packages/singularity` 下 `pnpm build`：通过；日志可见 `agent-singularity build$ tsc --noEmit && tsdown`。
+2. 外层 harness 下 `pnpm vitest run --project unit packages/singularity`：25 文件 / 609 项通过（P3 新增 14 项；`evolution.spec.ts` 由 193 项增至 207 项）。
+3. 外层 harness 下 `pnpm vitest run --project integration packages/singularity`：19 文件 / 96 项通过（新增 1 项插件路径生产基线拒绝）。
+4. `packages/singularity` 下 `pnpm run verify-persistence`：OK，4 个事件根指纹匹配 `docs/persistence-schema.json`。
+5. `packages/singularity` 下 `git diff --check`：通过。
+6. `agent-singularity` 下 `pnpm exec tsc --noEmit`：0 错误。
+7. P3 反例探针：临时让 `assertProductionBaseline` 直接返回，单测 10 项 P3 冲突用例失败（P3-B×2、P3-C、P3-D、P3-E、P3-F×2、P3-G 重启、P3-G 旧 ledger×2），恢复实现后全部通过；探针不在最终 diff 中。
+
+给下一批的前置条件：P3 只固定“串行调用之间生产基线没变”，不实现跨进程锁、并发 CAS 或任意外部写入者与 apply 同时写的原子性；rollback 覆盖策略保持原状。S1-C/S4 仍为部分完成：真实 run/evidence 来源绑定、preset 沙箱执行、分层指标与自动 Retro 均未建，不因 P1–P3 通过而宣称完整自进化框架已完成。
+
+下一批仍待固定的合同（本票未开始实现）：
+
+1. **真实 run/evidence 来源绑定**（S1-C / S4）：replay 固定 manifest/run/evidence 身份，报告自洽但来源伪造仍是反例；apply 写入同一版本。
+2. **preset 沙箱执行**（S1-C / S3）：补 agent_preset 沙箱解析/执行器，解除 manual replay 的当前阻塞，而不是绕过验证。
+3. **独立父验收**（S1-V）：父 AC → 子证据映射、独立组合判据、区分原始输入与要求已验证的产物。
+4. **supervisor/blocked 恢复**（S2-E / S2-R / S3）：gap 身份与解决事件、supervisor 自主实现并验证候选、人审后系统恢复受阻分支。
 
 ## S1-V：先保证验的是目标
 
@@ -189,7 +224,7 @@ Supervisor 的范围并不永久限定于 skill：后续按细化想法4 §30 �
 后续按以下小批次推进，不等待 S1/S4 全平台建完：
 
 1. **固定实际评估对象**（S1-C / S4）：prepare 记录候选内容摘要，replay 固定 manifest/run/evidence 身份，apply 写入同一版本；禁止先验证 A 再应用 B。补 preset 沙箱解析/执行，解除 manual replay 的当前阻塞。验收包含报告自洽但伪造来源、回放后替换候选文件两类反例。
-   - 2026-09-21 P2 已完成其中“单文件 Skill 候选内容绑定”切片：prepare 摘要、replay 报告身份、服务入口复检、apply 写入同一版本均已落地并通过验收；“replay 固定 manifest/run/evidence 身份”与 preset 沙箱执行仍待建。
+   - 2026-09-21 P2 已完成其中“单文件 Skill 候选内容绑定”切片：prepare 摘要、replay 报告身份、服务入口复检、apply 写入同一版本均已落地并通过验收；P3 再完成“生产基线没变”切片：prepare 记录生产文件摘要、apply 人审前与实际写入前复检。“replay 固定 manifest/run/evidence 身份”与 preset 沙箱执行仍待建。
 2. **补目标验证最小闭环**（S1-V）：选一个可确定性检查的父级目标，增加独立组合判据；依赖引用区分原始输入与要求已验证的产物。verifier 正负样本实际执行，固定判据来源；相同失败不能仅凭不退化被视作修复。模板改判据应交由独立固定基准比较，不能只改变 command 后继续比较通过率。
 3. **联合实现自动补路径与恢复**（S2-E / S2-R / S3）：定义 gap/obligation 身份及解决事件，supervisor 消费一次诊断、实现候选、调用已有评估工具；人审改进后系统应用并重新准入受阻分支。先交付一个 L1 和一个 L2 案例，覆盖拒绝、重启去重和预算停止。不得以人工编写 skill 的演示代替验收。
 4. **扩大改进目标**（S4）：以完整轨迹驱动 Retro，增加成功率/成本、verifier 漏检/变异检出、模板难度归一化指标。当前非退化闸不能作为全面自动接受的完成证据；更广的运行时/裁判修改仍由 supervisor 实现验证、人审核。

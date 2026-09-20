@@ -53,7 +53,10 @@ export function defineEvolutionApplyTool(ctx: Context) {
       '(skill / agent_preset / capability) at L1–L3 with a materialized sandbox; task_definition, the five ' +
       'bookkeeping-only types, and L4 lack executors and are refused with instructions. Always asks a human through the ' +
       'native approval seam first — a second gate after evolution_decide — naming every production path it will ' +
-      'write; a reject, cancel, or unavailable answerer writes nothing and leaves the proposal decided. skill and ' +
+      'write; a reject, cancel, or unavailable answerer writes nothing and leaves the proposal decided. A skill ' +
+      'apply additionally re-verifies the production baseline recorded at prepare (the production SKILL.md must ' +
+      'still be those exact bytes, or still be absent) before the human is asked and again after the grant, and ' +
+      'refuses a stale candidate instead of overwriting a production skill that changed. skill and ' +
       'agent_preset take effect on write; a capability row is mirrored into the running registry and persists in ' +
       'config.yml. evolution_rollback restores the champion snapshot.',
     parameters: {
@@ -82,6 +85,10 @@ export function defineEvolutionApplyTool(ctx: Context) {
       if (manual !== null) return `evolution_apply rejected: ${manual}`
       try {
         await ctx.evolution.checkPromotion(proposal.proposalId)
+        // P3: the production baseline must still be the one this candidate was
+        // evaluated against, checked BEFORE the human is asked. The service
+        // entry re-runs it after the grant, immediately before the write.
+        await ctx.evolution.checkProductionBaseline(proposal.proposalId)
       } catch (error) {
         return `evolution_apply rejected: ${error instanceof Error ? error.message : String(error)}`
       }

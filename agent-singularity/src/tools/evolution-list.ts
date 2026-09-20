@@ -52,7 +52,9 @@ export function defineEvolutionListTool(ctx: Context) {
             const championText = view.champion === 'captured' ? 'champion snapshot captured' : 'champion: null'
             // P2: a skill candidate shows the content identity later stages verify against.
             const contentText = view.skillContent === undefined ? '' : `, candidate content ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}…`
-            lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, ${championText}${contentText})`)
+            // P3: the production baseline the apply compares against.
+            const baselineText = view.skillBaseline === undefined ? '' : `, production baseline ${view.skillBaseline.name} sha256:${view.skillBaseline.sha256.slice(0, 12)}…`
+            lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, ${championText}${contentText}${baselineText})`)
           }
         }
         if (proposal.replayed !== undefined) {
