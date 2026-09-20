@@ -36,4 +36,14 @@ export interface CreateGraphRequest {
   readonly envId?: string
   /** Planned github owner/repo refs when createEnv is set. Cloned later by env agents. */
   readonly repos?: readonly string[]
+  /** Named workspace: reuse the environment labeled with it, or create and label a new one. */
+  readonly workspace?: string
+  /** With createEnv, skip reuse matching and always create a fresh environment. */
+  readonly fresh?: boolean
+}
+
+export interface CreateGraphResult {
+  readonly graph: GraphRecord
+  /** True when the graph bound a pre-existing environment instead of a newly created one. */
+  readonly reused: boolean
 }

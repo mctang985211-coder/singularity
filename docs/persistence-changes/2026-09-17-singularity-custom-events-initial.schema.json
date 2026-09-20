@@ -1,0 +1,37 @@
+{
+  "formatVersion": 1,
+  "roots": [
+    {
+      "key": "event:graph/event",
+      "kind": "event",
+      "event": "graph/event",
+      "payload": "GraphEvent",
+      "digest": "f97245856a7303e50d23f5ff83c72f07f816de6b259d6633bf0dc5e154b3221e",
+      "source": "graph/src/index.ts"
+    },
+    {
+      "key": "event:graphs/event",
+      "kind": "event",
+      "event": "graphs/event",
+      "payload": "GraphsEvent",
+      "digest": "2a75c5fb3153994d18895e11870380006540691a6aea33bc04ab47fb8ce16d4f",
+      "source": "graphs/src/index.ts"
+    },
+    {
+      "key": "event:layout/event",
+      "kind": "event",
+      "event": "layout/event",
+      "payload": "LayoutEvent",
+      "digest": "f6c87e2eaf9370beacbacdca1a7a37bbd427a041304bd24c7171f0669cf114fd",
+      "source": "layout/src/index.ts"
+    },
+    {
+      "key": "event:task/event",
+      "kind": "event",
+      "event": "task/event",
+      "payload": "TaskEvent",
+      "digest": "196cc188ad25ba96df9a04597d81352c73fd2c9aae593c63b64e54d0de22a861",
+      "source": "task/src/index.ts"
+    }
+  ]
+}

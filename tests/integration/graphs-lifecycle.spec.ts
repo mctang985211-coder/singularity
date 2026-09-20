@@ -105,7 +105,7 @@ describe('graphs creation lifecycle', () => {
     expect(runtime.prompt).not.toHaveBeenCalled()
     expect(await service.list()).toEqual([])
     persisted.resolve()
-    const graph = await creating
+    const { graph } = await creating
 
     expect(runtime.createRoot).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -169,7 +169,7 @@ describe('graphs creation lifecycle', () => {
 describe('graphs removal lifecycle', () => {
   it('waits for all previous workers to stop before launching cleanup, then archives after cleaning', async () => {
     const { ctx, service, store, agents, runtime, graph, layout } = harness()
-    const created = await service.create({ createEnv: true, repos: ['acme/widget'] })
+    const { graph: created } = await service.create({ createEnv: true, repos: ['acme/widget'] })
     const workerId = 'old-worker' as SessionId
     agents.push({ id: workerId })
     store.attachSession(created.envId, workerId)
@@ -218,7 +218,7 @@ describe('graphs removal lifecycle', () => {
 
   it('disposes the cleanup timer and listener without archiving if cleanup spawn fails', async () => {
     const { ctx, service, store, runtime, graph, layout } = harness()
-    const created = await service.create({ createEnv: true, repos: ['acme/widget'] })
+    const { graph: created } = await service.create({ createEnv: true, repos: ['acme/widget'] })
     vi.useFakeTimers()
     const timerCount = vi.getTimerCount()
     runtime.spawn.mockRejectedValueOnce(new Error('cleanup spawn failed'))

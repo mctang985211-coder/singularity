@@ -1,6 +1,55 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SESSION_FORMAT_VERSION, SessionId, SessionSeq } from "@deepseek-ai/dsh-session";
 
+//#region src/types.ts
+/** DFS over an edge list: true when `target` is reachable from `start`. */
+function reaches(edges, start, target) {
+	const seen = /* @__PURE__ */ new Set();
+	const pending = [start];
+	while (pending.length > 0) {
+		const current = pending.pop();
+		if (current === target) return true;
+		if (seen.has(current)) continue;
+		seen.add(current);
+		for (const edge of edges) if (edge.from === current) pending.push(edge.to);
+	}
+	return false;
+}
+/** Every judged dimension, in the order a report reads them. */
+const JUDGED_DIMENSIONS = [
+	"task_specification",
+	"acceptance",
+	"decomposition",
+	"skill_fit",
+	"tool_fit",
+	"context_efficiency"
+];
+/** Every judgement verdict, for reducer validation and rendering. */
+const JUDGEMENT_VERDICTS = [
+	"adequate",
+	"inadequate",
+	"unknown"
+];
+/** Fixed definition fields of a graph's root task (see task-runtime createRootTask). */
+const RootTaskSpec = {
+	taskType: "root",
+	version: 1,
+	acceptanceCriteria: [{
+		criterionId: "root-children-verified",
+		description: "all mandatory children verified",
+		verificationMode: "composite",
+		requiredEvidence: [],
+		mandatory: true
+	}],
+	requiredCapabilities: [],
+	decompositionPolicy: { allowed: true }
+};
+/** Store id convention: one task store per root session. */
+function rootTaskStoreId(rootSessionId) {
+	return `sg-t-${rootSessionId}`;
+}
+
+//#endregion
 //#region src/service/state.ts
 function copy(value) {
 	return structuredClone(value);
@@ -13,6 +62,20 @@ const ADMITTED_OR_LATER = [
 	"verified",
 	"failed"
 ];
+const PROPOSAL_TARGET_TYPES = [
+	"skill",
+	"tool",
+	"capability",
+	"task_definition",
+	"decomposition_policy",
+	"agent_preset",
+	"workflow_policy",
+	"verifier",
+	"runtime_policy"
+];
+function nonEmpty(value) {
+	return typeof value === "string" && value.length > 0;
+}
 var TaskState = class TaskState {
 	value;
 	constructor(id, snapshot) {
@@ -24,6 +87,9 @@ var TaskState = class TaskState {
 			edges: [],
 			evidence: [],
 			handoffs: [],
+			reviews: [],
+			diagnoses: [],
+			obligations: [],
 			capabilities: {}
 		} : copy(snapshot);
 	}
@@ -83,6 +149,15 @@ var TaskState = class TaskState {
 			case "HandoffCreated":
 				this.addHandoff(event$1.payload.handoff);
 				return;
+			case "ReviewRecorded":
+				this.recordReview(event$1.taskId, event$1.runId, event$1.payload.review);
+				return;
+			case "DiagnosisRecorded":
+				this.recordDiagnosis(event$1.taskId, event$1.payload.diagnosis);
+				return;
+			case "ObligationRecorded":
+				this.recordObligation(event$1.payload.obligation);
+				return;
 			default: throw new Error(`task: unknown event kind "${event$1.kind}"`);
 		}
 	}
@@ -128,7 +203,7 @@ var TaskState = class TaskState {
 	addDependency(edge) {
 		this.task(edge.from);
 		this.task(edge.to);
-		if (edge.from === edge.to || this.reaches(edge.to, edge.from)) throw new Error(`task: dependency "${edge.from}" → "${edge.to}" creates a cycle`);
+		if (edge.from === edge.to || reaches(this.value.edges, edge.to, edge.from)) throw new Error(`task: dependency "${edge.from}" → "${edge.to}" creates a cycle`);
 		if (this.value.edges.some((item) => item.from === edge.from && item.to === edge.to)) throw new Error(`task: dependency "${edge.from}" → "${edge.to}" already exists`);
 		this.value = {
 			...this.value,
@@ -224,17 +299,104 @@ var TaskState = class TaskState {
 			handoffs: [...this.value.handoffs, copy(handoff)]
 		};
 	}
-	reaches(start, target) {
-		const seen = /* @__PURE__ */ new Set();
-		const pending = [start];
-		while (pending.length > 0) {
-			const current = pending.pop();
-			if (current === target) return true;
-			if (seen.has(current)) continue;
-			seen.add(current);
-			for (const edge of this.value.edges) if (edge.from === current) pending.push(edge.to);
+	/**
+	* A review is the legal companion of the terminal transition it follows: the
+	* run (or the runless blocked task) must already sit in the outcome the record
+	* declares, and each run accepts exactly one record — a second one is a bug in
+	* the writer, not a late event to tolerate.
+	*/
+	recordReview(taskId, envelopeRunId, review) {
+		const task = this.task(taskId);
+		if (review.taskId !== taskId) throw new Error(`task: review for "${review.taskId}" does not belong to task "${taskId}"`);
+		if (review.outcome === "failed" && (typeof review.localizedCause !== "string" || review.localizedCause.length === 0)) throw new Error(`task: failed review for task "${taskId}" requires a localized cause`);
+		if (review.outcome !== "failed" && review.localizedCause !== void 0) throw new Error(`task: review for task "${taskId}" is ${review.outcome}; only a failed outcome carries a localized cause`);
+		if (review.outcome !== "failed" && review.logTail !== void 0) throw new Error(`task: review for task "${taskId}" is ${review.outcome}; only a failed outcome carries a log tail`);
+		if (review.outcome !== "blocked" && review.blockedBy !== void 0) throw new Error(`task: review for task "${taskId}" is ${review.outcome}; only a blocked outcome carries blockers`);
+		if (review.runId === void 0) {
+			if (review.outcome !== "blocked" || task.status !== "blocked") throw new Error(`task: review for task "${taskId}" has no run; only a blocked task settles without a run`);
+			if (this.value.reviews.some((item) => item.taskId === taskId && item.runId === void 0)) throw new Error(`task: task "${taskId}" already has a runless review`);
+		} else {
+			const run = this.run(review.runId);
+			if (run.taskId !== taskId) throw new Error(`task: review run "${run.runId}" belongs to task "${run.taskId}"`);
+			if (envelopeRunId !== void 0 && envelopeRunId !== review.runId) throw new Error(`task: review for run "${review.runId}" envelope run id mismatch`);
+			if (run.status !== review.outcome) throw new Error(`task: run "${run.runId}" is ${run.status}; a review must follow the terminal transition it declares (${review.outcome})`);
+			if (this.value.reviews.some((item) => item.runId === review.runId)) throw new Error(`task: run "${review.runId}" already has a review`);
 		}
-		return false;
+		this.value = {
+			...this.value,
+			reviews: [...this.value.reviews, copy(review)]
+		};
+	}
+	/**
+	* A diagnosis is caller-triggered, not lifecycle-bound: any existing task
+	* accepts one at any time, and a task accumulates several. What the reducer
+	* enforces is integrity, not timing — the id is unique across the store
+	* (a repeat write is a bug, not an update), every field is present and
+	* well-formed, the diagnosis rests on at least one evidence or review ref,
+	* and every proposal names one of the nine frozen target types (§2.7.6).
+	*
+	* The two optional additions are checked the same way: `producedBy` must name
+	* a known producer kind (and a non-empty session when it carries one), and
+	* every `judgements` entry must name a judged dimension and a known verdict,
+	* carry a rationale, and rest on at least one non-empty evidence ref — an
+	* `unknown` verdict still cites the refs it considered, so a judgement that
+	* cites nothing is rejected rather than stored.
+	*/
+	recordDiagnosis(taskId, diagnosis) {
+		this.task(taskId);
+		if (!nonEmpty(diagnosis.diagnosisId)) throw new Error("task: diagnosis id must be a non-empty string");
+		if (this.value.diagnoses.some((item) => item.diagnosisId === diagnosis.diagnosisId)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" already exists`);
+		if (diagnosis.taskId !== taskId) throw new Error(`task: diagnosis for "${diagnosis.taskId}" does not belong to task "${taskId}"`);
+		if (!nonEmpty(diagnosis.observedFailure)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" requires an observed failure`);
+		if (!nonEmpty(diagnosis.scope)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" requires a scope`);
+		if (!nonEmpty(diagnosis.localizedCause)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" requires a localized cause`);
+		if (![
+			"high",
+			"medium",
+			"low"
+		].includes(diagnosis.confidence)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" confidence must be high, medium, or low`);
+		if (!Array.isArray(diagnosis.evidenceRefs) || !Array.isArray(diagnosis.reviewRefs) || diagnosis.evidenceRefs.some((item) => !nonEmpty(item)) || diagnosis.reviewRefs.some((item) => !nonEmpty(item))) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" refs must be arrays of non-empty strings`);
+		if (diagnosis.evidenceRefs.length + diagnosis.reviewRefs.length === 0) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" must rest on at least one evidence or review ref`);
+		if (!Array.isArray(diagnosis.proposals)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" proposals must be an array`);
+		for (const proposal of diagnosis.proposals) {
+			if (!PROPOSAL_TARGET_TYPES.includes(proposal.targetType)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" proposal target type must be one of ${PROPOSAL_TARGET_TYPES.join(", ")}`);
+			if (!nonEmpty(proposal.targetId) || !nonEmpty(proposal.rationale)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" proposal requires a target id and a rationale`);
+		}
+		if (diagnosis.producedBy !== void 0) {
+			const provenance = diagnosis.producedBy;
+			if (provenance.kind !== "agent" && provenance.kind !== "human") throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" producedBy.kind must be "agent" or "human"`);
+			if (provenance.sessionId !== void 0 && !nonEmpty(provenance.sessionId)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" producedBy.sessionId must be a non-empty string`);
+		}
+		if (diagnosis.judgements !== void 0) {
+			if (!Array.isArray(diagnosis.judgements)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" judgements must be an array`);
+			for (const judgement of diagnosis.judgements) {
+				if (!JUDGED_DIMENSIONS.includes(judgement.dimension)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" judgement dimension must be one of ${JUDGED_DIMENSIONS.join(", ")}`);
+				if (!JUDGEMENT_VERDICTS.includes(judgement.verdict)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" judgement verdict must be one of ${JUDGEMENT_VERDICTS.join(", ")}`);
+				if (!Array.isArray(judgement.evidenceRefs) || judgement.evidenceRefs.length === 0 || judgement.evidenceRefs.some((item) => !nonEmpty(item))) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" judgement "${judgement.dimension}" must rest on at least one non-empty evidence ref`);
+				if (!nonEmpty(judgement.rationale)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" judgement "${judgement.dimension}" requires a rationale`);
+			}
+		}
+		for (const related of diagnosis.relatedTaskIds ?? []) this.task(related);
+		this.value = {
+			...this.value,
+			diagnoses: [...this.value.diagnoses, copy(diagnosis)]
+		};
+	}
+	/**
+	* An obligation is raised, never scheduled (KISS §5.1: a question, not an
+	* action): the reducer enforces integrity only — a unique non-empty id,
+	* non-empty goal and criterion, and a source task that exists in the store.
+	*/
+	recordObligation(obligation) {
+		if (!nonEmpty(obligation.obligationId)) throw new Error("task: obligation id must be a non-empty string");
+		if (this.value.obligations.some((item) => item.obligationId === obligation.obligationId)) throw new Error(`task: obligation "${obligation.obligationId}" already exists`);
+		if (!nonEmpty(obligation.goal)) throw new Error(`task: obligation "${obligation.obligationId}" requires a goal`);
+		if (!nonEmpty(obligation.criterion)) throw new Error(`task: obligation "${obligation.obligationId}" requires a criterion`);
+		this.task(obligation.sourceTaskId);
+		this.value = {
+			...this.value,
+			obligations: [...this.value.obligations, copy(obligation)]
+		};
 	}
 	transit(taskId, from, to) {
 		this.assertTransition(taskId, from, to);
@@ -278,27 +440,6 @@ var TaskState = class TaskState {
 		return run;
 	}
 };
-
-//#endregion
-//#region src/types.ts
-/** Fixed definition fields of a graph's root task (see task-runtime createRootTask). */
-const RootTaskSpec = {
-	taskType: "root",
-	version: 1,
-	acceptanceCriteria: [{
-		criterionId: "root-children-verified",
-		description: "all mandatory children verified",
-		verificationMode: "composite",
-		requiredEvidence: [],
-		mandatory: true
-	}],
-	requiredCapabilities: [],
-	decompositionPolicy: { allowed: true }
-};
-/** Store id convention: one task store per root session. */
-function rootTaskStoreId(rootSessionId) {
-	return `sg-t-${rootSessionId}`;
-}
 
 //#endregion
 //#region src/index.ts
@@ -564,6 +705,28 @@ var TaskService = class extends Service {
 			payload: { evidence }
 		})]);
 	}
+	async recordReviewIn(storeId, review, actor) {
+		await this.commitIn(storeId, [event("ReviewRecorded", {
+			taskId: review.taskId,
+			runId: review.runId,
+			actor,
+			payload: { review }
+		})]);
+	}
+	async recordDiagnosisIn(storeId, diagnosis, actor) {
+		await this.commitIn(storeId, [event("DiagnosisRecorded", {
+			taskId: diagnosis.taskId,
+			actor,
+			payload: { diagnosis }
+		})]);
+	}
+	async recordObligationIn(storeId, obligation, actor) {
+		await this.commitIn(storeId, [event("ObligationRecorded", {
+			taskId: obligation.sourceTaskId,
+			actor,
+			payload: { obligation }
+		})]);
+	}
 	async recordHandoffIn(storeId, handoff, actor) {
 		await this.commitIn(storeId, [event("HandoffCreated", {
 			taskId: handoff.childTaskId,
@@ -658,4 +821,4 @@ var TaskService = class extends Service {
 var src_default = TaskService;
 
 //#endregion
-export { RootTaskSpec, TaskService, TaskState, src_default as default, rootTaskStoreId };
+export { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, RootTaskSpec, TaskService, TaskState, src_default as default, reaches, rootTaskStoreId };

@@ -58,10 +58,5 @@
   "homepage": "https://github.com/DangoSys/singularity",
   "bugs": {
     "url": "https://github.com/DangoSys/singularity/issues"
-  },
-  "pnpm": {
-    "overrides": {
-      "@dangosys/dsh-singularity-task": "link:../task"
-    }
   }
 }

@@ -52,11 +52,31 @@ export function defineTaskDecomposeTool(ctx: Context) {
                   },
                   mandatory: { type: 'boolean', description: 'Whether the criterion must pass; default true' },
                   requiredEvidence: { type: 'array', items: { type: 'string' }, description: 'Evidence kinds the verifier must attach' },
+                  requiresArtifact: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Artifact/evidence kinds or ids that must already exist in the task store for this criterion to be judgeable; a missing one blocks the child before spawn and registers an obligation',
+                  },
+                  verifierRef: {
+                    type: 'string',
+                    description: 'Registered verifier id that judges this criterion; must exist in the verifier registry — an unknown id rejects the whole batch at admission and the error lists the registered ids. Omit to dispatch by mode.',
+                  },
                 },
               },
             },
-            requiredCapabilities: { type: 'array', items: { type: 'string' }, description: 'Capability names the child needs' },
+            requiredCapabilities: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'Capability names the child needs; call capability_list first to see the names the runtime can grant — ' +
+                'an unlisted name is a capability gap that rejects the whole batch unless the child is declared decomposable',
+            },
             dependsOn: { type: 'array', items: { type: 'integer' }, description: 'Indices of sibling children that must verify before this one starts' },
+            assumptions: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'External conditions this child\'s contract rests on; merged with dependency-evidence references into the worker handoff',
+            },
             decomposable: {
               type: 'boolean',
               description: 'Declare that this child should split further instead of doing the work: its worker is told to call task_decompose. Together with a capability gap this decides whether the child is admitted as decomposable.',

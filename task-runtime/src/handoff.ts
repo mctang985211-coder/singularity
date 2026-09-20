@@ -15,6 +15,25 @@ export interface HandoffInit {
   relevantEvidence?: readonly string[]
 }
 
+/**
+ * Deployment knobs the rendered prompt has to reflect. Required, not optional:
+ * the prompt is the only place a worker learns whether the runtime will admit
+ * its own decomposition, and a default here could silently disagree with
+ * `Config.allowRuntimeDecomposition` (#16 in the guide is exactly this failure
+ * mode — prompt wording decides the route, and no test asserts the real model's
+ * choice).
+ */
+export interface WorkerPromptOptions {
+  /**
+   * `Config.allowRuntimeDecomposition`. On, the rules tell every worker it may
+   * call `task_decompose` when the work turns out not to be atomic, and what a
+   * refusal means; off, the rules stay silent about the tool — a `decomposable`
+   * child's own block already names it, and for a `leaf` worker naming it would
+   * only invite a call admission refuses.
+   */
+  allowRuntimeDecomposition: boolean
+}
+
 /** Envelope passed from a parent run to the child it delegates to (RFC §18). */
 export function buildHandoff(init: HandoffInit): TaskHandoff {
   return {
@@ -44,10 +63,11 @@ function listSection(title: string, items: readonly string[], empty: string): st
  * Render the worker prompt for a delegated child task. Compact on purpose:
  * objective, the acceptance criteria table (with verifier commands), the
  * handoff envelope, the pointer to the delegating session, the decomposable
- * reminder when the child may split further, and the rules — a few thousand
- * tokens at most.
+ * reminder when the parent asked for a further split, the runtime-split rule
+ * when the deployment admits one ({@link WorkerPromptOptions}), and the rules —
+ * a few thousand tokens at most.
  */
-export function renderWorkerPrompt(handoff: TaskHandoff, childTask: TaskInstance): string {
+export function renderWorkerPrompt(handoff: TaskHandoff, childTask: TaskInstance, options: WorkerPromptOptions): string {
   const header = [
     `# Delegated task ${childTask.taskId}`,
     '',
@@ -101,12 +121,25 @@ export function renderWorkerPrompt(handoff: TaskHandoff, childTask: TaskInstance
     '- Full-text search is disabled in this deployment, so read parent events by sequence.',
   ].join('\n')
 
+  // Only a deployment with the runtime-decomposition switch on admits a task's
+  // own `task_decompose`; where it is off, naming the tool would invite a call
+  // the runtime answers with a refusal the worker could not have avoided.
+  const runtimeSplitRule =
+    '- If the work turns out not to be atomic after all, call `task_decompose` yourself: this deployment admits a task\'s own decomposition, ' +
+    'so your parent did not have to predict it. The call still has to clear admission — structure, acyclic dependencies, a command on every ' +
+    'executable criterion, capability coverage, depth and batch-size limits — and a task may split only once; a refusal names the rule that ' +
+    'blocked it, and that reason is what you act on. Split only into pieces a verifier can judge on its own; otherwise do the work here.'
+
   const rules = [
     '## Rules',
     '',
     '- Do the work; never declare completion yourself — an external verifier checks every mandatory criterion.',
     '- Where a criterion lists a command, make that command exit 0 in the checkout.',
-    '- Keep changes scoped to this task; escalate conflicts through your parent.',
+    '- Keep changes scoped to this task. Need a human decision? Ask with `ask_user_question`.',
+    '- Cannot continue? Fail with a clear reason — the orchestrator blocks dependent tasks and reports to the parent task.',
+    ...(options.allowRuntimeDecomposition ? [runtimeSplitRule] : []),
+    '- This prompt is where you start, not the whole truth: re-read your own contract and run with `task_read`, and the whole tree with `task_status`, whenever you need them.',
+    '- Before you finish, `task_verify` re-runs the verifier as a self-check and records the evidence it produces; it never changes task status, and the final verdict stays with the verifier.',
   ].join('\n')
 
   const blocks = [header, envelope, parentSession, rules]

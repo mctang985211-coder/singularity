@@ -2,8 +2,9 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
-import type {} from '@dangosys/dsh-singularity-task'
+import type { TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
+import { checkObligationCoverage, findRepoRoot, loadObligationTemplates } from '@dangosys/dsh-singularity-task-runtime'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
@@ -13,10 +14,44 @@ function sessionId(exec: ToolRunContext): string {
   return id
 }
 
+/** Soft view of the env-builder store: the graph env's path is where template discovery walks up from. */
+interface EnvPathSource {
+  store: { get(envId: string): { path: string } }
+}
+
+/**
+ * Best-effort obligation coverage for the footer (KISS §5.1, guide §4.2 #21):
+ * templates from `<repoRoot>/.agents/skills/<name>/obligations.yml` against the
+ * graph's obligations and requested capabilities. Every step may be absent —
+ * no env builder, no repo root within 8 levels, no template files — and an
+ * absent source omits the line rather than reporting zero coverage. Uncovered
+ * entries are a hint ("satisfied, or forgotten?"), never a block.
+ */
+async function obligationLines(ctx: Context, envId: string, snapshot: TaskSnapshot): Promise<string[]> {
+  const header = snapshot.obligations.length === 0 ? [] : [`obligations: ${snapshot.obligations.length} recorded`]
+  try {
+    const envBuilder = (ctx.get?.('envBuilder') ?? (ctx as unknown as { envBuilder?: EnvPathSource }).envBuilder) as EnvPathSource | undefined
+    const envPath = envBuilder?.store.get(envId).path
+    if (envPath === undefined) return header
+    const repoRoot = await findRepoRoot(envPath)
+    if (repoRoot === undefined) return header
+    const templates = (await loadObligationTemplates(repoRoot)).flatMap(file => file.templates)
+    if (templates.length === 0) return header
+    const coverage = checkObligationCoverage(templates, snapshot)
+    const uncovered = coverage.uncovered.map(template => `${template.id} ("${template.question}") — satisfied, or forgotten?`)
+    return [
+      ...header,
+      `obligation coverage: ${coverage.covered.length}/${templates.length} covered${uncovered.length === 0 ? '' : `; uncovered: ${uncovered.join('; ')}`}`,
+    ]
+  } catch {
+    return header
+  }
+}
+
 export function defineTaskStatusTool(ctx: Context) {
   return defineTool({
     name: 'task_status',
-    description: 'Compact snapshot of the caller\'s graph task tree: task id, objective, status, latest run status, and evidence ids.',
+    description: 'Compact snapshot of the caller\'s graph task tree: task id, objective, status, latest run status, evidence ids, and terminal review outcome. Also lists recorded obligations and the domain-template coverage hint.',
     parameters: {},
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (_args, exec) => {
@@ -27,11 +62,23 @@ export function defineTaskStatusTool(ctx: Context) {
         const runId = task.runIds[task.runIds.length - 1]
         const run = snapshot.runs.find(item => item.runId === runId)
         const evidence = snapshot.evidence.filter(item => item.taskId === task.taskId).map(item => item.evidenceId)
+        const review = [...snapshot.reviews].reverse().find(item => item.taskId === task.taskId)
+        const diagnoses = snapshot.diagnoses.filter(item => item.taskId === task.taskId).length
         const runPart = run === undefined ? 'run: none' : `run: ${run.status}`
         const evidencePart = evidence.length === 0 ? '' : ` evidence: [${evidence.join(', ')}]`
-        return `${'  '.repeat(task.depth)}${task.taskId} [${task.status}] ${task.objective} (${runPart}${evidencePart})`
+        const failing = review?.criteria?.filter(item => item.verdict !== 'pass') ?? []
+        const detail = review?.outcome === 'failed' && failing.length > 0
+          ? `${review.localizedCause ?? 'failed'} [${failing.map(item => `${item.criterionId}${item.exitCode === undefined ? '' : ` exit ${item.exitCode}`}`).join(', ')}]`
+          : review?.localizedCause ?? review?.anomalies[0]
+        const reviewPart = review === undefined ? '' : ` review: ${review.outcome}${detail === undefined ? '' : ` — ${detail}`}`
+        const diagPart = diagnoses === 0 ? '' : ` diag: ${diagnoses}`
+        return `${'  '.repeat(task.depth)}${task.taskId} [${task.status}] ${task.objective} (${runPart}${evidencePart}${reviewPart}${diagPart})`
       })
-      return [`graph ${graph.id} task tree (${snapshot.tasks.length} tasks):`, ...lines].join('\n')
+      return [
+        `graph ${graph.id} task tree (${snapshot.tasks.length} tasks):`,
+        ...lines,
+        ...await obligationLines(ctx, graph.envId, snapshot),
+      ].join('\n')
     },
   })
 }

@@ -12,6 +12,7 @@ export * from './types.ts'
 export { LayoutState } from './service/state.ts'
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
+    /** One canvas-geometry mutation in a per-graph layout store; the LayoutEvent union that LayoutState replays on load. */
     'layout/event': LayoutEvent
   }
 }

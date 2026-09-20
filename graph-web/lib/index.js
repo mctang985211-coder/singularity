@@ -99,6 +99,7 @@ function registerGraphEnvs(ctx) {
 			const bound = new Set((await ctx.graphs.list()).map((g) => g.envId));
 			send(res, 200, "application/json; charset=utf-8", { envs: ctx.envBuilder.store.list().map((env) => ({
 				id: env.id,
+				label: env.label,
 				path: env.path,
 				componentCount: env.components.length,
 				sessionCount: env.sessionIds.length,
@@ -155,7 +156,11 @@ function registerGraphs(ctx) {
 				}
 				if (req.method === "POST") {
 					const body = await readJson(req);
-					send(res, 200, "application/json; charset=utf-8", await ctx.graphs.create(body));
+					const { graph, reused } = await ctx.graphs.create(body);
+					send(res, 200, "application/json; charset=utf-8", {
+						...graph,
+						reused
+					});
 					return;
 				}
 				send(res, 405, "text/plain; charset=utf-8", "method not allowed");

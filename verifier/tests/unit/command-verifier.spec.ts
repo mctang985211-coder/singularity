@@ -85,6 +85,31 @@ describe('CommandVerifier', () => {
     expect(result.logRef).toBeUndefined()
   })
 
+  test('every inconclusive is a task-side unknown: the command was missing or never finished', async () => {
+    const { verifier, request } = await setup()
+    const [noCommand] = await verifier.verify(request([criterion()]))
+    expect(noCommand).toMatchObject({ status: 'inconclusive', unknownKind: 'task' })
+    const [timedOut] = await verifier.verify(request(
+      [criterion({ command: 'node -e "setTimeout(() => {}, 30000)"' })],
+      200,
+    ))
+    expect(timedOut).toMatchObject({ status: 'inconclusive', unknownKind: 'task' })
+  })
+
+  test('the declared selftest samples are distinguished for real (KISS §12 step 2)', async () => {
+    const { verifier, request } = await setup()
+    expect(verifier.selftest.positiveCases.length).toBeGreaterThan(0)
+    expect(verifier.selftest.negativeCases.length).toBeGreaterThan(0)
+    for (const sample of verifier.selftest.positiveCases) {
+      const [result] = await verifier.verify(request([criterion({ command: sample })]))
+      expect(result.status, `positive sample "${sample}"`).toBe('pass')
+    }
+    for (const sample of verifier.selftest.negativeCases) {
+      const [result] = await verifier.verify(request([criterion({ command: sample })]))
+      expect(result.status, `negative sample "${sample}"`).toBe('fail')
+    }
+  })
+
   test('criterion ids are sanitized for log file names', async () => {
     const { verifier, request } = await setup()
     const [result] = await verifier.verify(request([

@@ -4,7 +4,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { open } from 'node:fs/promises'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -23,11 +24,17 @@ import { CommandVerifier } from './command-verifier.ts'
 import { CompositeVerifier } from './composite-verifier.ts'
 import { ReviewVerifier } from './review-verifier.ts'
 
-export type { VerificationMode, VerificationResult, Verifier, VerifyRequest } from '@dangosys/dsh-singularity-task'
+export type { VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifyRequest } from '@dangosys/dsh-singularity-task'
 export { CommandVerifier } from './command-verifier.ts'
 export { CompositeVerifier } from './composite-verifier.ts'
 export type { CompositeTaskSource } from './composite-verifier.ts'
 export { ReviewVerifier } from './review-verifier.ts'
+
+/** Caps for the log-tail excerpt a review record carries: enough to read the failure, small enough to keep a record lean. */
+export const LOG_TAIL_MAX_LINES = 40
+export const LOG_TAIL_MAX_CHARS = 2048
+/** Read window for large logs: the tail of a failure lives at the end of the file. */
+const LOG_TAIL_READ_BYTES = 64 * 1024
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -76,13 +83,33 @@ export class VerifierRegistry extends Service {
     this.register(new ReviewVerifier())
   }
 
-  /** Add a verifier; later registrations win mode dispatch. Returns the disposer. */
+  /**
+   * Add a verifier; later registrations win mode dispatch. Returns the
+   * disposer. A registration without a `selftest` (KISS §4.3) is logged as a
+   * warning, not refused — soft until every built-in verifier carries one,
+   * so existing test doubles keep registering; flipping to a hard refusal is
+   * a deliberate later step.
+   */
   register(verifier: Verifier): () => void {
     if (this.verifiers.has(verifier.id)) throw new Error(`verifier: duplicate verifier "${verifier.id}"`)
+    if (verifier.selftest === undefined) {
+      this.warn(`verifier "${verifier.id}" registered without a selftest (no declared positive/negative known samples)`)
+    }
     this.verifiers.set(verifier.id, verifier)
     return () => {
       this.verifiers.delete(verifier.id)
     }
+  }
+
+  /** The registered verifier ids, sorted — the vocabulary a criterion's `verifierRef` may name. */
+  verifierIds(): string[] {
+    return [...this.verifiers.keys()].sort()
+  }
+
+  /** Best-effort warn through the cordis logger when one is mounted; tests and minimal contexts may not have it. */
+  private warn(message: string): void {
+    const logger = (this.ctx as { logger?: (name: string) => { warn(format: string): void } }).logger
+    logger?.('verifier').warn(message)
   }
 
   /**
@@ -121,13 +148,31 @@ export class VerifierRegistry extends Service {
   }
 
   private async verifyCriterion(storeId: string, request: VerifyRequest, criterion: AcceptanceCriterion): Promise<VerificationResult[]> {
-    const verifier = this.findVerifier(criterion.verificationMode)
+    // An explicit `verifierRef` pins the judge by id (admission already
+    // rejected unknown ids, but a store can predate the registry or a replay
+    // can bypass admission); absent, dispatch by mode as before.
+    const verifier = criterion.verifierRef === undefined
+      ? this.findVerifier(criterion.verificationMode)
+      : this.verifiers.get(criterion.verifierRef)
     if (verifier === undefined) {
+      // The judge is missing — a verifier-side unknown (KISS §4.3 UNKNOWN_VERIFIER).
       return [{
         criterionId: criterion.criterionId,
         status: 'inconclusive',
-        verifierId: 'verifier',
-        details: `no verifier supports mode "${criterion.verificationMode}"`,
+        verifierId: criterion.verifierRef ?? 'verifier',
+        details: criterion.verifierRef === undefined
+          ? `no verifier supports mode "${criterion.verificationMode}"`
+          : `no verifier registered with id "${criterion.verifierRef}"`,
+        unknownKind: 'verifier',
+      }]
+    }
+    if (!verifier.supports(criterion.verificationMode)) {
+      return [{
+        criterionId: criterion.criterionId,
+        status: 'inconclusive',
+        verifierId: verifier.id,
+        details: `verifier "${verifier.id}" does not support mode "${criterion.verificationMode}"`,
+        unknownKind: 'verifier',
       }]
     }
     let results: VerificationResult[]
@@ -136,11 +181,13 @@ export class VerifierRegistry extends Service {
         ? await verifier.verifyIn(storeId, { ...request, criteria: [criterion] })
         : await verifier.verify({ ...request, criteria: [criterion] })
     } catch (error) {
+      // The judge itself broke — a verifier-side unknown, never a task failure.
       return [{
         criterionId: criterion.criterionId,
         status: 'inconclusive',
         verifierId: verifier.id,
         details: error instanceof Error ? error.message : String(error),
+        unknownKind: 'verifier',
       }]
     }
     return results.map(result => this.normalizeLogRef(result))
@@ -163,6 +210,37 @@ export class VerifierRegistry extends Service {
     return { ...result, logRef: rel }
   }
 
+  /**
+   * Tail excerpt of one criterion log (logRef relative to evidenceRoot),
+   * bounded by LOG_TAIL_MAX_LINES and LOG_TAIL_MAX_CHARS, for a failed review
+   * record to carry. `undefined` when the log is missing or unreadable — a
+   * record must never fail to write because a log is gone.
+   */
+  async logTail(logRef: string): Promise<string | undefined> {
+    const path = resolve(this.evidenceRoot, logRef)
+    if (path !== this.evidenceRoot && !path.startsWith(this.evidenceRoot + sep)) {
+      throw new Error(`verifier: logRef "${logRef}" escapes evidenceRoot`)
+    }
+    let handle
+    try {
+      handle = await open(path, 'r')
+    } catch {
+      return undefined
+    }
+    try {
+      const { size } = await handle.stat()
+      const length = Math.min(size, LOG_TAIL_READ_BYTES)
+      const buffer = Buffer.alloc(length)
+      await handle.read(buffer, 0, length, size - length)
+      const lines = buffer.toString('utf8').split('\n')
+      let excerpt = lines.slice(-LOG_TAIL_MAX_LINES).join('\n').trimEnd()
+      if (excerpt.length > LOG_TAIL_MAX_CHARS) excerpt = excerpt.slice(-LOG_TAIL_MAX_CHARS)
+      return excerpt.length === 0 ? undefined : excerpt
+    } finally {
+      await handle.close()
+    }
+  }
+
   private claim(evidenceId: string, result: VerificationResult): EvidenceClaim {
     return {
       claimId: `${evidenceId}#${result.criterionId}`,
@@ -171,6 +249,7 @@ export class VerifierRegistry extends Service {
       verifierId: result.verifierId,
       artifactRefs: [],
       details: result.details,
+      ...(result.unknownKind === undefined ? {} : { unknownKind: result.unknownKind }),
     }
   }
 }

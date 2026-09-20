@@ -15,6 +15,7 @@ export function registerGraphEnvs(ctx: Context): () => void {
       const bound = new Set((await ctx.graphs.list()).map(g => g.envId))
       const envs = ctx.envBuilder.store.list().map(env => ({
         id: env.id,
+        label: env.label,
         path: env.path,
         componentCount: env.components.length,
         sessionCount: env.sessionIds.length,

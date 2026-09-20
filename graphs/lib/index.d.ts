@@ -45,6 +45,15 @@ interface CreateGraphRequest {
   readonly envId?: string;
   /** Planned github owner/repo refs when createEnv is set. Cloned later by env agents. */
   readonly repos?: readonly string[];
+  /** Named workspace: reuse the environment labeled with it, or create and label a new one. */
+  readonly workspace?: string;
+  /** With createEnv, skip reuse matching and always create a fresh environment. */
+  readonly fresh?: boolean;
+}
+interface CreateGraphResult {
+  readonly graph: GraphRecord;
+  /** True when the graph bound a pre-existing environment instead of a newly created one. */
+  readonly reused: boolean;
 }
 //#endregion
 //#region src/service/state.d.ts
@@ -62,6 +71,7 @@ declare class GraphsState {
 //#region src/index.d.ts
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
+    /** One graph-registry mutation in the graphs-registry store; the GraphsEvent union that GraphsState replays on load. */
     'graphs/event': GraphsEvent;
   }
 }
@@ -94,7 +104,10 @@ declare class GraphsService extends Service {
   }>;
   list(): Promise<readonly GraphRecord[]>;
   select(id: string): Promise<GraphRecord>;
-  create(request: CreateGraphRequest): Promise<GraphRecord>;
+  create(request: CreateGraphRequest): Promise<CreateGraphResult>;
+  private isReusable;
+  private assertReusable;
+  private workspaceTaken;
   markReady(id: string): Promise<GraphRecord>;
   graphForSession(sessionId: SessionId): Promise<GraphRecord>;
   remove(id: string): Promise<void>;
@@ -105,4 +118,4 @@ declare class GraphsService extends Service {
   private header;
 }
 //#endregion
-export { CreateGraphRequest, GraphArchive, GraphRecord, GraphsEvent, GraphsService, GraphsService as default, GraphsSnapshot, GraphsState };
+export { CreateGraphRequest, CreateGraphResult, GraphArchive, GraphRecord, GraphsEvent, GraphsService, GraphsService as default, GraphsSnapshot, GraphsState };

@@ -30,8 +30,8 @@ export function registerGraphs(ctx: Context): () => void {
         }
         if (req.method === 'POST') {
           const body = await readJson<CreateGraphRequest>(req)
-          const graph = await ctx.graphs.create(body)
-          send(res, 200, 'application/json; charset=utf-8', graph)
+          const { graph, reused } = await ctx.graphs.create(body)
+          send(res, 200, 'application/json; charset=utf-8', { ...graph, reused })
           return
         }
         send(res, 405, 'text/plain; charset=utf-8', 'method not allowed')

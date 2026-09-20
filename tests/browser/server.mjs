@@ -8,6 +8,7 @@ import Graph from '../../graph/lib/index.js'
 import Layout, { DEFAULT_ROOT } from '../../layout/lib/index.js'
 import Graphs from '../../graphs/lib/index.js'
 import { HitlService } from '../../agent-singularity/lib/index.js'
+import UserQuestionService from '../../../../thirdparty/deepseek-harness/packages/interaction/user-questions/lib/index.js'
 import { apply as graphWeb } from '../../graph-web/lib/index.js'
 
 const root = await mkdtemp(join(tmpdir(), 'singularity-browser-'))
@@ -32,6 +33,7 @@ ctx.provide('sessionPersistence', {
 new Graph(ctx)
 new Layout(ctx)
 new HitlService(ctx)
+await ctx.plugin(UserQuestionService)
 ctx.provide('envBuilder', { store: new EnvStore(root) })
 ctx.provide('agentRuntime', {
   createRoot: async ({ sessionId, scope }) => {
@@ -61,7 +63,7 @@ ctx.provide('webServer', {
 })
 graphWeb(ctx)
 for (const name of ['Alpha', 'Beta']) {
-  const graph = await ctx.graphs.create({ createEnv: true, name, repos: [`fixture/${name.toLowerCase()}`] })
+  const { graph } = await ctx.graphs.create({ createEnv: true, name, repos: [`fixture/${name.toLowerCase()}`] })
   const child = `${graph.id}-worker`
   await ctx.layout.setIn(graph.layoutStoreId, child, { ...DEFAULT_ROOT, x: 380, y: 210 })
   await ctx.graph.commitIn(graph.graphStoreId, [
@@ -115,8 +117,8 @@ const server = await createServer({
             }
             if (url.pathname === '/__fixture/ask' && req.method === 'POST') {
               const graph = await ctx.graphs.get(url.searchParams.get('graphId'))
-              void ctx.hitl
-                .ask(graph.rootSessionId, 'Which repository?', new AbortController().signal)
+              void ctx.userQuestions
+                .ask({ questions: [{ id: 'fixture-ask', question: 'Which repository?' }] })
                 .then(answer => console.log('HITL answer:', answer))
               res.end('ok')
               return

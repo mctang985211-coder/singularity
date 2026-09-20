@@ -301,6 +301,32 @@ describe('AgentRuntime root lifecycle', () => {
     expect(followup).toHaveBeenCalledOnce()
   })
 
+  test('spawn setup applies the capability-granted permission preset instead of the default posture', async () => {
+    const state = context([id('root')])
+    const runtime = new AgentRuntime(state.ctx as never)
+    await runtime.ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
+    Object.assign(state.root, {
+      session: { header: { id: id('root'), cwd: '/environment', agentPreset: 'standard' } },
+    })
+    const child = { id: id('child'), followup: vi.fn() }
+    const create = vi.fn(async () => ({ agent: child, dispose: async () => {} }))
+    Object.assign(state.ctx.agents, { get: () => state.root, create })
+    Object.assign(state.ctx.graph, { commitIn: async () => {} })
+    Object.assign(state.ctx, { parallel: async () => {} })
+
+    await runtime.spawn(state.root, {
+      sessionId: id('child'),
+      name: 'worker',
+      prompt: [{ type: 'text', text: 'work' }],
+      permissionPreset: 'workspace-write',
+    })
+
+    const childSession = {}
+    await (create.mock.calls[0][0] as { setup: (ctx: unknown, agent: unknown) => Promise<void> })
+      .setup({}, { session: childSession })
+    expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(childSession, 'workspace-write')
+  })
+
   test('stamps a spawned child with its parent lineage and one delegation level deeper', async () => {
     const state = context([id('root')])
     const runtime = new AgentRuntime(state.ctx as never)
@@ -370,7 +396,7 @@ describe('AgentRuntime root lifecycle', () => {
     ])
     const restrict = vi.fn()
     const section = vi.fn()
-    const session = {}
+    const session = { append: vi.fn() }
     const agentCtx = {
       tools: { restrict },
       systemPrompt: { section },
@@ -379,6 +405,9 @@ describe('AgentRuntime root lifecycle', () => {
     await (state.resumeOptions[0] as { setup: (ctx: unknown, agent: unknown) => Promise<void> }).setup(agentCtx, agent)
     expect(state.mounted).toEqual([[agentCtx, 'standard']])
     expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(session, 'danger-full-access')
+    // hitl_approve routes through ctx.approval; the danger-full-access bundle's
+    // 'never' policy would auto-reject it, so the root session is pinned to 'ask'.
+    expect(session.append).toHaveBeenCalledExactlyOnceWith('approval/policy', { policy: 'ask' })
     expect(restrict).toHaveBeenCalledWith({
       allow: [
         'graph_spawn',
@@ -386,9 +415,23 @@ describe('AgentRuntime root lifecycle', () => {
         'hitl_ask',
         'hitl_approve',
         'task_read',
+        'capability_list',
+        'skill',
         'task_decompose',
         'task_status',
         'task_verify',
+        'task_review_pack',
+        'task_review_agent',
+        'task_diagnose',
+        'evolution_propose',
+        'evolution_candidate',
+        'evolution_prepare',
+        'evolution_replay',
+        'evolution_gate',
+        'evolution_decide',
+        'evolution_apply',
+        'evolution_rollback',
+        'evolution_list',
       ],
     })
     expect(section).toHaveBeenCalledWith({
@@ -426,7 +469,7 @@ describe('AgentRuntime root lifecycle', () => {
     ])
     const restrict = vi.fn()
     const section = vi.fn()
-    const session = {}
+    const session = { append: vi.fn() }
     const agentCtx = {
       tools: { restrict },
       systemPrompt: { section },
@@ -434,6 +477,7 @@ describe('AgentRuntime root lifecycle', () => {
     const agent = { session }
     await (state.createOptions[0] as { setup: (ctx: unknown, agent: unknown) => Promise<void> }).setup(agentCtx, agent)
     expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(session, 'danger-full-access')
+    expect(session.append).toHaveBeenCalledExactlyOnceWith('approval/policy', { policy: 'ask' })
     expect(state.added).toEqual([['graph', { id: id('root'), name: 'Singularity', status: 'idle' }, true]])
   })
 })

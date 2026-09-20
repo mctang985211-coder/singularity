@@ -1,11 +1,24 @@
+import { reaches } from '@dangosys/dsh-singularity-task'
 import type { AcceptanceCriterion, DependencyEdge, TaskInstance, VerificationMode } from '@dangosys/dsh-singularity-task'
 
 /** Modes whose criterion is executed by the command verifier and therefore needs `command`. */
 const EXECUTABLE_MODES: readonly VerificationMode[] = ['deterministic', 'simulation', 'measurement']
 
-/** Parent task plus the decomposition policy its definition grants. */
+/** Parent task plus the decomposition policy its caller grants it. */
 export interface AdmissionParent extends TaskInstance {
-  decompositionPolicy: { allowed: boolean; maxDepth?: number; maxChildren?: number }
+  decompositionPolicy: {
+    /** Whether this batch may proceed at all. */
+    allowed: boolean
+    /**
+     * The parent is admitted `leaf`. With the runtime-decomposition switch off
+     * that alone closes the policy, so the refusal below names the leaf rule
+     * instead of leaving the model to guess whether a limit refused it — the
+     * two causes need different follow-ups (do the work here vs. stay shallow).
+     */
+    leaf?: boolean
+    maxDepth?: number
+    maxChildren?: number
+  }
 }
 
 /** One planned child at admission time; `dependsOn` indexes into the children array. */
@@ -31,7 +44,12 @@ export function checkDecomposition(
   const reasons: string[] = []
   const policy = parent.decompositionPolicy
 
-  if (!policy.allowed) reasons.push(`task "${parent.taskId}" decomposition is not allowed`)
+  if (!policy.allowed) {
+    reasons.push(policy.leaf === true
+      ? `task "${parent.taskId}" decomposition is not allowed: it is admitted as leaf and runtime decomposition is off ` +
+        '(allowRuntimeDecomposition: false), so only a task admitted decomposable may split'
+      : `task "${parent.taskId}" decomposition is not allowed`)
+  }
   if (policy.maxDepth !== undefined && parent.depth + 1 > policy.maxDepth) {
     reasons.push(`task "${parent.taskId}" children would exceed maxDepth ${policy.maxDepth} (depth ${parent.depth + 1})`)
   }
@@ -48,6 +66,20 @@ export function checkDecomposition(
     for (const criterion of child.acceptanceCriteria) {
       if (EXECUTABLE_MODES.includes(criterion.verificationMode) && (criterion.command ?? '').trim().length === 0) {
         reasons.push(`${label} criterion "${criterion.criterionId}" (${criterion.verificationMode}) requires a command`)
+      }
+      // `requiresArtifact` gets a shape check here and nothing more: whether the
+      // named artifact exists is a spawn-time question (it needs the store
+      // snapshot), so admission only refuses a malformed declaration.
+      if (criterion.requiresArtifact !== undefined
+        && (!Array.isArray(criterion.requiresArtifact) || criterion.requiresArtifact.some(ref => typeof ref !== 'string' || ref.trim().length === 0))) {
+        reasons.push(`${label} criterion "${criterion.criterionId}" requiresArtifact must be an array of non-empty strings`)
+      }
+      // `verifierRef` gets a shape check here and nothing more: whether the id
+      // is registered is a batch-level question (it needs the verifier
+      // registry), so admission only refuses a malformed declaration.
+      if (criterion.verifierRef !== undefined
+        && (typeof criterion.verifierRef !== 'string' || criterion.verifierRef.trim().length === 0)) {
+        reasons.push(`${label} criterion "${criterion.criterionId}" verifierRef must be a non-empty string`)
       }
     }
     for (const dependency of child.dependsOn ?? []) {
@@ -75,18 +107,4 @@ export function checkDecomposition(
   }
 
   return reasons.length === 0 ? { ok: true } : { ok: false, reasons }
-}
-
-/** DFS over an edge list: true when `target` is reachable from `start`. */
-function reaches(edges: readonly DependencyEdge[], start: string, target: string): boolean {
-  const seen = new Set<string>()
-  const pending = [start]
-  while (pending.length > 0) {
-    const current = pending.pop() as string
-    if (current === target) return true
-    if (seen.has(current)) continue
-    seen.add(current)
-    for (const edge of edges) if (edge.from === current) pending.push(edge.to)
-  }
-  return false
 }

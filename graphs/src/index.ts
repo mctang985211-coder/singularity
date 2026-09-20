@@ -9,13 +9,13 @@ import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { SESSION_FORMAT_VERSION, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@dangosys/dsh-env-builder'
-import { cleanPromptText } from '@dangosys/dsh-env-builder'
+import { cleanPromptText, type EnvRecord } from '@dangosys/dsh-env-builder'
 import type {} from '@dangosys/dsh-singularity-graph'
 import type {} from '@dangosys/dsh-singularity-layout'
 import type {} from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
-import type { CreateGraphRequest, GraphArchive, GraphRecord, GraphsEvent, GraphsSnapshot } from './types.ts'
+import type { CreateGraphRequest, CreateGraphResult, GraphArchive, GraphRecord, GraphsEvent, GraphsSnapshot } from './types.ts'
 import { GraphsState } from './service/state.ts'
 import { setupPromptText } from './prompts/setup.prompts.ts'
 
@@ -24,6 +24,7 @@ export { GraphsState } from './service/state.ts'
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
+    /** One graph-registry mutation in the graphs-registry store; the GraphsEvent union that GraphsState replays on load. */
     'graphs/event': GraphsEvent
   }
 }
@@ -120,7 +121,7 @@ export class GraphsService extends Service {
     })
   }
 
-  async create(request: CreateGraphRequest): Promise<GraphRecord> {
+  async create(request: CreateGraphRequest): Promise<CreateGraphResult> {
     return this.transition(async () => {
       await this.ready
       let createdEnvId: string | undefined
@@ -128,26 +129,58 @@ export class GraphsService extends Service {
       let rootAgentId: SessionId | undefined
       let committed = false
       try {
-        if ((request.createEnv === true) === (request.envId !== undefined)) {
-          throw new Error('graphs: provide exactly one of createEnv, envId')
-        }
+        const store = this.ctx.envBuilder.store
         let envId: string
-        if (request.createEnv === true) {
+        let reused = false
+        if (request.envId !== undefined) {
+          if (request.createEnv === true || request.workspace !== undefined || request.fresh === true) {
+            throw new Error('graphs: envId cannot combine with createEnv, workspace, or fresh')
+          }
+          if (request.repos !== undefined) throw new Error('graphs: repos only allowed with createEnv')
+          envId = request.envId
+          this.assertReusable(envId)
+          reused = true
+        } else if (request.workspace !== undefined) {
+          const label = request.workspace.trim()
+          if (label.length === 0) throw new Error('graphs: workspace is empty')
+          if (request.fresh !== true) {
+            const matches = store.findByLabel(label)
+            const available = matches.filter(env => this.isReusable(env))
+            if (available.length > 0) {
+              envId = available[0].id
+              this.assertReusable(envId)
+              reused = true
+            } else if (matches.length > 0) {
+              throw new Error(this.workspaceTaken(label, matches))
+            }
+          }
+          if (!reused) {
+            if (request.repos === undefined || request.repos.length === 0) {
+              throw new Error('graphs: new environment requires at least one repository')
+            }
+            const env = store.create(label)
+            envId = createdEnvId = env.id
+            for (const ref of request.repos) store.planComponent(envId, ref)
+          }
+        } else if (request.createEnv === true) {
           if (request.repos === undefined || request.repos.length === 0) {
             throw new Error('graphs: new environment requires at least one repository')
           }
-          const env = this.ctx.envBuilder.store.create()
-          envId = createdEnvId = env.id
-          for (const ref of request.repos) this.ctx.envBuilder.store.planComponent(envId, ref)
-        } else {
-          if (request.repos !== undefined) throw new Error('graphs: repos only allowed with createEnv')
-          envId = request.envId!
-          if (this.state.boundEnvIds().has(envId)) throw new Error(`graphs: environment "${envId}" already bound`)
-          const env = this.ctx.envBuilder.store.get(envId)
-          if (env.components.length === 0) throw new Error(`graphs: environment "${envId}" has no repositories`)
-          if (env.sessionIds.length > 0) {
-            throw new Error(`graphs: environment "${envId}" still has sessions`)
+          if (request.fresh !== true) {
+            const match = store.findByRepos(request.repos).find(env => this.isReusable(env))
+            if (match !== undefined) {
+              envId = match.id
+              this.assertReusable(envId)
+              reused = true
+            }
           }
+          if (!reused) {
+            const env = store.create()
+            envId = createdEnvId = env.id
+            for (const ref of request.repos) store.planComponent(envId, ref)
+          }
+        } else {
+          throw new Error('graphs: provide exactly one of createEnv, envId, workspace')
         }
         const registry = this.state.snapshot()
         const id = nextGraphId([
@@ -199,7 +232,7 @@ export class GraphsService extends Service {
             text: setupPromptText(id, env),
           },
         ])
-        return graph
+        return { graph, reused }
       } catch (error) {
         if (committed) throw error
         if (attached !== undefined) {
@@ -212,6 +245,42 @@ export class GraphsService extends Service {
         throw error
       }
     })
+  }
+
+  private isReusable(env: EnvRecord): boolean {
+    return env.components.length > 0 && !this.state.boundEnvIds().has(env.id) && env.sessionIds.length === 0
+  }
+
+  private assertReusable(envId: string): void {
+    const occupant = this.state.snapshot().graphs.find(graph => graph.envId === envId)
+    if (occupant !== undefined) {
+      throw new Error(
+        `graphs: environment "${envId}" already bound to graph "${occupant.id}" ("${occupant.name}"); ` +
+          `release it with POST /singularity/graphs/${occupant.id}/delete or choose another environment`,
+      )
+    }
+    const env = this.ctx.envBuilder.store.get(envId)
+    if (env.components.length === 0) throw new Error(`graphs: environment "${envId}" has no repositories`)
+    if (env.sessionIds.length > 0) throw new Error(`graphs: environment "${envId}" still has sessions`)
+  }
+
+  private workspaceTaken(label: string, matches: readonly EnvRecord[]): string {
+    const details = matches
+      .map(env => {
+        const occupant = this.state.snapshot().graphs.find(graph => graph.envId === env.id)
+        const reason =
+          occupant !== undefined
+            ? `bound to graph "${occupant.id}"`
+            : env.sessionIds.length > 0
+              ? `has ${env.sessionIds.length} session(s)`
+              : 'has no repositories'
+        return `${env.id} (${reason})`
+      })
+      .join(', ')
+    return (
+      `graphs: workspace "${label}" is taken by ${details}; ` +
+      'release the occupying graph with POST /singularity/graphs/<id>/delete or choose another workspace name'
+    )
   }
 
   async markReady(id: string): Promise<GraphRecord> {

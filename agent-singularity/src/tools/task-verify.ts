@@ -15,7 +15,7 @@ function sessionId(exec: ToolRunContext): string {
 
 /** Local view of the verifier service; resolved softly so this package never imports the verifier plugin. */
 interface RunVerifier {
-  verifyRun(storeId: string, runId: RunId, options?: { cwd?: string }): Promise<EvidenceBundle>
+  verifyRun(storeId: string, runId: RunId, options?: { cwd?: string; timeoutMs?: number }): Promise<EvidenceBundle>
 }
 
 /** Local view of the env-builder service; resolved softly like the verifier. */
@@ -31,8 +31,8 @@ export function defineTaskVerifyTool(ctx: Context) {
   return defineTool({
     name: 'task_verify',
     description:
-      'Self-check: re-run the verifier against the caller\'s current task run and report per-criterion results. ' +
-      'Records no task status; use it to see what the verifier would say before reporting back.',
+      'Self-check: re-run the verifier against the caller\'s current task run, record the resulting evidence bundle in the task store, and report per-criterion results. ' +
+      'Records evidence but no task status; only valid while the run is running — calling it on a finished run returns an error.',
     parameters: {},
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (_args, exec) => {
@@ -42,6 +42,9 @@ export function defineTaskVerifyTool(ctx: Context) {
         throw new Error('task_verify: verifier service is not loaded')
       }
       const { storeId, task, run } = await ctx.taskRuntime.runForSession(caller)
+      if (run.status !== 'running') {
+        return `task_verify: run ${run.runId} of task ${task.taskId} is ${run.status}; evidence can only be recorded while the run is running`
+      }
       let cwd: string | undefined
       try {
         const graph = await ctx.graphs.graphForSession(caller)
@@ -49,7 +52,17 @@ export function defineTaskVerifyTool(ctx: Context) {
       } catch {
         cwd = undefined
       }
-      const bundle = await verifier.verifyRun(storeId, run.runId, cwd === undefined ? {} : { cwd })
+      // The verifier sets no timer when `timeoutMs` is undefined
+      // (`verifier/src/command-verifier.ts:47`), so a criterion with a long
+      // command would hang this turn forever. Judge under the same deadline the
+      // final verification gets, and refuse to run rather than run unbounded.
+      const timeoutMs = ctx.taskRuntime.verifyTimeoutMs
+      if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+        throw new Error(
+          `task_verify: task runtime exposes no positive verifyTimeoutMs (got ${String(timeoutMs)}); refusing to run the verifier without a deadline`,
+        )
+      }
+      const bundle = await verifier.verifyRun(storeId, run.runId, { ...(cwd === undefined ? {} : { cwd }), timeoutMs })
       const lines = [
         `run ${run.runId} of task ${task.taskId}: evidence ${bundle.evidenceId} (self-check, status unchanged)`,
         ...bundle.verifierResults.map(result => {

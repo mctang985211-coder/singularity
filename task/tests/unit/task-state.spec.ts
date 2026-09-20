@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'vitest'
 import type {
   CapabilityManifest,
+  Diagnosis,
   EvidenceBundle,
+  Obligation,
+  ReviewRecord,
   RunId,
   TaskEvent,
   TaskEventKind,
@@ -381,5 +384,184 @@ describe('TaskState evidence and handoffs', () => {
     expect(state.snapshot().capabilities['t1']).toEqual(manifest)
     expect(() => state.apply(ev('CapabilityResolved', { manifest }, { taskId: 'ghost' }))).toThrow('unknown task')
     expect(() => state.apply(ev('CapabilityGapDetected', { missing: ['x'] }, { taskId: 'ghost' }))).toThrow('unknown task')
+  })
+})
+
+describe('TaskState reviews', () => {
+  function review(overrides: Partial<ReviewRecord> = {}): ReviewRecord {
+    return { taskId: 't1', outcome: 'verified', evidenceRefs: ['e1'], anomalies: [], ...overrides }
+  }
+
+  test('a terminal run accepts exactly one review; a second one is rejected', () => {
+    const state = verifiedState()
+    state.apply(ev('ReviewRecorded', { review: review({ runId: 'r1' }) }, { runId: 'r1' }))
+    expect(state.snapshot().reviews).toEqual([review({ runId: 'r1' })])
+    expect(() => state.apply(ev('ReviewRecorded', { review: review({ runId: 'r1' }) }, { runId: 'r1' }))).toThrow('already has a review')
+  })
+
+  test('a review must follow the run\'s terminal state and carries a cause iff failed', () => {
+    const failed = failedState()
+    expect(() => failed.apply(ev('ReviewRecorded', { review: review({ runId: 'r1', outcome: 'failed' }) }, { runId: 'r1' })))
+      .toThrow('requires a localized cause')
+    failed.apply(ev('ReviewRecorded', { review: review({ runId: 'r1', outcome: 'failed', localizedCause: 'boom' }) }, { runId: 'r1' }))
+    expect(failed.snapshot().reviews[0]?.localizedCause).toBe('boom')
+
+    const verified = verifiedState()
+    expect(() => verified.apply(ev('ReviewRecorded', { review: review({ runId: 'r1', localizedCause: 'stray' }) }, { runId: 'r1' })))
+      .toThrow('only a failed outcome')
+    expect(() => verified.apply(ev('ReviewRecorded', { review: review({ runId: 'r1', outcome: 'failed', localizedCause: 'boom' }) }, { runId: 'r1' })))
+      .toThrow('must follow the terminal transition')
+    expect(() => verified.apply(ev('ReviewRecorded', { review: review({ runId: 'ghost' }) }, { runId: 'ghost' }))).toThrow('unknown run')
+  })
+
+  test('a runless review is accepted only for a blocked task, exactly once', () => {
+    const state = admittedState()
+    const blockedReview = review({ outcome: 'blocked', evidenceRefs: [], anomalies: ['dependencies [t0] did not verify'], relatedTaskIds: ['t0'] })
+    expect(() => state.apply(ev('ReviewRecorded', { review: blockedReview }))).toThrow('only a blocked task settles without a run')
+    state.apply(ev('TaskBlocked', { reason: 'dependencies [t0] did not verify' }))
+    state.apply(ev('ReviewRecorded', { review: blockedReview }))
+    expect(state.snapshot().reviews).toEqual([blockedReview])
+    expect(() => state.apply(ev('ReviewRecorded', { review: blockedReview }))).toThrow('already has a runless review')
+  })
+
+  test('a log tail rides only on a failed outcome; criteria and durationMs pass through untouched', () => {
+    const verified = verifiedState()
+    expect(() => verified.apply(ev('ReviewRecorded', { review: review({ runId: 'r1', logTail: 'tail' }) }, { runId: 'r1' })))
+      .toThrow('only a failed outcome carries a log tail')
+    verified.apply(ev('ReviewRecorded', {
+      review: review({
+        runId: 'r1',
+        durationMs: 42,
+        criteria: [{ criterionId: 'c1', verdict: 'pass', command: 'true', exitCode: 0, logRef: 'store/r1/c1.log' }],
+      }),
+    }, { runId: 'r1' }))
+    expect(verified.snapshot().reviews[0]).toMatchObject({ durationMs: 42, criteria: [{ criterionId: 'c1', verdict: 'pass', exitCode: 0 }] })
+
+    const failed = failedState()
+    failed.apply(ev('ReviewRecorded', {
+      review: review({ runId: 'r1', outcome: 'failed', localizedCause: 'boom', logTail: 'tail', durationMs: 7 }),
+    }, { runId: 'r1' }))
+    expect(failed.snapshot().reviews[0]).toMatchObject({ logTail: 'tail', durationMs: 7 })
+  })
+
+  test('blockers ride only on a blocked outcome', () => {
+    const verified = verifiedState()
+    expect(() => verified.apply(ev('ReviewRecorded', {
+      review: review({ runId: 'r1', blockedBy: [{ taskId: 't0', outcome: 'failed' }] }),
+    }, { runId: 'r1' }))).toThrow('only a blocked outcome carries blockers')
+
+    const state = admittedState()
+    state.apply(ev('TaskBlocked', { reason: 'dependencies [t0] did not verify' }))
+    state.apply(ev('ReviewRecorded', {
+      review: review({ outcome: 'blocked', evidenceRefs: [], anomalies: ['dependencies [t0] did not verify'], blockedBy: [{ taskId: 't0', outcome: 'failed' }] }),
+    }))
+    expect(state.snapshot().reviews[0]?.blockedBy).toEqual([{ taskId: 't0', outcome: 'failed' }])
+  })
+})
+
+describe('TaskState diagnoses', () => {
+  function diagnosis(overrides: Partial<Diagnosis> = {}): Diagnosis {
+    return {
+      diagnosisId: 'd1',
+      taskId: 't1',
+      observedFailure: 'criterion c1 failed',
+      scope: 'this task only',
+      localizedCause: 'the parser rejects empty input',
+      evidenceRefs: ['e1'],
+      reviewRefs: ['t1#r1'],
+      confidence: 'medium',
+      proposals: [],
+      ...overrides,
+    }
+  }
+
+  test('a task accepts a diagnosis and several diagnoses accumulate under distinct ids', () => {
+    const state = verifiedState()
+    state.apply(ev('DiagnosisRecorded', { diagnosis: diagnosis() }))
+    expect(state.snapshot().diagnoses).toEqual([diagnosis()])
+    state.apply(ev('DiagnosisRecorded', { diagnosis: diagnosis({ diagnosisId: 'd2', confidence: 'low' }) }))
+    expect(state.snapshot().diagnoses.map(item => item.diagnosisId)).toEqual(['d1', 'd2'])
+  })
+
+  test('a repeated diagnosis id is rejected, across tasks too', () => {
+    const state = verifiedState()
+    state.apply(ev('DiagnosisRecorded', { diagnosis: diagnosis() }))
+    expect(() => state.apply(ev('DiagnosisRecorded', { diagnosis: diagnosis() }))).toThrow('already exists')
+    expect(state.snapshot().diagnoses).toHaveLength(1)
+  })
+
+  test('the diagnosis must belong to an existing task and match the envelope task', () => {
+    const state = verifiedState()
+    expect(() => state.apply(ev('DiagnosisRecorded', { diagnosis: diagnosis({ taskId: 'ghost' }) }, { taskId: 'ghost' }))).toThrow('unknown task')
+    expect(() => state.apply(ev('DiagnosisRecorded', { diagnosis: diagnosis({ taskId: 'other' }) }))).toThrow('does not belong')
+  })
+
+  test('empty text fields, a stray confidence, and missing refs are rejected', () => {
+    const state = verifiedState()
+    expect(() => state.apply(ev('DiagnosisRecorded', { diagnosis: diagnosis({ observedFailure: '' }) }))).toThrow('observed failure')
+    expect(() => state.apply(ev('DiagnosisRecorded', { diagnosis: diagnosis({ scope: '' }) }))).toThrow('scope')
+    expect(() => state.apply(ev('DiagnosisRecorded', { diagnosis: diagnosis({ localizedCause: '' }) }))).toThrow('localized cause')
+    expect(() => state.apply(ev('DiagnosisRecorded', { diagnosis: diagnosis({ confidence: '0.41' as Diagnosis['confidence'] }) }))).toThrow('confidence')
+    expect(() => state.apply(ev('DiagnosisRecorded', { diagnosis: diagnosis({ evidenceRefs: [], reviewRefs: [] }) }))).toThrow('at least one evidence or review ref')
+    expect(() => state.apply(ev('DiagnosisRecorded', { diagnosis: diagnosis({ evidenceRefs: [''] }) }))).toThrow('non-empty strings')
+  })
+
+  test('proposals name one of the nine frozen target types and carry id and rationale', () => {
+    const state = verifiedState()
+    expect(() => state.apply(ev('DiagnosisRecorded', {
+      diagnosis: diagnosis({ proposals: [{ targetType: 'production' as Diagnosis['proposals'][number]['targetType'], targetId: 'x', rationale: 'y' }] }),
+    }))).toThrow('target type')
+    expect(() => state.apply(ev('DiagnosisRecorded', {
+      diagnosis: diagnosis({ proposals: [{ targetType: 'skill', targetId: '', rationale: 'y' }] }),
+    }))).toThrow('target id and a rationale')
+    state.apply(ev('DiagnosisRecorded', {
+      diagnosis: diagnosis({ proposals: [{ targetType: 'verifier', targetId: 'command', rationale: 'the criterion command misses the empty-input case' }] }),
+    }))
+    expect(state.snapshot().diagnoses[0]?.proposals).toEqual([
+      { targetType: 'verifier', targetId: 'command', rationale: 'the criterion command misses the empty-input case' },
+    ])
+  })
+
+  test('relatedTaskIds point at existing tasks (cross-task lineage inside the store)', () => {
+    const state = verifiedState()
+    expect(() => state.apply(ev('DiagnosisRecorded', { diagnosis: diagnosis({ relatedTaskIds: ['ghost'] }) }))).toThrow('unknown task')
+    state.apply(ev('DiagnosisRecorded', { diagnosis: diagnosis({ relatedTaskIds: ['t1'] }) }))
+    expect(state.snapshot().diagnoses[0]?.relatedTaskIds).toEqual(['t1'])
+  })
+})
+
+describe('TaskState obligations', () => {
+  function obligation(overrides: Partial<Obligation> = {}): Obligation {
+    return {
+      obligationId: 'o1',
+      goal: 'artifact "bemu_trace" required by task "t1" criterion c1 does not exist in the task store',
+      criterion: 'the task store holds evidence or an artifact named "bemu_trace"',
+      sourceTaskId: 't1',
+      ...overrides,
+    }
+  }
+
+  test('a task accepts an obligation and several obligations accumulate under distinct ids', () => {
+    const state = createdState()
+    state.apply(ev('ObligationRecorded', { obligation: obligation() }))
+    expect(state.snapshot().obligations).toEqual([obligation()])
+    state.apply(ev('ObligationRecorded', { obligation: obligation({ obligationId: 'o2', goal: 'capability "ppa" is not granted' }) }))
+    expect(state.snapshot().obligations.map(item => item.obligationId)).toEqual(['o1', 'o2'])
+  })
+
+  test('a repeated obligation id is rejected', () => {
+    const state = createdState()
+    state.apply(ev('ObligationRecorded', { obligation: obligation() }))
+    expect(() => state.apply(ev('ObligationRecorded', { obligation: obligation() }))).toThrow('already exists')
+    expect(state.snapshot().obligations).toHaveLength(1)
+  })
+
+  test('empty fields and an unknown source task are rejected', () => {
+    const state = createdState()
+    expect(() => state.apply(ev('ObligationRecorded', { obligation: obligation({ obligationId: '' }) }))).toThrow('non-empty string')
+    expect(() => state.apply(ev('ObligationRecorded', { obligation: obligation({ goal: '' }) }))).toThrow('requires a goal')
+    expect(() => state.apply(ev('ObligationRecorded', { obligation: obligation({ criterion: '' }) }))).toThrow('requires a criterion')
+    expect(() => state.apply(ev('ObligationRecorded', { obligation: obligation({ sourceTaskId: 'ghost' }) }))).toThrow('unknown task')
+    expect(state.snapshot().obligations).toHaveLength(0)
   })
 })

@@ -97,11 +97,14 @@ var GraphsState = class GraphsState {
 //#endregion
 //#region src/prompts/setup.prompts.ts
 function setupPromptText(graphId, env) {
-	const repositories = env.components.map((component) => `${component.owner}/${component.repo}`).join(", ");
+	const pending = env.components.filter((component) => component.status === "installing");
+	const present = env.components.filter((component) => component.status !== "installing");
+	const names = (components) => components.map((component) => `${component.owner}/${component.repo}`).join(", ");
+	const presentLine = present.length === 0 ? "" : `\nAlready present (do not reinstall): ${names(present)}.`;
 	return `Set up Singularity graph ${graphId}. Environment ${env.id} is at ${env.path}.
-Planned repositories: ${repositories || "(none)"}.
+Planned repositories: ${names(pending) || "(none)"}.${presentLine}
 
-For each planned repository, delegate installation and registration to a worker. The worker must install it with bash according to the repository instructions and then call env_register_component. If a worker needs human input, you may use hitl_ask or hitl_approve. When all setup workers complete successfully, call graph_mark_ready. If there are no planned repositories, call graph_mark_ready immediately.`;
+For each planned repository, delegate installation and registration to a worker with graph_spawn — never with task_decompose, which is reserved for the user objective and whose root allowance is a single call. The worker must install it with bash according to the repository instructions and then call env_register_component. If a worker needs human input, you may use hitl_ask or hitl_approve. When all setup workers complete successfully, call graph_mark_ready. If there are no planned repositories, call graph_mark_ready immediately.`;
 }
 
 //#endregion
@@ -191,20 +194,47 @@ var GraphsService = class extends Service {
 			let rootAgentId;
 			let committed = false;
 			try {
-				if (request.createEnv === true === (request.envId !== void 0)) throw new Error("graphs: provide exactly one of createEnv, envId");
+				const store = this.ctx.envBuilder.store;
 				let envId;
-				if (request.createEnv === true) {
-					if (request.repos === void 0 || request.repos.length === 0) throw new Error("graphs: new environment requires at least one repository");
-					envId = createdEnvId = this.ctx.envBuilder.store.create().id;
-					for (const ref of request.repos) this.ctx.envBuilder.store.planComponent(envId, ref);
-				} else {
+				let reused = false;
+				if (request.envId !== void 0) {
+					if (request.createEnv === true || request.workspace !== void 0 || request.fresh === true) throw new Error("graphs: envId cannot combine with createEnv, workspace, or fresh");
 					if (request.repos !== void 0) throw new Error("graphs: repos only allowed with createEnv");
 					envId = request.envId;
-					if (this.state.boundEnvIds().has(envId)) throw new Error(`graphs: environment "${envId}" already bound`);
-					const env$1 = this.ctx.envBuilder.store.get(envId);
-					if (env$1.components.length === 0) throw new Error(`graphs: environment "${envId}" has no repositories`);
-					if (env$1.sessionIds.length > 0) throw new Error(`graphs: environment "${envId}" still has sessions`);
-				}
+					this.assertReusable(envId);
+					reused = true;
+				} else if (request.workspace !== void 0) {
+					const label = request.workspace.trim();
+					if (label.length === 0) throw new Error("graphs: workspace is empty");
+					if (request.fresh !== true) {
+						const matches = store.findByLabel(label);
+						const available = matches.filter((env$1) => this.isReusable(env$1));
+						if (available.length > 0) {
+							envId = available[0].id;
+							this.assertReusable(envId);
+							reused = true;
+						} else if (matches.length > 0) throw new Error(this.workspaceTaken(label, matches));
+					}
+					if (!reused) {
+						if (request.repos === void 0 || request.repos.length === 0) throw new Error("graphs: new environment requires at least one repository");
+						envId = createdEnvId = store.create(label).id;
+						for (const ref of request.repos) store.planComponent(envId, ref);
+					}
+				} else if (request.createEnv === true) {
+					if (request.repos === void 0 || request.repos.length === 0) throw new Error("graphs: new environment requires at least one repository");
+					if (request.fresh !== true) {
+						const match = store.findByRepos(request.repos).find((env$1) => this.isReusable(env$1));
+						if (match !== void 0) {
+							envId = match.id;
+							this.assertReusable(envId);
+							reused = true;
+						}
+					}
+					if (!reused) {
+						envId = createdEnvId = store.create().id;
+						for (const ref of request.repos) store.planComponent(envId, ref);
+					}
+				} else throw new Error("graphs: provide exactly one of createEnv, envId, workspace");
 				const registry = this.state.snapshot();
 				const id = nextGraphId([...registry.graphs.map((graph$1) => graph$1.id), ...registry.archives.map((archive) => archive.graph.id)]);
 				const name = request.name === void 0 ? id : request.name.trim();
@@ -254,7 +284,10 @@ var GraphsService = class extends Service {
 					type: "text",
 					text: setupPromptText(id, env)
 				}]);
-				return graph;
+				return {
+					graph,
+					reused
+				};
 			} catch (error) {
 				if (committed) throw error;
 				if (attached !== void 0) {
@@ -265,6 +298,23 @@ var GraphsService = class extends Service {
 				throw error;
 			}
 		});
+	}
+	isReusable(env) {
+		return env.components.length > 0 && !this.state.boundEnvIds().has(env.id) && env.sessionIds.length === 0;
+	}
+	assertReusable(envId) {
+		const occupant = this.state.snapshot().graphs.find((graph) => graph.envId === envId);
+		if (occupant !== void 0) throw new Error(`graphs: environment "${envId}" already bound to graph "${occupant.id}" ("${occupant.name}"); release it with POST /singularity/graphs/${occupant.id}/delete or choose another environment`);
+		const env = this.ctx.envBuilder.store.get(envId);
+		if (env.components.length === 0) throw new Error(`graphs: environment "${envId}" has no repositories`);
+		if (env.sessionIds.length > 0) throw new Error(`graphs: environment "${envId}" still has sessions`);
+	}
+	workspaceTaken(label, matches) {
+		return `graphs: workspace "${label}" is taken by ${matches.map((env) => {
+			const occupant = this.state.snapshot().graphs.find((graph) => graph.envId === env.id);
+			const reason = occupant !== void 0 ? `bound to graph "${occupant.id}"` : env.sessionIds.length > 0 ? `has ${env.sessionIds.length} session(s)` : "has no repositories";
+			return `${env.id} (${reason})`;
+		}).join(", ")}; release the occupying graph with POST /singularity/graphs/<id>/delete or choose another workspace name`;
 	}
 	async markReady(id) {
 		await this.ready;

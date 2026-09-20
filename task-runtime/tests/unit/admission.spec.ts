@@ -42,6 +42,34 @@ function parent(overrides: Partial<AdmissionParent> = {}): AdmissionParent {
 }
 
 describe('checkDecomposition', () => {
+  test('rejects a malformed requiresArtifact declaration, shape only', () => {
+    const verdict = checkDecomposition(parent(), [
+      child({ acceptanceCriteria: [criterion({ requiresArtifact: ['bemu_trace', ''] })] }),
+    ], [])
+    expect(verdict.ok).toBe(false)
+    if (!verdict.ok) expect(verdict.reasons.join('\n')).toMatch(/requiresArtifact must be an array of non-empty strings/)
+
+    // A well-formed declaration passes admission untouched: existence is not
+    // checked here — that judgement belongs to the orchestrator at spawn time.
+    expect(checkDecomposition(parent(), [
+      child({ acceptanceCriteria: [criterion({ requiresArtifact: ['bemu_trace'] })] }),
+    ], [])).toEqual({ ok: true })
+  })
+
+  test('rejects a malformed verifierRef declaration, shape only', () => {
+    const verdict = checkDecomposition(parent(), [
+      child({ acceptanceCriteria: [criterion({ verifierRef: '  ' })] }),
+    ], [])
+    expect(verdict.ok).toBe(false)
+    if (!verdict.ok) expect(verdict.reasons.join('\n')).toMatch(/verifierRef must be a non-empty string/)
+
+    // A well-formed ref passes admission untouched: whether the id is
+    // registered is judged batch-level against the verifier registry, not here.
+    expect(checkDecomposition(parent(), [
+      child({ acceptanceCriteria: [criterion({ verifierRef: 'command' })] }),
+    ], [])).toEqual({ ok: true })
+  })
+
   test('accepts a well-formed batch with a dependency chain', () => {
     const verdict = checkDecomposition(parent(), [
       child({ taskId: 'c1' }),
@@ -54,6 +82,48 @@ describe('checkDecomposition', () => {
     const verdict = checkDecomposition(parent({ decompositionPolicy: { allowed: false } }), [child()], [])
     expect(verdict.ok).toBe(false)
     if (!verdict.ok) expect(verdict.reasons.join('\n')).toMatch(/not allowed/)
+  })
+
+  test('names the leaf rule and the switch when that is what closed the policy', () => {
+    const verdict = checkDecomposition(
+      parent({ decompositionPolicy: { allowed: false, leaf: true, maxDepth: 4, maxChildren: 8 } }),
+      [child()],
+      [],
+    )
+    expect(verdict.ok).toBe(false)
+    if (!verdict.ok) {
+      const reasons = verdict.reasons.join('\n')
+      expect(reasons).toMatch(/admitted as leaf/)
+      expect(reasons).toMatch(/allowRuntimeDecomposition: false/)
+      expect(reasons).not.toMatch(/maxDepth|maxChildren/)
+    }
+  })
+
+  test('admits a leaf parent once the runtime-decomposition switch is on', () => {
+    const verdict = checkDecomposition(
+      parent({ decompositionPolicy: { allowed: true, leaf: true, maxDepth: 4, maxChildren: 8 } }),
+      [child({ taskId: 'c1' }), child({ taskId: 'c2', acceptanceCriteria: [criterion({ criterionId: 'ac2-1' })], dependsOn: [0] })],
+      [],
+    )
+    expect(verdict).toEqual({ ok: true })
+  })
+
+  test('still refuses a leaf parent on the limits it hits, naming them', () => {
+    const overDepth = checkDecomposition(
+      parent({ depth: 2, decompositionPolicy: { allowed: true, leaf: true, maxDepth: 2, maxChildren: 8 } }),
+      [child()],
+      [],
+    )
+    expect(overDepth.ok).toBe(false)
+    if (!overDepth.ok) expect(overDepth.reasons.join('\n')).toMatch(/maxDepth 2 \(depth 3\)/)
+
+    const overCount = checkDecomposition(
+      parent({ decompositionPolicy: { allowed: true, leaf: true, maxDepth: 4, maxChildren: 1 } }),
+      [child({ taskId: 'c1' }), child({ taskId: 'c2', acceptanceCriteria: [criterion({ criterionId: 'ac2-1' })] })],
+      [],
+    )
+    expect(overCount.ok).toBe(false)
+    if (!overCount.ok) expect(overCount.reasons.join('\n')).toMatch(/maxChildren 1/)
   })
 
   test('rejects when children would exceed maxDepth', () => {

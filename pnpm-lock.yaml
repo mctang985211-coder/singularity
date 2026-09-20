@@ -32,6 +32,9 @@ importers:
       '@deepseek-ai/dsh-llm':
         specifier: link:../../../thirdparty/deepseek-harness/packages/llm/llm
         version: link:../../../thirdparty/deepseek-harness/packages/llm/llm
+      '@deepseek-ai/dsh-mcp-client':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/mcp/mcp-client
+        version: link:../../../thirdparty/deepseek-harness/packages/mcp/mcp-client
       '@deepseek-ai/dsh-permission-presets':
         specifier: link:../../../thirdparty/deepseek-harness/packages/interaction/permission-presets
         version: link:../../../thirdparty/deepseek-harness/packages/interaction/permission-presets
@@ -47,6 +50,9 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: link:../../../thirdparty/deepseek-harness/packages/core/tools
         version: link:../../../thirdparty/deepseek-harness/packages/core/tools
+      '@deepseek-ai/dsh-user-approval':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/interaction/user-approval
+        version: link:../../../thirdparty/deepseek-harness/packages/interaction/user-approval
       '@types/node':
         specifier: ^22.20.0
         version: 22.20.1
@@ -84,6 +90,12 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: link:../../../thirdparty/deepseek-harness/packages/core/tools
         version: link:../../../thirdparty/deepseek-harness/packages/core/tools
+      '@deepseek-ai/dsh-user-approval':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/interaction/user-approval
+        version: link:../../../thirdparty/deepseek-harness/packages/interaction/user-approval
+      '@deepseek-ai/dsh-user-questions':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/interaction/user-questions
+        version: link:../../../thirdparty/deepseek-harness/packages/interaction/user-questions
       '@types/node':
         specifier: ^22.20.0
         version: 22.20.1

@@ -72,6 +72,10 @@ function logFileName(criterionId: string): string {
  */
 export class CommandVerifier implements Verifier {
   readonly id = 'command'
+  readonly version = '1'
+  readonly owner = 'singularity'
+  /** Known samples the package tests execute for real: `true` must pass, `false` must fail (KISS §12 step 2). */
+  readonly selftest = { positiveCases: ['true'], negativeCases: ['false'] }
 
   constructor(private readonly evidenceRoot: string) {}
 
@@ -85,18 +89,21 @@ export class CommandVerifier implements Verifier {
 
   private async runCriterion(req: VerifyRequest, criterion: AcceptanceCriterion): Promise<VerificationResult> {
     const base = { criterionId: criterion.criterionId, verifierId: this.id, command: criterion.command }
+    // Every inconclusive this verifier reports is task-side (KISS §4.3
+    // UNKNOWN_TASK): the command was missing, never started, or timed out —
+    // the criterion was never tested.
     if (criterion.command === undefined || criterion.command.trim() === '') {
-      return { ...base, status: 'inconclusive', details: 'criterion has no command' }
+      return { ...base, status: 'inconclusive', details: 'criterion has no command', unknownKind: 'task' }
     }
     await mkdir(req.logDir, { recursive: true })
     const logPath = join(req.logDir, logFileName(criterion.criterionId))
     const logRef = relative(this.evidenceRoot, logPath)
     const outcome = await runCommand(criterion.command, req.cwd, req.timeoutMs, logPath)
     if (outcome.error !== undefined) {
-      return { ...base, status: 'inconclusive', logRef, details: outcome.error.message }
+      return { ...base, status: 'inconclusive', logRef, details: outcome.error.message, unknownKind: 'task' }
     }
     if (outcome.timedOut === true) {
-      return { ...base, status: 'inconclusive', logRef, details: `timeout after ${req.timeoutMs}ms` }
+      return { ...base, status: 'inconclusive', logRef, details: `timeout after ${req.timeoutMs}ms`, unknownKind: 'task' }
     }
     return { ...base, status: outcome.exitCode === 0 ? 'pass' : 'fail', exitCode: outcome.exitCode, logRef }
   }

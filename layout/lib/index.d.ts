@@ -41,6 +41,7 @@ declare class LayoutState {
 //#region src/index.d.ts
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
+    /** One canvas-geometry mutation in a per-graph layout store; the LayoutEvent union that LayoutState replays on load. */
     'layout/event': LayoutEvent;
   }
 }

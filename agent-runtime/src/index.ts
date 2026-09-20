@@ -8,13 +8,17 @@ import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-permission-presets'
+import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import type {} from '@dangosys/dsh-singularity-layout'
 import { DEFAULT_ROOT } from '@dangosys/dsh-singularity-layout'
 import type { Agent, AgentHandle, ContentBlock, GraphEvent, GraphScope, RootRequest, SpawnRequest } from './types.ts'
+import { applyWorkerGrant } from './grants.ts'
+import { installWorkerContract } from './contract-reinjection.ts'
 import { rootPromptText } from './prompts/root.prompts.ts'
 
 const ROOT_TOOLS = [
@@ -23,19 +27,51 @@ const ROOT_TOOLS = [
   'hitl_ask',
   'hitl_approve',
   'task_read',
+  'capability_list',
+  // The skill loader rides the mounted preset's plane (`tool-skill`), not the
+  // global layer: allowing it here is what lets the root load domain reference
+  // skills (e.g. bb-pipeline) discovered from the deployment's skill roots.
+  'skill',
   'task_decompose',
   'task_status',
   'task_verify',
+  'task_review_pack',
+  'task_review_agent',
+  'task_diagnose',
+  'evolution_propose',
+  'evolution_candidate',
+  'evolution_prepare',
+  'evolution_replay',
+  'evolution_gate',
+  'evolution_decide',
+  'evolution_apply',
+  'evolution_rollback',
+  'evolution_list',
 ]
+
+/**
+ * `hitl_approve` asks through `ctx.approval`, whose 'never' policy (bundled into
+ * danger-full-access) auto-rejects before any answerer sees the request. Root
+ * agents expose no policy-gated tools, so pinning their session to 'ask'
+ * re-enables only the explicit human decision.
+ */
+function pinRootApprovalPolicy(session: Session): void {
+  setApprovalPolicy(session, 'ask')
+}
 export type {
   AgentOptions,
   CanvasNode,
   ContentBlock,
   GraphScope,
+  McpServerSpec,
   RootRequest,
   SessionVisibility,
   SpawnRequest,
+  WorkerCapabilityGrant,
+  WorkerGrant,
 } from './types.ts'
+export { applyWorkerGrant, resolveGrant } from './grants.ts'
+export type { ResolvedGrant } from './grants.ts'
 
 export class AgentRuntime extends Service {
   static inject = [
@@ -128,6 +164,7 @@ export class AgentRuntime extends Service {
         setup: async (agentCtx, agent) => {
           await this.ctx.agentPresets.mount(agentCtx, agentPreset)
           this.ctx.permissionPresets.set(agent.session, 'danger-full-access')
+          pinRootApprovalPolicy(agent.session)
           agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText() })
           agentCtx.tools.restrict({ allow: ROOT_TOOLS })
         },
@@ -156,6 +193,7 @@ export class AgentRuntime extends Service {
           setup: async (agentCtx, agent) => {
             await this.ctx.agentPresets.mount(agentCtx, agentPreset)
             this.ctx.permissionPresets.set(agent.session, 'danger-full-access')
+            pinRootApprovalPolicy(agent.session)
             agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText() })
             agentCtx.tools.restrict({ allow: ROOT_TOOLS })
           },
@@ -213,7 +251,18 @@ export class AgentRuntime extends Service {
           signal: request.signal,
           setup: async (agentCtx, agent) => {
             await this.ctx.agentPresets.mount(agentCtx, agentPreset)
-            this.ctx.permissionPresets.set(agent.session, 'danger-full-access')
+            // Unknown preset names throw out of permissionPresets.set itself
+            // (its resolve names the preset), failing the spawn loudly.
+            this.ctx.permissionPresets.set(agent.session, request.permissionPreset ?? 'danger-full-access')
+            // The contract rides the worker's own prompt scope, so the loop
+            // reprojects it into surface node 0 on every step and compaction
+            // cannot fold it away (contract-reinjection.ts).
+            installWorkerContract(agentCtx, request.contract)
+            // A capability grant restricts the surface the preset just joined
+            // (its tools are inherited, so restrictable) and registers the
+            // granted skills into this worker's own layer. A spawn nobody
+            // authorized with capabilities keeps its composition's surface.
+            if (request.grant !== undefined) await applyWorkerGrant(agentCtx, agent, request.grant)
           },
         })
       } catch (error) {

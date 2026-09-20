@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
-import type { EvidenceBundle, TaskEvent, TaskHandoff, TaskInstance, TaskRun } from '../../src/index.ts'
+import type { Diagnosis, EvidenceBundle, Obligation, RunId, TaskEvent, TaskHandoff, TaskInstance, TaskRun } from '../../src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../src/index.ts'
 
 const NOW = '2026-09-16T00:00:00.000Z'
@@ -131,7 +131,7 @@ describe('TaskService store lifecycle', () => {
     await expect(service.snapshotIn(STORE)).rejects.toThrow('not open')
 
     const empty = await service.createStore(STORE)
-    expect(empty).toEqual({ version: 1, id: STORE, tasks: [], runs: [], edges: [], evidence: [], handoffs: [], capabilities: {} })
+    expect(empty).toEqual({ version: 1, id: STORE, tasks: [], runs: [], edges: [], evidence: [], handoffs: [], reviews: [], diagnoses: [], obligations: [], capabilities: {} })
     await expect(service.createStore(STORE)).rejects.toThrow('already open')
     await expect(service.createStore('bad id!')).rejects.toThrow('invalid store id')
 
@@ -362,6 +362,145 @@ describe('TaskService handoffs', () => {
   })
 })
 
+describe('TaskService reviews', () => {
+  test('recordReviewIn persists the terminal record and refuses a second one for the same run', async () => {
+    const h = harness()
+    const service = new TaskService(h.ctx as never)
+    await service.createStore(STORE)
+    await service.createTaskIn(STORE, task(), 'tester')
+    await service.admitTaskIn(STORE, 't1', 'tester')
+    await service.startRunIn(STORE, run(), 'tester')
+    await service.markRunStatusIn(STORE, 't1', 'r1', 'failed', 'tester', { reason: 'verifier failed' })
+
+    const review = {
+      taskId: 't1',
+      runId: 'r1',
+      sessionId: 's1',
+      outcome: 'failed' as const,
+      evidenceRefs: [],
+      anomalies: [],
+      localizedCause: 'verifier failed',
+    }
+    await service.recordReviewIn(STORE, review, 'tester')
+    expect((await service.snapshotIn(STORE)).reviews).toEqual([review])
+    expect(persistedKinds(h)).toEqual(['TaskCreated', 'TaskAdmitted', 'TaskStarted', 'TaskFailed', 'ReviewRecorded'])
+
+    await expect(service.recordReviewIn(STORE, review, 'tester')).rejects.toThrow('already has a review')
+    expect(persistedKinds(h)).toHaveLength(5)
+    expect((await service.snapshotIn(STORE)).reviews).toHaveLength(1)
+  })
+
+  test('a blocked task that never started accepts a runless review naming the blocker', async () => {
+    const h = harness()
+    const service = new TaskService(h.ctx as never)
+    await service.createStore(STORE)
+    await service.createTaskIn(STORE, task(), 'tester')
+    await service.admitTaskIn(STORE, 't1', 'tester')
+    await service.markRunStatusIn(STORE, 't1', undefined as unknown as RunId, 'blocked', 'tester', { reason: 'dependencies [t0] did not verify' })
+
+    const review = {
+      taskId: 't1',
+      outcome: 'blocked' as const,
+      evidenceRefs: [],
+      anomalies: ['dependencies [t0] did not verify'],
+      relatedTaskIds: ['t0'],
+    }
+    await service.recordReviewIn(STORE, review, 'tester')
+    expect((await service.snapshotIn(STORE)).reviews).toEqual([review])
+
+    await expect(service.recordReviewIn(STORE, review, 'tester')).rejects.toThrow('already has a runless review')
+    expect(persistedKinds(h)).toEqual(['TaskCreated', 'TaskAdmitted', 'TaskBlocked', 'ReviewRecorded'])
+  })
+})
+
+describe('TaskService diagnoses', () => {
+  function diagnosis(overrides: Partial<Diagnosis> = {}): Diagnosis {
+    return {
+      diagnosisId: 'd1',
+      taskId: 't1',
+      observedFailure: 'criterion c1 failed',
+      scope: 'this task only',
+      localizedCause: 'the parser rejects empty input',
+      evidenceRefs: ['e1'],
+      reviewRefs: ['t1#r1'],
+      confidence: 'medium',
+      proposals: [{ targetType: 'task_definition', targetId: 'build:1', rationale: 'the acceptance command never feeds empty input' }],
+      ...overrides,
+    }
+  }
+
+  test('recordDiagnosisIn persists the diagnosis and refuses a repeated id', async () => {
+    const h = harness()
+    const service = new TaskService(h.ctx as never)
+    await service.createStore(STORE)
+    await service.createTaskIn(STORE, task(), 'tester')
+    await service.admitTaskIn(STORE, 't1', 'tester')
+
+    await service.recordDiagnosisIn(STORE, diagnosis(), 'tester')
+    expect((await service.snapshotIn(STORE)).diagnoses).toEqual([diagnosis()])
+    expect(persistedKinds(h)).toEqual(['TaskCreated', 'TaskAdmitted', 'DiagnosisRecorded'])
+
+    await expect(service.recordDiagnosisIn(STORE, diagnosis(), 'tester')).rejects.toThrow('already exists')
+    expect(persistedKinds(h)).toHaveLength(3)
+    expect((await service.snapshotIn(STORE)).diagnoses).toHaveLength(1)
+
+    await service.recordDiagnosisIn(STORE, diagnosis({ diagnosisId: 'd2', confidence: 'high', relatedTaskIds: ['t1'] }), 'tester')
+    expect((await service.snapshotIn(STORE)).diagnoses.map(item => item.diagnosisId)).toEqual(['d1', 'd2'])
+  })
+
+  test('recordDiagnosisIn rejects a malformed diagnosis before anything persists', async () => {
+    const h = harness()
+    const service = new TaskService(h.ctx as never)
+    await service.createStore(STORE)
+    await service.createTaskIn(STORE, task(), 'tester')
+    await service.admitTaskIn(STORE, 't1', 'tester')
+
+    await expect(service.recordDiagnosisIn(STORE, diagnosis({ evidenceRefs: [], reviewRefs: [] }), 'tester'))
+      .rejects.toThrow('at least one evidence or review ref')
+    await expect(service.recordDiagnosisIn(STORE, diagnosis({ confidence: '0.9' as Diagnosis['confidence'] }), 'tester'))
+      .rejects.toThrow('confidence')
+    expect(persistedKinds(h)).toEqual(['TaskCreated', 'TaskAdmitted'])
+  })
+})
+
+describe('TaskService obligations', () => {
+  function obligation(overrides: Partial<Obligation> = {}): Obligation {
+    return {
+      obligationId: 'o1',
+      goal: 'artifact "bemu_trace" required by task "t1" criterion c1 does not exist in the task store',
+      criterion: 'the task store holds evidence or an artifact named "bemu_trace"',
+      sourceTaskId: 't1',
+      ...overrides,
+    }
+  }
+
+  test('recordObligationIn persists the obligation and refuses a repeated id', async () => {
+    const h = harness()
+    const service = new TaskService(h.ctx as never)
+    await service.createStore(STORE)
+    await service.createTaskIn(STORE, task(), 'tester')
+
+    await service.recordObligationIn(STORE, obligation(), 'tester')
+    expect((await service.snapshotIn(STORE)).obligations).toEqual([obligation()])
+    expect(persistedKinds(h)).toEqual(['TaskCreated', 'ObligationRecorded'])
+
+    await expect(service.recordObligationIn(STORE, obligation(), 'tester')).rejects.toThrow('already exists')
+    expect(persistedKinds(h)).toHaveLength(2)
+    expect((await service.snapshotIn(STORE)).obligations).toHaveLength(1)
+  })
+
+  test('recordObligationIn rejects a malformed obligation before anything persists', async () => {
+    const h = harness()
+    const service = new TaskService(h.ctx as never)
+    await service.createStore(STORE)
+    await service.createTaskIn(STORE, task(), 'tester')
+
+    await expect(service.recordObligationIn(STORE, obligation({ goal: '' }), 'tester')).rejects.toThrow('requires a goal')
+    await expect(service.recordObligationIn(STORE, obligation({ sourceTaskId: 'ghost' }), 'tester')).rejects.toThrow('unknown task')
+    expect(persistedKinds(h)).toEqual(['TaskCreated'])
+  })
+})
+
 describe('TaskService replay', () => {
   test('append → close → open replays into an equal snapshot and stays writable', async () => {
     const h = harness()
@@ -378,7 +517,33 @@ describe('TaskService replay', () => {
     await service.markRunStatusIn(storeId, 'c1', 'r1', 'verifying', 'tester')
     await service.recordEvidenceIn(storeId, evidence({ taskId: 'c1' }), 'tester')
     await service.markRunStatusIn(storeId, 'c1', 'r1', 'verified', 'tester')
+    await service.recordReviewIn(storeId, {
+      taskId: 'c1',
+      runId: 'r1',
+      sessionId: 's1',
+      outcome: 'verified',
+      evidenceRefs: ['e1'],
+      anomalies: [],
+    }, 'tester')
     await service.recordHandoffIn(storeId, handoff({ parentTaskId: 'root', childTaskId: 'c2' }), 'tester')
+    await service.recordDiagnosisIn(storeId, {
+      diagnosisId: 'd1',
+      taskId: 'c1',
+      observedFailure: 'nothing failed; checking acceptance quality',
+      scope: 'this task only',
+      localizedCause: 'the criterion command is a tautology',
+      evidenceRefs: ['e1'],
+      reviewRefs: ['c1#r1'],
+      confidence: 'low',
+      proposals: [],
+      relatedTaskIds: ['c2'],
+    }, 'tester')
+    await service.recordObligationIn(storeId, {
+      obligationId: 'o1',
+      goal: 'artifact "bemu_trace" required by task "c2" does not exist in the task store',
+      criterion: 'the task store holds evidence or an artifact named "bemu_trace"',
+      sourceTaskId: 'c2',
+    }, 'tester')
     const before = await service.snapshotIn(storeId)
     await Promise.all(h.disposers.map(dispose => dispose()))
 

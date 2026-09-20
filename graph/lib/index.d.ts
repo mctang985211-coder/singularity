@@ -77,6 +77,7 @@ declare class GraphState {
 //#region src/index.d.ts
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
+    /** One agent-topology mutation in a per-graph store; the GraphEvent union that GraphState replays on load. */
     'graph/event': GraphEvent;
   }
 }

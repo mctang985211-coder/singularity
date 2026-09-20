@@ -10,7 +10,10 @@ import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import type {
   CapabilityManifest,
   DependencyEdge,
+  Diagnosis,
   EvidenceBundle,
+  Obligation,
+  ReviewRecord,
   RunId,
   RunStatus,
   TaskEvent,
@@ -29,6 +32,7 @@ export { TaskState } from './service/state.ts'
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
+    /** One task-store mutation in a per-task store; the TaskEvent union that TaskState replays on load. */
     'task/event': TaskEvent
   }
 }
@@ -280,6 +284,18 @@ export class TaskService extends Service {
 
   async recordEvidenceIn(storeId: string, evidence: EvidenceBundle, actor: string): Promise<void> {
     await this.commitIn(storeId, [event('EvidenceProduced', { taskId: evidence.taskId, runId: evidence.taskRunId, actor, payload: { evidence } })])
+  }
+
+  async recordReviewIn(storeId: string, review: ReviewRecord, actor: string): Promise<void> {
+    await this.commitIn(storeId, [event('ReviewRecorded', { taskId: review.taskId, runId: review.runId, actor, payload: { review } })])
+  }
+
+  async recordDiagnosisIn(storeId: string, diagnosis: Diagnosis, actor: string): Promise<void> {
+    await this.commitIn(storeId, [event('DiagnosisRecorded', { taskId: diagnosis.taskId, actor, payload: { diagnosis } })])
+  }
+
+  async recordObligationIn(storeId: string, obligation: Obligation, actor: string): Promise<void> {
+    await this.commitIn(storeId, [event('ObligationRecorded', { taskId: obligation.sourceTaskId, actor, payload: { obligation } })])
   }
 
   async recordHandoffIn(storeId: string, handoff: TaskHandoff, actor: string): Promise<void> {

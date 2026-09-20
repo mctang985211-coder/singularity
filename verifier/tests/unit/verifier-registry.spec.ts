@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
@@ -11,7 +11,7 @@ import type {
   Verifier,
   VerifyRequest,
 } from '../../../task/src/types.ts'
-import { VerifierRegistry } from '../../src/index.ts'
+import { LOG_TAIL_MAX_CHARS, LOG_TAIL_MAX_LINES, ReviewVerifier, VerifierRegistry } from '../../src/index.ts'
 
 const NOW = '2026-09-16T00:00:00.000Z'
 const STORE = 'sg-t-root-session'
@@ -60,6 +60,7 @@ function run(overrides: Partial<TaskRun> = {}): TaskRun {
 
 function harness(options: { task: TaskInstance; run?: TaskRun; children?: TaskInstance[] }) {
   const recorded: EvidenceBundle[] = []
+  const warnings: string[] = []
   const taskService = {
     runIn: vi.fn(async (_storeId: string, runId: string) => ({ ...(options.run ?? run()), runId })),
     taskIn: vi.fn(async () => options.task),
@@ -71,8 +72,9 @@ function harness(options: { task: TaskInstance; run?: TaskRun; children?: TaskIn
   const ctx = {
     reflect: { provide: () => {} },
     task: taskService,
+    logger: () => ({ warn: (message: string) => { warnings.push(message) } }),
   }
-  return { ctx, taskService, recorded }
+  return { ctx, taskService, recorded, warnings }
 }
 
 async function setup(options: { task: TaskInstance; run?: TaskRun; children?: TaskInstance[] }) {
@@ -219,5 +221,157 @@ describe('VerifierRegistry evidence bundles', () => {
     })
     const bundle = await registry.verifyRun(STORE, 'r1')
     expect(bundle.verifierResults[0]).toMatchObject({ criterionId: 'cmp', verifierId: 'composite', status: 'fail' })
+  })
+})
+
+describe('VerifierRegistry logTail', () => {
+  test('returns the excerpt a failed command logged, addressed by its relative logRef', async () => {
+    const { registry, cwd } = await setup({
+      task: task([criterion({ command: 'node -e "console.log(\'boom\'); process.exit(1)"' })]),
+    })
+    const bundle = await registry.verifyRun(STORE, 'r1', { cwd })
+    const tail = await registry.logTail(bundle.verifierResults[0]!.logRef!)
+    expect(tail).toBe('boom')
+  })
+
+  test('truncates to the line and char caps, keeping the end of the log', async () => {
+    const { registry, evidenceRoot } = await setup({ task: task([]) })
+    await mkdir(join(evidenceRoot, STORE, 'r1'), { recursive: true })
+    const manyLines = Array.from({ length: LOG_TAIL_MAX_LINES + 20 }, (_item, index) => `line-${index}`).join('\n')
+    await writeFile(join(evidenceRoot, STORE, 'r1', 'lines.log'), manyLines)
+    const lineTail = await registry.logTail(`${STORE}/r1/lines.log`)
+    expect(lineTail).toBeDefined()
+    expect(lineTail!.split('\n')).toHaveLength(LOG_TAIL_MAX_LINES)
+    expect(lineTail).toContain(`line-${LOG_TAIL_MAX_LINES + 19}`)
+    expect(lineTail).not.toContain('line-19')
+
+    const longLine = 'x'.repeat(LOG_TAIL_MAX_CHARS + 500)
+    await writeFile(join(evidenceRoot, STORE, 'r1', 'long.log'), `prefix\n${longLine}`)
+    const charTail = await registry.logTail(`${STORE}/r1/long.log`)
+    expect(charTail).toBeDefined()
+    expect(charTail!.length).toBe(LOG_TAIL_MAX_CHARS)
+    expect(charTail).not.toContain('prefix')
+  })
+
+  test('missing logs and escapes resolve to undefined or a loud error, never a crash', async () => {
+    const { registry } = await setup({ task: task([]) })
+    expect(await registry.logTail(`${STORE}/r1/nope.log`)).toBeUndefined()
+    await expect(registry.logTail('../escape.log')).rejects.toThrow('escapes evidenceRoot')
+  })
+})
+
+describe('VerifierRegistry metadata and selftest (KISS §4.3, VRTC plan 2.2)', () => {
+  test('the three built-ins register with version, owner, and selftest — construction logs no warning', async () => {
+    const { registry, warnings } = await setup({ task: task([]) })
+    expect(warnings).toEqual([])
+    expect(registry.verifierIds()).toEqual(['command', 'composite', 'review'])
+  })
+
+  test('a registration without a selftest is warned, not refused', async () => {
+    const { registry, warnings } = await setup({ task: task([criterion()]) })
+    const custom: Verifier = {
+      id: 'custom-command',
+      supports: mode => mode === 'deterministic',
+      verify: async req => req.criteria.map(c => ({ criterionId: c.criterionId, status: 'pass' as const, verifierId: 'custom-command' })),
+    }
+    registry.register(custom)
+    expect(warnings).toEqual(['verifier "custom-command" registered without a selftest (no declared positive/negative known samples)'])
+    expect(registry.verifierIds()).toContain('custom-command')
+    const bundle = await registry.verifyRun(STORE, 'r1')
+    expect(bundle.verifierResults[0]!.verifierId).toBe('custom-command')
+  })
+
+  test('a registration carrying a selftest logs no warning', async () => {
+    const { registry, warnings } = await setup({ task: task([criterion()]) })
+    const custom: Verifier = {
+      id: 'self-tested',
+      version: '1',
+      owner: 'tests',
+      selftest: { positiveCases: ['known-good'], negativeCases: ['known-bad'] },
+      supports: mode => mode === 'deterministic',
+      verify: async req => req.criteria.map(c => ({ criterionId: c.criterionId, status: 'pass' as const, verifierId: 'self-tested' })),
+    }
+    registry.register(custom)
+    expect(warnings).toEqual([])
+    expect(registry.verifierIds()).toContain('self-tested')
+  })
+
+  test('the review verifier never auto-passes its declared positive sample', async () => {
+    const verifier = new ReviewVerifier()
+    const [result] = await verifier.verify({
+      taskId: 't1',
+      runId: 'r1',
+      criteria: [criterion({ verificationMode: 'review', command: undefined })],
+      cwd: '',
+      logDir: '',
+    })
+    expect(result!.status).toBe('inconclusive')
+  })
+})
+
+describe('VerifierRegistry verifierRef dispatch (KISS §4.1, VRTC plan 1.4)', () => {
+  test('a criterion with verifierRef dispatches to that verifier, not the mode winner', async () => {
+    // The task pins the built-in 'command' while a later registration also
+    // supports the mode — mode dispatch would pick the later one, so only the
+    // ref can explain a 'command' verdict.
+    const { registry } = await setup({ task: task([criterion({ verifierRef: 'command' })]) })
+    const custom: Verifier = {
+      id: 'custom-command',
+      selftest: { positiveCases: ['known-good'], negativeCases: ['known-bad'] },
+      supports: mode => mode === 'deterministic',
+      verify: async req => req.criteria.map(c => ({ criterionId: c.criterionId, status: 'fail' as const, verifierId: 'custom-command' })),
+    }
+    registry.register(custom)
+    const bundle = await registry.verifyRun(STORE, 'r1')
+    expect(bundle.verifierResults[0]!.verifierId).toBe('command')
+    expect(bundle.verifierResults[0]!.status).toBe('pass')
+  })
+
+  test('an unknown verifierRef settles inconclusive as a verifier-side unknown', async () => {
+    const { registry } = await setup({ task: task([criterion({ verifierRef: 'ghost' })]) })
+    const bundle = await registry.verifyRun(STORE, 'r1')
+    expect(bundle.verifierResults[0]).toEqual({
+      criterionId: 'c1',
+      status: 'inconclusive',
+      verifierId: 'ghost',
+      details: 'no verifier registered with id "ghost"',
+      unknownKind: 'verifier',
+    })
+    // The claim carries the kind too, so a reader never reopens the result.
+    expect(bundle.claims[0]!.unknownKind).toBe('verifier')
+  })
+
+  test('a pinned verifier that does not support the mode settles inconclusive as a verifier-side unknown', async () => {
+    const { registry } = await setup({
+      task: task([criterion({ verifierRef: 'review' })]),
+    })
+    const bundle = await registry.verifyRun(STORE, 'r1')
+    expect(bundle.verifierResults[0]).toEqual({
+      criterionId: 'c1',
+      status: 'inconclusive',
+      verifierId: 'review',
+      details: 'verifier "review" does not support mode "deterministic"',
+      unknownKind: 'verifier',
+    })
+  })
+
+  test('a verifier that throws settles inconclusive as a verifier-side unknown', async () => {
+    const { registry } = await setup({ task: task([criterion({ verifierRef: 'broken' })]) })
+    const broken: Verifier = {
+      id: 'broken',
+      selftest: { positiveCases: [], negativeCases: [] },
+      supports: mode => mode === 'deterministic',
+      verify: async () => { throw new Error('judge exploded') },
+    }
+    registry.register(broken)
+    const bundle = await registry.verifyRun(STORE, 'r1')
+    expect(bundle.verifierResults[0]).toEqual({
+      criterionId: 'c1',
+      status: 'inconclusive',
+      verifierId: 'broken',
+      details: 'judge exploded',
+      unknownKind: 'verifier',
+    })
+    expect(bundle.claims[0]!.unknownKind).toBe('verifier')
   })
 })

@@ -20,6 +20,17 @@ export interface CompositeTaskSource {
  */
 export class CompositeVerifier implements Verifier {
   readonly id = 'composite'
+  readonly version = '1'
+  readonly owner = 'singularity'
+  /**
+   * The distinguishing samples need a task store (the verdict reads child
+   * status), so they live in this package's tests:
+   * `tests/unit/composite-verifier.spec.ts` runs both.
+   */
+  readonly selftest = {
+    positiveCases: ['a task whose children are all verified (composite-verifier.spec.ts)'],
+    negativeCases: ['a task with an unverified child (composite-verifier.spec.ts)'],
+  }
 
   constructor(private readonly task: CompositeTaskSource) {}
 
