@@ -1,11 +1,12 @@
-import { appendFile, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { EvolutionService } from '../../src/evolution.ts'
 import type { GateAnswers, ProposeInput } from '../../src/evolution.ts'
+import type { SkillContentIdentity } from '../../src/replay.ts'
 import { editCapabilityRow, readCapabilityRowSource, restoreCapabilityRowSource } from '../../src/config-edit.ts'
 import { defineEvolutionApplyTool } from '../../src/tools/evolution-apply.ts'
 import { defineEvolutionCandidateTool } from '../../src/tools/evolution-candidate.ts'
@@ -21,6 +22,34 @@ import { assertReplayReport, compareReplaySides, overallReplayVerdict } from '..
 function fixtureCtx() {
   return { reflect: { provide: () => {} }, effect: () => {} } as never
 }
+
+/**
+ * P2-D race seam: wraps `node:fs/promises.readFile` so a test can replace a
+ * candidate SKILL.md on disk immediately after a read of it completes. Inert
+ * unless a test arms `onCandidateRead` — every other call passes straight
+ * through to the real fs.
+ */
+const candidateReadHooks = vi.hoisted(() => ({
+  onCandidateRead: undefined as undefined | ((path: string, readCount: number) => Promise<void> | void),
+}))
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  const read = actual.readFile as (path: unknown, options?: unknown) => Promise<unknown>
+  let candidateReads = 0
+  return {
+    ...actual,
+    readFile: async (path: unknown, options?: unknown) => {
+      const bytes = await read(path, options)
+      const asPath = String(path)
+      if (asPath.includes(`${sep}sandbox${sep}`) && asPath.endsWith(`${sep}SKILL.md`)) {
+        candidateReads += 1
+        await candidateReadHooks.onCandidateRead?.(asPath, candidateReads)
+      }
+      return bytes
+    },
+  } as typeof actual
+})
 
 async function service() {
   const root = await mkdtemp(join(tmpdir(), 'evolution-'))
@@ -54,7 +83,12 @@ function gateAnswers(refs: string[]): GateAnswers {
 const VERSION_SET = { taskDefinition: 'v3', verifier: 'v1' }
 
 /** A minimal executed replay report over one comparison, for service-level state-machine tests. */
-function replayReport(proposalId: string, targetType: ProposeInput['targetType'], overrides: Record<string, unknown> = {}) {
+function replayReport(
+  proposalId: string,
+  targetType: ProposeInput['targetType'],
+  overrides: Record<string, unknown> = {},
+  candidateContent?: SkillContentIdentity,
+) {
   return {
     formatVersion: 1,
     proposalId,
@@ -77,8 +111,17 @@ function replayReport(proposalId: string, targetType: ProposeInput['targetType']
       verdictMatch: true, criteriaDiff: [], relation: 'not-worse',
     }] },
     verdict: 'not-worse',
+    // P2: a skill report names the candidate content identity. Callers walking
+    // a real skill proposal pass the one prepare recorded; the placeholder
+    // below is shape-valid but deliberately fails the service's equality check.
+    ...(targetType === 'skill' ? { candidateContent: candidateContent ?? { name: 'verify', sha256: '0'.repeat(64) } } : {}),
     ...overrides,
   }
+}
+
+/** The candidate content identity prepare recorded for a skill proposal. */
+async function skillIdentity(svc: EvolutionService, proposalId: string): Promise<SkillContentIdentity> {
+  return (await svc.get(proposalId)).prepared!.skillContent!
 }
 
 describe('EvolutionService ledger', () => {
@@ -556,7 +599,7 @@ describe('EvolutionService prepared state machine', () => {
     const evidenceFile = join(root, 'regression.log')
     await writeFile(evidenceFile, 'ok')
     await svc.prepare('s1', 'root-1')
-    await svc.replay('s1', 'root-1', replayReport('s1', 'skill'))
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, await skillIdentity(svc, 's1')))
     const replayed = await svc.get('s1')
     expect(replayed.status).toBe('replayed')
     expect(replayed.replayed).toEqual({
@@ -605,6 +648,8 @@ describe('EvolutionService sandbox materialization', () => {
       sandbox: 'sandbox/s1',
       mechanical: true,
       champion: 'captured',
+      // P2: the identity is the SHA-256 of the exact materialized bytes
+      skillContent: { name: 'verify', sha256: createHash('sha256').update('new skill text', 'utf8').digest('hex') },
       files: ['skills/verify/SKILL.md', 'champion/skills/verify/SKILL.md'],
     })
     expect(await readFile(join(root, 'sandbox', 's1', 'skills', 'verify', 'SKILL.md'), 'utf8')).toBe('new skill text')
@@ -787,6 +832,8 @@ describe('EvolutionService replay compatibility', () => {
       sandbox: 'sandbox/s1',
       mechanical: true,
       champion: 'captured',
+      // P2: the content identity survives the reopen unchanged
+      skillContent: { name: 'verify', sha256: createHash('sha256').update('new', 'utf8').digest('hex') },
       files: ['skills/verify/SKILL.md', 'champion/skills/verify/SKILL.md'],
     })
   })
@@ -1013,7 +1060,7 @@ describe('EvolutionService replay', () => {
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: 'x' })
     await expect(svc.replay('s1', 'root-1', replayReport('s1', 'skill'))).rejects.toThrow('cannot record "replayed"')
     await svc.prepare('s1', 'root-1')
-    await svc.replay('s1', 'root-1', replayReport('s1', 'skill'))
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, await skillIdentity(svc, 's1')))
     await expect(svc.replay('s1', 'root-1', replayReport('s1', 'skill'))).rejects.toThrow('cannot record "replayed"')
   })
 
@@ -1044,7 +1091,7 @@ describe('EvolutionService replay', () => {
     await svc.propose(skillProposal, 'root-1')
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: 'x' })
     await svc.prepare('s1', 'root-1')
-    await svc.replay('s1', 'root-1', replayReport('s1', 'skill'))
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, await skillIdentity(svc, 's1')))
     const evidenceFile = join(root, 'regression.log')
     await writeFile(evidenceFile, 'ok')
     await expect(svc.gate('s1', gateAnswers([evidenceFile]), 'root-1'))
@@ -1059,7 +1106,7 @@ describe('EvolutionService replay', () => {
     await svc.propose(skillProposal, 'root-1')
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: 'x' })
     await svc.prepare('s1', 'root-1')
-    await svc.replay('s1', 'root-1', replayReport('s1', 'skill'))
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, await skillIdentity(svc, 's1')))
     await rm(join(root, 'sandbox', 's1', 'replay-report.json'))
     await expect(svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1'))
       .rejects.toThrow('no longer exists under the ledger root')
@@ -1115,7 +1162,7 @@ describe('EvolutionService replay', () => {
     await svc.propose(skillProposal, 'root-1')
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: 'x' })
     await svc.prepare('s1', 'root-1')
-    await svc.replay('s1', 'root-1', replayReport('s1', 'skill'))
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, await skillIdentity(svc, 's1')))
     const live = await svc.list()
     const reopened = new EvolutionService(fixtureCtx(), { root, skillRoot })
     expect(await reopened.list()).toEqual(live)
@@ -1526,8 +1573,8 @@ async function walkToDecided(
 ) {
   await svc.propose(input, 'root-1')
   await svc.candidate(input.proposalId, VERSION_SET, 'root-1', mutation)
-  await svc.prepare(input.proposalId, 'root-1', champion)
-  await svc.replay(input.proposalId, 'root-1', replayReport(input.proposalId, input.targetType))
+  const prepared = await svc.prepare(input.proposalId, 'root-1', champion)
+  await svc.replay(input.proposalId, 'root-1', replayReport(input.proposalId, input.targetType, {}, prepared.prepared!.skillContent))
   await svc.gate(input.proposalId, gateAnswers([`sandbox/${input.proposalId}/replay-report.json`]), 'root-1')
   await svc.decide(input.proposalId, 'PROMOTE', 'root-1', 'approval:call-0')
 }
@@ -1591,7 +1638,8 @@ describe('replay evidence integrity and promotion', () => {
       await svc.prepare(id, 'root-1')
       const report = replayReport(id, input.targetType, scenario === 'manual'
         ? { mode: 'manual', manualReason: 'executor unavailable', observed: [], verdict: 'manual' }
-        : scenario === 'missing holdout' ? { holdout: { executed: false, tasks: [] } } : {})
+        : scenario === 'missing holdout' ? { holdout: { executed: false, tasks: [] } } : {},
+        await skillIdentity(svc, id))
       if (scenario === 'regressing holdout') {
         const comparison = report.holdout.tasks[0]!
         comparison.candidate.outcome = 'failed'
@@ -1617,7 +1665,7 @@ describe('replay evidence integrity and promotion', () => {
       await svc.propose(skillProposal, 'root-1')
       await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: 'candidate' })
       await svc.prepare('s1', 'root-1')
-      await svc.replay('s1', 'root-1', replayReport('s1', 'skill'))
+      await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, await skillIdentity(svc, 's1')))
       const refs = ['sandbox/s1/replay-report.json']
       if (stage !== 'gate') await svc.gate('s1', gateAnswers(refs), 'root-1')
       if (stage === 'apply') await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:decide')
@@ -1703,7 +1751,7 @@ describe('EvolutionService apply/rollback state machine', () => {
     await svc.propose(skillProposal, 'root-1')
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: '# new\n' })
     await svc.prepare('s1', 'root-1')
-    await svc.replay('s1', 'root-1', replayReport('s1', 'skill'))
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, await skillIdentity(svc, 's1')))
     await svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')
     await svc.decide('s1', decision, 'root-1', 'approval:call-1')
     await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow(
@@ -1720,7 +1768,7 @@ describe('EvolutionService apply/rollback state machine', () => {
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: '# new\n' })
     await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('cannot record "applied"')
     await svc.prepare('s1', 'root-1')
-    await svc.replay('s1', 'root-1', replayReport('s1', 'skill'))
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, await skillIdentity(svc, 's1')))
     await svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')
     await expect(svc.rollback('s1', 'root-1', 'approval:call-1')).rejects.toThrow('cannot record "rolledback"')
     await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-1')
@@ -1778,7 +1826,7 @@ describe('EvolutionService apply/rollback state machine', () => {
     await svc.propose(skillProposal, 'root-1')
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: '# new\n' })
     await svc.prepare('s1', 'root-1')
-    await svc.replay('s1', 'root-1', replayReport('s1', 'skill'))
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, await skillIdentity(svc, 's1')))
     await svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')
     await svc.decide('s1', 'REJECT', 'root-1', 'approval:call-1')
     const forged = { formatVersion: 1, kind: 'applied', proposalId: 's1', targets: ['/x'], approvalRef: 'approval:call-9', actor: 'x', at: 'now' }
@@ -1791,7 +1839,7 @@ describe('EvolutionService apply/rollback state machine', () => {
     await svc2.propose(skillProposal, 'root-1')
     await svc2.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: '# new\n' })
     await svc2.prepare('s1', 'root-1')
-    await svc2.replay('s1', 'root-1', replayReport('s1', 'skill'))
+    await svc2.replay('s1', 'root-1', replayReport('s1', 'skill', {}, await skillIdentity(svc2, 's1')))
     await svc2.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')
     await svc2.decide('s1', 'PROMOTE', 'root-1', 'approval:call-1')
     const malformed = { formatVersion: 1, kind: 'applied', proposalId: 's1', targets: [], approvalRef: '', actor: 'x', at: 'now' }
@@ -1951,6 +1999,424 @@ describe('EvolutionService apply/rollback production writes', () => {
     const rolledback = await svc.rollback('c1', 'root-1', 'approval:call-2')
     expect(await readFile(configFile, 'utf8')).toBe(CONFIG_FIXTURE)
     expect(rolledback.capability).toEqual({ name: 'research-plus', entry: null })
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/* P2: single-file skill candidate content binding. prepare records    */
+/* the SHA-256 of the materialized SKILL.md; the replay report, every   */
+/* gate, and the apply write re-verify that exact content.              */
+/* ------------------------------------------------------------------ */
+
+const SKILL_CANDIDATE = '# new verify skill\n\nwith a trailing newline\n'
+const skillCandidateFile = (root: string, proposalId = 's1') => join(root, 'sandbox', proposalId, 'skills', 'verify', 'SKILL.md')
+
+/** propose → candidate → prepare a skill proposal; returns the recorded content identity. */
+async function prepareSkill(svc: EvolutionService, content: string = SKILL_CANDIDATE) {
+  await svc.propose(skillProposal, 'root-1')
+  await svc.candidate('s1', { skill: 'v2' }, 'root-1', { name: 'verify', content })
+  const prepared = await svc.prepare('s1', 'root-1')
+  return prepared.prepared!.skillContent!
+}
+
+/** A pre-binding (pre-P2) skill ledger: no skillContent, no reportDigest, sandbox files on disk. */
+async function writeLegacySkillLedger(svc: EvolutionService, root: string, upTo: 'gated' | 'applied') {
+  await mkdir(join(root, 'sandbox', 's1', 'skills', 'verify'), { recursive: true })
+  await mkdir(join(root, 'sandbox', 's1', 'champion', 'skills', 'verify'), { recursive: true })
+  await writeFile(join(root, 'sandbox', 's1', 'skills', 'verify', 'SKILL.md'), 'candidate')
+  await writeFile(join(root, 'sandbox', 's1', 'champion', 'skills', 'verify', 'SKILL.md'), 'champion bytes')
+  const at = (minute: number) => `2026-09-16T09:${String(minute).padStart(2, '0')}:00.000Z`
+  const lines: Record<string, unknown>[] = [
+    { formatVersion: 1, kind: 'proposed', proposalId: 's1', targetType: 'skill', targetId: 'verify', baseVersion: 'v1', level: 'L2', rationale: 'the skill never mentions empty-input fixtures', sourceRefs: ['diagnosis:d1'], actor: 'root-1', at: at(0) },
+    { formatVersion: 1, kind: 'candidate', proposalId: 's1', versionSet: { skill: 'v1' }, mutation: { name: 'verify', content: 'candidate' }, actor: 'root-1', at: at(1) },
+    { formatVersion: 1, kind: 'prepared', proposalId: 's1', sandbox: 'sandbox/s1', mechanical: true, champion: 'captured', files: ['skills/verify/SKILL.md', 'champion/skills/verify/SKILL.md'], actor: 'root-1', at: at(2) },
+    { formatVersion: 1, kind: 'replayed', proposalId: 's1', report: 'sandbox/s1/replay-report.json', verdict: 'not-worse', tasks: [], actor: 'root-1', at: at(3) },
+    { formatVersion: 1, kind: 'gated', proposalId: 's1', gate: gateAnswers(['sandbox/s1/replay-report.json']), actor: 'root-1', at: at(4) },
+  ]
+  if (upTo === 'applied') {
+    lines.push(
+      { formatVersion: 1, kind: 'decided', proposalId: 's1', decision: 'PROMOTE', approvalRef: 'approval:decide', actor: 'root-1', at: at(5) },
+      { formatVersion: 1, kind: 'applied', proposalId: 's1', targets: ['/production/skills/verify/SKILL.md'], approvalRef: 'approval:apply', actor: 'root-1', at: at(6) },
+    )
+  }
+  await writeFile(join(root, 'proposals.jsonl'), `${lines.map(line => JSON.stringify(line)).join('\n')}\n`)
+}
+
+describe('skill candidate content binding (P2)', () => {
+  it('P2-A: an untouched candidate walks prepare → replay → gate → decide → apply with byte-identical production content', async () => {
+    const { svc, root, skillRoot } = await serviceWithProduction()
+    await mkdir(join(skillRoot, 'verify'), { recursive: true })
+    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), '# old verify skill\n')
+    const identity = await prepareSkill(svc)
+    // the digest is over the exact file bytes — no trim, no newline conversion
+    expect(identity).toEqual({ name: 'verify', sha256: createHash('sha256').update(SKILL_CANDIDATE, 'utf8').digest('hex') })
+    expect(await readFile(skillCandidateFile(root), 'utf8')).toBe(SKILL_CANDIDATE)
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, identity))
+    const evidenceFile = join(root, 'regression.log')
+    await writeFile(evidenceFile, 'ok')
+    await svc.gate('s1', gateAnswers([evidenceFile, 'sandbox/s1/replay-report.json']), 'root-1')
+    await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')
+    await svc.apply('s1', 'root-1', 'approval:call-1')
+
+    // production content is byte-equal to the verified candidate bytes
+    expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'))).toEqual(Buffer.from(SKILL_CANDIDATE, 'utf8'))
+    // report and ledger identity agree with the prepared record
+    const reportBytes = await readFile(join(root, 'sandbox', 's1', 'replay-report.json'))
+    expect(JSON.parse(reportBytes.toString('utf8')).candidateContent).toEqual(identity)
+    const applied = await svc.get('s1')
+    expect(applied.status).toBe('applied')
+    expect(applied.prepared!.skillContent).toEqual(identity)
+    expect(applied.replayed!.reportDigest).toBe(createHash('sha256').update(reportBytes).digest('hex'))
+  })
+
+  it('P2-A: the replay tool binds the report to the verified candidate, overlays the sandbox skills dir, and ignores production', async () => {
+    const { svc, root, skillRoot } = await serviceWithProduction()
+    await mkdir(join(skillRoot, 'verify'), { recursive: true })
+    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), '# old verify skill\n')
+    const identity = await prepareSkill(svc)
+    // rewriting production must not move the candidate identity: the replay
+    // validates and digests the sandbox candidate, never the production skill
+    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), '# production rewritten\n')
+    const replayTask = vi.fn(async () => ({ ...replayOutcome }))
+    const { ctx } = replayToolCtx(svc, replayTask)
+    const result = (await defineEvolutionReplayTool(ctx).execute(
+      { proposalId: 's1', taskIds: ['t-champ'] },
+      exec('root-1'),
+    )) as string
+    expect(result).toContain('proposal s1 [replayed] skill verify — verdict: not-worse')
+    expect(replayTask.mock.calls[0]![2]).toMatchObject({
+      lineage: 'evolution-replay:s1',
+      overlay: { extraSkillRoots: [join(root, 'sandbox', 's1', 'skills')] },
+    })
+    const report = JSON.parse(await readFile(join(root, 'sandbox', 's1', 'replay-report.json'), 'utf8'))
+    expect(report.candidateContent).toEqual(identity)
+    expect(identity.sha256).not.toBe(createHash('sha256').update('# production rewritten\n', 'utf8').digest('hex'))
+  })
+
+  it('P2-A: other targetTypes carry no skill fields and replay without a candidate identity', async () => {
+    const { svc, root } = await serviceWithProduction()
+    await svc.propose(capabilityProposal, 'root-1')
+    await svc.candidate('c1', { capabilityTable: 'config.yml#doc1' }, 'root-1', capabilityMutation)
+    const capability = await svc.prepare('c1', 'root-1', { capabilityEntry: { preset: 'standard' } })
+    expect(capability.prepared!.skillContent).toBeUndefined()
+    await svc.replay('c1', 'root-1', replayReport('c1', 'capability'))
+
+    await svc.propose(proposal, 'root-1')
+    await svc.candidate('p1', VERSION_SET, 'root-1', { baseVersion: 'v3', definition: { objective: 'new' } })
+    const definition = await svc.prepare('p1', 'root-1', { taskDefinition: null })
+    expect(definition.prepared!.skillContent).toBeUndefined()
+    await svc.replay('p1', 'root-1', replayReport('p1', 'task_definition'))
+
+    for (const proposalId of ['c1', 'p1']) {
+      const report = JSON.parse(await readFile(join(root, 'sandbox', proposalId, 'replay-report.json'), 'utf8'))
+      expect(report.candidateContent).toBeUndefined()
+    }
+  })
+
+  it('P2-B: a candidate modified after prepare is refused before any replay run, tool and service alike', async () => {
+    const { svc, root } = await serviceWithProduction()
+    const identity = await prepareSkill(svc)
+    await writeFile(skillCandidateFile(root), 'tampered after prepare\n')
+
+    const replayTask = vi.fn()
+    const { ctx } = replayToolCtx(svc, replayTask)
+    const viaTool = (await defineEvolutionReplayTool(ctx).execute({ proposalId: 's1', taskIds: ['t-champ'] }, exec('root-1'))) as string
+    expect(viaTool).toContain('evolution_replay rejected:')
+    expect(viaTool).toContain('no longer matches the content identity recorded at prepare')
+    expect(replayTask).not.toHaveBeenCalled()
+
+    // the same refusal through a direct service call, with an honest report
+    await expect(svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, identity)))
+      .rejects.toThrow('no longer matches the content identity recorded at prepare')
+    expect((await svc.get('s1')).status).toBe('prepared')
+    expect(existsSync(join(root, 'sandbox', 's1', 'replay-report.json'))).toBe(false)
+  })
+
+  it('P2-B: a candidate modified during the replay runs leaves no replayed state and production untouched', async () => {
+    const { svc, root, skillRoot } = await serviceWithProduction()
+    await mkdir(join(skillRoot, 'verify'), { recursive: true })
+    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), '# old verify skill\n')
+    await prepareSkill(svc)
+    // Deterministic hook: the replay run itself rewrites the candidate and
+    // leaves it changed. No sleeps, no timing races.
+    const replayTask = vi.fn(async () => {
+      await writeFile(skillCandidateFile(root), 'rewritten mid-replay\n')
+      return { ...replayOutcome }
+    })
+    const { ctx } = replayToolCtx(svc, replayTask)
+    const result = (await defineEvolutionReplayTool(ctx).execute({ proposalId: 's1', taskIds: ['t-champ'] }, exec('root-1'))) as string
+    expect(result).toContain('evolution_replay rejected:')
+    expect(result).toContain('no longer matches the content identity')
+    expect(replayTask).toHaveBeenCalledOnce()
+    expect((await svc.get('s1')).status).toBe('prepared')
+    expect(existsSync(join(root, 'sandbox', 's1', 'replay-report.json'))).toBe(false)
+    expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe('# old verify skill\n')
+  })
+
+  it('P2-B: a candidate modified after the replay is refused at decide and apply, with no successful-promotion state', async () => {
+    const { svc, root, skillRoot } = await serviceWithProduction()
+    await mkdir(join(skillRoot, 'verify'), { recursive: true })
+    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), '# old verify skill\n')
+    const identity = await prepareSkill(svc)
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, identity))
+    await svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')
+    await writeFile(skillCandidateFile(root), 'rewritten after the replay\n')
+
+    await expect(svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')).rejects.toThrow('no longer matches the content identity')
+    await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('cannot record "applied"')
+    expect((await svc.get('s1')).status).toBe('gated')
+    expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe('# old verify skill\n')
+    const kinds = (await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
+      .map(line => (JSON.parse(line) as { kind: string }).kind)
+    expect(kinds).not.toContain('decided')
+    expect(kinds).not.toContain('applied')
+  })
+
+  it('P2-C: refuses a deleted candidate and a directory in its place', async () => {
+    const { svc, root } = await serviceWithProduction()
+    await prepareSkill(svc)
+    await rm(skillCandidateFile(root))
+    await expect(svc.readSkillCandidate('s1')).rejects.toThrow('is missing under')
+    await expect(svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, await skillIdentity(svc, 's1'))))
+      .rejects.toThrow('is missing under')
+
+    await mkdir(skillCandidateFile(root))
+    await expect(svc.readSkillCandidate('s1')).rejects.toThrow('is not a regular file')
+    expect((await svc.get('s1')).status).toBe('prepared')
+  })
+
+  it('P2-C: refuses a symlinked candidate file or ancestor and never writes the link target', async () => {
+    const { svc, dir, root, skillRoot } = await serviceWithProduction()
+    await mkdir(join(skillRoot, 'verify'), { recursive: true })
+    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), '# old verify skill\n')
+    const identity = await prepareSkill(svc)
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, identity))
+    await svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')
+    await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')
+
+    const outside = join(dir, 'outside')
+    await mkdir(outside, { recursive: true })
+    await writeFile(join(outside, 'SKILL.md'), 'external content\n')
+    // the skill directory itself becomes a symlink to the outside target
+    const verifyDir = join(root, 'sandbox', 's1', 'skills', 'verify')
+    await rm(verifyDir, { recursive: true, force: true })
+    await symlink(outside, verifyDir)
+    await expect(svc.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('is a symbolic link')
+    expect(await readFile(join(outside, 'SKILL.md'), 'utf8')).toBe('external content\n')
+    expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe('# old verify skill\n')
+    expect((await svc.get('s1')).status).toBe('decided')
+
+    // the candidate file itself as a symlink is refused at replay time
+    await rm(verifyDir)
+    await mkdir(verifyDir, { recursive: true })
+    await writeFile(join(outside, 'SKILL.md'), 'external content\n')
+    await symlink(join(outside, 'SKILL.md'), skillCandidateFile(root))
+    await expect(svc.readSkillCandidate('s1')).rejects.toThrow('is a symbolic link')
+  })
+
+  it('P2-D: apply writes exactly the verified bytes when the source is replaced mid-read', async () => {
+    const { svc, root, skillRoot, presetRoot, configFile } = await serviceWithProduction()
+    await mkdir(join(skillRoot, 'verify'), { recursive: true })
+    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), '# old verify skill\n')
+    const identity = await prepareSkill(svc)
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, identity))
+    await svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')
+    await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')
+
+    const candidate = skillCandidateFile(root)
+    const replacement = 'replaced after the candidate read\n'
+    let reads = 0
+    let fired = 0
+    candidateReadHooks.onCandidateRead = async path => {
+      if (path !== candidate) return
+      reads += 1
+      // apply reads the candidate twice — checkPromotion's precheck, then the
+      // write read. The source is replaced only after that second read
+      // completes, deterministically, with no sleep-based race.
+      if (reads === 2) {
+        fired += 1
+        await writeFile(candidate, replacement)
+      }
+    }
+    try {
+      await svc.apply('s1', 'root-1', 'approval:call-1')
+    } finally {
+      candidateReadHooks.onCandidateRead = undefined
+    }
+    expect(fired).toBe(1)
+    // production carries the verified bytes; the replacement never reached it
+    expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'))).toEqual(Buffer.from(SKILL_CANDIDATE, 'utf8'))
+    expect(await readFile(candidate, 'utf8')).toBe(replacement)
+    // and the replaced source can no longer verify for any later stage
+    const reopened = new EvolutionService(fixtureCtx(), { root, skillRoot, presetRoot, configFile })
+    await expect(reopened.checkPromotion('s1')).rejects.toThrow('no longer matches the content identity')
+  })
+
+  it('P2-E: refuses a skill replay report whose candidate identity is missing or forged, direct service calls included', async () => {
+    const { svc, root } = await serviceWithProduction()
+    const identity = await prepareSkill(svc)
+    const base = replayReport('s1', 'skill', {}, identity)
+    const { candidateContent: _missing, ...withoutIdentity } = base
+    const forged = [
+      ['missing', withoutIdentity],
+      ['a forged digest', { ...base, candidateContent: { name: 'verify', sha256: 'a'.repeat(64) } }],
+      ['a forged name', { ...base, candidateContent: { name: 'evil', sha256: identity.sha256 } }],
+    ] as const
+    for (const [label, report] of forged) {
+      await expect(svc.replay('s1', 'root-1', report), label).rejects.toThrow(/candidateContent|content identity/)
+      expect((await svc.get('s1')).status).toBe('prepared')
+    }
+    expect(existsSync(join(root, 'sandbox', 's1', 'replay-report.json'))).toBe(false)
+    // the schema check itself refuses a hand-built report with no identity
+    expect(() => assertReplayReport(skillProposal, withoutIdentity)).toThrow('must carry candidateContent')
+
+    // even a recorded report whose identity was stripped — with the report
+    // digest re-forged to match — cannot back the gate or a promotion
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, identity))
+    const reportPath = join(root, 'sandbox', 's1', 'replay-report.json')
+    const stripped = JSON.parse(await readFile(reportPath, 'utf8'))
+    delete stripped.candidateContent
+    const strippedBytes = Buffer.from(`${JSON.stringify(stripped, null, 2)}\n`, 'utf8')
+    await writeFile(reportPath, strippedBytes)
+    const ledgerPath = join(root, 'proposals.jsonl')
+    const lines = (await readFile(ledgerPath, 'utf8')).trim().split('\n')
+    const replayedIndex = lines.findIndex(line => (JSON.parse(line) as { kind: string }).kind === 'replayed')
+    const replayedRecord = JSON.parse(lines[replayedIndex]!)
+    replayedRecord.reportDigest = createHash('sha256').update(strippedBytes).digest('hex')
+    lines[replayedIndex] = JSON.stringify(replayedRecord)
+    await writeFile(ledgerPath, `${lines.join('\n')}\n`)
+    const reopened = new EvolutionService(fixtureCtx(), { root })
+    await expect(reopened.checkPromotion('s1')).rejects.toThrow('must carry candidateContent')
+    await expect(reopened.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')).rejects.toThrow('must carry candidateContent')
+    expect((await reopened.get('s1')).status).toBe('replayed')
+  })
+
+  it('P2-F: a reopened service enforces the same identity checks', async () => {
+    const { svc, root, skillRoot, presetRoot, configFile } = await serviceWithProduction()
+    await mkdir(join(skillRoot, 'verify'), { recursive: true })
+    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), '# old verify skill\n')
+    const identity = await prepareSkill(svc)
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, identity))
+    await svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')
+    await writeFile(skillCandidateFile(root), 'rewritten across a restart\n')
+
+    const reopened = new EvolutionService(fixtureCtx(), { root, skillRoot, presetRoot, configFile })
+    await expect(reopened.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')).rejects.toThrow('no longer matches the content identity')
+    await expect(reopened.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('cannot record "applied"')
+    expect((await reopened.get('s1')).status).toBe('gated')
+    expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe('# old verify skill\n')
+  })
+
+  it('P2-F: a pre-binding ledger stays readable, its applied object still rolls back, and its un-applied skill cannot newly promote', async () => {
+    const { svc, root, skillRoot, presetRoot, configFile } = await serviceWithProduction()
+    await writeLegacySkillLedger(svc, root, 'applied')
+    await mkdir(join(skillRoot, 'verify'), { recursive: true })
+    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), 'applied bytes')
+    const reopened = new EvolutionService(fixtureCtx(), { root, skillRoot, presetRoot, configFile })
+    // readable
+    expect((await reopened.get('s1')).status).toBe('applied')
+    expect((await reopened.get('s1')).prepared!.skillContent).toBeUndefined()
+    // the old applied object still rolls back
+    const rolledback = await reopened.rollback('s1', 'root-1', 'approval:rollback')
+    expect(rolledback.proposal.status).toBe('rolledback')
+    expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe('champion bytes')
+
+    // an old un-applied skill candidate cannot bypass the new checks
+    const gatedRoot = await mkdtemp(join(tmpdir(), 'evolution-legacy-'))
+    await writeLegacySkillLedger(new EvolutionService(fixtureCtx(), { root: gatedRoot }), gatedRoot, 'gated')
+    const legacy = new EvolutionService(fixtureCtx(), { root: gatedRoot, skillRoot, presetRoot, configFile })
+    await expect(legacy.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0'))
+      .rejects.toThrow('prepared before content binding; propose a new candidate and re-evaluate it')
+    await expect(legacy.replay('s1', 'root-1', replayReport('s1', 'skill', {}, { name: 'verify', sha256: 'b'.repeat(64) })))
+      .rejects.toThrow('cannot record "replayed"')
+  })
+
+  it('P2-G: an illegitimate candidate is refused before the human is asked', async () => {
+    const { svc, root, skillRoot } = await serviceWithProduction()
+    await mkdir(join(skillRoot, 'verify'), { recursive: true })
+    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), '# old verify skill\n')
+    const identity = await prepareSkill(svc)
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, identity))
+    await svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')
+    await writeFile(skillCandidateFile(root), 'rewritten before the human review\n')
+
+    const { ctx, approval } = toolCtx(svc)
+    const result = (await defineEvolutionDecideTool(ctx).execute({ proposalId: 's1', decision: 'PROMOTE' }, exec('root-1'))) as string
+    expect(result).toContain('evolution_decide rejected:')
+    expect(result).toContain('no longer matches the content identity')
+    expect(approval.request).not.toHaveBeenCalled()
+    expect((await svc.get('s1')).status).toBe('gated')
+    expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe('# old verify skill\n')
+  })
+
+  it('P2-G: a candidate changed while the human approval is pending is refused by the service recheck', async () => {
+    const { svc, root, skillRoot } = await serviceWithProduction()
+    await mkdir(join(skillRoot, 'verify'), { recursive: true })
+    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), '# old verify skill\n')
+    const identity = await prepareSkill(svc)
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, identity))
+    await svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')
+
+    // The approval mock is the controllable hook: it rewrites the candidate
+    // while the human is deciding, then grants. The service entry rechecks.
+    const approval = {
+      request: vi.fn(async () => {
+        await writeFile(skillCandidateFile(root), 'rewritten while the human decided\n')
+        return 'allowed-once' as const
+      }),
+    }
+    const base = toolCtx(svc)
+    const ctx = { ...(base.ctx as unknown as Record<string, unknown>), approval } as never
+    const result = (await defineEvolutionDecideTool(ctx).execute({ proposalId: 's1', decision: 'PROMOTE' }, exec('root-1'))) as string
+    expect(approval.request).toHaveBeenCalledOnce()
+    expect(result).toContain('evolution_decide rejected:')
+    expect(result).toContain('no longer matches the content identity')
+    expect((await svc.get('s1')).status).toBe('gated')
+    const kinds = (await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
+      .map(line => (JSON.parse(line) as { kind: string }).kind)
+    expect(kinds).not.toContain('decided')
+    expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe('# old verify skill\n')
+  })
+
+  it('P2-G: the apply tool rechecks the identity after its own approval and writes nothing on a changed candidate', async () => {
+    const { svc, root, skillRoot } = await serviceWithProduction()
+    await mkdir(join(skillRoot, 'verify'), { recursive: true })
+    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), '# old verify skill\n')
+    const identity = await prepareSkill(svc)
+    await svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, identity))
+    await svc.gate('s1', gateAnswers(['sandbox/s1/replay-report.json']), 'root-1')
+    await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')
+
+    const approval = {
+      request: vi.fn(async () => {
+        await writeFile(skillCandidateFile(root), 'rewritten while the human decided\n')
+        return 'allowed-once' as const
+      }),
+    }
+    const base = toolCtx(svc)
+    const ctx = { ...(base.ctx as unknown as Record<string, unknown>), approval } as never
+    const result = (await defineEvolutionApplyTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))) as string
+    expect(approval.request).toHaveBeenCalledOnce()
+    expect(result).toContain('evolution_apply rejected:')
+    expect(result).toContain('no longer matches the content identity')
+    expect((await svc.get('s1')).status).toBe('decided')
+    expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe('# old verify skill\n')
+    const kinds = (await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
+      .map(line => (JSON.parse(line) as { kind: string }).kind)
+    expect(kinds).not.toContain('applied')
+  })
+
+  it('P2-F: a forged skillContent on a non-skill prepared record fails the fold', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evolution-forge-'))
+    const svc = new EvolutionService(fixtureCtx(), { root })
+    await svc.propose(capabilityProposal, 'root-1')
+    await svc.candidate('c1', VERSION_SET, 'root-1', capabilityMutation)
+    const forged = {
+      formatVersion: 1, kind: 'prepared', proposalId: 'c1', sandbox: 'sandbox/c1', mechanical: true,
+      champion: 'captured', files: ['x'], skillContent: { name: 'verify', sha256: 'c'.repeat(64) }, actor: 'x', at: 'now',
+    }
+    await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
+    await expect(new EvolutionService(fixtureCtx(), { root }).list()).rejects.toThrow('carries skillContent but targetType "capability" is not skill')
   })
 })
 
@@ -2304,7 +2770,7 @@ describe('evolution_apply / evolution_rollback tools', () => {
     await svc.propose({ ...skillProposal, proposalId: 's-rej' }, 'root-1')
     await svc.candidate('s-rej', VERSION_SET, 'root-1', { name: 'verify', content: '# new\n' })
     await svc.prepare('s-rej', 'root-1')
-    await svc.replay('s-rej', 'root-1', replayReport('s-rej', 'skill'))
+    await svc.replay('s-rej', 'root-1', replayReport('s-rej', 'skill', {}, await skillIdentity(svc, 's-rej')))
     await svc.gate('s-rej', gateAnswers(['sandbox/s-rej/replay-report.json']), 'root-1')
     await svc.decide('s-rej', 'REJECT', 'root-1', 'approval:call-1')
     expect((await applyTool.execute({ proposalId: 's-rej' }, exec('root-1'))) as string)

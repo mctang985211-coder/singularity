@@ -32,6 +32,21 @@ export interface ReplayCriterionSummary {
   exitCode?: number
 }
 
+/**
+ * The content identity of a single-file skill candidate (P2): the skill name
+ * plus the SHA-256 of the exact bytes of the materialized `SKILL.md`. Recorded
+ * at prepare, carried by the replay report, and re-verified before the
+ * `replayed` record is written, at every promotion gate, and on the apply
+ * write — so the chain can never validate one file's content and apply
+ * another's. Only `targetType: skill` candidates carry one.
+ */
+export interface SkillContentIdentity {
+  /** The skill name the mutation targets (`mutation.name`, the proposal's targetId). */
+  name: string
+  /** Lowercase SHA-256 hex over the exact file bytes — no trim, no newline conversion. */
+  sha256: string
+}
+
 /** One side of one task's comparison. The champion is the historical record; the candidate is the fresh replay run. */
 export interface ReplaySideSummary {
   taskId: string
@@ -70,6 +85,12 @@ export interface ReplayReport {
   /** `executed`: candidate runs really ran. `manual`: nothing executed (agent_preset v1) and `manualReason` says why. */
   mode: 'executed' | 'manual'
   manualReason?: string
+  /**
+   * Skill candidates only (P2): the candidate content identity this replay ran
+   * against — it must equal the `prepared` record's `skillContent`. Other
+   * targetTypes carry no skill fields.
+   */
+  candidateContent?: SkillContentIdentity
   /** Comparisons over `taskIds` (the tasks the proposal's evidence already covers). */
   observed: ReplayTaskComparison[]
   /** Comparisons over `holdoutTaskIds`; `executed: false` + empty tasks reads as "not run". */
@@ -188,6 +209,9 @@ function assertComparison(value: unknown, field: string, mode: 'executed' | 'man
  * `mode: 'manual'` (the preset roster scans constructor-fixed roots and cannot
  * mount a sandbox-materialized preset), and only a manual report may carry the
  * `manual` verdict — every other targetType must produce executed evidence.
+ * A skill report must additionally carry the candidate content identity
+ * (`candidateContent`) the replay ran against; equality with the prepared
+ * record is the service's check, not this schema's.
  */
 export function assertReplayReport(
   proposal: { proposalId: string; targetType: ProposalTargetType },
@@ -243,6 +267,20 @@ export function assertReplayReport(
   }
   if (report.mode === 'executed' && report.verdict !== overallReplayVerdict(comparisons)) {
     throw new Error('evolution: replay report verdict does not match its comparisons')
+  }
+  // P2 content binding: a skill report must name the candidate content
+  // identity it ran against (the service then checks it against the prepared
+  // record and the live file). Last, so the schema checks above keep their
+  // specific diagnostics.
+  if (proposal.targetType === 'skill') {
+    const identity = report.candidateContent
+    if (!isRecord(identity) || typeof identity.name !== 'string' || identity.name.length === 0
+      || typeof identity.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(identity.sha256)) {
+      throw new Error(
+        'evolution: a skill replay report must carry candidateContent { name, sha256 } bound at prepare — ' +
+        'evidence without the candidate content identity predates content binding; propose a new candidate and re-evaluate it',
+      )
+    }
   }
 }
 

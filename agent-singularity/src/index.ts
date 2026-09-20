@@ -71,6 +71,7 @@ export type {
   ReplaySideSummary,
   ReplayTaskComparison,
   ReplayVerdict,
+  SkillContentIdentity,
 } from './replay.ts'
 export { compareReplaySides, overallReplayVerdict, REPLAY_RELATIONS, REPLAY_VERDICTS } from './replay.ts'
 export type { ReplayedView } from './evolution.ts'

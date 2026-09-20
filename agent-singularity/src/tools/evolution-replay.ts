@@ -24,6 +24,12 @@
  * re-execution. The report lands at `sandbox/<proposalId>/replay-report.json`
  * and the ledger's `replayed` record cites it; `evolution_gate` requires that
  * path in its regression evidence.
+ *
+ * Skill candidates are content-bound (P2): the candidate file is verified
+ * against the SHA-256 prepare recorded before any run starts, the report names
+ * that identity, and the service re-verifies the file after the runs before the
+ * `replayed` record is written — a candidate that changed and stayed changed is
+ * refused, not recorded.
  * @module dsh-singularity-agent/tools/evolution-replay
  */
 
@@ -210,6 +216,19 @@ export function defineEvolutionReplayTool(ctx: Context) {
       if (!prepared.mechanical) {
         return `evolution_replay rejected: proposal ${proposal.proposalId} is bookkeeping-only (mechanical: false); nothing to replay — gate it directly with evolution_gate`
       }
+      // P2 content binding: before anything executes, the candidate file must
+      // still be the exact content prepare recorded (regular file, no symlinked
+      // path, digest match). The overlay below shadows this same file for the
+      // replay worker — never the production skill — so what runs is what was
+      // checked. The service re-verifies after the runs, before the replayed
+      // record is written.
+      if (proposal.targetType === 'skill') {
+        try {
+          await ctx.evolution.readSkillCandidate(proposal.proposalId)
+        } catch (error) {
+          return `evolution_replay rejected: ${error instanceof Error ? error.message : String(error)}`
+        }
+      }
       const lineage = replayLineage(proposal.proposalId)
 
       // agent_preset: the v1 manual boundary — record it, execute nothing.
@@ -282,6 +301,9 @@ export function defineEvolutionReplayTool(ctx: Context) {
             const capability = mutation as CapabilityMutation
             options = { overlay: { capabilityOverrides: { [capability.name]: capability.entry } } }
           } else if (proposal.targetType === 'skill') {
+            // The overlay root is exactly the dir holding the candidate file
+            // verified above (`skills/<name>/SKILL.md`) — the replay worker
+            // shadows the same-name production skill with it for that run only.
             options = { overlay: { extraSkillRoots: [join(sandboxAbs, 'skills')] } }
           } else if (proposal.targetType === 'task_definition') {
             const definition = JSON.parse(await readFile(join(sandboxAbs, 'task-definition.json'), 'utf8'))
@@ -316,6 +338,9 @@ export function defineEvolutionReplayTool(ctx: Context) {
         targetType: proposal.targetType,
         at: new Date().toISOString(),
         mode: 'executed',
+        // P2: a skill report names the candidate content identity the runs went
+        // through — the one verified above and re-verified by the service.
+        ...(proposal.targetType === 'skill' ? { candidateContent: prepared.skillContent } : {}),
         observed,
         holdout: { executed: holdout.length > 0, tasks: holdout },
         verdict: overallReplayVerdict([...observed, ...holdout]),

@@ -50,7 +50,9 @@ export function defineEvolutionListTool(ctx: Context) {
             lines.push('  prepared: bookkeeping only, nothing materialized')
           } else {
             const championText = view.champion === 'captured' ? 'champion snapshot captured' : 'champion: null'
-            lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, ${championText})`)
+            // P2: a skill candidate shows the content identity later stages verify against.
+            const contentText = view.skillContent === undefined ? '' : `, candidate content ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}…`
+            lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, ${championText}${contentText})`)
           }
         }
         if (proposal.replayed !== undefined) {

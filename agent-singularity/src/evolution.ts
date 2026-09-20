@@ -16,18 +16,26 @@
  * granted through the native approval seam (done by the tools, not here). L4
  * proposals, the five bookkeeping-only types, and task_definition never apply:
  * the ledger records them and a human edits production by hand.
+ *
+ * Single-file skill candidates additionally carry a content identity (P2):
+ * prepare records the SHA-256 of the exact bytes of the materialized
+ * `skills/<name>/SKILL.md`, the replay report must carry the same identity,
+ * and the `replayed` write, every promotion gate, and the apply write re-read
+ * and re-verify that file — so the chain cannot validate one file's content
+ * and apply another's. Identity is not functional correctness, and it binds
+ * skill candidates only.
  * @module dsh-singularity-agent
  */
 
-import { appendFile, cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { appendFile, cp, lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
 import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
-import type { ReplayRelation, ReplayReport, ReplayVerdict } from './replay.ts'
+import type { ReplayRelation, ReplayReport, ReplayVerdict, SkillContentIdentity } from './replay.ts'
 import { assertReplayPromotable, assertReplayReport, REPLAY_RELATIONS, REPLAY_VERDICTS } from './replay.ts'
 import { editCapabilityRow, readCapabilityRowSource, restoreCapabilityRowSource } from './config-edit.ts'
 import type { CapabilityRowResult } from './config-edit.ts'
@@ -41,6 +49,7 @@ export type {
   ReplaySideSummary,
   ReplayTaskComparison,
   ReplayVerdict,
+  SkillContentIdentity,
 } from './replay.ts'
 export { compareReplaySides, overallReplayVerdict, REPLAY_RELATIONS, REPLAY_VERDICTS } from './replay.ts'
 
@@ -159,6 +168,8 @@ export interface PreparedView {
   champion: ChampionState
   /** Capability prepares only (W19): where the champion snapshot came from; absent on pre-W19 records. */
   championSource?: ChampionSource
+  /** Skill prepares only (P2): the content identity recorded for the materialized candidate `SKILL.md`. */
+  skillContent?: SkillContentIdentity
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
   files: string[]
 }
@@ -253,6 +264,14 @@ export type EvolutionRecord =
       champion: ChampionState
       /** Capability prepares only (W19): where the champion snapshot came from; absent on pre-W19 records. */
       championSource?: ChampionSource
+      /**
+       * Skill prepares only (P2): the content identity of the materialized
+       * candidate `SKILL.md` — the skill name plus the SHA-256 of the exact
+       * file bytes. Absent on records written before content binding and on
+       * every non-skill targetType; those old skill candidates cannot be newly
+       * promoted without a fresh candidate and evaluation.
+       */
+      skillContent?: SkillContentIdentity
       /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
       files: string[]
       actor: string
@@ -458,6 +477,45 @@ function resolveWithin(base: string, rel: string): string {
     throw new Error(`evolution: sandbox path "${rel}" escapes ${base}`)
   }
   return abs
+}
+
+/** Lowercase SHA-256 hex over exact bytes — the content identity primitive (P2). */
+function sha256Hex(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+/**
+ * Read the file at `rel` under `root` as raw bytes, refusing anything but a
+ * real regular file (P2): the entry itself and every ancestor between `root`
+ * and it must not be a symbolic link, so a read can never land outside the
+ * ledger root through a redirected path even though the lexical path stays
+ * inside. A missing file, a directory in the file's place, or any other
+ * non-regular entry fails loudly. Node standard fs only.
+ */
+async function readVerifiedFile(root: string, rel: string): Promise<Buffer> {
+  const abs = resolveWithin(root, rel)
+  const steps = relative(root, abs).split(sep)
+  let current = root
+  for (const step of steps) {
+    current = join(current, step)
+    let stat
+    try {
+      stat = await lstat(current)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        throw new Error(`evolution: "${rel}" is missing under ${root} (${code === 'ENOTDIR' ? 'a path component is not a directory' : 'no such file or directory'})`)
+      }
+      throw error
+    }
+    if (stat.isSymbolicLink()) {
+      throw new Error(`evolution: "${current}" is a symbolic link; a candidate path and its ancestors must be real entries inside the ledger root`)
+    }
+    if (current === abs ? !stat.isFile() : !stat.isDirectory()) {
+      throw new Error(`evolution: "${current}" is not a regular ${current === abs ? 'file' : 'directory'}`)
+    }
+  }
+  return readFile(abs)
 }
 
 /**
@@ -800,6 +858,11 @@ export class EvolutionService extends Service {
    * records `champion: 'missing'` (champion: null). Non-mechanical mutations
    * materialize nothing and record `mechanical: false`. Materialization runs
    * before the ledger append; every write is confined to the sandbox dir.
+   *
+   * A skill candidate additionally records `skillContent` (P2): the name plus
+   * the SHA-256 of the exact bytes of the file that was actually materialized
+   * (read back from disk, never re-rendered from the mutation string), so
+   * replay, the gates, and apply can verify this exact content later.
    */
   async prepare(proposalId: string, actor: string, champion: PrepareChampion = {}): Promise<EvolutionProposal> {
     const current = await this.assertNext(proposalId, 'prepared')
@@ -814,6 +877,7 @@ export class EvolutionService extends Service {
     let sandbox: string | null = null
     let championState: ChampionState = 'none'
     let championSource: ChampionSource | undefined
+    let skillContent: SkillContentIdentity | undefined
     let files: string[] = []
     if (mechanical) {
       if (current.targetType === 'capability' && !('capabilityEntry' in champion)) {
@@ -829,6 +893,10 @@ export class EvolutionService extends Service {
       championState = written.champion
       championSource = written.championSource
       files = written.files
+      if (current.targetType === 'skill') {
+        const { name } = mutation as unknown as SkillMutation
+        skillContent = { name, sha256: sha256Hex(await readVerifiedFile(this.root, `${sandbox}/skills/${name}/SKILL.md`)) }
+      }
     }
     await this.append({
       formatVersion: 1,
@@ -838,6 +906,7 @@ export class EvolutionService extends Service {
       mechanical,
       champion: championState,
       ...(championSource === undefined ? {} : { championSource }),
+      ...(skillContent === undefined ? {} : { skillContent }),
       files,
       actor,
       at: new Date().toISOString(),
@@ -855,6 +924,13 @@ export class EvolutionService extends Service {
    * executed evidence). The report write is confined to the sandbox; the ledger
    * record cites it by root-relative path, and the gate later requires that
    * path in its regression evidence.
+   *
+   * For a skill candidate the service additionally binds the content identity
+   * (P2): the report must carry the same `candidateContent` prepare recorded,
+   * and the candidate file on disk must still hash to it. The tool re-checks
+   * before it runs anything; this check runs after the runs and before the
+   * record is written, so a modification that happened and persisted during
+   * the replay is refused instead of recorded.
    */
   async replay(proposalId: string, actor: string, report: unknown): Promise<EvolutionProposal> {
     const current = await this.assertNext(proposalId, 'replayed')
@@ -862,6 +938,9 @@ export class EvolutionService extends Service {
     const sandbox = current.prepared?.sandbox
     if (sandbox === undefined || sandbox === null) {
       throw new Error(`evolution: proposal "${proposalId}" names no sandbox; cannot place the replay report`)
+    }
+    if (current.targetType === 'skill') {
+      await this.assertSkillContentBound(current, report)
     }
     const rel = `${sandbox}/replay-report.json`
     const abs = resolveWithin(this.root, rel)
@@ -883,6 +962,35 @@ export class EvolutionService extends Service {
       at: new Date().toISOString(),
     })
     return this.get(proposalId)
+  }
+
+  /**
+   * The skill replay's content binding (P2), enforced on the service entry that
+   * writes the `replayed` record: the report's identity must equal the one
+   * prepare recorded, and the candidate file must still be those exact bytes.
+   * A candidate prepared before content binding, or one that changed and stayed
+   * changed, is refused with the same guidance — fix the candidate through a
+   * new proposal and evaluation; the append-only ledger never re-digests an old
+   * record.
+   */
+  private async assertSkillContentBound(proposal: EvolutionProposal, report: ReplayReport): Promise<void> {
+    const identity = proposal.prepared?.skillContent
+    if (identity === undefined) {
+      throw new Error(
+        `evolution: skill proposal "${proposal.proposalId}" was prepared before candidate content binding — ` +
+        'propose a new candidate and re-evaluate it; recorded identities are never re-digested',
+      )
+    }
+    if (report.candidateContent === undefined) {
+      throw new Error('evolution: a skill replay report must carry candidateContent { name, sha256 }')
+    }
+    if (report.candidateContent.name !== identity.name || report.candidateContent.sha256 !== identity.sha256) {
+      throw new Error(
+        `evolution: replay report candidate content identity { name: "${report.candidateContent.name}", sha256: ${report.candidateContent.sha256} } ` +
+        `does not match the identity prepared for proposal "${proposal.proposalId}" { name: "${identity.name}", sha256: ${identity.sha256} }`,
+      )
+    }
+    await this.readVerifiedSkillCandidate(proposal)
   }
 
   /**
@@ -998,7 +1106,49 @@ export class EvolutionService extends Service {
   async checkPromotion(proposalId: string): Promise<void> {
     const proposal = await this.get(proposalId)
     if (proposal.prepared?.mechanical !== true) return
+    // P2: the candidate bytes must still be the ones prepare recorded. This is
+    // the shared identity check — the tools run it before asking a human, and
+    // decide(PROMOTE) / apply run it again on the service entry, so a change
+    // that lands while the human is deciding is still refused.
+    if (proposal.targetType === 'skill') await this.readVerifiedSkillCandidate(proposal)
     assertReplayPromotable(await this.readRecordedReplay(proposal))
+  }
+
+  /**
+   * Read a prepared skill candidate's materialized bytes and verify them
+   * against the content identity recorded at prepare (P2). The one read path
+   * every stage shares: the replay tool's pre-execution check, the `replayed`
+   * record's post-execution recheck, every promotion gate, and the apply write.
+   * Throws — never silently re-digests — when the candidate file is missing,
+   * is not a regular file, its path crosses a symbolic link, or its bytes no
+   * longer match the recorded digest.
+   */
+  async readSkillCandidate(proposalId: string): Promise<Buffer> {
+    return this.readVerifiedSkillCandidate(await this.get(proposalId))
+  }
+
+  private async readVerifiedSkillCandidate(proposal: EvolutionProposal): Promise<Buffer> {
+    if (proposal.targetType !== 'skill') {
+      throw new Error(`evolution: candidate content identity binds skill proposals only, not "${proposal.targetType}"`)
+    }
+    const sandbox = proposal.prepared?.sandbox
+    const identity = proposal.prepared?.skillContent
+    if (sandbox == null || identity === undefined) {
+      throw new Error(
+        `evolution: skill proposal "${proposal.proposalId}" carries no recorded candidate content identity — ` +
+        'it was prepared before content binding; propose a new candidate and re-evaluate it (prepare records the SHA-256 of the materialized SKILL.md)',
+      )
+    }
+    const rel = `${sandbox}/skills/${identity.name}/SKILL.md`
+    const bytes = await readVerifiedFile(this.root, rel)
+    const digest = sha256Hex(bytes)
+    if (digest !== identity.sha256) {
+      throw new Error(
+        `evolution: skill candidate "${rel}" no longer matches the content identity recorded at prepare ` +
+        `(sha256 ${digest} != ${identity.sha256}) — propose a new candidate and re-evaluate it; recorded identities are never re-digested`,
+      )
+    }
+    return bytes
   }
 
   private async readRecordedReplay(proposal: EvolutionProposal): Promise<ReplayReport> {
@@ -1061,10 +1211,19 @@ export class EvolutionService extends Service {
           await rm(resolveWithin(this.skillRoot, name), { recursive: true, force: true })
           return { targets: [`${resolveWithin(this.skillRoot, name)} (deleted — the apply had created it)`] }
         }
-        const src = resolveWithin(this.root, direction === 'apply' ? `${sandbox}/skills/${name}/SKILL.md` : `${sandbox}/champion/skills/${name}/SKILL.md`)
-        const content = await readFile(src, 'utf8')
+        if (direction === 'apply') {
+          // P2: read the candidate once, verify the digest prepare recorded, and
+          // write exactly those verified bytes. The path is never re-read after
+          // the check, so a source replaced mid-apply cannot reach production
+          // unverified — the whole apply refuses instead.
+          const bytes = await this.readVerifiedSkillCandidate(proposal)
+          await mkdir(dirname(dst), { recursive: true })
+          await writeFile(dst, bytes)
+          return { targets: [dst] }
+        }
+        const content = await readVerifiedFile(this.root, `${sandbox}/champion/skills/${name}/SKILL.md`)
         await mkdir(dirname(dst), { recursive: true })
-        await writeFile(dst, content, 'utf8')
+        await writeFile(dst, content)
         return { targets: [dst] }
       }
       case 'agent_preset': {
@@ -1318,11 +1477,23 @@ export class EvolutionService extends Service {
               )
             }
           }
+          // P2: skillContent is optional (pre-binding records fold without it)
+          // but when present it must be a real identity on a skill proposal.
+          if (record.skillContent !== undefined) {
+            if (current.targetType !== 'skill') {
+              throw new Error(`evolution: prepared record for "${record.proposalId}" carries skillContent but targetType "${current.targetType}" is not skill`)
+            }
+            if (!isRecord(record.skillContent) || typeof record.skillContent.name !== 'string' || record.skillContent.name.length === 0
+              || typeof record.skillContent.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(record.skillContent.sha256)) {
+              throw new Error(`evolution: prepared record for "${record.proposalId}" has a malformed skillContent identity`)
+            }
+          }
           current.prepared = {
             sandbox: record.sandbox,
             mechanical: record.mechanical,
             champion: record.champion,
             ...(record.championSource === undefined ? {} : { championSource: record.championSource }),
+            ...(record.skillContent === undefined ? {} : { skillContent: { name: record.skillContent.name, sha256: record.skillContent.sha256 } }),
             files: [...record.files],
           }
           break

@@ -180,6 +180,20 @@ interface ReplayCriterionSummary {
   command?: string;
   exitCode?: number;
 }
+/**
+ * The content identity of a single-file skill candidate (P2): the skill name
+ * plus the SHA-256 of the exact bytes of the materialized `SKILL.md`. Recorded
+ * at prepare, carried by the replay report, and re-verified before the
+ * `replayed` record is written, at every promotion gate, and on the apply
+ * write — so the chain can never validate one file's content and apply
+ * another's. Only `targetType: skill` candidates carry one.
+ */
+interface SkillContentIdentity {
+  /** The skill name the mutation targets (`mutation.name`, the proposal's targetId). */
+  name: string;
+  /** Lowercase SHA-256 hex over the exact file bytes — no trim, no newline conversion. */
+  sha256: string;
+}
 /** One side of one task's comparison. The champion is the historical record; the candidate is the fresh replay run. */
 interface ReplaySideSummary {
   taskId: string;
@@ -215,6 +229,12 @@ interface ReplayReport {
   /** `executed`: candidate runs really ran. `manual`: nothing executed (agent_preset v1) and `manualReason` says why. */
   mode: 'executed' | 'manual';
   manualReason?: string;
+  /**
+   * Skill candidates only (P2): the candidate content identity this replay ran
+   * against — it must equal the `prepared` record's `skillContent`. Other
+   * targetTypes carry no skill fields.
+   */
+  candidateContent?: SkillContentIdentity;
   /** Comparisons over `taskIds` (the tasks the proposal's evidence already covers). */
   observed: ReplayTaskComparison[];
   /** Comparisons over `holdoutTaskIds`; `executed: false` + empty tasks reads as "not run". */
@@ -318,6 +338,8 @@ interface PreparedView {
   champion: ChampionState;
   /** Capability prepares only (W19): where the champion snapshot came from; absent on pre-W19 records. */
   championSource?: ChampionSource;
+  /** Skill prepares only (P2): the content identity recorded for the materialized candidate `SKILL.md`. */
+  skillContent?: SkillContentIdentity;
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
   files: string[];
 }
@@ -406,6 +428,14 @@ type EvolutionRecord = {
   champion: ChampionState;
   /** Capability prepares only (W19): where the champion snapshot came from; absent on pre-W19 records. */
   championSource?: ChampionSource;
+  /**
+   * Skill prepares only (P2): the content identity of the materialized
+   * candidate `SKILL.md` — the skill name plus the SHA-256 of the exact
+   * file bytes. Absent on records written before content binding and on
+   * every non-skill targetType; those old skill candidates cannot be newly
+   * promoted without a fresh candidate and evaluation.
+   */
+  skillContent?: SkillContentIdentity;
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
   files: string[];
   actor: string;
@@ -625,6 +655,11 @@ declare class EvolutionService extends Service {
    * records `champion: 'missing'` (champion: null). Non-mechanical mutations
    * materialize nothing and record `mechanical: false`. Materialization runs
    * before the ledger append; every write is confined to the sandbox dir.
+   *
+   * A skill candidate additionally records `skillContent` (P2): the name plus
+   * the SHA-256 of the exact bytes of the file that was actually materialized
+   * (read back from disk, never re-rendered from the mutation string), so
+   * replay, the gates, and apply can verify this exact content later.
    */
   prepare(proposalId: string, actor: string, champion?: PrepareChampion): Promise<EvolutionProposal>;
   /**
@@ -637,8 +672,25 @@ declare class EvolutionService extends Service {
    * executed evidence). The report write is confined to the sandbox; the ledger
    * record cites it by root-relative path, and the gate later requires that
    * path in its regression evidence.
+   *
+   * For a skill candidate the service additionally binds the content identity
+   * (P2): the report must carry the same `candidateContent` prepare recorded,
+   * and the candidate file on disk must still hash to it. The tool re-checks
+   * before it runs anything; this check runs after the runs and before the
+   * record is written, so a modification that happened and persisted during
+   * the replay is refused instead of recorded.
    */
   replay(proposalId: string, actor: string, report: unknown): Promise<EvolutionProposal>;
+  /**
+   * The skill replay's content binding (P2), enforced on the service entry that
+   * writes the `replayed` record: the report's identity must equal the one
+   * prepare recorded, and the candidate file must still be those exact bytes.
+   * A candidate prepared before content binding, or one that changed and stayed
+   * changed, is refused with the same guidance — fix the candidate through a
+   * new proposal and evaluation; the append-only ledger never re-digests an old
+   * record.
+   */
+  private assertSkillContentBound;
   /**
    * Move candidate → gated (manual candidates), prepared → gated
    * (bookkeeping-only mutations), or replayed → gated (mechanical mutations):
@@ -676,6 +728,17 @@ declare class EvolutionService extends Service {
   apply(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome>;
   /** Preflight for tools before asking for approval; mutation methods repeat the check. */
   checkPromotion(proposalId: string): Promise<void>;
+  /**
+   * Read a prepared skill candidate's materialized bytes and verify them
+   * against the content identity recorded at prepare (P2). The one read path
+   * every stage shares: the replay tool's pre-execution check, the `replayed`
+   * record's post-execution recheck, every promotion gate, and the apply write.
+   * Throws — never silently re-digests — when the candidate file is missing,
+   * is not a regular file, its path crosses a symbolic link, or its bytes no
+   * longer match the recorded digest.
+   */
+  readSkillCandidate(proposalId: string): Promise<Buffer>;
+  private readVerifiedSkillCandidate;
   private readRecordedReplay;
   /**
    * Move applied → rolledback: undo the apply. Champion captured → restore the
@@ -744,4 +807,4 @@ declare class SingularityAgent extends Service {
   constructor(ctx: Context);
 }
 //#endregion
-export { APPLYABLE_TARGET_TYPES, type AgentPresetMutation, type ApplyOutcome, type ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, type CapabilityMutation, type ChampionSource, type ChampionState, ESCALATION_TRIGGERS, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, type Escalation, type EscalationInput, type EscalationRecord, EscalationService, type EscalationTrigger, type EvolutionDecision, type EvolutionLevel, type EvolutionProposal, type EvolutionRecord, EvolutionService, type EvolutionStatus, type GateAnswers, type HitlAnswer, type HitlKind, type HitlPending, HitlService, type ListFilter, MECHANICAL_TARGET_TYPES, type MechanicalMutation, type PrepareChampion, type PreparedView, type ProposeInput, REPLAY_RELATIONS, REPLAY_VERDICTS, type ReplayCriterionDiff, type ReplayCriterionSummary, type ReplayRelation, type ReplayReport, type ReplaySideSummary, type ReplayTaskComparison, type ReplayVerdict, type ReplayedView, SingularityAgent, SingularityAgent as default, type SkillMutation, type TaskDefinitionMutation, applyTargets, compareReplaySides, mutationMechanical, overallReplayVerdict };
+export { APPLYABLE_TARGET_TYPES, type AgentPresetMutation, type ApplyOutcome, type ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, type CapabilityMutation, type ChampionSource, type ChampionState, ESCALATION_TRIGGERS, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, type Escalation, type EscalationInput, type EscalationRecord, EscalationService, type EscalationTrigger, type EvolutionDecision, type EvolutionLevel, type EvolutionProposal, type EvolutionRecord, EvolutionService, type EvolutionStatus, type GateAnswers, type HitlAnswer, type HitlKind, type HitlPending, HitlService, type ListFilter, MECHANICAL_TARGET_TYPES, type MechanicalMutation, type PrepareChampion, type PreparedView, type ProposeInput, REPLAY_RELATIONS, REPLAY_VERDICTS, type ReplayCriterionDiff, type ReplayCriterionSummary, type ReplayRelation, type ReplayReport, type ReplaySideSummary, type ReplayTaskComparison, type ReplayVerdict, type ReplayedView, SingularityAgent, SingularityAgent as default, type SkillContentIdentity, type SkillMutation, type TaskDefinitionMutation, applyTargets, compareReplaySides, mutationMechanical, overallReplayVerdict };

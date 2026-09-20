@@ -1,7 +1,7 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { appendFile, cp, lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { defineTool } from "@deepseek-ai/dsh-tools";
@@ -364,6 +364,9 @@ function assertComparison(value, field, mode) {
 * `mode: 'manual'` (the preset roster scans constructor-fixed roots and cannot
 * mount a sandbox-materialized preset), and only a manual report may carry the
 * `manual` verdict — every other targetType must produce executed evidence.
+* A skill report must additionally carry the candidate content identity
+* (`candidateContent`) the replay ran against; equality with the prepared
+* record is the service's check, not this schema's.
 */
 function assertReplayReport(proposal, report) {
 	if (!isRecord$3(report)) throw new Error("evolution: replay report must be an object");
@@ -390,6 +393,10 @@ function assertReplayReport(proposal, report) {
 	const candidateIds = comparisons.flatMap((item) => item.candidate === void 0 ? [] : [item.candidate.taskId]);
 	if (new Set(taskIds).size !== taskIds.length || new Set(candidateIds).size !== candidateIds.length || candidateIds.some((id) => taskIds.includes(id))) throw new Error("evolution: replay report observed and holdout must use distinct champion and candidate tasks");
 	if (report.mode === "executed" && report.verdict !== overallReplayVerdict(comparisons)) throw new Error("evolution: replay report verdict does not match its comparisons");
+	if (proposal.targetType === "skill") {
+		const identity = report.candidateContent;
+		if (!isRecord$3(identity) || typeof identity.name !== "string" || identity.name.length === 0 || typeof identity.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(identity.sha256)) throw new Error("evolution: a skill replay report must carry candidateContent { name, sha256 } bound at prepare — evidence without the candidate content identity predates content binding; propose a new candidate and re-evaluate it");
+	}
 }
 /** A human approval cannot substitute for two independent, non-regressing replay groups. */
 function assertReplayPromotable(report) {
@@ -705,6 +712,37 @@ function resolveWithin(base, rel) {
 	if (abs !== base && !abs.startsWith(`${base}${sep}`)) throw new Error(`evolution: sandbox path "${rel}" escapes ${base}`);
 	return abs;
 }
+/** Lowercase SHA-256 hex over exact bytes — the content identity primitive (P2). */
+function sha256Hex(bytes) {
+	return createHash("sha256").update(bytes).digest("hex");
+}
+/**
+* Read the file at `rel` under `root` as raw bytes, refusing anything but a
+* real regular file (P2): the entry itself and every ancestor between `root`
+* and it must not be a symbolic link, so a read can never land outside the
+* ledger root through a redirected path even though the lexical path stays
+* inside. A missing file, a directory in the file's place, or any other
+* non-regular entry fails loudly. Node standard fs only.
+*/
+async function readVerifiedFile(root, rel) {
+	const abs = resolveWithin(root, rel);
+	const steps = relative(root, abs).split(sep);
+	let current = root;
+	for (const step of steps) {
+		current = join(current, step);
+		let stat;
+		try {
+			stat = await lstat(current);
+		} catch (error) {
+			const code = error.code;
+			if (code === "ENOENT" || code === "ENOTDIR") throw new Error(`evolution: "${rel}" is missing under ${root} (${code === "ENOTDIR" ? "a path component is not a directory" : "no such file or directory"})`);
+			throw error;
+		}
+		if (stat.isSymbolicLink()) throw new Error(`evolution: "${current}" is a symbolic link; a candidate path and its ancestors must be real entries inside the ledger root`);
+		if (current === abs ? !stat.isFile() : !stat.isDirectory()) throw new Error(`evolution: "${current}" is not a regular ${current === abs ? "file" : "directory"}`);
+	}
+	return readFile(abs);
+}
 /**
 * Validate a candidate's mutation against the proposal's targetType. The four
 * mechanical types have fixed schemas and every path field is checked to stay
@@ -974,6 +1012,11 @@ var EvolutionService = class extends Service {
 	* records `champion: 'missing'` (champion: null). Non-mechanical mutations
 	* materialize nothing and record `mechanical: false`. Materialization runs
 	* before the ledger append; every write is confined to the sandbox dir.
+	*
+	* A skill candidate additionally records `skillContent` (P2): the name plus
+	* the SHA-256 of the exact bytes of the file that was actually materialized
+	* (read back from disk, never re-rendered from the mutation string), so
+	* replay, the gates, and apply can verify this exact content later.
 	*/
 	async prepare(proposalId, actor, champion = {}) {
 		const current = await this.assertNext(proposalId, "prepared");
@@ -984,6 +1027,7 @@ var EvolutionService = class extends Service {
 		let sandbox = null;
 		let championState = "none";
 		let championSource;
+		let skillContent;
 		let files = [];
 		if (mechanical) {
 			if (current.targetType === "capability" && !("capabilityEntry" in champion)) throw new Error("evolution: preparing a capability mutation requires champion.capabilityEntry (pass null when the capability is new)");
@@ -995,6 +1039,13 @@ var EvolutionService = class extends Service {
 			championState = written.champion;
 			championSource = written.championSource;
 			files = written.files;
+			if (current.targetType === "skill") {
+				const { name } = mutation;
+				skillContent = {
+					name,
+					sha256: sha256Hex(await readVerifiedFile(this.root, `${sandbox}/skills/${name}/SKILL.md`))
+				};
+			}
 		}
 		await this.append({
 			formatVersion: 1,
@@ -1004,6 +1055,7 @@ var EvolutionService = class extends Service {
 			mechanical,
 			champion: championState,
 			...championSource === void 0 ? {} : { championSource },
+			...skillContent === void 0 ? {} : { skillContent },
 			files,
 			actor,
 			at: (/* @__PURE__ */ new Date()).toISOString()
@@ -1020,12 +1072,20 @@ var EvolutionService = class extends Service {
 	* executed evidence). The report write is confined to the sandbox; the ledger
 	* record cites it by root-relative path, and the gate later requires that
 	* path in its regression evidence.
+	*
+	* For a skill candidate the service additionally binds the content identity
+	* (P2): the report must carry the same `candidateContent` prepare recorded,
+	* and the candidate file on disk must still hash to it. The tool re-checks
+	* before it runs anything; this check runs after the runs and before the
+	* record is written, so a modification that happened and persisted during
+	* the replay is refused instead of recorded.
 	*/
 	async replay(proposalId, actor, report) {
 		const current = await this.assertNext(proposalId, "replayed");
 		assertReplayReport(current, report);
 		const sandbox = current.prepared?.sandbox;
 		if (sandbox === void 0 || sandbox === null) throw new Error(`evolution: proposal "${proposalId}" names no sandbox; cannot place the replay report`);
+		if (current.targetType === "skill") await this.assertSkillContentBound(current, report);
 		const rel = `${sandbox}/replay-report.json`;
 		const abs = resolveWithin(this.root, rel);
 		await mkdir(dirname(abs), { recursive: true });
@@ -1051,6 +1111,22 @@ var EvolutionService = class extends Service {
 			at: (/* @__PURE__ */ new Date()).toISOString()
 		});
 		return this.get(proposalId);
+	}
+	/**
+	* The skill replay's content binding (P2), enforced on the service entry that
+	* writes the `replayed` record: the report's identity must equal the one
+	* prepare recorded, and the candidate file must still be those exact bytes.
+	* A candidate prepared before content binding, or one that changed and stayed
+	* changed, is refused with the same guidance — fix the candidate through a
+	* new proposal and evaluation; the append-only ledger never re-digests an old
+	* record.
+	*/
+	async assertSkillContentBound(proposal, report) {
+		const identity = proposal.prepared?.skillContent;
+		if (identity === void 0) throw new Error(`evolution: skill proposal "${proposal.proposalId}" was prepared before candidate content binding — propose a new candidate and re-evaluate it; recorded identities are never re-digested`);
+		if (report.candidateContent === void 0) throw new Error("evolution: a skill replay report must carry candidateContent { name, sha256 }");
+		if (report.candidateContent.name !== identity.name || report.candidateContent.sha256 !== identity.sha256) throw new Error(`evolution: replay report candidate content identity { name: "${report.candidateContent.name}", sha256: ${report.candidateContent.sha256} } does not match the identity prepared for proposal "${proposal.proposalId}" { name: "${identity.name}", sha256: ${identity.sha256} }`);
+		await this.readVerifiedSkillCandidate(proposal);
 	}
 	/**
 	* Move candidate → gated (manual candidates), prepared → gated
@@ -1151,7 +1227,31 @@ var EvolutionService = class extends Service {
 	async checkPromotion(proposalId) {
 		const proposal = await this.get(proposalId);
 		if (proposal.prepared?.mechanical !== true) return;
+		if (proposal.targetType === "skill") await this.readVerifiedSkillCandidate(proposal);
 		assertReplayPromotable(await this.readRecordedReplay(proposal));
+	}
+	/**
+	* Read a prepared skill candidate's materialized bytes and verify them
+	* against the content identity recorded at prepare (P2). The one read path
+	* every stage shares: the replay tool's pre-execution check, the `replayed`
+	* record's post-execution recheck, every promotion gate, and the apply write.
+	* Throws — never silently re-digests — when the candidate file is missing,
+	* is not a regular file, its path crosses a symbolic link, or its bytes no
+	* longer match the recorded digest.
+	*/
+	async readSkillCandidate(proposalId) {
+		return this.readVerifiedSkillCandidate(await this.get(proposalId));
+	}
+	async readVerifiedSkillCandidate(proposal) {
+		if (proposal.targetType !== "skill") throw new Error(`evolution: candidate content identity binds skill proposals only, not "${proposal.targetType}"`);
+		const sandbox = proposal.prepared?.sandbox;
+		const identity = proposal.prepared?.skillContent;
+		if (sandbox == null || identity === void 0) throw new Error(`evolution: skill proposal "${proposal.proposalId}" carries no recorded candidate content identity — it was prepared before content binding; propose a new candidate and re-evaluate it (prepare records the SHA-256 of the materialized SKILL.md)`);
+		const rel = `${sandbox}/skills/${identity.name}/SKILL.md`;
+		const bytes = await readVerifiedFile(this.root, rel);
+		const digest = sha256Hex(bytes);
+		if (digest !== identity.sha256) throw new Error(`evolution: skill candidate "${rel}" no longer matches the content identity recorded at prepare (sha256 ${digest} != ${identity.sha256}) — propose a new candidate and re-evaluate it; recorded identities are never re-digested`);
+		return bytes;
 	}
 	async readRecordedReplay(proposal) {
 		const replay = proposal.replayed;
@@ -1211,9 +1311,15 @@ var EvolutionService = class extends Service {
 					});
 					return { targets: [`${resolveWithin(this.skillRoot, name)} (deleted — the apply had created it)`] };
 				}
-				const content = await readFile(resolveWithin(this.root, direction === "apply" ? `${sandbox}/skills/${name}/SKILL.md` : `${sandbox}/champion/skills/${name}/SKILL.md`), "utf8");
+				if (direction === "apply") {
+					const bytes = await this.readVerifiedSkillCandidate(proposal);
+					await mkdir(dirname(dst), { recursive: true });
+					await writeFile(dst, bytes);
+					return { targets: [dst] };
+				}
+				const content = await readVerifiedFile(this.root, `${sandbox}/champion/skills/${name}/SKILL.md`);
 				await mkdir(dirname(dst), { recursive: true });
-				await writeFile(dst, content, "utf8");
+				await writeFile(dst, content);
 				return { targets: [dst] };
 			}
 			case "agent_preset": {
@@ -1457,11 +1563,19 @@ var EvolutionService = class extends Service {
 						if (current.targetType !== "capability") throw new Error(`evolution: prepared record for "${record.proposalId}" carries championSource but targetType "${current.targetType}" is not capability`);
 						if (record.championSource === "missing" !== (record.champion === "missing")) throw new Error(`evolution: prepared record for "${record.proposalId}" has championSource "${record.championSource}" but champion "${record.champion}"`);
 					}
+					if (record.skillContent !== void 0) {
+						if (current.targetType !== "skill") throw new Error(`evolution: prepared record for "${record.proposalId}" carries skillContent but targetType "${current.targetType}" is not skill`);
+						if (!isRecord$2(record.skillContent) || typeof record.skillContent.name !== "string" || record.skillContent.name.length === 0 || typeof record.skillContent.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(record.skillContent.sha256)) throw new Error(`evolution: prepared record for "${record.proposalId}" has a malformed skillContent identity`);
+					}
 					current.prepared = {
 						sandbox: record.sandbox,
 						mechanical: record.mechanical,
 						champion: record.champion,
 						...record.championSource === void 0 ? {} : { championSource: record.championSource },
+						...record.skillContent === void 0 ? {} : { skillContent: {
+							name: record.skillContent.name,
+							sha256: record.skillContent.sha256
+						} },
 						files: [...record.files]
 					};
 					break;
@@ -2214,7 +2328,8 @@ function defineEvolutionListTool(ctx) {
 					if (view.sandbox === null) lines.push("  prepared: bookkeeping only, nothing materialized");
 					else {
 						const championText = view.champion === "captured" ? "champion snapshot captured" : "champion: null";
-						lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, ${championText})`);
+						const contentText = view.skillContent === void 0 ? "" : `, candidate content ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}…`;
+						lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, ${championText}${contentText})`);
 					}
 				}
 				if (proposal.replayed !== void 0) {
@@ -2584,6 +2699,11 @@ function defineEvolutionReplayTool(ctx) {
 			if (proposal.status !== "prepared") return `evolution_replay rejected: proposal ${proposal.proposalId} is ${proposal.status}; only a prepared proposal can be replayed`;
 			const prepared = proposal.prepared;
 			if (!prepared.mechanical) return `evolution_replay rejected: proposal ${proposal.proposalId} is bookkeeping-only (mechanical: false); nothing to replay — gate it directly with evolution_gate`;
+			if (proposal.targetType === "skill") try {
+				await ctx.evolution.readSkillCandidate(proposal.proposalId);
+			} catch (error) {
+				return `evolution_replay rejected: ${error instanceof Error ? error.message : String(error)}`;
+			}
 			const lineage = replayLineage(proposal.proposalId);
 			if (proposal.targetType === "agent_preset") {
 				const report$1 = {
@@ -2682,6 +2802,7 @@ function defineEvolutionReplayTool(ctx) {
 				targetType: proposal.targetType,
 				at: (/* @__PURE__ */ new Date()).toISOString(),
 				mode: "executed",
+				...proposal.targetType === "skill" ? { candidateContent: prepared.skillContent } : {},
 				observed,
 				holdout: {
 					executed: holdout.length > 0,
