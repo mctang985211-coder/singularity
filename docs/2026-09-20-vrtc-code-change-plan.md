@@ -6,6 +6,16 @@
 
 ## 当前排期
 
+先期确定性任务的派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。按 P1 → P2 → P3 顺序执行；每项完成必须同步本计划及主 guide，不能只更新测试或执行日志。
+
+| 任务 | 当前状态 | 前置 | 完成边界 |
+|---|---|---|---|
+| [P1 类型闸](execution-prompts/01-root-agent-typecheck.md) | 待执行 | 当前验证闸基线 | root-agent 严格类型检查零错误，build 实际执行类型检查 |
+| [P2 Skill 内容绑定](execution-prompts/02-skill-content-binding.md) | 待执行 | P1 验收通过 | 单文件 Skill prepare/replay/审核/apply 内容身份一致；旧记录读取与回滚保留 |
+| [P3 生产基线检查](execution-prompts/03-skill-champion-check.md) | 待执行 | P2 验收通过 | 串行 apply 拒绝过期 Skill 候选，不覆盖变化的生产文件 |
+
+这些是 S1-C/S4 的有限工程切片。P2 不证明证据来源真实，P3 不承诺跨进程原子更新；完成后不将整张 S 票标为完成。
+
 | 票据 | 状态（2026-09-21） | 依赖 | 交付范围 |
 |---|---|---|---|
 | S0 | 已完成，验证结果见文末 | 无 | 文档去漂移、术语统一、worker 能力查询 |
