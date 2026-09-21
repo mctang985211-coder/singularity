@@ -35,6 +35,10 @@ import { checkDecomposition, contractDefects, independentAcceptanceDefects } fro
 import { buildHandoff, renderWorkerPrompt } from './handoff.ts'
 import { normalizeDecomposition } from './normalize.ts'
 import {
+  fixCriteriaProtectedInputs,
+  fixSpecProtectedInputs,
+} from './protected-inputs.ts'
+import {
   runChildrenCascade,
   runReplayTask,
   VerifierUnavailableError,
@@ -64,6 +68,12 @@ export type { McpEnvBinding, McpServerTemplate } from './mcp-servers.ts'
 export { MCP_SERVER_REGISTRY, manifestMcpServers, resolveMcpServerSpecs } from './mcp-servers.ts'
 export type { AdmissionChild, AdmissionParent, AdmissionVerdict } from './admission.ts'
 export { checkDecomposition, contractDefects, independentAcceptanceDefects } from './admission.ts'
+export {
+  fixCriteriaProtectedInputs,
+  fixProtectedInputs,
+  fixSpecProtectedInputs,
+  protectedInputDefects,
+} from './protected-inputs.ts'
 export type {
   DecompositionIdentityContext,
   NormalizationContext,
@@ -225,6 +235,29 @@ export interface CriterionSpec {
    * exclusive with `childEvidence`.
    */
   heuristic?: boolean
+  /**
+   * Acceptance inputs this criterion's verdict rests on that the executing side
+   * must not modify (S1-V slice 2): acceptance scripts, threshold files,
+   * fixtures — declared as paths, resolved against the session's checkout.
+   *
+   * **Only the paths declared here are protected.** A criterion that declares
+   * none carries no protection, and nothing is read or claimed for it.
+   *
+   * Who fixes the identity: the runtime, at admission, before the contract is
+   * written. Each declared path is resolved against the session's checkout and
+   * read once; the SHA-256 of its bytes is fixed beside the declared path in
+   * the child's contract, which is what the contract and proposal identities
+   * describe. A declared path that cannot be read — or a session whose checkout
+   * cannot be resolved — refuses the whole batch: no id minted, nothing
+   * persisted, because an identity fixed against the wrong bytes (or against a
+   * guessed base) is worse than no task at all.
+   *
+   * Who re-checks: the verifier registry, before judging the criterion, against
+   * the same checkout. A missing or modified input fails the criterion naming
+   * the path, so a rewritten acceptance script can never turn a wrong product
+   * into a pass.
+   */
+  protectedInputs?: readonly string[]
 }
 
 export interface DecomposeChildSpec {
@@ -607,17 +640,24 @@ export class TaskRuntime extends Service {
   }
 
   /**
-   * Atomic decomposition plus the sequential run cascade: normalization,
-   * structural admission and capability admission must all pass for the whole
-   * batch before anything is persisted; children then run one at a time in
-   * dependency order.
+   * Atomic decomposition plus the sequential run cascade: protected-input
+   * identity fixing, normalization, structural admission and capability
+   * admission must all pass for the whole batch before anything is persisted;
+   * children then run one at a time in dependency order.
    *
-   * The batch is normalized first ({@link normalizeDecomposition}): raw caller
+   * Protected acceptance inputs are fixed first (`protected-inputs.ts`): every
+   * criterion's declared paths are read against the session's checkout and
+   * recorded as the SHA-256 of their bytes, so the contract — and both content
+   * identities computed over it — describe the fixed identity, never a path
+   * that could be re-pointed or re-read later.
+   *
+   * The batch is then normalized ({@link normalizeDecomposition}): raw caller
    * input becomes the contract of every child with its defaults filled and its
    * criterion ids fixed, and the batch identity plus the limits in force become
-   * ready to be recorded with the decomposition. A refused batch is refused
-   * whole — the error names every reason, no id is minted into the store, no
-   * capability is resolved into an event, and no obligation is recorded.
+   * ready to be recorded with the decomposition. A refused batch — by the
+   * fixing or by normalization, in one message — is refused whole: no id is
+   * minted into the store, no capability is resolved into an event, and no
+   * obligation is recorded.
    *
    * The structural policy is `allowed` — a `leaf` task may decompose only while
    * {@link Config.allowRuntimeDecomposition} is on — plus the configured growth
@@ -641,22 +681,29 @@ export class TaskRuntime extends Service {
     if (parentRun.sessionId !== callerSessionId) {
       throw new Error(`task-runtime: run "${parentRunId}" is bound to session "${parentRun.sessionId}", not caller "${callerSessionId}"`)
     }
+    // Protected acceptance inputs are fixed before the one normalization entry
+    // (S1-V slice 2): the declared paths become the identity of the bytes they
+    // name, read against the same checkout the criterion's judge will run in,
+    // so the contract — and both content identities computed over it — describe
+    // the fixed digest rather than a path someone could re-point later. The
+    // strings-vs-fixed conversion happens *here*, not in normalization: by the
+    // time the single entry reads the batch, there is one form and one form
+    // only. A refused fixing joins the normalization refusal — same error, same
+    // no-op: no id minted, no capability resolved, nothing persisted.
+    const fixed = await fixSpecProtectedInputs(spec, await this.envPathForSession(callerSessionId))
     // The one normalization entry (T1): raw input in, the canonical contract of
     // every child plus the batch identity out — and every reason, in one list,
     // when it is refused. Nothing is minted or persisted before this returns ok,
     // which is what makes a refused batch a no-op.
-    const normalized = normalizeDecomposition(spec, {
+    const normalized = normalizeDecomposition(fixed.spec, {
       storeId,
       parentTaskId,
       parentRunId,
       callerSessionId,
       admissionContext: this.admissionContext(),
     })
-    if (!normalized.ok) {
-      throw new Error(
-        `task-runtime: contract rejected decomposition of "${parentTaskId}":\n- ${normalized.reasons.join('\n- ')}`,
-      )
-    }
+    const reasons = [...fixed.reasons, ...(normalized.ok ? [] : normalized.reasons)]
+    if (!normalized.ok || reasons.length > 0) throw this.contractRefusal(parentTaskId, reasons)
     const batch = normalized.batch
 
     const childTaskIds = batch.children.map(() => `t-${randomUUID()}`)
@@ -810,9 +857,15 @@ export class TaskRuntime extends Service {
    * The replayed task carries a normalized contract like every other creation
    * (T1), and its criteria are judged by the same structural rules an ordinary
    * decomposition child faces (`contractDefects` plus the P4 declarations).
-   * A replay has no batch, so it records no admission context: nothing was
-   * proposed to a parent, there is no sibling set to bound, and the limits that
-   * do apply to its run are the run's own budget, not a batch's.
+   * Protected acceptance inputs are fixed here too (S1-V slice 2), against the
+   * replay caller's checkout: a candidate contract declaring paths has their
+   * identity fixed before anything else reads it, while a champion's stored
+   * `{ path, sha256 }` refs are carried verbatim — the historical identity is
+   * what the pre-judgement re-check compares against, so it is never re-read
+   * from disk and never invented. A replay has no batch, so it records no
+   * admission context: nothing was proposed to a parent, there is no sibling
+   * set to bound, and the limits that do apply to its run are the run's own
+   * budget, not a batch's.
    */
   async replayTask(
     storeId: string,
@@ -842,15 +895,29 @@ export class TaskRuntime extends Service {
     // Both are structural, both are judged here — before anything persists — and
     // the label names the champion this task stands in for.
     const label = `replay of "${championTaskId}"`
+    // Protected acceptance inputs are fixed the same way the ordinary path
+    // fixes them (S1-V slice 2), against the replay caller's checkout: the
+    // declared (string) form is converted before any rule reads the criteria,
+    // and a declaration that cannot be read, or a caller whose checkout cannot
+    // be resolved, refuses the replay before anything persists. A champion's
+    // stored fixed form is carried verbatim — never re-fixed, never invented —
+    // because that historical identity is exactly what the pre-judgement
+    // re-check has to compare against.
+    const fixed = await fixCriteriaProtectedInputs(
+      effective.acceptanceCriteria,
+      await this.envPathForSession(callerSessionId),
+      label,
+    )
     const acceptanceDefects = [
-      ...contractDefects(effective.acceptanceCriteria, label),
-      ...independentAcceptanceDefects(effective.acceptanceCriteria, champion.requiresIndependentAcceptance, label),
+      ...fixed.reasons,
+      ...contractDefects(fixed.criteria, label),
+      ...independentAcceptanceDefects(fixed.criteria, champion.requiresIndependentAcceptance, label),
     ]
     if (acceptanceDefects.length > 0) {
       throw new Error(`task-runtime: replay of "${championTaskId}" rejected:\n- ${acceptanceDefects.join('\n- ')}`)
     }
     this.assertKnownVerifierRefs(
-      effective.acceptanceCriteria.map(criterion => ({ childIndex: 0, criterion })),
+      fixed.criteria.map(criterion => ({ childIndex: 0, criterion })),
       `replay of "${championTaskId}"`,
     )
     // The replayed task's contract: the lineage-tagged objective, the criteria
@@ -862,7 +929,7 @@ export class TaskRuntime extends Service {
     const contract: TaskContract = {
       contractVersion: TASK_CONTRACT_VERSION,
       objective: `[${options.lineage}] ${effective.objective}`,
-      acceptanceCriteria: structuredClone(effective.acceptanceCriteria),
+      acceptanceCriteria: structuredClone([...fixed.criteria]),
       assumptions: [...(champion.contract?.assumptions ?? [])],
       constraints: [...(champion.contract?.constraints ?? [])],
       requiredCapabilities: [...effective.requiredCapabilities],
@@ -996,6 +1063,57 @@ export class TaskRuntime extends Service {
     }
   }
 
+  /**
+   * The env binding the session's graph runs in, or `undefined` when the
+   * deployment mounts no env-builder or the graph cannot be read. Best-effort
+   * by contract: every caller decides what an unresolved env means — a
+   * verification command without `cwd`, a refused composition of MCP servers, a
+   * refused batch when a protected input has to be fixed — and none of them may
+   * guess one.
+   */
+  private async sessionEnv(
+    sessionId: string,
+  ): Promise<{ path: string; components?: readonly { repo: string; dir: string }[] } | undefined> {
+    // The whole resolution sits inside the `try`, service lookup included: on a
+    // real Cordis context an absent service throws on property access
+    // ("cannot get property … without inject"), which is exactly the case this
+    // helper has to read as "no env binding" rather than propagate — a
+    // deployment without env-builder still runs tasks, it just cannot name a
+    // checkout.
+    try {
+      const envBuilder = (this.ctx.get?.('envBuilder') ?? (this.ctx as unknown as { envBuilder?: EnvPathSource }).envBuilder) as
+        | EnvPathSource
+        | undefined
+      if (envBuilder === undefined) return undefined
+      const graph = await this.ctx.graphs.graphForSession(SessionId(sessionId))
+      return envBuilder.store.get(graph.envId)
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * The session's checkout directory: the one directory a run's commands, a
+   * verifier's `cwd`, and a protected acceptance input's bytes are all resolved
+   * against. `undefined` means the deployment cannot name it — the caller
+   * refuses rather than fixing an identity against a base it does not know
+   * ({@link fixProtectedInputs}).
+   */
+  private async envPathForSession(sessionId: string): Promise<string | undefined> {
+    return (await this.sessionEnv(sessionId))?.path
+  }
+
+  /**
+   * The single refusal text a decomposition batch is rejected at the contract
+   * stage with, whichever step produced the reasons (the protected-input fixing
+   * or the normalization entry): a caller reads one message shape and one
+   * reason-per-bullet list, and the label names the parent the batch was
+   * refused for.
+   */
+  private contractRefusal(parentTaskId: TaskId, reasons: readonly string[]): Error {
+    return new Error(`task-runtime: contract rejected decomposition of "${parentTaskId}":\n- ${reasons.join('\n- ')}`)
+  }
+
   private orchestrateEnv(callerSessionId: string, actor: string): OrchestrateEnv {
     return {
       task: this.ctx.task,
@@ -1024,22 +1142,14 @@ export class TaskRuntime extends Service {
         // The same graph env the verifier's cwd comes from; absent in test
         // contexts and in deployments without env-builder — a capability that
         // declares MCP servers then fails the spawn loudly (mcp-servers.ts).
-        const envBuilder = (this.ctx.get?.('envBuilder') ?? (this.ctx as unknown as { envBuilder?: EnvPathSource }).envBuilder) as
-          | EnvPathSource
-          | undefined
-        if (envBuilder === undefined) return undefined
-        try {
-          const graph = await this.ctx.graphs.graphForSession(SessionId(callerSessionId))
-          const env = envBuilder.store.get(graph.envId)
-          return {
-            envRoot: env.path,
-            checkout: repo => {
-              const component = (env.components ?? []).find(item => item.repo === repo)
-              return component === undefined ? undefined : join(env.path, component.dir)
-            },
-          }
-        } catch {
-          return undefined
+        const env = await this.sessionEnv(callerSessionId)
+        if (env === undefined) return undefined
+        return {
+          envRoot: env.path,
+          checkout: repo => {
+            const component = (env.components ?? []).find(item => item.repo === repo)
+            return component === undefined ? undefined : join(env.path, component.dir)
+          },
         }
       },
       spawn: request => {
@@ -1062,14 +1172,7 @@ export class TaskRuntime extends Service {
             `task-runtime: verifier service is not loaded; cannot verify run "${runId}" (expected plugin id "verifier", ticket C2)`,
           )
         }
-        let cwd: string | undefined
-        try {
-          const graph = await this.ctx.graphs.graphForSession(SessionId(callerSessionId))
-          cwd = ((this.ctx.get?.('envBuilder') ?? (this.ctx as unknown as { envBuilder?: EnvPathSource }).envBuilder) as EnvPathSource | undefined)
-            ?.store.get(graph.envId).path
-        } catch {
-          cwd = undefined
-        }
+        const cwd = await this.envPathForSession(callerSessionId)
         return verifier.verifyRun(storeId, runId, { ...(cwd === undefined ? {} : { cwd }), ...options })
       },
       readLogTail: async logRef => this.runVerifier()?.logTail?.(logRef),

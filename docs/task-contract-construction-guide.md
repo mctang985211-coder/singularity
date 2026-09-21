@@ -43,6 +43,8 @@
 
 T1 在 task 包中形成唯一的规范化契约数据定义；工具输入适配到它，admission 消费它，存储与 handoff 引用同一份。类型、工具 schema 与 runtime validator 必须有一致性测试；不要求一次重写整个 schema 工具链。
 
+S1-V 切片 2（2026-09-21）另在 AC 上加入 `protectedInputs`（受保护验收输入）：准入固定 `{ path, sha256 }`、判决前复检，当前事实、源码/测试锚与边界见主 guide §5.7；它不改变 T2/T3 的审核范围。
+
 **T1 已实现部分（2026-09-21）**：数据定义 `task/src/contract.ts:TaskContract`（含 `contractVersion`、`assumptions`、`constraints`），唯一规范化与校验入口 `task-runtime/src/normalize.ts:normalizeDecomposition`（三层闭合字段集、默认值、criterion id 固定、未知版本拒绝），身份算法 `canonicalize`/`contractDigest`/`decompositionDigest`，批次准入记录 `TaskDecomposed.admission`（`proposalDigest` + `AdmissionContext`），以及普通分解/replay/root 三个入口的持久化与共用结构校验（`task-runtime/src/admission.ts:contractDefects`）。下表的 `contractVersion`、`assumptions`、`constraints`、`requiredCapabilities`、`dependsOn`、输入/证据、复合声明、分解意图各行的**当前实现状态**以主 guide §5.6 与建设计划 T1 节为准；本节其余描述（生成审核、提案状态机、预算上下文指纹）仍属 T2/T3 设计。
 
 保留当前字段词汇，新增字段明确版本。以下是目标语义，不是当前工具参数示例：
@@ -57,6 +59,7 @@ T1 在 task 包中形成唯一的规范化契约数据定义；工具输入适�
 | `requiredCapabilities` | 需求名称，沿用当前解析与缺口规则 | 不写死 Skill，不将 decomposable 当成能力已具备 |
 | `dependsOn` | 当前批次的子索引，顺序有语义 | 越界、自依赖、环拒绝；不是预设领域 workflow |
 | 输入/证据 | AC 内沿用 `acceptsArtifact` / `requiresArtifact` / `requiredEvidence` | 保留 P4 原始输入与 verified 参考产物区别 |
+| 受保护验收输入 | AC 内 `protectedInputs` 由调用者声明路径（字符串），准入时固定为 `{ path, sha256 }`（读不到即整批拒绝、零副作用），判决前复检：缺失或被改 → `fail` 点名路径且不派发裁判 | 只保护显式声明的路径；未声明的不受保护，也不得被描述成“已保护”；固定的是字节身份，不认证内容来源真实性 |
 | 复合声明 | 沿用 `childEvidence`、`requiresIndependentAcceptance`、`heuristic` | 不把映射存在性夸大为完整父目标证明 |
 | 分解意图 | 沿用 `decomposable` | depth/maxChildren 仍受部署与父级限制 |
 

@@ -1,12 +1,15 @@
 import type {
   AcceptanceCriterion,
   ChildEvidenceRef,
+  EvidenceBundle,
   TaskId,
   TaskInstance,
+  TaskRun,
   TaskSnapshot,
   VerificationMode,
   VerificationResult,
   Verifier,
+  VerifierSelftest,
   VerifyRequest,
 } from '@dangosys/dsh-singularity-task'
 
@@ -20,6 +23,9 @@ export interface CompositeTaskSource {
    */
   snapshotIn(storeId: string): Promise<TaskSnapshot>
 }
+
+/** The registered id of the composite judge: the class and the pure judgement must sign their verdicts with one id. */
+const COMPOSITE_VERIFIER_ID = 'composite'
 
 /** How one map entry reads when it is satisfied. */
 function describeSatisfied(entry: ChildEvidenceRef, child: TaskInstance): string {
@@ -101,22 +107,179 @@ function entryDefect(
  * carries the explicit heuristic label in its details, so a natural-language
  * coverage signal is never mistaken for a mechanical proof (KISS §5.1).
  *
- * Reading children and evidence needs the store id, which VerifyRequest does
- * not carry, so the registry dispatches through {@link verifyIn}; the plain
+ * Pure by construction — the criterion, the batch's children, and a snapshot
+ * getter are the whole input. The getter is called only when a map needs it,
+ * so a map-less criterion never reads a snapshot; that also lets the registry
+ * judge a selftest sample's declared store view without a store behind it.
+ * Reading children needs the store id, which VerifyRequest does not carry, so
+ * production dispatches through {@link CompositeVerifier.verifyIn}; the plain
  * `verify` stays inconclusive.
  */
+export async function judgeCompositeCriterion(
+  criterion: AcceptanceCriterion,
+  children: readonly TaskInstance[],
+  snapshot: () => Promise<TaskSnapshot>,
+): Promise<VerificationResult> {
+  const map = criterion.childEvidence ?? []
+  const base = { criterionId: criterion.criterionId, verifierId: COMPOSITE_VERIFIER_ID }
+
+  if (children.length === 0) {
+    if (map.length === 0) {
+      return { ...base, status: 'inconclusive', details: 'no child tasks' }
+    }
+    // A declared map with no children to satisfy it is incomplete, not absent:
+    // refusing here is what keeps the declaration from silently degrading.
+    return {
+      ...base,
+      status: 'fail',
+      details: `incomplete childEvidence map: the task has no child tasks to satisfy ${map.map(describeEntry).join('; ')}`,
+    }
+  }
+
+  const unverified = children.filter(child => child.status !== 'verified')
+  if (unverified.length > 0) {
+    return {
+      ...base,
+      status: 'fail',
+      details: `unverified children: ${unverified.map(child => `${child.taskId}(${child.status})`).join(', ')}`,
+    }
+  }
+
+  if (map.length === 0) {
+    // The conjunction verdict, unchanged. A criterion labeled heuristic keeps
+    // it but carries the label: the reader is told this is a coverage signal,
+    // and the orchestrator does not count it as a deterministic pass.
+    return {
+      ...base,
+      status: 'pass',
+      ...(criterion.heuristic === true
+        ? { details: 'heuristic conjunction: every child verified — explicitly labeled heuristic (KISS §5.1); a conjunction is a coverage signal, not a deterministic proof of the parent goal, and is not counted as one' }
+        : {}),
+    }
+  }
+
+  const store = await snapshot()
+  const defects = map
+    .map(entry => entryDefect(entry, children, store))
+    .filter((defect): defect is string => defect !== undefined)
+  if (defects.length > 0) {
+    return { ...base, status: 'fail', details: `incomplete childEvidence map: ${defects.join('; ')}` }
+  }
+  return {
+    ...base,
+    status: 'pass',
+    details: `childEvidence satisfied: ${map.map(entry => describeSatisfied(entry, children[entry.childIndex]!)).join('; ')}`,
+  }
+}
+
+/** The criterion a selftest sample hands the judge; only the fields the judge reads carry meaning. */
+function sampleCriterion(overrides: Partial<AcceptanceCriterion> = {}): AcceptanceCriterion {
+  return {
+    criterionId: 'selftest-child-evidence',
+    description: 'the parent goal rests on the child evidence the map names',
+    verificationMode: 'composite',
+    requiredEvidence: [],
+    mandatory: true,
+    ...overrides,
+  }
+}
+
+/** The verified child the samples judge over, carrying the criterion a sample names. */
+function selftestChild(criterionId: string): TaskInstance {
+  return {
+    taskId: 'selftest-child',
+    definitionRef: { taskType: 'selftest', version: 1 },
+    parentTaskId: 'selftest-parent',
+    objective: 'the child work the parent rests on',
+    depth: 1,
+    acceptanceCriteria: [{
+      criterionId,
+      description: 'the child criterion the map names',
+      verificationMode: 'deterministic',
+      requiredEvidence: [],
+      mandatory: true,
+      command: 'true',
+    }],
+    requestedCapabilities: [],
+    decompositionStatus: 'leaf',
+    status: 'verified',
+    runIds: ['selftest-run'],
+    childTaskIds: [],
+  }
+}
+
+/** The verified run the samples' child carries. */
+function selftestRun(): TaskRun {
+  return {
+    runId: 'selftest-run',
+    taskId: 'selftest-child',
+    sessionId: 'selftest-session',
+    capabilitySnapshot: [],
+    artifacts: [],
+    verifierResults: [],
+    status: 'verified',
+    startedAt: '2026-09-21T00:00:00.000Z',
+    finishedAt: '2026-09-21T00:01:00.000Z',
+  }
+}
+
+/** The bundle that verified run left behind, carrying the verdicts given. */
+function selftestBundle(verdicts: VerificationResult[]): EvidenceBundle {
+  return {
+    evidenceId: 'selftest-evidence',
+    taskRunId: 'selftest-run',
+    taskId: 'selftest-child',
+    artifacts: [],
+    verifierResults: verdicts,
+    claims: verdicts.map(verdict => ({
+      claimId: `selftest-evidence#${verdict.criterionId}`,
+      criterionId: verdict.criterionId,
+      status: verdict.status,
+      verifierId: verdict.verifierId,
+      artifactRefs: [],
+    })),
+    generatedAt: '2026-09-21T00:01:00.000Z',
+  }
+}
+
 export class CompositeVerifier implements Verifier {
-  readonly id = 'composite'
+  readonly id = COMPOSITE_VERIFIER_ID
   readonly version = '1'
   readonly owner = 'singularity'
   /**
-   * The distinguishing samples need a task store (the verdict reads child
-   * status), so they live in this package's tests:
-   * `tests/unit/composite-verifier.spec.ts` runs both.
+   * Known samples the registry executes before it will register this judge
+   * (KISS §4.3, V2-1): one map the fixture store satisfies, one whose named
+   * criterion has no passing verdict in that evidence. Same child, same run,
+   * same bundle shape — the two samples differ only in a verdict, so a judge
+   * that returns one status for both is caught. Neither the samples nor the
+   * fixtures are read from a real store; the store *view* each sample declares
+   * is the whole input (`VerifierSelftestSample.store`).
    */
-  readonly selftest = {
-    positiveCases: ['a task whose children are all verified (composite-verifier.spec.ts)'],
-    negativeCases: ['a task with an unverified child (composite-verifier.spec.ts)'],
+  readonly selftest: VerifierSelftest = {
+    samples: [
+      {
+        role: 'positive',
+        name: 'a childEvidence map the verified child evidence satisfies',
+        criterion: sampleCriterion({ childEvidence: [{ childIndex: 0, criterionId: 'selftest-child-criterion' }] }),
+        expect: 'pass',
+        store: {
+          children: [selftestChild('selftest-child-criterion')],
+          runs: [selftestRun()],
+          evidence: [selftestBundle([{ criterionId: 'selftest-child-criterion', status: 'pass', verifierId: 'command' }])],
+        },
+      },
+      {
+        role: 'negative',
+        name: 'a childEvidence map whose named criterion has no passing verdict',
+        criterion: sampleCriterion({ childEvidence: [{ childIndex: 0, criterionId: 'selftest-child-criterion' }] }),
+        expect: 'fail',
+        store: {
+          children: [selftestChild('selftest-child-criterion')],
+          runs: [selftestRun()],
+          evidence: [selftestBundle([{ criterionId: 'selftest-child-criterion', status: 'inconclusive', verifierId: 'review' }])],
+        },
+      },
+    ],
   }
 
   constructor(private readonly task: CompositeTaskSource) {}
@@ -138,61 +301,8 @@ export class CompositeVerifier implements Verifier {
     const children = await this.task.childrenIn(storeId, req.taskId)
     const results: VerificationResult[] = []
     for (const criterion of req.criteria) {
-      results.push(await this.judge(storeId, criterion, children))
+      results.push(await judgeCompositeCriterion(criterion, children, () => this.task.snapshotIn(storeId)))
     }
     return results
-  }
-
-  private async judge(storeId: string, criterion: AcceptanceCriterion, children: readonly TaskInstance[]): Promise<VerificationResult> {
-    const map = criterion.childEvidence ?? []
-    const base = { criterionId: criterion.criterionId, verifierId: this.id }
-
-    if (children.length === 0) {
-      if (map.length === 0) {
-        return { ...base, status: 'inconclusive', details: 'no child tasks' }
-      }
-      // A declared map with no children to satisfy it is incomplete, not absent:
-      // refusing here is what keeps the declaration from silently degrading.
-      return {
-        ...base,
-        status: 'fail',
-        details: `incomplete childEvidence map: the task has no child tasks to satisfy ${map.map(describeEntry).join('; ')}`,
-      }
-    }
-
-    const unverified = children.filter(child => child.status !== 'verified')
-    if (unverified.length > 0) {
-      return {
-        ...base,
-        status: 'fail',
-        details: `unverified children: ${unverified.map(child => `${child.taskId}(${child.status})`).join(', ')}`,
-      }
-    }
-
-    if (map.length === 0) {
-      // The conjunction verdict, unchanged. A criterion labeled heuristic keeps
-      // it but carries the label: the reader is told this is a coverage signal,
-      // and the orchestrator does not count it as a deterministic pass.
-      return {
-        ...base,
-        status: 'pass',
-        ...(criterion.heuristic === true
-          ? { details: 'heuristic conjunction: every child verified — explicitly labeled heuristic (KISS §5.1); a conjunction is a coverage signal, not a deterministic proof of the parent goal, and is not counted as one' }
-          : {}),
-      }
-    }
-
-    const snapshot = await this.task.snapshotIn(storeId)
-    const defects = map
-      .map(entry => entryDefect(entry, children, snapshot))
-      .filter((defect): defect is string => defect !== undefined)
-    if (defects.length > 0) {
-      return { ...base, status: 'fail', details: `incomplete childEvidence map: ${defects.join('; ')}` }
-    }
-    return {
-      ...base,
-      status: 'pass',
-      details: `childEvidence satisfied: ${map.map(entry => describeSatisfied(entry, children[entry.childIndex]!)).join('; ')}`,
-    }
   }
 }

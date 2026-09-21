@@ -98,15 +98,13 @@ describe('CommandVerifier', () => {
 
   test('the declared selftest samples are distinguished for real (KISS §12 step 2)', async () => {
     const { verifier, request } = await setup()
-    expect(verifier.selftest.positiveCases.length).toBeGreaterThan(0)
-    expect(verifier.selftest.negativeCases.length).toBeGreaterThan(0)
-    for (const sample of verifier.selftest.positiveCases) {
-      const [result] = await verifier.verify(request([criterion({ command: sample })]))
-      expect(result.status, `positive sample "${sample}"`).toBe('pass')
-    }
-    for (const sample of verifier.selftest.negativeCases) {
-      const [result] = await verifier.verify(request([criterion({ command: sample })]))
-      expect(result.status, `negative sample "${sample}"`).toBe('fail')
+    const samples = verifier.selftest.samples
+    expect(samples.some(sample => sample.role === 'positive')).toBe(true)
+    expect(samples.some(sample => sample.role === 'negative')).toBe(true)
+    for (const sample of samples) {
+      const [result] = await verifier.verify(request([sample.criterion]))
+      const judged = result.status === 'pass' ? 'pass' : result.status === 'fail' ? 'fail' : 'not-pass'
+      expect(judged, `sample "${sample.name}" (${sample.role}) expected ${sample.expect}, judged ${result.status}`).toBe(sample.expect)
     }
   })
 

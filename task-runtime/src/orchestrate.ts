@@ -347,6 +347,14 @@ async function authorizedGrant(env: OrchestrateEnv, manifest: CapabilityManifest
  * Copy the verifier's per-criterion results onto a review record, filling the
  * command from the criterion itself when the result omits it — the record
  * must show what was checked without a trip back into the evidence bundle.
+ *
+ * The deciding judge travels with the verdict (S1-V slice 2): the registered
+ * verifier id and the version of the instance that produced the verdict, so a
+ * reader can tell which judge decided, and a later recall can index the
+ * verdict by `(verifierRef, version)` (KISS §8.2) without reopening the bundle.
+ * Both are optional on the record and omitted when the result carries neither —
+ * a verdict written before the fields existed stays readable exactly as before,
+ * and nothing is invented for it.
  */
 function reviewCriteria(criteria: readonly AcceptanceCriterion[], results: readonly VerificationResult[]): ReviewCriterion[] {
   return results.map(result => {
@@ -354,6 +362,8 @@ function reviewCriteria(criteria: readonly AcceptanceCriterion[], results: reado
     return {
       criterionId: result.criterionId,
       verdict: result.status,
+      ...(result.verifierId === undefined ? {} : { verifierId: result.verifierId }),
+      ...(result.verifierVersion === undefined ? {} : { verifierVersion: result.verifierVersion }),
       ...(command === undefined ? {} : { command }),
       ...(result.exitCode === undefined ? {} : { exitCode: result.exitCode }),
       ...(result.logRef === undefined ? {} : { logRef: result.logRef }),

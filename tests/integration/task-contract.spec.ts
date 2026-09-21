@@ -176,6 +176,9 @@ async function generation(
 
   const task = new TaskService(ctx)
   const verifier = new VerifierRegistry(ctx, { evidenceRoot: await mkdtemp(join(tmpdir(), 't1-evidence-')) })
+  // Cordis readies the service when it loads the plugin; a hand-built registry
+  // has to be readied explicitly, or `verifierIds()` reports no vocabulary at all.
+  await verifier.ready()
   const runtime = new TaskRuntime(ctx, options.config as Config | undefined)
   if (options.mountAgent === true) await ctx.plugin(SingularityAgent)
   return { ctx, task, runtime, verifier, tools, spawned, memory }

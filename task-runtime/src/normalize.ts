@@ -21,10 +21,19 @@
  *
  * What this entry does *not* judge: the shape of `command` and of the P4
  * declarations (`requiresArtifact`, `acceptsArtifact`, `verifierRef`,
- * `childEvidence`, `heuristic`). Those rules live in `admission.ts`
- * (`contractDefects`, `independentAcceptanceDefects`) and are applied to the
- * normalized batch before anything is persisted; a duplicate here would be a
- * second place to keep in step. A declared mode is carried the same way.
+ * `childEvidence`, `heuristic`), nor of `protectedInputs`. Those rules live in
+ * `admission.ts` (`contractDefects`, `independentAcceptanceDefects`) and are
+ * applied to the normalized batch before anything is persisted; a duplicate
+ * here would be a second place to keep in step. A declared mode is carried the
+ * same way.
+ *
+ * `protectedInputs` carries one extra thing worth naming: what arrives here is
+ * already the **fixed** form — `{ path, sha256 }` refs — because the runtime
+ * converts the caller's declared paths before this entry ever sees the batch
+ * (`protected-inputs.ts`). That conversion is admission-time identity fixing,
+ * not normalization: doing it here would make the contract's identity depend on
+ * when the file happened to be read, and the read needs a checkout directory
+ * this module has no business knowing about.
  *
  * The identity covers where the batch came from (store, parent task and run,
  * caller), its contract language, the caller's reason, and the complete
@@ -45,6 +54,7 @@ import type {
   AdmissionContext,
   ChildEvidenceRef,
   DecompositionAdmission,
+  ProtectedInputRef,
   TaskContract,
   TaskContractVersion,
   VerificationMode,
@@ -108,6 +118,7 @@ const CRITERION_FIELDS: ReadonlySet<string> = new Set([
   'verifierRef',
   'childEvidence',
   'heuristic',
+  'protectedInputs',
 ])
 
 function message(error: unknown): string {
@@ -276,6 +287,11 @@ function normalizeCriteria(
       ...(value.verifierRef === undefined ? {} : { verifierRef: carried<string>(value.verifierRef) }),
       ...(value.childEvidence === undefined ? {} : { childEvidence: carried<ChildEvidenceRef[]>(value.childEvidence) }),
       ...(value.heuristic === undefined ? {} : { heuristic: carried<boolean>(value.heuristic) }),
+      // The fixed protected inputs, carried verbatim like the P4 declarations
+      // (admission owns the shape rule). The runtime fixed their identity
+      // *before* this entry ran, so what is hashed here is the byte identity,
+      // never the caller's paths.
+      ...(value.protectedInputs === undefined ? {} : { protectedInputs: carried<ProtectedInputRef[]>(value.protectedInputs) }),
     }
     if (reasons.length > before) return
     criteria.push(criterion)

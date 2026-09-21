@@ -97,6 +97,16 @@ export function defineTaskDecomposeTool(ctx: Context) {
                     type: 'boolean',
                     description: 'Label this criterion a heuristic judgement: the verdict is marked as such and never counted as a deterministic pass. Mutually exclusive with childEvidence',
                   },
+                  protectedInputs: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description:
+                      'Paths of acceptance inputs this criterion depends on that must not be modified by the executing side: acceptance scripts, threshold files, fixtures. ' +
+                      'Declare them as paths relative to the task\'s checkout (an absolute path stays absolute). Admission resolves each one against the session\'s checkout and fixes the SHA-256 of its bytes ' +
+                      'before the contract is written — a path that cannot be read refuses the whole batch, and no protected input is ever stored as a bare path. ' +
+                      'The verifier then re-reads every declared input before judging and fails the criterion, naming the path, if it is missing or its bytes changed. ' +
+                      'Only declared paths are protected: a criterion that lists none is not protected and nothing is checked or claimed for it.',
+                  },
                 },
               },
             },

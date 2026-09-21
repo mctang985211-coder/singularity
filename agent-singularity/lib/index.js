@@ -3212,6 +3212,11 @@ function defineTaskDecomposeTool(ctx) {
 									heuristic: {
 										type: "boolean",
 										description: "Label this criterion a heuristic judgement: the verdict is marked as such and never counted as a deterministic pass. Mutually exclusive with childEvidence"
+									},
+									protectedInputs: {
+										type: "array",
+										items: { type: "string" },
+										description: "Paths of acceptance inputs this criterion depends on that must not be modified by the executing side: acceptance scripts, threshold files, fixtures. Declare them as paths relative to the task's checkout (an absolute path stays absolute). Admission resolves each one against the session's checkout and fixes the SHA-256 of its bytes before the contract is written — a path that cannot be read refuses the whole batch, and no protected input is ever stored as a bare path. The verifier then re-reads every declared input before judging and fails the criterion, naming the path, if it is missing or its bytes changed. Only declared paths are protected: a criterion that lists none is not protected and nothing is checked or claimed for it."
 									}
 								}
 							}
@@ -3460,6 +3465,16 @@ function contractLines(task) {
 	if (contract === void 0) return [];
 	return [...contract.assumptions.length === 0 ? [] : ["assumptions:", ...contract.assumptions.map((item) => `- ${item}`)], ...contract.constraints.length === 0 ? [] : ["constraints:", ...contract.constraints.map((item) => `- ${item}`)]];
 }
+/**
+* The protected acceptance inputs a criterion declares, as one suffix a worker
+* can read: the paths it must not modify. Empty for a criterion that declares
+* none — such a criterion carries no protection, and printing an empty list
+* would read like a claim that it does.
+*/
+function protectedInputsPart(criterion) {
+	const declared = criterion.protectedInputs ?? [];
+	return declared.length === 0 ? "" : ` [protected inputs: ${declared.map((ref) => ref.path).join(", ")}]`;
+}
 function defineTaskReadTool(ctx) {
 	return defineTool({
 		name: "task_read",
@@ -3480,7 +3495,7 @@ function defineTaskReadTool(ctx) {
 					"acceptance criteria:",
 					...task.acceptanceCriteria.map((criterion) => {
 						const command = criterion.command === void 0 ? "" : ` — $ ${criterion.command}`;
-						return `- ${criterion.criterionId} [${criterion.verificationMode}${criterion.mandatory ? ", mandatory" : ""}] ${criterion.description}${command}`;
+						return `- ${criterion.criterionId} [${criterion.verificationMode}${criterion.mandatory ? ", mandatory" : ""}] ${criterion.description}${command}${protectedInputsPart(criterion)}`;
 					}),
 					...contractLines(task),
 					`run ${run.runId} [${run.status}] started ${run.startedAt}`
@@ -3495,7 +3510,7 @@ function defineTaskReadTool(ctx) {
 				`root task ${root.taskId} [${root.status}/${root.decompositionStatus}]`,
 				`objective: ${root.objective}`,
 				"acceptance criteria:",
-				...root.acceptanceCriteria.map((criterion) => `- ${criterion.criterionId} [${criterion.verificationMode}] ${criterion.description}`),
+				...root.acceptanceCriteria.map((criterion) => `- ${criterion.criterionId} [${criterion.verificationMode}] ${criterion.description}${protectedInputsPart(criterion)}`),
 				`children: ${children.length}`,
 				...children.map((child) => {
 					const run = latestRun(snapshot, child);
@@ -3725,10 +3740,11 @@ function renderReview(review) {
 	if (review.localizedCause !== void 0) lines.push(`  cause: ${review.localizedCause}`);
 	for (const anomaly of review.anomalies) lines.push(`  anomaly: ${anomaly}`);
 	for (const criterion of review.criteria ?? []) {
+		const judge = criterion.verifierId === void 0 ? "" : criterion.verifierVersion === void 0 ? ` [${criterion.verifierId}]` : ` [${criterion.verifierId}@${criterion.verifierVersion}]`;
 		const command = criterion.command === void 0 ? "" : ` — $ ${criterion.command}`;
 		const exit = criterion.exitCode === void 0 ? "" : ` exit ${criterion.exitCode}`;
 		const log = criterion.logRef === void 0 ? "" : ` log ${criterion.logRef}`;
-		lines.push(`  criterion ${criterion.criterionId}: ${criterion.verdict}${exit}${command}${log}`);
+		lines.push(`  criterion ${criterion.criterionId}: ${criterion.verdict}${judge}${exit}${command}${log}`);
 	}
 	for (const blocker of review.blockedBy ?? []) lines.push(`  blockedBy ${blocker.taskId} [${blocker.outcome}]`);
 	if (review.metrics !== void 0) {

@@ -4,7 +4,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
-import type { TaskInstance, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
+import type { AcceptanceCriterion, TaskInstance, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
@@ -37,6 +37,17 @@ function contractLines(task: TaskInstance): string[] {
   ]
 }
 
+/**
+ * The protected acceptance inputs a criterion declares, as one suffix a worker
+ * can read: the paths it must not modify. Empty for a criterion that declares
+ * none — such a criterion carries no protection, and printing an empty list
+ * would read like a claim that it does.
+ */
+function protectedInputsPart(criterion: AcceptanceCriterion): string {
+  const declared = criterion.protectedInputs ?? []
+  return declared.length === 0 ? '' : ` [protected inputs: ${declared.map(ref => ref.path).join(', ')}]`
+}
+
 export function defineTaskReadTool(ctx: Context) {
   return defineTool({
     name: 'task_read',
@@ -55,7 +66,7 @@ export function defineTaskReadTool(ctx: Context) {
           'acceptance criteria:',
           ...task.acceptanceCriteria.map(criterion => {
             const command = criterion.command === undefined ? '' : ` — $ ${criterion.command}`
-            return `- ${criterion.criterionId} [${criterion.verificationMode}${criterion.mandatory ? ', mandatory' : ''}] ${criterion.description}${command}`
+            return `- ${criterion.criterionId} [${criterion.verificationMode}${criterion.mandatory ? ', mandatory' : ''}] ${criterion.description}${command}${protectedInputsPart(criterion)}`
           }),
           ...contractLines(task),
           `run ${run.runId} [${run.status}] started ${run.startedAt}`,
@@ -74,7 +85,8 @@ export function defineTaskReadTool(ctx: Context) {
         `root task ${root.taskId} [${root.status}/${root.decompositionStatus}]`,
         `objective: ${root.objective}`,
         'acceptance criteria:',
-        ...root.acceptanceCriteria.map(criterion => `- ${criterion.criterionId} [${criterion.verificationMode}] ${criterion.description}`),
+        ...root.acceptanceCriteria.map(criterion =>
+          `- ${criterion.criterionId} [${criterion.verificationMode}] ${criterion.description}${protectedInputsPart(criterion)}`),
         `children: ${children.length}`,
         ...children.map(child => {
           const run = latestRun(snapshot, child)

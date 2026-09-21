@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
-import { RootTaskSpec, TASK_CONTRACT_VERSION, contractDigest, decompositionDigest, reaches, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
+import { RootTaskSpec, TASK_CONTRACT_VERSION, contractDigest, decompositionDigest, reaches, rootTaskStoreId, sha256Hex } from "@dangosys/dsh-singularity-task";
 import { readFile, readdir, stat } from "node:fs/promises";
 
 //#region src/mcp-servers.ts
@@ -357,6 +357,211 @@ function resolvePermission(manifest, resolveSpec) {
 }
 
 //#endregion
+//#region src/protected-inputs.ts
+function message$2(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+function isPlainObject$1(value) {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+/** Non-blank text: the one check every string field shares. */
+function nonBlank$1(value) {
+	return typeof value === "string" && value.trim().length > 0;
+}
+/**
+* The authoring form of one criterion's declaration: a non-empty array of
+* non-blank strings, in the order the caller wrote them.
+*
+* Everything else is *not* this generator's business. An absent declaration
+* says nothing was declared; the already-fixed form, a bare string, a mixed or
+* otherwise malformed array are left exactly as declared so
+* {@link protectedInputDefects} — through `admission.contractDefects` — refuses
+* them with a reason of their own. Fixing a malformed declaration instead of
+* refusing it would accept a shape nobody promised to read.
+*/
+function declaredPaths(value) {
+	if (!Array.isArray(value) || value.length === 0) return [];
+	return value.every((item) => nonBlank$1(item)) ? [...value] : [];
+}
+/**
+* The label one criterion is reported under: the declared id when it has one,
+* its position otherwise — the vocabulary `normalize.ts` names criteria with,
+* so a caller reading a refusal sees one numbering, not two.
+*/
+function criterionLabel(childLabel, criterion, index) {
+	return `${childLabel} criterion ${nonBlank$1(criterion.criterionId) ? JSON.stringify(criterion.criterionId) : index + 1}`;
+}
+/**
+* Fix the byte identity of every declared protected input, against the
+* checkout directory the criterion's judge will run in.
+*
+* `paths` are the paths **as declared** (the caller's spellings, verbatim):
+* each is resolved against `cwd` for the read — an absolute path stays
+* absolute — while the returned ref keeps the declared spelling, so the
+* identity names what the caller wrote and not a tidied version of it. An
+* identical declaration repeated is read once and produces one entry, in
+* first-declaration order; two spellings of the same file stay two
+* declarations.
+*
+* Refusals are values, never throws: a path that cannot be read (missing,
+* unreadable, a directory) yields a reason naming the label and the path, and a
+* session whose checkout directory cannot be resolved (`cwd === undefined`)
+* yields one reason instead of fixing the declaration against the wrong base.
+* That refusal is whole-batch and absolute paths are not exempt: the checkout
+* names the directory the criterion's judge runs in, so a batch that cannot
+* name it cannot promise that what it fixed is what the re-check will compare —
+* and the refs of a batch refused for one path are never trustworthy either.
+* Nothing is ever written: the files are read and left byte-identical.
+*/
+async function fixProtectedInputs(paths, cwd, label) {
+	if (paths.length === 0) return {
+		refs: [],
+		reasons: []
+	};
+	if (cwd === void 0) return {
+		refs: [],
+		reasons: [`${label} protectedInputs cannot be fixed: the session's checkout directory cannot be resolved (the session has no readable graph env binding), so the declared paths are refused rather than fixed against the wrong base`]
+	};
+	const refs = [];
+	const reasons = [];
+	const seen = /* @__PURE__ */ new Set();
+	for (const path of paths) {
+		if (seen.has(path)) continue;
+		seen.add(path);
+		try {
+			refs.push({
+				path,
+				sha256: sha256Hex(await readFile(resolve(cwd, path)))
+			});
+		} catch (error) {
+			reasons.push(`${label} protectedInputs path ${JSON.stringify(path)} cannot be read: ${message$2(error)}`);
+		}
+	}
+	return {
+		refs,
+		reasons
+	};
+}
+/**
+* Fix the declarations of one criterion list, rebuilding only the criteria that
+* declared one: every untouched criterion is carried by reference, and the
+* caller's input is never mutated — which is also why the returned list is
+* typed read-only.
+*
+* `label` is the position prefix a criterion is reported under (`child 0` on a
+* decomposition, `replay of "t-1"` on a replay); {@link criterionLabel} appends
+* the criterion's own id or position. A criterion whose fixing was refused is
+* carried unchanged — it never reaches the store, because the caller refuses
+* the whole batch on any reason — so no half-fixed identity can be read as a
+* fixed one.
+*/
+async function fixCriteriaProtectedInputs(criteria, cwd, label) {
+	const reasons = [];
+	if (!Array.isArray(criteria)) return {
+		criteria,
+		reasons
+	};
+	const fixed = [];
+	for (const [index, criterion] of criteria.entries()) {
+		const paths = declaredPaths(criterion.protectedInputs);
+		if (paths.length === 0) {
+			fixed.push(criterion);
+			continue;
+		}
+		const outcome = await fixProtectedInputs(paths, cwd, criterionLabel(label, criterion, index));
+		reasons.push(...outcome.reasons);
+		fixed.push(outcome.reasons.length === 0 ? {
+			...criterion,
+			protectedInputs: outcome.refs
+		} : criterion);
+	}
+	return {
+		criteria: fixed,
+		reasons
+	};
+}
+/**
+* Fix the declared protected inputs of a whole decomposition proposal before
+* anything else reads it: the runtime calls this ahead of the single
+* normalization entry, so the contract the store receives — and both content
+* identities computed over it — describe the fixed byte identity rather than
+* the caller's paths.
+*
+* Absent declarations and every malformed shape are carried exactly as
+* declared, and a child nothing was fixed in is returned by reference: this
+* function converts the authoring form, it does not validate, so the reasons it
+* returns are only the ones fixing itself could produce.
+*/
+async function fixSpecProtectedInputs(spec, cwd) {
+	const reasons = [];
+	if (!Array.isArray(spec?.children)) return {
+		spec,
+		reasons
+	};
+	const children = [];
+	for (const [index, child] of spec.children.entries()) {
+		if (child === null || typeof child !== "object" || !Array.isArray(child.acceptanceCriteria)) {
+			children.push(child);
+			continue;
+		}
+		const outcome = await fixCriteriaProtectedInputs(child.acceptanceCriteria, cwd, `child ${index}`);
+		reasons.push(...outcome.reasons);
+		const touched = outcome.criteria.some((criterion, position) => criterion !== child.acceptanceCriteria[position]);
+		children.push(touched ? {
+			...child,
+			acceptanceCriteria: outcome.criteria
+		} : child);
+	}
+	return {
+		spec: children.some((child, index) => child !== spec.children[index]) ? {
+			...spec,
+			children
+		} : spec,
+		reasons
+	};
+}
+/**
+* Structural defects of the **fixed** form of every criterion's protected
+* inputs: each declaration must be an array of plain objects carrying exactly
+* `path` (non-blank string) and `sha256` (lowercase 64-character hex). Shape
+* only — whether the file still hashes to that digest is the pre-judgement
+* re-check's question, and it needs the checkout, not this function.
+*
+* The ordinary decomposition path and the replay path share this function (via
+* `admission.contractDefects`) so one rule can never hold on one and not on the
+* other, and the declared string form is refused here as well: reaching
+* admission with paths instead of digests means the runtime's fixing step was
+* bypassed, which is exactly the state that must not be persisted. Every reason
+* is prefixed with `<label> criterion "<id>"`, the label the other contract
+* rules use.
+*/
+function protectedInputDefects(criteria, label) {
+	const reasons = [];
+	for (const criterion of criteria) {
+		const where = `${label} criterion ${JSON.stringify(criterion.criterionId)}`;
+		const declared = criterion.protectedInputs;
+		if (declared === void 0) continue;
+		if (!Array.isArray(declared)) {
+			reasons.push(`${where} protectedInputs must be an array of { path, sha256 } entries (declared paths are fixed by admission, never stored as strings)`);
+			continue;
+		}
+		declared.forEach((entry, index) => {
+			const at = `${where} protectedInputs entry ${index}`;
+			if (!isPlainObject$1(entry)) {
+				reasons.push(`${at} must be an object with only path and sha256`);
+				return;
+			}
+			for (const key of Object.keys(entry)) if (key !== "path" && key !== "sha256") reasons.push(`${at} declares unknown field ${JSON.stringify(key)}`);
+			if (!nonBlank$1(entry.path)) reasons.push(`${at} path must be a non-empty string`);
+			if (typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256)) reasons.push(`${at} sha256 must be a lowercase 64-character hex digest`);
+		});
+	}
+	return reasons;
+}
+
+//#endregion
 //#region src/admission.ts
 /** Modes whose criterion is executed by the command verifier and therefore needs `command`. */
 const EXECUTABLE_MODES = [
@@ -420,8 +625,9 @@ function hasCommand(command) {
 * Structural defects of one task's acceptance contract (T1, construction guide
 * §4): what has to hold before a contract can be admitted at all, whichever
 * entry wrote it — an ordinary decomposition child, a replay candidate, or
-* (later) a template instance. Texts, ids and modes only; nothing here judges
-* whether a criterion is any good, and nothing here needs the store.
+* (later) a template instance. Texts, ids, modes, and the fixed form of a
+* criterion's protected acceptance inputs only; nothing here judges whether a
+* criterion is any good, and nothing here needs the store.
 *
 * The ordinary decomposition path and the replay path share this function so
 * that a rule can never hold on one and not on the other. The *parent* task's
@@ -453,6 +659,7 @@ function contractDefects(criteria, label) {
 			reportedDuplicate.add(criterion.criterionId);
 		}
 		seen.add(criterion.criterionId);
+		reasons.push(...protectedInputDefects([criterion], label));
 	}
 	if (!criteria.some((criterion) => criterion.mandatory === true)) reasons.push(`${label} requires at least one mandatory acceptance criterion`);
 	return reasons;
@@ -510,6 +717,80 @@ function checkDecomposition(parent, children, existingEdges) {
 }
 
 //#endregion
+//#region src/contract.ts
+/**
+* Opening marker of the block. Stable on purpose: it is what tells a reader —
+* human or test — that this text is the contract, and it lets a future
+* re-render find the copy already on the surface.
+*/
+const WORKER_CONTRACT_OPEN = "<worker-contract";
+/** Closing marker, and the URL-safe suffix a search for the block's end uses. */
+const WORKER_CONTRACT_CLOSE = "</worker-contract>";
+/**
+* The protected acceptance inputs cell of one criterion row — the paths the
+* worker must not modify, or `—` when the criterion declares none.
+*
+* One helper for both tables (`criteriaTable` here and the spawn prompt's own
+* copy in `./handoff.ts`) because the two render the same contract and must
+* agree byte-for-byte: a criterion that declares nothing is marked as such
+* rather than left blank, and the paths are joined in declaration order, never
+* sorted or deduplicated — what the caller declared is what the worker reads.
+* Only paths are rendered: the fixed digest is the verifier's business, and a
+* hex string in a prompt would be noise the worker cannot act on.
+*/
+function protectedInputsCell(criterion) {
+	const refs = criterion.protectedInputs ?? [];
+	return refs.length === 0 ? "—" : refs.map((ref) => ref.path).join(", ");
+}
+/** The criteria table, in the same shape the spawn prompt renders: what, how judged, the command, and what must not change. */
+function criteriaTable(criteria) {
+	return [
+		"| criterion | mode | mandatory | description | command | protected inputs |",
+		"| --- | --- | --- | --- | --- | --- |",
+		...criteria.map((criterion) => `| ${criterion.criterionId} | ${criterion.verificationMode} | ${criterion.mandatory ? "yes" : "no"} | ${criterion.description} | ${criterion.command ?? "—"} | ${protectedInputsCell(criterion)} |`)
+	];
+}
+/** One handoff list: `(none)` for an empty one, the items as a nested list otherwise. */
+function field(title, items) {
+	if (items.length === 0) return [`- ${title}: (none)`];
+	return [`- ${title}:`, ...items.map((item) => `  - ${item}`)];
+}
+/**
+* Render one task's contract block.
+* @param task - the child task as the store holds it at delegation.
+* @param handoff - the envelope the parent passed to this child.
+* @returns the marked block, ending in the one line that says where the
+*   authority lives, so a model reading it never has to guess whether a
+*   compacted spawn prompt or this block is the current contract.
+*/
+function renderWorkerContract(task, handoff) {
+	return [
+		`${WORKER_CONTRACT_OPEN} task="${task.taskId}" decomposition="${task.decompositionStatus}">`,
+		"",
+		`# Delegated task ${task.taskId}`,
+		"",
+		task.objective,
+		"",
+		"## Acceptance criteria",
+		"",
+		...criteriaTable(task.acceptanceCriteria),
+		"",
+		"## Handoff",
+		"",
+		`- Parent objective: ${handoff.parentObjective}`,
+		`- Reason for delegation: ${handoff.reasonForDelegation}`,
+		...field("Constraints", handoff.constraints),
+		...field("Decisions already made", handoff.decisions),
+		...field("Assumptions", handoff.assumptions),
+		...field("Open questions", handoff.openQuestions),
+		"",
+		WORKER_CONTRACT_CLOSE,
+		"",
+		"This block is the authoritative copy of your contract and is re-sent with every request; `task_read` reads the same store."
+	].join("\n");
+}
+
+//#endregion
 //#region src/handoff.ts
 /** Envelope passed from a parent run to the child it delegates to (RFC §18). */
 function buildHandoff(init) {
@@ -536,11 +817,12 @@ function listSection(title, items, empty) {
 }
 /**
 * Render the worker prompt for a delegated child task. Compact on purpose:
-* objective, the acceptance criteria table (with verifier commands), the
-* handoff envelope, the pointer to the delegating session, the decomposable
-* reminder when the parent asked for a further split, the runtime-split rule
-* when the deployment admits one ({@link WorkerPromptOptions}), and the rules —
-* a few thousand tokens at most.
+* objective, the acceptance criteria table (with verifier commands and the
+* protected input paths the worker must not modify), the handoff envelope, the
+* pointer to the delegating session, the decomposable reminder when the parent
+* asked for a further split, the runtime-split rule when the deployment admits
+* one ({@link WorkerPromptOptions}), and the rules — a few thousand tokens at
+* most.
 */
 function renderWorkerPrompt(handoff, childTask, options) {
 	const header = [
@@ -550,9 +832,9 @@ function renderWorkerPrompt(handoff, childTask, options) {
 		"",
 		"## Acceptance criteria",
 		"",
-		"| criterion | mode | mandatory | description | command |",
-		"| --- | --- | --- | --- | --- |",
-		...childTask.acceptanceCriteria.map((criterion) => `| ${criterion.criterionId} | ${criterion.verificationMode} | ${criterion.mandatory ? "yes" : "no"} | ${criterion.description} | ${criterion.command ?? "—"} |`)
+		"| criterion | mode | mandatory | description | command | protected inputs |",
+		"| --- | --- | --- | --- | --- | --- |",
+		...childTask.acceptanceCriteria.map((criterion) => `| ${criterion.criterionId} | ${criterion.verificationMode} | ${criterion.mandatory ? "yes" : "no"} | ${criterion.description} | ${criterion.command ?? "—"} | ${protectedInputsCell(criterion)} |`)
 	].join("\n");
 	const decomposition = [
 		"## This task is decomposable",
@@ -594,6 +876,7 @@ function renderWorkerPrompt(handoff, childTask, options) {
 			"",
 			"- Do the work; never declare completion yourself — an external verifier checks every mandatory criterion.",
 			"- Where a criterion lists a command, make that command exit 0 in the checkout.",
+			"- A criterion's declared protected inputs must not be modified: the verifier re-checks their identity before judging, and a changed or missing input fails the criterion, naming the path.",
 			"- Keep changes scoped to this task. Need a human decision? Ask with `ask_user_question`.",
 			"- Cannot continue? Fail with a clear reason — the orchestrator blocks dependent tasks and reports to the parent task.",
 			...options.allowRuntimeDecomposition ? ["- If the work turns out not to be atomic after all, call `task_decompose` yourself: this deployment admits a task's own decomposition, so your parent did not have to predict it. The call still has to clear admission — structure, acyclic dependencies, a command on every executable criterion, capability coverage, depth and batch-size limits — and a task may split only once; a refusal names the rule that blocked it, and that reason is what you act on. Split only into pieces a verifier can judge on its own; otherwise do the work here."] : [],
@@ -636,7 +919,8 @@ const CRITERION_FIELDS = new Set([
 	"acceptsArtifact",
 	"verifierRef",
 	"childEvidence",
-	"heuristic"
+	"heuristic",
+	"protectedInputs"
 ]);
 function message$1(error) {
 	return error instanceof Error ? error.message : String(error);
@@ -770,7 +1054,8 @@ function normalizeCriteria(raw, childIndex, childLabel, reasons) {
 			...value.acceptsArtifact === void 0 ? {} : { acceptsArtifact: carried(value.acceptsArtifact) },
 			...value.verifierRef === void 0 ? {} : { verifierRef: carried(value.verifierRef) },
 			...value.childEvidence === void 0 ? {} : { childEvidence: carried(value.childEvidence) },
-			...value.heuristic === void 0 ? {} : { heuristic: carried(value.heuristic) }
+			...value.heuristic === void 0 ? {} : { heuristic: carried(value.heuristic) },
+			...value.protectedInputs === void 0 ? {} : { protectedInputs: carried(value.protectedInputs) }
 		};
 		if (reasons.length > before) return;
 		criteria.push(criterion);
@@ -875,64 +1160,6 @@ function normalizeDecomposition(spec, context) {
 			reasons: [`decomposition content cannot be canonicalized: ${message$1(error)}`]
 		};
 	}
-}
-
-//#endregion
-//#region src/contract.ts
-/**
-* Opening marker of the block. Stable on purpose: it is what tells a reader —
-* human or test — that this text is the contract, and it lets a future
-* re-render find the copy already on the surface.
-*/
-const WORKER_CONTRACT_OPEN = "<worker-contract";
-/** Closing marker, and the URL-safe suffix a search for the block's end uses. */
-const WORKER_CONTRACT_CLOSE = "</worker-contract>";
-/** The criteria table, in the same shape the spawn prompt renders: what, how judged, and the command. */
-function criteriaTable(criteria) {
-	return [
-		"| criterion | mode | mandatory | description | command |",
-		"| --- | --- | --- | --- | --- |",
-		...criteria.map((criterion) => `| ${criterion.criterionId} | ${criterion.verificationMode} | ${criterion.mandatory ? "yes" : "no"} | ${criterion.description} | ${criterion.command ?? "—"} |`)
-	];
-}
-/** One handoff list: `(none)` for an empty one, the items as a nested list otherwise. */
-function field(title, items) {
-	if (items.length === 0) return [`- ${title}: (none)`];
-	return [`- ${title}:`, ...items.map((item) => `  - ${item}`)];
-}
-/**
-* Render one task's contract block.
-* @param task - the child task as the store holds it at delegation.
-* @param handoff - the envelope the parent passed to this child.
-* @returns the marked block, ending in the one line that says where the
-*   authority lives, so a model reading it never has to guess whether a
-*   compacted spawn prompt or this block is the current contract.
-*/
-function renderWorkerContract(task, handoff) {
-	return [
-		`${WORKER_CONTRACT_OPEN} task="${task.taskId}" decomposition="${task.decompositionStatus}">`,
-		"",
-		`# Delegated task ${task.taskId}`,
-		"",
-		task.objective,
-		"",
-		"## Acceptance criteria",
-		"",
-		...criteriaTable(task.acceptanceCriteria),
-		"",
-		"## Handoff",
-		"",
-		`- Parent objective: ${handoff.parentObjective}`,
-		`- Reason for delegation: ${handoff.reasonForDelegation}`,
-		...field("Constraints", handoff.constraints),
-		...field("Decisions already made", handoff.decisions),
-		...field("Assumptions", handoff.assumptions),
-		...field("Open questions", handoff.openQuestions),
-		"",
-		WORKER_CONTRACT_CLOSE,
-		"",
-		"This block is the authoritative copy of your contract and is re-sent with every request; `task_read` reads the same store."
-	].join("\n");
 }
 
 //#endregion
@@ -1054,6 +1281,14 @@ async function authorizedGrant(env, manifest) {
 * Copy the verifier's per-criterion results onto a review record, filling the
 * command from the criterion itself when the result omits it — the record
 * must show what was checked without a trip back into the evidence bundle.
+*
+* The deciding judge travels with the verdict (S1-V slice 2): the registered
+* verifier id and the version of the instance that produced the verdict, so a
+* reader can tell which judge decided, and a later recall can index the
+* verdict by `(verifierRef, version)` (KISS §8.2) without reopening the bundle.
+* Both are optional on the record and omitted when the result carries neither —
+* a verdict written before the fields existed stays readable exactly as before,
+* and nothing is invented for it.
 */
 function reviewCriteria(criteria, results) {
 	return results.map((result) => {
@@ -1061,6 +1296,8 @@ function reviewCriteria(criteria, results) {
 		return {
 			criterionId: result.criterionId,
 			verdict: result.status,
+			...result.verifierId === void 0 ? {} : { verifierId: result.verifierId },
+			...result.verifierVersion === void 0 ? {} : { verifierVersion: result.verifierVersion },
 			...command === void 0 ? {} : { command },
 			...result.exitCode === void 0 ? {} : { exitCode: result.exitCode },
 			...result.logRef === void 0 ? {} : { logRef: result.logRef },
@@ -1251,8 +1488,8 @@ async function awaitWorker(handle, signal, wallTimeMs) {
 			kind: "failed",
 			reason: message(error)
 		})];
-		if (wallTimeMs !== void 0) branches.push(new Promise((resolve) => {
-			timer = setTimeout(() => resolve({ kind: "budget-exhausted" }), wallTimeMs);
+		if (wallTimeMs !== void 0) branches.push(new Promise((resolve$1) => {
+			timer = setTimeout(() => resolve$1({ kind: "budget-exhausted" }), wallTimeMs);
 			if (typeof timer.unref === "function") timer.unref();
 		}));
 		const settled = await Promise.race(branches);
@@ -2285,17 +2522,24 @@ var TaskRuntime = class extends Service {
 		};
 	}
 	/**
-	* Atomic decomposition plus the sequential run cascade: normalization,
-	* structural admission and capability admission must all pass for the whole
-	* batch before anything is persisted; children then run one at a time in
-	* dependency order.
+	* Atomic decomposition plus the sequential run cascade: protected-input
+	* identity fixing, normalization, structural admission and capability
+	* admission must all pass for the whole batch before anything is persisted;
+	* children then run one at a time in dependency order.
 	*
-	* The batch is normalized first ({@link normalizeDecomposition}): raw caller
+	* Protected acceptance inputs are fixed first (`protected-inputs.ts`): every
+	* criterion's declared paths are read against the session's checkout and
+	* recorded as the SHA-256 of their bytes, so the contract — and both content
+	* identities computed over it — describe the fixed identity, never a path
+	* that could be re-pointed or re-read later.
+	*
+	* The batch is then normalized ({@link normalizeDecomposition}): raw caller
 	* input becomes the contract of every child with its defaults filled and its
 	* criterion ids fixed, and the batch identity plus the limits in force become
-	* ready to be recorded with the decomposition. A refused batch is refused
-	* whole — the error names every reason, no id is minted into the store, no
-	* capability is resolved into an event, and no obligation is recorded.
+	* ready to be recorded with the decomposition. A refused batch — by the
+	* fixing or by normalization, in one message — is refused whole: no id is
+	* minted into the store, no capability is resolved into an event, and no
+	* obligation is recorded.
 	*
 	* The structural policy is `allowed` — a `leaf` task may decompose only while
 	* {@link Config.allowRuntimeDecomposition} is on — plus the configured growth
@@ -2308,14 +2552,16 @@ var TaskRuntime = class extends Service {
 		const parentRun = await this.ctx.task.runIn(storeId, parentRunId);
 		if (parentRun.taskId !== parentTaskId) throw new Error(`task-runtime: run "${parentRunId}" belongs to task "${parentRun.taskId}", not "${parentTaskId}"`);
 		if (parentRun.sessionId !== callerSessionId) throw new Error(`task-runtime: run "${parentRunId}" is bound to session "${parentRun.sessionId}", not caller "${callerSessionId}"`);
-		const normalized = normalizeDecomposition(spec, {
+		const fixed = await fixSpecProtectedInputs(spec, await this.envPathForSession(callerSessionId));
+		const normalized = normalizeDecomposition(fixed.spec, {
 			storeId,
 			parentTaskId,
 			parentRunId,
 			callerSessionId,
 			admissionContext: this.admissionContext()
 		});
-		if (!normalized.ok) throw new Error(`task-runtime: contract rejected decomposition of "${parentTaskId}":\n- ${normalized.reasons.join("\n- ")}`);
+		const reasons = [...fixed.reasons, ...normalized.ok ? [] : normalized.reasons];
+		if (!normalized.ok || reasons.length > 0) throw this.contractRefusal(parentTaskId, reasons);
 		const batch = normalized.batch;
 		const childTaskIds = batch.children.map(() => `t-${randomUUID()}`);
 		const snapshot = await this.ctx.task.snapshotIn(storeId);
@@ -2429,9 +2675,15 @@ var TaskRuntime = class extends Service {
 	* The replayed task carries a normalized contract like every other creation
 	* (T1), and its criteria are judged by the same structural rules an ordinary
 	* decomposition child faces (`contractDefects` plus the P4 declarations).
-	* A replay has no batch, so it records no admission context: nothing was
-	* proposed to a parent, there is no sibling set to bound, and the limits that
-	* do apply to its run are the run's own budget, not a batch's.
+	* Protected acceptance inputs are fixed here too (S1-V slice 2), against the
+	* replay caller's checkout: a candidate contract declaring paths has their
+	* identity fixed before anything else reads it, while a champion's stored
+	* `{ path, sha256 }` refs are carried verbatim — the historical identity is
+	* what the pre-judgement re-check compares against, so it is never re-read
+	* from disk and never invented. A replay has no batch, so it records no
+	* admission context: nothing was proposed to a parent, there is no sibling
+	* set to bound, and the limits that do apply to its run are the run's own
+	* budget, not a batch's.
 	*/
 	async replayTask(storeId, championTaskId, options, callerSessionId) {
 		const champion = await this.ctx.task.taskIn(storeId, championTaskId);
@@ -2449,16 +2701,21 @@ var TaskRuntime = class extends Service {
 		const manifest = resolveCapabilities(effective.requiredCapabilities, table);
 		if (manifest.missing.length > 0) throw new Error(`task-runtime: replay of "${championTaskId}" cannot run: capability gap [${manifest.missing.join(", ")}] under the overlay`);
 		const label = `replay of "${championTaskId}"`;
-		const acceptanceDefects = [...contractDefects(effective.acceptanceCriteria, label), ...independentAcceptanceDefects(effective.acceptanceCriteria, champion.requiresIndependentAcceptance, label)];
+		const fixed = await fixCriteriaProtectedInputs(effective.acceptanceCriteria, await this.envPathForSession(callerSessionId), label);
+		const acceptanceDefects = [
+			...fixed.reasons,
+			...contractDefects(fixed.criteria, label),
+			...independentAcceptanceDefects(fixed.criteria, champion.requiresIndependentAcceptance, label)
+		];
 		if (acceptanceDefects.length > 0) throw new Error(`task-runtime: replay of "${championTaskId}" rejected:\n- ${acceptanceDefects.join("\n- ")}`);
-		this.assertKnownVerifierRefs(effective.acceptanceCriteria.map((criterion) => ({
+		this.assertKnownVerifierRefs(fixed.criteria.map((criterion) => ({
 			childIndex: 0,
 			criterion
 		})), `replay of "${championTaskId}"`);
 		const contract = {
 			contractVersion: TASK_CONTRACT_VERSION,
 			objective: `[${options.lineage}] ${effective.objective}`,
-			acceptanceCriteria: structuredClone(effective.acceptanceCriteria),
+			acceptanceCriteria: structuredClone([...fixed.criteria]),
 			assumptions: [...champion.contract?.assumptions ?? []],
 			constraints: [...champion.contract?.constraints ?? []],
 			requiredCapabilities: [...effective.requiredCapabilities]
@@ -2582,6 +2839,44 @@ var TaskRuntime = class extends Service {
 			}
 		};
 	}
+	/**
+	* The env binding the session's graph runs in, or `undefined` when the
+	* deployment mounts no env-builder or the graph cannot be read. Best-effort
+	* by contract: every caller decides what an unresolved env means — a
+	* verification command without `cwd`, a refused composition of MCP servers, a
+	* refused batch when a protected input has to be fixed — and none of them may
+	* guess one.
+	*/
+	async sessionEnv(sessionId) {
+		try {
+			const envBuilder = this.ctx.get?.("envBuilder") ?? this.ctx.envBuilder;
+			if (envBuilder === void 0) return void 0;
+			const graph = await this.ctx.graphs.graphForSession(SessionId(sessionId));
+			return envBuilder.store.get(graph.envId);
+		} catch {
+			return;
+		}
+	}
+	/**
+	* The session's checkout directory: the one directory a run's commands, a
+	* verifier's `cwd`, and a protected acceptance input's bytes are all resolved
+	* against. `undefined` means the deployment cannot name it — the caller
+	* refuses rather than fixing an identity against a base it does not know
+	* ({@link fixProtectedInputs}).
+	*/
+	async envPathForSession(sessionId) {
+		return (await this.sessionEnv(sessionId))?.path;
+	}
+	/**
+	* The single refusal text a decomposition batch is rejected at the contract
+	* stage with, whichever step produced the reasons (the protected-input fixing
+	* or the normalization entry): a caller reads one message shape and one
+	* reason-per-bullet list, and the label names the parent the batch was
+	* refused for.
+	*/
+	contractRefusal(parentTaskId, reasons) {
+		return /* @__PURE__ */ new Error(`task-runtime: contract rejected decomposition of "${parentTaskId}":\n- ${reasons.join("\n- ")}`);
+	}
 	orchestrateEnv(callerSessionId, actor) {
 		return {
 			task: this.ctx.task,
@@ -2601,21 +2896,15 @@ var TaskRuntime = class extends Service {
 				return presets.resolve(name);
 			},
 			resolveMcpEnv: async () => {
-				const envBuilder = this.ctx.get?.("envBuilder") ?? this.ctx.envBuilder;
-				if (envBuilder === void 0) return void 0;
-				try {
-					const graph = await this.ctx.graphs.graphForSession(SessionId(callerSessionId));
-					const env = envBuilder.store.get(graph.envId);
-					return {
-						envRoot: env.path,
-						checkout: (repo) => {
-							const component = (env.components ?? []).find((item) => item.repo === repo);
-							return component === void 0 ? void 0 : join(env.path, component.dir);
-						}
-					};
-				} catch {
-					return;
-				}
+				const env = await this.sessionEnv(callerSessionId);
+				if (env === void 0) return void 0;
+				return {
+					envRoot: env.path,
+					checkout: (repo) => {
+						const component = (env.components ?? []).find((item) => item.repo === repo);
+						return component === void 0 ? void 0 : join(env.path, component.dir);
+					}
+				};
 			},
 			spawn: (request) => {
 				const parent = this.liveAgent(callerSessionId);
@@ -2636,13 +2925,7 @@ var TaskRuntime = class extends Service {
 			verifyRun: async (storeId, runId, options = {}) => {
 				const verifier = this.runVerifier();
 				if (verifier === void 0 || typeof verifier.verifyRun !== "function") throw new VerifierUnavailableError(`task-runtime: verifier service is not loaded; cannot verify run "${runId}" (expected plugin id "verifier", ticket C2)`);
-				let cwd;
-				try {
-					const graph = await this.ctx.graphs.graphForSession(SessionId(callerSessionId));
-					cwd = (this.ctx.get?.("envBuilder") ?? this.ctx.envBuilder)?.store.get(graph.envId).path;
-				} catch {
-					cwd = void 0;
-				}
+				const cwd = await this.envPathForSession(callerSessionId);
 				return verifier.verifyRun(storeId, runId, {
 					...cwd === void 0 ? {} : { cwd },
 					...options
@@ -2781,4 +3064,4 @@ var TaskRuntime = class extends Service {
 var src_default = TaskRuntime;
 
 //#endregion
-export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, MCP_SERVER_REGISTRY, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, buildHandoff, checkDecomposition, checkObligationCoverage, contractDefects, src_default as default, escalationHint, findRepoRoot, independentAcceptanceDefects, loadObligationTemplates, manifestMcpServers, normalizeDecomposition, parseObligationTemplates, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };
+export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, MCP_SERVER_REGISTRY, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, buildHandoff, checkDecomposition, checkObligationCoverage, contractDefects, src_default as default, escalationHint, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, independentAcceptanceDefects, loadObligationTemplates, manifestMcpServers, normalizeDecomposition, parseObligationTemplates, protectedInputDefects, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };

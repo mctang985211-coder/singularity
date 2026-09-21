@@ -40,7 +40,15 @@ function canonicalize(value) {
 	return `{${Object.keys(source).filter((key) => source[key] !== void 0).sort().map((key) => `${JSON.stringify(key)}:${canonicalize(source[key])}`).join(",")}}`;
 }
 function sha256(text) {
-	return createHash("sha256").update(text, "utf8").digest("hex");
+	return sha256Hex(text);
+}
+/**
+* SHA-256 (lowercase hex) of raw bytes: the digest form a protected
+* acceptance input's identity is fixed with ({@link ProtectedInputRef}),
+* shared by the admission-time fixing and the pre-judgement re-check.
+*/
+function sha256Hex(bytes) {
+	return createHash("sha256").update(bytes).digest("hex");
 }
 /** The single-task contract identity: SHA-256 over {@link canonicalize} of the normalized contract. */
 function contractDigest(contract) {
@@ -924,4 +932,4 @@ var TaskService = class extends Service {
 var src_default = TaskService;
 
 //#endregion
-export { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, RootTaskSpec, TASK_CONTRACT_VERSION, TaskService, TaskState, canonicalize, contractDigest, decompositionDigest, src_default as default, reaches, rootTaskStoreId };
+export { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, RootTaskSpec, TASK_CONTRACT_VERSION, TaskService, TaskState, canonicalize, contractDigest, decompositionDigest, src_default as default, reaches, rootTaskStoreId, sha256Hex };

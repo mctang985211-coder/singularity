@@ -1,6 +1,6 @@
 # Singularity 确定性构建任务
 
-日期：2026-09-21。本目录保存执行合同，完成状态以建设计划为准；P1–P4 已完成，T1–T3 与 A0–A6 待执行。
+日期：2026-09-21。本目录保存执行合同，完成状态以建设计划为准；P1–P4 与 T1 已完成，S1-V 切片 2 已完成（见建设计划记录）；T2/T3 与 A0–A6 待执行。
 准备文档前备份：Singularity `6fe9c26`，外层 harness `1afb656`。
 
 ## 派发顺序
@@ -10,7 +10,7 @@
 3. [P3：过期 Skill 候选拒绝](03-skill-champion-check.md)，基于 P2 验收后的代码执行。
 4. [P4：独立父验收与证据身份](04-parent-acceptance-evidence-identity.md)，基于 P3 验收后的代码执行；S1-V 切片 2（verifier selftest 执行）不在本票。
 
-下一项为 [Task 自主构造与契约审核](../task-contract-construction-guide.md) §8 的 T1。唯一后续顺序以 [建设计划](../2026-09-20-vrtc-code-change-plan.md)文首表为准；不要按文件名、T/A/S 编号或历史段落自行推定下一项。T2/T3 在 A3 完成后作为一个交付组执行，其他交付组同样只以计划明确列出的范围为准。
+下一项见 [建设计划](../2026-09-20-vrtc-code-change-plan.md)文首唯一顺序（唯一顺序第 3 项 S1-C：能力预检与版本绑定）。唯一后续顺序以建设计划文首表为准；不要按文件名、T/A/S 编号或历史段落自行推定下一项。T2/T3 在 A3 完成后作为一个交付组执行，其他交付组同样只以计划明确列出的范围为准。
 
 全局上下文、父子澄清、任务发现和 supervisor 的协议见 [深入架构](../exploration-evolution-architecture.md) §10，角色文本见 [Prompt 合同](../agent-prompt-contracts.md)。S1 验证/能力合同先于 A3；审核完整交付后建 A0；评估 S4-E 先于自动主管/候选执行。不得先写 ask_parent 再忽略父工具同步等待，也不能只换 prompt 宣称机制已实现。每次仅派发计划指定的一票或一个交付组，不另建提前运行版。
 

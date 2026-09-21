@@ -184,7 +184,16 @@ export function canonicalize(value: unknown): string {
 }
 
 function sha256(text: string): string {
-  return createHash('sha256').update(text, 'utf8').digest('hex')
+  return sha256Hex(text)
+}
+
+/**
+ * SHA-256 (lowercase hex) of raw bytes: the digest form a protected
+ * acceptance input's identity is fixed with ({@link ProtectedInputRef}),
+ * shared by the admission-time fixing and the pre-judgement re-check.
+ */
+export function sha256Hex(bytes: Uint8Array | string): string {
+  return createHash('sha256').update(bytes).digest('hex')
 }
 
 /** The single-task contract identity: SHA-256 over {@link canonicalize} of the normalized contract. */

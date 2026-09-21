@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
 import type { AcceptanceCriterion, EvidenceBundle, TaskInstance, TaskRun, TaskSnapshot, VerificationResult, VerifyRequest } from '../../../task/src/types.ts'
-import { CompositeVerifier } from '../../src/composite-verifier.ts'
+import { CompositeVerifier, judgeCompositeCriterion } from '../../src/composite-verifier.ts'
 
 const NOW = '2026-09-16T00:00:00.000Z'
 
@@ -259,5 +259,29 @@ describe('CompositeVerifier parent evidence map (P4, KISS §6 C2)', () => {
     // Without the label the conjunction verdict carries no heuristic marker.
     const [plain] = await verifier.verifyIn('sg-t-root', request())
     expect(plain.details).toBeUndefined()
+  })
+})
+
+describe('CompositeVerifier executable selftest samples (V2-1, KISS §4.3)', () => {
+  test('the declared samples are distinguishable when the real judge executes them', async () => {
+    const verifier = new CompositeVerifier(source([]))
+    const samples = verifier.selftest.samples
+    expect(samples.map(sample => sample.role)).toEqual(['positive', 'negative'])
+    const statuses: VerificationResult['status'][] = []
+    for (const sample of samples) {
+      const store = sample.store
+      expect(store, `sample "${sample.name}" declares the store view it is judged against`).toBeDefined()
+      const result = await judgeCompositeCriterion(
+        sample.criterion,
+        store!.children,
+        async () => snapshot(store!.children, store!.runs ?? [], store!.evidence ?? []),
+      )
+      statuses.push(result.status)
+      expect(result.verifierId).toBe('composite')
+      expect(result.status, `sample "${sample.name}" expected ${sample.expect}`).toBe(sample.expect)
+    }
+    // The pair sits on opposite sides of the judgement: what tells them apart
+    // is the fixture store, not the sample's own text.
+    expect(statuses).toEqual(['pass', 'fail'])
   })
 })

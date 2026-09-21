@@ -774,7 +774,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(contract).toContain(WORKER_CONTRACT_OPEN)
     expect(contract).toContain('<worker-contract task="')
     expect(contract).toContain('ball child')
-    expect(contract).toContain('| ac1-1 | deterministic | yes | ball child works | true |')
+    expect(contract).toContain('| ac1-1 | deterministic | yes | ball child works | true | — |')
     expect(contract).toContain('`task_read` reads the same store')
     // It rides its own channel: the prompt is not the contract and the contract
     // is not the prompt, so a fold that shadows one leaves the other.
@@ -1956,11 +1956,13 @@ describe('TaskRuntime unknown-kind feedback (KISS §4.3, VRTC plan 2.1)', () => 
       )} (verifier exploded)`)
 
     // The review record carries the kind too, so E3 can be read without the bundle.
+    // It also carries the deciding judge since S1-V slice 2, copied off the
+    // verifier result — the record names who decided, not only what was decided.
     const snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.reviews.find(item => item.runId === outcomes[0]!.runId)!.criteria)
-      .toEqual([{ criterionId: 'ac1-1', verdict: 'inconclusive', command: 'true', unknownKind: 'task' }])
+      .toEqual([{ criterionId: 'ac1-1', verdict: 'inconclusive', verifierId: 'fake-verifier', command: 'true', unknownKind: 'task' }])
     expect(snapshot.reviews.find(item => item.runId === outcomes[1]!.runId)!.criteria)
-      .toEqual([{ criterionId: 'ac2-1', verdict: 'inconclusive', command: 'true', unknownKind: 'verifier' }])
+      .toEqual([{ criterionId: 'ac2-1', verdict: 'inconclusive', verifierId: 'fake-verifier', command: 'true', unknownKind: 'verifier' }])
   })
 })
 
@@ -2131,7 +2133,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     const replayTask = await h.task.taskIn(STORE, outcome.taskId)
     expect(replayTask.acceptanceCriteria.map(item => item.criterionId)).toEqual(['cd-1'])
     const record = (await h.task.snapshotIn(STORE)).reviews.find(item => item.runId === outcome.runId)
-    expect(record!.criteria).toEqual([{ criterionId: 'cd-1', verdict: 'pass', command: 'make candidate' }])
+    expect(record!.criteria).toEqual([{ criterionId: 'cd-1', verdict: 'pass', verifierId: 'fake-verifier', command: 'make candidate' }])
     expect(record!.anomalies).toEqual(['evolution-replay:p5'])
   })
 

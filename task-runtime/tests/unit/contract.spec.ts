@@ -65,10 +65,37 @@ describe('renderWorkerContract', () => {
   test('carries the objective and every acceptance criterion with the fields a verifier judges', () => {
     const rendered = renderWorkerContract(child, handoff)
     expect(rendered).toContain('implement the feature')
+    expect(rendered).toContain('| criterion | mode | mandatory | description | command | protected inputs |')
     for (const row of [
-      '| ac1-1 | deterministic | yes | unit tests pass | pnpm test |',
-      '| ac1-2 | review | no | reviewed | — |',
+      '| ac1-1 | deterministic | yes | unit tests pass | pnpm test | — |',
+      '| ac1-2 | review | no | reviewed | — | — |',
     ]) expect(rendered, row).toContain(row)
+  })
+
+  test('shows a criterion\'s declared protected inputs as the paths a worker must not modify', () => {
+    const guarded = task({
+      acceptanceCriteria: [
+        {
+          criterionId: 'ac1-1',
+          description: 'unit tests pass',
+          verificationMode: 'deterministic',
+          requiredEvidence: [],
+          mandatory: true,
+          command: 'pnpm test',
+          protectedInputs: [
+            { path: 'tests/check.sh', sha256: 'a'.repeat(64) },
+            { path: 'thresholds.json', sha256: 'b'.repeat(64) },
+          ],
+        },
+        // no declaration: the cell marks the absence rather than dropping it
+        task().acceptanceCriteria[1]!,
+      ],
+    })
+
+    const rendered = renderWorkerContract(guarded, handoffOf(guarded))
+
+    expect(rendered).toContain('| ac1-1 | deterministic | yes | unit tests pass | pnpm test | tests/check.sh, thresholds.json |')
+    expect(rendered).toContain('| ac1-2 | review | no | reviewed | — | — |')
   })
 
   test('renders the handoff envelope, marking empty lists rather than dropping them', () => {
@@ -100,6 +127,6 @@ describe('renderWorkerContract', () => {
     }), handoff)
     expect(changed).not.toBe(base)
     expect(changed).toContain('decomposition="decomposable"')
-    expect(changed).toContain('| ac1-1 | deterministic | yes | unit tests pass | pnpm test --run |')
+    expect(changed).toContain('| ac1-1 | deterministic | yes | unit tests pass | pnpm test --run | — |')
   })
 })

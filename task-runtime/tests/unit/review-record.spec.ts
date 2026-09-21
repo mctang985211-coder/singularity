@@ -291,6 +291,9 @@ describe('runChildrenCascade review records', () => {
     expect(failed.criteria).toEqual([{
       criterionId: 'ac1-1',
       verdict: 'fail',
+      // The deciding judge rides along since S1-V slice 2; the rest of the
+      // record is what it always was.
+      verifierId: 'fake-verifier',
       command: 'true',
       exitCode: 1,
       logRef: `${STORE}/${outcomes[0]!.runId}/ac1-1.log`,
@@ -314,6 +317,7 @@ describe('runChildrenCascade review records', () => {
     expect(verifiedChild.criteria).toEqual([{
       criterionId: 'ac3-1',
       verdict: 'pass',
+      verifierId: 'fake-verifier',
       command: 'true',
       exitCode: 0,
       logRef: `${STORE}/${outcomes[2]!.runId}/ac3-1.log`,
@@ -325,7 +329,7 @@ describe('runChildrenCascade review records', () => {
     expect(root.outcome).toBe('verified')
     expect(root.runId).toBe(rootRunId)
     expect(root.relatedTaskIds).toEqual(outcomes.map(outcome => outcome.taskId))
-    expect(root.criteria).toEqual([{ criterionId: 'root-children-verified', verdict: 'pass' }])
+    expect(root.criteria).toEqual([{ criterionId: 'root-children-verified', verdict: 'pass', verifierId: 'fake-verifier' }])
   })
 
   test('a cancelled run leaves a review without a cause; the siblings it never started leave one blocked', async () => {

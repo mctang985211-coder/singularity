@@ -112,8 +112,8 @@ describe('renderWorkerPrompt', () => {
     })
     const prompt = renderWorkerPrompt(handoff, task(), POLICY)
     expect(prompt).toContain('implement the feature')
-    expect(prompt).toContain('| ac1-1 | deterministic | yes | unit tests pass | pnpm test |')
-    expect(prompt).toContain('| ac1-2 | review | no | reviewed | — |')
+    expect(prompt).toContain('| ac1-1 | deterministic | yes | unit tests pass | pnpm test | — |')
+    expect(prompt).toContain('| ac1-2 | review | no | reviewed | — | — |')
     expect(prompt).toContain('Parent objective: ship the release')
     expect(prompt).toContain('Reason for delegation: split the work')
     expect(prompt).toContain('- do not touch the public API')
@@ -142,7 +142,7 @@ describe('renderWorkerPrompt', () => {
     expect(decomposable).toContain('`task_decompose`')
     expect(decomposable).toContain('RFC §36')
     expect(decomposable).toContain('the nested verification settles this task')
-    expect(decomposable).toContain('| ac1-1 | deterministic | yes | unit tests pass | pnpm test |')
+    expect(decomposable).toContain('| ac1-1 | deterministic | yes | unit tests pass | pnpm test | — |')
     expect(decomposable).toContain(RUNTIME_SPLIT)
 
     // A leaf child: no "you were admitted to split" block, but the rules say the
@@ -215,6 +215,62 @@ describe('renderWorkerPrompt', () => {
       expect(prompt).toContain('`task_verify` re-runs the verifier as a self-check')
       expect(prompt).toContain('it never changes task status')
       expect(prompt).toContain('the final verdict stays with the verifier')
+    }
+  })
+
+  test('shows the declared protected inputs in the criteria table', () => {
+    const handoff = buildHandoff({
+      parentTask: task({ taskId: 'root', parentTaskId: undefined, depth: 0, objective: 'ship the release' }),
+      parentRun: run(),
+      childTask: task(),
+      reason: 'split the work',
+      callerSessionId: 'root-session',
+    })
+    const guarded = task({
+      acceptanceCriteria: [
+        {
+          criterionId: 'ac1-1',
+          description: 'unit tests pass',
+          verificationMode: 'deterministic',
+          requiredEvidence: [],
+          mandatory: true,
+          command: 'pnpm test',
+          protectedInputs: [
+            { path: 'tests/check.sh', sha256: 'a'.repeat(64) },
+            { path: 'thresholds.json', sha256: 'b'.repeat(64) },
+          ],
+        },
+        // the second criterion declares none: the cell says so rather than
+        // leaving the column blank, which would read like a dropped value
+        task().acceptanceCriteria[1]!,
+      ],
+    })
+
+    const prompt = renderWorkerPrompt(handoff, guarded, POLICY)
+
+    expect(prompt).toContain('| criterion | mode | mandatory | description | command | protected inputs |')
+    expect(prompt).toContain('| ac1-1 | deterministic | yes | unit tests pass | pnpm test | tests/check.sh, thresholds.json |')
+    expect(prompt).toContain('| ac1-2 | review | no | reviewed | — | — |')
+  })
+
+  test('states the protected-input rule in both switch branches, next to the command rule', () => {
+    const handoff = buildHandoff({
+      parentTask: task({ taskId: 'root', parentTaskId: undefined, depth: 0, objective: 'ship the release' }),
+      parentRun: run(),
+      childTask: task(),
+      reason: 'split the work',
+      callerSessionId: 'root-session',
+    })
+
+    for (const options of [POLICY, POLICY_OFF]) {
+      const prompt = renderWorkerPrompt(handoff, task(), options)
+      // The rule is not about decomposition, so it survives the switch being
+      // off, and it sits with the other execution rules.
+      expect(prompt, JSON.stringify(options)).toContain(
+        '- A criterion\'s declared protected inputs must not be modified: the verifier re-checks their identity before judging, ' +
+        'and a changed or missing input fails the criterion, naming the path.',
+      )
+      expect(prompt).toContain('- Where a criterion lists a command, make that command exit 0 in the checkout.')
     }
   })
 })

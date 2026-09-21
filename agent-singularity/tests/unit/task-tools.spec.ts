@@ -189,6 +189,57 @@ describe('task_read', () => {
     expect(result).not.toContain('assumptions:')
     expect(result).not.toContain('constraints:')
   })
+
+  it('renders the declared protected inputs on a worker criterion line', async () => {
+    const { ctx } = fixture()
+    ctx.taskRuntime.runForSession.mockImplementation(async () => ({
+      storeId: 'sg-t-root-1',
+      task: {
+        ...workerTask,
+        acceptanceCriteria: [
+          {
+            ...workerTask.acceptanceCriteria[0]!,
+            protectedInputs: [
+              { path: 'tests/check.sh', sha256: 'a'.repeat(64) },
+              { path: 'thresholds.json', sha256: 'b'.repeat(64) },
+            ],
+          },
+        ],
+      },
+      run: workerRun,
+    }) as never)
+    const tool = defineTaskReadTool(ctx as never)
+    const result = (await tool.execute({}, exec('s-worker'))) as string
+    expect(result).toContain(
+      '- ac1-1 [deterministic, mandatory] parses the fixtures — $ pnpm test [protected inputs: tests/check.sh, thresholds.json]',
+    )
+  })
+
+  it('renders no protected-input suffix for a criterion that declares none', async () => {
+    const { ctx } = fixture()
+    const tool = defineTaskReadTool(ctx as never)
+    const result = (await tool.execute({}, exec('s-worker'))) as string
+    expect(result).not.toContain('protected inputs')
+  })
+
+  it('renders the declared protected inputs on the root line too', async () => {
+    const { ctx } = fixture()
+    ctx.task.openStore.mockResolvedValue({
+      ...snapshot,
+      tasks: [
+        {
+          ...rootTask,
+          acceptanceCriteria: [
+            { ...rootTask.acceptanceCriteria[0]!, protectedInputs: [{ path: 'tests/check.sh', sha256: 'a'.repeat(64) }] },
+          ],
+        },
+        childTask,
+      ],
+    })
+    const tool = defineTaskReadTool(ctx as never)
+    const result = (await tool.execute({}, exec('root-1'))) as string
+    expect(result).toContain('- root-children-verified [composite] all mandatory children verified [protected inputs: tests/check.sh]')
+  })
 })
 
 describe('task_decompose', () => {
@@ -302,6 +353,45 @@ describe('task_decompose', () => {
       },
     ]
     const tool = defineTaskDecomposeTool(ctx as never)
+    await tool.execute({ reason: 'split the work', children: declared }, { agent: { id: 'root-1' }, signal } as never)
+    expect(ctx.taskRuntime.decomposeAndRun).toHaveBeenCalledExactlyOnceWith(
+      'sg-t-root-1',
+      't-root',
+      'r-root',
+      'root-1',
+      { reason: 'split the work', children: declared },
+      { signal },
+    )
+  })
+
+  it('declares protectedInputs on the criterion schema and passes the declared paths through untouched', async () => {
+    const { ctx } = fixture()
+    const signal = new AbortController().signal
+    ctx.taskRuntime.decomposeAndRun.mockResolvedValue([{ taskId: 't-child-1', status: 'verified' }])
+    const tool = defineTaskDecomposeTool(ctx as never)
+
+    // The schema is the model-facing half of the contract: the declared paths
+    // are a per-criterion string array, and the description says who fixes the
+    // identity, who re-checks it, and that only declared paths are protected.
+    const criteria = (tool.parameters as {
+      properties: { children: { items: { properties: { acceptanceCriteria: { items: { properties: Record<string, { type: unknown; items?: { type: unknown }; description?: string }> } } } } } }
+    }).properties.children.items.properties.acceptanceCriteria.items.properties
+    expect(criteria.protectedInputs?.type).toBe('array')
+    expect(criteria.protectedInputs?.items?.type).toBe('string')
+    expect(criteria.protectedInputs?.description).toContain('SHA-256')
+    expect(criteria.protectedInputs?.description).toContain('before judging')
+    expect(criteria.protectedInputs?.description).toContain('Only declared paths are protected')
+
+    const declared = [
+      {
+        objective: 'Implement the parser',
+        acceptanceCriteria: [{
+          description: 'parses the fixtures',
+          command: 'tests/check.sh',
+          protectedInputs: ['tests/check.sh', 'thresholds.json'],
+        }],
+      },
+    ]
     await tool.execute({ reason: 'split the work', children: declared }, { agent: { id: 'root-1' }, signal } as never)
     expect(ctx.taskRuntime.decomposeAndRun).toHaveBeenCalledExactlyOnceWith(
       'sg-t-root-1',
@@ -621,6 +711,28 @@ describe('task_review_pack', () => {
     const { ctx } = fixture()
     const tool = defineTaskReviewPackTool(ctx as never)
     await expect(tool.execute({ taskId: 'ghost' }, exec('root-1'))).rejects.toThrow('unknown task "ghost"')
+  })
+
+  it('shows the deciding judge and its version on the criterion line', async () => {
+    const { ctx } = fixture()
+    const full = nestedSnapshot()
+    const target = full.reviews.find(item => item.taskId === 't-child-1')!
+    Object.assign(target, {
+      criteria: [
+        { criterionId: 'ac1-1', verdict: 'fail', verifierId: 'command', verifierVersion: '1', command: 'pnpm test', exitCode: 1 },
+        { criterionId: 'ac1-2', verdict: 'inconclusive', verifierId: 'review' },
+        { criterionId: 'ac1-3', verdict: 'pass' },
+      ],
+    })
+    ctx.task.openStore.mockResolvedValue(full)
+    const tool = defineTaskReviewPackTool(ctx as never)
+    const pack = (await tool.execute({ taskId: 't-child-1' }, exec('root-1'))) as string
+
+    expect(pack).toContain('criterion ac1-1: fail [command@1] exit 1 — $ pnpm test')
+    expect(pack).toContain('criterion ac1-2: inconclusive [review]')
+    // a record written before the judge was recorded renders exactly as before
+    expect(pack).toContain('criterion ac1-3: pass')
+    expect(pack).not.toContain('criterion ac1-3: pass [')
   })
 })
 

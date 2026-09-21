@@ -7,10 +7,23 @@ import type {
   VerificationMode,
   VerificationResult,
   Verifier,
+  VerifierSelftest,
   VerifyRequest,
 } from '@dangosys/dsh-singularity-task'
 
 const EXECUTABLE_MODES: readonly VerificationMode[] = ['deterministic', 'simulation', 'measurement']
+
+/** The criterion a selftest sample hands this verifier: the fields it reads, with the command the sample's verdict rests on. */
+function sampleCriterion(criterionId: string, command: string): AcceptanceCriterion {
+  return {
+    criterionId,
+    description: 'a selftest sample',
+    verificationMode: 'deterministic',
+    requiredEvidence: [],
+    mandatory: true,
+    command,
+  }
+}
 
 interface CommandOutcome {
   exitCode?: number
@@ -74,8 +87,19 @@ export class CommandVerifier implements Verifier {
   readonly id = 'command'
   readonly version = '1'
   readonly owner = 'singularity'
-  /** Known samples the package tests execute for real: `true` must pass, `false` must fail (KISS §12 step 2). */
-  readonly selftest = { positiveCases: ['true'], negativeCases: ['false'] }
+  /**
+   * Known samples the registry executes before it will register this judge
+   * (KISS §4.3, V2-1): a command that exits zero must come back `pass`, one
+   * that exits non-zero must come back `fail`. Both go through the same shell
+   * path production uses, so the proof is this verifier's own exit-code
+   * reading, executed — not a description of it.
+   */
+  readonly selftest: VerifierSelftest = {
+    samples: [
+      { role: 'positive', name: 'a command that exits zero', criterion: sampleCriterion('selftest-exit-zero', 'true'), expect: 'pass' },
+      { role: 'negative', name: 'a command that exits non-zero', criterion: sampleCriterion('selftest-exit-non-zero', 'false'), expect: 'fail' },
+    ],
+  }
 
   constructor(private readonly evidenceRoot: string) {}
 

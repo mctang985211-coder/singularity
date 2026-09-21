@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { ArtifactRef, TaskHandoff, TaskInstance, TaskRun } from '@dangosys/dsh-singularity-task'
+import { protectedInputsCell } from './contract.ts'
 
 export interface HandoffInit {
   parentTask: TaskInstance
@@ -61,11 +62,12 @@ function listSection(title: string, items: readonly string[], empty: string): st
 
 /**
  * Render the worker prompt for a delegated child task. Compact on purpose:
- * objective, the acceptance criteria table (with verifier commands), the
- * handoff envelope, the pointer to the delegating session, the decomposable
- * reminder when the parent asked for a further split, the runtime-split rule
- * when the deployment admits one ({@link WorkerPromptOptions}), and the rules —
- * a few thousand tokens at most.
+ * objective, the acceptance criteria table (with verifier commands and the
+ * protected input paths the worker must not modify), the handoff envelope, the
+ * pointer to the delegating session, the decomposable reminder when the parent
+ * asked for a further split, the runtime-split rule when the deployment admits
+ * one ({@link WorkerPromptOptions}), and the rules — a few thousand tokens at
+ * most.
  */
 export function renderWorkerPrompt(handoff: TaskHandoff, childTask: TaskInstance, options: WorkerPromptOptions): string {
   const header = [
@@ -75,10 +77,10 @@ export function renderWorkerPrompt(handoff: TaskHandoff, childTask: TaskInstance
     '',
     '## Acceptance criteria',
     '',
-    '| criterion | mode | mandatory | description | command |',
-    '| --- | --- | --- | --- | --- |',
+    '| criterion | mode | mandatory | description | command | protected inputs |',
+    '| --- | --- | --- | --- | --- | --- |',
     ...childTask.acceptanceCriteria.map(criterion =>
-      `| ${criterion.criterionId} | ${criterion.verificationMode} | ${criterion.mandatory ? 'yes' : 'no'} | ${criterion.description} | ${criterion.command ?? '—'} |`),
+      `| ${criterion.criterionId} | ${criterion.verificationMode} | ${criterion.mandatory ? 'yes' : 'no'} | ${criterion.description} | ${criterion.command ?? '—'} | ${protectedInputsCell(criterion)} |`),
   ].join('\n')
 
   const decomposition = [
@@ -135,6 +137,8 @@ export function renderWorkerPrompt(handoff: TaskHandoff, childTask: TaskInstance
     '',
     '- Do the work; never declare completion yourself — an external verifier checks every mandatory criterion.',
     '- Where a criterion lists a command, make that command exit 0 in the checkout.',
+    '- A criterion\'s declared protected inputs must not be modified: the verifier re-checks their identity before judging, ' +
+    'and a changed or missing input fails the criterion, naming the path.',
     '- Keep changes scoped to this task. Need a human decision? Ask with `ask_user_question`.',
     '- Cannot continue? Fail with a clear reason — the orchestrator blocks dependent tasks and reports to the parent task.',
     ...(options.allowRuntimeDecomposition ? [runtimeSplitRule] : []),

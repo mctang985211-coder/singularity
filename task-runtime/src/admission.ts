@@ -1,5 +1,6 @@
 import { reaches } from '@dangosys/dsh-singularity-task'
 import type { AcceptanceCriterion, DependencyEdge, TaskInstance, VerificationMode } from '@dangosys/dsh-singularity-task'
+import { protectedInputDefects } from './protected-inputs.ts'
 
 /** Modes whose criterion is executed by the command verifier and therefore needs `command`. */
 const EXECUTABLE_MODES: readonly VerificationMode[] = ['deterministic', 'simulation', 'measurement']
@@ -119,8 +120,9 @@ function hasCommand(command: unknown): boolean {
  * Structural defects of one task's acceptance contract (T1, construction guide
  * §4): what has to hold before a contract can be admitted at all, whichever
  * entry wrote it — an ordinary decomposition child, a replay candidate, or
- * (later) a template instance. Texts, ids and modes only; nothing here judges
- * whether a criterion is any good, and nothing here needs the store.
+ * (later) a template instance. Texts, ids, modes, and the fixed form of a
+ * criterion's protected acceptance inputs only; nothing here judges whether a
+ * criterion is any good, and nothing here needs the store.
  *
  * The ordinary decomposition path and the replay path share this function so
  * that a rule can never hold on one and not on the other. The *parent* task's
@@ -163,6 +165,13 @@ export function contractDefects(criteria: readonly AcceptanceCriterion[], label:
       reportedDuplicate.add(criterion.criterionId)
     }
     seen.add(criterion.criterionId)
+    // The fixed form of a criterion's protected acceptance inputs (S1-V slice
+    // 2): the same rule for an ordinary decomposition child and for a replay
+    // candidate, because `protectedInputDefects` is the only place that shape
+    // is described. The declared (string) form is refused here too — reaching
+    // admission with paths instead of digests means the runtime's fixing step
+    // was bypassed, and no unfixed identity may be persisted.
+    reasons.push(...protectedInputDefects([criterion], label))
   }
   // A contract whose every criterion is optional cannot settle: passing it would
   // mean nothing was required, and failing it would close nothing.

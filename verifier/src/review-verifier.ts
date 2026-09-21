@@ -1,21 +1,52 @@
-import type { VerificationMode, VerificationResult, Verifier, VerifyRequest } from '@dangosys/dsh-singularity-task'
+import type { AcceptanceCriterion, VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifyRequest } from '@dangosys/dsh-singularity-task'
 
 const REVIEW_MODES: readonly VerificationMode[] = ['review', 'formal']
 
-/** Placeholder for human judgment: never auto-passes. */
+/** The criterion a selftest sample hands this verifier: a review criterion carries no command, so only its identity and mode matter. */
+function sampleCriterion(criterionId: string, verificationMode: VerificationMode): AcceptanceCriterion {
+  return {
+    criterionId,
+    description: 'a selftest sample',
+    verificationMode,
+    requiredEvidence: [],
+    mandatory: true,
+  }
+}
+
+/**
+ * Placeholder for human judgment: never auto-passes.
+ *
+ * Its selftest takes the equivalent form KISS §4.3 allows a judge that judges
+ * nothing: a known-good sample must be demonstrably *not* auto-passed, and a
+ * known-bad sample must not be judged `pass` either. Both are executed by the
+ * registry before it will register this verifier.
+ *
+ * What that proves: the judge returns a not-pass verdict instead of silently
+ * accepting, on both a criterion that ought to be verifiable by a human and one
+ * that ought not to pass. What it does not prove: anything about products —
+ * this verifier does not judge products at all, and no sample can make its
+ * verdict meaningful. What closes a review criterion is the human review it
+ * defers to, outside this verifier.
+ */
 export class ReviewVerifier implements Verifier {
   readonly id = 'review'
   readonly version = '1'
   readonly owner = 'singularity'
-  /**
-   * This verifier judges nothing by design — a human does — so the one
-   * distinction its selftest can prove is the negative one: a known-good
-   * sample still comes back inconclusive, never an auto-pass. The package
-   * tests execute exactly that sample.
-   */
-  readonly selftest = {
-    positiveCases: ['a known-good review criterion still returns inconclusive (never auto-pass)'],
-    negativeCases: [],
+  readonly selftest: VerifierSelftest = {
+    samples: [
+      {
+        role: 'positive',
+        name: 'a known-good review criterion is never auto-passed',
+        criterion: sampleCriterion('selftest-review-known-good', 'review'),
+        expect: 'not-pass',
+      },
+      {
+        role: 'negative',
+        name: 'a known-bad formal criterion is not judged pass',
+        criterion: sampleCriterion('selftest-formal-known-bad', 'formal'),
+        expect: 'not-pass',
+      },
+    ],
   }
 
   supports(mode: VerificationMode): boolean {

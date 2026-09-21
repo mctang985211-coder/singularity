@@ -10,8 +10,10 @@
  * every step (`agent-runtime/src/contract-reinjection.ts` carries the mechanism
  * and the upstream citations).
  *
- * In: the objective, the acceptance criteria table the verifier judges, the
- * decomposition status, and the handoff envelope. Out: the behavioural rules
+ * In: the objective, the acceptance criteria table the verifier judges (with
+ * each criterion's command and the protected input paths a worker must not
+ * modify — {@link protectedInputsCell}), the decomposition status, and the
+ * handoff envelope. Out: the behavioural rules
  * and the parent-session pointer (guidance, not contract) and each criterion's
  * `requiredEvidence` (the verifier reads it from the store, not the model from
  * its prompt).
@@ -35,13 +37,30 @@ export const WORKER_CONTRACT_OPEN = '<worker-contract'
 /** Closing marker, and the URL-safe suffix a search for the block's end uses. */
 export const WORKER_CONTRACT_CLOSE = '</worker-contract>'
 
-/** The criteria table, in the same shape the spawn prompt renders: what, how judged, and the command. */
+/**
+ * The protected acceptance inputs cell of one criterion row — the paths the
+ * worker must not modify, or `—` when the criterion declares none.
+ *
+ * One helper for both tables (`criteriaTable` here and the spawn prompt's own
+ * copy in `./handoff.ts`) because the two render the same contract and must
+ * agree byte-for-byte: a criterion that declares nothing is marked as such
+ * rather than left blank, and the paths are joined in declaration order, never
+ * sorted or deduplicated — what the caller declared is what the worker reads.
+ * Only paths are rendered: the fixed digest is the verifier's business, and a
+ * hex string in a prompt would be noise the worker cannot act on.
+ */
+export function protectedInputsCell(criterion: AcceptanceCriterion): string {
+  const refs = criterion.protectedInputs ?? []
+  return refs.length === 0 ? '—' : refs.map(ref => ref.path).join(', ')
+}
+
+/** The criteria table, in the same shape the spawn prompt renders: what, how judged, the command, and what must not change. */
 function criteriaTable(criteria: readonly AcceptanceCriterion[]): string[] {
   return [
-    '| criterion | mode | mandatory | description | command |',
-    '| --- | --- | --- | --- | --- |',
+    '| criterion | mode | mandatory | description | command | protected inputs |',
+    '| --- | --- | --- | --- | --- | --- |',
     ...criteria.map(criterion =>
-      `| ${criterion.criterionId} | ${criterion.verificationMode} | ${criterion.mandatory ? 'yes' : 'no'} | ${criterion.description} | ${criterion.command ?? '—'} |`),
+      `| ${criterion.criterionId} | ${criterion.verificationMode} | ${criterion.mandatory ? 'yes' : 'no'} | ${criterion.description} | ${criterion.command ?? '—'} | ${protectedInputsCell(criterion)} |`),
   ]
 }
 

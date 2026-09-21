@@ -15,8 +15,8 @@
 | 次序 | 一次派发的范围 | 状态 | 负责人/任务 | 交付记录 | 进入下一项的条件 |
 |---|---|---|---|---|---|
 | 1 | T1：统一规范化契约 | 已验收（2026-09-21，独立子代理复核） | Kimi Code 主代理（4 实现/测试子代理 + 1 只读复核子代理 + 1 复核修复子代理） | 见「T1：统一规范化契约 执行与验收记录」 | 契约规范化、持久化与普通分解/replay 一致性全部验收 |
-| 2 | S1-V 切片 2：验证器自测与输入身份 | 待派发（下一项） | 待填 | 待填 | 正负样本执行、裁判版本与受保护输入校验完整；P4 组合验收回归通过（本轮已复跑 26 项） |
-| 3 | S1-C：能力预检与版本绑定 | 待前置 | 待填 | 待填 | provider 预检、侧车契约、Run 绑定内容与旧版本读取完整；所有实际支持入口共用校验 |
+| 2 | S1-V 切片 2：验证器自测与输入身份 | 已验收（2026-09-22，独立子代理复核） | Kimi Code 主代理（2 实现子代理 + 1 集成子代理 + 1 渲染跟进子代理 + 1 只读复核子代理 + 1 复核修复子代理） | 见「S1-V 切片 2：验证器自测与输入身份 执行与验收记录」 | 正负样本执行、裁判版本与受保护输入校验完整；P4 组合验收回归通过（本轮复跑 26 项；全量集成 22 文件 / 145 项） |
+| 3 | S1-C：能力预检与版本绑定 | 待派发（下一项；前置已满足） | 待填 | 待填 | provider 预检、侧车契约、Run 绑定内容与旧版本读取完整；所有实际支持入口共用校验 |
 | 4 | A3：非阻塞运行与恢复 | 待前置 | 待填 | 待填 | 非阻塞推进、工作区写入归属、显式提交、取消/恢复、根预算与普通/replay 一致性完整 |
 | 5 | T2 + T3：契约审核与恢复（一个交付组） | 待前置 | 待填 | 待填 | off/all、审核持久化、批准后重检及崩溃恢复一起验收，不单独交付不可恢复的 all |
 | 6 | A0：真实根契约入口 | 待前置 | 待填 | 待填 | 根 intake 复用已完成审核/恢复协议；真实目标、独立 AC 与幂等激活完整 |
@@ -61,7 +61,7 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-先期确定性任务的派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。P1–P4 已完成，T1 见下方 T1 节；下一项按文首唯一顺序为 S1-V 切片 2。Task 主线合同见 [Task 自主构造建设指导](task-contract-construction-guide.md)，上下文/协作/主管主线见 [探索与自进化架构](exploration-evolution-architecture.md)及 [Prompt 合同](agent-prompt-contracts.md)。统一依赖顺序如下；每项完成必须同步本计划及主 guide，不能只更新测试或执行日志。
+先期确定性任务的派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。P1–P4 与 T1 已完成，S1-V 切片 2 见下方记录；下一项按文首唯一顺序为 S1-C。Task 主线合同见 [Task 自主构造建设指导](task-contract-construction-guide.md)，上下文/协作/主管主线见 [探索与自进化架构](exploration-evolution-architecture.md)及 [Prompt 合同](agent-prompt-contracts.md)。统一依赖顺序如下；每项完成必须同步本计划及主 guide，不能只更新测试或执行日志。
 
 | 任务 | 当前状态 | 前置 | 完成边界 |
 |---|---|---|---|
@@ -113,7 +113,7 @@ T1 已交付统一契约、身份与准入记录；T2/T3 后按唯一派发顺�
 | 票据 | 状态（2026-09-21） | 依赖 | 交付范围 |
 |---|---|---|---|
 | S0 | 已完成，验证结果见文末 | 无 | 文档去漂移、术语统一、worker 能力查询 |
-| S1-V | 部分：verifier 返回边界校验已建；父级证据映射、独立父级组合检查与证据身份收紧已落地（P4，切片 1+3）；verifier selftest 执行与输入身份（切片 2）待建 | S0 | 可信验收、父级组合检查、有效产物引用 |
+| S1-V | 部分：verifier 返回边界校验、父级证据映射、独立父级组合检查与证据身份收紧已建（P4，切片 1+3）；切片 2（verifier 自测执行、裁判版本、受保护输入身份）已完成，见「S1-V 切片 2 执行与验收记录」；剩余 C3 假设满足性完整证明与证据来源真实性认证 | S0 | 可信验收、父级组合检查、有效产物引用 |
 | S1-C | 部分：多 preset 冲突已在解析期拒绝；单文件 Skill 候选的晋升链路内容身份已绑定（P2），生产基线已在 apply 前复检（P3） | S0 | provider 预检、skill 分类契约、run 解析快照 |
 | S2-E | 部分：已有手动 L4 工具与 raised 台账 | 与 A5 同组，前置见唯一顺序 | 缺口记录、诊断与候选交接、例外上报、结构化拒绝；候选执行由 A6 组接入 |
 | S2-R | 待建；已有 blocked/obligation 记录 | A5/S2-E、S4-E；与 A6/S3 同组 | agent 补齐后的系统恢复、版本/证据重检、预算与判决处置 |
@@ -307,6 +307,48 @@ T1 已交付统一契约、身份与准入记录；T2/T3 后按唯一派发顺�
 
 接口交接（给 S1-V 切片 2 与 T2/T3）：契约类型从 `@dangosys/dsh-singularity-task` 导出（`TaskContract`/`AdmissionContext`/`DecompositionAdmission`/`contractDigest`/`decompositionDigest`/`canonicalize`）；批次身份读自父任务 `TaskDecomposed.payload.admission`（`proposalDigest`，含 store/parentTask/parentRun/caller/reason 与完整有序 children；不含准入铸的 id）；结构规则 `contractDefects(criteria, label)` 与形状规则 `independentAcceptanceDefects` 分别可复用；T2 需补的是准入上下文指纹、提案存储/状态机与批准后重检，T3 需补 requestKey 与崩溃恢复，本票不提供这两者。
 
+## S1-V 切片 2：验证器自测与输入身份 执行与验收记录（2026-09-21 / 22）
+
+| 字段 | 填写内容 |
+|---|---|
+| 状态、最近更新日期 | 已验收（2026-09-22；独立复核为子代理只读 + 变异复核，未由人类复核） |
+| 执行 agent / 任务链接 | Kimi Code 主代理执行；2 个实现/测试子代理（verifier 包；task-runtime + 工具面）、1 个集成子代理、1 个渲染跟进子代理、1 个只读复核子代理、1 个复核修复子代理（后两个为 resumed 会话） |
+| 开始日期 / 验收日期 | 2026-09-21 / 2026-09-22（工作跨零点，记录与文件名按实际时刻标注） |
+| 前置验收记录 | T1：本票开始前把工作区中未提交的 T1 交付提交为 Singularity `741dcb2`（见 T1 节）。进入条件「P4 组合验收回归通过」实跑复核（修改前）：`verifier` 单测 3 文件 / 49 项、`tests/integration/parent-acceptance.spec.ts` 26 项通过；全量基线单测 27 文件 / 713 项、集成 21 文件 / 138 项通过；T1 的 `TaskContract`/`normalizeDecomposition`/`contractDefects`、P4 的父验收与产物依赖规则、verifier 现有 selftest/version/owner 事实逐项在源码核对——前置成立，未发现阻断本票的前置缺陷 |
+| 修改前基线 | Singularity `741dcb2`（T1 交付提交），外层 harness `f8839133e1`（仅同步子模块指针；第三方 DSH 子模块未跟踪文件保持原样） |
+| 交付版本 | 未提交（本票结束时代码与文档仍在工作区；提交由派发方决定） |
+| 验收项对应 | V2-1 → `verifier/src/index.ts:selftestGate/executeSamples` + 三个内建的 `selftest.samples` → `verifier/tests/unit/{verifier-registry,composite,command}-verifier.spec.ts`；V2-2 → `register`/`ready`/`[Service.init]`（唯一替换路径）与显式 `{ testDouble: true }` → 同文件 + `tests/integration/verifier-selftest-inputs.spec.ts`；V2-3 → `stampVersion`/`claim`/`evidenceByVerifier` + `ReviewCriterion` → verifier 单测、集成、`task-runtime/tests/unit/review-record.spec.ts`；V2-4 → `task-runtime/src/protected-inputs.ts`（准入固定）+ `verifier/src/protected-inputs.ts`（判决前复检）→ `task-runtime/tests/unit/protected-inputs.spec.ts` + 集成反例；V2-5 → P4 与 verifier 全量回归（见实际检查）；V2-6 → 下方实跑与文档同步 |
+| 实际检查 | `pnpm build`（packages/singularity，日志含 `agent-singularity build$ tsc --noEmit && tsdown`）通过；外层 `pnpm vitest run --project unit packages/singularity` 28 文件 / 775 项通过（基线 27 / 713，D1 修复后为 28 / 777）；`--project integration packages/singularity` 22 文件 / 145 项通过（基线 21 / 138）；`pnpm run verify-persistence` OK（4 个事件根指纹未变，新增记录 `docs/persistence-changes/2026-09-21-verifier-selftest-protected-inputs.md`，未 `--write`）；`git diff --check` 通过；各包 `pnpm exec tsc --noEmit`：`task` 0、`verifier` 0、`agent-singularity` 0、`task-runtime` 8 处既有 G9 诊断（复核子代理按行号是否落在 diff 之外 + 基线类别比对核实同源） |
+| 跨入口/组合反例 | 先红后绿：注册闸改造前 verifier 单测 52 红 / 23 绿（`ready`/`samples` 不存在）、task-runtime 受保护输入改造前 25 红（`protectedInputs` 被当未知字段拒绝）、渲染 4 红。独立复核 5 组变异：M1 关闭判决前复检 → 集成反例转红（子任务被判 verified，本应 failed——错误产物被判 PASS）；M2 关闭漏检拒绝 → 永远返回 pass 的裁判被注册；M3 采信插件自报版本 → 单测 2 红；M4 准入 fixing 置空 → 单测 8 红、集成 4 红；M5 索引忽略版本过滤 → 单测 2 红、集成 1 红；探针全部哈希证明还原。集成正反例：worker 改写受保护脚本 → 子任务 failed、点名路径与两个摘要、无 exitCode/logRef、无派发痕迹；合法正例（脚本未动、产物真实通过）→ verified 且 claim 带 `command@1`；未声明保护范围 → 改写脚本仍通过、事件日志无受保护输入文本（边界如实固化）；声明读不到 → 整批拒绝零事件零派发；畸形 store 声明（D1）先红（TypeError）后绿（点名条目的可读 fail 且不派发）。拒绝路径断言无 spawn、无证据落库、无成功状态 |
+| 独立复核 | 子代理（只读复核 + 5 组变异探针 + 5 个自建反例探针，临时文件删除、源码哈希证明还原）；结论：V2-1–V2-5 在实际执行与对抗性探针下成立，未能在受支持路径上击穿注册闸、受保护输入闸、版本记录或索引。发现 D1（畸形 `protectedInputs` 直写 store 绕过准入时判决前复检崩溃而非可读 fail；低危、fail-closed、仅绕过路径可达）、D2（复核时计划记录与表未同步——本记录即修复）、D3（guide §4.1 版本归属措辞不精确）、D4（testDouble 警告依赖 logger 的说明）；D1 已修复并补 2 个反例（verifier 单测 76→78），D3/D4 已按措辞修正。修复后未再重跑该复核 |
+| 文档同步 | 主 guide §4.1「Verifier 边界」、§4.2 G1、§3 状态行、§5.1 范围边界、新增 §5.7（范围/源码/测试锚/未覆盖）；本计划本记录与两张表；`task-contract-construction-guide.md` §4（`protectedInputs` 行 + 来源说明）；`agent-prompt-contracts.md` §7 反例清单与真实模型测量段；`execution-prompts/README.md` 状态与下一项；`docs/persistence-changes/2026-09-21-verifier-selftest-protected-inputs.md` + 同名 `.schema.json`（same-version，根指纹未动，实跑确认） |
+| 模拟与未覆盖范围 | 未调用真实模型、未跑 BB 仿真、未部署、未推送。未建：KISS §8.2 裁决召回（`evidenceByVerifier` 只是可查询索引，降级/重验未建）、证据来源真实性认证、verifier 与执行者的独立性隔离、自测样本“有意义”的证明、`targetType: verifier` 的 Evolution 机械执行器（仍显式拒绝）；replay × 受保护输入的端到端集成未覆盖（该路径由 `task-runtime/tests/unit/protected-inputs.spec.ts` 单测覆盖）；集成未覆盖“插件伪造 `verifierVersion` 被覆盖”（verifier 单测覆盖，变异 M3 证明单测能抓住）；`verifierIds()` 在未 ready 的手工构造上下文为空（生产由 `Service.init` 覆盖，测试显式 `await ready()`）；任务契约的 `AdmissionContext` 指纹仍属 T2 |
+| 未解决缺陷 / 阻塞 | 无未解决的本票缺陷。复核 D1 已修复并回归；范围外边界如实保留（见上一行），不改称已认证/已保护 |
+| 最终验收结论 | 通过（依据：上述实跑命令、先红后绿反例、独立复核报告及其 D1 修复回归；确认者：执行代理 + 独立复核子代理，未由人类验收） |
+| 下一项 | 唯一顺序第 3 项 S1-C（能力预检与版本绑定）：前置为本票验收与 T1，均已满足。S1-C 应复用本票接口：`VerifierSelftest`/`register`/`ready`（注册闸，测试替身必须显式声明）、`protectedInputs` 的准入固定与 registry 复检、`evidenceByVerifier` 索引；S1-C 自己交付 provider 预检、类型化侧车契约与 run 解析快照，不把“统一校验入口”提前到本票，也不重做切片 1/3 的父级映射与产物依赖语义 |
+
+实现范围（只做 S1-V 切片 2；父级验收与证据依赖由 P4 交付，不重做）：
+
+- **可执行自测与注册闸**：`VerifierSelftest` 从描述性文字改为可执行样本（`{ role, name, criterion, expect, store? }`）；`VerifierRegistry.register` 改为 async 并在注册前真实执行样本（只带 criterion 的经 `verify()`，带 store 视图的经纯函数 `judgeCompositeCriterion`），用与生产相同的校验比对 `expect`（`pass`/`fail`/`not-pass`）；漏检/未通过/缺样本/畸形/不可执行使裁判不可用并点名原因。三个内建各带真实样本。内建经幂等 `ready()` 注册，`[Service.init]` 调用，`verifyRun`/`evidenceByVerifier` 先 await；唯一跳过通道是调用者显式 `{ testDouble: true }`（测试替身，记警告）。`register` 是唯一裁判替换路径（复核核实）。
+- **裁判版本**：`verifyCriterion` 用实际注册实例的 `version` 覆盖插件自报值写入 `VerificationResult.verifierVersion`，`claim()` 复制；`evidenceByVerifier(storeId, ref, version?)` 按 `(verifierRef, version)` 索引（旧证据无版本仍可读，版本变更不改写历史）。
+- **受保护验收输入**：`CriterionSpec`/工具 schema 声明路径字符串；`decomposeAndRun` 在规范化入口前固定为 `{ path, sha256 }`（读不到或 checkout 无法解析 → 整批拒绝零副作用）；replay 固定字符串形态、原样携带冠军的固定形态；`contractDefects` 共用固定形态规则；判决前 registry 复检（缺失/被改 → `fail` 点名路径，不派发）。
+- **消费者与渲染**：spawn prompt 与 worker 契约块判据表、`task_read` 判据行、review record 与 review pack（` [command@1]`）。
+- **持久化兼容**：只给事件载荷引用的类型新增可选字段（`AcceptanceCriterion.protectedInputs`、`VerificationResult.verifierVersion`、`EvidenceClaim.verifierVersion`、`ReviewCriterion.verifierId/verifierVersion`），`task/event` 载荷类型文本未变，根指纹未移动，按纪律写 same-version 记录并实跑确认。
+
+测试锚：`verifier/tests/unit/verifier-registry.spec.ts`（注册闸正反例、testDouble 显式通道、版本覆盖、受保护输入失配/缺失/畸形且不派发、索引与旧证据）、`verifier/tests/unit/{composite,command}-verifier.spec.ts`、`task-runtime/tests/unit/protected-inputs.spec.ts`、`task-runtime/tests/unit/{orchestrate,admission,normalize,contract,handoff,review-record}.spec.ts`、`agent-singularity/tests/unit/task-tools.spec.ts`、`tests/integration/verifier-selftest-inputs.spec.ts`。
+
+实跑命令与结果（2026-09-21/22，按公共执行合同顺序，最终状态）：
+
+1. `packages/singularity` 下 `pnpm build`：通过（含 `agent-singularity build$ tsc --noEmit && tsdown`）。
+2. 外层 `pnpm vitest run --project unit packages/singularity`：28 文件 / 775 项通过（D1 修复后 777）；基线 27 / 713。
+3. 外层 `pnpm vitest run --project integration packages/singularity`：22 文件 / 145 项通过；基线 21 / 138。
+4. `packages/singularity` 下 `pnpm run verify-persistence`：OK，4 个事件根指纹匹配（未 `--write`，新增 same-version 记录）。
+5. `packages/singularity` 下 `git diff --check`：通过。
+6. 各包 `pnpm exec tsc --noEmit`：`task` 0、`verifier` 0、`agent-singularity` 0、`task-runtime` 8 处既有诊断（G9）。
+7. 未运行：真实 LLM、BB 构建/仿真、生产 Evolution、部署与推送。
+
+接口交接（给 S1-C 与后续票）：`VerifierSelftestSample`/`VerifierSelftestStore`/`VerifierSelftest`、`ProtectedInputRef`、`sha256Hex` 从 `@dangosys/dsh-singularity-task` 导出；`VerifierRegistry.register(verifier, { testDouble? })` 为 async，`ready()` 幂等且 `[Service.init]` 调用；`evidenceByVerifier(storeId, ref, version?)` 只做索引；`task-runtime/src/protected-inputs.ts` 的 `fixProtectedInputs`/`fixCriteriaProtectedInputs`/`fixSpecProtectedInputs`/`protectedInputDefects` 与 `verifier/src/protected-inputs.ts` 的 `protectedInputDefects` 可复用；`protectedInputs` 的固定形态（`{ path, sha256 }`）是持久化词汇，字符串形态只属于准入输入。
+
 ## S1-V：先保证验的是目标
 
 落点：`task/src/types.ts`、`verifier/src/index.ts`、`verifier/src/composite-verifier.ts`、`task-runtime/src/admission.ts`、`task-runtime/src/orchestrate.ts`。
@@ -314,7 +356,7 @@ T1 已交付统一契约、身份与准入记录；T2/T3 后按唯一派发顺�
 分成三个可独立验收的切片：
 
 1. **父级验收**（2026-09-21 P4 已完成最小机械版）：父 AC → 子证据映射（`childEvidence`，按 batch 位置 + 判据/证据引用，验收期对照 store 校验存在性与 verified 来源）与至少一个独立父级组合检查（映射断言 + 父级 command）已落地；默认 composite 的“子全 verified”仍只作汇总。剩余：C3 假设满足性完整证明、自然语言条款只作显式标注的启发式（`heuristic`）。
-2. **验证器自测与输入身份**（待建）：将当前 selftest 描述落为可执行正负样本；注册/晋升时执行。记录 verifier 版本，固定测试与阈值来源，明确 worker 可写产物与受保护验收输入的边界。
+2. **验证器自测与输入身份**（2026-09-21 已完成，见「S1-V 切片 2 执行与验收记录」）：selftest 已从描述落为可执行正负样本并在注册路径实际执行（注册闸；唯一例外是调用者显式声明的测试替身）；判决与证据记录实际注册实例的版本并可按 `(verifierRef, version)` 索引；criterion 声明的受保护验收输入在准入固定身份（摘要）、判决前复检。未声明保护范围的输入不受保护；C3 完整证明与证据来源真实性认证仍缺。
 3. **证据依赖有效性**（2026-09-21 P4 已完成）：`requiresArtifact` 收敛为已验证参考产物（verified run + pass 判据），原始输入用 `acceptsArtifact` 独立表达；失败/过期 run 的同名产物不再满足依赖。剩余：产物来源、版本/摘要与适用性的进一步绑定。
 
 验收：子任务都通过但组合接口错误，父必须拒绝；删掉父 AC 的证据映射必须拒绝；负样本可检出；修改验收脚本不能把错误产物变成 PASS；同名过期/失败证据不能满足要求已验证参考的依赖。自然语言蕴含留作有标记的启发式判断。

@@ -1,6 +1,6 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { AcceptanceCriterion, AdmissionContext, ArtifactRef, CapabilityManifest, ChildEvidenceRef, DecompositionAdmission, DependencyEdge, EvidenceBundle, ReviewCriterion, ReviewTokenUsage, ReviewToolCall, RunId, TaskContract, TaskContractVersion, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskSnapshot, VerificationMode } from "@dangosys/dsh-singularity-task";
+import { AcceptanceCriterion, AdmissionContext, ArtifactRef, CapabilityManifest, ChildEvidenceRef, DecompositionAdmission, DependencyEdge, EvidenceBundle, ProtectedInputRef, ReviewCriterion, ReviewTokenUsage, ReviewToolCall, RunId, TaskContract, TaskContractVersion, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskSnapshot, VerificationMode } from "@dangosys/dsh-singularity-task";
 import { AgentHandle } from "@deepseek-ai/dsh-agent";
 import { McpServerSpec, WorkerGrant } from "@dangosys/dsh-singularity-agent-runtime";
 
@@ -512,8 +512,9 @@ declare function independentAcceptanceDefects(criteria: readonly AcceptanceCrite
  * Structural defects of one task's acceptance contract (T1, construction guide
  * §4): what has to hold before a contract can be admitted at all, whichever
  * entry wrote it — an ordinary decomposition child, a replay candidate, or
- * (later) a template instance. Texts, ids and modes only; nothing here judges
- * whether a criterion is any good, and nothing here needs the store.
+ * (later) a template instance. Texts, ids, modes, and the fixed form of a
+ * criterion's protected acceptance inputs only; nothing here judges whether a
+ * criterion is any good, and nothing here needs the store.
  *
  * The ordinary decomposition path and the replay path share this function so
  * that a rule can never hold on one and not on the other. The *parent* task's
@@ -533,6 +534,93 @@ declare function contractDefects(criteria: readonly AcceptanceCriterion[], label
  * verdict is `ok`, so admission is atomic for the whole batch.
  */
 declare function checkDecomposition(parent: AdmissionParent, children: readonly AdmissionChild[], existingEdges: readonly DependencyEdge[]): AdmissionVerdict;
+//#endregion
+//#region src/protected-inputs.d.ts
+/**
+ * The smallest shape this module fixes: a criterion that may carry a declared
+ * id (the label it is reported under) and a `protectedInputs` value of unknown
+ * shape. Both the tool-facing authoring form (`CriterionSpec`, paths as
+ * strings) and a stored criterion (the fixed refs) satisfy it.
+ */
+interface DeclaredProtectedInputs {
+  criterionId?: string;
+  protectedInputs?: unknown;
+}
+/**
+ * Fix the byte identity of every declared protected input, against the
+ * checkout directory the criterion's judge will run in.
+ *
+ * `paths` are the paths **as declared** (the caller's spellings, verbatim):
+ * each is resolved against `cwd` for the read — an absolute path stays
+ * absolute — while the returned ref keeps the declared spelling, so the
+ * identity names what the caller wrote and not a tidied version of it. An
+ * identical declaration repeated is read once and produces one entry, in
+ * first-declaration order; two spellings of the same file stay two
+ * declarations.
+ *
+ * Refusals are values, never throws: a path that cannot be read (missing,
+ * unreadable, a directory) yields a reason naming the label and the path, and a
+ * session whose checkout directory cannot be resolved (`cwd === undefined`)
+ * yields one reason instead of fixing the declaration against the wrong base.
+ * That refusal is whole-batch and absolute paths are not exempt: the checkout
+ * names the directory the criterion's judge runs in, so a batch that cannot
+ * name it cannot promise that what it fixed is what the re-check will compare —
+ * and the refs of a batch refused for one path are never trustworthy either.
+ * Nothing is ever written: the files are read and left byte-identical.
+ */
+declare function fixProtectedInputs(paths: readonly string[], cwd: string | undefined, label: string): Promise<{
+  refs: ProtectedInputRef[];
+  reasons: string[];
+}>;
+/**
+ * Fix the declarations of one criterion list, rebuilding only the criteria that
+ * declared one: every untouched criterion is carried by reference, and the
+ * caller's input is never mutated — which is also why the returned list is
+ * typed read-only.
+ *
+ * `label` is the position prefix a criterion is reported under (`child 0` on a
+ * decomposition, `replay of "t-1"` on a replay); {@link criterionLabel} appends
+ * the criterion's own id or position. A criterion whose fixing was refused is
+ * carried unchanged — it never reaches the store, because the caller refuses
+ * the whole batch on any reason — so no half-fixed identity can be read as a
+ * fixed one.
+ */
+declare function fixCriteriaProtectedInputs<T extends DeclaredProtectedInputs>(criteria: readonly T[], cwd: string | undefined, label: string): Promise<{
+  criteria: readonly T[];
+  reasons: string[];
+}>;
+/**
+ * Fix the declared protected inputs of a whole decomposition proposal before
+ * anything else reads it: the runtime calls this ahead of the single
+ * normalization entry, so the contract the store receives — and both content
+ * identities computed over it — describe the fixed byte identity rather than
+ * the caller's paths.
+ *
+ * Absent declarations and every malformed shape are carried exactly as
+ * declared, and a child nothing was fixed in is returned by reference: this
+ * function converts the authoring form, it does not validate, so the reasons it
+ * returns are only the ones fixing itself could produce.
+ */
+declare function fixSpecProtectedInputs(spec: DecomposeSpec, cwd: string | undefined): Promise<{
+  spec: DecomposeSpec;
+  reasons: string[];
+}>;
+/**
+ * Structural defects of the **fixed** form of every criterion's protected
+ * inputs: each declaration must be an array of plain objects carrying exactly
+ * `path` (non-blank string) and `sha256` (lowercase 64-character hex). Shape
+ * only — whether the file still hashes to that digest is the pre-judgement
+ * re-check's question, and it needs the checkout, not this function.
+ *
+ * The ordinary decomposition path and the replay path share this function (via
+ * `admission.contractDefects`) so one rule can never hold on one and not on the
+ * other, and the declared string form is refused here as well: reaching
+ * admission with paths instead of digests means the runtime's fixing step was
+ * bypassed, which is exactly the state that must not be persisted. Every reason
+ * is prefixed with `<label> criterion "<id>"`, the label the other contract
+ * rules use.
+ */
+declare function protectedInputDefects(criteria: readonly AcceptanceCriterion[], label: string): string[];
 //#endregion
 //#region src/normalize.d.ts
 /** Where one batch came from: the store, the parent, its run, and the caller that submitted it. */
@@ -662,11 +750,12 @@ interface WorkerPromptOptions {
 declare function buildHandoff(init: HandoffInit): TaskHandoff;
 /**
  * Render the worker prompt for a delegated child task. Compact on purpose:
- * objective, the acceptance criteria table (with verifier commands), the
- * handoff envelope, the pointer to the delegating session, the decomposable
- * reminder when the parent asked for a further split, the runtime-split rule
- * when the deployment admits one ({@link WorkerPromptOptions}), and the rules —
- * a few thousand tokens at most.
+ * objective, the acceptance criteria table (with verifier commands and the
+ * protected input paths the worker must not modify), the handoff envelope, the
+ * pointer to the delegating session, the decomposable reminder when the parent
+ * asked for a further split, the runtime-split rule when the deployment admits
+ * one ({@link WorkerPromptOptions}), and the rules — a few thousand tokens at
+ * most.
  */
 declare function renderWorkerPrompt(handoff: TaskHandoff, childTask: TaskInstance, options: WorkerPromptOptions): string;
 //#endregion
@@ -752,6 +841,29 @@ interface CriterionSpec {
    * exclusive with `childEvidence`.
    */
   heuristic?: boolean;
+  /**
+   * Acceptance inputs this criterion's verdict rests on that the executing side
+   * must not modify (S1-V slice 2): acceptance scripts, threshold files,
+   * fixtures — declared as paths, resolved against the session's checkout.
+   *
+   * **Only the paths declared here are protected.** A criterion that declares
+   * none carries no protection, and nothing is read or claimed for it.
+   *
+   * Who fixes the identity: the runtime, at admission, before the contract is
+   * written. Each declared path is resolved against the session's checkout and
+   * read once; the SHA-256 of its bytes is fixed beside the declared path in
+   * the child's contract, which is what the contract and proposal identities
+   * describe. A declared path that cannot be read — or a session whose checkout
+   * cannot be resolved — refuses the whole batch: no id minted, nothing
+   * persisted, because an identity fixed against the wrong bytes (or against a
+   * guessed base) is worse than no task at all.
+   *
+   * Who re-checks: the verifier registry, before judging the criterion, against
+   * the same checkout. A missing or modified input fails the criterion naming
+   * the path, so a rewritten acceptance script can never turn a wrong product
+   * into a pass.
+   */
+  protectedInputs?: readonly string[];
 }
 interface DecomposeChildSpec {
   objective: string;
@@ -974,17 +1086,24 @@ declare class TaskRuntime extends Service {
     runId: RunId;
   }>;
   /**
-   * Atomic decomposition plus the sequential run cascade: normalization,
-   * structural admission and capability admission must all pass for the whole
-   * batch before anything is persisted; children then run one at a time in
-   * dependency order.
+   * Atomic decomposition plus the sequential run cascade: protected-input
+   * identity fixing, normalization, structural admission and capability
+   * admission must all pass for the whole batch before anything is persisted;
+   * children then run one at a time in dependency order.
    *
-   * The batch is normalized first ({@link normalizeDecomposition}): raw caller
+   * Protected acceptance inputs are fixed first (`protected-inputs.ts`): every
+   * criterion's declared paths are read against the session's checkout and
+   * recorded as the SHA-256 of their bytes, so the contract — and both content
+   * identities computed over it — describe the fixed identity, never a path
+   * that could be re-pointed or re-read later.
+   *
+   * The batch is then normalized ({@link normalizeDecomposition}): raw caller
    * input becomes the contract of every child with its defaults filled and its
    * criterion ids fixed, and the batch identity plus the limits in force become
-   * ready to be recorded with the decomposition. A refused batch is refused
-   * whole — the error names every reason, no id is minted into the store, no
-   * capability is resolved into an event, and no obligation is recorded.
+   * ready to be recorded with the decomposition. A refused batch — by the
+   * fixing or by normalization, in one message — is refused whole: no id is
+   * minted into the store, no capability is resolved into an event, and no
+   * obligation is recorded.
    *
    * The structural policy is `allowed` — a `leaf` task may decompose only while
    * {@link Config.allowRuntimeDecomposition} is on — plus the configured growth
@@ -1010,9 +1129,15 @@ declare class TaskRuntime extends Service {
    * The replayed task carries a normalized contract like every other creation
    * (T1), and its criteria are judged by the same structural rules an ordinary
    * decomposition child faces (`contractDefects` plus the P4 declarations).
-   * A replay has no batch, so it records no admission context: nothing was
-   * proposed to a parent, there is no sibling set to bound, and the limits that
-   * do apply to its run are the run's own budget, not a batch's.
+   * Protected acceptance inputs are fixed here too (S1-V slice 2), against the
+   * replay caller's checkout: a candidate contract declaring paths has their
+   * identity fixed before anything else reads it, while a champion's stored
+   * `{ path, sha256 }` refs are carried verbatim — the historical identity is
+   * what the pre-judgement re-check compares against, so it is never re-read
+   * from disk and never invented. A replay has no batch, so it records no
+   * admission context: nothing was proposed to a parent, there is no sibling
+   * set to bound, and the limits that do apply to its run are the run's own
+   * budget, not a batch's.
    */
   replayTask(storeId: string, championTaskId: TaskId, options: ReplayTaskOptions, callerSessionId: string): Promise<ReplayRunOutcome>;
   /** Reverse lookup: the task run a (worker) session is bound to. */
@@ -1037,6 +1162,31 @@ declare class TaskRuntime extends Service {
    * means there is no token ceiling to record at all.
    */
   private admissionContext;
+  /**
+   * The env binding the session's graph runs in, or `undefined` when the
+   * deployment mounts no env-builder or the graph cannot be read. Best-effort
+   * by contract: every caller decides what an unresolved env means — a
+   * verification command without `cwd`, a refused composition of MCP servers, a
+   * refused batch when a protected input has to be fixed — and none of them may
+   * guess one.
+   */
+  private sessionEnv;
+  /**
+   * The session's checkout directory: the one directory a run's commands, a
+   * verifier's `cwd`, and a protected acceptance input's bytes are all resolved
+   * against. `undefined` means the deployment cannot name it — the caller
+   * refuses rather than fixing an identity against a base it does not know
+   * ({@link fixProtectedInputs}).
+   */
+  private envPathForSession;
+  /**
+   * The single refusal text a decomposition batch is rejected at the contract
+   * stage with, whichever step produced the reasons (the protected-input fixing
+   * or the normalization entry): a caller reads one message shape and one
+   * reason-per-bullet list, and the label names the parent the batch was
+   * refused for.
+   */
+  private contractRefusal;
   private orchestrateEnv;
   /**
    * One best-effort read of a run's session for the review record's dimensions
@@ -1084,4 +1234,4 @@ declare class TaskRuntime extends Service {
   private liveAgent;
 }
 //#endregion
-export { type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BudgetConfig, type CapabilityConfig, type ChildOutcome, type ChildPlan, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DecomposeChildSpec, DecomposeSpec, type DecompositionIdentityContext, type HandoffInit, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type PermissionSpec, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, ReplayTaskOptions, RunVerifier, type SessionObservation, type SpawnChildRequest, TOOL_LABELS, TaskRuntime, TaskRuntime as default, VerifierUnavailableError, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, type WorkerPromptOptions, buildHandoff, checkDecomposition, checkObligationCoverage, contractDefects, escalationHint, findRepoRoot, independentAcceptanceDefects, loadObligationTemplates, manifestMcpServers, normalizeDecomposition, parseObligationTemplates, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };
+export { type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BudgetConfig, type CapabilityConfig, type ChildOutcome, type ChildPlan, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DecomposeChildSpec, DecomposeSpec, type DecompositionIdentityContext, type HandoffInit, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type PermissionSpec, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, ReplayTaskOptions, RunVerifier, type SessionObservation, type SpawnChildRequest, TOOL_LABELS, TaskRuntime, TaskRuntime as default, VerifierUnavailableError, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, type WorkerPromptOptions, buildHandoff, checkDecomposition, checkObligationCoverage, contractDefects, escalationHint, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, independentAcceptanceDefects, loadObligationTemplates, manifestMcpServers, normalizeDecomposition, parseObligationTemplates, protectedInputDefects, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };

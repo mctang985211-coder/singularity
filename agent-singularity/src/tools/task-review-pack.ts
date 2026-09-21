@@ -120,10 +120,19 @@ function renderReview(review: ReviewRecord): string[] {
   if (review.localizedCause !== undefined) lines.push(`  cause: ${review.localizedCause}`)
   for (const anomaly of review.anomalies) lines.push(`  anomaly: ${anomaly}`)
   for (const criterion of review.criteria ?? []) {
+    // The deciding judge rides next to the verdict (S1-V slice 2): a reader of
+    // the pack sees which registered verifier decided, at which version, without
+    // opening the evidence bundle. A record written before the judge was
+    // recorded renders exactly as it did before — no suffix, nothing invented.
+    const judge = criterion.verifierId === undefined
+      ? ''
+      : criterion.verifierVersion === undefined
+        ? ` [${criterion.verifierId}]`
+        : ` [${criterion.verifierId}@${criterion.verifierVersion}]`
     const command = criterion.command === undefined ? '' : ` — $ ${criterion.command}`
     const exit = criterion.exitCode === undefined ? '' : ` exit ${criterion.exitCode}`
     const log = criterion.logRef === undefined ? '' : ` log ${criterion.logRef}`
-    lines.push(`  criterion ${criterion.criterionId}: ${criterion.verdict}${exit}${command}${log}`)
+    lines.push(`  criterion ${criterion.criterionId}: ${criterion.verdict}${judge}${exit}${command}${log}`)
   }
   for (const blocker of review.blockedBy ?? []) lines.push(`  blockedBy ${blocker.taskId} [${blocker.outcome}]`)
   if (review.metrics !== undefined) {

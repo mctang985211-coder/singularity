@@ -117,6 +117,12 @@ interface DecompositionIdentity {
  * different value that happened to stringify the same way.
  */
 declare function canonicalize(value: unknown): string;
+/**
+ * SHA-256 (lowercase hex) of raw bytes: the digest form a protected
+ * acceptance input's identity is fixed with ({@link ProtectedInputRef}),
+ * shared by the admission-time fixing and the pre-judgement re-check.
+ */
+declare function sha256Hex(bytes: Uint8Array | string): string;
 /** The single-task contract identity: SHA-256 over {@link canonicalize} of the normalized contract. */
 declare function contractDigest(contract: TaskContract): string;
 /** The whole-batch proposal identity: SHA-256 over {@link canonicalize} of the normalized proposal. */
@@ -202,6 +208,33 @@ interface AcceptanceCriterion {
    * exclusive with {@link childEvidence} (admission refuses the combination).
    */
   heuristic?: boolean;
+  /**
+   * The acceptance inputs this criterion's verdict rests on that the executing
+   * side must not modify (S1-V slice 2): acceptance scripts, threshold files,
+   * fixtures. Callers declare paths; admission resolves each one against the
+   * session's checkout and fixes its identity as the SHA-256 of its bytes
+   * ({@link ProtectedInputRef}), so the fixed identity — not a later read —
+   * is what the contract and its digests describe. Before judging the
+   * criterion the verifier registry re-reads every declared input and refuses
+   * the verdict — `fail`, naming the path — when one is missing or its bytes
+   * changed, so a rewritten acceptance script can never turn a wrong product
+   * into a pass. Only declared paths are protected; a criterion that declares
+   * none carries no protection and must not be described as protected.
+   */
+  protectedInputs?: ProtectedInputRef[];
+}
+/**
+ * One protected acceptance input ({@link AcceptanceCriterion.protectedInputs}):
+ * the path as declared, plus the SHA-256 of the file's bytes fixed when the
+ * task was admitted. The path is resolved against the same checkout directory
+ * the criterion's judge runs in, both at admission and at the pre-judgement
+ * re-check.
+ */
+interface ProtectedInputRef {
+  /** The input path as declared, resolved against the run's checkout directory. */
+  path: string;
+  /** SHA-256 (lowercase hex) of the file's bytes at admission. */
+  sha256: string;
 }
 /**
  * One entry of a parent criterion's evidence map ({@link
@@ -302,6 +335,15 @@ interface VerificationResult {
   criterionId: string;
   status: 'pass' | 'fail' | 'inconclusive';
   verifierId: string;
+  /**
+   * The version of the registered verifier instance that produced this verdict
+   * (S1-V slice 2, KISS §8.2): stamped by the verifier registry from the
+   * instance it actually dispatched to — never from the criterion's own text
+   * or from the verifier's returned object. Absent when the registered
+   * instance declares no version, and on verdicts written before the field
+   * existed; a later version change never rewrites historical verdicts.
+   */
+  verifierVersion?: string;
   command?: string;
   exitCode?: number;
   logRef?: string;
@@ -322,6 +364,8 @@ interface EvidenceClaim {
   criterionId: string;
   status: 'pass' | 'fail' | 'inconclusive';
   verifierId: string;
+  /** Copied from the {@link VerificationResult} this claim rests on: the registered instance's version, the second half of the `(verifierRef, version)` index key (KISS §8.2). */
+  verifierVersion?: string;
   artifactRefs: string[];
   details?: string;
   /** Copied from the {@link VerificationResult} this claim rests on; see that field. */
@@ -380,6 +424,10 @@ interface ReviewCriterion {
   criterionId: string;
   /** The verifier's verdict for this criterion. */
   verdict: 'pass' | 'fail' | 'inconclusive';
+  /** The registered verifier that decided the verdict, copied from the verifier result. */
+  verifierId?: string;
+  /** The deciding instance's version, copied from the verifier result (S1-V slice 2); absent when it declared none or the record predates the field. */
+  verifierVersion?: string;
   /** The command that was run, from the verifier result or the criterion itself, when the mode runs one. */
   command?: string;
   /** The command's exit code, when the verifier reported one. */
@@ -776,30 +824,87 @@ interface Diagnosis {
   judgements?: ReviewJudgement[];
 }
 /**
- * A verifier's own known-sample proof (KISS §4.3 `selftest`): samples the
- * verifier must be able to tell apart — known-good ones it passes,
- * known-bad ones it catches. Entries name the sample (a command, a fixture
- * reference, or a case description); where the sample is mechanically
- * runnable (the command verifier's entries are shell commands), the package's
- * own tests execute them. Registration without a selftest is a warning, not a
- * refusal — soft until every built-in verifier carries one.
+ * One executable selftest sample (KISS §4.3): the criterion a verifier is
+ * handed, the store view a store-reading judge is judged against, and the
+ * verdict a healthy verifier must return for the sample to count as proof that
+ * the verifier can tell the sample's side apart.
+ *
+ * Samples are data, and the registry executes them — a verifier cannot prove
+ * its selftest by describing it. A sample the registry cannot execute (a store
+ * view for a judge the registry cannot run against one) refuses registration
+ * rather than being skipped.
+ */
+interface VerifierSelftestSample {
+  /** Which side of the discrimination this sample proves. */
+  role: 'positive' | 'negative';
+  /** Human-readable sample name; the refusal text names the missed sample by it. */
+  name: string;
+  /** The sample criterion handed to the verifier. */
+  criterion: AcceptanceCriterion;
+  /**
+   * The verdict a healthy verifier returns for this sample: `pass` for a
+   * known-good sample; `fail` for a known-bad sample; `not-pass` for a sample
+   * that must merely never be auto-passed (a never-auto-pass judge such as the
+   * review verifier, where "known-good is not auto-passed" plus "known-bad is
+   * not judged pass" is the equivalent form the sample pair takes).
+   */
+  expect: 'pass' | 'fail' | 'not-pass';
+  /** The store view a store-reading judge is judged against; absent for a judge that judges the criterion alone. */
+  store?: VerifierSelftestStore;
+}
+/**
+ * The task-store view one store-reading selftest sample is judged against
+ * ({@link VerifierSelftestSample.store}): the child tasks the criterion is
+ * judged over, plus the runs and evidence bundles a judge reads for the
+ * children's verified states and verdicts. Everything else a full snapshot
+ * carries is empty in a sample.
+ */
+interface VerifierSelftestStore {
+  /** The sample task's children, by batch position — exactly what a store-reading judge's child lookup returns. */
+  children: TaskInstance[];
+  /** Runs the sample judge reads (a child's verified run); `[]` when the sample needs none. */
+  runs?: TaskRun[];
+  /** Evidence bundles the sample judge reads; `[]` when the sample needs none. */
+  evidence?: EvidenceBundle[];
+}
+/**
+ * A verifier's executable known-sample proof (KISS §4.3 `selftest`): the
+ * samples the verifier must mechanically distinguish before the registry will
+ * register it — at least one known-good sample and at least one known-bad one,
+ * each executed through the verifier and compared against the verdict the
+ * verifier declared. A missed negative sample (the known-bad case judged
+ * `pass`) or a positive sample that is not accepted makes the verifier
+ * unavailable, and the refusal names the sample.
+ *
+ * What this proves and what it does not: that the verifier, as registered,
+ * returns the declared verdicts for its own declared samples — a regression
+ * gate against a judge that cannot tell its known cases apart. It does not
+ * prove the samples are meaningful, that the verifier is independent from any
+ * executor, or that its verdicts are right on real products.
  */
 interface VerifierSelftest {
-  /** Known-good samples a healthy verifier judges `pass` (or, for a never-auto-pass verifier, demonstrably does not auto-pass). */
-  positiveCases: string[];
-  /** Known-bad samples a healthy verifier judges `fail`. */
-  negativeCases: string[];
+  /** Executable samples; a healthy verifier returns `expect` for every one of them. */
+  samples: VerifierSelftestSample[];
 }
 interface Verifier {
   id: string;
   /**
    * Registry metadata (KISS §4.3): a version so a later verdict recall can
-   * index evidence by `(verifierRef, version)` (KISS §8.2), and an owner so
-   * the execution/judgement separation (I3) has something to compare against
-   * the executing skill's owner.
+   * index evidence by `(verifierRef, version)` (KISS §8.2) — the registry
+   * stamps it onto every verdict and claim it dispatches, so the recorded
+   * version is the registered instance's, never a self-report — and an owner
+   * so the execution/judgement separation (I3) has something to compare
+   * against the executing skill's owner.
    */
   version?: string;
   owner?: string;
+  /**
+   * The verifier's executable known-sample proof ({@link VerifierSelftest}).
+   * Required to register: {@link VerifierRegistry.register} executes every
+   * sample and refuses the verifier when one is missed, and refuses a
+   * registration without samples — a descriptive selftest is not a selftest.
+   * Only an explicit, documented test-double registration skips the gate.
+   */
   selftest?: VerifierSelftest;
   supports(mode: VerificationMode): boolean;
   verify(req: VerifyRequest): Promise<VerificationResult[]>;
@@ -1068,4 +1173,4 @@ declare class TaskService extends Service {
   private header;
 }
 //#endregion
-export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootTaskSpec, RunId, RunStatus, SkillFitFacts, TASK_CONTRACT_VERSION, TaskContract, TaskContractVersion, TaskDefinition, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifyRequest, canonicalize, contractDigest, decompositionDigest, reaches, rootTaskStoreId };
+export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ProtectedInputRef, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootTaskSpec, RunId, RunStatus, SkillFitFacts, TASK_CONTRACT_VERSION, TaskContract, TaskContractVersion, TaskDefinition, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifierSelftestSample, VerifierSelftestStore, VerifyRequest, canonicalize, contractDigest, decompositionDigest, reaches, rootTaskStoreId, sha256Hex };

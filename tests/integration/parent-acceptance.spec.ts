@@ -78,6 +78,10 @@ async function harness(): Promise<Harness> {
 
   const task = new TaskService(ctx)
   const verifier = new VerifierRegistry(ctx, { evidenceRoot: await mkdtemp(join(tmpdir(), 'p4-evidence-')) })
+  // Cordis runs `Service.init` (hence `ready()`) when it loads the plugin; this
+  // harness builds the registry by hand, so the built-ins — and the vocabulary
+  // `verifierIds()` reports — have to be readied explicitly.
+  await verifier.ready()
   const runtime = new TaskRuntime(ctx)
   return { task, runtime, verifier, log, spawned }
 }
@@ -262,7 +266,9 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
   ])('custom verifier cannot bypass mapping or be bypassed: %j', async ({ explicit, validMap, customPass }) => {
     const h = await harness()
     let calls = 0
-    h.verifier.register({
+    // An explicit test double: its verdicts are this test's, not a judge's, so
+    // it is registered through the declared channel rather than the selftest gate.
+    await h.verifier.register({
       id: 'custom-composite', supports: mode => mode === 'composite',
       verify: async req => {
         calls++
@@ -270,7 +276,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
           criterionId: c.criterionId, verifierId: 'custom-composite', status: customPass ? 'pass' : 'fail',
         }))
       },
-    })
+    }, { testDouble: true })
     const { taskId, runId } = await createParent(h, [{
       criterionId: 'root-map', description: 'required map', verificationMode: 'composite',
       mandatory: true, requiredEvidence: [],
