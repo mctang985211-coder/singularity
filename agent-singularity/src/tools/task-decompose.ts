@@ -2,7 +2,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
-import type { ChildOutcome } from '@dangosys/dsh-singularity-task-runtime'
+import type { ChildOutcome, DecomposeSpec } from '@dangosys/dsh-singularity-task-runtime'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
@@ -26,6 +26,12 @@ export function defineTaskDecomposeTool(ctx: Context) {
       'Each child is verified independently; only verified children count as done.',
     parameters: {
       reason: { type: 'string', required: true, description: 'Why this delegation is needed; recorded in each child handoff' },
+      contractVersion: {
+        type: 'integer',
+        description:
+          'Contract version this batch is written under. The runtime stores version 1 and refuses a declared version it does not know, ' +
+          'so callers normally omit this field and let the runtime write the current version',
+      },
       children: {
         type: 'array',
         required: true,
@@ -44,6 +50,14 @@ export function defineTaskDecomposeTool(ctx: Context) {
                 additionalProperties: false,
                 properties: {
                   description: { type: 'string', required: true, description: 'What must hold true' },
+                  criterionId: {
+                    type: 'string',
+                    description:
+                      'Stable id for this criterion: fixed at admission, and the only id a parent-level childEvidence.criterionId can rely on. ' +
+                      'Omitted, the runtime generates one from the batch position; declared ids must be unique inside a child. ' +
+                      'A parent-level childEvidence.criterionId must name an id the child it points to actually declared, ' +
+                      'which only holds when that child declares the id explicitly here',
+                  },
                   command: { type: 'string', description: 'Shell command; exit code 0 proves the criterion (deterministic modes)' },
                   mode: {
                     type: 'string',
@@ -99,6 +113,11 @@ export function defineTaskDecomposeTool(ctx: Context) {
               items: { type: 'string' },
               description: 'External conditions this child\'s contract rests on; merged with dependency-evidence references into the worker handoff',
             },
+            constraints: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Execution scope and limits this child runs under; persisted in the child\'s contract and handed to its worker',
+            },
             decomposable: {
               type: 'boolean',
               description: 'Declare that this child should split further instead of doing the work: its worker is told to call task_decompose. Together with a capability gap this decides whether the child is admitted as decomposable.',
@@ -122,7 +141,16 @@ export function defineTaskDecomposeTool(ctx: Context) {
           task.taskId,
           run.runId,
           caller,
-          { reason: args.reason, children: args.children },
+          // The caller's whole spec goes to the runtime, which is the contract
+          // entry for it (T1 §4). The schema above validates the *declared
+          // surface* only: the types, the mode enum, and the closed child and
+          // criterion objects. Its parameter root is an implicitly open object,
+          // so a batch-level key this tool does not declare passes the schema
+          // and is refused by the runtime, by name — never dropped here, never
+          // accepted in silence. The cast is the seam where model arguments
+          // become the runtime's input; what makes it harmless is that nothing
+          // here reads the object first.
+          args as unknown as DecomposeSpec,
           { signal: exec.signal },
         )
       } catch (error) {

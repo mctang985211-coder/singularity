@@ -1,6 +1,6 @@
 # Singularity Harness 工作指南
 
-复核日期：2026-09-21。审计基线：Singularity `b00915c`，外层 harness `6c5eb49894`。
+复核日期：2026-09-21。审计基线：Singularity `8469388`（T1 修改前），外层 harness `63c25a14b0`。
 这两个提交保存了修改前的已跟踪及非忽略新增文件；第三方 DSH 子模块原有未跟踪文件不在这两个提交内。
 
 本文是当前方向与进度的入口；[建设计划](2026-09-20-vrtc-code-change-plan.md)规定下一步落点和验收。
@@ -76,8 +76,9 @@ DSH 提供 agent/session、skill 发现与加载、preset、MCP、上下文与�
 ```text
 父节点 / 可分解子节点
   capability_list -> task_decompose(children.requiredCapabilities)
+  -> normalizeDecomposition（唯一规范化入口：闭合字段集、默认值、criterion id、批次摘要）
   -> checkDecomposition + resolveCapabilities（查部署配置表）
-  -> 保存 Task / CapabilityManifest
+  -> 保存 Task（含规范化 contract）/ CapabilityManifest / 批次准入记录
   -> 按 dependsOn 顺序运行就绪子任务
   -> 检查 requiresArtifact -> Handoff + 独立 Session
   -> grant tools / 注册 skills / 挂载 MCP / 选择 preset
@@ -85,9 +86,10 @@ DSH 提供 agent/session、skill 发现与加载、preset、MCP、上下文与�
   -> verifier -> EvidenceBundle -> task 状态 -> 父验收
 ```
 
-源码入口：`task-runtime/src/index.ts` 的 `decomposeAndRun`、`task-runtime/src/capability.ts` 的 `resolveCapabilities`、`task-runtime/src/orchestrate.ts` 的 `runChildrenCascade`、`agent-runtime/src/grants.ts` 的 `applyWorkerGrant`。
+源码入口：`task-runtime/src/normalize.ts` 的 `normalizeDecomposition`、`task-runtime/src/index.ts` 的 `decomposeAndRun`、`task-runtime/src/capability.ts` 的 `resolveCapabilities`、`task-runtime/src/orchestrate.ts` 的 `runChildrenCascade`、`agent-runtime/src/grants.ts` 的 `applyWorkerGrant`。
 
 - `resolveCapabilities` 只查表并展开工具标签，返回 `closed` 或 `gap`；虽然类型含 `partial`，实现不产生它。`closed` 表示声明的名字已命中，**不表示 skill 前置条件或产物契约已闭包**。
+- 节点提交的批次先经过 `normalizeDecomposition`（唯一规范化入口，T1）：闭合字段集、默认值、criterion id 固定、批次摘要；被拒绝的批次在铸 id 和落库之前返回，且零副作用。之后才进入结构准入与能力解析。
 - 缺 capability 且子任务未标 `decomposable`：拒绝整批子任务，另在父任务记录 Obligation。标了 `decomposable` 可以准入并启动规划 worker；执行安全仍依赖后续分解与授权约束。
 - 多个命中能力的 skill/tool 合并，preset 只能有一个不同的声明值；同名合并，不同名在能力解析时拒绝，不再按能力顺序选第一个（2026-09-21 样本改造）。无声明才使用部署默认 preset。Skill 不存在仍到 spawn 的 `grantSkills` 才报错。
 - DSH skill grant 保证内容在 worker 的 skill 层注册；全局目录仍可能显示其他 skill，**没有按 worker 隐藏目录的保证**。工具授权另由 grant 限制；preset 自带工具与 MCP 挂载也是授权面的一部分。
@@ -147,7 +149,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 详细票据见 [建设计划](2026-09-20-vrtc-code-change-plan.md)。以下是依赖顺序，不是任务执行 workflow。
 
-先期确定性工程切片见 [执行 prompt](execution-prompts/README.md)：P1–P4 已于 2026-09-21 完成并同步本文；下一项仍为 T1。后续先完成验证/能力合同和 A3 生命周期，再完整交付审核、根目标与上下文/问答；S4-E 评估基础先于自动主管与候选执行。具体次序只在建设计划维护。四项既有交付不替代自主修复与恢复闭环，也不宣称独立父验收全部完成（C3 完整证明与 verifier selftest 执行仍缺）。
+先期确定性工程切片见 [执行 prompt](execution-prompts/README.md)：P1–P4 与 T1 已于 2026-09-21 完成并同步本文；下一项为 S1-V 切片 2（验证器自测与输入身份）。后续先完成验证/能力合同和 A3 生命周期，再完整交付审核、根目标与上下文/问答；S4-E 评估基础先于自动主管与候选执行。具体次序只在建设计划维护。P1–P4 与 T1 不替代自主修复与恢复闭环，也不宣称独立父验收全部完成（C3 完整证明与 verifier selftest 执行仍缺）。
 
 | 顺序 | 建设目标 | 完成条件 |
 |---|---|---|
@@ -172,8 +174,8 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 | 能力 | 当前事实与限制 | 源码锚 |
 |---|---|---|
 | Task / TaskRun / 递归分解 | 有独立对象、事件存储、结构准入、树与依赖 DAG、顺序级联；原子性和自然语言 AC 覆盖不由机器证明 | `task/src/types.ts`；`task-runtime/src/admission.ts:checkDecomposition` |
-| Task 语言与生成审核 | 已能现场生成子任务，无模板命中要求；类型、工具声明、规范化与准入分散。assumptions 由分解输入进入 handoff，TaskInstance 本身不保存完整契约；无生成提案审核开关、摘要绑定和可恢复的审核状态 | `TaskDefinition` / `TaskInstance`；`DecomposeChildSpec`；`normalizeCriteria`；`decomposeAndRun` |
-| Task 定义版本 | 有 `definitionRef`；普通子任务使用 `subtask@1`，不等于完整不可变定义库和变更授权机制 | `task-runtime/src/index.ts:decomposeAndRun` |
+| Task 语言与生成审核 | 已能现场生成子任务，无模板命中要求。T1 已收敛为单一规范化契约与身份（见 §5.6）：`TaskContract` 数据定义、闭合字段集与默认值、criterion id 固定、单契约/整批摘要、`contract` 与 assumptions/constraints 持久化，普通分解/replay/root 共用同一入口与结构校验。仍无生成提案审核开关、审批摘要绑定与可恢复的审核状态（T2/T3） | `task/src/contract.ts`；`task-runtime/src/normalize.ts`；`task-runtime/src/index.ts:decomposeAndRun`、`replayTask`、`createRootTask`；`task/src/service/state.ts:assertContract` |
+| Task 定义版本 | 有 `definitionRef`；普通子任务使用 `subtask@1`，不等于完整不可变定义库和变更授权机制。T1 固定的是契约内容身份（`contractDigest`/`proposalDigest`），未建模板库 | `task-runtime/src/index.ts:decomposeAndRun`；`task/src/contract.ts:contractDigest` |
 | 根目标入口 | 当前 graph name 传给 createRootTask 作 objective；RootTaskSpec 默认仅子全 verified；尚无独立的根契约 intake/接受/激活流程 | `graphs/src/index.ts:create`；`task/src/types.ts:RootTaskSpec` |
 | Capability | 配置表解析与真实 grant 已建；没有完整 skill 契约预检、可行性证明或多候选选择 | `capability.ts:resolveCapabilities`；`grants.ts:grantSkills` |
 | Handoff / 上下文 | fresh session、handoff、父会话引用、契约系统投影已有；实际主要传父目标/依赖证据/assumptions，根全局 brief、带来源决定和动态有界 ContextView 待建；原始 session query 按 cwd 授权，不等于图/group 隔离 | `handoff.ts`、`orchestrate.ts:buildHandoff`；`agent-runtime/src/contract-reinjection.ts` |
@@ -204,7 +206,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 | G7 | 已补报告自洽、机械晋升最低闸、单文件 Skill 候选内容绑定（P2）与生产基线检查（P3）；证据来源绑定、分层指标和自动 Retro 未建，当前不能宣称防止裁判弱化或过拟合 | S4 / 旧 #28 |
 | G8 | `task_decompose`/`escalate` 部分拒绝返回普通文本，上层不能可靠用工具错误信号判定 | S2-E / 旧 #33 |
 | G9 | 类型闸只覆盖 `agent-singularity`；其余 Singularity 包的 `build` 仍只有 tsdown，未接 `tsc --noEmit`，其严格类型状态未经本闸保证 | P1 范围外，待独立评估 |
-| G10 | 动态生成已存在，但无统一可持久化契约及提案审核协议；不能把 Task 模板库当成合法性白名单，也不能把工具层弹窗当成完整治理 | T1–T3 / Task 自主构造指导 |
+| G10 | 动态生成已存在，但无生成提案审核协议；不能把 Task 模板库当成合法性白名单，也不能把工具层弹窗当成完整治理。T1 已补统一可持久化契约、闭合字段集、内容摘要与准入记录（§5.6）；审核开关、提案状态机与恢复仍属 T2/T3 | T2/T3 / Task 自主构造指导 |
 | G11 | 根 objective/AC 入口过弱；上下文传递缺根目标、祖先决定来源与新鲜度；根目标错了时全局传播不能补救 | A0/A1 |
 | G12 | 父同步等子与子回问冲突；idle 等同执行结束，不支持有持久状态的等待与继续；不能仅添加 ask_parent 或开放 send_message | A3/A4 |
 | G13 | task_status 全树文本不表达执行权/合法动作；session 同 cwd 可读比 group 边界宽；reviewer 局部 pack 不等于跨图因果 debug | A2/A5 |
@@ -212,7 +214,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 历史记录中的 M1–M9 为此前会话的实跑声明，保留于历史指南。本次回归结果见建设计划 S0；本次没有重跑 LLM、BB 构建仿真或生产 Evolution 链路。旧环境可用性、外部 bbdev 缺陷和部署阈值在使用前需重新读取对应部署，不能从旧日志推断当前状态。
 
-2026-09-21 的 P1 已关闭“root-agent 包 build 不执行严格类型检查”这一缺口：该包 `pnpm exec tsc --noEmit` 从 12 处错误降到 0，`build` 改为先 `tsc --noEmit` 再 `tsdown`，工作区根 `pnpm build` 同样经过。G9 是 P1 明确未做的剩余部分：类型闸没有推广到其他包，也未改变任何业务流程、审批次数、持久化格式或工具输入输出合同。同日的 P2 已关闭 G7 中“候选内容绑定”的单文件 Skill 切片（范围见 §5.5）；P3 再关闭其中“生产基线没变”的切片。证据来源绑定仍待建，由后续工作推进，不因 P1/P2/P3 完成而标记 S1-C/S4 完成。同日的 P4 已关闭 G1/G3 的最小机械切片（范围见 §5.1 末段）：父 AC → 子证据映射的存在性与 verified 来源检查、独立父级组合检查、原始输入与已验证参考产物的区分；C3 完整证明、verifier selftest 执行与 blocked 恢复仍属后续票，不因 P4 通过而宣称独立父验收全部完成。
+2026-09-21 的 P1 已关闭“root-agent 包 build 不执行严格类型检查”这一缺口：该包 `pnpm exec tsc --noEmit` 从 12 处错误降到 0，`build` 改为先 `tsc --noEmit` 再 `tsdown`，工作区根 `pnpm build` 同样经过。G9 是 P1 明确未做的剩余部分：类型闸没有推广到其他包，也未改变任何业务流程、审批次数、持久化格式或工具输入输出合同。同日的 P2 已关闭 G7 中“候选内容绑定”的单文件 Skill 切片（范围见 §5.5）；P3 再关闭其中“生产基线没变”的切片。证据来源绑定仍待建，由后续工作推进，不因 P1/P2/P3 完成而标记 S1-C/S4 完成。同日的 P4 已关闭 G1/G3 的最小机械切片（范围见 §5.1 末段）：父 AC → 子证据映射的存在性与 verified 来源检查、独立父级组合检查、原始输入与已验证参考产物的区分；C3 完整证明、verifier selftest 执行与 blocked 恢复仍属后续票，不因 P4 通过而宣称独立父验收全部完成。同日的 T1 已落地统一规范化契约、内容身份与批次准入记录（范围见 §5.6）：新实例的契约成为单一数据定义并持久化，普通分解、replay 与 root 入口共用同一规范化与结构校验；生成提案审核、审批摘要绑定与崩溃恢复仍属 T2/T3，不因 T1 通过而宣称自主构造治理完成。
 
 ## 5. 实现时的关键约束
 
@@ -271,6 +273,24 @@ pnpm vitest run --project integration packages/singularity
 **生产基线也已固定（2026-09-21 P3）**：这是与“候选内容没变”不同的第二项检查——前者保证 apply 写出的就是被评估过的那份候选字节（P2），后者保证被评估时的生产状态没有被别人改掉（P3）。prepare 对生产文件只读一次：同一份字节既写进 `champion/skills/<name>/SKILL.md` 快照，也算出 SHA-256 写进 `prepared` 记录的新可选字段 `skillBaseline: { name, sha256 }`（快照与摘要因此不可能互相矛盾）；生产文件原本不存在时记录 `champion: 'missing'`，不写摘要。apply 在人审前由工具调用 `checkProductionBaseline` 复检，人类批准后由服务入口在实际写入前再复检一次，直接调用服务同样经过：`captured` 要求生产目标是普通文件且摘要与记录一致，`missing` 要求目标仍不存在；文件缺失、内容不同、类型改变（例如变成目录）、文件或其祖先为符号链接都算冲突，明确拒绝。冲突时不改生产文件、不记 `applied`、不自动覆盖/merge/更新 champion/改写原 proposal，错误提示要求基于新生产状态创建新候选并重新评估；拒绝后原候选、报告与历史都保留，P2 的候选身份检查与既有 replay 闸继续生效。拒绝后 rollback 合同不变：rollback 仍按 champion 快照覆盖写回，P3 没有改这套策略。
 
 范围边界（P3）：只覆盖 `targetType: skill` 的单个 `SKILL.md`，且只保证**单进程串行调用**以及两次调用之间发生的外部修改。不实现跨进程锁、并发 compare-and-swap，也不保证任意外部写入者与 apply 同时写时的原子性；因此“串行应用两个基于同一 champion 的候选，第二个被拒绝”是确定验收的，“两个进程同时 apply”不是。旧 ledger 无 `skillBaseline` 仍可读、旧已应用对象仍可回滚；captured 但没有基线摘要的旧未应用候选拒绝新 apply（不能默认匹配），missing 的旧候选仅在目标仍不存在时可应用。P2/P3 合起来仍不证明证据来源真实、provider 预检存在或自动 Retro 已建；完整自进化框架未完成。
+
+### 5.6 统一规范化契约（2026-09-21 T1）
+
+T1 把“任务契约”从散落在工具 schema、runtime 局部函数与事件载荷里的字段，收敛成一份可持久化、可摘要、可校验的数据：`task/src/contract.ts` 的 `TaskContract`（`contractVersion`、`objective`、`acceptanceCriteria`、`assumptions`、`constraints`、`requiredCapabilities`）。普通分解的子任务、replay 实例与 root 都保存这份契约；`TaskInstance.objective`、`acceptanceCriteria`、`requestedCapabilities` 退化为它的投影字段，store 在写入时用 `canonicalize` 逐字段比对、拒绝内容不一致的新事件。旧任务（无新字段）读取、验收、回放行为不变，也不会被补出 assumptions/constraints/version。
+
+唯一入口是 `task-runtime/src/normalize.ts` 的 `normalizeDecomposition`：批次/子任务/判据三层都是闭合字段集（未声明字段按名字拒绝而不是静默丢弃——这是“生成字段不能提高预算、不能写死 skill”的机械保障）；`contractVersion` 省略按当前版本 1 处理，声明成未知版本明确拒绝；objective/description/assumptions/constraints 只做空白校验，不做 trim 或换行重写；criterion id 显式声明则原样固定，否则按批次位置生成 `ac<i>-<j>`，同一子任务内重复 id 整批拒绝。拒绝一次返回全部原因，且发生在铸 task id、查能力、落库之前，因此被拒批次零副作用。
+
+身份与摘要：`canonicalize` 单点实现（对象键稳定排序、数组保序、`undefined` 值键与 session log 的 `compact` 一致地丢弃、无法 JSON 往返的值响亮拒绝），固定向量测试的期望值来自仓库外 `sha256sum` 的同一段文本，不拿实现当自己的期望。单契约身份是 `contractDigest`；整批提案身份是 `decompositionDigest`，覆盖 store/parentTask/parentRun/caller、契约版本、reason 与完整有序 children（子契约摘要 + `dependsOn` + `decomposable` + `requiresIndependentAcceptance`）。准入铸的 task id/run id 不在摘要内，同一提案重试保持同一身份；重排 children 或改动任一契约字段都是新提案。批次准入上下文（`AdmissionContext`：硬限制 `maxDepth`/`maxChildren`/`wallTimeMs` 与仅审计的 `maxToolCalls`/`tokens`/`attempts`）与摘要一起写在父任务 `TaskDecomposed` 事件的 `admission` 字段上，由 reducer 校验形状。**上下文自身的指纹未建**（T2 的 stale 判定会用它）：本票只保证上下文内容被如实记录、易变 registry 状态不混入内容摘要。
+
+共用点：普通分解、replay、root 三个入口都构造并保存契约；结构规则 `contractDefects`（至少一条判据、至少一条 mandatory、id 唯一、mode 合法、可执行 mode 需要有 command）由 `checkDecomposition` 与 replay 路径共用；P4 的 `independentAcceptanceDefects` 保持原样，父任务已有的契约不在分解时被重新审判（T1 不追溯收紧旧父任务）。handoff 的 assumptions/constraints 直接来自 store 里的契约，worker 的 `task_read` 从同一份契约渲染这两项，两个视图不会各说一套。
+
+工具面：`task_decompose` 增加可选 `contractVersion`、判据级 `criterionId`、子任务级 `constraints`；工具把调用者给的整个批次对象交给 runtime，未声明的批次级字段由契约入口按名字拒绝（工具 schema 仍校验自己的声明面：类型、mode 枚举、子任务/判据闭合对象）。因此两个入口在“接受/拒绝”上不矛盾：schema 拒绝的输入直接调用 runtime 也被拒绝，schema 放行而不属于声明面的批次级字段由 runtime 点名拒绝；差异只在拒绝文本由哪一层给出。
+
+边界：`generatedTaskReview` 开关、提案状态机、批准后重检与崩溃恢复仍属 T2/T3；`childEvidence` 仍只做结构检查，不做索引范围与蕴含证明；契约修订协议与模板库未建；新增预算/限额字段会被当未知字段拒绝，预算只能在部署配置里改（本票不引入“请求预算”）。root 的契约由 `RootTaskSpec` 常量展开、未再经独立校验；`AdmissionContext` 的硬限制只保证配置值被如实记录并由既有准入规则执行，不新增运行期强制。reducer 只校验契约的形状与版本，不重复结构性规则（全 optional、重复 id 在三个入口判定），因此直接写 store 的调用方仍可落库一份自洽但结构不合规的契约；`assertAdmission` 也只校验摘要非空，不校验摘要与所存 children 相符——那是 T2 提案绑定的职责。
+
+验证与解析边界（T1 复核）：task-runtime 的 src 与单测按 workspace 链接解析 `@dangosys/dsh-singularity-task` 到 `task/lib`，所以 `task/src` 的改动在重新 build 之前不会反映到 task-runtime 侧测试——本票因此规定先 `pnpm build` 再跑测试；这是既有解析方式，不是 T1 引入的机制。`task-runtime` 的严格类型检查仍有 8 处既有诊断（G9，行号均在 T1 diff 之外），本票未新增、未修复。集成测试的 sessionPersistence 是内存假件并做 JSON 往返，真实 JSONL 写入与崩溃重启行为只由单测/集成 fixture 覆盖。
+
+测试锚：`task/tests/unit/contract.spec.ts`（`canonicalize` 与两个摘要的固定向量、默认值/键序等价、内容敏感度）、`task/tests/unit/task-state.spec.ts`（reducer 契约一致性与准入记录形状）、`task-runtime/tests/unit/normalize.spec.ts`（闭合字段集、版本、默认值、id 固定与重复、摘要、深拷贝）、`task-runtime/tests/unit/admission.spec.ts`（`contractDefects` 与既有结构规则回归）、`task-runtime/tests/unit/orchestrate.spec.ts`（真实 TaskRuntime + TaskService：契约落库读回、重开 store、准入上下文、拒绝零副作用、handoff 一致、提案摘要重试稳定、replay 结构规则与契约、`mode: null` 拒绝）、`agent-singularity/tests/unit/task-tools.spec.ts`（工具 schema 传递与 `task_read` 渲染）、`tests/integration/task-contract.spec.ts`（真实 TaskService + TaskRuntime + VerifierRegistry，含真实 `task_decompose` 工具路径、八例拒绝、重开 store、legacy 任务与配置限额记录）。实跑命令、数量与未覆盖范围见建设计划「T1 执行与验收记录」。
 
 ## 6. 文档维护
 

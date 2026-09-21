@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
-import { RootTaskSpec, reaches, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
+import { RootTaskSpec, TASK_CONTRACT_VERSION, contractDigest, decompositionDigest, reaches, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
 import { readFile, readdir, stat } from "node:fs/promises";
 
 //#region src/mcp-servers.ts
@@ -364,6 +364,15 @@ const EXECUTABLE_MODES = [
 	"simulation",
 	"measurement"
 ];
+/** Every mode a criterion may declare, in declaration order (`VerificationMode`); the list the mode rule names. */
+const VERIFICATION_MODES = [
+	"deterministic",
+	"simulation",
+	"formal",
+	"measurement",
+	"review",
+	"composite"
+];
 /**
 * Structural reasons one task's parent-acceptance declarations are malformed
 * (P4, KISS §6 C2). Shape only: whether a mapping target exists is judged at
@@ -400,6 +409,55 @@ function independentAcceptanceDefects(criteria, requiresIndependentAcceptance, l
 	return reasons;
 }
 /**
+* Whether a criterion declares a command a verifier could actually run. A
+* declared command that is blank — or not text at all — is as missing as an
+* absent one: nothing executable was handed to the judge.
+*/
+function hasCommand(command) {
+	return typeof command === "string" && command.trim().length > 0;
+}
+/**
+* Structural defects of one task's acceptance contract (T1, construction guide
+* §4): what has to hold before a contract can be admitted at all, whichever
+* entry wrote it — an ordinary decomposition child, a replay candidate, or
+* (later) a template instance. Texts, ids and modes only; nothing here judges
+* whether a criterion is any good, and nothing here needs the store.
+*
+* The ordinary decomposition path and the replay path share this function so
+* that a rule can never hold on one and not on the other. The *parent* task's
+* own criteria are deliberately not put through it: a parent that already
+* exists was admitted when it was created, and T1 does not re-open contracts
+* that predate the normalized one — `checkDecomposition` still applies
+* {@link independentAcceptanceDefects} to the parent, which is its own P4
+* promise about a declaration the parent itself carries.
+*
+* `label` names the task under validation (`child 0 ("t-1")`, `replay of
+* "t-1"`); every reason is prefixed with it.
+*/
+function contractDefects(criteria, label) {
+	const reasons = [];
+	if (criteria.length === 0) {
+		reasons.push(`${label} requires at least one acceptance criterion`);
+		return reasons;
+	}
+	const seen = /* @__PURE__ */ new Set();
+	const reportedDuplicate = /* @__PURE__ */ new Set();
+	for (const criterion of criteria) {
+		const where = `${label} criterion "${criterion.criterionId}"`;
+		const description = criterion.description;
+		if (typeof description !== "string" || description.trim().length === 0) reasons.push(`${where} requires a non-empty description`);
+		if (!VERIFICATION_MODES.includes(criterion.verificationMode)) reasons.push(`${where} verificationMode "${String(criterion.verificationMode)}" is not one of ${VERIFICATION_MODES.join(", ")}`);
+		else if (EXECUTABLE_MODES.includes(criterion.verificationMode) && !hasCommand(criterion.command)) reasons.push(`${where} (${criterion.verificationMode}) requires a command`);
+		if (seen.has(criterion.criterionId) && !reportedDuplicate.has(criterion.criterionId)) {
+			reasons.push(`${label} declares criterion id "${criterion.criterionId}" more than once`);
+			reportedDuplicate.add(criterion.criterionId);
+		}
+		seen.add(criterion.criterionId);
+	}
+	if (!criteria.some((criterion) => criterion.mandatory === true)) reasons.push(`${label} requires at least one mandatory acceptance criterion`);
+	return reasons;
+}
+/**
 * Structural admission checks for one decomposition batch (RFC §36). Pure:
 * every rule is validated up front and the caller persists only when the
 * verdict is `ok`, so admission is atomic for the whole batch.
@@ -416,10 +474,9 @@ function checkDecomposition(parent, children, existingEdges) {
 	children.forEach((child, index) => {
 		const label = `child ${index} ("${child.taskId}")`;
 		if (child.objective.trim().length === 0) reasons.push(`${label} objective must be non-empty`);
-		if (child.acceptanceCriteria.length === 0) reasons.push(`${label} requires at least one acceptance criterion`);
+		reasons.push(...contractDefects(child.acceptanceCriteria, label));
 		reasons.push(...independentAcceptanceDefects(child.acceptanceCriteria, child.requiresIndependentAcceptance, label));
 		for (const criterion of child.acceptanceCriteria) {
-			if (EXECUTABLE_MODES.includes(criterion.verificationMode) && (criterion.command ?? "").trim().length === 0) reasons.push(`${label} criterion "${criterion.criterionId}" (${criterion.verificationMode}) requires a command`);
 			if (criterion.requiresArtifact !== void 0 && (!Array.isArray(criterion.requiresArtifact) || criterion.requiresArtifact.some((ref) => typeof ref !== "string" || ref.trim().length === 0))) reasons.push(`${label} criterion "${criterion.criterionId}" requiresArtifact must be an array of non-empty strings`);
 			if (criterion.verifierRef !== void 0 && (typeof criterion.verifierRef !== "string" || criterion.verifierRef.trim().length === 0)) reasons.push(`${label} criterion "${criterion.criterionId}" verifierRef must be a non-empty string`);
 		}
@@ -546,6 +603,278 @@ function renderWorkerPrompt(handoff, childTask, options) {
 	];
 	if (childTask.decompositionStatus === "decomposable") blocks.push(decomposition);
 	return `${blocks.join("\n\n")}\n`;
+}
+
+//#endregion
+//#region src/normalize.ts
+/** The batch fields, and nothing else: a key outside this set is refused. */
+const BATCH_FIELDS = new Set([
+	"contractVersion",
+	"reason",
+	"children"
+]);
+/** The child fields, and nothing else. */
+const CHILD_FIELDS = new Set([
+	"objective",
+	"acceptanceCriteria",
+	"requiredCapabilities",
+	"dependsOn",
+	"assumptions",
+	"constraints",
+	"decomposable",
+	"requiresIndependentAcceptance"
+]);
+/** The criterion fields, and nothing else. */
+const CRITERION_FIELDS = new Set([
+	"criterionId",
+	"description",
+	"command",
+	"mode",
+	"mandatory",
+	"requiredEvidence",
+	"requiresArtifact",
+	"acceptsArtifact",
+	"verifierRef",
+	"childEvidence",
+	"heuristic"
+]);
+function message$1(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+function isPlainObject(value) {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+/** Non-blank text: the one check every string field shares. */
+function nonBlank(value) {
+	return typeof value === "string" && value.trim().length > 0;
+}
+/** A declared version value, rendered so a non-number cannot read like a number (`"1"` is not `1`). */
+function declaredText(value) {
+	return typeof value === "number" ? String(value) : JSON.stringify(value) ?? String(value);
+}
+/**
+* A deep copy of declared contract data: primitives are immutable, arrays and
+* plain objects are rebuilt, so a caller mutating its input afterwards cannot
+* reach the normalized contract. Anything else is passed through unchanged — a
+* value no canonical form can carry is refused by the digest below, never
+* silently rewritten.
+*/
+function copyValue(value) {
+	if (Array.isArray(value)) return value.map((item) => copyValue(item));
+	if (isPlainObject(value)) {
+		const copy = {};
+		for (const [key, item] of Object.entries(value)) copy[key] = copyValue(item);
+		return copy;
+	}
+	return value;
+}
+/** Report every key a level does not declare. */
+function unknownFields(source, allowed, label, reasons) {
+	for (const key of Object.keys(source)) if (!allowed.has(key)) reasons.push(`${label} declares unknown field ${JSON.stringify(key)}`);
+}
+/** A required text field; a blank or non-string value is refused with the field named. */
+function text(value, label, reasons) {
+	if (!nonBlank(value)) {
+		reasons.push(`${label} must be a non-empty string`);
+		return "";
+	}
+	return value;
+}
+/**
+* A declared string collection: copied verbatim when it holds nothing but
+* non-blank strings, refused as one defect otherwise — a blank entry is
+* refused, not trimmed, and an omitted collection is the caller's `[]`.
+*/
+function stringList(value, label, reasons) {
+	if (!Array.isArray(value) || value.some((item) => !nonBlank(item))) {
+		reasons.push(`${label} must be an array of non-empty strings`);
+		return [];
+	}
+	return value.map((item) => item);
+}
+/**
+* A `dependsOn` list: integers only, copied verbatim. Whether an index is in
+* range, points at itself, or closes a cycle is admission's judgement — it
+* needs the whole batch, which this entry never sees as a graph.
+*/
+function integerList(value, label, reasons) {
+	if (!Array.isArray(value) || value.some((item) => !Number.isInteger(item))) {
+		reasons.push(`${label} must be an array of integers`);
+		return [];
+	}
+	return value.map((item) => item);
+}
+/** A boolean declaration: absent keeps the designed default, anything else is refused. */
+function booleanField(value, fallback, label, reasons) {
+	if (value === void 0) return fallback;
+	if (typeof value !== "boolean") {
+		reasons.push(`${label} must be a boolean`);
+		return fallback;
+	}
+	return value;
+}
+/**
+* A value carried as declared. `command` and the P4 declarations are judged by
+* admission, so this entry only copies them: a shape those rules refuse never
+* reaches the store, and the cast is the boundary that says so.
+*/
+function carried(value) {
+	return copyValue(value);
+}
+/**
+* One child's criteria list. Ids are fixed here — a declared id verbatim, an
+* absent one as `ac<childIndex + 1>-<criterionIndex + 1>`, the scheme the
+* runtime has always used — because the digest must not depend on spellings and
+* because a parent-level `childEvidence.criterionId` can only point at an id
+* that was fixed before its parent's criteria were accepted.
+*
+* A criterion that carried a defect is left out of the returned list: the batch
+* is refused as a whole, and the contract must describe only what a well-formed
+* declaration asked for.
+*/
+function normalizeCriteria(raw, childIndex, childLabel, reasons) {
+	const criteria = [];
+	const seen = /* @__PURE__ */ new Set();
+	const reportedDuplicate = /* @__PURE__ */ new Set();
+	raw.forEach((value, index) => {
+		const before = reasons.length;
+		const position = `${childLabel} criterion ${index + 1}`;
+		if (!isPlainObject(value)) {
+			reasons.push(`${position} must be an object`);
+			return;
+		}
+		const declaredId = value.criterionId;
+		if (declaredId !== void 0 && !nonBlank(declaredId)) reasons.push(`${position} criterionId must be a non-empty string`);
+		const criterionId = nonBlank(declaredId) ? declaredId : `ac${childIndex + 1}-${index + 1}`;
+		const label = `${childLabel} criterion ${JSON.stringify(criterionId)}`;
+		unknownFields(value, CRITERION_FIELDS, label, reasons);
+		if (seen.has(criterionId) && !reportedDuplicate.has(criterionId)) {
+			reasons.push(`${childLabel} declares criterion id ${JSON.stringify(criterionId)} more than once`);
+			reportedDuplicate.add(criterionId);
+		}
+		seen.add(criterionId);
+		const description = text(value.description, `${label} description`, reasons);
+		const mandatory = booleanField(value.mandatory, true, `${label} mandatory`, reasons);
+		const requiredEvidence = value.requiredEvidence === void 0 ? [] : stringList(value.requiredEvidence, `${label} requiredEvidence`, reasons);
+		const command = value.command;
+		const criterion = {
+			criterionId,
+			description,
+			verificationMode: carried(value.mode === void 0 ? command !== void 0 ? "deterministic" : "review" : value.mode),
+			requiredEvidence,
+			mandatory,
+			...command === void 0 ? {} : { command: carried(command) },
+			...value.requiresArtifact === void 0 ? {} : { requiresArtifact: carried(value.requiresArtifact) },
+			...value.acceptsArtifact === void 0 ? {} : { acceptsArtifact: carried(value.acceptsArtifact) },
+			...value.verifierRef === void 0 ? {} : { verifierRef: carried(value.verifierRef) },
+			...value.childEvidence === void 0 ? {} : { childEvidence: carried(value.childEvidence) },
+			...value.heuristic === void 0 ? {} : { heuristic: carried(value.heuristic) }
+		};
+		if (reasons.length > before) return;
+		criteria.push(criterion);
+	});
+	return criteria;
+}
+/** One batch child, normalized; `undefined` exactly when it contributed a reason. */
+function normalizeChild(raw, index, reasons) {
+	const before = reasons.length;
+	const label = `child ${index}`;
+	if (!isPlainObject(raw)) {
+		reasons.push(`${label} must be an object`);
+		return;
+	}
+	unknownFields(raw, CHILD_FIELDS, label, reasons);
+	const objective = text(raw.objective, `${label} objective`, reasons);
+	const rawCriteria = raw.acceptanceCriteria;
+	let criteria = [];
+	if (!Array.isArray(rawCriteria)) reasons.push(`${label} acceptanceCriteria must be an array`);
+	else criteria = normalizeCriteria(rawCriteria, index, label, reasons);
+	const requiredCapabilities = raw.requiredCapabilities === void 0 ? [] : stringList(raw.requiredCapabilities, `${label} requiredCapabilities`, reasons);
+	const assumptions = raw.assumptions === void 0 ? [] : stringList(raw.assumptions, `${label} assumptions`, reasons);
+	const constraints = raw.constraints === void 0 ? [] : stringList(raw.constraints, `${label} constraints`, reasons);
+	const dependsOn = raw.dependsOn === void 0 ? [] : integerList(raw.dependsOn, `${label} dependsOn`, reasons);
+	const decomposable = booleanField(raw.decomposable, false, `${label} decomposable`, reasons);
+	const requiresIndependentAcceptance = booleanField(raw.requiresIndependentAcceptance, false, `${label} requiresIndependentAcceptance`, reasons);
+	if (reasons.length > before) return void 0;
+	return {
+		contract: {
+			contractVersion: TASK_CONTRACT_VERSION,
+			objective,
+			acceptanceCriteria: criteria,
+			assumptions,
+			constraints,
+			requiredCapabilities
+		},
+		dependsOn,
+		decomposable,
+		requiresIndependentAcceptance
+	};
+}
+/**
+* Normalize one decomposition proposal.
+*
+* Returns every defect it found, never the first: a caller revising a proposal
+* needs the whole list, and a batch that returns at all is one the digest could
+* describe. A refusal is a value, never a throw.
+*/
+function normalizeDecomposition(spec, context) {
+	const reasons = [];
+	if (!isPlainObject(spec)) return {
+		ok: false,
+		reasons: ["decomposition must be an object with a reason and a children array"]
+	};
+	unknownFields(spec, BATCH_FIELDS, "decomposition", reasons);
+	const declaredVersion = spec.contractVersion;
+	if (declaredVersion !== void 0 && declaredVersion !== TASK_CONTRACT_VERSION) reasons.push(`unknown contract version ${declaredText(declaredVersion)}: this runtime writes version ${TASK_CONTRACT_VERSION}`);
+	let reason = "";
+	if (nonBlank(spec.reason)) reason = spec.reason;
+	else reasons.push("decomposition requires a non-blank reason");
+	const children = [];
+	const rawChildren = spec.children;
+	if (rawChildren === void 0 || Array.isArray(rawChildren) && rawChildren.length === 0) reasons.push("decomposition requires at least one child");
+	else if (!Array.isArray(rawChildren)) reasons.push("decomposition children must be an array");
+	else rawChildren.forEach((raw, index) => {
+		const child = normalizeChild(raw, index, reasons);
+		if (child !== void 0) children.push(child);
+	});
+	if (reasons.length > 0) return {
+		ok: false,
+		reasons
+	};
+	const contractVersion = TASK_CONTRACT_VERSION;
+	try {
+		return {
+			ok: true,
+			batch: {
+				contractVersion,
+				children,
+				admission: {
+					proposalDigest: decompositionDigest({
+						contractVersion,
+						storeId: context.storeId,
+						parentTaskId: context.parentTaskId,
+						parentRunId: context.parentRunId,
+						callerSessionId: context.callerSessionId,
+						reason,
+						children: children.map((child) => ({
+							contractDigest: contractDigest(child.contract),
+							dependsOn: child.dependsOn,
+							decomposable: child.decomposable,
+							requiresIndependentAcceptance: child.requiresIndependentAcceptance
+						}))
+					}),
+					context: copyValue(context.admissionContext)
+				}
+			}
+		};
+	} catch (error) {
+		return {
+			ok: false,
+			reasons: [`decomposition content cannot be canonicalized: ${message$1(error)}`]
+		};
+	}
 }
 
 //#endregion
@@ -1121,6 +1450,7 @@ async function runChildrenCascade(env, storeId, parentTask, parentRun, plans, re
 			reason,
 			callerSessionId,
 			assumptions: [...plan.assumptions ?? [], ...dependencyEvidence.map((evidenceId) => `dependency evidence "${evidenceId}" is verified and available as a reference`)],
+			constraints: plan.constraints ?? [],
 			relevantEvidence: dependencyEvidence
 		});
 		await env.task.recordHandoffIn(storeId, handoff, env.actor);
@@ -1510,10 +1840,10 @@ function nonEmpty(value) {
 * refusing malformed entries loudly — a template that cannot be read is a
 * defect in the domain pack, not an empty template set.
 */
-function parseObligationTemplates(text, source) {
+function parseObligationTemplates(text$1, source) {
 	let raw;
 	try {
-		raw = JSON.parse(text);
+		raw = JSON.parse(text$1);
 	} catch (error) {
 		throw new Error(`obligation: ${source} is not JSON-compatible YAML: ${error instanceof Error ? error.message : String(error)}`);
 	}
@@ -1570,15 +1900,15 @@ async function loadObligationTemplates(repoRoot) {
 	for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
 		if (!entry.isDirectory()) continue;
 		const file = join(skillsRoot, entry.name, "obligations.yml");
-		let text;
+		let text$1;
 		try {
-			text = await readFile(file, "utf8");
+			text$1 = await readFile(file, "utf8");
 		} catch {
 			continue;
 		}
 		files.push({
 			file,
-			templates: parseObligationTemplates(text, file)
+			templates: parseObligationTemplates(text$1, file)
 		});
 	}
 	return files;
@@ -1813,25 +2143,6 @@ const ConfigSchema = z.object({
 function now() {
 	return (/* @__PURE__ */ new Date()).toISOString();
 }
-function normalizeCriteria(criteria, childIndex) {
-	return criteria.map((criterion, index) => ({
-		criterionId: `ac${childIndex + 1}-${index + 1}`,
-		description: criterion.description,
-		verificationMode: criterion.mode ?? (criterion.command !== void 0 ? "deterministic" : "review"),
-		requiredEvidence: [...criterion.requiredEvidence ?? []],
-		mandatory: criterion.mandatory ?? true,
-		...criterion.command !== void 0 ? { command: criterion.command } : {},
-		...criterion.requiresArtifact !== void 0 ? { requiresArtifact: [...criterion.requiresArtifact] } : {},
-		...criterion.acceptsArtifact !== void 0 ? { acceptsArtifact: [...criterion.acceptsArtifact] } : {},
-		...criterion.verifierRef !== void 0 ? { verifierRef: criterion.verifierRef } : {},
-		...criterion.childEvidence !== void 0 ? { childEvidence: criterion.childEvidence.map((entry) => ({
-			childIndex: entry.childIndex,
-			...entry.criterionId !== void 0 ? { criterionId: entry.criterionId } : {},
-			...entry.evidenceRef !== void 0 ? { evidenceRef: entry.evidenceRef } : {}
-		})) } : {},
-		...criterion.heuristic !== void 0 ? { heuristic: criterion.heuristic } : {}
-	}));
-}
 var TaskRuntime = class extends Service {
 	static inject = [
 		"task",
@@ -1923,23 +2234,29 @@ var TaskRuntime = class extends Service {
 			};
 		}
 		const manifest = this.resolveCapabilities(RootTaskSpec.requiredCapabilities);
+		const contract = {
+			contractVersion: TASK_CONTRACT_VERSION,
+			objective: options.objective,
+			acceptanceCriteria: structuredClone(RootTaskSpec.acceptanceCriteria),
+			assumptions: [],
+			constraints: [],
+			requiredCapabilities: [...RootTaskSpec.requiredCapabilities]
+		};
 		const task = {
 			taskId: `t-${randomUUID()}`,
 			definitionRef: {
 				taskType: RootTaskSpec.taskType,
 				version: RootTaskSpec.version
 			},
-			objective: options.objective,
+			objective: contract.objective,
 			depth: 0,
-			acceptanceCriteria: RootTaskSpec.acceptanceCriteria.map((criterion) => ({
-				...criterion,
-				requiredEvidence: [...criterion.requiredEvidence]
-			})),
-			requestedCapabilities: [...RootTaskSpec.requiredCapabilities],
+			acceptanceCriteria: contract.acceptanceCriteria,
+			requestedCapabilities: [...contract.requiredCapabilities],
 			decompositionStatus: "decomposable",
 			status: "created",
 			runIds: [],
-			childTaskIds: []
+			childTaskIds: [],
+			contract
 		};
 		await this.ctx.task.createTaskIn(storeId, task, actor);
 		await this.ctx.task.admitTaskIn(storeId, task.taskId, actor, {
@@ -1968,9 +2285,17 @@ var TaskRuntime = class extends Service {
 		};
 	}
 	/**
-	* Atomic decomposition plus the sequential run cascade: structural admission
-	* and capability admission must pass for the whole batch before anything is
-	* persisted; children then run one at a time in dependency order.
+	* Atomic decomposition plus the sequential run cascade: normalization,
+	* structural admission and capability admission must all pass for the whole
+	* batch before anything is persisted; children then run one at a time in
+	* dependency order.
+	*
+	* The batch is normalized first ({@link normalizeDecomposition}): raw caller
+	* input becomes the contract of every child with its defaults filled and its
+	* criterion ids fixed, and the batch identity plus the limits in force become
+	* ready to be recorded with the decomposition. A refused batch is refused
+	* whole — the error names every reason, no id is minted into the store, no
+	* capability is resolved into an event, and no obligation is recorded.
 	*
 	* The structural policy is `allowed` — a `leaf` task may decompose only while
 	* {@link Config.allowRuntimeDecomposition} is on — plus the configured growth
@@ -1983,9 +2308,16 @@ var TaskRuntime = class extends Service {
 		const parentRun = await this.ctx.task.runIn(storeId, parentRunId);
 		if (parentRun.taskId !== parentTaskId) throw new Error(`task-runtime: run "${parentRunId}" belongs to task "${parentRun.taskId}", not "${parentTaskId}"`);
 		if (parentRun.sessionId !== callerSessionId) throw new Error(`task-runtime: run "${parentRunId}" is bound to session "${parentRun.sessionId}", not caller "${callerSessionId}"`);
-		if (!Array.isArray(spec.children) || spec.children.length === 0) throw new Error("task-runtime: decomposition requires at least one child");
-		const childTaskIds = spec.children.map(() => `t-${randomUUID()}`);
-		const criteria = spec.children.map((child, index) => normalizeCriteria(child.acceptanceCriteria, index));
+		const normalized = normalizeDecomposition(spec, {
+			storeId,
+			parentTaskId,
+			parentRunId,
+			callerSessionId,
+			admissionContext: this.admissionContext()
+		});
+		if (!normalized.ok) throw new Error(`task-runtime: contract rejected decomposition of "${parentTaskId}":\n- ${normalized.reasons.join("\n- ")}`);
+		const batch = normalized.batch;
+		const childTaskIds = batch.children.map(() => `t-${randomUUID()}`);
 		const snapshot = await this.ctx.task.snapshotIn(storeId);
 		const leaf = parentTask.decompositionStatus === "leaf";
 		const verdict = checkDecomposition({
@@ -1996,57 +2328,58 @@ var TaskRuntime = class extends Service {
 				maxDepth: this.config.maxDepth,
 				maxChildren: this.config.maxChildren
 			}
-		}, spec.children.map((child, index) => ({
+		}, batch.children.map((child, index) => ({
 			taskId: childTaskIds[index],
-			objective: child.objective,
-			acceptanceCriteria: criteria[index],
+			objective: child.contract.objective,
+			acceptanceCriteria: child.contract.acceptanceCriteria,
 			dependsOn: child.dependsOn,
-			...child.requiresIndependentAcceptance !== void 0 ? { requiresIndependentAcceptance: child.requiresIndependentAcceptance } : {}
+			requiresIndependentAcceptance: child.requiresIndependentAcceptance
 		})), snapshot.edges);
 		if (!verdict.ok) throw new Error(`task-runtime: admission rejected decomposition of "${parentTaskId}":\n- ${verdict.reasons.join("\n- ")}`);
-		const manifests = spec.children.map((child) => this.resolveCapabilities(child.requiredCapabilities ?? []));
-		const rejected = spec.children.map((child, index) => ({
+		const manifests = batch.children.map((child) => this.resolveCapabilities(child.contract.requiredCapabilities));
+		const rejected = batch.children.map((child, index) => ({
 			child,
 			index,
 			manifest: manifests[index]
-		})).filter(({ child, manifest }) => manifest.missing.length > 0 && child.decomposable !== true);
+		})).filter(({ child, manifest }) => manifest.missing.length > 0 && !child.decomposable);
 		if (rejected.length > 0) {
 			const detail = rejected.map(({ index, manifest }) => `child ${index} is missing [${manifest.missing.join(", ")}] and may not decompose`).join("; ");
 			for (const { index, manifest } of rejected) for (const missing of manifest.missing) await this.ctx.task.recordObligationIn(storeId, {
 				obligationId: `o-${randomUUID()}`,
-				goal: `capability "${missing}" required by child ${index} ("${spec.children[index].objective}") of "${parentTaskId}" is not granted by the registry`,
+				goal: `capability "${missing}" required by child ${index} ("${batch.children[index].contract.objective}") of "${parentTaskId}" is not granted by the registry`,
 				criterion: `capability "${missing}" resolves in the capability registry (capability_list shows it)`,
 				sourceTaskId: parentTaskId
 			}, actor);
 			const gapNames = [...new Set(rejected.flatMap(({ manifest }) => manifest.missing))];
 			throw new Error(`task-runtime: admission rejected decomposition of "${parentTaskId}": capability gap: ${detail}; ` + escalationHint(`capabilities [${gapNames.join(", ")}] are not granted by the capability registry`, "capability_list and the children's declared capabilities", "grant the capability in the registry, or mark the child decomposable"));
 		}
-		this.assertKnownVerifierRefs(criteria.flatMap((list, childIndex) => list.map((criterion) => ({
+		this.assertKnownVerifierRefs(batch.children.flatMap((child, childIndex) => child.contract.acceptanceCriteria.map((criterion) => ({
 			childIndex,
 			criterion
 		}))), `decomposition of "${parentTaskId}"`);
-		const children = spec.children.map((child, index) => ({
+		const children = batch.children.map((child, index) => ({
 			taskId: childTaskIds[index],
 			definitionRef: {
 				taskType: "subtask",
 				version: 1
 			},
 			parentTaskId,
-			objective: child.objective,
+			objective: child.contract.objective,
 			depth: parentTask.depth + 1,
-			acceptanceCriteria: criteria[index],
-			requestedCapabilities: [...child.requiredCapabilities ?? []],
-			decompositionStatus: child.decomposable === true || manifests[index].missing.length > 0 ? "decomposable" : "leaf",
+			acceptanceCriteria: child.contract.acceptanceCriteria,
+			requestedCapabilities: [...child.contract.requiredCapabilities],
+			decompositionStatus: child.decomposable || manifests[index].missing.length > 0 ? "decomposable" : "leaf",
 			status: "created",
 			runIds: [],
 			childTaskIds: [],
-			...child.requiresIndependentAcceptance === true ? { requiresIndependentAcceptance: true } : {}
+			contract: child.contract,
+			...child.requiresIndependentAcceptance ? { requiresIndependentAcceptance: true } : {}
 		}));
-		const edges = spec.children.flatMap((child, to) => (child.dependsOn ?? []).map((from) => ({
+		const edges = batch.children.flatMap((child, to) => child.dependsOn.map((from) => ({
 			from: childTaskIds[from],
 			to: childTaskIds[to]
 		})));
-		await this.ctx.task.decomposeIn(storeId, parentTaskId, children, actor, edges);
+		await this.ctx.task.decomposeIn(storeId, parentTaskId, children, actor, edges, batch.admission);
 		const manifestEvents = manifests.flatMap((manifest, index) => {
 			const envelope = {
 				taskId: childTaskIds[index],
@@ -2068,12 +2401,16 @@ var TaskRuntime = class extends Service {
 			return events;
 		});
 		await this.ctx.task.commitIn(storeId, manifestEvents);
-		const plans = children.map((task, index) => ({
-			task,
-			manifest: manifests[index],
-			dependsOn: spec.children[index].dependsOn ?? [],
-			...spec.children[index].assumptions === void 0 ? {} : { assumptions: [...spec.children[index].assumptions] }
-		}));
+		const plans = children.map((task, index) => {
+			const child = batch.children[index];
+			return {
+				task,
+				manifest: manifests[index],
+				dependsOn: child.dependsOn,
+				assumptions: [...child.contract.assumptions],
+				constraints: [...child.contract.constraints]
+			};
+		});
 		return runChildrenCascade(this.orchestrateEnv(callerSessionId, actor), storeId, parentTask, parentRun, plans, spec.reason, callerSessionId, exec.signal);
 	}
 	/**
@@ -2088,12 +2425,19 @@ var TaskRuntime = class extends Service {
 	* criteria replay). Capability resolution runs against the configured table
 	* with `overlay.capabilityOverrides` applied as whole-row replacements; a gap
 	* under the overlay refuses the replay before anything is persisted.
+	*
+	* The replayed task carries a normalized contract like every other creation
+	* (T1), and its criteria are judged by the same structural rules an ordinary
+	* decomposition child faces (`contractDefects` plus the P4 declarations).
+	* A replay has no batch, so it records no admission context: nothing was
+	* proposed to a parent, there is no sibling set to bound, and the limits that
+	* do apply to its run are the run's own budget, not a batch's.
 	*/
 	async replayTask(storeId, championTaskId, options, callerSessionId) {
 		const champion = await this.ctx.task.taskIn(storeId, championTaskId);
 		if (champion.status !== "verified" && champion.status !== "failed") throw new Error(`task-runtime: champion task "${championTaskId}" is ${champion.status}; only a terminal (verified or failed) task can be replayed`);
 		const championRunId = champion.runIds[champion.runIds.length - 1];
-		const contract = options.contract ?? {
+		const effective = options.contract ?? {
 			objective: champion.objective,
 			acceptanceCriteria: champion.acceptanceCriteria,
 			requiredCapabilities: champion.requestedCapabilities
@@ -2102,28 +2446,35 @@ var TaskRuntime = class extends Service {
 			...this.config.capabilities,
 			...options.overlay?.capabilityOverrides ?? {}
 		};
-		const manifest = resolveCapabilities(contract.requiredCapabilities, table);
+		const manifest = resolveCapabilities(effective.requiredCapabilities, table);
 		if (manifest.missing.length > 0) throw new Error(`task-runtime: replay of "${championTaskId}" cannot run: capability gap [${manifest.missing.join(", ")}] under the overlay`);
-		const acceptanceDefects = independentAcceptanceDefects(contract.acceptanceCriteria, champion.requiresIndependentAcceptance, `replay of "${championTaskId}"`);
+		const label = `replay of "${championTaskId}"`;
+		const acceptanceDefects = [...contractDefects(effective.acceptanceCriteria, label), ...independentAcceptanceDefects(effective.acceptanceCriteria, champion.requiresIndependentAcceptance, label)];
 		if (acceptanceDefects.length > 0) throw new Error(`task-runtime: replay of "${championTaskId}" rejected:\n- ${acceptanceDefects.join("\n- ")}`);
-		this.assertKnownVerifierRefs(contract.acceptanceCriteria.map((criterion) => ({
+		this.assertKnownVerifierRefs(effective.acceptanceCriteria.map((criterion) => ({
 			childIndex: 0,
 			criterion
 		})), `replay of "${championTaskId}"`);
+		const contract = {
+			contractVersion: TASK_CONTRACT_VERSION,
+			objective: `[${options.lineage}] ${effective.objective}`,
+			acceptanceCriteria: structuredClone(effective.acceptanceCriteria),
+			assumptions: [...champion.contract?.assumptions ?? []],
+			constraints: [...champion.contract?.constraints ?? []],
+			requiredCapabilities: [...effective.requiredCapabilities]
+		};
 		const task = {
 			taskId: `t-${randomUUID()}`,
 			definitionRef: { ...champion.definitionRef },
-			objective: `[${options.lineage}] ${contract.objective}`,
+			objective: contract.objective,
 			depth: 0,
-			acceptanceCriteria: contract.acceptanceCriteria.map((criterion) => ({
-				...criterion,
-				requiredEvidence: [...criterion.requiredEvidence]
-			})),
+			acceptanceCriteria: contract.acceptanceCriteria,
 			requestedCapabilities: [...contract.requiredCapabilities],
 			decompositionStatus: "leaf",
 			status: "created",
 			runIds: [],
 			childTaskIds: [],
+			contract,
 			...champion.requiresIndependentAcceptance === true ? { requiresIndependentAcceptance: true } : {}
 		};
 		const spawn = options.spawn !== false;
@@ -2136,6 +2487,8 @@ var TaskRuntime = class extends Service {
 				childTask: task,
 				reason: `${options.lineage}: replay of ${championTaskId} under the candidate's overlay`,
 				callerSessionId,
+				assumptions: [...contract.assumptions],
+				constraints: [...contract.constraints],
 				relevantEvidence: []
 			});
 			prompt = renderWorkerPrompt(handoff, task, { allowRuntimeDecomposition: false });
@@ -2203,6 +2556,31 @@ var TaskRuntime = class extends Service {
 			taskId: run.taskId,
 			runId: run.runId
 		});
+	}
+	/**
+	* The limits one batch is admitted under (T1, construction guide §4),
+	* recorded with the decomposition and never derived from the contract: the
+	* contract's own text has no field that can raise a limit, and every value
+	* here is resolved from this runtime's configuration at admission time.
+	*
+	* Only the keys the deployment actually defined are included. `wallTimeMs`
+	* and the `auditOnly` trio are one record apart on purpose — a reader has to
+	* be able to tell which ceiling would have stopped the run — and an absent
+	* `tokens` (this deployment ships no default for it, see {@link BudgetConfig})
+	* means there is no token ceiling to record at all.
+	*/
+	admissionContext() {
+		const budget = this.config.budget;
+		return {
+			maxDepth: this.config.maxDepth,
+			maxChildren: this.config.maxChildren,
+			...budget.wallTimeMs === void 0 ? {} : { wallTimeMs: budget.wallTimeMs },
+			auditOnly: {
+				...budget.maxToolCalls === void 0 ? {} : { maxToolCalls: budget.maxToolCalls },
+				...budget.tokens === void 0 ? {} : { tokens: budget.tokens },
+				...budget.attempts === void 0 ? {} : { attempts: budget.attempts }
+			}
+		};
 	}
 	orchestrateEnv(callerSessionId, actor) {
 		return {
@@ -2403,4 +2781,4 @@ var TaskRuntime = class extends Service {
 var src_default = TaskRuntime;
 
 //#endregion
-export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, MCP_SERVER_REGISTRY, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, buildHandoff, checkDecomposition, checkObligationCoverage, src_default as default, escalationHint, findRepoRoot, independentAcceptanceDefects, loadObligationTemplates, manifestMcpServers, parseObligationTemplates, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };
+export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, MCP_SERVER_REGISTRY, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, buildHandoff, checkDecomposition, checkObligationCoverage, contractDefects, src_default as default, escalationHint, findRepoRoot, independentAcceptanceDefects, loadObligationTemplates, manifestMcpServers, normalizeDecomposition, parseObligationTemplates, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };

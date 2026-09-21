@@ -25,9 +25,11 @@ import type {
   TaskRun,
   TaskSnapshot,
 } from './types.ts'
+import type { DecompositionAdmission } from './contract.ts'
 import { TaskState } from './service/state.ts'
 
 export * from './types.ts'
+export * from './contract.ts'
 export { TaskState } from './service/state.ts'
 
 declare module '@deepseek-ai/dsh-session/types' {
@@ -218,6 +220,7 @@ export class TaskService extends Service {
     children: readonly TaskInstance[],
     actor: string,
     edges: readonly DependencyEdge[] = [],
+    admission?: DecompositionAdmission,
   ): Promise<void> {
     if (children.length === 0) throw new Error('task: decompose requires at least one child')
     const events: TaskEvent[] = []
@@ -232,7 +235,11 @@ export class TaskService extends Service {
     for (const edge of edges) {
       events.push(event('DependencyAdded', { taskId: edge.to, actor, payload: { edge } }))
     }
-    events.push(event('TaskDecomposed', { taskId: parentTaskId, actor, payload: { childTaskIds: children.map(child => child.taskId) } }))
+    events.push(event('TaskDecomposed', {
+      taskId: parentTaskId,
+      actor,
+      payload: { childTaskIds: children.map(child => child.taskId), ...(admission === undefined ? {} : { admission }) },
+    }))
     await this.commitIn(storeId, events)
   }
 

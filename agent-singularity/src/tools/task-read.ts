@@ -20,6 +20,23 @@ function latestRun(snapshot: TaskSnapshot, task: TaskInstance): TaskRun | undefi
   return snapshot.runs.find(run => run.runId === runId)
 }
 
+/**
+ * The two contract facts a worker cannot read off the objective and the
+ * criteria table: what its contract assumes and what it constrains (T1 §4) —
+ * persisted with the task, so this store-backed view and the handoff-rendered
+ * block say the same thing. A task created before the contract existed has
+ * neither, and renders exactly what it rendered before: nothing is invented
+ * for the part the store never held.
+ */
+function contractLines(task: TaskInstance): string[] {
+  const contract = task.contract
+  if (contract === undefined) return []
+  return [
+    ...(contract.assumptions.length === 0 ? [] : ['assumptions:', ...contract.assumptions.map(item => `- ${item}`)]),
+    ...(contract.constraints.length === 0 ? [] : ['constraints:', ...contract.constraints.map(item => `- ${item}`)]),
+  ]
+}
+
 export function defineTaskReadTool(ctx: Context) {
   return defineTool({
     name: 'task_read',
@@ -40,6 +57,7 @@ export function defineTaskReadTool(ctx: Context) {
             const command = criterion.command === undefined ? '' : ` — $ ${criterion.command}`
             return `- ${criterion.criterionId} [${criterion.verificationMode}${criterion.mandatory ? ', mandatory' : ''}] ${criterion.description}${command}`
           }),
+          ...contractLines(task),
           `run ${run.runId} [${run.status}] started ${run.startedAt}`,
         ]
         return lines.join('\n')

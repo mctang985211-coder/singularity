@@ -4,6 +4,11 @@ import type { AcceptanceCriterion, DependencyEdge, TaskInstance, VerificationMod
 /** Modes whose criterion is executed by the command verifier and therefore needs `command`. */
 const EXECUTABLE_MODES: readonly VerificationMode[] = ['deterministic', 'simulation', 'measurement']
 
+/** Every mode a criterion may declare, in declaration order (`VerificationMode`); the list the mode rule names. */
+const VERIFICATION_MODES: readonly VerificationMode[] = [
+  'deterministic', 'simulation', 'formal', 'measurement', 'review', 'composite',
+]
+
 /** Parent task plus the decomposition policy its caller grants it. */
 export interface AdmissionParent extends TaskInstance {
   decompositionPolicy: {
@@ -102,6 +107,72 @@ export function independentAcceptanceDefects(
 }
 
 /**
+ * Whether a criterion declares a command a verifier could actually run. A
+ * declared command that is blank — or not text at all — is as missing as an
+ * absent one: nothing executable was handed to the judge.
+ */
+function hasCommand(command: unknown): boolean {
+  return typeof command === 'string' && command.trim().length > 0
+}
+
+/**
+ * Structural defects of one task's acceptance contract (T1, construction guide
+ * §4): what has to hold before a contract can be admitted at all, whichever
+ * entry wrote it — an ordinary decomposition child, a replay candidate, or
+ * (later) a template instance. Texts, ids and modes only; nothing here judges
+ * whether a criterion is any good, and nothing here needs the store.
+ *
+ * The ordinary decomposition path and the replay path share this function so
+ * that a rule can never hold on one and not on the other. The *parent* task's
+ * own criteria are deliberately not put through it: a parent that already
+ * exists was admitted when it was created, and T1 does not re-open contracts
+ * that predate the normalized one — `checkDecomposition` still applies
+ * {@link independentAcceptanceDefects} to the parent, which is its own P4
+ * promise about a declaration the parent itself carries.
+ *
+ * `label` names the task under validation (`child 0 ("t-1")`, `replay of
+ * "t-1"`); every reason is prefixed with it.
+ */
+export function contractDefects(criteria: readonly AcceptanceCriterion[], label: string): string[] {
+  const reasons: string[] = []
+  if (criteria.length === 0) {
+    reasons.push(`${label} requires at least one acceptance criterion`)
+    return reasons
+  }
+  const seen = new Set<string>()
+  const reportedDuplicate = new Set<string>()
+  for (const criterion of criteria) {
+    const where = `${label} criterion "${criterion.criterionId}"`
+    const description: unknown = criterion.description
+    if (typeof description !== 'string' || description.trim().length === 0) {
+      reasons.push(`${where} requires a non-empty description`)
+    }
+    if (!VERIFICATION_MODES.includes(criterion.verificationMode)) {
+      reasons.push(`${where} verificationMode "${String(criterion.verificationMode)}" is not one of ${VERIFICATION_MODES.join(', ')}`)
+    } else if (EXECUTABLE_MODES.includes(criterion.verificationMode) && !hasCommand(criterion.command)) {
+      // The command verifier executes the criterion: without a command there is
+      // nothing to run, and a criterion that can never be judged is not a task.
+      reasons.push(`${where} (${criterion.verificationMode}) requires a command`)
+    }
+    // Duplicates are refused before the batch is persisted, not at acceptance:
+    // a verdict names its criterion by id, so two criteria sharing one id make
+    // every later verdict ambiguous. One reason per duplicated id, however many
+    // times it repeats.
+    if (seen.has(criterion.criterionId) && !reportedDuplicate.has(criterion.criterionId)) {
+      reasons.push(`${label} declares criterion id "${criterion.criterionId}" more than once`)
+      reportedDuplicate.add(criterion.criterionId)
+    }
+    seen.add(criterion.criterionId)
+  }
+  // A contract whose every criterion is optional cannot settle: passing it would
+  // mean nothing was required, and failing it would close nothing.
+  if (!criteria.some(criterion => criterion.mandatory === true)) {
+    reasons.push(`${label} requires at least one mandatory acceptance criterion`)
+  }
+  return reasons
+}
+
+/**
  * Structural admission checks for one decomposition batch (RFC §36). Pure:
  * every rule is validated up front and the caller persists only when the
  * verdict is `ok`, so admission is atomic for the whole batch.
@@ -142,12 +213,12 @@ export function checkDecomposition(
   children.forEach((child, index) => {
     const label = `child ${index} ("${child.taskId}")`
     if (child.objective.trim().length === 0) reasons.push(`${label} objective must be non-empty`)
-    if (child.acceptanceCriteria.length === 0) reasons.push(`${label} requires at least one acceptance criterion`)
+    // Two separate judgements, both required: the contract's own structure
+    // ({@link contractDefects}, shared with the replay path) and the P4
+    // declarations a child carries about its parent's acceptance.
+    reasons.push(...contractDefects(child.acceptanceCriteria, label))
     reasons.push(...independentAcceptanceDefects(child.acceptanceCriteria, child.requiresIndependentAcceptance, label))
     for (const criterion of child.acceptanceCriteria) {
-      if (EXECUTABLE_MODES.includes(criterion.verificationMode) && (criterion.command ?? '').trim().length === 0) {
-        reasons.push(`${label} criterion "${criterion.criterionId}" (${criterion.verificationMode}) requires a command`)
-      }
       // `requiresArtifact` gets a shape check here and nothing more: whether the
       // named artifact exists is a spawn-time question (it needs the store
       // snapshot), so admission only refuses a malformed declaration.

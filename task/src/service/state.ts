@@ -1,3 +1,4 @@
+import { TASK_CONTRACT_VERSION, canonicalize, type DecompositionAdmission, type TaskContract } from '../contract.ts'
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, reaches } from '../types.ts'
 import type {
   DependencyEdge,
@@ -30,6 +31,11 @@ function nonEmpty(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
 }
 
+/** Plain-object test: `null` and arrays are not records, whatever `typeof` says. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 export class TaskState {
   private value: TaskSnapshot
 
@@ -52,7 +58,7 @@ export class TaskState {
       case 'TaskCreated': this.addTask(event.payload.task); return
       case 'TaskAdmitted': this.admit(event.taskId, event.payload.decompositionStatus); return
       case 'TaskRejected': this.transit(event.taskId, ['created'], 'blocked'); return
-      case 'TaskDecomposed': this.decompose(event.taskId, event.payload.childTaskIds); return
+      case 'TaskDecomposed': this.decompose(event.taskId, event.payload.childTaskIds, event.payload.admission); return
       case 'DependencyAdded': this.addDependency(event.payload.edge); return
       case 'TaskStarted': this.start(event.taskId, event.runId, event.payload.run); return
       case 'TaskBlocked': this.block(event.taskId, event.runId); return
@@ -79,6 +85,7 @@ export class TaskState {
     if (task.status !== 'created') throw new Error(`task: task "${task.taskId}" must be created in status "created"`)
     if (task.runIds.length !== 0 || task.childTaskIds.length !== 0) throw new Error('task: task runs and children must use events')
     if (task.parentTaskId === task.taskId) throw new Error(`task: task "${task.taskId}" cannot be its own parent`)
+    if (task.contract !== undefined) this.assertContract(task.taskId, task.contract, task)
     if (task.parentTaskId === undefined) {
       if (task.depth !== 0) throw new Error(`task: root task "${task.taskId}" depth must be 0`)
       this.value = { ...this.value, tasks: [...this.value.tasks, copy(task)] }
@@ -97,12 +104,85 @@ export class TaskState {
     }
   }
 
+  /**
+   * A task's contract is either absent — a task created before the contract
+   * existed — or the single source its projection fields are generated from.
+   * The check re-derives the projections from the contract and refuses a
+   * disagreement instead of letting either side stand in for the other: a
+   * reader that trusts `objective` and one that trusts `contract.objective`
+   * must never see two different goals. Structural comparison goes through
+   * `canonicalize`, so key order in the stored payload is not a difference.
+   */
+  private assertContract(taskId: TaskId, contract: TaskContract, task: TaskInstance): void {
+    if (contract.contractVersion !== TASK_CONTRACT_VERSION) {
+      throw new Error(`task: task "${taskId}" declares contract version ${String(contract.contractVersion)}; this build stores version ${TASK_CONTRACT_VERSION}`)
+    }
+    const lists: ReadonlyArray<readonly [string, unknown]> = [
+      ['assumptions', contract.assumptions],
+      ['constraints', contract.constraints],
+      ['requiredCapabilities', contract.requiredCapabilities],
+    ]
+    for (const [name, value] of lists) {
+      if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) {
+        throw new Error(`task: task "${taskId}" contract ${name} must be an array of strings`)
+      }
+    }
+    if (typeof contract.objective !== 'string') {
+      throw new Error(`task: task "${taskId}" contract objective must be a string`)
+    }
+    if (task.objective !== contract.objective) {
+      throw new Error(`task: task "${taskId}" objective disagrees with its contract objective`)
+    }
+    if (canonicalize(task.acceptanceCriteria) !== canonicalize(contract.acceptanceCriteria)) {
+      throw new Error(`task: task "${taskId}" acceptance criteria disagree with its contract`)
+    }
+    if (canonicalize(task.requestedCapabilities) !== canonicalize(contract.requiredCapabilities)) {
+      throw new Error(`task: task "${taskId}" requested capabilities disagree with its contract`)
+    }
+  }
+
+  /**
+   * The batch record a decomposition carries is the identity a later review
+   * gate binds an approval to, so a malformed one is refused rather than
+   * stored: an empty proposal digest or a non-numeric limit would make the
+   * record unusable exactly when someone needs to compare it.
+   */
+  private assertAdmission(taskId: TaskId, admission: DecompositionAdmission): void {
+    if (typeof admission.proposalDigest !== 'string' || admission.proposalDigest.length === 0) {
+      throw new Error(`task: task "${taskId}" decomposition admission requires a proposal digest`)
+    }
+    const context = admission.context
+    if (!isRecord(context)) {
+      throw new Error(`task: task "${taskId}" decomposition admission requires an admission context`)
+    }
+    for (const [name, value] of [['maxDepth', context.maxDepth], ['maxChildren', context.maxChildren]] as const) {
+      if (!Number.isInteger(value) || value < 0) {
+        throw new Error(`task: task "${taskId}" admission context ${name} must be a non-negative integer`)
+      }
+    }
+    const auditOnly: unknown = context.auditOnly
+    if (!isRecord(auditOnly)) {
+      throw new Error(`task: task "${taskId}" admission context auditOnly must be an object`)
+    }
+    const limits: ReadonlyArray<readonly [string, unknown]> = [
+      ['wallTimeMs', context.wallTimeMs],
+      ['auditOnly.maxToolCalls', auditOnly.maxToolCalls],
+      ['auditOnly.tokens', auditOnly.tokens],
+      ['auditOnly.attempts', auditOnly.attempts],
+    ]
+    for (const [name, value] of limits) {
+      if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value))) {
+        throw new Error(`task: task "${taskId}" admission context ${name} must be a finite number when present`)
+      }
+    }
+  }
+
   private admit(taskId: TaskId, decompositionStatus: 'leaf' | 'decomposable'): void {
     this.assertTransition(taskId, ['created'], 'admitted')
     this.updateTask(taskId, { status: 'admitted', decompositionStatus })
   }
 
-  private decompose(taskId: TaskId, childTaskIds: readonly TaskId[]): void {
+  private decompose(taskId: TaskId, childTaskIds: readonly TaskId[], admission?: DecompositionAdmission): void {
     const parent = this.task(taskId)
     if (parent.decompositionStatus === 'decomposed') throw new Error(`task: task "${taskId}" is already decomposed`)
     for (const childTaskId of childTaskIds) {
@@ -110,6 +190,7 @@ export class TaskState {
     }
     const admitted = parent.childTaskIds.filter(childTaskId => ADMITTED_OR_LATER.includes(this.task(childTaskId).status))
     if (admitted.length === 0) throw new Error(`task: task "${taskId}" cannot decompose without an admitted child`)
+    if (admission !== undefined) this.assertAdmission(taskId, admission)
     this.updateTask(taskId, { decompositionStatus: 'decomposed' })
   }
 

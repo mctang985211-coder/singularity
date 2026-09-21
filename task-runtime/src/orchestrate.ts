@@ -38,6 +38,12 @@ export interface ChildPlan {
   dependsOn: readonly number[]
   /** Caller-declared assumptions (`DecomposeChildSpec.assumptions`), merged into the handoff at spawn time. */
   assumptions?: readonly string[]
+  /**
+   * The child's contract constraints (`DecomposeChildSpec.constraints`, T1):
+   * recorded in the contract and rendered into the handoff, so the worker reads
+   * the same execution scope the store holds.
+   */
+  constraints?: readonly string[]
 }
 
 export interface ChildOutcome {
@@ -868,6 +874,9 @@ export async function runChildrenCascade(
         ...(plan.assumptions ?? []),
         ...dependencyEvidence.map(evidenceId => `dependency evidence "${evidenceId}" is verified and available as a reference`),
       ],
+      // The contract's constraints ride through unchanged: the worker's scope is
+      // what the task was admitted with, not what the prompt author guessed.
+      constraints: plan.constraints ?? [],
       relevantEvidence: dependencyEvidence,
     })
     await env.task.recordHandoffIn(storeId, handoff, env.actor)

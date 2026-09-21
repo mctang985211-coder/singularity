@@ -3113,6 +3113,10 @@ function defineTaskDecomposeTool(ctx) {
 				required: true,
 				description: "Why this delegation is needed; recorded in each child handoff"
 			},
+			contractVersion: {
+				type: "integer",
+				description: "Contract version this batch is written under. The runtime stores version 1 and refuses a declared version it does not know, so callers normally omit this field and let the runtime write the current version"
+			},
 			children: {
 				type: "array",
 				required: true,
@@ -3138,6 +3142,10 @@ function defineTaskDecomposeTool(ctx) {
 										type: "string",
 										required: true,
 										description: "What must hold true"
+									},
+									criterionId: {
+										type: "string",
+										description: "Stable id for this criterion: fixed at admission, and the only id a parent-level childEvidence.criterionId can rely on. Omitted, the runtime generates one from the batch position; declared ids must be unique inside a child. A parent-level childEvidence.criterionId must name an id the child it points to actually declared, which only holds when that child declares the id explicitly here"
 									},
 									command: {
 										type: "string",
@@ -3223,6 +3231,11 @@ function defineTaskDecomposeTool(ctx) {
 							items: { type: "string" },
 							description: "External conditions this child's contract rests on; merged with dependency-evidence references into the worker handoff"
 						},
+						constraints: {
+							type: "array",
+							items: { type: "string" },
+							description: "Execution scope and limits this child runs under; persisted in the child's contract and handed to its worker"
+						},
 						decomposable: {
 							type: "boolean",
 							description: "Declare that this child should split further instead of doing the work: its worker is told to call task_decompose. Together with a capability gap this decides whether the child is admitted as decomposable."
@@ -3244,10 +3257,7 @@ function defineTaskDecomposeTool(ctx) {
 			const { storeId, task, run } = await ctx.taskRuntime.runForSession(caller);
 			let outcomes;
 			try {
-				outcomes = await ctx.taskRuntime.decomposeAndRun(storeId, task.taskId, run.runId, caller, {
-					reason: args.reason,
-					children: args.children
-				}, { signal: exec.signal });
+				outcomes = await ctx.taskRuntime.decomposeAndRun(storeId, task.taskId, run.runId, caller, args, { signal: exec.signal });
 			} catch (error) {
 				return `task_decompose rejected: ${error instanceof Error ? error.message : String(error)}`;
 			}
@@ -3437,6 +3447,19 @@ function latestRun(snapshot, task) {
 	const runId = task.runIds[task.runIds.length - 1];
 	return snapshot.runs.find((run) => run.runId === runId);
 }
+/**
+* The two contract facts a worker cannot read off the objective and the
+* criteria table: what its contract assumes and what it constrains (T1 §4) —
+* persisted with the task, so this store-backed view and the handoff-rendered
+* block say the same thing. A task created before the contract existed has
+* neither, and renders exactly what it rendered before: nothing is invented
+* for the part the store never held.
+*/
+function contractLines(task) {
+	const contract = task.contract;
+	if (contract === void 0) return [];
+	return [...contract.assumptions.length === 0 ? [] : ["assumptions:", ...contract.assumptions.map((item) => `- ${item}`)], ...contract.constraints.length === 0 ? [] : ["constraints:", ...contract.constraints.map((item) => `- ${item}`)]];
+}
 function defineTaskReadTool(ctx) {
 	return defineTool({
 		name: "task_read",
@@ -3459,6 +3482,7 @@ function defineTaskReadTool(ctx) {
 						const command = criterion.command === void 0 ? "" : ` — $ ${criterion.command}`;
 						return `- ${criterion.criterionId} [${criterion.verificationMode}${criterion.mandatory ? ", mandatory" : ""}] ${criterion.description}${command}`;
 					}),
+					...contractLines(task),
 					`run ${run.runId} [${run.status}] started ${run.startedAt}`
 				].join("\n");
 			}

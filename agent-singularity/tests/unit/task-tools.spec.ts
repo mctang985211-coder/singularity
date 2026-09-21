@@ -158,6 +158,37 @@ describe('task_read', () => {
     expect(result).toContain('- ac1-1 [deterministic, mandatory] parses the fixtures — $ pnpm test')
     expect(result).toContain('run r-worker [running]')
   })
+
+  it('renders the stored contract assumptions and constraints when the task has a contract', async () => {
+    const { ctx } = fixture()
+    ctx.taskRuntime.runForSession.mockImplementation(async () => ({
+      storeId: 'sg-t-root-1',
+      task: {
+        ...workerTask,
+        contract: {
+          contractVersion: 1,
+          objective: workerTask.objective,
+          acceptanceCriteria: workerTask.acceptanceCriteria,
+          assumptions: ['the fixtures are checked in'],
+          constraints: ['no network access'],
+          requiredCapabilities: [],
+        },
+      },
+      run: workerRun,
+    }) as never)
+    const tool = defineTaskReadTool(ctx as never)
+    const result = (await tool.execute({}, exec('s-worker'))) as string
+    expect(result).toContain('assumptions:\n- the fixtures are checked in')
+    expect(result).toContain('constraints:\n- no network access')
+  })
+
+  it('renders a worker task without a contract exactly as before, inventing nothing', async () => {
+    const { ctx } = fixture()
+    const tool = defineTaskReadTool(ctx as never)
+    const result = (await tool.execute({}, exec('s-worker'))) as string
+    expect(result).not.toContain('assumptions:')
+    expect(result).not.toContain('constraints:')
+  })
 })
 
 describe('task_decompose', () => {
@@ -205,6 +236,81 @@ describe('task_decompose', () => {
     expect(result).toContain('task_decompose rejected:')
     expect(result).toContain('admission rejected decomposition of "t-root"')
     expect(result).toContain('child 0 has no acceptance criteria')
+  })
+
+  it('passes a declared contract version through to decomposeAndRun', async () => {
+    const { ctx } = fixture()
+    const signal = new AbortController().signal
+    ctx.taskRuntime.decomposeAndRun.mockResolvedValue([{ taskId: 't-child-1', status: 'verified' }])
+    const tool = defineTaskDecomposeTool(ctx as never)
+    await tool.execute({ reason: 'split the work', contractVersion: 1, children }, { agent: { id: 'root-1' }, signal } as never)
+    expect(ctx.taskRuntime.decomposeAndRun).toHaveBeenCalledExactlyOnceWith(
+      'sg-t-root-1',
+      't-root',
+      'r-root',
+      'root-1',
+      { reason: 'split the work', contractVersion: 1, children },
+      { signal },
+    )
+    // The key rides along only when declared: the pass-through test above omits it and stays unchanged.
+    expect(Object.keys(ctx.taskRuntime.decomposeAndRun.mock.calls[0]![4] as Record<string, unknown>).sort())
+      .toEqual(['children', 'contractVersion', 'reason'])
+  })
+
+  it('sends no contractVersion key when the caller declares none', async () => {
+    const { ctx } = fixture()
+    ctx.taskRuntime.decomposeAndRun.mockResolvedValue([{ taskId: 't-child-1', status: 'verified' }])
+    const tool = defineTaskDecomposeTool(ctx as never)
+    await tool.execute({ reason: 'split the work', children }, exec('root-1'))
+    // Deep equality alone also accepts a present key holding undefined, so the omission is asserted on the keys.
+    expect(Object.keys(ctx.taskRuntime.decomposeAndRun.mock.calls[0]![4] as Record<string, unknown>).sort())
+      .toEqual(['children', 'reason'])
+  })
+
+  it('returns the runtime rejection of an unknown declared contract version as error text', async () => {
+    const { ctx } = fixture()
+    const signal = new AbortController().signal
+    ctx.taskRuntime.decomposeAndRun.mockRejectedValue(
+      new Error('task-runtime: contract rejected decomposition of "t-root":\n- unknown contract version 2: this runtime writes version 1'),
+    )
+    const tool = defineTaskDecomposeTool(ctx as never)
+    const result = (await tool.execute(
+      { reason: 'split the work', contractVersion: 2, children },
+      { agent: { id: 'root-1' }, signal } as never,
+    )) as string
+    expect(ctx.taskRuntime.decomposeAndRun).toHaveBeenCalledExactlyOnceWith(
+      'sg-t-root-1',
+      't-root',
+      'r-root',
+      'root-1',
+      { reason: 'split the work', contractVersion: 2, children },
+      { signal },
+    )
+    expect(result).toContain('task_decompose rejected:')
+    expect(result).toContain('unknown contract version 2')
+  })
+
+  it('passes declared criterion ids and child constraints through untouched', async () => {
+    const { ctx } = fixture()
+    const signal = new AbortController().signal
+    ctx.taskRuntime.decomposeAndRun.mockResolvedValue([{ taskId: 't-child-1', status: 'verified' }])
+    const declared = [
+      {
+        objective: 'Implement the parser',
+        acceptanceCriteria: [{ criterionId: 'parse-fixtures', description: 'parses the fixtures', command: 'pnpm test' }],
+        constraints: ['no network access', 'write only inside the env checkout'],
+      },
+    ]
+    const tool = defineTaskDecomposeTool(ctx as never)
+    await tool.execute({ reason: 'split the work', children: declared }, { agent: { id: 'root-1' }, signal } as never)
+    expect(ctx.taskRuntime.decomposeAndRun).toHaveBeenCalledExactlyOnceWith(
+      'sg-t-root-1',
+      't-root',
+      'r-root',
+      'root-1',
+      { reason: 'split the work', children: declared },
+      { signal },
+    )
   })
 })
 

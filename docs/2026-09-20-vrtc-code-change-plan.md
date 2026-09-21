@@ -14,8 +14,8 @@
 
 | 次序 | 一次派发的范围 | 状态 | 负责人/任务 | 交付记录 | 进入下一项的条件 |
 |---|---|---|---|---|---|
-| 1 | T1：统一规范化契约 | 待派发（下一项） | 待填 | 待填 | 契约规范化、持久化与普通分解/replay 一致性全部验收 |
-| 2 | S1-V 切片 2：验证器自测与输入身份 | 待前置 | 待填 | 待填 | 正负样本执行、裁判版本与受保护输入校验完整；P4 组合验收回归通过 |
+| 1 | T1：统一规范化契约 | 已验收（2026-09-21，独立子代理复核） | Kimi Code 主代理（4 实现/测试子代理 + 1 只读复核子代理 + 1 复核修复子代理） | 见「T1：统一规范化契约 执行与验收记录」 | 契约规范化、持久化与普通分解/replay 一致性全部验收 |
+| 2 | S1-V 切片 2：验证器自测与输入身份 | 待派发（下一项） | 待填 | 待填 | 正负样本执行、裁判版本与受保护输入校验完整；P4 组合验收回归通过（本轮已复跑 26 项） |
 | 3 | S1-C：能力预检与版本绑定 | 待前置 | 待填 | 待填 | provider 预检、侧车契约、Run 绑定内容与旧版本读取完整；所有实际支持入口共用校验 |
 | 4 | A3：非阻塞运行与恢复 | 待前置 | 待填 | 待填 | 非阻塞推进、工作区写入归属、显式提交、取消/恢复、根预算与普通/replay 一致性完整 |
 | 5 | T2 + T3：契约审核与恢复（一个交付组） | 待前置 | 待填 | 待填 | off/all、审核持久化、批准后重检及崩溃恢复一起验收，不单独交付不可恢复的 all |
@@ -29,7 +29,7 @@
 
 状态填写：`待前置 → 待派发 → 进行中 → 待验收 → 已验收`；有未解决缺陷填 `返工`，因外部条件无法继续填 `阻塞` 并记录原因。实现者宣称完成仅进入待验收；“已验收”需要下述完成闸证据。依赖票的状态不能因内部部分提交而提前推进。每次更新本表，同时更新本文对应票据状态及主 guide，记录冲突时先核实证据。
 
-填表起点：P4 三类漏洞修复已提交为 Singularity `f9039a4` / 外层 `b41bf0b`；构建、758 项测试、相关类型及持久化检查通过，详见 P4 修复复核节。该修复尚无另一 agent 的独立复核记录，不能填成“独立复核通过”。
+填表起点：P4 三类漏洞修复已提交为 Singularity `f9039a4` / 外层 `b41bf0b`；构建、758 项测试、相关类型及持久化检查通过，详见 P4 修复复核节。该修复尚无另一 agent 的独立复核记录，不能填成“独立复核通过”。T1 的修改前基线为 Singularity `8469388` / 外层 `63c25a14b0`，执行与验收记录见下节；其独立复核由子代理完成（非人类复核），已在记录中注明。
 
 单项记录模板（填入本文相应任务的完成记录；交付组共用一份，逐票列明验收结果）：
 
@@ -61,7 +61,7 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-先期确定性任务的派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。P1–P4 已完成；下一项 T1。Task 主线合同见 [Task 自主构造建设指导](task-contract-construction-guide.md)，上下文/协作/主管主线见 [探索与自进化架构](exploration-evolution-architecture.md)及 [Prompt 合同](agent-prompt-contracts.md)。统一依赖顺序如下；每项完成必须同步本计划及主 guide，不能只更新测试或执行日志。
+先期确定性任务的派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。P1–P4 已完成，T1 见下方 T1 节；下一项按文首唯一顺序为 S1-V 切片 2。Task 主线合同见 [Task 自主构造建设指导](task-contract-construction-guide.md)，上下文/协作/主管主线见 [探索与自进化架构](exploration-evolution-architecture.md)及 [Prompt 合同](agent-prompt-contracts.md)。统一依赖顺序如下；每项完成必须同步本计划及主 guide，不能只更新测试或执行日志。
 
 | 任务 | 当前状态 | 前置 | 完成边界 |
 |---|---|---|---|
@@ -69,6 +69,8 @@ S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进
 | [P2 Skill 内容绑定](execution-prompts/02-skill-content-binding.md) | 已完成（2026-09-21，见 P2 节） | P1 验收通过：`agent-singularity` build 为 `tsc --noEmit && tsdown`，类型错误即失败 | 单文件 Skill prepare/replay/审核/apply 内容身份一致；旧记录读取与回滚保留 |
 | [P3 生产基线检查](execution-prompts/03-skill-champion-check.md) | 已完成（2026-09-21，见 P3 节） | P2 验收通过：候选内容身份字段、兼容规则与读取/检查入口见 P2 节交接，P3 必须复用该身份语义，不另建摘要体系 | 串行 apply 拒绝过期 Skill 候选，不覆盖变化的生产文件 |
 | [P4 独立父验收与证据身份](execution-prompts/04-parent-acceptance-evidence-identity.md) | 原交付有遗漏；本轮三个组合漏洞已修复并回归，见 P4 修复节 | P3 已满足；历史 f6886cf 的全绿记录不能替代本轮反例 | 普通/replay 同检输入；父映射拒绝 heuristic 子判据；插件不能跳过映射；原 P4 合同回归通过 |
+
+T1 不在本表（确定性 prompt 切片）中：它是 Task 自主构造接续组的第一票，执行与验收记录见下方 T1 节。
 
 P1–P4 是构建基础与 S1-V/S1-C/S4 的有限工程切片。P2 不证明证据来源真实，P3 不承诺跨进程原子更新；完成后不将整张 S 票标为完成。
 
@@ -78,11 +80,11 @@ P1–P4 是构建基础与 S1-V/S1-C/S4 的有限工程切片。P2 不证明证�
 
 | 票据 | 状态 | 前置 | 范围与验收入口 |
 |---|---|---|---|
-| T1 统一规范化契约 | 待执行，下一项可派发 | P4 已满足 | Task 字段语义/摘要/持久化、分解与 replay 共用结构校验、handoff 一致；详细指导 §4、§8 T1-A–F |
+| T1 统一规范化契约 | 已完成（2026-09-21，见 T1 执行与验收记录） | P4 已满足 | Task 字段语义/摘要/持久化、分解与 replay 共用结构校验、handoff 一致；详细指导 §4、§8 T1-A–F |
 | T2 可选契约人审 | 待执行，与 T3 同组 | T1/A3 | off/all、不可变提案、摘要绑定、批准后重检；组内先完成契约规则，不单独宣称产品完成 |
 | T3 审核恢复与幂等派发 | 待执行，与 T2 同组 | T1/A3；组内复用 T2 | 四个崩溃点恢复、requestKey 去重、单父分解竞争、节点修订；整组完成才开放 all |
 
-T1 优先于新的任务生成/审核代码，随后按唯一派发顺序补齐 S1 验证与能力合同。S2/S3 消费已验收的运行、评估与诊断接口，不能提前用人工补能力替代。T3 的审核交接恢复不等于 S2-R 的能力/产物缺口恢复。
+T1 已交付统一契约、身份与准入记录；T2/T3 后按唯一派发顺序补齐 S1 验证与能力合同。S2/S3 消费已验收的运行、评估与诊断接口，不能提前用人工补能力替代。T3 的审核交接恢复不等于 S2-R 的能力/产物缺口恢复。
 
 本组文档规划基线：Singularity `7be57a1`，外层 `9f818152bb`；工作区相关修改已在这些提交中保存。本次仅修改文档，P1–P4 的测试结果沿用各自历史记录，不将其算作 T1–T3 验收。
 
@@ -261,6 +263,49 @@ T1 优先于新的任务生成/审核代码，随后按唯一派发顺序补齐 
 本轮实跑：`pnpm build` 通过（仅已有前端体积提示）；外层 `pnpm vitest run --project unit packages/singularity --project integration packages/singularity` 通过，45 文件 / 758 项（原 739 + 19）；`pnpm run verify-persistence` 的 4 个事件根匹配；verifier 和 agent-singularity 各执行 `pnpm exec tsc --noEmit`，均通过；`git diff --check` 通过。未部署、未跑真实 LLM/BB 仿真，本轮修复未声称已经过另一 agent 独立复核。
 
 公共执行合同补入“构建与复核质量 Prompt”，要求跨入口/跨层组合测试和完整性证据。下一项仍按文首顺序派发 T1；本次修复不算 T1 或 S1-V 切片 2 完成。
+
+## T1：统一规范化契约 执行与验收记录（2026-09-21）
+
+| 字段 | 填写内容 |
+|---|---|
+| 状态、最近更新日期 | 已验收（2026-09-21；完成闸证据见下，独立复核为子代理只读复核，未由人类复核） |
+| 执行 agent / 任务链接 | Kimi Code 主代理执行；4 个实现/测试子代理 + 1 个只读复核子代理 + 1 个复核修复子代理（详见下） |
+| 开始日期 / 验收日期 | 2026-09-21 / 2026-09-21 |
+| 前置验收记录 | P4：Singularity `f9039a4` / 外层 `b41bf0b`，见 P4 修复复核节。本票开始前复核：该提交在树上，`pnpm build` 通过，单测 25 文件 / 636 项、集成 20 文件 / 122 项全绿（合计 758，与 P4 记录一致），`verify-persistence` 4 根匹配——前置成立，未发现阻断 T1 的前置缺陷 |
+| 修改前基线 | Singularity `8469388`（外层 `63c25a14b0`）：先提交了工作区中尚未提交的 P4 修复文档（dispatch 填表入口），再在外层仅同步子模块指针；第三方 DSH 子模块的未跟踪文件保持原样 |
+| 交付版本 | 未提交（本票结束时代码与文档仍在工作区；提交由派发方决定） |
+| 验收项对应 | T1-A → `task_decompose` 工具 / `TaskRuntime.decomposeAndRun` → `tests/integration/task-contract.spec.ts`；T1-B → `normalizeDecomposition` + `contractDefects` → integration 的 8 例拒绝表 + `normalize.spec.ts` + `admission.spec.ts`；T1-C → `canonicalize`/`contractDigest`/`decompositionDigest` → `task/tests/unit/contract.spec.ts`（固定向量）+ `normalize.spec.ts`；T1-D → `TaskInstance.contract` / `HandoffCreated` / `task_read` / `state.assertContract` → integration T1-D + `orchestrate.spec.ts`（重开 store）+ `task-tools.spec.ts` + `task-state.spec.ts`；T1-E → `checkDecomposition` + `admissionContext()` → 既有 admission/orchestrate 用例 + integration T1-E；T1-F → 下方实跑与文档同步 |
+| 实际检查 | `pnpm build`（packages/singularity）通过；外层 `pnpm vitest run --project unit packages/singularity` 27 文件 / 713 项通过；`--project integration packages/singularity` 21 文件 / 138 项通过（基线 706/138 与 636/122 对比见下）；`pnpm run verify-persistence` OK（4 个事件根指纹未变，新增记录 `docs/persistence-changes/2026-09-21-task-contract-normalization.md`）；`git diff --check` 通过；`pnpm exec tsc --noEmit`：`task` 0、`agent-singularity` 0、`task-runtime` 8 处既有诊断（G9，均在本票 diff 之外，基线核对方式见独立复核） |
+| 跨入口/组合反例 | 未知字段 / 未知版本 / 重复显式 criterion id / 全 optional / 非法 mode：先复现失败再修复（`normalize.spec.ts` 首跑 0 加载失败、`admission.spec.ts` 10 红、`orchestrate.spec.ts` 5 红）；合法正例：同批合法契约全链 verified、`acceptsArtifact` 原始输入与 verified 参考产物两态、P4 映射+heuristic 用例保持原状。拒绝路径断言零事件、零任务、零派发；结论从 store/事件日志读回（`task-contract.spec.ts`）。复核新发现的三处缺陷已修复并回归：replay 未共享 `contractDefects` 且无测试（补 4 项，含把该调用注释掉后 2 项转红的变异证据）、replay 的 handoff 渲染与 store 视图不一致（补 1 项）、`mode: null` 被静默默认（补 2 项） |
+| 独立复核 | 子代理（只读复核 + 9 组变异探针 + 自建反例），被审快照 = 本记录对应的未提交工作区；结论：实现与测试基本成立，报出 D1–D9（D1/D2 文档矛盾、D3 lib/src 解析边界、D4/D5/D7/D8 已修复、D6/D9 记为边界/后续票）。修复后未再重跑该复核；修复项自带先红后绿证据 |
+| 文档同步 | 主 guide §5.6 + §2.2/§3/§4.1/§4.2（G10）；本计划 T1 节与两张表；`task-contract-construction-guide.md`（状态、锚点、§8 T1 标记、§4 实现范围）；`agent-prompt-contracts.md:147`（assumptions/constraints 两视图一致的反例）；`docs/persistence-changes/2026-09-21-task-contract-normalization.md` + 对应 `.schema.json` |
+| 模拟与未覆盖范围 | 未调用真实模型、未跑 BB 仿真、未部署、未推送。集成测试的 sessionPersistence 是内存假件（JSON 往返），真实 JSONL 写入与崩溃重启未验；`AdmissionContext` 的硬限制只被“记录值 = 配置值”与既有准入用例覆盖，5s wallTimeMs 到期未触发；root 契约由常量展开、未再经独立校验；task-runtime 单测经 `task/lib` 解析 task 包（先 build 再测的既有纪律）；集成 spec 无 tsconfig 类型闸（仓库既有状况）；`admission.context` 上下文指纹未建（T2） |
+| 未解决缺陷 / 阻塞 | 无未解决的本票缺陷。范围外边界如实保留：契约上下文指纹与提案状态机（T2/T3）、`childEvidence` 索引范围/蕴含（T2 及后续）、blocked 恢复（S2-R）、reducer 不重复结构性规则、集成 spec 类型闸缺失（G9） |
+| 最终验收结论 | 通过（依据：上述实跑命令、先红后绿反例、独立复核报告与其修复回归；确认者：执行代理 + 独立复核子代理，未由人类验收） |
+| 下一项 | 唯一顺序第 2 项 S1-V 切片 2（验证器自测与输入身份）：前置为 P4 组合验收回归通过——本票已回归 `tests/integration/parent-acceptance.spec.ts` 26 项与 verifier 单测，前置满足 |
+
+实现范围（只做 §4 规范化字段、身份算法与新实例持久化，普通分解/replay 的适用结构校验与 handoff 一致性；未做模板库、审批开关、状态机、恢复调度与父验收重做）：
+
+- **契约数据定义**：`task/src/contract.ts` 的 `TaskContract`（`contractVersion`、`objective`、`acceptanceCriteria`、`assumptions`、`constraints`、`requiredCapabilities`）、`AdmissionContext`、`DecompositionAdmission`、`canonicalize`/`contractDigest`/`decompositionDigest`。`TaskInstance.contract` 可选；`objective`/`acceptanceCriteria`/`requestedCapabilities` 为其投影，`state.ts:assertContract` 用 `canonicalize` 比对并拒绝不一致的新事件；旧任务缺字段读取、验收、回放行为不变。
+- **唯一入口**：`task-runtime/src/normalize.ts:normalizeDecomposition`（三层闭合字段集、未知版本拒绝、空白校验不重写文本、criterion id 固定与重复拒绝、默认值、批次摘要、深拷贝）。拒绝一次返回全部原因且发生在铸 id/查能力/落库之前。
+- **准入与持久化**：`decomposeAndRun` 先规范化，再把 `admission`（`proposalDigest` + 生效限额）写入父任务 `TaskDecomposed`，子任务携带 `contract`；`createRootTask` 与 `replayTask` 同样构造契约；replay 与普通分解共用 `contractDefects`，P4 规则不变（父任务契约不被重新审判）。
+- **handoff 与渲染**：`ChildPlan.constraints` 进入 `buildHandoff`，assumptions/constraints 与 store 契约同源；worker 契约块与 `task_read` 从同一份契约渲染；replay 的 in-memory handoff 也带同一份声明（复核修复）。
+- **工具面**：`task_decompose` 增加可选 `contractVersion`/判据级 `criterionId`/子任务级 `constraints`，调用者的整个批次对象交给 runtime 点名拒绝未声明字段；schema 仍校验自己的声明面。
+
+测试锚：`task/tests/unit/contract.spec.ts`（固定向量 + 规范化 + 摘要敏感度）、`task/tests/unit/task-state.spec.ts`（reducer 契约/准入记录规则）、`task-runtime/tests/unit/normalize.spec.ts`、`task-runtime/tests/unit/admission.spec.ts`（`contractDefects`）、`task-runtime/tests/unit/orchestrate.spec.ts`（真实 TaskRuntime+TaskService：契约落库读回、重开 store、准入上下文、拒绝零副作用、handoff 一致、提案摘要重试稳定、replay 结构规则与契约）、`agent-singularity/tests/unit/task-tools.spec.ts`（工具 schema 与 `task_read` 渲染）、`tests/integration/task-contract.spec.ts`（真实 TaskService+TaskRuntime+VerifierRegistry，含真实 `task_decompose` 工具路径、8 例拒绝、重开 store、legacy 任务、配置限额记录）。
+
+实跑命令与结果（2026-09-21，按公共执行合同顺序）：
+
+1. `packages/singularity` 下 `pnpm build`：通过（`agent-singularity build$ tsc --noEmit && tsdown`）。
+2. 外层 `pnpm vitest run --project unit packages/singularity`：27 文件 / 713 项通过（基线 25 / 636）。
+3. 外层 `pnpm vitest run --project integration packages/singularity`：21 文件 / 138 项通过（基线 20 / 122）。
+4. `packages/singularity` 下 `pnpm run verify-persistence`：OK，4 个事件根指纹匹配（`task/event` 载荷类型文本未变，故未 `--write`，只按纪律加记录）。
+5. `packages/singularity` 下 `git diff --check`：通过。
+6. 各包 `pnpm exec tsc --noEmit`：`task` 0、`agent-singularity` 0（P1 闸保持 0）、`task-runtime` 8 处既有诊断（G9；独立复核用 `8469388` 检出与临时替换对照确认同源，且行号均在 T1 diff 之外）。
+7. 反例先红后绿：实现前 `normalize.spec.ts` 无法加载（0 项）、`admission.spec.ts` 10 红、`orchestrate.spec.ts` 5 红；实现后全绿。复核修复轮先红后绿 7 项（normalize 1、admission 1、orchestrate 5），其中 replay 共用规则的移除使 2 项转红。
+8. 未运行：真实 LLM、BB 构建/仿真、生产 Evolution、部署与推送。
+
+接口交接（给 S1-V 切片 2 与 T2/T3）：契约类型从 `@dangosys/dsh-singularity-task` 导出（`TaskContract`/`AdmissionContext`/`DecompositionAdmission`/`contractDigest`/`decompositionDigest`/`canonicalize`）；批次身份读自父任务 `TaskDecomposed.payload.admission`（`proposalDigest`，含 store/parentTask/parentRun/caller/reason 与完整有序 children；不含准入铸的 id）；结构规则 `contractDefects(criteria, label)` 与形状规则 `independentAcceptanceDefects` 分别可复用；T2 需补的是准入上下文指纹、提案存储/状态机与批准后重检，T3 需补 requestKey 与崩溃恢复，本票不提供这两者。
 
 ## S1-V：先保证验的是目标
 

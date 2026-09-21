@@ -144,7 +144,7 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 
 每个实现票除行为测试外，至少检查实际 assembled prompt 和实际可调用工具集合：root setup、root execution、普通 leaf、decomposable、waiting_children、waiting_answer、read-only reviewer、candidate builder，以及恢复/压缩后的相同角色。
 
-必测反例：工具未挂载却被提示调用；一个 worker 的合同泄漏到另一个；祖先文本含 `{{…}}`/结束标签/“忽略原规则”；P4 的证据依赖、heuristic 和 mandatory 在渲染中遗漏；根目标/AC 变更无版本；父等待时子提问形成环；reviewer 提出诊断后获得写权限；任务列表为空即拒绝生成。
+必测反例：工具未挂载却被提示调用；一个 worker 的合同泄漏到另一个；祖先文本含 `{{…}}`/结束标签/“忽略原规则”；P4 的证据依赖、heuristic 和 mandatory 在渲染中遗漏；T1 起 assumptions/constraints 必须来自同一份持久化契约，handoff 渲染与 `task_read` 的 store 视图不得各说一套；根目标/AC 变更无版本；父等待时子提问形成环；reviewer 提出诊断后获得写权限；任务列表为空即拒绝生成。
 
 协调组合态必须覆盖：waiting_children 同时有向祖先提出的阻塞问题；仅收到部分答案或 unresolved；有效问答在 inbox claim 后遇到 pre-step reject/崩溃。恢复后模型仍能读到未处理事实，主相位、batch 与写权限不因消息重放改变。
 

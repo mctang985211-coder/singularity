@@ -1,3 +1,5 @@
+import type { DecompositionAdmission, TaskContract } from './contract.ts'
+
 export type TaskId = string
 export type RunId = string
 
@@ -113,14 +115,32 @@ export interface TaskInstance {                     // (§5.2)
   taskId: TaskId
   definitionRef: { taskType: string; version: number }
   parentTaskId?: TaskId
+  /**
+   * The task's goal: the projection of {@link contract} (or, on a task created
+   * before the contract existed, the whole of what the store holds). Never an
+   * independent source — the store refuses an event whose projection disagrees
+   * with the contract it carries.
+   */
   objective: string
   depth: number
+  /** The criteria the verifier judges: the projection of {@link contract}, checked for disagreement on write. */
   acceptanceCriteria: AcceptanceCriterion[]
+  /** Capability requirements by name: the projection of {@link TaskContract.requiredCapabilities}. */
   requestedCapabilities: string[]
   decompositionStatus: DecompositionStatus
   status: TaskStatus
   runIds: RunId[]
   childTaskIds: TaskId[]
+  /**
+   * The normalized contract this instance was created from (T1, construction
+   * guide §4): defaults filled, criterion ids fixed, assumptions and
+   * constraints persisted rather than left in a spawn prompt. Absent on tasks
+   * created before the field existed — their contract *is* the three
+   * projection fields above, read exactly as before, with nothing invented for
+   * the parts the store never held (no assumptions, no constraints, no
+   * version).
+   */
+  contract?: TaskContract
   /**
    * Contract-level marker (KISS §6 C2): this task's acceptance must be decided
    * by its own criteria and evidence map, never by the composite "all children
@@ -783,7 +803,16 @@ export interface TaskEventPayloads {
   /** A created task is rejected at admission and settles blocked. */
   TaskRejected: { reason: string }
   /** A decomposable task's children are registered and the parent closes as decomposed. */
-  TaskDecomposed: { childTaskIds: TaskId[] }
+  TaskDecomposed: {
+    childTaskIds: TaskId[]
+    /**
+     * The batch's content identity and the limits it was admitted under
+     * (construction guide §4). Absent for a batch admitted before the
+     * normalized contract existed — those children carry no contract either,
+     * and nothing is invented for them on read.
+     */
+    admission?: DecompositionAdmission
+  }
   /** A dependency edge is added to the DAG (from must verify before to starts). */
   DependencyAdded: { edge: DependencyEdge }
   /** A run starts on an admitted/ready task. */

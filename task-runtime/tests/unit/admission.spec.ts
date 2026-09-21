@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import type { AcceptanceCriterion, DependencyEdge } from '../../../task/src/types.ts'
 import type { AdmissionChild, AdmissionParent } from '../../src/admission.ts'
-import { checkDecomposition } from '../../src/admission.ts'
+import { checkDecomposition, contractDefects } from '../../src/admission.ts'
 
 function criterion(overrides: Partial<AcceptanceCriterion> = {}): AcceptanceCriterion {
   return {
@@ -341,5 +341,115 @@ describe('checkDecomposition parent acceptance declarations (P4, KISS §6 C2)', 
     )
     expect(verdict.ok).toBe(false)
     if (!verdict.ok) expect(verdict.reasons.join('\n')).toMatch(/task "root" criterion "root-1" childEvidence/)
+  })
+})
+
+describe('contractDefects (T1, construction guide §4)', () => {
+  test('admits a well-formed criterion list', () => {
+    expect(contractDefects([
+      criterion(),
+      criterion({ criterionId: 'ac1-2', verificationMode: 'review', command: undefined }),
+    ], 'child 0')).toEqual([])
+  })
+
+  test('refuses a criterion list with nothing to judge, in the wording admission already used', () => {
+    expect(contractDefects([], 'child 0')).toEqual(['child 0 requires at least one acceptance criterion'])
+  })
+
+  test('refuses a list without a mandatory criterion', () => {
+    expect(contractDefects([criterion({ mandatory: false })], 'child 0'))
+      .toEqual(['child 0 requires at least one mandatory acceptance criterion'])
+    expect(contractDefects([
+      criterion({ mandatory: false }),
+      criterion({ criterionId: 'ac1-2' }),
+    ], 'child 0')).toEqual([])
+  })
+
+  test('refuses a blank description', () => {
+    expect(contractDefects([criterion({ description: '   ' })], 'child 0'))
+      .toEqual(['child 0 criterion "ac1-1" requires a non-empty description'])
+  })
+
+  test('refuses a mode outside the six declared modes, naming them', () => {
+    expect(contractDefects([criterion({ verificationMode: 'guess' as never })], 'child 0')).toEqual([
+      'child 0 criterion "ac1-1" verificationMode "guess" is not one of '
+      + 'deterministic, simulation, formal, measurement, review, composite',
+    ])
+  })
+
+  test('refuses a declared null or non-mode value, naming it as declared', () => {
+    // `null` is a declaration, not an absence: it reaches this rule instead of
+    // being defaulted to a judge the caller never named (normalize.ts carries
+    // it verbatim), and the reason shows it as the value it was.
+    const cases: Array<[string, unknown]> = [['a null mode', null], ['a numeric mode', 0]]
+    for (const [label, mode] of cases) {
+      expect(contractDefects([criterion({ verificationMode: mode as never })], 'child 0'), label).toEqual([
+        `child 0 criterion "ac1-1" verificationMode "${String(mode)}" is not one of `
+        + 'deterministic, simulation, formal, measurement, review, composite',
+      ])
+    }
+  })
+
+  test('keeps the exact missing-command wording for the executable modes', () => {
+    for (const mode of ['deterministic', 'simulation', 'measurement'] as const) {
+      expect(contractDefects([criterion({ verificationMode: mode, command: undefined })], 'child 0'))
+        .toEqual([`child 0 criterion "ac1-1" (${mode}) requires a command`])
+    }
+    // A review criterion needs no command, and a command that is present but
+    // unusable (blank, or not a command at all) is as missing as an absent one.
+    expect(contractDefects([criterion({ verificationMode: 'review', command: undefined })], 'child 0')).toEqual([])
+    expect(contractDefects([criterion({ command: '  ' })], 'child 0'))
+      .toEqual(['child 0 criterion "ac1-1" (deterministic) requires a command'])
+    expect(contractDefects([criterion({ command: 42 as never })], 'child 0'))
+      .toEqual(['child 0 criterion "ac1-1" (deterministic) requires a command'])
+  })
+
+  test('refuses a criterion id declared twice inside one task', () => {
+    expect(contractDefects([criterion(), criterion({ description: 'judged again' })], 'child 0'))
+      .toEqual(['child 0 declares criterion id "ac1-1" more than once'])
+  })
+
+  test('reports every defect of one criterion list', () => {
+    expect(contractDefects([
+      criterion({ criterionId: 'a', description: '', mandatory: false }),
+      criterion({ criterionId: 'a', verificationMode: 'guess' as never, command: undefined, mandatory: false }),
+    ], 'child 0')).toEqual([
+      'child 0 criterion "a" requires a non-empty description',
+      'child 0 criterion "a" verificationMode "guess" is not one of '
+      + 'deterministic, simulation, formal, measurement, review, composite',
+      'child 0 declares criterion id "a" more than once',
+      'child 0 requires at least one mandatory acceptance criterion',
+    ])
+  })
+})
+
+describe('checkDecomposition contract defects (T1)', () => {
+  test('emits the contract defects for a child malformed in the new ways, under the child label', () => {
+    const verdict = checkDecomposition(parent(), [
+      child({
+        acceptanceCriteria: [
+          criterion({ criterionId: 'dup', description: '  ', verificationMode: 'guess' as never, mandatory: false }),
+          criterion({ criterionId: 'dup', verificationMode: 'review', command: undefined, mandatory: false }),
+        ],
+      }),
+    ], [])
+
+    expect(verdict.ok).toBe(false)
+    if (!verdict.ok) {
+      const reasons = verdict.reasons.join('\n')
+      expect(reasons).toContain('child 0 ("c1") criterion "dup" requires a non-empty description')
+      expect(reasons).toContain('child 0 ("c1") criterion "dup" verificationMode "guess" is not one of '
+        + 'deterministic, simulation, formal, measurement, review, composite')
+      expect(reasons).toContain('child 0 ("c1") declares criterion id "dup" more than once')
+      expect(reasons).toContain('child 0 ("c1") requires at least one mandatory acceptance criterion')
+    }
+  })
+
+  test('still refuses an all-optional child with the one message that names the rule', () => {
+    const verdict = checkDecomposition(parent(), [child({ acceptanceCriteria: [criterion({ mandatory: false })] })], [])
+    expect(verdict.ok).toBe(false)
+    if (!verdict.ok) {
+      expect(verdict.reasons).toEqual(['child 0 ("c1") requires at least one mandatory acceptance criterion'])
+    }
   })
 })

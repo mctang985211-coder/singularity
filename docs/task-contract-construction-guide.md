@@ -1,6 +1,6 @@
 # Task 自主构造与契约审核建设指导
 
-日期：2026-09-21。状态：设计合同，T1–T3 尚未实现；不修改当前运行行为。
+日期：2026-09-21。状态：设计合同；T1「统一规范化契约」已实现并验收（2026-09-21，源码/测试锚见主 guide §5.6 与建设计划 T1 节），T2/T3 尚未实现，正文其余部分仍不描述已落地行为。
 本次编辑前工作区干净，已有提交作为备份：Singularity `7be57a1`，外层 harness `9f818152bb`。保留 P1–P4 的实现与验证记录。
 
 方向入口为 [主指南](singularity-harness-guide.md)，派发顺序以 [建设计划](2026-09-20-vrtc-code-change-plan.md)为准；本文件细化 Task 契约与生成审核，不替代两者。
@@ -21,7 +21,7 @@
 |---|---|---|
 | Task 定义、实例、Run、AC 类型 | `task/src/types.ts` | 完整不可变 TaskDefinition 注册库 |
 | 节点动态提交 objective、AC、能力、依赖、assumptions | `agent-singularity/src/tools/task-decompose.ts` | 必须从已有模板选择；已有生成人审开关 |
-| AC 默认值与自动编号 | `task-runtime/src/index.ts:normalizeCriteria` | 工具 schema 是所有入口的统一运行时校验 |
+| AC 默认值与自动编号 | `task-runtime/src/normalize.ts:normalizeDecomposition`（T1 前为 `task-runtime/src/index.ts:normalizeCriteria`，已删除） | 工具 schema 是所有入口的统一运行时校验 |
 | 深度、数量、依赖无环及部分判据结构准入 | `task-runtime/src/admission.ts` | 父目标与所有子契约之间的自然语言蕴含证明 |
 | P4 父证据映射、独立判据、原始/已验证输入区分 | `independentAcceptanceDefects`、composite verifier | C3 假设满足性完整证明、任何父任务都已有独立判据 |
 | 一批子任务准入后落库并顺序执行 | `decomposeAndRun`、`decomposeIn` | 审批暂停/重启后的幂等恢复和执行一次保障 |
@@ -42,6 +42,8 @@
 ## 4. 首版契约结构
 
 T1 在 task 包中形成唯一的规范化契约数据定义；工具输入适配到它，admission 消费它，存储与 handoff 引用同一份。类型、工具 schema 与 runtime validator 必须有一致性测试；不要求一次重写整个 schema 工具链。
+
+**T1 已实现部分（2026-09-21）**：数据定义 `task/src/contract.ts:TaskContract`（含 `contractVersion`、`assumptions`、`constraints`），唯一规范化与校验入口 `task-runtime/src/normalize.ts:normalizeDecomposition`（三层闭合字段集、默认值、criterion id 固定、未知版本拒绝），身份算法 `canonicalize`/`contractDigest`/`decompositionDigest`，批次准入记录 `TaskDecomposed.admission`（`proposalDigest` + `AdmissionContext`），以及普通分解/replay/root 三个入口的持久化与共用结构校验（`task-runtime/src/admission.ts:contractDefects`）。下表的 `contractVersion`、`assumptions`、`constraints`、`requiredCapabilities`、`dependsOn`、输入/证据、复合声明、分解意图各行的**当前实现状态**以主 guide §5.6 与建设计划 T1 节为准；本节其余描述（生成审核、提案状态机、预算上下文指纹）仍属 T2/T3 设计。
 
 保留当前字段词汇，新增字段明确版本。以下是目标语义，不是当前工具参数示例：
 
@@ -149,7 +151,7 @@ Task 契约数据由 task 拥有，规范化规则可先在现有 task-runtime �
 
 ## 8. 分批建设与验收
 
-### T1：统一规范化契约（下一项可派发）
+### T1：统一规范化契约（2026-09-21 已实现，执行与验收记录见建设计划 T1 节）
 
 范围：§4 规范化字段、身份算法与新实例持久化，普通分解/replay 的适用结构校验、handoff 一致性。无模板库、审批开关、状态机和恢复调度。已有 P4 语义保留，不重做父验收。
 

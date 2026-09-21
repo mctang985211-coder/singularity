@@ -1,6 +1,6 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { AcceptanceCriterion, ArtifactRef, CapabilityManifest, ChildEvidenceRef, DependencyEdge, EvidenceBundle, ReviewCriterion, ReviewTokenUsage, ReviewToolCall, RunId, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskSnapshot, VerificationMode } from "@dangosys/dsh-singularity-task";
+import { AcceptanceCriterion, AdmissionContext, ArtifactRef, CapabilityManifest, ChildEvidenceRef, DecompositionAdmission, DependencyEdge, EvidenceBundle, ReviewCriterion, ReviewTokenUsage, ReviewToolCall, RunId, TaskContract, TaskContractVersion, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskSnapshot, VerificationMode } from "@dangosys/dsh-singularity-task";
 import { AgentHandle } from "@deepseek-ai/dsh-agent";
 import { McpServerSpec, WorkerGrant } from "@dangosys/dsh-singularity-agent-runtime";
 
@@ -236,6 +236,12 @@ interface ChildPlan {
   dependsOn: readonly number[];
   /** Caller-declared assumptions (`DecomposeChildSpec.assumptions`), merged into the handoff at spawn time. */
   assumptions?: readonly string[];
+  /**
+   * The child's contract constraints (`DecomposeChildSpec.constraints`, T1):
+   * recorded in the contract and rendered into the handoff, so the worker reads
+   * the same execution scope the store holds.
+   */
+  constraints?: readonly string[];
 }
 interface ChildOutcome {
   taskId: TaskId;
@@ -503,11 +509,71 @@ type AdmissionVerdict = {
  */
 declare function independentAcceptanceDefects(criteria: readonly AcceptanceCriterion[], requiresIndependentAcceptance: boolean | undefined, label: string): string[];
 /**
+ * Structural defects of one task's acceptance contract (T1, construction guide
+ * §4): what has to hold before a contract can be admitted at all, whichever
+ * entry wrote it — an ordinary decomposition child, a replay candidate, or
+ * (later) a template instance. Texts, ids and modes only; nothing here judges
+ * whether a criterion is any good, and nothing here needs the store.
+ *
+ * The ordinary decomposition path and the replay path share this function so
+ * that a rule can never hold on one and not on the other. The *parent* task's
+ * own criteria are deliberately not put through it: a parent that already
+ * exists was admitted when it was created, and T1 does not re-open contracts
+ * that predate the normalized one — `checkDecomposition` still applies
+ * {@link independentAcceptanceDefects} to the parent, which is its own P4
+ * promise about a declaration the parent itself carries.
+ *
+ * `label` names the task under validation (`child 0 ("t-1")`, `replay of
+ * "t-1"`); every reason is prefixed with it.
+ */
+declare function contractDefects(criteria: readonly AcceptanceCriterion[], label: string): string[];
+/**
  * Structural admission checks for one decomposition batch (RFC §36). Pure:
  * every rule is validated up front and the caller persists only when the
  * verdict is `ok`, so admission is atomic for the whole batch.
  */
 declare function checkDecomposition(parent: AdmissionParent, children: readonly AdmissionChild[], existingEdges: readonly DependencyEdge[]): AdmissionVerdict;
+//#endregion
+//#region src/normalize.d.ts
+/** Where one batch came from: the store, the parent, its run, and the caller that submitted it. */
+interface DecompositionIdentityContext {
+  storeId: string;
+  parentTaskId: string;
+  parentRunId: string;
+  callerSessionId: string;
+}
+interface NormalizationContext extends DecompositionIdentityContext {
+  /** The limits in force, resolved by the caller from its configuration and recorded verbatim with the batch. */
+  admissionContext: AdmissionContext;
+}
+/** One normalized child: its contract plus the batch facts the identity covers. */
+interface NormalizedChild {
+  contract: TaskContract;
+  dependsOn: number[];
+  decomposable: boolean;
+  requiresIndependentAcceptance: boolean;
+}
+interface NormalizedBatch {
+  contractVersion: TaskContractVersion;
+  children: NormalizedChild[];
+  /** The batch identity and the limits it was admitted under, ready to be recorded with the decomposition. */
+  admission: DecompositionAdmission;
+}
+type NormalizationResult = {
+  ok: true;
+  batch: NormalizedBatch;
+} | {
+  ok: false;
+  reasons: string[];
+};
+/**
+ * Normalize one decomposition proposal.
+ *
+ * Returns every defect it found, never the first: a caller revising a proposal
+ * needs the whole list, and a batch that returns at all is one the digest could
+ * describe. A refusal is a value, never a throw.
+ */
+declare function normalizeDecomposition(spec: unknown, context: NormalizationContext): NormalizationResult;
 //#endregion
 //#region src/obligation.d.ts
 /** One known obligation of a domain pack: a question plus what would answer it. */
@@ -634,6 +700,15 @@ interface RunVerifier {
   verifierIds?(): string[];
 }
 interface CriterionSpec {
+  /**
+   * Stable criterion id (T1). Omitted, the runtime generates one from the batch
+   * position (`ac1-1`, `ac2-1`, …) — the scheme every criterion was numbered
+   * with. Declared, it is stored verbatim, and it is the only id a
+   * parent-level `childEvidence.criterionId` can name: a parent that defines a
+   * child's criteria *and* points at one of them must declare the id here,
+   * because a generated id is only known after admission.
+   */
+  criterionId?: string;
   description: string;
   command?: string;
   mode?: VerificationMode;
@@ -691,6 +766,14 @@ interface DecomposeChildSpec {
    */
   assumptions?: readonly string[];
   /**
+   * Execution scope and limits this child runs under, in the caller's words
+   * (T1). Persisted in the child's contract — so a reader of the store sees the
+   * scope the worker was given, not only the spawn prompt's copy of it — and
+   * rendered into the handoff's constraints. Text is a declaration, not a
+   * grant: the runtime still enforces every permission on its own plane.
+   */
+  constraints?: readonly string[];
+  /**
    * The caller declares this child may decompose itself (RFC §36: the agent
    * admits it so its own worker keeps the option to split further). A missing
    * required capability forces `decomposable` on its own; the declaration is
@@ -708,6 +791,14 @@ interface DecomposeChildSpec {
 interface DecomposeSpec {
   children: readonly DecomposeChildSpec[];
   reason: string;
+  /**
+   * The contract language this batch is written in (T1). Omitted is the legacy
+   * adapter — the runtime writes its current version, which is what an entry
+   * that does not version its input means. A declared version this build does
+   * not know is refused for the whole batch, never read with the wrong field
+   * semantics.
+   */
+  contractVersion?: number;
 }
 /**
  * Options for {@link TaskRuntime.replayTask} (guide §2.7.6, W15).
@@ -883,9 +974,17 @@ declare class TaskRuntime extends Service {
     runId: RunId;
   }>;
   /**
-   * Atomic decomposition plus the sequential run cascade: structural admission
-   * and capability admission must pass for the whole batch before anything is
-   * persisted; children then run one at a time in dependency order.
+   * Atomic decomposition plus the sequential run cascade: normalization,
+   * structural admission and capability admission must all pass for the whole
+   * batch before anything is persisted; children then run one at a time in
+   * dependency order.
+   *
+   * The batch is normalized first ({@link normalizeDecomposition}): raw caller
+   * input becomes the contract of every child with its defaults filled and its
+   * criterion ids fixed, and the batch identity plus the limits in force become
+   * ready to be recorded with the decomposition. A refused batch is refused
+   * whole — the error names every reason, no id is minted into the store, no
+   * capability is resolved into an event, and no obligation is recorded.
    *
    * The structural policy is `allowed` — a `leaf` task may decompose only while
    * {@link Config.allowRuntimeDecomposition} is on — plus the configured growth
@@ -907,6 +1006,13 @@ declare class TaskRuntime extends Service {
    * criteria replay). Capability resolution runs against the configured table
    * with `overlay.capabilityOverrides` applied as whole-row replacements; a gap
    * under the overlay refuses the replay before anything is persisted.
+   *
+   * The replayed task carries a normalized contract like every other creation
+   * (T1), and its criteria are judged by the same structural rules an ordinary
+   * decomposition child faces (`contractDefects` plus the P4 declarations).
+   * A replay has no batch, so it records no admission context: nothing was
+   * proposed to a parent, there is no sibling set to bound, and the limits that
+   * do apply to its run are the run's own budget, not a batch's.
    */
   replayTask(storeId: string, championTaskId: TaskId, options: ReplayTaskOptions, callerSessionId: string): Promise<ReplayRunOutcome>;
   /** Reverse lookup: the task run a (worker) session is bound to. */
@@ -918,6 +1024,19 @@ declare class TaskRuntime extends Service {
   private lookupRun;
   private resolveBinding;
   private reindex;
+  /**
+   * The limits one batch is admitted under (T1, construction guide §4),
+   * recorded with the decomposition and never derived from the contract: the
+   * contract's own text has no field that can raise a limit, and every value
+   * here is resolved from this runtime's configuration at admission time.
+   *
+   * Only the keys the deployment actually defined are included. `wallTimeMs`
+   * and the `auditOnly` trio are one record apart on purpose — a reader has to
+   * be able to tell which ceiling would have stopped the run — and an absent
+   * `tokens` (this deployment ships no default for it, see {@link BudgetConfig})
+   * means there is no token ceiling to record at all.
+   */
+  private admissionContext;
   private orchestrateEnv;
   /**
    * One best-effort read of a run's session for the review record's dimensions
@@ -965,4 +1084,4 @@ declare class TaskRuntime extends Service {
   private liveAgent;
 }
 //#endregion
-export { type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BudgetConfig, type CapabilityConfig, type ChildOutcome, type ChildPlan, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DecomposeChildSpec, DecomposeSpec, type HandoffInit, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type PermissionSpec, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, ReplayTaskOptions, RunVerifier, type SessionObservation, type SpawnChildRequest, TOOL_LABELS, TaskRuntime, TaskRuntime as default, VerifierUnavailableError, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, type WorkerPromptOptions, buildHandoff, checkDecomposition, checkObligationCoverage, escalationHint, findRepoRoot, independentAcceptanceDefects, loadObligationTemplates, manifestMcpServers, parseObligationTemplates, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };
+export { type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BudgetConfig, type CapabilityConfig, type ChildOutcome, type ChildPlan, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DecomposeChildSpec, DecomposeSpec, type DecompositionIdentityContext, type HandoffInit, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type PermissionSpec, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, ReplayTaskOptions, RunVerifier, type SessionObservation, type SpawnChildRequest, TOOL_LABELS, TaskRuntime, TaskRuntime as default, VerifierUnavailableError, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, type WorkerPromptOptions, buildHandoff, checkDecomposition, checkObligationCoverage, contractDefects, escalationHint, findRepoRoot, independentAcceptanceDefects, loadObligationTemplates, manifestMcpServers, normalizeDecomposition, parseObligationTemplates, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };

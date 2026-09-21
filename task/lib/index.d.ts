@@ -1,5 +1,127 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 
+//#region src/contract.d.ts
+
+/**
+ * The normalized contract version this build writes. Separate from a
+ * `TaskDefinition.version` (a template's own generation) and from the event
+ * envelope's `schemaVersion` (the store's wire format): this one versions the
+ * contract data definition, and an entry that declares a version this build
+ * does not know is refused rather than read with the wrong field semantics.
+ */
+declare const TASK_CONTRACT_VERSION: 1;
+/** Every version of {@link TaskContract} this build can write or read. */
+type TaskContractVersion = typeof TASK_CONTRACT_VERSION;
+/**
+ * One task's contract, in normalized form: defaults already filled, criterion
+ * ids already fixed, every array present. A stored task's contract is
+ * immutable — a revision is a new task, never an edit — which is why the store
+ * can carry it verbatim and why the projection fields on `TaskInstance`
+ * (`objective`, `acceptanceCriteria`, `requestedCapabilities`) are generated
+ * from it and checked for disagreement on write.
+ *
+ * `assumptions` and `constraints` are persisted here instead of living only in
+ * the spawn prompt: a worker handoff renders them, a reader of the store can
+ * quote them later, and neither is allowed to drift from what the task was
+ * admitted with. Text is stored verbatim (no trimming, no newline rewriting) —
+ * non-blank validation happens on the entry, byte identity in the digest.
+ */
+interface TaskContract {
+  contractVersion: TaskContractVersion;
+  /** The self-contained goal/deliverable, verbatim. */
+  objective: string;
+  /** At least one criterion, at least one of them mandatory; ids unique within the task. */
+  acceptanceCriteria: AcceptanceCriterion[];
+  /** External conditions the contract rests on; `[]` when none were declared. */
+  assumptions: string[];
+  /** Execution scope and limits in the caller's words; `[]` when none were declared. */
+  constraints: string[];
+  /** Capability *requirements* by name (never a skill id): the runtime resolves these against its registry. */
+  requiredCapabilities: string[];
+}
+/**
+ * The limits one decomposition batch was admitted under (§4). Recorded with
+ * the batch, never derived from the contract: a contract's own text has no
+ * field that can raise a limit, and the runtime resolves every value here from
+ * its configuration at admission time. The split between enforced and audited
+ * values is the point of the record — a reader must be able to tell which
+ * ceiling would actually have stopped the run.
+ */
+interface AdmissionContext {
+  /** Growth guardrail enforced at admission: a batch reaching depth `maxDepth + 1` is refused before anything is persisted. */
+  maxDepth: number;
+  /** Growth guardrail enforced at admission: a batch above `maxChildren` is refused before anything is persisted. */
+  maxChildren: number;
+  /** Enforced in flight: each run of the batch races this wall-clock deadline and settles failed naming the budget when it expires. Absent when the deployment configures none. */
+  wallTimeMs?: number;
+  /**
+   * Effective values that are only audited after a run settled — never
+   * enforced in flight (the orchestrator can observe tool calls and tokens
+   * only once the session log is readable). Recorded so a later gate sees what
+   * the batch ran under instead of re-deriving it from a config that may have
+   * moved on.
+   */
+  auditOnly: {
+    maxToolCalls?: number;
+    tokens?: number;
+    attempts?: number;
+  };
+}
+/**
+ * The identity of one admitted batch, recorded on the parent's decomposition
+ * event: what the batch asked for (digest) and the limits it was admitted
+ * under (context). T2's review gate binds an approval to exactly this pair;
+ * nothing in T1 acts on it beyond writing it down truthfully.
+ */
+interface DecompositionAdmission {
+  /** {@link decompositionDigest} of the normalized batch. */
+  proposalDigest: string;
+  context: AdmissionContext;
+}
+/** One child of a decomposition proposal, reduced to what its identity covers. */
+interface DecompositionChildIdentity {
+  /** {@link contractDigest} of the child's normalized contract. */
+  contractDigest: string;
+  /** Sibling indices (0-based, in batch order) this child's run waits for; order is insignificant to execution but part of the digest. */
+  dependsOn: readonly number[];
+  /** Whether the child may split further; a declaration, not a permission (admission still applies every guardrail). */
+  decomposable: boolean;
+  /** Whether the child demands independent parent acceptance (P4 marker). */
+  requiresIndependentAcceptance: boolean;
+}
+/**
+ * Everything a batch proposal's identity covers (§4): where it came from
+ * (store, parent task and run, caller), which contract language it is written
+ * in, why it was proposed, and the complete ordered children. The caller's
+ * `reason` is inside the digest on purpose — two batches with identical
+ * contracts but different reasons are different proposals.
+ */
+interface DecompositionIdentity {
+  contractVersion: TaskContractVersion;
+  storeId: string;
+  parentTaskId: string;
+  parentRunId: string;
+  callerSessionId: string;
+  reason: string;
+  children: readonly DecompositionChildIdentity[];
+}
+/**
+ * Stable serialization of contract data: object keys sorted, arrays kept in
+ * order, strings byte-for-byte, `undefined`-valued keys dropped (the session
+ * log drops them too, so the digest describes what is actually persisted).
+ *
+ * Two spellings of the same data must serialize identically — that is what
+ * makes key order irrelevant to an identity. Values the session log cannot
+ * round-trip (functions, symbols, `NaN`, `Infinity`, `bigint`) are refused
+ * loudly: a digest over such a value would compare equal to a digest of a
+ * different value that happened to stringify the same way.
+ */
+declare function canonicalize(value: unknown): string;
+/** The single-task contract identity: SHA-256 over {@link canonicalize} of the normalized contract. */
+declare function contractDigest(contract: TaskContract): string;
+/** The whole-batch proposal identity: SHA-256 over {@link canonicalize} of the normalized proposal. */
+declare function decompositionDigest(identity: DecompositionIdentity): string;
+//#endregion
 //#region src/types.d.ts
 type TaskId = string;
 type RunId = string;
@@ -118,14 +240,32 @@ interface TaskInstance {
     version: number;
   };
   parentTaskId?: TaskId;
+  /**
+   * The task's goal: the projection of {@link contract} (or, on a task created
+   * before the contract existed, the whole of what the store holds). Never an
+   * independent source — the store refuses an event whose projection disagrees
+   * with the contract it carries.
+   */
   objective: string;
   depth: number;
+  /** The criteria the verifier judges: the projection of {@link contract}, checked for disagreement on write. */
   acceptanceCriteria: AcceptanceCriterion[];
+  /** Capability requirements by name: the projection of {@link TaskContract.requiredCapabilities}. */
   requestedCapabilities: string[];
   decompositionStatus: DecompositionStatus;
   status: TaskStatus;
   runIds: RunId[];
   childTaskIds: TaskId[];
+  /**
+   * The normalized contract this instance was created from (T1, construction
+   * guide §4): defaults filled, criterion ids fixed, assumptions and
+   * constraints persisted rather than left in a spawn prompt. Absent on tasks
+   * created before the field existed — their contract *is* the three
+   * projection fields above, read exactly as before, with nothing invented for
+   * the parts the store never held (no assumptions, no constraints, no
+   * version).
+   */
+  contract?: TaskContract;
   /**
    * Contract-level marker (KISS §6 C2): this task's acceptance must be decided
    * by its own criteria and evidence map, never by the composite "all children
@@ -721,6 +861,13 @@ interface TaskEventPayloads {
   /** A decomposable task's children are registered and the parent closes as decomposed. */
   TaskDecomposed: {
     childTaskIds: TaskId[];
+    /**
+     * The batch's content identity and the limits it was admitted under
+     * (construction guide §4). Absent for a batch admitted before the
+     * normalized contract existed — those children carry no contract either,
+     * and nothing is invented for them on read.
+     */
+    admission?: DecompositionAdmission;
   };
   /** A dependency edge is added to the DAG (from must verify before to starts). */
   DependencyAdded: {
@@ -803,6 +950,23 @@ declare class TaskState {
   snapshot(): TaskSnapshot;
   apply(event: TaskEvent): void;
   private addTask;
+  /**
+   * A task's contract is either absent — a task created before the contract
+   * existed — or the single source its projection fields are generated from.
+   * The check re-derives the projections from the contract and refuses a
+   * disagreement instead of letting either side stand in for the other: a
+   * reader that trusts `objective` and one that trusts `contract.objective`
+   * must never see two different goals. Structural comparison goes through
+   * `canonicalize`, so key order in the stored payload is not a difference.
+   */
+  private assertContract;
+  /**
+   * The batch record a decomposition carries is the identity a later review
+   * gate binds an approval to, so a malformed one is refused rather than
+   * stored: an empty proposal digest or a non-numeric limit would make the
+   * record unusable exactly when someone needs to compare it.
+   */
+  private assertAdmission;
   private admit;
   private decompose;
   private addDependency;
@@ -884,7 +1048,7 @@ declare class TaskService extends Service {
     manifest?: CapabilityManifest;
   }): Promise<void>;
   rejectTaskIn(storeId: string, taskId: TaskId, actor: string, reason: string, manifest?: CapabilityManifest): Promise<void>;
-  decomposeIn(storeId: string, parentTaskId: TaskId, children: readonly TaskInstance[], actor: string, edges?: readonly DependencyEdge[]): Promise<void>;
+  decomposeIn(storeId: string, parentTaskId: TaskId, children: readonly TaskInstance[], actor: string, edges?: readonly DependencyEdge[], admission?: DecompositionAdmission): Promise<void>;
   addDependencyIn(storeId: string, edge: DependencyEdge, actor: string): Promise<void>;
   startRunIn(storeId: string, run: TaskRun, actor: string): Promise<void>;
   markRunStatusIn(storeId: string, taskId: TaskId, runId: RunId, status: RunStatus | 'verifying', actor: string, options?: {
@@ -904,4 +1068,4 @@ declare class TaskService extends Service {
   private header;
 }
 //#endregion
-export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionFacts, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootTaskSpec, RunId, RunStatus, SkillFitFacts, TaskDefinition, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifyRequest, reaches, rootTaskStoreId };
+export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootTaskSpec, RunId, RunStatus, SkillFitFacts, TASK_CONTRACT_VERSION, TaskContract, TaskContractVersion, TaskDefinition, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifyRequest, canonicalize, contractDigest, decompositionDigest, reaches, rootTaskStoreId };

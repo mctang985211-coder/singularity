@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'vitest'
+import { TASK_CONTRACT_VERSION } from '../../src/contract.ts'
+import type { AdmissionContext, DecompositionAdmission, TaskContract } from '../../src/contract.ts'
 import type {
+  AcceptanceCriterion,
   CapabilityManifest,
   Diagnosis,
   EvidenceBundle,
@@ -563,5 +566,165 @@ describe('TaskState obligations', () => {
     expect(() => state.apply(ev('ObligationRecorded', { obligation: obligation({ criterion: '' }) }))).toThrow('requires a criterion')
     expect(() => state.apply(ev('ObligationRecorded', { obligation: obligation({ sourceTaskId: 'ghost' }) }))).toThrow('unknown task')
     expect(state.snapshot().obligations).toHaveLength(0)
+  })
+})
+
+describe('TaskState contract and admission records', () => {
+  const PROPOSAL_DIGEST = '3f2a1c0e9d8b7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f'
+
+  const CRITERION: AcceptanceCriterion = {
+    criterionId: 'c1',
+    description: 'compiles',
+    verificationMode: 'deterministic',
+    requiredEvidence: [],
+    mandatory: true,
+    command: 'true',
+  }
+
+  const ADMISSION_CONTEXT: AdmissionContext = {
+    maxDepth: 2,
+    maxChildren: 4,
+    wallTimeMs: 600_000,
+    auditOnly: { maxToolCalls: 200, tokens: 1_000_000, attempts: 3 },
+  }
+
+  function contract(overrides: Partial<TaskContract> = {}): TaskContract {
+    return {
+      contractVersion: TASK_CONTRACT_VERSION,
+      objective: 'build the thing',
+      acceptanceCriteria: [CRITERION],
+      assumptions: ['the checkout is clean'],
+      constraints: ['no network access'],
+      requiredCapabilities: [],
+      ...overrides,
+    }
+  }
+
+  /**
+   * A task whose projection fields are generated from its contract, so the two
+   * agree by construction; a `projection` override breaks that agreement on
+   * purpose for the refusal cases.
+   */
+  function contractedTask(
+    contractOverrides: Partial<TaskContract> = {},
+    projection: Partial<Pick<TaskInstance, 'objective' | 'acceptanceCriteria' | 'requestedCapabilities'>> = {},
+  ): TaskInstance {
+    const value = contract(contractOverrides)
+    return task({
+      objective: value.objective,
+      acceptanceCriteria: value.acceptanceCriteria,
+      requestedCapabilities: [...value.requiredCapabilities],
+      contract: value,
+      ...projection,
+    })
+  }
+
+  function admission(overrides: Record<string, unknown> = {}): DecompositionAdmission {
+    return { proposalDigest: PROPOSAL_DIGEST, context: ADMISSION_CONTEXT, ...overrides } as DecompositionAdmission
+  }
+
+  function decomposableState(): TaskState {
+    const state = new TaskState('store')
+    state.apply(ev('TaskCreated', { task: task({ taskId: 'root', decompositionStatus: 'decomposable' }) }, { taskId: 'root' }))
+    state.apply(ev('TaskAdmitted', { decompositionStatus: 'decomposable' }, { taskId: 'root' }))
+    state.apply(ev('TaskCreated', { task: task({ taskId: 'c1', parentTaskId: 'root', depth: 1 }) }, { taskId: 'c1', parentTaskId: 'root' }))
+    state.apply(ev('TaskAdmitted', { decompositionStatus: 'leaf' }, { taskId: 'c1' }))
+    return state
+  }
+
+  test('stores a task with a consistent contract and reads it back unchanged', () => {
+    const state = new TaskState('store')
+    state.apply(ev('TaskCreated', { task: contractedTask() }))
+    const stored = state.snapshot().tasks[0]
+    expect(stored?.contract).toEqual(contract())
+    expect(stored?.contract?.assumptions).toEqual(['the checkout is clean'])
+    expect(stored?.contract?.constraints).toEqual(['no network access'])
+    expect(stored?.objective).toBe('build the thing')
+    expect(stored?.acceptanceCriteria).toEqual([CRITERION])
+    expect(stored?.requestedCapabilities).toEqual([])
+  })
+
+  test('accepts a contract that spells the same data with keys in another order', () => {
+    const state = new TaskState('store')
+    const reordered: TaskContract = {
+      requiredCapabilities: [],
+      constraints: ['no network access'],
+      assumptions: ['the checkout is clean'],
+      acceptanceCriteria: [
+        { command: 'true', mandatory: true, requiredEvidence: [], verificationMode: 'deterministic', description: 'compiles', criterionId: 'c1' },
+      ],
+      objective: 'build the thing',
+      contractVersion: TASK_CONTRACT_VERSION,
+    }
+    state.apply(ev('TaskCreated', { task: task({ contract: reordered }) }))
+    expect(state.snapshot().tasks).toHaveLength(1)
+  })
+
+  const disagreeing: Array<[string, TaskInstance, string]> = [
+    ['objective', contractedTask({}, { objective: 'ship the release' }), 'task: task "t1" objective disagrees with its contract objective'],
+    ['acceptance criteria', contractedTask({}, { acceptanceCriteria: [{ ...CRITERION, command: 'false' }] }), 'task: task "t1" acceptance criteria disagree with its contract'],
+    ['requested capabilities', contractedTask({ requiredCapabilities: ['research'] }, { requestedCapabilities: [] }), 'task: task "t1" requested capabilities disagree with its contract'],
+  ]
+
+  test.each(disagreeing)('refuses a task whose %s disagree with its contract and stores nothing', (_name, created, message) => {
+    const state = new TaskState('store')
+    expect(() => state.apply(ev('TaskCreated', { task: created }))).toThrow(message)
+    expect(state.snapshot().tasks).toHaveLength(0)
+  })
+
+  test('refuses a contract version this build does not know', () => {
+    const state = new TaskState('store')
+    const future = contractedTask({ contractVersion: 2 as TaskContract['contractVersion'] })
+    expect(() => state.apply(ev('TaskCreated', { task: future })))
+      .toThrow('task: task "t1" declares contract version 2; this build stores version 1')
+    expect(state.snapshot().tasks).toHaveLength(0)
+  })
+
+  test('refuses a contract whose assumptions carry a non-string', () => {
+    const state = new TaskState('store')
+    const malformed = contractedTask({ assumptions: ['the checkout is clean', 7 as unknown as string] })
+    expect(() => state.apply(ev('TaskCreated', { task: malformed })))
+      .toThrow('task: task "t1" contract assumptions must be an array of strings')
+    expect(state.snapshot().tasks).toHaveLength(0)
+  })
+
+  test('a task created without a contract still applies (legacy store compatibility)', () => {
+    const state = new TaskState('store')
+    state.apply(ev('TaskCreated', { task: task() }))
+    const stored = state.snapshot().tasks[0]
+    expect(stored).toEqual(task())
+    expect(stored?.contract).toBeUndefined()
+  })
+
+  const malformedAdmissions: Array<[string, DecompositionAdmission, string]> = [
+    ['an empty proposal digest', admission({ proposalDigest: '' }), 'task: task "root" decomposition admission requires a proposal digest'],
+    ['a non-string proposal digest', admission({ proposalDigest: 42 }), 'task: task "root" decomposition admission requires a proposal digest'],
+    ['a non-object context', admission({ context: 'limits' }), 'task: task "root" decomposition admission requires an admission context'],
+    ['a null context', admission({ context: null }), 'task: task "root" decomposition admission requires an admission context'],
+    ['an array context', admission({ context: [] }), 'task: task "root" decomposition admission requires an admission context'],
+    ['a negative maxDepth', admission({ context: { ...ADMISSION_CONTEXT, maxDepth: -1 } }), 'task: task "root" admission context maxDepth must be a non-negative integer'],
+    ['a fractional maxChildren', admission({ context: { ...ADMISSION_CONTEXT, maxChildren: 1.5 } }), 'task: task "root" admission context maxChildren must be a non-negative integer'],
+    ['a non-object auditOnly', admission({ context: { ...ADMISSION_CONTEXT, auditOnly: 'none' } }), 'task: task "root" admission context auditOnly must be an object'],
+    ['an array auditOnly', admission({ context: { ...ADMISSION_CONTEXT, auditOnly: [] } }), 'task: task "root" admission context auditOnly must be an object'],
+    ['an infinite wallTimeMs', admission({ context: { ...ADMISSION_CONTEXT, wallTimeMs: Number.POSITIVE_INFINITY } }), 'task: task "root" admission context wallTimeMs must be a finite number when present'],
+    ['a NaN tokens limit', admission({ context: { ...ADMISSION_CONTEXT, auditOnly: { maxToolCalls: 200, tokens: Number.NaN } } }), 'task: task "root" admission context auditOnly.tokens must be a finite number when present'],
+  ]
+
+  test.each(malformedAdmissions)('refuses a decomposition carrying %s and leaves the parent decomposable', (_name, value, message) => {
+    const state = decomposableState()
+    expect(() => state.apply(ev('TaskDecomposed', { childTaskIds: ['c1'], admission: value }, { taskId: 'root' }))).toThrow(message)
+    expect(state.snapshot().tasks.find(item => item.taskId === 'root')?.decompositionStatus).toBe('decomposable')
+  })
+
+  test('records a decomposition whose admission is well-formed', () => {
+    const state = decomposableState()
+    state.apply(ev('TaskDecomposed', { childTaskIds: ['c1'], admission: admission() }, { taskId: 'root' }))
+    expect(state.snapshot().tasks.find(item => item.taskId === 'root')?.decompositionStatus).toBe('decomposed')
+  })
+
+  test('a decomposition event without an admission still applies (legacy store compatibility)', () => {
+    const state = decomposableState()
+    state.apply(ev('TaskDecomposed', { childTaskIds: ['c1'] }, { taskId: 'root' }))
+    expect(state.snapshot().tasks.find(item => item.taskId === 'root')?.decompositionStatus).toBe('decomposed')
   })
 })

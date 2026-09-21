@@ -1,6 +1,57 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SESSION_FORMAT_VERSION, SessionId, SessionSeq } from "@deepseek-ai/dsh-session";
+import { createHash } from "node:crypto";
 
+//#region src/contract.ts
+/**
+* The normalized contract version this build writes. Separate from a
+* `TaskDefinition.version` (a template's own generation) and from the event
+* envelope's `schemaVersion` (the store's wire format): this one versions the
+* contract data definition, and an entry that declares a version this build
+* does not know is refused rather than read with the wrong field semantics.
+*/
+const TASK_CONTRACT_VERSION = 1;
+/**
+* Stable serialization of contract data: object keys sorted, arrays kept in
+* order, strings byte-for-byte, `undefined`-valued keys dropped (the session
+* log drops them too, so the digest describes what is actually persisted).
+*
+* Two spellings of the same data must serialize identically — that is what
+* makes key order irrelevant to an identity. Values the session log cannot
+* round-trip (functions, symbols, `NaN`, `Infinity`, `bigint`) are refused
+* loudly: a digest over such a value would compare equal to a digest of a
+* different value that happened to stringify the same way.
+*/
+function canonicalize(value) {
+	if (value === null) return "null";
+	switch (typeof value) {
+		case "string": return JSON.stringify(value);
+		case "boolean": return value ? "true" : "false";
+		case "number":
+			if (!Number.isFinite(value)) throw new Error(`task: cannot canonicalize ${String(value)}: contract data must be finite JSON`);
+			return JSON.stringify(value);
+		case "object": break;
+		default: throw new Error(`task: cannot canonicalize a ${typeof value}: contract data must be JSON`);
+	}
+	if (Array.isArray(value)) return `[${value.map((item) => item === void 0 ? "null" : canonicalize(item)).join(",")}]`;
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) throw new Error(`task: cannot canonicalize a ${value.constructor?.name ?? "non-plain object"}: contract data must be plain JSON`);
+	const source = value;
+	return `{${Object.keys(source).filter((key) => source[key] !== void 0).sort().map((key) => `${JSON.stringify(key)}:${canonicalize(source[key])}`).join(",")}}`;
+}
+function sha256(text) {
+	return createHash("sha256").update(text, "utf8").digest("hex");
+}
+/** The single-task contract identity: SHA-256 over {@link canonicalize} of the normalized contract. */
+function contractDigest(contract) {
+	return sha256(canonicalize(contract));
+}
+/** The whole-batch proposal identity: SHA-256 over {@link canonicalize} of the normalized proposal. */
+function decompositionDigest(identity) {
+	return sha256(canonicalize(identity));
+}
+
+//#endregion
 //#region src/types.ts
 /** DFS over an edge list: true when `target` is reachable from `start`. */
 function reaches(edges, start, target) {
@@ -76,6 +127,10 @@ const PROPOSAL_TARGET_TYPES = [
 function nonEmpty(value) {
 	return typeof value === "string" && value.length > 0;
 }
+/** Plain-object test: `null` and arrays are not records, whatever `typeof` says. */
+function isRecord(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 var TaskState = class TaskState {
 	value;
 	constructor(id, snapshot) {
@@ -111,7 +166,7 @@ var TaskState = class TaskState {
 				this.transit(event$1.taskId, ["created"], "blocked");
 				return;
 			case "TaskDecomposed":
-				this.decompose(event$1.taskId, event$1.payload.childTaskIds);
+				this.decompose(event$1.taskId, event$1.payload.childTaskIds, event$1.payload.admission);
 				return;
 			case "DependencyAdded":
 				this.addDependency(event$1.payload.edge);
@@ -168,6 +223,7 @@ var TaskState = class TaskState {
 		if (task.status !== "created") throw new Error(`task: task "${task.taskId}" must be created in status "created"`);
 		if (task.runIds.length !== 0 || task.childTaskIds.length !== 0) throw new Error("task: task runs and children must use events");
 		if (task.parentTaskId === task.taskId) throw new Error(`task: task "${task.taskId}" cannot be its own parent`);
+		if (task.contract !== void 0) this.assertContract(task.taskId, task.contract, task);
 		if (task.parentTaskId === void 0) {
 			if (task.depth !== 0) throw new Error(`task: root task "${task.taskId}" depth must be 0`);
 			this.value = {
@@ -186,6 +242,49 @@ var TaskState = class TaskState {
 			} : item), copy(task)]
 		};
 	}
+	/**
+	* A task's contract is either absent — a task created before the contract
+	* existed — or the single source its projection fields are generated from.
+	* The check re-derives the projections from the contract and refuses a
+	* disagreement instead of letting either side stand in for the other: a
+	* reader that trusts `objective` and one that trusts `contract.objective`
+	* must never see two different goals. Structural comparison goes through
+	* `canonicalize`, so key order in the stored payload is not a difference.
+	*/
+	assertContract(taskId, contract, task) {
+		if (contract.contractVersion !== TASK_CONTRACT_VERSION) throw new Error(`task: task "${taskId}" declares contract version ${String(contract.contractVersion)}; this build stores version ${TASK_CONTRACT_VERSION}`);
+		const lists = [
+			["assumptions", contract.assumptions],
+			["constraints", contract.constraints],
+			["requiredCapabilities", contract.requiredCapabilities]
+		];
+		for (const [name, value] of lists) if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error(`task: task "${taskId}" contract ${name} must be an array of strings`);
+		if (typeof contract.objective !== "string") throw new Error(`task: task "${taskId}" contract objective must be a string`);
+		if (task.objective !== contract.objective) throw new Error(`task: task "${taskId}" objective disagrees with its contract objective`);
+		if (canonicalize(task.acceptanceCriteria) !== canonicalize(contract.acceptanceCriteria)) throw new Error(`task: task "${taskId}" acceptance criteria disagree with its contract`);
+		if (canonicalize(task.requestedCapabilities) !== canonicalize(contract.requiredCapabilities)) throw new Error(`task: task "${taskId}" requested capabilities disagree with its contract`);
+	}
+	/**
+	* The batch record a decomposition carries is the identity a later review
+	* gate binds an approval to, so a malformed one is refused rather than
+	* stored: an empty proposal digest or a non-numeric limit would make the
+	* record unusable exactly when someone needs to compare it.
+	*/
+	assertAdmission(taskId, admission) {
+		if (typeof admission.proposalDigest !== "string" || admission.proposalDigest.length === 0) throw new Error(`task: task "${taskId}" decomposition admission requires a proposal digest`);
+		const context = admission.context;
+		if (!isRecord(context)) throw new Error(`task: task "${taskId}" decomposition admission requires an admission context`);
+		for (const [name, value] of [["maxDepth", context.maxDepth], ["maxChildren", context.maxChildren]]) if (!Number.isInteger(value) || value < 0) throw new Error(`task: task "${taskId}" admission context ${name} must be a non-negative integer`);
+		const auditOnly = context.auditOnly;
+		if (!isRecord(auditOnly)) throw new Error(`task: task "${taskId}" admission context auditOnly must be an object`);
+		const limits = [
+			["wallTimeMs", context.wallTimeMs],
+			["auditOnly.maxToolCalls", auditOnly.maxToolCalls],
+			["auditOnly.tokens", auditOnly.tokens],
+			["auditOnly.attempts", auditOnly.attempts]
+		];
+		for (const [name, value] of limits) if (value !== void 0 && (typeof value !== "number" || !Number.isFinite(value))) throw new Error(`task: task "${taskId}" admission context ${name} must be a finite number when present`);
+	}
 	admit(taskId, decompositionStatus) {
 		this.assertTransition(taskId, ["created"], "admitted");
 		this.updateTask(taskId, {
@@ -193,11 +292,12 @@ var TaskState = class TaskState {
 			decompositionStatus
 		});
 	}
-	decompose(taskId, childTaskIds) {
+	decompose(taskId, childTaskIds, admission) {
 		const parent = this.task(taskId);
 		if (parent.decompositionStatus === "decomposed") throw new Error(`task: task "${taskId}" is already decomposed`);
 		for (const childTaskId of childTaskIds) if (!parent.childTaskIds.includes(childTaskId)) throw new Error(`task: task "${childTaskId}" is not a child of "${taskId}"`);
 		if (parent.childTaskIds.filter((childTaskId) => ADMITTED_OR_LATER.includes(this.task(childTaskId).status)).length === 0) throw new Error(`task: task "${taskId}" cannot decompose without an admitted child`);
+		if (admission !== void 0) this.assertAdmission(taskId, admission);
 		this.updateTask(taskId, { decompositionStatus: "decomposed" });
 	}
 	addDependency(edge) {
@@ -588,7 +688,7 @@ var TaskService = class extends Service {
 		}));
 		await this.commitIn(storeId, events);
 	}
-	async decomposeIn(storeId, parentTaskId, children, actor, edges = []) {
+	async decomposeIn(storeId, parentTaskId, children, actor, edges = [], admission) {
 		if (children.length === 0) throw new Error("task: decompose requires at least one child");
 		const events = [];
 		for (const child of children) {
@@ -614,7 +714,10 @@ var TaskService = class extends Service {
 		events.push(event("TaskDecomposed", {
 			taskId: parentTaskId,
 			actor,
-			payload: { childTaskIds: children.map((child) => child.taskId) }
+			payload: {
+				childTaskIds: children.map((child) => child.taskId),
+				...admission === void 0 ? {} : { admission }
+			}
 		}));
 		await this.commitIn(storeId, events);
 	}
@@ -821,4 +924,4 @@ var TaskService = class extends Service {
 var src_default = TaskService;
 
 //#endregion
-export { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, RootTaskSpec, TaskService, TaskState, src_default as default, reaches, rootTaskStoreId };
+export { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, RootTaskSpec, TASK_CONTRACT_VERSION, TaskService, TaskState, canonicalize, contractDigest, decompositionDigest, src_default as default, reaches, rootTaskStoreId };
