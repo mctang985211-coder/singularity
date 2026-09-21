@@ -121,7 +121,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 详细票据见 [建设计划](2026-09-20-vrtc-code-change-plan.md)。以下是依赖顺序，不是任务执行 workflow。
 
-可先派发的确定性工程切片见 [执行 prompt](execution-prompts/README.md)：P1 类型闸 → P2 单文件 Skill 内容绑定 → P3 生产基线冲突检查。P1、P2、P3 已于 2026-09-21 完成并同步本文；三项都不替代 S2/S3 的自主修复与恢复闭环。
+可先派发的确定性工程切片见 [执行 prompt](execution-prompts/README.md)：P1 类型闸 → P2 单文件 Skill 内容绑定 → P3 生产基线冲突检查 → P4 独立父验收与证据身份。P1、P2、P3、P4 已于 2026-09-21 完成并同步本文；四项都不替代 S2/S3 的自主修复与恢复闭环，也不宣称独立父验收全部完成（C3 完整证明与 verifier selftest 执行仍缺）。
 
 | 顺序 | 建设目标 | 完成条件 |
 |---|---|---|
@@ -145,11 +145,11 @@ S1 的最小验证与能力契约是候选生产晋升的前置。S2 与 S3 按�
 | Task 定义版本 | 有 `definitionRef`；普通子任务使用 `subtask@1`，不等于完整不可变定义库和变更授权机制 | `task-runtime/src/index.ts:decomposeAndRun` |
 | Capability | 配置表解析与真实 grant 已建；没有完整 skill 契约预检、可行性证明或多候选选择 | `capability.ts:resolveCapabilities`；`grants.ts:grantSkills` |
 | Handoff / 上下文 | fresh session、结构化 handoff、父会话引用、契约重注入已有；不是父 transcript 全复制 | `task-runtime/src/handoff.ts`；`agent-runtime/src/contract-reinjection.ts` |
-| Evidence 依赖 | `requiresArtifact` 检查 store 中 evidence id / artifact id / kind 的存在性；缺失则 blocked + Obligation；不自动生成上游，也不验证匹配证据的通过状态、版本和适用性 | `orchestrate.ts:missingRequiredArtifacts` |
+| Evidence 依赖 | `requiresArtifact` 检查 store 中 evidence id / artifact id / kind 的存在性，且只认 **verified run** 产出的证据（run 终态 verified 且 bundle 带 pass 判据）；原始输入用独立的 `acceptsArtifact`（存在即可，任意 run 状态）。缺失则 blocked + Obligation（obligation 文本区分两种要求）；不自动生成上游，也不验证匹配证据的版本和适用性 | `orchestrate.ts:missingRequiredArtifacts` |
 | Obligation | 记录缺能力/缺产物；模板 coverage 由任务声明 capability 或文字提及匹配；不是义务已被证据满足，更不是防漏的硬闸 | `task-runtime/src/obligation.ts:checkObligationCoverage` |
-| 判决 | `pass/fail/inconclusive`；部分 unknown 有 task/verifier 分类；没有 PARTIAL 状态与剩余义务自动派发；未通过 mandatory 判据仍走失败路径 | `task/src/types.ts:VerificationResult`；`orchestrate.ts:unmetMandatory` |
+| 判决 | `pass/fail/inconclusive`；部分 unknown 有 task/verifier 分类；没有 PARTIAL 状态与剩余义务自动派发；未通过 mandatory 判据仍走失败路径；`heuristic` 标记的判据永远不计入确定性通过 | `task/src/types.ts:VerificationResult`；`orchestrate.ts:unmetMandatory` |
 | Verifier 边界 | 已校验单个判据返回数量、criterion/verifier 身份及判决；异常归为 UNKNOWN(verifier)。可选 selftest 仍只描述、不执行，尚无独立性隔离 | `verifier/src/index.ts:verifyCriterion`、`register` |
-| 父验收 | 默认 composite 只检查所有子任务 verified；没有 C2 覆盖映射、C3 假设满足性、C4 独立全局不变量 | `verifier/src/composite-verifier.ts:verifyIn` |
+| 父验收 | 默认 composite 只检查所有子任务 verified（未声明映射时保持此行为）；父 AC 可声明 `childEvidence` 映射（子任务按分解 batch 位置 + 可选判据/证据引用），composite 校验该映射真实存在且证据来自子任务 verified run，不完整则拒绝并逐字点名缺失项；`heuristic` 标记的父 AC 显式标注启发式、不计入确定性闭包；契约级标记 `requiresIndependentAcceptance` 在映射缺失/被删时 admission 响亮拒绝 | `verifier/src/composite-verifier.ts:verifyIn`；`task-runtime/src/admission.ts:independentAcceptanceDefects` |
 | 预算 | wallTimeMs 在飞取消；tools/tokens 仅终态审计；attempts/noProgressRounds 仅声明 | `orchestrate.ts:awaitWorker`、`budgetBreaches`；`task-runtime/src/index.ts:Config` |
 | L4 上报 | root 的 `escalate` 工具与台账已有；模型主动调用，批准后才记 raised；运行时只输出提示，无自动触发、无处理结果/恢复闭环 | `agent-singularity/src/tools/escalate.ts`；`orchestrate.ts:escalationHint` |
 | blocked 恢复 | blocked 无恢复出边；TaskRetried 只接受 failed，父分解一次的限制仍在；补能力后不会自动续跑原图 | `task/src/service/state.ts`；`task-runtime/src/index.ts:decomposeAndRun` |
@@ -161,9 +161,9 @@ S1 的最小验证与能力契约是候选生产晋升的前置。S2 与 S3 按�
 
 | 编号 | 问题与影响 | 建设票 / 历史对应 |
 |---|---|---|
-| G1 | 父 composite 仅对子状态求合取，不能证明根目标；同环境执行 verifier 也不等于测试与阈值不可被修改 | S1-V / 旧 #25、#26 |
+| G1 | 父 composite 曾仅对子状态求合取，不能证明根目标；同环境执行 verifier 也不等于测试与阈值不可被修改。P4 已落地最小机械版（S1-V 切片 1+3）：父 AC `childEvidence` 映射的存在性与 verified 来源检查、至少一条可机械执行的独立父级组合检查（映射断言与父级 command）、`heuristic` 显式标注。剩余：C3 假设满足性的完整证明、verifier selftest 正负样本实际执行（切片 2）、验收输入来源与版本固定、证据来源真实性认证 | S1-V / 旧 #25、#26 |
 | G2 | provider 未预检、run 级内容版本未固定；`closed` 被误用为可执行保证。多 preset 冲突已在解析期拒绝；单文件 Skill 候选的晋升链路内容身份（P2）与生产基线（P3）已固定，但 provider 预检与 run 解析快照仍未建 | S1-C / 旧 #29 |
-| G3 | 缺产物只查存在且 blocked 无恢复，证据驱动生长断在登记之后 | S1-V、S2-R / 旧 #20、#21、#22 |
+| G3 | 缺产物曾只查存在且 blocked 无恢复，证据驱动生长断在登记之后。P4 已把存在性收紧为 verified 参考产物并区分原始输入（`acceptsArtifact`）；blocked 仍无恢复出边，补产物后不会自动续跑原图 | S1-V、S2-R / 旧 #20、#21、#22 |
 | G4 | 上报依赖模型调用且批准前不落账；任务阻塞、通知与人类决策混在一起 | S2-E / 旧 #27；已有工具不能标为待建 |
 | G5 | 三值判决、预算半接线，没有 PARTIAL/UNKNOWN 的任务级处置 | S2-R / 旧 #23、#24 |
 | G6 | 缺 skill 契约与知识型定位，L1/L2 又被排在其前面，形成建设依赖倒置 | S1-C → S3 / 旧 #29 |
@@ -173,7 +173,7 @@ S1 的最小验证与能力契约是候选生产晋升的前置。S2 与 S3 按�
 
 历史记录中的 M1–M9 为此前会话的实跑声明，保留于历史指南。本次回归结果见建设计划 S0；本次没有重跑 LLM、BB 构建仿真或生产 Evolution 链路。旧环境可用性、外部 bbdev 缺陷和部署阈值在使用前需重新读取对应部署，不能从旧日志推断当前状态。
 
-2026-09-21 的 P1 已关闭“root-agent 包 build 不执行严格类型检查”这一缺口：该包 `pnpm exec tsc --noEmit` 从 12 处错误降到 0，`build` 改为先 `tsc --noEmit` 再 `tsdown`，工作区根 `pnpm build` 同样经过。G9 是 P1 明确未做的剩余部分：类型闸没有推广到其他包，也未改变任何业务流程、审批次数、持久化格式或工具输入输出合同。同日的 P2 已关闭 G7 中“候选内容绑定”的单文件 Skill 切片（范围见 §5.5）；P3 再关闭其中“生产基线没变”的切片。证据来源绑定仍待建，由后续工作推进，不因 P1/P2/P3 完成而标记 S1-C/S4 完成。
+2026-09-21 的 P1 已关闭“root-agent 包 build 不执行严格类型检查”这一缺口：该包 `pnpm exec tsc --noEmit` 从 12 处错误降到 0，`build` 改为先 `tsc --noEmit` 再 `tsdown`，工作区根 `pnpm build` 同样经过。G9 是 P1 明确未做的剩余部分：类型闸没有推广到其他包，也未改变任何业务流程、审批次数、持久化格式或工具输入输出合同。同日的 P2 已关闭 G7 中“候选内容绑定”的单文件 Skill 切片（范围见 §5.5）；P3 再关闭其中“生产基线没变”的切片。证据来源绑定仍待建，由后续工作推进，不因 P1/P2/P3 完成而标记 S1-C/S4 完成。同日的 P4 已关闭 G1/G3 的最小机械切片（范围见 §5.1 末段）：父 AC → 子证据映射的存在性与 verified 来源检查、独立父级组合检查、原始输入与已验证参考产物的区分；C3 完整证明、verifier selftest 执行与 blocked 恢复仍属后续票，不因 P4 通过而宣称独立父验收全部完成。
 
 ## 5. 实现时的关键约束
 
@@ -181,7 +181,9 @@ S1 的最小验证与能力契约是候选生产晋升的前置。S2 与 S3 按�
 
 现有 command verifier 与 worker 共享 checkout：外部进程运行命令只提供执行分离，不保证 worker 无法修改测试、脚本或阈值。建设目标是固定验收输入的来源与版本，保护判据，记录 verifier 版本及证据产物身份；自述 JSON 和退出 0 均不能单独证明领域正确性。
 
-组合验收先针对一个客观的小任务实现父 AC → 子证据映射和独立父级检查。不需要先做通用自然语言蕴含求解器。能机械判断的接口/数值写成检查；启发式覆盖显式标注，不能记成确定性闭包。
+**父级验收与证据身份已落地（2026-09-21 P4，S1-V 切片 1+3）**：父 AC 用可选字段 `childEvidence` 声明“需要哪些子任务的哪条判据/哪类证据”——子任务按分解 batch 位置（0 基，与 `dependsOn` 同一索引词汇）指向，可再窄化到子判据 id 与证据引用（evidence id / artifact kind / artifact id 三种拼写），composite 在父验收期对照 store 校验该映射真实存在且证据来自子任务的 verified run，不完整则拒绝并在 reason 逐字点名缺失项；缺省（无映射）完全保持现行“子全 verified”合取行为。独立父级组合检查有两条可机械执行的形式：映射断言本身，以及父 AC 的确定性 `command`（接口/数值级判据，子全 verified 但组合错误时父必须拒绝）。`heuristic: true` 标记的父 AC 是自然语言条款：verdict 显式带 heuristic 标注，且不计入确定性通过。`requiresArtifact` 收紧为“已验证参考产物”（产出 run 终态 verified 且 bundle 带 pass 判据），原始输入改用 `acceptsArtifact`（存在即可，任意 run 状态）；契约级标记 `requiresIndependentAcceptance` 要求映射存在，新建/分解路径 admission 对映射缺失/被删/形状畸形响亮拒绝，不静默降级为合取；replay 路径与普通分解共用同一校验规则。
+
+范围边界：映射按 batch 位置指向，不做通用自然语言蕴含求解器，也不做 C3 假设满足性的完整证明（只做映射指向存在性的结构检查）；verifier selftest 正负样本的实际执行与输入身份固定属 S1-V 切片 2，证据来源真实性认证、blocked 缺产物后的自动恢复（S2-R）均未建。旧任务（无新字段）读取、回放、验收行为不变；`requiresArtifact` 的收紧对旧声明同样生效——失败 run 的同名产物不再满足依赖，这是本票的修复点而非兼容性破坏。
 
 ### 5.2 缺口恢复从有限状态开始
 

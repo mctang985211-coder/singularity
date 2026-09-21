@@ -131,11 +131,60 @@ var CommandVerifier = class {
 
 //#endregion
 //#region src/composite-verifier.ts
+/** How one map entry reads when it is satisfied. */
+function describeSatisfied(entry, child) {
+	const who = `child #${entry.childIndex} (${child.taskId})`;
+	if (entry.criterionId !== void 0) return `${who} criterion "${entry.criterionId}" passed`;
+	if (entry.evidenceRef !== void 0) return `${who} evidence "${entry.evidenceRef}" present`;
+	return `${who} verified`;
+}
+/** How one map entry reads when it is missing — the reason names the item verbatim. */
+function describeEntry(entry) {
+	const parts = [`child #${entry.childIndex}`];
+	if (entry.criterionId !== void 0) parts.push(`criterion "${entry.criterionId}"`);
+	if (entry.evidenceRef !== void 0) parts.push(`evidence "${entry.evidenceRef}"`);
+	return parts.join(" ");
+}
 /**
-* Judges a composite criterion by child task status: pass iff the task has at
-* least one child and every child is verified. Reading children needs the
-* store id, which VerifyRequest does not carry, so the registry dispatches
-* through {@link verifyIn}; the plain `verify` stays inconclusive.
+* The defect one map entry carries against the store, or `undefined` when the
+* entry is satisfied. Every branch is a store fact: the child exists in the
+* batch, sits in the verified terminal state, and — for the narrowed spellings
+* — the child's *verified run* evidence carries the passing verdict and the
+* named reference. Evidence an earlier failed run produced is an expired
+* reference and never satisfies an entry.
+*/
+function entryDefect(entry, children, snapshot) {
+	const child = children[entry.childIndex];
+	if (child === void 0) return `child #${entry.childIndex} does not exist (the decomposition batch has ${children.length} children)`;
+	if (child.status !== "verified") return `child #${entry.childIndex} (${child.taskId}) is ${child.status}, not verified`;
+	const verifiedRun = snapshot.runs.find((run) => run.taskId === child.taskId && run.status === "verified");
+	const bundles = snapshot.evidence.filter((item) => item.taskRunId === verifiedRun?.runId);
+	if (entry.criterionId !== void 0) {
+		if (!child.acceptanceCriteria.some((item) => item.criterionId === entry.criterionId)) return `child #${entry.childIndex} (${child.taskId}) has no criterion "${entry.criterionId}"`;
+		const verdict = bundles.flatMap((item) => item.verifierResults).find((item) => item.criterionId === entry.criterionId);
+		if (verdict?.status !== "pass") return `child #${entry.childIndex} (${child.taskId}) criterion "${entry.criterionId}" has no passing verdict in its verified run's evidence` + (verdict === void 0 ? "" : ` (verdict ${verdict.status})`);
+	}
+	if (entry.evidenceRef !== void 0) {
+		if (!new Set(bundles.flatMap((item) => [item.evidenceId, ...item.artifacts.flatMap((artifact) => [artifact.kind, artifact.artifactId])])).has(entry.evidenceRef)) return `child #${entry.childIndex} (${child.taskId}) evidence does not contain "${entry.evidenceRef}" (evidence id, artifact kind, or artifact id)`;
+	}
+}
+/**
+* Judges a composite criterion. The default is the child-status conjunction
+* (pass iff the task has at least one child and every child is verified),
+* unchanged for criteria that declare nothing.
+*
+* A criterion carrying a {@link AcceptanceCriterion.childEvidence} map is
+* judged by the map as well: every entry must resolve against the store, and an
+* incomplete mapping fails the criterion with the missing items named — the
+* conjunction alone can never pass a parent whose root goal rests on evidence
+* the children did not produce (KISS §6 C2). A criterion labeled
+* {@link AcceptanceCriterion.heuristic} keeps the conjunction verdict but
+* carries the explicit heuristic label in its details, so a natural-language
+* coverage signal is never mistaken for a mechanical proof (KISS §5.1).
+*
+* Reading children and evidence needs the store id, which VerifyRequest does
+* not carry, so the registry dispatches through {@link verifyIn}; the plain
+* `verify` stays inconclusive.
 */
 var CompositeVerifier = class {
 	id = "composite";
@@ -166,25 +215,51 @@ var CompositeVerifier = class {
 	}
 	async verifyIn(storeId, req) {
 		const children = await this.task.childrenIn(storeId, req.taskId);
-		let status;
-		let details;
-		if (children.length === 0) {
-			status = "inconclusive";
-			details = "no child tasks";
-		} else {
-			const unverified = children.filter((child) => child.status !== "verified");
-			if (unverified.length === 0) status = "pass";
-			else {
-				status = "fail";
-				details = `unverified children: ${unverified.map((child) => `${child.taskId}(${child.status})`).join(", ")}`;
-			}
-		}
-		return req.criteria.map((criterion) => ({
+		const results = [];
+		for (const criterion of req.criteria) results.push(await this.judge(storeId, criterion, children));
+		return results;
+	}
+	async judge(storeId, criterion, children) {
+		const map = criterion.childEvidence ?? [];
+		const base = {
 			criterionId: criterion.criterionId,
-			status,
-			verifierId: this.id,
-			details
-		}));
+			verifierId: this.id
+		};
+		if (children.length === 0) {
+			if (map.length === 0) return {
+				...base,
+				status: "inconclusive",
+				details: "no child tasks"
+			};
+			return {
+				...base,
+				status: "fail",
+				details: `incomplete childEvidence map: the task has no child tasks to satisfy ${map.map(describeEntry).join("; ")}`
+			};
+		}
+		const unverified = children.filter((child) => child.status !== "verified");
+		if (unverified.length > 0) return {
+			...base,
+			status: "fail",
+			details: `unverified children: ${unverified.map((child) => `${child.taskId}(${child.status})`).join(", ")}`
+		};
+		if (map.length === 0) return {
+			...base,
+			status: "pass",
+			...criterion.heuristic === true ? { details: "heuristic conjunction: every child verified — explicitly labeled heuristic (KISS §5.1); a conjunction is a coverage signal, not a deterministic proof of the parent goal, and is not counted as one" } : {}
+		};
+		const snapshot = await this.task.snapshotIn(storeId);
+		const defects = map.map((entry) => entryDefect(entry, children, snapshot)).filter((defect) => defect !== void 0);
+		if (defects.length > 0) return {
+			...base,
+			status: "fail",
+			details: `incomplete childEvidence map: ${defects.join("; ")}`
+		};
+		return {
+			...base,
+			status: "pass",
+			details: `childEvidence satisfied: ${map.map((entry) => describeSatisfied(entry, children[entry.childIndex])).join("; ")}`
+		};
 	}
 };
 

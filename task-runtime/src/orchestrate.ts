@@ -226,6 +226,15 @@ function unknownTag(result: VerificationResult): string {
 function unmetMandatory(criteria: readonly AcceptanceCriterion[], results: readonly VerificationResult[]): UnmetCriterion[] {
   return criteria.filter(criterion => criterion.mandatory).flatMap(criterion => {
     const result = results.find(item => item.criterionId === criterion.criterionId)
+    // KISS §5.1: a criterion explicitly labeled heuristic is judged and labeled,
+    // never counted as a deterministic pass — a natural-language coverage signal
+    // cannot close a criterion mechanically, whatever verdict a judge returned.
+    if (criterion.heuristic === true) {
+      return [{
+        criterionId: criterion.criterionId,
+        detail: `heuristic judgement${result === undefined ? '' : ` (verdict ${result.status})`} — explicitly labeled heuristic, not counted as a deterministic pass`,
+      }]
+    }
     if (result?.status === 'pass') return []
     return [{
       criterionId: criterion.criterionId,
@@ -238,24 +247,54 @@ function failureReason(unmet: readonly UnmetCriterion[]): string {
   return `mandatory criteria not satisfied: ${unmet.map(item => `${item.criterionId} ${item.detail}`).join(', ')}`
 }
 
+/** One required artifact reference no store evidence satisfies yet. */
+interface MissingArtifact {
+  criterionId: string
+  ref: string
+  /**
+   * Which declaration the reference came from: `requires` is a verified
+   * reference product, `accepts` a raw input whose existence is the whole
+   * requirement. The blocked reason and the registered obligation say which,
+   * so a reader knows what would close the gap.
+   */
+  requirement: 'requires' | 'accepts'
+}
+
 /**
- * The `requiresArtifact` references (per criterion) that no store evidence
- * satisfies yet. A reference matches an evidence id, an artifact kind, or an
- * artifact id — the three spellings a contract can name a product by. Judged at
- * spawn time, never at admission: existence needs the store snapshot.
+ * The artifact references (per criterion) that no store evidence satisfies yet.
+ * A reference matches an evidence id, an artifact kind, or an artifact id — the
+ * three spellings a contract can name a product by. Judged at spawn time, never
+ * at admission: existence needs the store snapshot.
+ *
+ * The two declarations differ in what "satisfied" means (P4, KISS §5.1):
+ * `requiresArtifact` names a **verified reference product** — the producing run
+ * must sit in the verified terminal state and its bundle must carry a passing
+ * verdict, so a failed or still-running run's same-named product never closes
+ * the gap — while `acceptsArtifact` names a **raw input** whose mere existence
+ * in the store is the requirement.
  */
 function missingRequiredArtifacts(
   criteria: readonly AcceptanceCriterion[],
   snapshot: TaskSnapshot,
-): { criterionId: string; ref: string }[] {
-  const available = new Set(snapshot.evidence.flatMap(item => [
-    item.evidenceId,
-    ...item.artifacts.flatMap(artifact => [artifact.kind, artifact.artifactId]),
-  ]))
-  return criteria.flatMap(criterion =>
-    (criterion.requiresArtifact ?? [])
-      .filter(ref => !available.has(ref))
-      .map(ref => ({ criterionId: criterion.criterionId, ref })))
+): MissingArtifact[] {
+  const present = new Set<string>()
+  const verified = new Set<string>()
+  for (const item of snapshot.evidence) {
+    const run = snapshot.runs.find(candidate => candidate.runId === item.taskRunId)
+    const refs = [item.evidenceId, ...item.artifacts.flatMap(artifact => [artifact.kind, artifact.artifactId])]
+    for (const ref of refs) present.add(ref)
+    if (run?.status === 'verified' && item.verifierResults.some(result => result.status === 'pass')) {
+      for (const ref of refs) verified.add(ref)
+    }
+  }
+  return criteria.flatMap(criterion => [
+    ...(criterion.requiresArtifact ?? [])
+      .filter(ref => !verified.has(ref))
+      .map(ref => ({ criterionId: criterion.criterionId, ref, requirement: 'requires' as const })),
+    ...(criterion.acceptsArtifact ?? [])
+      .filter(ref => !present.has(ref))
+      .map(ref => ({ criterionId: criterion.criterionId, ref, requirement: 'accepts' as const })),
+  ])
 }
 
 /**
@@ -776,25 +815,31 @@ export async function runChildrenCascade(
     const snapshot = await env.task.snapshotIn(storeId)
     const dependencyTaskIds = plan.dependsOn.map(dependency => plans[dependency]!.task.taskId)
 
-    // Evidence dependencies (KISS §5.1): a criterion's `requiresArtifact` names
-    // kinds or ids that must exist in the store before the criterion can be
-    // judged at all. Missing → the child never spawns; it settles as a runless
-    // blocked task under the same discipline as blockRemaining, its record's
-    // anomalies name the missing items, and each missing item is registered as
-    // an obligation — a question the tree must answer, not an action.
+    // Evidence dependencies (KISS §5.1): a criterion's `requiresArtifact` /
+    // `acceptsArtifact` names kinds or ids that must exist in the store before
+    // the criterion can be judged at all — the former as a verified reference
+    // product, the latter as a raw input. Missing → the child never spawns; it
+    // settles as a runless blocked task under the same discipline as
+    // blockRemaining, its record's anomalies name the missing items, and each
+    // missing item is registered as an obligation — a question the tree must
+    // answer, not an action.
     const missingArtifacts = missingRequiredArtifacts(plan.task.acceptanceCriteria, snapshot)
     if (missingArtifacts.length > 0) {
-      const reason = `missing required artifacts: ${missingArtifacts.map(item => `${item.ref} (criterion ${item.criterionId})`).join(', ')}`
+      const reason = `missing required artifacts: ${missingArtifacts.map(item =>
+        `${item.ref} (criterion ${item.criterionId}${item.requirement === 'accepts' ? '; raw input, any run state' : ''})`).join(', ')}`
       await env.task.markRunStatusIn(storeId, childTaskId, undefined as unknown as RunId, 'blocked', env.actor, { reason })
       await recordReview(childTaskId, 'blocked', {
         anomalies: [reason],
         relatedTaskIds: dependencyTaskIds,
       })
       for (const item of missingArtifacts) {
+        const verified = item.requirement === 'requires'
         await env.task.recordObligationIn(storeId, {
           obligationId: `o-${randomUUID()}`,
-          goal: `artifact/evidence "${item.ref}" required by task "${childTaskId}" criterion ${item.criterionId} does not exist in the task store`,
-          criterion: `the task store holds evidence or an artifact named "${item.ref}" (evidence id, artifact kind, or artifact id)`,
+          goal: `artifact/evidence "${item.ref}" required by task "${childTaskId}" criterion ${item.criterionId} does not exist in the task store${verified ? ' as a verified reference product' : ''}`,
+          criterion: verified
+            ? `the task store holds evidence or an artifact named "${item.ref}" (evidence id, artifact kind, or artifact id) produced by a verified run carrying a passing verdict`
+            : `the task store holds evidence or an artifact named "${item.ref}" (evidence id, artifact kind, or artifact id)`,
           sourceTaskId: childTaskId,
         }, env.actor)
       }

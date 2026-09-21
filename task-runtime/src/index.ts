@@ -15,6 +15,7 @@ import type {} from '@dangosys/dsh-singularity-graphs'
 import type {
   AcceptanceCriterion,
   CapabilityManifest,
+  ChildEvidenceRef,
   DependencyEdge,
   EvidenceBundle,
   ReviewTokenUsage,
@@ -28,7 +29,7 @@ import type {
 } from '@dangosys/dsh-singularity-task'
 import { RootTaskSpec, rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import { resolveCapabilities, capabilitySnapshot, resolvePreset, type CapabilityConfig, type PermissionSpec } from './capability.ts'
-import { checkDecomposition } from './admission.ts'
+import { checkDecomposition, independentAcceptanceDefects } from './admission.ts'
 import { buildHandoff, renderWorkerPrompt } from './handoff.ts'
 import {
   runChildrenCascade,
@@ -59,7 +60,7 @@ export {
 export type { McpEnvBinding, McpServerTemplate } from './mcp-servers.ts'
 export { MCP_SERVER_REGISTRY, manifestMcpServers, resolveMcpServerSpecs } from './mcp-servers.ts'
 export type { AdmissionChild, AdmissionParent, AdmissionVerdict } from './admission.ts'
-export { checkDecomposition } from './admission.ts'
+export { checkDecomposition, independentAcceptanceDefects } from './admission.ts'
 export type { ObligationCoverage, ObligationTemplate, ObligationTemplateFile } from './obligation.ts'
 export { checkObligationCoverage, findRepoRoot, loadObligationTemplates, parseObligationTemplates } from './obligation.ts'
 export type { HandoffInit, WorkerPromptOptions } from './handoff.ts'
@@ -168,12 +169,20 @@ export interface CriterionSpec {
   requiredEvidence?: string[]
   /**
    * Evidence dependencies (KISS §5.1): artifact/evidence kinds or ids that must
-   * exist in the store before this criterion can be judged. Admission checks
-   * the shape only; the orchestrator judges existence at spawn time and a
-   * missing reference settles the child blocked, with the gap registered as an
-   * obligation.
+   * exist in the store before this criterion can be judged. Since P4 this
+   * declaration names a **verified reference product** — the producing run must
+   * be verified and carry a passing verdict. Admission checks the shape only;
+   * the orchestrator judges existence at spawn time and a missing reference
+   * settles the child blocked, with the gap registered as an obligation.
    */
   requiresArtifact?: string[]
+  /**
+   * Raw-input counterpart of `requiresArtifact` (P4): artifact/evidence kinds
+   * or ids this criterion consumes, where mere existence in the store is the
+   * whole requirement — any run state. Judged at spawn time exactly like
+   * `requiresArtifact`.
+   */
+  acceptsArtifact?: string[]
   /**
    * The registered verifier id that judges this criterion (KISS §4.1
    * `verifier_ref`). Absent dispatches by mode (the current behavior);
@@ -182,6 +191,20 @@ export interface CriterionSpec {
    * registered id.
    */
   verifierRef?: string
+  /**
+   * The parent-level evidence map (KISS §6 C2, P4): which child of the
+   * decomposing task this criterion rests on, by batch position, optionally
+   * narrowed to a child criterion and an evidence reference. Requires mode
+   * `composite`; judged at parent-acceptance time against the store. Absent
+   * keeps the composite conjunction as the whole verdict.
+   */
+  childEvidence?: ChildEvidenceRef[]
+  /**
+   * Labels this criterion's judgement heuristic (KISS §5.1, P4): the verdict is
+   * marked as such and never counted as a deterministic pass. Mutually
+   * exclusive with `childEvidence`.
+   */
+  heuristic?: boolean
 }
 
 export interface DecomposeChildSpec {
@@ -203,6 +226,13 @@ export interface DecomposeChildSpec {
    * what makes a child with no gap decomposable.
    */
   decomposable?: boolean
+  /**
+   * Contract-level marker (P4, KISS §6 C2): this child demands independent
+   * parent acceptance — its own criteria must carry a `childEvidence` map, or
+   * admission refuses the batch. Deleting the map can never silently degrade
+   * the task back to the composite conjunction.
+   */
+  requiresIndependentAcceptance?: boolean
 }
 
 export interface DecomposeSpec {
@@ -410,7 +440,16 @@ function normalizeCriteria(criteria: readonly CriterionSpec[], childIndex: numbe
     mandatory: criterion.mandatory ?? true,
     ...(criterion.command !== undefined ? { command: criterion.command } : {}),
     ...(criterion.requiresArtifact !== undefined ? { requiresArtifact: [...criterion.requiresArtifact] } : {}),
+    ...(criterion.acceptsArtifact !== undefined ? { acceptsArtifact: [...criterion.acceptsArtifact] } : {}),
     ...(criterion.verifierRef !== undefined ? { verifierRef: criterion.verifierRef } : {}),
+    ...(criterion.childEvidence !== undefined ? {
+      childEvidence: criterion.childEvidence.map(entry => ({
+        childIndex: entry.childIndex,
+        ...(entry.criterionId !== undefined ? { criterionId: entry.criterionId } : {}),
+        ...(entry.evidenceRef !== undefined ? { evidenceRef: entry.evidenceRef } : {}),
+      })),
+    } : {}),
+    ...(criterion.heuristic !== undefined ? { heuristic: criterion.heuristic } : {}),
   }))
 }
 
@@ -591,6 +630,7 @@ export class TaskRuntime extends Service {
         objective: child.objective,
         acceptanceCriteria: criteria[index]!,
         dependsOn: child.dependsOn,
+        ...(child.requiresIndependentAcceptance !== undefined ? { requiresIndependentAcceptance: child.requiresIndependentAcceptance } : {}),
       })),
       snapshot.edges,
     )
@@ -650,6 +690,7 @@ export class TaskRuntime extends Service {
       status: 'created',
       runIds: [],
       childTaskIds: [],
+      ...(child.requiresIndependentAcceptance === true ? { requiresIndependentAcceptance: true } : {}),
     }))
     const edges: DependencyEdge[] = spec.children.flatMap((child, to) =>
       (child.dependsOn ?? [] as readonly number[]).map((from: number) => ({ from: childTaskIds[from]!, to: childTaskIds[to]! })))
@@ -727,6 +768,17 @@ export class TaskRuntime extends Service {
     if (manifest.missing.length > 0) {
       throw new Error(`task-runtime: replay of "${championTaskId}" cannot run: capability gap [${manifest.missing.join(', ')}] under the overlay`)
     }
+    // The replay path shares the ordinary decomposition's admission rule (P4,
+    // contract 8): a parent-level declaration that would be refused on a
+    // decomposition is refused here too, before anything persists.
+    const acceptanceDefects = independentAcceptanceDefects(
+      contract.acceptanceCriteria,
+      champion.requiresIndependentAcceptance,
+      `replay of "${championTaskId}"`,
+    )
+    if (acceptanceDefects.length > 0) {
+      throw new Error(`task-runtime: replay of "${championTaskId}" rejected:\n- ${acceptanceDefects.join('\n- ')}`)
+    }
     this.assertKnownVerifierRefs(
       contract.acceptanceCriteria.map(criterion => ({ childIndex: 0, criterion })),
       `replay of "${championTaskId}"`,
@@ -742,6 +794,7 @@ export class TaskRuntime extends Service {
       status: 'created',
       runIds: [],
       childTaskIds: [],
+      ...(champion.requiresIndependentAcceptance === true ? { requiresIndependentAcceptance: true } : {}),
     }
     const spawn = options.spawn !== false
     let prompt: string | undefined

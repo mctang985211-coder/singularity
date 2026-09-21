@@ -1,6 +1,6 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { EvidenceBundle, RunId, TaskId, TaskInstance, VerificationMode, VerificationMode as VerificationMode$1, VerificationResult, VerificationResult as VerificationResult$1, Verifier, Verifier as Verifier$1, VerifierSelftest, VerifyRequest, VerifyRequest as VerifyRequest$1 } from "@dangosys/dsh-singularity-task";
+import { EvidenceBundle, RunId, TaskId, TaskInstance, TaskSnapshot, VerificationMode, VerificationMode as VerificationMode$1, VerificationResult, VerificationResult as VerificationResult$1, Verifier, Verifier as Verifier$1, VerifierSelftest, VerifyRequest, VerifyRequest as VerifyRequest$1 } from "@dangosys/dsh-singularity-task";
 
 //#region src/command-verifier.d.ts
 
@@ -29,12 +29,30 @@ declare class CommandVerifier implements Verifier$1 {
 /** The slice of the task service the composite verifier reads. */
 interface CompositeTaskSource {
   childrenIn(storeId: string, taskId: TaskId): Promise<TaskInstance[]>;
+  /**
+   * The full store snapshot. The plain conjunction needs only children, but a
+   * parent's {@link AcceptanceCriterion.childEvidence} map is judged against
+   * child evidence and run states, so the source exposes the snapshot too.
+   */
+  snapshotIn(storeId: string): Promise<TaskSnapshot>;
 }
 /**
- * Judges a composite criterion by child task status: pass iff the task has at
- * least one child and every child is verified. Reading children needs the
- * store id, which VerifyRequest does not carry, so the registry dispatches
- * through {@link verifyIn}; the plain `verify` stays inconclusive.
+ * Judges a composite criterion. The default is the child-status conjunction
+ * (pass iff the task has at least one child and every child is verified),
+ * unchanged for criteria that declare nothing.
+ *
+ * A criterion carrying a {@link AcceptanceCriterion.childEvidence} map is
+ * judged by the map as well: every entry must resolve against the store, and an
+ * incomplete mapping fails the criterion with the missing items named — the
+ * conjunction alone can never pass a parent whose root goal rests on evidence
+ * the children did not produce (KISS §6 C2). A criterion labeled
+ * {@link AcceptanceCriterion.heuristic} keeps the conjunction verdict but
+ * carries the explicit heuristic label in its details, so a natural-language
+ * coverage signal is never mistaken for a mechanical proof (KISS §5.1).
+ *
+ * Reading children and evidence needs the store id, which VerifyRequest does
+ * not carry, so the registry dispatches through {@link verifyIn}; the plain
+ * `verify` stays inconclusive.
  */
 declare class CompositeVerifier implements Verifier$1 {
   private readonly task;
@@ -54,6 +72,7 @@ declare class CompositeVerifier implements Verifier$1 {
   supports(mode: VerificationMode$1): boolean;
   verify(req: VerifyRequest$1): Promise<VerificationResult$1[]>;
   verifyIn(storeId: string, req: VerifyRequest$1): Promise<VerificationResult$1[]>;
+  private judge;
 }
 //#endregion
 //#region src/review-verifier.d.ts

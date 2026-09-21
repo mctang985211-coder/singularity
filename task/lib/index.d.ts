@@ -25,8 +25,24 @@ interface AcceptanceCriterion {
    * (non-empty strings); existence is judged at spawn time by the orchestrator,
    * which settles the child blocked — never spawned — and registers each
    * missing item as an Obligation.
+   *
+   * Since P4 the match is tightened to a **verified reference product**: the
+   * producing run must sit in the verified terminal state and its bundle must
+   * carry a passing verdict. A failed or still-running run's same-named product
+   * never satisfies the reference. A raw input that need only exist is declared
+   * with {@link acceptsArtifact} instead.
    */
   requiresArtifact?: string[];
+  /**
+   * Artifact or evidence references (kinds or ids) this criterion consumes as a
+   * **raw input** (KISS §5.1): existence in the task store is the whole
+   * requirement — any run state, verified or not. This is the pre-P4
+   * `requiresArtifact` semantics, kept as its own field so a reference that
+   * must have been verified ({@link requiresArtifact}) and one that merely must
+   * exist are never confused. Judged at spawn time, blocked + Obligation when
+   * missing, exactly like `requiresArtifact`.
+   */
+  acceptsArtifact?: string[];
   /**
    * The registered verifier id that judges this criterion (KISS §4.1
    * `verifier_ref`). Absent keeps the current behavior: dispatch by
@@ -36,6 +52,50 @@ interface AcceptanceCriterion {
    * the error naming the registered ids.
    */
   verifierRef?: string;
+  /**
+   * The parent-level evidence map (KISS §6 C2, minimal mechanical version):
+   * which child of this task — by position in its decomposition batch, the same
+   * index vocabulary `dependsOn` uses — this criterion rests on, optionally
+   * narrowed to one of the child's criteria and one evidence/artifact
+   * reference. The composite verifier judges every entry at parent-acceptance
+   * time against the store: the named child must be `verified`, the named
+   * criterion (when given) must carry a passing verdict in the child's verified
+   * run evidence, and the named reference (when given) must exist there. An
+   * incomplete mapping fails the criterion with the missing items named — the
+   * "all children verified" conjunction can never stand in for it.
+   *
+   * Absent (or empty) keeps the current composite behavior exactly. A non-empty
+   * map is judged only by the composite verifier, so admission requires
+   * `verificationMode: 'composite'` on the criterion that carries it — a
+   * declaration no judge reads would be a silent lie — and refuses the
+   * combination with `heuristic` (a heuristic judgement is never a mechanical
+   * check).
+   */
+  childEvidence?: ChildEvidenceRef[];
+  /**
+   * Marks this criterion's judgement as **heuristic** (KISS §5.1): the verdict
+   * is explicitly labeled as such wherever it is reported, and it is never
+   * counted as a deterministic pass — a natural-language coverage signal can
+   * inform a reader but cannot close the criterion mechanically. Mutually
+   * exclusive with {@link childEvidence} (admission refuses the combination).
+   */
+  heuristic?: boolean;
+}
+/**
+ * One entry of a parent criterion's evidence map ({@link
+ * AcceptanceCriterion.childEvidence}): a child of the decomposing task, named
+ * by its position in the decomposition batch — the only child identity that
+ * exists when the parent's criteria are authored, since child task ids are
+ * minted by the orchestrator at decomposition time. Existence of the mapping
+ * target is an acceptance-time question; admission validates the shape only.
+ */
+interface ChildEvidenceRef {
+  /** Position of the child in the parent's decomposition batch (0-based). */
+  childIndex: number;
+  /** The child criterion whose passing verdict is required; absent requires only the child's verified state. */
+  criterionId?: string;
+  /** The evidence id, artifact kind, or artifact id that must exist in the child's verified run evidence; absent requires only the child's evidence. */
+  evidenceRef?: string;
 }
 interface TaskDefinition {
   taskType: string;
@@ -66,6 +126,17 @@ interface TaskInstance {
   status: TaskStatus;
   runIds: RunId[];
   childTaskIds: TaskId[];
+  /**
+   * Contract-level marker (KISS §6 C2): this task's acceptance must be decided
+   * by its own criteria and evidence map, never by the composite "all children
+   * verified" conjunction alone. Admission refuses a creation or decomposition
+   * whose task carries the marker while none of its criteria carries a
+   * {@link AcceptanceCriterion.childEvidence} map — deleting or never writing
+   * the map can never silently degrade the task back to the conjunction.
+   * Absent on every task that predates the field; a stored task's criteria are
+   * immutable, so the marker is only ever set at creation time.
+   */
+  requiresIndependentAcceptance?: boolean;
 }
 interface DependencyEdge {
   from: TaskId;
@@ -833,4 +904,4 @@ declare class TaskService extends Service {
   private header;
 }
 //#endregion
-export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ContextEfficiencyFacts, DecompositionFacts, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootTaskSpec, RunId, RunStatus, SkillFitFacts, TaskDefinition, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifyRequest, reaches, rootTaskStoreId };
+export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionFacts, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootTaskSpec, RunId, RunStatus, SkillFitFacts, TaskDefinition, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifyRequest, reaches, rootTaskStoreId };

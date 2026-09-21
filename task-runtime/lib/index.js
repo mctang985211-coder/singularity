@@ -365,6 +365,41 @@ const EXECUTABLE_MODES = [
 	"measurement"
 ];
 /**
+* Structural reasons one task's parent-acceptance declarations are malformed
+* (P4, KISS §6 C2). Shape only: whether a mapping target exists is judged at
+* acceptance time, never here. The ordinary decomposition path and the replay
+* path share this function so both judge the same declarations the same way.
+*
+* `label` names the task under validation (`task "t-1"`, `child 0 ("c1")`,
+* `replay of "t-1"`); every reason is prefixed with it.
+*/
+function independentAcceptanceDefects(criteria, requiresIndependentAcceptance, label) {
+	const reasons = [];
+	for (const criterion of criteria) {
+		const where = `${label} criterion "${criterion.criterionId}"`;
+		if (criterion.acceptsArtifact !== void 0 && (!Array.isArray(criterion.acceptsArtifact) || criterion.acceptsArtifact.some((ref) => typeof ref !== "string" || ref.trim().length === 0))) reasons.push(`${where} acceptsArtifact must be an array of non-empty strings`);
+		if (criterion.heuristic !== void 0 && typeof criterion.heuristic !== "boolean") reasons.push(`${where} heuristic must be a boolean`);
+		const map = criterion.childEvidence;
+		if (map !== void 0) if (!Array.isArray(map)) reasons.push(`${where} childEvidence must be an array of entries`);
+		else {
+			map.forEach((entry, index) => {
+				const at = `${where} childEvidence entry ${index}`;
+				if (typeof entry !== "object" || entry === null) {
+					reasons.push(`${at} must be an object`);
+					return;
+				}
+				if (!Number.isInteger(entry.childIndex) || entry.childIndex < 0) reasons.push(`${at} childIndex must be a non-negative integer`);
+				if (entry.criterionId !== void 0 && (typeof entry.criterionId !== "string" || entry.criterionId.trim().length === 0)) reasons.push(`${at} criterionId must be a non-empty string`);
+				if (entry.evidenceRef !== void 0 && (typeof entry.evidenceRef !== "string" || entry.evidenceRef.trim().length === 0)) reasons.push(`${at} evidenceRef must be a non-empty string`);
+			});
+			if (map.length > 0 && criterion.verificationMode !== "composite") reasons.push(`${where} childEvidence requires verificationMode "composite" (the composite verifier is its only judge)`);
+			if (map.length > 0 && criterion.heuristic === true) reasons.push(`${where} cannot be both heuristic and carry a childEvidence map: a heuristic judgement is never a mechanical check`);
+		}
+	}
+	if (requiresIndependentAcceptance === true && !criteria.some((criterion) => (criterion.childEvidence?.length ?? 0) > 0)) reasons.push(`${label} requires independent parent acceptance but no acceptance criterion carries a childEvidence map (the composite conjunction alone cannot stand in for the root goal)`);
+	return reasons;
+}
+/**
 * Structural admission checks for one decomposition batch (RFC §36). Pure:
 * every rule is validated up front and the caller persists only when the
 * verdict is `ok`, so admission is atomic for the whole batch.
@@ -376,11 +411,13 @@ function checkDecomposition(parent, children, existingEdges) {
 	if (policy.maxDepth !== void 0 && parent.depth + 1 > policy.maxDepth) reasons.push(`task "${parent.taskId}" children would exceed maxDepth ${policy.maxDepth} (depth ${parent.depth + 1})`);
 	if (policy.maxChildren !== void 0 && children.length > policy.maxChildren) reasons.push(`task "${parent.taskId}" would have ${children.length} children, above maxChildren ${policy.maxChildren}`);
 	if (children.length === 0) reasons.push(`task "${parent.taskId}" decomposition requires at least one child`);
+	reasons.push(...independentAcceptanceDefects(parent.acceptanceCriteria, parent.requiresIndependentAcceptance, `task "${parent.taskId}"`));
 	const plannedEdges = [];
 	children.forEach((child, index) => {
 		const label = `child ${index} ("${child.taskId}")`;
 		if (child.objective.trim().length === 0) reasons.push(`${label} objective must be non-empty`);
 		if (child.acceptanceCriteria.length === 0) reasons.push(`${label} requires at least one acceptance criterion`);
+		reasons.push(...independentAcceptanceDefects(child.acceptanceCriteria, child.requiresIndependentAcceptance, label));
 		for (const criterion of child.acceptanceCriteria) {
 			if (EXECUTABLE_MODES.includes(criterion.verificationMode) && (criterion.command ?? "").trim().length === 0) reasons.push(`${label} criterion "${criterion.criterionId}" (${criterion.verificationMode}) requires a command`);
 			if (criterion.requiresArtifact !== void 0 && (!Array.isArray(criterion.requiresArtifact) || criterion.requiresArtifact.some((ref) => typeof ref !== "string" || ref.trim().length === 0))) reasons.push(`${label} criterion "${criterion.criterionId}" requiresArtifact must be an array of non-empty strings`);
@@ -599,6 +636,10 @@ function unknownTag(result) {
 function unmetMandatory(criteria, results) {
 	return criteria.filter((criterion) => criterion.mandatory).flatMap((criterion) => {
 		const result = results.find((item) => item.criterionId === criterion.criterionId);
+		if (criterion.heuristic === true) return [{
+			criterionId: criterion.criterionId,
+			detail: `heuristic judgement${result === void 0 ? "" : ` (verdict ${result.status})`} — explicitly labeled heuristic, not counted as a deterministic pass`
+		}];
 		if (result?.status === "pass") return [];
 		return [{
 			criterionId: criterion.criterionId,
@@ -610,17 +651,36 @@ function failureReason(unmet) {
 	return `mandatory criteria not satisfied: ${unmet.map((item) => `${item.criterionId} ${item.detail}`).join(", ")}`;
 }
 /**
-* The `requiresArtifact` references (per criterion) that no store evidence
-* satisfies yet. A reference matches an evidence id, an artifact kind, or an
-* artifact id — the three spellings a contract can name a product by. Judged at
-* spawn time, never at admission: existence needs the store snapshot.
+* The artifact references (per criterion) that no store evidence satisfies yet.
+* A reference matches an evidence id, an artifact kind, or an artifact id — the
+* three spellings a contract can name a product by. Judged at spawn time, never
+* at admission: existence needs the store snapshot.
+*
+* The two declarations differ in what "satisfied" means (P4, KISS §5.1):
+* `requiresArtifact` names a **verified reference product** — the producing run
+* must sit in the verified terminal state and its bundle must carry a passing
+* verdict, so a failed or still-running run's same-named product never closes
+* the gap — while `acceptsArtifact` names a **raw input** whose mere existence
+* in the store is the requirement.
 */
 function missingRequiredArtifacts(criteria, snapshot) {
-	const available = new Set(snapshot.evidence.flatMap((item) => [item.evidenceId, ...item.artifacts.flatMap((artifact) => [artifact.kind, artifact.artifactId])]));
-	return criteria.flatMap((criterion) => (criterion.requiresArtifact ?? []).filter((ref) => !available.has(ref)).map((ref) => ({
+	const present = /* @__PURE__ */ new Set();
+	const verified = /* @__PURE__ */ new Set();
+	for (const item of snapshot.evidence) {
+		const run = snapshot.runs.find((candidate) => candidate.runId === item.taskRunId);
+		const refs = [item.evidenceId, ...item.artifacts.flatMap((artifact) => [artifact.kind, artifact.artifactId])];
+		for (const ref of refs) present.add(ref);
+		if (run?.status === "verified" && item.verifierResults.some((result) => result.status === "pass")) for (const ref of refs) verified.add(ref);
+	}
+	return criteria.flatMap((criterion) => [...(criterion.requiresArtifact ?? []).filter((ref) => !verified.has(ref)).map((ref) => ({
 		criterionId: criterion.criterionId,
-		ref
-	})));
+		ref,
+		requirement: "requires"
+	})), ...(criterion.acceptsArtifact ?? []).filter((ref) => !present.has(ref)).map((ref) => ({
+		criterionId: criterion.criterionId,
+		ref,
+		requirement: "accepts"
+	}))]);
 }
 /**
 * The authorization one admitted child runs under, built from its manifest:
@@ -1028,18 +1088,21 @@ async function runChildrenCascade(env, storeId, parentTask, parentRun, plans, re
 		const dependencyTaskIds = plan.dependsOn.map((dependency) => plans[dependency].task.taskId);
 		const missingArtifacts = missingRequiredArtifacts(plan.task.acceptanceCriteria, snapshot);
 		if (missingArtifacts.length > 0) {
-			const reason$1 = `missing required artifacts: ${missingArtifacts.map((item) => `${item.ref} (criterion ${item.criterionId})`).join(", ")}`;
+			const reason$1 = `missing required artifacts: ${missingArtifacts.map((item) => `${item.ref} (criterion ${item.criterionId}${item.requirement === "accepts" ? "; raw input, any run state" : ""})`).join(", ")}`;
 			await env.task.markRunStatusIn(storeId, childTaskId, void 0, "blocked", env.actor, { reason: reason$1 });
 			await recordReview(childTaskId, "blocked", {
 				anomalies: [reason$1],
 				relatedTaskIds: dependencyTaskIds
 			});
-			for (const item of missingArtifacts) await env.task.recordObligationIn(storeId, {
-				obligationId: `o-${randomUUID()}`,
-				goal: `artifact/evidence "${item.ref}" required by task "${childTaskId}" criterion ${item.criterionId} does not exist in the task store`,
-				criterion: `the task store holds evidence or an artifact named "${item.ref}" (evidence id, artifact kind, or artifact id)`,
-				sourceTaskId: childTaskId
-			}, env.actor);
+			for (const item of missingArtifacts) {
+				const verified$1 = item.requirement === "requires";
+				await env.task.recordObligationIn(storeId, {
+					obligationId: `o-${randomUUID()}`,
+					goal: `artifact/evidence "${item.ref}" required by task "${childTaskId}" criterion ${item.criterionId} does not exist in the task store${verified$1 ? " as a verified reference product" : ""}`,
+					criterion: verified$1 ? `the task store holds evidence or an artifact named "${item.ref}" (evidence id, artifact kind, or artifact id) produced by a verified run carrying a passing verdict` : `the task store holds evidence or an artifact named "${item.ref}" (evidence id, artifact kind, or artifact id)`,
+					sourceTaskId: childTaskId
+				}, env.actor);
+			}
 			outcomes[index] = {
 				taskId: childTaskId,
 				status: "blocked"
@@ -1754,7 +1817,14 @@ function normalizeCriteria(criteria, childIndex) {
 		mandatory: criterion.mandatory ?? true,
 		...criterion.command !== void 0 ? { command: criterion.command } : {},
 		...criterion.requiresArtifact !== void 0 ? { requiresArtifact: [...criterion.requiresArtifact] } : {},
-		...criterion.verifierRef !== void 0 ? { verifierRef: criterion.verifierRef } : {}
+		...criterion.acceptsArtifact !== void 0 ? { acceptsArtifact: [...criterion.acceptsArtifact] } : {},
+		...criterion.verifierRef !== void 0 ? { verifierRef: criterion.verifierRef } : {},
+		...criterion.childEvidence !== void 0 ? { childEvidence: criterion.childEvidence.map((entry) => ({
+			childIndex: entry.childIndex,
+			...entry.criterionId !== void 0 ? { criterionId: entry.criterionId } : {},
+			...entry.evidenceRef !== void 0 ? { evidenceRef: entry.evidenceRef } : {}
+		})) } : {},
+		...criterion.heuristic !== void 0 ? { heuristic: criterion.heuristic } : {}
 	}));
 }
 var TaskRuntime = class extends Service {
@@ -1925,7 +1995,8 @@ var TaskRuntime = class extends Service {
 			taskId: childTaskIds[index],
 			objective: child.objective,
 			acceptanceCriteria: criteria[index],
-			dependsOn: child.dependsOn
+			dependsOn: child.dependsOn,
+			...child.requiresIndependentAcceptance !== void 0 ? { requiresIndependentAcceptance: child.requiresIndependentAcceptance } : {}
 		})), snapshot.edges);
 		if (!verdict.ok) throw new Error(`task-runtime: admission rejected decomposition of "${parentTaskId}":\n- ${verdict.reasons.join("\n- ")}`);
 		const manifests = spec.children.map((child) => this.resolveCapabilities(child.requiredCapabilities ?? []));
@@ -1963,7 +2034,8 @@ var TaskRuntime = class extends Service {
 			decompositionStatus: child.decomposable === true || manifests[index].missing.length > 0 ? "decomposable" : "leaf",
 			status: "created",
 			runIds: [],
-			childTaskIds: []
+			childTaskIds: [],
+			...child.requiresIndependentAcceptance === true ? { requiresIndependentAcceptance: true } : {}
 		}));
 		const edges = spec.children.flatMap((child, to) => (child.dependsOn ?? []).map((from) => ({
 			from: childTaskIds[from],
@@ -2027,6 +2099,8 @@ var TaskRuntime = class extends Service {
 		};
 		const manifest = resolveCapabilities(contract.requiredCapabilities, table);
 		if (manifest.missing.length > 0) throw new Error(`task-runtime: replay of "${championTaskId}" cannot run: capability gap [${manifest.missing.join(", ")}] under the overlay`);
+		const acceptanceDefects = independentAcceptanceDefects(contract.acceptanceCriteria, champion.requiresIndependentAcceptance, `replay of "${championTaskId}"`);
+		if (acceptanceDefects.length > 0) throw new Error(`task-runtime: replay of "${championTaskId}" rejected:\n- ${acceptanceDefects.join("\n- ")}`);
 		this.assertKnownVerifierRefs(contract.acceptanceCriteria.map((criterion) => ({
 			childIndex: 0,
 			criterion
@@ -2044,7 +2118,8 @@ var TaskRuntime = class extends Service {
 			decompositionStatus: "leaf",
 			status: "created",
 			runIds: [],
-			childTaskIds: []
+			childTaskIds: [],
+			...champion.requiresIndependentAcceptance === true ? { requiresIndependentAcceptance: true } : {}
 		};
 		const spawn = options.spawn !== false;
 		let prompt;
@@ -2323,4 +2398,4 @@ var TaskRuntime = class extends Service {
 var src_default = TaskRuntime;
 
 //#endregion
-export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, MCP_SERVER_REGISTRY, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, buildHandoff, checkDecomposition, checkObligationCoverage, src_default as default, escalationHint, findRepoRoot, loadObligationTemplates, manifestMcpServers, parseObligationTemplates, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };
+export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, MCP_SERVER_REGISTRY, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, buildHandoff, checkDecomposition, checkObligationCoverage, src_default as default, escalationHint, findRepoRoot, independentAcceptanceDefects, loadObligationTemplates, manifestMcpServers, parseObligationTemplates, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };

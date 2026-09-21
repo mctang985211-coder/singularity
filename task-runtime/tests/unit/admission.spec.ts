@@ -232,3 +232,114 @@ describe('checkDecomposition', () => {
     if (!verdict.ok) expect(verdict.reasons.length).toBeGreaterThanOrEqual(2)
   })
 })
+
+describe('checkDecomposition parent acceptance declarations (P4, KISS §6 C2)', () => {
+  test('accepts a well-formed childEvidence map and acceptsArtifact, shape only', () => {
+    const verdict = checkDecomposition(parent(), [
+      child({ acceptanceCriteria: [criterion({
+        verificationMode: 'composite',
+        command: undefined,
+        childEvidence: [{ childIndex: 0, criterionId: 'ac1-1' }, { childIndex: 1, evidenceRef: 'bemu_trace' }],
+      })] }),
+      child({ taskId: 'c2', acceptanceCriteria: [criterion({ criterionId: 'ac2-1', acceptsArtifact: ['bemu_trace'] })] }),
+    ], [])
+    expect(verdict).toEqual({ ok: true })
+  })
+
+  test('rejects malformed childEvidence entries, naming the entry', () => {
+    const cases: Array<[string, unknown]> = [
+      ['not an array', 'ac1-1'],
+      ['a non-object entry', [42]],
+      ['a negative childIndex', [{ childIndex: -1 }]],
+      ['a fractional childIndex', [{ childIndex: 0.5 }]],
+      ['a non-integer childIndex', [{ childIndex: '0' }]],
+      ['an empty criterionId', [{ childIndex: 0, criterionId: '  ' }]],
+      ['an empty evidenceRef', [{ childIndex: 0, evidenceRef: '' }]],
+    ]
+    for (const [label, childEvidence] of cases) {
+      const verdict = checkDecomposition(parent(), [
+        child({ acceptanceCriteria: [criterion({ childEvidence: childEvidence as never })] }),
+      ], [])
+      expect(verdict.ok, label).toBe(false)
+      if (!verdict.ok) expect(verdict.reasons.join('\n'), label).toMatch(/childEvidence/)
+    }
+  })
+
+  test('rejects a malformed acceptsArtifact declaration', () => {
+    const verdict = checkDecomposition(parent(), [
+      child({ acceptanceCriteria: [criterion({ acceptsArtifact: ['bemu_trace', ''] })] }),
+    ], [])
+    expect(verdict.ok).toBe(false)
+    if (!verdict.ok) expect(verdict.reasons.join('\n')).toMatch(/acceptsArtifact must be an array of non-empty strings/)
+  })
+
+  test('rejects a malformed heuristic flag', () => {
+    const verdict = checkDecomposition(parent(), [
+      child({ acceptanceCriteria: [criterion({ heuristic: 'yes' as never })] }),
+    ], [])
+    expect(verdict.ok).toBe(false)
+    if (!verdict.ok) expect(verdict.reasons.join('\n')).toMatch(/heuristic must be a boolean/)
+  })
+
+  test('rejects a criterion that is both a heuristic judgement and carries a map', () => {
+    const verdict = checkDecomposition(parent(), [
+      child({ acceptanceCriteria: [criterion({ heuristic: true, childEvidence: [{ childIndex: 0 }] })] }),
+    ], [])
+    expect(verdict.ok).toBe(false)
+    if (!verdict.ok) expect(verdict.reasons.join('\n')).toMatch(/cannot be both heuristic and carry a childEvidence map/)
+  })
+
+  test('P4-E: a child requiring independent acceptance without a map is refused, naming the rule', () => {
+    const verdict = checkDecomposition(parent(), [
+      child({ requiresIndependentAcceptance: true, acceptanceCriteria: [criterion()] }),
+    ], [])
+    expect(verdict.ok).toBe(false)
+    if (!verdict.ok) {
+      const reasons = verdict.reasons.join('\n')
+      expect(reasons).toMatch(/requires independent parent acceptance/)
+      expect(reasons).toMatch(/no acceptance criterion carries a childEvidence map/)
+    }
+  })
+
+  test('P4-E: a deleted (empty) map is refused the same way — no silent degradation to the conjunction', () => {
+    const verdict = checkDecomposition(parent(), [
+      child({ requiresIndependentAcceptance: true, acceptanceCriteria: [criterion({ childEvidence: [] })] }),
+    ], [])
+    expect(verdict.ok).toBe(false)
+    if (!verdict.ok) expect(verdict.reasons.join('\n')).toMatch(/no acceptance criterion carries a childEvidence map/)
+  })
+
+  test('P4-E: a child requiring independent acceptance with a map is admitted', () => {
+    const verdict = checkDecomposition(parent(), [
+      child({
+        requiresIndependentAcceptance: true,
+        acceptanceCriteria: [criterion({ verificationMode: 'composite', command: undefined, childEvidence: [{ childIndex: 0 }] })],
+      }),
+    ], [])
+    expect(verdict).toEqual({ ok: true })
+  })
+
+  test('P4-E: a parent requiring independent acceptance without a map is refused too', () => {
+    const verdict = checkDecomposition(
+      parent({ requiresIndependentAcceptance: true }),
+      [child()],
+      [],
+    )
+    expect(verdict.ok).toBe(false)
+    if (!verdict.ok) {
+      const reasons = verdict.reasons.join('\n')
+      expect(reasons).toMatch(/task "root" requires independent parent acceptance/)
+      expect(reasons).toMatch(/no acceptance criterion carries a childEvidence map/)
+    }
+  })
+
+  test('a parent whose own criteria carry a malformed map is refused before anything persists', () => {
+    const verdict = checkDecomposition(
+      parent({ acceptanceCriteria: [criterion({ criterionId: 'root-1', verificationMode: 'composite', command: undefined, childEvidence: [{ childIndex: 'x' as never }] })] }),
+      [child()],
+      [],
+    )
+    expect(verdict.ok).toBe(false)
+    if (!verdict.ok) expect(verdict.reasons.join('\n')).toMatch(/task "root" criterion "root-1" childEvidence/)
+  })
+})

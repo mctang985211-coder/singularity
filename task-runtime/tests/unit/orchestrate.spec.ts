@@ -1,7 +1,8 @@
 import { describe, expect, test, vi } from 'vitest'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
-import type { EvidenceBundle, TaskEvent, VerificationResult } from '../../../task/src/index.ts'
+import type { AcceptanceCriterion, EvidenceBundle, TaskEvent, TaskInstance, TaskRun, VerificationResult } from '../../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
+import { CompositeVerifier } from '../../../verifier/src/composite-verifier.ts'
 import type { Config, DecomposeSpec, ChildOutcome } from '../../src/index.ts'
 import {
   DEFAULT_ALLOW_RUNTIME_DECOMPOSITION,
@@ -49,7 +50,7 @@ interface SpawnCall {
   }
 }
 
-function harness(options: { config?: Partial<Config>; verifier?: 'pass' | 'by-objective' | 'timeout' | 'absent'; spawnError?: string } = {}) {
+function harness(options: { config?: Partial<Config>; verifier?: 'pass' | 'by-objective' | 'timeout' | 'absent' | 'real-composite'; spawnError?: string } = {}) {
   const sessions = new Map<string, StoredSession>()
   const disposers: Array<() => unknown> = []
   const persistence = {
@@ -133,11 +134,24 @@ function harness(options: { config?: Partial<Config>; verifier?: 'pass' | 'by-ob
       const instance = await taskService.taskIn(storeId, run.taskId)
       const verdict: VerificationResult['status'] =
         options.verifier === 'by-objective' && instance.objective.includes('fail-me') ? 'fail' : 'pass'
-      const verifierResults: VerificationResult[] = instance.acceptanceCriteria.map(criterion => ({
-        criterionId: criterion.criterionId,
-        status: verdict,
-        verifierId: 'fake-verifier',
-      }))
+      // The `real-composite` mode routes composite-mode criteria to the real
+      // CompositeVerifier against the real store, so a parent's childEvidence
+      // map is judged by the code that ships, not by a stand-in.
+      const verifierResults: VerificationResult[] = []
+      for (const criterion of instance.acceptanceCriteria) {
+        if (options.verifier === 'real-composite' && criterion.verificationMode === 'composite') {
+          const [compositeResult] = await new CompositeVerifier(taskService).verifyIn(storeId, {
+            taskId: instance.taskId,
+            runId,
+            criteria: [criterion],
+            cwd: '/unused',
+            logDir: '/unused',
+          })
+          verifierResults.push(compositeResult!)
+        } else {
+          verifierResults.push({ criterionId: criterion.criterionId, status: verdict, verifierId: 'fake-verifier' })
+        }
+      }
       const bundle: EvidenceBundle = {
         evidenceId: `e-${runId}`,
         taskRunId: runId,
@@ -260,6 +274,104 @@ async function settleRunNested(
     ...(verdict === 'fail' ? { localizedCause: 'nested verdict' } : {}),
   }, actor)
   return evidenceId
+}
+
+/**
+ * Seed one upstream product the way the store records it: a producer task's
+ * run carrying evidence with the artifact, settled terminal. After P4 a
+ * `requiresArtifact` reference is satisfied only by the `verified` outcome —
+ * the `failed` outcome's same-named product is an expired reference, and a raw
+ * input that merely exists is declared with `acceptsArtifact` instead.
+ */
+async function seedProducer(
+  h: Harness,
+  options: { outcome: 'verified' | 'failed'; kind: string; artifactId?: string },
+): Promise<{ taskId: string; runId: string }> {
+  const taskId = `t-producer-${options.outcome}`
+  const runId = `r-producer-${options.outcome}`
+  const status: VerificationResult['status'] = options.outcome === 'verified' ? 'pass' : 'fail'
+  await h.task.createTaskIn(STORE, {
+    taskId,
+    definitionRef: { taskType: 'producer', version: 1 },
+    objective: 'produce the reference product',
+    depth: 0,
+    acceptanceCriteria: [{
+      criterionId: 'producer-1',
+      description: 'the product exists',
+      verificationMode: 'deterministic',
+      requiredEvidence: [],
+      mandatory: true,
+      command: 'true',
+    }],
+    requestedCapabilities: [],
+    decompositionStatus: 'leaf',
+    status: 'created',
+    runIds: [],
+    childTaskIds: [],
+  }, 'tester')
+  await h.task.admitTaskIn(STORE, taskId, 'tester', { decompositionStatus: 'leaf' })
+  await h.task.startRunIn(STORE, {
+    runId,
+    taskId,
+    sessionId: 's-producer',
+    capabilitySnapshot: [],
+    artifacts: [],
+    verifierResults: [],
+    status: 'running',
+    startedAt: new Date().toISOString(),
+  }, 'tester')
+  await h.task.markRunStatusIn(STORE, taskId, runId, 'verifying', 'tester')
+  await h.task.recordEvidenceIn(STORE, {
+    evidenceId: `e-${runId}`,
+    taskRunId: runId,
+    taskId,
+    artifacts: [{ artifactId: options.artifactId ?? `a-${options.kind}`, kind: options.kind, uri: `products/${options.kind}.jsonl` }],
+    verifierResults: [{ criterionId: 'producer-1', status, verifierId: 'fake-verifier' }],
+    claims: [{ claimId: `claim-${options.kind}`, criterionId: 'producer-1', status, verifierId: 'fake-verifier', artifactRefs: [] }],
+    generatedAt: new Date().toISOString(),
+  }, 'tester')
+  await h.task.markRunStatusIn(STORE, taskId, runId, options.outcome, 'tester',
+    options.outcome === 'failed' ? { reason: 'the producer failed' } : {})
+  return { taskId, runId }
+}
+
+/**
+ * A parent task authored directly in the store with caller-chosen acceptance
+ * criteria — the shape a parent-level evidence map arrives on, since
+ * `createRootTask` expands the fixed RootTaskSpec and a stored task's criteria
+ * are immutable. Returns the ids the cascade then runs under.
+ */
+async function createAcceptanceParent(
+  h: Harness,
+  acceptanceCriteria: AcceptanceCriterion[],
+): Promise<{ taskId: string; runId: string }> {
+  await h.task.createStore(STORE)
+  const taskId = 't-parent'
+  const runId = 'r-parent'
+  await h.task.createTaskIn(STORE, {
+    taskId,
+    definitionRef: { taskType: 'root', version: 1 },
+    objective: 'prove the combination, not only the parts',
+    depth: 0,
+    acceptanceCriteria,
+    requestedCapabilities: [],
+    decompositionStatus: 'decomposable',
+    status: 'created',
+    runIds: [],
+    childTaskIds: [],
+  }, 'tester')
+  await h.task.admitTaskIn(STORE, taskId, 'tester', { decompositionStatus: 'decomposable' })
+  await h.task.startRunIn(STORE, {
+    runId,
+    taskId,
+    sessionId: ROOT_SESSION,
+    capabilitySnapshot: [],
+    artifacts: [],
+    verifierResults: [],
+    status: 'running',
+    startedAt: new Date().toISOString(),
+  }, 'tester')
+  return { taskId, runId }
 }
 
 /**
@@ -499,20 +611,14 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect((await h.task.runIn(STORE, rootRunId)).status).toBe('verified')
   })
 
-  test('a required artifact already in the store lets the child run — the stage is legitimately skipped', async () => {
+  test('P4-C: a required artifact from a verified run lets the child run — the stage is legitimately skipped', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    // An upstream product already exists (KISS §5.1): seed the store with
-    // evidence carrying the artifact kind before the cascade starts.
-    await h.task.recordEvidenceIn(STORE, {
-      evidenceId: 'e-golden',
-      taskRunId: rootRunId,
-      taskId: rootTaskId,
-      artifacts: [{ artifactId: 'a-trace', kind: 'bemu_trace', uri: 'traces/bemu.jsonl' }],
-      verifierResults: [],
-      claims: [],
-      generatedAt: new Date().toISOString(),
-    }, 'tester')
+    // An upstream product already exists (KISS §5.1): a producer task's
+    // verified run recorded evidence carrying the artifact kind before the
+    // cascade starts. A `requiresArtifact` reference is a verified reference
+    // product, so the producing run's terminal state is part of the match.
+    await seedProducer(h, { outcome: 'verified', kind: 'bemu_trace' })
 
     const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
@@ -1436,6 +1542,189 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   })
 })
 
+
+describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
+  test('P4-A: a parent AC with a complete childEvidence map verifies once every child verified', async () => {
+    const h = harness({ verifier: 'real-composite' })
+    const { taskId, runId } = await createAcceptanceParent(h, [{
+      criterionId: 'root-combination',
+      description: 'the children together prove the root goal',
+      verificationMode: 'composite',
+      requiredEvidence: [],
+      mandatory: true,
+      childEvidence: [{ childIndex: 0, criterionId: 'ac1-1' }, { childIndex: 1 }],
+    }])
+
+    const outcomes = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('child a'), childSpec('child b')],
+    })
+
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
+    expect((await h.task.taskIn(STORE, taskId)).status).toBe('verified')
+    expect((await h.task.runIn(STORE, runId)).status).toBe('verified')
+  })
+
+  test('P4-B: a map pointing at a criterion no child has fails the parent, naming the missing item', async () => {
+    const h = harness({ verifier: 'real-composite' })
+    const { taskId, runId } = await createAcceptanceParent(h, [{
+      criterionId: 'root-combination',
+      description: 'the children together prove the root goal',
+      verificationMode: 'composite',
+      requiredEvidence: [],
+      mandatory: true,
+      childEvidence: [{ childIndex: 0, criterionId: 'ac1-9' }],
+    }])
+
+    const outcomes = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('child a'), childSpec('child b')],
+    })
+
+    // Every child verified — the conjunction alone would have passed the parent.
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
+    expect((await h.task.taskIn(STORE, taskId)).status).toBe('failed')
+    const failed = taskEvents(h).find(item => item.kind === 'TaskFailed' && item.taskId === taskId)
+    const reason = failed?.kind === 'TaskFailed' ? failed.payload.reason : undefined
+    expect(reason).toContain('root-combination')
+    expect(reason).toContain('ac1-9')
+  })
+
+  test('P4-C: a same-named product from a failed run does not satisfy requiresArtifact', async () => {
+    const h = harness()
+    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    await seedProducer(h, { outcome: 'failed', kind: 'bemu_trace' })
+
+    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('rtl implementation', {
+        acceptanceCriteria: [{
+          description: 'cycle-equivalent to the reference on N workloads',
+          command: 'true',
+          requiresArtifact: ['bemu_trace'],
+        }],
+      })],
+    })
+
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['blocked'])
+    expect(outcomes[0]!.runId).toBeUndefined()
+    expect(h.spawned).toHaveLength(0)
+    const blocked = taskEvents(h).find(item => item.kind === 'TaskBlocked' && item.taskId === outcomes[0]!.taskId)
+    expect(blocked?.kind === 'TaskBlocked' ? blocked.payload.reason : undefined)
+      .toBe('missing required artifacts: bemu_trace (criterion ac1-1)')
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.obligations).toHaveLength(1)
+    expect(snapshot.obligations[0]!.goal).toContain('"bemu_trace"')
+    expect(snapshot.obligations[0]!.criterion).toContain('verified run')
+  })
+
+  test('P4-C: acceptsArtifact names a raw input — a product from any run state satisfies it', async () => {
+    const h = harness()
+    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    await seedProducer(h, { outcome: 'failed', kind: 'bemu_trace' })
+
+    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [
+        childSpec('rtl implementation', {
+          acceptanceCriteria: [{
+            description: 'consumes the golden trace as a raw input',
+            command: 'true',
+            acceptsArtifact: ['bemu_trace'],
+          }],
+        }),
+        // The raw-input expression is still an existence check: a reference no
+        // run ever produced blocks the same way a missing one always did.
+        childSpec('dependent consumer', {
+          acceptanceCriteria: [{
+            description: 'consumes a trace nobody produced',
+            command: 'true',
+            acceptsArtifact: ['absent_trace'],
+          }],
+        }),
+      ],
+    })
+
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'blocked'])
+    expect(h.spawned).toHaveLength(1)
+    const blocked = taskEvents(h).find(item => item.kind === 'TaskBlocked' && item.taskId === outcomes[1]!.taskId)
+    expect(blocked?.kind === 'TaskBlocked' ? blocked.payload.reason : undefined)
+      .toBe('missing required artifacts: absent_trace (criterion ac2-1; raw input, any run state)')
+  })
+
+  test('P4-D: a heuristic criterion is not counted as a deterministic pass even when the verdict is pass', async () => {
+    const h = harness()
+    const { taskId, runId } = await createAcceptanceParent(h, [{
+      criterionId: 'root-heuristic',
+      description: 'the combination reads as correct to a reviewer',
+      verificationMode: 'composite',
+      requiredEvidence: [],
+      mandatory: true,
+      heuristic: true,
+    }])
+
+    const outcomes = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('child a')],
+    })
+
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
+    // The child verified and the harness verifier passed the parent's
+    // criterion; the heuristic label is the only thing standing between that
+    // verdict and a deterministic pass — and it holds.
+    expect((await h.task.taskIn(STORE, taskId)).status).toBe('failed')
+    const failed = taskEvents(h).find(item => item.kind === 'TaskFailed' && item.taskId === taskId)
+    const reason = failed?.kind === 'TaskFailed' ? failed.payload.reason : undefined
+    expect(reason).toContain('root-heuristic')
+    expect(reason).toContain('heuristic')
+  })
+
+  test('P4-D: the same parent without the heuristic label verifies — the default is unchanged', async () => {
+    const h = harness()
+    const { taskId, runId } = await createAcceptanceParent(h, [{
+      criterionId: 'root-combination',
+      description: 'all mandatory children verified',
+      verificationMode: 'composite',
+      requiredEvidence: [],
+      mandatory: true,
+    }])
+
+    await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('child a')],
+    })
+
+    expect((await h.task.taskIn(STORE, taskId)).status).toBe('verified')
+  })
+
+  test('P4-E: a child requiring independent acceptance without a map is refused at admission and persists nothing', async () => {
+    const h = harness()
+    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('child a', { requiresIndependentAcceptance: true })],
+    })).rejects.toThrow(/requires independent parent acceptance/)
+
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.tasks).toHaveLength(1)
+    expect(h.spawned).toHaveLength(0)
+  })
+
+  test('P4-E: a tampered (malformed) childEvidence map is refused at admission and persists nothing', async () => {
+    const h = harness()
+    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('child a', {
+        acceptanceCriteria: [{ description: 'the child works', command: 'true', childEvidence: [{ childIndex: -1 }] }],
+      })],
+    })).rejects.toThrow(/childEvidence/)
+
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.tasks).toHaveLength(1)
+    expect(h.spawned).toHaveLength(0)
+  })
+})
 
 describe('TaskRuntime budget (KISS §5, VRTC plan 1.3)', () => {
   test('an unconfigured deployment resolves the shipped budget and no-progress defaults', () => {

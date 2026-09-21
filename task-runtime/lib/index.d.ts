@@ -1,6 +1,6 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { AcceptanceCriterion, ArtifactRef, CapabilityManifest, DependencyEdge, EvidenceBundle, ReviewCriterion, ReviewTokenUsage, ReviewToolCall, RunId, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskSnapshot, VerificationMode } from "@dangosys/dsh-singularity-task";
+import { AcceptanceCriterion, ArtifactRef, CapabilityManifest, ChildEvidenceRef, DependencyEdge, EvidenceBundle, ReviewCriterion, ReviewTokenUsage, ReviewToolCall, RunId, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskSnapshot, VerificationMode } from "@dangosys/dsh-singularity-task";
 import { AgentHandle } from "@deepseek-ai/dsh-agent";
 import { McpServerSpec, WorkerGrant } from "@dangosys/dsh-singularity-agent-runtime";
 
@@ -483,6 +483,8 @@ interface AdmissionChild {
   objective: string;
   acceptanceCriteria: readonly AcceptanceCriterion[];
   dependsOn?: readonly number[];
+  /** Contract-level marker (P4): this child demands independent parent acceptance, so at least one of its criteria must carry a `childEvidence` map. */
+  requiresIndependentAcceptance?: boolean;
 }
 type AdmissionVerdict = {
   ok: true;
@@ -490,6 +492,16 @@ type AdmissionVerdict = {
   ok: false;
   reasons: string[];
 };
+/**
+ * Structural reasons one task's parent-acceptance declarations are malformed
+ * (P4, KISS §6 C2). Shape only: whether a mapping target exists is judged at
+ * acceptance time, never here. The ordinary decomposition path and the replay
+ * path share this function so both judge the same declarations the same way.
+ *
+ * `label` names the task under validation (`task "t-1"`, `child 0 ("c1")`,
+ * `replay of "t-1"`); every reason is prefixed with it.
+ */
+declare function independentAcceptanceDefects(criteria: readonly AcceptanceCriterion[], requiresIndependentAcceptance: boolean | undefined, label: string): string[];
 /**
  * Structural admission checks for one decomposition batch (RFC §36). Pure:
  * every rule is validated up front and the caller persists only when the
@@ -629,12 +641,20 @@ interface CriterionSpec {
   requiredEvidence?: string[];
   /**
    * Evidence dependencies (KISS §5.1): artifact/evidence kinds or ids that must
-   * exist in the store before this criterion can be judged. Admission checks
-   * the shape only; the orchestrator judges existence at spawn time and a
-   * missing reference settles the child blocked, with the gap registered as an
-   * obligation.
+   * exist in the store before this criterion can be judged. Since P4 this
+   * declaration names a **verified reference product** — the producing run must
+   * be verified and carry a passing verdict. Admission checks the shape only;
+   * the orchestrator judges existence at spawn time and a missing reference
+   * settles the child blocked, with the gap registered as an obligation.
    */
   requiresArtifact?: string[];
+  /**
+   * Raw-input counterpart of `requiresArtifact` (P4): artifact/evidence kinds
+   * or ids this criterion consumes, where mere existence in the store is the
+   * whole requirement — any run state. Judged at spawn time exactly like
+   * `requiresArtifact`.
+   */
+  acceptsArtifact?: string[];
   /**
    * The registered verifier id that judges this criterion (KISS §4.1
    * `verifier_ref`). Absent dispatches by mode (the current behavior);
@@ -643,6 +663,20 @@ interface CriterionSpec {
    * registered id.
    */
   verifierRef?: string;
+  /**
+   * The parent-level evidence map (KISS §6 C2, P4): which child of the
+   * decomposing task this criterion rests on, by batch position, optionally
+   * narrowed to a child criterion and an evidence reference. Requires mode
+   * `composite`; judged at parent-acceptance time against the store. Absent
+   * keeps the composite conjunction as the whole verdict.
+   */
+  childEvidence?: ChildEvidenceRef[];
+  /**
+   * Labels this criterion's judgement heuristic (KISS §5.1, P4): the verdict is
+   * marked as such and never counted as a deterministic pass. Mutually
+   * exclusive with `childEvidence`.
+   */
+  heuristic?: boolean;
 }
 interface DecomposeChildSpec {
   objective: string;
@@ -663,6 +697,13 @@ interface DecomposeChildSpec {
    * what makes a child with no gap decomposable.
    */
   decomposable?: boolean;
+  /**
+   * Contract-level marker (P4, KISS §6 C2): this child demands independent
+   * parent acceptance — its own criteria must carry a `childEvidence` map, or
+   * admission refuses the batch. Deleting the map can never silently degrade
+   * the task back to the composite conjunction.
+   */
+  requiresIndependentAcceptance?: boolean;
 }
 interface DecomposeSpec {
   children: readonly DecomposeChildSpec[];
@@ -924,4 +965,4 @@ declare class TaskRuntime extends Service {
   private liveAgent;
 }
 //#endregion
-export { type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BudgetConfig, type CapabilityConfig, type ChildOutcome, type ChildPlan, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DecomposeChildSpec, DecomposeSpec, type HandoffInit, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type PermissionSpec, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, ReplayTaskOptions, RunVerifier, type SessionObservation, type SpawnChildRequest, TOOL_LABELS, TaskRuntime, TaskRuntime as default, VerifierUnavailableError, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, type WorkerPromptOptions, buildHandoff, checkDecomposition, checkObligationCoverage, escalationHint, findRepoRoot, loadObligationTemplates, manifestMcpServers, parseObligationTemplates, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };
+export { type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BudgetConfig, type CapabilityConfig, type ChildOutcome, type ChildPlan, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DecomposeChildSpec, DecomposeSpec, type HandoffInit, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type PermissionSpec, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, ReplayTaskOptions, RunVerifier, type SessionObservation, type SpawnChildRequest, TOOL_LABELS, TaskRuntime, TaskRuntime as default, VerifierUnavailableError, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, type WorkerPromptOptions, buildHandoff, checkDecomposition, checkObligationCoverage, escalationHint, findRepoRoot, independentAcceptanceDefects, loadObligationTemplates, manifestMcpServers, parseObligationTemplates, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };

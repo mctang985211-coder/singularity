@@ -13,13 +13,14 @@
 | [P1 类型闸](execution-prompts/01-root-agent-typecheck.md) | 已完成（2026-09-21，见 P1 节） | 已满足 | root-agent 严格类型检查零错误，build 实际执行类型检查 |
 | [P2 Skill 内容绑定](execution-prompts/02-skill-content-binding.md) | 已完成（2026-09-21，见 P2 节） | P1 验收通过：`agent-singularity` build 为 `tsc --noEmit && tsdown`，类型错误即失败 | 单文件 Skill prepare/replay/审核/apply 内容身份一致；旧记录读取与回滚保留 |
 | [P3 生产基线检查](execution-prompts/03-skill-champion-check.md) | 已完成（2026-09-21，见 P3 节） | P2 验收通过：候选内容身份字段、兼容规则与读取/检查入口见 P2 节交接，P3 必须复用该身份语义，不另建摘要体系 | 串行 apply 拒绝过期 Skill 候选，不覆盖变化的生产文件 |
+| [P4 独立父验收与证据身份](execution-prompts/04-parent-acceptance-evidence-identity.md) | 已完成（2026-09-21，见 P4 节） | P3 验收通过：串行 apply 已能拒绝过期候选；P4 只动 task/verifier/task-runtime 与 task_decompose 声明面，不改 Evolution 链路 | 父 AC `childEvidence` 映射不完整即拒绝；`requiresArtifact` 只认 verified 参考产物；独立父级组合检查可机械执行 |
 
 这些是 S1-C/S4 的有限工程切片。P2 不证明证据来源真实，P3 不承诺跨进程原子更新；完成后不将整张 S 票标为完成。
 
 | 票据 | 状态（2026-09-21） | 依赖 | 交付范围 |
 |---|---|---|---|
 | S0 | 已完成，验证结果见文末 | 无 | 文档去漂移、术语统一、worker 能力查询 |
-| S1-V | 部分：verifier 返回边界校验已建 | S0 | 可信验收、父级组合检查、有效产物引用 |
+| S1-V | 部分：verifier 返回边界校验已建；父级证据映射、独立父级组合检查与证据身份收紧已落地（P4，切片 1+3）；verifier selftest 执行与输入身份（切片 2）待建 | S0 | 可信验收、父级组合检查、有效产物引用 |
 | S1-C | 部分：多 preset 冲突已在解析期拒绝；单文件 Skill 候选的晋升链路内容身份已绑定（P2），生产基线已在 apply 前复检（P3） | S0 | provider 预检、skill 分类契约、run 解析快照 |
 | S2-E | 部分：已有手动 L4 工具与 raised 台账 | S0 | 自动缺口记录、supervisor 交接、人审改进与例外上报、结构化拒绝 |
 | S2-R | 待建；已有 blocked/obligation 记录 | S1 最小切片、S2-E；与 S3 联合验收 | agent 补齐缺口后的系统恢复、预算与判决处置 |
@@ -120,8 +121,37 @@
 
 1. **真实 run/evidence 来源绑定**（S1-C / S4）：replay 固定 manifest/run/evidence 身份，报告自洽但来源伪造仍是反例；apply 写入同一版本。
 2. **preset 沙箱执行**（S1-C / S3）：补 agent_preset 沙箱解析/执行器，解除 manual replay 的当前阻塞，而不是绕过验证。
-3. **独立父验收**（S1-V）：父 AC → 子证据映射、独立组合判据、区分原始输入与要求已验证的产物。
+3. **独立父验收**（S1-V）：父 AC → 子证据映射、独立组合判据、区分原始输入与要求已验证的产物。P4 已完成其最小机械版（见 P4 节）：映射存在性与 verified 来源、独立组合检查（映射断言 + 父级 command）、`acceptsArtifact`/`requiresArtifact` 分离；剩余 C3 假设满足性完整证明、verifier selftest 正负样本执行（切片 2）、验收输入来源固定。
 4. **supervisor/blocked 恢复**（S2-E / S2-R / S3）：gap 身份与解决事件、supervisor 自主实现并验证候选、人审后系统恢复受阻分支。
+
+## P4：独立父验收与证据身份（2026-09-21 已完成）
+
+修改前回退点：Singularity `05cb27c`（外层 harness `c198457d56`）。基线工作区干净；基线备份提交：Singularity `53b9831`（提交 P4 执行 prompt 派发入口），外层 harness `4bd9c42`（仅提交对应子模块指针）。
+
+实现范围（只做 KISS §6 C2/C4 的最小机械版与 §5.1 的证据身份区分；未做通用自然语言蕴含求解器、C3 完整证明、verifier 四值语义、preset/MCP/skill 预检、verifier selftest 执行）：
+
+- **父 AC 证据映射（C2）**：`AcceptanceCriterion` 新增可选 `childEvidence?: ChildEvidenceRef[]`——`{ childIndex, criterionId?, evidenceRef? }`，子任务按分解 batch 位置（0 基，与 `dependsOn` 同一索引词汇，这是父 AC 作者在子任务 id 产生前唯一稳定的子任务身份）指向，可窄化到子判据与证据引用（evidence id / artifact kind / artifact id 三种拼写）。composite 在父验收期对照 store 校验：子任务存在且 verified、指名判据在其 verified run 的 evidence 中有 pass 判决、指名引用在该 evidence 中存在；任一条不满足即 fail 并逐字点名缺失项。无映射（或空映射）保持现行“子全 verified”合取，旧任务零行为变化。
+- **独立父级组合检查（C4）**：两条可机械执行的形式——映射断言本身，以及父 AC 的确定性 `command`（真实 CommandVerifier 执行，接口/数值级判据）。子全 verified 但组合接口错误时父拒绝。`heuristic?: boolean` 标记的父 AC 为自然语言条款：composite 的合取 verdict 带显式 heuristic 标注，`unmetMandatory` 永不把 heuristic 判据算作确定性通过。
+- **证据身份（切片 3）**：`requiresArtifact` 收紧为“已验证参考产物”——产出 run 终态 verified 且 bundle 带 pass 判据，失败/在跑 run 的同名产物不再满足；新增 `acceptsArtifact?: string[]` 表达原始输入（存在即可，任意 run 状态），即 P4 前 `requiresArtifact` 的语义。spawn 期 blocked reason 与 Obligation 文本区分两种声明。产物已在且验证通过的合法跳过保持不变。
+- **契约级标记与 admission**：`TaskInstance.requiresIndependentAcceptance?: boolean`（经 `DecomposeChildSpec.requiresIndependentAcceptance` 声明）要求至少一条 AC 带非空映射，否则新建/分解路径 admission 响亮拒绝，不静默降级为合取；`admission.ts` 新增共享纯函数 `independentAcceptanceDefects`（形状校验 + 标记规则 + heuristic/映射互斥 + 映射要求 composite 模式），普通分解与 replay 路径共用。`normalizeCriteria` 透传全部新字段；`replayTask` 对契约执行同一校验并携带标记。
+- **模型声明面**：`task_decompose` 工具 schema 增加 `acceptsArtifact` / `childEvidence` / `heuristic` / `requiresIndependentAcceptance` 可选属性（全部可选，缺省行为不变）。
+- **兼容与旧 ledger**：新字段全部可选；reducer 原样拷贝载荷、不校验新字段；旧任务读取、回放、验收行为不变；`requiresArtifact` 收紧对旧声明同样生效（失败 run 同名产物不再满足依赖），这是修复点。
+
+持久化记录：`docs/persistence-changes/2026-09-21-parent-acceptance-evidence-identity.md`（`task/event` 载荷内传递引用的类型新增可选字段，非 SessionEventMap 根，四个事件根指纹不变）。
+
+测试锚：`verifier/tests/unit/composite-verifier.spec.ts` 的 `CompositeVerifier parent evidence map (P4, KISS §6 C2)` 组（P4-A 完整映射通过并列名所验项、evidenceRef 三种拼写；P4-B 判据缺失/引用缺失/越界/无 pass 判决逐一点名；P4-C 失败 run 的同名产物不满足、verified run 满足；无子任务+映射拒绝而不退化为合取；heuristic 标注）；`task-runtime/tests/unit/admission.spec.ts` 的 `checkDecomposition parent acceptance declarations (P4, KISS §6 C2)` 组（形状拒绝、marker 缺映射拒绝、空映射拒绝、heuristic 与映射互斥、父级标记复查）；`task-runtime/tests/unit/orchestrate.spec.ts` 的 `TaskRuntime parent acceptance and evidence identity (P4)` 组与改写后的 W27 合法跳过用例（P4-A/P4-B 经真实 cascade + 真实 CompositeVerifier；P4-C 失败产物 blocked+Obligation、verified 产物放行、acceptsArtifact 原始输入；P4-D heuristic 不计确定性通过且同形状无标记照过；P4-E admission 拒绝且零落库）；`packages/singularity/tests/integration/parent-acceptance.spec.ts`（真实 TaskService + TaskRuntime + VerifierRegistry 全链：P4-A 映射+组合 command 双通过、P4-D 组合 command 失败拒父、P4-B 点名缺失判据、P4-C 失败/verified 产物两态、replay 与普通分解共用准入规则；断言全部读回持久化事件日志）。
+
+验证（2026-09-21，实际执行）：
+
+1. `packages/singularity` 下 `pnpm build`：通过；日志可见 `agent-singularity build$ tsc --noEmit && tsdown`。
+2. 外层 harness 下 `pnpm vitest run --project unit packages/singularity`：25 文件 / 636 项通过（P4 新增 27 项；`composite-verifier.spec.ts` 5→14、`admission.spec.ts` 23→33、`orchestrate.spec.ts` 68→76；基线 609 项）。
+3. 外层 harness 下 `pnpm vitest run --project integration packages/singularity`：20 文件 / 103 项通过（新增 `tests/integration/parent-acceptance.spec.ts` 7 项）。
+4. `packages/singularity` 下 `pnpm run verify-persistence`：OK，4 个事件根指纹匹配 `docs/persistence-schema.json`（digest 未变，按纪律以记录备案）。
+5. `packages/singularity` 下 `git diff --check`：通过。
+6. `agent-singularity` 下 `pnpm exec tsc --noEmit`：0 错误。
+7. 反例先红后绿：实现前新测试按预期失败（composite 8 项、admission 8 项、orchestrate 5 项、integration 6 项），实现后全部通过。
+
+给下一批的前置条件：P4 只做最小机械版——映射按 batch 位置指向（父 AC 作者在子 id 产生前唯一稳定的身份），C3 假设满足性完整证明、通用自然语言蕴含、verifier selftest 正负样本执行（S1-V 切片 2）、验收输入来源固定均未建；`requiresArtifact` 收紧后，依赖“任意 run 状态产物”的旧声明改用 `acceptsArtifact`；blocked 仍无恢复出边（S2-R）。不因 P4 通过宣称独立父验收全部完成。
 
 ## S1-V：先保证验的是目标
 
@@ -129,9 +159,9 @@
 
 分成三个可独立验收的切片：
 
-1. **父级验收**：为客观的小型任务建立父 AC → 子证据映射；实现至少一个独立父级组合检查。默认 composite 的“子全 verified”只能作为汇总，不足以代表根目标。
-2. **验证器自测与输入身份**：将当前 selftest 描述落为可执行正负样本；注册/晋升时执行。记录 verifier 版本，固定测试与阈值来源，明确 worker 可写产物与受保护验收输入的边界。
-3. **证据依赖有效性**：把当前全 store 的 kind/id 存在性匹配收敛为明确的产物来源、版本/摘要与所需验证状态；普通原始输入与“必须已验证的参考产物”分开表达。不能把失败 run 的同名产物当作正确性证据。
+1. **父级验收**（2026-09-21 P4 已完成最小机械版）：父 AC → 子证据映射（`childEvidence`，按 batch 位置 + 判据/证据引用，验收期对照 store 校验存在性与 verified 来源）与至少一个独立父级组合检查（映射断言 + 父级 command）已落地；默认 composite 的“子全 verified”仍只作汇总。剩余：C3 假设满足性完整证明、自然语言条款只作显式标注的启发式（`heuristic`）。
+2. **验证器自测与输入身份**（待建）：将当前 selftest 描述落为可执行正负样本；注册/晋升时执行。记录 verifier 版本，固定测试与阈值来源，明确 worker 可写产物与受保护验收输入的边界。
+3. **证据依赖有效性**（2026-09-21 P4 已完成）：`requiresArtifact` 收敛为已验证参考产物（verified run + pass 判据），原始输入用 `acceptsArtifact` 独立表达；失败/过期 run 的同名产物不再满足依赖。剩余：产物来源、版本/摘要与适用性的进一步绑定。
 
 验收：子任务都通过但组合接口错误，父必须拒绝；删掉父 AC 的证据映射必须拒绝；负样本可检出；修改验收脚本不能把错误产物变成 PASS；同名过期/失败证据不能满足要求已验证参考的依赖。自然语言蕴含留作有标记的启发式判断。
 
@@ -226,6 +256,7 @@ Supervisor 的范围并不永久限定于 skill：后续按细化想法4 §30 �
 1. **固定实际评估对象**（S1-C / S4）：prepare 记录候选内容摘要，replay 固定 manifest/run/evidence 身份，apply 写入同一版本；禁止先验证 A 再应用 B。补 preset 沙箱解析/执行，解除 manual replay 的当前阻塞。验收包含报告自洽但伪造来源、回放后替换候选文件两类反例。
    - 2026-09-21 P2 已完成其中“单文件 Skill 候选内容绑定”切片：prepare 摘要、replay 报告身份、服务入口复检、apply 写入同一版本均已落地并通过验收；P3 再完成“生产基线没变”切片：prepare 记录生产文件摘要、apply 人审前与实际写入前复检。“replay 固定 manifest/run/evidence 身份”与 preset 沙箱执行仍待建。
 2. **补目标验证最小闭环**（S1-V）：选一个可确定性检查的父级目标，增加独立组合判据；依赖引用区分原始输入与要求已验证的产物。verifier 正负样本实际执行，固定判据来源；相同失败不能仅凭不退化被视作修复。模板改判据应交由独立固定基准比较，不能只改变 command 后继续比较通过率。
+   - 2026-09-21 P4 已完成其中“父级验收最小机械版”与“证据依赖有效性”两个切片：父 AC `childEvidence` 映射 + 独立组合检查（映射断言与父级 command）+ `heuristic` 显式标注；`requiresArtifact` 收紧为 verified 参考产物、`acceptsArtifact` 表达原始输入。“verifier 正负样本实际执行，固定判据来源”（切片 2）仍待建。
 3. **联合实现自动补路径与恢复**（S2-E / S2-R / S3）：定义 gap/obligation 身份及解决事件，supervisor 消费一次诊断、实现候选、调用已有评估工具；人审改进后系统应用并重新准入受阻分支。先交付一个 L1 和一个 L2 案例，覆盖拒绝、重启去重和预算停止。不得以人工编写 skill 的演示代替验收。
 4. **扩大改进目标**（S4）：以完整轨迹驱动 Retro，增加成功率/成本、verifier 漏检/变异检出、模板难度归一化指标。当前非退化闸不能作为全面自动接受的完成证据；更广的运行时/裁判修改仍由 supervisor 实现验证、人审核。
 

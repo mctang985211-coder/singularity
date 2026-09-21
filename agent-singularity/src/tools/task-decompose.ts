@@ -55,11 +55,33 @@ export function defineTaskDecomposeTool(ctx: Context) {
                   requiresArtifact: {
                     type: 'array',
                     items: { type: 'string' },
-                    description: 'Artifact/evidence kinds or ids that must already exist in the task store for this criterion to be judgeable; a missing one blocks the child before spawn and registers an obligation',
+                    description: 'Artifact/evidence kinds or ids that must already exist in the task store as a verified reference product (a verified run carrying a passing verdict) for this criterion to be judgeable; a missing one blocks the child before spawn and registers an obligation',
+                  },
+                  acceptsArtifact: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Artifact/evidence kinds or ids this criterion consumes as a raw input: existence in the task store is the whole requirement, any run state. Missing blocks the child before spawn and registers an obligation',
                   },
                   verifierRef: {
                     type: 'string',
                     description: 'Registered verifier id that judges this criterion; must exist in the verifier registry — an unknown id rejects the whole batch at admission and the error lists the registered ids. Omit to dispatch by mode.',
+                  },
+                  childEvidence: {
+                    type: 'array',
+                    description: 'Parent-level evidence map (composite mode only): which child of this decomposition batch — by 0-based position — this criterion rests on, optionally narrowed to a child criterion and an evidence reference. Judged at parent-acceptance time; an incomplete mapping fails the parent naming the missing items',
+                    items: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        childIndex: { type: 'integer', required: true, description: '0-based position of the child in this decomposition batch' },
+                        criterionId: { type: 'string', description: 'The child criterion whose passing verdict is required' },
+                        evidenceRef: { type: 'string', description: 'The evidence id, artifact kind, or artifact id that must exist in the child\'s verified run evidence' },
+                      },
+                    },
+                  },
+                  heuristic: {
+                    type: 'boolean',
+                    description: 'Label this criterion a heuristic judgement: the verdict is marked as such and never counted as a deterministic pass. Mutually exclusive with childEvidence',
                   },
                 },
               },
@@ -80,6 +102,10 @@ export function defineTaskDecomposeTool(ctx: Context) {
             decomposable: {
               type: 'boolean',
               description: 'Declare that this child should split further instead of doing the work: its worker is told to call task_decompose. Together with a capability gap this decides whether the child is admitted as decomposable.',
+            },
+            requiresIndependentAcceptance: {
+              type: 'boolean',
+              description: 'Contract-level marker: this child demands independent parent acceptance — at least one of its acceptance criteria must carry a childEvidence map, or admission refuses the batch. Deleting the map never silently degrades acceptance back to the all-children-verified conjunction',
             },
           },
         },
