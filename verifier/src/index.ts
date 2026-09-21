@@ -74,12 +74,14 @@ export class VerifierRegistry extends Service {
   /** Absolute evidence root resolved at construction. */
   readonly evidenceRoot: string
   private readonly verifiers = new Map<string, Verifier>()
+  private readonly composite: CompositeVerifier
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'verifier')
     this.evidenceRoot = resolve(config.evidenceRoot ?? defaultEvidenceRoot())
     this.register(new CommandVerifier(this.evidenceRoot))
-    this.register(new CompositeVerifier(ctx.task))
+    this.composite = new CompositeVerifier(ctx.task)
+    this.register(this.composite)
     this.register(new ReviewVerifier())
   }
 
@@ -177,6 +179,11 @@ export class VerifierRegistry extends Service {
     }
     let results: VerificationResult[]
     try {
+      // Evidence mappings remain mandatory even when a plugin owns mode dispatch.
+      if ((criterion.childEvidence?.length ?? 0) > 0 && verifier !== this.composite) {
+        const mapped = await this.composite.verifyIn(storeId, { ...request, criteria: [criterion] })
+        if (mapped[0]!.status !== 'pass') return mapped
+      }
       results = verifier instanceof CompositeVerifier
         ? await verifier.verifyIn(storeId, { ...request, criteria: [criterion] })
         : await verifier.verify({ ...request, criteria: [criterion] })

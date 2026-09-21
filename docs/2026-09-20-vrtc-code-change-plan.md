@@ -38,7 +38,7 @@ S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进
 | [P1 类型闸](execution-prompts/01-root-agent-typecheck.md) | 已完成（2026-09-21，见 P1 节） | 已满足 | root-agent 严格类型检查零错误，build 实际执行类型检查 |
 | [P2 Skill 内容绑定](execution-prompts/02-skill-content-binding.md) | 已完成（2026-09-21，见 P2 节） | P1 验收通过：`agent-singularity` build 为 `tsc --noEmit && tsdown`，类型错误即失败 | 单文件 Skill prepare/replay/审核/apply 内容身份一致；旧记录读取与回滚保留 |
 | [P3 生产基线检查](execution-prompts/03-skill-champion-check.md) | 已完成（2026-09-21，见 P3 节） | P2 验收通过：候选内容身份字段、兼容规则与读取/检查入口见 P2 节交接，P3 必须复用该身份语义，不另建摘要体系 | 串行 apply 拒绝过期 Skill 候选，不覆盖变化的生产文件 |
-| [P4 独立父验收与证据身份](execution-prompts/04-parent-acceptance-evidence-identity.md) | 已完成（2026-09-21，见 P4 节） | P3 验收通过：串行 apply 已能拒绝过期候选；P4 只动 task/verifier/task-runtime 与 task_decompose 声明面，不改 Evolution 链路 | 父 AC `childEvidence` 映射不完整即拒绝；`requiresArtifact` 只认 verified 参考产物；独立父级组合检查可机械执行 |
+| [P4 独立父验收与证据身份](execution-prompts/04-parent-acceptance-evidence-identity.md) | 原交付有遗漏；本轮三个组合漏洞已修复并回归，见 P4 修复节 | P3 已满足；历史 f6886cf 的全绿记录不能替代本轮反例 | 普通/replay 同检输入；父映射拒绝 heuristic 子判据；插件不能跳过映射；原 P4 合同回归通过 |
 
 P1–P4 是构建基础与 S1-V/S1-C/S4 的有限工程切片。P2 不证明证据来源真实，P3 不承诺跨进程原子更新；完成后不将整张 S 票标为完成。
 
@@ -216,6 +216,21 @@ T1 优先于新的任务生成/审核代码，随后按唯一派发顺序补齐 
 给下一批的前置条件：P4 只做最小机械版——映射按 batch 位置指向（父 AC 作者在子 id 产生前唯一稳定的身份），C3 假设满足性完整证明、通用自然语言蕴含、verifier selftest 正负样本执行（S1-V 切片 2）、验收输入来源固定均未建；`requiresArtifact` 收紧后，依赖“任意 run 状态产物”的旧声明改用 `acceptsArtifact`；blocked 仍无恢复出边（S2-R）。不因 P4 通过宣称独立父验收全部完成。
 
 已知边界（如实记录，不当作兼容性缺口）：(1) 真实链子上 `TaskRun.artifacts` 恒空——该类型没有写入方（见 `task/src/types.ts` 中 `ReviewMetrics` 的同类说明），因此 `childEvidence.evidenceRef` 的三种拼写只匹配 `EvidenceBundle` 的 evidence id / artifact kind / artifact id，匹配不依赖也不读取 `TaskRun.artifacts`。(2) replay 任务按设计无父无子，携带 `childEvidence` 映射的候选契约在验收期失败关闭（`tests/integration/parent-acceptance.spec.ts` 的 replay 用例固化该行为）：当前 replay 路径不存在“能通过”的父级映射表达，这是范围边界而非待修缺陷。(3) `entryDefect` 的逐条目 `child.status !== 'verified'` 分支在当前调用路径下不可达：`judge` 的合取闸门已先行拒绝任一未验证子任务，映射判定只在全部子任务 verified 之后执行；该分支是防御性保留（函数自包含），不构成额外行为，未验证子任务由合取闸门的用例覆盖。
+
+## P4 修复复核（2026-09-21）
+
+修改前备份：Singularity `ff259e0`，外层 `e658595`，保存上一轮建设指导。`f6886cf` 的“完成”经独立审查发现三类错误通过，历史记录保留但不再作为这些路径已正确的依据。
+
+- `runReplayTask` 在建立 Task/Run 和执行 verifier/worker 之前复用 `missingRequiredArtifacts`。缺输入抛出带引用/判据的错误，零 Task 事件与零派发；普通分解仍 blocked + Obligation，两者输入资格规则相同，调用结果按原接口处理。
+- `CompositeVerifier.entryDefect` 检查所引用子判据的 heuristic 标记，拒绝以其 pass 关闭父机械判据；合法的可选非 heuristic 子判据仍可引用。
+- `VerifierRegistry.verifyCriterion` 在自定义 verifier 前执行内建映射检查。默认模式覆盖和显式 verifierRef 都不能跳过；映射合法后仍调用所选 verifier，其 fail 不能被内建映射 pass 覆盖。
+- 持久化载荷/schema 未改，旧事件正常读取、不改写已有终态；对旧契约的新执行/重新验收采用修复后的规则。未补通用来源认证、产物版本适用性或父子树 replay，这些仍按原票记录。
+
+测试锚：`tests/integration/parent-acceptance.spec.ts` 新增 19 项组合测试，覆盖 heuristic 正反例、自定义 verifier 两种选择方式及自身拒绝、两类输入 × spawn 开关 × 缺失/failed/verified producer。使用真实 TaskService/TaskRuntime/VerifierRegistry，模拟会话持久化和 agent handle，不调用真实模型。修复前 9 项按误判通过的预期失败；修复后该文件 26 项全部通过。拒绝断言检查事件数量及派发数量，正常验收结果读回 evidence/Task 状态。
+
+本轮实跑：`pnpm build` 通过（仅已有前端体积提示）；外层 `pnpm vitest run --project unit packages/singularity --project integration packages/singularity` 通过，45 文件 / 758 项（原 739 + 19）；`pnpm run verify-persistence` 的 4 个事件根匹配；verifier 和 agent-singularity 各执行 `pnpm exec tsc --noEmit`，均通过；`git diff --check` 通过。未部署、未跑真实 LLM/BB 仿真，本轮修复未声称已经过另一 agent 独立复核。
+
+公共执行合同补入“构建与复核质量 Prompt”，要求跨入口/跨层组合测试和完整性证据。下一项仍按文首顺序派发 T1；本次修复不算 T1 或 S1-V 切片 2 完成。
 
 ## S1-V：先保证验的是目标
 

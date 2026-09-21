@@ -160,7 +160,9 @@ function entryDefect(entry, children, snapshot) {
 	const verifiedRun = snapshot.runs.find((run) => run.taskId === child.taskId && run.status === "verified");
 	const bundles = snapshot.evidence.filter((item) => item.taskRunId === verifiedRun?.runId);
 	if (entry.criterionId !== void 0) {
-		if (!child.acceptanceCriteria.some((item) => item.criterionId === entry.criterionId)) return `child #${entry.childIndex} (${child.taskId}) has no criterion "${entry.criterionId}"`;
+		const criterion = child.acceptanceCriteria.find((item) => item.criterionId === entry.criterionId);
+		if (criterion === void 0) return `child #${entry.childIndex} (${child.taskId}) has no criterion "${entry.criterionId}"`;
+		if (criterion.heuristic === true) return `child #${entry.childIndex} (${child.taskId}) criterion "${entry.criterionId}" is heuristic, not deterministic evidence`;
 		const verdict = bundles.flatMap((item) => item.verifierResults).find((item) => item.criterionId === entry.criterionId);
 		if (verdict?.status !== "pass") return `child #${entry.childIndex} (${child.taskId}) criterion "${entry.criterionId}" has no passing verdict in its verified run's evidence` + (verdict === void 0 ? "" : ` (verdict ${verdict.status})`);
 	}
@@ -311,11 +313,13 @@ var VerifierRegistry = class extends Service {
 	/** Absolute evidence root resolved at construction. */
 	evidenceRoot;
 	verifiers = /* @__PURE__ */ new Map();
+	composite;
 	constructor(ctx, config = {}) {
 		super(ctx, "verifier");
 		this.evidenceRoot = resolve(config.evidenceRoot ?? defaultEvidenceRoot());
 		this.register(new CommandVerifier(this.evidenceRoot));
-		this.register(new CompositeVerifier(ctx.task));
+		this.composite = new CompositeVerifier(ctx.task);
+		this.register(this.composite);
 		this.register(new ReviewVerifier());
 	}
 	/**
@@ -392,6 +396,13 @@ var VerifierRegistry = class extends Service {
 		}];
 		let results;
 		try {
+			if ((criterion.childEvidence?.length ?? 0) > 0 && verifier !== this.composite) {
+				const mapped = await this.composite.verifyIn(storeId, {
+					...request,
+					criteria: [criterion]
+				});
+				if (mapped[0].status !== "pass") return mapped;
+			}
 			results = verifier instanceof CompositeVerifier ? await verifier.verifyIn(storeId, {
 				...request,
 				criteria: [criterion]

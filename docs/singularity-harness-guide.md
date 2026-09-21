@@ -179,11 +179,11 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 | Handoff / 上下文 | fresh session、handoff、父会话引用、契约系统投影已有；实际主要传父目标/依赖证据/assumptions，根全局 brief、带来源决定和动态有界 ContextView 待建；原始 session query 按 cwd 授权，不等于图/group 隔离 | `handoff.ts`、`orchestrate.ts:buildHandoff`；`agent-runtime/src/contract-reinjection.ts` |
 | 父子交互 / 生命周期 | task_decompose 同步等待整批；whenIdle 后验收；没有持久 question/answer 与等待相位。DSH send_message 不能直接用于未注册 continuable activation 的这些子节点 | `task-runtime/src/orchestrate.ts:awaitWorker`；`agent-runtime/src/index.ts:spawn` |
 | 任务导航 / 诊断 | task_read 当前任务、task_status 整树；review pack 有局部证据及父子摘要，只读 reviewer 可写 Diagnosis；无合法动作投影、因果遍历协议或自动 supervisor incident 调度 | `agent-singularity/src/tools/{task-read,task-status,task-review-pack,review-agent}.ts` |
-| Evidence 依赖 | `requiresArtifact` 检查 store 中 evidence id / artifact id / kind 的存在性，且只认 **verified run** 产出的证据（run 终态 verified 且 bundle 带 pass 判据）；原始输入用独立的 `acceptsArtifact`（存在即可，任意 run 状态）。缺失则 blocked + Obligation（obligation 文本区分两种要求）；不自动生成上游，也不验证匹配证据的版本和适用性 | `orchestrate.ts:missingRequiredArtifacts` |
+| Evidence 依赖 | `requiresArtifact` 只认 verified run 且带 pass 判据的证据；`acceptsArtifact` 只要求存在。普通分解缺失时 blocked + Obligation；replay 的 spawn 开/关路径使用同一检查，缺失时在建任务/Run 前抛错，零派发/零成功记录。不自动生成上游，不验证匹配证据的版本和适用性 | `orchestrate.ts:missingRequiredArtifacts`、`runReplayTask` |
 | Obligation | 记录缺能力/缺产物；模板 coverage 由任务声明 capability 或文字提及匹配；不是义务已被证据满足，更不是防漏的硬闸 | `task-runtime/src/obligation.ts:checkObligationCoverage` |
 | 判决 | `pass/fail/inconclusive`；部分 unknown 有 task/verifier 分类；没有 PARTIAL 状态与剩余义务自动派发；未通过 mandatory 判据仍走失败路径；`heuristic` 标记的判据永远不计入确定性通过 | `task/src/types.ts:VerificationResult`；`orchestrate.ts:unmetMandatory` |
 | Verifier 边界 | 已校验单个判据返回数量、criterion/verifier 身份及判决；异常归为 UNKNOWN(verifier)。可选 selftest 仍只描述、不执行，尚无独立性隔离 | `verifier/src/index.ts:verifyCriterion`、`register` |
-| 父验收 | 默认 composite 只检查所有子任务 verified（未声明映射时保持此行为）；父 AC 可声明 `childEvidence` 映射（子任务按分解 batch 位置 + 可选判据/证据引用），composite 校验该映射真实存在且证据来自子任务 verified run，不完整则拒绝并逐字点名缺失项；`heuristic` 标记的父 AC 显式标注启发式、不计入确定性闭包；契约级标记 `requiresIndependentAcceptance` 在映射缺失/被删时 admission 响亮拒绝 | `verifier/src/composite-verifier.ts:verifyIn`；`task-runtime/src/admission.ts:independentAcceptanceDefects` |
+| 父验收 | 默认无映射 composite 保持子全 verified；childEvidence 必须存在且来自 verified run，被引用子判据为 heuristic 时拒绝。registry 在自定义 verifier 执行前同样检查映射，合法映射仍须通过所选 verifier，插件不能覆盖映射规则。父 mandatory heuristic 不计确定性通过；requiresIndependentAcceptance 缺映射时准入拒绝 | `composite-verifier.ts:entryDefect`；`verifier/src/index.ts:verifyCriterion`；`admission.ts:independentAcceptanceDefects` |
 | 预算 | wallTimeMs 在飞取消；tools/tokens 仅终态审计；attempts/noProgressRounds 仅声明 | `orchestrate.ts:awaitWorker`、`budgetBreaches`；`task-runtime/src/index.ts:Config` |
 | L4 上报 | root 的 `escalate` 工具与台账已有；模型主动调用，批准后才记 raised；运行时只输出提示，无自动触发、无处理结果/恢复闭环 | `agent-singularity/src/tools/escalate.ts`；`orchestrate.ts:escalationHint` |
 | blocked 恢复 | blocked 无恢复出边；TaskRetried 只接受 failed，父分解一次的限制仍在；补能力后不会自动续跑原图 | `task/src/service/state.ts`；`task-runtime/src/index.ts:decomposeAndRun` |
@@ -217,6 +217,8 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 ## 5. 实现时的关键约束
 
 ### 5.1 验收先于自动生长
+
+P4 `f6886cf` 的完成声明经复核发现三个组合路径漏洞，本轮修复 replay 输入检查、子 heuristic 引用及自定义 verifier 绕过。原 739 项通过不足以证明这些规则成立；新增交叉路径正反例见 `tests/integration/parent-acceptance.spec.ts`，修复验证记录见建设计划 P4 修复节。原提交的历史结论不作为当前验收证据。
 
 现有 command verifier 与 worker 共享 checkout：外部进程运行命令只提供执行分离，不保证 worker 无法修改测试、脚本或阈值。建设目标是固定验收输入的来源与版本，保护判据，记录 verifier 版本及证据产物身份；自述 JSON 和退出 0 均不能单独证明领域正确性。
 
@@ -272,6 +274,7 @@ pnpm vitest run --project integration packages/singularity
 
 ## 6. 文档维护
 
+- 每次派发同时执行 [公共合同中的质量 Prompt](execution-prompts/README.md)：检查规则实际消费位置、替换入口和跨层组合，保留先失败后通过的反例及合法正例；不能把合同缺陷改名为已知边界。指南中的完成状态必须与这些证据一致。
 - 本文只维护方向和当前事实，建设计划只维护票据与验收；实施日志进入带日期记录。
 - 每项完成状态必须写清范围、复核日期、源码/测试锚；区分声明、接线、自动测试、真实端到端运行。
 - 同一改动同步更新本文的状态和建设计划。部分完成继续标“部分”，不可用“完成（核心未做）”。

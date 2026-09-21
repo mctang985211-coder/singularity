@@ -28,6 +28,7 @@ const STORE = rootTaskStoreId(ROOT_SESSION)
 interface Harness {
   task: TaskService
   runtime: TaskRuntime
+  verifier: VerifierRegistry
   log: Map<string, SessionEvent[]>
   spawned: string[]
 }
@@ -78,7 +79,7 @@ async function harness(): Promise<Harness> {
   const task = new TaskService(ctx)
   const verifier = new VerifierRegistry(ctx, { evidenceRoot: await mkdtemp(join(tmpdir(), 'p4-evidence-')) })
   const runtime = new TaskRuntime(ctx)
-  return { task, runtime, log, spawned }
+  return { task, runtime, verifier, log, spawned }
 }
 
 /** Every task event the store actually appended, read back off its session log. */
@@ -231,6 +232,91 @@ async function createVerifiedChampion(h: Harness): Promise<string> {
 }
 
 describe('parent acceptance and evidence identity, end to end (P4)', () => {
+  it.each([false, true])('parent mapping preserves child heuristic classification (heuristic=%s)', async heuristic => {
+    const h = await harness()
+    const { taskId, runId } = await createParent(h, [{
+      criterionId: 'root-map', description: 'independent evidence', verificationMode: 'composite',
+      mandatory: true, requiredEvidence: [], childEvidence: [{ childIndex: 0, criterionId: 'ac1-2' }],
+    }])
+    await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'check evidence classification',
+      children: [{ objective: 'child', acceptanceCriteria: [
+        { description: 'mechanical check', command: 'true' },
+        { description: 'optional judgement', command: 'true', mandatory: false, heuristic },
+      ] }],
+    })
+    expect((await h.task.childrenIn(STORE, taskId))[0]!.status).toBe('verified')
+    expect((await h.task.taskIn(STORE, taskId)).status).toBe(heuristic ? 'failed' : 'verified')
+    if (heuristic) {
+      expect(payloadOf(h, 'TaskFailed', taskId)?.reason).toContain('heuristic')
+      expect(evidenceFor(h, runId)[0]!.verifierResults[0]!.details).toContain('ac1-2')
+    }
+  })
+
+  it.each([
+    { explicit: false, validMap: false, customPass: true },
+    { explicit: true, validMap: false, customPass: true },
+    { explicit: false, validMap: true, customPass: true },
+    { explicit: true, validMap: true, customPass: true },
+    { explicit: true, validMap: true, customPass: false },
+  ])('custom verifier cannot bypass mapping or be bypassed: %j', async ({ explicit, validMap, customPass }) => {
+    const h = await harness()
+    let calls = 0
+    h.verifier.register({
+      id: 'custom-composite', supports: mode => mode === 'composite',
+      verify: async req => {
+        calls++
+        return req.criteria.map(c => ({
+          criterionId: c.criterionId, verifierId: 'custom-composite', status: customPass ? 'pass' : 'fail',
+        }))
+      },
+    })
+    const { taskId, runId } = await createParent(h, [{
+      criterionId: 'root-map', description: 'required map', verificationMode: 'composite',
+      mandatory: true, requiredEvidence: [],
+      childEvidence: [{ childIndex: 0, criterionId: validMap ? 'ac1-1' : 'missing-criterion' }],
+      ...(explicit ? { verifierRef: 'custom-composite' } : {}),
+    }])
+    await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'custom verifier',
+      children: [{ objective: 'child', acceptanceCriteria: [{ description: 'works', command: 'true' }] }],
+    })
+    expect((await h.task.taskIn(STORE, taskId)).status).toBe(validMap && customPass ? 'verified' : 'failed')
+    expect(calls).toBe(validMap ? 1 : 0)
+    if (!validMap) expect(evidenceFor(h, runId)[0]!.verifierResults[0]!.details).toContain('missing-criterion')
+  })
+
+  for (const field of ['requiresArtifact', 'acceptsArtifact'] as const) {
+    for (const spawn of [false, true]) {
+      it.each(['missing', 'failed', 'verified'] as const)(`replay ${field}, spawn=${spawn}, producer=%s`, async producer => {
+        const h = await harness()
+        const championId = await createVerifiedChampion(h)
+        if (producer !== 'missing') await seedProducer(h, producer, 'reference')
+        const before = taskEvents(h).length
+        const replay = h.runtime.replayTask(STORE, championId, {
+          lineage: 'evolution-replay:p4-regression', spawn,
+          contract: {
+            objective: 'consume reference', requiredCapabilities: [],
+            acceptanceCriteria: [{
+              criterionId: 'consume', description: 'consume reference', verificationMode: 'deterministic',
+              mandatory: true, requiredEvidence: [], command: 'true', [field]: ['reference'],
+            }],
+          },
+        }, ROOT_SESSION)
+        if (producer === 'missing' || (field === 'requiresArtifact' && producer === 'failed')) {
+          await expect(replay).rejects.toThrow(/missing required artifacts: reference/)
+          expect(h.spawned).toHaveLength(0)
+          expect(taskEvents(h)).toHaveLength(before)
+        } else {
+          const result = await replay
+          expect(result.status).toBe('verified')
+          expect(h.spawned).toHaveLength(spawn ? 1 : 0)
+          expect(evidenceFor(h, result.runId)[0]!.verifierResults[0]!.status).toBe('pass')
+        }
+      })
+    }
+  }
+
   it('P4-A: a complete childEvidence map plus a passing combination command verifies the parent', async () => {
     const h = await harness()
     const iface = await seedInterface(7, 7)

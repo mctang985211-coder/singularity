@@ -297,6 +297,11 @@ function missingRequiredArtifacts(
   ])
 }
 
+function missingArtifactReason(missing: readonly MissingArtifact[]): string {
+  return `missing required artifacts: ${missing.map(item =>
+    `${item.ref} (criterion ${item.criterionId}${item.requirement === 'accepts' ? '; raw input, any run state' : ''})`).join(', ')}`
+}
+
 /**
  * The authorization one admitted child runs under, built from its manifest:
  * the tools and skills its matched capabilities declared (labels already
@@ -825,8 +830,7 @@ export async function runChildrenCascade(
     // answer, not an action.
     const missingArtifacts = missingRequiredArtifacts(plan.task.acceptanceCriteria, snapshot)
     if (missingArtifacts.length > 0) {
-      const reason = `missing required artifacts: ${missingArtifacts.map(item =>
-        `${item.ref} (criterion ${item.criterionId}${item.requirement === 'accepts' ? '; raw input, any run state' : ''})`).join(', ')}`
+      const reason = missingArtifactReason(missingArtifacts)
       await env.task.markRunStatusIn(storeId, childTaskId, undefined as unknown as RunId, 'blocked', env.actor, { reason })
       await recordReview(childTaskId, 'blocked', {
         anomalies: [reason],
@@ -1124,6 +1128,10 @@ export async function runReplayTask(
   signal?: AbortSignal,
 ): Promise<ReplayRunOutcome> {
   const task = init.task
+  const missingArtifacts = missingRequiredArtifacts(task.acceptanceCriteria, await env.task.snapshotIn(storeId))
+  if (missingArtifacts.length > 0) {
+    throw new Error(`task-runtime: replay rejected: ${missingArtifactReason(missingArtifacts)}`)
+  }
   const anomalies = [init.lineage]
   await env.task.createTaskIn(storeId, task, env.actor)
   await env.task.admitTaskIn(storeId, task.taskId, env.actor, { decompositionStatus: 'leaf', manifest: init.manifest })

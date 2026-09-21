@@ -60,8 +60,12 @@ function entryDefect(
   const verifiedRun = snapshot.runs.find(run => run.taskId === child.taskId && run.status === 'verified')
   const bundles = snapshot.evidence.filter(item => item.taskRunId === verifiedRun?.runId)
   if (entry.criterionId !== undefined) {
-    if (!child.acceptanceCriteria.some(item => item.criterionId === entry.criterionId)) {
+    const criterion = child.acceptanceCriteria.find(item => item.criterionId === entry.criterionId)
+    if (criterion === undefined) {
       return `child #${entry.childIndex} (${child.taskId}) has no criterion "${entry.criterionId}"`
+    }
+    if (criterion.heuristic === true) {
+      return `child #${entry.childIndex} (${child.taskId}) criterion "${entry.criterionId}" is heuristic, not deterministic evidence`
     }
     const verdict = bundles.flatMap(item => item.verifierResults).find(item => item.criterionId === entry.criterionId)
     if (verdict?.status !== 'pass') {

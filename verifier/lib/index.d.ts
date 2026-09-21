@@ -126,6 +126,7 @@ declare class VerifierRegistry extends Service {
   /** Absolute evidence root resolved at construction. */
   readonly evidenceRoot: string;
   private readonly verifiers;
+  private readonly composite;
   constructor(ctx: Context, config?: Config);
   /**
    * Add a verifier; later registrations win mode dispatch. Returns the
