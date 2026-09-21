@@ -195,7 +195,7 @@ S1 的最小验证与能力契约是候选生产晋升的前置。S2 与 S3 按�
 
 **父级验收与证据身份已落地（2026-09-21 P4，S1-V 切片 1+3）**：父 AC 用可选字段 `childEvidence` 声明“需要哪些子任务的哪条判据/哪类证据”——子任务按分解 batch 位置（0 基，与 `dependsOn` 同一索引词汇）指向，可再窄化到子判据 id 与证据引用（evidence id / artifact kind / artifact id 三种拼写），composite 在父验收期对照 store 校验该映射真实存在且证据来自子任务的 verified run，不完整则拒绝并在 reason 逐字点名缺失项；缺省（无映射）完全保持现行“子全 verified”合取行为。独立父级组合检查有两条可机械执行的形式：映射断言本身，以及父 AC 的确定性 `command`（接口/数值级判据，子全 verified 但组合错误时父必须拒绝）。`heuristic: true` 标记的父 AC 是自然语言条款：verdict 显式带 heuristic 标注，且不计入确定性通过。`requiresArtifact` 收紧为“已验证参考产物”（产出 run 终态 verified 且 bundle 带 pass 判据），原始输入改用 `acceptsArtifact`（存在即可，任意 run 状态）；契约级标记 `requiresIndependentAcceptance` 要求映射存在，新建/分解路径 admission 对映射缺失/被删/形状畸形响亮拒绝，不静默降级为合取；replay 路径与普通分解共用同一校验规则。
 
-范围边界：映射按 batch 位置指向，不做通用自然语言蕴含求解器，也不做 C3 假设满足性的完整证明（只做映射指向存在性的结构检查）；verifier selftest 正负样本的实际执行与输入身份固定属 S1-V 切片 2，证据来源真实性认证、blocked 缺产物后的自动恢复（S2-R）均未建。旧任务（无新字段）读取、回放、验收行为不变；`requiresArtifact` 的收紧对旧声明同样生效——失败 run 的同名产物不再满足依赖，这是本票的修复点而非兼容性破坏。另有两个已知边界如实记录：replay 任务按设计无父无子，携带 `childEvidence` 映射的候选契约失败关闭（当前 replay 不存在“能通过”的父级映射表达）；`evidenceRef` 的三种拼写只匹配 `EvidenceBundle`（evidence id / artifact kind / artifact id），真实链子上 `TaskRun.artifacts` 恒空，匹配不依赖它。
+范围边界：映射按 batch 位置指向，不做通用自然语言蕴含求解器，也不做 C3 假设满足性的完整证明（只做映射指向存在性的结构检查）；verifier selftest 正负样本的实际执行与输入身份固定属 S1-V 切片 2，证据来源真实性认证、blocked 缺产物后的自动恢复（S2-R）均未建。旧任务（无新字段）读取、回放、验收行为不变；`requiresArtifact` 的收紧对旧声明同样生效——失败 run 的同名产物不再满足依赖，这是本票的修复点而非兼容性破坏。另有三个已知边界如实记录：replay 任务按设计无父无子，携带 `childEvidence` 映射的候选契约失败关闭（当前 replay 不存在“能通过”的父级映射表达）；`evidenceRef` 的三种拼写只匹配 `EvidenceBundle`（evidence id / artifact kind / artifact id），真实链子上 `TaskRun.artifacts` 恒空，匹配不依赖它；composite `entryDefect` 的逐条目子任务状态检查位于“子全 verified”合取闸门之后，当前调用路径下不可达，属防御性分支（未验证子任务由合取闸门拒绝并点名）。
 
 ### 5.2 缺口恢复从有限状态开始
 

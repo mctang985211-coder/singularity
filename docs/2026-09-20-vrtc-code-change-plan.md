@@ -164,10 +164,11 @@ T1 优先于新的任务生成/审核代码；S1-V verifier 自测与 S1-C provi
 5. `packages/singularity` 下 `git diff --check`：通过。
 6. `agent-singularity` 下 `pnpm exec tsc --noEmit`：0 错误。
 7. 反例先红后绿：实现前新测试按预期失败（composite 8 项、admission 8 项、orchestrate 5 项、integration 6 项），实现后全部通过。
+8. 第 3 轮终审复核（2026-09-21，独立只读重跑 + 1 处变异复跑，代码零改动）：`pnpm build` 通过；单测 25 文件 / 636 项、集成 20 文件 / 103 项、`verify-persistence`（4 个事件根指纹匹配）、`git diff --check`、`agent-singularity` 的 `pnpm exec tsc --noEmit`（0 错误）全部复现。变异复跑点为 `orchestrate.ts:unmetMandatory` 的 heuristic 闸门（第 2 轮未做过的点）：临时禁用后 `orchestrate.spec.ts` 的 P4-D 用例精确失败（期望 `failed`、实测 `verified`，仅该 1 项红），恢复后同文件 76 项全绿——确定性通过锚真实绑定“heuristic 不计入闭包”的行为。
 
 给下一批的前置条件：P4 只做最小机械版——映射按 batch 位置指向（父 AC 作者在子 id 产生前唯一稳定的身份），C3 假设满足性完整证明、通用自然语言蕴含、verifier selftest 正负样本执行（S1-V 切片 2）、验收输入来源固定均未建；`requiresArtifact` 收紧后，依赖“任意 run 状态产物”的旧声明改用 `acceptsArtifact`；blocked 仍无恢复出边（S2-R）。不因 P4 通过宣称独立父验收全部完成。
 
-已知边界（如实记录，不当作兼容性缺口）：(1) 真实链子上 `TaskRun.artifacts` 恒空——该类型没有写入方（见 `task/src/types.ts` 中 `ReviewMetrics` 的同类说明），因此 `childEvidence.evidenceRef` 的三种拼写只匹配 `EvidenceBundle` 的 evidence id / artifact kind / artifact id，匹配不依赖也不读取 `TaskRun.artifacts`。(2) replay 任务按设计无父无子，携带 `childEvidence` 映射的候选契约在验收期失败关闭（`tests/integration/parent-acceptance.spec.ts` 的 replay 用例固化该行为）：当前 replay 路径不存在“能通过”的父级映射表达，这是范围边界而非待修缺陷。
+已知边界（如实记录，不当作兼容性缺口）：(1) 真实链子上 `TaskRun.artifacts` 恒空——该类型没有写入方（见 `task/src/types.ts` 中 `ReviewMetrics` 的同类说明），因此 `childEvidence.evidenceRef` 的三种拼写只匹配 `EvidenceBundle` 的 evidence id / artifact kind / artifact id，匹配不依赖也不读取 `TaskRun.artifacts`。(2) replay 任务按设计无父无子，携带 `childEvidence` 映射的候选契约在验收期失败关闭（`tests/integration/parent-acceptance.spec.ts` 的 replay 用例固化该行为）：当前 replay 路径不存在“能通过”的父级映射表达，这是范围边界而非待修缺陷。(3) `entryDefect` 的逐条目 `child.status !== 'verified'` 分支在当前调用路径下不可达：`judge` 的合取闸门已先行拒绝任一未验证子任务，映射判定只在全部子任务 verified 之后执行；该分支是防御性保留（函数自包含），不构成额外行为，未验证子任务由合取闸门的用例覆盖。
 
 ## S1-V：先保证验的是目标
 
