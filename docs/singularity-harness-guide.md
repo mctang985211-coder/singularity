@@ -6,6 +6,8 @@
 本文是当前方向与进度的入口；[建设计划](2026-09-20-vrtc-code-change-plan.md)规定下一步落点和验收。
 [术语表](../CONTEXT.md)定义概念。[历史指南](history/2026-09-21-harness-guide-snapshot.md)保留旧 §4.2 #1–#33、W/M 记录和操作经验，历史结论不能直接当成当前事实。
 
+深入实施入口：[Task 契约与可选人审](task-contract-construction-guide.md)、[有目标的探索/自进化架构](exploration-evolution-architecture.md)、[角色与 System Prompt 合同](agent-prompt-contracts.md)。[开源机制调研](2026-09-21-open-source-agent-patterns.md)记录已读取的一手来源；新协议均标记待建，不能用设计替代当前实现事实。
+
 设计依据是 `/home/ROXY/code/ref/docs/VRTC-最小架构-KISS版-v2.0.md`，其正文版本为 **v2.1-KISS**，下称 KISS；旧 RFC 为同目录 `细化想法4.md`。
 本次不修改外部参考文档。下面区分“源码事实”“建设目标”“本次设计选择”；设计选择是工程推导，不冒充此前的人类裁决。
 
@@ -119,6 +121,18 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 ## 3. 建设顺序与完成条件
 
+### 上下文、协作与诊断的方向决定
+
+节点默认继承结构化契约与 handoff，不复制祖先完整聊天；全局观由真实根目标/硬约束、当前任务的贡献、相关决定与证据引用构成，细节按授权范围查询。沿用 DSH scoped system prompt 和 Session 原始日志，摘要仅改变视图，不能替代原始证据。Task DAG、Agent Graph、Session lineage 分别拥有事实，按 id 关联。
+
+父子澄清必须采用非阻塞协议。当前父 `task_decompose` 等整个 cascade，子再等待父回答会循环等待；DSH 的 send_message 还要求 continuable activation，当前 Singularity spawn 未接该生命周期。近期保留现有 agent-runtime handle 所有权，复用原生 inbox/steer/resume，增加任务域问答记录；不引入第二套 agent loop/Team task board。先实现父模型可响应的批次推进、区分 idle 与提交验收，再开放问父工具。
+
+协调主相位与阻塞问题分别记录，逐级询问不丢原批次或开放写权限；消息入箱不等于模型已消费，必须覆盖 claim 后中断的恢复。派发子节点和开始验收前均关闭新写入并确认在途写入收敛。对应故障窗口与竞态反例纳入 A3/A4，不能只靠 prompt 维持这些不变量。
+
+任务列表分开表达可见、可准入、可运行和调用者合法动作；可见不等于可领取。首版 runtime 分派，节点可查询与提出新 Task，不做全局工作窃取。Supervisor 按去重 incident 触发、沿实际依赖与证据逐步下钻，先只读诊断，再由候选节点实现和独立验证，最后人审应用；不设每节点常驻主管，不以诊断自述取代正确性证据。
+
+另一个前置是根契约入口：当前 graph name 直接成为根 objective，RootTaskSpec 仍以子全通过验收；P4 只提供独立父验收能力，不能宣称业务根目标已受保护。A0 将业务根任务延迟到真实用户目标/AC 被接受之后激活，setup 与目标执行分离，旧任务不原地改题。上述决定的字段、状态、DSH 复用点及 A0–A6 验收见 [深入架构](exploration-evolution-architecture.md)。
+
 ### Task 自主构造与可选人审
 
 **方向已确定，完整协议待建**：节点可以复用、组合或直接生成任务实例，不以“先找不到模板”为必要条件。现有 `task_decompose` 已允许现场给出 objective/AC/capability；这不等于 Task 语言规范、持久化合同与审核闭环均已完成。`definitionRef: subtask@1` 不是命中了人工模板库的证明。
@@ -131,7 +145,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 详细票据见 [建设计划](2026-09-20-vrtc-code-change-plan.md)。以下是依赖顺序，不是任务执行 workflow。
 
-先期确定性工程切片见 [执行 prompt](execution-prompts/README.md)：P1 类型闸 → P2 单文件 Skill 内容绑定 → P3 生产基线冲突检查 → P4 独立父验收与证据身份。P1、P2、P3、P4 已于 2026-09-21 完成并同步本文；下一项可派发 T1，接续 T2/T3。四项既有交付不替代 S2/S3 的自主修复与恢复闭环，也不宣称独立父验收全部完成（C3 完整证明与 verifier selftest 执行仍缺）。
+先期确定性工程切片见 [执行 prompt](execution-prompts/README.md)：P1 类型闸 → P2 单文件 Skill 内容绑定 → P3 生产基线冲突检查 → P4 独立父验收与证据身份。P1、P2、P3、P4 已于 2026-09-21 完成并同步本文；下一项为 T1，随后 A0 → A1/A2 → A3 → A4；A5 依赖 A1/A2，A6 与 S2/S3 联合验收。T2 在 T1 后建设可选人审，T3 复用 A3 的恢复，避免出现第二个调度器。四项既有交付不替代 S2/S3 的自主修复与恢复闭环，也不宣称独立父验收全部完成（C3 完整证明与 verifier selftest 执行仍缺）。
 
 | 顺序 | 建设目标 | 完成条件 |
 |---|---|---|
@@ -154,8 +168,11 @@ S1 的最小验证与能力契约是候选生产晋升的前置。S2 与 S3 按�
 | Task / TaskRun / 递归分解 | 有独立对象、事件存储、结构准入、树与依赖 DAG、顺序级联；原子性和自然语言 AC 覆盖不由机器证明 | `task/src/types.ts`；`task-runtime/src/admission.ts:checkDecomposition` |
 | Task 语言与生成审核 | 已能现场生成子任务，无模板命中要求；类型、工具声明、规范化与准入分散。assumptions 由分解输入进入 handoff，TaskInstance 本身不保存完整契约；无生成提案审核开关、摘要绑定和可恢复的审核状态 | `TaskDefinition` / `TaskInstance`；`DecomposeChildSpec`；`normalizeCriteria`；`decomposeAndRun` |
 | Task 定义版本 | 有 `definitionRef`；普通子任务使用 `subtask@1`，不等于完整不可变定义库和变更授权机制 | `task-runtime/src/index.ts:decomposeAndRun` |
+| 根目标入口 | 当前 graph name 传给 createRootTask 作 objective；RootTaskSpec 默认仅子全 verified；尚无独立的根契约 intake/接受/激活流程 | `graphs/src/index.ts:create`；`task/src/types.ts:RootTaskSpec` |
 | Capability | 配置表解析与真实 grant 已建；没有完整 skill 契约预检、可行性证明或多候选选择 | `capability.ts:resolveCapabilities`；`grants.ts:grantSkills` |
-| Handoff / 上下文 | fresh session、结构化 handoff、父会话引用、契约重注入已有；不是父 transcript 全复制 | `task-runtime/src/handoff.ts`；`agent-runtime/src/contract-reinjection.ts` |
+| Handoff / 上下文 | fresh session、handoff、父会话引用、契约系统投影已有；实际主要传父目标/依赖证据/assumptions，根全局 brief、带来源决定和动态有界 ContextView 待建；原始 session query 按 cwd 授权，不等于图/group 隔离 | `handoff.ts`、`orchestrate.ts:buildHandoff`；`agent-runtime/src/contract-reinjection.ts` |
+| 父子交互 / 生命周期 | task_decompose 同步等待整批；whenIdle 后验收；没有持久 question/answer 与等待相位。DSH send_message 不能直接用于未注册 continuable activation 的这些子节点 | `task-runtime/src/orchestrate.ts:awaitWorker`；`agent-runtime/src/index.ts:spawn` |
+| 任务导航 / 诊断 | task_read 当前任务、task_status 整树；review pack 有局部证据及父子摘要，只读 reviewer 可写 Diagnosis；无合法动作投影、因果遍历协议或自动 supervisor incident 调度 | `agent-singularity/src/tools/{task-read,task-status,task-review-pack,review-agent}.ts` |
 | Evidence 依赖 | `requiresArtifact` 检查 store 中 evidence id / artifact id / kind 的存在性，且只认 **verified run** 产出的证据（run 终态 verified 且 bundle 带 pass 判据）；原始输入用独立的 `acceptsArtifact`（存在即可，任意 run 状态）。缺失则 blocked + Obligation（obligation 文本区分两种要求）；不自动生成上游，也不验证匹配证据的版本和适用性 | `orchestrate.ts:missingRequiredArtifacts` |
 | Obligation | 记录缺能力/缺产物；模板 coverage 由任务声明 capability 或文字提及匹配；不是义务已被证据满足，更不是防漏的硬闸 | `task-runtime/src/obligation.ts:checkObligationCoverage` |
 | 判决 | `pass/fail/inconclusive`；部分 unknown 有 task/verifier 分类；没有 PARTIAL 状态与剩余义务自动派发；未通过 mandatory 判据仍走失败路径；`heuristic` 标记的判据永远不计入确定性通过 | `task/src/types.ts:VerificationResult`；`orchestrate.ts:unmetMandatory` |
@@ -182,6 +199,10 @@ S1 的最小验证与能力契约是候选生产晋升的前置。S2 与 S3 按�
 | G8 | `task_decompose`/`escalate` 部分拒绝返回普通文本，上层不能可靠用工具错误信号判定 | S2-E / 旧 #33 |
 | G9 | 类型闸只覆盖 `agent-singularity`；其余 Singularity 包的 `build` 仍只有 tsdown，未接 `tsc --noEmit`，其严格类型状态未经本闸保证 | P1 范围外，待独立评估 |
 | G10 | 动态生成已存在，但无统一可持久化契约及提案审核协议；不能把 Task 模板库当成合法性白名单，也不能把工具层弹窗当成完整治理 | T1–T3 / Task 自主构造指导 |
+| G11 | 根 objective/AC 入口过弱；上下文传递缺根目标、祖先决定来源与新鲜度；根目标错了时全局传播不能补救 | A0/A1 |
+| G12 | 父同步等子与子回问冲突；idle 等同执行结束，不支持有持久状态的等待与继续；不能仅添加 ask_parent 或开放 send_message | A3/A4 |
+| G13 | task_status 全树文本不表达执行权/合法动作；session 同 cwd 可读比 group 边界宽；reviewer 局部 pack 不等于跨图因果 debug | A2/A5 |
+| G14 | root/worker prompt 与当前方向有漂移：L4/manual、直接问人、make command exit 0、分解意图矛盾；未来工具必须随真实协议接线再写入提示 | A0–A6 逐票同步 Prompt 合同 |
 
 历史记录中的 M1–M9 为此前会话的实跑声明，保留于历史指南。本次回归结果见建设计划 S0；本次没有重跑 LLM、BB 构建仿真或生产 Evolution 链路。旧环境可用性、外部 bbdev 缺陷和部署阈值在使用前需重新读取对应部署，不能从旧日志推断当前状态。
 
