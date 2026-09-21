@@ -8,6 +8,7 @@
 1. [P1：严格类型检查](01-root-agent-typecheck.md)
 2. [P2：单文件 Skill 内容绑定](02-skill-content-binding.md)，基于 P1 验收后的代码执行。
 3. [P3：过期 Skill 候选拒绝](03-skill-champion-check.md)，基于 P2 验收后的代码执行。
+4. [P4：独立父验收与证据身份](04-parent-acceptance-evidence-identity.md)，基于 P3 验收后的代码执行；S1-V 切片 2（verifier selftest 执行）不在本票。
 
 每次将对应 prompt 文档路径交给执行 agent，要求阅读全文并执行。三项依次集成，不在同一工作区并行修改 Evolution 和 guide。
 
