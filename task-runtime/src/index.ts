@@ -21,6 +21,7 @@ import type {
   EvidenceBundle,
   ReviewTokenUsage,
   RunId,
+  RunProviderBinding,
   TaskContract,
   TaskEvent,
   TaskId,
@@ -32,6 +33,10 @@ import type {
 import { RootTaskSpec, TASK_CONTRACT_VERSION, rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import { resolveCapabilities, capabilitySnapshot, resolvePreset, type CapabilityConfig, type PermissionSpec } from './capability.ts'
 import { checkDecomposition, contractDefects, independentAcceptanceDefects } from './admission.ts'
+import { optionalService, precheckProviders, precheckReplacedCapabilityRow, providerDefectLines, providerRefusals, registeredVerifierIds } from './provider-precheck.ts'
+import type { ProviderPrecheck, SkillDiscoveryView } from './provider-precheck.ts'
+import { bindRunProviders, defaultRunBindingRoot, readRunBinding } from './run-binding.ts'
+import type { RunBindingRead } from './run-binding.ts'
 import { buildHandoff, renderWorkerPrompt } from './handoff.ts'
 import { normalizeDecomposition } from './normalize.ts'
 import {
@@ -88,6 +93,56 @@ export type { HandoffInit, WorkerPromptOptions } from './handoff.ts'
 export { buildHandoff, renderWorkerPrompt } from './handoff.ts'
 export { renderWorkerContract, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN } from './contract.ts'
 export type {
+  AcceptedSkillProviderVerdict,
+  CapabilityGrants,
+  CapabilityToolAnswer,
+  CapabilityToolQuery,
+  ExecutionProviderVerdict,
+  GuidanceProviderVerdict,
+  KnowledgeProviderVerdict,
+  LoadedSkillSidecar,
+  RejectedProviderVerdict,
+  SkillDefect,
+  SkillDefectCode,
+  SkillProviderCandidate,
+  SkillProviderIdentity,
+  SkillProviderVerdict,
+  SkillValidationContext,
+} from './sidecar.ts'
+export {
+  capabilityToolQuery,
+  executionProviders,
+  loadSkillSidecar,
+  registryRevision,
+  skillValidationContext,
+  validateSkillProvider,
+} from './sidecar.ts'
+export type { VerifiedWalk } from './verified-read.ts'
+export { readVerifiedFile, walkVerified } from './verified-read.ts'
+export type {
+  RunBindingRead,
+  RunBindingRequest,
+  RunBindingSkillRead,
+} from './run-binding.ts'
+export { RUN_BINDING_SKILLS_DIR, bindRunProviders, defaultRunBindingRoot, readRunBinding, renderRunBinding } from './run-binding.ts'
+export type {
+  CapabilityProviderPrecheck,
+  ProviderPrecheck,
+  ProviderPrecheckRequest,
+  SkillDiscoveryView,
+  VerifierVocabulary,
+} from './provider-precheck.ts'
+export {
+  optionalService,
+  precheckProviders,
+  precheckReplacedCapabilityRow,
+  providerDefectLines,
+  providerRefusals,
+  registeredVerifierIds,
+  skillSearchRoots,
+  unlistableVerifierRefusal,
+} from './provider-precheck.ts'
+export type {
   BudgetConfig,
   ChildOutcome,
   ChildPlan,
@@ -109,6 +164,13 @@ export interface RunVerifier {
   logTail?(logRef: string): Promise<string | undefined>
   /** The registered verifier ids; optional on the service, required to validate a criterion's `verifierRef`. */
   verifierIds?(): string[]
+  /**
+   * The cordis service lifecycle hook. Optional because a test double is already
+   * readied when it is built; the provider pre-check awaits it before reading
+   * `verifierIds()`, so a registry that is merely still loading is not read as
+   * an empty vocabulary (S1-C).
+   */
+  ready?(): Promise<void>
 }
 
 /** Soft view of the env-builder store: verification commands and env-bound MCP servers run where the workers ran. */
@@ -352,6 +414,42 @@ export interface Config {
    * unless the child was declared `decomposable`.
    */
   allowRuntimeDecomposition: boolean
+  /**
+   * Where a run's bound provider content is materialized (S1-C): one directory
+   * per run holding the skills the run loads, outside the worker's checkout so a
+   * worker cannot rewrite what it is verified against. Defaults to
+   * {@link defaultRunBindingRoot} (`<DSH_HOME or ~/.dsh>/singularity/run-bindings`);
+   * a deployment that cannot materialize content fails a run that selects any,
+   * rather than letting it load an unbound production path.
+   */
+  runBindingRoot?: string
+}
+
+/**
+ * What the load-time provider scan found (S1-C item 3) — the deployment's own
+ * capability table read from the harness process's own discovery roots, at the
+ * moment that table went into effect.
+ *
+ * Two readings, both honest: {@link precheck} carries every verdict, so the
+ * effective provider set is `executionProviders` of its rows (the only role that
+ * may close an execution gap) with knowledge/guidance beside it; {@link defects}
+ * carries the same refusals the load report printed, one line per defect.
+ *
+ * `defects` empty and `failed` absent means every skill the table names is a
+ * loadable provider *from this viewpoint* — which is not the same as "every
+ * worker's viewpoint", see {@link TaskRuntime.providerLoadReport}.
+ */
+export interface ProviderLoadReport {
+  /** The scan's verdicts, per capability and per skill; absent when the scan could not run at all. */
+  readonly precheck?: ProviderPrecheck
+  /** Every refused provider, one line per defect; empty when the table names only loadable providers. */
+  readonly defects: readonly string[]
+  /**
+   * Why the scan could not run at all — a failure of the scan itself, not of a
+   * provider. Reported instead of a verdict, never swallowed: a load report that
+   * could not be taken is not a quiet success.
+   */
+  readonly failed?: string
 }
 
 export const DEFAULT_VERIFY_TIMEOUT_MS = 10 * 60 * 1000
@@ -507,6 +605,8 @@ export class TaskRuntime extends Service {
   private readonly config: Config
   /** sessionId → run binding, rebuilt whenever a store is (re)opened. */
   private readonly sessions = new Map<string, RunBinding>()
+  /** The load-time provider scan, taken once ({@link providerLoadReport}). */
+  private providerLoad?: Promise<ProviderLoadReport>
 
   constructor(ctx: Context, config?: Config) {
     super(ctx, 'taskRuntime')
@@ -519,7 +619,99 @@ export class TaskRuntime extends Service {
       budget: { ...DEFAULT_BUDGET, ...(config?.budget ?? {}) },
       noProgressRounds: config?.noProgressRounds ?? DEFAULT_NO_PROGRESS_ROUNDS,
       allowRuntimeDecomposition: config?.allowRuntimeDecomposition ?? DEFAULT_ALLOW_RUNTIME_DECOMPOSITION,
+      runBindingRoot: config?.runBindingRoot ?? defaultRunBindingRoot(),
     }
+  }
+
+  /**
+   * Cordis runs this after construction, once the injected services are there:
+   * the load-time provider scan (S1-C item 3) is taken here, so the first thing
+   * a deployment learns about its own capability table is what its own discovery
+   * roots make of it.
+   *
+   * This hook never throws: see {@link providerLoadReport} for why the scan
+   * reports instead of refusing to start.
+   */
+  async [Service.init](): Promise<void> {
+    await this.providerLoadReport()
+  }
+
+  /**
+   * The load-time provider scan over the capability table this process is
+   * running (guide §2.4, S1-C item 3): every skill the effective table names,
+   * discovered from the harness process's own skill roots (`process.cwd()`'s
+   * project roots, `$DSH_HOME/skills`, the user root) and judged by
+   * {@link validateSkillProvider} — the same validator admission, capability
+   * replacement and candidate promotion use.
+   *
+   * Why this reports instead of refusing the deployment: the harness process's
+   * own viewpoint is **not** the worker's. A deployment-level process loads
+   * `config.yml` long before any graph env exists, so it cannot see the checkout
+   * a worker will run in (`/…/env/<name>`, whose own `.agents/skills` a worker's
+   * discovery walks first) — a skill that resolves fine at admission is
+   * therefore legitimately *missing* from the load-time viewpoint. Failing the
+   * load on that would refuse configurations that work, and it would fail for a
+   * reason the operator cannot fix by editing the table. So every defect is
+   * printed, nothing is enforced here, and the hard gate stays where the
+   * viewpoint is the worker's own: the admission pre-check, which refuses the
+   * whole batch before it persists anything.
+   *
+   * The result is kept as a value ({@link ProviderLoadReport}): the effective
+   * provider set and the defect summary stay queryable after the log line has
+   * scrolled away, without re-running the validation. It is the *load-time* fact
+   * — a row replaced later in this process (an evolution apply, a rollback) was
+   * judged by its own entry before it landed, and is not folded back into this
+   * report.
+   */
+  async providerLoadReport(): Promise<ProviderLoadReport> {
+    this.providerLoad ??= this.scanConfiguredProviders()
+    return this.providerLoad
+  }
+
+  /**
+   * One load-time scan, never thrown: a scan that cannot run (a discovery or a
+   * read that fails outright) is reported as {@link ProviderLoadReport.failed}
+   * and printed just as loudly as a refused provider.
+   */
+  private async scanConfiguredProviders(): Promise<ProviderLoadReport> {
+    let report: ProviderLoadReport
+    try {
+      const precheck = await this.providerPrecheck(Object.keys(this.config.capabilities), { cwd: process.cwd() })
+      report = { precheck, defects: providerDefectLines(precheck) }
+    } catch (error) {
+      report = { defects: [], failed: error instanceof Error ? error.message : String(error) }
+    }
+    this.reportProviderLoad(report)
+    return report
+  }
+
+  /**
+   * The load report, printed through the cordis logger when one is mounted: one
+   * line per defect (capability, skill, defect code, detail) plus a header that
+   * says what was scanned and that the deployment is starting anyway.
+   */
+  private reportProviderLoad(report: ProviderLoadReport): void {
+    const roots = report.precheck?.roots ?? []
+    if (report.failed !== undefined) {
+      this.warn(
+        `config load: the capability provider scan could not run (${report.failed}); the deployment starts, and admission ` +
+        'still refuses a batch whose provider cannot be judged',
+      )
+      return
+    }
+    if (report.defects.length === 0) return
+    this.warn(
+      `config load: ${report.defects.length} provider defect${report.defects.length === 1 ? '' : 's'} in the effective capability table ` +
+      `(roots: ${roots.join(', ')}); reported, not enforced — this process's own roots are not the worker's, so a skill ` +
+      'reachable from a run\'s checkout may legitimately be missing here. Admission refuses a batch that names one of these.',
+    )
+    for (const line of report.defects) this.warn(`config load: ${line}`)
+  }
+
+  /** Best-effort warn through the cordis logger when one is mounted; tests and minimal contexts may not have it. */
+  private warn(message: string): void {
+    const logger = (this.ctx as { logger?: (name: string) => { warn(format: string): void } }).logger
+    logger?.('task-runtime').warn(message)
   }
 
   /**
@@ -559,15 +751,53 @@ export class TaskRuntime extends Service {
    * this, so a restart reloads the identical table. `null` removes the row
    * (rollback of a newly-added capability). Later admissions resolve against
    * the replaced row; in-flight runs are untouched.
+   *
+   * **A replacement is validated before it lands; a removal is not.** This is
+   * the entry that makes a row effective in this process, so it runs the same
+   * check the promotion gate ran before the row was written to `config.yml`:
+   * every skill the new row grants is discovered from the harness process's own
+   * roots and judged by `validateSkillProvider`
+   * ({@link precheckReplacedCapabilityRow}), against the live registry's verifier
+   * vocabulary — fail-closed when that vocabulary cannot be listed. An unusable
+   * provider rejects with its named defects and the table is left exactly as it
+   * was, so no path into the effective registry skips the one validator
+   * (guide §2.4, S1-C item 3). A removal needs no such check: it grants
+   * nothing, and refusing a rollback would strand a deployment on a row it is
+   * trying to undo.
    */
-  applyCapabilityRow(name: string, entry: CapabilityConfig | null): void {
+  async applyCapabilityRow(name: string, entry: CapabilityConfig | null): Promise<void> {
     if (entry === null) {
       const rest = { ...this.config.capabilities }
       delete rest[name]
       this.config.capabilities = rest
       return
     }
+    await this.assertReplacementRow(name, entry)
     this.config.capabilities = { ...this.config.capabilities, [name]: structuredClone(entry) }
+  }
+
+  /**
+   * The replacement check behind {@link applyCapabilityRow}: the row as it will
+   * read after this write, judged by the admission pre-check itself. Throws with
+   * every refusal named (capability, skill, defect code, detail) — and writes
+   * nothing, which is what makes the caller's table unchanged.
+   */
+  private async assertReplacementRow(name: string, entry: CapabilityConfig): Promise<void> {
+    const verifierRefs = await this.registeredVerifierIds()
+    const { refusals } = await precheckReplacedCapabilityRow({
+      name,
+      entry,
+      table: this.config.capabilities,
+      // The deployment's own viewpoint, the same one the evolution gate and the
+      // load-time report ask from: this process knows its own skill roots.
+      view: { cwd: process.cwd() },
+      ...(verifierRefs === undefined ? {} : { verifierRefs }),
+    })
+    if (refusals.length === 0) return
+    throw new Error(
+      `task-runtime: capability "${name}" was not replaced — the row grants providers that are not usable:\n` +
+      refusals.map(line => `- ${line}`).join('\n'),
+    )
   }
 
   /** Create (or reopen) the store, expand RootTaskSpec into the root task, and bind a run to the root session. */
@@ -589,6 +819,18 @@ export class TaskRuntime extends Service {
       const run = [...snapshot.runs].reverse().find(item => item.taskId === root.taskId && item.sessionId === options.rootSessionId)
       if (run === undefined) {
         throw new Error(`task-runtime: store "${storeId}" already has root task "${root.taskId}" without a run for session "${options.rootSessionId}"`)
+      }
+      // Re-entering a run (a restarted root session adopts the run bound to it):
+      // the record's own content identity is re-checked before the run is handed
+      // back. A run whose bound content is no longer readable is refused by name
+      // rather than resumed against whatever stands at that path now.
+      if (run.providerBinding !== undefined) {
+        const read = await readRunBinding(run.providerBinding)
+        if (read !== undefined && read.defects.length > 0) {
+          throw new Error(
+            `task-runtime: run "${run.runId}" cannot be re-entered: the content it is bound to is not readable:\n- ${read.defects.join('\n- ')}`,
+          )
+        }
       }
       return { taskId: root.taskId, runId: run.runId }
     }
@@ -624,11 +866,24 @@ export class TaskRuntime extends Service {
     }
     await this.ctx.task.createTaskIn(storeId, task, actor)
     await this.ctx.task.admitTaskIn(storeId, task.taskId, actor, { decompositionStatus: 'decomposable', manifest })
+    const runId: RunId = `r-${randomUUID()}`
+    // The root binds a binding like every other run — the same builder, the same
+    // meaning — and for a root that grants nothing that is a record with no
+    // providers, no snapshot, and the registry revision the table stood at:
+    // nothing about content is invented for a run that loaded none.
+    const providerBinding = await bindRunProviders({
+      storeId,
+      runId,
+      manifest,
+      table: this.config.capabilities,
+      root: this.config.runBindingRoot,
+    })
     const run: TaskRun = {
-      runId: `r-${randomUUID()}`,
+      runId,
       taskId: task.taskId,
       sessionId: options.rootSessionId,
       capabilitySnapshot: capabilitySnapshot(manifest),
+      providerBinding,
       artifacts: [],
       verifierResults: [],
       status: 'running',
@@ -681,6 +936,13 @@ export class TaskRuntime extends Service {
     if (parentRun.sessionId !== callerSessionId) {
       throw new Error(`task-runtime: run "${parentRunId}" is bound to session "${parentRun.sessionId}", not caller "${callerSessionId}"`)
     }
+    // The session's checkout, resolved once: the same directory the caller's
+    // protected acceptance inputs are read against, the children's MCP servers
+    // are bound to, and — S1-C — the granted skills are discovered from, since a
+    // spawned worker inherits its cwd from this session
+    // (`agent-runtime/src/index.ts`) and walks project skill roots upward from
+    // there.
+    const envPath = await this.envPathForSession(callerSessionId)
     // Protected acceptance inputs are fixed before the one normalization entry
     // (S1-V slice 2): the declared paths become the identity of the bytes they
     // name, read against the same checkout the criterion's judge will run in,
@@ -690,7 +952,7 @@ export class TaskRuntime extends Service {
     // time the single entry reads the batch, there is one form and one form
     // only. A refused fixing joins the normalization refusal — same error, same
     // no-op: no id minted, no capability resolved, nothing persisted.
-    const fixed = await fixSpecProtectedInputs(spec, await this.envPathForSession(callerSessionId))
+    const fixed = await fixSpecProtectedInputs(spec, envPath)
     // The one normalization entry (T1): raw input in, the canonical contract of
     // every child plus the batch identity out — and every reason, in one list,
     // when it is refused. Nothing is minted or persisted before this returns ok,
@@ -771,6 +1033,25 @@ export class TaskRuntime extends Service {
       )
     }
 
+    // Provider pre-check (S1-C item 1): every skill the matched capabilities
+    // grant must be discoverable from the viewpoint of the workers about to be
+    // spawned, and what discovery finds must be a provider the unified
+    // validator accepts (registered verifier, covered tools, matching content).
+    // It runs after the gap rejection and before the first write, so a batch
+    // refused here leaves no task, no run, no event and no obligation — and the
+    // same verdicts then travel with the batch (ChildPlan) instead of being
+    // recomputed at spawn.
+    const precheck = await this.providerPrecheck(
+      [...new Set(manifests.flatMap(manifest => Object.keys(manifest.capabilities)))],
+      { ...(envPath === undefined ? {} : { cwd: envPath }) },
+    )
+    const refusals = providerRefusals(precheck)
+    if (refusals.length > 0) {
+      throw new Error(
+        `task-runtime: provider pre-check rejected decomposition of "${parentTaskId}":\n- ${refusals.join('\n- ')}`,
+      )
+    }
+
     this.assertKnownVerifierRefs(
       batch.children.flatMap((child, childIndex) =>
         child.contract.acceptanceCriteria.map(criterion => ({ childIndex, criterion }))),
@@ -823,6 +1104,10 @@ export class TaskRuntime extends Service {
         task,
         manifest: manifests[index]!,
         dependsOn: child.dependsOn,
+        // The batch-wide provider verdicts ride with every plan: one pre-check
+        // per admission, never one per child, and the result the Run binding
+        // records is the one admission actually judged.
+        providers: precheck,
         // Both declarations come from the contract the store holds, so the
         // handoff a worker reads can never drift from what was admitted.
         assumptions: [...child.contract.assumptions],
@@ -890,6 +1175,21 @@ export class TaskRuntime extends Service {
     if (manifest.missing.length > 0) {
       throw new Error(`task-runtime: replay of "${championTaskId}" cannot run: capability gap [${manifest.missing.join(', ')}] under the overlay`)
     }
+    const envPath = await this.envPathForSession(callerSessionId)
+    // The same provider pre-check the ordinary decomposition runs (S1-C item 1),
+    // from the replay caller's checkout and under the overlay's own capability
+    // table — the table this replay resolved against, not the configured one.
+    // The overlay's extra skill roots are searched first because that is the
+    // order the grant registers them in: a candidate skill in the sandbox is
+    // what the replayed worker would load. Refused before anything persists.
+    const precheck = await this.providerPrecheck(Object.keys(manifest.capabilities), {
+      ...(envPath === undefined ? {} : { cwd: envPath }),
+      ...(options.overlay?.extraSkillRoots === undefined ? {} : { extraRoots: [...options.overlay.extraSkillRoots] }),
+    }, table)
+    const refusals = providerRefusals(precheck)
+    if (refusals.length > 0) {
+      throw new Error(`task-runtime: provider pre-check rejected replay of "${championTaskId}":\n- ${refusals.join('\n- ')}`)
+    }
     // The replay path shares the ordinary decomposition's rules: the contract's
     // own structure (T1) and the P4 parent-acceptance declarations (contract 8).
     // Both are structural, both are judged here — before anything persists — and
@@ -905,7 +1205,7 @@ export class TaskRuntime extends Service {
     // re-check has to compare against.
     const fixed = await fixCriteriaProtectedInputs(
       effective.acceptanceCriteria,
-      await this.envPathForSession(callerSessionId),
+      envPath,
       label,
     )
     const acceptanceDefects = [
@@ -978,6 +1278,9 @@ export class TaskRuntime extends Service {
     return runReplayTask(this.orchestrateEnv(callerSessionId, callerSessionId), storeId, {
       task,
       manifest,
+      // The pre-check this replay passed: the Run binding (S1-C item 4) records
+      // what the replay resolved against without re-running discovery.
+      providers: precheck,
       lineage: options.lineage,
       agentPreset: options.overlay?.presetOverride ?? resolvePreset(manifest, this.config.defaultPreset),
       ...(prompt === undefined ? {} : { prompt, contract: contractBlock }),
@@ -1119,6 +1422,7 @@ export class TaskRuntime extends Service {
       task: this.ctx.task,
       actor,
       ...(this.config.defaultPreset !== undefined ? { defaultPreset: this.config.defaultPreset } : {}),
+      ...(this.config.runBindingRoot === undefined ? {} : { runBindingRoot: this.config.runBindingRoot }),
       verifyTimeoutMs: this.config.verifyTimeoutMs,
       budget: { ...this.config.budget },
       allowRuntimeDecomposition: this.config.allowRuntimeDecomposition,
@@ -1285,14 +1589,80 @@ export class TaskRuntime extends Service {
    * absent in test contexts and in deployments that mount a smaller bundle.
    */
   private softService<T>(name: string): T | undefined {
-    const viaContext = this.ctx.get?.(name)
-    if (viaContext !== undefined) return viaContext as T
-    return (this.ctx as unknown as Record<string, unknown>)[name] as T | undefined
+    return optionalService<T>(this.ctx, name)
   }
 
   /** The verifier service is an optional plugin; resolve it softly, never import the package. */
   private runVerifier(): RunVerifier | undefined {
     return (this.ctx.get?.('verifier') ?? (this.ctx as unknown as { verifier?: RunVerifier }).verifier) as RunVerifier | undefined
+  }
+
+  /**
+   * The registered verifier vocabulary one provider pre-check judges execution
+   * sidecars against — `registeredVerifierIds` in `./provider-precheck.ts`, the
+   * one implementation every provider check shares, with the reasoning for
+   * `ready()`-first and for the fail-closed `undefined` documented there.
+   */
+  private async registeredVerifierIds(): Promise<readonly string[] | undefined> {
+    return registeredVerifierIds(this.ctx)
+  }
+
+  /**
+   * The provider pre-check (S1-C item 1) over the given capability rows, run
+   * against the effective table unless `table` replaces it (the replay overlay).
+   * Read-only: it discovers skill directories and reads them, writes nothing,
+   * and returns every refusal as a verdict rather than throwing.
+   */
+  private async providerPrecheck(
+    capabilities: readonly string[],
+    view: SkillDiscoveryView,
+    table: Readonly<Record<string, CapabilityConfig>> = this.config.capabilities,
+  ): Promise<ProviderPrecheck> {
+    const verifierRefs = await this.registeredVerifierIds()
+    return precheckProviders({
+      capabilities,
+      table,
+      view,
+      ...(verifierRefs === undefined ? {} : { verifierRefs }),
+    })
+  }
+
+  /**
+   * The provider verdicts for the capability rows in play, discovered from one
+   * session's own viewpoint — the read-only entry `capability_list` renders
+   * (guide §2.3 item 1: the model sees the pre-check's conclusion before it
+   * dispatches, not only after admission refused its batch). Nothing is thrown
+   * for an unusable provider: the verdict says what is wrong with it, and the
+   * caller renders that.
+   *
+   * `capabilities` names the rows to check; omitting it checks every row of the
+   * effective table. A caller that wants the verdicts a *batch* resolved
+   * against should pass its matched rows — the revision then describes exactly
+   * what admission judged. Two things this recompute cannot reproduce, which is
+   * why admission carries its own result with the batch (S1-C item 4): the
+   * replay overlay's replaced table, and the bytes as they were at admission.
+   */
+  async capabilityProviderReport(sessionId: string, capabilities?: readonly string[]): Promise<ProviderPrecheck> {
+    const envPath = await this.envPathForSession(sessionId)
+    return this.providerPrecheck(capabilities ?? Object.keys(this.config.capabilities), {
+      ...(envPath === undefined ? {} : { cwd: envPath }),
+    })
+  }
+
+  /**
+   * Re-check the content a run's binding recorded against the bytes its snapshot
+   * holds now (S1-C item 4) — the read a historical view (`task_read`) and a
+   * re-entry (`createRootTask` adopting an existing run) both perform before
+   * trusting the record.
+   *
+   * `undefined` means the record names no snapshot: a run that loaded no content
+   * has nothing to re-read, which is not the same as content that failed to
+   * re-read. A caller that gets a report must look at its `defects`: content
+   * that is not readable as bound is reported by name and is never substituted
+   * with whatever the production path holds now.
+   */
+  async readRunBinding(binding: RunProviderBinding): Promise<RunBindingRead | undefined> {
+    return readRunBinding(binding)
   }
 
   /**

@@ -25,7 +25,8 @@
  * @module @dangosys/dsh-singularity-task-runtime/contract
  */
 
-import type { AcceptanceCriterion, TaskHandoff, TaskInstance } from '@dangosys/dsh-singularity-task'
+import type { AcceptanceCriterion, RunProviderBinding, TaskHandoff, TaskInstance } from '@dangosys/dsh-singularity-task'
+import { renderRunBinding } from './run-binding.ts'
 
 /**
  * Opening marker of the block. Stable on purpose: it is what tells a reader —
@@ -74,11 +75,17 @@ function field(title: string, items: readonly string[]): string[] {
  * Render one task's contract block.
  * @param task - the child task as the store holds it at delegation.
  * @param handoff - the envelope the parent passed to this child.
+ * @param binding - what this run was bound to and loaded (S1-C item 4): the
+ *   providers chosen for it, rendered as the "chosen implementation" section
+ *   from the same function and record `task_read` renders, so the two views
+ *   cannot describe different runs. Absent on a run that recorded no binding,
+ *   and then nothing is added to the block.
  * @returns the marked block, ending in the one line that says where the
  *   authority lives, so a model reading it never has to guess whether a
  *   compacted spawn prompt or this block is the current contract.
  */
-export function renderWorkerContract(task: TaskInstance, handoff: TaskHandoff): string {
+export function renderWorkerContract(task: TaskInstance, handoff: TaskHandoff, binding?: RunProviderBinding): string {
+  const summary = renderRunBinding(binding)
   return [
     `${WORKER_CONTRACT_OPEN} task="${task.taskId}" decomposition="${task.decompositionStatus}">`,
     '',
@@ -89,6 +96,7 @@ export function renderWorkerContract(task: TaskInstance, handoff: TaskHandoff): 
     '## Acceptance criteria',
     '',
     ...criteriaTable(task.acceptanceCriteria),
+    ...(summary.length === 0 ? [] : ['', summary]),
     '',
     '## Handoff',
     '',

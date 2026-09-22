@@ -1,0 +1,55 @@
+{
+  "contractVersion": 1,
+  "type": "execution",
+  "capabilities": ["verify-ball-functional"],
+  "precondition": "The project MCP server bbdev is loaded and the Ball, its ISA macro and its CTest exist in the checkout",
+  "inputs": [
+    {
+      "name": "ball",
+      "description": "Ball name whose workload directory holds the CTest",
+      "required": true
+    },
+    {
+      "name": "chip",
+      "description": "Chip configuration the workload is built against",
+      "required": true
+    },
+    {
+      "name": "platform",
+      "description": "Binary platform suffix, baremetal unless the test is a toolchain test",
+      "required": false
+    }
+  ],
+  "outputs": [
+    {
+      "name": "bemu-log",
+      "description": "BEMU run log for the built binary",
+      "required": true
+    },
+    {
+      "name": "rtl-report",
+      "description": "Verilator RTL report for the same binary and config",
+      "required": true
+    }
+  ],
+  "requiredTools": [
+    "bash",
+    "job_output",
+    "mcp__bbdev__bbdev_bemu_sim",
+    "mcp__bbdev__bbdev_bebop_verilator_run",
+    "mcp__bbdev__bbdev_workload_build",
+    "read"
+  ],
+  "verifier": {
+    "ref": "command"
+  },
+  "content": {
+    "skillMdSha256": "c23354f88a9aa3fbfd705f2e7d5d04f02d16a11e771bbd3bbe4d65b44357092c",
+    "resources": [
+      {
+        "path": "scripts/run_bemu.sh",
+        "sha256": "0aec21463951dcdd02a076b6d0fed94118b03d1df4ef90b34d9aa0ee6fac4503"
+      }
+    ]
+  }
+}

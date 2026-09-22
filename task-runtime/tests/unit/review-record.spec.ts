@@ -1,12 +1,15 @@
-import { describe, expect, test, vi } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { EvidenceBundle, ReviewRecord, TaskRun, VerificationResult } from '../../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
+import { pinSkillHome, releaseSkillHomes } from '../support/skill-roots.ts'
 import type { Config, DecomposeSpec } from '../../src/index.ts'
 import { TaskRuntime } from '../../src/index.ts'
 
 const ROOT_SESSION = 'root-session'
 const STORE = rootTaskStoreId(ROOT_SESSION)
+
+afterEach(releaseSkillHomes)
 
 interface StoredSession {
   readonly header: SessionHeader
@@ -460,6 +463,7 @@ describe('review dimensions and metrics (P4)', () => {
   })
 
   test('a session observation fills the token, tool, skill and intervention facts with observed numbers', async () => {
+    pinSkillHome('ball-align')
     const h = harness({
       session: {
         tokens: { uncachedInputTokens: 1000, outputTokens: 200, cacheReadTokens: 50, cacheWriteTokens: 10 },

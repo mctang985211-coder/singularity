@@ -1,6 +1,6 @@
 # Singularity Harness 工作指南
 
-复核日期：2026-09-21。审计基线：Singularity `741dcb2`（T1 交付后、S1-V 切片 2 修改前），外层 harness `f8839133e1`。
+复核日期：2026-09-22。审计基线：Singularity `c2912af`（S1-V 切片 2 交付后、S1-C 修改前），外层 harness `7fadd85151`。
 这两个提交保存了修改前的已跟踪及非忽略新增文件；第三方 DSH 子模块原有未跟踪文件不在这两个提交内。
 
 本文是当前方向与进度的入口；[建设计划](2026-09-20-vrtc-code-change-plan.md)规定下一步落点和验收。
@@ -78,6 +78,7 @@ DSH 提供 agent/session、skill 发现与加载、preset、MCP、上下文与�
   capability_list -> task_decompose(children.requiredCapabilities)
   -> normalizeDecomposition（唯一规范化入口：闭合字段集、默认值、criterion id、批次摘要）
   -> checkDecomposition + resolveCapabilities（查部署配置表）
+  -> provider 预检（用实际 worker 的 cwd/preset 发现路径校验已配置 skill 等资源，S1-C）
   -> 保存 Task（含规范化 contract）/ CapabilityManifest / 批次准入记录
   -> 按 dependsOn 顺序运行就绪子任务
   -> 检查 requiresArtifact -> Handoff + 独立 Session
@@ -91,18 +92,20 @@ DSH 提供 agent/session、skill 发现与加载、preset、MCP、上下文与�
 - `resolveCapabilities` 只查表并展开工具标签，返回 `closed` 或 `gap`；虽然类型含 `partial`，实现不产生它。`closed` 表示声明的名字已命中，**不表示 skill 前置条件或产物契约已闭包**。
 - 节点提交的批次先经过 `normalizeDecomposition`（唯一规范化入口，T1）：闭合字段集、默认值、criterion id 固定、批次摘要；被拒绝的批次在铸 id 和落库之前返回，且零副作用。之后才进入结构准入与能力解析。
 - 缺 capability 且子任务未标 `decomposable`：拒绝整批子任务，另在父任务记录 Obligation。标了 `decomposable` 可以准入并启动规划 worker；执行安全仍依赖后续分解与授权约束。
-- 多个命中能力的 skill/tool 合并，preset 只能有一个不同的声明值；同名合并，不同名在能力解析时拒绝，不再按能力顺序选第一个（2026-09-21 样本改造）。无声明才使用部署默认 preset。Skill 不存在仍到 spawn 的 `grantSkills` 才报错。
+- 多个命中能力的 skill/tool 合并，preset 只能有一个不同的声明值；同名合并，不同名在能力解析时拒绝，不再按能力顺序选第一个（2026-09-21 样本改造）。无声明才使用部署默认 preset。
+- 准入 provider 预检（2026-09-22 S1-C）：在子任务落库前用实际 worker 的 cwd/preset 发现路径检查已配置 skill——发现不到、frontmatter 名不符、侧车非法（未知执行 verifier、工具声明不被覆盖、内容身份不匹配、不支持的资源形态）均整批拒绝且零副作用；普通分解、replay 与直接服务调用共用。MCP 启动失败仍在 spawn 阶段记录。闭包语义不变：闭包仍由配置表条目决定；知识型/无侧车（guidance）skill 可加载但不计为执行 provider。
+- Run 绑定实际实现（2026-09-22 S1-C）：run 启动时把选定 skill 物化为 run 级快照并逐字节复检准入身份，worker 经 overlay 加载快照字节而非可变生产路径；`TaskRun.providerBinding` 记录 registry 修订、各 provider 角色与内容摘要、preset/MCP 身份；worker 合同块/spawn prompt/`task_read` 同源渲染选定实现摘要，正文按需读。apply 新版本不热替换在途 run；旧内容不可读时明确拒绝，不静默回退。
 - DSH skill grant 保证内容在 worker 的 skill 层注册；全局目录仍可能显示其他 skill，**没有按 worker 隐藏目录的保证**。工具授权另由 grant 限制；preset 自带工具与 MCP 挂载也是授权面的一部分。
 - 本次修复：worker baseline 增加只读 `capability_list`。原先 `task_decompose` 指示先查能力表，但 worker 过滤器把它剔除，导致递归节点只能猜能力名。`graph_spawn`、Evolution 与平台审批工具仍不进入 worker baseline。
 
-### 2.3 最小建设目标（尚未实现）
+### 2.3 最小建设目标（1–3 已由 S1-C 交付）
 
 先保留显式能力表作为唯一 provider 选择入口；不要立即引入向量检索、自动排名或通用规划器。
 
-1. **准入期预检已选实现**：skill 可发现、所需工具/MCP/preset 可配置。多个 preset 冲突检查已完成，其余预检待建。预检不能保证 MCP 启动成功，spawn 仍需实际校验，失败要指向相同的缺口类型。
-2. **worker 收到自己的精简能力摘要**：选中的 capability、skill 名称/用途、工具边界和未解决缺口；通过 DSH 按需读正文。当前 handoff 没有这个专门摘要，不应写成已实现。全局 skill catalog 的 token 成本仍存在。
-3. **run 记录实际选择**：除了现有名称快照，还需记录 capability 表修订、skill 内容摘要或版本、preset/MCP 配置身份。现有 `capabilitySnapshot: string[]` 不足以复现内容。
-4. **运行中发现缺口**：先检查已授权能力能否回答，再提出有验收标准的获取/分解任务；无可行路径则上报。加载另一份指导不扩权，不自动安装工具，不修改当前 Task 的 AC。
+1. **准入期预检已选实现**（2026-09-22 S1-C 已交付，§5.8）：skill 可发现性、frontmatter 名一致、侧车契约合法（执行型 verifier 已注册、requiredTools 被能力展开工具覆盖、内容身份匹配）在子任务落库前校验。多个 preset 冲突检查此前已完成。预检不能保证 MCP 启动成功，spawn 仍需实际校验，失败指向相同的缺口类型。
+2. **worker 收到自己的精简能力摘要**（2026-09-22 S1-C 已交付）：合同块/spawn prompt/`task_read` 同源渲染本 run 选中的 capability、skill 名称/角色/用途与内容短摘要及 registry 修订；通过 DSH 按需读正文。全局 skill catalog 的 token 成本仍存在。
+3. **run 记录实际选择**（2026-09-22 S1-C 已交付）：`TaskRun.providerBinding` 在名称快照之外记录 capability 表修订（registry revision）、每个 provider 的角色与内容摘要、preset/MCP 身份与快照根；`capabilitySnapshot: string[]` 保留为投影。
+4. **运行中发现缺口**（仍未实现）：先检查已授权能力能否回答，再提出有验收标准的获取/分解任务；无可行路径则上报。加载另一份指导不扩权，不自动安装工具，不修改当前 Task 的 AC（"加载未选 skill 不扩大工具权限"已有 S1-C 回归测试，缺口处置流程仍属后续票）。
 
 一个 capability 可有多种 skill 实现，一个 skill 也可服务多个任务。首版仍由部署选择一组实现；有真实替换需求和测量数据后，再做多候选排序。
 
@@ -115,9 +118,9 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 | 执行型 | 声明提供的 capability、前置条件、输入/输出、required tools、verifier 引用；用正负样本验证实现效果 | 经契约和验证检查后才可以 |
 | 知识型 | 来源、适用范围、内容版本、结构/引用检查；义务模板需能解析并验证覆盖规则 | 不可以；只能帮助发现义务和选择方法 |
 
-**本次设计选择**：侧车元数据采用带类型的契约，知识型不伪造执行 verifier，也不计入执行闭包；它仍需内容检查和变更审查。这是对 DSH 内容类型的划分，不是给执行型 skill 开“未验入库”豁免。
+**本次设计选择**：侧车元数据采用带类型的契约，知识型不伪造执行 verifier，也不计入执行闭包；它仍需内容检查和变更审查。这是对 DSH 内容类型的划分，不是给执行型 skill 开"未验入库"豁免。
 
-侧车注册表尚未建设，确切 schema 留在实现票中。第一版只加入上述决策必需字段；成熟度五阶段、成功率衰减与统计排名后置。注册表负责元数据，DSH 继续负责正文加载。`evolution_apply` 检查也不是唯一入口：启动配置与新增/替换 provider 都必须经过同一校验。
+类型化侧车契约已落地（2026-09-22 S1-C，见 §5.8）：侧车为 skill 目录内 `SKILL.contract.json`，执行型/知识型判别联合，闭合字段集与内容身份（含受支持多文件资源）；成熟度五阶段、成功率衰减与统计排名仍后置。侧车负责元数据，DSH 继续负责正文加载。统一校验入口 `validateSkillProvider` 被配置载入、provider 替换（capability 行 apply 与运行表替换）、候选晋升与准入预检共用：`evolution_apply` 不是唯一防线。
 
 领域包包含义务模板、执行 skill 与参考 verifier。模板只提问，不规定 C→BEMU→Compiler→RTL 的固定步骤。`dependsOn` 可以表达本次任务中确实存在的证据依赖；它不是被禁用的 API。
 
@@ -149,7 +152,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 详细票据见 [建设计划](2026-09-20-vrtc-code-change-plan.md)。以下是依赖顺序，不是任务执行 workflow。
 
-先期确定性工程切片见 [执行 prompt](execution-prompts/README.md)：P1–P4、T1 与 S1-V 切片 2 已于 2026-09-21 完成并同步本文；下一项为 S1-C（能力预检与版本绑定）。后续先完成验证/能力合同和 A3 生命周期，再完整交付审核、根目标与上下文/问答；S4-E 评估基础先于自动主管与候选执行。具体次序只在建设计划维护。P1–P4、T1 与切片 2 不替代自主修复与恢复闭环，也不宣称独立父验收全部完成（C3 假设满足性完整证明与证据来源真实性认证仍缺）。
+先期确定性工程切片见 [执行 prompt](execution-prompts/README.md)：P1–P4、T1 与 S1-V 切片 2 已于 2026-09-21 完成并同步本文；S1-C（能力预检与版本绑定）已于 2026-09-22 完成（§5.8）；下一项为 A3（非阻塞运行与恢复）。后续先完成验证/能力合同和 A3 生命周期，再完整交付审核、根目标与上下文/问答；S4-E 评估基础先于自动主管与候选执行。具体次序只在建设计划维护。P1–P4、T1、切片 2 与 S1-C 不替代自主修复与恢复闭环，也不宣称独立父验收全部完成（C3 假设满足性完整证明与证据来源真实性认证仍缺）。
 
 | 顺序 | 建设目标 | 完成条件 |
 |---|---|---|
@@ -177,8 +180,8 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 | Task 语言与生成审核 | 已能现场生成子任务，无模板命中要求。T1 已收敛为单一规范化契约与身份（见 §5.6）：`TaskContract` 数据定义、闭合字段集与默认值、criterion id 固定、单契约/整批摘要、`contract` 与 assumptions/constraints 持久化，普通分解/replay/root 共用同一入口与结构校验。仍无生成提案审核开关、审批摘要绑定与可恢复的审核状态（T2/T3） | `task/src/contract.ts`；`task-runtime/src/normalize.ts`；`task-runtime/src/index.ts:decomposeAndRun`、`replayTask`、`createRootTask`；`task/src/service/state.ts:assertContract` |
 | Task 定义版本 | 有 `definitionRef`；普通子任务使用 `subtask@1`，不等于完整不可变定义库和变更授权机制。T1 固定的是契约内容身份（`contractDigest`/`proposalDigest`），未建模板库 | `task-runtime/src/index.ts:decomposeAndRun`；`task/src/contract.ts:contractDigest` |
 | 根目标入口 | 当前 graph name 传给 createRootTask 作 objective；RootTaskSpec 默认仅子全 verified；尚无独立的根契约 intake/接受/激活流程 | `graphs/src/index.ts:create`；`task/src/types.ts:RootTaskSpec` |
-| Capability | 配置表解析与真实 grant 已建；没有完整 skill 契约预检、可行性证明或多候选选择 | `capability.ts:resolveCapabilities`；`grants.ts:grantSkills` |
-| Handoff / 上下文 | fresh session、handoff、父会话引用、契约系统投影已有；实际主要传父目标/依赖证据/assumptions，根全局 brief、带来源决定和动态有界 ContextView 待建；原始 session query 按 cwd 授权，不等于图/group 隔离 | `handoff.ts`、`orchestrate.ts:buildHandoff`；`agent-runtime/src/contract-reinjection.ts` |
+| Capability | 配置表解析、准入 provider 预检与真实 grant 已建；执行型/知识型侧车契约经统一校验，run 级内容绑定固定实际实现（§5.8）；没有可行性证明或多候选选择 | `capability.ts:resolveCapabilities`；`provider-precheck.ts`；`sidecar.ts:validateSkillProvider`；`run-binding.ts`；`grants.ts:grantSkills` |
+| Handoff / 上下文 | fresh session、handoff、父会话引用、契约系统投影已有；实际主要传父目标/依赖证据/assumptions，worker 摘要含本 run 选定 capability/skill 绑定（S1-C）；根全局 brief、带来源决定和动态有界 ContextView 待建；原始 session query 按 cwd 授权，不等于图/group 隔离 | `handoff.ts`、`orchestrate.ts:buildHandoff`；`run-binding.ts:renderRunBinding`；`agent-runtime/src/contract-reinjection.ts` |
 | 父子交互 / 生命周期 | task_decompose 同步等待整批；whenIdle 后验收；没有持久 question/answer 与等待相位。DSH send_message 不能直接用于未注册 continuable activation 的这些子节点 | `task-runtime/src/orchestrate.ts:awaitWorker`；`agent-runtime/src/index.ts:spawn` |
 | 任务导航 / 诊断 | task_read 当前任务、task_status 整树；review pack 有局部证据及父子摘要，只读 reviewer 可写 Diagnosis；无合法动作投影、因果遍历协议或自动 supervisor incident 调度 | `agent-singularity/src/tools/{task-read,task-status,task-review-pack,review-agent}.ts` |
 | Evidence 依赖 | `requiresArtifact` 只认 verified run 且带 pass 判据的证据；`acceptsArtifact` 只要求存在。普通分解缺失时 blocked + Obligation；replay 的 spawn 开/关路径使用同一检查，缺失时在建任务/Run 前抛错，零派发/零成功记录。不自动生成上游，不验证匹配证据的版本和适用性 | `orchestrate.ts:missingRequiredArtifacts`、`runReplayTask` |
@@ -198,11 +201,11 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 | 编号 | 问题与影响 | 建设票 / 历史对应 |
 |---|---|---|
 | G1 | 父 composite 曾仅对子状态求合取，不能证明根目标；同环境执行 verifier 也不等于测试与阈值不可被修改。P4 已落地最小机械版（切片 1+3：父 AC `childEvidence` 映射、独立父级组合检查、`heuristic` 标注、原始输入与已验证参考产物区分）；S1-V 切片 2 已落地 verifier 自测的实际执行（注册闸）与声明式受保护验收输入的准入身份固定 + 判决前复检。剩余：C3 假设满足性的完整证明、未声明保护范围的输入仍不受保护（这是边界，不是“已保护”）、证据来源真实性认证、自测样本“有意义”的证明 | S1-V / 旧 #25、#26 |
-| G2 | provider 未预检、run 级内容版本未固定；`closed` 被误用为可执行保证。多 preset 冲突已在解析期拒绝；单文件 Skill 候选的晋升链路内容身份（P2）与生产基线（P3）已固定，但 provider 预检与 run 解析快照仍未建 | S1-C / 旧 #29 |
+| G2 | provider 预检、run 级内容绑定与统一校验入口已由 S1-C 落地（§5.8）：不存在的 skill、未知执行 verifier、工具声明不满足、冲突 preset 在落库前拒绝；run 可定位并实际加载绑定的旧版本。单文件 Skill 候选内容身份（P2）与生产基线（P3）保持。剩余：`closed` 仍不证明自然语言契约完整或搜索路径必然成功；skill 晋升执行器只支持单文件；证据来源真实性认证未建 | S1-C / 旧 #29 |
 | G3 | 缺产物曾只查存在且 blocked 无恢复，证据驱动生长断在登记之后。P4 已把存在性收紧为 verified 参考产物并区分原始输入（`acceptsArtifact`）；blocked 仍无恢复出边，补产物后不会自动续跑原图 | S1-V、S2-R / 旧 #20、#21、#22 |
 | G4 | 上报依赖模型调用且批准前不落账；任务阻塞、通知与人类决策混在一起 | S2-E / 旧 #27；已有工具不能标为待建 |
 | G5 | 三值判决、预算半接线，没有 PARTIAL/UNKNOWN 的任务级处置 | S2-R / 旧 #23、#24 |
-| G6 | 缺 skill 契约与知识型定位，L1/L2 又被排在其前面，形成建设依赖倒置 | S1-C → S3 / 旧 #29 |
+| G6 | 类型化侧车契约与知识型定位已由 S1-C 交付（§5.8），建设依赖倒置已解除；L1 复用/组合与 L2 生成候选仍待 S3，候选须经同一校验与验证闭包 | S1-C → S3 / 旧 #29 |
 | G7 | 已补报告自洽、机械晋升最低闸、单文件 Skill 候选内容绑定（P2）与生产基线检查（P3）；证据来源绑定、分层指标和自动 Retro 未建，当前不能宣称防止裁判弱化或过拟合 | S4 / 旧 #28 |
 | G8 | `task_decompose`/`escalate` 部分拒绝返回普通文本，上层不能可靠用工具错误信号判定 | S2-E / 旧 #33 |
 | G9 | 类型闸只覆盖 `agent-singularity`；其余 Singularity 包的 `build` 仍只有 tsdown，未接 `tsc --noEmit`，其严格类型状态未经本闸保证 | P1 范围外，待独立评估 |
@@ -214,7 +217,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 历史记录中的 M1–M9 为此前会话的实跑声明，保留于历史指南。本次回归结果见建设计划 S0；本次没有重跑 LLM、BB 构建仿真或生产 Evolution 链路。旧环境可用性、外部 bbdev 缺陷和部署阈值在使用前需重新读取对应部署，不能从旧日志推断当前状态。
 
-2026-09-21 的 P1 已关闭“root-agent 包 build 不执行严格类型检查”这一缺口：该包 `pnpm exec tsc --noEmit` 从 12 处错误降到 0，`build` 改为先 `tsc --noEmit` 再 `tsdown`，工作区根 `pnpm build` 同样经过。G9 是 P1 明确未做的剩余部分：类型闸没有推广到其他包，也未改变任何业务流程、审批次数、持久化格式或工具输入输出合同。同日的 P2 已关闭 G7 中“候选内容绑定”的单文件 Skill 切片（范围见 §5.5）；P3 再关闭其中“生产基线没变”的切片。证据来源绑定仍待建，由后续工作推进，不因 P1/P2/P3 完成而标记 S1-C/S4 完成。同日的 P4 已关闭 G1/G3 的最小机械切片（范围见 §5.1 末段）：父 AC → 子证据映射的存在性与 verified 来源检查、独立父级组合检查、原始输入与已验证参考产物的区分；C3 完整证明、verifier selftest 执行与 blocked 恢复当时仍属后续票（selftest 执行已由同日 S1-V 切片 2 落地，见下），不因 P4 通过而宣称独立父验收全部完成。同日的 T1 已落地统一规范化契约、内容身份与批次准入记录（范围见 §5.6）：新实例的契约成为单一数据定义并持久化，普通分解、replay 与 root 入口共用同一规范化与结构校验；生成提案审核、审批摘要绑定与崩溃恢复仍属 T2/T3，不因 T1 通过而宣称自主构造治理完成。同日的 S1-V 切片 2 已落地可执行 verifier 自测（注册闸）、判决/证据的裁判版本记录与 `(verifierRef, version)` 索引、受保护验收输入的准入身份固定与判决前复检（范围见 §5.7）：保障只覆盖显式声明的范围，不认证证据来源真实性，C3 假设满足性完整证明仍缺，不因切片 2 通过而宣称独立父验收全部完成。
+2026-09-21 的 P1 已关闭“root-agent 包 build 不执行严格类型检查”这一缺口：该包 `pnpm exec tsc --noEmit` 从 12 处错误降到 0，`build` 改为先 `tsc --noEmit` 再 `tsdown`，工作区根 `pnpm build` 同样经过。G9 是 P1 明确未做的剩余部分：类型闸没有推广到其他包，也未改变任何业务流程、审批次数、持久化格式或工具输入输出合同。同日的 P2 已关闭 G7 中“候选内容绑定”的单文件 Skill 切片（范围见 §5.5）；P3 再关闭其中“生产基线没变”的切片。证据来源绑定仍待建，由后续工作推进，不因 P1/P2/P3 完成而标记 S1-C/S4 完成。同日的 P4 已关闭 G1/G3 的最小机械切片（范围见 §5.1 末段）：父 AC → 子证据映射的存在性与 verified 来源检查、独立父级组合检查、原始输入与已验证参考产物的区分；C3 完整证明、verifier selftest 执行与 blocked 恢复当时仍属后续票（selftest 执行已由同日 S1-V 切片 2 落地，见下），不因 P4 通过而宣称独立父验收全部完成。同日的 T1 已落地统一规范化契约、内容身份与批次准入记录（范围见 §5.6）：新实例的契约成为单一数据定义并持久化，普通分解、replay 与 root 入口共用同一规范化与结构校验；生成提案审核、审批摘要绑定与崩溃恢复仍属 T2/T3，不因 T1 通过而宣称自主构造治理完成。同日的 S1-V 切片 2 已落地可执行 verifier 自测（注册闸）、判决/证据的裁判版本记录与 `(verifierRef, version)` 索引、受保护验收输入的准入身份固定与判决前复检（范围见 §5.7）：保障只覆盖显式声明的范围，不认证证据来源真实性，C3 假设满足性完整证明仍缺，不因切片 2 通过而宣称独立父验收全部完成。2026-09-22 的 S1-C 已落地准入 provider 预检、类型化侧车契约、统一校验入口与 run 级内容绑定（范围见 §5.8）：不存在的 skill、未知执行 verifier、工具声明不满足在落库前拒绝，run 实际加载绑定版本且旧内容不可读时明确拒绝恢复；skill 晋升执行器仍只支持单文件，效率对比实验是票后工作，不因 S1-C 通过而宣称能力检索已被证明更高效。
 
 ## 5. 实现时的关键约束
 
@@ -306,6 +309,21 @@ T1 把“任务契约”从散落在工具 schema、runtime 局部函数与事�
 测试锚：`verifier/tests/unit/verifier-registry.spec.ts`（注册闸正反例、testDouble 显式通道、版本覆盖、受保护输入失配/缺失且不派发、索引与旧证据）、`verifier/tests/unit/{composite,command}-verifier.spec.ts`（可执行样本）、`task-runtime/tests/unit/protected-inputs.spec.ts`（fixing、形状、摘要敏感度、零副作用）、`task-runtime/tests/unit/{orchestrate,admission,normalize,contract,handoff,review-record}.spec.ts`、`agent-singularity/tests/unit/task-tools.spec.ts`（schema 与渲染、review pack）、`tests/integration/verifier-selftest-inputs.spec.ts`（真实 TaskService+TaskRuntime+VerifierRegistry：worker 改写受保护脚本的反例、合法正例、未声明边界、注册闸、版本与索引、拒绝零副作用，结论全部从持久化事件日志读回）。实跑命令与数量见建设计划「S1-V 切片 2 执行与验收记录」。
 
 未覆盖/边界（如实记录）：criterion 只保护**它声明的**路径，未声明的不受保护；没有内容来源真实性认证（字节是谁在何时产生的仍不可证）；自测样本由裁判自己声明，本票只证明“能区分声明的样本”，不证明样本有意义；`verifierIds()` 同步读取，未 ready 的手工构造上下文会看到空表（生产由 `Service.init` 覆盖，集成测试显式 `await ready()`）；`targetType: verifier` 的 Evolution 候选仍只记账、无机械执行器，显式拒绝不变；KISS §8.2 的裁决召回（漏检裁判的历史 PASS 自动降级重验）未建，`evidenceByVerifier` 只是可查询的索引。
+
+### 5.8 能力预检与版本绑定（2026-09-22 S1-C）
+
+范围（建设计划 §S1-C 四点：provider 预检、类型化侧车契约、统一校验入口、run 摘要与选定内容绑定；效率对比实验不属本票，记为票后工作，本票不声称任何效率结论）：
+
+- **准入期 provider 预检**：`task-runtime/src/provider-precheck.ts` 的 `precheckProviders` 在 `decomposeAndRun` 与 `replayTask` 落库/spawn 之前执行（`index.ts` 两处挂点），用实际 worker 视角（会话 checkout 的 cwd 上溯 + DSH_HOME + 用户根；replay 含候选 overlay 根）检查每条命中能力声明的 skill：发现不到、frontmatter 名不符、侧车非法均整批拒绝、零副作用（无任务事件、无 spawn、无 Obligation 写入）；verifier 词表经 `registeredVerifierIds` 软取（先 `ready()`，不可列举时执行型 fail-closed）。preset 冲突、未知工具标签、未知 MCP server 的既有拒绝不变；MCP 启动失败仍在 spawn 阶段记录。闭包语义不变：能力闭包仍由配置表条目决定；知识型/无侧车（guidance）skill 可加载但不计为执行 provider。发现原语与 spawn 的 `grantSkills` 共用同一实现（`agent-runtime/src/skill-file.ts`，task-runtime 经其导出复用）。
+- **类型化侧车契约**：`task/src/skill-contract.ts`（skill 目录内 `SKILL.contract.json`，`type: execution | knowledge` 判别联合，闭合字段集，`contractVersion` 1；执行型含 capabilities/precondition/inputs/outputs/requiredTools/verifier ref/内容身份；知识型含 source/scope/contentCheck/内容身份）；`task-runtime/src/sidecar.ts` 的 `loadSkillSidecar`/`validateSkillProvider` 为统一校验入口（结构化 defect 码）。内容身份覆盖 `SKILL.md` 精确字节与受支持多文件资源（`references/`、`scripts/` 一层 UTF-8 文本，逐文件 sha256）；符号链接、更深嵌套、非普通文件、受支持位置的二进制等形态显式拒绝并点名，不宣称单文件摘要覆盖全部执行环境。无侧车 = guidance：可加载、非执行 provider、非 defect。最小样例：`task-runtime/tests/fixtures/skills/`（ball-align、workload-tests 知识型；verify 执行型）。首版不做成熟度五级与成功率衰减。
+- **统一校验四消费者**：配置载入（`Service.init` → `providerLoadReport`，逐条 warn 报告但**不硬 fail**——载入视角没有 worker checkout，"载入找不到"≠"worker 用不了"，硬闸在准入预检）、provider 替换（`EvolutionService.assertCapabilityRowProviders` 与 `TaskRuntime.applyCapabilityRow` 共用 `precheckReplacedCapabilityRow`；替换必经验证，移除不需要）、候选晋升（`assertSkillCandidateProvider`，叠加在 P2/P3 内容身份与生产基线检查之上）、准入预检。同一非法输入四个入口给出同一 defect 码；没有合法执行 verifier 的执行型 skill 不能被计为有效 provider（`executionProviders` 是唯一计数入口，知识型/guidance 恒不在其中）。skill 晋升执行器只写单个 `SKILL.md`：携带侧车/资源的候选**显式拒绝**（不静默丢弃、不记录生产上不存在的 execution-provider；目录整体晋升属后续票）。
+- **Run 绑定与摘要**：`task-runtime/src/run-binding.ts` 在 run 启动时把选定 skill 物化为 run 级快照（默认 `<DSH_HOME|~/.dsh>/singularity/run-bindings/<storeId>/<runId>/skills/`，在 worker 写区之外；`Config.runBindingRoot` 可覆盖），逐字节比对准入身份后经 `WorkerGrant.skillRoots` overlay 加载——worker 实际加载快照字节，不是保存摘要后仍读可变生产路径。`TaskRun.providerBinding`（可选字段，旧事件无此字段可读）持久化 registry 修订、各 provider 角色与内容摘要、preset/MCP 身份、快照根与 uncovered 列表。worker 合同块/spawn prompt/`task_read` 三视图同源渲染选定实现摘要（`renderRunBinding`，含快照路径与修订），正文按需经 skill 工具读；review pack 打印绑定记录（只读事实，不回读盘）。`createRootTask` 重入与 `task_read` 展示前经 `readRunBinding` 复检快照身份：缺失/被改 → 具名拒绝，不静默回退生产路径。evolution apply 不热替换在途 run；新 run 绑定新内容（"换版本用新 Run"）；retry 入口当前不存在（`attempts` 仅声明），worker 无恢复 spawn 路径，如实记录。
+
+源码锚：上述加 `task-runtime/src/verified-read.ts`（自 `agent-singularity/src/evolution.ts` 下移的唯一 verified-read 实现，evolution 改为引用）、`task/src/types.ts:TaskRun.providerBinding`、`task/src/service/state.ts:assertProviderBinding`（只校验形状）、`agent-singularity/src/tools/capability-list.ts`（provider 状态行）、`task-runtime/src/index.ts`（预检挂点、`providerLoadReport`、`applyCapabilityRow`、`readRunBinding` 服务方法）、`task-runtime/src/orchestrate.ts`（`bindRunProviders` 两创建点、`skillRootsForRun`）。
+
+测试锚：`task/tests/unit/skill-contract.spec.ts`、`task-runtime/tests/unit/{sidecar,verified-read,provider-precheck,provider-load,run-binding,carried-precheck,capability}.spec.ts`、`tests/integration/{provider-precheck,worker-binding,provider-promotion,provider-version-binding,knowledge-provider,recursive-capability,run-skill-loading}.spec.ts`、`agent-singularity/tests/unit/{evolution,task-tools}.spec.ts`。实跑命令与数量见建设计划「S1-C 执行与验收记录」。
+
+未覆盖/边界（如实记录）：配置载入只报告不硬 fail（语义与理由见 `providerLoadReport` docblock）；skill 晋升执行器只支持单文件 `SKILL.md`（含侧车/资源候选显式拒绝）；guidance 快照的 `uncovered` 复检只覆盖"快照出现身份未覆盖条目"方向（记录列出的源目录条目本来就不复制进快照，反向不是差异）；MCP 工具覆盖是前缀判定，server 真实工具表只有 spawn 才知道；run 快照无 GC/配额（A3/S2-R 领域）；`mcpServers[].templateDigest` 只记录渲染、无回读复检（spawn 对缺失 server 具名失败）；worker 仍可读到部署 catalog 里未选 skill 的正文（DSH 无 per-agent 隐藏；授权面未变，有加载未选 skill 不扩权的回归）；预检视角不含仅 DSH 自带发现可见的 skill（该形态会 fail-closed 误拒，模块文档已点名）；快照只保证字节=准入身份，不证明内容正确；`contentCheck` 只识别并携带引用，没有 gate 执行它；效率对比实验（固定任务集与真实模型）是票后工作，不凭 token 变化宣布更高效。
 
 ## 6. 文档维护
 

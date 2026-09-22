@@ -1,0 +1,493 @@
+/**
+ * One deployment-shaped stack for the S1-C integration specs that need the real
+ * agent plane, not only the store: the real `TaskService` store and reducer, the
+ * real `TaskRuntime` entries (`createRootTask`, `decomposeAndRun`, `replayTask`),
+ * the real `AgentRuntime.spawn` over the real DSH tool/skill planes, the real
+ * `VerifierRegistry` with its built-in `CommandVerifier`, and the real
+ * filesystem the skills live on.
+ *
+ * What is replaced, and why:
+ * - `sessionPersistence` — an in-memory handle with the JSONL log's shape, so a
+ *   test can read back the events a store actually appended.
+ * - the agent factory (`ctx.agents.setFactory`) — the model loop. The stub mints
+ *   the scoped world and awaits `setup`, which is exactly what the loop does
+ *   before the first prompt, so the grant, the tool restriction and the skill
+ *   registration asserted here are the ones a live worker's first request would
+ *   be assembled against.
+ * - `graph`/`graphs`/`envBuilder` — a fixed env whose checkout is this test's tmp
+ *   directory, i.e. the same directory a worker's cwd resolves to in a real
+ *   graph. `graphForSession` keeps one root per spawned session, because two
+ *   roots in one deployment (a second admission after a version moved) is a shape
+ *   these specs need and a single-root fixture cannot express.
+ * - `approval`/`userQuestions` — the human seams, answered 'allowed-once' so a
+ *   tool path can run; a spec that cares about *not* burning an approval asserts
+ *   on the spy.
+ *
+ * Everything a spec asserts is read back from a durable surface: the store's own
+ * events and snapshot, the run binding the store holds, the bytes on disk, or the
+ * skill/tool registration a worker's own scope resolves.
+ * @module tests/support/run-stack
+ */
+
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { cp, mkdir, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { vi } from 'vitest'
+import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
+import SystemPrompt from '../../../../thirdparty/deepseek-harness/packages/core/system-prompt/lib/index.js'
+import ToolRuntime from '../../../../thirdparty/deepseek-harness/packages/core/tools/lib/index.js'
+import { AgentRegistry } from '../../../../thirdparty/deepseek-harness/packages/core/agent/lib/index.js'
+import SkillRegistry from '../../../../thirdparty/deepseek-harness/packages/skill/skill/lib/index.js'
+import * as SkillFilesystem from '../../../../thirdparty/deepseek-harness/packages/skill/skill-filesystem/lib/index.js'
+import * as SkillTool from '../../../../thirdparty/deepseek-harness/packages/skill/tool-skill/lib/index.js'
+import { createScope, type Scope } from '../../../../thirdparty/deepseek-harness/packages/core/scope/lib/index.js'
+import type { Agent, AgentHandle, ToolDefinition } from '@deepseek-ai/dsh-agent'
+import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
+import { AgentRuntime } from '../../agent-runtime/src/index.ts'
+import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
+import { defineCapabilityListTool } from '../../agent-singularity/src/tools/capability-list.ts'
+import { defineTaskDecomposeTool } from '../../agent-singularity/src/tools/task-decompose.ts'
+import { defineTaskReadTool } from '../../agent-singularity/src/tools/task-read.ts'
+import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
+import type { TaskEvent, TaskSnapshot } from '../../task/src/index.ts'
+import type { CapabilityConfig, Config } from '../../task-runtime/src/index.ts'
+import { TaskRuntime } from '../../task-runtime/src/index.ts'
+import { VerifierRegistry } from '../../verifier/src/index.ts'
+
+/** The fixture skills the deployment's own pre-check fixtures install. */
+const FIXTURE_SKILLS = fileURLToPath(new URL('../../task-runtime/tests/fixtures/skills/', import.meta.url))
+
+/** Exactly the root agent's allow-list, so the root composition is the deployment's own. */
+export const ROOT_TOOLS = [
+  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'skill', 'task_decompose',
+  'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
+  'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
+]
+
+/** The global-plane machinery every agent inherits. `skill` rides the preset plane, as `tool-skill` mounts it in the deployment. */
+export const GLOBAL_TOOLS = [...ROOT_TOOLS.filter(name => name !== 'skill'), 'session_search', 'session_event_read', 'session_trace']
+
+/** The tools a stack can mount for real ({@link RunStackOptions.tools}); the stand-ins skip these names. */
+const REAL_TOOLS = ['task_read', 'capability_list', 'task_decompose']
+
+/** What the `standard`-style preset contributes on its own plane. */
+export const PRESET_TOOLS = ['bash', 'read', 'write', 'edit', 'read_image', 'glob', 'grep', 'skill', 'job_output', 'job_list', 'job_kill', 'ask_user_question', 'web_fetch', 'subagent_fetchless']
+
+export interface RunStackOptions {
+  /** The capability table admissions resolve against. Defaults to no capabilities. */
+  readonly capabilities?: Readonly<Record<string, CapabilityConfig>>
+  /** Root sessions of this deployment, in order; the first is the primary. Defaults to `['s-root']`. */
+  readonly roots?: readonly string[]
+  /** Mount the deployment's filesystem skill provider, so a worker's own catalog is real. */
+  readonly discovery?: boolean
+  /** Mount the real `skill` loader (`@deepseek-ai/dsh-tool-skill`) instead of a stand-in. */
+  readonly skillTool?: boolean
+  /** Register the real singularity tools (`task_read`, `capability_list`, `task_decompose`) on the global plane. */
+  readonly tools?: boolean
+  /** Where run bindings are materialized. Defaults to `<home>/singularity/run-bindings`. */
+  readonly runBindingRoot?: string
+  /** Depth ceiling for a cascade; defaults to the runtime's own. */
+  readonly maxDepth?: number
+  /**
+   * The scripted worker: what one spawned agent does before it goes idle. The
+   * runtime awaits it through `whenIdle` — after the spawn resolved, so a worker
+   * that re-decomposes calls back into the runtime from outside the spawn it is
+   * running under, exactly as a live one does.
+   */
+  readonly worker?: (sessionId: SessionId, agent: Agent) => Promise<void> | void
+}
+
+export interface RunStack {
+  readonly ctx: Context
+  readonly runtime: TaskRuntime
+  readonly task: TaskService
+  readonly verifier: VerifierRegistry
+  /** The tmp directory the whole fixture lives in. */
+  readonly workspace: string
+  /** The pinned `$DSH_HOME` and `$HOME`: a skill installed here is reachable from both discovery viewpoints. */
+  readonly home: string
+  /** The env checkout every worker runs in and every provider pre-check discovers from. */
+  readonly checkout: string
+  readonly roots: readonly SessionId[]
+  /** Every spawn request the runtime handed to the agent runtime, in order. */
+  readonly spawns: readonly SpawnRequest[]
+  /** The live agent for one session, as the deployment's registry holds it. */
+  agent(sessionId: SessionId): Agent | undefined
+  /** The root agent of the primary (or a named) root session. */
+  rootAgent(sessionId?: SessionId): Agent
+  /** The tool names one worker's composition offers, from the registry's own view. */
+  visible(agent: Agent): string[]
+  /** Every task event one store appended, read back off its own session log. */
+  events(storeId: string): TaskEvent[]
+  /** The store's snapshot as the store itself holds it. */
+  snapshot(storeId: string): Promise<TaskSnapshot>
+  /** Create (or reopen) one root session's store and bind its root run. */
+  root(sessionId?: SessionId, objective?: string): Promise<{ storeId: string; taskId: string; runId: string }>
+  /** Dispatch one tool call on behalf of one agent, the way the loop does. */
+  call(agent: Agent, name: string, args: Record<string, unknown>): Promise<ToolCallResult>
+}
+
+/** What one dispatched tool call answered: the model-facing text, and whether the registry settled it as an error. */
+export interface ToolCallResult {
+  readonly isError: boolean
+  readonly text: string
+}
+
+/** The stacks in play, so a spec's `afterEach` can dispose whatever a failed test left behind. */
+const stacks: RunStackImpl[] = []
+
+/** Dispose every stack started since the last call and release the pinned environment. */
+export async function disposeRunStacks(): Promise<void> {
+  for (const stack of stacks.splice(0)) await stack.dispose()
+  vi.unstubAllEnvs()
+}
+
+/**
+ * Boot the stack. Every tmp path is created inside one newly minted workspace, and
+ * `$DSH_HOME`/`$HOME` are pinned into it so a skill installed on the machine
+ * running the suite can never decide a verdict here.
+ */
+export async function startRunStack(options: RunStackOptions = {}): Promise<RunStack> {
+  const stack = new RunStackImpl(options)
+  stacks.push(stack)
+  return stack.start()
+}
+
+/** A stand-in for one tool name: enough for the registry and the grant filter, and it answers its own name. */
+function standIn(name: string): ToolDefinition {
+  return {
+    name,
+    description: `tool ${name}`,
+    parameters: { type: 'object', properties: {} },
+    output: { schema: { type: 'string' }, render: (_args: unknown, value: unknown) => [{ type: 'text', text: value as string }] },
+    execute: async () => name,
+  }
+}
+
+class RunStackImpl implements RunStack {
+  readonly workspace: string
+  readonly home: string
+  readonly checkout: string
+  readonly roots: readonly SessionId[]
+  readonly ctx: Context
+  readonly task: TaskService
+  readonly verifier: VerifierRegistry
+  readonly agentRuntime: RecordingAgentRuntime
+  readonly runtime: TaskRuntime
+  private readonly log = new Map<string, SessionEvent[]>()
+  private readonly headers = new Map<string, SessionHeader>()
+  private readonly live = new Map<string, Agent>()
+  private readonly sessionRoot = new Map<string, string>()
+  private readonly primary: SessionId
+  private previousHome: string | undefined
+  private callSeq = 0
+
+  constructor(private readonly options: RunStackOptions) {
+    this.workspace = mkdtempSync(join(tmpdir(), 'singularity-run-stack-'))
+    // The checkout a worker runs in, the env path admission discovers from, and
+    // the directory the root agent's cwd resolves to are one directory, as they
+    // are in a deployment.
+    this.checkout = join(this.workspace, 'env')
+    this.home = join(this.workspace, 'dsh-home')
+    mkdirSync(join(this.home, 'skills'), { recursive: true })
+    mkdirSync(this.checkout, { recursive: true })
+    this.roots = (options.roots ?? ['s-root']).map(id => id as SessionId)
+    this.primary = this.roots[0]!
+    this.ctx = new Context()
+    for (const root of this.roots) this.sessionRoot.set(root, root)
+    this.previousHome = process.env.DSH_HOME
+    vi.stubEnv('DSH_HOME', this.home)
+    vi.stubEnv('HOME', this.home)
+    process.env.DSH_HOME = this.home
+
+    // Every service the boot mounts is constructed after the provides it injects,
+    // the order a cordis deployment resolves in.
+    this.task = new TaskService(this.ctx)
+    this.verifier = new VerifierRegistry(this.ctx, { evidenceRoot: join(this.workspace, 'evidence') })
+    this.agentRuntime = new RecordingAgentRuntime(this.ctx, this.sessionRoot, () => this.primary)
+    this.runtime = new TaskRuntime(this.ctx, {
+      capabilities: { ...(this.options.capabilities ?? {}) },
+      ...(this.options.maxDepth === undefined ? {} : { maxDepth: this.options.maxDepth }),
+      runBindingRoot: this.options.runBindingRoot ?? join(this.home, 'singularity', 'run-bindings'),
+    } as Config)
+  }
+
+  async start(): Promise<this> {
+    const ctx = this.ctx
+    await ctx.plugin(SystemPrompt, {})
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SkillRegistry, {})
+    // The real loader when the spec is about loading; the preset plane's stand-in
+    // otherwise, which is what the deployment's `skill` tool looks like to a tool
+    // surface that only counts names.
+    if (this.options.skillTool === true) await ctx.plugin(SkillTool, {})
+    if (this.options.discovery === true) {
+      await ctx.plugin(SkillFilesystem, { dshHome: this.home, agentsHome: join(this.workspace, 'agents-home'), watch: false })
+    }
+    for (const name of GLOBAL_TOOLS) {
+      if (this.options.tools === true && REAL_TOOLS.includes(name)) continue
+      ctx.tools.register(standIn(name))
+    }
+    ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'p', model: 'm' }) })
+    ctx.provide('agentPresets', { defaultId: 'standard', mount: async () => {}, resolve: async () => ({}) })
+    ctx.provide('permissionPresets', { set: vi.fn(), resolve: () => ({}) })
+    ctx.provide('sessions', {})
+    ctx.provide('approval', { request: vi.fn(async () => 'allowed-once') })
+    ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) })
+
+    for (const root of this.roots) {
+      this.headers.set(root, { id: root, cwd: this.checkout, agentPreset: 'standard' } as unknown as SessionHeader)
+    }
+    ctx.provide('sessionPersistence', {
+      list: async () => [...this.headers.values()].map(header => ({ header })),
+      create: async (header: SessionHeader) => {
+        this.headers.set(header.id, header)
+        this.log.set(header.id, [])
+        return this.handle(header.id)
+      },
+      open: async (id: SessionId) => {
+        if (!this.log.has(id)) throw new Error(`missing session ${id}`)
+        return this.handle(id)
+      },
+    } as never)
+    ctx.provide('layout', { setIn: async () => {} })
+    const graphAgents = this.roots.map(id => ({ id, name: 'Singularity', status: 'idle' as const }))
+    ctx.provide('graph', {
+      snapshotIn: async () => ({ version: 1, id: 'g', roots: [...this.roots], agents: [...graphAgents], groups: [], edges: [] }),
+      commitIn: async () => {},
+      setStatusIn: async () => {},
+      addAgentIn: async () => {},
+    } as never)
+    // One graph per root session, so a second admission in the same deployment
+    // (a new version after an apply) has its own store and its own root run.
+    ctx.provide('graphs', {
+      graphForSession: async (sessionId: SessionId) => ({
+        id: 'g1',
+        name: 'graph',
+        envId: 'env1',
+        rootSessionId: this.sessionRoot.get(sessionId) ?? this.primary,
+        graphStoreId: 'sg-g-root',
+        layoutStoreId: 'sg-l-root',
+      }),
+    } as never)
+    ctx.provide('envBuilder', { store: { get: (envId: string) => (envId === 'env1' ? { path: this.checkout, components: [] } : undefined) } } as never)
+
+    // A preset's standing mount lives in its own scope; an agent joins it by scope parentage.
+    const presetKey = { id: 'preset:standard' }
+    let presetScope!: Scope
+    await ctx.plugin(Object.assign((inner: Context) => { presetScope = createScope(inner, presetKey) }, { inject: ['tools', 'systemPrompt'] }))
+    for (const name of PRESET_TOOLS) if (name !== 'skill' || this.options.skillTool !== true) presetScope.ctx.tools.register(standIn(name))
+    // The root always rides a standard-style plane, whose allow-list names the loader.
+    const rootPresetKey = { id: 'preset:root-standard' }
+    await ctx.plugin(Object.assign((inner: Context) => {
+      const rootPresetScope = createScope(inner, rootPresetKey)
+      for (const name of PRESET_TOOLS) if (name !== 'skill' || this.options.skillTool !== true) rootPresetScope.ctx.tools.register(standIn(name))
+    }, { inject: ['tools', 'systemPrompt'] }))
+
+    const rootKeys = new Map(this.roots.map(root => [root as string, rootPresetKey]))
+    ctx.agents.setFactory({
+      createAgent: async (_ownerCtx: Context, opts: { sessionId: SessionId; setup?: (agentCtx: Context, agent: Agent) => Promise<unknown> }) =>
+        ({ agent: await this.mint(opts.sessionId, opts.setup, rootKeys.get(opts.sessionId) ?? presetKey), dispose: async () => { this.live.delete(opts.sessionId) } }),
+      resume: async (_ownerCtx: Context, opts: { resumeSessionId: SessionId; setup?: (agentCtx: Context, agent: Agent) => Promise<unknown> }) =>
+        ({ agent: await this.mint(opts.resumeSessionId, opts.setup, rootKeys.get(opts.resumeSessionId) ?? presetKey), dispose: async () => { this.live.delete(opts.resumeSessionId) } }),
+    } as never)
+
+    await this.verifier.ready()
+    if (this.options.tools === true) {
+      ctx.tools.register(defineTaskReadTool(ctx))
+      ctx.tools.register(defineCapabilityListTool(ctx))
+      ctx.tools.register(defineTaskDecomposeTool(ctx))
+    }
+    for (const root of this.roots) await this.agentRuntime.ensureRoot(root, { graphStoreId: 'sg-g-root', layoutStoreId: 'sg-l-root' })
+    return this
+  }
+
+  private handle(id: SessionId) {
+    return {
+      read: async () => ({ events: this.log.get(id) ?? [] }),
+      append: async (records: readonly SessionEvent[]) => { this.log.get(id)?.push(...records) },
+      flush: async () => {},
+      close: async () => {},
+    }
+  }
+
+  /** Mint one agent's scoped world and run `setup` on it, exactly as the loop's factory does. */
+  private async mint(
+    sessionId: SessionId,
+    setup: ((agentCtx: Context, agent: Agent) => Promise<unknown>) | undefined,
+    parentKey: { id: string },
+  ): Promise<Agent> {
+    let self!: Agent
+    const agent = {
+      id: sessionId,
+      followup: vi.fn(),
+      cancel: vi.fn(),
+      append: vi.fn(),
+      // A live worker goes idle when its work is done; here that is whatever the
+      // spec scripted for this session, run at the same point in the cascade.
+      whenIdle: async () => { await this.options.worker?.(sessionId, self) },
+      session: {
+        id: sessionId,
+        header: this.headers.get(sessionId) ?? { id: sessionId, cwd: this.checkout, agentPreset: 'standard' },
+        append: vi.fn(),
+      },
+    } as unknown as Agent
+    self = agent
+    let scope!: Scope
+    await this.ctx.plugin(Object.assign((inner: Context) => {
+      scope = createScope(inner, agent, { parent: parentKey })
+    }, { inject: ['tools', 'systemPrompt'] }))
+    Object.assign(agent as object, { ctx: scope.ctx })
+    await setup?.(scope.ctx, agent)
+    await (this.ctx.agents.register(agent) as unknown as Promise<void>)
+    this.live.set(sessionId, agent)
+    return agent
+  }
+
+  agent(sessionId: SessionId): Agent | undefined {
+    return this.live.get(sessionId)
+  }
+
+  rootAgent(sessionId: SessionId = this.primary): Agent {
+    const agent = this.live.get(sessionId)
+    if (agent === undefined) throw new Error(`the stack holds no root agent for "${sessionId}"`)
+    return agent
+  }
+
+  get spawns(): readonly SpawnRequest[] {
+    return this.agentRuntime.requests
+  }
+
+  visible(agent: Agent): string[] {
+    return this.ctx.tools.schemas(agent).map(schema => schema.name).sort()
+  }
+
+  events(storeId: string): TaskEvent[] {
+    return (this.log.get(storeId) ?? []).flatMap(event => (event.type === 'task/event' ? [event.data as unknown as TaskEvent] : []))
+  }
+
+  async snapshot(storeId: string): Promise<TaskSnapshot> {
+    return this.task.snapshotIn(storeId)
+  }
+
+  async root(sessionId: SessionId = this.primary, objective = 'ship the release'): Promise<{ storeId: string; taskId: string; runId: string }> {
+    const storeId = rootTaskStoreId(sessionId)
+    const { taskId, runId } = await this.runtime.createRootTask(storeId, { objective, rootSessionId: sessionId }, sessionId)
+    return { storeId, taskId, runId }
+  }
+
+  async call(agent: Agent, name: string, args: Record<string, unknown>): Promise<ToolCallResult> {
+    this.callSeq += 1
+    const result = await this.ctx.tools.execute({
+      callId: `call-${this.callSeq}`,
+      name,
+      arguments: args,
+      agent,
+      signal: new AbortController().signal,
+    })
+    return {
+      isError: result.isError,
+      text: result.content.map(block => (block.type === 'text' ? block.text : `[${block.type}]`)).join('\n'),
+    }
+  }
+
+  async dispose(): Promise<void> {
+    if (this.previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = this.previousHome
+    await this.ctx.fiber.dispose()
+    rmSync(this.workspace, { recursive: true, force: true })
+  }
+}
+
+/**
+ * The real `AgentRuntime.spawn`, with every request recorded: the prompt and the
+ * contract block the runtime hands a worker are what the deployment's own spawn
+ * seam receives, so a spec asserting "the worker was told" reads them here rather
+ * than from a re-render.
+ */
+class RecordingAgentRuntime extends AgentRuntime {
+  readonly requests: SpawnRequest[] = []
+
+  constructor(
+    ctx: Context,
+    private readonly sessionRoot: Map<string, string>,
+    private readonly primary: () => string,
+  ) {
+    super(ctx)
+  }
+
+  override async spawn(parent: Agent, request: SpawnRequest): Promise<AgentHandle> {
+    this.requests.push(request)
+    this.sessionRoot.set(request.sessionId, this.sessionRoot.get(parent.id) ?? this.primary())
+    return super.spawn(parent, request)
+  }
+}
+
+/** SHA-256 of text, computed here so the implementation is never confirmed against itself. */
+export function sha256Of(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+/** A loadable `SKILL.md`: the frontmatter `readSkillFile` requires, plus whatever body a test is about. */
+export function skillText(body: string, name: string, description = `${name} fixture skill`): string {
+  return `---\nname: ${name}\ndescription: ${description}\n---\n\n${body}`
+}
+
+/**
+ * Write one guidance skill — a `SKILL.md` alone, the shape the deployment's own
+ * reference skills have — where both discovery viewpoints reach it. The digest a
+ * spec sees in a binding or a verdict is of exactly these bytes.
+ */
+export async function writeGuidanceSkill(root: string, name: string, body: string, declaredName = name): Promise<string> {
+  const directory = join(root, name)
+  await mkdir(directory, { recursive: true })
+  await writeFile(join(directory, 'SKILL.md'), skillText(body, declaredName), 'utf8')
+  return directory
+}
+
+/**
+ * Write one knowledge skill: a `SKILL.md` plus a knowledge sidecar whose declared
+ * content identity is the digest of exactly those bytes. `extra` merges into the
+ * declaration, so a spec can install a shape the validator must refuse.
+ */
+export async function writeKnowledgeSkill(
+  root: string,
+  name: string,
+  body: string,
+  extra: Record<string, unknown> = {},
+): Promise<string> {
+  const directory = join(root, name)
+  await mkdir(directory, { recursive: true })
+  const content = skillText(body, name)
+  await writeFile(join(directory, 'SKILL.md'), content, 'utf8')
+  const sidecar = {
+    contractVersion: 1,
+    type: 'knowledge',
+    source: 'this test fixture',
+    scope: 'S1-C integration fixture',
+    content: { skillMdSha256: sha256Of(content), resources: [] },
+    contentCheck: { kind: 'command', command: 'true' },
+    ...extra,
+  }
+  await writeFile(join(directory, 'SKILL.contract.json'), `${JSON.stringify(sidecar, null, 2)}\n`, 'utf8')
+  return directory
+}
+
+/** Copy one fixture skill directory (`task-runtime/tests/fixtures/skills/<name>`) under `root`. */
+export async function copyFixtureSkill(root: string, name: string): Promise<string> {
+  const directory = join(root, name)
+  await cp(join(FIXTURE_SKILLS, name), directory, { recursive: true })
+  return directory
+}
+
+/** Write an arbitrary file inside a directory, creating parents — for resources and tamper fixtures. */
+export async function writeWithin(directory: string, relative: string, contents: string): Promise<string> {
+  const file = join(directory, relative)
+  await mkdir(dirname(file), { recursive: true })
+  await writeFile(file, contents, 'utf8')
+  return file
+}

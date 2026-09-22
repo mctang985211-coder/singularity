@@ -171,6 +171,40 @@ function renderDiagnosis(diagnosis: Diagnosis): string[] {
 }
 
 /**
+ * What each of the task's runs was bound to and loaded (S1-C item 4): one line
+ * per run that recorded a binding, naming the registry revision, the providers
+ * (skill, role, short content digest) and the granted MCP servers. This is what
+ * makes "which version did this execution run against?" answerable from the
+ * pack, next to the run ids the reviews above already cite.
+ *
+ * The pack reports the record; it does not re-read the snapshots. It is the
+ * facts sheet a reviewer starts from, and the bytes are re-checked by the
+ * entries that act on them (`task_read`, a run re-entry) — a line here says what
+ * the run was bound to, never that the content is still on disk. A run that
+ * carries no binding (one written before the field existed, or one whose caller
+ * assembled its plan without a pre-check) contributes no line, and nothing is
+ * invented for it.
+ */
+function renderBindings(snapshot: TaskSnapshot, taskId: TaskId): string[] {
+  const lines: string[] = []
+  for (const run of snapshot.runs.filter(item => item.taskId === taskId)) {
+    const binding = run.providerBinding
+    if (binding === undefined) continue
+    const skills = binding.skills.length === 0
+      ? 'no provider skill'
+      : binding.skills
+        .map(skill => `${skill.name} [${skill.role}] content ${skill.contentDigest.slice(0, 12)}${skill.contractDigest === null ? '' : ` contract ${skill.contractDigest.slice(0, 12)}`}`)
+        .join('; ')
+    const servers = binding.mcpServers.length === 0
+      ? ''
+      : `; mcp ${binding.mcpServers.map(server => server.serverName).join(', ')}`
+    const snapshotRoot = binding.snapshotRoot === undefined ? '' : `; snapshot ${binding.snapshotRoot}`
+    lines.push(`- run ${run.runId} [${run.status}] bound registry ${binding.registryRevision.slice(0, 12)}: ${skills}${servers}${snapshotRoot}`)
+  }
+  return lines
+}
+
+/**
  * The pack for one task: the facts first (reviews, dependency edges,
  * parent/child summaries), then the escalation decision, then the judgement
  * dimensions the facts cannot settle, then the diagnoses that explain them.
@@ -194,6 +228,7 @@ export function buildReviewPack(snapshot: TaskSnapshot, taskId: TaskId, escalati
     renderJudgementDimensions(),
     `reviews (${reviews.length}):`,
     ...reviews.flatMap(renderReview),
+    ...renderBindings(snapshot, task.taskId),
   ]
   if (parent !== undefined) lines.push(`parent ${parent.taskId} [${parent.status}]: ${reviewSummary(snapshot, parent.taskId)}`)
   lines.push(`children (${task.childTaskIds.length}):`)

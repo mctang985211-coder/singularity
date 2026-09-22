@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
+import { renderRunBinding } from '@dangosys/dsh-singularity-task-runtime'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
 import type { AcceptanceCriterion, TaskInstance, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
@@ -48,6 +49,29 @@ function protectedInputsPart(criterion: AcceptanceCriterion): string {
   return declared.length === 0 ? '' : ` [protected inputs: ${declared.map(ref => ref.path).join(', ')}]`
 }
 
+/**
+ * The run the caller is executing, as the store recorded it (S1-C item 4): the
+ * providers this run was bound to, re-checked against the snapshot the record
+ * names before they are shown.
+ *
+ * Why the re-check is not optional: the record says which bytes the run loaded,
+ * and the snapshot path is the only place those bytes still exist. A snapshot
+ * that is missing or edited is reported as such, naming the skill — the one
+ * thing this view must never do is quietly show what stands at the production
+ * skill path now, which would read as "this is what you are running".
+ *
+ * A run created before the field existed, or by a caller that assembled its plan
+ * without a pre-check, carries no binding: then there is nothing to claim and
+ * nothing is rendered, exactly as before.
+ */
+async function bindingLines(ctx: Context, run: TaskRun): Promise<string[]> {
+  const binding = run.providerBinding
+  if (binding === undefined) return []
+  const read = await ctx.taskRuntime.readRunBinding(binding)
+  const summary = renderRunBinding(binding, read)
+  return summary.length === 0 ? [] : ['', ...summary.split('\n')]
+}
+
 export function defineTaskReadTool(ctx: Context) {
   return defineTool({
     name: 'task_read',
@@ -70,6 +94,7 @@ export function defineTaskReadTool(ctx: Context) {
           }),
           ...contractLines(task),
           `run ${run.runId} [${run.status}] started ${run.startedAt}`,
+          ...(await bindingLines(ctx, run)),
         ]
         return lines.join('\n')
       }

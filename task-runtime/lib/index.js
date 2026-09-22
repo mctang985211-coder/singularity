@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
-import { RootTaskSpec, TASK_CONTRACT_VERSION, contractDigest, decompositionDigest, reaches, rootTaskStoreId, sha256Hex } from "@dangosys/dsh-singularity-task";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { RootTaskSpec, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TASK_CONTRACT_VERSION, canonicalize, contractDigest, decompositionDigest, reaches, rootTaskStoreId, sha256Hex, skillContentDigest, skillContractDefects, skillContractDigest } from "@dangosys/dsh-singularity-task";
+import { lstat, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { findSkillFileIn, parseSkillFile, skillRootsFor } from "@dangosys/dsh-singularity-agent-runtime";
+import { homedir } from "node:os";
 
 //#region src/mcp-servers.ts
 /**
@@ -358,7 +360,7 @@ function resolvePermission(manifest, resolveSpec) {
 
 //#endregion
 //#region src/protected-inputs.ts
-function message$2(error) {
+function message$4(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 function isPlainObject$1(value) {
@@ -436,7 +438,7 @@ async function fixProtectedInputs(paths, cwd, label) {
 				sha256: sha256Hex(await readFile(resolve(cwd, path)))
 			});
 		} catch (error) {
-			reasons.push(`${label} protectedInputs path ${JSON.stringify(path)} cannot be read: ${message$2(error)}`);
+			reasons.push(`${label} protectedInputs path ${JSON.stringify(path)} cannot be read: ${message$4(error)}`);
 		}
 	}
 	return {
@@ -717,6 +719,1095 @@ function checkDecomposition(parent, children, existingEdges) {
 }
 
 //#endregion
+//#region src/verified-read.ts
+/** Resolve `rel` under `base`, refusing anything that would land outside. */
+function resolveWithin(base, rel) {
+	const abs = resolve(base, rel);
+	if (abs !== base && !abs.startsWith(`${base}${sep}`)) throw new Error(`verified-read: path ${JSON.stringify(rel)} escapes ${base}`);
+	return abs;
+}
+/**
+* Walk `rel` under `root` one component at a time, refusing anything but real
+* entries: a symbolic link anywhere on the path, a non-regular entry where the
+* target should be, or a non-directory where a directory should be all fail
+* loudly, so a read can never land outside the root through a redirected path
+* even though the lexical path stays inside. A component that is simply absent
+* (ENOENT / ENOTDIR anywhere along the walk) is reported as `missing`, never
+* thrown — the caller decides whether absence is an error or an answer.
+*/
+async function walkVerified(root, rel) {
+	const abs = resolveWithin(root, rel);
+	const steps = relative(root, abs).split(sep);
+	let current = root;
+	for (const step of steps) {
+		current = join(current, step);
+		let stat$1;
+		try {
+			stat$1 = await lstat(current);
+		} catch (error) {
+			const code = error.code;
+			if (code === "ENOENT" || code === "ENOTDIR") return {
+				missing: true,
+				reason: code === "ENOTDIR" ? "a path component is not a directory" : "no such file or directory"
+			};
+			throw error;
+		}
+		if (stat$1.isSymbolicLink()) throw new Error(`verified-read: "${current}" is a symbolic link; a path and its ancestors must be real entries inside ${root}`);
+		if (current === abs ? !stat$1.isFile() : !stat$1.isDirectory()) throw new Error(`verified-read: "${current}" is not a regular ${current === abs ? "file" : "directory"}`);
+	}
+	return {
+		missing: false,
+		abs
+	};
+}
+/**
+* Read the file at `rel` under `root` as raw bytes, refusing anything but a
+* real regular file: the entry itself and every ancestor between `root` and it
+* must not be a symbolic link. A missing file, a directory in the file's place,
+* or any other non-regular entry fails loudly. The bytes are returned exactly
+* as stored — no decoding, no newline conversion.
+*/
+async function readVerifiedFile(root, rel) {
+	const walked = await walkVerified(root, rel);
+	if (walked.missing) throw new Error(`verified-read: ${JSON.stringify(rel)} is missing under ${root} (${walked.reason})`);
+	return readFile(walked.abs);
+}
+
+//#endregion
+//#region src/sidecar.ts
+/**
+* A capability table as a query, going through `resolveCapabilities` — the same
+* resolution admission performs — so the pre-check sees exactly the grant a
+* spawn would build and a broken row is refused with the resolution's own
+* reason instead of being silently treated as granting nothing.
+*/
+function capabilityToolQuery(capabilities) {
+	return (capability) => {
+		let manifest;
+		try {
+			manifest = resolveCapabilities([capability], capabilities);
+		} catch (error) {
+			return {
+				known: false,
+				reason: error instanceof Error ? error.message : String(error)
+			};
+		}
+		const entry = manifest.capabilities[capability];
+		if (entry === void 0) return {
+			known: false,
+			reason: `capability "${capability}" is not in the capability table`
+		};
+		return {
+			known: true,
+			tools: entry.tools,
+			mcpServers: entry.mcpServers ?? []
+		};
+	};
+}
+/** Build the pre-check context from a capability table and the registered verifier ids. */
+function skillValidationContext(capabilities, verifierRefs) {
+	return {
+		verifierRefs: [...verifierRefs].sort(),
+		capabilityTools: capabilityToolQuery(capabilities)
+	};
+}
+/**
+* The verdicts that may close an execution gap — and the only place a caller
+* needs to ask. A knowledge or guidance verdict is not in the result, so the
+* closure semantics cannot be relaxed by accident at a call site.
+*/
+function executionProviders(verdicts) {
+	return verdicts.filter((verdict) => verdict.valid && verdict.role === "execution-provider");
+}
+function message$3(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+function defect$1(code, detail) {
+	return {
+		code,
+		detail
+	};
+}
+/** The sidecar contract's own defect codes are already named the same way, so they carry over unchanged. */
+function contractDefects$1(defects) {
+	return defects.map((item) => defect$1(item.code, item.reason));
+}
+/** Whether the bytes are text a worker can read: valid UTF-8 with no NUL byte. */
+function isText(bytes) {
+	if (bytes.includes(0)) return false;
+	try {
+		new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		return true;
+	} catch {
+		return false;
+	}
+}
+/**
+* Read the compiled bytes of one file under the skill directory, turning a
+* refusal into a named defect rather than a throw, so one broken entry does not
+* hide the rest of the scan.
+*/
+async function readBytes(directory, relativePath, relative$1, defects) {
+	try {
+		const walked = await walkVerified(directory, relativePath);
+		if (walked.missing) {
+			defects.push(defect$1("content-mismatch", `${relative$1} is declared but missing from the skill directory`));
+			return;
+		}
+		return await readFile(walked.abs);
+	} catch (error) {
+		defects.push(defect$1("content-unsupported", `${relative$1} cannot be read as a real file: ${message$3(error)}`));
+		return;
+	}
+}
+/**
+* Walk one skill directory and describe it: which files sit at supported
+* positions with their real digests, which direct entries the supported
+* vocabulary does not cover, and every entry that is not a shape this contract
+* supports. Nothing is skipped silently — a link, a nested tree or a non-text
+* file is named.
+*/
+async function scanSkillDirectory(directory) {
+	const scanned = {
+		skillMdPresent: false,
+		resources: [],
+		uncovered: [],
+		unsupported: [],
+		defects: []
+	};
+	let entries;
+	try {
+		entries = await readdir(directory, { withFileTypes: true });
+	} catch (error) {
+		scanned.defects.push(defect$1("skill-missing", `skill directory ${directory} cannot be read: ${message$3(error)}`));
+		return scanned;
+	}
+	for (const entry of entries) {
+		const name = entry.name;
+		const at = join(directory, name);
+		let info;
+		try {
+			info = await lstat(at);
+		} catch (error) {
+			scanned.defects.push(defect$1("content-unsupported", `${name} cannot be read: ${message$3(error)}`));
+			continue;
+		}
+		if (name === "SKILL.md") {
+			scanned.skillMdPresent = true;
+			if (info.isSymbolicLink()) {
+				scanned.defects.push(defect$1("content-unsupported", "SKILL.md is a symbolic link; a skill's SKILL.md must be a real file"));
+				continue;
+			}
+			if (!info.isFile()) {
+				scanned.defects.push(defect$1("content-unsupported", "SKILL.md is not a regular file"));
+				continue;
+			}
+			const bytes = await readBytes(directory, "SKILL.md", "SKILL.md", scanned.defects);
+			if (bytes !== void 0) {
+				scanned.skillMdSha256 = sha256Hex(bytes);
+				try {
+					const parsed = parseSkillFile(bytes.toString("utf8"), join(directory, "SKILL.md"));
+					scanned.frontmatter = {
+						name: parsed.name,
+						description: parsed.description
+					};
+				} catch (error) {
+					scanned.defects.push(defect$1("skill-file-invalid", message$3(error)));
+				}
+			}
+			continue;
+		}
+		if (name === SKILL_SIDECAR_FILE) continue;
+		if (SUPPORTED_SKILL_RESOURCE_DIRS.includes(name)) {
+			if (info.isSymbolicLink()) {
+				scanned.unsupported.push(`${name}/`);
+				scanned.defects.push(defect$1("content-unsupported", `${name}/ is a symbolic link; a skill directory\'s entries must be real`));
+				continue;
+			}
+			if (!info.isDirectory()) {
+				scanned.unsupported.push(`${name}/`);
+				scanned.defects.push(defect$1("content-unsupported", `${name} is not a directory`));
+				continue;
+			}
+			let children;
+			try {
+				children = await readdir(at, { withFileTypes: true });
+			} catch (error) {
+				scanned.unsupported.push(`${name}/`);
+				scanned.defects.push(defect$1("content-unsupported", `${name}/ cannot be read: ${message$3(error)}`));
+				continue;
+			}
+			for (const child of children) {
+				const relative$1 = `${name}/${child.name}`;
+				let childInfo;
+				try {
+					childInfo = await lstat(join(at, child.name));
+				} catch (error) {
+					scanned.unsupported.push(relative$1);
+					scanned.defects.push(defect$1("content-unsupported", `${relative$1} cannot be read: ${message$3(error)}`));
+					continue;
+				}
+				if (childInfo.isSymbolicLink()) {
+					scanned.unsupported.push(relative$1);
+					scanned.defects.push(defect$1("content-unsupported", `${relative$1} is a symbolic link; a resource must be a real file`));
+					continue;
+				}
+				if (childInfo.isDirectory()) {
+					scanned.unsupported.push(relative$1);
+					scanned.defects.push(defect$1("content-unsupported", `${relative$1} is a directory nested deeper than the supported one-level shape (${name}/<file>)`));
+					continue;
+				}
+				if (!childInfo.isFile()) {
+					scanned.unsupported.push(relative$1);
+					scanned.defects.push(defect$1("content-unsupported", `${relative$1} is not a regular file`));
+					continue;
+				}
+				const bytes = await readBytes(directory, relative$1, relative$1, scanned.defects);
+				if (bytes === void 0) {
+					scanned.unsupported.push(relative$1);
+					continue;
+				}
+				if (!isText(bytes)) {
+					scanned.unsupported.push(relative$1);
+					scanned.defects.push(defect$1("content-unsupported", `${relative$1} is not UTF-8 text; a supported resource is a text file a worker can read`));
+					continue;
+				}
+				scanned.resources.push({
+					path: relative$1,
+					sha256: sha256Hex(bytes)
+				});
+			}
+			continue;
+		}
+		if (info.isSymbolicLink()) {
+			scanned.defects.push(defect$1("content-unsupported", `${name} is a symbolic link; a skill directory holds real entries only`));
+			continue;
+		}
+		scanned.uncovered.push(info.isDirectory() ? `${name}/` : name);
+	}
+	scanned.resources.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+	scanned.uncovered.sort();
+	return scanned;
+}
+/**
+* Load and check one skill directory: the directory itself, `SKILL.md`, the
+* sidecar when there is one, the identity of the bytes on disk, and the shape
+* of everything else in it.
+*
+* The returned `content` is the identity computed from the bytes just read —
+* the same value a clean sidecar declares, and the honest answer for a skill
+* that declares nothing. `defects` empty means the directory is fully described
+* by its identity: every file is `SKILL.md`, the sidecar itself, or a supported
+* resource the declaration names. Absence of a sidecar is not a defect: the
+* skill is then guidance, not a provider.
+*/
+async function loadSkillSidecar(directory) {
+	let info;
+	try {
+		info = await lstat(directory);
+	} catch (error) {
+		return {
+			directory,
+			uncovered: [],
+			defects: [defect$1("skill-missing", `skill directory ${directory} cannot be read: ${message$3(error)}`)]
+		};
+	}
+	if (info.isSymbolicLink()) return {
+		directory,
+		uncovered: [],
+		defects: [defect$1("content-unsupported", `${directory} is a symbolic link; a skill directory must be a real directory`)]
+	};
+	if (!info.isDirectory()) return {
+		directory,
+		uncovered: [],
+		defects: [defect$1("skill-missing", `${directory} is not a directory`)]
+	};
+	const scanned = await scanSkillDirectory(directory);
+	const defects = [...scanned.defects];
+	if (!scanned.skillMdPresent) defects.push(defect$1("skill-missing", `${join(directory, "SKILL.md")} does not exist; a skill directory carries a SKILL.md`));
+	const content = scanned.skillMdSha256 === void 0 ? void 0 : {
+		skillMdSha256: scanned.skillMdSha256,
+		resources: scanned.resources
+	};
+	let sidecar;
+	let sidecarBytes;
+	try {
+		const walked = await walkVerified(directory, SKILL_SIDECAR_FILE);
+		if (!walked.missing) sidecarBytes = await readFile(walked.abs);
+	} catch (error) {
+		defects.push(defect$1("content-unsupported", `${SKILL_SIDECAR_FILE} cannot be read as a real file: ${message$3(error)}`));
+	}
+	if (sidecarBytes !== void 0) if (!isText(sidecarBytes)) defects.push(defect$1("sidecar-unreadable", `${SKILL_SIDECAR_FILE} is not UTF-8 text`));
+	else {
+		let declared;
+		try {
+			declared = JSON.parse(sidecarBytes.toString("utf8"));
+		} catch (error) {
+			defects.push(defect$1("sidecar-unreadable", `${SKILL_SIDECAR_FILE} is not readable JSON: ${message$3(error)}`));
+		}
+		if (declared !== void 0) {
+			const declaredDefects = skillContractDefects(declared);
+			defects.push(...contractDefects$1(declaredDefects));
+			if (declaredDefects.length === 0) {
+				const sidecarValue = declared;
+				sidecar = sidecarValue;
+				if (content !== void 0) defects.push(...contentDefects(sidecarValue.content, content, scanned.uncovered, scanned.unsupported));
+			}
+		}
+	}
+	return {
+		directory,
+		...sidecar === void 0 ? {} : { sidecar },
+		...content === void 0 ? {} : { content },
+		...scanned.frontmatter === void 0 ? {} : { frontmatter: scanned.frontmatter },
+		uncovered: scanned.uncovered,
+		defects
+	};
+}
+/**
+* Compare a declared identity with the bytes on disk: the declared `SKILL.md`
+* digest, every declared resource, and — the other direction — every file the
+* declaration does not name. A missing declared file or a changed byte is a
+* `content-mismatch`; a file nobody declared is `content-unsupported`, because
+* an identity that covers most of a directory is not an identity of it. A path
+* the scan already refused for its shape is not counted again here.
+*/
+function contentDefects(declared, actual, uncovered, unsupported) {
+	const defects = [];
+	if (declared.skillMdSha256 !== actual.skillMdSha256) defects.push(defect$1("content-mismatch", `SKILL.md is not the declared content: declared ${declared.skillMdSha256}, read ${actual.skillMdSha256}`));
+	const refused = (path) => unsupported.some((entry) => entry.endsWith("/") ? path.startsWith(entry) : path === entry);
+	const actualResources = new Map(actual.resources.map((resource) => [resource.path, resource.sha256]));
+	for (const declaredResource of declared.resources) {
+		const read = actualResources.get(declaredResource.path);
+		if (read === void 0) {
+			if (refused(declaredResource.path)) continue;
+			defects.push(defect$1("content-mismatch", `${declaredResource.path} is declared but missing from the skill directory`));
+			continue;
+		}
+		if (read !== declaredResource.sha256) defects.push(defect$1("content-mismatch", `${declaredResource.path} is not the declared content: declared ${declaredResource.sha256}, read ${read}`));
+	}
+	const declaredPaths$1 = new Set(declared.resources.map((resource) => resource.path));
+	for (const resource of actual.resources) if (!declaredPaths$1.has(resource.path)) defects.push(defect$1("content-unsupported", `${resource.path} is not covered by the declared identity; the identity must name every file in the skill directory`));
+	for (const entry of uncovered) defects.push(defect$1("content-unsupported", `${entry} is not covered by the declared identity; a sidecar declares SKILL.md plus resources under ${SUPPORTED_SKILL_RESOURCE_DIRS.join("/, ")}/ only`));
+	return defects;
+}
+/**
+* The unified pre-check: one candidate provider against the deployment's
+* verifier vocabulary and capability table (guide §2.3, S1-C item 3). Every
+* entry — config load, provider replacement, candidate promotion — calls this,
+* so `evolution_apply` is not the only defence and no entry can be the one that
+* skipped it.
+*
+* Rules, in the order they are checked:
+*
+* 1. The directory exists, is a real directory, and is named after the skill.
+* 2. The loader reads it: `SKILL.md`, the sidecar when present, the supported
+*    resources, and every entry whose shape the contract does not support. The
+*    declared content identity must equal the bytes read, and the `SKILL.md`
+*    frontmatter must parse and declare the granted name — the same rule, and
+*    the same words, the spawn's `readSkillFile` applies when it registers the
+*    body.
+* 3. A sidecar the caller supplied must be the one the directory carries.
+* 4. An execution sidecar's `verifier.ref` must be a registered verifier, and
+*    its `requiredTools` must be granted by the capabilities it declares it
+*    serves (`mcp__<server>__<tool>` counts when the capability mounts that
+*    server; the worker baseline is deliberately not counted — a capability
+*    must grant what the provider it carries needs).
+* 5. A knowledge sidecar is checked for content and carried as knowledge: it
+*    never becomes an execution provider.
+*
+* The verdict is a value: all defects are collected, nothing is written, and a
+* caller that only wants execution providers filters with
+* {@link executionProviders}.
+*/
+async function validateSkillProvider(candidate, context) {
+	const defects = [];
+	const refuse = (directory$1) => ({
+		valid: false,
+		name: candidate.name,
+		...directory$1 === void 0 ? {} : { directory: directory$1 },
+		defects
+	});
+	if (candidate.directory === void 0) {
+		defects.push(defect$1("skill-missing", `no directory was discovered for skill "${candidate.name}"; a provider without a SKILL.md on disk cannot be an execution provider`));
+		return refuse(void 0);
+	}
+	const directory = candidate.directory;
+	if (basename(directory) !== candidate.name) defects.push(defect$1("skill-name-mismatch", `skill "${candidate.name}" resolves to directory ${directory}, whose name is "${basename(directory)}"; a skill directory is named after the skill it holds`));
+	const loaded = await loadSkillSidecar(directory);
+	defects.push(...loaded.defects);
+	const content = loaded.content;
+	const frontmatter = loaded.frontmatter;
+	if (frontmatter !== void 0 && frontmatter.name !== candidate.name) defects.push(defect$1("skill-name-mismatch", `skill file ${join(directory, "SKILL.md")} declares name "${frontmatter.name}" but the capability grants "${candidate.name}"`));
+	if (candidate.sidecar !== void 0) {
+		const suppliedDefects = skillContractDefects(candidate.sidecar);
+		defects.push(...contractDefects$1(suppliedDefects));
+		if (loaded.sidecar === void 0) defects.push(defect$1("sidecar-mismatch", `skill "${candidate.name}" was checked against a supplied sidecar, but ${join(directory, SKILL_SIDECAR_FILE)} holds none; a declaration must describe the directory it is validated against`));
+		else if (suppliedDefects.length === 0 && skillContractDigest(loaded.sidecar) !== skillContractDigest(candidate.sidecar)) defects.push(defect$1("sidecar-mismatch", `the supplied sidecar for skill "${candidate.name}" is not the declaration in ${join(directory, SKILL_SIDECAR_FILE)}`));
+	}
+	const sidecar = loaded.sidecar ?? candidate.sidecar;
+	if (sidecar === void 0) {
+		if (defects.length > 0 || content === void 0 || frontmatter === void 0) return refuse(directory);
+		return {
+			valid: true,
+			role: "guidance",
+			name: candidate.name,
+			directory,
+			description: frontmatter.description,
+			content,
+			contentDigest: skillContentDigest(content),
+			uncovered: loaded.uncovered
+		};
+	}
+	if (sidecar.type === "execution") {
+		if (!context.verifierRefs.includes(sidecar.verifier.ref)) {
+			const registered = [...context.verifierRefs].sort();
+			defects.push(defect$1("verifier-unknown", `skill "${candidate.name}" declares execution verifier ${JSON.stringify(sidecar.verifier.ref)}, which is not registered; registered verifiers: ${registered.length === 0 ? "none" : registered.join(", ")}`));
+		}
+		const tools = /* @__PURE__ */ new Set();
+		const servers = /* @__PURE__ */ new Set();
+		let grantComplete = true;
+		for (const capability of sidecar.capabilities) {
+			const answer = context.capabilityTools(capability);
+			if (!answer.known) {
+				grantComplete = false;
+				defects.push(defect$1("capability-unknown", `skill "${candidate.name}" declares capability ${JSON.stringify(capability)}: ${answer.reason}`));
+				continue;
+			}
+			for (const tool of answer.tools) tools.add(tool);
+			for (const server of answer.mcpServers) servers.add(server);
+		}
+		if (grantComplete) {
+			const uncoveredTools = sidecar.requiredTools.filter((tool) => !tools.has(tool) && ![...servers].some((server) => tool.startsWith(`mcp__${server}__`) && tool.length > `mcp__${server}__`.length));
+			if (uncoveredTools.length > 0) {
+				const granted = [...tools].sort().join(", ");
+				defects.push(defect$1("tool-not-covered", `skill "${candidate.name}" requires tools its declared capabilities do not grant: ${[...uncoveredTools].sort().map((tool) => JSON.stringify(tool)).join(", ")}; declared capabilities ${sidecar.capabilities.join(", ")} grant: ${granted}${servers.size === 0 ? "" : ` · mounted servers: ${[...servers].sort().join(", ")}`}`));
+			}
+		}
+		if (defects.length > 0 || content === void 0 || frontmatter === void 0) return refuse(directory);
+		return {
+			valid: true,
+			role: "execution-provider",
+			name: candidate.name,
+			directory,
+			capabilities: [...sidecar.capabilities],
+			precondition: sidecar.precondition,
+			description: frontmatter.description,
+			inputs: sidecar.inputs.map((port) => ({
+				name: port.name,
+				description: port.description,
+				required: port.required
+			})),
+			outputs: sidecar.outputs.map((port) => ({
+				name: port.name,
+				description: port.description,
+				required: port.required
+			})),
+			requiredTools: [...sidecar.requiredTools],
+			verifierRef: sidecar.verifier.ref,
+			contractDigest: skillContractDigest(sidecar),
+			content,
+			contentDigest: skillContentDigest(content)
+		};
+	}
+	if (defects.length > 0 || content === void 0 || frontmatter === void 0) return refuse(directory);
+	return {
+		valid: true,
+		role: "knowledge",
+		name: candidate.name,
+		directory,
+		source: sidecar.source,
+		scope: sidecar.scope,
+		contentCheck: {
+			kind: sidecar.contentCheck.kind,
+			command: sidecar.contentCheck.command
+		},
+		description: frontmatter.description,
+		contractDigest: skillContractDigest(sidecar),
+		content,
+		contentDigest: skillContentDigest(content)
+	};
+}
+/**
+* The registry revision: SHA-256 over {@link canonicalize} of the capability
+* table (each row sorted by name, carrying its skills, the tool labels it
+* declares, the DSH tool names those labels expand to, its preset, permission
+* and MCP servers — defaults and declaration order normalized away) plus every
+* provider's sidecar identity.
+*
+* What it covers, and what it deliberately does not: a run can cite this
+* revision to say which table and which declared provider content it resolved
+* against. Two runs with the same revision resolved the same rows over the same
+* declared sidecar content. It does **not** cover the bytes of a skill that
+* declares nothing (its identity is `null` here), the verifier registry's own
+* revisions, or the deployment's environment — a caller that needs those records
+* them separately rather than reading them into this digest.
+*/
+function registryRevision(capabilities, providers) {
+	return sha256Hex(canonicalize({
+		capabilities: Object.keys(capabilities).sort().map((name) => {
+			const entry = capabilities[name];
+			const answers = capabilityToolQuery(capabilities)(name);
+			return {
+				name,
+				skills: [...new Set(entry.skills ?? [])].sort(),
+				declaredTools: [...new Set(entry.tools ?? [])].sort(),
+				tools: answers.known ? [...new Set(answers.tools)].sort() : [],
+				mcpServers: answers.known ? [...new Set(answers.mcpServers)].sort() : [],
+				...entry.preset === void 0 ? {} : { preset: entry.preset },
+				...entry.permission === void 0 ? {} : { permission: entry.permission }
+			};
+		}),
+		providers: providers.map((provider) => ({
+			name: provider.name,
+			contractDigest: provider.contractDigest
+		})).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
+	}));
+}
+
+//#endregion
+//#region src/provider-precheck.ts
+/**
+* Resolve an optional sibling plugin's service by property or `ctx.get(name)`,
+* the soft pattern this repo uses for services a deployment may or may not
+* mount (`verifier`, `sessionQuery`, `agents`): absent in test contexts and in
+* smaller bundles, not an error.
+*
+* Both lookups are inside the `try` because cordis refuses a property read of a
+* service the asking context does not have (`cannot get property "verifier"
+* without inject`, `reflect.ts` — it throws instead of returning `undefined`).
+* An optional service that is absent is exactly the case this function exists
+* for, so the refusal is the answer: `undefined`.
+*/
+function optionalService(host, name) {
+	if (host === null || typeof host !== "object") return void 0;
+	const holder = host;
+	try {
+		const viaContext = typeof holder.get === "function" ? holder.get(name) : void 0;
+		if (viaContext !== void 0) return viaContext;
+		return holder[name];
+	} catch {
+		return;
+	}
+}
+/**
+* The registered verifier vocabulary a provider check judges execution sidecars
+* against, or `undefined` when the deployment cannot list it — no verifier
+* service, a service that never became ready, or a registry whose own read
+* throws.
+*
+* `ready()` first, and only here: a verifier service that has been constructed
+* but not readied reports an empty `verifierIds()`, and reading that as "no
+* verifier is registered" would refuse every execution provider on a deployment
+* whose registry is merely still loading. The distinction between "the registry
+* could not answer" and "the registry answered: empty" is exactly what the
+* returned `undefined` preserves: a caller refuses an execution sidecar in the
+* first case (fail-closed, {@link unlistableVerifierRefusal}) and names the
+* registry's own answer in the second.
+*
+* One implementation for every consumer — the admission pre-check, the
+* load-time scan and the promotion checks all ask it (guide §2.4, S1-C item 3).
+*/
+async function registeredVerifierIds(host) {
+	const verifier = optionalService(host, "verifier");
+	if (verifier === void 0) return void 0;
+	try {
+		await verifier.ready?.();
+		return verifier.verifierIds?.();
+	} catch {
+		return;
+	}
+}
+/**
+* The refusal of an execution sidecar the deployment cannot judge because its
+* verifier vocabulary could not be listed: the declared ref is refused rather
+* than assumed registered (fail-closed). The admission pre-check and the
+* evolution promotion checks share this function, so one situation reads the
+* same way in every entry instead of each inventing its own explanation.
+*/
+function unlistableVerifierRefusal(name, directory, ref) {
+	return {
+		valid: false,
+		name,
+		...directory === void 0 ? {} : { directory },
+		defects: [defect("verifier-unknown", `skill "${name}" declares execution verifier ${JSON.stringify(ref)} but the verifier registry cannot be listed (verifierIds() is unavailable, so the registry was never readied); the ref is refused rather than assumed registered`)]
+	};
+}
+/**
+* Every root one discovery view covers, in search order — the single root list
+* the pre-check searches and the one a refusal names, so "searched the roots"
+* in an error message is never a hand-written approximation of the search.
+*/
+async function skillSearchRoots(view = {}) {
+	return [...view.extraRoots ?? [], ...await skillRootsFor(view.cwd)];
+}
+function defect(code, detail) {
+	return {
+		code,
+		detail
+	};
+}
+/** The search-failure refusal: the skill name and the roots, which no phase-1 validator can know. */
+function undiscovered(name, roots) {
+	return {
+		valid: false,
+		name,
+		defects: [defect("skill-missing", `no SKILL.md for skill "${name}" is reachable from the worker's discovery roots; searched ${roots.join(", ")}`)]
+	};
+}
+/** The one provider identity a revision can cite: a validated sidecar, or `null` for a skill that declares none. */
+function providerIdentity(verdict) {
+	return {
+		name: verdict.name,
+		contractDigest: verdict.contractDigest
+	};
+}
+/**
+* Check every skill every listed capability declares, from one discovery
+* viewpoint.
+*
+* The rules, in the order they are applied per skill: it must be discoverable
+* from the view's roots; the directory it resolves to must pass
+* {@link validateSkillProvider} against the table and the verifier vocabulary.
+* An execution sidecar is refused when the vocabulary is unknown
+* (`verifierRefs` absent) — the one case the phase-1 validator cannot judge,
+* because it would read an empty list as "nothing is registered".
+*
+* Nothing is written and nothing is thrown: every refusal is a verdict, and
+* {@link providerRefusals} turns the refusals into the lines a caller reports
+* before it refuses the whole batch.
+*/
+async function precheckProviders(request) {
+	const roots = await skillSearchRoots(request.view);
+	const verifierRefs = request.verifierRefs;
+	const context = skillValidationContext(request.table, verifierRefs ?? []);
+	const capabilities = [];
+	for (const capability of request.capabilities) {
+		const declared = request.table[capability]?.skills ?? [];
+		const skills = [];
+		for (const name of [...new Set(declared)]) {
+			const file = await findSkillFileIn(roots, name);
+			if (file === void 0) {
+				skills.push(undiscovered(name, roots));
+				continue;
+			}
+			const directory = dirname(file);
+			if (verifierRefs === void 0) {
+				const loaded = await loadSkillSidecar(directory);
+				if (loaded.sidecar?.type === "execution") {
+					skills.push(unlistableVerifierRefusal(name, directory, loaded.sidecar.verifier.ref));
+					continue;
+				}
+			}
+			skills.push(await validateSkillProvider({
+				name,
+				directory
+			}, context));
+		}
+		capabilities.push({
+			capability,
+			skills
+		});
+	}
+	const providers = capabilities.flatMap((row) => row.skills).flatMap((verdict) => {
+		if (!verdict.valid) return [];
+		return [verdict.role === "guidance" ? {
+			name: verdict.name,
+			contractDigest: null
+		} : providerIdentity(verdict)];
+	}).filter((identity, index, all) => all.findIndex((entry) => entry.name === identity.name) === index).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+	return {
+		capabilities,
+		roots,
+		...verifierRefs === void 0 ? {} : { verifierRefs: [...verifierRefs] },
+		revision: registryRevision(request.table, providers)
+	};
+}
+/**
+* One capability row as it would read after a replacement, checked by the same
+* pre-check a batch is admitted under: `entry` is folded into `table` — the row
+* as `config.yml` will hold it once written — and every skill the new row grants
+* is discovered from `view` and judged by {@link validateSkillProvider}, with
+* the row's own tool labels expanding through `resolveCapabilities` as the
+* covering set for a skill that declares this row.
+*
+* The two entries that write a row share this function, so the run-time registry
+* mirror (`TaskRuntime.applyCapabilityRow`) asks exactly the question the
+* promotion gate (`EvolutionService.checkPromotion`) asked before the row
+* reached `config.yml`: one composition, one vocabulary of refusals, no entry
+* that can be replaced without being judged. `refusals` is empty for a row that
+* grants no skill or only loadable providers.
+*/
+async function precheckReplacedCapabilityRow(request) {
+	const precheck = await precheckProviders({
+		capabilities: [request.name],
+		table: {
+			...request.table,
+			[request.name]: request.entry
+		},
+		view: request.view,
+		...request.verifierRefs === void 0 ? {} : { verifierRefs: request.verifierRefs }
+	});
+	return {
+		precheck,
+		refusals: providerRefusals(precheck)
+	};
+}
+/**
+* The head every refusal line shares: the capability that declares the skill,
+* the skill itself, and the directory discovery found (when it found one).
+* One function, so the two renderings below can never describe the same refusal
+* differently.
+*/
+function refusalHead(capability, verdict) {
+	const where = verdict.directory === void 0 ? "" : ` (found at ${verdict.directory})`;
+	return `capability ${JSON.stringify(capability)} skill ${JSON.stringify(verdict.name)}${where}`;
+}
+/**
+* Every refused provider of one pre-check, one line each, naming the capability
+* that declares it, the skill, the directory when one was found, and every
+* defect with its code. Empty means the batch may proceed — which is a
+* statement about *loadable* providers only: this pre-check never adds a
+* capability to the closure, and knowledge/guidance verdicts are loadable
+* without being execution providers.
+*/
+function providerRefusals(precheck) {
+	return precheck.capabilities.flatMap((row) => row.skills.filter((verdict) => !verdict.valid).map((verdict) => `${refusalHead(row.capability, verdict)}: ${verdict.defects.map((item) => `${item.code}: ${item.detail}`).join("; ")}`));
+}
+/**
+* The same refusals, one line per defect: the shape a loud report wants, since
+* a caller reading a log needs the capability, the skill, the defect code and
+* the detail of each problem rather than a summary line per provider. The
+* load-time scan (`TaskRuntime.providerLoadReport`) prints these; admission
+* refuses a batch on {@link providerRefusals}.
+*/
+function providerDefectLines(precheck) {
+	return precheck.capabilities.flatMap((row) => row.skills.filter((verdict) => !verdict.valid).flatMap((verdict) => verdict.defects.map((item) => `${refusalHead(row.capability, verdict)}: ${item.code}: ${item.detail}`)));
+}
+
+//#endregion
+//#region src/run-binding.ts
+/** The directory under one run's own directory that holds its `<name>/SKILL.md` entries — a skill root as `WorkerGrant.skillRoots` expects. */
+const RUN_BINDING_SKILLS_DIR = "skills";
+/**
+* Where run bindings are materialized unless the deployment says otherwise:
+* `<DSH_HOME or ~/.dsh>/singularity/run-bindings`, resolved per call so a test
+* (or a deployment) that moves `DSH_HOME` moves the snapshots with it.
+*
+* Outside the worker's checkout on purpose: the run's cwd is where a worker
+* writes, and content it can rewrite under itself would make "the worker loaded
+* the bound bytes" unverifiable. A snapshot is re-checked against its digest on
+* every read, so even a writer that reaches it cannot make it pass for
+* something else — but the ordinary case should not depend on that.
+*/
+function defaultRunBindingRoot() {
+	return join(process.env.DSH_HOME !== void 0 && process.env.DSH_HOME.length > 0 ? process.env.DSH_HOME : join(homedir(), ".dsh"), "singularity", "run-bindings");
+}
+function message$2(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+/** The identity one accepted verdict contributes to a run's record. */
+function skillBinding(provider) {
+	const { verdict, capabilities } = provider;
+	return {
+		name: verdict.name,
+		role: verdict.role,
+		capabilities: [...capabilities],
+		description: verdict.description,
+		contractDigest: verdict.role === "guidance" ? null : verdict.contractDigest,
+		contentDigest: verdict.contentDigest,
+		uncovered: verdict.role === "guidance" ? [...verdict.uncovered] : []
+	};
+}
+/**
+* The providers one run selects: every accepted verdict of the run's own rows,
+* one entry per skill name, carrying the rows that grant it.
+*
+* A row whose declared skill has no accepted verdict is a refusal, not a
+* partial selection: such a skill would be resolved by discovery at spawn —
+* exactly the mutable production path this module exists to close — so the run
+* fails rather than loading bytes nothing judged. (Admission already refuses
+* such a batch; this is the same rule where the run is created, so a caller
+* that hands the cascade its own pre-check cannot slip past it.)
+*/
+function selectedProviders(providers, rows, declaredBy) {
+	if (providers === void 0) return [];
+	const accepted = /* @__PURE__ */ new Map();
+	const refused = /* @__PURE__ */ new Map();
+	for (const row of providers.capabilities) {
+		if (!rows.includes(row.capability)) continue;
+		for (const verdict of row.skills) {
+			if (!verdict.valid) {
+				refused.set(verdict.name, [...refused.get(verdict.name) ?? [], ...verdict.defects]);
+				continue;
+			}
+			const existing = accepted.get(verdict.name);
+			if (existing === void 0) accepted.set(verdict.name, {
+				verdict,
+				capabilities: new Set([row.capability])
+			});
+			else existing.capabilities.add(row.capability);
+		}
+	}
+	const missing = [...new Set(rows.flatMap((row) => declaredBy(row)))].filter((name) => !accepted.has(name));
+	if (missing.length > 0) {
+		const why = missing.map((name) => refused.has(name) ? `"${name}" (${refused.get(name).map((defect$2) => `${defect$2.code}: ${defect$2.detail}`).join("; ")})` : `"${name}" (no verdict was taken for it)`);
+		throw new Error(`the pre-check this run was admitted with holds no accepted provider for skill${missing.length > 1 ? "s" : ""} ${why.join(", ")}; a run loads only content its admission judged, so it cannot be started against an unjudged skill`);
+	}
+	return [...accepted.entries()].map(([, entry]) => ({
+		verdict: entry.verdict,
+		capabilities: [...entry.capabilities].sort()
+	})).sort((left, right) => left.verdict.name < right.verdict.name ? -1 : left.verdict.name > right.verdict.name ? 1 : 0);
+}
+/** The granted MCP servers' identity: the registry key and the template it resolved to, or `null` when the registry holds no such key. */
+function mcpServerBindings(manifest, registry) {
+	const names = [];
+	for (const entry of Object.values(manifest.capabilities)) for (const name of entry.mcpServers ?? []) if (!names.includes(name)) names.push(name);
+	return names.map((serverName) => {
+		const template = registry[serverName];
+		return {
+			serverName,
+			templateDigest: template === void 0 ? null : sha256Hex(canonicalize(template))
+		};
+	});
+}
+/**
+* Copy one selected provider's admitted bytes into the run's snapshot.
+*
+* Every file is read through the verified walk (a link or a wrong type anywhere
+* on the path is refused, never followed) and hashed against the identity the
+* pre-check recorded before it is written, and the sidecar is carried verbatim
+* after its own digest and shape are checked — the declaration a reader sees in
+* the snapshot is the declaration the provider was validated against, not a
+* fresh parse that could differ.
+*/
+async function materializeProvider(provider, snapshotRoot, runId) {
+	const { verdict } = provider;
+	const target = join(snapshotRoot, verdict.name);
+	await mkdir(target, { recursive: true });
+	const files = [{
+		rel: "SKILL.md",
+		sha256: verdict.content.skillMdSha256
+	}, ...verdict.content.resources.map((resource) => ({
+		rel: resource.path,
+		sha256: resource.sha256
+	}))];
+	for (const file of files) {
+		let bytes;
+		try {
+			bytes = await readVerifiedFile(verdict.directory, file.rel);
+		} catch (error) {
+			throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${message$2(error)}`);
+		}
+		const read = sha256Hex(bytes);
+		if (read !== file.sha256) throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${file.rel} at ${verdict.directory} is not the admitted content (admitted ${file.sha256}, read ${read}); the provider changed after it was judged`);
+		const at = join(target, file.rel);
+		await mkdir(dirname(at), { recursive: true });
+		await writeFile(at, bytes);
+	}
+	if (verdict.role === "guidance") return;
+	let sidecarBytes;
+	try {
+		sidecarBytes = await readVerifiedFile(verdict.directory, SKILL_SIDECAR_FILE);
+	} catch (error) {
+		throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${message$2(error)}`);
+	}
+	let declared;
+	try {
+		declared = JSON.parse(sidecarBytes.toString("utf8"));
+	} catch (error) {
+		throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": ${SKILL_SIDECAR_FILE} is not readable JSON: ${message$2(error)}`);
+	}
+	const defects = skillContractDefects(declared);
+	if (defects.length > 0) throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": the declaration in ${verdict.directory} is not a valid sidecar (${defects.map((item) => `${item.code}: ${item.reason}`).join("; ")})`);
+	const digest = skillContractDigest(declared);
+	if (digest !== verdict.contractDigest) throw new Error(`run "${runId}" cannot bind skill "${verdict.name}": the declaration in ${verdict.directory} is not the one it was judged against (judged ${verdict.contractDigest}, read ${digest})`);
+	await writeFile(join(target, SKILL_SIDECAR_FILE), sidecarBytes);
+}
+/**
+* Bind one run's content: identify the providers its admission judged,
+* materialize their admitted bytes, and verify the snapshot against the record
+* before it is handed back to be stored.
+*
+* Returns `undefined` for a run that has capability rows but no pre-check — a
+* caller that assembled its plan itself. Such a run's grant resolves its skills
+* at spawn through the deployment's own discovery, which is exactly the mutable
+* path this module exists to close, so **nothing is claimed**: the run records no
+* binding at all rather than a record that looks authoritative and describes
+* bytes nobody judged. Every production entry runs the pre-check, so this is the
+* hand-built-caller case only.
+*
+* Throws — with the skill or the path named — when the admitted bytes are no
+* longer there, when the deployment cannot materialize at all, or when the
+* snapshot does not read back as the record describes it. A throw means the run
+* records no binding and loads no content: there is no state in which a run
+* claims content it did not load.
+*/
+async function bindRunProviders(request) {
+	const rows = Object.keys(request.manifest.capabilities);
+	if (request.providers === void 0 && rows.length > 0) return void 0;
+	const selected = selectedProviders(request.providers, rows, (row) => request.manifest.capabilities[row]?.skills ?? []);
+	const base = {
+		registryRevision: request.providers?.revision ?? registryRevision(request.table ?? {}, []),
+		capabilities: [...rows].sort(),
+		skills: selected.map(skillBinding),
+		mcpServers: mcpServerBindings(request.manifest, request.mcpRegistry ?? MCP_SERVER_REGISTRY)
+	};
+	if (selected.length === 0) return base;
+	const root = request.root;
+	if (root === void 0) throw new Error(`run "${request.runId}" selects skills [${selected.map((provider) => provider.verdict.name).join(", ")}] but this deployment configures no run binding root (\`Config.runBindingRoot\`); without one the run cannot load content it was admitted against`);
+	const runDirectory = join(root, request.storeId, request.runId);
+	const snapshotRoot = join(runDirectory, RUN_BINDING_SKILLS_DIR);
+	await mkdir(dirname(runDirectory), { recursive: true });
+	try {
+		await mkdir(runDirectory);
+	} catch (error) {
+		throw new Error(`run "${request.runId}" cannot bind content: ${runDirectory} already exists (${message$2(error)}); a run materializes once`);
+	}
+	try {
+		for (const provider of selected) await materializeProvider(provider, snapshotRoot, request.runId);
+	} catch (error) {
+		await rm(runDirectory, {
+			recursive: true,
+			force: true
+		});
+		throw error;
+	}
+	const binding = {
+		...base,
+		snapshotRoot
+	};
+	const read = await readRunBinding(binding);
+	if (read !== void 0 && read.defects.length > 0) {
+		await rm(runDirectory, {
+			recursive: true,
+			force: true
+		});
+		throw new Error(`run "${request.runId}" cannot bind content: the snapshot it just wrote does not read back as the record describes it:\n- ${read.defects.join("\n- ")}`);
+	}
+	return binding;
+}
+/**
+* Re-check one run's binding against the bytes its snapshot holds now — the read
+* a later reader (an old run's summary, a re-entry, a recovery path) performs
+* before trusting the record.
+*
+* The check is the loader the pre-check uses, so "the snapshot is the admitted
+* content" is judged by the same rules that admitted it: the `SKILL.md` and the
+* declared resources must hash to the recorded content identity, the sidecar to
+* the recorded contract identity, the frontmatter must declare the skill's own
+* name, and the snapshot root must hold exactly the recorded skills — an extra
+* directory would be registered into a worker's layer, so it is reported rather
+* than ignored.
+*
+* One more thing is re-read for a guidance skill: the loader names the entries
+* of its directory that the content identity does not cover (the same list
+* admission recorded as `uncovered`), and a snapshot must hold its bound content
+* only. An entry that appeared there since admission is therefore reported with
+* its name — the record described a directory that does not match these bytes —
+* while an entry the record lists as uncovered and absent from the snapshot is
+* simply a correct snapshot: materialization copies the identity's files, so a
+* source directory's uncovered entries never reach a run.
+*
+* Returns `undefined` for a record that names no snapshot: a run that loaded no
+* content (a deterministic criteria replay, a run with no provider) has nothing
+* to re-read, which is not the same as content that failed to re-read.
+*/
+async function readRunBinding(binding) {
+	const root = binding.snapshotRoot;
+	if (root === void 0) return void 0;
+	const skills = [];
+	const rootDefects = [];
+	const recorded = new Set(binding.skills.map((skill) => skill.name));
+	let entries;
+	try {
+		entries = (await readdir(root, { withFileTypes: true })).map((entry) => entry.name);
+	} catch (error) {
+		entries = [];
+		rootDefects.push(`${root} cannot be read: ${message$2(error)}; the content this run was bound to is not available`);
+	}
+	for (const name of entries) if (!recorded.has(name)) rootDefects.push(`${join(root, name)} is not a skill this run's record names; a worker's skill layer would register it, so it is reported rather than ignored`);
+	for (const skill of binding.skills) {
+		const loaded = await loadSkillSidecar(join(root, skill.name));
+		const defects = loaded.defects.map((defect$2) => `${defect$2.code}: ${defect$2.detail}`);
+		if (loaded.content === void 0) {
+			if (defects.length === 0) defects.push(`skill-missing: ${join(root, skill.name)} holds no readable SKILL.md`);
+		} else {
+			const digest = skillContentDigest(loaded.content);
+			if (digest !== skill.contentDigest) defects.push(`content-mismatch: ${join(root, skill.name, "SKILL.md")} and its resources are not the bound content: bound ${skill.contentDigest}, read ${digest}`);
+			if (loaded.frontmatter === void 0 && defects.length === 0) defects.push(`skill-file-invalid: ${join(root, skill.name, "SKILL.md")} declares no frontmatter a worker could load`);
+			else if (loaded.frontmatter !== void 0 && loaded.frontmatter.name !== skill.name) defects.push(`skill-name-mismatch: skill file ${join(root, skill.name, "SKILL.md")} declares name "${loaded.frontmatter.name}" but the record binds "${skill.name}"`);
+			const declared = loaded.sidecar === void 0 ? null : skillContractDigest(loaded.sidecar);
+			if (declared !== skill.contractDigest) defects.push(`sidecar-mismatch: the declaration in ${join(root, skill.name)} is not the one the run was bound to: bound ${skill.contractDigest ?? "none"}, read ${declared ?? "none"}`);
+			if (skill.role === "guidance" && loaded.sidecar === void 0) for (const entry of [...loaded.uncovered].sort()) {
+				const noted = skill.uncovered.includes(entry) ? "; this run's record lists it as uncovered in the source skill, and a snapshot carries bound content only" : "";
+				defects.push(`content-mismatch: ${join(root, skill.name)} holds ${JSON.stringify(entry)}, which the content identity this run is bound to does not cover${noted}`);
+			}
+		}
+		skills.push({
+			name: skill.name,
+			role: skill.role,
+			readable: defects.length === 0,
+			defects
+		});
+	}
+	return {
+		snapshotRoot: root,
+		skills,
+		defects: [...rootDefects, ...skills.flatMap((skill) => skill.defects.map((defect$2) => `skill "${skill.name}": ${defect$2}`))]
+	};
+}
+/** The first 12 hex of a digest: enough to match two listings by eye, not a wall of hex. */
+function shortDigest(digest) {
+	return digest.slice(0, 12);
+}
+/**
+* The "chosen implementation" summary of one run — the section a worker's
+* contract block, its spawn prompt and `task_read` all render, from this one
+* function and one record, so the three views cannot describe different runs.
+*
+* What it carries: every capability the run matched, the skill selected for it
+* (name, role, purpose, short content digest and — where the skill declares one
+* — the contract digest), the granted MCP servers, the snapshot the run is bound
+* to, and what the binding does *not* cover. What it deliberately leaves out: the
+* skill text. A worker reads the body on demand with the `skill` tool; a summary
+* is identity and purpose.
+*
+* `read` is the re-check result when the caller re-read the snapshot. A caller
+* that has not read it (the spawn's own render, before the worker exists) omits
+* it, and then no readability claim is made in either direction. When it is
+* given and reports defects, they are rendered under a named refusal so a reader
+* is never told to trust content that is not there.
+*/
+function renderRunBinding(binding, read) {
+	if (binding === void 0) return "";
+	const lines = [];
+	for (const capability of binding.capabilities) {
+		const selected = binding.skills.filter((skill) => skill.capabilities.includes(capability));
+		if (selected.length === 0) {
+			lines.push(`- capability \`${capability}\`: no provider skill — the capability's tools are granted without one`);
+			continue;
+		}
+		for (const skill of selected) {
+			const contract = skill.contractDigest === null ? "" : `, contract ${shortDigest(skill.contractDigest)}`;
+			const gaps = skill.uncovered.length === 0 ? "" : ` · not covered by this binding: ${skill.uncovered.join(", ")}`;
+			lines.push(`- capability \`${capability}\` → skill \`${skill.name}\` [${skill.role}] — ${skill.description} (content ${shortDigest(skill.contentDigest)}${contract})${gaps}`);
+		}
+	}
+	if (binding.mcpServers.length > 0) lines.push(`- MCP servers mounted for this run: ${binding.mcpServers.map((server) => `\`${server.serverName}\`${server.templateDigest === null ? "" : ` (template ${shortDigest(server.templateDigest)})`}`).join(", ")}`);
+	if (lines.length === 0) return "";
+	const header = [
+		"## Implementation chosen for this run",
+		"",
+		`- registry revision: ${shortDigest(binding.registryRevision)}`,
+		...lines,
+		...binding.snapshotRoot === void 0 ? ["- a skill named here is read with the `skill` tool when you need its body; this run bound no content snapshot, so the revision and digests above are what it resolved against"] : [`- bound content snapshot: ${binding.snapshotRoot}`, "- a skill named here is read with the `skill` tool when you need its body; the revision, digests and snapshot path above are what this run is bound to"]
+	];
+	if (read !== void 0 && read.defects.length > 0) header.push("", "Bound content is not readable: the snapshot no longer matches this run's record, and the production skill path is not a substitute for it.", ...read.defects.map((defect$2) => `- ${defect$2}`));
+	return header.join("\n");
+}
+
+//#endregion
 //#region src/contract.ts
 /**
 * Opening marker of the block. Stable on purpose: it is what tells a reader —
@@ -759,11 +1850,17 @@ function field(title, items) {
 * Render one task's contract block.
 * @param task - the child task as the store holds it at delegation.
 * @param handoff - the envelope the parent passed to this child.
+* @param binding - what this run was bound to and loaded (S1-C item 4): the
+*   providers chosen for it, rendered as the "chosen implementation" section
+*   from the same function and record `task_read` renders, so the two views
+*   cannot describe different runs. Absent on a run that recorded no binding,
+*   and then nothing is added to the block.
 * @returns the marked block, ending in the one line that says where the
 *   authority lives, so a model reading it never has to guess whether a
 *   compacted spawn prompt or this block is the current contract.
 */
-function renderWorkerContract(task, handoff) {
+function renderWorkerContract(task, handoff, binding) {
+	const summary = renderRunBinding(binding);
 	return [
 		`${WORKER_CONTRACT_OPEN} task="${task.taskId}" decomposition="${task.decompositionStatus}">`,
 		"",
@@ -774,6 +1871,7 @@ function renderWorkerContract(task, handoff) {
 		"## Acceptance criteria",
 		"",
 		...criteriaTable(task.acceptanceCriteria),
+		...summary.length === 0 ? [] : ["", summary],
 		"",
 		"## Handoff",
 		"",
@@ -818,7 +1916,8 @@ function listSection(title, items, empty) {
 /**
 * Render the worker prompt for a delegated child task. Compact on purpose:
 * objective, the acceptance criteria table (with verifier commands and the
-* protected input paths the worker must not modify), the handoff envelope, the
+* protected input paths the worker must not modify), the implementation chosen
+* for this run ({@link WorkerPromptOptions.binding}), the handoff envelope, the
 * pointer to the delegating session, the decomposable reminder when the parent
 * asked for a further split, the runtime-split rule when the deployment admits
 * one ({@link WorkerPromptOptions}), and the rules — a few thousand tokens at
@@ -844,45 +1943,50 @@ function renderWorkerPrompt(handoff, childTask, options) {
 		"- Decompose only when RFC §36 atomicity holds — independently verifiable acceptance dimensions, clear artifact boundaries, capabilities that match or gaps you can handle; otherwise do the work here.",
 		"- Once you decompose, the nested verification settles this task; you still never declare completion yourself."
 	].join("\n");
+	const envelope = [
+		"## Handoff",
+		"",
+		`- Parent objective: ${handoff.parentObjective}`,
+		`- Reason for delegation: ${handoff.reasonForDelegation}`,
+		"",
+		listSection("Constraints", handoff.constraints, "(none)"),
+		"",
+		listSection("Decisions already made", handoff.decisions, "(none)"),
+		"",
+		listSection("Relevant artifacts", handoff.relevantArtifacts.map((artifact) => `${artifact.kind} ${artifact.uri}`), "(none)"),
+		"",
+		listSection("Relevant evidence", handoff.relevantEvidence, "(none)"),
+		"",
+		listSection("Assumptions", handoff.assumptions, "(none)"),
+		"",
+		listSection("Open questions", handoff.openQuestions, "(none)")
+	].join("\n");
+	const parentSession = [
+		"## Parent session",
+		"",
+		`- The session that delegated this task is \`${handoff.parentSessionRef}\`.`,
+		"- Need more of that context? Read it exactly with `session_event_read` (one `seq`) or `session_trace` (lineage and neighborhood).",
+		"- Full-text search is disabled in this deployment, so read parent events by sequence."
+	].join("\n");
+	const summary = renderRunBinding(options.binding);
+	const rules = [
+		"## Rules",
+		"",
+		"- Do the work; never declare completion yourself — an external verifier checks every mandatory criterion.",
+		"- Where a criterion lists a command, make that command exit 0 in the checkout.",
+		"- A criterion's declared protected inputs must not be modified: the verifier re-checks their identity before judging, and a changed or missing input fails the criterion, naming the path.",
+		"- Keep changes scoped to this task. Need a human decision? Ask with `ask_user_question`.",
+		"- Cannot continue? Fail with a clear reason — the orchestrator blocks dependent tasks and reports to the parent task.",
+		...options.allowRuntimeDecomposition ? ["- If the work turns out not to be atomic after all, call `task_decompose` yourself: this deployment admits a task's own decomposition, so your parent did not have to predict it. The call still has to clear admission — structure, acyclic dependencies, a command on every executable criterion, capability coverage, depth and batch-size limits — and a task may split only once; a refusal names the rule that blocked it, and that reason is what you act on. Split only into pieces a verifier can judge on its own; otherwise do the work here."] : [],
+		"- This prompt is where you start, not the whole truth: re-read your own contract and run with `task_read`, and the whole tree with `task_status`, whenever you need them.",
+		"- Before you finish, `task_verify` re-runs the verifier as a self-check and records the evidence it produces; it never changes task status, and the final verdict stays with the verifier."
+	].join("\n");
 	const blocks = [
 		header,
-		[
-			"## Handoff",
-			"",
-			`- Parent objective: ${handoff.parentObjective}`,
-			`- Reason for delegation: ${handoff.reasonForDelegation}`,
-			"",
-			listSection("Constraints", handoff.constraints, "(none)"),
-			"",
-			listSection("Decisions already made", handoff.decisions, "(none)"),
-			"",
-			listSection("Relevant artifacts", handoff.relevantArtifacts.map((artifact) => `${artifact.kind} ${artifact.uri}`), "(none)"),
-			"",
-			listSection("Relevant evidence", handoff.relevantEvidence, "(none)"),
-			"",
-			listSection("Assumptions", handoff.assumptions, "(none)"),
-			"",
-			listSection("Open questions", handoff.openQuestions, "(none)")
-		].join("\n"),
-		[
-			"## Parent session",
-			"",
-			`- The session that delegated this task is \`${handoff.parentSessionRef}\`.`,
-			"- Need more of that context? Read it exactly with `session_event_read` (one `seq`) or `session_trace` (lineage and neighborhood).",
-			"- Full-text search is disabled in this deployment, so read parent events by sequence."
-		].join("\n"),
-		[
-			"## Rules",
-			"",
-			"- Do the work; never declare completion yourself — an external verifier checks every mandatory criterion.",
-			"- Where a criterion lists a command, make that command exit 0 in the checkout.",
-			"- A criterion's declared protected inputs must not be modified: the verifier re-checks their identity before judging, and a changed or missing input fails the criterion, naming the path.",
-			"- Keep changes scoped to this task. Need a human decision? Ask with `ask_user_question`.",
-			"- Cannot continue? Fail with a clear reason — the orchestrator blocks dependent tasks and reports to the parent task.",
-			...options.allowRuntimeDecomposition ? ["- If the work turns out not to be atomic after all, call `task_decompose` yourself: this deployment admits a task's own decomposition, so your parent did not have to predict it. The call still has to clear admission — structure, acyclic dependencies, a command on every executable criterion, capability coverage, depth and batch-size limits — and a task may split only once; a refusal names the rule that blocked it, and that reason is what you act on. Split only into pieces a verifier can judge on its own; otherwise do the work here."] : [],
-			"- This prompt is where you start, not the whole truth: re-read your own contract and run with `task_read`, and the whole tree with `task_status`, whenever you need them.",
-			"- Before you finish, `task_verify` re-runs the verifier as a self-check and records the evidence it produces; it never changes task status, and the final verdict stays with the verifier."
-		].join("\n")
+		...summary.length === 0 ? [] : [summary],
+		envelope,
+		parentSession,
+		rules
 	];
 	if (childTask.decompositionStatus === "decomposable") blocks.push(decomposition);
 	return `${blocks.join("\n\n")}\n`;
@@ -1263,19 +2367,33 @@ function workerGrant(manifest) {
 }
 /**
 * The full grant for one spawn: {@link workerGrant} plus the manifest's MCP
-* servers materialized against the run's env binding. Throws when a declared
-* server has no binding or its repo is absent from the env — inside the spawn
-* `try`, so the failure walks the run to `failed` with the cause named, the
-* same discipline as a dangling preset.
+* servers materialized against the run's env binding, plus the skill roots the
+* worker's own skill layer registers before anything else (S1-C: the run's
+* snapshot; a replay's candidate overlay stays in front of it). Throws when a
+* declared server has no binding or its repo is absent from the env — inside the
+* spawn `try`, so the failure walks the run to `failed` with the cause named,
+* the same discipline as a dangling preset.
 */
-async function authorizedGrant(env, manifest) {
-	const grant = workerGrant(manifest);
+async function authorizedGrant(env, manifest, skillRoots = []) {
+	const grant = {
+		...workerGrant(manifest),
+		...skillRoots.length === 0 ? {} : { skillRoots: [...skillRoots] }
+	};
 	if (manifestMcpServers(manifest).length === 0) return grant;
 	const binding = env.resolveMcpEnv === void 0 ? void 0 : await env.resolveMcpEnv();
 	return {
 		...grant,
 		mcpServers: resolveMcpServerSpecs(manifest, binding)
 	};
+}
+/**
+* The skill roots one worker's layer registers, in order: whatever the caller
+* passes first (a replay's candidate overlay, which must win a same-name
+* collision — P2's semantics) and then the run's own snapshot. The snapshot is
+* never conditional on the overlay: a run that bound content loads that content.
+*/
+function skillRootsForRun(overlayRoots, binding) {
+	return [...overlayRoots, ...binding?.snapshotRoot === void 0 ? [] : [binding.snapshotRoot]];
 }
 /**
 * Copy the verifier's per-criterion results onto a review record, filling the
@@ -1706,7 +2824,37 @@ async function runChildrenCascade(env, storeId, parentTask, parentRun, plans, re
 			status: "running",
 			startedAt: (/* @__PURE__ */ new Date()).toISOString()
 		};
-		await env.task.startRunIn(storeId, run, env.actor);
+		let binding;
+		try {
+			binding = await bindRunProviders({
+				storeId,
+				runId: run.runId,
+				manifest: plan.manifest,
+				...plan.providers === void 0 ? {} : { providers: plan.providers },
+				...env.runBindingRoot === void 0 ? {} : { root: env.runBindingRoot }
+			});
+		} catch (error) {
+			const reason$1 = `content binding failed: ${message(error)}`;
+			await env.task.startRunIn(storeId, run, env.actor);
+			await env.task.markRunStatusIn(storeId, childTaskId, run.runId, "failed", env.actor, { reason: reason$1 });
+			await recordReview(childTaskId, "failed", {
+				run,
+				localizedCause: reason$1,
+				relatedTaskIds: dependencyTaskIds
+			});
+			outcomes[index] = {
+				taskId: childTaskId,
+				runId: run.runId,
+				status: "failed"
+			};
+			remaining.delete(index);
+			continue;
+		}
+		const bound = binding === void 0 ? run : {
+			...run,
+			providerBinding: binding
+		};
+		await env.task.startRunIn(storeId, bound, env.actor);
 		let handle;
 		try {
 			await assertPresetUsable(env, plan.manifest, agentPreset);
@@ -1714,9 +2862,12 @@ async function runChildrenCascade(env, storeId, parentTask, parentRun, plans, re
 			handle = await env.spawn({
 				sessionId,
 				name,
-				prompt: renderWorkerPrompt(handoff, plan.task, { allowRuntimeDecomposition: env.allowRuntimeDecomposition }),
-				contract: renderWorkerContract(plan.task, handoff),
-				grant: await authorizedGrant(env, plan.manifest),
+				prompt: renderWorkerPrompt(handoff, plan.task, {
+					allowRuntimeDecomposition: env.allowRuntimeDecomposition,
+					...binding === void 0 ? {} : { binding }
+				}),
+				contract: renderWorkerContract(plan.task, handoff, binding),
+				grant: await authorizedGrant(env, plan.manifest, skillRootsForRun([], binding)),
 				...agentPreset !== void 0 ? { agentPreset } : {},
 				...permissionPreset !== void 0 ? { permissionPreset } : {},
 				...signal !== void 0 ? { signal } : {}
@@ -1940,7 +3091,35 @@ async function runReplayTask(env, storeId, init, signal) {
 		status: "running",
 		startedAt: (/* @__PURE__ */ new Date()).toISOString()
 	};
-	await env.task.startRunIn(storeId, run, env.actor);
+	let contentBinding;
+	try {
+		contentBinding = await bindRunProviders({
+			storeId,
+			runId: run.runId,
+			manifest: init.manifest,
+			...init.providers === void 0 ? {} : { providers: init.providers },
+			...env.runBindingRoot === void 0 ? {} : { root: env.runBindingRoot }
+		});
+	} catch (error) {
+		const reason = `content binding failed: ${message(error)}`;
+		await env.task.startRunIn(storeId, run, env.actor);
+		await env.task.markRunStatusIn(storeId, task.taskId, run.runId, "failed", env.actor, { reason });
+		await recordTerminalReview(env, storeId, task.taskId, "failed", {
+			run,
+			localizedCause: reason,
+			anomalies
+		});
+		return {
+			taskId: task.taskId,
+			runId: run.runId,
+			status: "failed",
+			durationMs: await runDurationMs(env, storeId, run)
+		};
+	}
+	await env.task.startRunIn(storeId, contentBinding === void 0 ? run : {
+		...run,
+		providerBinding: contentBinding
+	}, env.actor);
 	const finish = async (status, criteria, evidenceId) => ({
 		taskId: task.taskId,
 		runId: run.runId,
@@ -1993,15 +3172,13 @@ async function runReplayTask(env, storeId, init, signal) {
 	try {
 		await assertPresetUsable(env, init.manifest, init.agentPreset);
 		const permissionPreset = permissionFor(env, init.manifest);
+		const roots = skillRootsForRun(init.skillRoots ?? [], contentBinding);
 		handle = await env.spawn({
 			sessionId,
 			name: task.objective.trim().replace(/\s+/g, " ").slice(0, 40) || `replay-${task.taskId}`,
 			prompt: init.prompt ?? "",
 			...init.contract === void 0 ? {} : { contract: init.contract },
-			grant: {
-				...await authorizedGrant(env, init.manifest),
-				...init.skillRoots === void 0 ? {} : { skillRoots: [...init.skillRoots] }
-			},
+			grant: await authorizedGrant(env, init.manifest, roots),
 			...init.agentPreset === void 0 ? {} : { agentPreset: init.agentPreset },
 			...permissionPreset === void 0 ? {} : { permissionPreset },
 			...signal === void 0 ? {} : { signal }
@@ -2390,6 +3567,8 @@ var TaskRuntime = class extends Service {
 	config;
 	/** sessionId → run binding, rebuilt whenever a store is (re)opened. */
 	sessions = /* @__PURE__ */ new Map();
+	/** The load-time provider scan, taken once ({@link providerLoadReport}). */
+	providerLoad;
 	constructor(ctx, config) {
 		super(ctx, "taskRuntime");
 		this.config = {
@@ -2403,8 +3582,94 @@ var TaskRuntime = class extends Service {
 				...config?.budget ?? {}
 			},
 			noProgressRounds: config?.noProgressRounds ?? DEFAULT_NO_PROGRESS_ROUNDS,
-			allowRuntimeDecomposition: config?.allowRuntimeDecomposition ?? DEFAULT_ALLOW_RUNTIME_DECOMPOSITION
+			allowRuntimeDecomposition: config?.allowRuntimeDecomposition ?? DEFAULT_ALLOW_RUNTIME_DECOMPOSITION,
+			runBindingRoot: config?.runBindingRoot ?? defaultRunBindingRoot()
 		};
+	}
+	/**
+	* Cordis runs this after construction, once the injected services are there:
+	* the load-time provider scan (S1-C item 3) is taken here, so the first thing
+	* a deployment learns about its own capability table is what its own discovery
+	* roots make of it.
+	*
+	* This hook never throws: see {@link providerLoadReport} for why the scan
+	* reports instead of refusing to start.
+	*/
+	async [Service.init]() {
+		await this.providerLoadReport();
+	}
+	/**
+	* The load-time provider scan over the capability table this process is
+	* running (guide §2.4, S1-C item 3): every skill the effective table names,
+	* discovered from the harness process's own skill roots (`process.cwd()`'s
+	* project roots, `$DSH_HOME/skills`, the user root) and judged by
+	* {@link validateSkillProvider} — the same validator admission, capability
+	* replacement and candidate promotion use.
+	*
+	* Why this reports instead of refusing the deployment: the harness process's
+	* own viewpoint is **not** the worker's. A deployment-level process loads
+	* `config.yml` long before any graph env exists, so it cannot see the checkout
+	* a worker will run in (`/…/env/<name>`, whose own `.agents/skills` a worker's
+	* discovery walks first) — a skill that resolves fine at admission is
+	* therefore legitimately *missing* from the load-time viewpoint. Failing the
+	* load on that would refuse configurations that work, and it would fail for a
+	* reason the operator cannot fix by editing the table. So every defect is
+	* printed, nothing is enforced here, and the hard gate stays where the
+	* viewpoint is the worker's own: the admission pre-check, which refuses the
+	* whole batch before it persists anything.
+	*
+	* The result is kept as a value ({@link ProviderLoadReport}): the effective
+	* provider set and the defect summary stay queryable after the log line has
+	* scrolled away, without re-running the validation. It is the *load-time* fact
+	* — a row replaced later in this process (an evolution apply, a rollback) was
+	* judged by its own entry before it landed, and is not folded back into this
+	* report.
+	*/
+	async providerLoadReport() {
+		this.providerLoad ??= this.scanConfiguredProviders();
+		return this.providerLoad;
+	}
+	/**
+	* One load-time scan, never thrown: a scan that cannot run (a discovery or a
+	* read that fails outright) is reported as {@link ProviderLoadReport.failed}
+	* and printed just as loudly as a refused provider.
+	*/
+	async scanConfiguredProviders() {
+		let report;
+		try {
+			const precheck = await this.providerPrecheck(Object.keys(this.config.capabilities), { cwd: process.cwd() });
+			report = {
+				precheck,
+				defects: providerDefectLines(precheck)
+			};
+		} catch (error) {
+			report = {
+				defects: [],
+				failed: error instanceof Error ? error.message : String(error)
+			};
+		}
+		this.reportProviderLoad(report);
+		return report;
+	}
+	/**
+	* The load report, printed through the cordis logger when one is mounted: one
+	* line per defect (capability, skill, defect code, detail) plus a header that
+	* says what was scanned and that the deployment is starting anyway.
+	*/
+	reportProviderLoad(report) {
+		const roots = report.precheck?.roots ?? [];
+		if (report.failed !== void 0) {
+			this.warn(`config load: the capability provider scan could not run (${report.failed}); the deployment starts, and admission still refuses a batch whose provider cannot be judged`);
+			return;
+		}
+		if (report.defects.length === 0) return;
+		this.warn(`config load: ${report.defects.length} provider defect${report.defects.length === 1 ? "" : "s"} in the effective capability table (roots: ${roots.join(", ")}); reported, not enforced — this process's own roots are not the worker's, so a skill reachable from a run's checkout may legitimately be missing here. Admission refuses a batch that names one of these.`);
+		for (const line of report.defects) this.warn(`config load: ${line}`);
+	}
+	/** Best-effort warn through the cordis logger when one is mounted; tests and minimal contexts may not have it. */
+	warn(message$5) {
+		const logger = this.ctx.logger;
+		logger?.("task-runtime").warn(message$5);
 	}
 	/**
 	* The wall-clock deadline one `verifier.verifyRun` call runs under
@@ -2438,18 +3703,50 @@ var TaskRuntime = class extends Service {
 	* this, so a restart reloads the identical table. `null` removes the row
 	* (rollback of a newly-added capability). Later admissions resolve against
 	* the replaced row; in-flight runs are untouched.
+	*
+	* **A replacement is validated before it lands; a removal is not.** This is
+	* the entry that makes a row effective in this process, so it runs the same
+	* check the promotion gate ran before the row was written to `config.yml`:
+	* every skill the new row grants is discovered from the harness process's own
+	* roots and judged by `validateSkillProvider`
+	* ({@link precheckReplacedCapabilityRow}), against the live registry's verifier
+	* vocabulary — fail-closed when that vocabulary cannot be listed. An unusable
+	* provider rejects with its named defects and the table is left exactly as it
+	* was, so no path into the effective registry skips the one validator
+	* (guide §2.4, S1-C item 3). A removal needs no such check: it grants
+	* nothing, and refusing a rollback would strand a deployment on a row it is
+	* trying to undo.
 	*/
-	applyCapabilityRow(name, entry) {
+	async applyCapabilityRow(name, entry) {
 		if (entry === null) {
 			const rest = { ...this.config.capabilities };
 			delete rest[name];
 			this.config.capabilities = rest;
 			return;
 		}
+		await this.assertReplacementRow(name, entry);
 		this.config.capabilities = {
 			...this.config.capabilities,
 			[name]: structuredClone(entry)
 		};
+	}
+	/**
+	* The replacement check behind {@link applyCapabilityRow}: the row as it will
+	* read after this write, judged by the admission pre-check itself. Throws with
+	* every refusal named (capability, skill, defect code, detail) — and writes
+	* nothing, which is what makes the caller's table unchanged.
+	*/
+	async assertReplacementRow(name, entry) {
+		const verifierRefs = await this.registeredVerifierIds();
+		const { refusals } = await precheckReplacedCapabilityRow({
+			name,
+			entry,
+			table: this.config.capabilities,
+			view: { cwd: process.cwd() },
+			...verifierRefs === void 0 ? {} : { verifierRefs }
+		});
+		if (refusals.length === 0) return;
+		throw new Error(`task-runtime: capability "${name}" was not replaced — the row grants providers that are not usable:\n` + refusals.map((line) => `- ${line}`).join("\n"));
 	}
 	/** Create (or reopen) the store, expand RootTaskSpec into the root task, and bind a run to the root session. */
 	async createRootTask(storeId, options, actor) {
@@ -2465,6 +3762,10 @@ var TaskRuntime = class extends Service {
 		if (root !== void 0) {
 			const run$1 = [...snapshot.runs].reverse().find((item) => item.taskId === root.taskId && item.sessionId === options.rootSessionId);
 			if (run$1 === void 0) throw new Error(`task-runtime: store "${storeId}" already has root task "${root.taskId}" without a run for session "${options.rootSessionId}"`);
+			if (run$1.providerBinding !== void 0) {
+				const read = await readRunBinding(run$1.providerBinding);
+				if (read !== void 0 && read.defects.length > 0) throw new Error(`task-runtime: run "${run$1.runId}" cannot be re-entered: the content it is bound to is not readable:\n- ${read.defects.join("\n- ")}`);
+			}
 			return {
 				taskId: root.taskId,
 				runId: run$1.runId
@@ -2500,11 +3801,20 @@ var TaskRuntime = class extends Service {
 			decompositionStatus: "decomposable",
 			manifest
 		});
+		const runId = `r-${randomUUID()}`;
+		const providerBinding = await bindRunProviders({
+			storeId,
+			runId,
+			manifest,
+			table: this.config.capabilities,
+			root: this.config.runBindingRoot
+		});
 		const run = {
-			runId: `r-${randomUUID()}`,
+			runId,
 			taskId: task.taskId,
 			sessionId: options.rootSessionId,
 			capabilitySnapshot: capabilitySnapshot(manifest),
+			providerBinding,
 			artifacts: [],
 			verifierResults: [],
 			status: "running",
@@ -2552,7 +3862,8 @@ var TaskRuntime = class extends Service {
 		const parentRun = await this.ctx.task.runIn(storeId, parentRunId);
 		if (parentRun.taskId !== parentTaskId) throw new Error(`task-runtime: run "${parentRunId}" belongs to task "${parentRun.taskId}", not "${parentTaskId}"`);
 		if (parentRun.sessionId !== callerSessionId) throw new Error(`task-runtime: run "${parentRunId}" is bound to session "${parentRun.sessionId}", not caller "${callerSessionId}"`);
-		const fixed = await fixSpecProtectedInputs(spec, await this.envPathForSession(callerSessionId));
+		const envPath = await this.envPathForSession(callerSessionId);
+		const fixed = await fixSpecProtectedInputs(spec, envPath);
 		const normalized = normalizeDecomposition(fixed.spec, {
 			storeId,
 			parentTaskId,
@@ -2599,6 +3910,9 @@ var TaskRuntime = class extends Service {
 			const gapNames = [...new Set(rejected.flatMap(({ manifest }) => manifest.missing))];
 			throw new Error(`task-runtime: admission rejected decomposition of "${parentTaskId}": capability gap: ${detail}; ` + escalationHint(`capabilities [${gapNames.join(", ")}] are not granted by the capability registry`, "capability_list and the children's declared capabilities", "grant the capability in the registry, or mark the child decomposable"));
 		}
+		const precheck = await this.providerPrecheck([...new Set(manifests.flatMap((manifest) => Object.keys(manifest.capabilities)))], { ...envPath === void 0 ? {} : { cwd: envPath } });
+		const refusals = providerRefusals(precheck);
+		if (refusals.length > 0) throw new Error(`task-runtime: provider pre-check rejected decomposition of "${parentTaskId}":\n- ${refusals.join("\n- ")}`);
 		this.assertKnownVerifierRefs(batch.children.flatMap((child, childIndex) => child.contract.acceptanceCriteria.map((criterion) => ({
 			childIndex,
 			criterion
@@ -2653,6 +3967,7 @@ var TaskRuntime = class extends Service {
 				task,
 				manifest: manifests[index],
 				dependsOn: child.dependsOn,
+				providers: precheck,
 				assumptions: [...child.contract.assumptions],
 				constraints: [...child.contract.constraints]
 			};
@@ -2700,8 +4015,15 @@ var TaskRuntime = class extends Service {
 		};
 		const manifest = resolveCapabilities(effective.requiredCapabilities, table);
 		if (manifest.missing.length > 0) throw new Error(`task-runtime: replay of "${championTaskId}" cannot run: capability gap [${manifest.missing.join(", ")}] under the overlay`);
+		const envPath = await this.envPathForSession(callerSessionId);
+		const precheck = await this.providerPrecheck(Object.keys(manifest.capabilities), {
+			...envPath === void 0 ? {} : { cwd: envPath },
+			...options.overlay?.extraSkillRoots === void 0 ? {} : { extraRoots: [...options.overlay.extraSkillRoots] }
+		}, table);
+		const refusals = providerRefusals(precheck);
+		if (refusals.length > 0) throw new Error(`task-runtime: provider pre-check rejected replay of "${championTaskId}":\n- ${refusals.join("\n- ")}`);
 		const label = `replay of "${championTaskId}"`;
-		const fixed = await fixCriteriaProtectedInputs(effective.acceptanceCriteria, await this.envPathForSession(callerSessionId), label);
+		const fixed = await fixCriteriaProtectedInputs(effective.acceptanceCriteria, envPath, label);
 		const acceptanceDefects = [
 			...fixed.reasons,
 			...contractDefects(fixed.criteria, label),
@@ -2754,6 +4076,7 @@ var TaskRuntime = class extends Service {
 		return runReplayTask(this.orchestrateEnv(callerSessionId, callerSessionId), storeId, {
 			task,
 			manifest,
+			providers: precheck,
 			lineage: options.lineage,
 			agentPreset: options.overlay?.presetOverride ?? resolvePreset(manifest, this.config.defaultPreset),
 			...prompt === void 0 ? {} : {
@@ -2882,6 +4205,7 @@ var TaskRuntime = class extends Service {
 			task: this.ctx.task,
 			actor,
 			...this.config.defaultPreset !== void 0 ? { defaultPreset: this.config.defaultPreset } : {},
+			...this.config.runBindingRoot === void 0 ? {} : { runBindingRoot: this.config.runBindingRoot },
 			verifyTimeoutMs: this.config.verifyTimeoutMs,
 			budget: { ...this.config.budget },
 			allowRuntimeDecomposition: this.config.allowRuntimeDecomposition,
@@ -3028,13 +4352,69 @@ var TaskRuntime = class extends Service {
 	* absent in test contexts and in deployments that mount a smaller bundle.
 	*/
 	softService(name) {
-		const viaContext = this.ctx.get?.(name);
-		if (viaContext !== void 0) return viaContext;
-		return this.ctx[name];
+		return optionalService(this.ctx, name);
 	}
 	/** The verifier service is an optional plugin; resolve it softly, never import the package. */
 	runVerifier() {
 		return this.ctx.get?.("verifier") ?? this.ctx.verifier;
+	}
+	/**
+	* The registered verifier vocabulary one provider pre-check judges execution
+	* sidecars against — `registeredVerifierIds` in `./provider-precheck.ts`, the
+	* one implementation every provider check shares, with the reasoning for
+	* `ready()`-first and for the fail-closed `undefined` documented there.
+	*/
+	async registeredVerifierIds() {
+		return registeredVerifierIds(this.ctx);
+	}
+	/**
+	* The provider pre-check (S1-C item 1) over the given capability rows, run
+	* against the effective table unless `table` replaces it (the replay overlay).
+	* Read-only: it discovers skill directories and reads them, writes nothing,
+	* and returns every refusal as a verdict rather than throwing.
+	*/
+	async providerPrecheck(capabilities, view, table = this.config.capabilities) {
+		const verifierRefs = await this.registeredVerifierIds();
+		return precheckProviders({
+			capabilities,
+			table,
+			view,
+			...verifierRefs === void 0 ? {} : { verifierRefs }
+		});
+	}
+	/**
+	* The provider verdicts for the capability rows in play, discovered from one
+	* session's own viewpoint — the read-only entry `capability_list` renders
+	* (guide §2.3 item 1: the model sees the pre-check's conclusion before it
+	* dispatches, not only after admission refused its batch). Nothing is thrown
+	* for an unusable provider: the verdict says what is wrong with it, and the
+	* caller renders that.
+	*
+	* `capabilities` names the rows to check; omitting it checks every row of the
+	* effective table. A caller that wants the verdicts a *batch* resolved
+	* against should pass its matched rows — the revision then describes exactly
+	* what admission judged. Two things this recompute cannot reproduce, which is
+	* why admission carries its own result with the batch (S1-C item 4): the
+	* replay overlay's replaced table, and the bytes as they were at admission.
+	*/
+	async capabilityProviderReport(sessionId, capabilities) {
+		const envPath = await this.envPathForSession(sessionId);
+		return this.providerPrecheck(capabilities ?? Object.keys(this.config.capabilities), { ...envPath === void 0 ? {} : { cwd: envPath } });
+	}
+	/**
+	* Re-check the content a run's binding recorded against the bytes its snapshot
+	* holds now (S1-C item 4) — the read a historical view (`task_read`) and a
+	* re-entry (`createRootTask` adopting an existing run) both perform before
+	* trusting the record.
+	*
+	* `undefined` means the record names no snapshot: a run that loaded no content
+	* has nothing to re-read, which is not the same as content that failed to
+	* re-read. A caller that gets a report must look at its `defects`: content
+	* that is not readable as bound is reported by name and is never substituted
+	* with whatever the production path holds now.
+	*/
+	async readRunBinding(binding) {
+		return readRunBinding(binding);
 	}
 	/**
 	* verifierRef validation at creation/decomposition time, never spawn time
@@ -3064,4 +4444,4 @@ var TaskRuntime = class extends Service {
 var src_default = TaskRuntime;
 
 //#endregion
-export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, MCP_SERVER_REGISTRY, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, buildHandoff, checkDecomposition, checkObligationCoverage, contractDefects, src_default as default, escalationHint, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, independentAcceptanceDefects, loadObligationTemplates, manifestMcpServers, normalizeDecomposition, parseObligationTemplates, protectedInputDefects, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };
+export { DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, MCP_SERVER_REGISTRY, RUN_BINDING_SKILLS_DIR, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, bindRunProviders, buildHandoff, capabilityToolQuery, checkDecomposition, checkObligationCoverage, contractDefects, src_default as default, defaultRunBindingRoot, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, independentAcceptanceDefects, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, optionalService, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, protectedInputDefects, providerDefectLines, providerRefusals, readRunBinding, readVerifiedFile, registeredVerifierIds, registryRevision, renderRunBinding, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import type { ArtifactRef, TaskHandoff, TaskInstance, TaskRun } from '@dangosys/dsh-singularity-task'
+import type { ArtifactRef, RunProviderBinding, TaskHandoff, TaskInstance, TaskRun } from '@dangosys/dsh-singularity-task'
 import { protectedInputsCell } from './contract.ts'
+import { renderRunBinding } from './run-binding.ts'
 
 export interface HandoffInit {
   parentTask: TaskInstance
@@ -33,6 +34,14 @@ export interface WorkerPromptOptions {
    * only invite a call admission refuses.
    */
   allowRuntimeDecomposition: boolean
+  /**
+   * What this run was bound to and loaded (S1-C item 4). Rendered as the
+   * "chosen implementation" section — the run's capability names, the provider
+   * selected for each, and how to read a body on demand — from the same function
+   * the contract block and `task_read` use. Absent on a run that recorded no
+   * binding, and then the prompt says nothing about one.
+   */
+  binding?: RunProviderBinding
 }
 
 /** Envelope passed from a parent run to the child it delegates to (RFC §18). */
@@ -63,7 +72,8 @@ function listSection(title: string, items: readonly string[], empty: string): st
 /**
  * Render the worker prompt for a delegated child task. Compact on purpose:
  * objective, the acceptance criteria table (with verifier commands and the
- * protected input paths the worker must not modify), the handoff envelope, the
+ * protected input paths the worker must not modify), the implementation chosen
+ * for this run ({@link WorkerPromptOptions.binding}), the handoff envelope, the
  * pointer to the delegating session, the decomposable reminder when the parent
  * asked for a further split, the runtime-split rule when the deployment admits
  * one ({@link WorkerPromptOptions}), and the rules — a few thousand tokens at
@@ -123,6 +133,11 @@ export function renderWorkerPrompt(handoff: TaskHandoff, childTask: TaskInstance
     '- Full-text search is disabled in this deployment, so read parent events by sequence.',
   ].join('\n')
 
+  // The run's own binding, rendered by the one function the contract block and
+  // `task_read` share: what this run's admission chose for it, so a worker knows
+  // its capability names and providers instead of guessing them.
+  const summary = renderRunBinding(options.binding)
+
   // Only a deployment with the runtime-decomposition switch on admits a task's
   // own `task_decompose`; where it is off, naming the tool would invite a call
   // the runtime answers with a refusal the worker could not have avoided.
@@ -146,7 +161,7 @@ export function renderWorkerPrompt(handoff: TaskHandoff, childTask: TaskInstance
     '- Before you finish, `task_verify` re-runs the verifier as a self-check and records the evidence it produces; it never changes task status, and the final verdict stays with the verifier.',
   ].join('\n')
 
-  const blocks = [header, envelope, parentSession, rules]
+  const blocks = [header, ...(summary.length === 0 ? [] : [summary]), envelope, parentSession, rules]
   if (childTask.decompositionStatus === 'decomposable') blocks.push(decomposition)
 
   return `${blocks.join('\n\n')}\n`

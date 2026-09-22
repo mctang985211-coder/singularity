@@ -539,6 +539,47 @@ interface ApplyOutcome {
     name: string;
     entry: CapabilityConfig | null;
   };
+  /**
+   * What the promotion check validated about the providers this apply put in
+   * place ({@link PromotionCheck.providers}): the candidate skill of a skill
+   * apply, every skill a replaced/added capability row grants — each with the
+   * role it may be counted as, so a knowledge or guidance provider is reported
+   * as such rather than presented as the execution provider it is not. Empty
+   * when the target carries no provider. Not persisted: the ledger's `applied`
+   * record keeps its shape, and a run's own binding is where a selected role is
+   * recorded for real.
+   */
+  providers?: readonly PromotionProvider[];
+}
+/**
+ * One provider a promotion check judged, with the role it may be counted as.
+ * The role vocabulary is the validator's, not a second opinion: this value is
+ * read off a {@link SkillProviderVerdict} the unified pre-check produced.
+ */
+interface PromotionProvider {
+  /** The skill name a capability grants (or the candidate skill's own name). */
+  readonly name: string;
+  /**
+   * `execution-provider` is the only role that may close an execution gap
+   * (`executionProviders`); `knowledge` and `guidance` are loadable content a
+   * promotion may put in place, and neither ever counts as an execution
+   * provider — they are recorded, not upgraded.
+   */
+  readonly role: 'execution-provider' | 'knowledge' | 'guidance';
+  /** {@link skillContentDigest} of the bytes the verdict was taken from. */
+  readonly contentDigest: string;
+  /** Execution providers only: the declared verifier ref, proven registered against the live vocabulary. */
+  readonly verifierRef?: string;
+}
+/**
+ * What a promotion check validated (S1-C item 3). Returned by
+ * {@link EvolutionService.checkPromotion} so the entries that gate on it (the
+ * two tools and the service's own `decide` / `apply`) can report the roles
+ * instead of re-deriving them.
+ */
+interface PromotionCheck {
+  /** One entry per provider this promotion puts in place; empty for a target type that carries none (`agent_preset`, `task_definition`, bookkeeping-only). */
+  readonly providers: readonly PromotionProvider[];
 }
 /** Folded view of one `replayed` record. */
 interface ReplayedView {
@@ -749,10 +790,121 @@ declare class EvolutionService extends Service {
    * grant and immediately before the write: the production target must still be
    * the one prepare recorded. A direct service call therefore cannot bypass the
    * check the tool already ran before asking for approval.
+   *
+   * The promotion check (S1-C item 3) runs here too, immediately before the
+   * write and after the grant: a candidate whose provider role changed while the
+   * human was deciding (a sidecar that appeared in the sandbox, a capability row
+   * whose skill stopped being reachable, a verifier that was unregistered) is
+   * refused here, so no entry can write something a later admission would have
+   * refused.
    */
   apply(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome>;
-  /** Preflight for tools before asking for approval; mutation methods repeat the check. */
-  checkPromotion(proposalId: string): Promise<void>;
+  /**
+   * Preflight for tools before asking for approval; mutation methods repeat the
+   * check. Returns the providers the promotion would put in place, each with the
+   * role it may be counted as (an empty list for a target type that carries
+   * none), so the callers that already gate on this check can report them.
+   *
+   * Three checks run here, in this order, all of them shared with the service
+   * entry the tools ultimately call:
+   *
+   * 1. P2: the candidate bytes must still be the ones prepare recorded.
+   * 2. The replay gate (`assertReplayPromotable`).
+   * 3. S1-C item 3: the provider check. A skill candidate's sandbox directory and
+   *    a capability candidate's new row are judged by the same
+   *    {@link validateSkillProvider} admission, config load and capability
+   *    replacement use, so `evolution_apply` is not the only entry that knows
+   *    what a usable provider is — and a candidate carrying an execution
+   *    sidecar with an unregistered verifier or ungranted tools is refused here,
+   *    before a human is asked, before `decided` is recorded, and before
+   *    anything is written.
+   */
+  checkPromotion(proposalId: string): Promise<PromotionCheck>;
+  /**
+   * The promotion-time provider check (S1-C item 3): what the promotion would
+   * put in place, judged as a provider before it becomes production state.
+   *
+   * - `skill`: the materialized candidate directory
+   *   (`sandbox/<id>/skills/<name>/`) is read as a skill directory and judged
+   *   against the deployment's own sources — the effective capability table and
+   *   the registered verifier vocabulary. Nothing is discovered from a root: the
+   *   candidate is exactly the directory this promotion would write.
+   * - `capability`: the row as it will read after the replacement is checked by
+   *   the admission pre-check itself, over the table the replacement produces
+   *   and the harness process's own discovery roots (the row's own tool labels
+   *   expand through the same `resolveCapabilities` admission uses, which is what
+   *   makes them the covering set for a skill that declares this row). Whichever
+   *   skill the row grants must be reachable and usable from that viewpoint, or
+   *   the row is refused rather than written and refused later at admission.
+   * - every other target type carries no provider: nothing to judge.
+   *
+   * What the verdict means, in the vocabulary the whole system uses
+   * (`sidecar.ts`): only an execution sidecar whose verifier is registered and
+   * whose required tools its declared capabilities grant may be counted as an
+   * execution provider; knowledge and guidance are loadable and are recorded as
+   * such; anything else is a refusal naming every defect. None of it writes,
+   * and nothing is recorded before the caller's own transition.
+   */
+  private assertProvidersPromotable;
+  /**
+   * The candidate skill's provider verdict, taken from the directory the
+   * promotion would write — plus the executor boundary this promotion cannot
+   * cross.
+   *
+   * The boundary: `writeProduction` promotes a **single `SKILL.md`**, so a
+   * candidate whose directory carries anything else (`SKILL.contract.json`, a
+   * `references/` or `scripts/` tree, any other file) is refused here by name.
+   * The executor is not being extended to multi-file candidates; what is being
+   * refused is the promotion of a candidate whose declaration or resources
+   * production would never receive — a promotion that reported an
+   * `execution-provider` role (or a content identity covering files nobody
+   * wrote) for content that does not exist is exactly the false record this
+   * refusal prevents.
+   *
+   * Both the shape and the declaration are named when both are wrong: the
+   * validator's own defects stay in the message with their codes, so this entry
+   * reports the same defect vocabulary admission, config load and capability
+   * replacement report for the same directory.
+   */
+  private assertSkillCandidateProvider;
+  /**
+   * One provider candidate judged by the unified validator, with the sources the
+   * deployment actually has:
+   *
+   * - the effective capability table (the runtime registry — what a restart
+   *   re-reads from `config.yml`), asked through `capabilityToolQuery`, so a
+   *   capability's grant is read by the same resolution admission performs;
+   * - the registered verifier vocabulary, `ready()` first, fail-closed: an
+   *   execution sidecar whose ref cannot be proven registered against a live
+   *   registry is refused with the same named defect the admission pre-check
+   *   uses rather than assumed valid.
+   *
+   * A context with no runtime registry at all answers every capability question
+   * as unreadable instead of as "granting nothing": an execution provider is then
+   * refused (fail-closed), while knowledge and guidance — which make no tool
+   * claim — are judged by the same validator as everywhere else.
+   */
+  private providerVerdict;
+  /**
+   * The capability table this service judges providers against: the running
+   * registry, which is the table a restart re-reads from `config.yml` and the one
+   * `evolution_prepare` snapshots the champion from. Absent (no task-runtime in
+   * this context) means the table cannot be read — reported as an unreadable
+   * grant rather than mistaken for an empty table.
+   */
+  private capabilityToolAnswer;
+  /**
+   * The row a capability promotion would write, checked as the pre-check checks
+   * a row: the replacement is folded into the effective table, and every skill
+   * the new row grants is discovered from the harness process's own roots and
+   * judged by {@link validateSkillProvider} — `verifierRefs` from the live
+   * registry, the row's own tool labels expanding through `resolveCapabilities`
+   * as the covering set. A refusal names the capability, the skill and every
+   * defect, and nothing is written.
+   */
+  private assertCapabilityRowProviders;
+  /** The effective capability table, or `undefined` when this context cannot read one (no task-runtime service). */
+  private effectiveCapabilities;
   /**
    * Read a prepared skill candidate's materialized bytes and verify them
    * against the content identity recorded at prepare (P2). The one read path

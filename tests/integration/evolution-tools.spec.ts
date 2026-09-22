@@ -101,6 +101,16 @@ function exec(sessionId: string) {
   return { agent: { id: sessionId }, callId: 'call-1', signal: new AbortController().signal } as never
 }
 
+/**
+ * A loadable `SKILL.md` for a promotion test: the frontmatter `readSkillFile`
+ * requires, plus the body a test is about. The promotion checks hold a candidate
+ * to the same validator admission uses (S1-C item 3), so a candidate no worker
+ * could load is refused.
+ */
+function skillText(body: string, name = 'verify'): string {
+  return `---\nname: ${name}\ndescription: candidate skill for a promotion test\n---\n\n${body}`
+}
+
 it('drives evolution_propose and evolution_list through the plugin context onto the ledger', async () => {
   const { tools, home } = await mountAgent()
   try {
@@ -330,13 +340,13 @@ it('drives a skill proposal to applied and rolledback through the plugin, produc
     await candidate.execute({
       proposalId: 'p-skill-1',
       versionSet: { skill: 'v2' },
-      mutation: { name: 'verify', content: '# new verify skill\n' },
+      mutation: { name: 'verify', content: skillText('# new verify skill') },
     }, exec('root-1'))
     await prepare.execute({ proposalId: 'p-skill-1' }, exec('root-1'))
     // P2: prepare records the SHA-256 of the materialized candidate bytes on the ledger line
     const preparedRecord = JSON.parse((await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n').at(-1)!)
     const candidateBytes = await readFile(join(home, 'evolution', 'sandbox', 'p-skill-1', 'skills', 'verify', 'SKILL.md'))
-    expect(candidateBytes.toString('utf8')).toBe('# new verify skill\n')
+    expect(candidateBytes.toString('utf8')).toBe(skillText('# new verify skill'))
     expect(preparedRecord.skillContent).toEqual({ name: 'verify', sha256: createHash('sha256').update(candidateBytes).digest('hex') })
 
     await replay.execute({ proposalId: 'p-skill-1', taskIds: ['t-champ'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))
@@ -364,7 +374,7 @@ it('drives a skill proposal to applied and rolledback through the plugin, produc
     expect(approval.request).toHaveBeenCalledTimes(2)
     expect((approval.request.mock.calls[1]![0] as { toolName: string }).toolName).toBe('evolution_apply')
     // P2: production receives the verified candidate bytes, byte for byte
-    expect(await readFile(join(championDir, 'SKILL.md'))).toEqual(Buffer.from('# new verify skill\n', 'utf8'))
+    expect(await readFile(join(championDir, 'SKILL.md'))).toEqual(Buffer.from(skillText('# new verify skill'), 'utf8'))
 
     const rolledback = await rollback.execute({ proposalId: 'p-skill-1' }, exec('root-1'))
     expect(rolledback).toContain('proposal p-skill-1 [rolledback] L2 skill verify')
@@ -406,7 +416,7 @@ it('refuses a tampered skill candidate through the plugin, leaving production an
     await candidate.execute({
       proposalId: 'p-skill-2',
       versionSet: { skill: 'v2' },
-      mutation: { name: 'verify', content: '# new verify skill\n' },
+      mutation: { name: 'verify', content: skillText('# new verify skill') },
     }, exec('root-1'))
     await prepare.execute({ proposalId: 'p-skill-2' }, exec('root-1'))
     // the candidate changes after prepare — the service identity check must refuse it
@@ -452,7 +462,7 @@ it('refuses a skill apply whose production baseline moved after prepare, through
     await candidate.execute({
       proposalId: 'p-skill-3',
       versionSet: { skill: 'v2' },
-      mutation: { name: 'verify', content: '# new verify skill\n' },
+      mutation: { name: 'verify', content: skillText('# new verify skill') },
     }, exec('root-1'))
     const prepared = await prepare.execute({ proposalId: 'p-skill-3' }, exec('root-1'))
     // P3: prepare records the production baseline digest on the ledger line

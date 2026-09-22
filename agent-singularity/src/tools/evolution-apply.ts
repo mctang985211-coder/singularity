@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
-import { APPLYABLE_TARGET_TYPES, applyTargets } from '../evolution.ts'
+import { APPLYABLE_TARGET_TYPES, applyTargets, renderProviderRoles } from '../evolution.ts'
 import type { EvolutionProposal } from '../evolution.ts'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
@@ -56,7 +56,9 @@ export function defineEvolutionApplyTool(ctx: Context) {
       'write; a reject, cancel, or unavailable answerer writes nothing and leaves the proposal decided. A skill ' +
       'apply additionally re-verifies the production baseline recorded at prepare (the production SKILL.md must ' +
       'still be those exact bytes, or still be absent) before the human is asked and again after the grant, and ' +
-      'refuses a stale candidate instead of overwriting a production skill that changed. skill and ' +
+      'refuses a stale candidate instead of overwriting a production skill that changed. A skill candidate is ' +
+      'promoted as one file: one carrying a SKILL.contract.json or any resource is refused (the executor writes ' +
+      'SKILL.md only, so such a candidate would be reported as a provider production never received). skill and ' +
       'agent_preset take effect on write; a capability row is mirrored into the running registry and persists in ' +
       'config.yml. evolution_rollback restores the champion snapshot.',
     parameters: {
@@ -83,8 +85,9 @@ export function defineEvolutionApplyTool(ctx: Context) {
       }
       const manual = manualGuidance(proposal)
       if (manual !== null) return `evolution_apply rejected: ${manual}`
+      let promotion
       try {
-        await ctx.evolution.checkPromotion(proposal.proposalId)
+        promotion = await ctx.evolution.checkPromotion(proposal.proposalId)
         // P3: the production baseline must still be the one this candidate was
         // evaluated against, checked BEFORE the human is asked. The service
         // entry re-runs it after the grant, immediately before the write.
@@ -99,6 +102,7 @@ export function defineEvolutionApplyTool(ctx: Context) {
         'recorded decision: PROMOTE',
         'this writes production targets:',
         ...targets.map(target => `  - ${target}`),
+        ...renderProviderRoles(promotion.providers),
         effectNote(proposal),
         'rollback: evolution_rollback restores the champion snapshot from the sandbox',
       ].join('\n')
@@ -122,7 +126,7 @@ export function defineEvolutionApplyTool(ctx: Context) {
         let runtimeNote = ''
         if (applied.capability !== undefined) {
           try {
-            ctx.taskRuntime.applyCapabilityRow(applied.capability.name, applied.capability.entry)
+            await ctx.taskRuntime.applyCapabilityRow(applied.capability.name, applied.capability.entry)
             runtimeNote = '\nruntime registry row replaced — new admissions in this process use it now'
           } catch (error) {
             runtimeNote = `\nruntime override failed (${error instanceof Error ? error.message : String(error)}) — the config.yml row takes effect on the next restart`
@@ -132,6 +136,7 @@ export function defineEvolutionApplyTool(ctx: Context) {
           `proposal ${applied.proposal.proposalId} [applied] ${applied.proposal.level} ${applied.proposal.targetType} ${applied.proposal.targetId} — PROMOTE in effect`,
           'wrote production targets:',
           ...applied.targets.map(target => `  - ${target}`),
+          ...renderProviderRoles(applied.providers ?? []),
           effectNote(proposal),
           `human approval: approval:${exec.callId} — rollback with evolution_rollback`,
         ].join('\n') + runtimeNote

@@ -1,0 +1,19 @@
+{
+  "contractVersion": 1,
+  "type": "knowledge",
+  "source": "bb-tests workload tree and the per-chip regression manifests in this repository",
+  "scope": "Buckyball workload test placement, naming and regression-manifest coverage; not the tests' assertions themselves",
+  "content": {
+    "skillMdSha256": "5653a0e3563dab23a52eb161b125a7d52da85d5f5138c318826cd31c1be56ef1",
+    "resources": [
+      {
+        "path": "references/regression-manifest.md",
+        "sha256": "e21ecd83dd260159656a7a4ec03778e3b9a5101caf52a1c5a8ba9257d02d3e0c"
+      }
+    ]
+  },
+  "contentCheck": {
+    "kind": "command",
+    "command": "grep -q '## Manifest rules' SKILL.md"
+  }
+}

@@ -73,6 +73,8 @@ export type {
 } from './types.ts'
 export { applyWorkerGrant, resolveGrant } from './grants.ts'
 export type { ResolvedGrant } from './grants.ts'
+export { findSkillFileIn, parseSkillFile, skillRootsFor } from './skill-file.ts'
+export type { ParsedSkillFile } from './skill-file.ts'
 
 export class AgentRuntime extends Service {
   static inject = [

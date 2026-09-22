@@ -172,6 +172,43 @@ declare function resolveGrant(agentCtx: Context, agent: Agent, grant: WorkerGran
  */
 declare function applyWorkerGrant(agentCtx: Context, agent: Agent, grant: WorkerGrant): Promise<void>;
 //#endregion
+//#region src/skill-file.d.ts
+/** One parsed `SKILL.md`: the frontmatter the registry needs plus the body. */
+interface ParsedSkillFile {
+  readonly path: string;
+  readonly name: string;
+  readonly description: string;
+  readonly whenToUse?: string;
+  readonly invocation: {
+    readonly modelInvocable: boolean;
+    readonly userInvocable: boolean;
+  };
+  readonly content: string;
+}
+/**
+ * Split `SKILL.md` text into its frontmatter fields and body. The frontmatter
+ * grammar accepted here is the flat `key: value` one every skill in this
+ * deployment uses; a nested structure fails loudly rather than being guessed at.
+ */
+declare function parseSkillFile(text: string, path: string): ParsedSkillFile;
+/**
+ * Locate the `SKILL.md` a granted skill name refers to under an explicit root
+ * list, in the order given. The one search loop every discovery path shares:
+ * {@link findSkillFile} runs it over a worker's own roots, and the task
+ * runtime's provider pre-check runs it over the same roots with the replay
+ * overlay's extra roots in front, so admission asks the question the spawn
+ * will answer instead of restating the search.
+ * @param roots - skill roots, searched in order.
+ * @param name - the skill name a capability declares.
+ * @returns the absolute path, or undefined when no root holds that skill.
+ */
+declare function findSkillFileIn(roots: readonly string[], name: string): Promise<string | undefined>;
+/**
+ * Every root {@link findSkillFile} searches, for an error message that tells the
+ * operator where a granted skill should have been.
+ */
+declare function skillRootsFor(cwd: string | undefined): Promise<string[]>;
+//#endregion
 //#region src/index.d.ts
 declare class AgentRuntime extends Service {
   static inject: string[];
@@ -196,4 +233,4 @@ declare class AgentRuntime extends Service {
   private scope;
 }
 //#endregion
-export { type AgentOptions, AgentRuntime, AgentRuntime as default, type CanvasNode, type ContentBlock, type GraphScope, type McpServerSpec, type ResolvedGrant, type RootRequest, type SessionVisibility, type SpawnRequest, type WorkerCapabilityGrant, type WorkerGrant, applyWorkerGrant, resolveGrant };
+export { type AgentOptions, AgentRuntime, AgentRuntime as default, type CanvasNode, type ContentBlock, type GraphScope, type McpServerSpec, type ParsedSkillFile, type ResolvedGrant, type RootRequest, type SessionVisibility, type SpawnRequest, type WorkerCapabilityGrant, type WorkerGrant, applyWorkerGrant, findSkillFileIn, parseSkillFile, resolveGrant, skillRootsFor };

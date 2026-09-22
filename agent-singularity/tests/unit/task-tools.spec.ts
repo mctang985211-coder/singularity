@@ -107,6 +107,67 @@ const snapshot = {
   capabilities: {},
 }
 
+/**
+ * The provider report `capability_list` renders: one accepted row per role, one
+ * refused row, and one row that grants no skill — the shapes the renderer has to
+ * say something honest about.
+ */
+function providerReport() {
+  return {
+    capabilities: [
+      {
+        capability: 'design-ball',
+        skills: [{
+          valid: true,
+          role: 'guidance',
+          name: 'ball-align',
+          directory: '/skills/ball-align',
+          content: { skillMdSha256: 'a'.repeat(64), resources: [] },
+          contentDigest: 'b'.repeat(64),
+          uncovered: [],
+        }],
+      },
+      {
+        capability: 'verify-ball-functional',
+        skills: [{
+          valid: true,
+          role: 'execution-provider',
+          name: 'verify',
+          directory: '/skills/verify',
+          capabilities: ['verify-ball-functional'],
+          precondition: 'the bbdev server is loaded',
+          inputs: [],
+          outputs: [],
+          requiredTools: ['bash'],
+          verifierRef: 'command',
+          contractDigest: 'c'.repeat(64),
+          content: { skillMdSha256: 'd'.repeat(64), resources: [] },
+          contentDigest: 'e'.repeat(64),
+        }],
+      },
+      {
+        capability: 'integrate-model',
+        skills: [{
+          valid: false,
+          name: 'workload-tests',
+          directory: '/skills/workload-tests',
+          defects: [{ code: 'content-mismatch', detail: 'SKILL.md is not the declared content' }],
+        }],
+      },
+      { capability: 'research', skills: [] },
+    ],
+    roots: ['/env/.agents/skills', '/dsh-home/skills'],
+  }
+}
+
+/** The table the rendering test checks: the three verdict shapes above plus a row that grants no skill. */
+const RENDER_TABLE = {
+  'design-ball': { skills: ['ball-align'], tools: ['filesystem', 'bash'] },
+  'verify-ball-functional': { skills: ['verify'], preset: 'bb-verify', mcpServers: ['bbdev'] },
+  'integrate-model': { skills: ['workload-tests'] },
+  research: { preset: 'standard' },
+}
+
 function fixture() {
   const services: Record<string, unknown> = {}
   const ctx = {
@@ -125,6 +186,7 @@ function fixture() {
       })),
       decomposeAndRun: vi.fn(),
       listCapabilities: vi.fn(() => structuredClone(DEFAULT_CAPABILITIES)),
+      capabilityProviderReport: vi.fn(async (_sessionId: string) => providerReport()),
       verifyTimeoutMs: 1234,
     },
     get: (name: string) => services[name],
@@ -220,6 +282,87 @@ describe('task_read', () => {
     const tool = defineTaskReadTool(ctx as never)
     const result = (await tool.execute({}, exec('s-worker'))) as string
     expect(result).not.toContain('protected inputs')
+  })
+
+  /**
+   * The run the caller is executing, as the store recorded it (S1-C stage 3):
+   * the same summary the spawn's contract block carries, read back from the run
+   * record and re-checked against the bytes the run was bound to. A view that
+   * fell back to the production skill path when the snapshot was gone would tell
+   * the worker it is running content it is not.
+   */
+  const workerBinding = {
+    registryRevision: 'a'.repeat(64),
+    capabilities: ['design-ball'],
+    skills: [
+      {
+        name: 'ball-align',
+        role: 'guidance' as const,
+        capabilities: ['design-ball'],
+        description: 'Align a Buckyball Ball across layers',
+        contractDigest: null,
+        contentDigest: 'b'.repeat(64),
+        uncovered: [] as string[],
+      },
+    ],
+    mcpServers: [],
+    snapshotRoot: '/dsh/singularity/run-bindings/sg-t-root-1/r-worker/skills',
+  }
+
+  function boundWorkerFixture(read: unknown) {
+    const { ctx } = fixture()
+    ctx.taskRuntime.runForSession.mockImplementation(async () => ({
+      storeId: 'sg-t-root-1',
+      task: workerTask,
+      run: { ...workerRun, providerBinding: workerBinding },
+    }) as never)
+    ctx.taskRuntime.readRunBinding = vi.fn(async () => read) as never
+    return { ctx }
+  }
+
+  it('renders the providers this run was bound to, and re-checks them against the record', async () => {
+    const { ctx } = boundWorkerFixture({
+      skills: [{ name: 'ball-align', role: 'guidance', readable: true, defects: [] }],
+      defects: [],
+    })
+    const tool = defineTaskReadTool(ctx as never)
+    const result = (await tool.execute({}, exec('s-worker'))) as string
+
+    expect(ctx.taskRuntime.readRunBinding).toHaveBeenCalledExactlyOnceWith(workerBinding)
+    expect(result).toContain('design-ball')
+    expect(result).toContain('ball-align')
+    expect(result).toContain('guidance')
+    expect(result).toContain('Align a Buckyball Ball across layers')
+    expect(result).toContain('bbbbbbbbbbbb')
+    // The snapshot was read back and matched: no refusal line is invented.
+    expect(result).not.toContain('not readable')
+  })
+
+  it('reports bound content that is not readable by name, never a silent fallback', async () => {
+    const { ctx } = boundWorkerFixture({
+      skills: [{ name: 'ball-align', role: 'guidance', readable: false, defects: ['SKILL.md is not the recorded content: recorded bb…, read cc…'] }],
+      defects: ['skill "ball-align": SKILL.md is not the recorded content: recorded bb…, read cc…'],
+    })
+    const tool = defineTaskReadTool(ctx as never)
+    const result = (await tool.execute({}, exec('s-worker'))) as string
+
+    expect(result).toContain('not readable')
+    expect(result).toContain('ball-align')
+    expect(result).toContain('SKILL.md is not the recorded content')
+    // The record's identity is still shown — what the run was bound to is a
+    // fact, and the refusal is about the bytes on disk now.
+    expect(result).toContain('bbbbbbbbbbbb')
+  })
+
+  it('renders nothing extra for a run that carries no binding claim', async () => {
+    const { ctx } = fixture()
+    ctx.taskRuntime.readRunBinding = vi.fn() as never
+    const tool = defineTaskReadTool(ctx as never)
+    const result = (await tool.execute({}, exec('s-worker'))) as string
+
+    expect(ctx.taskRuntime.readRunBinding).not.toHaveBeenCalled()
+    expect(result).not.toContain('bound')
+    expect(result).not.toContain('not readable')
   })
 
   it('renders the declared protected inputs on the root line too', async () => {
@@ -441,6 +584,40 @@ describe('capability_list', () => {
     const result = (await tool.execute({}, exec('root-1'))) as string
     expect(result).toContain('- broken — tools: [filesystem → read, write, edit; filesytem → (unknown label)] skills: []')
   })
+
+  it('renders the provider verdict of every declared skill under its capability row', async () => {
+    const { ctx } = fixture()
+    ctx.taskRuntime.listCapabilities.mockReturnValue(structuredClone(RENDER_TABLE))
+    const tool = defineCapabilityListTool(ctx as never)
+    const result = (await tool.execute({}, exec('root-1'))) as string
+
+    // The pre-check runs for the calling session — the same viewpoint admission
+    // would discover from — and only once.
+    expect(ctx.taskRuntime.capabilityProviderReport).toHaveBeenCalledExactlyOnceWith('root-1')
+    // A skill with no sidecar is guidance, and says so rather than looking like
+    // a provider that failed.
+    expect(result).toContain('    providers: ball-align → guidance (no sidecar; loadable guidance, not an execution provider; content: bbbbbbbbbbbb)')
+    // An execution provider names the verifier that judges it and the tools it needs.
+    expect(result).toContain('verify → execution-provider (verifier: command; requires: bash; content: eeeeeeeeeeee)')
+    // A refused provider is not hidden: the defect code and its reason are shown.
+    expect(result).toContain('workload-tests → invalid (content-mismatch: SKILL.md is not the declared content)')
+    // A row that grants no skill says that too, instead of rendering nothing.
+    expect(result).toContain('    providers: (none — the capability grants no skill)')
+    // The roots the verdicts were discovered from travel with them.
+    expect(result).toContain('skill roots searched for this session: /env/.agents/skills, /dsh-home/skills')
+    // The row lines themselves are unchanged by the addition.
+    expect(result).toContain('- design-ball — tools: [filesystem → read, write, edit; bash → bash] skills: [ball-align]')
+  })
+
+  it('says the providers were not checked when the tool has no calling session to check for', async () => {
+    const { ctx } = fixture()
+    const tool = defineCapabilityListTool(ctx as never)
+    const result = (await tool.execute({}, { signal: new AbortController().signal } as never)) as string
+
+    expect(ctx.taskRuntime.capabilityProviderReport).not.toHaveBeenCalled()
+    expect(result).toContain('providers: (not checked — the tool was called without a calling session)')
+    expect(result).not.toContain('skill roots searched for this session:')
+  })
 })
 
 describe('task_status', () => {
@@ -660,6 +837,54 @@ describe('task_review_pack', () => {
     expect(blockedPack).toContain('review t-child-2#no-run [blocked]')
     expect(blockedPack).toContain('blockedBy t-child-1 [failed]')
     expect(blockedPack).toContain('dependencies: must verify first [t-child-1]; blocks []')
+  })
+
+  /**
+   * The version a run executed against, next to the run ids the reviews already
+   * cite (S1-C item 4): the pack reports the record — registry revision,
+   * providers with their short content digests, the mounted servers and the
+   * snapshot path — without re-reading the snapshot, which is the job of the
+   * entries that act on it. A run that carries no binding contributes no line.
+   */
+  it('names what each run of the task was bound to, and nothing for a run without a binding', async () => {
+    const { ctx } = fixture()
+    const bound = {
+      ...nestedSnapshot(),
+      runs: [
+        {
+          ...rootRun,
+          status: 'verified',
+          providerBinding: {
+            registryRevision: 'a'.repeat(64),
+            capabilities: ['design-ball', 'research'],
+            skills: [{
+              name: 'ball-align',
+              role: 'knowledge',
+              capabilities: ['design-ball'],
+              description: 'Align a Ball',
+              contractDigest: 'b'.repeat(64),
+              contentDigest: 'c'.repeat(64),
+              uncovered: [],
+            }],
+            mcpServers: [{ serverName: 'bbdev', templateDigest: 'd'.repeat(64) }],
+            snapshotRoot: '/dsh/singularity/run-bindings/sg-t-root-1/r-root/skills',
+          },
+        },
+        { ...childRun, status: 'failed' },
+      ],
+    }
+    ctx.task.openStore.mockResolvedValue(bound)
+    const tool = defineTaskReviewPackTool(ctx as never)
+
+    const rootPack = (await tool.execute({ taskId: 't-root' }, exec('root-1'))) as string
+    expect(rootPack).toContain(
+      `- run r-root [verified] bound registry ${'a'.repeat(12)}: ball-align [knowledge] content ${'c'.repeat(12)} contract ${'b'.repeat(12)}; mcp bbdev; snapshot /dsh/singularity/run-bindings/sg-t-root-1/r-root/skills`,
+    )
+
+    // The child's run carries no binding: its review line and the pack around it
+    // are exactly what they were before the field existed.
+    const childPack = (await tool.execute({ taskId: 't-child-1' }, exec('root-1'))) as string
+    expect(childPack).not.toContain('bound registry')
   })
 
   it('renders the metrics line and each dimension fact, and nothing for the dimensions the record omits', async () => {

@@ -7,6 +7,7 @@ import type {
   ProposalTargetType,
   ReviewRecord,
   RunId,
+  RunProviderBinding,
   RunStatus,
   TaskEvent,
   TaskId,
@@ -194,6 +195,69 @@ export class TaskState {
     this.updateTask(taskId, { decompositionStatus: 'decomposed' })
   }
 
+  /**
+   * The content identity a run records is what a later reader re-checks the
+   * snapshot against, so a malformed record is refused rather than stored: a
+   * digest that is not a digest, or a skill entry without a name, would make the
+   * record unusable exactly when someone asks whether an execution's bound
+   * content is still the content on disk. Only the shape is judged here — the
+   * bytes are the runtime's business, and a record whose snapshot no longer
+   * matches is a refusal its reader reports, not a reason to reject the event
+   * that already happened.
+   */
+  private assertProviderBinding(runId: RunId, binding: RunProviderBinding): void {
+    if (typeof binding.registryRevision !== 'string' || binding.registryRevision.length === 0) {
+      throw new Error(`task: run "${runId}" provider binding requires a registry revision`)
+    }
+    const list = (name: string, value: unknown): unknown[] => {
+      if (!Array.isArray(value)) throw new Error(`task: run "${runId}" provider binding ${name} must be an array`)
+      return value
+    }
+    for (const name of list('capabilities', binding.capabilities)) {
+      if (typeof name !== 'string' || name.length === 0) {
+        throw new Error(`task: run "${runId}" provider binding capability names must be non-empty strings`)
+      }
+    }
+    const digest = (where: string, value: unknown, nullable: boolean): void => {
+      if (nullable && value === null) return
+      if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) {
+        throw new Error(`task: run "${runId}" provider binding ${where} must be a lowercase SHA-256 hex digest${nullable ? ' or null' : ''}`)
+      }
+    }
+    for (const entry of list('skills', binding.skills)) {
+      if (!isRecord(entry)) throw new Error(`task: run "${runId}" provider binding skill entries must be objects`)
+      if (typeof entry.name !== 'string' || entry.name.length === 0) {
+        throw new Error(`task: run "${runId}" provider binding skill requires a name`)
+      }
+      if (entry.role !== 'execution-provider' && entry.role !== 'knowledge' && entry.role !== 'guidance') {
+        throw new Error(`task: run "${runId}" provider binding skill "${entry.name}" has an unknown role ${JSON.stringify(entry.role)}`)
+      }
+      if (typeof entry.description !== 'string') {
+        throw new Error(`task: run "${runId}" provider binding skill "${entry.name}" requires a description`)
+      }
+      const capabilities: unknown = entry.capabilities
+      if (!Array.isArray(capabilities) || capabilities.some(item => typeof item !== 'string')) {
+        throw new Error(`task: run "${runId}" provider binding skill "${entry.name}" capabilities must be an array of strings`)
+      }
+      const uncovered: unknown = entry.uncovered
+      if (!Array.isArray(uncovered) || uncovered.some(item => typeof item !== 'string')) {
+        throw new Error(`task: run "${runId}" provider binding skill "${entry.name}" uncovered must be an array of strings`)
+      }
+      digest(`skill "${entry.name}" contractDigest`, entry.contractDigest, true)
+      digest(`skill "${entry.name}" contentDigest`, entry.contentDigest, false)
+    }
+    for (const entry of list('mcpServers', binding.mcpServers)) {
+      if (!isRecord(entry)) throw new Error(`task: run "${runId}" provider binding MCP entries must be objects`)
+      if (typeof entry.serverName !== 'string' || entry.serverName.length === 0) {
+        throw new Error(`task: run "${runId}" provider binding MCP entry requires a server name`)
+      }
+      digest(`MCP server "${entry.serverName}" templateDigest`, entry.templateDigest, true)
+    }
+    if (binding.snapshotRoot !== undefined && (typeof binding.snapshotRoot !== 'string' || binding.snapshotRoot.length === 0)) {
+      throw new Error(`task: run "${runId}" provider binding snapshotRoot must be a non-empty path when present`)
+    }
+  }
+
   private addDependency(edge: DependencyEdge): void {
     this.task(edge.from)
     this.task(edge.to)
@@ -213,6 +277,7 @@ export class TaskState {
     if (envelopeRunId !== run.runId) throw new Error(`task: run "${run.runId}" envelope run id mismatch`)
     if (run.status !== 'running') throw new Error(`task: run "${run.runId}" must start in status "running"`)
     if (typeof run.sessionId !== 'string' || run.sessionId.length === 0) throw new Error(`task: run "${run.runId}" session id must be non-empty`)
+    if (run.providerBinding !== undefined) this.assertProviderBinding(run.runId, run.providerBinding)
     if (run.parentRunId !== undefined) this.run(run.parentRunId)
     this.assertTransition(taskId, ['admitted', 'ready'], 'running')
     this.value = { ...this.value, runs: [...this.value.runs, copy(run)] }

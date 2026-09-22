@@ -1,8 +1,8 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { AcceptanceCriterion, AdmissionContext, ArtifactRef, CapabilityManifest, ChildEvidenceRef, DecompositionAdmission, DependencyEdge, EvidenceBundle, ProtectedInputRef, ReviewCriterion, ReviewTokenUsage, ReviewToolCall, RunId, TaskContract, TaskContractVersion, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskSnapshot, VerificationMode } from "@dangosys/dsh-singularity-task";
-import { AgentHandle } from "@deepseek-ai/dsh-agent";
+import { AcceptanceCriterion, AdmissionContext, ArtifactRef, CapabilityManifest, ChildEvidenceRef, DecompositionAdmission, DependencyEdge, EvidenceBundle, KnowledgeContentCheck, ProtectedInputRef, ReviewCriterion, ReviewTokenUsage, ReviewToolCall, RunId, RunProviderBinding, RunSkillBinding, SkillContentIdentity, SkillContractDefectCode, SkillPort, SkillSidecar, TaskContract, TaskContractVersion, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskSnapshot, VerificationMode } from "@dangosys/dsh-singularity-task";
 import { McpServerSpec, WorkerGrant } from "@dangosys/dsh-singularity-agent-runtime";
+import { AgentHandle } from "@deepseek-ai/dsh-agent";
 
 //#region src/capability.d.ts
 /** One capability entry as held in plugin Config (arrays optional pre-validation). */
@@ -162,6 +162,424 @@ interface PermissionSpec {
  */
 declare function resolvePermission(manifest: CapabilityManifest, resolveSpec: (name: string) => PermissionSpec): string | undefined;
 //#endregion
+//#region src/sidecar.d.ts
+
+/** Every reason a provider is refused, named so a caller can act on the kind of problem. */
+type SkillDefectCode = SkillContractDefectCode | 'skill-missing' | 'skill-file-invalid' | 'skill-name-mismatch' | 'sidecar-unreadable' | 'sidecar-mismatch' | 'content-mismatch' | 'content-unsupported' | 'verifier-unknown' | 'capability-unknown' | 'tool-not-covered';
+/** One named reason a provider is not acceptable, with the detail a caller reports. */
+interface SkillDefect {
+  code: SkillDefectCode;
+  detail: string;
+}
+/** What the real DSH tool plane a capability grants looks like: expanded names plus the servers it mounts. */
+interface CapabilityGrants {
+  /** Real DSH tool names the capability's tool labels expand to. */
+  readonly tools: readonly string[];
+  /** MCP server names the capability mounts; their tools reach a worker as `mcp__<server>__<tool>`. */
+  readonly mcpServers: readonly string[];
+}
+/**
+ * What the context knows about one capability. `known: false` covers both "no
+ * such row" and "the row does not resolve" (an unknown tool label, an unknown
+ * MCP server): both mean the grant cannot be read off the table, and the
+ * refusal carries the reason the table itself gave.
+ */
+type CapabilityToolAnswer = ({
+  readonly known: true;
+} & CapabilityGrants) | {
+  readonly known: false;
+  readonly reason: string;
+};
+/** How a caller lends its capability table to the pre-check. */
+type CapabilityToolQuery = (capability: string) => CapabilityToolAnswer;
+/** Everything the pre-check needs that is not the candidate itself. */
+interface SkillValidationContext {
+  /** Verifier ids the registry can dispatch to (`VerifierRegistry.verifierIds()`): the whole vocabulary `verifier.ref` may name. */
+  readonly verifierRefs: readonly string[];
+  /** The expanded tool plane of a capability, in the same vocabulary a sidecar's `requiredTools` is written in. */
+  readonly capabilityTools: CapabilityToolQuery;
+}
+/**
+ * A capability table as a query, going through `resolveCapabilities` — the same
+ * resolution admission performs — so the pre-check sees exactly the grant a
+ * spawn would build and a broken row is refused with the resolution's own
+ * reason instead of being silently treated as granting nothing.
+ */
+declare function capabilityToolQuery(capabilities: Readonly<Record<string, CapabilityConfig>>): CapabilityToolQuery;
+/** Build the pre-check context from a capability table and the registered verifier ids. */
+declare function skillValidationContext(capabilities: Readonly<Record<string, CapabilityConfig>>, verifierRefs: readonly string[]): SkillValidationContext;
+/** What a skill directory honestly held when it was read. */
+interface LoadedSkillSidecar {
+  /** The skill directory that was read, as given. */
+  readonly directory: string;
+  /** The declared sidecar, when the directory holds a readable one that passed the shape rules. */
+  readonly sidecar?: SkillSidecar;
+  /** The identity of the bytes actually read; absent when there is no readable regular `SKILL.md`. */
+  readonly content?: SkillContentIdentity;
+  /**
+   * What the `SKILL.md` frontmatter declares — the name the file loads under
+   * and the purpose a reader sees. Absent exactly when the file could not be
+   * read or parsed, which is then a defect in {@link defects}: a skill file
+   * that cannot be parsed is not a skill file a worker can load.
+   */
+  readonly frontmatter?: LoadedSkillFrontmatter;
+  /** Direct entries the supported vocabulary does not cover (a directory reads as `name/`), sorted. */
+  readonly uncovered: readonly string[];
+  /** Every reason the directory or its sidecar is not acceptable; empty means a clean load. */
+  readonly defects: readonly SkillDefect[];
+}
+/**
+ * The frontmatter two consumers need: the spawn's `readSkillFile` (which
+ * publishes the body under `name`) and every renderer that shows what a
+ * provider is for (`description`). Read once, by the same parser.
+ */
+interface LoadedSkillFrontmatter {
+  /** The name the file declares it is; a directory reached under another name is refused. */
+  readonly name: string;
+  /** The purpose the file declares, in the author's words. */
+  readonly description: string;
+}
+/** One provider under pre-check: the granted skill name and where discovery found it. */
+interface SkillProviderCandidate {
+  /** The skill name a capability grants; the directory under a skill root is named after it. */
+  readonly name: string;
+  /** Absolute path of the skill directory discovery resolved, or absent when nothing was found. */
+  readonly directory?: string;
+  /**
+   * A sidecar the caller already holds (a prepare-time declaration, a ledger
+   * copy). It is never trusted as a substitute for the directory: it must be
+   * the same declaration the directory carries, so a validated declaration
+   * cannot be paired with different bytes at apply time.
+   */
+  readonly sidecar?: SkillSidecar;
+}
+/** The only verdict kind that may close an execution gap: an execution sidecar that passed every rule. */
+interface ExecutionProviderVerdict {
+  readonly valid: true;
+  readonly role: 'execution-provider';
+  readonly name: string;
+  readonly directory: string;
+  readonly capabilities: readonly string[];
+  /** The declared precondition, carried verbatim for the caller that renders a worker summary. */
+  readonly precondition: string;
+  /**
+   * The purpose this skill declares for itself (`SKILL.md` frontmatter), carried
+   * so a run summary or a record can say what the provider is for without
+   * re-reading the file it was judged from.
+   */
+  readonly description: string;
+  readonly inputs: readonly SkillPort[];
+  readonly outputs: readonly SkillPort[];
+  readonly requiredTools: readonly string[];
+  readonly verifierRef: string;
+  /** {@link skillContractDigest} of the sidecar the verdict was taken from. */
+  readonly contractDigest: string;
+  readonly content: SkillContentIdentity;
+  /** {@link skillContentDigest} of {@link content}: the bytes this verdict is about, in one string. */
+  readonly contentDigest: string;
+}
+/** A knowledge skill: loadable, content-verified, and deliberately without any execution claim. */
+interface KnowledgeProviderVerdict {
+  readonly valid: true;
+  readonly role: 'knowledge';
+  readonly name: string;
+  readonly directory: string;
+  readonly source: string;
+  readonly scope: string;
+  /** The declared content check, carried — this pre-check never runs it. */
+  readonly contentCheck: KnowledgeContentCheck;
+  /** The purpose this skill declares for itself; see {@link ExecutionProviderVerdict.description}. */
+  readonly description: string;
+  readonly contractDigest: string;
+  readonly content: SkillContentIdentity;
+  readonly contentDigest: string;
+}
+/** A skill with no sidecar: guidance a worker may read, with no execution claim and no defect. */
+interface GuidanceProviderVerdict {
+  readonly valid: true;
+  readonly role: 'guidance';
+  readonly name: string;
+  readonly directory: string;
+  /** The purpose this skill declares for itself; see {@link ExecutionProviderVerdict.description}. */
+  readonly description: string;
+  readonly content: SkillContentIdentity;
+  readonly contentDigest: string;
+  readonly uncovered: readonly string[];
+}
+type AcceptedSkillProviderVerdict = ExecutionProviderVerdict | KnowledgeProviderVerdict | GuidanceProviderVerdict;
+/** A refused provider: every reason named, nothing written, nothing claimed. */
+interface RejectedProviderVerdict {
+  readonly valid: false;
+  readonly name: string;
+  readonly directory?: string;
+  readonly defects: readonly SkillDefect[];
+}
+type SkillProviderVerdict = AcceptedSkillProviderVerdict | RejectedProviderVerdict;
+/**
+ * The verdicts that may close an execution gap — and the only place a caller
+ * needs to ask. A knowledge or guidance verdict is not in the result, so the
+ * closure semantics cannot be relaxed by accident at a call site.
+ */
+declare function executionProviders(verdicts: readonly SkillProviderVerdict[]): ExecutionProviderVerdict[];
+/** One provider's declared content identity inside the registry revision. */
+interface SkillProviderIdentity {
+  /** The skill name a capability grants. */
+  readonly name: string;
+  /** {@link skillContractDigest} of the provider's sidecar, or `null` when the skill carries none. */
+  readonly contractDigest: string | null;
+}
+/**
+ * Load and check one skill directory: the directory itself, `SKILL.md`, the
+ * sidecar when there is one, the identity of the bytes on disk, and the shape
+ * of everything else in it.
+ *
+ * The returned `content` is the identity computed from the bytes just read —
+ * the same value a clean sidecar declares, and the honest answer for a skill
+ * that declares nothing. `defects` empty means the directory is fully described
+ * by its identity: every file is `SKILL.md`, the sidecar itself, or a supported
+ * resource the declaration names. Absence of a sidecar is not a defect: the
+ * skill is then guidance, not a provider.
+ */
+declare function loadSkillSidecar(directory: string): Promise<LoadedSkillSidecar>;
+/**
+ * The unified pre-check: one candidate provider against the deployment's
+ * verifier vocabulary and capability table (guide §2.3, S1-C item 3). Every
+ * entry — config load, provider replacement, candidate promotion — calls this,
+ * so `evolution_apply` is not the only defence and no entry can be the one that
+ * skipped it.
+ *
+ * Rules, in the order they are checked:
+ *
+ * 1. The directory exists, is a real directory, and is named after the skill.
+ * 2. The loader reads it: `SKILL.md`, the sidecar when present, the supported
+ *    resources, and every entry whose shape the contract does not support. The
+ *    declared content identity must equal the bytes read, and the `SKILL.md`
+ *    frontmatter must parse and declare the granted name — the same rule, and
+ *    the same words, the spawn's `readSkillFile` applies when it registers the
+ *    body.
+ * 3. A sidecar the caller supplied must be the one the directory carries.
+ * 4. An execution sidecar's `verifier.ref` must be a registered verifier, and
+ *    its `requiredTools` must be granted by the capabilities it declares it
+ *    serves (`mcp__<server>__<tool>` counts when the capability mounts that
+ *    server; the worker baseline is deliberately not counted — a capability
+ *    must grant what the provider it carries needs).
+ * 5. A knowledge sidecar is checked for content and carried as knowledge: it
+ *    never becomes an execution provider.
+ *
+ * The verdict is a value: all defects are collected, nothing is written, and a
+ * caller that only wants execution providers filters with
+ * {@link executionProviders}.
+ */
+declare function validateSkillProvider(candidate: SkillProviderCandidate, context: SkillValidationContext): Promise<SkillProviderVerdict>;
+/**
+ * The registry revision: SHA-256 over {@link canonicalize} of the capability
+ * table (each row sorted by name, carrying its skills, the tool labels it
+ * declares, the DSH tool names those labels expand to, its preset, permission
+ * and MCP servers — defaults and declaration order normalized away) plus every
+ * provider's sidecar identity.
+ *
+ * What it covers, and what it deliberately does not: a run can cite this
+ * revision to say which table and which declared provider content it resolved
+ * against. Two runs with the same revision resolved the same rows over the same
+ * declared sidecar content. It does **not** cover the bytes of a skill that
+ * declares nothing (its identity is `null` here), the verifier registry's own
+ * revisions, or the deployment's environment — a caller that needs those records
+ * them separately rather than reading them into this digest.
+ */
+declare function registryRevision(capabilities: Readonly<Record<string, CapabilityConfig>>, providers: readonly SkillProviderIdentity[]): string;
+//#endregion
+//#region src/provider-precheck.d.ts
+/**
+ * The verifier service as a provider check uses it: an optional plugin this
+ * package never imports, resolved softly from whichever context is asking.
+ */
+interface VerifierVocabulary {
+  /** Idempotent registration gate; awaited before the registry is read. */
+  ready?(): Promise<void>;
+  /** The registered verifier ids, the vocabulary a sidecar's `verifier.ref` may name. */
+  verifierIds?(): string[];
+}
+/**
+ * Resolve an optional sibling plugin's service by property or `ctx.get(name)`,
+ * the soft pattern this repo uses for services a deployment may or may not
+ * mount (`verifier`, `sessionQuery`, `agents`): absent in test contexts and in
+ * smaller bundles, not an error.
+ *
+ * Both lookups are inside the `try` because cordis refuses a property read of a
+ * service the asking context does not have (`cannot get property "verifier"
+ * without inject`, `reflect.ts` — it throws instead of returning `undefined`).
+ * An optional service that is absent is exactly the case this function exists
+ * for, so the refusal is the answer: `undefined`.
+ */
+declare function optionalService<T>(host: unknown, name: string): T | undefined;
+/**
+ * The registered verifier vocabulary a provider check judges execution sidecars
+ * against, or `undefined` when the deployment cannot list it — no verifier
+ * service, a service that never became ready, or a registry whose own read
+ * throws.
+ *
+ * `ready()` first, and only here: a verifier service that has been constructed
+ * but not readied reports an empty `verifierIds()`, and reading that as "no
+ * verifier is registered" would refuse every execution provider on a deployment
+ * whose registry is merely still loading. The distinction between "the registry
+ * could not answer" and "the registry answered: empty" is exactly what the
+ * returned `undefined` preserves: a caller refuses an execution sidecar in the
+ * first case (fail-closed, {@link unlistableVerifierRefusal}) and names the
+ * registry's own answer in the second.
+ *
+ * One implementation for every consumer — the admission pre-check, the
+ * load-time scan and the promotion checks all ask it (guide §2.4, S1-C item 3).
+ */
+declare function registeredVerifierIds(host: unknown): Promise<readonly string[] | undefined>;
+/**
+ * The refusal of an execution sidecar the deployment cannot judge because its
+ * verifier vocabulary could not be listed: the declared ref is refused rather
+ * than assumed registered (fail-closed). The admission pre-check and the
+ * evolution promotion checks share this function, so one situation reads the
+ * same way in every entry instead of each inventing its own explanation.
+ */
+declare function unlistableVerifierRefusal(name: string, directory: string | undefined, ref: string): RejectedProviderVerdict;
+/**
+ * Where a pre-check looks for a skill: the viewpoint of the worker that would
+ * load it. `cwd` is the session's checkout — the directory the worker's own
+ * discovery walks upward from — and `extraRoots` are the roots that precede the
+ * standard ones (the replay overlay's, exactly as `applyWorkerGrant` orders
+ * them).
+ */
+interface SkillDiscoveryView {
+  /** The worker's working directory (the session's checkout); absent when the deployment cannot name one. */
+  readonly cwd?: string;
+  /** Roots searched before the standard ones: the replay overlay's skill roots, in the order the grant registers them. */
+  readonly extraRoots?: readonly string[];
+}
+/**
+ * Every root one discovery view covers, in search order — the single root list
+ * the pre-check searches and the one a refusal names, so "searched the roots"
+ * in an error message is never a hand-written approximation of the search.
+ */
+declare function skillSearchRoots(view?: SkillDiscoveryView): Promise<string[]>;
+/** What one capability row's declared skills resolved to. */
+interface CapabilityProviderPrecheck {
+  /** The capability row the skills were read from. */
+  readonly capability: string;
+  /** One verdict per distinct skill the row declares, in declaration order. */
+  readonly skills: readonly SkillProviderVerdict[];
+}
+/**
+ * The result of one pre-check, shaped to be carried: per capability, the
+ * verdict for every skill it declares; the roots that were searched; the
+ * verifier vocabulary the execution sidecars were judged against; and the
+ * registry revision the accepted providers produce.
+ *
+ * The verdicts carry their own facts (`role`, `directory`, `contentDigest`,
+ * `contractDigest`, `verifierRef`, the declared ports), so a caller that has to
+ * *record* what a run resolved against — the Run binding (S1-C item 4) — reads
+ * them off this value instead of re-reading the skill directories.
+ */
+interface ProviderPrecheck {
+  /** Every capability row that was checked, in the order given. */
+  readonly capabilities: readonly CapabilityProviderPrecheck[];
+  /** The discovery roots the search covered, in order. */
+  readonly roots: readonly string[];
+  /**
+   * The registered verifier ids the execution sidecars were checked against.
+   * **Absent** means the registry could not be listed at all, which is not the
+   * same as "no verifier is registered": an execution sidecar is refused in
+   * that case rather than assumed valid (fail-closed).
+   */
+  readonly verifierRefs?: readonly string[];
+  /**
+   * {@link registryRevision} over the table the rows came from and the provider
+   * identity of every **accepted** skill in play (a skill without a sidecar
+   * contributes `null`; a refused one contributes nothing, because a refused
+   * provider is never something a run resolved against).
+   */
+  readonly revision: string;
+}
+/** What one pre-check needs beyond the view: the rows in play and their table. */
+interface ProviderPrecheckRequest {
+  /**
+   * The capability rows in play, in the order they should be reported — the
+   * matched rows of the batch's manifests (ordinary decomposition, replay) or
+   * every row of the table (`capability_list`). A name the table does not hold
+   * contributes nothing: resolution already refused it as a gap, which is a
+   * different question from this one.
+   */
+  readonly capabilities: readonly string[];
+  /** The capability table the rows were resolved from; its identity is part of {@link ProviderPrecheck.revision}. */
+  readonly table: Readonly<Record<string, CapabilityConfig>>;
+  /** Where discovery looks. */
+  readonly view: SkillDiscoveryView;
+  /**
+   * The registered verifier ids (`VerifierRegistry.verifierIds()`, after
+   * `ready()`), or absent when the registry cannot be listed.
+   */
+  readonly verifierRefs?: readonly string[];
+}
+/**
+ * Check every skill every listed capability declares, from one discovery
+ * viewpoint.
+ *
+ * The rules, in the order they are applied per skill: it must be discoverable
+ * from the view's roots; the directory it resolves to must pass
+ * {@link validateSkillProvider} against the table and the verifier vocabulary.
+ * An execution sidecar is refused when the vocabulary is unknown
+ * (`verifierRefs` absent) — the one case the phase-1 validator cannot judge,
+ * because it would read an empty list as "nothing is registered".
+ *
+ * Nothing is written and nothing is thrown: every refusal is a verdict, and
+ * {@link providerRefusals} turns the refusals into the lines a caller reports
+ * before it refuses the whole batch.
+ */
+declare function precheckProviders(request: ProviderPrecheckRequest): Promise<ProviderPrecheck>;
+/**
+ * One capability row as it would read after a replacement, checked by the same
+ * pre-check a batch is admitted under: `entry` is folded into `table` — the row
+ * as `config.yml` will hold it once written — and every skill the new row grants
+ * is discovered from `view` and judged by {@link validateSkillProvider}, with
+ * the row's own tool labels expanding through `resolveCapabilities` as the
+ * covering set for a skill that declares this row.
+ *
+ * The two entries that write a row share this function, so the run-time registry
+ * mirror (`TaskRuntime.applyCapabilityRow`) asks exactly the question the
+ * promotion gate (`EvolutionService.checkPromotion`) asked before the row
+ * reached `config.yml`: one composition, one vocabulary of refusals, no entry
+ * that can be replaced without being judged. `refusals` is empty for a row that
+ * grants no skill or only loadable providers.
+ */
+declare function precheckReplacedCapabilityRow(request: {
+  /** The capability row being written. */
+  readonly name: string;
+  /** The row's entry as it will read after the replacement. */
+  readonly entry: CapabilityConfig;
+  /** The table the row is folded into — the replacement table, then. */
+  readonly table: Readonly<Record<string, CapabilityConfig>>;
+  /** Where discovery looks; a deployment's own process viewpoint or a worker's checkout. */
+  readonly view: SkillDiscoveryView;
+  /** The registered verifier ids (`VerifierRegistry.verifierIds()`), or absent when the registry cannot be listed. */
+  readonly verifierRefs?: readonly string[];
+}): Promise<{
+  readonly precheck: ProviderPrecheck;
+  readonly refusals: readonly string[];
+}>;
+/**
+ * Every refused provider of one pre-check, one line each, naming the capability
+ * that declares it, the skill, the directory when one was found, and every
+ * defect with its code. Empty means the batch may proceed — which is a
+ * statement about *loadable* providers only: this pre-check never adds a
+ * capability to the closure, and knowledge/guidance verdicts are loadable
+ * without being execution providers.
+ */
+declare function providerRefusals(precheck: ProviderPrecheck): string[];
+/**
+ * The same refusals, one line per defect: the shape a loud report wants, since
+ * a caller reading a log needs the capability, the skill, the defect code and
+ * the detail of each problem rather than a summary line per provider. The
+ * load-time scan (`TaskRuntime.providerLoadReport`) prints these; admission
+ * refuses a batch on {@link providerRefusals}.
+ */
+declare function providerDefectLines(precheck: ProviderPrecheck): string[];
+//#endregion
 //#region src/mcp-servers.d.ts
 /**
  * The env binding one spawn resolves server templates against. Produced by
@@ -224,6 +642,130 @@ declare function resolveMcpServerSpecs(manifest: {
   }>;
 }, binding: McpEnvBinding | undefined, registry?: Readonly<Record<string, McpServerTemplate>>): McpServerSpec[];
 //#endregion
+//#region src/run-binding.d.ts
+/** The directory under one run's own directory that holds its `<name>/SKILL.md` entries — a skill root as `WorkerGrant.skillRoots` expects. */
+declare const RUN_BINDING_SKILLS_DIR = "skills";
+/**
+ * Where run bindings are materialized unless the deployment says otherwise:
+ * `<DSH_HOME or ~/.dsh>/singularity/run-bindings`, resolved per call so a test
+ * (or a deployment) that moves `DSH_HOME` moves the snapshots with it.
+ *
+ * Outside the worker's checkout on purpose: the run's cwd is where a worker
+ * writes, and content it can rewrite under itself would make "the worker loaded
+ * the bound bytes" unverifiable. A snapshot is re-checked against its digest on
+ * every read, so even a writer that reaches it cannot make it pass for
+ * something else — but the ordinary case should not depend on that.
+ */
+declare function defaultRunBindingRoot(): string;
+/** Everything one run needs to bind its content: the verdicts, the rows, and where the snapshot goes. */
+interface RunBindingRequest {
+  /** The store the run belongs to; scopes the snapshot directory. */
+  storeId: string;
+  /** The run the snapshot is scoped to. */
+  runId: RunId;
+  /** The run's resolved manifest: its rows are the run's capability rows and its granted servers. */
+  manifest: CapabilityManifest;
+  /**
+   * The admission-time pre-check this run's verdicts come from. Absent when the
+   * caller assembled the plan itself (a hand-built cascade): then no binding is
+   * recorded and the grant keeps its discovery-time behaviour, because there is
+   * no judged identity to bind.
+   */
+  providers?: ProviderPrecheck;
+  /** The capability table the run resolved against; its revision is recorded when no pre-check carries one. */
+  table?: Readonly<Record<string, CapabilityConfig>>;
+  /** Where the run snapshot is materialized; absent means this deployment cannot materialize content, which fails a run that selected any. */
+  root?: string;
+  /** The MCP template registry the granted server names resolve against (tests pass their own). */
+  mcpRegistry?: Readonly<Record<string, McpServerTemplate>>;
+}
+/**
+ * Bind one run's content: identify the providers its admission judged,
+ * materialize their admitted bytes, and verify the snapshot against the record
+ * before it is handed back to be stored.
+ *
+ * Returns `undefined` for a run that has capability rows but no pre-check — a
+ * caller that assembled its plan itself. Such a run's grant resolves its skills
+ * at spawn through the deployment's own discovery, which is exactly the mutable
+ * path this module exists to close, so **nothing is claimed**: the run records no
+ * binding at all rather than a record that looks authoritative and describes
+ * bytes nobody judged. Every production entry runs the pre-check, so this is the
+ * hand-built-caller case only.
+ *
+ * Throws — with the skill or the path named — when the admitted bytes are no
+ * longer there, when the deployment cannot materialize at all, or when the
+ * snapshot does not read back as the record describes it. A throw means the run
+ * records no binding and loads no content: there is no state in which a run
+ * claims content it did not load.
+ */
+declare function bindRunProviders(request: RunBindingRequest): Promise<RunProviderBinding | undefined>;
+/** One skill's re-read result: whether the snapshot still holds the bytes the record names, and why not. */
+interface RunBindingSkillRead {
+  /** The skill name the record names. */
+  readonly name: string;
+  /** The role the run was bound to it as. */
+  readonly role: RunSkillBinding['role'];
+  /** True when the snapshot directory holds exactly the recorded content and declaration. */
+  readonly readable: boolean;
+  /** Every reason this skill's content is not readable as recorded, each naming its code. */
+  readonly defects: readonly string[];
+}
+/** What re-reading one run's binding found. */
+interface RunBindingRead {
+  /** The snapshot root the record names. */
+  readonly snapshotRoot: string;
+  /** One entry per skill in record order. */
+  readonly skills: readonly RunBindingSkillRead[];
+  /** Every reason any skill's content is not readable as recorded; empty means the whole snapshot verified. */
+  readonly defects: readonly string[];
+}
+/**
+ * Re-check one run's binding against the bytes its snapshot holds now — the read
+ * a later reader (an old run's summary, a re-entry, a recovery path) performs
+ * before trusting the record.
+ *
+ * The check is the loader the pre-check uses, so "the snapshot is the admitted
+ * content" is judged by the same rules that admitted it: the `SKILL.md` and the
+ * declared resources must hash to the recorded content identity, the sidecar to
+ * the recorded contract identity, the frontmatter must declare the skill's own
+ * name, and the snapshot root must hold exactly the recorded skills — an extra
+ * directory would be registered into a worker's layer, so it is reported rather
+ * than ignored.
+ *
+ * One more thing is re-read for a guidance skill: the loader names the entries
+ * of its directory that the content identity does not cover (the same list
+ * admission recorded as `uncovered`), and a snapshot must hold its bound content
+ * only. An entry that appeared there since admission is therefore reported with
+ * its name — the record described a directory that does not match these bytes —
+ * while an entry the record lists as uncovered and absent from the snapshot is
+ * simply a correct snapshot: materialization copies the identity's files, so a
+ * source directory's uncovered entries never reach a run.
+ *
+ * Returns `undefined` for a record that names no snapshot: a run that loaded no
+ * content (a deterministic criteria replay, a run with no provider) has nothing
+ * to re-read, which is not the same as content that failed to re-read.
+ */
+declare function readRunBinding(binding: RunProviderBinding): Promise<RunBindingRead | undefined>;
+/**
+ * The "chosen implementation" summary of one run — the section a worker's
+ * contract block, its spawn prompt and `task_read` all render, from this one
+ * function and one record, so the three views cannot describe different runs.
+ *
+ * What it carries: every capability the run matched, the skill selected for it
+ * (name, role, purpose, short content digest and — where the skill declares one
+ * — the contract digest), the granted MCP servers, the snapshot the run is bound
+ * to, and what the binding does *not* cover. What it deliberately leaves out: the
+ * skill text. A worker reads the body on demand with the `skill` tool; a summary
+ * is identity and purpose.
+ *
+ * `read` is the re-check result when the caller re-read the snapshot. A caller
+ * that has not read it (the spawn's own render, before the worker exists) omits
+ * it, and then no readability claim is made in either direction. When it is
+ * given and reports defects, they are rendered under a named refusal so a reader
+ * is never told to trust content that is not there.
+ */
+declare function renderRunBinding(binding: RunProviderBinding | undefined, read?: RunBindingRead): string;
+//#endregion
 //#region src/orchestrate.d.ts
 /** Raised when the verifier service (ticket C2) is not loaded in the context. */
 declare class VerifierUnavailableError extends Error {
@@ -234,6 +776,13 @@ interface ChildPlan {
   task: TaskInstance;
   manifest: CapabilityManifest;
   dependsOn: readonly number[];
+  /**
+   * The provider pre-check the batch passed (S1-C item 1), carried per plan so
+   * the run's own record can be bound to the providers admission actually
+   * judged — one verdict set for the whole batch, not one recomputation per
+   * child. Absent when a caller assembles plans without it.
+   */
+  providers?: ProviderPrecheck;
   /** Caller-declared assumptions (`DecomposeChildSpec.assumptions`), merged into the handoff at spawn time. */
   assumptions?: readonly string[];
   /**
@@ -369,6 +918,12 @@ interface OrchestrateEnv {
   /** Optional tail reader for verifier logs (logRef relative to the verifier's evidence root); absent keeps logTail off failed records. */
   readLogTail?(logRef: string): Promise<string | undefined>;
   /**
+   * Where a run's bound content is materialized (S1-C, `Config.runBindingRoot`).
+   * Absent means this deployment cannot materialize content: a run that selects
+   * any skill then fails by name rather than loading a path nothing judged.
+   */
+  runBindingRoot?: string;
+  /**
    * Optional session reader for the review record's dimensions and metrics
    * (§2.7.3): one read of a run's session log and token projection. Absent — or
    * a rejection — keeps only the store-derived facts; it can never fail a review.
@@ -431,6 +986,12 @@ interface ReplayRunInit {
   task: TaskInstance;
   /** The manifest resolved under the overlay. */
   manifest: CapabilityManifest;
+  /**
+   * The provider pre-check this replay passed (S1-C item 1): the verdicts and
+   * registry revision the replay resolved against, so the Run binding can record
+   * them without repeating discovery.
+   */
+  providers?: ProviderPrecheck;
   /** Lineage marker (`evolution-replay:<proposalId>`), recorded on the review record's anomalies. */
   lineage: string;
   /** The preset to mount; already overlay-resolved by the caller. */
@@ -745,13 +1306,22 @@ interface WorkerPromptOptions {
    * only invite a call admission refuses.
    */
   allowRuntimeDecomposition: boolean;
+  /**
+   * What this run was bound to and loaded (S1-C item 4). Rendered as the
+   * "chosen implementation" section — the run's capability names, the provider
+   * selected for each, and how to read a body on demand — from the same function
+   * the contract block and `task_read` use. Absent on a run that recorded no
+   * binding, and then the prompt says nothing about one.
+   */
+  binding?: RunProviderBinding;
 }
 /** Envelope passed from a parent run to the child it delegates to (RFC §18). */
 declare function buildHandoff(init: HandoffInit): TaskHandoff;
 /**
  * Render the worker prompt for a delegated child task. Compact on purpose:
  * objective, the acceptance criteria table (with verifier commands and the
- * protected input paths the worker must not modify), the handoff envelope, the
+ * protected input paths the worker must not modify), the implementation chosen
+ * for this run ({@link WorkerPromptOptions.binding}), the handoff envelope, the
  * pointer to the delegating session, the decomposable reminder when the parent
  * asked for a further split, the runtime-split rule when the deployment admits
  * one ({@link WorkerPromptOptions}), and the rules — a few thousand tokens at
@@ -772,11 +1342,65 @@ declare const WORKER_CONTRACT_CLOSE = "</worker-contract>";
  * Render one task's contract block.
  * @param task - the child task as the store holds it at delegation.
  * @param handoff - the envelope the parent passed to this child.
+ * @param binding - what this run was bound to and loaded (S1-C item 4): the
+ *   providers chosen for it, rendered as the "chosen implementation" section
+ *   from the same function and record `task_read` renders, so the two views
+ *   cannot describe different runs. Absent on a run that recorded no binding,
+ *   and then nothing is added to the block.
  * @returns the marked block, ending in the one line that says where the
  *   authority lives, so a model reading it never has to guess whether a
  *   compacted spawn prompt or this block is the current contract.
  */
-declare function renderWorkerContract(task: TaskInstance, handoff: TaskHandoff): string;
+declare function renderWorkerContract(task: TaskInstance, handoff: TaskHandoff, binding?: RunProviderBinding): string;
+//#endregion
+//#region src/verified-read.d.ts
+/**
+ * Reading files without following a link: the one implementation of "a path
+ * under a root, walked one component at a time through `lstat`".
+ *
+ * Why it is a module of its own: both the Evolution ledger (skill candidates in
+ * a proposal sandbox, the production skill baseline) and the skill sidecar
+ * loader read files whose identity they then vouch for. A read that followed a
+ * symbolic link would let the digest describe one file while the path a worker
+ * opens is another — so every component from the root to the file must be a
+ * real entry, and a link, a directory in a file's place, or a fifo anywhere on
+ * the way is a refusal, never a silent follow. The check lives here once, so
+ * the two callers cannot drift into two rules.
+ *
+ * Only Node standard fs: the walk is about `lstat` semantics, not about any
+ * harness service.
+ * @module @dangosys/dsh-singularity-task-runtime/verified-read
+ */
+/**
+ * Where a component walk under a root stopped. The walk is split from the read
+ * so a caller that records "absent" can tell it apart from a path that changed
+ * type: `missing` is a value, a link or a wrong type is a throw.
+ */
+type VerifiedWalk = {
+  missing: false;
+  abs: string;
+} | {
+  missing: true;
+  reason: 'no such file or directory' | 'a path component is not a directory';
+};
+/**
+ * Walk `rel` under `root` one component at a time, refusing anything but real
+ * entries: a symbolic link anywhere on the path, a non-regular entry where the
+ * target should be, or a non-directory where a directory should be all fail
+ * loudly, so a read can never land outside the root through a redirected path
+ * even though the lexical path stays inside. A component that is simply absent
+ * (ENOENT / ENOTDIR anywhere along the walk) is reported as `missing`, never
+ * thrown — the caller decides whether absence is an error or an answer.
+ */
+declare function walkVerified(root: string, rel: string): Promise<VerifiedWalk>;
+/**
+ * Read the file at `rel` under `root` as raw bytes, refusing anything but a
+ * real regular file: the entry itself and every ancestor between `root` and it
+ * must not be a symbolic link. A missing file, a directory in the file's place,
+ * or any other non-regular entry fails loudly. The bytes are returned exactly
+ * as stored — no decoding, no newline conversion.
+ */
+declare function readVerifiedFile(root: string, rel: string): Promise<Buffer>;
 //#endregion
 //#region src/index.d.ts
 /** Local view of the verifier service (ticket C2 develops it in parallel): the
@@ -787,6 +1411,13 @@ interface RunVerifier {
   logTail?(logRef: string): Promise<string | undefined>;
   /** The registered verifier ids; optional on the service, required to validate a criterion's `verifierRef`. */
   verifierIds?(): string[];
+  /**
+   * The cordis service lifecycle hook. Optional because a test double is already
+   * readied when it is built; the provider pre-check awaits it before reading
+   * `verifierIds()`, so a registry that is merely still loading is not read as
+   * an empty vocabulary (S1-C).
+   */
+  ready?(): Promise<void>;
 }
 interface CriterionSpec {
   /**
@@ -958,6 +1589,41 @@ interface Config {
    * unless the child was declared `decomposable`.
    */
   allowRuntimeDecomposition: boolean;
+  /**
+   * Where a run's bound provider content is materialized (S1-C): one directory
+   * per run holding the skills the run loads, outside the worker's checkout so a
+   * worker cannot rewrite what it is verified against. Defaults to
+   * {@link defaultRunBindingRoot} (`<DSH_HOME or ~/.dsh>/singularity/run-bindings`);
+   * a deployment that cannot materialize content fails a run that selects any,
+   * rather than letting it load an unbound production path.
+   */
+  runBindingRoot?: string;
+}
+/**
+ * What the load-time provider scan found (S1-C item 3) — the deployment's own
+ * capability table read from the harness process's own discovery roots, at the
+ * moment that table went into effect.
+ *
+ * Two readings, both honest: {@link precheck} carries every verdict, so the
+ * effective provider set is `executionProviders` of its rows (the only role that
+ * may close an execution gap) with knowledge/guidance beside it; {@link defects}
+ * carries the same refusals the load report printed, one line per defect.
+ *
+ * `defects` empty and `failed` absent means every skill the table names is a
+ * loadable provider *from this viewpoint* — which is not the same as "every
+ * worker's viewpoint", see {@link TaskRuntime.providerLoadReport}.
+ */
+interface ProviderLoadReport {
+  /** The scan's verdicts, per capability and per skill; absent when the scan could not run at all. */
+  readonly precheck?: ProviderPrecheck;
+  /** Every refused provider, one line per defect; empty when the table names only loadable providers. */
+  readonly defects: readonly string[];
+  /**
+   * Why the scan could not run at all — a failure of the scan itself, not of a
+   * provider. Reported instead of a verdict, never swallowed: a load report that
+   * could not be taken is not a quiet success.
+   */
+  readonly failed?: string;
 }
 declare const DEFAULT_VERIFY_TIMEOUT_MS: number;
 /**
@@ -1052,7 +1718,61 @@ declare class TaskRuntime extends Service {
   private readonly config;
   /** sessionId → run binding, rebuilt whenever a store is (re)opened. */
   private readonly sessions;
+  /** The load-time provider scan, taken once ({@link providerLoadReport}). */
+  private providerLoad?;
   constructor(ctx: Context, config?: Config);
+  /**
+   * Cordis runs this after construction, once the injected services are there:
+   * the load-time provider scan (S1-C item 3) is taken here, so the first thing
+   * a deployment learns about its own capability table is what its own discovery
+   * roots make of it.
+   *
+   * This hook never throws: see {@link providerLoadReport} for why the scan
+   * reports instead of refusing to start.
+   */
+  [Service.init](): Promise<void>;
+  /**
+   * The load-time provider scan over the capability table this process is
+   * running (guide §2.4, S1-C item 3): every skill the effective table names,
+   * discovered from the harness process's own skill roots (`process.cwd()`'s
+   * project roots, `$DSH_HOME/skills`, the user root) and judged by
+   * {@link validateSkillProvider} — the same validator admission, capability
+   * replacement and candidate promotion use.
+   *
+   * Why this reports instead of refusing the deployment: the harness process's
+   * own viewpoint is **not** the worker's. A deployment-level process loads
+   * `config.yml` long before any graph env exists, so it cannot see the checkout
+   * a worker will run in (`/…/env/<name>`, whose own `.agents/skills` a worker's
+   * discovery walks first) — a skill that resolves fine at admission is
+   * therefore legitimately *missing* from the load-time viewpoint. Failing the
+   * load on that would refuse configurations that work, and it would fail for a
+   * reason the operator cannot fix by editing the table. So every defect is
+   * printed, nothing is enforced here, and the hard gate stays where the
+   * viewpoint is the worker's own: the admission pre-check, which refuses the
+   * whole batch before it persists anything.
+   *
+   * The result is kept as a value ({@link ProviderLoadReport}): the effective
+   * provider set and the defect summary stay queryable after the log line has
+   * scrolled away, without re-running the validation. It is the *load-time* fact
+   * — a row replaced later in this process (an evolution apply, a rollback) was
+   * judged by its own entry before it landed, and is not folded back into this
+   * report.
+   */
+  providerLoadReport(): Promise<ProviderLoadReport>;
+  /**
+   * One load-time scan, never thrown: a scan that cannot run (a discovery or a
+   * read that fails outright) is reported as {@link ProviderLoadReport.failed}
+   * and printed just as loudly as a refused provider.
+   */
+  private scanConfiguredProviders;
+  /**
+   * The load report, printed through the cordis logger when one is mounted: one
+   * line per defect (capability, skill, defect code, detail) plus a header that
+   * says what was scanned and that the deployment is starting anyway.
+   */
+  private reportProviderLoad;
+  /** Best-effort warn through the cordis logger when one is mounted; tests and minimal contexts may not have it. */
+  private warn;
   /**
    * The wall-clock deadline one `verifier.verifyRun` call runs under
    * ({@link Config.verifyTimeoutMs}). Exposed because the same deadline has to
@@ -1075,8 +1795,28 @@ declare class TaskRuntime extends Service {
    * this, so a restart reloads the identical table. `null` removes the row
    * (rollback of a newly-added capability). Later admissions resolve against
    * the replaced row; in-flight runs are untouched.
+   *
+   * **A replacement is validated before it lands; a removal is not.** This is
+   * the entry that makes a row effective in this process, so it runs the same
+   * check the promotion gate ran before the row was written to `config.yml`:
+   * every skill the new row grants is discovered from the harness process's own
+   * roots and judged by `validateSkillProvider`
+   * ({@link precheckReplacedCapabilityRow}), against the live registry's verifier
+   * vocabulary — fail-closed when that vocabulary cannot be listed. An unusable
+   * provider rejects with its named defects and the table is left exactly as it
+   * was, so no path into the effective registry skips the one validator
+   * (guide §2.4, S1-C item 3). A removal needs no such check: it grants
+   * nothing, and refusing a rollback would strand a deployment on a row it is
+   * trying to undo.
    */
-  applyCapabilityRow(name: string, entry: CapabilityConfig | null): void;
+  applyCapabilityRow(name: string, entry: CapabilityConfig | null): Promise<void>;
+  /**
+   * The replacement check behind {@link applyCapabilityRow}: the row as it will
+   * read after this write, judged by the admission pre-check itself. Throws with
+   * every refusal named (capability, skill, defect code, detail) — and writes
+   * nothing, which is what makes the caller's table unchanged.
+   */
+  private assertReplacementRow;
   /** Create (or reopen) the store, expand RootTaskSpec into the root task, and bind a run to the root session. */
   createRootTask(storeId: string, options: {
     objective: string;
@@ -1222,6 +1962,49 @@ declare class TaskRuntime extends Service {
   /** The verifier service is an optional plugin; resolve it softly, never import the package. */
   private runVerifier;
   /**
+   * The registered verifier vocabulary one provider pre-check judges execution
+   * sidecars against — `registeredVerifierIds` in `./provider-precheck.ts`, the
+   * one implementation every provider check shares, with the reasoning for
+   * `ready()`-first and for the fail-closed `undefined` documented there.
+   */
+  private registeredVerifierIds;
+  /**
+   * The provider pre-check (S1-C item 1) over the given capability rows, run
+   * against the effective table unless `table` replaces it (the replay overlay).
+   * Read-only: it discovers skill directories and reads them, writes nothing,
+   * and returns every refusal as a verdict rather than throwing.
+   */
+  private providerPrecheck;
+  /**
+   * The provider verdicts for the capability rows in play, discovered from one
+   * session's own viewpoint — the read-only entry `capability_list` renders
+   * (guide §2.3 item 1: the model sees the pre-check's conclusion before it
+   * dispatches, not only after admission refused its batch). Nothing is thrown
+   * for an unusable provider: the verdict says what is wrong with it, and the
+   * caller renders that.
+   *
+   * `capabilities` names the rows to check; omitting it checks every row of the
+   * effective table. A caller that wants the verdicts a *batch* resolved
+   * against should pass its matched rows — the revision then describes exactly
+   * what admission judged. Two things this recompute cannot reproduce, which is
+   * why admission carries its own result with the batch (S1-C item 4): the
+   * replay overlay's replaced table, and the bytes as they were at admission.
+   */
+  capabilityProviderReport(sessionId: string, capabilities?: readonly string[]): Promise<ProviderPrecheck>;
+  /**
+   * Re-check the content a run's binding recorded against the bytes its snapshot
+   * holds now (S1-C item 4) — the read a historical view (`task_read`) and a
+   * re-entry (`createRootTask` adopting an existing run) both perform before
+   * trusting the record.
+   *
+   * `undefined` means the record names no snapshot: a run that loaded no content
+   * has nothing to re-read, which is not the same as content that failed to
+   * re-read. A caller that gets a report must look at its `defects`: content
+   * that is not readable as bound is reported by name and is never substituted
+   * with whatever the production path holds now.
+   */
+  readRunBinding(binding: RunProviderBinding): Promise<RunBindingRead | undefined>;
+  /**
    * verifierRef validation at creation/decomposition time, never spawn time
    * (KISS §4.1 `verifier_ref`): every declared ref must name a registered
    * verifier, or the whole batch is rejected before anything is persisted and
@@ -1234,4 +2017,4 @@ declare class TaskRuntime extends Service {
   private liveAgent;
 }
 //#endregion
-export { type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BudgetConfig, type CapabilityConfig, type ChildOutcome, type ChildPlan, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DecomposeChildSpec, DecomposeSpec, type DecompositionIdentityContext, type HandoffInit, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type PermissionSpec, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, ReplayTaskOptions, RunVerifier, type SessionObservation, type SpawnChildRequest, TOOL_LABELS, TaskRuntime, TaskRuntime as default, VerifierUnavailableError, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, type WorkerPromptOptions, buildHandoff, checkDecomposition, checkObligationCoverage, contractDefects, escalationHint, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, independentAcceptanceDefects, loadObligationTemplates, manifestMcpServers, normalizeDecomposition, parseObligationTemplates, protectedInputDefects, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, workerBaseline };
+export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BudgetConfig, type CapabilityConfig, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, type ChildPlan, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DecomposeChildSpec, DecomposeSpec, type DecompositionIdentityContext, type ExecutionProviderVerdict, type GuidanceProviderVerdict, type HandoffInit, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type PermissionSpec, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, RUN_BINDING_SKILLS_DIR, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, ReplayTaskOptions, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, type WorkerPromptOptions, bindRunProviders, buildHandoff, capabilityToolQuery, checkDecomposition, checkObligationCoverage, contractDefects, defaultRunBindingRoot, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, independentAcceptanceDefects, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, optionalService, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, protectedInputDefects, providerDefectLines, providerRefusals, readRunBinding, readVerifiedFile, registeredVerifierIds, registryRevision, renderRunBinding, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };

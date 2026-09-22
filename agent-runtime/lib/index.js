@@ -84,16 +84,30 @@ async function skillRoots(cwd) {
 	return roots;
 }
 /**
+* Locate the `SKILL.md` a granted skill name refers to under an explicit root
+* list, in the order given. The one search loop every discovery path shares:
+* {@link findSkillFile} runs it over a worker's own roots, and the task
+* runtime's provider pre-check runs it over the same roots with the replay
+* overlay's extra roots in front, so admission asks the question the spawn
+* will answer instead of restating the search.
+* @param roots - skill roots, searched in order.
+* @param name - the skill name a capability declares.
+* @returns the absolute path, or undefined when no root holds that skill.
+*/
+async function findSkillFileIn(roots, name) {
+	for (const root of roots) {
+		const file = await skillFileIn(root, name);
+		if (file !== void 0) return file;
+	}
+}
+/**
 * Locate the `SKILL.md` a granted skill name refers to.
 * @param name - the skill name a capability declares.
 * @param cwd - the worker's working directory; project roots are searched upward from it.
 * @returns the absolute path, or undefined when no root holds that skill.
 */
 async function findSkillFile(name, cwd) {
-	for (const root of await skillRoots(cwd)) {
-		const file = await skillFileIn(root, name);
-		if (file !== void 0) return file;
-	}
+	return findSkillFileIn(await skillRoots(cwd), name);
 }
 /**
 * Every root {@link findSkillFile} searches, for an error message that tells the
@@ -711,4 +725,4 @@ var AgentRuntime = class extends Service {
 var src_default = AgentRuntime;
 
 //#endregion
-export { AgentRuntime, applyWorkerGrant, src_default as default, resolveGrant };
+export { AgentRuntime, applyWorkerGrant, src_default as default, findSkillFileIn, parseSkillFile, resolveGrant, skillRootsFor };

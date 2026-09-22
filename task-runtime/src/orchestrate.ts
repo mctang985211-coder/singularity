@@ -13,6 +13,7 @@ import type {
   ReviewTokenUsage,
   ReviewToolCall,
   RunId,
+  RunProviderBinding,
   TaskId,
   TaskInstance,
   TaskRun,
@@ -22,6 +23,8 @@ import type {
   VerificationResult,
 } from '@dangosys/dsh-singularity-task'
 import { capabilitySnapshot, resolvePermission, resolvePreset, workerBaseline, type CapabilityConfig, type PermissionSpec } from './capability.ts'
+import type { ProviderPrecheck } from './provider-precheck.ts'
+import { bindRunProviders } from './run-binding.ts'
 import { manifestMcpServers, resolveMcpServerSpecs, type McpEnvBinding } from './mcp-servers.ts'
 import { buildHandoff, renderWorkerPrompt } from './handoff.ts'
 import { renderWorkerContract } from './contract.ts'
@@ -36,6 +39,13 @@ export interface ChildPlan {
   task: TaskInstance
   manifest: CapabilityManifest
   dependsOn: readonly number[]
+  /**
+   * The provider pre-check the batch passed (S1-C item 1), carried per plan so
+   * the run's own record can be bound to the providers admission actually
+   * judged — one verdict set for the whole batch, not one recomputation per
+   * child. Absent when a caller assembles plans without it.
+   */
+  providers?: ProviderPrecheck
   /** Caller-declared assumptions (`DecomposeChildSpec.assumptions`), merged into the handoff at spawn time. */
   assumptions?: readonly string[]
   /**
@@ -189,6 +199,12 @@ export interface OrchestrateEnv {
   /** Optional tail reader for verifier logs (logRef relative to the verifier's evidence root); absent keeps logTail off failed records. */
   readLogTail?(logRef: string): Promise<string | undefined>
   /**
+   * Where a run's bound content is materialized (S1-C, `Config.runBindingRoot`).
+   * Absent means this deployment cannot materialize content: a run that selects
+   * any skill then fails by name rather than loading a path nothing judged.
+   */
+  runBindingRoot?: string
+  /**
    * Optional session reader for the review record's dimensions and metrics
    * (§2.7.3): one read of a run's session log and token projection. Absent — or
    * a rejection — keeps only the store-derived facts; it can never fail a review.
@@ -331,16 +347,28 @@ function workerGrant(manifest: CapabilityManifest): WorkerGrant {
 
 /**
  * The full grant for one spawn: {@link workerGrant} plus the manifest's MCP
- * servers materialized against the run's env binding. Throws when a declared
- * server has no binding or its repo is absent from the env — inside the spawn
- * `try`, so the failure walks the run to `failed` with the cause named, the
- * same discipline as a dangling preset.
+ * servers materialized against the run's env binding, plus the skill roots the
+ * worker's own skill layer registers before anything else (S1-C: the run's
+ * snapshot; a replay's candidate overlay stays in front of it). Throws when a
+ * declared server has no binding or its repo is absent from the env — inside the
+ * spawn `try`, so the failure walks the run to `failed` with the cause named,
+ * the same discipline as a dangling preset.
  */
-async function authorizedGrant(env: OrchestrateEnv, manifest: CapabilityManifest): Promise<WorkerGrant> {
-  const grant = workerGrant(manifest)
+async function authorizedGrant(env: OrchestrateEnv, manifest: CapabilityManifest, skillRoots: readonly string[] = []): Promise<WorkerGrant> {
+  const grant = { ...workerGrant(manifest), ...(skillRoots.length === 0 ? {} : { skillRoots: [...skillRoots] }) }
   if (manifestMcpServers(manifest).length === 0) return grant
   const binding = env.resolveMcpEnv === undefined ? undefined : await env.resolveMcpEnv()
   return { ...grant, mcpServers: resolveMcpServerSpecs(manifest, binding) }
+}
+
+/**
+ * The skill roots one worker's layer registers, in order: whatever the caller
+ * passes first (a replay's candidate overlay, which must win a same-name
+ * collision — P2's semantics) and then the run's own snapshot. The snapshot is
+ * never conditional on the overlay: a run that bound content loads that content.
+ */
+function skillRootsForRun(overlayRoots: readonly string[], binding: RunProviderBinding | undefined): string[] {
+  return [...overlayRoots, ...(binding?.snapshotRoot === undefined ? [] : [binding.snapshotRoot])]
 }
 
 /**
@@ -909,7 +937,32 @@ export async function runChildrenCascade(
       status: 'running',
       startedAt: new Date().toISOString(),
     }
-    await env.task.startRunIn(storeId, run, env.actor)
+    // Bind the run's content before it is recorded and before any worker exists
+    // (S1-C item 4): the admitted bytes are materialized into the run's own
+    // snapshot and read back against the pre-check's digests. A binding that
+    // cannot be established settles the run failed with the cause named — the
+    // same discipline a dead MCP server gets at spawn — and records no binding at
+    // all, so no run ever claims content it did not load.
+    let binding: RunProviderBinding | undefined
+    try {
+      binding = await bindRunProviders({
+        storeId,
+        runId: run.runId,
+        manifest: plan.manifest,
+        ...(plan.providers === undefined ? {} : { providers: plan.providers }),
+        ...(env.runBindingRoot === undefined ? {} : { root: env.runBindingRoot }),
+      })
+    } catch (error) {
+      const reason = `content binding failed: ${message(error)}`
+      await env.task.startRunIn(storeId, run, env.actor)
+      await env.task.markRunStatusIn(storeId, childTaskId, run.runId, 'failed', env.actor, { reason })
+      await recordReview(childTaskId, 'failed', { run, localizedCause: reason, relatedTaskIds: dependencyTaskIds })
+      outcomes[index] = { taskId: childTaskId, runId: run.runId, status: 'failed' }
+      remaining.delete(index)
+      continue
+    }
+    const bound: TaskRun = binding === undefined ? run : { ...run, providerBinding: binding }
+    await env.task.startRunIn(storeId, bound, env.actor)
     let handle: AgentHandle
     try {
       await assertPresetUsable(env, plan.manifest, agentPreset)
@@ -917,11 +970,14 @@ export async function runChildrenCascade(
       handle = await env.spawn({
         sessionId,
         name,
-        prompt: renderWorkerPrompt(handoff, plan.task, { allowRuntimeDecomposition: env.allowRuntimeDecomposition }),
+        prompt: renderWorkerPrompt(handoff, plan.task, {
+          allowRuntimeDecomposition: env.allowRuntimeDecomposition,
+          ...(binding === undefined ? {} : { binding }),
+        }),
         // The same task the prompt table came from, rendered as the block the
         // agent runtime projects into the worker's system prompt.
-        contract: renderWorkerContract(plan.task, handoff),
-        grant: await authorizedGrant(env, plan.manifest),
+        contract: renderWorkerContract(plan.task, handoff, binding),
+        grant: await authorizedGrant(env, plan.manifest, skillRootsForRun([], binding)),
         ...(agentPreset !== undefined ? { agentPreset } : {}),
         ...(permissionPreset !== undefined ? { permissionPreset } : {}),
         ...(signal !== undefined ? { signal } : {}),
@@ -1105,6 +1161,12 @@ export interface ReplayRunInit {
   task: TaskInstance
   /** The manifest resolved under the overlay. */
   manifest: CapabilityManifest
+  /**
+   * The provider pre-check this replay passed (S1-C item 1): the verdicts and
+   * registry revision the replay resolved against, so the Run binding can record
+   * them without repeating discovery.
+   */
+  providers?: ProviderPrecheck
   /** Lineage marker (`evolution-replay:<proposalId>`), recorded on the review record's anomalies. */
   lineage: string
   /** The preset to mount; already overlay-resolved by the caller. */
@@ -1170,7 +1232,34 @@ export async function runReplayTask(
     status: 'running',
     startedAt: new Date().toISOString(),
   }
-  await env.task.startRunIn(storeId, run, env.actor)
+  // The replay's content binding comes from the pre-check the caller carried
+  // (`ReplayRunInit.providers`), not from a fresh discovery here: the identities
+  // recorded are the ones the replay was admitted under, under the overlay's own
+  // table. Materialized and read back before the record is written, exactly as in
+  // the cascade — a criteria replay (no worker) binds the same way, so the run's
+  // record cannot mean two different things depending on `spawn`.
+  let contentBinding: RunProviderBinding | undefined
+  try {
+    contentBinding = await bindRunProviders({
+      storeId,
+      runId: run.runId,
+      manifest: init.manifest,
+      ...(init.providers === undefined ? {} : { providers: init.providers }),
+      ...(env.runBindingRoot === undefined ? {} : { root: env.runBindingRoot }),
+    })
+  } catch (error) {
+    const reason = `content binding failed: ${message(error)}`
+    await env.task.startRunIn(storeId, run, env.actor)
+    await env.task.markRunStatusIn(storeId, task.taskId, run.runId, 'failed', env.actor, { reason })
+    await recordTerminalReview(env, storeId, task.taskId, 'failed', { run, localizedCause: reason, anomalies })
+    return {
+      taskId: task.taskId,
+      runId: run.runId,
+      status: 'failed',
+      durationMs: await runDurationMs(env, storeId, run),
+    }
+  }
+  await env.task.startRunIn(storeId, contentBinding === undefined ? run : { ...run, providerBinding: contentBinding }, env.actor)
 
   const finish = async (status: 'verified' | 'failed' | 'cancelled', criteria?: ReviewCriterion[], evidenceId?: string): Promise<ReplayRunOutcome> => ({
     taskId: task.taskId,
@@ -1219,12 +1308,16 @@ export async function runReplayTask(
   try {
     await assertPresetUsable(env, init.manifest, init.agentPreset)
     const permissionPreset = permissionFor(env, init.manifest)
+    // The overlay's roots stay in front (a candidate skill wins a same-name
+    // collision for this worker), and the run's own snapshot follows: what the
+    // replayed worker loads is bound content in both cases.
+    const roots = skillRootsForRun(init.skillRoots ?? [], contentBinding)
     handle = await env.spawn({
       sessionId,
       name: task.objective.trim().replace(/\s+/g, ' ').slice(0, 40) || `replay-${task.taskId}`,
       prompt: init.prompt ?? '',
       ...(init.contract === undefined ? {} : { contract: init.contract }),
-      grant: { ...(await authorizedGrant(env, init.manifest)), ...(init.skillRoots === undefined ? {} : { skillRoots: [...init.skillRoots] }) },
+      grant: await authorizedGrant(env, init.manifest, roots),
       ...(init.agentPreset === undefined ? {} : { agentPreset: init.agentPreset }),
       ...(permissionPreset === undefined ? {} : { permissionPreset }),
       ...(signal === undefined ? {} : { signal }),

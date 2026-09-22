@@ -1,0 +1,23 @@
+{
+  "contractVersion": 1,
+  "type": "knowledge",
+  "source": "docs/superpowers/ball-dev-guide.md (Buckyball Ball development guide) and the ctest semantics of the touched Ball",
+  "scope": "Ball-level semantic alignment across ctest, BEMU, compiler, MLIR, RTL and UVM; not chip-level integration, not workload design",
+  "content": {
+    "skillMdSha256": "412c58c716906d67668497b5ffe5407c4f9861bd807c4b96be6e43d0625df164",
+    "resources": [
+      {
+        "path": "references/contract-checklist.md",
+        "sha256": "3e6c086168338923e936c64860714d81321380af59e9a4038e9e0aa4a74f4c7a"
+      },
+      {
+        "path": "references/illegal-input-table.md",
+        "sha256": "b4a017f856b54f13dcd91551f39d5c2c841118960e8df4b4ecbf4f247c15a35d"
+      }
+    ]
+  },
+  "contentCheck": {
+    "kind": "command",
+    "command": "grep -q 'Illegal-input table' references/illegal-input-table.md"
+  }
+}

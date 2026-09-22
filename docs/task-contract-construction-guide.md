@@ -45,6 +45,8 @@ T1 在 task 包中形成唯一的规范化契约数据定义；工具输入适�
 
 S1-V 切片 2（2026-09-21）另在 AC 上加入 `protectedInputs`（受保护验收输入）：准入固定 `{ path, sha256 }`、判决前复检，当前事实、源码/测试锚与边界见主 guide §5.7；它不改变 T2/T3 的审核范围。
 
+S1-C（2026-09-22）把"Task 只提需求、Run 固定实现"落成机制：`requiredCapabilities` 仍是契约里的需求名（不写死 Skill），provider 预检、类型化侧车契约与 run 级内容绑定（`TaskRun.providerBinding`：registry 修订、provider 角色与内容摘要、preset/MCP 身份）见主 guide §5.8；它不改变本文件的契约字段与审核范围。
+
 **T1 已实现部分（2026-09-21）**：数据定义 `task/src/contract.ts:TaskContract`（含 `contractVersion`、`assumptions`、`constraints`），唯一规范化与校验入口 `task-runtime/src/normalize.ts:normalizeDecomposition`（三层闭合字段集、默认值、criterion id 固定、未知版本拒绝），身份算法 `canonicalize`/`contractDigest`/`decompositionDigest`，批次准入记录 `TaskDecomposed.admission`（`proposalDigest` + `AdmissionContext`），以及普通分解/replay/root 三个入口的持久化与共用结构校验（`task-runtime/src/admission.ts:contractDefects`）。下表的 `contractVersion`、`assumptions`、`constraints`、`requiredCapabilities`、`dependsOn`、输入/证据、复合声明、分解意图各行的**当前实现状态**以主 guide §5.6 与建设计划 T1 节为准；本节其余描述（生成审核、提案状态机、预算上下文指纹）仍属 T2/T3 设计。
 
 保留当前字段词汇，新增字段明确版本。以下是目标语义，不是当前工具参数示例：

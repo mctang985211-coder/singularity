@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 // The real upstream token fold, not a copy of it: the same unit the deployment's
@@ -6,6 +6,7 @@ import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-se
 import { tokenUsageProjectionDefinition } from '../../../../thirdparty/deepseek-harness/packages/llm/token-meter/src/usage-projection.ts'
 import type { EvidenceBundle, ReviewRecord, VerificationResult } from '../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
+import { pinSkillHome, releaseSkillHomes } from '../../task-runtime/tests/support/skill-roots.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 
 /**
@@ -28,6 +29,8 @@ import { TaskRuntime } from '../../task-runtime/src/index.ts'
 
 const ROOT_SESSION = 's-root'
 const STORE = rootTaskStoreId(ROOT_SESSION)
+
+afterEach(releaseSkillHomes)
 
 /** The worker's log: the shape a real session writes, including one tool failure and one approval. */
 const WORKER_LOG = [
@@ -145,6 +148,9 @@ function harness() {
 
 describe('review record metrics and dimensions, end to end', () => {
   it('persists the dimensions and metrics inside the appended ReviewRecorded event', async () => {
+    // The granted `ball-align` has to be discoverable from the worker's own
+    // roots: admission checks that before it mints a child (S1-C).
+    pinSkillHome('ball-align')
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await h.runtime.createRootTask(
       STORE,

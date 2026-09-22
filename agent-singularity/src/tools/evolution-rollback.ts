@@ -72,7 +72,7 @@ export function defineEvolutionRollbackTool(ctx: Context) {
         let runtimeNote = ''
         if (rolledback.capability !== undefined) {
           try {
-            ctx.taskRuntime.applyCapabilityRow(rolledback.capability.name, rolledback.capability.entry)
+            await ctx.taskRuntime.applyCapabilityRow(rolledback.capability.name, rolledback.capability.entry)
             runtimeNote = rolledback.capability.entry === null
               ? '\nruntime registry row removed — new admissions in this process no longer see it'
               : '\nruntime registry row restored — new admissions in this process use the champion entry now'

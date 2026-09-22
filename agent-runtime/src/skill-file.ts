@@ -128,17 +128,32 @@ async function skillRoots(cwd: string | undefined): Promise<string[]> {
 }
 
 /**
+ * Locate the `SKILL.md` a granted skill name refers to under an explicit root
+ * list, in the order given. The one search loop every discovery path shares:
+ * {@link findSkillFile} runs it over a worker's own roots, and the task
+ * runtime's provider pre-check runs it over the same roots with the replay
+ * overlay's extra roots in front, so admission asks the question the spawn
+ * will answer instead of restating the search.
+ * @param roots - skill roots, searched in order.
+ * @param name - the skill name a capability declares.
+ * @returns the absolute path, or undefined when no root holds that skill.
+ */
+export async function findSkillFileIn(roots: readonly string[], name: string): Promise<string | undefined> {
+  for (const root of roots) {
+    const file = await skillFileIn(root, name)
+    if (file !== undefined) return file
+  }
+  return undefined
+}
+
+/**
  * Locate the `SKILL.md` a granted skill name refers to.
  * @param name - the skill name a capability declares.
  * @param cwd - the worker's working directory; project roots are searched upward from it.
  * @returns the absolute path, or undefined when no root holds that skill.
  */
 export async function findSkillFile(name: string, cwd: string | undefined): Promise<string | undefined> {
-  for (const root of await skillRoots(cwd)) {
-    const file = await skillFileIn(root, name)
-    if (file !== undefined) return file
-  }
-  return undefined
+  return findSkillFileIn(await skillRoots(cwd), name)
 }
 
 /**

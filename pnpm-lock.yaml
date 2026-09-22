@@ -358,13 +358,13 @@ importers:
 
   task-runtime:
     dependencies:
+      '@dangosys/dsh-singularity-agent-runtime':
+        specifier: workspace:*
+        version: link:../agent-runtime
       '@dangosys/dsh-singularity-task':
         specifier: workspace:*
         version: link:../task
     devDependencies:
-      '@dangosys/dsh-singularity-agent-runtime':
-        specifier: link:../agent-runtime
-        version: link:../agent-runtime
       '@dangosys/dsh-singularity-graphs':
         specifier: link:../graphs
         version: link:../graphs

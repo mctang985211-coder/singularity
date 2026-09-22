@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest'
-import type { TaskInstance, TaskRun } from '../../../task/src/types.ts'
+import type { RunProviderBinding, TaskInstance, TaskRun } from '../../../task/src/types.ts'
 import { buildHandoff, renderWorkerPrompt } from '../../src/handoff.ts'
+import { renderWorkerContract } from '../../src/contract.ts'
 
 const NOW = '2026-09-16T00:00:00.000Z'
 
@@ -271,6 +272,76 @@ describe('renderWorkerPrompt', () => {
         'and a changed or missing input fails the criterion, naming the path.',
       )
       expect(prompt).toContain('- Where a criterion lists a command, make that command exit 0 in the checkout.')
+    }
+  })
+})
+
+/**
+ * The run's binding in the two worker-facing renders (S1-C item 4): the spawn
+ * prompt and the contract block must say the same thing about the same run, and
+ * a run without a binding must render exactly as it did before the field
+ * existed. Both texts come from one function, so this asserts the wiring, not
+ * the wording.
+ */
+describe('the chosen implementation in the spawn prompt and the contract block', () => {
+  const binding: RunProviderBinding = {
+    registryRevision: 'a'.repeat(64),
+    capabilities: ['design-ball', 'research'],
+    skills: [{
+      name: 'ball-align',
+      role: 'knowledge',
+      capabilities: ['design-ball'],
+      description: 'Align a Buckyball Ball across layers',
+      contractDigest: 'c'.repeat(64),
+      contentDigest: 'd'.repeat(64),
+      uncovered: [],
+    }],
+    mcpServers: [{ serverName: 'bbdev', templateDigest: 'e'.repeat(64) }],
+    snapshotRoot: '/dsh/singularity/run-bindings/sg-t-root/r-1/skills',
+  }
+
+  test('both views carry the section, byte-identical, from the one renderer', () => {
+    const handoff = buildHandoff({
+      parentTask: task({ taskId: 'root', parentTaskId: undefined, depth: 0, objective: 'ship the release' }),
+      parentRun: run(),
+      childTask: task(),
+      reason: 'split the work',
+      callerSessionId: 'root-session',
+    })
+
+    const prompt = renderWorkerPrompt(handoff, task(), { ...POLICY, binding })
+    const contract = renderWorkerContract(task(), handoff, binding)
+    for (const text of [prompt, contract]) {
+      expect(text).toContain('## Implementation chosen for this run')
+      expect(text).toContain('capability `design-ball` → skill `ball-align` [knowledge]')
+      expect(text).toContain('capability `research`: no provider skill')
+      expect(text).toContain('Align a Buckyball Ball across layers')
+      expect(text).toContain('`bbdev`')
+      expect(text).toContain('read with the `skill` tool')
+    }
+    // Neither view carries the body, and neither makes a readability claim it
+    // has not established.
+    expect(prompt).not.toContain('not readable')
+    expect(contract).not.toContain('not readable')
+  })
+
+  test('a run with no binding renders both views exactly as before', () => {
+    const handoff = buildHandoff({
+      parentTask: task({ taskId: 'root', parentTaskId: undefined, depth: 0, objective: 'ship the release' }),
+      parentRun: run(),
+      childTask: task(),
+      reason: 'split the work',
+      callerSessionId: 'root-session',
+    })
+
+    for (const text of [
+      renderWorkerPrompt(handoff, task(), POLICY),
+      renderWorkerContract(task(), handoff),
+      renderWorkerPrompt(handoff, task(), { ...POLICY, binding: undefined }),
+      renderWorkerContract(task(), handoff, undefined),
+    ]) {
+      expect(text).not.toContain('## Implementation chosen for this run')
+      expect(text).not.toContain('registry revision')
     }
   })
 })

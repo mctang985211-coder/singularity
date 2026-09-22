@@ -200,6 +200,111 @@ export function reaches(edges: readonly DependencyEdge[], start: TaskId, target:
 
 export type RunStatus = 'running' | 'blocked' | 'failed' | 'verified' | 'cancelled'
 
+/**
+ * One skill a run's grant was built from, as the admission-time provider
+ * pre-check judged it (S1-C item 4). The run *loaded* these bytes — the record
+ * is what lets a reader tell which version an execution ran against after the
+ * production files have moved on.
+ *
+ * Identity here is content identity, the same vocabulary the pre-check and the
+ * evolution ledger use: `contentDigest` covers the `SKILL.md` bytes plus every
+ * declared resource, `contractDigest` the sidecar the provider was validated
+ * against. Both are recomputable from the run's own snapshot, which is what
+ * makes "is this still the content the run was bound to?" a question a reader
+ * can answer instead of trust.
+ */
+export interface RunSkillBinding {
+  /** The skill name a capability granted; the snapshot directory is named after it. */
+  name: string
+  /** How the pre-check accepted it — execution provider, loadable knowledge, or plain guidance. */
+  role: 'execution-provider' | 'knowledge' | 'guidance'
+  /**
+   * The run's capability rows that grant this skill, sorted: the capability names
+   * a worker's summary groups its providers under, read from the record rather
+   * than re-derived from the store.
+   */
+  capabilities: string[]
+  /** The purpose the skill declares for itself, so a summary can say what the provider is for without reading its body. */
+  description: string
+  /** `skillContractDigest` of the sidecar the provider was validated against, or `null` for a skill that declares none. */
+  contractDigest: string | null
+  /** `skillContentDigest` of the bytes the run loaded. */
+  contentDigest: string
+  /**
+   * Entries of the source skill directory the identity does not cover (a
+   * guidance skill's extra files, a directory reads as `name/`). They are not in
+   * the snapshot either, so naming them is the honest statement of what this
+   * binding does not include; empty for a provider whose identity covers its
+   * whole directory.
+   */
+  uncovered: string[]
+}
+
+/**
+ * One MCP server a run's manifest granted: the registry key it resolved through
+ * and the identity of the template it resolved to. The resolved spec carries
+ * machine paths, so the template — the part a deployment edits — is what is
+ * digestible; `null` means the registry held no such key, which the spawn then
+ * refuses by name.
+ */
+export interface RunMcpServerBinding {
+  /** The server name the capability declared and the worker's tools are namespaced under. */
+  serverName: string
+  /** SHA-256 over the registry template the name resolved to, or `null` when the registry holds no such name. */
+  templateDigest: string | null
+}
+
+/**
+ * What one run resolved against and loaded (S1-C item 4): the registry revision
+ * the admission-time pre-check computed, the identity of every skill the run's
+ * grant was built from, the MCP servers its manifest granted, and — when the
+ * run loaded content at all — the run-scoped snapshot root those bytes were
+ * materialized into.
+ *
+ * Why it exists next to {@link TaskRun.capabilitySnapshot}: the snapshot names
+ * what was granted, this names the *bytes* that were granted. A capability row
+ * can be edited, a production `SKILL.md` rewritten, a skill replaced outright;
+ * a run that recorded only names cannot say which version it executed, and a
+ * reader cannot tell whether the content it can see now is the content the run
+ * was bound to.
+ *
+ * Absent members mean "not bound", never "bound to nothing": a run that loaded
+ * no skill carries an empty `skills` list and no `snapshotRoot`, and a field
+ * the record does not carry is never invented for it.
+ */
+export interface RunProviderBinding {
+  /**
+   * The registry revision the admission-time provider pre-check computed for
+   * this run's table and accepted providers (`provider-precheck.ts:registryRevision`):
+   * two runs citing the same revision resolved the same rows over the same
+   * declared provider content.
+   */
+  registryRevision: string
+  /**
+   * Every capability row this run's manifest matched, sorted — including a row
+   * that grants no skill (its tools are granted without a provider). The summary
+   * a worker reads lists its capabilities from here, so a node that wants to
+   * re-decompose or delegate never has to guess a capability name.
+   */
+  capabilities: string[]
+  /**
+   * One entry per skill the run's grant was built from, sorted by name. A skill
+   * two capabilities declare appears once, naming both.
+   */
+  skills: RunSkillBinding[]
+  /** The MCP servers the run's manifest granted, in first-declaration order. */
+  mcpServers: RunMcpServerBinding[]
+  /**
+   * Absolute path of this run's snapshot skill root — the directory whose
+   * `<name>/SKILL.md` entries the worker's skill layer registers — present
+   * exactly when the run materialized the content it was bound to. A reader
+   * re-checks the bytes there against this record's digests; a missing or
+   * changed snapshot is a refusal to report, never a silent fallback to the
+   * production path.
+   */
+  snapshotRoot?: string
+}
+
 export interface TaskRun {                          // (§5.3)
   runId: RunId
   taskId: TaskId
@@ -207,6 +312,13 @@ export interface TaskRun {                          // (§5.3)
   parentRunId?: RunId
   capabilitySnapshot: string[]
   agentPreset?: string
+  /**
+   * What this run was bound to and loaded (S1-C item 4). Absent on every run
+   * created before the field existed, and on a run whose caller assembled its
+   * plan without an admission-time pre-check: neither loaded content this build
+   * can vouch for, and neither is retroactively given a claim.
+   */
+  providerBinding?: RunProviderBinding
   artifacts: ArtifactRef[]
   verifierResults: VerificationResult[]
   status: RunStatus

@@ -16,7 +16,7 @@
 |---|---|---|---|---|---|
 | 1 | T1：统一规范化契约 | 已验收（2026-09-21，独立子代理复核） | Kimi Code 主代理（4 实现/测试子代理 + 1 只读复核子代理 + 1 复核修复子代理） | 见「T1：统一规范化契约 执行与验收记录」 | 契约规范化、持久化与普通分解/replay 一致性全部验收 |
 | 2 | S1-V 切片 2：验证器自测与输入身份 | 已验收（2026-09-22，独立子代理复核） | Kimi Code 主代理（2 实现子代理 + 1 集成子代理 + 1 渲染跟进子代理 + 1 只读复核子代理 + 1 复核修复子代理） | 见「S1-V 切片 2：验证器自测与输入身份 执行与验收记录」 | 正负样本执行、裁判版本与受保护输入校验完整；P4 组合验收回归通过（本轮复跑 26 项；全量集成 22 文件 / 145 项） |
-| 3 | S1-C：能力预检与版本绑定 | 待派发（下一项；前置已满足） | 待填 | 待填 | provider 预检、侧车契约、Run 绑定内容与旧版本读取完整；所有实际支持入口共用校验 |
+| 3 | S1-C：能力预检与版本绑定 | 已验收（2026-09-22，独立子代理复核） | Kimi Code 主代理（5 实现子代理 + 1 独立复核子代理 + 1 复核修复子代理） | 见「S1-C：能力预检与版本绑定 执行与验收记录」 | provider 预检、侧车契约、Run 绑定内容与旧版本读取完整；所有实际支持入口共用校验 |
 | 4 | A3：非阻塞运行与恢复 | 待前置 | 待填 | 待填 | 非阻塞推进、工作区写入归属、显式提交、取消/恢复、根预算与普通/replay 一致性完整 |
 | 5 | T2 + T3：契约审核与恢复（一个交付组） | 待前置 | 待填 | 待填 | off/all、审核持久化、批准后重检及崩溃恢复一起验收，不单独交付不可恢复的 all |
 | 6 | A0：真实根契约入口 | 待前置 | 待填 | 待填 | 根 intake 复用已完成审核/恢复协议；真实目标、独立 AC 与幂等激活完整 |
@@ -114,7 +114,7 @@ T1 已交付统一契约、身份与准入记录；T2/T3 后按唯一派发顺�
 |---|---|---|---|
 | S0 | 已完成，验证结果见文末 | 无 | 文档去漂移、术语统一、worker 能力查询 |
 | S1-V | 部分：verifier 返回边界校验、父级证据映射、独立父级组合检查与证据身份收紧已建（P4，切片 1+3）；切片 2（verifier 自测执行、裁判版本、受保护输入身份）已完成，见「S1-V 切片 2 执行与验收记录」；剩余 C3 假设满足性完整证明与证据来源真实性认证 | S0 | 可信验收、父级组合检查、有效产物引用 |
-| S1-C | 部分：多 preset 冲突已在解析期拒绝；单文件 Skill 候选的晋升链路内容身份已绑定（P2），生产基线已在 apply 前复检（P3） | S0 | provider 预检、skill 分类契约、run 解析快照 |
+| S1-C | 已完成（2026-09-22，见「S1-C 执行与验收记录」）：provider 预检、类型化侧车契约、统一校验四入口、run 内容绑定与 worker 摘要已交付；多 preset 冲突检查（解析期拒绝）与 P2/P3 内容身份保持；skill 晋升执行器单文件边界与效率实验（票后工作）如实记录 | S0 | provider 预检、skill 分类契约、run 解析快照 |
 | S2-E | 部分：已有手动 L4 工具与 raised 台账 | 与 A5 同组，前置见唯一顺序 | 缺口记录、诊断与候选交接、例外上报、结构化拒绝；候选执行由 A6 组接入 |
 | S2-R | 待建；已有 blocked/obligation 记录 | A5/S2-E、S4-E；与 A6/S3 同组 | agent 补齐后的系统恢复、版本/证据重检、预算与判决处置 |
 | S3 | 待建 | A5/S2-E、S4-E；与 A6/S2-R 同组 | L1 组合与 L2 生成，验证、人审应用、恢复一起交付 |
@@ -361,7 +361,29 @@ T1 已交付统一契约、身份与准入记录；T2/T3 后按唯一派发顺�
 
 验收：子任务都通过但组合接口错误，父必须拒绝；删掉父 AC 的证据映射必须拒绝；负样本可检出；修改验收脚本不能把错误产物变成 PASS；同名过期/失败证据不能满足要求已验证参考的依赖。自然语言蕴含留作有标记的启发式判断。
 
+## S1-C：能力预检与版本绑定 执行与验收记录（2026-09-22）
+
+| 字段 | 填写内容 |
+|---|---|
+| 状态、最近更新日期 | 已验收（2026-09-22；独立复核为 K3 主模型子代理只读 + 变异/反例复核，未由人类复核） |
+| 执行 agent / 任务链接 | Kimi Code 主代理指挥与验收；5 个实现子代理（①侧车契约 ②准入预检 ③Run 绑定与摘要 ④统一校验三入口 ⑤组合集成）+ 1 个独立复核子代理（K3 主模型）+ 1 个复核修复子代理（resumed ④） |
+| 开始日期 / 验收日期 | 2026-09-22 / 2026-09-22 |
+| 前置验收记录 | T1（`741dcb2`）与 S1-V 切片 2（交付时未提交）。派发方先逐项实跑复核 S1-V 切片 2 记录：`pnpm build` 通过；单测 28 文件 / 777 项、集成 22 文件 / 145 项全绿；`verify-persistence` 4 根匹配；`task`/`verifier`/`agent-singularity` tsc 0 错误，`task-runtime` 8 处既有 G9 诊断且全部落在其 diff 之外——与记录一致，随后代为建立基线提交 `c2912af`（仿 T1 由派发方提交 `741dcb2` 的模式），外层仅同步子模块指针，thirdparty 未跟踪内容保持原样。前置代码逐项源码核对：T1 的 `TaskContract`/`normalizeDecomposition`/`contractDefects`、S1-V 切片 2 的 `register`/`ready` 注册闸与 `{ testDouble: true }` 通道、`protectedInputs` 准入固定（`fixSpecProtectedInputs`）与判决前复检、P2/P3 的 `skillContent`/`skillBaseline` 身份与 `checkPromotion`/`checkProductionBaseline` 复检入口——前置成立，未发现阻断本票的前置缺陷 |
+| 修改前基线 | Singularity `c2912af`（S1-V 切片 2 交付提交，派发方代建），外层 harness `7fadd85151`（仅同步子模块指针） |
+| 交付版本 | 未提交（本票结束时代码与文档仍在工作区；提交由派发方决定） |
+| 验收项对应 | 不存在的 skill 预检拒绝 → `decomposeAndRun`/`replayTask`/`task_decompose` → `tests/integration/provider-precheck.spec.ts`（16 项）+ `task-runtime/tests/unit/provider-precheck.spec.ts`；未知执行 verifier / 工具声明不满足 → `validateSkillProvider` × 四入口 → `provider-precheck.spec.ts` + `tests/integration/provider-promotion.spec.ts`（verifier-unknown、tool-not-covered × 4 消费者）；冲突 preset → `resolveCapabilities`（普通分解/replay 共用）→ `capability.spec.ts:181,190`、`orchestrate.spec.ts:824,2385`（既有回归）；知识型可加载但不能关闭执行 GAP → 准入判决 + `executionProviders` + run 绑定 → `tests/integration/knowledge-provider.spec.ts`；替换 provider 不改 Task AC → capability apply（真实 `evolution_apply` + config.yml + 运行表镜像）→ `tests/integration/provider-version-binding.spec.ts` 测试 4；老 run 能定位旧内容 → run 绑定读回 / `readRunBinding` / `task_read` / 重入 → `tests/integration/worker-binding.spec.ts`（8 项）+ `provider-version-binding.spec.ts` 测试 1/2/3/5；子节点递归分解无需猜能力名 → 子 worker 合同块/prompt/`task_read` 摘要 + `capability_list` → `tests/integration/recursive-capability.spec.ts`；加载未选 skill 不扩大工具权限 → 真实 `skill` 工具 + grant 过滤 → `tests/integration/run-skill-loading.spec.ts`；统一校验入口（配置载入/provider 替换/候选晋升/准入预检，evolution_apply 不是唯一防线）→ 四消费者 × 5 非法形状同一 defect 码 → `provider-promotion.spec.ts` + `task-runtime/tests/unit/{provider-load,capability}.spec.ts`；Run 实际加载绑定版本、新版本 apply 不热替换在途 run、旧内容不可读明确拒绝恢复 → `run-binding.ts` + `orchestrate.ts:skillRootsForRun` → `worker-binding.spec.ts`、`provider-version-binding.spec.ts`；多文件资源完整身份、不支持形态显式拒绝 → `loadSkillSidecar` → `task-runtime/tests/unit/sidecar.spec.ts` + 集成篡改用例 |
+| 实际检查 | `pnpm build`（packages/singularity）通过；外层 `pnpm vitest run --project unit packages/singularity` 35 文件 / **917 项**通过（本票基线 28 / 777，新增 7 文件 / 140 项）；`--project integration packages/singularity` 29 文件 / **184 项**通过（基线 22 / 145，新增 7 文件 / 39 项）；`pnpm run verify-persistence` OK（4 个事件根指纹未变，新增 same-version 记录 `docs/persistence-changes/2026-09-22-run-provider-binding.md` + `.schema.json`，未 `--write`）；`git diff --check` 通过；各包 `pnpm exec tsc --noEmit`：`task` 0、`verifier` 0、`agent-singularity` 0、`agent-runtime` 2 处既有诊断（`agent-runtime.spec.ts:325`，本票未改该文件）、`task-runtime` 8 处既有 G9 诊断（行号均在本票 diff 之外） |
+| 跨入口/组合反例 | 各阶段先红后绿：阶段 1 三 spec 无法加载→65 项绿；阶段 2  stash 实现后集成 12/15 红→恢复绿；阶段 3 四处先红（预检 4 红、orchestrate 5 红、task_read 3 红、worker-binding 7 红）→绿；阶段 4 双闸禁用后单测 21 红 + 集成 3 红→恢复绿；复核修复轮 D1（闸禁用单测 3 红 + 集成 1 红）、D2（1 红）、D4（1 红）、D6（2 红）先红后绿。独立复核 9 组变异（decomposeAndRun/replayTask 预检置空、`executionProviders` 放行 knowledge、绑定复检旁路、`skillRootsForRun` 丢快照根、`checkPromotion` 跳校验、`providerLoadReport` 吞 defect、未知 verifier 放行、物化后字节变动检查跳过）全部转红并哈希证明还原；6 个自建反例中 5 个攻击失败（在途 run 不加载新字节、裸 `applyCapabilityRow` 被准入兜底、快照删除后 task_read 具名拒绝、多文件篡改被抓），1 个击穿（CE-A = D1，已修复）。合法正例保留：合法执行型全链路晋升、知识型加载、在途 run 正常判决、无侧车 guidance 准入。拒绝路径断言零落库/零 spawn/零 config 写入/零 applied/零审批燃烧，结论从 store/事件日志/worker skill 层实际注册内容读回 |
+| 独立复核 | K3 主模型子代理（只读复核 + 9 组变异 + 6 自建反例，临时文件删除、sha256 证明还原）：受支持路径未击穿；发现 D1（含侧车/资源的 skill 候选被校验为 execution-provider 并写入人审理由与台账，但执行器只写单文件——已修复为显式拒绝并回归）、D2（`readRunBinding` 不复检 guidance 快照根级条目——已修复，按"快照出现身份未覆盖条目"方向实现并记录理由）、D3（guide/计划未同步——本记录与文档同步即修复）、D4（`renderRunBinding` 声称渲染快照路径实际不渲染——已修复为实际渲染）、D5（`state.ts` 格式回退——已修复）；另由复核 CE-D 发现、派发方立项 D6（`applyCapabilityRow` 直调绕过统一校验——已修复为替换前必经 `precheckReplacedCapabilityRow`，移除路径不需校验）。修复后未再重跑该复核；修复项自带先红后绿证据 |
+| 文档同步 | 主 guide：审计基线行、§2.2 链路与预检/绑定 bullet、§2.3（1–3 已交付）、§2.4（侧车已落地）、§3 状态行、§4.1 Capability/Handoff 行、§4.2 G2/G6、§4.2 末段完成段、新增 §5.8（范围/源码锚/测试锚/未覆盖边界）；本计划：文首表第 3 行、S 表 S1-C 行、S1-C 节状态行、本记录；`execution-prompts/README.md`（状态与下一项）；`agent-prompt-contracts.md`（worker 摘要的真实渲染落点）；`docs/persistence-changes/2026-09-22-run-provider-binding.md` + `.schema.json`（same-version，根指纹未动，实跑确认） |
+| 模拟与未覆盖范围 | 未调用真实模型、未跑 BB 仿真、未部署、未推送；效率对比实验（固定任务集与真实模型）是票后工作，本票不凭 token 变化宣布更高效。配置载入只报告不硬 fail（载入视角无 worker checkout，硬闸在准入）；skill 晋升执行器只支持单文件 `SKILL.md`，携带侧车/资源的候选显式拒绝（目录整体晋升属后续票）；guidance 快照 uncovered 复检只覆盖新增方向；MCP 工具覆盖为前缀判定（server 真实工具表 spawn 才知道）；run 快照无 GC/配额（A3/S2-R 领域）；`templateDigest` 只记录渲染无回读复检；worker 仍可读到部署 catalog 未选 skill 正文（DSH 无 per-agent 隐藏，授权面未变且有回归）；预检视角不含仅 DSH 自带发现可见的 skill（fail-closed 误拒可能，模块文档已点名）；`contentCheck` 只识别携带引用，无 gate 执行；快照只保证字节=准入身份，不证明内容正确；集成 sessionPersistence 为内存假件（既有状况）；replay 报告在组合集成中为既有 fixture 捷径（文件头已注明） |
+| 未解决缺陷 / 阻塞 | 无未解决的本票缺陷。复核 D1–D5 与派发方立项 D6 均已修复并回归；范围外边界如实保留（见上行），不改称已完成 |
+| 最终验收结论 | 通过（依据：上述实跑命令、各阶段与修复轮先红后绿、独立复核报告及其缺陷修复回归；确认者：派发方主代理 K3 MAX + 独立复核子代理，未由人类验收） |
+| 下一项 | 唯一顺序第 4 项 A3（非阻塞运行与恢复）：前置 T1、S1-V 切片 2、S1-C 均已验收——前置满足。A3 可复用接口：`TaskRun.providerBinding`/`readRunBinding`（恢复入口快照复检，S2-R/A3 的恢复路径必须复用同一复检）、`precheckProviders`/`precheckReplacedCapabilityRow`、`RunProviderBinding` 持久化词汇；A3 不属本票，未开始 |
+
 ## S1-C：Task 只提需求，Run 固定实现
+
+状态：已完成（2026-09-22，执行与验收记录见上节；效率对比实验为票后工作）。以下为范围与验收的原始规定。
 
 落点：`task-runtime/src/capability.ts`、`task-runtime/src/index.ts`、`agent-runtime/src/grants.ts`、`task-runtime/src/handoff.ts`、`task/src/types.ts`。DSH skill 发现/加载服务继续复用。
 

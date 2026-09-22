@@ -30,6 +30,7 @@ import { TaskState } from './service/state.ts'
 
 export * from './types.ts'
 export * from './contract.ts'
+export * from './skill-contract.ts'
 export { TaskState } from './service/state.ts'
 
 declare module '@deepseek-ai/dsh-session/types' {

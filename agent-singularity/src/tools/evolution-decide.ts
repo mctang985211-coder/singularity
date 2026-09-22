@@ -2,7 +2,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
-import { EVOLUTION_DECISIONS } from '../evolution.ts'
+import { EVOLUTION_DECISIONS, renderProviderRoles } from '../evolution.ts'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
@@ -40,9 +40,10 @@ export function defineEvolutionDecideTool(ctx: Context) {
       if (proposal.status !== 'gated') {
         return `evolution_decide rejected: proposal ${proposal.proposalId} is ${proposal.status}; only a gated proposal can be decided`
       }
+      let promotion
       if (args.decision === 'PROMOTE') {
         try {
-          await ctx.evolution.checkPromotion(proposal.proposalId)
+          promotion = await ctx.evolution.checkPromotion(proposal.proposalId)
         } catch (error) {
           return `evolution_decide rejected: ${error instanceof Error ? error.message : String(error)}`
         }
@@ -59,6 +60,7 @@ export function defineEvolutionDecideTool(ctx: Context) {
         `gate: 5. Holdout performance acceptable? ${gate.holdoutPerformanceAcceptable}`,
         `gate: 6. Resource cost acceptable? ${gate.resourceCostAcceptable}`,
         `proposed decision: ${args.decision}${args.note === undefined ? '' : ` — ${args.note}`}`,
+        `this promotion would put in place: ${promotion === undefined || promotion.providers.length === 0 ? 'no provider skill' : renderProviderRoles(promotion.providers).join('; ')}`,
       ].join('\n')
       const outcome = await ctx.approval.request({
         agent,

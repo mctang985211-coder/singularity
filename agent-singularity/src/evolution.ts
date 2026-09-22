@@ -37,16 +37,56 @@
  * covers serial single-process calls and external changes between two calls —
  * it is not a cross-process lock and does not make apply atomic against a
  * writer that writes concurrently with it.
+ *
+ * Every promotion also passes the unified provider pre-check (S1-C item 3):
+ * `checkPromotion` — the one precheck `evolution_decide`, `evolution_apply`
+ * before it asks a human, and the service's own `decide` / `apply` call — reads
+ * a skill candidate's sandbox directory and a capability candidate's new row
+ * through `validateSkillProvider`, the validator admission, the config load and
+ * capability replacement run. So `evolution_apply` is not the only entry that
+ * knows what a usable provider is: an execution sidecar whose verifier is
+ * unregistered or whose required tools the deployment cannot grant is refused
+ * here, before an approval is burned and before anything is written, and a
+ * knowledge or guidance provider is recorded as exactly that. The roles are
+ * reported to the reviewer (`renderProviderRoles`) and carried on
+ * {@link ApplyOutcome.providers}; nothing about them is persisted, and the
+ * execution closure itself stays a property of the capability table.
+ *
+ * What a skill promotion promotes is one file: `writeProduction` writes the
+ * candidate's `SKILL.md`, so a candidate whose sandbox directory carries
+ * anything else — a `SKILL.contract.json`, a `references/` or `scripts/` tree,
+ * any other entry — is refused by name at the same precheck. That is a stated
+ * boundary of this executor, not a defect hidden behind it: the alternative
+ * would be a promotion that reports an execution-provider role, or a content
+ * identity covering files, for content production never receives. Multi-file
+ * skill candidates need an executor that writes them; until then they are
+ * refused before a human is asked.
  * @module dsh-singularity-agent
  */
 
-import { appendFile, cp, lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { appendFile, cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
+import {
+  capabilityToolQuery,
+  loadSkillSidecar,
+  optionalService,
+  precheckReplacedCapabilityRow,
+  readVerifiedFile,
+  registeredVerifierIds,
+  unlistableVerifierRefusal,
+  validateSkillProvider,
+  walkVerified,
+} from '@dangosys/dsh-singularity-task-runtime'
+import type {
+  CapabilityToolQuery,
+  SkillProviderCandidate,
+  SkillProviderVerdict,
+} from '@dangosys/dsh-singularity-task-runtime'
 import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
 import type { ReplayRelation, ReplayReport, ReplayVerdict, SkillContentIdentity } from './replay.ts'
 import { assertReplayPromotable, assertReplayReport, REPLAY_RELATIONS, REPLAY_VERDICTS } from './replay.ts'
@@ -381,6 +421,77 @@ export interface ApplyOutcome {
    * change takes effect without a restart.
    */
   capability?: { name: string; entry: CapabilityConfig | null }
+  /**
+   * What the promotion check validated about the providers this apply put in
+   * place ({@link PromotionCheck.providers}): the candidate skill of a skill
+   * apply, every skill a replaced/added capability row grants — each with the
+   * role it may be counted as, so a knowledge or guidance provider is reported
+   * as such rather than presented as the execution provider it is not. Empty
+   * when the target carries no provider. Not persisted: the ledger's `applied`
+   * record keeps its shape, and a run's own binding is where a selected role is
+   * recorded for real.
+   */
+  providers?: readonly PromotionProvider[]
+}
+
+/**
+ * One provider a promotion check judged, with the role it may be counted as.
+ * The role vocabulary is the validator's, not a second opinion: this value is
+ * read off a {@link SkillProviderVerdict} the unified pre-check produced.
+ */
+export interface PromotionProvider {
+  /** The skill name a capability grants (or the candidate skill's own name). */
+  readonly name: string
+  /**
+   * `execution-provider` is the only role that may close an execution gap
+   * (`executionProviders`); `knowledge` and `guidance` are loadable content a
+   * promotion may put in place, and neither ever counts as an execution
+   * provider — they are recorded, not upgraded.
+   */
+  readonly role: 'execution-provider' | 'knowledge' | 'guidance'
+  /** {@link skillContentDigest} of the bytes the verdict was taken from. */
+  readonly contentDigest: string
+  /** Execution providers only: the declared verifier ref, proven registered against the live vocabulary. */
+  readonly verifierRef?: string
+}
+
+/**
+ * What a promotion check validated (S1-C item 3). Returned by
+ * {@link EvolutionService.checkPromotion} so the entries that gate on it (the
+ * two tools and the service's own `decide` / `apply`) can report the roles
+ * instead of re-deriving them.
+ */
+export interface PromotionCheck {
+  /** One entry per provider this promotion puts in place; empty for a target type that carries none (`agent_preset`, `task_definition`, bookkeeping-only). */
+  readonly providers: readonly PromotionProvider[]
+}
+
+/** The task runtime as a promotion check reads it: the effective capability registry, resolved softly. */
+interface CapabilityRegistrySource {
+  listCapabilities?(): Readonly<Record<string, CapabilityConfig>>
+}
+
+/** One accepted verdict as a promotion report entry: the role, the content it was taken from, and the verifier ref only an execution provider has. */
+function promotionProviderOf(verdict: Extract<SkillProviderVerdict, { valid: true }>): PromotionProvider {
+  return {
+    name: verdict.name,
+    role: verdict.role,
+    contentDigest: verdict.contentDigest,
+    ...(verdict.role === 'execution-provider' ? { verifierRef: verdict.verifierRef } : {}),
+  }
+}
+
+/** One provider role per line, for a decision or apply report. */
+export function renderProviderRoles(providers: readonly PromotionProvider[]): string[] {
+  return providers.map(provider => {
+    if (provider.role === 'execution-provider') {
+      return `provider: skill \`${provider.name}\` → execution-provider (verifier ${provider.verifierRef})`
+    }
+    if (provider.role === 'knowledge') {
+      return `provider: skill \`${provider.name}\` → knowledge (loadable content; it does not close an execution gap)`
+    }
+    return `provider: skill \`${provider.name}\` → guidance (no sidecar; loadable guidance, not an execution provider)`
+  })
 }
 
 /** Folded view of one `replayed` record. */
@@ -516,70 +627,10 @@ function sha256Hex(bytes: Buffer): string {
 }
 
 /**
- * Where a component walk under a root stopped (P3 splits the walk from the
- * read so a caller that records "absent" can tell it apart from a path that
- * changed type).
- */
-type VerifiedWalk =
-  | { missing: false; abs: string }
-  | { missing: true; reason: 'no such file or directory' | 'a path component is not a directory' }
-
-/**
- * Walk `rel` under `root` one component at a time, refusing anything but real
- * entries: a symbolic link anywhere on the path, a non-regular entry where the
- * target should be, or a non-directory where a directory should be all fail
- * loudly, so a read can never land outside the root through a redirected path
- * even though the lexical path stays inside. A component that is simply absent
- * (ENOENT / ENOTDIR anywhere along the walk) is reported as `missing`, never
- * thrown — the ledger-root reader turns it into the loud error it always was,
- * and the production reader reads it as "the target does not exist". Node
- * standard fs only.
- */
-async function walkVerified(root: string, rel: string): Promise<VerifiedWalk> {
-  const abs = resolveWithin(root, rel)
-  const steps = relative(root, abs).split(sep)
-  let current = root
-  for (const step of steps) {
-    current = join(current, step)
-    let stat
-    try {
-      stat = await lstat(current)
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code
-      if (code === 'ENOENT' || code === 'ENOTDIR') {
-        return { missing: true, reason: code === 'ENOTDIR' ? 'a path component is not a directory' : 'no such file or directory' }
-      }
-      throw error
-    }
-    if (stat.isSymbolicLink()) {
-      throw new Error(`evolution: "${current}" is a symbolic link; a candidate path and its ancestors must be real entries inside the ledger root`)
-    }
-    if (current === abs ? !stat.isFile() : !stat.isDirectory()) {
-      throw new Error(`evolution: "${current}" is not a regular ${current === abs ? 'file' : 'directory'}`)
-    }
-  }
-  return { missing: false, abs }
-}
-
-/**
- * Read the file at `rel` under `root` as raw bytes, refusing anything but a
- * real regular file (P2): the entry itself and every ancestor between `root`
- * and it must not be a symbolic link. A missing file, a directory in the
- * file's place, or any other non-regular entry fails loudly. Node standard fs
- * only.
- */
-async function readVerifiedFile(root: string, rel: string): Promise<Buffer> {
-  const walked = await walkVerified(root, rel)
-  if (walked.missing) {
-    throw new Error(`evolution: "${rel}" is missing under ${root} (${walked.reason})`)
-  }
-  return readFile(walked.abs)
-}
-
-/**
  * The production skill target as it stands right now (P3): null when nothing
  * is there, otherwise the exact bytes plus their SHA-256. Read through the same
- * component walk as the ledger root, so a production path that became a
+ * component walk as the ledger root (`walkVerified`, shared with the skill
+ * sidecar loader in task-runtime), so a production path that became a
  * directory, or that is a symbolic link (the file itself or an ancestor), is a
  * conflict the caller refuses — never a silent follow.
  */
@@ -811,6 +862,26 @@ export function applyTargets(
     default:
       return []
   }
+}
+
+/**
+ * The entries of a candidate's own directory beyond the one file the skill
+ * executor writes — `SKILL.md`'s siblings, a directory read as `name/`, sorted.
+ * Empty for a single-file candidate, and also for a directory that cannot be
+ * listed: a candidate with nothing there is then refused by the validator with
+ * the defect its absence deserves (`skill-missing`), not by this boundary.
+ */
+async function unsupportedCandidateEntries(directory: string): Promise<string[]> {
+  let entries
+  try {
+    entries = await readdir(directory, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  return entries
+    .filter(entry => entry.name !== 'SKILL.md')
+    .map(entry => (entry.isDirectory() ? `${entry.name}/` : entry.name))
+    .sort()
 }
 
 /** All files under `dir` as `/`-joined relative paths, sorted for a deterministic ledger record. */
@@ -1166,11 +1237,18 @@ export class EvolutionService extends Service {
    * grant and immediately before the write: the production target must still be
    * the one prepare recorded. A direct service call therefore cannot bypass the
    * check the tool already ran before asking for approval.
+   *
+   * The promotion check (S1-C item 3) runs here too, immediately before the
+   * write and after the grant: a candidate whose provider role changed while the
+   * human was deciding (a sidecar that appeared in the sandbox, a capability row
+   * whose skill stopped being reachable, a verifier that was unregistered) is
+   * refused here, so no entry can write something a later admission would have
+   * refused.
    */
   async apply(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome> {
     const current = await this.assertNext(proposalId, 'applied')
     nonEmpty(approvalRef, 'approvalRef')
-    await this.checkPromotion(proposalId)
+    const promotion = await this.checkPromotion(proposalId)
     await this.checkProductionBaseline(proposalId)
     const outcome = await this.writeProduction(current, 'apply')
     await this.append({
@@ -1182,19 +1260,219 @@ export class EvolutionService extends Service {
       actor,
       at: new Date().toISOString(),
     })
-    return { ...outcome, proposal: await this.get(proposalId) }
+    return { ...outcome, providers: promotion.providers, proposal: await this.get(proposalId) }
   }
 
-  /** Preflight for tools before asking for approval; mutation methods repeat the check. */
-  async checkPromotion(proposalId: string): Promise<void> {
+  /**
+   * Preflight for tools before asking for approval; mutation methods repeat the
+   * check. Returns the providers the promotion would put in place, each with the
+   * role it may be counted as (an empty list for a target type that carries
+   * none), so the callers that already gate on this check can report them.
+   *
+   * Three checks run here, in this order, all of them shared with the service
+   * entry the tools ultimately call:
+   *
+   * 1. P2: the candidate bytes must still be the ones prepare recorded.
+   * 2. The replay gate (`assertReplayPromotable`).
+   * 3. S1-C item 3: the provider check. A skill candidate's sandbox directory and
+   *    a capability candidate's new row are judged by the same
+   *    {@link validateSkillProvider} admission, config load and capability
+   *    replacement use, so `evolution_apply` is not the only entry that knows
+   *    what a usable provider is — and a candidate carrying an execution
+   *    sidecar with an unregistered verifier or ungranted tools is refused here,
+   *    before a human is asked, before `decided` is recorded, and before
+   *    anything is written.
+   */
+  async checkPromotion(proposalId: string): Promise<PromotionCheck> {
     const proposal = await this.get(proposalId)
-    if (proposal.prepared?.mechanical !== true) return
+    if (proposal.prepared?.mechanical !== true) return { providers: [] }
     // P2: the candidate bytes must still be the ones prepare recorded. This is
     // the shared identity check — the tools run it before asking a human, and
     // decide(PROMOTE) / apply run it again on the service entry, so a change
     // that lands while the human is deciding is still refused.
     if (proposal.targetType === 'skill') await this.readVerifiedSkillCandidate(proposal)
     assertReplayPromotable(await this.readRecordedReplay(proposal))
+    return { providers: await this.assertProvidersPromotable(proposal) }
+  }
+
+  /**
+   * The promotion-time provider check (S1-C item 3): what the promotion would
+   * put in place, judged as a provider before it becomes production state.
+   *
+   * - `skill`: the materialized candidate directory
+   *   (`sandbox/<id>/skills/<name>/`) is read as a skill directory and judged
+   *   against the deployment's own sources — the effective capability table and
+   *   the registered verifier vocabulary. Nothing is discovered from a root: the
+   *   candidate is exactly the directory this promotion would write.
+   * - `capability`: the row as it will read after the replacement is checked by
+   *   the admission pre-check itself, over the table the replacement produces
+   *   and the harness process's own discovery roots (the row's own tool labels
+   *   expand through the same `resolveCapabilities` admission uses, which is what
+   *   makes them the covering set for a skill that declares this row). Whichever
+   *   skill the row grants must be reachable and usable from that viewpoint, or
+   *   the row is refused rather than written and refused later at admission.
+   * - every other target type carries no provider: nothing to judge.
+   *
+   * What the verdict means, in the vocabulary the whole system uses
+   * (`sidecar.ts`): only an execution sidecar whose verifier is registered and
+   * whose required tools its declared capabilities grant may be counted as an
+   * execution provider; knowledge and guidance are loadable and are recorded as
+   * such; anything else is a refusal naming every defect. None of it writes,
+   * and nothing is recorded before the caller's own transition.
+   */
+  private async assertProvidersPromotable(proposal: EvolutionProposal): Promise<PromotionProvider[]> {
+    if (proposal.targetType === 'skill') return [await this.assertSkillCandidateProvider(proposal)]
+    if (proposal.targetType === 'capability') return this.assertCapabilityRowProviders(proposal)
+    return []
+  }
+
+  /**
+   * The candidate skill's provider verdict, taken from the directory the
+   * promotion would write — plus the executor boundary this promotion cannot
+   * cross.
+   *
+   * The boundary: `writeProduction` promotes a **single `SKILL.md`**, so a
+   * candidate whose directory carries anything else (`SKILL.contract.json`, a
+   * `references/` or `scripts/` tree, any other file) is refused here by name.
+   * The executor is not being extended to multi-file candidates; what is being
+   * refused is the promotion of a candidate whose declaration or resources
+   * production would never receive — a promotion that reported an
+   * `execution-provider` role (or a content identity covering files nobody
+   * wrote) for content that does not exist is exactly the false record this
+   * refusal prevents.
+   *
+   * Both the shape and the declaration are named when both are wrong: the
+   * validator's own defects stay in the message with their codes, so this entry
+   * reports the same defect vocabulary admission, config load and capability
+   * replacement report for the same directory.
+   */
+  private async assertSkillCandidateProvider(proposal: EvolutionProposal): Promise<PromotionProvider> {
+    const sandbox = proposal.prepared?.sandbox
+    const { name } = proposal.mutation as unknown as SkillMutation
+    if (sandbox == null) {
+      throw new Error(`evolution: proposal "${proposal.proposalId}" names no sandbox; the candidate's provider role cannot be judged`)
+    }
+    const directory = resolveWithin(this.root, `${sandbox}/skills/${name}`)
+    const unsupported = await unsupportedCandidateEntries(directory)
+    const verdict = await this.providerVerdict({ name, directory })
+    const defects = verdict.valid ? '' : verdict.defects.map(item => `${item.code}: ${item.detail}`).join('; ')
+    if (unsupported.length > 0) {
+      throw new Error(
+        `evolution: skill candidate "${name}" at ${directory} carries ${unsupported.map(entry => JSON.stringify(entry)).join(', ')} — ` +
+        'the skill executor promotes single-file SKILL.md candidates only, so a sidecar or resource this promotion would not write is ' +
+        `refused rather than silently dropped${verdict.valid ? '' : `; the declared provider is unusable too — ${defects}`}`,
+      )
+    }
+    if (!verdict.valid) {
+      throw new Error(
+        `evolution: skill candidate "${name}" at ${directory} is not a usable provider — ${defects}; ` +
+        'a promotion writes only a skill a worker could load and, when it claims execution, only one whose verifier and tools the deployment can grant',
+      )
+    }
+    return promotionProviderOf(verdict)
+  }
+
+  /**
+   * One provider candidate judged by the unified validator, with the sources the
+   * deployment actually has:
+   *
+   * - the effective capability table (the runtime registry — what a restart
+   *   re-reads from `config.yml`), asked through `capabilityToolQuery`, so a
+   *   capability's grant is read by the same resolution admission performs;
+   * - the registered verifier vocabulary, `ready()` first, fail-closed: an
+   *   execution sidecar whose ref cannot be proven registered against a live
+   *   registry is refused with the same named defect the admission pre-check
+   *   uses rather than assumed valid.
+   *
+   * A context with no runtime registry at all answers every capability question
+   * as unreadable instead of as "granting nothing": an execution provider is then
+   * refused (fail-closed), while knowledge and guidance — which make no tool
+   * claim — are judged by the same validator as everywhere else.
+   */
+  private async providerVerdict(candidate: SkillProviderCandidate): Promise<SkillProviderVerdict> {
+    const verifierRefs = await registeredVerifierIds(this.ctx)
+    if (verifierRefs === undefined && candidate.directory !== undefined) {
+      const loaded = await loadSkillSidecar(candidate.directory)
+      if (loaded.sidecar?.type === 'execution') {
+        return unlistableVerifierRefusal(candidate.name, candidate.directory, loaded.sidecar.verifier.ref)
+      }
+    }
+    return validateSkillProvider(candidate, {
+      verifierRefs: verifierRefs === undefined ? [] : [...verifierRefs],
+      capabilityTools: this.capabilityToolAnswer(),
+    })
+  }
+
+  /**
+   * The capability table this service judges providers against: the running
+   * registry, which is the table a restart re-reads from `config.yml` and the one
+   * `evolution_prepare` snapshots the champion from. Absent (no task-runtime in
+   * this context) means the table cannot be read — reported as an unreadable
+   * grant rather than mistaken for an empty table.
+   */
+  private capabilityToolAnswer(): CapabilityToolQuery {
+    const table = this.effectiveCapabilities()
+    if (table !== undefined) return capabilityToolQuery(table)
+    return () => ({
+      known: false,
+      reason:
+        'the effective capability registry cannot be read in this context (no task-runtime service), so the tools this ' +
+        'capability grants cannot be resolved',
+    })
+  }
+
+  /**
+   * The row a capability promotion would write, checked as the pre-check checks
+   * a row: the replacement is folded into the effective table, and every skill
+   * the new row grants is discovered from the harness process's own roots and
+   * judged by {@link validateSkillProvider} — `verifierRefs` from the live
+   * registry, the row's own tool labels expanding through `resolveCapabilities`
+   * as the covering set. A refusal names the capability, the skill and every
+   * defect, and nothing is written.
+   */
+  private async assertCapabilityRowProviders(proposal: EvolutionProposal): Promise<PromotionProvider[]> {
+    const { name, entry } = proposal.mutation as unknown as CapabilityMutation
+    const table = this.effectiveCapabilities()
+    if (table === undefined) {
+      throw new Error(
+        `evolution: capability "${name}" cannot be promoted: the effective capability registry cannot be read in this context ` +
+        '(no task-runtime service), so the providers the new row would grant cannot be judged',
+      )
+    }
+    const verifierRefs = await registeredVerifierIds(this.ctx)
+    // The one composition of the admission pre-check over a replaced row — the
+    // same function the runtime's own registry mirror asks through, so a row
+    // cannot be written here and refused there for a different reason.
+    const { precheck, refusals } = await precheckReplacedCapabilityRow({
+      name,
+      entry,
+      table,
+      // The harness process's own viewpoint: the deployment knows where its
+      // skills live, a worker's checkout is not knowable here — which is why
+      // this refusal is the hard gate and the load-time report is not.
+      view: { cwd: process.cwd() },
+      ...(verifierRefs === undefined ? {} : { verifierRefs }),
+    })
+    if (refusals.length > 0) {
+      throw new Error(
+        `evolution: capability "${name}" cannot be promoted — the row it would write grants providers that are not usable:\n` +
+        refusals.map(line => `- ${line}`).join('\n'),
+      )
+    }
+    return precheck.capabilities
+      .flatMap(row => row.skills)
+      .filter((verdict): verdict is Extract<SkillProviderVerdict, { valid: true }> => verdict.valid)
+      .map(verdict => promotionProviderOf(verdict))
+  }
+
+  /** The effective capability table, or `undefined` when this context cannot read one (no task-runtime service). */
+  private effectiveCapabilities(): Readonly<Record<string, CapabilityConfig>> | undefined {
+    const runtime = optionalService<CapabilityRegistrySource>(this.ctx, 'taskRuntime')
+    try {
+      return runtime?.listCapabilities?.()
+    } catch {
+      return undefined
+    }
   }
 
   /**

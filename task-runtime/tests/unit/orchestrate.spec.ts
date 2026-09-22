@@ -1,8 +1,11 @@
-import { describe, expect, test, vi } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { AcceptanceCriterion, EvidenceBundle, TaskEvent, TaskInstance, TaskRun, VerificationResult } from '../../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
 import { CompositeVerifier } from '../../../verifier/src/composite-verifier.ts'
+import { pinSkillHome, releaseSkillHomes } from '../support/skill-roots.ts'
 import type { Config, DecomposeSpec, ChildOutcome } from '../../src/index.ts'
 import { normalizeDecomposition } from '../../src/index.ts'
 import {
@@ -16,12 +19,15 @@ import {
   TaskRuntime,
   VerifierUnavailableError,
   escalationHint,
+  renderRunBinding,
   workerBaseline,
 } from '../../src/index.ts'
 import { WORKER_CONTRACT_OPEN } from '../../src/contract.ts'
 
 const ROOT_SESSION = 'root-session'
 const STORE = rootTaskStoreId(ROOT_SESSION)
+
+afterEach(releaseSkillHomes)
 
 interface StoredSession {
   readonly header: SessionHeader
@@ -739,6 +745,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   })
 
   test('spawn carries the grant its manifest resolves to: declared tools and skills, the worker baseline', async () => {
+    const home = pinSkillHome('ball-align')
     const h = harness({ config: { capabilities: { 'design-ball': { skills: ['ball-align'], tools: ['filesystem'] } } } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
@@ -751,6 +758,10 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
       capabilities: [{ capability: 'design-ball', tools: ['read', 'write', 'edit'], skills: ['ball-align'] }],
       baseline: workerBaseline(),
       keepPresetTools: false,
+      // The grant loads this run's own snapshot of the granted skill (S1-C), so
+      // the skill layer registers the admitted bytes rather than whatever stands
+      // at the production path when the worker starts.
+      skillRoots: [join(home, 'singularity', 'run-bindings', STORE, outcomes[0]!.runId!, 'skills')],
     })
     // The prompt's own needs are in the baseline the grant forwards.
     expect(h.spawned[0]!.grant!.baseline).toContain('bash')
@@ -794,6 +805,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   })
 
   test('the preset tool plane stays only for a capability that names its own preset', async () => {
+    pinSkillHome('verify')
     const h = harness({
       config: { capabilities: { 'verify-ball-functional': { skills: ['verify'], preset: 'bb-verify' } } },
     })
@@ -1300,6 +1312,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   })
 
   test('binds capability-granted MCP servers onto the spawn grant, resolved against the graph env', async () => {
+    pinSkillHome('check')
     const h = harness({ config: { capabilities: { 'check-ball-registration': { skills: ['check'], mcpServers: ['bbdev'] } } } })
     h.ctx.envBuilder = {
       store: {
@@ -1330,6 +1343,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   })
 
   test('a capability-granted MCP server with no env binding fails the spawn loudly and settles the run failed', async () => {
+    pinSkillHome('check')
     const h = harness({ config: { capabilities: { 'check-ball-registration': { skills: ['check'], mcpServers: ['bbdev'] } } } })
     // no envBuilder in the context: the binding resolves to undefined
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
@@ -1361,6 +1375,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   })
 
   test('a capability without MCP servers never consults the env binding', async () => {
+    pinSkillHome('ball-align')
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
@@ -1540,6 +1555,177 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
 
     expect((await h.task.runIn(STORE, rootRunId)).status).toBe('cancelled')
     expect(runEventKinds(h, rootRunId)).toEqual(['TaskStarted', 'TaskCancelled', 'ReviewRecorded'])
+  })
+})
+
+/**
+ * The content a run is bound to and loads (S1-C stage 3). The claim under test
+ * has three parts, and each is asserted where it can be observed: the *record*
+ * (read back from the store, not off the writer), the *bytes* (read from the
+ * snapshot directory the record names), and the *grant* (the spawn request the
+ * worker's skill layer is built from). A run that only recorded a digest while
+ * the worker still loaded a mutable production path would pass the first and
+ * fail the others.
+ */
+describe('the content a run is bound to (S1-C)', () => {
+  /** The production `SKILL.md` the pinned skill home holds, as the admission pre-check read it. */
+  function productionSkill(home: string, name = 'ball-align'): string {
+    return join(home, 'skills', name, 'SKILL.md')
+  }
+
+  test('a child run records the provider identity it was admitted under and loads its own snapshot of the bytes', async () => {
+    const home = pinSkillHome('ball-align')
+    const h = harness({ config: { capabilities: { 'design-ball': { skills: ['ball-align'] } } } })
+    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('ball child', { requiredCapabilities: ['design-ball'] })],
+    })
+
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
+    const run = await h.task.runIn(STORE, outcomes[0]!.runId!)
+    const binding = run.providerBinding
+    if (binding === undefined) throw new Error('the run recorded no provider binding')
+    expect(binding.registryRevision).toMatch(/^[0-9a-f]{64}$/)
+    expect(binding.mcpServers).toEqual([])
+    expect(binding.snapshotRoot).toBe(join(home, 'singularity', 'run-bindings', STORE, run.runId, 'skills'))
+    expect(binding.skills).toHaveLength(1)
+    const skill = binding.skills[0]!
+    expect(skill.name).toBe('ball-align')
+    expect(skill.role).toBe('guidance')
+    expect(skill.capabilities).toEqual(['design-ball'])
+    expect(skill.description).toContain('Align a Buckyball Ball')
+    expect(skill.contractDigest).toBeNull()
+    expect(skill.uncovered).toEqual([])
+    expect(skill.contentDigest).toMatch(/^[0-9a-f]{64}$/)
+
+    // The bytes: the snapshot holds the admitted content, not a copy made later.
+    const admitted = await readFile(productionSkill(home), 'utf8')
+    const snapshot = await readFile(join(binding.snapshotRoot!, 'ball-align', 'SKILL.md'), 'utf8')
+    expect(snapshot).toBe(admitted)
+    // And the record's own digests describe those bytes: re-reading the snapshot
+    // through the runtime reports nothing wrong with it, which is the check a
+    // later reader (and `task_read`) performs before trusting the record.
+    expect((await h.runtime.readRunBinding(binding))?.defects).toEqual([])
+
+    // The grant: the worker's skill layer is built from the snapshot root.
+    expect(h.spawned[0]!.grant!.skillRoots).toEqual([binding.snapshotRoot])
+
+    // The worker's summary is rendered from the same record, so the capability
+    // names a worker may need are in the prompt it starts from.
+    expect(h.spawned[0]!.prompt).toContain('design-ball')
+    expect(h.spawned[0]!.prompt).toContain('ball-align')
+    expect(h.spawned[0]!.contract).toContain('ball-align')
+  })
+
+  test('a production rewrite after the run was bound leaves the run\'s bytes alone, and the next run binds the new bytes', async () => {
+    const home = pinSkillHome('ball-align')
+    const h = harness({ config: { capabilities: { 'design-ball': { skills: ['ball-align'] } } } })
+    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const first = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('first ball child', { requiredCapabilities: ['design-ball'] })],
+    })
+    const firstBinding = (await h.task.runIn(STORE, first[0]!.runId!)).providerBinding!
+    const firstBytes = await readFile(join(firstBinding.snapshotRoot!, 'ball-align', 'SKILL.md'), 'utf8')
+
+    // The evolution-apply shape: the production file is rewritten under a
+    // running system. The bound run's snapshot is untouched…
+    await writeFile(productionSkill(home), '---\nname: ball-align\ndescription: rewritten purpose\n---\n\nnew body\n')
+    expect(await readFile(join(firstBinding.snapshotRoot!, 'ball-align', 'SKILL.md'), 'utf8')).toBe(firstBytes)
+
+    // …and a run admitted afterwards binds the new bytes, recording its own
+    // identity: a version change is a new run, never a hot swap of an old one.
+    // (A parent decomposes once, so the new admission belongs to its own store —
+    // the same deployment, the same pinned skill home.)
+    const next = harness({ config: { capabilities: { 'design-ball': { skills: ['ball-align'] } } } })
+    const secondRoot = await createRoot(next)
+    const second = await next.runtime.decomposeAndRun(STORE, secondRoot.taskId, secondRoot.runId, ROOT_SESSION, {
+      reason: 'split the work again',
+      children: [childSpec('second ball child', { requiredCapabilities: ['design-ball'] })],
+    })
+    expect(second[0]!.status).toBe('verified')
+    const secondBinding = (await next.task.runIn(STORE, second[0]!.runId!)).providerBinding!
+    expect(secondBinding.snapshotRoot).not.toBe(firstBinding.snapshotRoot)
+    expect(secondBinding.skills[0]!.contentDigest).not.toBe(firstBinding.skills[0]!.contentDigest)
+    expect(await readFile(join(secondBinding.snapshotRoot!, 'ball-align', 'SKILL.md'), 'utf8')).toContain('new body')
+    expect(next.spawned[0]!.grant!.skillRoots).toEqual([secondBinding.snapshotRoot])
+  })
+
+  test('a provider whose bytes moved between admission and the run fails that run by name, with no worker spawned', async () => {
+    const home = pinSkillHome('ball-align')
+    const h = harness({ config: { capabilities: { 'design-ball': { skills: ['ball-align'] } } } })
+    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    // The window is real: the batch is admitted once, and a later child's run
+    // starts only after its dependency settled. The production file moves inside
+    // that window, so the bytes the admission judged are gone by the time the
+    // second run would bind them.
+    h.setIdleBehavior(async sessionId => {
+      if (sessionId === h.spawned[0]?.sessionId) {
+        await writeFile(productionSkill(home), '---\nname: ball-align\ndescription: rewritten during the batch\n---\n\nreplaced\n')
+      }
+    })
+    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [
+        childSpec('first ball child', { requiredCapabilities: ['design-ball'] }),
+        childSpec('second ball child', { requiredCapabilities: ['design-ball'], dependsOn: [0] }),
+      ],
+    })
+
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'failed'])
+    // One worker: the second run never reached the spawn.
+    expect(h.spawned).toHaveLength(1)
+    const snapshot = await h.task.snapshotIn(STORE)
+    const failedRun = snapshot.runs.find(run => run.taskId === outcomes[1]!.taskId)!
+    expect(failedRun.status).toBe('failed')
+    // Nothing is bound by a run that loaded nothing: the failure is named, and
+    // the record does not claim content it never materialized.
+    expect(failedRun.providerBinding).toBeUndefined()
+    const record = snapshot.reviews.find(item => item.taskId === outcomes[1]!.taskId)!
+    expect(record.localizedCause).toContain('content binding failed')
+    expect(record.localizedCause).toContain('ball-align')
+    expect(record.localizedCause).toContain('SKILL.md')
+    expect(record.localizedCause).toContain('not the admitted content')
+    // Nothing spawned a worker, and nothing was left claiming to have loaded.
+    expect(snapshot.evidence.filter(item => item.taskRunId === failedRun.runId)).toEqual([])
+    expect(record.outcome).toBe('failed')
+  })
+
+  test('the worker summary groups every selected provider under the capability rows that grant it', async () => {
+    pinSkillHome('ball-align', 'check')
+    const h = harness({
+      config: {
+        capabilities: {
+          'design-ball': { skills: ['ball-align'] },
+          'check-ball-registration': { skills: ['check'] },
+          'research': { tools: ['filesystem'] },
+        },
+      },
+    })
+    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('ball child', { requiredCapabilities: ['design-ball', 'check-ball-registration', 'research'] })],
+    })
+
+    const binding = h.spawned[0] === undefined
+      ? undefined
+      : (await h.task.runIn(STORE, (await h.task.snapshotIn(STORE)).runs.find(item => item.taskId !== rootTaskId)!.runId)).providerBinding
+    const summary = renderRunBinding(binding)
+    // Every capability the run matched is named, including the row that carries
+    // no provider skill (its tools are granted without one); a worker never has
+    // to guess a capability name to decompose or delegate.
+    expect(summary).toContain('design-ball')
+    expect(summary).toContain('check-ball-registration')
+    expect(summary).toContain('research')
+    expect(summary).toContain('no provider skill')
+    expect(summary).toContain('ball-align')
+    expect(summary).toContain('check')
+    expect(summary).toContain('guidance')
+    // The summary is identity and purpose, never the body: the worker reads the
+    // text with the `skill` tool on demand.
+    expect(summary).toContain('skill` tool')
   })
 })
 
@@ -1980,6 +2166,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
   }
 
   test('a capability override applies for the replay run only, and the replay task stands apart from the champion', async () => {
+    pinSkillHome('verify')
     const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
     const { championTaskId, championRunId } = await champion(h)
     const before = await h.task.taskIn(STORE, championTaskId)
@@ -2035,6 +2222,37 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     expect(spawn.agentPreset).toBe('standard')
     expect(spawn.prompt).not.toContain('call `task_decompose` yourself')
     expect(spawn.prompt).toContain('[evolution-replay:p2]')
+  })
+
+  test('a spawning replay binds its own content: the overlay root stays first and the run\'s snapshot follows it', async () => {
+    const home = pinSkillHome('verify')
+    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const { championTaskId } = await champion(h)
+    // The candidate skill a skill replay passes: a sandbox directory the overlay
+    // root exposes, with no sidecar (loadable guidance for the row under test).
+    const sandbox = join(home, 'sandbox', 'p3', 'skills')
+    await mkdir(join(sandbox, 'verify'), { recursive: true })
+    await writeFile(join(sandbox, 'verify', 'SKILL.md'), '---\nname: verify\ndescription: candidate verify\n---\n\nCANDIDATE BODY\n')
+
+    const outcome = await h.runtime.replayTask(STORE, championTaskId, {
+      lineage: 'evolution-replay:binding',
+      overlay: { extraSkillRoots: [sandbox], capabilityOverrides: { research: { preset: 'standard', skills: ['verify'] } } },
+    }, ROOT_SESSION)
+
+    expect(outcome.status).toBe('verified')
+    const run = await h.task.runIn(STORE, outcome.runId)
+    const binding = run.providerBinding
+    if (binding === undefined) throw new Error('the replay run recorded no provider binding')
+    expect(binding.skills.map(skill => skill.name)).toEqual(['verify'])
+    expect(binding.skills[0]!.role).toBe('guidance')
+    // P2's order is preserved — the candidate is registered first — and the run's
+    // snapshot of what the pre-check judged follows it.
+    const spawn = h.spawned[h.spawned.length - 1]!
+    expect(spawn.grant!.skillRoots).toEqual([sandbox, binding.snapshotRoot])
+    // The snapshot holds the overlay's bytes, because the overlay is what this
+    // replay's admission judged.
+    expect(await readFile(join(binding.snapshotRoot!, 'verify', 'SKILL.md'), 'utf8')).toContain('CANDIDATE BODY')
+    expect((await h.runtime.readRunBinding(binding))?.defects).toEqual([])
   })
 
   test('the replay renders the champion\'s own declarations and persists the same two lists', async () => {
