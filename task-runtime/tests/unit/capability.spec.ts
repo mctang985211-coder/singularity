@@ -248,7 +248,7 @@ describe('tool labels', () => {
       'skill',
       'session_event_read', 'session_event_trace', 'session_trace',
       'ask_user_question',
-      'task_read', 'task_status', 'task_decompose', 'task_verify', 'capability_list',
+      'task_read', 'task_status', 'task_decompose', 'task_submit_result', 'task_cancel', 'task_verify', 'capability_list',
     ])
     expect(baseline).toEqual([...new Set(baseline)])
     // The task machinery is the tail, in the order WORKER_BASELINE_TOOLS declares.

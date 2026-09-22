@@ -124,7 +124,14 @@ async function harness(): Promise<Harness> {
       // The worker's whole effect on the world: it runs inside the checkout.
       await workerAction(checkout)
       return {
-        agent: { id: request.sessionId, cancel: () => {}, whenIdle: async () => {} },
+        agent: {
+          id: request.sessionId,
+          cancel: () => {},
+          // A live worker hands its result in before it goes idle (A3 §3.2): an
+          // idle session is not a completion, so a stub that only went idle would
+          // be stopped by the no-progress rule instead of being verified.
+          whenIdle: async () => { await runtime.submitResult(request.sessionId, { summary: 'worker finished (fixture auto-submit)' }) },
+        },
         dispose: async () => {},
       }
     },
@@ -182,6 +189,19 @@ function payloadOf<K extends TaskEvent['kind']>(h: Harness, kind: K, taskId: str
 /** The evidence bundles the store persisted under one run. */
 function evidenceFor(h: Harness, runId: string): EvidenceBundle[] {
   return taskEvents(h).flatMap(item => item.kind === 'EvidenceProduced' && item.runId === runId ? [item.payload.evidence] : [])
+}
+
+/**
+ * The one bundle a settled run left. Named as a check rather than asserted with
+ * `[0]!`, which would make a missing bundle read as a TypeError on undefined
+ * instead of as "this run produced no evidence, and why not is the question".
+ */
+function onlyBundle(h: Harness, runId: string): EvidenceBundle {
+  const bundles = evidenceFor(h, runId)
+  if (bundles.length !== 1) {
+    throw new Error(`run "${runId}" left ${bundles.length} evidence bundle(s); exactly one is expected`)
+  }
+  return bundles[0]!
 }
 
 /** The one verdict about one criterion across those bundles. */
@@ -252,10 +272,11 @@ async function createRoot(h: Harness): Promise<{ taskId: string; runId: string }
 /** Decompose the root into one child carrying exactly the given acceptance criteria. */
 async function decomposeToChild(h: Harness, criteria: readonly CriterionSpec[]): Promise<{ parentTaskId: string; childTaskId: string }> {
   const root = await createRoot(h)
-  await h.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT_SESSION, {
+  const { batchId } = await h.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT_SESSION, {
     reason: 'split the work',
     children: [{ objective: 'produce the product the acceptance check reads', acceptanceCriteria: [...criteria] }],
   })
+  await h.runtime.awaitBatch(STORE, batchId)
   return { parentTaskId: root.taskId, childTaskId: onlyChild(h, root.taskId) }
 }
 
@@ -590,8 +611,8 @@ describe('V2-3: the (verifierRef, version) index over the real store', () => {
     const { parentTaskId, childTaskId } = await decomposeToChild(h, [productCriterion()])
     const childRun = runOf(h, childTaskId)
     const parentRun = runOf(h, parentTaskId)
-    const judged = evidenceFor(h, childRun)[0]!
-    const combined = evidenceFor(h, parentRun)[0]!
+    const judged = onlyBundle(h, childRun)
+    const combined = onlyBundle(h, parentRun)
     // The two real judges that ran, read back off the persisted bundles.
     expect(judged.claims[0]).toMatchObject({ verifierId: 'command', verifierVersion: '1' })
     expect(combined.claims[0]).toMatchObject({ verifierId: 'composite', verifierVersion: '1' })

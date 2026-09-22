@@ -27,12 +27,14 @@ import { defineEvolutionReplayTool } from './tools/evolution-replay.ts'
 import { defineEvolutionRollbackTool } from './tools/evolution-rollback.ts'
 import { defineMarkReadyTool } from './tools/mark-ready.ts'
 import { defineSpawnTool } from './tools/spawn.ts'
+import { defineTaskCancelTool } from './tools/task-cancel.ts'
 import { defineTaskDecomposeTool } from './tools/task-decompose.ts'
 import { defineTaskDiagnoseTool } from './tools/task-diagnose.ts'
 import { defineTaskReadTool } from './tools/task-read.ts'
 import { defineTaskReviewAgentTool } from './tools/review-agent.ts'
 import { defineTaskReviewPackTool } from './tools/task-review-pack.ts'
 import { defineTaskStatusTool } from './tools/task-status.ts'
+import { defineTaskSubmitResultTool } from './tools/task-submit-result.ts'
 import { defineTaskVerifyTool } from './tools/task-verify.ts'
 
 export { HitlService } from './hitl.ts'
@@ -97,6 +99,8 @@ export class SingularityAgent extends Service {
     ctx.tools.register(defineCapabilityListTool(ctx))
     ctx.tools.register(defineTaskDecomposeTool(ctx))
     ctx.tools.register(defineTaskStatusTool(ctx))
+    ctx.tools.register(defineTaskSubmitResultTool(ctx))
+    ctx.tools.register(defineTaskCancelTool(ctx))
     ctx.tools.register(defineTaskVerifyTool(ctx))
     ctx.tools.register(defineTaskReviewPackTool(ctx))
     ctx.tools.register(defineTaskReviewAgentTool(ctx))

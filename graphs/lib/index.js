@@ -336,6 +336,8 @@ var GraphsService = class extends Service {
 				graphStoreId: graph.graphStoreId,
 				layoutStoreId: graph.layoutStoreId
 			};
+			const taskRuntime = this.ctx.get?.("taskRuntime") ?? this.ctx.taskRuntime;
+			if (taskRuntime !== void 0) await taskRuntime.cancelGraph(rootTaskStoreId(graph.rootSessionId), "graph removed");
 			await this.ctx.agentRuntime.stopGraph(scope);
 			const root = await this.ctx.agentRuntime.ensureRoot(graph.rootSessionId, {
 				graphStoreId: graph.graphStoreId,

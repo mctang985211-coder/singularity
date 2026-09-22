@@ -17,7 +17,7 @@
 | 1 | T1：统一规范化契约 | 已验收（2026-09-21，独立子代理复核） | Kimi Code 主代理（4 实现/测试子代理 + 1 只读复核子代理 + 1 复核修复子代理） | 见「T1：统一规范化契约 执行与验收记录」 | 契约规范化、持久化与普通分解/replay 一致性全部验收 |
 | 2 | S1-V 切片 2：验证器自测与输入身份 | 已验收（2026-09-22，独立子代理复核） | Kimi Code 主代理（2 实现子代理 + 1 集成子代理 + 1 渲染跟进子代理 + 1 只读复核子代理 + 1 复核修复子代理） | 见「S1-V 切片 2：验证器自测与输入身份 执行与验收记录」 | 正负样本执行、裁判版本与受保护输入校验完整；P4 组合验收回归通过（本轮复跑 26 项；全量集成 22 文件 / 145 项） |
 | 3 | S1-C：能力预检与版本绑定 | 已验收（2026-09-22，独立子代理复核） | Kimi Code 主代理（5 实现子代理 + 1 独立复核子代理 + 1 复核修复子代理） | 见「S1-C：能力预检与版本绑定 执行与验收记录」 | provider 预检、侧车契约、Run 绑定内容与旧版本读取完整；所有实际支持入口共用校验 |
-| 4 | A3：非阻塞运行与恢复 | 待前置 | 待填 | 待填 | 非阻塞推进、工作区写入归属、显式提交、取消/恢复、根预算与普通/replay 一致性完整 |
+| 4 | A3：非阻塞运行与恢复 | 已验收（2026-09-22，独立子代理复核 + 复核修复回归） | Kimi Code 主代理（5 阶段实现/测试子代理 + 1 独立复核子代理 + 1 复核修复子代理） | 见「A3：非阻塞运行与恢复 执行与验收记录」 | 非阻塞推进、工作区写入归属、显式提交、取消/恢复、根预算与普通/replay 一致性完整 |
 | 5 | T2 + T3：契约审核与恢复（一个交付组） | 待前置 | 待填 | 待填 | off/all、审核持久化、批准后重检及崩溃恢复一起验收，不单独交付不可恢复的 all |
 | 6 | A0：真实根契约入口 | 待前置 | 待填 | 待填 | 根 intake 复用已完成审核/恢复协议；真实目标、独立 AC 与幂等激活完整 |
 | 7 | A2：任务导航与合法动作 | 待前置 | 待填 | 待填 | 授权任务查询、合法动作、版本分页完整，覆盖 A0 未激活与 A3 等待状态 |
@@ -61,7 +61,7 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-先期确定性任务的派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。P1–P4 与 T1 已完成，S1-V 切片 2 见下方记录；下一项按文首唯一顺序为 S1-C。Task 主线合同见 [Task 自主构造建设指导](task-contract-construction-guide.md)，上下文/协作/主管主线见 [探索与自进化架构](exploration-evolution-architecture.md)及 [Prompt 合同](agent-prompt-contracts.md)。统一依赖顺序如下；每项完成必须同步本计划及主 guide，不能只更新测试或执行日志。
+先期确定性任务的派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。P1–P4 与 T1 已完成，S1-V 切片 2、S1-C 与 A3 见下方记录；下一项按文首唯一顺序为 T2+T3 交付组。Task 主线合同见 [Task 自主构造建设指导](task-contract-construction-guide.md)，上下文/协作/主管主线见 [探索与自进化架构](exploration-evolution-architecture.md)及 [Prompt 合同](agent-prompt-contracts.md)。统一依赖顺序如下；每项完成必须同步本计划及主 guide，不能只更新测试或执行日志。
 
 | 任务 | 当前状态 | 前置 | 完成边界 |
 |---|---|---|---|
@@ -97,7 +97,7 @@ T1 已交付统一契约、身份与准入记录；T2/T3 后按唯一派发顺�
 | A0 真实根契约入口 | 待执行 | T1、S1-V 切片 2、T2/T3 组 | setup/graph 与业务根 Task 激活分离，真实目标与独立顶层 AC，审核/恢复完整，旧图不改历史 |
 | A1 全局上下文投影 | 待执行 | A0/A2、S1-C | root brief、贡献、决定/证据、来源版本和授权读取；压缩不丢契约 |
 | A2 Task 导航与合法动作 | 待执行 | A0/A3、S1-C | 可见域与结构化任务切片、revision/分页、owner/阻塞/allowedActions，不能看见即领取 |
-| A3 非阻塞批次与协调相位 | 待执行 | T1、S1-V 切片 2、S1-C | 统一迁移与串行推进、工作区写入归属、显式提交、根预算、取消/恢复及 replay 一致性 |
+| A3 非阻塞批次与协调相位 | 已完成（2026-09-22，见「A3 执行与验收记录」） | T1、S1-V 切片 2、S1-C | 统一迁移与串行推进、工作区写入归属、显式提交、根预算、取消/恢复及 replay 一致性 |
 | A4 父子澄清 | 待执行 | A1/A2/A3 | 问题身份与父子授权、持久投递；逐级问答保留批次与写闸；入箱/消费/处理分离，claim 后故障可恢复；未知回答及部分回答不解除全部阻塞 |
 | A5 因果诊断与主管触发 | 待执行，与 S2-E 同组 | A1/A2/A4、S4-E | 真实依赖/证据下钻、可验证引用、事件去重/预算、持久候选交接；不提前执行候选 |
 | A6 自主修复与恢复 | 待执行，与 S2-R/S3 同组 | A5/S2-E 组及 S4-E | agent 实现验证候选、人审、应用/恢复、版本重检与回滚；无人工补 Skill、坏候选被拒 |
@@ -380,6 +380,26 @@ T1 已交付统一契约、身份与准入记录；T2/T3 后按唯一派发顺�
 | 未解决缺陷 / 阻塞 | 无未解决的本票缺陷。复核 D1–D5 与派发方立项 D6 均已修复并回归；范围外边界如实保留（见上行），不改称已完成 |
 | 最终验收结论 | 通过（依据：上述实跑命令、各阶段与修复轮先红后绿、独立复核报告及其缺陷修复回归；确认者：派发方主代理 K3 MAX + 独立复核子代理，未由人类验收） |
 | 下一项 | 唯一顺序第 4 项 A3（非阻塞运行与恢复）：前置 T1、S1-V 切片 2、S1-C 均已验收——前置满足。A3 可复用接口：`TaskRun.providerBinding`/`readRunBinding`（恢复入口快照复检，S2-R/A3 的恢复路径必须复用同一复检）、`precheckProviders`/`precheckReplacedCapabilityRow`、`RunProviderBinding` 持久化词汇；A3 不属本票，未开始 |
+
+## A3：非阻塞运行与恢复 执行与验收记录（2026-09-22）
+
+| 字段 | 填写内容 |
+|---|---|
+| 状态、最近更新日期 | 已验收（2026-09-22；独立复核为子代理只读 + 变异探针复核，未由人类复核；复核与修复均用子代理默认模型） |
+| 执行 agent / 任务链接 | Kimi Code 主代理指挥与验收；实现按 5 阶段派子代理（①task 相位/事件/reducer 闸 ②workspace/gate/root-budget 三模块 ③编排重写与接线 ④工具与 prompt ⑤验收规格）；设计合同 `docs/2026-09-22-a3-coordination-design.md` 先经一轮独立评审（8 项缺陷修正后实施）；1 个独立复核子代理（只读 + 7 组变异探针 + 源码/复杂度审计 + tsc 基线对照）；1 个复核修复子代理（resumed 复核代理，7 项缺陷修复 + KISS 清理） |
+| 开始日期 / 验收日期 | 2026-09-22 / 2026-09-22 |
+| 前置验收记录 | T1（`741dcb2`）、S1-V 切片 2（`c2912af`）、S1-C（交付时未提交）。派发方先逐项实跑复核 S1-C 记录：`pnpm build` 通过；单测 35 文件 / 917 项、集成 29 文件 / 184 项全绿；`verify-persistence` 4 根匹配；各包 tsc 与记录一致——随后代为建立基线提交 `eaa024f`（仿 S1-V 由派发方提交 `c2912af` 的模式），外层 `853e49a` 仅同步子模块指针，其他无关修改保留。前置代码逐项源码核对：T1 的 `TaskContract`/`normalizeDecomposition`/admission 记录，S1-V 切片 2 的注册闸与受保护输入准入固定/判决前复检，S1-C 的 `TaskRun.providerBinding`/`readRunBinding`（本票恢复路径复用同一快照复检，未另建恢复专用读取）与 `precheckProviders`/`precheckReplacedCapabilityRow`——前置成立，未发现阻断本票的前置缺陷 |
+| 修改前基线 | Singularity `eaa024f`（S1-C 交付提交，派发方代建），外层 harness `853e49a`（仅同步子模块指针） |
+| 交付版本 | 未提交（本票结束时代码与文档仍在工作区；提交由派发方决定） |
+| 验收项对应 | 按设计合同 §4.3 逐行核实（独立复核 A 节 + 修复后回归）：分解立即返回且父可继续 → `task_decompose`/`decomposeAndRun` → `tests/integration/a3-coordination-loop.spec.ts:79`（真实 loop，反例先行）+ `coordination-tools.spec.ts` + `orchestrate.spec.ts:2966`；waiting idle 不验收 → `observeWorkerRun` 相位机 → `loop:152` + `orchestrate.spec:3014`；显式提交/父独立验收 → `submitResult`/`settleParentBatch` → `coordination-tools:96` + `orchestrate:3047/3082`；依赖串行 → `driveRounds`（沿用原 cascade 规则，未复制第二套）→ `orchestrate.spec:570`；取消/恢复/卸载完整 → `cancelBatch`/`cancelGraph`/dispose/`reconcileStore` → `loop:276/316/386` + `orchestrate:3314/3355`（嵌套取消/期限）+ `a3-recovery.spec.ts` 13 项（真实 JSONL 重开 6 崩溃点）+ `coordination-tools:145`；提交/派发去重 → 相位唯一性 + reducer 迁移闸 → `task/tests/unit/coordination.spec.ts` + `orchestrate:3047`；迟到写入被阻挡 → `ExecutionGate`（真 tools waterfall）→ `loop:197` + `gate.spec.ts`；跨批次/跨根工作区冲突 → `workspace.ts` → `a3-workspace:98/162/186/212` + `workspace.spec.ts` + verifier 排他正反例（`orchestrate.spec`）；普通/replay 同守状态规则 → `runReplayTask` → `a3-workspace:129/162` + `a3-recovery:882`（spawn:false 出生 submitted）；根预算不因新 Run/重启重置 → `root-budget.ts` → `root-budget.spec.ts` + `orchestrate:3130/3164/3190` + replay 共享同一根总额（`a3-workspace:162`）+ 崩溃重数不退款（`a3-recovery`）；无进展停止 → `RunProgressMarked` 相位机 → `loop:152` + `a3-workspace:147`；signal 转移 → 两阶段 `decomposeAndRun` → `orchestrate:2996` + `loop:79`；恢复复用 `readRunBinding` → `reconcileStore` → `a3-recovery:733`；旧无相位 run 派生 needs-recovery 不重跑 → `run-phase.ts` → `a3-recovery:629` |
+| 实际检查 | `pnpm build`（packages/singularity）通过且幂等（构建前后文件清单无差异）；外层 `pnpm vitest run --project unit packages/singularity` 39 文件 / **1086 项**通过（S1-C 基线 35 / 917）；`--project integration packages/singularity` 33 文件 / **212 项**通过（基线 29 / 184；A3 四部：loop 6、recovery 13、workspace 5、coordination-tools 4）；`pnpm run verify-persistence` OK（4 根指纹未移动；same-version 记录 `docs/persistence-changes/2026-09-22-a3-coordination-phases.md` + `.schema.json`，未 `--write`，机制与先例已在记录中说明）；`git diff --check` 两仓通过；各包 `tsc --noEmit`：task 0、verifier 0、agent-singularity 0、agent-runtime 2 处既有（`agent-runtime.spec.ts:325`，本票未改该文件）、task-runtime 3 处既有（独立复核用 `eaa024f` 检出走 `git archive` 对照基线 8 处，确认当前 3 处同源、本票净减 5 处）、graphs 6 处既有行列一致；以上全量为派发方主代理亲自复跑确认 |
+| 跨入口/组合反例 | 变异探针 7 组全部先红后还原（sha256 证明）：闸放行 waiting_children 写 → 单测+集成双红；无进展标记禁用（有界变体）→ 双红；settleSubmittedRun verifying 守卫移除 → 恢复 3 红；submitResult drain/提交顺序颠倒 → 红；maxRuns 检查移除 → 2 红；decomposeAndRun 改回同步等待 → 循环等待反例红；workspace claim 放行第二根 → 单测 7 红（双缺变体集成红）。复核发现 7 项缺陷均先红后绿修复：根预算×replay（"2 parentless = 不可解析"误拒 + replay 入口跳过检查 → owner 改按 `rootTaskStoreId` 持久绑定解析、三入口统一、`hasRootLimits` 区分未配置/空配置）；嵌套批次取消挂死（waiting 分支只等终态 → `awaitWaitingTerminal` 恢复 [终态｜期限｜批次 abort] 竞争，`cancelBatch` 级联下级批次，未启动子节点 cancelled-before-start）；registerDriver 只 warn（→ `failBatchFromRuntime`：父 failed + 诊断 + 通知 owner）；orchestrate.spec 未 await 的 rejects；reconcileStore 按 store 整体跳过（取证可达 → 改按 run/批次粒度跳过）；两处静默 catch（→ 具名 warn）；verifier 排他无测试且栈顶不符照常验证（→ 栈顶属别的 store 具名拒绝验证 + 正反例）。合法正例保留：正常分解/提交/验收/取消/恢复/重开全链路；拒绝路径断言零落库/零 spawn |
+| 独立复核 | 子代理默认模型（只读复核 + 7 组变异探针 + 源码审计 + 复杂度审计 + tsc 基线对照 + 全量实跑；342 文件 sha256 清单证明复核零残留）：结论**返工**——2 项验收级缺陷（根预算×replay 与合同相反、嵌套批次取消可挂死）+ 1 项低级（driver 异常只 warn）+ 9 项记录边界 + 复杂度删除清单。修复由 resumed 复核代理执行（每项先红后绿），派发方主代理亲自复跑全量并抽查修复点代码确认。注：首轮复核曾派 K3 主模型，完成 3 组探针后按派发方指示中止换模（其探针均以 sha256 验证还原，工作区零残留），最终复核由默认模型完整独立重做 |
+| 文档同步 | 主 guide：§3 状态行与 A3 运行可行性段、§4.1 父子交互行/预算行、§4.2 G12 行、新增 §5.9；本计划：文首表第 4 行、A 表 A3 行、入口段下一项、本记录；深入架构：§10 A3 行、§7.1/§7.2/§7.4 落地事实回写（未落地部分保持待建表述）；`agent-prompt-contracts.md`：§3/§4 模板（显式提交协议、非阻塞批次、task_cancel、写闸）与 §6 表三行、§7 矩阵一句；`execution-prompts/README.md` 状态行；`README.md` 与 `agent-singularity/README{,.zh}.md` 工具清单（21→23，task_decompose 语义更新）；持久化记录 `docs/persistence-changes/2026-09-22-a3-coordination-phases.{md,schema.json}`（same-version，根指纹未动，实跑确认）；设计合同 `docs/2026-09-22-a3-coordination-design.md`（含评审修正记录） |
+| 模拟与未覆盖范围 | 未调用真实模型（协调协议用真实 DSH loop + `ScriptedModelAdapter` 按 sessionId 分片）、未跑 BB 仿真、未部署、未推送；崩溃恢复以真实 JSONL 重开 store 验证（6 崩溃点 + 验证中断 3 例），其余路径沿用内存假件（既有状况）；run-stack 单测 harness 直构 TaskRuntime（Service.init 不执行），闸的拒绝断言只出现在真实 loop 套件（独立复核核查无假绿）。边界：A4 问答工具未建（挂载点字段已持久化无消费者）；子任务按依赖串行、无并行工作窃取；进程崩溃时在途 active worker run 不恢复现场（cancelled+诊断，session 续跑属 S2-R）；工作区归属不防御共享文件系统上的外部 unmanaged 写入者（含多机共享 DSH_HOME 时 pid 探测失效）；pid 复用可把陈旧标记误判为活（marker 尽力记录 starttime）；replayLineage 为进程内 Map（重启后补验证的 replay 终态 review 不带 lineage tag）；根 run 终态后根 session 被闸置 terminal（迟到写入拒绝的合同结果，对用户续聊是行为变化，A0/A4 领域）；`waitRunSettled` 2s 尾部窗口等的是同进程结算簿记（非写进程停止），该超时分支无测试；token/工具费用只有终态软统计（unknown 不记零）；真实模型质量实验为票后工作 |
+| 未解决缺陷 / 阻塞 | 无未解决的本票缺陷。独立复核 7 项缺陷均已修复并回归；范围外边界如实保留（见上行），不改称已完成 |
+| 最终验收结论 | 通过（依据：上述实跑命令与数量、变异探针与 7 项缺陷修复的先红后绿、独立复核报告及修复回归、派发方亲自复跑与抽查；确认者：派发方主代理 K3 MAX + 独立复核子代理，未由人类验收） |
+| 下一项 | 唯一顺序第 5 项 T2+T3 交付组（契约审核与恢复）：前置 T1、A3 均已验收——前置满足。可复用接口：`admitBatchIn` 原子提交、`batchId` 词汇（`b-<parentTaskId>`）、`awaitBatch`、executionPhase 迁移闸（审核等待是提案状态，新增相位须走同一持久化纪律）、根预算记账点（`checkRunStart`/`checkBatchAdmission`/`resolveRootBudget`）、`readRunBinding` 恢复复检、`reconcileStore` 按 run 粒度幂等；A3 的写闸/取消/恢复规则对 T2/T3 的审核等待态同样适用；T2/T3 不属本票，未开始 |
 
 ## S1-C：Task 只提需求，Run 固定实现
 

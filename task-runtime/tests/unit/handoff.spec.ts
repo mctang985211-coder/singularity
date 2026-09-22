@@ -200,7 +200,7 @@ describe('renderWorkerPrompt', () => {
     }
   })
 
-  test('tells both child branches to re-read their contract and the tree, and to self-check with task_verify', () => {
+  test('tells both child branches to re-read their contract and the tree, and how a run is submitted', () => {
     const handoff = buildHandoff({
       parentTask: task({ taskId: 'root', parentTaskId: undefined, depth: 0, objective: 'ship the release' }),
       parentRun: run(),
@@ -213,9 +213,15 @@ describe('renderWorkerPrompt', () => {
       const prompt = renderWorkerPrompt(handoff, task({ decompositionStatus }), POLICY)
       expect(prompt).toContain('re-read your own contract and run with `task_read`')
       expect(prompt).toContain('whole tree with `task_status`')
-      expect(prompt).toContain('`task_verify` re-runs the verifier as a self-check')
-      expect(prompt).toContain('it never changes task status')
-      expect(prompt).toContain('the final verdict stays with the verifier')
+      // The explicit submission protocol (A3 §3.9): the tool that ends the run,
+      // the fact that idle is not a completion, and the self-check's own limit.
+      expect(prompt).toContain('hand it in with `task_submit_result`')
+      expect(prompt).toContain('closes this run to further writes')
+      expect(prompt).toContain('Going idle is not a submission')
+      expect(prompt).toContain('stops the run under the no-progress budget')
+      expect(prompt).toContain('`task_verify` is only a self-check')
+      expect(prompt).toContain('never changes task status')
+      expect(prompt).toContain('does not stand in for a submission')
     }
   })
 

@@ -2,7 +2,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
-import type { ChildOutcome, DecomposeSpec } from '@dangosys/dsh-singularity-task-runtime'
+import type { DecomposeSpec } from '@dangosys/dsh-singularity-task-runtime'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
@@ -12,18 +12,13 @@ function sessionId(exec: ToolRunContext): string {
   return id
 }
 
-function renderOutcome(outcome: ChildOutcome): string {
-  const run = outcome.runId === undefined ? '' : ` run ${outcome.runId}`
-  const evidence = outcome.evidenceId === undefined ? '' : ` evidence ${outcome.evidenceId}`
-  return `- ${outcome.taskId}: ${outcome.status}${run}${evidence}`
-}
-
 export function defineTaskDecomposeTool(ctx: Context) {
   return defineTool({
     name: 'task_decompose',
     description:
-      'Decompose the caller\'s current task into child tasks, then run them one at a time in dependency order. ' +
-      'Each child is verified independently; only verified children count as done.',
+      'Decompose the caller\'s current task into child tasks. The batch is admitted atomically and the runtime then runs them ' +
+      'one at a time in dependency order; this call returns at admission and does not wait. Each child is verified ' +
+      'independently; only verified children count as done.',
     parameters: {
       reason: { type: 'string', required: true, description: 'Why this delegation is needed; recorded in each child handoff' },
       contractVersion: {
@@ -144,9 +139,9 @@ export function defineTaskDecomposeTool(ctx: Context) {
     execute: async (args, exec) => {
       const caller = sessionId(exec)
       const { storeId, task, run } = await ctx.taskRuntime.runForSession(caller)
-      let outcomes: ChildOutcome[]
+      let admitted: { batchId: string; childTaskIds: string[] }
       try {
-        outcomes = await ctx.taskRuntime.decomposeAndRun(
+        admitted = await ctx.taskRuntime.decomposeAndRun(
           storeId,
           task.taskId,
           run.runId,
@@ -161,12 +156,34 @@ export function defineTaskDecomposeTool(ctx: Context) {
           // become the runtime's input; what makes it harmless is that nothing
           // here reads the object first.
           args as unknown as DecomposeSpec,
-          { signal: exec.signal },
+          {
+            signal: exec.signal,
+            // The registration id of this call, so the batch's first drain does
+            // not wait for the call that is asking (A3 §3.3). A caller without
+            // one — a test double — drains without the exclusion.
+            ...(typeof exec.callId === 'string' && exec.callId.length > 0 ? { callId: String(exec.callId) } : {}),
+          },
         )
       } catch (error) {
         return `task_decompose rejected: ${error instanceof Error ? error.message : String(error)}`
       }
-      return [`decomposed ${task.taskId} into ${outcomes.length} children:`, ...outcomes.map(renderOutcome)].join('\n')
+      // The batch is admitted, not finished (A3 §3.1): the call returns as soon
+      // as the atomic commit landed, and the runtime drives the children from
+      // there. What the caller may do next is not a matter of taste — the phase
+      // it is in decides it — so the tool states the contract it is now under
+      // rather than leaving the model to infer it from a status line.
+      return [
+        `decomposed ${task.taskId} into ${admitted.childTaskIds.length} children (batch ${admitted.batchId}):`,
+        ...admitted.childTaskIds.map((taskId, index) => `- child ${index + 1}: ${taskId}`),
+        '',
+        `The runtime owns batch ${admitted.batchId} now: it starts the children one at a time in dependency order and settles this ` +
+        'task when they are all terminal. This call returns at admission and does not wait for the batch.',
+        `You are in phase waiting_children: read and query with \`task_read\`/\`task_status\` (and diagnose or inspect), or end the ` +
+        'batch with `task_cancel`. Writes, shell commands, another decomposition and a submission of your own are refused while the ' +
+        'children run — do not start work that would collide with theirs in the shared checkout.',
+        'You are notified when the batch settles; the runtime then submits this task for verification on your behalf, so an idle ' +
+        'session is not a completion and needs no submission from you.',
+      ].join('\n')
     },
   })
 }

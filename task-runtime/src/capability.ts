@@ -137,7 +137,9 @@ export const WORKER_BASELINE_LABELS: readonly string[] = [
  * frozen material fixes for every agent (`细化想法4.md:724-738`: `task_read`,
  * `task_decompose`, `task_status`, and the verifier tool this deployment names
  * `task_verify`) — L0 is the "every node, whatever it works on" layer, so a
- * worker keeps it whatever its capabilities declare.
+ * worker keeps it whatever its capabilities declare — plus the two A3
+ * coordination tools (`task_submit_result`, `task_cancel`) and
+ * `capability_list`, which have no label that could expand to them either.
  *
  * They are listed here individually, unlike the labels above, because these tools
  * are registered on the GLOBAL layer rather than a capability or preset plane
@@ -148,12 +150,20 @@ export const WORKER_BASELINE_LABELS: readonly string[] = [
  * Every entry cites the prompt or tool contract that needs it:
  * - `capability_list`: `task_decompose` asks callers to discover valid capability
  *   names before proposing children, including recursively spawned workers.
- * - `task_decompose` — "Call `task_decompose` instead, with a `reason` and the child task list" (`handoff.ts:87`),
+ * - `task_decompose` — "Call `task_decompose` instead, with a `reason` and the child task list" (`handoff.ts:100`),
  *   and for a `leaf` worker whose deployment runs with `Config.allowRuntimeDecomposition` on,
- *   the runtime-split rule (`handoff.ts:127`) that opens the same tool to it.
- * - `task_read` — "re-read your own contract and run with `task_read`" (`handoff.ts:140`).
- * - `task_status` — the same line: the whole tree with `task_status` (`handoff.ts:140`).
- * - `task_verify` — "Before you finish, `task_verify` re-runs the verifier as a self-check" (`handoff.ts:141`).
+ *   the runtime-split rule (`handoff.ts:145`) that opens the same tool to it.
+ * - `task_submit_result` — "When the work is done, hand it in with `task_submit_result`" (`handoff.ts:161`):
+ *   the submission is the only completion a worker can claim, so a worker without
+ *   the tool could never finish a run.
+ * - `task_read` — "re-read your own contract and run with `task_read`" (`handoff.ts:160`).
+ * - `task_status` — the same line: the whole tree with `task_status` (`handoff.ts:160`).
+ * - `task_verify` — "`task_verify` is only a self-check" (`handoff.ts:166`).
+ * - `task_cancel` — no prompt line asks for it: a run that decomposed holds a
+ *   batch of its own, and the protocol's only way to end that batch early is
+ *   this call (A3 §3.6). It is also the one write the execution gate keeps for
+ *   a run in `waiting_children` or `submitted` (`gate.ts:COORDINATION_ALLOWED`),
+ *   so the tool has to be on the surface of every run that can hold a batch.
  *
  * `graph_spawn` is deliberately NOT here, even though the deployment registers
  * it for the root: it reaches the graph without Task Admission and returns the
@@ -168,7 +178,15 @@ export const WORKER_BASELINE_LABELS: readonly string[] = [
  * admitted is the runtime's decision, not the tool plane's
  * (`Config.allowRuntimeDecomposition`, `index.ts:DEFAULT_ALLOW_RUNTIME_DECOMPOSITION`).
  */
-export const WORKER_BASELINE_TOOLS: readonly string[] = ['task_read', 'task_status', 'task_decompose', 'task_verify', 'capability_list']
+export const WORKER_BASELINE_TOOLS: readonly string[] = [
+  'task_read',
+  'task_status',
+  'task_decompose',
+  'task_submit_result',
+  'task_cancel',
+  'task_verify',
+  'capability_list',
+]
 
 /**
  * Every real tool name a capability worker keeps on top of what its

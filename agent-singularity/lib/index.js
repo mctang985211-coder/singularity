@@ -37,12 +37,12 @@ var HitlService = class extends Service {
 		ctx.on("user-questions/request", async (request, next) => {
 			if (request.questions.length !== 1) return next();
 			const question = request.questions[0];
-			const text$21 = await this.enqueue(request.agent?.id ?? "unknown", "ask", question.question, request.signal);
-			if (text$21.kind !== "ask") throw new Error("hitl: expected ask answer");
+			const text$23 = await this.enqueue(request.agent?.id ?? "unknown", "ask", question.question, request.signal);
+			if (text$23.kind !== "ask") throw new Error("hitl: expected ask answer");
 			return { answers: [{
 				id: question.id,
 				selected: [],
-				custom: text$21.text
+				custom: text$23.text
 			}] };
 		}, { prepend: true });
 		ctx.on("approval/request", async (request) => {
@@ -66,16 +66,16 @@ var HitlService = class extends Service {
 		waiter.resolve(answer);
 		this.ctx.emit("hitl/change", this.list());
 	}
-	enqueue(sessionId$16, kind, prompt, callerSignal) {
+	enqueue(sessionId$18, kind, prompt, callerSignal) {
 		const signal = callerSignal === void 0 ? this.lifetime.signal : AbortSignal.any([callerSignal, this.lifetime.signal]);
 		signal.throwIfAborted();
-		if (typeof sessionId$16 !== "string" || sessionId$16.length === 0) throw new Error("hitl: missing session id");
+		if (typeof sessionId$18 !== "string" || sessionId$18.length === 0) throw new Error("hitl: missing session id");
 		const id = randomUUID();
 		const pending = {
 			id,
 			kind,
 			prompt,
-			sessionId: sessionId$16,
+			sessionId: sessionId$18,
 			createdAt: Date.now()
 		};
 		const abort = () => {
@@ -228,14 +228,14 @@ var EscalationService = class extends Service {
 		return escalations;
 	}
 	async load() {
-		let text$21;
+		let text$23;
 		try {
-			text$21 = await readFile(this.file, "utf8");
+			text$23 = await readFile(this.file, "utf8");
 		} catch (error) {
 			if (error.code === "ENOENT") return;
 			throw error;
 		}
-		const records = text$21.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
+		const records = text$23.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
 			try {
 				return JSON.parse(line);
 			} catch {
@@ -480,9 +480,9 @@ function entryEnd(lines, head, regionEnd, headerIndent) {
 * task-runtime entry, more than one (the error names every matching line —
 * refusing to guess which one governs), or no capabilities mapping.
 */
-function locateCapabilityRow(text$21, name) {
-	const eol = text$21.includes("\r\n") ? "\r\n" : "\n";
-	const lines = text$21.split(eol);
+function locateCapabilityRow(text$23, name) {
+	const eol = text$23.includes("\r\n") ? "\r\n" : "\n";
+	const lines = text$23.split(eol);
 	const docEnd = lines.findIndex((line) => line.trim() === "---");
 	const doc1End = docEnd === -1 ? lines.length : docEnd;
 	const itemIndices = [];
@@ -554,8 +554,8 @@ function locateCapabilityRow(text$21, name) {
 * beats re-rendering the registry entry, whose schema fills default arrays the
 * source text never spelled out.
 */
-function readCapabilityRowSource(text$21, name) {
-	const located = locateCapabilityRow(text$21, name);
+function readCapabilityRowSource(text$23, name) {
+	const located = locateCapabilityRow(text$23, name);
 	if (located.rowStart === -1) return null;
 	return located.lines.slice(located.rowStart, located.rowStart + located.rowSpan).join("\n");
 }
@@ -565,8 +565,8 @@ function readCapabilityRowSource(text$21, name) {
 * row is gone, insert the lines where a new row would go. Every other byte of
 * the file is preserved, exactly as with `editCapabilityRow`.
 */
-function restoreCapabilityRowSource(text$21, name, source) {
-	const { lines, eol, capIndex, capIndent, capCollapsed, rowStart, rowSpan, insertAt } = locateCapabilityRow(text$21, name);
+function restoreCapabilityRowSource(text$23, name, source) {
+	const { lines, eol, capIndex, capIndent, capCollapsed, rowStart, rowSpan, insertAt } = locateCapabilityRow(text$23, name);
 	const sourceLines = source.replace(/\r?\n$/, "").split("\n");
 	if (rowStart !== -1) {
 		lines.splice(rowStart, rowSpan, ...sourceLines);
@@ -595,8 +595,8 @@ function restoreCapabilityRowSource(text$21, name, source) {
 * than one (the error names every matching line — refusing to guess which one
 * governs), no capabilities mapping, or a removal names no existing row.
 */
-function editCapabilityRow(text$21, name, entry) {
-	const { lines, eol, capIndex, capIndent, capCollapsed, regionEnd, rowStart, rowSpan, insertAt, entryIndent } = locateCapabilityRow(text$21, name);
+function editCapabilityRow(text$23, name, entry) {
+	const { lines, eol, capIndex, capIndent, capCollapsed, regionEnd, rowStart, rowSpan, insertAt, entryIndent } = locateCapabilityRow(text$23, name);
 	const rowLine = `${" ".repeat(rowStart === -1 ? entryIndent : indentOf(lines[rowStart]))}${keySpelling(name)}: ${flowEntry(entry ?? {})}`;
 	if (entry !== null && rowStart !== -1) {
 		lines.splice(rowStart, rowSpan, rowLine);
@@ -712,16 +712,16 @@ function assertOnlyKeys(value, allowed, field) {
 }
 /** A single safe path segment (one directory name): no separators, never `.`/`..`, never absolute. */
 function assertSegment(value, field) {
-	const text$21 = nonEmpty(value, field);
-	if (text$21 === "." || text$21 === ".." || text$21.includes("/") || text$21.includes("\\") || isAbsolute(text$21)) throw new Error(`evolution: ${field} must be a single safe path segment, got "${text$21}"`);
-	return text$21;
+	const text$23 = nonEmpty(value, field);
+	if (text$23 === "." || text$23 === ".." || text$23.includes("/") || text$23.includes("\\") || isAbsolute(text$23)) throw new Error(`evolution: ${field} must be a single safe path segment, got "${text$23}"`);
+	return text$23;
 }
 /** A clean relative path: never absolute (posix or drive-letter), no `\`, no empty / `.` / `..` segments. */
 function assertSandboxPath(value, field) {
-	const text$21 = nonEmpty(value, field);
-	if (isAbsolute(text$21) || /^[A-Za-z]:[\\/]/.test(text$21) || text$21.includes("\\") || text$21.includes("\0")) throw new Error(`evolution: ${field} must be a relative path inside the sandbox, got "${text$21}"`);
-	if (text$21.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) throw new Error(`evolution: ${field} must be a clean relative path (no empty / "." / ".." segments), got "${text$21}"`);
-	return text$21;
+	const text$23 = nonEmpty(value, field);
+	if (isAbsolute(text$23) || /^[A-Za-z]:[\\/]/.test(text$23) || text$23.includes("\\") || text$23.includes("\0")) throw new Error(`evolution: ${field} must be a relative path inside the sandbox, got "${text$23}"`);
+	if (text$23.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) throw new Error(`evolution: ${field} must be a clean relative path (no empty / "." / ".." segments), got "${text$23}"`);
+	return text$23;
 }
 /** Resolve `rel` under `base`, refusing anything that would land outside — the sandbox confinement belt. */
 function resolveWithin(base, rel) {
@@ -902,8 +902,8 @@ function championEntryYaml(name, entry) {
 	].join("\n");
 }
 /** Read back the champion capability snapshot: the single JSON line under the `#` header, keyed by the capability name. */
-function parseChampionEntry(text$21, name) {
-	const line = text$21.split("\n").map((item) => item.trim()).filter((item) => item.length > 0 && !item.startsWith("#")).at(-1);
+function parseChampionEntry(text$23, name) {
+	const line = text$23.split("\n").map((item) => item.trim()).filter((item) => item.length > 0 && !item.startsWith("#")).at(-1);
 	if (line === void 0) throw new Error("evolution: the champion capability snapshot carries no entry line");
 	const parsed = JSON.parse(line);
 	if (!isRecord$2(parsed) || !(name in parsed) || !isRecord$2(parsed[name])) throw new Error(`evolution: the champion capability snapshot does not hold an entry for "${name}"`);
@@ -1586,24 +1586,24 @@ var EvolutionService = class extends Service {
 			}
 			case "capability": {
 				const { name, entry } = proposal.mutation;
-				const text$21 = await readFile(this.configFile, "utf8");
+				const text$23 = await readFile(this.configFile, "utf8");
 				let row;
 				let edited;
 				if (direction === "apply") {
 					row = entry;
-					edited = editCapabilityRow(text$21, name, row);
+					edited = editCapabilityRow(text$23, name, row);
 				} else if (champion === "missing") {
 					row = null;
-					edited = editCapabilityRow(text$21, name, null);
+					edited = editCapabilityRow(text$23, name, null);
 				} else if (proposal.prepared?.championSource === "config-text") {
 					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = restoreCapabilityRowSource(text$21, name, await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.source.txt`), "utf8"));
+					edited = restoreCapabilityRowSource(text$23, name, await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.source.txt`), "utf8"));
 				} else if (proposal.prepared?.championSource === "code-default") {
 					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = editCapabilityRow(text$21, name, null);
+					edited = editCapabilityRow(text$23, name, null);
 				} else {
 					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = editCapabilityRow(text$21, name, row);
+					edited = editCapabilityRow(text$23, name, row);
 				}
 				await writeFile(this.configFile, edited.text, "utf8");
 				return {
@@ -1640,14 +1640,14 @@ var EvolutionService = class extends Service {
 	* apply would.
 	*/
 	async capabilityRowSource(name) {
-		let text$21;
+		let text$23;
 		try {
-			text$21 = await readFile(this.configFile, "utf8");
+			text$23 = await readFile(this.configFile, "utf8");
 		} catch (error) {
 			if (error.code === "ENOENT") return null;
 			throw error;
 		}
-		return readCapabilityRowSource(text$21, name);
+		return readCapabilityRowSource(text$23, name);
 	}
 	/**
 	* Early state-machine check so a wrong-state call reports the transition
@@ -1877,14 +1877,14 @@ var EvolutionService = class extends Service {
 		return proposals;
 	}
 	async load() {
-		let text$21;
+		let text$23;
 		try {
-			text$21 = await readFile(this.file, "utf8");
+			text$23 = await readFile(this.file, "utf8");
 		} catch (error) {
 			if (error.code === "ENOENT") return;
 			throw error;
 		}
-		const records = text$21.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
+		const records = text$23.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
 			try {
 				return JSON.parse(line);
 			} catch {
@@ -1911,7 +1911,7 @@ var EvolutionService = class extends Service {
 
 //#endregion
 //#region src/tools/approve.ts
-const text$20 = (value) => [{
+const text$22 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -1926,7 +1926,7 @@ function defineApproveTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$20(v)
+			render: (_a, v) => text$22(v)
 		},
 		execute: async (args, exec) => {
 			if (args.prompt.trim().length === 0) throw new Error("hitl_approve: prompt is empty");
@@ -1950,7 +1950,7 @@ function defineApproveTool(ctx) {
 
 //#endregion
 //#region src/tools/ask.ts
-const text$19 = (value) => [{
+const text$21 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -1966,7 +1966,7 @@ function defineAskTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$19(v)
+			render: (_a, v) => text$21(v)
 		},
 		execute: async (args, exec) => {
 			if (args.prompt.trim().length === 0) throw new Error("hitl_ask: prompt is empty");
@@ -1985,7 +1985,7 @@ function defineAskTool(ctx) {
 
 //#endregion
 //#region src/tools/capability-list.ts
-const text$18 = (value) => [{
+const text$20 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2044,7 +2044,7 @@ function defineCapabilityListTool(ctx) {
 		parameters: {},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$18(v)
+			render: (_a, v) => text$20(v)
 		},
 		execute: async (_args, exec) => {
 			const capabilities = ctx.taskRuntime.listCapabilities();
@@ -2085,11 +2085,11 @@ function defineCapabilityListTool(ctx) {
 
 //#endregion
 //#region src/tools/escalate.ts
-const text$17 = (value) => [{
+const text$19 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$15(exec) {
+function sessionId$17(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("escalate: missing agent id");
 	return id;
@@ -2162,7 +2162,7 @@ function defineEscalateTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$17(v)
+			render: (_a, v) => text$19(v)
 		},
 		execute: async (args, exec) => {
 			if (args.list === true) {
@@ -2170,7 +2170,7 @@ function defineEscalateTool(ctx) {
 				if (escalations.length === 0) return "escalations: none recorded";
 				return [`escalations (${escalations.length}):`, ...escalations.map(renderEscalation$1)].join("\n");
 			}
-			const caller = sessionId$15(exec);
+			const caller = sessionId$17(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("escalate: missing agent");
 			const missing = ELEMENTS.filter((element) => {
@@ -2222,11 +2222,11 @@ function defineEscalateTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-apply.ts
-const text$16 = (value) => [{
+const text$18 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$14(exec) {
+function sessionId$16(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_apply: missing agent id");
 	return id;
@@ -2260,10 +2260,10 @@ function defineEvolutionApplyTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$16(v)
+			render: (_a, v) => text$18(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$14(exec);
+			const caller = sessionId$16(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("evolution_apply: missing agent");
 			let proposal;
@@ -2328,11 +2328,11 @@ function defineEvolutionApplyTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-candidate.ts
-const text$15 = (value) => [{
+const text$17 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$13(exec) {
+function sessionId$15(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_candidate: missing agent id");
 	return id;
@@ -2361,10 +2361,10 @@ function defineEvolutionCandidateTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$15(v)
+			render: (_a, v) => text$17(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$13(exec);
+			const caller = sessionId$15(exec);
 			const versions = args.versionSet;
 			try {
 				const proposal = await ctx.evolution.candidate(args.proposalId, versions, caller, args.mutation);
@@ -2380,11 +2380,11 @@ function defineEvolutionCandidateTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-decide.ts
-const text$14 = (value) => [{
+const text$16 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$12(exec) {
+function sessionId$14(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_decide: missing agent id");
 	return id;
@@ -2412,10 +2412,10 @@ function defineEvolutionDecideTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$14(v)
+			render: (_a, v) => text$16(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$12(exec);
+			const caller = sessionId$14(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("evolution_decide: missing agent");
 			let proposal;
@@ -2465,11 +2465,11 @@ function defineEvolutionDecideTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-gate.ts
-const text$13 = (value) => [{
+const text$15 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$11(exec) {
+function sessionId$13(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_gate: missing agent id");
 	return id;
@@ -2523,10 +2523,10 @@ function defineEvolutionGateTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$13(v)
+			render: (_a, v) => text$15(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$11(exec);
+			const caller = sessionId$13(exec);
 			let evidenceIds = /* @__PURE__ */ new Set();
 			try {
 				const graph = await ctx.graphs.graphForSession(caller);
@@ -2555,7 +2555,7 @@ function defineEvolutionGateTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-list.ts
-const text$12 = (value) => [{
+const text$14 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2601,7 +2601,7 @@ function defineEvolutionListTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$12(v)
+			render: (_a, v) => text$14(v)
 		},
 		execute: async (args) => {
 			const proposals = await ctx.evolution.list({
@@ -2648,11 +2648,11 @@ function defineEvolutionListTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-prepare.ts
-const text$11 = (value) => [{
+const text$13 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$10(exec) {
+function sessionId$12(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_prepare: missing agent id");
 	return id;
@@ -2695,10 +2695,10 @@ function defineEvolutionPrepareTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$11(v)
+			render: (_a, v) => text$13(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$10(exec);
+			const caller = sessionId$12(exec);
 			let proposal;
 			try {
 				proposal = await ctx.evolution.get(args.proposalId);
@@ -2733,7 +2733,7 @@ function defineEvolutionPrepareTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-propose.ts
-const text$10 = (value) => [{
+const text$12 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2752,7 +2752,7 @@ const TARGET_TYPE_SET$1 = new Set(TARGET_TYPES$1);
 function isProposalTargetType$1(value) {
 	return typeof value === "string" && TARGET_TYPE_SET$1.has(value);
 }
-function sessionId$9(exec) {
+function sessionId$11(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_propose: missing agent id");
 	return id;
@@ -2821,10 +2821,10 @@ function defineEvolutionProposeTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$10(v)
+			render: (_a, v) => text$12(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$9(exec);
+			const caller = sessionId$11(exec);
 			let targetType = args.targetType;
 			let targetId = args.targetId;
 			let rationale = args.rationale;
@@ -2867,7 +2867,7 @@ function defineEvolutionProposeTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-replay.ts
-const text$9 = (value) => [{
+const text$11 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2885,7 +2885,7 @@ const VERIFICATION_MODES = [
 	"review",
 	"composite"
 ];
-function sessionId$8(exec) {
+function sessionId$10(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_replay: missing agent id");
 	return id;
@@ -2987,10 +2987,10 @@ function defineEvolutionReplayTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$9(v)
+			render: (_a, v) => text$11(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$8(exec);
+			const caller = sessionId$10(exec);
 			let proposal;
 			try {
 				proposal = await ctx.evolution.get(args.proposalId);
@@ -3132,11 +3132,11 @@ function defineEvolutionReplayTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-rollback.ts
-const text$8 = (value) => [{
+const text$10 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$7(exec) {
+function sessionId$9(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_rollback: missing agent id");
 	return id;
@@ -3152,10 +3152,10 @@ function defineEvolutionRollbackTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$8(v)
+			render: (_a, v) => text$10(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$7(exec);
+			const caller = sessionId$9(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("evolution_rollback: missing agent");
 			let proposal;
@@ -3206,7 +3206,7 @@ function defineEvolutionRollbackTool(ctx) {
 
 //#endregion
 //#region src/tools/mark-ready.ts
-const text$7 = (value) => [{
+const text$9 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3217,12 +3217,12 @@ function defineMarkReadyTool(ctx) {
 		parameters: {},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$7(v)
+			render: (_a, v) => text$9(v)
 		},
 		execute: async (_args, exec) => {
-			const sessionId$16 = exec.agent?.id;
-			if (sessionId$16 === void 0) throw new Error("graph_mark_ready: missing agent id");
-			const graph = await ctx.graphs.graphForSession(sessionId$16);
+			const sessionId$18 = exec.agent?.id;
+			if (sessionId$18 === void 0) throw new Error("graph_mark_ready: missing agent id");
+			const graph = await ctx.graphs.graphForSession(sessionId$18);
 			await ctx.graphs.markReady(graph.id);
 			return `graph ${graph.id} ready`;
 		}
@@ -3282,14 +3282,14 @@ function defineSpawnTool(ctx) {
 }
 
 //#endregion
-//#region src/tools/task-decompose.ts
-const text$6 = (value) => [{
+//#region src/tools/task-cancel.ts
+const text$8 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$6(exec) {
+function sessionId$8(exec) {
 	const id = exec.agent?.id;
-	if (typeof id !== "string" || id.length === 0) throw new Error("task_decompose: missing agent id");
+	if (typeof id !== "string" || id.length === 0) throw new Error("task_cancel: missing agent id");
 	return id;
 }
 function renderOutcome(outcome) {
@@ -3297,10 +3297,49 @@ function renderOutcome(outcome) {
 	const evidence = outcome.evidenceId === void 0 ? "" : ` evidence ${outcome.evidenceId}`;
 	return `- ${outcome.taskId}: ${outcome.status}${run}${evidence}`;
 }
+function defineTaskCancelTool(ctx) {
+	return defineTool({
+		name: "task_cancel",
+		description: "Cancel the batch of child tasks this run is waiting on. The children still in flight are cancelled, the ones that never started are blocked before start, and this run is cancelled with them — a batch that cannot finish is ended here, never left hanging. Only the run whose own batch it is may cancel it, and only while the batch is in flight; a run with no batch open is told so and nothing changes. To end work that is not a batch of yours, remove the graph instead.",
+		parameters: { reason: {
+			type: "string",
+			description: "Why the batch is being cancelled; the settlement answer echoes it back to you"
+		} },
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text$8(v)
+		},
+		execute: async (args, exec) => {
+			const caller = sessionId$8(exec);
+			const { storeId, run } = await ctx.taskRuntime.runForSession(caller);
+			if (run.executionPhase !== "waiting_children" || run.batchId === void 0) return `task_cancel: no batch is in flight for run "${run.runId}" (${run.status}${run.executionPhase === void 0 ? ", no coordination phase recorded" : `, phase ${run.executionPhase}`}); nothing was changed`;
+			const batchId = run.batchId;
+			let outcomes;
+			try {
+				outcomes = await ctx.taskRuntime.cancelBatch(storeId, batchId, caller);
+			} catch (error) {
+				return `task_cancel rejected: ${error instanceof Error ? error.message : String(error)}`;
+			}
+			return [`cancelled batch ${batchId}${args.reason === void 0 ? "" : ` (${args.reason})`}:`, ...outcomes.map(renderOutcome)].join("\n");
+		}
+	});
+}
+
+//#endregion
+//#region src/tools/task-decompose.ts
+const text$7 = (value) => [{
+	type: "text",
+	text: value
+}];
+function sessionId$7(exec) {
+	const id = exec.agent?.id;
+	if (typeof id !== "string" || id.length === 0) throw new Error("task_decompose: missing agent id");
+	return id;
+}
 function defineTaskDecomposeTool(ctx) {
 	return defineTool({
 		name: "task_decompose",
-		description: "Decompose the caller's current task into child tasks, then run them one at a time in dependency order. Each child is verified independently; only verified children count as done.",
+		description: "Decompose the caller's current task into child tasks. The batch is admitted atomically and the runtime then runs them one at a time in dependency order; this call returns at admission and does not wait. Each child is verified independently; only verified children count as done.",
 		parameters: {
 			reason: {
 				type: "string",
@@ -3449,25 +3488,35 @@ function defineTaskDecomposeTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$6(v)
+			render: (_a, v) => text$7(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$6(exec);
+			const caller = sessionId$7(exec);
 			const { storeId, task, run } = await ctx.taskRuntime.runForSession(caller);
-			let outcomes;
+			let admitted;
 			try {
-				outcomes = await ctx.taskRuntime.decomposeAndRun(storeId, task.taskId, run.runId, caller, args, { signal: exec.signal });
+				admitted = await ctx.taskRuntime.decomposeAndRun(storeId, task.taskId, run.runId, caller, args, {
+					signal: exec.signal,
+					...typeof exec.callId === "string" && exec.callId.length > 0 ? { callId: String(exec.callId) } : {}
+				});
 			} catch (error) {
 				return `task_decompose rejected: ${error instanceof Error ? error.message : String(error)}`;
 			}
-			return [`decomposed ${task.taskId} into ${outcomes.length} children:`, ...outcomes.map(renderOutcome)].join("\n");
+			return [
+				`decomposed ${task.taskId} into ${admitted.childTaskIds.length} children (batch ${admitted.batchId}):`,
+				...admitted.childTaskIds.map((taskId, index) => `- child ${index + 1}: ${taskId}`),
+				"",
+				`The runtime owns batch ${admitted.batchId} now: it starts the children one at a time in dependency order and settles this task when they are all terminal. This call returns at admission and does not wait for the batch.`,
+				"You are in phase waiting_children: read and query with `task_read`/`task_status` (and diagnose or inspect), or end the batch with `task_cancel`. Writes, shell commands, another decomposition and a submission of your own are refused while the children run — do not start work that would collide with theirs in the shared checkout.",
+				"You are notified when the batch settles; the runtime then submits this task for verification on your behalf, so an idle session is not a completion and needs no submission from you."
+			].join("\n");
 		}
 	});
 }
 
 //#endregion
 //#region src/tools/task-diagnose.ts
-const text$5 = (value) => [{
+const text$6 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3510,7 +3559,7 @@ function toProposals(value) {
 		};
 	});
 }
-function sessionId$5(exec) {
+function sessionId$6(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_diagnose: missing agent id");
 	return id;
@@ -3599,10 +3648,10 @@ function defineTaskDiagnoseTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$5(v)
+			render: (_a, v) => text$6(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$5(exec);
+			const caller = sessionId$6(exec);
 			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(caller)).rootSessionId);
 			const diagnosis = {
 				diagnosisId: args.diagnosisId,
@@ -3632,12 +3681,61 @@ function defineTaskDiagnoseTool(ctx) {
 }
 
 //#endregion
+//#region src/tools/run-phase.ts
+/**
+* The A3 coordination phase of one run, as the two readers of the store render
+* it. Both views come from these functions so `task_read` and `task_status` can
+* never describe the same run differently — the same discipline
+* `renderRunBinding` applies to the "chosen implementation" section.
+*
+* The rendering rule, and why it is a rule: a run created before the phase
+* field existed has *no* phase, and its phase is never guessed. A non-terminal
+* such run is displayed as `needs-recovery` — an old record whose only legal
+* continuation is cancellation (`TaskRuntime.reconcileStore` leaves it exactly
+* as it stands, and admission and submission both refuse it) — while a terminal
+* one renders nothing extra, because a finished run needs no phase. Reporting
+* `active` for it would invite work nobody can admit.
+*/
+/** The full form: what the record is and what a reader can do about it. */
+const NEEDS_RECOVERY = "needs-recovery (an old record: it was created before coordination phases, so it has no phase to continue from and cannot decompose, submit or verify — cancel this task tree to recover)";
+/** The compact form for `task_status`, whose run part is a cell inside a denser line. */
+const NEEDS_RECOVERY_SHORT = "needs-recovery (old record without a coordination phase)";
+/** The submission a run carries, as one clause: who handed it in, when, and what it named. */
+function submissionClause(submission) {
+	const evidence = submission.evidenceRefs.length === 0 ? "" : `; evidence [${submission.evidenceRefs.join(", ")}]`;
+	const notes = submission.notes === void 0 ? "" : `; notes: ${submission.notes}`;
+	return `submitted by ${submission.origin} at ${submission.submittedAt}: "${submission.summary}"${evidence}${notes}`;
+}
+/**
+* The phase, batch, submission and no-progress facts of one run, appended to a
+* `task_read` run line: where this run sits in the protocol, in that order, with
+* the batch id only where a batch exists to name. A phase change and a progress
+* marking rewrite these fields, so this is the run's current position, never a
+* history.
+*/
+function runPhaseSuffix(run) {
+	const parts = [];
+	if (run.executionPhase !== void 0) {
+		parts.push(`phase ${run.executionPhase}`);
+		if (run.batchId !== void 0) parts.push(`batch ${run.batchId}`);
+		if (run.submission !== void 0) parts.push(submissionClause(run.submission));
+	} else if (run.status === "running") parts.push(NEEDS_RECOVERY);
+	if (run.noProgress !== void 0) parts.push(`no-progress round ${run.noProgress.rounds} (${run.noProgress.kind})`);
+	return parts.length === 0 ? "" : ` — ${parts.join("; ")}`;
+}
+/** The same fact for `task_status`, whose run part is a cell inside a denser line. */
+function runPhaseCell(run) {
+	if (run.executionPhase !== void 0) return ` — phase ${run.executionPhase}`;
+	return run.status === "running" ? ` — ${NEEDS_RECOVERY_SHORT}` : "";
+}
+
+//#endregion
 //#region src/tools/task-read.ts
-const text$4 = (value) => [{
+const text$5 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$4(exec) {
+function sessionId$5(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_read: missing agent id");
 	return id;
@@ -3693,14 +3791,14 @@ async function bindingLines(ctx, run) {
 function defineTaskReadTool(ctx) {
 	return defineTool({
 		name: "task_read",
-		description: "Read the caller's task contract. The root session sees the root task, its acceptance criteria, and child task statuses; a worker sees its own task and run.",
+		description: "Read the caller's task contract. The root session sees the root task, its acceptance criteria, and child task statuses; a worker sees its own task and run. A run line carries the coordination phase this run is in — and its batch id, its submission and any no-progress marking when it has them; a run with no phase is an old record and is shown as needs-recovery.",
 		parameters: {},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$4(v)
+			render: (_a, v) => text$5(v)
 		},
 		execute: async (_args, exec) => {
-			const caller = sessionId$4(exec);
+			const caller = sessionId$5(exec);
 			const graph = await ctx.graphs.graphForSession(caller);
 			if (graph.rootSessionId !== caller) {
 				const { task, run } = await ctx.taskRuntime.runForSession(caller);
@@ -3713,7 +3811,7 @@ function defineTaskReadTool(ctx) {
 						return `- ${criterion.criterionId} [${criterion.verificationMode}${criterion.mandatory ? ", mandatory" : ""}] ${criterion.description}${command}${protectedInputsPart(criterion)}`;
 					}),
 					...contractLines(task),
-					`run ${run.runId} [${run.status}] started ${run.startedAt}`,
+					`run ${run.runId} [${run.status}]${runPhaseSuffix(run)} started ${run.startedAt}`,
 					...await bindingLines(ctx, run)
 				].join("\n");
 			}
@@ -3730,7 +3828,7 @@ function defineTaskReadTool(ctx) {
 				`children: ${children.length}`,
 				...children.map((child) => {
 					const run = latestRun(snapshot, child);
-					const runPart = run === void 0 ? "no run" : `run ${run.runId} [${run.status}]`;
+					const runPart = run === void 0 ? "no run" : `run ${run.runId} [${run.status}]${runPhaseSuffix(run)}`;
 					return `- ${child.taskId} [${child.status}/${child.decompositionStatus}] ${runPart} ${child.objective}`;
 				})
 			].join("\n");
@@ -3832,15 +3930,15 @@ function reviewAgentBudget() {
 * reads as zero; a corrupt line throws rather than silently undercounting.
 */
 async function countReviewAgentRuns(rootStoreId) {
-	let text$21;
+	let text$23;
 	try {
-		text$21 = await readFile(reviewAgentLedgerFile(), "utf8");
+		text$23 = await readFile(reviewAgentLedgerFile(), "utf8");
 	} catch (error) {
 		if (error.code === "ENOENT") return 0;
 		throw error;
 	}
 	let count = 0;
-	text$21.split("\n").forEach((line, index) => {
+	text$23.split("\n").forEach((line, index) => {
 		if (line.trim().length === 0) return;
 		let record;
 		try {
@@ -3866,11 +3964,11 @@ async function appendReviewAgentRun(record) {
 
 //#endregion
 //#region src/tools/task-review-pack.ts
-const text$3 = (value) => [{
+const text$4 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$3(exec) {
+function sessionId$4(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_review_pack: missing agent id");
 	return id;
@@ -4061,10 +4159,10 @@ function defineTaskReviewPackTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$3(v)
+			render: (_a, v) => text$4(v)
 		},
 		execute: async (args, exec) => {
-			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(sessionId$3(exec))).rootSessionId);
+			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(sessionId$4(exec))).rootSessionId);
 			const snapshot = await ctx.task.openStore(storeId);
 			const used = await countReviewAgentRuns(storeId);
 			const escalation = computeEscalation(snapshot, args.taskId, {
@@ -4078,7 +4176,7 @@ function defineTaskReviewPackTool(ctx) {
 
 //#endregion
 //#region src/tools/review-agent.ts
-const text$2 = (value) => [{
+const text$3 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -4115,7 +4213,7 @@ function reviewerGrant() {
 }
 /** Default watchdog deadline for one review agent (10 minutes). */
 const REVIEW_AGENT_TIMEOUT_MS = 6e5;
-function sessionId$2(exec) {
+function sessionId$3(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_review_agent: missing agent id");
 	return id;
@@ -4226,10 +4324,10 @@ function defineTaskReviewAgentTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$2(v)
+			render: (_a, v) => text$3(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$2(exec);
+			const caller = sessionId$3(exec);
 			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(caller)).rootSessionId);
 			const snapshot = await ctx.task.openStore(storeId);
 			if (snapshot.tasks.find((item) => item.taskId === args.taskId) === void 0) return `task_review_agent: unknown task "${args.taskId}"`;
@@ -4333,11 +4431,11 @@ function defineTaskReviewAgentTool(ctx) {
 
 //#endregion
 //#region src/tools/task-status.ts
-const text$1 = (value) => [{
+const text$2 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$1(exec) {
+function sessionId$2(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_status: missing agent id");
 	return id;
@@ -4369,14 +4467,14 @@ async function obligationLines(ctx, envId, snapshot) {
 function defineTaskStatusTool(ctx) {
 	return defineTool({
 		name: "task_status",
-		description: "Compact snapshot of the caller's graph task tree: task id, objective, status, latest run status, evidence ids, and terminal review outcome. Also lists recorded obligations and the domain-template coverage hint.",
+		description: "Compact snapshot of the caller's graph task tree: task id, objective, status, latest run status with its coordination phase (a phase-less non-terminal run reads needs-recovery), evidence ids, and terminal review outcome. Also lists recorded obligations and the domain-template coverage hint.",
 		parameters: {},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$1(v)
+			render: (_a, v) => text$2(v)
 		},
 		execute: async (_args, exec) => {
-			const graph = await ctx.graphs.graphForSession(sessionId$1(exec));
+			const graph = await ctx.graphs.graphForSession(sessionId$2(exec));
 			const storeId = rootTaskStoreId(graph.rootSessionId);
 			const snapshot = await ctx.task.openStore(storeId);
 			const lines = snapshot.tasks.map((task) => {
@@ -4385,7 +4483,7 @@ function defineTaskStatusTool(ctx) {
 				const evidence = snapshot.evidence.filter((item) => item.taskId === task.taskId).map((item) => item.evidenceId);
 				const review = [...snapshot.reviews].reverse().find((item) => item.taskId === task.taskId);
 				const diagnoses = snapshot.diagnoses.filter((item) => item.taskId === task.taskId).length;
-				const runPart = run === void 0 ? "run: none" : `run: ${run.status}`;
+				const runPart = run === void 0 ? "run: none" : `run: ${run.status}${runPhaseCell(run)}`;
 				const evidencePart = evidence.length === 0 ? "" : ` evidence: [${evidence.join(", ")}]`;
 				const failing = review?.criteria?.filter((item) => item.verdict !== "pass") ?? [];
 				const detail = review?.outcome === "failed" && failing.length > 0 ? `${review.localizedCause ?? "failed"} [${failing.map((item) => `${item.criterionId}${item.exitCode === void 0 ? "" : ` exit ${item.exitCode}`}`).join(", ")}]` : review?.localizedCause ?? review?.anomalies[0];
@@ -4398,6 +4496,54 @@ function defineTaskStatusTool(ctx) {
 				...lines,
 				...await obligationLines(ctx, graph.envId, snapshot)
 			].join("\n");
+		}
+	});
+}
+
+//#endregion
+//#region src/tools/task-submit-result.ts
+const text$1 = (value) => [{
+	type: "text",
+	text: value
+}];
+function sessionId$1(exec) {
+	const id = exec.agent?.id;
+	if (typeof id !== "string" || id.length === 0) throw new Error("task_submit_result: missing agent id");
+	return id;
+}
+function defineTaskSubmitResultTool(ctx) {
+	return defineTool({
+		name: "task_submit_result",
+		description: "Hand in this run's result for acceptance. This is the explicit submission the coordination protocol is built on: it records what was delivered (summary, plus the evidence/artifact references you produced), closes admission for this run — no further write, command or decomposition is admitted — drains the calls still in flight, and hands the run to the verifier. The call returns the verdict. An idle session is not a completion: a worker that goes idle without submitting gets one reminder and is stopped by the no-progress budget if it still has not submitted. A run waiting on its own child batch cannot submit — the batch submits for it when the children are terminal.",
+		parameters: {
+			summary: {
+				type: "string",
+				required: true,
+				description: "What was delivered, in your own words; a blank summary is refused"
+			},
+			evidenceRefs: {
+				type: "array",
+				items: { type: "string" },
+				description: "Evidence ids, artifact refs or review refs you name as proof of the summary"
+			},
+			notes: {
+				type: "string",
+				description: "Anything further a reader of the submission should know"
+			}
+		},
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text$1(v)
+		},
+		execute: async (args, exec) => {
+			const caller = sessionId$1(exec);
+			let result;
+			try {
+				result = await ctx.taskRuntime.submitResult(caller, args, { ...typeof exec.callId === "string" && exec.callId.length > 0 ? { callId: String(exec.callId) } : {} });
+			} catch (error) {
+				return `task_submit_result rejected: ${error instanceof Error ? error.message : String(error)}`;
+			}
+			return `task_submit_result ${result.status}: ${result.detail}`;
 		}
 	});
 }
@@ -4479,6 +4625,8 @@ var SingularityAgent = class extends Service {
 		ctx.tools.register(defineCapabilityListTool(ctx));
 		ctx.tools.register(defineTaskDecomposeTool(ctx));
 		ctx.tools.register(defineTaskStatusTool(ctx));
+		ctx.tools.register(defineTaskSubmitResultTool(ctx));
+		ctx.tools.register(defineTaskCancelTool(ctx));
 		ctx.tools.register(defineTaskVerifyTool(ctx));
 		ctx.tools.register(defineTaskReviewPackTool(ctx));
 		ctx.tools.register(defineTaskReviewAgentTool(ctx));

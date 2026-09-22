@@ -44,8 +44,8 @@ const PLATFORM_TOOLS = [
 /** The baseline plus the row's own labels: what this worker's grant resolves to. */
 const GRANTED_TOOLS = [
   'bash', 'capability_list', 'edit', 'glob', 'grep', 'job_kill', 'job_list', 'job_output',
-  'read', 'session_event_read', 'session_trace', 'skill', 'task_decompose', 'task_read', 'task_status',
-  'task_verify', 'write', 'ask_user_question',
+  'read', 'session_event_read', 'session_trace', 'skill', 'task_cancel', 'task_decompose', 'task_read', 'task_status',
+  'task_submit_result', 'task_verify', 'write', 'ask_user_question',
 ]
 
 describe('an unselected skill and a worker\'s tool plane (S1-C)', () => {
@@ -65,7 +65,7 @@ describe('an unselected skill and a worker\'s tool plane (S1-C)', () => {
     const unselected = await writeKnowledgeSkill(join(h.checkout, '.agents', 'skills'), UNSELECTED, 'UNSELECTED BODY')
 
     const root = await h.root(ROOT)
-    const outcomes = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT, {
+    const batch = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
       children: [{
         objective: 'align the ball',
@@ -73,6 +73,7 @@ describe('an unselected skill and a worker\'s tool plane (S1-C)', () => {
         requiredCapabilities: [ROW],
       }] as DecomposeSpec['children'],
     })
+    const outcomes = await h.runtime.awaitBatch(root.storeId, batch.batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
 
     const run = await h.task.runIn(root.storeId, outcomes[0]!.runId!)

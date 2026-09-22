@@ -6,6 +6,7 @@ import type {} from '@dangosys/dsh-singularity-graphs'
 import type { TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import { checkObligationCoverage, findRepoRoot, loadObligationTemplates } from '@dangosys/dsh-singularity-task-runtime'
+import { runPhaseCell } from './run-phase.ts'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
@@ -52,7 +53,7 @@ async function obligationLines(ctx: Context, envId: string, snapshot: TaskSnapsh
 export function defineTaskStatusTool(ctx: Context) {
   return defineTool({
     name: 'task_status',
-    description: 'Compact snapshot of the caller\'s graph task tree: task id, objective, status, latest run status, evidence ids, and terminal review outcome. Also lists recorded obligations and the domain-template coverage hint.',
+    description: 'Compact snapshot of the caller\'s graph task tree: task id, objective, status, latest run status with its coordination phase (a phase-less non-terminal run reads needs-recovery), evidence ids, and terminal review outcome. Also lists recorded obligations and the domain-template coverage hint.',
     parameters: {},
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (_args, exec) => {
@@ -65,7 +66,7 @@ export function defineTaskStatusTool(ctx: Context) {
         const evidence = snapshot.evidence.filter(item => item.taskId === task.taskId).map(item => item.evidenceId)
         const review = [...snapshot.reviews].reverse().find(item => item.taskId === task.taskId)
         const diagnoses = snapshot.diagnoses.filter(item => item.taskId === task.taskId).length
-        const runPart = run === undefined ? 'run: none' : `run: ${run.status}`
+        const runPart = run === undefined ? 'run: none' : `run: ${run.status}${runPhaseCell(run)}`
         const evidencePart = evidence.length === 0 ? '' : ` evidence: [${evidence.join(', ')}]`
         const failing = review?.criteria?.filter(item => item.verdict !== 'pass') ?? []
         const detail = review?.outcome === 'failed' && failing.length > 0

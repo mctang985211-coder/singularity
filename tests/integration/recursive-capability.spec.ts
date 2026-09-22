@@ -74,7 +74,7 @@ describe('a child that decomposes further (S1-C)', () => {
     await writeKnowledgeSkill(join(h.home, 'skills'), SKILL, BODY)
 
     const root = await h.root(ROOT)
-    const outcomes = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT, {
+    const batch = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
       children: [{
         objective: 'align the ball',
@@ -83,14 +83,17 @@ describe('a child that decomposes further (S1-C)', () => {
         decomposable: true,
       }] as DecomposeSpec['children'],
     })
+    const outcomes = await h.runtime.awaitBatch(root.storeId, batch.batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
 
     // The child's own decompose went through the real tool and was admitted: the
-    // name it used came from its summary, not from the test.
+    // name it used came from its summary, not from the test. The tool returns at
+    // admission (A3 §3.1), so what it reports is the batch, not a verdict.
     if (decomposeAnswer === undefined) throw new Error('the child never decomposed')
     expect(decomposeAnswer.isError).toBe(false)
     expect(decomposeAnswer.text).toContain('decomposed')
-    expect(decomposeAnswer.text).toContain('verified')
+    expect(decomposeAnswer.text).toContain('does not wait for the batch')
+    expect(decomposeAnswer.text).toContain('phase waiting_children')
 
     // The tree the store holds: root → child (settled by the nested cascade) → grandchild.
     const snapshot = await h.snapshot(root.storeId)

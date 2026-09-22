@@ -87,7 +87,7 @@ DSH 提供 agent/session、skill 发现与加载、preset、MCP、上下文与�
   -> verifier -> EvidenceBundle -> task 状态 -> 父验收
 ```
 
-源码入口：`task-runtime/src/normalize.ts` 的 `normalizeDecomposition`、`task-runtime/src/index.ts` 的 `decomposeAndRun`、`task-runtime/src/capability.ts` 的 `resolveCapabilities`、`task-runtime/src/orchestrate.ts` 的 `runChildrenCascade`、`agent-runtime/src/grants.ts` 的 `applyWorkerGrant`。
+源码入口：`task-runtime/src/normalize.ts` 的 `normalizeDecomposition`、`task-runtime/src/index.ts` 的 `decomposeAndRun`、`task-runtime/src/capability.ts` 的 `resolveCapabilities`、`task-runtime/src/orchestrate.ts` 的 `driveBatch`（`runChildrenCascade` 被 A3 取代：准入与推进分离，见 `docs/2026-09-22-a3-coordination-design.md`）、`agent-runtime/src/grants.ts` 的 `applyWorkerGrant`。
 
 - `resolveCapabilities` 只查表并展开工具标签，返回 `closed` 或 `gap`；虽然类型含 `partial`，实现不产生它。`closed` 表示声明的名字已命中，**不表示 skill 前置条件或产物契约已闭包**。
 - 节点提交的批次先经过 `normalizeDecomposition`（唯一规范化入口，T1）：闭合字段集、默认值、criterion id 固定、批次摘要；被拒绝的批次在铸 id 和落库之前返回，且零副作用。之后才进入结构准入与能力解析。
@@ -152,7 +152,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 详细票据见 [建设计划](2026-09-20-vrtc-code-change-plan.md)。以下是依赖顺序，不是任务执行 workflow。
 
-先期确定性工程切片见 [执行 prompt](execution-prompts/README.md)：P1–P4、T1 与 S1-V 切片 2 已于 2026-09-21 完成并同步本文；S1-C（能力预检与版本绑定）已于 2026-09-22 完成（§5.8）；下一项为 A3（非阻塞运行与恢复）。后续先完成验证/能力合同和 A3 生命周期，再完整交付审核、根目标与上下文/问答；S4-E 评估基础先于自动主管与候选执行。具体次序只在建设计划维护。P1–P4、T1、切片 2 与 S1-C 不替代自主修复与恢复闭环，也不宣称独立父验收全部完成（C3 假设满足性完整证明与证据来源真实性认证仍缺）。
+先期确定性工程切片见 [执行 prompt](execution-prompts/README.md)：P1–P4、T1 与 S1-V 切片 2 已于 2026-09-21 完成并同步本文；S1-C（能力预检与版本绑定）与 A3（非阻塞运行与恢复）已于 2026-09-22 完成（§5.8、§5.9）；下一项为 T2+T3 交付组（契约审核与恢复）。后续先完整交付审核，再交付根目标与上下文/问答；S4-E 评估基础先于自动主管与候选执行。具体次序只在建设计划维护。P1–P4、T1、切片 2 与 S1-C 不替代自主修复与恢复闭环，也不宣称独立父验收全部完成（C3 假设满足性完整证明与证据来源真实性认证仍缺）。
 
 | 顺序 | 建设目标 | 完成条件 |
 |---|---|---|
@@ -164,7 +164,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 上表 S 编号表示责任领域，实际派发及拆分以建设计划为准。S1 受支持合同和 S4-E 评估是候选晋升前置。A6/S2-R/S3 完整交付：故障可注入，但解决路径由 agent 产出，不能止于人工填配置。L3 引入新工具继续走权限流程。长期记忆、通用全局调度器、复杂 skill 成熟度系统后置，均不替代已承诺行为的完整验收。
 
-运行可行性由 A3 统一保证：状态迁移、效果交接、恢复和根预算归属集中在 Task runtime；普通/replay/恢复共用规则，工作区写入归属覆盖跨批次/跨根冲突。新建子任务、候选或 Run 不重置总预算；反复同一失败、改写计划不能自动计为进展。硬限额必须可执行，未知费用不记零。
+运行可行性已由 A3 统一落地（2026-09-22，§5.9）：状态迁移、效果交接、恢复和根预算归属集中在 Task runtime；普通/replay/恢复共用规则，工作区写入归属覆盖跨批次/跨根冲突。新建子任务、候选或 Run 不重置总预算；反复同一失败、改写计划不能自动计为进展。硬限额必须可执行，未知费用不记零。
 
 迭代有效性由 S1-C/S4-E/S2-R 衔接：Run 实际加载绑定版本，基线/候选从相同初始输入在隔离工作区比较，真实证据及冻结判据支撑结论；任务内经验不自动晋升共享能力。apply 不热换在途实现，换版本用新 Run；成功兄弟证据仅在仍适用时复用。模型成功率、回归和成本需真实实验，协议测试通过不等于已证明模型进步。以上均为待建指导，不修改 §4 的当前实现事实。
 
@@ -182,14 +182,14 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 | 根目标入口 | 当前 graph name 传给 createRootTask 作 objective；RootTaskSpec 默认仅子全 verified；尚无独立的根契约 intake/接受/激活流程 | `graphs/src/index.ts:create`；`task/src/types.ts:RootTaskSpec` |
 | Capability | 配置表解析、准入 provider 预检与真实 grant 已建；执行型/知识型侧车契约经统一校验，run 级内容绑定固定实际实现（§5.8）；没有可行性证明或多候选选择 | `capability.ts:resolveCapabilities`；`provider-precheck.ts`；`sidecar.ts:validateSkillProvider`；`run-binding.ts`；`grants.ts:grantSkills` |
 | Handoff / 上下文 | fresh session、handoff、父会话引用、契约系统投影已有；实际主要传父目标/依赖证据/assumptions，worker 摘要含本 run 选定 capability/skill 绑定（S1-C）；根全局 brief、带来源决定和动态有界 ContextView 待建；原始 session query 按 cwd 授权，不等于图/group 隔离 | `handoff.ts`、`orchestrate.ts:buildHandoff`；`run-binding.ts:renderRunBinding`；`agent-runtime/src/contract-reinjection.ts` |
-| 父子交互 / 生命周期 | task_decompose 同步等待整批；whenIdle 后验收；没有持久 question/answer 与等待相位。DSH send_message 不能直接用于未注册 continuable activation 的这些子节点 | `task-runtime/src/orchestrate.ts:awaitWorker`；`agent-runtime/src/index.ts:spawn` |
+| 父子交互 / 生命周期 | A3 已改非阻塞（§5.9）：task_decompose 准入后立即返回 batchId，父进入 waiting_children（运行时闸只放行读/状态/诊断/task_cancel），子全部终态后父由 runtime 自动提交验收；worker 经 task_submit_result 显式提交，session idle 不再是完成证据（无进展相位机：标记→一次提醒→到限停止）；取消/恢复/卸载经 cancelBatch/cancelGraph/dispose/reconcileStore。持久 question/answer 与问答等待仍属 A4（字段挂载点已持久化）。DSH send_message 不能直接用于未注册 continuable activation 的这些子节点 | `task-runtime/src/index.ts:decomposeAndRun`、`orchestrate.ts:driveBatch/observeWorkerRun`、`gate.ts`、`agent-singularity/src/tools/task-submit-result.ts`；`agent-runtime/src/index.ts:spawn` |
 | 任务导航 / 诊断 | task_read 当前任务、task_status 整树；review pack 有局部证据及父子摘要，只读 reviewer 可写 Diagnosis；无合法动作投影、因果遍历协议或自动 supervisor incident 调度 | `agent-singularity/src/tools/{task-read,task-status,task-review-pack,review-agent}.ts` |
 | Evidence 依赖 | `requiresArtifact` 只认 verified run 且带 pass 判据的证据；`acceptsArtifact` 只要求存在。普通分解缺失时 blocked + Obligation；replay 的 spawn 开/关路径使用同一检查，缺失时在建任务/Run 前抛错，零派发/零成功记录。不自动生成上游，不验证匹配证据的版本和适用性 | `orchestrate.ts:missingRequiredArtifacts`、`runReplayTask` |
 | Obligation | 记录缺能力/缺产物；模板 coverage 由任务声明 capability 或文字提及匹配；不是义务已被证据满足，更不是防漏的硬闸 | `task-runtime/src/obligation.ts:checkObligationCoverage` |
 | 判决 | `pass/fail/inconclusive`；部分 unknown 有 task/verifier 分类；没有 PARTIAL 状态与剩余义务自动派发；未通过 mandatory 判据仍走失败路径；`heuristic` 标记的判据永远不计入确定性通过 | `task/src/types.ts:VerificationResult`；`orchestrate.ts:unmetMandatory` |
 | Verifier 边界 | 注册即执行可执行自测（`VerifierSelftest.samples` 正负样本；缺样本、描述性样本或漏检样本拒绝注册，唯一例外是调用者显式声明的 `{ testDouble: true }` 并记录警告）。判决与 claim 记录**实际注册实例**的 `version`（插件自报一律被覆盖；版本归属规则见 §5.7：只有实际判决、或由 registry 归因到已解析裁判实例的拒绝才带版本，未知 ref 与不支持 mode 的拒绝不带）；证据可按 `(verifierRef, version)` 索引（`evidenceByVerifier`；KISS §8.2 的裁决召回本身未建）。criterion 声明的受保护验收输入在准入时固定 `{ path, sha256 }`（读不到即整批拒绝），判决前复检：缺失或被改 → `fail` 点名路径且不派发；store 里畸形声明（绕过准入口直写）得到点名条目的可读 `fail`，不是崩溃。仍未建：verifier 与执行者的独立性隔离（`owner` 只是元数据）、证据来源真实性认证、自测样本“有意义”的证明 | `verifier/src/index.ts:register`、`selftestGate`、`verifyCriterion`、`evidenceByVerifier`；`verifier/src/protected-inputs.ts`；`task-runtime/src/protected-inputs.ts` |
 | 父验收 | 默认无映射 composite 保持子全 verified；childEvidence 必须存在且来自 verified run，被引用子判据为 heuristic 时拒绝。registry 在自定义 verifier 执行前同样检查映射，合法映射仍须通过所选 verifier，插件不能覆盖映射规则。父 mandatory heuristic 不计确定性通过；requiresIndependentAcceptance 缺映射时准入拒绝 | `composite-verifier.ts:entryDefect`；`verifier/src/index.ts:verifyCriterion`；`admission.ts:independentAcceptanceDefects` |
-| 预算 | wallTimeMs 在飞取消；tools/tokens 仅终态审计；attempts/noProgressRounds 仅声明 | `orchestrate.ts:awaitWorker`、`budgetBreaches`；`task-runtime/src/index.ts:Config` |
+| 预算 | A3 已建根预算（§5.9）：`Config.rootBudget`（wallTimeMs/maxRuns/maxConcurrentWrites=1，闭合 schema，未知成员具名拒启）；run 期限 = min（配置 wallTimeMs，根剩余），从持久化 run.startedAt 起算、重启不重计时；maxRuns 按 runId 记账、崩溃重数不退款不重置；replay 经 rootTaskStoreId 根绑定共享 store 根总额；无进展相位机（标记→一次提醒→到限停止）已接线。tools/tokens 仍仅终态软统计（unknown 不记零）；attempts 仅声明 | `root-budget.ts:resolveRootBudget/checkRunStart/hasRootLimits`；`orchestrate.ts:observeWorkerRun`、`budgetBreaches`；`task-runtime/src/index.ts:Config` |
 | L4 上报 | root 的 `escalate` 工具与台账已有；模型主动调用，批准后才记 raised；运行时只输出提示，无自动触发、无处理结果/恢复闭环 | `agent-singularity/src/tools/escalate.ts`；`orchestrate.ts:escalationHint` |
 | blocked 恢复 | blocked 无恢复出边；TaskRetried 只接受 failed，父分解一次的限制仍在；补能力后不会自动续跑原图 | `task/src/service/state.ts`；`task-runtime/src/index.ts:decomposeAndRun` |
 | Review / Evolution | 已有工具链；机械候选 PROMOTE/apply 要求 observed、holdout 各自非空且不退化，报告按明细重算并校验记录时摘要。单文件 Skill 候选内容已绑定（P2）：prepare 记录实际物化 SKILL.md 的 SHA-256，replay 报告携带同一身份，`replayed` 记录写入前、晋升预检与 decide(PROMOTE)/apply 服务入口均复检候选文件，apply 只写入已校验字节。生产基线已固定（P3）：prepare 用同一次读取的生产文件得到 champion 快照与 `skillBaseline` 摘要，apply 工具在人审前、服务在实际写入前复检生产目标仍等于该基线（captured 要求普通文件摘要一致，missing 要求目标仍不存在；缺失/内容不同/类型改变/符号链接路径均明确拒绝），过期候选不写生产、不记 applied，也不自动覆盖或改写原 proposal。未实现其他 targetType 的内容绑定、真实证据来源校验、分层指标或自动 Retro | `agent-singularity/src/evolution.ts:prepare`、`readSkillCandidate`、`checkPromotion`、`checkProductionBaseline`、`writeProduction`；`replay.ts:assertReplayReport` |
@@ -211,7 +211,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 | G9 | 类型闸只覆盖 `agent-singularity`；其余 Singularity 包的 `build` 仍只有 tsdown，未接 `tsc --noEmit`，其严格类型状态未经本闸保证 | P1 范围外，待独立评估 |
 | G10 | 动态生成已存在，但无生成提案审核协议；不能把 Task 模板库当成合法性白名单，也不能把工具层弹窗当成完整治理。T1 已补统一可持久化契约、闭合字段集、内容摘要与准入记录（§5.6）；审核开关、提案状态机与恢复仍属 T2/T3 | T2/T3 / Task 自主构造指导 |
 | G11 | 根 objective/AC 入口过弱；上下文传递缺根目标、祖先决定来源与新鲜度；根目标错了时全局传播不能补救 | A0/A1 |
-| G12 | 父同步等子与子回问冲突；idle 等同执行结束，不支持有持久状态的等待与继续；不能仅添加 ask_parent 或开放 send_message | A3/A4 |
+| G12 | 父同步等子的循环等待已由 A3 解除（§5.9：分解立即返回 batchId、waiting_children 运行时写闸、显式提交、无进展停止，idle 不再等同执行结束）。仍缺：持久 question/answer 与问答等待（task_ask_parent/task_answer 属 A4）；不能仅添加 ask_parent 或开放 send_message | A3（已交付）→ A4 |
 | G13 | task_status 全树文本不表达执行权/合法动作；session 同 cwd 可读比 group 边界宽；reviewer 局部 pack 不等于跨图因果 debug | A2/A5 |
 | G14 | root/worker prompt 与当前方向有漂移：L4/manual、直接问人、make command exit 0、分解意图矛盾；未来工具必须随真实协议接线再写入提示 | A0–A6 逐票同步 Prompt 合同 |
 
@@ -324,6 +324,24 @@ T1 把“任务契约”从散落在工具 schema、runtime 局部函数与事�
 测试锚：`task/tests/unit/skill-contract.spec.ts`、`task-runtime/tests/unit/{sidecar,verified-read,provider-precheck,provider-load,run-binding,carried-precheck,capability}.spec.ts`、`tests/integration/{provider-precheck,worker-binding,provider-promotion,provider-version-binding,knowledge-provider,recursive-capability,run-skill-loading}.spec.ts`、`agent-singularity/tests/unit/{evolution,task-tools}.spec.ts`。实跑命令与数量见建设计划「S1-C 执行与验收记录」。
 
 未覆盖/边界（如实记录）：配置载入只报告不硬 fail（语义与理由见 `providerLoadReport` docblock）；skill 晋升执行器只支持单文件 `SKILL.md`（含侧车/资源候选显式拒绝）；guidance 快照的 `uncovered` 复检只覆盖"快照出现身份未覆盖条目"方向（记录列出的源目录条目本来就不复制进快照，反向不是差异）；MCP 工具覆盖是前缀判定，server 真实工具表只有 spawn 才知道；run 快照无 GC/配额（A3/S2-R 领域）；`mcpServers[].templateDigest` 只记录渲染、无回读复检（spawn 对缺失 server 具名失败）；worker 仍可读到部署 catalog 里未选 skill 的正文（DSH 无 per-agent 隐藏；授权面未变，有加载未选 skill 不扩权的回归）；预检视角不含仅 DSH 自带发现可见的 skill（该形态会 fail-closed 误拒，模块文档已点名）；快照只保证字节=准入身份，不证明内容正确；`contentCheck` 只识别并携带引用，没有 gate 执行它；效率对比实验（固定任务集与真实模型）是票后工作，不凭 token 变化宣布更高效。
+
+### 5.9 非阻塞运行与恢复（2026-09-22 A3）
+
+范围（建设计划文首表第 4 行完成闸：非阻塞推进、工作区写入归属、显式提交、取消/恢复、根预算与普通/replay 一致性；问答工具 task_ask_parent/task_answer 属 A4，本票只留持久化字段挂载点；设计合同与验收映射见 `docs/2026-09-22-a3-coordination-design.md`）：
+
+- **准入与推进分离**：`decomposeAndRun` 两阶段（`task-runtime/src/index.ts`）——既有准入链（受保护输入固定→规范化→结构准入→能力缺口→provider 预检→verifierRef）顺序不变，新增父 run 相位必须 active、根预算预留、工作区归属检查，任何拒绝零副作用；原子提交（`admitBatchIn` 单次 commit）后工具 signal 失效（所有权转移给 per-batch AbortController），立即返回 `{ batchId, childTaskIds }`。推进函数 `driveBatch`（`orchestrate.ts`）可重入：每轮从 store 重读子状态，内存只缓存 handle/watcher；验证/依赖规则沿用原 cascade（`runChildrenCascade` 已删除，无第二套状态分支）。driver 失败经 `failBatchFromRuntime`：父 run failed + 诊断 + 通知 owner，不 fire-and-forget。`awaitBatch` 供服务/测试消费。
+- **协调相位与显式提交**：TaskRun 持久化 `executionPhase`（active/waiting_children/submitted）+ `batchId`/`submission`/`noProgress`，及 A4 挂载点字段（`pendingQuestionIds`/`blockingQuestionIds`，无消费者）；新事件 `RunPhaseChanged`/`RunProgressMarked`（same-version；reducer 迁移闸只放行 active→waiting_children、active→submitted、waiting_children→submitted）。`task_submit_result`（新工具，ROOT_TOOLS 与 worker baseline 同步）：runtime `submitResult` 身份/状态重检 → 先落相位事件 → drain → verifier 排他执行 → 既有 unmetMandatory/终态 review；迟到提交读回已记录结果（去重靠相位唯一性）。session idle 不再是完成证据：active idle 无提交 → RunProgressMarked 计数 → 一次 followup 提醒 → 到限停止（诊断保留）；根 run 不挂无进展相位机（用户输入间合法 idle）。
+- **写入收敛与执行闸**：`gate.ts` ExecutionGate 经 `tools/pre-execute`（prepend）+ `tools/result` 接线（Service.init；run-stack 等直构 harness 不在其内，闸的拒绝断言只在真实 loop 套件）；相位 ≠ active 时只放行 18 个协调工具（读/状态/诊断/问答挂载点/`task_cancel`），写/shell/再次分解/提交一律 deny，在途调用登记计入（发起提交/分解的调用经 `excludeCallId` 排除）。写入收敛三步共用：先持久化准入关闭 → `drainSession`（有界等在途写 + kill/wait 受管理 jobs）→ 启动子批次/转 verifier；不可确认 → 明确的不可验收诊断，禁止超时假定停止。
+- **工作区唯一写入归属**：`workspace.ts` WorkspaceRegistry——realpath 规范化的 checkout 身份、归属栈（run→batch→子 run→verifier）、marker 文件（`<runBindingRoot>/workspace-owners/<sha256>.json`，pid 活性 + 尽力记录进程 starttime）；冲突在副作用前抛 `WorkspaceBusyError`（结构化），无隐含等待队列；verifier 占排他执行期，栈顶属别的 store 具名拒绝验证（不兜底照常验证）；stale 标记仅恢复路径 `reconcileAdopt` 接管。单进程 registry + marker，不宣称跨进程锁；多管理进程接管同一工作区由 marker+pid 探测拒绝。
+- **取消/恢复/卸载**：`cancelBatch`（仅该批次父 run 的 session 可调，闸放行表内）/ `cancelGraph`（graphs.remove 钩子在 stopGraph 前调用）/ dispose effect（abort 全部 driver → 有界结算 → 关闸 → 释放标记）。等待相位的子 run 仍竞争 [终态｜期限｜批次 abort]（`awaitWaitingTerminal`），嵌套批次取消有界结算；未启动子节点标 cancelled-before-start；两合法结算路径撞同一 run 时以 store 为仲裁。恢复 `reconcileStore`（store 打开/根收养时，按 run 粒度幂等——在飞 driver 的批次跳过）：先复用 S1-C `readRunBinding` 快照复检（被改 → 具名拒绝，不静默回退），再按相位机处置（submitted → 补验证；waiting_children → 按深度降序重启 driver；active 非根 → cancelled+诊断）；旧无相位 run 不改状态、不重跑，`task_read`/`task_status` 派生 needs-recovery，唯一合法动作是取消。
+- **根预算**：`root-budget.ts`——owner = store 根任务（其 run 经 `rootTaskStoreId` 绑定回本 store；replay 的 parentless task 共享该根总额，不另建账本）；硬限制仅根截止（从根 run startedAt 计）/maxRuns（按 runId 记账、崩溃重数不退款不重置）/maxDepth（既有）/并发写=1（其他值构造期拒绝）；token/工具费用只作终态软统计（budgetBreaches，unknown 不记零）；闭合 schema + `hasRootLimits`（区分未配置与空配置），调用方配无法执行的硬限制 → `assertRootBudgetConfig` 具名拒启。普通/replay/恢复三入口同守（`replayTask` 不跳过 `checkRunStart`）。进展计数用快照可计算的子树条目和（tasks+runs+edges+evidence+handoffs+reviews+diagnoses+obligations），自然语言“有进展”与重复失败调用不清零；到限停止并保留诊断，不调用尚不存在的主管入口（A5）。
+- **signal 转移**：工具 `exec.signal` 只管准入段；原子提交后批次由 per-batch AbortController 拥有；取消源 = cancelGraph/cancelBatch/根期限/dispose；有测试证明工具返回/abort 后批次继续、graph 取消才停止。
+
+源码锚：上述加 `task/src/types.ts`（ExecutionPhase/SubmissionRecord/NoProgressRecord、TaskRun 新字段）、`task/src/index.ts`（`changeRunPhaseIn`/`markRunProgressIn`/`admitBatchIn`；`cancel` 源状态放宽为 running/verifying——行为收紧修复点，已写入持久化记录）、`task/src/service/state.ts`（迁移闸）、`agent-singularity/src/tools/{task-submit-result,task-cancel,run-phase}.ts` 与 `task-decompose.ts`（立即返回）、`agent-runtime/src/prompts/root.prompts.ts`、`task-runtime/src/handoff.ts`（显式提交协议）、`graphs/src/index.ts`（remove 钩子）。
+
+测试锚：`task-runtime/tests/unit/{orchestrate,gate,workspace,root-budget}.spec.ts`、`task/tests/unit/coordination.spec.ts`、`agent-singularity/tests/unit/task-tools.spec.ts`；集成 `tests/integration/a3-coordination-loop.spec.ts`（真实 DSH loop + scripted provider，6 项）、`a3-recovery.spec.ts`（真实 JSONL 重开 6 崩溃点 + 验证中断 3 例 + 取消竞态，13 项）、`a3-workspace.spec.ts`（跨根/replay/直调冲突与 replay 预算共享，5 项）、`coordination-tools.spec.ts`（4 项）。实跑命令与数量见建设计划「A3 执行与验收记录」。
+
+未覆盖/边界（如实记录）：A4 问答工具与 waiting_answer 显示未建（挂载点字段已持久化、无消费者）；子任务按依赖串行，无并行工作窃取；进程崩溃时在途 active worker run 不恢复现场（cancelled+诊断，worker session 续跑属 S2-R）；工作区归属不防御共享文件系统上的外部 unmanaged 写入者（含多机共享 DSH_HOME 时 pid 探测失效）；pid 复用可把陈旧标记误判为活；replayLineage 为进程内 Map（重启后补验证的 replay 终态 review 不带 lineage tag）；根 run 终态后根 session 被闸置 terminal（迟到写入拒绝的合同结果；对用户续聊是行为变化，A0/A4 领域）；`waitRunSettled` 的 2s 尾部窗口等的是同进程结算簿记（非写进程停止），超时仅 notify 并照常采纳，该分支无测试；token/工具费用只有终态软统计；真实模型质量实验为票后工作。
 
 ## 6. 文档维护
 

@@ -146,23 +146,23 @@ scoped system section 只放可信 runtime 生成的结构与合同。引用的�
 
 当前链路是“父工具等待子 whenIdle → 子工具等待父回答”，DSH 的 steer 只能在父下一 step 生效，无法抢入尚未返回的工具执行。给子节点加 ask_parent 而不改父侧协调会死锁。
 
-建设决定：把 `decomposeAndRun` 的“准入提交”与“批次推进”分开。Task runtime 保存一个批次的 child ids、依赖、执行进度；准入后立即返回 batchId/状态，runtime 在 Cordis effect 拥有的执行中推进。父 agent 得以继续收消息/答问。初版仍每批一次运行一个子任务，共享 checkout 不因父可响应而变成并行写入。
+建设决定：把 `decomposeAndRun` 的“准入提交”与“批次推进”分开。Task runtime 保存一个批次的 child ids、依赖、执行进度；准入后立即返回 batchId/状态，runtime 在 Cordis effect 拥有的执行中推进。父 agent 得以继续收消息/答问。初版仍每批一次运行一个子任务，共享 checkout 不因父可响应而变成并行写入。（A3 已落地，2026-09-22：`decomposeAndRun` 两阶段返回 `{ batchId, childTaskIds }`，`driveBatch` 可重入推进、每批按依赖串行；批次由 per-batch AbortController 拥有，工具 signal 只管准入段。）
 
-推进不是另建 workflow 引擎：沿用 runChildrenCascade 的验证/依赖规则，抽出可重入推进函数；事件 store 是真相，内存只缓存 handle 和待运行工作。出错必须记录并通知 owner，不能 fire-and-forget 吞异常。取消按 graph/batch/run 明确传播，卸载按 owner 顺序停止/flush。
+推进不是另建 workflow 引擎：沿用原 cascade 的验证/依赖规则，抽出可重入推进函数（A3 落为 `driveBatch`）；事件 store 是真相，内存只缓存 handle 和待运行工作。出错必须记录并通知 owner，不能 fire-and-forget 吞异常。取消按 graph/batch/run 明确传播，卸载按 owner 顺序停止/flush。
 
 A3 统一模块职责：Task runtime 对分解、提交、取消和恢复负责身份/状态重检、幂等与副作用交接，工具层只做输入转换和结果展示；A4 问答沿用同一合同。先计算合法迁移并持久化效果意图，再通过已有 agent-runtime/verifier 执行；恢复按稳定身份补缺失效果，不把内存 promise 当状态。普通执行、replay、恢复共用提交/验证/预算/取消规则，只允许调用场景显式不同；不得各复制一套状态分支。新增内部 helper 必须减少重复职责，不把每个事件包装成独立框架或插件。
 
-共享工作区必须避免父子同时写：父进入 waiting_children 时，运行时工具执行闸只放行上下文读取、向直属父提问、回答子问题、root 的必要人类澄清、诊断请求、状态查询与受控取消；拒绝父的写/shell/再次分解等动作。不能只调整下一步工具 schemas，因为在途调用也需检查。并行独立工作必须另有产物范围与隔离合同，本票不开放。
+共享工作区必须避免父子同时写：父进入 waiting_children 时，运行时工具执行闸只放行上下文读取、向直属父提问、回答子问题、root 的必要人类澄清、诊断请求、状态查询与受控取消；拒绝父的写/shell/再次分解等动作。不能只调整下一步工具 schemas，因为在途调用也需检查。并行独立工作必须另有产物范围与隔离合同，本票不开放。（A3 已落地 2026-09-22：`gate.ts` 经 `tools/pre-execute` waterfall 真实否决，在途调用同样登记检查，放行表含读/状态/诊断/`task_cancel` 等 18 项；问答两类动作只留 A4 挂载点。）
 
-派发与验收共用写入收敛边界：先持久化准入关闭状态，再排空已准入的写调用及其受管理后台进程，最后启动子批次或捕获产物身份并验证。分解可以立即返回 batchId，但排空完成前不能启动子节点。提交可以立即返回已记录，但排空完成前不能进入 verifier。复用现有工具/进程生命周期服务，不自造进程调度器；无法确认停止的写进程形成明确的不可验收诊断，禁止超时后假定已停止。恢复后同样先对账，不能仅因内存调用计数为零就验证。该边界覆盖受管理执行，不声称隔离共享文件系统上的任意外部进程。
+派发与验收共用写入收敛边界：先持久化准入关闭状态，再排空已准入的写调用及其受管理后台进程，最后启动子批次或捕获产物身份并验证。分解可以立即返回 batchId，但排空完成前不能启动子节点。提交可以立即返回已记录，但排空完成前不能进入 verifier。复用现有工具/进程生命周期服务，不自造进程调度器；无法确认停止的写进程形成明确的不可验收诊断，禁止超时后假定已停止。恢复后同样先对账，不能仅因内存调用计数为零就验证。该边界覆盖受管理执行，不声称隔离共享文件系统上的任意外部进程。（A3 已落地：`drainSession` 有界排空 + `ctx.jobs` kill/wait 终态确认；发起提交/分解的调用经 `excludeCallId` 排除；不可确认 → 明确的不可验收诊断。）
 
-“批次内串行”不足以排除跨批次冲突。A3 在现有工作区/运行所有者中记录唯一写入归属，以规范化工作区身份覆盖共享该 checkout 的批次和根任务；冲突请求在副作用前返回结构化 busy，不建立隐含的无限等待队列。父委派前排空并转交归属，子完成后经 runtime 收回；取消/重启须对账受管理进程，不能抢走仍可能写入者的归属。验证器执行也占有该工作区的排他执行期，避免测试写文件与其他 Run 冲突。候选与基线各用独立工作区。首版归属由已有单进程 runtime 管理，部署入口必须拒绝无法保证独占的多个管理进程接管同一工作区；不把进程内 Map 宣称跨进程锁。实现无法检测某种入口时，该入口不能标为支持。这是 A3 的完整运行合同，不是另一个提前运行的图版本。
+“批次内串行”不足以排除跨批次冲突。A3 在现有工作区/运行所有者中记录唯一写入归属，以规范化工作区身份覆盖共享该 checkout 的批次和根任务；冲突请求在副作用前返回结构化 busy，不建立隐含的无限等待队列。父委派前排空并转交归属，子完成后经 runtime 收回；取消/重启须对账受管理进程，不能抢走仍可能写入者的归属。验证器执行也占有该工作区的排他执行期，避免测试写文件与其他 Run 冲突。候选与基线各用独立工作区。首版归属由已有单进程 runtime 管理，部署入口必须拒绝无法保证独占的多个管理进程接管同一工作区；不把进程内 Map 宣称跨进程锁。实现无法检测某种入口时，该入口不能标为支持。这是 A3 的完整运行合同，不是另一个提前运行的图版本。（A3 已落地：`workspace.ts` 归属栈 + marker 文件 + pid 活性/starttime 探测；冲突在副作用前抛 `WorkspaceBusyError`；verifier 排他期栈顶不符具名拒绝验证；stale 标记仅恢复路径接管。）
 
 ### 7.2 分开 Agent idle 与任务完成
 
-保留 Task 的结果状态；新 Run 主相位（建议 executionPhase）为 active、waiting_children、submitted，另以 pendingQuestionIds/blockingQuestionIds 记录正交的问答等待。active 且有阻塞问题时，对外显示 waiting_answer；waiting_children 同时可有阻塞问题，不能覆盖原 batchId 或把主相位改成 active。waiting 不是 PASS/FAIL，也不重用 capability blocked 原因。事件与 reducer 变更需按持久化规则记录。
+保留 Task 的结果状态；新 Run 主相位（建议 executionPhase）为 active、waiting_children、submitted，另以 pendingQuestionIds/blockingQuestionIds 记录正交的问答等待。active 且有阻塞问题时，对外显示 waiting_answer；waiting_children 同时可有阻塞问题，不能覆盖原 batchId 或把主相位改成 active。waiting 不是 PASS/FAIL，也不重用 capability blocked 原因。事件与 reducer 变更需按持久化规则记录。（A3 已落地 2026-09-22：`executionPhase` 三相位与 `batchId`/`submission`/`noProgress` 已持久化，reducer 迁移闸只放行 active→waiting_children、active→submitted、waiting_children→submitted；`pendingQuestionIds`/`blockingQuestionIds` 作为 A4 挂载点字段已持久化但无消费者，问答工具与 waiting_answer 显示未建。）
 
-新增提交验收动作（工作名 task_submit_result）：worker 提交 artifact refs 与证据引用，runtime 进入 submitted→verifying，verifier 决定结果。task_verify 仍只是自检。session idle 无提交时只能是等待或异常停顿，不能直接做“完成”证据；祖先 waiting_children 的 idle 不触发父验收。子全部终态之后仍必须执行独立父 AC。
+新增提交验收动作（工作名 task_submit_result）：worker 提交 artifact refs 与证据引用，runtime 进入 submitted→verifying，verifier 决定结果。task_verify 仍只是自检。session idle 无提交时只能是等待或异常停顿，不能直接做“完成”证据；祖先 waiting_children 的 idle 不触发父验收。子全部终态之后仍必须执行独立父 AC。（A3 已落地 2026-09-22：`task_submit_result` 工具 + `submitResult`（身份/相位重检 → RunPhaseChanged(submitted) 落库 → drainSession 排空 → verifier 排他执行）；idle 无提交经 RunProgressMarked 相位机提醒一次后到限停止；子全终态后父由 runtime 自动提交，composite 仍走既有独立父验收规则。）
 
 上游 agent/turn-stopping、pre-step 和原生 inbox 用于抑制空转/接收唤醒，不修改 agent-loop。当前 DSH 在 pre-step hook 之前已 claim 并持久化移除 inbox 项；不得用“正在等待”一律 reject，否则会吞掉尚未交给模型的问答。有效协调输入必须放行；claim 后 reject/crash 时从未处理领域记录重新投影或恢复投递，保留相同消息身份。首版 active idle 无提交且无阻塞问题时保持非终态并记录可观察的未提交诊断；允许一次配置内提醒，后续无进展走预算停止，不能无限唤醒。旧终态记录原样读取，不把旧 session idle 重新解释为新提交事件。
 
@@ -178,7 +178,9 @@ A3 统一模块职责：Task runtime 对分解、提交、取消和恢复负责�
 | 任意非终态 | graph 取消/硬超时/不可恢复基础设施失败 | 按原因走 cancelled/failed，取消未答问题和后续派发 |
 | 任意终态 | 迟到问题/回答/提交 | 拒绝执行效果，保留诊断；不能复活原 Run |
 
-历史非终态 Run 缺相位时不能默认认定 active 并自动重跑；恢复入口先从旧事件确认可安全继续的路径，否则显示 needs-recovery 诊断，不新增伪造终态。迁移模式不得绕过原预算、重复已产生的外部副作用。
+（A3 已落地 2026-09-22：reducer 迁移闸只放行 active→waiting_children、active→submitted、waiting_children→submitted；取消行与终态拒绝行已接线；含问答阻塞的两行属 A4 待建。）
+
+历史非终态 Run 缺相位时不能默认认定 active 并自动重跑；恢复入口先从旧事件确认可安全继续的路径，否则显示 needs-recovery 诊断，不新增伪造终态。（A3 已落地：旧无相位 run 不改状态、不重跑，`task_read`/`task_status` 派生 needs-recovery，唯一合法动作是取消。）迁移模式不得绕过原预算、重复已产生的外部副作用。
 
 ### 7.3 最小问答对象
 
@@ -211,15 +213,15 @@ answer 校验真实父身份、question 状态、对应 run 和契约；回答�
 
 每 run 的提问数、同一问题无进展次数、未答数量有外置限额；问题重复按 requestKey/idempotency 管，不能只用字符串相似度静默合并。未回答不是失败答案。首版 wallTime 按原始 startedAt 继续计入等待，不重启计时；超限取消协调并保留问题，未来主动执行时间与等待时间拆账另立票。
 
-A3 同时建立根目标预算归属：子任务、重试、诊断、候选和评估各有明细但共用根总额，replay 的 parentless Task 通过明确的资助根引用记账，不因 Task 无父亲获得新预算。独立评估请求必须有自己的显式预算 owner。时间从根接受时计，Run 期限不得晚于根期限；次数在准入时按稳定操作 id 预留/记账，崩溃恢复不重复计数，也不重置额度。A5/S2-R/S3/S4-E 接入该入口，不能新增各自独立的总预算。
+A3 同时建立根目标预算归属：子任务、重试、诊断、候选和评估各有明细但共用根总额，replay 的 parentless Task 通过明确的资助根引用记账，不因 Task 无父亲获得新预算。独立评估请求必须有自己的显式预算 owner。时间从根接受时计，Run 期限不得晚于根期限；次数在准入时按稳定操作 id 预留/记账，崩溃恢复不重复计数，也不重置额度。A5/S2-R/S3/S4-E 接入该入口，不能新增各自独立的总预算。（A3 已落地 2026-09-22：`root-budget.ts`；owner = store 根任务（其 run 经 `rootTaskStoreId` 绑定回本 store），replay 的 parentless task 共享该根总额；maxRuns 按 runId 记账、崩溃重数不退款不重置。）
 
-A3 先使用现有 root binding 和可追溯的创建/接受事件确定预算 owner；A0 后续只接入真实根契约接受事件，不改变预算语义。旧记录缺少可确定起点时走明确恢复诊断，不用重启时间伪造新预算，也不要求 A3 依赖尚未实现的 A0。
+A3 先使用现有 root binding 和可追溯的创建/接受事件确定预算 owner；A0 后续只接入真实根契约接受事件，不改变预算语义。旧记录缺少可确定起点时走明确恢复诊断，不用重启时间伪造新预算，也不要求 A3 依赖尚未实现的 A0。（A3 已按此实现：缺起点（无根/无 run/startedAt 不可读）走具名恢复诊断，未依赖 A0。）
 
-硬限制先覆盖可观察的截止时间、Run/实验启动次数、递归深度和并发写入数；达到上限拒绝新副作用并取消受影响执行。token/工具费用只有在实际 provider/工具入口提供运行中计数时才可标硬限制，事后观测必须标软统计，unknown 不记零。调用方要求无法执行的硬限制时明确拒绝启动，不悄悄降为软统计。
+硬限制先覆盖可观察的截止时间、Run/实验启动次数、递归深度和并发写入数；达到上限拒绝新副作用并取消受影响执行。token/工具费用只有在实际 provider/工具入口提供运行中计数时才可标硬限制，事后观测必须标软统计，unknown 不记零。调用方要求无法执行的硬限制时明确拒绝启动，不悄悄降为软统计。（A3 已落地：硬限制 = 根截止/maxRuns/maxDepth/并发写=1；token/工具费用只有终态软统计（budgetBreaches）；闭合 schema，未知成员或并发写 ≠ 1 在构造期具名拒启。）
 
-进展记录引用实际事实：新增且校验有效的证据、解除阻塞、满足义务，或带实验结果的假设排除。自然语言“有进展”、重复同一失败调用、重复创建同目标任务不自动清零 noProgressRounds。无需通用语义相似度判定；以稳定义务/证据/问题身份和有界诊断计数推进。已知等待不触发无进展重试，但仍受根截止时间约束；达到限额保留诊断并停止，A5 完成前不调用不存在的主管入口。
+进展记录引用实际事实：新增且校验有效的证据、解除阻塞、满足义务，或带实验结果的假设排除。自然语言“有进展”、重复同一失败调用、重复创建同目标任务不自动清零 noProgressRounds。无需通用语义相似度判定；以稳定义务/证据/问题身份和有界诊断计数推进。已知等待不触发无进展重试，但仍受根截止时间约束；达到限额保留诊断并停止，A5 完成前不调用不存在的主管入口。（A3 已落地：进展 = 快照可计算的子树条目和代理；`RunProgressMarked` 相位机提醒一次后到限停止并保留诊断。）
 
-非阻塞批次的工具 signal 只控制请求准入；工具正常返回不取消已接受的批次。批次之后由 graph/run 生命周期 signal 拥有，用户停止图或运行超时才取消。该 signal 转移须有测试，不能让“工具调用结束”意外杀掉所有子节点。
+非阻塞批次的工具 signal 只控制请求准入；工具正常返回不取消已接受的批次。批次之后由 graph/run 生命周期 signal 拥有，用户停止图或运行超时才取消。该 signal 转移须有测试，不能让“工具调用结束”意外杀掉所有子节点。（A3 已落地并有测试：工具返回/abort 后批次继续（`orchestrate.spec.ts` + `a3-coordination-loop.spec.ts`），graph 取消才停止。）
 
 ## 8. Supervisor 沿图 debug 的办法
 
@@ -283,7 +285,7 @@ Prompt 按角色政策（稳定）、不可变契约、当前上下文投影、�
 | A0 真实根契约入口 | T1、S1-V 切片 2、T2/T3 组；graphs/createRootTask、root 角色 | setup 不消费根分解；无契约时 task_read 返回未激活；graph name 不冒充目标；新根有独立 AC；子全通过但根错误仍拒绝；off/all 与激活崩溃恢复完整；拒绝草案零派发；旧图不改历史 |
 | A1 全局上下文投影 | A0/A2、S1-C；handoff/contract、scoped prompt | 三层递归能读 root/贡献/来源决定/依赖；复用 A2 授权读取；无关正文不默认注入；压缩/重启可恢复；超预算有引用与诊断；多个 depth=0/replay 不串根；文本不变权限 |
 | A2 任务导航与合法动作 | A0/A3、S1-C；task_read/status、权限域 | 自己/祖先/邻域分页与状态准确；未激活/等待状态不误报；跨 graph/隐藏组拒绝；不同 cwd 失败明确；ready 不允许接管；陈旧 revision 重检；空模板仍能生成；工具显示与准入相同合同 |
-| A3 非阻塞批次与协调相位 | T1、S1-V 切片 2、S1-C；Task runtime/reducer、agent-runtime | 分解立即返回且父可继续；waiting idle 不验收；显式提交/父独立验收；依赖串行、取消/恢复/卸载完整；提交/派发去重；迟到写入、跨批次/跨根工作区冲突被阻挡；普通/replay 同守状态规则；根预算不因新 Run/重启重置，无进展停止 |
+| A3 非阻塞批次与协调相位（已交付，2026-09-22；验收见建设计划「A3 执行与验收记录」，落地事实已回写 §7.1/§7.2/§7.4） | T1、S1-V 切片 2、S1-C；Task runtime/reducer、agent-runtime | 分解立即返回且父可继续；waiting idle 不验收；显式提交/父独立验收；依赖串行、取消/恢复/卸载完整；提交/派发去重；迟到写入、跨批次/跨根工作区冲突被阻挡；普通/replay 同守状态规则；根预算不因新 Run/重启重置，无进展停止 |
 | A4 父子问题/回答 | A1–A3；TaskQuestion、消息适配、scoped 工具 | 真实 DSH loop 父子问答完成，无同步死锁；孙问子、子问根后 batch 与写闸保留；一个答案不清空其他阻塞，unresolved/改契约不放行；重复/迟到/伪造身份/跨组/缺父拒绝；ask 先落账、无回复不成功；入箱及 claim 后 reject/crash 可恢复且不重复领域副作用；问题不新增 graph 边；闭包缺口不自动提权 |
 | A5 因果诊断与 supervisor 触发 | A1/A2/A4、S4-E；与 S2-E 同组 | 一个上游错误仅一次 incident；引用真实边与原始证据；伪造 ref 拒绝；裁判/任务错误分开；根预算与 frontier；候选交接落账但自动执行未开放；重启不重复通知/主管任务 |
 | A6 自主改进和恢复 | A5/S2-E 组、S4-E；与 S2-R/S3 同组 | 缺能力时自主组合，另例实现候选并独立验证；坏候选拒绝、正确候选人审 apply 后恢复；拒绝/重启/预算停止/回滚完整；有效兄弟证据复用、失效证据拒绝；新能力用新 Run，零人工补写 Skill |

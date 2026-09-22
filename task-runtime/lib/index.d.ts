@@ -1,6 +1,6 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { AcceptanceCriterion, AdmissionContext, ArtifactRef, CapabilityManifest, ChildEvidenceRef, DecompositionAdmission, DependencyEdge, EvidenceBundle, KnowledgeContentCheck, ProtectedInputRef, ReviewCriterion, ReviewTokenUsage, ReviewToolCall, RunId, RunProviderBinding, RunSkillBinding, SkillContentIdentity, SkillContractDefectCode, SkillPort, SkillSidecar, TaskContract, TaskContractVersion, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskSnapshot, VerificationMode } from "@dangosys/dsh-singularity-task";
+import { AcceptanceCriterion, AdmissionContext, ArtifactRef, CapabilityManifest, ChildEvidenceRef, DecompositionAdmission, DependencyEdge, EvidenceBundle, ExecutionPhase, KnowledgeContentCheck, ProtectedInputRef, ReviewCriterion, ReviewTokenUsage, ReviewToolCall, RunId, RunProviderBinding, RunSkillBinding, RunStatus, SkillContentIdentity, SkillContractDefectCode, SkillPort, SkillSidecar, TaskContract, TaskContractVersion, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskSnapshot, VerificationMode } from "@dangosys/dsh-singularity-task";
 import { McpServerSpec, WorkerGrant } from "@dangosys/dsh-singularity-agent-runtime";
 import { AgentHandle } from "@deepseek-ai/dsh-agent";
 
@@ -92,7 +92,9 @@ declare const WORKER_BASELINE_LABELS: readonly string[];
  * frozen material fixes for every agent (`细化想法4.md:724-738`: `task_read`,
  * `task_decompose`, `task_status`, and the verifier tool this deployment names
  * `task_verify`) — L0 is the "every node, whatever it works on" layer, so a
- * worker keeps it whatever its capabilities declare.
+ * worker keeps it whatever its capabilities declare — plus the two A3
+ * coordination tools (`task_submit_result`, `task_cancel`) and
+ * `capability_list`, which have no label that could expand to them either.
  *
  * They are listed here individually, unlike the labels above, because these tools
  * are registered on the GLOBAL layer rather than a capability or preset plane
@@ -103,12 +105,20 @@ declare const WORKER_BASELINE_LABELS: readonly string[];
  * Every entry cites the prompt or tool contract that needs it:
  * - `capability_list`: `task_decompose` asks callers to discover valid capability
  *   names before proposing children, including recursively spawned workers.
- * - `task_decompose` — "Call `task_decompose` instead, with a `reason` and the child task list" (`handoff.ts:87`),
+ * - `task_decompose` — "Call `task_decompose` instead, with a `reason` and the child task list" (`handoff.ts:100`),
  *   and for a `leaf` worker whose deployment runs with `Config.allowRuntimeDecomposition` on,
- *   the runtime-split rule (`handoff.ts:127`) that opens the same tool to it.
- * - `task_read` — "re-read your own contract and run with `task_read`" (`handoff.ts:140`).
- * - `task_status` — the same line: the whole tree with `task_status` (`handoff.ts:140`).
- * - `task_verify` — "Before you finish, `task_verify` re-runs the verifier as a self-check" (`handoff.ts:141`).
+ *   the runtime-split rule (`handoff.ts:145`) that opens the same tool to it.
+ * - `task_submit_result` — "When the work is done, hand it in with `task_submit_result`" (`handoff.ts:161`):
+ *   the submission is the only completion a worker can claim, so a worker without
+ *   the tool could never finish a run.
+ * - `task_read` — "re-read your own contract and run with `task_read`" (`handoff.ts:160`).
+ * - `task_status` — the same line: the whole tree with `task_status` (`handoff.ts:160`).
+ * - `task_verify` — "`task_verify` is only a self-check" (`handoff.ts:166`).
+ * - `task_cancel` — no prompt line asks for it: a run that decomposed holds a
+ *   batch of its own, and the protocol's only way to end that batch early is
+ *   this call (A3 §3.6). It is also the one write the execution gate keeps for
+ *   a run in `waiting_children` or `submitted` (`gate.ts:COORDINATION_ALLOWED`),
+ *   so the tool has to be on the surface of every run that can hold a batch.
  *
  * `graph_spawn` is deliberately NOT here, even though the deployment registers
  * it for the root: it reaches the graph without Task Admission and returns the
@@ -162,8 +172,126 @@ interface PermissionSpec {
  */
 declare function resolvePermission(manifest: CapabilityManifest, resolveSpec: (name: string) => PermissionSpec): string | undefined;
 //#endregion
-//#region src/sidecar.d.ts
+//#region src/gate.d.ts
 
+/**
+ * What a session bound to a run may still call once its run is no longer
+ * `active`. Read-only inspection, diagnosis, the human-question tools, and the
+ * controlled cancellation of this batch: the work of *looking at* a run or
+ * ending it, never of making it produce more.
+ *
+ * `task_cancel` is in the list because cancelling is the one write a waiting or
+ * submitted run is allowed: the run has stopped deciding, and the owner may
+ * still stop the tree.
+ */
+declare const COORDINATION_ALLOWED: ReadonlySet<string>;
+/** A tool call that was let through and has not reported its result yet. */
+interface InFlightCall {
+  readonly callId: string;
+  readonly name: string;
+}
+/**
+ * The jobs service as the drain uses it, structurally. Written as a soft
+ * interface so the runtime can hand in `ctx.jobs` without this module importing
+ * a cordis service (or any harness package): `id` is the job this module kills
+ * and waits on (DSH's own `JobSnapshot.id`), `status` is DSH's
+ * `running | stopping | completed | killed | failed`, and the three terminal
+ * ones are what "confirmed stopped" means.
+ */
+interface JobsViewEntry {
+  readonly id: string;
+  readonly status: string;
+  readonly detail?: string;
+}
+interface JobsView {
+  list(agent?: unknown): readonly JobsViewEntry[];
+  kill(id: string, agent?: unknown, reason?: string): unknown;
+  wait(id: string, timeoutMs: number, agent?: unknown): Promise<{
+    status: string;
+    detail?: string;
+  }>;
+}
+/** What the gate decided about one call. `allow: true` means `next()`; a refusal names the phase and why the tool is not in it. */
+type GateDecision = {
+  allow: true;
+} | {
+  allow: false;
+  reason: string;
+};
+interface DrainOptions {
+  /** How long the whole drain may take, in milliseconds; the caller's policy, never a default here. */
+  timeoutMs: number;
+  /**
+   * The call that is asking for the drain. It is in flight by definition (it is
+   * the submission or admission call itself), so counting it would wait for the
+   * drain to finish waiting — the deadlock §3.3 records.
+   */
+  excludeCallId?: string;
+  /** The jobs service; absent (with `agent`) means this deployment has no managed jobs to reconcile. */
+  jobs?: JobsView;
+  /** The owner agent a jobs call is authorized as. */
+  agent?: unknown;
+}
+type DrainResult = {
+  confirmed: true;
+} | {
+  confirmed: false;
+  pending: string[];
+};
+/**
+ * The phase each session is in, and what it has in flight. One instance per
+ * runtime; nothing here touches the store or a service, so the rules can be
+ * tested as the pure state machine they are.
+ */
+declare class ExecutionGate {
+  private readonly phases;
+  /** Registering by call id (not by session) because `tools/result` carries only the call id. */
+  private readonly calls;
+  /** Move a session's phase; the runtime calls this when the store recorded the transition. */
+  setPhase(sessionId: string, phase: ExecutionPhase): void;
+  /** Mark a session's run terminal: only the allow-list runs from here, and its reason says the call is late. */
+  setTerminal(sessionId: string): void;
+  /** The phase a session is under, or `undefined` when no run is bound to it (nothing is gated). */
+  phaseOf(sessionId: string): ExecutionPhase | 'terminal' | undefined;
+  /**
+   * Register a call that was let through. Called for every allowed call whatever
+   * its phase, because the phase can change while it runs — that in-flight write
+   * is what `drainSession` waits for.
+   */
+  trackAllowed(sessionId: string, callId: string, toolName: string): void;
+  /** The result event for a call arrived: it is no longer in flight. Unknown ids are the denied calls, and are ignored. */
+  settled(callId: string): void;
+  /**
+   * The session's in-flight calls that count as writes: everything whose name is
+   * not in {@link COORDINATION_ALLOWED}. The definition is the allow-list, not a
+   * second list of write tools — a tool this deployment adds is a write until the
+   * coordination protocol says otherwise, and the two answers cannot drift.
+   */
+  inFlightWrites(sessionId: string): InFlightCall[];
+  /**
+   * Decide one call. A session with no phase is not bound to a run and is not
+   * gated; an `active` run is still deciding its own work. Every other phase
+   * allows the coordination list and denies everything else, naming the phase,
+   * the refused tool, and what is still allowed.
+   */
+  decide(sessionId: string, toolName: string): GateDecision;
+  /**
+   * Wait — bounded — until this session has no in-flight write and no live
+   * managed job, and say exactly what is left when the window closes. Never
+   * assumes a stop: `confirmed: false` with named `pending` entries is the
+   * honest answer for a call that did not settle or a job that is still not
+   * terminal, and the caller must refuse verification on it (§3.3).
+   *
+   * Order matters: the in-flight calls first (they are the writes this process
+   * can see finish), then the jobs this session started (kill, then wait for a
+   * terminal status within whatever window is left). The jobs step is skipped
+   * entirely when the deployment gave no service or no agent — there is nothing
+   * to reconcile, which is not the same as "nothing running".
+   */
+  drainSession(sessionId: string, opts: DrainOptions): Promise<DrainResult>;
+}
+//#endregion
+//#region src/sidecar.d.ts
 /** Every reason a provider is refused, named so a caller can act on the kind of problem. */
 type SkillDefectCode = SkillContractDefectCode | 'skill-missing' | 'skill-file-invalid' | 'skill-name-mismatch' | 'sidecar-unreadable' | 'sidecar-mismatch' | 'content-mismatch' | 'content-unsupported' | 'verifier-unknown' | 'capability-unknown' | 'tool-not-covered';
 /** One named reason a provider is not acceptable, with the detail a caller reports. */
@@ -580,6 +708,130 @@ declare function providerRefusals(precheck: ProviderPrecheck): string[];
  */
 declare function providerDefectLines(precheck: ProviderPrecheck): string[];
 //#endregion
+//#region src/root-budget.d.ts
+/**
+ * The root budget as configured (`Config.rootBudget`). Every member is optional:
+ * absent means the deployment sets no such limit, which is a statement about
+ * what is enforced and must be read as one.
+ */
+interface RootBudgetConfig {
+  /** Wall-clock the whole tree may take, measured from the root run's own `startedAt`. */
+  wallTimeMs?: number;
+  /** How many runs the tree may start, counted over the store's whole run list. */
+  maxRuns?: number;
+  /**
+   * Writes that may hold one workspace at a time. This deployment enforces
+   * exactly one, so any other value is a limit it cannot honor — see
+   * {@link assertRootBudgetConfig}.
+   */
+  maxConcurrentWrites?: number;
+}
+/** A resolved root budget: the tree it belongs to, the instant it started, and the limits in force. */
+interface ResolvedRootBudget {
+  /** The store's root task (`parentTaskId === undefined`) — the tree the budget belongs to. */
+  readonly rootTaskId: TaskId;
+  /** The root run's persisted start, read from the store: the instant the budget was accepted. */
+  readonly acceptedAt: string;
+  /** `acceptedAt + wallTimeMs`, when a wall time is configured. */
+  readonly deadlineAt?: string;
+  /** The run count the tree may reach, when one is configured. */
+  readonly maxRuns?: number;
+}
+type RootBudgetResolution = ({
+  readonly ok: true;
+} & ResolvedRootBudget) | {
+  readonly ok: false;
+  readonly reason: string;
+};
+/**
+ * Whether a root budget enforces anything at all. The configuration's schema
+ * materializes an absent `rootBudget` as an empty object, so the presence of an
+ * object is not the question a refusal may ask: a budget with no member in force
+ * is no budget, and an entry that refuses work over an unmeasurable tree would
+ * otherwise refuse it for a limit this deployment never set. Every refusal that
+ * is "a configured limit cannot be measured" asks this first.
+ */
+declare function hasRootLimits(config: RootBudgetConfig | undefined): boolean;
+/** The verdict a start or a batch admission gets. A refusal always names the limit it hit. */
+type BudgetVerdict = {
+  readonly allowed: true;
+} | {
+  readonly allowed: false;
+  readonly reason: string;
+};
+/**
+ * The root budget a snapshot is under, or the reason none can be measured.
+ *
+ * The owner is the store's own root: among the parentless tasks, the one whose
+ * run is bound to the root session the store id derives from
+ * (`rootTaskStoreId`) — the same durable rule the recovery path uses to tell a
+ * store's own root run apart from a replay's. A replay's task is parentless by
+ * design and carries no such binding (its session is minted for the replay), so
+ * it shares the root's total instead of claiming a budget of its own (§3.5, the
+ * funding-root reference); inventing one for it would hand every experiment a
+ * fresh allowance. No run naming a root session of this store means no owner,
+ * and the store keeps the honest recovery diagnostic rather than a guess.
+ *
+ * `reason` texts are recovery diagnostics: they say what is missing (no root,
+ * no run bound to this store as its root, several such tasks, a root run with
+ * no readable start) so an operator reading `task_status` knows why the tree
+ * cannot be started under a budget instead of being handed a fabricated one.
+ */
+declare function resolveRootBudget(snapshot: TaskSnapshot, config: RootBudgetConfig): RootBudgetResolution;
+/**
+ * Whether a run may start under the budget. Two refusals, in this order: the run
+ * count has reached `maxRuns` (the limit is a count of what the store already
+ * holds, so a restart cannot refund it), or the root deadline has arrived.
+ */
+declare function checkRunStart(snapshot: TaskSnapshot, budget: ResolvedRootBudget, nowMs?: number): BudgetVerdict;
+/**
+ * Whether a decomposition batch of `childCount` children may be admitted. The
+ * check is a reservation, not a forecast: the children will each start a run, so
+ * a batch that would push the tree past `maxRuns` is refused whole — before a
+ * task, a child or an event exists — rather than admitted and then started until
+ * the budget runs out mid-batch.
+ */
+declare function checkBatchAdmission(snapshot: TaskSnapshot, budget: ResolvedRootBudget, childCount: number): BudgetVerdict;
+/**
+ * What is left of the tightest deadline that applies to a run, in milliseconds.
+ *
+ * `min` semantics over the two bounds that can be in force: the run's own wall
+ * time measured from its persisted `startedAt` (so a resumed run keeps the clock
+ * it started with) and what is left of the root's deadline. A bound that has
+ * passed returns 0 rather than a negative number, and `Infinity` means neither
+ * bound is configured.
+ *
+ * A bound whose instant cannot be read is treated as *reached* (`0`): a start
+ * time nobody can parse is not a licence to run without a deadline, which is the
+ * same discipline `resolveRootBudget` applies to a missing root start.
+ */
+declare function runDeadlineMs(runStartedAt: string, perRunWallTimeMs: number | undefined, rootDeadlineAt: string | undefined, nowMs: number): number;
+/**
+ * How many entries one task's subtree holds — the progress measure the
+ * no-progress rule counts. The subtree is the task itself plus everything
+ * reachable through `childTaskIds` (a cycle is walked once), and each collection
+ * is filtered by the side of the relation that names a task in it: runs by their
+ * `taskId`, edges by either end, evidence/reviews/diagnoses by `taskId`,
+ * handoffs by either `parentTaskId` or `childTaskId`, obligations by
+ * `sourceTaskId`. The count is of *entries*: an id in the subtree with no task
+ * record contributes no task entry, while its runs, edges and evidence still
+ * count, because those entries exist and name it.
+ *
+ * Pure: the same snapshot always yields the same count, so a reviewer can
+ * recompute it without replaying anything.
+ */
+declare function countSubtreeFacts(snapshot: TaskSnapshot, taskId: TaskId): number;
+/**
+ * Refuse a root budget this deployment cannot execute. The one such limit is
+ * `maxConcurrentWrites`: the workspace registry enforces exactly one writer, so
+ * a configuration asking for any other number is a hard limit nobody can honor —
+ * and §3.5's rule is that asking for an unenforceable hard limit refuses to
+ * start rather than starting under a limit that is not real. Everything else
+ * about the shape (unknown members, negative values) is the Config schema's
+ * business, checked where the configuration is loaded.
+ */
+declare function assertRootBudgetConfig(config: RootBudgetConfig): void;
+//#endregion
 //#region src/mcp-servers.d.ts
 /**
  * The env binding one spawn resolves server templates against. Produced by
@@ -766,36 +1018,140 @@ declare function readRunBinding(binding: RunProviderBinding): Promise<RunBinding
  */
 declare function renderRunBinding(binding: RunProviderBinding | undefined, read?: RunBindingRead): string;
 //#endregion
+//#region src/workspace.d.ts
+/** The directory under a deployment's run-binding root that holds ownership markers (§3.4). */
+declare const WORKSPACE_OWNERS_DIR = "workspace-owners";
+/**
+ * Who holds a workspace. One shape for the three roles the protocol gives it:
+ * the run that is writing, the verifier that owns the checkout exclusively
+ * while it judges, and the runtime itself in the gap between children.
+ */
+interface WorkspaceOwner {
+  kind: 'run' | 'verifier' | 'batch';
+  /** The store this owner belongs to; a second store claiming the same checkout is a conflict, not a merge. */
+  storeId: string;
+  taskId?: TaskId;
+  runId?: RunId;
+  batchId?: string;
+  /** When this owner took the workspace (the marker's own instant). */
+  since: string;
+}
+/**
+ * A workspace that cannot be claimed because something already holds it — or
+ * because a marker exists that cannot be read as a holder. Carries the three
+ * things a caller needs to report it: which workspace, who holds it, and since
+ * when. `owner`/`since` are absent only in the unreadable-marker case, where
+ * nothing on disk names a holder; the message says so instead of inventing one.
+ */
+declare class WorkspaceBusyError extends Error {
+  readonly workspace: string;
+  readonly owner?: WorkspaceOwner;
+  readonly since?: string;
+  constructor(workspace: string, owner: WorkspaceOwner | undefined, since: string | undefined, detail: string);
+}
+/**
+ * What `reconcileAdopt` found. `adopted` true means the caller may start owning
+ * the workspace (nothing held it, or a stale marker was cleared); `adopted` false
+ * leaves every byte as it was and names why.
+ */
+type WorkspaceAdoption = {
+  readonly adopted: true;
+} | {
+  readonly adopted: false;
+  readonly reason: string;
+};
+interface WorkspaceRegistryOptions {
+  /** Where markers live (a deployment passes `<runBindingRoot>/workspace-owners`). Created on demand. */
+  markerRoot: string;
+  /**
+   * The pid this registry runs as; defaults to `process.pid`. Injected so a test
+   * can stand in for another process's registry, and so a marker can be written
+   * that names a pid this process is not.
+   */
+  pid?: number;
+}
+/**
+ * Resolve a checkout path the way ownership keys it: absolute, with symbolic
+ * links resolved, so the two spellings of one directory cannot become two
+ * markers. Throws when the path cannot be resolved (absent, a broken link, no
+ * permission) — a workspace whose identity is unknown is not a workspace this
+ * module will record an owner for.
+ */
+declare function normalizeWorkspacePath(path: string): Promise<string>;
+/**
+ * The kernel's start-time token for `pid`, or `undefined` when it cannot be read
+ * (a non-Linux platform, a pid that is gone, a process this user may not stat).
+ * Exported because it is the one honest pid-reuse check available here: compare
+ * it with the value a marker recorded.
+ */
+declare function readProcessStartTime(pid: number): Promise<string | undefined>;
+declare class WorkspaceRegistry {
+  private readonly markerRoot;
+  private readonly pid;
+  private readonly stacks;
+  constructor(options: WorkspaceRegistryOptions);
+  /** Where one workspace's marker lives — derived from the path as given, so it is the same key the stack uses. */
+  markerPath(workspace: string): string;
+  /** The owner on top of the stack, or `undefined` when this process holds nothing for the workspace. */
+  ownerOf(workspace: string): WorkspaceOwner | undefined;
+  /**
+   * Take a workspace for `owner`. Refuses — before anything is written, so a
+   * refused claim leaves the marker exactly as it was — when this process
+   * already holds it, or when any marker is already there.
+   */
+  claim(workspace: string, owner: WorkspaceOwner): Promise<void>;
+  /**
+   * Hand the workspace from `from` (which must be the current holder) to `to`,
+   * pushing `to` on the stack and rewriting the marker to name it. The stack is
+   * the ownership history: the run at the bottom keeps its claim while its batch
+   * and current child are on top of it.
+   */
+  push(workspace: string, from: WorkspaceOwner, to: WorkspaceOwner): Promise<void>;
+  /**
+   * Release `owner`, which must be the current holder. A mismatch throws with
+   * both owners named — popping a lower holder would hand the checkout to
+   * someone while a writer still believes it holds the workspace. The last
+   * release deletes the marker; an earlier one rewrites it to the new top.
+   */
+  release(workspace: string, owner: WorkspaceOwner): Promise<void>;
+  /**
+   * Take over a marker whose owning process is gone — the recovery path only,
+   * and the only way a stale marker is ever cleared. An absent marker is a
+   * success that changes nothing; a marker whose pid is alive, or whose bytes
+   * cannot be read as a marker, is a refusal that leaves
+   * everything in place, because adopting it would hand the checkout to a caller
+   * while a writer that may still be running has no idea.
+   */
+  reconcileAdopt(workspace: string): Promise<WorkspaceAdoption>;
+  /**
+   * Release everything this process still holds, as an unload path does. Only
+   * markers that name this process's pid are deleted: a marker written by
+   * another process describes a writer this unload knows nothing about, and
+   * removing it could hand a checkout to the next caller while that writer runs.
+   */
+  close(): Promise<void>;
+  /** The busy error a marker earns: whose, why, and — when the recorded start time disagrees — that the pid was reused. */
+  private busyFromMarker;
+  private readMarker;
+  private writeMarker;
+  private removeMarker;
+}
+//#endregion
 //#region src/orchestrate.d.ts
 /** Raised when the verifier service (ticket C2) is not loaded in the context. */
 declare class VerifierUnavailableError extends Error {
   name: string;
 }
-/** One admitted child plus the manifest it was admitted with. */
-interface ChildPlan {
-  task: TaskInstance;
-  manifest: CapabilityManifest;
-  dependsOn: readonly number[];
-  /**
-   * The provider pre-check the batch passed (S1-C item 1), carried per plan so
-   * the run's own record can be bound to the providers admission actually
-   * judged — one verdict set for the whole batch, not one recomputation per
-   * child. Absent when a caller assembles plans without it.
-   */
-  providers?: ProviderPrecheck;
-  /** Caller-declared assumptions (`DecomposeChildSpec.assumptions`), merged into the handoff at spawn time. */
-  assumptions?: readonly string[];
-  /**
-   * The child's contract constraints (`DecomposeChildSpec.constraints`, T1):
-   * recorded in the contract and rendered into the handoff, so the worker reads
-   * the same execution scope the store holds.
-   */
-  constraints?: readonly string[];
-}
 interface ChildOutcome {
   taskId: TaskId;
   runId?: RunId;
   status: 'verified' | 'failed' | 'blocked' | 'cancelled';
+  /**
+   * The evidence bundle the run left, named whatever its verdict — the store has
+   * one settlement path since A3, so a failed run whose criteria were judged
+   * carries the bundle that judged them exactly as a verified one does. Absent
+   * when the run produced none (a spawn refusal, a run that never started).
+   */
   evidenceId?: string;
 }
 interface SpawnChildRequest {
@@ -934,6 +1290,78 @@ interface OrchestrateEnv {
     taskId: TaskId;
     runId: RunId;
   }): void;
+  /**
+   * The runtime's tool-execution gate (A3 §3.3). The orchestration owns the
+   * phase of every session it spawns — a worker that has submitted, a parent
+   * waiting on its children — and this is where those phases are recorded and
+   * where the write drain is run. Required: a deployment that cannot gate its
+   * own sessions cannot honestly promise "nothing writes after admission
+   * closed", and every caller here has one (the runtime constructs it).
+   */
+  gate: ExecutionGate;
+  /**
+   * The one-writer-per-workspace registry (A3 §3.4), with the checkout this
+   * orchestration's sessions run in ({@link OrchestrateEnv.workspacePath},
+   * already normalized by the caller — the registry resolves nothing itself).
+   * Both absent means this deployment cannot name a checkout, and ownership is
+   * skipped rather than guessed; one without the other is a wiring defect the
+   * orchestration reports instead of silently skipping the hold.
+   */
+  workspaces?: WorkspaceRegistry;
+  workspacePath?: string;
+  /**
+   * The provider pre-check, for the one case that has no verdict to carry: a
+   * batch whose admission happened in an earlier process. A freshly admitted
+   * batch carries its verdicts ({@link BatchContext.providers}) and never
+   * calls this.
+   */
+  precheck?(capabilities: readonly string[], cwd: string | undefined): Promise<ProviderPrecheck>;
+  /**
+   * Best-effort owner notification (`agent.followup` on a live session, DSH's
+   * tool-jobs notice precedent). A session with no live agent is skipped, and
+   * a failing notification never fails the settlement it reports on.
+   */
+  notify?(sessionId: string, text: string): void;
+  /**
+   * Observe one run's terminal transition: subscribe, then read the current
+   * state, so a run that settled between the caller's last read and the
+   * subscription is not missed. Returns the unsubscribe function. The runtime
+   * implements this over the task service's `task/change` event.
+   */
+  watchRun?(storeId: string, runId: RunId, cb: (status: RunStatus) => void): () => void;
+  /** The root budget in force (`Config.rootBudget`); absent means this deployment sets no root limits. */
+  rootBudget?: RootBudgetConfig;
+  /**
+   * No-progress rounds before a worker that went idle without submitting is
+   * stopped (`Config.noProgressRounds`). The count is consecutive and derived
+   * from the store's own last marking, so it survives a resume.
+   */
+  noProgressRounds: number;
+  /** How long a write drain may take before it is reported as unconfirmed (`Config.writeDrainTimeoutMs`). */
+  writeDrainTimeoutMs: number;
+  /** The jobs service the drain kills and waits on; absent means this deployment has no managed jobs. */
+  jobs?: JobsView;
+  /** The agent a run's session currently resolves to, if any — the authorization a jobs call carries. */
+  agentFor?(sessionId: string): unknown;
+  /**
+   * Runtime bookkeeping at a run's terminal transition: the gate closes for
+   * that session (only coordination tools remain) and the workspace the run
+   * held is released. Called once per run this orchestration settles, adopted
+   * terminal states included.
+   */
+  onRunSettled?(storeId: string, taskId: TaskId, runId: RunId, status: RunStatus): void;
+  /**
+   * The runtime's batch-failure seam: every child of the batch that has not
+   * reached a terminal state is blocked and the batch's parent run is failed
+   * with `reason`. Used for a failure the driver cannot settle from where it
+   * stands — verification being unavailable in a *nested* submission is the
+   * case it exists for (A3 §3.1, the `VerifierUnavailableError` rule).
+   */
+  failBatch?(storeId: string, batchId: string, reason: string): Promise<void>;
+}
+/** Raised when the deployment cannot observe a run's terminal state, so no honest settlement is possible. */
+declare class RunWatcherUnavailableError extends Error {
+  name: string;
 }
 /**
  * The L4 exit pointer (KISS §7, VRTC plan phase 3.1), appended to the feedback
@@ -945,15 +1373,87 @@ interface OrchestrateEnv {
  */
 declare function escalationHint(what: string, tried: string, suggested: string): string;
 /**
- * Sequential run cascade over one admitted batch of children (RFC §47 MVP):
- * the first child whose dependencies are all `verified` is handed off and
- * spawned; its run is verified, then readiness is re-evaluated. A child whose
- * dependency failed, was cancelled, or never ran becomes `blocked`; an abort
- * cancels the in-flight child agent and marks its run `cancelled`. Once the
- * batch settles the parent run takes the verifier's verdict on its own
- * criteria — the composite acceptance that closes the loop.
+ * The one batch the runtime drives: the parent whose children it admitted, the
+ * batch id the store recorded, and the signal that now owns the progress.
+ *
+ * `signal` is *not* the tool call's own signal. Admission is governed by the
+ * caller's signal; from the atomic commit on, the batch belongs to the
+ * runtime's per-batch controller (§3.7), so a tool call that returns — or a
+ * caller that aborts its own call after the batch was admitted — cannot stop
+ * work that is already persisted. Only a cancellation (batch, graph, deadline,
+ * unload) reaches this signal.
  */
-declare function runChildrenCascade(env: OrchestrateEnv, storeId: string, parentTask: TaskInstance, parentRun: TaskRun, plans: readonly ChildPlan[], reason: string, callerSessionId: string, signal?: AbortSignal): Promise<ChildOutcome[]>;
+interface BatchContext {
+  storeId: string;
+  parentTaskId: TaskId;
+  parentRunId: RunId;
+  batchId: string;
+  callerSessionId: string;
+  reason: string;
+  signal: AbortSignal;
+  /**
+   * The coordination call that admitted this batch. The parent's own drain
+   * excludes it for the same reason the submission drain does: the call is
+   * still in flight while the drain runs, and waiting for it would wait for
+   * the drain itself (A3 §3.3).
+   */
+  excludeCallId?: string;
+  /**
+   * The provider pre-check the batch was admitted under (S1-C). Carried so a
+   * fresh admission's verdicts reach each child's run binding instead of being
+   * recomputed; a batch re-created by the recovery path has nothing to carry
+   * and rebuilds its verdicts through {@link OrchestrateEnv.precheck}.
+   */
+  providers?: ProviderPrecheck;
+}
+/**
+ * One child's outcome as the store records it. A child that never reached a
+ * terminal state in a settled batch has no outcome to report and is named
+ * `failed` — the batch is over, so a still-running child is a defect of the
+ * settlement, never evidence of work in progress.
+ */
+declare function deriveChildOutcomes(task: TaskService, storeId: string, parentTaskId: TaskId): Promise<ChildOutcome[]>;
+/**
+ * Drive one admitted batch to settlement (A3 §3.1): reentrant, store-driven,
+ * and owned by the runtime rather than by the tool call that admitted it.
+ *
+ * The first step is the parent's own drain — admission closed at the atomic
+ * commit, so whatever the parent still had in flight has to stop before the
+ * first child starts writing (§3.3); an unconfirmable drain blocks the children
+ * that never started and fails the parent by name instead of assuming a stop.
+ *
+ * Then every round re-reads the store: children already terminal are adopted,
+ * exactly one ready child is started (the batch is serial by dependency order,
+ * not parallel — §5's declared boundary), and the round waits for that child's
+ * terminal state. A nested decomposition is not a recursive call: the child's
+ * own `task_decompose` registers its own driver, and this loop only waits for
+ * the child's run to settle.
+ *
+ * Nothing here throws at its caller: a driver failure is a parent failed with
+ * the cause named, recorded and notified (§3.1's "no fire-and-forget"), and the
+ * promise the runtime registered always resolves.
+ */
+declare function driveBatch(env: OrchestrateEnv, batch: BatchContext): Promise<ChildOutcome[]>;
+/**
+ * The one verification entry: a run whose phase change into `submitted` is
+ * already committed is drained, judged, and settled.
+ *
+ * Everything that verifies a run goes through here — the worker's own
+ * `task_submit_result`, the parent's automatic submission once its batch
+ * settles, and the recovery path's continuation of a run that submitted before
+ * a restart. That is what makes the three paths share the budget, the drain,
+ * the verifier deadline and the review discipline instead of three
+ * implementations that drift (§3.1 "验证权唯一").
+ *
+ * A drain that cannot be confirmed fails the run with the pending work named:
+ * judging a run whose writers may still be running would produce a verdict
+ * about bytes nothing can vouch for (§3.3).
+ */
+declare function settleSubmittedRun(env: OrchestrateEnv, storeId: string, taskId: TaskId, runId: RunId, opts?: {
+  excludeCallId?: string;
+  relatedTaskIds?: readonly TaskId[];
+  anomalies?: readonly string[];
+}): Promise<RunStatus>;
 /**
  * Per-run overlay (guide §2.7.6, W15): candidate-side patches applied to ONE
  * replay run, never to the runtime's configuration. The evolution replay is
@@ -1006,6 +1506,18 @@ interface ReplayRunInit {
   /** The champion run this replay stands in for, recorded as the run's parentRunId (execution lineage). */
   championRunId?: RunId;
 }
+/**
+ * The two signals a replay runs under — the same split the batch has (§3.7).
+ * `admission` is the caller's own tool signal and governs only the run's
+ * creation: once the run and its task are persisted the replay belongs to the
+ * runtime, whose `advance` signal (a controller the runtime registered) is what
+ * stops it. A tool call that returns, or a caller that aborts, therefore cannot
+ * strand a run that already exists in the store.
+ */
+interface ReplayRunSignals {
+  admission?: AbortSignal;
+  advance?: AbortSignal;
+}
 /** What one settled replay run reports back to the comparison report. */
 interface ReplayRunOutcome {
   taskId: TaskId;
@@ -1019,13 +1531,32 @@ interface ReplayRunOutcome {
  * Replay runner (guide §2.7.6, W15): create the caller-shaped replay task in
  * the store, run it once through the real spawn + verify chain — or straight
  * through the verifier alone for a deterministic criteria replay — and settle
- * it with the cascade's own terminal-record discipline ({@link recordTerminalReview}),
- * the lineage tag on the record's anomalies. The replayed task is parentless
- * and the historical task it mirrors is never touched: a replay is a
- * comparison experiment, not a tree edit. A replay never decomposes (its
- * prompt says the door is closed), so there is no parent acceptance to settle.
+ * it with the same terminal-record discipline every other run gets
+ * ({@link recordTerminalReview}), the lineage tag on the record's anomalies.
+ * The replayed task is parentless and the historical task it mirrors is never
+ * touched: a replay is a comparison experiment, not a tree edit. A replay never
+ * decomposes (its prompt says the door is closed), so there is no parent
+ * acceptance to settle.
+ *
+ * A spawning replay is a worker like any other and follows the same rules: it
+ * is born `active` and it *submits* — an idle worker is not a completion, the
+ * no-progress counter runs, and the verification comes from the one entry every
+ * run shares ({@link settleSubmittedRun}). A workerless replay is born
+ * `submitted` (origin `runtime`) because there is nobody to submit: its
+ * criteria are judged by the verifier and the run settles on the verdict.
  */
-declare function runReplayTask(env: OrchestrateEnv, storeId: string, init: ReplayRunInit, signal?: AbortSignal): Promise<ReplayRunOutcome>;
+declare function runReplayTask(env: OrchestrateEnv, storeId: string, init: ReplayRunInit, signals?: ReplayRunSignals): Promise<ReplayRunOutcome>;
+/**
+ * Settle one run terminal from outside the orchestration — a graph removal, or
+ * a recovery pass that refuses to continue a run — with the same terminal-record
+ * discipline every other settlement uses: the status event, its one review
+ * record (idempotent: a run whose review already exists is not given a second),
+ * the gate closed for its session, and the workspace layer it held released.
+ *
+ * A run that is already terminal is left exactly as it is: this is a settlement
+ * entry, not an overwrite.
+ */
+declare function settleRunFromRuntime(env: OrchestrateEnv, storeId: string, run: TaskRun, status: 'cancelled' | 'failed', reason: string): Promise<void>;
 //#endregion
 //#region src/admission.d.ts
 /** Parent task plus the decomposition policy its caller grants it. */
@@ -1575,10 +2106,13 @@ interface Config {
   /** Per-run resource budget; see {@link BudgetConfig} for which member is enforced, checked post-hoc, or declared only. */
   budget: BudgetConfig;
   /**
-   * No-progress rounds before the loop must escalate (KISS §5: `no_progress(3轮)`).
-   * **Declared, not enforced**: the orchestrator awaits a worker's terminal
-   * idle and has no per-round observation seam on an in-flight run, so there
-   * is nothing honest to count rounds against yet.
+   * No-progress rounds before a worker that went idle without submitting is
+   * stopped (KISS §5: `no_progress(3轮)`). **Enforced** since A3: the batch
+   * driver observes every idle of a run whose phase is still `active`, marks one
+   * round per unsubmitted idle (the store's own last marking supplies the
+   * consecutive count), reminds the worker once per streak, and stops the run
+   * with the no-progress reason at this limit. A run waiting on its children or
+   * on verification is expected to be idle and is never marked.
    */
   noProgressRounds: number;
   /**
@@ -1598,6 +2132,24 @@ interface Config {
    * rather than letting it load an unbound production path.
    */
   runBindingRoot?: string;
+  /**
+   * What the whole tree may spend (A3 §3.5): a wall-clock limit measured from
+   * the root run's own persisted `startedAt`, a cap on the runs the tree may
+   * start, and the concurrent-writer count — which this deployment can only
+   * honor as `1`. A limit that cannot be executed is refused at construction
+   * ({@link assertRootBudgetConfig}) instead of accepted and quietly ignored.
+   *
+   * The object is closed: a member this module does not know is a hard limit
+   * nobody would enforce, so naming one refuses to start.
+   */
+  rootBudget?: RootBudgetConfig;
+  /**
+   * How long one write drain may take (A3 §3.3) before it is reported as
+   * unconfirmed — and an unconfirmed drain fails the run rather than assuming
+   * the writers stopped. Applied to the parent's drain before a batch starts,
+   * to a submission's drain, and to a batch's settlement drain.
+   */
+  writeDrainTimeoutMs: number;
 }
 /**
  * What the load-time provider scan found (S1-C item 3) — the deployment's own
@@ -1638,8 +2190,17 @@ declare const DEFAULT_VERIFY_TIMEOUT_MS: number;
  * `tokens` carries no default on purpose — see {@link BudgetConfig}.
  */
 declare const DEFAULT_BUDGET: Readonly<BudgetConfig>;
-/** The shipped no-progress round count (KISS §5's `no_progress(3轮)`); declared, not enforced — see {@link Config.noProgressRounds}. */
+/** The shipped no-progress round count (KISS §5's `no_progress(3轮)`); enforced since A3 — see {@link Config.noProgressRounds}. */
 declare const DEFAULT_NO_PROGRESS_ROUNDS = 3;
+/**
+ * The shipped write-drain window (A3 §3.3). Thirty seconds is far above the
+ * settle time of a tool call this process can see finish — the drain waits on
+ * in-flight registrations and the session's managed jobs, both of which either
+ * stop promptly or are the thing the caller must be told about — and far below
+ * a verifier call's own deadline, so a drain that cannot be confirmed fails the
+ * run long before the verification budget it would otherwise waste.
+ */
+declare const DEFAULT_WRITE_DRAIN_TIMEOUT_MS = 30000;
 /**
  * Growth guardrails handed to admission as `decompositionPolicy`
  * ({@link Config.maxDepth}, {@link Config.maxChildren}, checked at
@@ -1718,9 +2279,50 @@ declare class TaskRuntime extends Service {
   private readonly config;
   /** sessionId → run binding, rebuilt whenever a store is (re)opened. */
   private readonly sessions;
+  /**
+   * The sessions this process actually started (a spawned worker, a root run
+   * created here, a replay). Deliberately *not* populated by {@link reindex}:
+   * the recovery path needs to tell "this process is running that run right
+   * now" from "the store holds a run from a process that is gone", and a
+   * binding rebuilt from a snapshot cannot answer that.
+   */
+  private readonly startedSessions;
+  /**
+   * The batches and replays this process owns, keyed `<storeId>/<batchId>`
+   * (`replay/<runId>` for a replay). The map is the registration the recovery
+   * path consults, and the controller in each entry is what a cancellation,
+   * the root deadline or the unload path aborts.
+   */
+  private readonly drivers;
+  /**
+   * The lineage tag of each replay task this process started, keyed by task id.
+   * A spawning replay's worker submits like any other worker, so its terminal
+   * review is written by the shared settlement entry — which is where the tag has
+   * to be known. In-process only, and honest about it: a replay resumed in a new
+   * process records no lineage on the run it continues.
+   */
+  private readonly replayLineage;
+  /** The tool-execution gate and the write drain (A3 §3.3); this runtime owns every phase it writes. */
+  private readonly executionGate;
+  /** The one-writer-per-workspace ownership registry (A3 §3.4). */
+  private readonly workspaces;
   /** The load-time provider scan, taken once ({@link providerLoadReport}). */
   private providerLoad?;
   constructor(ctx: Context, config?: Config);
+  /**
+   * Refuse a root budget carrying a member this build does not execute. The
+   * schema keeps unknown keys, so this is where a caller's typo or a limit from
+   * a newer version is caught: a `maxTokens` or `maxWallClock` nobody enforces
+   * would read as a promise the deployment breaks silently.
+   */
+  private assertClosedRootBudget;
+  /**
+   * The unload path: abort every driver, await their settlements, close the gate
+   * for every session this runtime tracks, and release the workspace markers
+   * this process wrote. Warnings, never throws — an unload that raised would
+   * leave the rest of the process's disposal half-done.
+   */
+  private unload;
   /**
    * Cordis runs this after construction, once the injected services are there:
    * the load-time provider scan (S1-C item 3) is taken here, so the first thing
@@ -1782,8 +2384,15 @@ declare class TaskRuntime extends Service {
   get verifyTimeoutMs(): number;
   /** The resolved per-run budget ({@link Config.budget}); which member is enforced, checked post-hoc, or declared only is documented on {@link BudgetConfig}. */
   get budget(): Readonly<BudgetConfig>;
-  /** The resolved no-progress round count ({@link Config.noProgressRounds}); declared, not enforced. */
+  /** The resolved no-progress round count ({@link Config.noProgressRounds}); the batch driver's stop limit. */
   get noProgressRounds(): number;
+  /**
+   * The tool-execution gate this runtime maintains (A3 §3.3), exposed read-only:
+   * what a phase admits and refuses is part of what this service promises, and
+   * the runtime is its only writer. Diagnostics and tests read it; nothing
+   * outside moves a phase through it.
+   */
+  get gate(): ExecutionGate;
   /** Resolve required capability names against the configured registry. */
   resolveCapabilities(required: readonly string[]): CapabilityManifest;
   /** The effective capability registry, cloned so callers cannot mutate runtime state. */
@@ -1826,10 +2435,30 @@ declare class TaskRuntime extends Service {
     runId: RunId;
   }>;
   /**
-   * Atomic decomposition plus the sequential run cascade: protected-input
-   * identity fixing, normalization, structural admission and capability
-   * admission must all pass for the whole batch before anything is persisted;
-   * children then run one at a time in dependency order.
+   * Admission and progress are two phases with two owners (A3 §3.1), and this
+   * entry is the boundary between them.
+   *
+   * **Admission** (governed by `exec.signal`): protected-input identity fixing,
+   * normalization, structural admission, capability admission, the provider
+   * pre-check and verifierRef validation all have to pass for the whole batch
+   * before anything is persisted — plus three checks that belong to the
+   * protocol rather than to the shape: the parent run must be `active`, the root
+   * budget must be able to reserve one run per child (§3.5), and the caller's
+   * checkout must already be held by this run or an ancestor of it (§3.4). Every
+   * refusal here is a refusal whole: no id minted, no event written, no worker
+   * started.
+   *
+   * **The atomic commit**: one `admitBatchIn` records the children, their
+   * admission, the dependency edges, the batch identity and the parent's
+   * `active → waiting_children` phase change (§1.3). It is the admission's
+   * closing act — from here the caller may only watch, read or cancel.
+   *
+   * **Progress** (governed by the runtime): the batch is handed to a driver
+   * registered under the runtime's own controller, and this call returns
+   * `{ batchId, childTaskIds }` immediately. The caller's signal dies with the
+   * commit; a tool call that returns, or a caller that aborts its own call,
+   * cannot stop a batch the store already admitted (§3.7). {@link awaitBatch}
+   * and the owner notification are how a caller learns how it went.
    *
    * Protected acceptance inputs are fixed first (`protected-inputs.ts`): every
    * criterion's declared paths are read against the session's checkout and
@@ -1852,7 +2481,11 @@ declare class TaskRuntime extends Service {
    */
   decomposeAndRun(storeId: string, parentTaskId: TaskId, parentRunId: RunId, callerSessionId: string, spec: DecomposeSpec, exec?: {
     signal?: AbortSignal;
-  }): Promise<ChildOutcome[]>;
+    callId?: string;
+  }): Promise<{
+    batchId: string;
+    childTaskIds: TaskId[];
+  }>;
   /**
    * Replay one historical terminal task under a candidate overlay (guide
    * §2.7.6, W15; the only consumer is `evolution_replay`). The replayed task is
@@ -1880,6 +2513,154 @@ declare class TaskRuntime extends Service {
    * budget, not a batch's.
    */
   replayTask(storeId: string, championTaskId: TaskId, options: ReplayTaskOptions, callerSessionId: string): Promise<ReplayRunOutcome>;
+  /**
+   * Register one runtime-owned driver (a batch, or a replay) and return at
+   * once: the caller's tool call is over, and the work is the runtime's (§3.7).
+   *
+   * The registered promise is meant never to reject — a driver settles its own
+   * failures by failing the run it reports on — so a rejection here is the one
+   * failure it could not settle from where it stood: the view of the deployment
+   * it was about to build (`orchestrateEnv`). That is still not fire-and-forget
+   * (§3.1): the batch's parent run is failed with the cause, the children that
+   * never started are blocked, and the owner is told. The belt below stays for a
+   * rejection for a key that names no batch (a replay, whose own caller already
+   * receives the error), so nothing surfaces as an unhandled rejection.
+   */
+  private registerDriver;
+  /**
+   * Fail one batch's parent run without an `OrchestrateEnv`: the children that
+   * never started are blocked, the parent run is failed with the cause, and the
+   * owner is told. Store-level on purpose — the caller is here because the env
+   * could not be built, so the store service and the notification seam are all
+   * this path needs — and it never throws, so a driver's failure cannot become an
+   * unhandled rejection of its own.
+   */
+  private failBatchFromRuntime;
+  /**
+   * Start the driver for one admitted batch. The controller is registered
+   * before the driver runs, so a cancellation arriving immediately after
+   * admission finds something to abort.
+   */
+  private startBatchDriver;
+  /**
+   * The explicit submission (A3 §3.2, `task_submit_result`): the worker's own
+   * account of what it delivered, recorded as the phase change that closes
+   * admission, and then the one settlement path every verified run takes.
+   *
+   * A submission that arrives twice is answered from the record rather than
+   * applied again — the phase event is unique by construction, so the second
+   * caller reads the first one's result. A run waiting on its children may not
+   * submit at all: its batch has to settle first, and that settlement submits on
+   * its behalf.
+   */
+  submitResult(callerSessionId: string, spec: {
+    summary: string;
+    evidenceRefs?: string[];
+    notes?: string;
+  }, exec?: {
+    callId?: string;
+  }): Promise<{
+    status: string;
+    detail: string;
+  }>;
+  /**
+   * Cancel one batch (`task_cancel`, §3.6): abort its driver, which settles the
+   * children — the one in flight is cancelled, the ones that never started are
+   * blocked before start, and the parent run is cancelled — and return that
+   * settlement.
+   *
+   * Only the batch's own parent session may cancel it, and only while the batch
+   * is in flight. A batch this process is not driving (already settled, or
+   * waiting for recovery after a restart) is refused by name: silently
+   * synthesising a settlement would write terminal states the store's own
+   * records do not support, and the graph-level cancellation is the entry that
+   * covers that case.
+   */
+  cancelBatch(storeId: string, batchId: string, callerSessionId: string): Promise<ChildOutcome[]>;
+  /**
+   * Settle every run below `taskId` that is still in flight as cancelled — the
+   * runs this cancellation owns. The batch's own parent run is not settled here:
+   * its driver's abort branch does that, with the batch's terminal review and the
+   * owner notification.
+   */
+  private settleCancelledDescendants;
+  /**
+   * Abort every batch driver of `storeId` whose parent task is a strict
+   * descendant of `taskId`, and wait for their settlements. A batch's driver key
+   * carries its parent (`<storeId>/b-<parentTaskId>`), so the subtree is read
+   * from the store's own task list and no extra bookkeeping is needed.
+   */
+  private abortDescendantBatches;
+  /**
+   * Cancel everything one store has in flight (§3.6), called by
+   * `graphs.remove` before the graph is stopped and exposed as a service API.
+   *
+   * The order is the promise: the gate closes for every session of the store
+   * first (so no further tool call writes anything), then every driver is
+   * aborted and awaited (so the children and parents settle through the same
+   * rules as a batch cancellation), then the runs that are still non-terminal —
+   * a root run with no batch in flight, a replay — are cancelled with the
+   * reason recorded, and finally the workspace claim this store held is released
+   * and its sessions' managed jobs are reconciled.
+   *
+   * Idempotent: every step tolerates having already happened, so a second call
+   * is a no-op rather than an error.
+   */
+  cancelGraph(storeId: string, reason: string): Promise<void>;
+  /**
+   * The settlement of one batch, from the outside: the registered driver's own
+   * promise when this process is driving it, or the outcomes the store already
+   * records when the batch settled earlier (or in another process). §3.8's
+   * `awaitBatch` — the entry a test or a service uses to wait for a batch a tool
+   * call no longer waits for.
+   */
+  awaitBatch(storeId: string, batchId: string): Promise<ChildOutcome[]>;
+  /**
+   * The recovery entry (A3 §3.6): settle or restart what a store left in flight.
+   * Idempotent, and safe to call on a store this process is already driving —
+   * the registered batches are skipped, and runs this process started are left
+   * to their own drivers.
+   *
+   * The order is depth-descending (a child before its parent), so a restarted
+   * parent batch reads its children already settled:
+   *
+   * - a run with no phase is an old record: it is left exactly as it is, and the
+   *   read side derives `needs-recovery` from the missing phase — inventing a
+   *   phase here would admit a run nobody knows the state of;
+   * - a run whose content binding no longer re-reads is failed by name (S1-C's
+   *   refusal, never a silent fallback);
+   * - `submitted` runs are verified (the phase is the whole recovery evidence);
+   * - `active` runs that are not a root are in-flight workers: nothing can
+   *   confirm the writes they may have made, so they are cancelled with the
+   *   diagnostic — a root run is left alone, because a root legitimately sits
+   *   `active` between its own decisions;
+   * - `waiting_children` runs are restarted, unless the workspace is held by
+   *   another live process, in which case they fail by name rather than writing
+   *   into a checkout somebody else owns.
+   */
+  reconcileStore(storeId: string): Promise<void>;
+  /**
+   * Rebuild this process's workspace ownership for one store from the store's
+   * own state: the root run's own hold, and — when that run is waiting on
+   * children — the batch layer its driver hands to each child in turn. A tree
+   * whose runs all reached terminal states releases the claim instead, which is
+   * what makes a finished tree leave no marker behind.
+   */
+  private rebuildWorkspaceOwnership;
+  /** Release every layer this process holds for one store's workspace, naming any layer that is not the store's. */
+  private releaseStoreWorkspace;
+  /**
+   * The fallback batch-failure seam the orchestration calls when a run's own
+   * settlement cannot finish the batch (verification unavailable in a nested
+   * submission): every child that is not terminal is blocked, the parent run is
+   * failed with the reason, and the batch's driver is aborted so its own loop
+   * stops seeing work that no longer exists.
+   */
+  private failBatch;
+  /** The session whose viewpoint a store-wide operation (recovery, cancellation) resolves its checkout from. */
+  private recoverySessionFor;
+  /** Any session bound to this store, for the seams that only need a viewpoint (never `storeId` if one exists). */
+  private sessionForStore;
   /** Reverse lookup: the task run a (worker) session is bound to. */
   runForSession(sessionId: string): Promise<{
     storeId: string;
@@ -1889,6 +2670,50 @@ declare class TaskRuntime extends Service {
   private lookupRun;
   private resolveBinding;
   private reindex;
+  /**
+   * The checkout one session's runs work in, in the form ownership keys it:
+   * the graph env's path, resolved to its real path so two spellings of one
+   * directory cannot become two markers ({@link normalizeWorkspacePath}).
+   *
+   * `undefined` means this deployment cannot name a checkout — no env-builder,
+   * no graph, or a path that does not resolve — and ownership is skipped rather
+   * than guessed, which is the honest reading of §3.4's `unbound`.
+   */
+  private workspacePathForSession;
+  /**
+   * Refuse a decomposition whose caller does not hold its own checkout. The
+   * holder may be the parent run itself (the ordinary case: a run works in its
+   * checkout and hands it down), a batch the runtime holds between children, or
+   * an ancestor run of this one — the chain a nested child sits on. Anything
+   * else is another writer, and the batch is refused *before* anything is
+   * written ({@link WorkspaceBusyError} carries the holder and since when).
+   */
+  private assertWorkspaceHeldBy;
+  /** The parent task id of one task, read from the store; `undefined` when the store cannot answer. */
+  private ancestorTaskIdFor;
+  /**
+   * Take the checkout for one replay run: an unheld workspace is claimed, and a
+   * workspace the *caller's own* tree already holds is handed over (the replay
+   * run writes where its caller writes). Any other holder is a conflict, and the
+   * replay refuses before its task is created.
+   */
+  private claimReplayWorkspace;
+  /** Release the replay's own layer, leaving whatever the caller held in place. */
+  private releaseReplayWorkspace;
+  /**
+   * Best-effort owner notification through the live agent (A3 §3.1, DSH's
+   * tool-jobs precedent: a `plugin`-sourced `notice`). A session with no live
+   * agent — a worker that already left, a headless test context — is skipped,
+   * and a failing follow-up never fails the settlement that reports it.
+   */
+  private notify;
+  /**
+   * Kill and confirm one session's managed jobs — the half of the write
+   * convergence a cancellation owes its checkout. A deployment with no jobs
+   * service, or a session whose agent is gone, has nothing to reconcile, and
+   * the drain's own report is what a caller reads as "not confirmed".
+   */
+  private reconcileSessionJobs;
   /**
    * The limits one batch is admitted under (T1, construction guide §4),
    * recorded with the decomposition and never derived from the contract: the
@@ -1927,7 +2752,34 @@ declare class TaskRuntime extends Service {
    * refused for.
    */
   private contractRefusal;
+  /**
+   * The service-supplied seam the orchestration runs against (A3 §3.1). Every
+   * piece of the protocol that needs the process — the gate, the workspace
+   * registry, the notifications, the run watcher, the jobs service, the root
+   * budget — enters through here, which is what keeps `orchestrate.ts` free of
+   * cordis types and testable as the state machine it is.
+   *
+   * The checkout is resolved once per construction ({@link workspacePathForSession}):
+   * the caller's session is the viewpoint every path in this env shares — the
+   * verifier's `cwd`, the protected inputs' base, the skills' discovery root and
+   * the workspace ownership key are one directory.
+   */
   private orchestrateEnv;
+  /**
+   * Observe one run's terminal transition (A3 §3.1) over the task service's own
+   * `task/change` event: subscribe first, then read the current status, so a run
+   * that settled between the caller's read and this subscription is reported
+   * rather than missed. The returned function unsubscribes.
+   *
+   * A deployment with no event bus (a minimal context) cannot promise the
+   * observer anything, and the returned no-op says so by leaving the caller's
+   * own timeout in charge.
+   */
+  private watchRun;
+  /** The session this process binds to one run, or `undefined` when the run was never bound here. */
+  private sessionBoundInProcess;
+  /** Release the workspace layer one settled run held, never popping a stranger's layer. */
+  private releaseRunWorkspaceLayer;
   /**
    * One best-effort read of a run's session for the review record's dimensions
    * and effort metrics (§2.7.3): the session's token projection plus one scan of
@@ -2015,6 +2867,13 @@ declare class TaskRuntime extends Service {
   private assertKnownVerifierRefs;
   /** The `agents` registry is not an injected dependency; resolve it softly like the verifier. */
   private liveAgent;
+  /**
+   * The live agent behind one session, or `undefined` — the non-throwing half of
+   * {@link liveAgent}, for the seams where an absent agent is a legitimate state
+   * (a notification nobody can receive, a jobs call with no owner) rather than a
+   * refusal.
+   */
+  private agentOrUndefined;
 }
 //#endregion
-export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BudgetConfig, type CapabilityConfig, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, type ChildPlan, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DecomposeChildSpec, DecomposeSpec, type DecompositionIdentityContext, type ExecutionProviderVerdict, type GuidanceProviderVerdict, type HandoffInit, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type PermissionSpec, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, RUN_BINDING_SKILLS_DIR, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, ReplayTaskOptions, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, type WorkerPromptOptions, bindRunProviders, buildHandoff, capabilityToolQuery, checkDecomposition, checkObligationCoverage, contractDefects, defaultRunBindingRoot, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, independentAcceptanceDefects, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, optionalService, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, protectedInputDefects, providerDefectLines, providerRefusals, readRunBinding, readVerifiedFile, registeredVerifierIds, registryRevision, renderRunBinding, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveToolLabels, runChildrenCascade, runReplayTask, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };
+export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BatchContext, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeChildSpec, DecomposeSpec, type DecompositionIdentityContext, type DrainOptions, type DrainResult, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type PermissionSpec, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, RUN_BINDING_SKILLS_DIR, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedRootBudget, type RootBudgetConfig, type RootBudgetResolution, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, WORKSPACE_OWNERS_DIR, type WorkerPromptOptions, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, assertRootBudgetConfig, bindRunProviders, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeWorkspacePath, optionalService, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, protectedInputDefects, providerDefectLines, providerRefusals, readProcessStartTime, readRunBinding, readVerifiedFile, registeredVerifierIds, registryRevision, renderRunBinding, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };

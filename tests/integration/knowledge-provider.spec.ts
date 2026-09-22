@@ -51,10 +51,11 @@ describe('a knowledge provider (S1-C)', () => {
     const directory = await writeKnowledgeSkill(join(h.home, 'skills'), SKILL, BODY)
 
     const root = await h.root(ROOT)
-    const outcomes = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT, {
+    const batch = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
       children: [child('align the ball', [ROW])],
     })
+    const outcomes = await h.runtime.awaitBatch(root.storeId, batch.batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
 
     // 1. The pre-check's verdict: knowledge, verified content, no execution claim.

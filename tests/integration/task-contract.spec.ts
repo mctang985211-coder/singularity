@@ -152,7 +152,14 @@ async function generation(
         ...(request.contract === undefined ? {} : { contract: request.contract }),
       })
       return {
-        agent: { id: request.sessionId, cancel: () => {}, whenIdle: async () => {} },
+        agent: {
+          id: request.sessionId,
+          cancel: () => {},
+          // A live worker hands its result in before it goes idle (A3 §3.2): an
+          // idle session is not a completion, so a stub that only went idle would
+          // be stopped by the no-progress rule instead of being verified.
+          whenIdle: async () => { await runtime.submitResult(request.sessionId, { summary: 'worker finished (fixture auto-submit)' }) },
+        },
         dispose: async () => {},
       }
     },
@@ -311,17 +318,23 @@ describe('T1-A: a task is created without any template', () => {
       }],
     }, exec(viaTool.session))) as string
     // The tool's own report — a convenience, not the evidence: everything
-    // asserted below is read back out of the store and the event log.
-    expect(feedback).toMatch(/^decomposed t-[0-9a-f-]+ into 1 children:/)
-    expect(feedback).toContain(': verified run r-')
+    // asserted below is read back out of the store and the event log. The tool
+    // returns at admission (A3 §3.1), so the text names the batch rather than
+    // outcomes nobody has produced yet; the batch id is read back from the
+    // store's own record rather than parsed out of the text.
+    expect(feedback).toMatch(/^decomposed t-[0-9a-f-]+ into 1 children \(batch b-t-[0-9a-f-]+\):/)
+    expect(feedback).toContain('does not wait for the batch')
+    const toolBatchId = (await h.task.runIn(viaTool.storeId, viaTool.runId)).batchId!
+    await h.runtime.awaitBatch(viaTool.storeId, toolBatchId)
 
-    const outcomes = await h.runtime.decomposeAndRun(viaRuntime.storeId, viaRuntime.taskId, viaRuntime.runId, viaRuntime.session, {
+    const batch = await h.runtime.decomposeAndRun(viaRuntime.storeId, viaRuntime.taskId, viaRuntime.runId, viaRuntime.session, {
       reason: 'delegate through the runtime',
       children: [{
         objective: runtimeObjective,
         acceptanceCriteria: [{ criterionId: 'runtime-1', description: 'the runtime child holds', command: 'true' }],
       }],
     })
+    const outcomes = await h.runtime.awaitBatch(viaRuntime.storeId, batch.batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
 
     // Both entries really walked the cascade: one worker per created task.
@@ -458,7 +471,7 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
     const h = await generation(sessionMemory())
     const root = await createRoot(h, 'the root whose batch declares conditions')
 
-    const outcomes = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, root.session, {
+    const batch = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, root.session, {
       reason: 'split the work under declared conditions',
       children: [
         {
@@ -476,6 +489,7 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
         },
       ],
     })
+    const outcomes = await h.runtime.awaitBatch(root.storeId, batch.batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
 
     const snapshot = await h.task.snapshotIn(root.storeId)
@@ -548,7 +562,8 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
         constraints: ['declared constraint'],
       }],
     }
-    await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, root.session, spec)
+    const { batchId } = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, root.session, spec)
+    await h.runtime.awaitBatch(root.storeId, batchId)
 
     const before = taskWithObjective(await h.task.snapshotIn(root.storeId), 'the child whose contract is read back twice').contract!
     expect(before).toEqual({
@@ -590,7 +605,9 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
     await h.task.createStore(STORE)
 
     // The legacy store shape: a task authored straight through the store, with
-    // no contract, whose run is bound to the caller session.
+    // no contract, whose run is bound to the caller session. The run still
+    // carries its coordination phase — what is legacy here is the contract, and
+    // a phase-less run would be refused by admission for a different reason.
     const legacyTaskId = 't-legacy'
     const legacyRunId = 'r-legacy'
     await h.task.createTaskIn(STORE, {
@@ -620,16 +637,18 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
       artifacts: [],
       verifierResults: [],
       status: 'running',
+      executionPhase: 'active',
       startedAt: new Date().toISOString(),
     }, 'tester')
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, legacyTaskId, legacyRunId, ROOT_SESSION, {
+    const batch = await h.runtime.decomposeAndRun(STORE, legacyTaskId, legacyRunId, ROOT_SESSION, {
       reason: 'the legacy parent splits',
       children: [{
         objective: 'the child of a task that carries no contract',
         acceptanceCriteria: [{ criterionId: 'legacy-child-1', description: 'the child holds', command: 'true' }],
       }],
     })
+    const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
 
     const snapshot = await h.task.snapshotIn(STORE)
@@ -661,7 +680,7 @@ describe('T1-E: a declared field cannot widen the admission context or touch the
     expect(parentBefore.contract).toBeDefined()
 
     const objectives = ['the first child under the narrowed limits', 'the second child under the narrowed limits']
-    const outcomes = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, root.session, {
+    const batch = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, root.session, {
       reason: 'split under the narrowed limits',
       children: [
         {
@@ -674,6 +693,7 @@ describe('T1-E: a declared field cannot widen the admission context or touch the
         },
       ],
     })
+    const outcomes = await h.runtime.awaitBatch(root.storeId, batch.batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
 
     const admission = payloadOf(h, 'TaskDecomposed', root.taskId)!.admission!

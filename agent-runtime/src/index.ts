@@ -33,6 +33,8 @@ const ROOT_TOOLS = [
   // skills (e.g. bb-pipeline) discovered from the deployment's skill roots.
   'skill',
   'task_decompose',
+  'task_submit_result',
+  'task_cancel',
   'task_status',
   'task_verify',
   'task_review_pack',

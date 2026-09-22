@@ -30,7 +30,7 @@ import { workerBaseline } from '../../task-runtime/src/capability.ts'
 /** Exactly the root agent's allow-list (`agent-runtime/src/index.ts`), so the root setup path is exercised for real. */
 const ROOT_TOOLS = [
   'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'skill', 'task_decompose',
-  'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
+  'task_submit_result', 'task_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
   'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
 
@@ -254,7 +254,7 @@ describe('worker capability grants', () => {
     const names = h.visible(await h.spawn(grantOf()))
 
     // A worker's own prompt tells it to re-read its contract and the tree, re-decompose, and self-check.
-    for (const kept of ['task_read', 'task_status', 'task_decompose', 'task_verify', 'capability_list']) {
+    for (const kept of ['task_read', 'task_status', 'task_decompose', 'task_submit_result', 'task_cancel', 'task_verify', 'capability_list']) {
       expect(names, kept).toContain(kept)
     }
     // Nodes grow by task_decompose through admission, never by reaching for the graph plane:

@@ -121,6 +121,11 @@ const ADMITTED_OR_LATER = [
 	"verified",
 	"failed"
 ];
+const EXECUTION_PHASES = [
+	"active",
+	"waiting_children",
+	"submitted"
+];
 const PROPOSAL_TARGET_TYPES = [
 	"skill",
 	"tool",
@@ -199,6 +204,12 @@ var TaskState = class TaskState {
 				return;
 			case "TaskRetried":
 				this.transit(event$1.taskId, ["failed"], "ready");
+				return;
+			case "RunPhaseChanged":
+				this.changeRunPhase(event$1.taskId, event$1.runId, event$1.payload);
+				return;
+			case "RunProgressMarked":
+				this.markRunProgress(event$1.taskId, event$1.runId, event$1.payload, event$1.timestamp);
 				return;
 			case "CapabilityResolved":
 				this.resolveCapabilities(event$1.taskId, event$1.payload.manifest);
@@ -348,6 +359,52 @@ var TaskState = class TaskState {
 		}
 		if (binding.snapshotRoot !== void 0 && (typeof binding.snapshotRoot !== "string" || binding.snapshotRoot.length === 0)) throw new Error(`task: run "${runId}" provider binding snapshotRoot must be a non-empty path when present`);
 	}
+	/**
+	* The submission record is what a reader trusts instead of re-reading the
+	* worker's transcript, so a malformed one is refused rather than stored: an
+	* unnamed summary or a ref list that is not a list would leave the record
+	* unusable exactly when someone asks what was handed in. Shape only —
+	* whether the refs point at anything the store holds is judged by the
+	* acceptance reader.
+	*/
+	assertSubmissionShape(runId, submission) {
+		if (!isRecord(submission)) throw new Error(`task: run "${runId}" submission must be an object`);
+		if (!nonEmpty(submission.summary)) throw new Error(`task: run "${runId}" submission requires a summary`);
+		if (!Array.isArray(submission.evidenceRefs) || submission.evidenceRefs.some((item) => typeof item !== "string")) throw new Error(`task: run "${runId}" submission evidence refs must be an array of strings`);
+		if (submission.notes !== void 0 && typeof submission.notes !== "string") throw new Error(`task: run "${runId}" submission notes must be a string when present`);
+		if (submission.origin !== "worker" && submission.origin !== "runtime") throw new Error(`task: run "${runId}" submission origin must be "worker" or "runtime"`);
+		if (!nonEmpty(submission.submittedAt)) throw new Error(`task: run "${runId}" submission requires a submission time`);
+	}
+	/**
+	* A run's birth phase is written by the runtime, and the reducer judges its
+	* shape only — the transition semantics belong to `changeRunPhase`. A run
+	* with no phase is a record from before the protocol and stays legal; a run
+	* born `active` carries neither a submission nor a batch; a run born
+	* `submitted` (a workerless replay) must carry a well-shaped submission and
+	* no batch. `waiting_children` is not a birth phase: no creation path admits
+	* a batch before the run exists.
+	*/
+	assertBirthPhase(run) {
+		const phase = run.executionPhase;
+		if (phase === void 0) return;
+		if (phase !== "active" && phase !== "submitted") throw new Error(`task: run "${run.runId}" execution phase must be "active" or "submitted" at start`);
+		if (run.batchId !== void 0) throw new Error(`task: run "${run.runId}" is born ${phase}; a batch id is recorded by a phase change, not at start`);
+		if (phase === "active") {
+			if (run.submission !== void 0) throw new Error(`task: run "${run.runId}" is born active; only a submitted run carries a submission`);
+			return;
+		}
+		if (run.submission === void 0) throw new Error(`task: run "${run.runId}" is born submitted; a submission record is required`);
+		this.assertSubmissionShape(run.runId, run.submission);
+	}
+	/**
+	* A4's question ids ride on the phase change; nothing reads them yet, so the
+	* reducer checks that the list is a list of strings and carries it unchanged
+	* — an empty list is a legitimate shape and is stored as given.
+	*/
+	assertQuestionIds(runId, payload) {
+		const lists = [["pendingQuestionIds", payload.pendingQuestionIds], ["blockingQuestionIds", payload.blockingQuestionIds]];
+		for (const [name, value] of lists) if (value !== void 0 && (!Array.isArray(value) || value.some((item) => typeof item !== "string"))) throw new Error(`task: run "${runId}" ${name} must be an array of strings`);
+	}
 	addDependency(edge) {
 		this.task(edge.from);
 		this.task(edge.to);
@@ -366,6 +423,7 @@ var TaskState = class TaskState {
 		if (run.status !== "running") throw new Error(`task: run "${run.runId}" must start in status "running"`);
 		if (typeof run.sessionId !== "string" || run.sessionId.length === 0) throw new Error(`task: run "${run.runId}" session id must be non-empty`);
 		if (run.providerBinding !== void 0) this.assertProviderBinding(run.runId, run.providerBinding);
+		this.assertBirthPhase(run);
 		if (run.parentRunId !== void 0) this.run(run.parentRunId);
 		this.assertTransition(taskId, ["admitted", "ready"], "running");
 		this.value = {
@@ -401,11 +459,103 @@ var TaskState = class TaskState {
 		this.updateTask(taskId, { status: "failed" });
 		if (runId !== void 0) this.setRun(runId, "failed", finishedAt);
 	}
+	/**
+	* A run keeps `running` through verification (the coordination phase, not the
+	* status, is what records the submission), so a cancellation that lands while a
+	* verifier call is in flight arrives at a task that is already `verifying`.
+	* Refusing it would leave the tree half-settled — the parent cancelled, the
+	* verifying child not — and make the documented exit for a store that cannot be
+	* recovered (`cancelGraph`) impossible exactly when it is needed. `failed`
+	* already accepts both source statuses; this is the same rule for `cancelled`.
+	*/
 	cancel(taskId, runId, finishedAt) {
-		this.assertTransition(taskId, ["running"], "cancelled");
+		this.assertTransition(taskId, ["running", "verifying"], "cancelled");
 		if (runId !== void 0) this.assertRunTransition(runId, ["running", "blocked"], "cancelled");
 		this.updateTask(taskId, { status: "cancelled" });
 		if (runId !== void 0) this.setRun(runId, "cancelled", finishedAt);
+	}
+	/**
+	* The coordination phase is the A3 admission gate, so this handler is where
+	* a transition is either the one legal edge or a refusal: a run accepts
+	* `active → waiting_children`, `active → submitted` and
+	* `waiting_children → submitted`, and nothing else. Same phase, a rollback,
+	* a run with no phase at all and a run that is no longer running are all
+	* refused, because "already submitted" and "already decomposed" have to be
+	* answered by this one field — a second submission that overwrote the first
+	* record, or a decomposition admitted after the gate closed, would make the
+	* field answer differently at two reads.
+	*
+	* The run status is checked first because a phase change on a failed or
+	* cancelled run is late by definition; verification is the case the phase
+	* guard exists for, since a run inside it is still `running`.
+	*
+	* Only the payload's shape is judged: the batch a run waits on and what it
+	* submitted are the writer's statements, and A4's question ids are carried,
+	* not interpreted.
+	*/
+	changeRunPhase(taskId, runId, payload) {
+		if (runId === void 0) throw new Error(`task: RunPhaseChanged for task "${taskId}" requires a run id`);
+		const run = this.run(runId);
+		if (run.taskId !== taskId) throw new Error(`task: run "${runId}" belongs to task "${run.taskId}", not "${taskId}"`);
+		if (run.status !== "running") throw new Error(`task: run "${runId}" is ${run.status}; a phase change requires a running run`);
+		const to = payload.phase;
+		if (!EXECUTION_PHASES.includes(to)) throw new Error(`task: run "${runId}" execution phase must be one of ${EXECUTION_PHASES.join(", ")}`);
+		const from = run.executionPhase;
+		if (from === void 0) throw new Error(`task: run "${runId}" has no execution phase; only an active run changes phase`);
+		if (!(from === "active" && (to === "waiting_children" || to === "submitted") || from === "waiting_children" && to === "submitted")) throw new Error(`task: illegal run phase transition "${from}" → "${to}" for run "${runId}"`);
+		if (to === "waiting_children") {
+			if (!nonEmpty(payload.batchId)) throw new Error(`task: run "${runId}" entering waiting_children requires a batch id`);
+			if (payload.submission !== void 0) throw new Error(`task: run "${runId}" is entering waiting_children; only the submitted phase carries a submission`);
+		} else {
+			if (payload.submission === void 0) throw new Error(`task: run "${runId}" submitting requires a submission record`);
+			this.assertSubmissionShape(runId, payload.submission);
+			if (payload.batchId !== void 0) throw new Error(`task: run "${runId}" is submitting; a batch id belongs to the waiting_children phase`);
+		}
+		this.assertQuestionIds(runId, payload);
+		this.value = {
+			...this.value,
+			runs: this.value.runs.map((item) => item.runId === runId ? {
+				...item,
+				executionPhase: to,
+				...payload.batchId === void 0 ? {} : { batchId: payload.batchId },
+				...payload.submission === void 0 ? {} : { submission: copy(payload.submission) },
+				...payload.pendingQuestionIds === void 0 ? {} : { pendingQuestionIds: [...payload.pendingQuestionIds] },
+				...payload.blockingQuestionIds === void 0 ? {} : { blockingQuestionIds: [...payload.blockingQuestionIds] }
+			} : item)
+		};
+	}
+	/**
+	* A no-progress marking is the A3 signal a reader shows before the budget
+	* stops a stuck run, and it is meaningful only on the phase that can still
+	* submit: `active`. A run waiting on children or on verification is expected
+	* to be idle — marking it would count a legitimate wait as stagnation and
+	* give the budget a reason to stop work that is still under way. `rounds` is
+	* the caller's consecutive count; the reducer records the number it is given
+	* and never accumulates, so replay and live observation agree.
+	*/
+	markRunProgress(taskId, runId, payload, timestamp) {
+		if (runId === void 0) throw new Error(`task: RunProgressMarked for task "${taskId}" requires a run id`);
+		const run = this.run(runId);
+		if (run.taskId !== taskId) throw new Error(`task: run "${runId}" belongs to task "${run.taskId}", not "${taskId}"`);
+		if (run.status !== "running") throw new Error(`task: run "${runId}" is ${run.status}; progress can only be marked while the run is running`);
+		const phase = run.executionPhase;
+		if (phase !== "active") throw new Error(`task: run "${runId}" execution phase is ${phase === void 0 ? "absent" : `"${phase}"`}; progress is only marked on an active run`);
+		if (payload.kind !== "unsubmitted-idle") throw new Error(`task: run "${runId}" progress kind must be "unsubmitted-idle"`);
+		if (!Number.isInteger(payload.rounds) || payload.rounds < 1) throw new Error(`task: run "${runId}" progress rounds must be a positive integer`);
+		if (!Number.isInteger(payload.factCount) || payload.factCount < 0) throw new Error(`task: run "${runId}" progress fact count must be a non-negative integer`);
+		if (!nonEmpty(payload.note)) throw new Error(`task: run "${runId}" progress requires a note`);
+		this.value = {
+			...this.value,
+			runs: this.value.runs.map((item) => item.runId === runId ? {
+				...item,
+				noProgress: {
+					kind: payload.kind,
+					rounds: payload.rounds,
+					factCount: payload.factCount,
+					markedAt: timestamp
+				}
+			} : item)
+		};
 	}
 	resolveCapabilities(taskId, manifest) {
 		this.task(taskId);
@@ -1019,6 +1169,74 @@ var TaskService = class extends Service {
 		}));
 		await this.commitIn(storeId, events);
 	}
+	/**
+	* The atomic batch-admission entry (A3 §1.3): every child's creation and
+	* admission, the dependency edges, the parent's decomposition record, the
+	* per-child capability manifests and the parent run's
+	* `active → waiting_children` phase change land in one commit — a batch is
+	* either fully admitted with the gate closed behind it, or not admitted at
+	* all. `decomposeIn` stays as the historical entry that leaves the parent
+	* run's phase untouched; this is the entry that makes admission atomic.
+	*
+	* `manifests` is aligned with `children` by index (the caller's own batch
+	* order): a list of another length is refused before anything is written.
+	*/
+	async admitBatchIn(storeId, parentTaskId, parentRunId, children, actor, edges = [], admission, manifests) {
+		if (children.length === 0) throw new Error("task: admit batch requires at least one child");
+		if (manifests !== void 0 && manifests.length !== children.length) throw new Error(`task: admit batch requires one manifest per child (${children.length} children, ${manifests.length} manifests)`);
+		const events = [];
+		for (const child of children) {
+			if (child.parentTaskId !== parentTaskId) throw new Error(`task: child "${child.taskId}" parentTaskId must be "${parentTaskId}"`);
+			if (child.decompositionStatus !== "leaf" && child.decompositionStatus !== "decomposable") throw new Error(`task: child "${child.taskId}" decomposition status must be "leaf" or "decomposable"`);
+			events.push(event("TaskCreated", {
+				taskId: child.taskId,
+				parentTaskId,
+				actor,
+				payload: { task: child }
+			}));
+			events.push(event("TaskAdmitted", {
+				taskId: child.taskId,
+				actor,
+				payload: { decompositionStatus: child.decompositionStatus }
+			}));
+		}
+		for (const edge of edges) events.push(event("DependencyAdded", {
+			taskId: edge.to,
+			actor,
+			payload: { edge }
+		}));
+		events.push(event("TaskDecomposed", {
+			taskId: parentTaskId,
+			actor,
+			payload: {
+				childTaskIds: children.map((child) => child.taskId),
+				...admission === void 0 ? {} : { admission }
+			}
+		}));
+		if (manifests !== void 0) children.forEach((child, index) => {
+			const manifest = manifests[index];
+			events.push(event("CapabilityResolved", {
+				taskId: child.taskId,
+				actor,
+				payload: { manifest }
+			}));
+			if (manifest.missing.length > 0) events.push(event("CapabilityGapDetected", {
+				taskId: child.taskId,
+				actor,
+				payload: { missing: manifest.missing }
+			}));
+		});
+		events.push(event("RunPhaseChanged", {
+			taskId: parentTaskId,
+			runId: parentRunId,
+			actor,
+			payload: {
+				phase: "waiting_children",
+				batchId: `b-${parentTaskId}`
+			}
+		}));
+		await this.commitIn(storeId, events);
+	}
 	async addDependencyIn(storeId, edge, actor) {
 		await this.commitIn(storeId, [event("DependencyAdded", {
 			taskId: edge.to,
@@ -1097,6 +1315,32 @@ var TaskService = class extends Service {
 			case "running": throw new Error("task: start a run with startRunIn");
 			default: throw new Error(`task: unknown run status "${String(status)}"`);
 		}
+	}
+	/**
+	* Records one coordination-phase change on a run (A3). The reducer is the
+	* gate: only `active → waiting_children` (carrying the batch id) and
+	* `active|waiting_children → submitted` (carrying the submission) apply, and
+	* a refused transition commits nothing.
+	*/
+	async changeRunPhaseIn(storeId, taskId, runId, actor, payload) {
+		await this.commitIn(storeId, [event("RunPhaseChanged", {
+			taskId,
+			runId,
+			actor,
+			payload
+		})]);
+	}
+	/**
+	* Records one no-progress marking on an active run (A3). `rounds` is the
+	* caller's consecutive count; the reducer records the value it is given.
+	*/
+	async markRunProgressIn(storeId, taskId, runId, actor, payload) {
+		await this.commitIn(storeId, [event("RunProgressMarked", {
+			taskId,
+			runId,
+			actor,
+			payload
+		})]);
 	}
 	async recordEvidenceIn(storeId, evidence, actor) {
 		await this.commitIn(storeId, [event("EvidenceProduced", {

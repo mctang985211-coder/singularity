@@ -2,41 +2,37 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { join } from 'node:path'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import { TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
-import type { ChildPlan, Config } from '../../src/index.ts'
+import type { BatchContext, Config } from '../../src/index.ts'
 import { TaskRuntime } from '../../src/index.ts'
 import { pinSkillHome, releaseSkillHomes } from '../support/skill-roots.ts'
 
 /**
  * The one pass-through S1-C leaves behind (guide §2.3 item 3, plan S1-C item 4):
- * the pre-check a batch passed travels with every plan the cascade runs, so the
- * Run binding records the verdicts and the registry revision that were actually
+ * the pre-check a batch passed travels *with the batch*, so every child's run
+ * binding records the verdicts and the registry revision that were actually
  * judged instead of re-running discovery and hoping it sees the same bytes.
- * That consumer now exists (`run-binding.ts`, exercised end to end in
- * `orchestrate.spec.ts`); this file keeps the seam itself honest.
  *
- * The seam is asserted where it is observable: this file captures the plans
- * `decomposeAndRun` hands the cascade — with the rest of the orchestrator kept
- * real through `importOriginal`, which keeps the store writes and admission
- * exactly what the other specs exercise. `runChildrenCascade` itself is replaced
- * here so the plans can be read without a cascade running; what is being tested
- * is that the value the binding consumes is on every plan.
+ * Where it travels changed with A3 and the assertion changed with it: admission
+ * hands the verdicts to the batch driver (`BatchContext.providers`) rather than
+ * to a list of pre-built plans, because the driver re-reads its children from the
+ * store on every round. The seam is asserted where it is observable — this file
+ * captures the batch context the runtime starts its driver with, keeping the rest
+ * of the orchestrator real through `importOriginal`, so admission's store writes
+ * are exactly what the other specs exercise. What is being tested is that the
+ * value each run's binding consumes is on the batch, computed once.
  */
 
-const captured = vi.hoisted(() => ({ plans: [] as readonly unknown[] }))
+const captured = vi.hoisted(() => ({ batches: [] as BatchContext[] }))
 
 vi.mock('../../src/orchestrate.ts', async importOriginal => {
   const actual = await importOriginal<typeof import('../../src/orchestrate.ts')>()
   return {
     ...actual,
-    runChildrenCascade: async (
-      _env: unknown,
-      _storeId: string,
-      _parentTask: unknown,
-      _parentRun: unknown,
-      plans: readonly ChildPlan[],
-    ) => {
-      captured.plans = [...plans]
-      return plans.map(plan => ({ taskId: plan.task.taskId, status: 'verified' as const }))
+    driveBatch: async (_env: unknown, batch: BatchContext) => {
+      captured.batches.push(batch)
+      // The driver is the thing under test elsewhere; here the batch has only to
+      // be captured, so the settlement it would have produced is reported.
+      return batch === undefined ? [] : []
     },
   }
 })
@@ -81,7 +77,7 @@ function harness() {
       }),
     },
     agentRuntime: {
-      spawn: async () => { throw new Error('the mocked cascade must not spawn a worker') },
+      spawn: async () => { throw new Error('the mocked driver must not spawn a worker') },
     },
   }
   const task = new TaskService(ctx as never)
@@ -89,11 +85,11 @@ function harness() {
   const runtime = new TaskRuntime(ctx as never, {
     capabilities: { 'design-ball': { skills: ['ball-align'], tools: ['filesystem'] } },
   } as unknown as Config)
-  return { ctx, task, runtime }
+  return { ctx, task, runtime, sessions }
 }
 
-describe('the pre-check a batch passed travels with its plans (S1-C)', () => {
-  test('every plan carries the same verdicts, roots and registry revision the batch was admitted under', async () => {
+describe('the pre-check a batch passed travels with its batch (S1-C)', () => {
+  test('the batch carries the verdicts, roots and registry revision admission judged, once', async () => {
     const home = pinSkillHome('ball-align')
     const h = harness()
     const { taskId, runId } = await h.runtime.createRootTask(
@@ -102,27 +98,37 @@ describe('the pre-check a batch passed travels with its plans (S1-C)', () => {
       ROOT_SESSION,
     )
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+    const { batchId, childTaskIds } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         { objective: 'design the ball', acceptanceCriteria: [{ description: 'works', command: 'true' }], requiredCapabilities: ['design-ball'] },
         { objective: 'and then some', acceptanceCriteria: [{ description: 'works', command: 'true' }] },
       ],
     })
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
-    expect(captured.plans).toHaveLength(2)
 
-    // One pre-check for the batch: both plans cite the same value, computed once
-    // from the manifest's matched rows — not once per child.
-    const first = (captured.plans[0] as ChildPlan).providers
-    const second = (captured.plans[1] as ChildPlan).providers
-    expect(first).toBeDefined()
-    expect(second).toBe(first)
-    expect(first!.capabilities.map(row => row.capability)).toEqual(['design-ball'])
-    expect(first!.capabilities[0]!.skills.map(skill => (skill.valid ? skill.role : 'invalid'))).toEqual(['guidance'])
+    // The tool call returns at admission (A3 §3.1), and the driver this test
+    // replaced is started asynchronously: waiting for the batch is what lets the
+    // runtime reach it.
+    await h.runtime.awaitBatch(STORE, batchId)
+    expect(captured.batches).toHaveLength(1)
+    const batch = captured.batches[0]!
+    expect(batch.batchId).toBe(batchId)
+    expect(childTaskIds).toHaveLength(2)
+    const providers = batch.providers
+    expect(providers).toBeDefined()
+    expect(providers!.capabilities.map(row => row.capability)).toEqual(['design-ball'])
+    expect(providers!.capabilities[0]!.skills.map(skill => (skill.valid ? skill.role : 'invalid'))).toEqual(['guidance'])
     // The roots were the ones discovery actually walked, and the revision is the
     // value a run can cite later.
-    expect(first!.roots[0]).toBe(join(home, 'skills'))
-    expect(first!.revision).toMatch(/^[0-9a-f]{64}$/)
+    expect(providers!.roots[0]).toBe(join(home, 'skills'))
+    expect(providers!.revision).toMatch(/^[0-9a-f]{64}$/)
+
+    // The children the store holds are the ones those rows were resolved for:
+    // the manifest each run binds is the one admission judged, not a second
+    // resolution — the row for the child that asked for it, and an empty
+    // manifest for the sibling that asked for nothing.
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.capabilities[childTaskIds[0]!]!.capabilities).toHaveProperty('design-ball')
+    expect(Object.keys(snapshot.capabilities[childTaskIds[1]!]!.capabilities)).toEqual([])
   })
 })

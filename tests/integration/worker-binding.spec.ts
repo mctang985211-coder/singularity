@@ -41,7 +41,7 @@ const STORE = rootTaskStoreId(ROOT_SESSION)
 /** Exactly the root agent's allow-list, so the root setup path is exercised for real. */
 const ROOT_TOOLS = [
   'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'skill', 'task_decompose',
-  'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
+  'task_submit_result', 'task_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
   'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
 
@@ -200,7 +200,10 @@ async function harness(options: { capabilities?: Record<string, { skills?: strin
       followup: vi.fn(),
       cancel: vi.fn(),
       append: vi.fn(),
-      whenIdle: async () => {},
+      // A live worker hands its result in before it goes idle (A3 §3.2): an
+      // idle session is not a completion, so a stub that only went idle would
+      // be stopped by the no-progress rule instead of being verified.
+      whenIdle: async () => { await runtime.submitResult(sessionId, { summary: 'worker finished (fixture auto-submit)' }) },
       session: { id: sessionId, header: { id: sessionId, cwd, agentPreset: 'standard' }, append: vi.fn() },
     } as unknown as Agent
     let scope!: Scope
@@ -277,10 +280,11 @@ function child(objective: string, requiredCapabilities: readonly string[]) {
 
 async function runOne(h: Harness, objective = 'align the ball', capabilities: readonly string[] = ['design-ball']): Promise<{ taskId: string; runId: string }> {
   const { taskId, runId } = await h.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION)
-  const outcomes = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+  const batch = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
     reason: 'split the work',
     children: [child(objective, capabilities)],
   })
+  const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
   expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
   const childTaskId = outcomes[0]!.taskId
   const childRunId = outcomes[0]!.runId!
@@ -417,10 +421,11 @@ describe('the binding record (S1-C)', () => {
     expect(rootRun.providerBinding!.snapshotRoot).toBeUndefined()
     expect(rootRun.providerBinding!.registryRevision).toMatch(/^[0-9a-f]{64}$/)
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, taskId, rootRunId, ROOT_SESSION, {
+    const batch = await h.runtime.decomposeAndRun(STORE, taskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [child('align the ball', ['design-ball'])],
     })
+    const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
     const childRunId = outcomes[0]!.runId!
 
     // The record is on the event log, not in the writer's memory: the event the
@@ -446,10 +451,11 @@ describe('the binding record (S1-C)', () => {
       capabilities: { 'check-ball-registration': { skills: ['ball-align'], tools: ['filesystem', 'bash', 'jobs'], mcpServers: ['bbdev'] } },
     })
     const { taskId, runId } = await h.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+    const batch = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [child('check the registration', ['check-ball-registration'])],
     })
+    const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
     const binding = (await h.task.runIn(STORE, outcomes[0]!.runId!)).providerBinding!
     expect(binding.skills.map(skill => skill.name)).toEqual(['ball-align'])
     expect(binding.mcpServers).toHaveLength(1)

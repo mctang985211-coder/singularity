@@ -49,8 +49,10 @@ import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-se
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
 import { defineCapabilityListTool } from '../../agent-singularity/src/tools/capability-list.ts'
+import { defineTaskCancelTool } from '../../agent-singularity/src/tools/task-cancel.ts'
 import { defineTaskDecomposeTool } from '../../agent-singularity/src/tools/task-decompose.ts'
 import { defineTaskReadTool } from '../../agent-singularity/src/tools/task-read.ts'
+import { defineTaskSubmitResultTool } from '../../agent-singularity/src/tools/task-submit-result.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
 import type { TaskEvent, TaskSnapshot } from '../../task/src/index.ts'
 import type { CapabilityConfig, Config } from '../../task-runtime/src/index.ts'
@@ -63,7 +65,7 @@ const FIXTURE_SKILLS = fileURLToPath(new URL('../../task-runtime/tests/fixtures/
 /** Exactly the root agent's allow-list, so the root composition is the deployment's own. */
 export const ROOT_TOOLS = [
   'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'skill', 'task_decompose',
-  'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
+  'task_submit_result', 'task_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
   'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
 
@@ -71,7 +73,7 @@ export const ROOT_TOOLS = [
 export const GLOBAL_TOOLS = [...ROOT_TOOLS.filter(name => name !== 'skill'), 'session_search', 'session_event_read', 'session_trace']
 
 /** The tools a stack can mount for real ({@link RunStackOptions.tools}); the stand-ins skip these names. */
-const REAL_TOOLS = ['task_read', 'capability_list', 'task_decompose']
+const REAL_TOOLS = ['task_read', 'capability_list', 'task_decompose', 'task_submit_result', 'task_cancel']
 
 /** What the `standard`-style preset contributes on its own plane. */
 export const PRESET_TOOLS = ['bash', 'read', 'write', 'edit', 'read_image', 'glob', 'grep', 'skill', 'job_output', 'job_list', 'job_kill', 'ask_user_question', 'web_fetch', 'subagent_fetchless']
@@ -92,12 +94,28 @@ export interface RunStackOptions {
   /** Depth ceiling for a cascade; defaults to the runtime's own. */
   readonly maxDepth?: number
   /**
+   * The tree-wide root budget (`Config.rootBudget`): the deadline and run count
+   * a store's whole tree — replays included, since a replay's parentless task
+   * shares the root's total — is measured against.
+   */
+  readonly rootBudget?: Readonly<{ wallTimeMs?: number; maxRuns?: number; maxConcurrentWrites?: number }>
+  /**
    * The scripted worker: what one spawned agent does before it goes idle. The
    * runtime awaits it through `whenIdle` — after the spawn resolved, so a worker
    * that re-decomposes calls back into the runtime from outside the spawn it is
    * running under, exactly as a live one does.
    */
   readonly worker?: (sessionId: SessionId, agent: Agent) => Promise<void> | void
+  /**
+   * Whether the fixture worker submits its own result once the scripted body
+   * returns (default `true`). A live worker has to: an idle session is not a
+   * completion, and a run that never submits is stopped under the no-progress
+   * budget. `false` is the un-submitted path — the run stays `active` where a
+   * submission was due — and is for the specs that are about idle meaning no
+   * completion. A worker whose body decomposed is skipped either way: its run is
+   * `waiting_children`, and its batch submits for it.
+   */
+  readonly submit?: boolean
 }
 
 export interface RunStack {
@@ -211,6 +229,7 @@ class RunStackImpl implements RunStack {
     this.runtime = new TaskRuntime(this.ctx, {
       capabilities: { ...(this.options.capabilities ?? {}) },
       ...(this.options.maxDepth === undefined ? {} : { maxDepth: this.options.maxDepth }),
+      ...(this.options.rootBudget === undefined ? {} : { rootBudget: { ...this.options.rootBudget } }),
       runBindingRoot: this.options.runBindingRoot ?? join(this.home, 'singularity', 'run-bindings'),
     } as Config)
   }
@@ -301,6 +320,8 @@ class RunStackImpl implements RunStack {
       ctx.tools.register(defineTaskReadTool(ctx))
       ctx.tools.register(defineCapabilityListTool(ctx))
       ctx.tools.register(defineTaskDecomposeTool(ctx))
+      ctx.tools.register(defineTaskSubmitResultTool(ctx))
+      ctx.tools.register(defineTaskCancelTool(ctx))
     }
     for (const root of this.roots) await this.agentRuntime.ensureRoot(root, { graphStoreId: 'sg-g-root', layoutStoreId: 'sg-l-root' })
     return this
@@ -324,12 +345,18 @@ class RunStackImpl implements RunStack {
     let self!: Agent
     const agent = {
       id: sessionId,
+      // A live agent is idle when its loop is not running a turn, and that is
+      // what the runtime's no-progress phase machine reads before it marks a
+      // worker as having gone idle where a submission was due
+      // (`orchestrate.ts:agentIsRunning`). The scripted body below flips it the
+      // way a turn would, so the field is honest in both states.
+      status: 'idle',
       followup: vi.fn(),
       cancel: vi.fn(),
       append: vi.fn(),
       // A live worker goes idle when its work is done; here that is whatever the
       // spec scripted for this session, run at the same point in the cascade.
-      whenIdle: async () => { await this.options.worker?.(sessionId, self) },
+      whenIdle: async () => { await this.runWorkerTurn(sessionId, self) },
       session: {
         id: sessionId,
         header: this.headers.get(sessionId) ?? { id: sessionId, cwd: this.checkout, agentPreset: 'standard' },
@@ -346,6 +373,28 @@ class RunStackImpl implements RunStack {
     await (this.ctx.agents.register(agent) as unknown as Promise<void>)
     this.live.set(sessionId, agent)
     return agent
+  }
+
+  /**
+   * One scripted worker turn: the spec's body with the agent marked as running,
+   * then the submission a live worker owes — the run is handed in before the
+   * agent is idle again, so the runtime's `whenIdle` observation already sees a
+   * terminal run and never marks a no-progress round. A body that decomposed
+   * leaves the run `waiting_children`: its batch submits for it, and a second
+   * submission from the worker would be refused by the protocol anyway.
+   */
+  private async runWorkerTurn(sessionId: SessionId, agent: Agent): Promise<void> {
+    const record = agent as unknown as { status?: string }
+    record.status = 'running'
+    try {
+      await this.options.worker?.(sessionId, agent)
+    } finally {
+      record.status = 'idle'
+    }
+    if (this.options.submit === false) return
+    const { run } = await this.runtime.runForSession(sessionId)
+    if (run.status !== 'running' || run.executionPhase !== 'active') return
+    await this.runtime.submitResult(sessionId, { summary: 'worker finished (fixture auto-submit)' })
   }
 
   agent(sessionId: SessionId): Agent | undefined {

@@ -12,7 +12,7 @@
 
 ### 可调用Tools
 
-全部 21 个工具注册在全局层；root agent 的 allow-list（`@dangosys/dsh-singularity-agent-runtime` 的 ROOT_TOOLS）恰好就是这份清单，两者不会漂移。
+全部 23 个工具注册在全局层；root agent 的 allow-list（`@dangosys/dsh-singularity-agent-runtime` 的 ROOT_TOOLS）恰好就是这份清单，两者不会漂移。
 
 1. graph_spawn：通过 Singularity runtime 创建 worker 节点并等待其回复。
 2. graph_mark_ready：将调用 agent 所属的图标记为就绪。
@@ -20,21 +20,23 @@
 4. hitl_approve：等待明确的 approve/reject 决定，随工具执行取消。
 5. task_read：读取调用者的任务契约（root 另可见子任务状态）。
 6. capability_list：打印生效的能力表——合法能力名及每个工具标签展开后的真实工具名。
-7. task_decompose：准入并启动一批子任务（reason + 子任务清单：objective / acceptance criteria / dependsOn / decomposable）。
-8. task_status：打印任务树，带 run / 证据 / review / diagnosis 摘要。
-9. task_verify：worker 自检——重跑 verifier、记录证据，绝不改变任务状态。
-10. task_review_pack：只读证据包（本任务 reviews 全文、父/子摘要、依赖边、升级判定行）。
-11. task_review_agent：当 pack 的升级判据（E1–E4）命中且每 store 预算有余时，spawn 一个只读评审 agent，把六维判读落为一条 Diagnosis。
-12. task_diagnose：持久化一条 Diagnosis（proposals 只是建议，绝不自动执行）。
-13. evolution_propose：登记一条 evolution 提案（可从 Diagnosis 转录）。
-14. evolution_candidate：记录 candidate 的完整版本集合与可选的结构化 mutation。
-15. evolution_prepare：把机械型 mutation 物化到提案沙箱，并落 champion 快照。
-16. evolution_replay：对本图已终态的历史任务重放候选，写 candidate vs champion 对比报告。
-17. evolution_gate：记录 Gate 六问（regression 证据引用必须真实存在）。
-18. evolution_decide：记录 PROMOTE / REJECT / KEEP_FOR_FURTHER_RESEARCH——先过一次原生人审才落账。
-19. evolution_apply：把已 PROMOTE 的提案（skill / agent_preset / capability，限 L1–L3、已物化）写进生产；第二次人审，reason 列出全部生产写入路径。
-20. evolution_rollback：从 champion 快照恢复（无 champion 则删除 apply 产物）；同样先过人审。
-21. evolution_list：只读台账，带过滤与 history。
+7. task_decompose：准入一批子任务并立即返回 batchId（reason + 子任务清单：objective / acceptance criteria / dependsOn / decomposable）；runtime 按依赖串行推进，调用方可继续工作。
+8. task_submit_result：提交已完成的 run——摘要加证据引用；runtime 先关闭写入准入、排空在途写，再由 verifier 判定。
+9. task_cancel：取消调用者自己派发的在途批次；子任务结算为 cancelled。
+10. task_status：打印任务树，带 run / 相位 / 证据 / review / diagnosis 摘要。
+11. task_verify：worker 自检——重跑 verifier、记录证据，绝不改变任务状态。
+12. task_review_pack：只读证据包（本任务 reviews 全文、父/子摘要、依赖边、升级判定行）。
+13. task_review_agent：当 pack 的升级判据（E1–E4）命中且每 store 预算有余时，spawn 一个只读评审 agent，把六维判读落为一条 Diagnosis。
+14. task_diagnose：持久化一条 Diagnosis（proposals 只是建议，绝不自动执行）。
+15. evolution_propose：登记一条 evolution 提案（可从 Diagnosis 转录）。
+16. evolution_candidate：记录 candidate 的完整版本集合与可选的结构化 mutation。
+17. evolution_prepare：把机械型 mutation 物化到提案沙箱，并落 champion 快照。
+18. evolution_replay：对本图已终态的历史任务重放候选，写 candidate vs champion 对比报告。
+19. evolution_gate：记录 Gate 六问（regression 证据引用必须真实存在）。
+20. evolution_decide：记录 PROMOTE / REJECT / KEEP_FOR_FURTHER_RESEARCH——先过一次原生人审才落账。
+21. evolution_apply：把已 PROMOTE 的提案（skill / agent_preset / capability，限 L1–L3、已物化）写进生产；第二次人审，reason 列出全部生产写入路径。
+22. evolution_rollback：从 champion 快照恢复（无 champion 则删除 apply 产物）；同样先过人审。
+23. evolution_list：只读台账，带过滤与 history。
 
 通过 New graph 创建图。仓库安装由 agent 用 bash（clone + 按仓库文档 build）完成，再调用 `env_register_component`。
 

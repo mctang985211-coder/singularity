@@ -58,7 +58,7 @@ Run 记录本次尝试。你可以选择方法、检索指导和提出合适的�
 来使验收命令退出 0。发现判据本身错误，提交裁判问题与反例。
 task_verify 只产生自检证据，不证明任务状态已成功。
 
-[有显式提交协议时]
+[显式提交协议（A3 已部署：worker 合同块见 task-runtime/src/handoff.ts）]
 完成实现后用 task_submit_result 提交产物及引用，由运行时验收。
 说明仍未满足的条件；不要把会话结束或最终回复等同于 Task PASS。
 ```
@@ -74,12 +74,14 @@ task_verify 只产生自检证据，不证明任务状态已成功。
 允许节点选择方法并提出合理分解；不要求它按固定领域工序逐步创建任务。
 依赖只表达实际输入/证据关系。协调责任不转移你对父目标的验收义务。
 
-[非阻塞批次协议启用时]
+[非阻塞批次协议（A3 已部署：agent-runtime/src/prompts/root.prompts.ts）]
 提交分解后保存 batchId。批次受 runtime 管理；无需保持一个同步等待工具。
 收到子节点问题时先检查 questionId 对应契约与相关决定，给出有来源的回答。
 没有足够依据就继续查询或沿祖先请求澄清，不能编造根目标。
 向祖先提问及收到答案都不取消原批次等待，也不恢复共享产物写权限。
 子运行期间只做协调与读取，不与子节点同时修改共享产物。
+需要终止本批次时用 task_cancel（只取消自己派发的批次）；waiting_children
+期间的写、shell 与再次分解由运行时闸拒绝，不只靠本提示词约束。
 
 看到子任务失败，区分原发失败和依赖传播。读取 review pack，必要时发起
 有预算的诊断。能力或机制缺口优先交给 supervisor 处理授权内的改进；
@@ -132,9 +134,9 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 | “你负责当前任务” | session→run→task 精确绑定，禁止同 session 冒领其他 Run |
 | “读取根目标和相关决定” | A0/A1 的真实根契约、ContextView 与原始 refs，不能只加一句“考虑全局” |
 | “可查看邻域任务” | A2 的可见域检查、revision、分页与合法动作；不能只有全树字符串 |
-| “向父节点询问并等待” | A3/A4 的非阻塞父循环、持久问题、协调相位、唤醒和超时 |
-| “提交后由 verifier 判定” | A3 的显式提交、写入准入关闭与在途写入排空；idle 不能绕过 |
-| “只做协调” | waiting_children 期间的工具执行闸只放行读/问答/取消等协调动作，不能只靠提示词防并发写 |
+| “向父节点询问并等待” | A3 已落地非阻塞父循环与协调相位（waiting_children/submitted、写闸、显式提交；task-runtime/src/gate.ts、orchestrate.ts）；持久问题、问答唤醒与超时仍属 A4 |
+| “提交后由 verifier 判定” | A3 已落地：task_submit_result → RunPhaseChanged(submitted) 落库后 drainSession 排空在途写，再转 verifier 排他执行；idle 不作完成证据 |
+| “只做协调” | A3 已落地：waiting_children 期间运行时闸（tools/pre-execute waterfall，在途调用同样登记检查）只放行读/状态/诊断/task_cancel 等协调动作，不只靠提示词防并发写 |
 | “主管只读诊断” | 实际工具 allow-list 不含写/shell/spawn/晋升；按需下钻仍有读取域限制 |
 | “产物满足目标” | 独立 verifier、来源与版本检查；prompt 不能保证语义正确 |
 
@@ -146,7 +148,7 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 
 必测反例：工具未挂载却被提示调用；一个 worker 的合同泄漏到另一个；祖先文本含 `{{…}}`/结束标签/“忽略原规则”；P4 的证据依赖、heuristic 和 mandatory 在渲染中遗漏；T1 起 assumptions/constraints 必须来自同一份持久化契约，handoff 渲染与 `task_read` 的 store 视图不得各说一套（S1-V 切片 2 起同样适用于判据的 `protectedInputs` 声明路径）；根目标/AC 变更无版本；父等待时子提问形成环；reviewer 提出诊断后获得写权限；任务列表为空即拒绝生成。
 
-协调组合态必须覆盖：waiting_children 同时有向祖先提出的阻塞问题；仅收到部分答案或 unresolved；有效问答在 inbox claim 后遇到 pre-step reject/崩溃。恢复后模型仍能读到未处理事实，主相位、batch 与写权限不因消息重放改变。
+协调组合态必须覆盖：waiting_children 同时有向祖先提出的阻塞问题；仅收到部分答案或 unresolved；有效问答在 inbox claim 后遇到 pre-step reject/崩溃。恢复后模型仍能读到未处理事实，主相位、batch 与写权限不因消息重放改变。waiting_children 的写拒绝以运行时闸在真实 tools waterfall 上的实际 deny 为证据（A3 起），不能只看 assembled prompt 未挂载。
 
 同一输入/revision 连续装配不产生不断增长的重复提示或写事件；输入变化有可追溯的模型可见事件。不要通过删除事实来满足 token 上限，也不要每步注入全图时间戳使缓存失效。
 

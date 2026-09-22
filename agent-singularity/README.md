@@ -12,7 +12,7 @@ config.yaml: none
 
 ### Tools
 
-All 21 are registered on the global layer; the root agent's allow-list (ROOT_TOOLS in `@dangosys/dsh-singularity-agent-runtime`) names exactly these, so the root surface and this list cannot drift apart.
+All 23 are registered on the global layer; the root agent's allow-list (ROOT_TOOLS in `@dangosys/dsh-singularity-agent-runtime`) names exactly these, so the root surface and this list cannot drift apart.
 
 1. graph_spawn: create a worker node through Singularity runtime and wait for its response.
 2. graph_mark_ready: mark the calling agent's graph ready.
@@ -20,21 +20,23 @@ All 21 are registered on the global layer; the root agent's allow-list (ROOT_TOO
 4. hitl_approve: wait for an explicit approve/reject decision; cancel with the tool execution.
 5. task_read: read the caller's task contract and (for the root) child task statuses.
 6. capability_list: print the configured capability table — the legal capability names, with each tool label's expansion.
-7. task_decompose: admit and start a child batch (reason + children with objective / acceptance criteria / dependsOn / decomposable).
-8. task_status: print the task tree with run / evidence / review / diagnosis summaries.
-9. task_verify: worker self-check — re-run the verifier, record evidence, never change task status.
-10. task_review_pack: read-only evidence pack for one task (reviews, parent/child summaries, dependency edges, escalation verdict).
-11. task_review_agent: spawn ONE read-only review agent when the pack's escalation criterion (E1–E4) fires and the per-store budget has room; persists its six-dimension judgement as a Diagnosis.
-12. task_diagnose: persist a Diagnosis (proposals are suggestions only; nothing auto-executes).
-13. evolution_propose: register an evolution proposal (optionally transcribed from a Diagnosis).
-14. evolution_candidate: record the candidate's full version set and optional structured mutation.
-15. evolution_prepare: materialize a mechanical mutation into the proposal sandbox plus the champion snapshot.
-16. evolution_replay: replay the candidate against this graph's terminal historical tasks; writes the candidate-vs-champion report.
-17. evolution_gate: record the six gate answers (regression evidence refs must exist).
-18. evolution_decide: record PROMOTE / REJECT / KEEP_FOR_FURTHER_RESEARCH — only after a native human approval.
-19. evolution_apply: promote a decided PROMOTE (skill / agent_preset / capability, L1–L3, materialized) into production; second human approval, names every production path it writes.
-20. evolution_rollback: restore the champion snapshot (or delete the apply product when there was no champion); human approval again.
-21. evolution_list: read the ledger with filters and history.
+7. task_decompose: admit a child batch and return its batch id at once (reason + children with objective / acceptance criteria / dependsOn / decomposable); the runtime runs the children in dependency order while the caller keeps working.
+8. task_submit_result: hand in a finished run — a summary plus evidence references; the runtime closes write admission, drains in-flight writes, then the verifier decides.
+9. task_cancel: cancel the caller's own in-flight batch; the children settle as cancelled.
+10. task_status: print the task tree with run / phase / evidence / review / diagnosis summaries.
+11. task_verify: worker self-check — re-run the verifier, record evidence, never change task status.
+12. task_review_pack: read-only evidence pack for one task (reviews, parent/child summaries, dependency edges, escalation verdict).
+13. task_review_agent: spawn ONE read-only review agent when the pack's escalation criterion (E1–E4) fires and the per-store budget has room; persists its six-dimension judgement as a Diagnosis.
+14. task_diagnose: persist a Diagnosis (proposals are suggestions only; nothing auto-executes).
+15. evolution_propose: register an evolution proposal (optionally transcribed from a Diagnosis).
+16. evolution_candidate: record the candidate's full version set and optional structured mutation.
+17. evolution_prepare: materialize a mechanical mutation into the proposal sandbox plus the champion snapshot.
+18. evolution_replay: replay the candidate against this graph's terminal historical tasks; writes the candidate-vs-champion report.
+19. evolution_gate: record the six gate answers (regression evidence refs must exist).
+20. evolution_decide: record PROMOTE / REJECT / KEEP_FOR_FURTHER_RESEARCH — only after a native human approval.
+21. evolution_apply: promote a decided PROMOTE (skill / agent_preset / capability, L1–L3, materialized) into production; second human approval, names every production path it writes.
+22. evolution_rollback: restore the champion snapshot (or delete the apply product when there was no champion); human approval again.
+23. evolution_list: read the ledger with filters and history.
 
 Graphs are created from New graph. Repository installs are done by the agent with bash (clone + build per repo docs), then `env_register_component`.
 

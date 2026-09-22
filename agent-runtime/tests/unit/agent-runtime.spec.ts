@@ -418,6 +418,8 @@ describe('AgentRuntime root lifecycle', () => {
         'capability_list',
         'skill',
         'task_decompose',
+        'task_submit_result',
+        'task_cancel',
         'task_status',
         'task_verify',
         'task_review_pack',

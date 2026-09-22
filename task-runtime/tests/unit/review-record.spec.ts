@@ -3,7 +3,7 @@ import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-se
 import type { EvidenceBundle, ReviewRecord, TaskRun, VerificationResult } from '../../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
 import { pinSkillHome, releaseSkillHomes } from '../support/skill-roots.ts'
-import type { Config, DecomposeSpec } from '../../src/index.ts'
+import type { ChildOutcome, Config, DecomposeSpec } from '../../src/index.ts'
 import { TaskRuntime } from '../../src/index.ts'
 
 const ROOT_SESSION = 'root-session'
@@ -66,7 +66,7 @@ function harness(options: {
 
   const spawned: SpawnCall[] = []
   const cancelled: string[] = []
-  let idleBehavior: (sessionId: string) => Promise<void> = async () => {}
+  let idleBehavior: ((sessionId: string) => Promise<void>) | undefined
   const parentAgent = { id: ROOT_SESSION }
   const agentRuntime = {
     spawn: vi.fn(async (_parent: unknown, request: {
@@ -82,10 +82,19 @@ function harness(options: {
         prompt: request.prompt.map(block => block.text).join('\n'),
         ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
       })
+      // `cancel` converges the agent to idle, as the real loop's does (A3 §3.7):
+      // the wait that saw the abort then reports it.
+      let releaseIdle: (() => void) | undefined
       const agent = {
         id: request.sessionId,
-        cancel: vi.fn(() => { cancelled.push(request.sessionId) }),
-        whenIdle: vi.fn(() => idleBehavior(request.sessionId)),
+        cancel: vi.fn(() => {
+          cancelled.push(request.sessionId)
+          releaseIdle?.()
+        }),
+        whenIdle: vi.fn(() => new Promise<void>((resolve, reject) => {
+          releaseIdle = resolve
+          void (idleBehavior ?? defaultIdle)(request.sessionId).then(resolve, reject)
+        })),
       }
       return { agent, dispose: vi.fn(async () => {}) }
     }),
@@ -139,6 +148,7 @@ function harness(options: {
     logTail: vi.fn(async (logRef: string) => options.logTail ?? `tail of ${logRef}`),
   }
 
+  const listeners = new Map<string, Set<(...args: never[]) => unknown>>()
   const ctx: Record<string, unknown> = {
     reflect: { provide: () => {} },
     provide: () => {},
@@ -146,8 +156,17 @@ function harness(options: {
       const value = execute()
       if (typeof value === 'function') disposers.push(value as () => unknown)
     },
-    emit: () => {},
-    on: () => {},
+    // The run watcher rides `task/change` (A3 §3.1); an `on` that swallowed
+    // subscriptions would test a watcher that never fires.
+    emit: (event: string, ...args: unknown[]) => {
+      for (const listener of [...(listeners.get(event) ?? [])]) (listener as (...a: unknown[]) => unknown)(...args)
+    },
+    on: (event: string, listener: (...args: never[]) => unknown) => {
+      const set = listeners.get(event) ?? new Set()
+      set.add(listener)
+      listeners.set(event, set)
+      return () => set.delete(listener)
+    },
     sessionPersistence: persistence,
     agentRuntime,
     agents: { get: (sessionId: string) => (sessionId === ROOT_SESSION ? parentAgent : undefined) },
@@ -171,6 +190,10 @@ function harness(options: {
     ctx.sessionQuery = { readSession }
   }
   const runtime = new TaskRuntime(ctx as never, options.config as Config | undefined)
+  /** A3's worker protocol: hand the result in through the submission entry, then idle. */
+  const defaultIdle = async (sessionId: string): Promise<void> => {
+    await runtime.submitResult(sessionId, { summary: `done: ${sessionId}` })
+  }
   return {
     ctx,
     sessions,
@@ -198,6 +221,15 @@ function childSpec(objective: string, overrides: Record<string, unknown> = {}) {
 
 async function createRoot(h: Harness) {
   return h.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION)
+}
+
+/** Admit a batch and wait for its settlement: the tool call returns at admission (A3 §3.1). */
+async function decomposeAndSettle(
+  h: Harness,
+  ...args: Parameters<TaskRuntime['decomposeAndRun']>
+): Promise<ChildOutcome[]> {
+  const { batchId } = await h.runtime.decomposeAndRun(...args)
+  return await h.runtime.awaitBatch(args[0], batchId)
 }
 
 /**
@@ -270,7 +302,7 @@ describe('runChildrenCascade review records', () => {
   test('every terminal run settles with exactly one review; failed carries a cause, verified and blocked do not', async () => {
     const h = harness({ verifier: 'by-objective' })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('fail-me now'),
@@ -338,18 +370,15 @@ describe('runChildrenCascade review records', () => {
   test('a cancelled run leaves a review without a cause; the siblings it never started leave one blocked', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const controller = new AbortController()
-    h.setIdleBehavior(() => new Promise<void>(resolve => {
-      controller.signal.addEventListener('abort', () => resolve(), { once: true })
-    }))
+    // A worker mid-turn: only the batch's own cancellation ends it.
+    h.setIdleBehavior(() => new Promise<void>(() => {}))
 
-    const pending = h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('task a'), childSpec('task b', { dependsOn: [0] })],
-    }, { signal: controller.signal })
+    })
     await vi.waitFor(() => expect(h.spawned).toHaveLength(1))
-    controller.abort()
-    const outcomes = await pending
+    const outcomes = await h.runtime.cancelBatch(STORE, batchId, ROOT_SESSION)
 
     const snapshot = await h.task.snapshotIn(STORE)
     expectReviewInvariant(snapshot.reviews, snapshot.runs)
@@ -374,7 +403,7 @@ describe('runChildrenCascade review records', () => {
   test('a spawn refusal still settles the run with exactly one review carrying the spawn cause', async () => {
     const h = harness({ spawnError: 'agent-presets: preset "default" not found (available: standard)' })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('unlucky child'),
@@ -406,7 +435,7 @@ describe('runChildrenCascade review records', () => {
       await settleRunNested(h.task, bound.storeId, bound.task.taskId, bound.run.runId, sessionId)
     })
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('splittable child', { decomposable: true }),
@@ -435,7 +464,7 @@ describe('review dimensions and metrics (P4)', () => {
   test('without a session plane the record keeps the store-derived facts and claims no session counters', async () => {
     const h = harness({ verifier: 'by-objective' })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('fail-me now'), childSpec('downstream', { dependsOn: [0] })],
     })
@@ -481,7 +510,7 @@ describe('review dimensions and metrics (P4)', () => {
       },
     })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('child work', { requiredCapabilities: ['design-ball'] })],
     })
@@ -533,7 +562,7 @@ describe('review dimensions and metrics (P4)', () => {
   test('a session log read that throws costs the record nothing', async () => {
     const h = harness({ session: { readSessionError: true, tokens: { uncachedInputTokens: 7, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 } } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('child work')],
     })

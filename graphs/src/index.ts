@@ -302,6 +302,16 @@ export class GraphsService extends Service {
     return this.transition(async () => {
       const graph = await this.get(id)
       const scope = { graphStoreId: graph.graphStoreId, layoutStoreId: graph.layoutStoreId }
+      // The task tree is stopped before its graph is: a batch driver still
+      // running would otherwise keep spawning workers into an environment that is
+      // being cleaned. The runtime is resolved lazily, the same way `create`
+      // resolves it, and a deployment without it (or without this graph's task
+      // store) simply has nothing to cancel. `cancelGraph` itself is idempotent,
+      // so a repeated removal is safe (A3 §3.6).
+      const taskRuntime = (this.ctx.get?.('taskRuntime') ?? this.ctx.taskRuntime) as Context['taskRuntime'] | undefined
+      if (taskRuntime !== undefined) {
+        await taskRuntime.cancelGraph(rootTaskStoreId(graph.rootSessionId), 'graph removed')
+      }
       await this.ctx.agentRuntime.stopGraph(scope)
       const root = await this.ctx.agentRuntime.ensureRoot(graph.rootSessionId, {
         graphStoreId: graph.graphStoreId,

@@ -7,6 +7,7 @@ import { renderRunBinding } from '@dangosys/dsh-singularity-task-runtime'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
 import type { AcceptanceCriterion, TaskInstance, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
+import { runPhaseSuffix } from './run-phase.ts'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
@@ -76,7 +77,9 @@ export function defineTaskReadTool(ctx: Context) {
   return defineTool({
     name: 'task_read',
     description:
-      'Read the caller\'s task contract. The root session sees the root task, its acceptance criteria, and child task statuses; a worker sees its own task and run.',
+      'Read the caller\'s task contract. The root session sees the root task, its acceptance criteria, and child task statuses; a worker sees its own task and run. ' +
+      'A run line carries the coordination phase this run is in — and its batch id, its submission and any no-progress marking when it has them; a run with no phase ' +
+      'is an old record and is shown as needs-recovery.',
     parameters: {},
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (_args, exec) => {
@@ -93,7 +96,7 @@ export function defineTaskReadTool(ctx: Context) {
             return `- ${criterion.criterionId} [${criterion.verificationMode}${criterion.mandatory ? ', mandatory' : ''}] ${criterion.description}${command}${protectedInputsPart(criterion)}`
           }),
           ...contractLines(task),
-          `run ${run.runId} [${run.status}] started ${run.startedAt}`,
+          `run ${run.runId} [${run.status}]${runPhaseSuffix(run)} started ${run.startedAt}`,
           ...(await bindingLines(ctx, run)),
         ]
         return lines.join('\n')
@@ -115,7 +118,7 @@ export function defineTaskReadTool(ctx: Context) {
         `children: ${children.length}`,
         ...children.map(child => {
           const run = latestRun(snapshot, child)
-          const runPart = run === undefined ? 'no run' : `run ${run.runId} [${run.status}]`
+          const runPart = run === undefined ? 'no run' : `run ${run.runId} [${run.status}]${runPhaseSuffix(run)}`
           return `- ${child.taskId} [${child.status}/${child.decompositionStatus}] ${runPart} ${child.objective}`
         }),
       ]

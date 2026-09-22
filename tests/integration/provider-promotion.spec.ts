@@ -211,7 +211,17 @@ async function harness(options: { capabilities?: Readonly<Record<string, Capabil
     },
   } as never)
   ctx.provide('agentRuntime', {
-    spawn: async () => ({ agent: { id: 'worker', cancel: () => {}, whenIdle: async () => {} }, dispose: async () => {} }),
+    spawn: async (_parent: unknown, request: { sessionId: string }) => ({
+      agent: {
+        id: request.sessionId,
+        cancel: () => {},
+          // A live worker hands its result in before it goes idle (A3 §3.2): an
+          // idle session is not a completion, so a stub that only went idle would
+          // be stopped by the no-progress rule instead of being verified.
+        whenIdle: async () => { await runtime.submitResult(request.sessionId, { summary: 'worker finished (fixture auto-submit)' }) },
+      },
+      dispose: async () => {},
+    }),
   } as never)
   ctx.provide('agents', { get: (sessionId: string) => ({ id: sessionId }) } as never)
   ctx.provide('graphs', { graphForSession: async () => ({ id: 'g1', envId: 'env1', rootSessionId: ROOT_SESSION }) } as never)
@@ -272,7 +282,7 @@ async function createRoot(h: Harness): Promise<{ storeId: string; taskId: string
 async function admissionRefusal(h: Harness, capability: string): Promise<string> {
   const root = await createRoot(h)
   try {
-    await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT_SESSION, {
+    const { batchId } = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT_SESSION, {
       reason: 'the ball needs verifying',
       children: [{
         objective: 'verify the ball',
@@ -280,6 +290,7 @@ async function admissionRefusal(h: Harness, capability: string): Promise<string>
         requiredCapabilities: [capability],
       }] as DecomposeSpec['children'],
     })
+    await h.runtime.awaitBatch(root.storeId, batchId)
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
   }
@@ -508,7 +519,7 @@ describe('one illegal provider, four consumers, one defect code (S1-C item 3)', 
     // 1. Admission admits the batch: the provider is discoverable, its verifier is
     //    registered and its required tools are granted by the row that carries it.
     const root = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT_SESSION, {
+    const batch = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT_SESSION, {
       reason: 'the ball needs verifying',
       children: [{
         objective: 'verify the ball',
@@ -516,6 +527,7 @@ describe('one illegal provider, four consumers, one defect code (S1-C item 3)', 
         requiredCapabilities: [ROW],
       }] as DecomposeSpec['children'],
     })
+    const outcomes = await h.runtime.awaitBatch(root.storeId, batch.batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
 
     // 2. The config load reports no defect at all for the same table.

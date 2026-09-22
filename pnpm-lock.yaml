@@ -374,9 +374,15 @@ importers:
       '@deepseek-ai/dsh-agent':
         specifier: link:../../../thirdparty/deepseek-harness/packages/core/agent
         version: link:../../../thirdparty/deepseek-harness/packages/core/agent
+      '@deepseek-ai/dsh-llm':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/llm/llm
+        version: link:../../../thirdparty/deepseek-harness/packages/llm/llm
       '@deepseek-ai/dsh-session':
         specifier: link:../../../thirdparty/deepseek-harness/packages/core/session
         version: link:../../../thirdparty/deepseek-harness/packages/core/session
+      '@deepseek-ai/dsh-tools':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/core/tools
+        version: link:../../../thirdparty/deepseek-harness/packages/core/tools
       '@deepseek-ai/schemastery':
         specifier: link:../../../thirdparty/deepseek-harness/vendor/schemastery
         version: link:../../../thirdparty/deepseek-harness/vendor/schemastery

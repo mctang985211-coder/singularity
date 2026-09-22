@@ -93,7 +93,14 @@ function harness() {
     spawn: async (_parent: unknown, request: { sessionId: string }) => {
       spawned.push(request.sessionId)
       return {
-        agent: { id: request.sessionId, cancel: () => {}, whenIdle: async () => {} },
+        agent: {
+          id: request.sessionId,
+          cancel: () => {},
+          // A live worker hands its result in before it goes idle (A3 §3.2): an
+          // idle session is not a completion, so a stub that only went idle would
+          // be stopped by the no-progress rule instead of being verified.
+          whenIdle: async () => { await runtime.submitResult(request.sessionId, { summary: 'worker finished (fixture auto-submit)' }) },
+        },
         dispose: async () => {},
       }
     },
@@ -157,7 +164,7 @@ describe('review record metrics and dimensions, end to end', () => {
       { objective: 'ship the release', rootSessionId: ROOT_SESSION },
       ROOT_SESSION,
     )
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const batch = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [{
         objective: 'child work',
@@ -165,6 +172,7 @@ describe('review record metrics and dimensions, end to end', () => {
         requiredCapabilities: ['design-ball'],
       }],
     })
+    const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
 
     // The record is read back from the store's own session log, not from the writer's arguments.
@@ -223,10 +231,11 @@ describe('review record metrics and dimensions, end to end', () => {
       { objective: 'ship the release', rootSessionId: ROOT_SESSION },
       ROOT_SESSION,
     )
-    await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [{ objective: 'child work', acceptanceCriteria: [{ description: 'the child works', command: 'true' }] }],
     })
+    await h.runtime.awaitBatch(STORE, batchId)
 
     const child = persistedReviews(h.log.get(STORE)).find(review => review.taskId !== rootTaskId)!
     expect(child.durationMs).toBeGreaterThanOrEqual(0)

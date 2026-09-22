@@ -244,6 +244,67 @@ export class TaskService extends Service {
     await this.commitIn(storeId, events)
   }
 
+  /**
+   * The atomic batch-admission entry (A3 §1.3): every child's creation and
+   * admission, the dependency edges, the parent's decomposition record, the
+   * per-child capability manifests and the parent run's
+   * `active → waiting_children` phase change land in one commit — a batch is
+   * either fully admitted with the gate closed behind it, or not admitted at
+   * all. `decomposeIn` stays as the historical entry that leaves the parent
+   * run's phase untouched; this is the entry that makes admission atomic.
+   *
+   * `manifests` is aligned with `children` by index (the caller's own batch
+   * order): a list of another length is refused before anything is written.
+   */
+  async admitBatchIn(
+    storeId: string,
+    parentTaskId: TaskId,
+    parentRunId: RunId,
+    children: readonly TaskInstance[],
+    actor: string,
+    edges: readonly DependencyEdge[] = [],
+    admission?: DecompositionAdmission,
+    manifests?: readonly CapabilityManifest[],
+  ): Promise<void> {
+    if (children.length === 0) throw new Error('task: admit batch requires at least one child')
+    if (manifests !== undefined && manifests.length !== children.length) {
+      throw new Error(`task: admit batch requires one manifest per child (${children.length} children, ${manifests.length} manifests)`)
+    }
+    const events: TaskEvent[] = []
+    for (const child of children) {
+      if (child.parentTaskId !== parentTaskId) throw new Error(`task: child "${child.taskId}" parentTaskId must be "${parentTaskId}"`)
+      if (child.decompositionStatus !== 'leaf' && child.decompositionStatus !== 'decomposable') {
+        throw new Error(`task: child "${child.taskId}" decomposition status must be "leaf" or "decomposable"`)
+      }
+      events.push(event('TaskCreated', { taskId: child.taskId, parentTaskId, actor, payload: { task: child } }))
+      events.push(event('TaskAdmitted', { taskId: child.taskId, actor, payload: { decompositionStatus: child.decompositionStatus } }))
+    }
+    for (const edge of edges) {
+      events.push(event('DependencyAdded', { taskId: edge.to, actor, payload: { edge } }))
+    }
+    events.push(event('TaskDecomposed', {
+      taskId: parentTaskId,
+      actor,
+      payload: { childTaskIds: children.map(child => child.taskId), ...(admission === undefined ? {} : { admission }) },
+    }))
+    if (manifests !== undefined) {
+      children.forEach((child, index) => {
+        const manifest = manifests[index] as CapabilityManifest
+        events.push(event('CapabilityResolved', { taskId: child.taskId, actor, payload: { manifest } }))
+        if (manifest.missing.length > 0) {
+          events.push(event('CapabilityGapDetected', { taskId: child.taskId, actor, payload: { missing: manifest.missing } }))
+        }
+      })
+    }
+    events.push(event('RunPhaseChanged', {
+      taskId: parentTaskId,
+      runId: parentRunId,
+      actor,
+      payload: { phase: 'waiting_children', batchId: `b-${parentTaskId}` },
+    }))
+    await this.commitIn(storeId, events)
+  }
+
   async addDependencyIn(storeId: string, edge: DependencyEdge, actor: string): Promise<void> {
     await this.commitIn(storeId, [event('DependencyAdded', { taskId: edge.to, actor, payload: { edge } })])
   }
@@ -288,6 +349,36 @@ export class TaskService extends Service {
       default:
         throw new Error(`task: unknown run status "${String(status)}"`)
     }
+  }
+
+  /**
+   * Records one coordination-phase change on a run (A3). The reducer is the
+   * gate: only `active → waiting_children` (carrying the batch id) and
+   * `active|waiting_children → submitted` (carrying the submission) apply, and
+   * a refused transition commits nothing.
+   */
+  async changeRunPhaseIn(
+    storeId: string,
+    taskId: TaskId,
+    runId: RunId,
+    actor: string,
+    payload: TaskEventPayloads['RunPhaseChanged'],
+  ): Promise<void> {
+    await this.commitIn(storeId, [event('RunPhaseChanged', { taskId, runId, actor, payload })])
+  }
+
+  /**
+   * Records one no-progress marking on an active run (A3). `rounds` is the
+   * caller's consecutive count; the reducer records the value it is given.
+   */
+  async markRunProgressIn(
+    storeId: string,
+    taskId: TaskId,
+    runId: RunId,
+    actor: string,
+    payload: TaskEventPayloads['RunProgressMarked'],
+  ): Promise<void> {
+    await this.commitIn(storeId, [event('RunProgressMarked', { taskId, runId, actor, payload })])
   }
 
   async recordEvidenceIn(storeId: string, evidence: EvidenceBundle, actor: string): Promise<void> {

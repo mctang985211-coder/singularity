@@ -69,6 +69,10 @@ function harness() {
       taskId: 'task-root',
       runId: 'run-root',
     })),
+    // The A3 hook `GraphsService.remove` calls before it stops the graph: a batch
+    // driver still running would keep spawning workers into an environment that
+    // is being cleaned, so the store's task tree is cancelled first (§3.6).
+    cancelGraph: vi.fn(async (_storeId: string, _reason: string) => {}),
   }
   ctx.provide('sessionPersistence', { list: async () => [], create: async () => handle } as never)
   ctx.provide('envBuilder', { store } as never)
@@ -168,7 +172,7 @@ describe('graphs creation lifecycle', () => {
 
 describe('graphs removal lifecycle', () => {
   it('waits for all previous workers to stop before launching cleanup, then archives after cleaning', async () => {
-    const { ctx, service, store, agents, runtime, graph, layout } = harness()
+    const { ctx, service, store, agents, runtime, graph, layout, taskRuntime } = harness()
     const { graph: created } = await service.create({ createEnv: true, repos: ['acme/widget'] })
     const workerId = 'old-worker' as SessionId
     agents.push({ id: workerId })
@@ -195,6 +199,9 @@ describe('graphs removal lifecycle', () => {
       graphStoreId: created.graphStoreId,
       layoutStoreId: created.layoutStoreId,
     })
+    // The task tree is cancelled before the graph is stopped, named by the store
+    // the removed graph owns.
+    expect(taskRuntime.cancelGraph).toHaveBeenCalledExactlyOnceWith(`sg-t-${created.rootSessionId}`, 'graph removed')
     expect(runtime.ensureRoot).not.toHaveBeenCalled()
     expect(runtime.spawn).not.toHaveBeenCalled()
     stopped.resolve()
@@ -217,7 +224,7 @@ describe('graphs removal lifecycle', () => {
   })
 
   it('disposes the cleanup timer and listener without archiving if cleanup spawn fails', async () => {
-    const { ctx, service, store, runtime, graph, layout } = harness()
+    const { ctx, service, store, runtime, graph, layout, taskRuntime } = harness()
     const { graph: created } = await service.create({ createEnv: true, repos: ['acme/widget'] })
     vi.useFakeTimers()
     const timerCount = vi.getTimerCount()
@@ -227,6 +234,7 @@ describe('graphs removal lifecycle', () => {
     expect(vi.getTimerCount()).toBe(timerCount)
     expect(ctx.events._hooks['envBuilder/cleaned']).toHaveLength(0)
     expect(runtime.stopAgents).toHaveBeenCalledTimes(2)
+    expect(taskRuntime.cancelGraph).toHaveBeenCalledOnce()
     expect(await service.snapshot()).toMatchObject({ graphs: [created], archives: [] })
     expect(store.get(created.envId).sessionIds).toEqual([created.rootSessionId])
     expect(graph.clearActive).not.toHaveBeenCalled()

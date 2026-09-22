@@ -26,7 +26,7 @@ pnpm dsh plugin --profile web add /absolute/path/to/packages/singularity/bundle
 | `@dangosys/dsh-singularity-task` | task contract / instances / runs + event-sourced store |
 | `@dangosys/dsh-singularity-verifier` | verifier registry + EvidenceBundle |
 | `@dangosys/dsh-singularity-task-runtime` | orchestration / admission / capability / handoff / MCP server registry (spawn-level per-env mounts) |
-| `@dangosys/dsh-singularity-agent` | root tools: graph_spawn / mark_ready / HITL + task_read / capability_list / task_decompose / task_status / task_verify / task_review_pack / task_review_agent / task_diagnose / escalate + 9 evolution_* (propose / candidate / prepare / replay / gate / decide / apply / rollback / list) |
+| `@dangosys/dsh-singularity-agent` | root tools: graph_spawn / mark_ready / HITL + task_read / capability_list / task_decompose / task_submit_result / task_cancel / task_status / task_verify / task_review_pack / task_review_agent / task_diagnose / escalate + 9 evolution_* (propose / candidate / prepare / replay / gate / decide / apply / rollback / list) |
 | `@dangosys/dsh-singularity-graph-web` | `/singularity/*` HTTP + SSE + map static |
 | `@dangosys/dsh-singularity-map` | xyflow map SPA + FocusPanel |
 | `@dangosys/dsh-singularity-canvas-view` | 对话 \| Singularity shell |

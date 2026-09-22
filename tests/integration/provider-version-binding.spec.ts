@@ -84,10 +84,11 @@ function child(objective: string, requiredCapabilities: readonly string[]): Deco
 /** Admit one child under a root session and return the runs that settled. */
 async function runOne(h: RunStack, sessionId: SessionId = ROOT_A, capability = ROW): Promise<{ storeId: string; taskId: string; runId: string }> {
   const root = await h.root(sessionId)
-  const outcomes = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, sessionId, {
+  const batch = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, sessionId, {
     reason: 'split the work',
     children: [child('align the ball', [capability])],
   })
+  const outcomes = await h.runtime.awaitBatch(root.storeId, batch.batchId)
   expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
   return { storeId: root.storeId, taskId: outcomes[0]!.taskId, runId: outcomes[0]!.runId! }
 }

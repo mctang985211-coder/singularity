@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { AcceptanceCriterion, EvidenceBundle, TaskEvent, VerificationResult } from '../../../task/src/index.ts'
 import { TaskService, contractDigest, rootTaskStoreId } from '../../../task/src/index.ts'
-import type { DecomposeSpec } from '../../src/index.ts'
+import type { ChildOutcome, Config, DecomposeSpec } from '../../src/index.ts'
 import {
   TaskRuntime,
   contractDefects,
@@ -78,6 +78,7 @@ function harness(options: { checkout?: string } = {}) {
   }
 
   const spawned: Array<{ sessionId: string; prompt: string; contract?: string }> = []
+  let idleBehavior: ((sessionId: string) => Promise<void>) | undefined
   const agentRuntime = {
     spawn: vi.fn(async (_parent: unknown, request: { sessionId: string; prompt: Array<{ type: 'text'; text: string }>; contract?: string }) => {
       spawned.push({
@@ -86,7 +87,11 @@ function harness(options: { checkout?: string } = {}) {
         ...(request.contract === undefined ? {} : { contract: request.contract }),
       })
       return {
-        agent: { id: request.sessionId, cancel: vi.fn(), whenIdle: vi.fn(async () => {}) },
+        agent: {
+          id: request.sessionId,
+          cancel: vi.fn(),
+          whenIdle: vi.fn(() => (idleBehavior ?? defaultIdle)(request.sessionId)),
+        },
         dispose: vi.fn(async () => {}),
       }
     }),
@@ -135,12 +140,23 @@ function harness(options: { checkout?: string } = {}) {
     }),
   }
 
+  const listeners = new Map<string, Set<(...args: never[]) => unknown>>()
   const ctx: Record<string, unknown> = {
     reflect: { provide: () => {} },
     provide: () => {},
     effect: () => {},
-    emit: () => {},
-    on: () => {},
+    // A real (small) event bus: the runtime's run watcher rides `task/change`
+    // (A3 §3.1), and an `on` that swallowed subscriptions would test a watcher
+    // that never fires.
+    emit: (event: string, ...args: unknown[]) => {
+      for (const listener of [...(listeners.get(event) ?? [])]) (listener as (...a: unknown[]) => unknown)(...args)
+    },
+    on: (event: string, listener: (...args: never[]) => unknown) => {
+      const set = listeners.get(event) ?? new Set()
+      set.add(listener)
+      listeners.set(event, set)
+      return () => set.delete(listener)
+    },
     sessionPersistence: persistence,
     agentRuntime,
     agents: { get: (sessionId: string) => ({ id: sessionId }) },
@@ -152,8 +168,36 @@ function harness(options: { checkout?: string } = {}) {
   taskService = new TaskService(ctx as never)
   ctx.task = taskService
   ctx.verifier = verifier
-  const runtime = new TaskRuntime(ctx as never)
-  return { ctx, sessions, task: taskService, runtime, verifier, spawned, graphs }
+  // A temp run-binding root: workspace markers and run snapshots belong to the
+  // deployment under test, never to the developer's own `~/.dsh`.
+  const runtime = new TaskRuntime(ctx as never, { runBindingRoot: join(options.checkout ?? tmpdir(), 'run-bindings') } as Config)
+  // A3's worker protocol: a worker hands its result in through the explicit
+  // submission entry and then goes idle — an idle is not a completion.
+  const defaultIdle = async (sessionId: string): Promise<void> => {
+    await runtime.submitResult(sessionId, { summary: `done: ${sessionId}` })
+  }
+  return {
+    ctx,
+    sessions,
+    task: taskService,
+    runtime,
+    verifier,
+    spawned,
+    graphs,
+    setIdleBehavior: (behavior: (sessionId: string) => Promise<void>) => { idleBehavior = behavior },
+  }
+}
+
+/**
+ * Admit a batch and wait for it to settle: `decomposeAndRun` returns at the
+ * atomic commit (A3 §3.1), so a test that reads outcomes asks `awaitBatch`.
+ */
+async function decomposeAndSettle(
+  h: Harness,
+  ...args: Parameters<TaskRuntime['decomposeAndRun']>
+): Promise<ChildOutcome[]> {
+  const { batchId } = await h.runtime.decomposeAndRun(...args)
+  return await h.runtime.awaitBatch(args[0], batchId)
 }
 
 /** Every persisted task-store event, read back from the session log the store writes to. */
@@ -469,7 +513,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const spec = protectedSpec('check.sh')
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, spec)
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, spec)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
 
     // the contract as the store wrote it, read back from the TaskCreated event
@@ -500,7 +544,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
     const h = harness({ checkout })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
 
-    await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, protectedSpec('check.sh'))
+    await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, protectedSpec('check.sh'))
 
     const call = h.spawned[0]!
     // Both surfaces a worker reads before its first `task_read` carry the same
@@ -557,7 +601,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const eventsBefore = taskEvents(h).length
 
-    await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, protectedSpec('tests/missing.sh')))
+    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, protectedSpec('tests/missing.sh')))
       .rejects.toThrow(
         /task-runtime: contract rejected decomposition of ".+":\n- child 0 criterion "ac1" protectedInputs path "tests\/missing\.sh" cannot be read/,
       )
@@ -576,7 +620,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const tasksBefore = (await h.task.snapshotIn(STORE)).tasks.length
 
-    await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, protectedSpec('check.sh')))
+    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, protectedSpec('check.sh')))
       .rejects.toThrow(/task-runtime: contract rejected decomposition of ".+":\n- child 0 criterion "ac1" protectedInputs cannot be fixed/)
 
     expect(h.spawned).toEqual([])
@@ -587,7 +631,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('child a')],
     } as DecomposeSpec)
@@ -609,7 +653,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
     ]
     for (const [spec, expected] of cases) {
       await expect(
-        h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, spec as DecomposeSpec),
+        decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, spec as DecomposeSpec),
         JSON.stringify(spec),
       ).rejects.toThrow(expected)
     }
@@ -622,7 +666,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
 describe('TaskRuntime.replayTask: protected inputs on the replay path', () => {
   async function champion(h: Harness) {
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('champion work')],
     } as DecomposeSpec)
@@ -655,6 +699,8 @@ describe('TaskRuntime.replayTask: protected inputs on the replay path', () => {
       capabilitySnapshot: [],
       artifacts: [],
       verifierResults: [],
+      // Born active like every run this build creates (A3 §1.1).
+      executionPhase: 'active',
       status: 'running',
       startedAt: new Date().toISOString(),
     }, 'tester')
@@ -699,7 +745,7 @@ describe('TaskRuntime.replayTask: protected inputs on the replay path', () => {
     writeFileSync(file, 'exit 0\n')
     const h = harness({ checkout })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('champion work', { acceptanceCriteria: [declaredCriterion('ac1', 'champion-check.sh')] })],
     } as unknown as DecomposeSpec)

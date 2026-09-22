@@ -155,7 +155,14 @@ async function harness(options: { capabilities?: Record<string, CapabilityConfig
     spawn: async (_parent: unknown, request: SpawnRequest) => {
       spawned.push(request)
       return {
-        agent: { id: request.sessionId, cancel: () => {}, whenIdle: async () => {} },
+        agent: {
+          id: request.sessionId,
+          cancel: () => {},
+          // A live worker hands its result in before it goes idle (A3 §3.2): an
+          // idle session is not a completion, so a stub that only went idle would
+          // be stopped by the no-progress rule instead of being verified.
+          whenIdle: async () => { await runtime.submitResult(request.sessionId, { summary: 'worker finished (fixture auto-submit)' }) },
+        },
         dispose: async () => {},
       }
     },
@@ -259,10 +266,11 @@ describe('admission provider pre-check (S1-C)', () => {
     const h = await harness()
     const root = await createRoot(h)
 
-    const outcomes = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT_SESSION, {
+    const batch = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT_SESSION, {
       reason: 'the ball needs verifying',
       children: [child('verify the ball', ['verify-ball-functional'])],
     })
+    const outcomes = await h.runtime.awaitBatch(root.storeId, batch.batchId)
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     expect(h.spawned).toHaveLength(1)
@@ -284,10 +292,11 @@ describe('admission provider pre-check (S1-C)', () => {
     const h = await harness()
     const root = await createRoot(h)
 
-    const outcomes = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT_SESSION, {
+    const batch = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT_SESSION, {
       reason: 'design the ball',
       children: [child('design the ball', ['design-ball'])],
     })
+    const outcomes = await h.runtime.awaitBatch(root.storeId, batch.batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
 
     const report = await h.runtime.capabilityProviderReport(ROOT_SESSION)
@@ -301,10 +310,11 @@ describe('admission provider pre-check (S1-C)', () => {
     const h = await harness()
     const root = await createRoot(h)
 
-    const outcomes = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT_SESSION, {
+    const batch = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT_SESSION, {
       reason: 'design the ball',
       children: [child('design the ball', ['design-ball'])],
     })
+    const outcomes = await h.runtime.awaitBatch(root.storeId, batch.batchId)
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     const report = await h.runtime.capabilityProviderReport(ROOT_SESSION)
@@ -319,10 +329,11 @@ describe('admission provider pre-check (S1-C)', () => {
     const h = await harness()
     const root = await createRoot(h)
 
-    const outcomes = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT_SESSION, {
+    const batch = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT_SESSION, {
       reason: 'design the ball',
       children: [child('design the ball', ['design-ball'])],
     })
+    const outcomes = await h.runtime.awaitBatch(root.storeId, batch.batchId)
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
   })
@@ -486,10 +497,11 @@ describe('replay provider pre-check (S1-C)', () => {
   /** A terminal champion: a root task whose single child verified, so the root itself verified. */
   async function champion(h: Harness): Promise<{ storeId: string; taskId: string; runId: string }> {
     const root = await createRoot(h)
-    await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT_SESSION, {
+    const { batchId } = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT_SESSION, {
       reason: 'the champion ran its own child',
       children: [child('champion work', [])],
     })
+    await h.runtime.awaitBatch(root.storeId, batchId)
     expect((await h.task.taskIn(STORE, root.taskId)).status).toBe('verified')
     return root
   }

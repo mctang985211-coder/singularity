@@ -66,7 +66,14 @@ async function harness(): Promise<Harness> {
     spawn: async (_parent: unknown, request: { sessionId: string }) => {
       spawned.push(request.sessionId)
       return {
-        agent: { id: request.sessionId, cancel: () => {}, whenIdle: async () => {} },
+        agent: {
+          id: request.sessionId,
+          cancel: () => {},
+          // A live worker hands its result in before it goes idle (A3 §3.2): an
+          // idle session is not a completion, so a stub that only went idle would
+          // be stopped by the no-progress rule instead of being verified.
+          whenIdle: async () => { await runtime.submitResult(request.sessionId, { summary: 'worker finished (fixture auto-submit)' }) },
+        },
         dispose: async () => {},
       }
     },
@@ -135,6 +142,10 @@ async function createParent(h: Harness, acceptanceCriteria: AcceptanceCriterion[
     artifacts: [],
     verifierResults: [],
     status: 'running',
+    // A run the A3 protocol would have created: born `active`, which is the only
+    // phase admission admits a batch from. A run without one is an old record
+    // and `decomposeAndRun` refuses it by name.
+    executionPhase: 'active',
     startedAt: new Date().toISOString(),
   }
   await h.task.startRunIn(STORE, run, 'tester')
@@ -242,13 +253,14 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
       criterionId: 'root-map', description: 'independent evidence', verificationMode: 'composite',
       mandatory: true, requiredEvidence: [], childEvidence: [{ childIndex: 0, criterionId: 'ac1-2' }],
     }])
-    await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'check evidence classification',
       children: [{ objective: 'child', acceptanceCriteria: [
         { description: 'mechanical check', command: 'true' },
         { description: 'optional judgement', command: 'true', mandatory: false, heuristic },
       ] }],
     })
+    await h.runtime.awaitBatch(STORE, batchId)
     expect((await h.task.childrenIn(STORE, taskId))[0]!.status).toBe('verified')
     expect((await h.task.taskIn(STORE, taskId)).status).toBe(heuristic ? 'failed' : 'verified')
     if (heuristic) {
@@ -283,10 +295,11 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
       childEvidence: [{ childIndex: 0, criterionId: validMap ? 'ac1-1' : 'missing-criterion' }],
       ...(explicit ? { verifierRef: 'custom-composite' } : {}),
     }])
-    await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'custom verifier',
       children: [{ objective: 'child', acceptanceCriteria: [{ description: 'works', command: 'true' }] }],
     })
+    await h.runtime.awaitBatch(STORE, batchId)
     expect((await h.task.taskIn(STORE, taskId)).status).toBe(validMap && customPass ? 'verified' : 'failed')
     expect(calls).toBe(validMap ? 1 : 0)
     if (!validMap) expect(evidenceFor(h, runId)[0]!.verifierResults[0]!.details).toContain('missing-criterion')
@@ -345,13 +358,14 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
       },
     ])
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+    const batch = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         { objective: 'port the ALU', acceptanceCriteria: [{ description: 'the port compiles', command: 'true' }] },
         { objective: 'run the model', acceptanceCriteria: [{ description: 'the model runs', command: 'true' }] },
       ],
     })
+    const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
     expect((await h.task.taskIn(STORE, taskId)).status).toBe('verified')
@@ -388,13 +402,14 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
       },
     ])
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+    const batch = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         { objective: 'port the ALU', acceptanceCriteria: [{ description: 'the port compiles', command: 'true' }] },
         { objective: 'run the model', acceptanceCriteria: [{ description: 'the model runs', command: 'true' }] },
       ],
     })
+    const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
 
     // The conjunction half passed; the independent parent-level check is what refused.
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
@@ -416,13 +431,14 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
       childEvidence: [{ childIndex: 1, criterionId: 'ac2-9' }],
     }])
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+    const batch = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         { objective: 'port the ALU', acceptanceCriteria: [{ description: 'the port compiles', command: 'true' }] },
         { objective: 'run the model', acceptanceCriteria: [{ description: 'the model runs', command: 'true' }] },
       ],
     })
+    const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
     expect((await h.task.taskIn(STORE, taskId)).status).toBe('failed')
@@ -437,13 +453,14 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
       await h.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION)
     await seedProducer(h, 'failed', 'bemu_trace')
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const batch = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [{
         objective: 'rtl implementation',
         acceptanceCriteria: [{ description: 'cycle-equivalent to the reference', command: 'true', requiresArtifact: ['bemu_trace'] }],
       }],
     })
+    const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['blocked'])
     expect(h.spawned).toHaveLength(0)
@@ -462,13 +479,14 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
       await h.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION)
     await seedProducer(h, 'verified', 'bemu_trace')
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const batch = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [{
         objective: 'rtl implementation',
         acceptanceCriteria: [{ description: 'cycle-equivalent to the reference', command: 'true', requiresArtifact: ['bemu_trace'] }],
       }],
     })
+    const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     expect(h.spawned).toHaveLength(1)

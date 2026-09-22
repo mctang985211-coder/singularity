@@ -420,6 +420,69 @@ interface RunProviderBinding {
    */
   snapshotRoot?: string;
 }
+/**
+ * Where one run sits in the A3 coordination protocol. `active` is the phase a
+ * run is born in, and the only one in which it may write, decompose or
+ * submit; `waiting_children` is a run whose decomposition batch was admitted
+ * atomically and whose children have not all settled; `submitted` is a run
+ * that handed in a {@link SubmissionRecord} and is waiting for (or inside)
+ * verification.
+ *
+ * The phase — not the run status — is the admission gate: a run in
+ * verification still carries status `running`, so `submitted` is what refuses
+ * a second submission, a write after the gate closed, and a decomposition
+ * admitted too late (A3 §1.2/§2).
+ *
+ * Absent on every run created before the field existed: such a run's phase is
+ * unknown and is never guessed. A non-terminal phase-less run is reported as
+ * `needs-recovery` — its only legal continuation is cancellation — and the
+ * reducer refuses phase changes for it (A3 §3.6).
+ */
+type ExecutionPhase = 'active' | 'waiting_children' | 'submitted';
+/**
+ * What one run handed in when it submitted (A3 `task_submit_result`, or the
+ * runtime settling a parent whose children all reached terminal states): the
+ * submitter's own account plus the references it names as proof. Written onto
+ * the run by the transition into `submitted`; that phase is terminal for the
+ * transition gate, so the record is written once and never overwritten — a
+ * late submission is answered from the record, not applied.
+ *
+ * `origin` keeps a worker's self-report apart from the runtime's automatic
+ * one: only `worker` means the run's own agent made the claim.
+ */
+interface SubmissionRecord {
+  /** What was delivered, in the submitter's words (runtime-generated for an automatic submission). */
+  summary: string;
+  /** The evidence ids, artifact refs, or review refs the submitter names as proof. */
+  evidenceRefs: string[];
+  /** Anything further a reader should know; absent when the submitter left none. */
+  notes?: string;
+  /** When the submission was recorded — the phase-change event's own timestamp. */
+  submittedAt: string;
+  /** Who submitted: the worker through its explicit call, or the runtime settling the run. */
+  origin: 'worker' | 'runtime';
+}
+/**
+ * One no-progress marking on an `active` run (A3 `RunProgressMarked`): the
+ * observable record that a worker went idle where a submission was due. It is
+ * a diagnostic, not an accumulator — every marking overwrites the previous
+ * one, and `rounds` is the caller's own consecutive count, so replay and live
+ * observation agree on the last state.
+ *
+ * Absent on a run that was never marked, on a run whose phase is not `active`
+ * (a run waiting on children or on verification is expected to be idle), and
+ * on every run written before the field existed.
+ */
+interface NoProgressRecord {
+  /** The only kind A3 writes. */
+  kind: 'unsubmitted-idle';
+  /** Consecutive no-progress rounds the caller observed; a positive integer, recorded as given. */
+  rounds: number;
+  /** The run subtree's fact count at marking time — the snapshot-derivable progress measure (A3 §3.5). */
+  factCount: number;
+  /** When the marking was recorded — the event's own timestamp. */
+  markedAt: string;
+}
 interface TaskRun {
   runId: RunId;
   taskId: TaskId;
@@ -434,6 +497,40 @@ interface TaskRun {
    * can vouch for, and neither is retroactively given a claim.
    */
   providerBinding?: RunProviderBinding;
+  /**
+   * Where this run sits in the A3 coordination protocol. A new run is born
+   * `active`, or `submitted` when it has no worker at all (a `spawn: false`
+   * replay). Absent on every run created before the field existed; its phase
+   * is read as unknown, never defaulted to `active`.
+   */
+  executionPhase?: ExecutionPhase;
+  /**
+   * The decomposition batch this run waits on, `b-<parentTaskId>` — the
+   * deterministic id a run records when it enters `waiting_children`. The
+   * parent decomposes once (the phase gate refuses a second batch), so the id
+   * needs no minted uniqueness. Absent on a run that never admitted a batch.
+   */
+  batchId?: string;
+  /**
+   * What this run handed in, written by the transition into `submitted`.
+   * Absent on a run that has not submitted; its presence is what makes a
+   * second submission a refusal rather than an overwrite.
+   */
+  submission?: SubmissionRecord;
+  /**
+   * Question ids the run is waiting on (A4 mount point). A3 never writes a
+   * non-empty value; the field exists so the shape has one owner, and the
+   * reducer carries whatever A4 writes through phase changes unchanged.
+   */
+  pendingQuestionIds?: string[];
+  /** Question ids whose answers block this run's next step (A4 mount point); see {@link pendingQuestionIds}. */
+  blockingQuestionIds?: string[];
+  /**
+   * The last no-progress marking on this run (A3). Overwritten by each
+   * `RunProgressMarked`; absent until a caller marks one, and on every run
+   * written before the field existed.
+   */
+  noProgress?: NoProgressRecord;
   artifacts: ArtifactRef[];
   verifierResults: VerificationResult[];
   status: RunStatus;
@@ -1113,6 +1210,51 @@ interface TaskEventPayloads {
   };
   /** A failed task returns to ready so a new run can start. */
   TaskRetried: Record<string, never>;
+  /**
+   * A running run's coordination phase changes (A3). The transition is the
+   * admission gate: `active → waiting_children` when its decomposition batch
+   * is admitted atomically, and `→ submitted` when it hands in a submission
+   * (explicitly or by runtime settlement). Replaying the store reconstructs
+   * exactly one path through {@link ExecutionPhase}, so a second submission, a
+   * decomposition admitted after the gate closed, and any late phase write are
+   * refused by the phase alone — the run status stays `running` through
+   * verification and cannot serve as that gate.
+   *
+   * A refused transition applies nothing: the reducer validates the whole
+   * payload before the run is touched.
+   */
+  RunPhaseChanged: {
+    phase: ExecutionPhase;
+    /** The batch a `waiting_children` run waits on (`b-<parentTaskId>`); required for that phase and refused elsewhere. */
+    batchId?: string;
+    /** The record a `submitted` run hands in; required for that phase and refused elsewhere. */
+    submission?: SubmissionRecord;
+    /** A4: question ids the run waits on; the reducer checks shape only and carries them unchanged. */
+    pendingQuestionIds?: string[];
+    /** A4: blocking question ids; same handling as `pendingQuestionIds`. */
+    blockingQuestionIds?: string[];
+    /** The caller's account of the transition, when a reader needs one. */
+    reason?: string;
+  };
+  /**
+   * A run was observed idle without submitting (A3): the no-progress record a
+   * reader shows before the budget stops a stuck run. Only an `active` run
+   * accepts a marking — a run waiting on children or on verification is
+   * expected to be idle, and marking it would count a legitimate wait as
+   * stagnation. `rounds` is the caller's consecutive count; the reducer
+   * records the number it is given and never accumulates, so replay agrees
+   * with live observation.
+   */
+  RunProgressMarked: {
+    /** The only kind A3 writes. */
+    kind: 'unsubmitted-idle';
+    /** Consecutive no-progress rounds the caller observed; a positive integer. */
+    rounds: number;
+    /** The run subtree's fact count at marking time (A3 §3.5). */
+    factCount: number;
+    /** The observable diagnostic: why the run looks stuck. */
+    note: string;
+  };
   /** The capability manifest a task was admitted with is stored. */
   CapabilityResolved: {
     manifest: CapabilityManifest;
@@ -1384,12 +1526,76 @@ declare class TaskState {
    * that already happened.
    */
   private assertProviderBinding;
+  /**
+   * The submission record is what a reader trusts instead of re-reading the
+   * worker's transcript, so a malformed one is refused rather than stored: an
+   * unnamed summary or a ref list that is not a list would leave the record
+   * unusable exactly when someone asks what was handed in. Shape only —
+   * whether the refs point at anything the store holds is judged by the
+   * acceptance reader.
+   */
+  private assertSubmissionShape;
+  /**
+   * A run's birth phase is written by the runtime, and the reducer judges its
+   * shape only — the transition semantics belong to `changeRunPhase`. A run
+   * with no phase is a record from before the protocol and stays legal; a run
+   * born `active` carries neither a submission nor a batch; a run born
+   * `submitted` (a workerless replay) must carry a well-shaped submission and
+   * no batch. `waiting_children` is not a birth phase: no creation path admits
+   * a batch before the run exists.
+   */
+  private assertBirthPhase;
+  /**
+   * A4's question ids ride on the phase change; nothing reads them yet, so the
+   * reducer checks that the list is a list of strings and carries it unchanged
+   * — an empty list is a legitimate shape and is stored as given.
+   */
+  private assertQuestionIds;
   private addDependency;
   private start;
   private block;
   private verify;
   private fail;
+  /**
+   * A run keeps `running` through verification (the coordination phase, not the
+   * status, is what records the submission), so a cancellation that lands while a
+   * verifier call is in flight arrives at a task that is already `verifying`.
+   * Refusing it would leave the tree half-settled — the parent cancelled, the
+   * verifying child not — and make the documented exit for a store that cannot be
+   * recovered (`cancelGraph`) impossible exactly when it is needed. `failed`
+   * already accepts both source statuses; this is the same rule for `cancelled`.
+   */
   private cancel;
+  /**
+   * The coordination phase is the A3 admission gate, so this handler is where
+   * a transition is either the one legal edge or a refusal: a run accepts
+   * `active → waiting_children`, `active → submitted` and
+   * `waiting_children → submitted`, and nothing else. Same phase, a rollback,
+   * a run with no phase at all and a run that is no longer running are all
+   * refused, because "already submitted" and "already decomposed" have to be
+   * answered by this one field — a second submission that overwrote the first
+   * record, or a decomposition admitted after the gate closed, would make the
+   * field answer differently at two reads.
+   *
+   * The run status is checked first because a phase change on a failed or
+   * cancelled run is late by definition; verification is the case the phase
+   * guard exists for, since a run inside it is still `running`.
+   *
+   * Only the payload's shape is judged: the batch a run waits on and what it
+   * submitted are the writer's statements, and A4's question ids are carried,
+   * not interpreted.
+   */
+  private changeRunPhase;
+  /**
+   * A no-progress marking is the A3 signal a reader shows before the budget
+   * stops a stuck run, and it is meaningful only on the phase that can still
+   * submit: `active`. A run waiting on children or on verification is expected
+   * to be idle — marking it would count a legitimate wait as stagnation and
+   * give the budget a reason to stop work that is still under way. `rounds` is
+   * the caller's consecutive count; the reducer records the number it is given
+   * and never accumulates, so replay and live observation agree.
+   */
+  private markRunProgress;
   private resolveCapabilities;
   private produceEvidence;
   private addHandoff;
@@ -1464,12 +1670,37 @@ declare class TaskService extends Service {
   }): Promise<void>;
   rejectTaskIn(storeId: string, taskId: TaskId, actor: string, reason: string, manifest?: CapabilityManifest): Promise<void>;
   decomposeIn(storeId: string, parentTaskId: TaskId, children: readonly TaskInstance[], actor: string, edges?: readonly DependencyEdge[], admission?: DecompositionAdmission): Promise<void>;
+  /**
+   * The atomic batch-admission entry (A3 §1.3): every child's creation and
+   * admission, the dependency edges, the parent's decomposition record, the
+   * per-child capability manifests and the parent run's
+   * `active → waiting_children` phase change land in one commit — a batch is
+   * either fully admitted with the gate closed behind it, or not admitted at
+   * all. `decomposeIn` stays as the historical entry that leaves the parent
+   * run's phase untouched; this is the entry that makes admission atomic.
+   *
+   * `manifests` is aligned with `children` by index (the caller's own batch
+   * order): a list of another length is refused before anything is written.
+   */
+  admitBatchIn(storeId: string, parentTaskId: TaskId, parentRunId: RunId, children: readonly TaskInstance[], actor: string, edges?: readonly DependencyEdge[], admission?: DecompositionAdmission, manifests?: readonly CapabilityManifest[]): Promise<void>;
   addDependencyIn(storeId: string, edge: DependencyEdge, actor: string): Promise<void>;
   startRunIn(storeId: string, run: TaskRun, actor: string): Promise<void>;
   markRunStatusIn(storeId: string, taskId: TaskId, runId: RunId, status: RunStatus | 'verifying', actor: string, options?: {
     reason?: string;
     finishedAt?: string;
   }): Promise<void>;
+  /**
+   * Records one coordination-phase change on a run (A3). The reducer is the
+   * gate: only `active → waiting_children` (carrying the batch id) and
+   * `active|waiting_children → submitted` (carrying the submission) apply, and
+   * a refused transition commits nothing.
+   */
+  changeRunPhaseIn(storeId: string, taskId: TaskId, runId: RunId, actor: string, payload: TaskEventPayloads['RunPhaseChanged']): Promise<void>;
+  /**
+   * Records one no-progress marking on an active run (A3). `rounds` is the
+   * caller's consecutive count; the reducer records the value it is given.
+   */
+  markRunProgressIn(storeId: string, taskId: TaskId, runId: RunId, actor: string, payload: TaskEventPayloads['RunProgressMarked']): Promise<void>;
   recordEvidenceIn(storeId: string, evidence: EvidenceBundle, actor: string): Promise<void>;
   recordReviewIn(storeId: string, review: ReviewRecord, actor: string): Promise<void>;
   recordDiagnosisIn(storeId: string, diagnosis: Diagnosis, actor: string): Promise<void>;
@@ -1483,4 +1714,4 @@ declare class TaskService extends Service {
   private header;
 }
 //#endregion
-export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, ExecutionSkillSidecar, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, KnowledgeContentCheck, KnowledgeSkillSidecar, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ProtectedInputRef, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootTaskSpec, RunId, RunMcpServerBinding, RunProviderBinding, RunSkillBinding, RunStatus, SKILL_CONTRACT_VERSION, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, SkillContentIdentity, SkillContractDefect, SkillContractDefectCode, SkillContractVersion, SkillFitFacts, SkillPort, SkillResourceIdentity, SkillSidecar, SkillVerifierRef, TASK_CONTRACT_VERSION, TaskContract, TaskContractVersion, TaskDefinition, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifierSelftestSample, VerifierSelftestStore, VerifyRequest, canonicalize, contractDigest, decompositionDigest, isSupportedSkillResourcePath, reaches, rootTaskStoreId, sha256Hex, skillContentDigest, skillContractDefects, skillContractDigest };
+export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, ExecutionPhase, ExecutionSkillSidecar, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, KnowledgeContentCheck, KnowledgeSkillSidecar, NoProgressRecord, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ProtectedInputRef, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootTaskSpec, RunId, RunMcpServerBinding, RunProviderBinding, RunSkillBinding, RunStatus, SKILL_CONTRACT_VERSION, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, SkillContentIdentity, SkillContractDefect, SkillContractDefectCode, SkillContractVersion, SkillFitFacts, SkillPort, SkillResourceIdentity, SkillSidecar, SkillVerifierRef, SubmissionRecord, TASK_CONTRACT_VERSION, TaskContract, TaskContractVersion, TaskDefinition, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifierSelftestSample, VerifierSelftestStore, VerifyRequest, canonicalize, contractDigest, decompositionDigest, isSupportedSkillResourcePath, reaches, rootTaskStoreId, sha256Hex, skillContentDigest, skillContractDefects, skillContractDigest };

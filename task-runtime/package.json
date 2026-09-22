@@ -29,7 +29,9 @@
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/schemastery": "*",
     "@deepseek-ai/dsh-agent": "*",
-    "@deepseek-ai/dsh-session": "*"
+    "@deepseek-ai/dsh-session": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-tools": "*"
   },
   "dependencies": {
     "@dangosys/dsh-singularity-agent-runtime": "workspace:*",
@@ -46,7 +48,9 @@
     "@deepseek-ai/dsh-session": "link:../../../thirdparty/deepseek-harness/packages/core/session",
     "@dangosys/dsh-singularity-task": "link:../task",
     "@dangosys/dsh-singularity-agent-runtime": "link:../agent-runtime",
-    "@dangosys/dsh-singularity-graphs": "link:../graphs"
+    "@dangosys/dsh-singularity-graphs": "link:../graphs",
+    "@deepseek-ai/dsh-llm": "link:../../../thirdparty/deepseek-harness/packages/llm/llm",
+    "@deepseek-ai/dsh-tools": "link:../../../thirdparty/deepseek-harness/packages/core/tools"
   },
   "publishConfig": {
     "access": "public"

@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { AcceptanceCriterion, EvidenceBundle, TaskEvent, TaskInstance, TaskRun, VerificationResult } from '../../../task/src/index.ts'
@@ -7,7 +9,8 @@ import { TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
 import { CompositeVerifier } from '../../../verifier/src/composite-verifier.ts'
 import { pinSkillHome, releaseSkillHomes } from '../support/skill-roots.ts'
 import type { Config, DecomposeSpec, ChildOutcome } from '../../src/index.ts'
-import { normalizeDecomposition } from '../../src/index.ts'
+import { WorkspaceBusyError, normalizeDecomposition } from '../../src/index.ts'
+import type { WorkspaceRegistry } from '../../src/index.ts'
 import {
   DEFAULT_ALLOW_RUNTIME_DECOMPOSITION,
   DEFAULT_BUDGET,
@@ -57,8 +60,11 @@ interface SpawnCall {
   }
 }
 
-function harness(options: { config?: Partial<Config>; verifier?: 'pass' | 'by-objective' | 'timeout' | 'absent' | 'real-composite'; spawnError?: string } = {}) {
-  const sessions = new Map<string, StoredSession>()
+function harness(
+  options: { config?: Partial<Config>; verifier?: 'pass' | 'by-objective' | 'timeout' | 'absent' | 'real-composite'; spawnError?: string } = {},
+  sharedSessions?: Map<string, StoredSession>,
+) {
+  const sessions = sharedSessions ?? new Map<string, StoredSession>()
   const disposers: Array<() => unknown> = []
   const persistence = {
     list: vi.fn(async () => [...sessions.values()].map(item => ({ header: item.header }))),
@@ -86,8 +92,21 @@ function harness(options: { config?: Partial<Config>; verifier?: 'pass' | 'by-ob
 
   const spawned: SpawnCall[] = []
   const cancelled: string[] = []
-  let idleBehavior: (sessionId: string) => Promise<void> = async () => {}
-  const parentAgent = { id: ROOT_SESSION }
+  const notifications: { sessionId: string; text: string }[] = []
+  /** The agents this process spawned, by session — the registry's live entries. */
+  const liveAgents = new Map<string, unknown>()
+  let idleBehavior: ((sessionId: string) => Promise<void>) | undefined
+  const parentAgent = {
+    id: ROOT_SESSION,
+    status: 'idle',
+    followup: (message: { content: readonly { text?: string }[] }) => {
+      notifications.push({
+        sessionId: ROOT_SESSION,
+        text: message.content.map(block => block.text ?? '').join('\n'),
+      })
+    },
+    cancel: vi.fn(() => {}),
+  }
   const agentRuntime = {
     spawn: vi.fn(async (_parent: unknown, request: {
       sessionId: string
@@ -108,11 +127,31 @@ function harness(options: { config?: Partial<Config>; verifier?: 'pass' | 'by-ob
         ...(request.permissionPreset !== undefined ? { permissionPreset: request.permissionPreset } : {}),
         ...(request.grant !== undefined ? { grant: request.grant } : {}),
       })
+      // `cancel` converges the agent to idle, as the real loop's does: a worker
+      // that is mid-turn when the batch is cancelled resolves its idle wait, and
+      // the wait that saw the abort reports it (A3 §3.7).
+      let releaseIdle: (() => void) | undefined
       const agent = {
         id: request.sessionId,
-        cancel: vi.fn(() => { cancelled.push(request.sessionId) }),
-        whenIdle: vi.fn(() => idleBehavior(request.sessionId)),
+        cancel: vi.fn(() => {
+          cancelled.push(request.sessionId)
+          releaseIdle?.()
+        }),
+        whenIdle: vi.fn(() => new Promise<void>((resolve, reject) => {
+          releaseIdle = resolve
+          // A behaviour that throws must reach the driver as a failed worker, as
+          // the old whenIdle did — swallowing it here would hide the failure the
+          // run is supposed to report.
+          void (idleBehavior ?? defaultIdle)(request.sessionId).then(resolve, reject)
+        })),
+        followup: (message: { content: readonly { text?: string }[] }) => {
+          notifications.push({
+            sessionId: request.sessionId,
+            text: message.content.map(block => block.text ?? '').join('\n'),
+          })
+        },
       }
+      liveAgents.set(request.sessionId, agent)
       return { agent, dispose: vi.fn(async () => {}) }
     }),
   }
@@ -179,6 +218,7 @@ function harness(options: { config?: Partial<Config>; verifier?: 'pass' | 'by-ob
     }),
   }
 
+  const listeners = new Map<string, Set<(...args: never[]) => unknown>>()
   const ctx: Record<string, unknown> = {
     reflect: { provide: () => {} },
     provide: () => {},
@@ -186,8 +226,18 @@ function harness(options: { config?: Partial<Config>; verifier?: 'pass' | 'by-ob
       const value = execute()
       if (typeof value === 'function') disposers.push(value as () => unknown)
     },
-    emit: () => {},
-    on: () => {},
+    // A real event bus, small as it is: the runtime's run watcher rides
+    // `task/change` (A3 §3.1), and a harness whose `on` swallowed every
+    // subscription would test a watcher that never fires.
+    emit: (event: string, ...args: unknown[]) => {
+      for (const listener of [...(listeners.get(event) ?? [])]) (listener as (...a: unknown[]) => unknown)(...args)
+    },
+    on: (event: string, listener: (...args: never[]) => unknown) => {
+      const set = listeners.get(event) ?? new Set()
+      set.add(listener)
+      listeners.set(event, set)
+      return () => set.delete(listener)
+    },
     sessionPersistence: persistence,
     agentRuntime,
     agents: {
@@ -195,8 +245,10 @@ function harness(options: { config?: Partial<Config>; verifier?: 'pass' | 'by-ob
       // `agents` registry does (`agent-runtime/src/index.ts` creates them):
       // the nested runtime-split tests call `decomposeAndRun` as a *child's*
       // own worker would, and that call resolves the caller's agent before
-      // spawning grandchildren.
-      get: (sessionId: string) => (sessionId === ROOT_SESSION ? parentAgent : { id: sessionId }),
+      // spawning grandchildren. A session this process never spawned (a worker
+      // from a previous process) has no agent, which is what the recovery path
+      // reads.
+      get: (sessionId: string) => (sessionId === ROOT_SESSION ? parentAgent : liveAgents.get(sessionId) ?? { id: sessionId }),
     },
     graphs,
   }
@@ -204,6 +256,15 @@ function harness(options: { config?: Partial<Config>; verifier?: 'pass' | 'by-ob
   ctx.task = taskService
   if (options.verifier !== 'absent') ctx.verifier = verifier
   const runtime = new TaskRuntime(ctx as never, options.config as Config | undefined)
+  /**
+   * The shipped worker behaviour under A3: a worker hands its result in through
+   * the explicit submission entry and *then* goes idle. An idle session is not a
+   * completion (§3.1), so a harness whose workers merely went idle would be
+   * testing the no-progress stop on every ordinary-path case instead.
+   */
+  const defaultIdle = async (sessionId: string): Promise<void> => {
+    await runtime.submitResult(sessionId, { summary: `done: ${sessionId}` })
+  }
   return {
     ctx,
     sessions,
@@ -213,6 +274,7 @@ function harness(options: { config?: Partial<Config>; verifier?: 'pass' | 'by-ob
     verifier,
     spawned,
     cancelled,
+    notifications,
     graphs,
     setIdleBehavior: (behavior: (sessionId: string) => Promise<void>) => { idleBehavior = behavior },
   }
@@ -230,6 +292,20 @@ function childSpec(objective: string, overrides: Record<string, unknown> = {}) {
 
 async function createRoot(h: Harness, objective = 'ship the release') {
   return h.runtime.createRootTask(STORE, { objective, rootSessionId: ROOT_SESSION }, ROOT_SESSION)
+}
+
+/**
+ * Admit a batch and wait for it to settle: the runtime's `decomposeAndRun`
+ * returns as soon as the batch is committed (§3.1), so a test that asserts on
+ * outcomes asks for them through `awaitBatch` — or, when the store is the thing
+ * under test, reads the store itself.
+ */
+async function decomposeAndSettle(
+  h: Harness,
+  ...args: Parameters<TaskRuntime['decomposeAndRun']>
+): Promise<ChildOutcome[]> {
+  const { batchId } = await h.runtime.decomposeAndRun(...args)
+  return await h.runtime.awaitBatch(args[0], batchId)
 }
 
 /**
@@ -324,6 +400,9 @@ async function seedProducer(
     capabilitySnapshot: [],
     artifacts: [],
     verifierResults: [],
+    // Born active like every run this build creates (A3 §1.1): a phase-less run
+    // is an old record, and admission refuses to decompose under one.
+    executionPhase: 'active',
     status: 'running',
     startedAt: new Date().toISOString(),
   }, 'tester')
@@ -375,6 +454,8 @@ async function createAcceptanceParent(
     capabilitySnapshot: [],
     artifacts: [],
     verifierResults: [],
+    // Born active like every run this build creates (A3 §1.1).
+    executionPhase: 'active',
     status: 'running',
     startedAt: new Date().toISOString(),
   }, 'tester')
@@ -389,20 +470,31 @@ async function createAcceptanceParent(
  *
  * Only the root's direct children (depth 1) act, or the grandchildren a granted
  * call creates would split again and the harness would recurse to the depth cap.
+ * A deeper session still has to follow the worker protocol — an idle without a
+ * submission is a no-progress stop — so it submits and goes idle like the
+ * default behaviour does.
  */
 function leafWorkerDecomposition(h: Harness, children: DecomposeSpec['children']) {
   const captured: { outcomes?: ChildOutcome[]; refusal?: string } = {}
   h.setIdleBehavior(async sessionId => {
     const bound = await h.runtime.runForSession(sessionId)
-    if (bound.task.depth !== 1) return
+    if (bound.task.depth !== 1) {
+      await h.runtime.submitResult(sessionId, { summary: 'done' })
+      return
+    }
     try {
-      captured.outcomes = await h.runtime.decomposeAndRun(bound.storeId, bound.task.taskId, bound.run.runId, sessionId, {
+      captured.outcomes = await decomposeAndSettle(h, bound.storeId, bound.task.taskId, bound.run.runId, sessionId, {
         reason: 'the work turned out not to be atomic',
         children,
       })
+      return
     } catch (error) {
       captured.refusal = error instanceof Error ? error.message : String(error)
     }
+    // The refusal is what the test is about; the worker still owes the protocol
+    // a result, or its run would stop on the no-progress rule instead of
+    // settling the way the test is describing.
+    await h.runtime.submitResult(sessionId, { summary: 'the split was refused; the work was done here' })
   })
   return captured
 }
@@ -411,10 +503,16 @@ function taskEvents(h: Harness): TaskEvent[] {
   return [...h.sessions.values()].flatMap(stored => stored.events.map(item => item.data as TaskEvent))
 }
 
-/** The status walk of one run: coordination events ride on the parent run, not on the walk. */
+/**
+ * The status walk of one run: the coordination events ride on the same run but
+ * are not part of the lifecycle walk these assertions describe — `RunPhaseChanged`
+ * (the phase protocol) and `RunProgressMarked` (the no-progress counter) are read
+ * back explicitly where a test is about them.
+ */
 function runEventKinds(h: Harness, runId: string): string[] {
   return taskEvents(h)
-    .filter(item => item.runId === runId && item.kind !== 'HandoffCreated')
+    .filter(item => item.runId === runId && item.kind !== 'HandoffCreated'
+      && item.kind !== 'RunPhaseChanged' && item.kind !== 'RunProgressMarked')
     .map(item => item.kind)
 }
 
@@ -473,7 +571,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('spawns children in dependency order and records evidence before verified', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('task a'),
@@ -512,7 +610,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('a failed dependency blocks its dependents while independent siblings still run', async () => {
     const h = harness({ verifier: 'by-objective' })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('fail-me now'),
@@ -522,6 +620,9 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     })
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['failed', 'blocked', 'verified'])
+    // The outcome names the bundle the run produced, whatever the verdict: since
+    // A3 one settlement path writes both, so there is no longer a difference
+    // between "failed by the verifier" and "failed on adoption".
     expect(outcomes[0]!.evidenceId).toBeDefined()
     expect(outcomes[1]!.runId).toBeUndefined()
     expect(h.spawned).toHaveLength(2)
@@ -536,7 +637,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('the handoff merges declared assumptions with dependency evidence references', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('reference producer'),
@@ -565,7 +666,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('a child whose required artifact is missing never spawns: blocked, named in the record, registered as an obligation', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('rtl implementation', {
@@ -627,7 +728,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     // product, so the producing run's terminal state is part of the match.
     await seedProducer(h, { outcome: 'verified', kind: 'bemu_trace' })
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('rtl implementation', {
@@ -650,7 +751,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('a capability-gap rejection registers one obligation per missing capability on the parent', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('gap child', { requiredCapabilities: ['no-such-cap'] })],
     })).rejects.toThrow(/capability gap/)
@@ -668,7 +769,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const spawnError = 'agent-presets: preset "default" not found (available: standard)'
     const h = harness({ verifier: 'by-objective', spawnError })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h, 'fail-me release')
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('unlucky child'),
@@ -721,7 +822,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
       },
     }
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('audited child', { requiredCapabilities: ['loose', 'strict'] })],
     })
@@ -734,7 +835,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('spawn omits the permission preset when no capability declares one', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('plain child')],
     })
@@ -748,7 +849,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const home = pinSkillHome('ball-align')
     const h = harness({ config: { capabilities: { 'design-ball': { skills: ['ball-align'], tools: ['filesystem'] } } } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('ball child', { requiredCapabilities: ['design-ball'] })],
     })
@@ -771,7 +872,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('spawn carries the contract as a marked block, separate from the prompt the worker starts from', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('ball child')],
     })
@@ -796,7 +897,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('a child with no capabilities still carries the baseline grant', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('plain child')],
     })
@@ -810,7 +911,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
       config: { capabilities: { 'verify-ball-functional': { skills: ['verify'], preset: 'bb-verify' } } },
     })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('verify child', { requiredCapabilities: ['verify-ball-functional'] })],
     })
@@ -829,7 +930,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const { taskId, runId } = await createRoot(h)
     const before = await h.task.snapshotIn(STORE)
     const eventsBefore = taskEvents(h)
-    await expect(h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+    await expect(decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('valid child', { requiredCapabilities: ['research'] }),
@@ -845,7 +946,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const h = harness({ config: { capabilities: { typo: { tools: ['filesytem'] } } } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
 
-    await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('typo child', { requiredCapabilities: ['typo'] })],
     })).rejects.toThrow(/capability "typo" declares unknown tool label "filesytem"; known labels: /)
@@ -866,7 +967,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
       },
     }
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('audited child', { requiredCapabilities: ['audited'] })],
     })
@@ -894,7 +995,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
       },
     }
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('research child', { requiredCapabilities: ['research'] })],
     })
@@ -916,7 +1017,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('a capability gap rejects the whole batch atomically when the child may not decompose', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('fine'),
@@ -933,7 +1034,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('a gap child marked decomposable is admitted as decomposable with CapabilityGapDetected', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('gap child', { requiredCapabilities: ['no-such-cap'], decomposable: true })],
     })
@@ -950,7 +1051,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('an explicitly decomposable child is admitted as decomposable, with no gap, and told to split further', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('splittable child', { decomposable: true }),
@@ -990,7 +1091,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
       await settleRunNested(h.task, bound.storeId, bound.task.taskId, bound.run.runId, sessionId)
     })
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('splittable child', { decomposable: true }),
@@ -1023,7 +1124,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
       await settleRunNested(h.task, bound.storeId, bound.task.taskId, bound.run.runId, sessionId, 'fail')
     })
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('splittable child', { decomposable: true }),
@@ -1032,9 +1133,10 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     })
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['failed', 'blocked'])
-    // Only a verified adoption carries the evidence id; the failed run's own
-    // evidence still stands in the store.
-    expect(outcomes[0]!.evidenceId).toBeUndefined()
+    // The adoption reports the bundle the nested settlement produced, and the run
+    // is not verified a second time — the one settlement rule A3 gives every
+    // terminal run.
+    expect(outcomes[0]!.evidenceId).toBe(`e-nested-${outcomes[0]!.runId}`)
     expect((await h.task.snapshotIn(STORE)).evidence
       .filter(item => item.taskRunId === outcomes[0]!.runId)
       .map(item => item.evidenceId))
@@ -1048,7 +1150,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('structural admission failures persist nothing', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('cycle a', { dependsOn: [1] }),
@@ -1064,7 +1166,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('refuses a batch above the configured maxChildren, naming the limit, and persists nothing', async () => {
     const h = harness({ config: { maxChildren: 2 } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('task a'), childSpec('task b'), childSpec('task c')],
     })).rejects.toThrow(/admission rejected decomposition of "[^"]+":\n- task "[^"]+" would have 3 children, above maxChildren 2/)
@@ -1076,7 +1178,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('admits a batch exactly at the configured maxChildren', async () => {
     const h = harness({ config: { maxChildren: 2 } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('task a'), childSpec('task b')],
     })
@@ -1086,7 +1188,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('refuses children that would exceed the configured maxDepth, naming the limit', async () => {
     const h = harness({ config: { maxDepth: 0 } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('task a')],
     })).rejects.toThrow(/children would exceed maxDepth 0 \(depth 1\)/)
@@ -1100,7 +1202,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(DEFAULT_MAX_CHILDREN).toBe(8)
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: Array.from({ length: 9 }, (_value, index) => childSpec(`task ${index}`)),
     })).rejects.toThrow(/would have 9 children, above maxChildren 8/)
@@ -1115,7 +1217,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const nested = leafWorkerDecomposition(h, [childSpec('piece one'), childSpec('piece two', { dependsOn: [0] })])
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('plain child')],
     })
@@ -1154,7 +1256,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
       childSpec('piece three'),
     ])
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('plain child')],
     })
@@ -1173,7 +1275,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const nested = leafWorkerDecomposition(h, [childSpec('piece one')])
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('plain child')],
     })
@@ -1189,21 +1291,19 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
   })
 
-  test('abort cancels the in-flight child and blocks the siblings it never started', async () => {
+  test('cancelBatch cancels the in-flight child, blocks the siblings it never started, and cancels the parent', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const controller = new AbortController()
-    h.setIdleBehavior(() => new Promise<void>(resolve => {
-      controller.signal.addEventListener('abort', () => resolve(), { once: true })
-    }))
+    // A worker mid-turn: its idle is a promise only the cancellation ends, which
+    // is what "in flight" means for the batch.
+    h.setIdleBehavior(() => new Promise<void>(() => {}))
 
-    const pending = h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('task a'), childSpec('task b', { dependsOn: [0] })],
-    }, { signal: controller.signal })
+    })
     await vi.waitFor(() => expect(h.spawned).toHaveLength(1))
-    controller.abort()
-    const outcomes = await pending
+    const outcomes = await h.runtime.cancelBatch(STORE, batchId, ROOT_SESSION)
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['cancelled', 'blocked'])
     expect(h.cancelled).toHaveLength(1)
@@ -1229,47 +1329,61 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(runless[0]!.outcome).toBe('blocked')
     expect(runless[0]!.anomalies).toEqual(['cancelled by the caller before this child started'])
     expect(runless[0]!.blockedBy).toEqual([{ taskId: outcomes[0]!.taskId, outcome: 'cancelled' }])
+    // The batch's parent run is cancelled by the same settlement — the batch is
+    // one cancellation, not one per child.
+    expect((await h.task.runIn(STORE, rootRunId)).status).toBe('cancelled')
+    expect((await h.task.taskIn(STORE, rootTaskId)).status).toBe('cancelled')
   })
 
-  test('an abort before the first child starts blocks the whole batch instead of leaving it admitted', async () => {
+  test('an already-aborted admission signal persists nothing at all', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const controller = new AbortController()
     controller.abort()
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
-      reason: 'split the work',
-      children: [childSpec('task a'), childSpec('task b')],
-    }, { signal: controller.signal })
-
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['blocked', 'blocked'])
-    expect(h.spawned).toHaveLength(0)
-    const snapshot = await h.task.snapshotIn(STORE)
-    expect(snapshot.tasks.every(task => task.status !== 'admitted')).toBe(true)
-    expect(snapshot.tasks.filter(task => task.taskId !== rootTaskId).every(task => task.status === 'blocked')).toBe(true)
-    expect(snapshot.reviews.filter(item => item.runId === undefined)).toHaveLength(2)
-    expect((await h.task.runIn(STORE, rootRunId)).status).toBe('cancelled')
-  })
-
-  test('a missing verifier fails the started run and rejects with a clear error', async () => {
-    const h = harness({ verifier: 'absent' })
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    // The caller's signal governs admission only (A3 §3.7): an aborted one is a
+    // batch that was never admitted, so nothing is persisted and the parent stays
+    // free to decide again.
     await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('task a'), childSpec('task b')],
-    })).rejects.toThrow(VerifierUnavailableError)
+    }, { signal: controller.signal })).rejects.toThrow(/cancelled before anything was persisted/)
 
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.tasks).toHaveLength(1)
+    expect(snapshot.runs).toHaveLength(1)
+    expect(h.spawned).toHaveLength(0)
+    expect((await h.task.runIn(STORE, rootRunId)).executionPhase).toBe('active')
+  })
+
+  test('a missing verifier fails the submitted run and settles the batch by name instead of rejecting', async () => {
+    const h = harness({ verifier: 'absent' })
+    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    // The submission path is where a missing verifier surfaces now: the worker
+    // submits, its run cannot be judged, and the batch's failure seam settles the
+    // parent and the children that never started — no rejection to a caller that
+    // is no longer waiting (A3 §3.1).
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a'), childSpec('task b')],
+    })
+
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed', 'blocked'])
     const snapshot = await h.task.snapshotIn(STORE)
     const started = snapshot.runs.filter(run => run.taskId !== rootTaskId)
     expect(started).toHaveLength(1)
     expect(started[0]!.status).toBe('failed')
+    const review = snapshot.reviews.find(item => item.runId === started[0]!.runId)
+    expect(review?.localizedCause).toContain('verifier service is not loaded')
+    expect((await h.task.runIn(STORE, rootRunId)).status).toBe('failed')
+    expect((await h.task.taskIn(STORE, outcomes[1]!.taskId)).status).toBe('blocked')
     expect(h.spawned).toHaveLength(1)
   })
 
   test('runForSession rebuilds its index from a replayed store via the graphs service', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('task a')],
     })
@@ -1291,7 +1405,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const h = harness()
     h.ctx.envBuilder = { store: { get: (envId: string) => ({ path: `/fake/env/${envId}` }) } }
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('task a')],
     })
@@ -1304,7 +1418,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('omits cwd when the env path cannot be resolved', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('task a')],
     })
@@ -1323,7 +1437,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
       },
     }
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('check the registration', { requiredCapabilities: ['check-ball-registration'] })],
     })
@@ -1347,7 +1461,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const h = harness({ config: { capabilities: { 'check-ball-registration': { skills: ['check'], mcpServers: ['bbdev'] } } } })
     // no envBuilder in the context: the binding resolves to undefined
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('check the registration', { requiredCapabilities: ['check-ball-registration'] })],
     })
@@ -1364,7 +1478,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     const h = harness({ config: { capabilities: { 'check-ball-registration': { mcpServers: ['bbdev'] } } } })
     h.ctx.envBuilder = { store: { get: (envId: string) => ({ path: `/fake/env/${envId}`, components: [] }) } }
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('check the registration', { requiredCapabilities: ['check-ball-registration'] })],
     })
@@ -1378,7 +1492,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     pinSkillHome('ball-align')
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('task a', { requiredCapabilities: ['design-ball'] })],
     })
@@ -1389,7 +1503,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('hands the configured verify deadline down as the verifier\'s own timeout', async () => {
     const h = harness({ config: { verifyTimeoutMs: 1234 } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('task a')],
     })
@@ -1399,7 +1513,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('settles the parent run verified, with its own evidence, once every child verified', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('task a'), childSpec('task b')],
     })
@@ -1443,7 +1557,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
       return bundle
     })
 
-    await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('task a')],
     })
@@ -1486,7 +1600,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
       return bundle
     })
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('task a')],
     })
@@ -1501,7 +1615,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
   test('a verification that times out fails its run once and no late verdict can land on it', async () => {
     const h = harness({ verifier: 'timeout' })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('task a')],
     })
@@ -1537,24 +1651,34 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(runEventKinds(h, childRunId)).toEqual(['TaskStarted', 'TaskVerifying', 'TaskFailed', 'ReviewRecorded'])
   })
 
-  test('cancels the parent run when the caller aborts the cascade', async () => {
+  test('cancelGraph settles the parent run and every session of the store', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const controller = new AbortController()
-    h.setIdleBehavior(() => new Promise<void>(resolve => {
-      controller.signal.addEventListener('abort', () => resolve(), { once: true })
-    }))
+    // A worker mid-turn: the graph cancellation has to stop it, settle it, and
+    // settle the parent that was waiting on it (A3 §3.6).
+    h.setIdleBehavior(() => new Promise<void>(() => {}))
 
-    const pending = h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('task a')],
-    }, { signal: controller.signal })
+    })
     await vi.waitFor(() => expect(h.spawned).toHaveLength(1))
-    controller.abort()
-    await pending
+    const childSession = h.spawned[0]!.sessionId
+
+    await h.runtime.cancelGraph(STORE, 'graph removed')
+    // Idempotent: the second call has nothing left to do and must not throw.
+    await h.runtime.cancelGraph(STORE, 'graph removed')
 
     expect((await h.task.runIn(STORE, rootRunId)).status).toBe('cancelled')
     expect(runEventKinds(h, rootRunId)).toEqual(['TaskStarted', 'TaskCancelled', 'ReviewRecorded'])
+    const snapshot = await h.task.snapshotIn(STORE)
+    const child = snapshot.tasks.find(task => task.taskId !== rootTaskId)!
+    expect(child.status).toBe('cancelled')
+    // The gate is closed for every session the store owns, so a late write from
+    // either session is denied (the tool-gate wiring itself is the runtime
+    // integration's; this is the phase bookkeeping it reads).
+    await expect(h.runtime.cancelBatch(STORE, batchId, ROOT_SESSION)).rejects.toThrow(/not in flight/)
+    void childSession
   })
 })
 
@@ -1577,7 +1701,7 @@ describe('the content a run is bound to (S1-C)', () => {
     const home = pinSkillHome('ball-align')
     const h = harness({ config: { capabilities: { 'design-ball': { skills: ['ball-align'] } } } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('ball child', { requiredCapabilities: ['design-ball'] })],
     })
@@ -1622,7 +1746,7 @@ describe('the content a run is bound to (S1-C)', () => {
     const home = pinSkillHome('ball-align')
     const h = harness({ config: { capabilities: { 'design-ball': { skills: ['ball-align'] } } } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const first = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const first = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('first ball child', { requiredCapabilities: ['design-ball'] })],
     })
@@ -1640,7 +1764,7 @@ describe('the content a run is bound to (S1-C)', () => {
     // the same deployment, the same pinned skill home.)
     const next = harness({ config: { capabilities: { 'design-ball': { skills: ['ball-align'] } } } })
     const secondRoot = await createRoot(next)
-    const second = await next.runtime.decomposeAndRun(STORE, secondRoot.taskId, secondRoot.runId, ROOT_SESSION, {
+    const second = await decomposeAndSettle(next, STORE, secondRoot.taskId, secondRoot.runId, ROOT_SESSION, {
       reason: 'split the work again',
       children: [childSpec('second ball child', { requiredCapabilities: ['design-ball'] })],
     })
@@ -1664,8 +1788,11 @@ describe('the content a run is bound to (S1-C)', () => {
       if (sessionId === h.spawned[0]?.sessionId) {
         await writeFile(productionSkill(home), '---\nname: ball-align\ndescription: rewritten during the batch\n---\n\nreplaced\n')
       }
+      // Whatever the override does, the worker protocol still applies: the run
+      // has to be submitted or it would stop on the no-progress rule.
+      await h.runtime.submitResult(sessionId, { summary: 'done' })
     })
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('first ball child', { requiredCapabilities: ['design-ball'] }),
@@ -1704,7 +1831,7 @@ describe('the content a run is bound to (S1-C)', () => {
       },
     })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('ball child', { requiredCapabilities: ['design-ball', 'check-ball-registration', 'research'] })],
     })
@@ -1742,7 +1869,7 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
       childEvidence: [{ childIndex: 0, criterionId: 'ac1-1' }, { childIndex: 1 }],
     }])
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('child a'), childSpec('child b')],
     })
@@ -1763,7 +1890,7 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
       childEvidence: [{ childIndex: 0, criterionId: 'ac1-9' }],
     }])
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('child a'), childSpec('child b')],
     })
@@ -1782,7 +1909,7 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     await seedProducer(h, { outcome: 'failed', kind: 'bemu_trace' })
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('rtl implementation', {
         acceptanceCriteria: [{
@@ -1810,7 +1937,7 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     await seedProducer(h, { outcome: 'failed', kind: 'bemu_trace' })
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('rtl implementation', {
@@ -1850,7 +1977,7 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
       heuristic: true,
     }])
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('child a')],
     })
@@ -1876,7 +2003,7 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
       mandatory: true,
     }])
 
-    await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+    await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('child a')],
     })
@@ -1887,7 +2014,7 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
   test('P4-E: a child requiring independent acceptance without a map is refused at admission and persists nothing', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('child a', { requiresIndependentAcceptance: true })],
     })).rejects.toThrow(/requires independent parent acceptance/)
@@ -1900,7 +2027,7 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
   test('P4-E: a tampered (malformed) childEvidence map is refused at admission and persists nothing', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('child a', {
         acceptanceCriteria: [{ description: 'the child works', command: 'true', childEvidence: [{ childIndex: -1 }] }],
@@ -1930,7 +2057,7 @@ describe('TaskRuntime budget (KISS §5, VRTC plan 1.3)', () => {
     const h = harness({ config: { budget: { wallTimeMs: 50 } } })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     h.setIdleBehavior(() => new Promise<void>(() => {}))
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('stuck child'), childSpec('downstream', { dependsOn: [0] })],
     })
@@ -1939,7 +2066,7 @@ describe('TaskRuntime budget (KISS §5, VRTC plan 1.3)', () => {
     // The exhausted agent was cancelled — a forced exit, not a silent degrade.
     expect(h.cancelled).toHaveLength(1)
     const reason = [
-      'budget exhausted: wallTimeMs (worker run exceeded its wall-clock limit of 50ms; this is a budget exhaustion, not a criteria failure)',
+      'budget exhausted: wallTimeMs (worker run exceeded its wall-clock budget (50ms from its own startedAt); this is a budget exhaustion, not a criteria failure)',
       `— ${escalationHint(
         'the run cannot finish inside its wall-clock budget',
         'the run was cancelled at the deadline',
@@ -1969,7 +2096,7 @@ describe('TaskRuntime budget (KISS §5, VRTC plan 1.3)', () => {
       }),
     }
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('chatty child')],
     })
@@ -1995,7 +2122,7 @@ describe('TaskRuntime budget (KISS §5, VRTC plan 1.3)', () => {
       snapshot: () => ({ values: { tokenUsage: { uncachedInputTokens: 60, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 } } }),
     }
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('hungry child')],
     })
@@ -2017,7 +2144,7 @@ describe('TaskRuntime criterion verifierRef (KISS §4.1, VRTC plan 1.4)', () => 
   test('an unknown verifierRef rejects the whole batch at admission, listing the registered ids, and persists nothing', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('pinned child', {
         acceptanceCriteria: [{ description: 'judged by a pinned verifier', command: 'true', verifierRef: 'ghost' }],
@@ -2031,7 +2158,7 @@ describe('TaskRuntime criterion verifierRef (KISS §4.1, VRTC plan 1.4)', () => 
   test('a registered verifierRef is admitted, stored on the criterion, and the run verifies as usual', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('pinned child', {
         acceptanceCriteria: [{ description: 'judged by a pinned verifier', command: 'true', verifierRef: 'command' }],
@@ -2045,7 +2172,7 @@ describe('TaskRuntime criterion verifierRef (KISS §4.1, VRTC plan 1.4)', () => 
   test('a declared verifierRef with no verifier service to validate against fails loudly before anything persists', async () => {
     const h = harness({ verifier: 'absent' })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await expect(h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('pinned child', {
         acceptanceCriteria: [{ description: 'judged by a pinned verifier', command: 'true', verifierRef: 'command' }],
@@ -2059,7 +2186,7 @@ describe('TaskRuntime criterion verifierRef (KISS §4.1, VRTC plan 1.4)', () => 
   test('an unknown verifierRef on a replay contract is rejected before anything persists', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('champion work')],
     })
@@ -2123,7 +2250,7 @@ describe('TaskRuntime unknown-kind feedback (KISS §4.3, VRTC plan 2.1)', () => 
       return bundle
     })
 
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('untested child'), childSpec('broken-judge child')],
     })
@@ -2157,7 +2284,7 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
   /** One verified champion child, spawned with the given capability table. */
   async function champion(h: Harness, objective = 'champion work', overrides: Record<string, unknown> = {}) {
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec(objective, { requiredCapabilities: ['research'], ...overrides })],
     })
@@ -2594,7 +2721,7 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
         requiredCapabilities: ['research'],
       })],
     }
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, spec)
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, spec)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
 
     const child = await h.task.taskIn(STORE, outcomes[0]!.taskId)
@@ -2645,7 +2772,7 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
   test('the contract survives a store reopen: it is read back from the events, not from memory', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('child a', { assumptions: ['a reference model exists'], constraints: ['no network'] })],
     })
@@ -2667,7 +2794,7 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
   test('the admission context records the limits in force, including every configured audit-only value', async () => {
     const h = harness({ config: { maxDepth: 2, maxChildren: 3, budget: { wallTimeMs: 5000, tokens: 999 } } })
     const { taskId, runId } = await createRoot(h)
-    await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+    await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('child a')],
     })
@@ -2718,7 +2845,7 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
       const h = harness()
       const { taskId, runId } = await createRoot(h)
       const before = await h.task.snapshotIn(STORE)
-      await expect(h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, spec), label).rejects.toThrow(expected)
+      await expect(decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, spec), label).rejects.toThrow(expected)
       expect(h.spawned, label).toHaveLength(0)
       expect(await h.task.snapshotIn(STORE), label).toEqual(before)
       // No child task id reached the store: the parent is still alone.
@@ -2730,7 +2857,7 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
   test('the handoff carries the contract constraints beside the declared assumptions, dependency evidence last', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    const outcomes = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
         childSpec('reference producer'),
@@ -2771,7 +2898,7 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
         requiredEvidence: [],
         mandatory: true,
       }])
-      await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, { reason: 'split the work', children })
+      await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, { reason: 'split the work', children })
       const decomposed = taskEvents(h).find(item => item.kind === 'TaskDecomposed')
       if (decomposed?.kind !== 'TaskDecomposed' || decomposed.payload.admission === undefined) {
         throw new Error('the batch was not admitted')
@@ -2803,5 +2930,913 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
     for (const [label, children] of variants) {
       expect((await submitted(children)).digest, label).not.toBe(first.digest)
     }
+  })
+})
+
+/* ------------------------------------------------------------------------- *
+ * A3: the coordination protocol (non-blocking batches, phases, gates,
+ * cancellation, the root budget, workspace ownership, recovery)
+ * ------------------------------------------------------------------------- */
+
+/** `mkdtemp` for a checkout, and the reading of an ownership directory. */
+function tempCheckout(label: string): string {
+  return mkdtempSync(join(tmpdir(), `${label}-`))
+}
+
+/** The owner markers a deployment wrote under its run-binding root, if any. */
+async function ownershipMarkers(bindingRoot: string): Promise<string[]> {
+  try {
+    return await readdir(join(bindingRoot, 'workspace-owners'))
+  } catch {
+    return []
+  }
+}
+
+describe('A3 coordination', () => {
+  afterEach(() => {
+    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  })
+
+  const tempDirs: string[] = []
+  function checkout(label: string): string {
+    const dir = tempCheckout(label)
+    tempDirs.push(dir)
+    return dir
+  }
+
+  test('decomposeAndRun returns a batch handle while the children are still running', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+    // A worker that never finishes on its own: the call has to return anyway.
+    h.setIdleBehavior(() => new Promise<void>(() => {}))
+
+    const { batchId, childTaskIds } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+
+    expect(batchId).toBe(`b-${taskId}`)
+    expect(childTaskIds).toHaveLength(1)
+    // The handle came back with the children still unsettled, and the store says
+    // the same: the parent is waiting, the child is running. (The driver starts
+    // asynchronously, so the spawn is allowed a moment to appear — the point is
+    // that this call did not wait for it.)
+    await vi.waitFor(() => expect(h.spawned).toHaveLength(1))
+    const snapshot = await h.task.snapshotIn(STORE)
+    const childRun = snapshot.runs.find(run => run.taskId === childTaskIds[0])!
+    expect(childRun.status).toBe('running')
+    expect(childRun.executionPhase).toBe('active')
+    expect((await h.task.runIn(STORE, runId)).executionPhase).toBe('waiting_children')
+    expect((await h.task.runIn(STORE, runId)).batchId).toBe(batchId)
+    // The batch is the runtime's now: cancelling it is what ends it.
+    const outcomes = await h.runtime.cancelBatch(STORE, batchId, ROOT_SESSION)
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['cancelled'])
+    expect(h.spawned).toHaveLength(1)
+  })
+
+  test('the caller signal governs admission only: aborting it after admission leaves the batch running to completion', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+    const controller = new AbortController()
+
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    }, { signal: controller.signal })
+    // The tool call is over (or aborted) — ownership of the batch moved at the
+    // atomic commit (A3 §3.7), so neither can stop it.
+    controller.abort()
+
+    const outcomes = await h.runtime.awaitBatch(STORE, batchId)
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
+    expect((await h.task.runIn(STORE, runId)).status).toBe('verified')
+  })
+
+  test('an idle without a submission is marked, reminded once, and stopped at the no-progress limit', async () => {
+    const h = harness({ config: { noProgressRounds: 2 } })
+    const { taskId, runId } = await createRoot(h)
+    // A worker that goes idle instead of submitting: the store must show the
+    // marking, the owner must be reminded once, and the run must stop at the
+    // configured limit — a budget stop, not a criteria verdict.
+    h.setIdleBehavior(async () => {})
+
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('stuck child')],
+    })
+    const outcomes = await h.runtime.awaitBatch(STORE, batchId)
+
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
+    const snapshot = await h.task.snapshotIn(STORE)
+    const childRun = snapshot.runs.find(run => run.taskId !== taskId)!
+    expect(childRun.status).toBe('failed')
+    expect(childRun.noProgress?.rounds).toBe(2)
+    const marks = taskEvents(h).filter(item => item.kind === 'RunProgressMarked')
+    expect(marks.map(item => (item.kind === 'RunProgressMarked' ? item.payload.rounds : 0))).toEqual([1, 2])
+    const reminders = h.notifications.filter(item => item.sessionId === childRun.sessionId)
+    expect(reminders).toHaveLength(1)
+    expect(reminders[0]!.text).toContain('task_submit_result')
+    const record = snapshot.reviews.find(item => item.runId === childRun.runId)!
+    expect(record.outcome).toBe('failed')
+    expect(record.localizedCause).toContain('no progress')
+    expect(record.localizedCause).toContain('budget stop on the no-progress rule')
+    // The parent run is settled by its own batch rules: the child failed, so the
+    // parent cannot verify — it is judged, and the verdict is the judge's.
+    expect(['failed', 'verified']).toContain((await h.task.runIn(STORE, runId)).status)
+  })
+
+  test('an explicit submission settles the run, a second one is answered from the record, and a waiting parent refuses to submit', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+    const replies: Array<{ status: string; detail: string }> = []
+    h.setIdleBehavior(async sessionId => {
+      replies.push(await h.runtime.submitResult(sessionId, { summary: 'implemented and checked', evidenceRefs: ['docs/r.md'] }))
+      // The late call: the phase gate is unique, so this reads the record.
+      replies.push(await h.runtime.submitResult(sessionId, { summary: 'second attempt' }))
+    })
+
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+    const outcomes = await h.runtime.awaitBatch(STORE, batchId)
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
+    expect(replies.map(reply => reply.status)).toEqual(['verified', 'verified'])
+    // The submission settled synchronously enough that the second call finds the
+    // terminal state: either answer is a read of the record, never a second
+    // write, and both say the recorded result stands.
+    expect(replies[1]!.detail).toContain('already')
+
+    const snapshot = await h.task.snapshotIn(STORE)
+    const childRun = snapshot.runs.find(run => run.taskId !== taskId)!
+    expect(childRun.submission).toMatchObject({ summary: 'implemented and checked', evidenceRefs: ['docs/r.md'], origin: 'worker' })
+    const phaseEvents = taskEvents(h).filter(item => item.kind === 'RunPhaseChanged' && item.runId === childRun.runId && item.payload.phase === 'submitted')
+    expect(phaseEvents).toHaveLength(1)
+    // The parent's own submission is the runtime's, and it carries the batch's
+    // evidence: the worker never wrote it.
+    const parentRun = await h.task.runIn(STORE, runId)
+    expect(parentRun.submission?.origin).toBe('runtime')
+    expect(parentRun.submission?.summary).toContain(`batch ${batchId} settled`)
+    expect(parentRun.submission?.evidenceRefs).toEqual(['e-' + childRun.runId])
+  })
+
+  test('a parent waiting on its children refuses a submission', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+    h.setIdleBehavior(() => new Promise<void>(() => {}))
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+    await vi.waitFor(() => expect(h.spawned).toHaveLength(1))
+
+    await expect(h.runtime.submitResult(ROOT_SESSION, { summary: 'parent claims done' }))
+      .rejects.toThrow(/waiting on its child batch/)
+    // Nothing was written by the refused call.
+    expect((await h.task.runIn(STORE, runId)).submission).toBeUndefined()
+    await h.runtime.cancelBatch(STORE, batchId, ROOT_SESSION)
+  })
+
+  test('a batch driver that cannot build its view of the world fails the parent run and tells the owner', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+    h.setIdleBehavior(() => new Promise<void>(() => {}))
+    // The env the driver starts from cannot be assembled. That rejection happens
+    // before `driveBatch`, whose own catch never sees it, and it must not be
+    // fire-and-forget (§3.1): the parent run fails by name, the child that never
+    // started is blocked, and the owner is told.
+    const runtime = h.runtime as unknown as { orchestrateEnv: (...args: unknown[]) => Promise<unknown> }
+    runtime.orchestrateEnv = async () => { throw new Error('the checkout cannot be resolved') }
+
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+
+    await vi.waitFor(async () => expect((await h.task.runIn(STORE, runId)).status).toBe('failed'))
+    const snapshot = await h.task.snapshotIn(STORE)
+    const record = snapshot.reviews.find(review => review.runId === runId)!
+    expect(record.outcome).toBe('failed')
+    expect(record.localizedCause).toContain('the checkout cannot be resolved')
+    const child = snapshot.tasks.find(task => task.parentTaskId === taskId)!
+    expect(child.status).toBe('blocked')
+    expect(snapshot.reviews.find(review => review.taskId === child.taskId)?.outcome).toBe('blocked')
+    expect(h.notifications.some(item => item.sessionId === ROOT_SESSION && item.text.includes('failed'))).toBe(true)
+    expect(h.spawned).toHaveLength(0)
+    // And the batch's own outcomes are derivable from the store afterwards: the
+    // registration is a cache, the store is the truth.
+    expect((await h.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['blocked'])
+  })
+
+  test('the gate denies writes and allows the coordination tools once the run is no longer active', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+    h.setIdleBehavior(() => new Promise<void>(() => {}))
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+    await vi.waitFor(() => expect(h.spawned).toHaveLength(1))
+
+    const gate = h.runtime.gate
+    expect(gate.phaseOf(ROOT_SESSION)).toBe('waiting_children')
+    const denied = gate.decide(ROOT_SESSION, 'write')
+    expect(denied.allow).toBe(false)
+    expect(denied.allow === false ? denied.reason : '').toContain('waiting_children')
+    expect(gate.decide(ROOT_SESSION, 'bash').allow).toBe(false)
+    expect(gate.decide(ROOT_SESSION, 'task_decompose').allow).toBe(false)
+    expect(gate.decide(ROOT_SESSION, 'task_submit_result').allow).toBe(false)
+    expect(gate.decide(ROOT_SESSION, 'task_read').allow).toBe(true)
+    expect(gate.decide(ROOT_SESSION, 'task_cancel').allow).toBe(true)
+    // A session with no run binding (an env-clean helper, a reviewer) is not gated.
+    expect(gate.decide('env-clean', 'write').allow).toBe(true)
+
+    await h.runtime.cancelBatch(STORE, batchId, ROOT_SESSION)
+    // A settled run is terminal for the gate: the late call is named as one.
+    expect(gate.phaseOf(ROOT_SESSION)).toBe('terminal')
+    const late = gate.decide(ROOT_SESSION, 'write')
+    expect(late.allow).toBe(false)
+    expect(late.allow === false ? late.reason : '').toContain('late call')
+  })
+
+  test('the root budget refuses a batch whole, refuses a start past maxRuns, and is not reset by reopening the store', async () => {
+    const h = harness({ config: { rootBudget: { maxRuns: 2 } } })
+    const { taskId, runId } = await createRoot(h)
+
+    // One recorded run (the root) plus two children would need three slots.
+    await expect(decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a'), childSpec('task b')],
+    })).rejects.toThrow(/would need 2 run slot/)
+
+    let snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.tasks).toHaveLength(1)
+    expect(snapshot.runs).toHaveLength(1)
+    expect(h.spawned).toHaveLength(0)
+    expect((await h.task.runIn(STORE, runId)).executionPhase).toBe('active')
+
+    // A batch that fits is admitted, and the count is a store fact: a restarted
+    // process counts the same runs.
+    const reopened = harness({ config: { rootBudget: { maxRuns: 2 } } }, h.sessions)
+    await reopened.task.openStore(STORE)
+    await expect(reopened.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a'), childSpec('task b')],
+    })).rejects.toThrow(/would need 2 run slot/)
+
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+    expect((await h.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['verified'])
+    snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.runs).toHaveLength(2)
+  })
+
+  test('a root deadline that has already passed refuses to start the child, naming the deadline', async () => {
+    // The deadline is measured from the root run's own persisted `startedAt`, so
+    // a wall time that has already elapsed refuses every start: no run begins
+    // under it, and the child that never started is blocked with the limit named
+    // (the store's own shape for a task with no run).
+    const h = harness({ config: { rootBudget: { wallTimeMs: 5 } } })
+    const { taskId, runId } = await createRoot(h)
+    await vi.waitFor(async () => {
+      const root = await h.task.runIn(STORE, runId)
+      expect(Date.now() - Date.parse(root.startedAt)).toBeGreaterThan(5)
+    })
+
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+    const outcomes = await h.runtime.awaitBatch(STORE, batchId)
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['blocked'])
+    expect(h.spawned).toHaveLength(0)
+    const snapshot = await h.task.snapshotIn(STORE)
+    const blocked = snapshot.reviews.find(item => item.taskId !== taskId)!
+    expect(blocked.outcome).toBe('blocked')
+    expect(blocked.anomalies.join(' ')).toContain('deadline')
+    expect(blocked.anomalies.join(' ')).toContain("no new run starts under this budget")
+  })
+
+  test('a deadline that expires while a child runs fails it as a budget exhaustion and stops its worker', async () => {
+    // Long enough to admit and start the run, short enough to fire while the
+    // worker is still working: the run's own budget is `min(per-run wall time,
+    // what is left of the root's)` (A3 §3.5).
+    const h = harness({ config: { rootBudget: { wallTimeMs: 60 } } })
+    const { taskId, runId } = await createRoot(h)
+    h.setIdleBehavior(() => new Promise<void>(() => {}))
+
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+    const outcomes = await h.runtime.awaitBatch(STORE, batchId)
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
+    const snapshot = await h.task.snapshotIn(STORE)
+    const childRun = snapshot.runs.find(run => run.taskId !== taskId)!
+    expect(childRun.status).toBe('failed')
+    const record = snapshot.reviews.find(item => item.runId === childRun.runId)!
+    expect(record.localizedCause).toContain('budget exhausted: wallTimeMs')
+    expect(record.localizedCause).toContain('not a criteria failure')
+    // A forced exit: the worker was cancelled, not left writing into a run that
+    // is already settled.
+    expect(h.cancelled).toEqual([childRun.sessionId])
+    // And the parent is not accepted after its own root deadline: the batch's
+    // settlement cancels it with the budget named rather than judging it.
+    expect((await h.task.runIn(STORE, runId)).status).toBe('cancelled')
+  })
+
+  test('a second root on one checkout is refused before anything is written, and ownership is released when the tree settles', async () => {
+    const checkoutRoot = checkout('a3-workspace')
+    const bindingRoot = join(checkoutRoot, 'bindings')
+    const h = harness({ config: { runBindingRoot: bindingRoot } })
+    h.ctx.envBuilder = { store: { get: () => ({ path: checkoutRoot }) } }
+    const { taskId, runId } = await createRoot(h)
+
+    // The same checkout for a second deployment entry: busy, with the holder
+    // named, and nothing persisted.
+    const other = harness({ config: { runBindingRoot: bindingRoot } })
+    other.ctx.envBuilder = { store: { get: () => ({ path: checkoutRoot }) } }
+    await expect(other.runtime.createRootTask(
+      rootTaskStoreId('other-root'),
+      { objective: 'second tree', rootSessionId: 'other-root' },
+      'other-root',
+    )).rejects.toThrow(WorkspaceBusyError)
+    expect((await other.task.snapshotIn(rootTaskStoreId('other-root'))).tasks).toHaveLength(0)
+    expect(await ownershipMarkers(bindingRoot)).toHaveLength(1)
+
+    // Decomposing under the holder works, and the batch's children hand the
+    // checkout down one at a time.
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+    expect((await h.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['verified'])
+    // The tree is done: the root run released its own layer with the settlement,
+    // so no ownership marker is left behind.
+    await vi.waitFor(async () => expect(await ownershipMarkers(bindingRoot)).toHaveLength(0))
+  })
+
+  /**
+   * The nested shape these cancellation cases are about: the root admits one
+   * child, the child decomposes in turn (so its own run waits on grandchildren),
+   * the first grandchild hangs forever, and the second one never starts because
+   * it depends on the first. The child's worker then goes idle, which is exactly
+   * the state the root's driver has to keep waiting in without losing the batch's
+   * abort or its own deadline.
+   */
+  async function nestedBatch(h: Harness): Promise<{ rootTaskId: string; rootRunId: string; rootBatchId: string; childSession: string }> {
+    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    h.setIdleBehavior(async sessionId => {
+      const bound = await h.runtime.runForSession(sessionId)
+      if (bound.task.depth === 1) {
+        await h.runtime.decomposeAndRun(STORE, bound.task.taskId, bound.run.runId, sessionId, {
+          reason: 'split it again',
+          children: [childSpec('grandchild one'), childSpec('grandchild two', { dependsOn: [0] })],
+        })
+        return
+      }
+      await new Promise<void>(() => {})
+    })
+    const { batchId: rootBatchId } = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('child')],
+    })
+    await vi.waitFor(() => expect(h.spawned).toHaveLength(2))
+    const childSession = h.spawned[0]!.sessionId
+    await vi.waitFor(async () => {
+      expect((await h.runtime.runForSession(childSession)).run.executionPhase).toBe('waiting_children')
+    })
+    return { rootTaskId, rootRunId, rootBatchId, childSession }
+  }
+
+  test('a batch cancellation reaches the nested batch its child waits on, and settles the whole shape', async () => {
+    const h = harness()
+    const shape = await nestedBatch(h)
+
+    // The root's current child waits on its own batch, so the root's driver is
+    // parked on that child's run: the cancellation must still be observed, and it
+    // must reach the grandchild that is in flight as well (A3 §3.6: the child in
+    // flight is stopped, the ones that never started are blocked before start).
+    const outcomes = await h.runtime.cancelBatch(STORE, shape.rootBatchId, ROOT_SESSION)
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['cancelled'])
+
+    const snapshot = await h.task.snapshotIn(STORE)
+    const childRun = snapshot.runs.find(run => run.sessionId === shape.childSession)!
+    expect(childRun.status).toBe('cancelled')
+    expect(snapshot.reviews.find(review => review.runId === childRun.runId)?.outcome).toBe('cancelled')
+
+    const grandchildren = snapshot.tasks.filter(task => task.parentTaskId === childRun.taskId)
+    expect(grandchildren).toHaveLength(2)
+    expect(grandchildren.map(task => task.status).sort()).toEqual(['blocked', 'cancelled'])
+    const neverStarted = grandchildren.find(task => task.status === 'blocked')!
+    expect(snapshot.reviews.find(review => review.taskId === neverStarted.taskId)?.anomalies.join(' '))
+      .toContain('cancelled by the caller before this child started')
+
+    expect((await h.task.runIn(STORE, shape.rootRunId)).status).toBe('cancelled')
+    expect((await h.task.taskIn(STORE, shape.rootTaskId)).status).toBe('cancelled')
+  })
+
+  test('a graph cancellation settles the same nested shape, bounded', async () => {
+    const h = harness()
+    const shape = await nestedBatch(h)
+
+    await h.runtime.cancelGraph(STORE, 'the graph is gone')
+
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect((await h.task.taskIn(STORE, shape.rootTaskId)).status).toBe('cancelled')
+    const childRun = snapshot.runs.find(run => run.sessionId === shape.childSession)!
+    expect(childRun.status).toBe('cancelled')
+    expect(snapshot.runs.every(run => run.status !== 'running')).toBe(true)
+    expect(snapshot.tasks.every(task => task.status !== 'running')).toBe(true)
+  })
+
+  test('the run deadline bounds a wait on a child that is itself waiting on a nested batch', async () => {
+    // Long enough to admit and start, short enough to fire while the root's
+    // driver is parked on the child's `waiting_children` run.
+    const h = harness({ config: { rootBudget: { wallTimeMs: 60 } } })
+    const shape = await nestedBatch(h)
+
+    const outcomes = await h.runtime.awaitBatch(STORE, shape.rootBatchId)
+    // A budget stop, not an acceptance: the batch settles, no run is left
+    // running under a tree that is over, and the child that was waiting ends
+    // terminal with the exhaustion on its record.
+    expect(['failed', 'cancelled']).toContain(outcomes[0]!.status)
+    const snapshot = await h.task.snapshotIn(STORE)
+    const childRun = snapshot.runs.find(run => run.sessionId === shape.childSession)!
+    expect(['failed', 'cancelled']).toContain(childRun.status)
+    const record = snapshot.reviews.find(review => review.runId === childRun.runId)!
+    expect([record.localizedCause ?? '', ...record.anomalies].join(' ')).toContain('budget exhausted')
+    await vi.waitFor(async () => {
+      const current = await h.task.snapshotIn(STORE)
+      expect(current.runs.every(run => run.status !== 'running')).toBe(true)
+    })
+    // And the root is not accepted after its own deadline.
+    expect((await h.task.runIn(STORE, shape.rootRunId)).status).toBe('cancelled')
+  })
+
+  test('unload is not held up by a driver parked on a nested wait', async () => {
+    const h = harness()
+    await nestedBatch(h)
+
+    // The unload path aborts every driver it owns; a driver parked on a child
+    // that waits on its own batch must wake with the abort (A3 §3.6: the unload
+    // waits for a bounded settlement, not for the tree to finish on its own).
+    const unloading = (h.disposers[h.disposers.length - 1] as () => Promise<void>)()
+    const bounded = await Promise.race([
+      unloading.then(() => 'settled'),
+      new Promise<string>(resolve => { setTimeout(() => resolve('hung'), 2_000).unref() }),
+    ])
+    expect(bounded).toBe('settled')
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.runs.every(run => run.status !== 'running')).toBe(true)
+  })
+
+  test('a verifier runs while the run\u2019s own store holds the workspace, and the verifier layer is on top', async () => {
+    const checkoutRoot = checkout('a3-verifier-exclusive')
+    const bindingRoot = join(checkoutRoot, 'bindings')
+    const h = harness({ config: { runBindingRoot: bindingRoot } })
+    h.ctx.envBuilder = { store: { get: () => ({ path: checkoutRoot }) } }
+    const registry = (h.runtime as unknown as { workspaces: WorkspaceRegistry }).workspaces
+    // What the workspace looks like at the moment each verifier call runs: the
+    // exclusive `verifier` layer must be on top of the stack (§3.4).
+    const heldDuringVerification: string[] = []
+    const inner = h.verifier.verifyRun
+    h.verifier.verifyRun = vi.fn(async (storeId: string, runId: string) => {
+      heldDuringVerification.push(registry.ownerOf(checkoutRoot)?.kind ?? 'none')
+      return await inner(storeId, runId)
+    })
+
+    const { taskId, runId } = await createRoot(h)
+    const outcomes = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
+    // One verification for the child and one for the parent's own acceptance,
+    // each holding the workspace exclusively.
+    expect(heldDuringVerification).toEqual(['verifier', 'verifier'])
+    // And no verifier layer is left behind: the tree's own settlement released the
+    // workspace it held (§3.4: a terminal run releases its claim).
+    expect(registry.ownerOf(checkoutRoot)).toBeUndefined()
+  })
+
+  test('a run whose workspace another store holds is not verified, and fails by name', async () => {
+    const checkoutRoot = checkout('a3-verifier-conflict')
+    const bindingRoot = join(checkoutRoot, 'bindings')
+    const h = harness({ config: { runBindingRoot: bindingRoot } })
+    h.ctx.envBuilder = { store: { get: () => ({ path: checkoutRoot }) } }
+    const registry = (h.runtime as unknown as { workspaces: WorkspaceRegistry }).workspaces
+    const { taskId, runId } = await createRoot(h)
+
+    // Another store's writer takes the checkout while this run is still active.
+    const top = registry.ownerOf(checkoutRoot)!
+    await registry.push(checkoutRoot, top, {
+      kind: 'batch',
+      storeId: rootTaskStoreId('someone-else'),
+      batchId: 'b-someone-else',
+      since: new Date().toISOString(),
+    })
+
+    const reply = await h.runtime.submitResult(ROOT_SESSION, { summary: 'done' })
+    expect(reply.status).toBe('failed')
+    const snapshot = await h.task.snapshotIn(STORE)
+    const run = snapshot.runs.find(candidate => candidate.runId === runId)!
+    expect(run.status).toBe('failed')
+    const record = snapshot.reviews.find(review => review.runId === runId)!
+    expect(record.outcome).toBe('failed')
+    expect(record.localizedCause).toContain('cannot be verified')
+    expect(record.localizedCause).toContain('held by')
+    // The verifier never ran: no evidence was recorded for the run.
+    expect(snapshot.evidence.filter(item => item.taskRunId === runId)).toHaveLength(0)
+    void taskId
+  })
+
+  test('cancelGraph stops a replay this process is driving', async () => {
+    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const { taskId: rootTaskId } = await createRoot(h)
+    // A terminal champion to replay: a verified task with its own run.
+    const championTaskId = 't-champion'
+    const championRunId = 'r-champion'
+    await h.task.createTaskIn(STORE, {
+      taskId: championTaskId,
+      definitionRef: { taskType: 'root', version: 1 },
+      objective: 'champion work',
+      depth: 0,
+      acceptanceCriteria: [{
+        criterionId: 'ac1-1',
+        description: 'it holds',
+        verificationMode: 'deterministic',
+        requiredEvidence: [],
+        mandatory: true,
+        command: 'true',
+      }],
+      requestedCapabilities: ['research'],
+      decompositionStatus: 'leaf',
+      status: 'created',
+      runIds: [],
+      childTaskIds: [],
+    }, 'tester')
+    await h.task.admitTaskIn(STORE, championTaskId, 'tester', { decompositionStatus: 'leaf' })
+    await h.task.startRunIn(STORE, {
+      runId: championRunId,
+      taskId: championTaskId,
+      sessionId: 's-champion',
+      capabilitySnapshot: [],
+      executionPhase: 'active',
+      artifacts: [],
+      verifierResults: [],
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    }, 'tester')
+    await h.task.markRunStatusIn(STORE, championTaskId, championRunId, 'verifying', 'tester')
+    await h.task.recordEvidenceIn(STORE, {
+      evidenceId: `e-${championRunId}`,
+      taskRunId: championRunId,
+      taskId: championTaskId,
+      artifacts: [],
+      verifierResults: [{ criterionId: 'ac1-1', status: 'pass', verifierId: 'fake-verifier' }],
+      claims: [],
+      generatedAt: new Date().toISOString(),
+    }, 'tester')
+    await h.task.markRunStatusIn(STORE, championTaskId, championRunId, 'verified', 'tester')
+
+    // A replay is a driver like a batch is: the runtime owns its progress, so a
+    // graph cancellation stops it (A3 §3.6/§3.7).
+    h.setIdleBehavior(() => new Promise<void>(() => {}))
+    const replay = h.runtime.replayTask(STORE, championTaskId, { lineage: 'evolution-replay:p2' }, ROOT_SESSION)
+    await vi.waitFor(() => expect(h.spawned).toHaveLength(1))
+    await h.runtime.cancelGraph(STORE, 'graph removed')
+
+    expect((await replay).status).toBe('cancelled')
+    const snapshot = await h.task.snapshotIn(STORE)
+    const replayRun = snapshot.runs.find(run => run.taskId !== rootTaskId && run.taskId !== championTaskId)!
+    expect(replayRun.status).toBe('cancelled')
+    expect(snapshot.reviews.find(item => item.runId === replayRun.runId)).toBeDefined()
+  })
+
+  test('unload aborts the drivers it owns and settles the batch before it lets go', async () => {
+    const checkoutRoot = checkout('a3-unload')
+    const bindingRoot = join(checkoutRoot, 'bindings')
+    const h = harness({ config: { runBindingRoot: bindingRoot } })
+    h.ctx.envBuilder = { store: { get: () => ({ path: checkoutRoot }) } }
+    const { taskId, runId } = await createRoot(h)
+    h.setIdleBehavior(() => new Promise<void>(() => {}))
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+    await vi.waitFor(() => expect(h.spawned).toHaveLength(1))
+    expect(await ownershipMarkers(bindingRoot)).toHaveLength(1)
+
+    // The unload path (A3 §3.6): every driver is aborted and awaited, the gate is
+    // closed for the sessions this process tracked, and the markers this process
+    // wrote are released — in that order, so nothing writes into a checkout that
+    // has already been handed back.
+    //
+    // Only the runtime's own effect runs here: the harness registers the task
+    // service's close effect on the same context first, and cordis disposes
+    // effects in reverse registration order, so a full disposal would close the
+    // store before the runtime's unload could settle anything.
+    await (h.disposers[h.disposers.length - 1] as () => Promise<void>)()
+
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.runs.find(run => run.taskId !== taskId)!.status).toBe('cancelled')
+    expect((await h.task.runIn(STORE, runId)).status).toBe('cancelled')
+    expect(await ownershipMarkers(bindingRoot)).toHaveLength(0)
+    // The batch's own outcomes are derivable from the store after the driver is
+    // gone: the registration is a cache, the store is the truth.
+    expect((await h.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['cancelled'])
+  })
+
+  test('recovery: an in-flight worker is cancelled with the diagnostic, and its batch resumes without re-spawning it', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+    // A worker that never submits, then a process that dies: the runtime is
+    // abandoned (no dispose), and a second harness reopens the same session log.
+    h.setIdleBehavior(() => new Promise<void>(() => {}))
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('first child'), childSpec('second child')],
+    })
+    await vi.waitFor(() => expect(h.spawned).toHaveLength(1))
+    const crashedSession = h.spawned[0]!.sessionId
+    const crashedRunId = (await h.task.snapshotIn(STORE)).runs.find(run => run.taskId !== taskId)!.runId
+
+    const restarted = harness({}, h.sessions)
+    await restarted.task.openStore(STORE)
+    await restarted.runtime.reconcileStore(STORE)
+
+    const snapshot = await restarted.task.snapshotIn(STORE)
+    const crashed = snapshot.runs.find(run => run.runId === crashedRunId)!
+    expect(crashed.status).toBe('cancelled')
+    const record = snapshot.reviews.find(item => item.runId === crashedRunId)!
+    expect(record.outcome).toBe('cancelled')
+    expect(record.anomalies.join(' ')).toContain('recovery')
+    // The batch resumed: the second child ran (once), and the parent settled.
+    await vi.waitFor(() => expect(restarted.spawned).toHaveLength(1))
+    expect(restarted.spawned[0]!.sessionId).not.toBe(crashedSession)
+    const settled = await restarted.runtime.awaitBatch(STORE, batchId)
+    expect(settled.map(outcome => outcome.status)).toEqual(['cancelled', 'verified'])
+    expect((await restarted.task.runIn(STORE, runId)).status).toBe('verified')
+  })
+
+  test('recovery: a submitted run is verified, and a run without a phase is left exactly as it is', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+
+    // (a) A run that submitted before the process died: the phase is the whole
+    // recovery evidence, so it is verified.
+    const submittedTaskId = 't-submitted'
+    const submittedRunId = 'r-submitted'
+    await h.task.createTaskIn(STORE, {
+      taskId: submittedTaskId,
+      definitionRef: { taskType: 'subtask', version: 1 },
+      parentTaskId: taskId,
+      objective: 'submitted work',
+      depth: 1,
+      acceptanceCriteria: [{
+        criterionId: 'ac1-1',
+        description: 'it holds',
+        verificationMode: 'deterministic',
+        requiredEvidence: [],
+        mandatory: true,
+        command: 'true',
+      }],
+      requestedCapabilities: [],
+      decompositionStatus: 'leaf',
+      status: 'created',
+      runIds: [],
+      childTaskIds: [],
+    }, 'tester')
+    await h.task.admitTaskIn(STORE, submittedTaskId, 'tester', { decompositionStatus: 'leaf' })
+    await h.task.startRunIn(STORE, {
+      runId: submittedRunId,
+      taskId: submittedTaskId,
+      sessionId: 's-submitted',
+      capabilitySnapshot: [],
+      executionPhase: 'active',
+      artifacts: [],
+      verifierResults: [],
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    }, 'tester')
+    await h.task.changeRunPhaseIn(STORE, submittedTaskId, submittedRunId, 'tester', {
+      phase: 'submitted',
+      submission: { summary: 'handed in before the crash', evidenceRefs: [], submittedAt: new Date().toISOString(), origin: 'worker' },
+    })
+
+    // (b) An old record with no phase at all: the read side derives
+    // needs-recovery from that, and nothing here may invent a phase for it.
+    const phaselessTaskId = 't-phaseless'
+    const phaselessRunId = 'r-phaseless'
+    await h.task.createTaskIn(STORE, {
+      taskId: phaselessTaskId,
+      definitionRef: { taskType: 'subtask', version: 1 },
+      parentTaskId: taskId,
+      objective: 'old record',
+      depth: 1,
+      acceptanceCriteria: [{
+        criterionId: 'ac1-1',
+        description: 'it holds',
+        verificationMode: 'deterministic',
+        requiredEvidence: [],
+        mandatory: true,
+        command: 'true',
+      }],
+      requestedCapabilities: [],
+      decompositionStatus: 'leaf',
+      status: 'created',
+      runIds: [],
+      childTaskIds: [],
+    }, 'tester')
+    await h.task.admitTaskIn(STORE, phaselessTaskId, 'tester', { decompositionStatus: 'leaf' })
+    await h.task.startRunIn(STORE, {
+      runId: phaselessRunId,
+      taskId: phaselessTaskId,
+      sessionId: 's-phaseless',
+      capabilitySnapshot: [],
+      artifacts: [],
+      verifierResults: [],
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    }, 'tester')
+
+    await h.runtime.reconcileStore(STORE)
+
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.runs.find(run => run.runId === submittedRunId)!.status).toBe('verified')
+    expect(snapshot.reviews.filter(item => item.runId === submittedRunId)).toHaveLength(1)
+    expect(snapshot.runs.find(run => run.runId === phaselessRunId)!.status).toBe('running')
+    expect(snapshot.runs.find(run => run.runId === phaselessRunId)!.executionPhase).toBeUndefined()
+    expect(snapshot.reviews.filter(item => item.runId === phaselessRunId)).toHaveLength(0)
+    // And admission refuses to build on it: a phase-less run's only continuation
+    // is cancellation.
+    await expect(h.runtime.decomposeAndRun(STORE, phaselessTaskId, phaselessRunId, 's-phaseless', {
+      reason: 'split the old record',
+      children: [childSpec('child')],
+    })).rejects.toThrow(/predates coordination phases/)
+    void runId
+  })
+
+  /**
+   * A run a previous process left in flight, written through the store service —
+   * the recovery path's subject, in a store this process is also driving.
+   */
+  async function deadWorkerRun(h: Harness, parentTaskId: string, label: string): Promise<{ taskId: string; runId: string }> {
+    const taskId = `t-${label}`
+    const runId = `r-${label}`
+    await h.task.createTaskIn(STORE, {
+      taskId,
+      definitionRef: { taskType: 'subtask', version: 1 },
+      parentTaskId,
+      objective: label,
+      depth: 1,
+      acceptanceCriteria: [{
+        criterionId: 'ac1-1',
+        description: 'it holds',
+        verificationMode: 'deterministic',
+        requiredEvidence: [],
+        mandatory: true,
+        command: 'true',
+      }],
+      requestedCapabilities: [],
+      decompositionStatus: 'leaf',
+      status: 'created',
+      runIds: [],
+      childTaskIds: [],
+    }, 'tester')
+    await h.task.admitTaskIn(STORE, taskId, 'tester', { decompositionStatus: 'leaf' })
+    await h.task.startRunIn(STORE, {
+      runId,
+      taskId,
+      sessionId: `s-${label}`,
+      capabilitySnapshot: [],
+      artifacts: [],
+      verifierResults: [],
+      status: 'running',
+      executionPhase: 'active',
+      startedAt: new Date().toISOString(),
+    }, 'tester')
+    return { taskId, runId }
+  }
+
+  test('recovery on a store it cannot read reports and changes nothing', async () => {
+    const h = harness()
+    const { runId } = await createRoot(h)
+    // The store's log cannot be read (the deployment's storage is gone): recovery
+    // has nothing to act on, so it says so and writes nothing — an error that
+    // silently looked like a clean pass would be worse than the failure.
+    const original = h.task.snapshotIn.bind(h.task)
+    let attempts = 0
+    h.task.snapshotIn = async () => { attempts += 1; throw new Error('the log is unreadable') }
+    await expect(h.runtime.reconcileStore(STORE)).resolves.toBeUndefined()
+    h.task.snapshotIn = original
+    expect(attempts).toBe(1)
+    expect((await h.task.runIn(STORE, runId)).status).toBe('running')
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.reviews).toHaveLength(0)
+  })
+
+  test('recovery settles a run a dead process left in the store even while this process drives a batch', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+    h.setIdleBehavior(() => new Promise<void>(() => {}))
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('live child')],
+    })
+    await vi.waitFor(() => expect(h.spawned).toHaveLength(1))
+    const liveChild = await h.runtime.runForSession(h.spawned[0]!.sessionId)
+    // A run from a process that is gone: this process never spawned its session.
+    const dead = await deadWorkerRun(h, taskId, 'dead-worker')
+
+    // The recovery pass (the entry a store adoption runs). A store this process
+    // is driving is not one to settle wholesale: the runs a driver owns stay
+    // live, and the runs nobody holds are still settled by the phase machine.
+    await h.runtime.reconcileStore(STORE)
+
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect((await h.task.runIn(STORE, liveChild.run.runId)).status).toBe('running')
+    expect((await h.task.runIn(STORE, liveChild.run.runId)).executionPhase).toBe('active')
+    expect(snapshot.reviews.filter(review => review.runId === liveChild.run.runId)).toHaveLength(0)
+    const settled = snapshot.runs.find(run => run.runId === dead.runId)!
+    expect(settled.status).toBe('cancelled')
+    expect(snapshot.reviews.find(review => review.runId === dead.runId)?.outcome).toBe('cancelled')
+    await h.runtime.cancelBatch(STORE, batchId, ROOT_SESSION)
+  })
+
+  test('recovery settles a dead process\u2019s run even while this process drives a replay of the same store', async () => {
+    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    const { taskId, runId } = await createRoot(h)
+    // A verified champion to replay: the replay's worker never returns, so its
+    // driver is in flight for the whole case.
+    h.setIdleBehavior(async sessionId => {
+      const bound = await h.runtime.runForSession(sessionId)
+      if (bound.task.taskId !== taskId) await new Promise<void>(() => {})
+    })
+    const championTaskId = 't-champion'
+    const championRunId = 'r-champion'
+    await h.task.createTaskIn(STORE, {
+      taskId: championTaskId,
+      definitionRef: { taskType: 'subtask', version: 1 },
+      parentTaskId: taskId,
+      objective: 'champion work',
+      depth: 1,
+      acceptanceCriteria: [{
+        criterionId: 'ac1-1',
+        description: 'it holds',
+        verificationMode: 'deterministic',
+        requiredEvidence: [],
+        mandatory: true,
+        command: 'true',
+      }],
+      requestedCapabilities: [],
+      decompositionStatus: 'leaf',
+      status: 'created',
+      runIds: [],
+      childTaskIds: [],
+    }, 'tester')
+    await h.task.admitTaskIn(STORE, championTaskId, 'tester', { decompositionStatus: 'leaf' })
+    await h.task.startRunIn(STORE, {
+      runId: championRunId,
+      taskId: championTaskId,
+      sessionId: 's-champion',
+      capabilitySnapshot: [],
+      artifacts: [],
+      verifierResults: [],
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    }, 'tester')
+    await h.task.markRunStatusIn(STORE, championTaskId, championRunId, 'verifying', 'tester')
+    await h.task.recordEvidenceIn(STORE, {
+      evidenceId: `e-${championRunId}`,
+      taskRunId: championRunId,
+      taskId: championTaskId,
+      artifacts: [],
+      verifierResults: [{ criterionId: 'ac1-1', status: 'pass', verifierId: 'fake-verifier' }],
+      claims: [],
+      generatedAt: new Date().toISOString(),
+    }, 'tester')
+    await h.task.markRunStatusIn(STORE, championTaskId, championRunId, 'verified', 'tester')
+
+    const replaying = h.runtime.replayTask(STORE, championTaskId, { lineage: 'evolution-replay:p1' }, ROOT_SESSION)
+    replaying.catch(() => {})
+    await vi.waitFor(() => expect(h.spawned).toHaveLength(1))
+    const replayRun = await h.runtime.runForSession(h.spawned[0]!.sessionId)
+    const dead = await deadWorkerRun(h, taskId, 'dead-worker')
+
+    await h.runtime.reconcileStore(STORE)
+
+    const snapshot = await h.task.snapshotIn(STORE)
+    // The replay this process drives is left alone...
+    expect((await h.task.runIn(STORE, replayRun.run.runId)).status).toBe('running')
+    expect(snapshot.reviews.filter(review => review.runId === replayRun.run.runId)).toHaveLength(0)
+    // ...and the run nobody holds is settled by the phase machine.
+    expect(snapshot.runs.find(run => run.runId === dead.runId)!.status).toBe('cancelled')
+    expect(snapshot.reviews.find(review => review.runId === dead.runId)?.outcome).toBe('cancelled')
+    await expect(h.runtime.cancelGraph(STORE, 'probe cleanup')).resolves.toBeUndefined()
+    void runId
   })
 })

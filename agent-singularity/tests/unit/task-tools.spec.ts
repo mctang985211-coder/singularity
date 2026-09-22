@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from 'vitest'
 import { DEFAULT_CAPABILITIES } from '../../../task-runtime/src/index.ts'
 import { defineCapabilityListTool } from '../../src/tools/capability-list.ts'
 import { defineTaskDecomposeTool } from '../../src/tools/task-decompose.ts'
+import { defineTaskCancelTool } from '../../src/tools/task-cancel.ts'
 import { defineTaskDiagnoseTool } from '../../src/tools/task-diagnose.ts'
 import { defineTaskReadTool } from '../../src/tools/task-read.ts'
 import { defineTaskReviewPackTool } from '../../src/tools/task-review-pack.ts'
 import { defineTaskStatusTool } from '../../src/tools/task-status.ts'
+import { defineTaskSubmitResultTool } from '../../src/tools/task-submit-result.ts'
 import { defineTaskVerifyTool } from '../../src/tools/task-verify.ts'
 
 const graph = { id: 'graph1', name: 'graph1', envId: 'project1', rootSessionId: 'root-1' }
@@ -69,10 +71,22 @@ const rootRun = {
   artifacts: [],
   verifierResults: [],
   status: 'running',
+  // A run the A3 protocol would have created: born `active`. A fixture run that
+  // carries no phase is an old record, and the readers say so (see the
+  // phase-rendering tests).
+  executionPhase: 'active' as const,
   startedAt: '2026-09-16T00:00:00.000Z',
 }
 
-const childRun = { ...rootRun, runId: 'r-child-1', taskId: 't-child-1', sessionId: 's-child', status: 'verified' }
+const childRun = {
+  ...rootRun,
+  runId: 'r-child-1',
+  taskId: 't-child-1',
+  sessionId: 's-child',
+  status: 'verified',
+  // The path every verified run took: it submitted, and the verdict followed.
+  executionPhase: 'submitted' as const,
+}
 const workerRun = { ...rootRun, runId: 'r-worker', taskId: 't-worker', sessionId: 's-worker', status: 'running' }
 
 const snapshot = {
@@ -207,7 +221,7 @@ describe('task_read', () => {
     expect(result).toContain('root task t-root [running/decomposed]')
     expect(result).toContain('objective: Build the feature')
     expect(result).toContain('root-children-verified [composite] all mandatory children verified')
-    expect(result).toContain('- t-child-1 [verified/leaf] run r-child-1 [verified] Implement the parser')
+    expect(result).toContain('- t-child-1 [verified/leaf] run r-child-1 [verified] — phase submitted Implement the parser')
   })
 
   it('returns the own task and run for a worker session', async () => {
@@ -383,6 +397,84 @@ describe('task_read', () => {
     const result = (await tool.execute({}, exec('root-1'))) as string
     expect(result).toContain('- root-children-verified [composite] all mandatory children verified [protected inputs: tests/check.sh]')
   })
+
+  /**
+   * The coordination phase (A3 §3.8): where the caller's own run stands in the
+   * protocol, and what an old record looks like — a reader is never told
+   * `active` about a run nobody can admit work for.
+   */
+  function workerRunFixture(run: Record<string, unknown>) {
+    const { ctx } = fixture()
+    ctx.taskRuntime.runForSession.mockImplementation(async () => ({
+      storeId: 'sg-t-root-1',
+      task: workerTask,
+      run: { ...workerRun, ...run },
+    }) as never)
+    return { ctx }
+  }
+
+  it('renders the phase of an active run, with its no-progress marking', async () => {
+    const { ctx } = workerRunFixture({
+      noProgress: { kind: 'unsubmitted-idle', rounds: 2, factCount: 7, markedAt: '2026-09-16T00:02:00.000Z' },
+    })
+    const result = (await defineTaskReadTool(ctx as never).execute({}, exec('s-worker'))) as string
+    expect(result).toContain(
+      'run r-worker [running] — phase active; no-progress round 2 (unsubmitted-idle) started 2026-09-16T00:00:00.000Z',
+    )
+  })
+
+  it('renders the batch a waiting run is waiting on', async () => {
+    const { ctx } = workerRunFixture({ executionPhase: 'waiting_children', batchId: 'b-t-worker' })
+    const result = (await defineTaskReadTool(ctx as never).execute({}, exec('s-worker'))) as string
+    expect(result).toContain('run r-worker [running] — phase waiting_children; batch b-t-worker started')
+  })
+
+  it('renders what a submitted run handed in, with the evidence it named', async () => {
+    const { ctx } = workerRunFixture({
+      executionPhase: 'submitted',
+      submission: {
+        summary: 'children verified and the suite passes',
+        evidenceRefs: ['ev-1', 'ev-2'],
+        notes: 'nothing left open',
+        submittedAt: '2026-09-16T00:03:00.000Z',
+        origin: 'worker',
+      },
+    })
+    const result = (await defineTaskReadTool(ctx as never).execute({}, exec('s-worker'))) as string
+    expect(result).toContain(
+      'run r-worker [running] — phase submitted; submitted by worker at 2026-09-16T00:03:00.000Z: ' +
+      '"children verified and the suite passes"; evidence [ev-1, ev-2]; notes: nothing left open started',
+    )
+  })
+
+  it('renders a running run with no phase as the old record it is, not as active', async () => {
+    const { ctx } = workerRunFixture({ executionPhase: undefined })
+    const result = (await defineTaskReadTool(ctx as never).execute({}, exec('s-worker'))) as string
+    expect(result).toContain('needs-recovery (an old record: it was created before coordination phases')
+    expect(result).toContain('cancel this task tree to recover')
+    expect(result).not.toContain('phase active')
+  })
+
+  it('adds no phase to a terminal run that predates the field', async () => {
+    const { ctx } = workerRunFixture({ executionPhase: undefined, status: 'verified' })
+    const result = (await defineTaskReadTool(ctx as never).execute({}, exec('s-worker'))) as string
+    expect(result).toContain('run r-worker [verified] started 2026-09-16T00:00:00.000Z')
+    expect(result).not.toContain('needs-recovery')
+    expect(result).not.toContain('phase ')
+  })
+
+  it('renders each child run line of the root view with its own phase', async () => {
+    const { ctx } = fixture()
+    ctx.task.openStore.mockResolvedValue({
+      ...snapshot,
+      tasks: [rootTask, { ...childTask, status: 'running' }],
+      runs: [rootRun, { ...childRun, status: 'running', executionPhase: 'waiting_children', batchId: 'b-t-child-1' }],
+    })
+    const result = (await defineTaskReadTool(ctx as never).execute({}, exec('root-1'))) as string
+    expect(result).toContain(
+      '- t-child-1 [running/leaf] run r-child-1 [running] — phase waiting_children; batch b-t-child-1 Implement the parser',
+    )
+  })
 })
 
 describe('task_decompose', () => {
@@ -401,10 +493,7 @@ describe('task_decompose', () => {
   it('passes the spec through to decomposeAndRun and renders per-child results', async () => {
     const { ctx } = fixture()
     const signal = new AbortController().signal
-    ctx.taskRuntime.decomposeAndRun.mockResolvedValue([
-      { taskId: 't-child-1', runId: 'r-1', status: 'verified', evidenceId: 'ev-1' },
-      { taskId: 't-child-2', status: 'blocked' },
-    ])
+    ctx.taskRuntime.decomposeAndRun.mockResolvedValue({ batchId: 'b-t-root', childTaskIds: ['t-child-1', 't-child-2'] })
     const tool = defineTaskDecomposeTool(ctx as never)
     const result = (await tool.execute({ reason: 'split the work', children }, { agent: { id: 'root-1' }, signal } as never)) as string
     expect(ctx.taskRuntime.decomposeAndRun).toHaveBeenCalledExactlyOnceWith(
@@ -415,9 +504,28 @@ describe('task_decompose', () => {
       { reason: 'split the work', children },
       { signal },
     )
-    expect(result).toContain('decomposed t-root into 2 children:')
-    expect(result).toContain('- t-child-1: verified run r-1 evidence ev-1')
-    expect(result).toContain('- t-child-2: blocked')
+    // The tool returns at admission (A3 §3.1) and says so: it reports the batch
+    // that was admitted, not outcomes nobody has produced yet.
+    expect(result).toContain('decomposed t-root into 2 children (batch b-t-root):')
+    expect(result).toContain('- child 1: t-child-1')
+    expect(result).toContain('- child 2: t-child-2')
+    expect(result).toContain('does not wait for the batch')
+  })
+
+  it('states the contract the caller is under while the batch runs', async () => {
+    const { ctx } = fixture()
+    ctx.taskRuntime.decomposeAndRun.mockResolvedValue({ batchId: 'b-t-root', childTaskIds: ['t-child-1'] })
+    const tool = defineTaskDecomposeTool(ctx as never)
+    const result = (await tool.execute({ reason: 'split the work', children }, exec('root-1'))) as string
+
+    // The model-visible behaviour contract (§3.8): the batch id, the phase the
+    // caller is now in, what is still allowed, and that settlement is announced
+    // — everything the caller needs to not write into the children's checkout.
+    expect(result).toContain('The runtime owns batch b-t-root now')
+    expect(result).toContain('You are in phase waiting_children')
+    expect(result).toContain('`task_cancel`')
+    expect(result).toContain('Writes, shell commands, another decomposition and a submission of your own are refused')
+    expect(result).toContain('You are notified when the batch settles')
   })
 
   it('returns the admission rejection as error text instead of throwing', async () => {
@@ -435,7 +543,7 @@ describe('task_decompose', () => {
   it('passes a declared contract version through to decomposeAndRun', async () => {
     const { ctx } = fixture()
     const signal = new AbortController().signal
-    ctx.taskRuntime.decomposeAndRun.mockResolvedValue([{ taskId: 't-child-1', status: 'verified' }])
+    ctx.taskRuntime.decomposeAndRun.mockResolvedValue({ batchId: 'b-t-root', childTaskIds: ['t-child-1'] })
     const tool = defineTaskDecomposeTool(ctx as never)
     await tool.execute({ reason: 'split the work', contractVersion: 1, children }, { agent: { id: 'root-1' }, signal } as never)
     expect(ctx.taskRuntime.decomposeAndRun).toHaveBeenCalledExactlyOnceWith(
@@ -453,7 +561,7 @@ describe('task_decompose', () => {
 
   it('sends no contractVersion key when the caller declares none', async () => {
     const { ctx } = fixture()
-    ctx.taskRuntime.decomposeAndRun.mockResolvedValue([{ taskId: 't-child-1', status: 'verified' }])
+    ctx.taskRuntime.decomposeAndRun.mockResolvedValue({ batchId: 'b-t-root', childTaskIds: ['t-child-1'] })
     const tool = defineTaskDecomposeTool(ctx as never)
     await tool.execute({ reason: 'split the work', children }, exec('root-1'))
     // Deep equality alone also accepts a present key holding undefined, so the omission is asserted on the keys.
@@ -487,7 +595,7 @@ describe('task_decompose', () => {
   it('passes declared criterion ids and child constraints through untouched', async () => {
     const { ctx } = fixture()
     const signal = new AbortController().signal
-    ctx.taskRuntime.decomposeAndRun.mockResolvedValue([{ taskId: 't-child-1', status: 'verified' }])
+    ctx.taskRuntime.decomposeAndRun.mockResolvedValue({ batchId: 'b-t-root', childTaskIds: ['t-child-1'] })
     const declared = [
       {
         objective: 'Implement the parser',
@@ -510,7 +618,7 @@ describe('task_decompose', () => {
   it('declares protectedInputs on the criterion schema and passes the declared paths through untouched', async () => {
     const { ctx } = fixture()
     const signal = new AbortController().signal
-    ctx.taskRuntime.decomposeAndRun.mockResolvedValue([{ taskId: 't-child-1', status: 'verified' }])
+    ctx.taskRuntime.decomposeAndRun.mockResolvedValue({ batchId: 'b-t-root', childTaskIds: ['t-child-1'] })
     const tool = defineTaskDecomposeTool(ctx as never)
 
     // The schema is the model-facing half of the contract: the declared paths
@@ -569,7 +677,7 @@ describe('capability_list', () => {
     expect(result).toContain('bash')
     expect(result).toContain('baseline labels: ')
     // The machinery line is rendered from WORKER_BASELINE_TOOLS, so it cannot drift from the grant.
-    expect(result).toContain('task machinery: task_read, task_status, task_decompose, task_verify')
+    expect(result).toContain('task machinery: task_read, task_status, task_decompose, task_submit_result, task_cancel, task_verify, capability_list')
     expect(result).toContain('tool grants are fail-closed: ')
     expect(result).toContain('skill grants are not exclusive: DSH has no per-agent skill hiding')
     expect(result).toContain('mcpServers grant whole MCP servers')
@@ -627,8 +735,8 @@ describe('task_status', () => {
     const result = (await tool.execute({}, exec('root-1'))) as string
     expect(ctx.task.openStore).toHaveBeenCalledExactlyOnceWith('sg-t-root-1')
     expect(result).toContain('graph graph1 task tree (2 tasks):')
-    expect(result).toContain('t-root [running] Build the feature (run: running)')
-    expect(result).toContain('  t-child-1 [verified] Implement the parser (run: verified evidence: [ev-1] review: verified)')
+    expect(result).toContain('t-root [running] Build the feature (run: running — phase active)')
+    expect(result).toContain('  t-child-1 [verified] Implement the parser (run: verified — phase submitted evidence: [ev-1] review: verified)')
   })
 
   it('renders the localized cause of a failed review', async () => {
@@ -700,6 +808,22 @@ describe('task_status', () => {
     const tool = defineTaskStatusTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
     expect(result).toContain('review: blocked — dependencies [t-other] did not verify')
+  })
+
+  it('renders each run\'s coordination phase, and needs-recovery for a run with no phase', async () => {
+    const { ctx } = fixture()
+    ctx.task.openStore.mockResolvedValue({
+      ...snapshot,
+      tasks: [rootTask, { ...childTask, status: 'running' }],
+      runs: [
+        // An old record: running, no phase. It is reported as what it is, not as active.
+        { ...rootRun, executionPhase: undefined },
+        { ...childRun, status: 'running', executionPhase: 'submitted' },
+      ],
+    })
+    const result = (await defineTaskStatusTool(ctx as never).execute({}, exec('root-1'))) as string
+    expect(result).toContain('t-root [running] Build the feature (run: running — needs-recovery (old record without a coordination phase))')
+    expect(result).toContain('  t-child-1 [running] Implement the parser (run: running — phase submitted')
   })
 })
 
@@ -998,7 +1122,7 @@ describe('task_diagnose', () => {
     expect(pack).toContain('diagnoses (1):')
     expect(pack).toContain('- d1 [medium] the fixtures never feed empty input')
     const status = (await defineTaskStatusTool(ctx as never).execute({}, exec('root-1'))) as string
-    expect(status).toContain('t-child-1 [verified] Implement the parser (run: verified evidence: [ev-1] review: verified diag: 1)')
+    expect(status).toContain('t-child-1 [verified] Implement the parser (run: verified — phase submitted evidence: [ev-1] review: verified diag: 1)')
     expect(status).not.toContain('diag: 0')
   })
 
@@ -1035,10 +1159,146 @@ describe('task_diagnose', () => {
   })
 })
 
+describe('task_submit_result', () => {
+  const submission = { summary: 'the parser passes the fixtures', evidenceRefs: ['ev-1'], notes: 'nothing left open' }
+
+  it('passes the submission and the call registration id to the runtime, and renders the verdict', async () => {
+    const { ctx } = fixture()
+    const submitResult = vi.fn(async () => ({ status: 'verified', detail: 'run "r-worker" submitted and verified.' }))
+    ctx.taskRuntime.submitResult = submitResult as never
+    const tool = defineTaskSubmitResultTool(ctx as never)
+    const result = (await tool.execute(submission, {
+      agent: { id: 's-worker' },
+      signal: new AbortController().signal,
+      callId: 'call-7',
+    } as never)) as string
+
+    // The call id is what keeps the drain from waiting for the call that asked
+    // for it (A3 §3.3), so it has to travel with the submission.
+    expect(submitResult).toHaveBeenCalledExactlyOnceWith('s-worker', submission, { callId: 'call-7' })
+    expect(result).toBe('task_submit_result verified: run "r-worker" submitted and verified.')
+  })
+
+  it('sends no callId key when the caller is not a registered tool call', async () => {
+    const { ctx } = fixture()
+    const submitResult = vi.fn(async () => ({ status: 'verified', detail: 'ok' }))
+    ctx.taskRuntime.submitResult = submitResult as never
+    const tool = defineTaskSubmitResultTool(ctx as never)
+    await tool.execute({ summary: 'done' }, exec('s-worker'))
+
+    expect(Object.keys(submitResult.mock.calls[0]![2] as Record<string, unknown>)).toEqual([])
+  })
+
+  it('requires a non-empty summary on the model-facing schema', () => {
+    const tool = defineTaskSubmitResultTool(fixture().ctx as never)
+    const parameters = tool.parameters as {
+      properties: Record<string, { type: unknown; required?: boolean; items?: { type: unknown } }>
+    }
+    expect(parameters.properties.summary?.type).toBe('string')
+    expect((tool.parameters as { required?: string[] }).required).toEqual(['summary'])
+    expect(parameters.properties.evidenceRefs?.type).toBe('array')
+    expect(parameters.properties.evidenceRefs?.items?.type).toBe('string')
+    expect(parameters.properties.notes?.type).toBe('string')
+    // The description is the model-facing half of the protocol: the submission
+    // is the action that ends the run, and idle is not a substitute for it.
+    expect(tool.description).toContain('An idle session is not a completion')
+    expect(tool.description).toContain('verifier')
+  })
+
+  it('answers a late or repeated submission with the runtime\'s own conclusion, not an error', async () => {
+    const { ctx } = fixture()
+    ctx.taskRuntime.submitResult = vi.fn(async () => ({
+      status: 'submitted',
+      detail: 'run "r-worker" already submitted: the parser passes at 2026-09-16T00:03:00.000Z. A second submission changes nothing.',
+    })) as never
+    const tool = defineTaskSubmitResultTool(ctx as never)
+    const result = (await tool.execute(submission, exec('s-worker'))) as string
+
+    expect(result).toContain('task_submit_result submitted:')
+    expect(result).toContain('already submitted')
+    expect(result).toContain('changes nothing')
+    expect(result).not.toContain('rejected')
+  })
+
+  it('returns the protocol refusal as text instead of throwing', async () => {
+    const { ctx } = fixture()
+    ctx.taskRuntime.submitResult = vi.fn(async () => {
+      throw new Error('task-runtime: run "r-worker" is waiting on its child batch (b-t-worker); a parent cannot submit while its children are still running')
+    }) as never
+    const tool = defineTaskSubmitResultTool(ctx as never)
+    const result = (await tool.execute(submission, exec('s-worker'))) as string
+
+    expect(result).toContain('task_submit_result rejected:')
+    expect(result).toContain('waiting on its child batch')
+  })
+})
+
+describe('task_cancel', () => {
+  function waitingRun() {
+    const { ctx } = fixture()
+    ctx.taskRuntime.runForSession.mockImplementation(async () => ({
+      storeId: 'sg-t-root-1',
+      task: workerTask,
+      run: { ...workerRun, executionPhase: 'waiting_children', batchId: 'b-t-worker' },
+    }) as never)
+    return { ctx }
+  }
+
+  it('cancels the batch this run waits on and reports the settlement', async () => {
+    const { ctx } = waitingRun()
+    const cancelBatch = vi.fn(async () => [
+      { taskId: 't-child-1', runId: 'r-child-1', status: 'cancelled' },
+      { taskId: 't-child-2', status: 'blocked' },
+    ])
+    ctx.taskRuntime.cancelBatch = cancelBatch as never
+    const tool = defineTaskCancelTool(ctx as never)
+    const result = (await tool.execute({ reason: 'the plan changed' }, exec('s-worker'))) as string
+
+    expect(cancelBatch).toHaveBeenCalledExactlyOnceWith('sg-t-root-1', 'b-t-worker', 's-worker')
+    expect(result).toContain('cancelled batch b-t-worker (the plan changed):')
+    expect(result).toContain('- t-child-1: cancelled run r-child-1')
+    expect(result).toContain('- t-child-2: blocked')
+  })
+
+  it('says there is no batch in flight and changes nothing when the run holds none', async () => {
+    const { ctx } = fixture()
+    const cancelBatch = vi.fn()
+    ctx.taskRuntime.cancelBatch = cancelBatch as never
+    const tool = defineTaskCancelTool(ctx as never)
+    const result = (await tool.execute({}, exec('s-worker'))) as string
+
+    expect(result).toContain('no batch is in flight for run "r-worker"')
+    expect(result).toContain('phase active')
+    expect(result).toContain('nothing was changed')
+    expect(cancelBatch).not.toHaveBeenCalled()
+  })
+
+  it('returns the runtime refusal as text instead of throwing', async () => {
+    const { ctx } = waitingRun()
+    ctx.taskRuntime.cancelBatch = vi.fn(async () => {
+      throw new Error('task-runtime: batch "b-t-worker" is not being driven by this process')
+    }) as never
+    const tool = defineTaskCancelTool(ctx as never)
+    const result = (await tool.execute({}, exec('s-worker'))) as string
+
+    expect(result).toContain('task_cancel rejected:')
+    expect(result).toContain('not being driven by this process')
+  })
+
+  it('declares the reason as an optional parameter', () => {
+    const tool = defineTaskCancelTool(fixture().ctx as never)
+    const parameters = tool.parameters as { properties: Record<string, { type: unknown }>; required?: string[] }
+    expect(parameters.properties.reason?.type).toBe('string')
+    expect(parameters.required ?? []).not.toContain('reason')
+  })
+})
+
 describe('missing agent identity', () => {
   it.each([
     ['task_read', () => defineTaskReadTool(fixture().ctx as never), {}],
     ['task_status', () => defineTaskStatusTool(fixture().ctx as never), {}],
+    ['task_submit_result', () => defineTaskSubmitResultTool(fixture().ctx as never), { summary: 'done' }],
+    ['task_cancel', () => defineTaskCancelTool(fixture().ctx as never), {}],
     ['task_verify', () => defineTaskVerifyTool(fixture().ctx as never), {}],
     ['task_review_pack', () => defineTaskReviewPackTool(fixture().ctx as never), { taskId: 't-child-1' }],
     ['task_diagnose', () => defineTaskDiagnoseTool(fixture().ctx as never), {
