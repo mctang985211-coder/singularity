@@ -129,10 +129,10 @@ function proposalIdOf(text: string): string {
   return match[1]!
 }
 
-/** The `index`-th review ask the channel made, waited for. */
+/** The `index`-th **batch** review ask the channel made, waited for. */
 async function askAt(h: ScriptedLoop, index: number): Promise<ScriptedReviewAsk> {
-  await vi.waitFor(() => expect(h.review.asks.length).toBeGreaterThan(index))
-  return h.review.asks[index]!
+  await vi.waitFor(() => expect(h.review.batchAsks.length).toBeGreaterThan(index))
+  return h.review.batchAsks[index]!
 }
 
 /** One proposal as the store holds it. */
@@ -214,7 +214,8 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
 
     // Nobody was asked: under `off` the audit record is the policy itself, never
-    // a missing approval.
+    // a missing approval — the root contract's own intake included, since the same
+    // policy governs both subjects.
     expect(h.review.asks).toHaveLength(0)
     const proposal = batchProposals(await h.snapshot(root.storeId))[0]!
     expect(proposal.policy).toBe('off')
@@ -279,7 +280,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
 
     // The answer is what admits it, and the runtime then drives the batch by
     // itself: the model is not asked for anything further.
-    h.review.answer(0, 'allowed-once')
+    h.review.answerBatch(0, 'allowed-once')
     await spawned(h, 1)
     const outcomes = await h.runtime.awaitBatch(root.storeId, await rootBatchId(h))
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
@@ -329,9 +330,11 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(second.result?.text).toContain('task_decompose rejected')
     expect(second.result?.text).toContain('declares unknown field "generatedTaskReview"')
 
-    // §5's 坏提案不弹审批: nothing was shown to a person, and the store holds no
-    // proposal, no child, no decomposition and no admission.
-    expect(h.review.asks).toHaveLength(0)
+    // §5's 坏提案不弹审批: nothing was shown to a person — the only ask this
+    // store's channel made is the setup root contract's own, which `begin` answered
+    // — and the store holds no batch proposal, no child, no decomposition, no
+    // admission.
+    expect(h.review.batchAsks).toHaveLength(0)
     expect(h.spawns).toHaveLength(0)
     const snapshot = await h.snapshot(root.storeId)
     expect(batchProposals(snapshot)).toHaveLength(0)
@@ -354,7 +357,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
     const proposalId = proposalIdOf(answer.result!.text)
     await askAt(h, 0)
 
-    h.review.answer(0, outcome)
+    h.review.answerBatch(0, outcome)
     if (outcome === 'rejected') {
       // A refusal is a fact on the record, under the channel's own decider and
       // with the reason it can honestly state.
@@ -373,7 +376,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
       expect(again.existing).toBe(true)
       expect(again.status).toBe('pending_review')
       expect((await proposalOf(h, root.storeId, proposalId)).decision).toBeUndefined()
-      expect(h.review.asks).toHaveLength(2)
+      expect(h.review.batchAsks).toHaveLength(2)
     }
 
     // No batch, no child, no worker, no admission — whatever the answer was.
@@ -423,7 +426,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
     const ask = await askAt(h, 0)
     expect(ask.reason).toContain('- child 0: align the ball')
 
-    h.review.answer(0, 'rejected')
+    h.review.answerBatch(0, 'rejected')
     await statusOf(h, root.storeId, firstId, 'rejected')
     refused.resolve()
 
@@ -448,7 +451,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(revision.proposalDigest).not.toBe((await proposalOf(h, root.storeId, firstId)).proposalDigest)
 
     await askAt(h, 1)
-    h.review.answer(1, 'allowed-once')
+    h.review.answerBatch(1, 'allowed-once')
     await spawned(h, 1)
     const outcomes = await h.runtime.awaitBatch(root.storeId, await rootBatchId(h))
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
@@ -462,7 +465,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(after.tasks.map(task => task.taskId)).toEqual([root.taskId, ...after.proposals!.byId[revisionId]!.consumption!.childTaskIds])
     expect((await h.task.taskIn(root.storeId, outcomes[0]!.taskId)).status).toBe('verified')
     expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('verified')
-    expect(h.review.asks).toHaveLength(2)
+    expect(h.review.batchAsks).toHaveLength(2)
   })
 
   it('holds a direct service call exactly as the tool, and admits it only from a recorded decision', async () => {
@@ -485,7 +488,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(h.spawns).toHaveLength(0)
     expect(h.calls.filter(call => call.name === 'task_decompose')).toHaveLength(0)
 
-    h.review.answer(0, 'allowed-once')
+    h.review.answerBatch(0, 'allowed-once')
     await spawned(h, 1)
     const outcomes = await h.runtime.awaitBatch(root.storeId, await rootBatchId(h))
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
@@ -545,7 +548,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
     // The run ends while the decision is still with the person: §6's late
     // approval may only invalidate the proposal.
     await h.task.markRunStatusIn(root.storeId, root.taskId, root.runId, 'cancelled', ROOT, { reason: 'the caller ended it' })
-    h.review.answer(0, 'allowed-once')
+    h.review.answerBatch(0, 'allowed-once')
 
     const expired = await statusOf(h, root.storeId, proposalId, 'expired')
     expect(expired.decision?.outcome).toBe('expired')
@@ -577,7 +580,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
     // The row this batch resolved against changes while the person decides: the
     // resolution the review covered is not the one an admission would run under.
     await h.runtime.applyCapabilityRow('align-capability', { tools: ['filesystem'] })
-    h.review.answer(0, 'allowed-once')
+    h.review.answerBatch(0, 'allowed-once')
 
     const stale = await statusOf(h, root.storeId, proposalId, 'stale')
     expect(stale.decision?.outcome).toBe('approved')
@@ -700,7 +703,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
     const root = await h.begin(ROOT_CONTRACT)
     // The root's own batch is approved by the person, so the child really runs.
     await askAt(h, 0)
-    h.review.answer(0, 'allowed-once')
+    h.review.answerBatch(0, 'allowed-once')
     await spawned(h, 1)
     const child = h.spawns[0]!.sessionId
     // The child proposed its own batch: that proposal waits, and the child idles.
@@ -769,8 +772,11 @@ describe('the review policy on the real loop (T2 §5)', () => {
 
     const replay = await h.runtime.replayTask(root.storeId, championTaskId, { lineage: 'evolution-replay:p1', spawn: false }, ROOT)
     expect(replay.status).toBe('verified')
-    // No review, no proposal: a replay is an evaluation entry, not a new batch.
-    expect(h.review.asks).toHaveLength(0)
+    // No review, no proposal: a replay is an evaluation entry, not a new batch —
+    // and the only ask this store's channel ever made is the setup root contract's
+    // own, which `begin` answered.
+    expect(h.review.batchAsks).toHaveLength(0)
+    expect(h.review.rootAsks).toHaveLength(1)
     expect(batchProposals(await h.snapshot(root.storeId))).toHaveLength(0)
     expect(batchProposalEvents(h, root.storeId)).toHaveLength(0)
     expect(h.spawns).toHaveLength(0)

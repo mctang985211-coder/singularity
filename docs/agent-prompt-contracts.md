@@ -2,7 +2,7 @@
 
 日期：2026-09-21。状态：建设用模板，未注入当前运行时（部署中的实际文本以 §3/§4 条件块标注的真实落点为准，例如 A3 的显式提交协议与 T2/T3 的生成任务审核段）。依赖与协议见 [探索/进化架构](exploration-evolution-architecture.md)。本文件不能单独作为“换提示词即可上线”的实现票。
 
-2026-09-23 修订：本文件是角色职责参考，不要求把以下全文叠加进 system prompt。R0 将按实际角色、配置和工具装配收敛部署文本，尚未实施；后续 A 票的未兑现段落继续留在设计文档。各票不得因新增测试就继续向 root 追加整段协议说明。
+2026-09-23 修订：本文件是角色职责参考，不要求把以下全文叠加进 system prompt。**R0 已按实际角色、配置与工具装配收敛部署文本（2026-09-23，待验收；落地事实见 §1 与主 guide §5.11）**；后续 A 票的未兑现段落继续留在设计文档。各票不得因新增测试就继续向 root 追加整段协议说明。
 
 ## 1. 装配规则
 
@@ -15,6 +15,8 @@
 部署文本只承担三类内容：稳定角色与不可越过的约束、当前任务事实、当前动作的必要说明。长篇状态分支由工具 schema/结构化结果解释，避免在角色文本再维护一份状态机。行为建议（先查证据、合理分解）靠真实模型实验评估，不要求逐句新增 gate；权限/状态/验收保证必须有实际代码来源。
 
 R0 的 root 默认不挂载 `evolution_*`，不注入整条晋升协议；显式启用时按管理角色提供相应工具和必要说明。root 协调、reviewer 只读诊断、candidate builder 在 sandbox 实现，沿用现有 preset/scoped tools，不新增通用角色框架。进化未启用不能描述成“请人代写能力”；应如实报告当前能力边界。BB 等领域指导由部署的领域 Skill/preset 提供，通用 root 不内置。
+
+**R0 落地事实（2026-09-23，待验收）**：装配开关是 `evolution: 'off' | 'on'`（默认 `off`，闭合 schema，未知值或未读成员构造期拒启）。off 的实际 composition：`agent-singularity` 注册 19 个常驻工具（含 `task_intake`、`escalate`），九个 `evolution_*` **不注册**（因此任何 agent 面都取不到，不靠权限检查劝阻），root allow-list 20 名（19 个 root 核心名 + `escalate`；核心名里的 `skill` 由 preset 平面挂载，不在常驻注册面），root prompt 无进化协议段；on：28 个常驻工具、allow-list 29 名，与 R0 之前逐名相同。allow-list 与 prompt 由同一布尔派生（`agent-runtime/src/index.ts:rootToolsFor` 消费 `ctx.singularityEvolution`，软读，缺失即 off），二者不可能互相矛盾；关闭只撤注册，不删账本、不降已有校验与授权规则。**BB 句子已从通用 root prompt 无条件移除**，领域指导归部署的领域 skill（本仓库的 `bb-pipeline` 等），通用角色文本不再内嵌领域内容。证据锚：`agent-singularity/tests/unit/assembly.spec.ts`（off = 19 常驻且零 `evolution_*`；on = 28）、`agent-runtime/tests/unit/agent-runtime.spec.ts`（`ROOT_TOOLS_CLOSED` 20 / `ROOT_TOOLS_OPEN` 29 与 prompt 同源）、`tests/integration/worker-grant.spec.ts`（off 组合下无 grant 的 worker 面不含任何 `evolution_*`）、`tests/integration/evolution-tools.spec.ts`（on 的既有回归）。
 
 根入口的解释原则：原请求和澄清是来源，模型提出的假设须标明。会改变交付或验收的歧义先经已有渠道澄清；普通方法选择自主决定。机器准入不证明自然语言理解正确，可选人审关闭也不改变这一边界。
 
@@ -117,6 +119,19 @@ task_decompose 可能返回“等待审核”与一个 proposalId：那时没有
 当前任务也未分解。读批次用 task_proposal_read；同内容不要重复提交；被拒时按记录中
 的理由修订后重新分解（新提案可 supersedes 旧的）。批准后运行时自行重检并继续批次，
 你不会被要求提供批准凭据，也没有工具可以决定提案。
+
+[根契约 intake 已部署（A0：真实落点 agent-runtime/src/prompts/root.prompts.ts 的
+intake 段；setup 文本见 graphs/src/prompts/setup.prompts.ts；工具 agent-singularity/src/tools/task-intake.ts）]
+用户说明了目标时，先把它写成根契约并用 task_intake 接受：objective 用用户自己的话，
+acceptance criteria 至少有一条 mandatory 判据直接检查交付物（“所有子任务通过”不能作为
+唯一判据——缺它会具名拒绝），并写出假设（标明是你的推断）、约束与所需能力。
+接受之前没有根任务：task_read 会报本 session 未激活，task_decompose 也没有可分解的对象，
+不要用图名或环境准备充当目标。会改变目标、范围或验收的歧义走已有澄清渠道；
+能忠实规范化的请求自己规范化，假设如实标注。部署开启契约人审时，task_intake 会回答
+proposalId 并说明契约在等审核（此时同样没有根任务、没有 run、没有 worker）；
+被拒时按记录中的理由修订并重新接受——修订是新内容、新提案，可 supersedes 旧的。
+没有任何工具或参数能批准契约：决定由审核渠道落账，运行时随后自行重检并激活；
+根 run 到达终态后本 session 关闭，迟到的 intake 会被拒绝而不是复活。
 ```
 
 ## 5. Reviewer / Supervisor 模板
@@ -160,7 +175,7 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 | Prompt 中的说法 | 代码侧必须提供 |
 |---|---|
 | “你负责当前任务” | session→run→task 精确绑定，禁止同 session 冒领其他 Run |
-| “读取根目标和相关决定” | A0/A1 的真实根契约、ContextView 与原始 refs，不能只加一句“考虑全局” |
+| “读取根目标和相关决定” | **A0 已落地（2026-09-23，待验收）**：真实的根契约（`task_intake` 接受后持久化的 objective/criteria/assumptions/constraints/requiredCapabilities）与来源 session 引用（根提案 `identity.rootSessionId`，承载用户输入的 session 日志里有该输入）；`task_read`/`task_status` 在未激活时给具名状态而非代用目标。**A1 未建**：ContextView、祖先决定投影与原始 refs 的授权读取仍待建，不能只加一句“考虑全局” |
 | “可查看邻域任务” | A2 的可见域检查、revision、分页与合法动作；不能只有全树字符串 |
 | “向父节点询问并等待” | A3 已落地非阻塞父循环与协调相位（waiting_children/submitted、写闸、显式提交；task-runtime/src/gate.ts、orchestrate.ts）；持久问题、问答唤醒与超时仍属 A4 |
 | “提交后由 verifier 判定” | A3 已落地：task_submit_result → RunPhaseChanged(submitted) 落库后 drainSession 排空在途写，再转 verifier 排他执行；idle 不作完成证据 |
@@ -180,6 +195,8 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 必测反例：工具未挂载却被提示调用；一个 worker 的合同泄漏到另一个；祖先文本含 `{{…}}`/结束标签/“忽略原规则”；P4 的证据依赖、heuristic 和 mandatory 在渲染中遗漏；T1 起 assumptions/constraints 必须来自同一份持久化契约，handoff 渲染与 `task_read` 的 store 视图不得各说一套（S1-V 切片 2 起同样适用于判据的 `protectedInputs` 声明路径）；根目标/AC 变更无版本；父等待时子提问形成环；reviewer 提出诊断后获得写权限；任务列表为空即拒绝生成。
 
 生成任务审核相关反例（T2/T3）：提示词/工具面出现“自行批准”或任何决定参数（模型不能自行生成可信 approvalRef）；worker 的工具面出现决定提案的工具或平台管理/HITL 工具；`off` 部署下模型被提示等待审核（应为正常分解）；`all` 下 prompt 未说明“等待审核时没有子任务、当前任务未分解”，或未说明“同内容重复提交答同一提案、修订是新提案”；审核等待期间模型被提示继续推进本任务（应为无法推进、可读可查可取消）。核对方法：真实装配后的工具面（`tests/integration/proposal-review.spec.ts` 的 worker/root 工具面用例）与渲染文本（`agent-singularity/src/proposal-review.ts` 的 §5 展示清单）。
+
+根入口与默认运行面相关反例（A0 + R0，2026-09-23 待验收）：`off` 组合的 root prompt 出现任何 `evolution_*` 名或晋升协议段（应为不注册也不提示）；`on` 组合缺少九个工具或漏掉协议段；prompt 与 allow-list 取自两个不同事实（本组由同一布尔派生，回归锚 `agent-runtime/tests/unit/agent-runtime.spec.ts`）；intake 段要求模型“自行接受/批准”契约或暗示可以绕过审核（部署的 intake 段明确“没有任何工具或参数能批准”）；未激活时提示模型 `task_decompose`（工具会具名拒绝，`task_read` 也报未激活）；worker 提示词/工具面出现 `task_intake`（它是 root 的路径，回归锚 `tests/integration/root-intake.spec.ts` 的 worker 工具面用例）。核对方法：真实装配后的 prompt 文本与工具面（`agent-runtime` 单测按 composition 逐名断言 allow-list、`assembly.spec.ts` 断言注册面），不用匹配自然语言句子证明状态机。
 
 协调组合态必须覆盖：waiting_children 同时有向祖先提出的阻塞问题；仅收到部分答案或 unresolved；有效问答在 inbox claim 后遇到 pre-step reject/崩溃。恢复后模型仍能读到未处理事实，主相位、batch 与写权限不因消息重放改变。waiting_children 的写拒绝以运行时闸在真实 tools waterfall 上的实际 deny 为证据（A3 起），不能只看 assembled prompt 未挂载。
 

@@ -39,7 +39,7 @@
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { vi } from 'vitest'
+import { expect, vi } from 'vitest'
 import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
 import { toolCallResponse, textResponse } from '../../../../thirdparty/deepseek-harness/packages/core/agent-loop/tests/mock-adapter.ts'
 import LlmRuntime, { LlmAdapter, createUserMessage } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
@@ -62,6 +62,7 @@ import { ProposalReviewService } from '../../agent-singularity/src/proposal-revi
 import { defineCapabilityListTool } from '../../agent-singularity/src/tools/capability-list.ts'
 import { defineTaskCancelTool } from '../../agent-singularity/src/tools/task-cancel.ts'
 import { defineTaskDecomposeTool } from '../../agent-singularity/src/tools/task-decompose.ts'
+import { defineTaskIntakeTool } from '../../agent-singularity/src/tools/task-intake.ts'
 import { defineTaskProposalCancelTool } from '../../agent-singularity/src/tools/task-proposal-cancel.ts'
 import { defineTaskProposalContinueTool } from '../../agent-singularity/src/tools/task-proposal-continue.ts'
 import { defineTaskProposalReadTool } from '../../agent-singularity/src/tools/task-proposal-read.ts'
@@ -74,7 +75,7 @@ import { VerifierRegistry } from '../../verifier/src/index.ts'
 
 /** The root agent's allow-list, exactly as `agent-runtime` composes it. Exported so a fixture that mounts no loop still composes the deployment's root surface. */
 export const ROOT_TOOLS = [
-  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'skill', 'task_decompose',
+  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'skill', 'task_intake', 'task_decompose',
   'task_submit_result', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
   'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
@@ -87,7 +88,7 @@ export const OTHER_TOOLS = [
 
 /** The tools this fixture registers for real; every other name is a stand-in. */
 const REAL_TOOLS = [
-  'task_read', 'task_status', 'capability_list', 'task_decompose', 'task_submit_result', 'task_cancel',
+  'task_read', 'task_status', 'capability_list', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel',
   'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel',
 ]
 
@@ -173,11 +174,17 @@ export interface ScriptedLoopOptions {
 export interface ScriptedReviewAsk {
   /** The owner session the review was shown in — the channel's own routing. */
   readonly sessionId: string
-  /** The tool the ask names; the deployment's channel names `task_decompose`. */
+  /** The tool the ask names: `task_decompose` for a batch, `task_intake` for a root contract (A0 §1.3, stage C's rendering). */
   readonly toolName: string
   /** The rendered review material: the whole batch, the limits and the identity a decision would bind. */
   readonly reason: string
 }
+
+/** The name the deployment's channel gives a batch review ask (`proposal-review.ts:BATCH_REVIEW_TOOL_NAME`). */
+const BATCH_REVIEW_TOOL = 'task_decompose'
+
+/** The name the channel gives a root contract review ask (`proposal-review.ts:ROOT_REVIEW_TOOL_NAME`). */
+const ROOT_REVIEW_TOOL = 'task_intake'
 
 /**
  * The human seam of this deployment (T2/T3 §5–§6): the real review channel
@@ -190,8 +197,21 @@ export interface ScriptedReviewAsk {
 export interface ScriptedReview {
   /** Every review ask, in ask order — the channel call count a refusal asserts on. */
   readonly asks: readonly ScriptedReviewAsk[]
+  /**
+   * Every ask about a **batch** ({@link BATCH_REVIEW_TOOL}), in ask order. A
+   * store's root contract is a subject of its own with its own lifecycle
+   * (A0 §1.3), so a case about a batch's review reads and answers batch asks
+   * rather than counting the setup's own.
+   */
+  readonly batchAsks: readonly ScriptedReviewAsk[]
+  /** Every ask about a **root contract** ({@link ROOT_REVIEW_TOOL}), in ask order. */
+  readonly rootAsks: readonly ScriptedReviewAsk[]
   /** Answer one held ask (ask order). An ask that has no answer held is refused by name. */
   answer(index: number, outcome: ApprovalOutcome): void
+  /** Answer the `index`-th **batch** ask. An index no batch ask holds is refused by name. */
+  answerBatch(index: number, outcome: ApprovalOutcome): void
+  /** Answer the `index`-th **root contract** ask. An index no root ask holds is refused by name. */
+  answerRoot(index: number, outcome: ApprovalOutcome): void
   /** How many asks were made and not answered yet. */
   pending(): number
 }
@@ -227,12 +247,33 @@ export interface ScriptedLoop {
   visible(agent: Agent): string[]
   /**
    * Activate the root session's tree through the real intake entry and start the
-   * root's first turn (A0 §1.1–§1.4): `task_intake` is a stage-C tool, so the spec
-   * calls the service entry the tool will call. The contract is the spec's own —
-   * there is no default, because the root's acceptance is the thing under test and
-   * a fixture that invented one would be answering the question for it.
+   * root's first turn (A0 §1.1–§1.4). The contract is the spec's own — there is no
+   * default, because the root's acceptance is the thing under test and a fixture
+   * that invented one would be answering the question for it.
+   *
+   * Under policy `off` the intake activates in the same call and this returns its
+   * ids. Under `all` the contract waits for a review (A0 §1.3) and the **fixture
+   * plays the reviewer**: it answers the root contract's own ask through the same
+   * desk a person's answer travels, and waits for the activation the channel's
+   * recorded decision then performs. What the cases built on this see afterwards
+   * is the state they assert on — an active root, and batch reviews of their own
+   * ({@link ScriptedReview.batchAsks}). A spec whose subject *is* the intake
+   * itself drives the tool instead, from the root agent's own script
+   * (`tests/integration/root-intake.spec.ts`).
    */
   begin(contract: RootContractSpec): Promise<{ storeId: string; taskId: string; runId: string }>
+  /**
+   * Put one user message on a session's log and let its turn read it — what a
+   * person typing at the root produces, and the entry a spec uses when the root's
+   * *own* scripted turn is the thing under test (accepting the contract with
+   * `task_intake`, reading the not-activated view first). The text lands on the
+   * session's own log as a `user/message` event, so "which session carried the
+   * request" is a fact a spec reads back rather than assumes.
+   *
+   * A session already running a turn queues the message for its next one, exactly
+   * as the loop queues a person's follow-up.
+   */
+  userSays(text: string, sessionId?: SessionId | string): void
   /** The run a session is bound to, with the store and task it belongs to. */
   runForSession(sessionId: SessionId | string): Promise<{ storeId: string; task: TaskInstance; run: TaskRun }>
   dispose(): Promise<void>
@@ -410,6 +451,33 @@ class ReviewDesk implements ScriptedReview {
     resolve(outcome)
   }
 
+  get batchAsks(): readonly ScriptedReviewAsk[] {
+    return this.asks.filter(ask => ask.toolName === BATCH_REVIEW_TOOL)
+  }
+
+  get rootAsks(): readonly ScriptedReviewAsk[] {
+    return this.asks.filter(ask => ask.toolName === ROOT_REVIEW_TOOL)
+  }
+
+  answerBatch(index: number, outcome: ApprovalOutcome): void {
+    this.answer(this.indexOfAsk(this.batchAsks, index, 'batch'), outcome)
+  }
+
+  answerRoot(index: number, outcome: ApprovalOutcome): void {
+    this.answer(this.indexOfAsk(this.rootAsks, index, 'root contract'), outcome)
+  }
+
+  /** The ask's position in the raw list a subject-scoped index names, refused by name when that ask does not exist. */
+  private indexOfAsk(asks: readonly ScriptedReviewAsk[], index: number, subject: string): number {
+    const ask = asks[index]
+    if (ask === undefined) {
+      throw new Error(
+        `no ${subject} review ask ${index} was made (this desk was asked about ${asks.length} ${subject}(s) out of ${this.asks.length} ask(s))`,
+      )
+    }
+    return this.asks.indexOf(ask)
+  }
+
   pending(): number {
     return this.held.size
   }
@@ -554,6 +622,10 @@ class ScriptedLoopImpl implements ScriptedLoop {
     ctx.tools.register(defineTaskReadTool(ctx))
     ctx.tools.register(defineTaskStatusTool(ctx))
     ctx.tools.register(defineCapabilityListTool(ctx))
+    // The real root intake (A0 stage C): a spec that drives the root's own turn
+    // reaches activation through the deployment's tool, not through a service call
+    // the tool would have made.
+    ctx.tools.register(defineTaskIntakeTool(ctx))
     ctx.tools.register(defineTaskDecomposeTool(ctx))
     ctx.tools.register(defineTaskSubmitResultTool(ctx))
     ctx.tools.register(defineTaskCancelTool(ctx))
@@ -690,6 +762,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
   }
 
   async begin(contract: RootContractSpec): Promise<{ storeId: string; taskId: string; runId: string }> {
+    const rootAsksBefore = this.review.rootAsks.length
     const submitted = await this.runtime.intakeRootContract(this.storeId, this.primary, contract)
     let rootTaskId: string
     let rootRunId: string
@@ -698,29 +771,73 @@ class ScriptedLoopImpl implements ScriptedLoop {
       rootRunId = submitted.runId
     } else {
       // Under policy `all` the root contract is held for a review exactly as a
-      // batch is (A0 §1.3). The **fixture plays the reviewer here** — through the
-      // same decision entry the approval channel calls — because the cases in
-      // these specs are about the *batch's* review: which asks reached a person,
-      // what they showed and what a decision can move stays theirs, uncontaminated
-      // by the setup. The deployment's own channel is still the one that was asked:
-      // a root contract's rendering is stage C's, so today that request reports
-      // itself as failed and the proposal keeps waiting — which is precisely the
-      // state this branch reads.
-      const waiting = await this.runtime.proposalIn(this.storeId, submitted.proposalId)
-      if (waiting.status === 'pending_review') {
-        await this.runtime.decideProposal(this.storeId, submitted.proposalId, { outcome: 'approved' }, 'fixture-setup')
-      }
-      const continued = await this.runtime.continueProposal(this.storeId, submitted.proposalId, this.primary)
-      if (continued.status !== 'activated') {
-        throw new Error(
-          `the fixture expected an activated root for session "${this.primary}" but the intake answered "${continued.status}": ${continued.detail}`,
-        )
-      }
-      rootTaskId = continued.taskId
-      rootRunId = continued.runId
+      // batch is (A0 §1.3), and nothing exists until a decision is recorded. The
+      // fixture answers that ask through the desk — decided by the owner session,
+      // as a person's answer is — and reads the ids back from the store instead of
+      // calling an admission entry a person could not reach. The deployment's own
+      // channel is the one that was asked: a root contract's rendering is stage C's,
+      // and the ask it raised here is the review this case's setup stands on.
+      await this.awaitRootAsk(rootAsksBefore, submitted.proposalId)
+      this.review.answerRoot(rootAsksBefore, 'allowed-once')
+      const activated = await this.awaitRootActivation(submitted.proposalId)
+      rootTaskId = activated.taskId
+      rootRunId = activated.runId
     }
-    this.agent(this.primary).followup(createUserMessage({ content: [{ type: 'text', text: 'begin' }], source: { kind: 'user' } }))
+    this.userSays('begin')
     return { storeId: this.storeId, taskId: rootTaskId, runId: rootRunId }
+  }
+
+  userSays(text: string, sessionId: SessionId | string = this.primary): void {
+    this.agent(sessionId).followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
+  }
+
+  /** Wait for the review the submission asked for to reach the desk, or report why no ask came. */
+  private async awaitRootAsk(rootAsksBefore: number, proposalId: string): Promise<void> {
+    try {
+      await vi.waitFor(
+        () => { expect(this.review.rootAsks.length).toBeGreaterThan(rootAsksBefore) },
+        { timeout: 20_000, interval: 25 },
+      )
+    } catch (error) {
+      const waiting = await this.runtime.proposalIn(this.storeId, proposalId).catch(() => undefined)
+      throw new Error(
+        `the fixture expected the review channel to ask about root contract ${proposalId}, but no root review ask was made: the proposal is ` +
+        `${waiting?.status ?? 'unreadable'} (${waiting?.detail ?? String(error)})`,
+      )
+    }
+  }
+
+  /**
+   * Wait for the root task the approved contract became, read from the store. The
+   * recording of a decision is deliberately off the asking tick (§5: the channel
+   * settles the ask asynchronously, so the runtime's per-store lock is not held
+   * while a person thinks), so the activation that follows the fixture's answer is
+   * observed here rather than awaited from a call this fixture made.
+   */
+  private async awaitRootActivation(proposalId: string): Promise<{ taskId: string; runId: string }> {
+    let root: { taskId: string; runId: string } | undefined
+    try {
+      await vi.waitFor(async () => {
+        const snapshot = await this.task.snapshotIn(this.storeId)
+        const task = snapshot.tasks.find(candidate => candidate.parentTaskId === undefined)
+        const run = task === undefined
+          ? undefined
+          : snapshot.runs.find(candidate => candidate.taskId === task.taskId && candidate.sessionId === String(this.primary))
+        if (task === undefined || run === undefined) {
+          throw new Error(
+            `the store holds ${snapshot.tasks.length} task(s) and no root run for session "${String(this.primary)}"`,
+          )
+        }
+        root = { taskId: task.taskId, runId: run.runId }
+      }, { timeout: 20_000, interval: 25 })
+    } catch (error) {
+      const waiting = await this.runtime.proposalIn(this.storeId, proposalId).catch(() => undefined)
+      throw new Error(
+        `the fixture approved root contract ${proposalId} but no root task was activated: the proposal is ${waiting?.status ?? 'unreadable'} ` +
+        `(${waiting?.detail ?? String(error)})`,
+      )
+    }
+    return root!
   }
 
   async dispose(): Promise<void> {

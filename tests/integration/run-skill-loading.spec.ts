@@ -36,7 +36,7 @@ afterEach(async () => {
 
 /** Every tool the platform keeps for the root and the root's own planes — none of which a granted worker may reach. */
 const PLATFORM_TOOLS = [
-  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_review_pack', 'task_review_agent',
+  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_intake', 'task_review_pack', 'task_review_agent',
   'task_diagnose', 'evolution_propose', 'evolution_candidate', 'evolution_prepare', 'evolution_replay',
   'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
