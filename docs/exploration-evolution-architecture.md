@@ -2,6 +2,8 @@
 
 日期：2026-09-21。状态：架构决定与待建合同，不是已上线功能。基线 Singularity `9900959`，外层 harness `51b6e2f`；本地 DSH `0d1f50007f9bca3f52b06e1c3074fa14d5fb0720`。
 
+2026-09-23 复核代码 `fda3d29`：A3 与 T2/T3 已交付，A0 和自主改进恢复仍未建。以下已落实协议按事实保留；未来字段/数据形状是设计候选，按建设计划 R1/R2 的实际运行证据复定后才成为实施合同。不能把整份文档视为必须逐字段实现的清单。当前先执行 A0 + R0、R1、R2，顺序只在建设计划维护。
+
 本文细化 [主指南](singularity-harness-guide.md)的上下文、协作与 supervisor 主线；Task 结构及可选契约审核见 [Task 自主构造指导](task-contract-construction-guide.md)，建设顺序见 [计划](2026-09-20-vrtc-code-change-plan.md)。外部事实及固定来源见 [开源调研](2026-09-21-open-source-agent-patterns.md)，角色提示词合同见 [Prompt 指导](agent-prompt-contracts.md)。
 
 ## 1. 要达成的行为
@@ -17,8 +19,8 @@
 | 子节点全局观 | fresh session；TaskHandoff 的父目标、理由、决策/约束等字段；父 session 引用；worker contract 系统投影 | 实际 `buildHandoff` 调用主要填父目标、依赖证据、assumptions，决策/约束常为空；没有完整 root brief 和祖先决策投影 |
 | 压缩后契约 | `contract-reinjection.ts` 复用 DSH system prompt projection，agent scope 隔离 | 动态上下文版本、决策变更通知、事实与摘要来源分离不完整 |
 | 子询问父 | DSH 有 inbox/steer/followup、continuable send_message；worker 有 ask_user_question | Singularity spawn 直接走 agents.create，未注册 continuable activation；开放 send_message 不能自动得到子到父通道；缺 questionId/答复/等待协议 |
-| 父节点可回答 | agent 会话可继续 | `decomposeAndRun` 等待整个 cascade；父模型卡在工具调用，子若同步等待父回答会形成循环等待 |
-| 多轮任务执行 | Agent 会话、TaskRun 分离 | `awaitWorker` 以 whenIdle 触发后续验收，不能区分“等待澄清的 idle”和“提交验收的 idle” |
+| 父节点可回答 | A3 已使 `decomposeAndRun` 返回 batchId，父可继续协调 | A4 的持久问题/回答与唤醒尚未接线，不能据非阻塞推进宣称问答完成 |
+| 多轮任务执行 | A3 已分开 idle 与显式提交，waiting_children/submitted 有运行时闸 | 问答等待、部分回答与 claim 后恢复仍待 A4；已提交未判决的恢复不等于任意中断自动续做 |
 | Task 发现 | task_read 读当前任务；task_status 列整 store；capability_list 列 registry | task_read 没有任意 taskId drill-down；没有受限图切片、revision/cursor、合法动作和阻塞原因的结构化视图；不存在任务模板 catalog |
 | 沿图 debug | task_review_pack 带当前任务的 reviews/父子摘要/相邻依赖；只读 task_review_agent 及 Diagnosis | 无自动 review 触发与跨任务因果遍历；reviewer prompt 限制“pack and nothing else”与读取更深证据的工具能力不协调 |
 | 改进执行 | Evolution proposal/prepare/replay/gate/approval/apply/rollback；P1–P4 | 无 supervisor 自动候选工作流、真实来源全绑定、blocked 恢复；多目标执行器仍缺失 |
@@ -27,7 +29,7 @@
 
 主要源码：`task-runtime/src/{handoff,contract,orchestrate,index,capability}.ts`；`agent-runtime/src/{index,contract-reinjection,grants}.ts`；`agent-runtime/src/prompts/root.prompts.ts`；`agent-singularity/src/tools/{task-read,task-status,task-review-pack,review-agent}.ts`。
 
-表中“没有”基于该提交源码，不据此推断具体运行 profile 已挂载哪些插件；实施前必须核对 profile composition 与工具实际可见集合。
+本表按已注明交付与本次源码复核更新，不据此推断具体运行 profile 已挂载哪些插件；实施前必须核对 profile composition 与工具实际可见集合。
 
 ## 3. 先固定的架构决定
 
@@ -95,6 +97,8 @@ T2/T3 作为一个交付组先完成子批次协议；A0 再负责根入口适�
 
 根契约未知的语义可以向用户澄清，但日常拆分不依赖用户编写。只设“子任务都通过”不能验收一个新业务根目标；至少一个独立根判据要回答真实交付是否成立。本文不强迫所有根预先写 childEvidence 的未来索引，可沿 P4 的独立 command/实际 verifier 路径验收。未落实顶层判据前不得把子任务成功汇总宣称为整体成功。
 
+根 intake 必须能追溯到实际用户请求及必要澄清，优先引用现有 Session 事件，不再复制一套需求库。用户明示要求、模型提出的假设分别展示；影响交付范围/验收的未知不能在 `off` 下静默变成已确认事实。用已有人类澄清渠道解决根歧义，普通方法选择自主进行，不新增普遍强制人审。至少一个非 composite 判据只是语法门槛；还必须有真实产物检查及“子全绿但交付错误”反例。自然语言目标的一般正确性不能由 schema/hash 保证。
+
 ### 5.1 三层内容
 
 | 层 | 默认内容 | 来源/更新 |
@@ -105,7 +109,7 @@ T2/T3 作为一个交付组先完成子批次协议；A0 再负责根入口适�
 
 “全局”是知道最终目标、硬边界、自己的贡献和依赖，不是看到所有会话。普通 worker 不默认收到无关兄弟历史、全库 Skill 正文、所有诊断。Supervisor 可在授权域内读取更宽切片，但也先摘要再展开。
 
-`ContextView` 建设字段：viewVersion、viewId、sourceRevision、storeId/graphId/taskId/runId、rootTaskRef、ancestorRefs、contractRef、handoffRef、decisionRefs、dependencyEvidenceRefs、capabilityManifestRef、pendingQuestionRefs、allowedActions、omittedRefs。名称可贴合 T1 现有字段，语义不可遗漏。
+`ContextView` 是读取投影，不默认增加一个持久化对象。候选信息包括任务/run 身份、根目标与当前契约、相关依赖和来源、合法动作；已有字段/引用足够时直接复用。A1 派发前按实际读取场景决定是否需要独立 viewId、版本、祖先/决定/问题引用和 omittedRefs；没有消费者的不建。不可遗漏的是适用约束、来源和省略/未知的诚实表达，不是字段全集。
 
 所有摘要段落带 sourceRefs 和 authoritative/derived 标注；LM 摘要不覆盖原始记录。规范约束优先级：运行时权限/部署限制 → 已接受根契约 → 当前任务契约 → 已记录决定 → 临时回答/摘要。发现冲突需显式诊断/提问，不能静默选一条、改变契约或提升权限。
 
@@ -113,7 +117,7 @@ T2/T3 作为一个交付组先完成子批次协议；A0 再负责根入口适�
 
 从 Task 的 parentTaskId 追到根，并以 GraphRecord/root binding 校验；不要使用“store 中第一个 depth=0”，因为 replay 也可能建立 parentless 任务。Session.parentSession 说明会话来源，不自动等于任务父子关系；reviewer/supervisor 节点可以有 session 但没有业务 TaskRun。
 
-祖先决策只传 applicableTo 当前任务或依赖接口的记录。决定的最小数据是 decisionId、author、scope、text、sourceRefs、createdAt、supersedes；Task store 保存一次，handoff 保存引用和建立时的版本。新增决定不能改写已接受 AC；需要改题时回到契约修订。
+祖先决定只传适用于当前任务或依赖接口的内容，优先引用现有 Session/Task 记录，不为一段上下文预建独立 decision ledger。确有修订/替代消费者时再定义专门记录，其身份、来源、适用域与替代关系必须可追溯。新增决定不能改写已接受 AC；需要改题时回到契约修订。
 
 ### 5.3 上下文预算与可见域
 
@@ -127,7 +131,7 @@ scoped system section 只放可信 runtime 生成的结构与合同。引用的�
 
 三个目录不能混用：实例视图列正在进行/历史任务；模板视图（尚未建）列可选契约模式；capability_list 列能力实现。首版不建模板库，不增加 Task 搜索向量数据库。
 
-扩展现有 task_read/task_status：task_read 可按授权 taskId 精读；task_status 支持 self/ancestors/neighborhood/subtree 的有界切片。建议结构化结果含 `revision, tasks[], dependencies[], diagnostics[], nextCursor`，文本 renderer 只投影结果，不独立决定状态。分页 cursor 绑定 revision，过期要求重读，禁止分页中混入不同快照却称一致。
+扩展现有 task_read/task_status：先交付实际需要的按授权 taskId 精读与有界邻域查询，返回调用者身份范围内的任务、依赖、诊断和合法动作，文本 renderer 不独立决定状态。self/ancestors/neighborhood/subtree 全套查询模式及 cursor 不是默认前置；A2 在 R1/R2 后固定所需模式。若确需分页，cursor 必须绑定 revision，过期要求重读；未实现分页时明确截断/省略，不把有限结果冒充全图。
 
 每个任务显示 taskId、parentTaskId、objective、status、latestRunId、ownerSessionId、contractRef、blockingReasons、evidenceRefs、allowedActions。普通 worker 默认看自己、祖先目标与直接依赖摘要；跨 group 的隐藏成员只显示 router 端点或授权摘要，不能通过 taskId 猜测越界读取。现有 task_status 全树可见不是已经具备该隔离，需迁移测试说明行为变化。
 
@@ -144,7 +148,7 @@ scoped system section 只放可信 runtime 生成的结构与合同。引用的�
 
 ### 7.1 必须先解除循环等待
 
-当前链路是“父工具等待子 whenIdle → 子工具等待父回答”，DSH 的 steer 只能在父下一 step 生效，无法抢入尚未返回的工具执行。给子节点加 ask_parent 而不改父侧协调会死锁。
+A3 前的链路是“父工具等待子 whenIdle → 子工具等待父回答”，会形成循环等待。A3 已解除父工具长等待；A4 仍须保证问答不重新引入同步递归等待。DSH 的 steer 只能在父下一 step 生效，不能抢入尚未返回的工具执行。
 
 建设决定：把 `decomposeAndRun` 的“准入提交”与“批次推进”分开。Task runtime 保存一个批次的 child ids、依赖、执行进度；准入后立即返回 batchId/状态，runtime 在 Cordis effect 拥有的执行中推进。父 agent 得以继续收消息/答问。初版仍每批一次运行一个子任务，共享 checkout 不因父可响应而变成并行写入。（A3 已落地，2026-09-22：`decomposeAndRun` 两阶段返回 `{ batchId, childTaskIds }`，`driveBatch` 可重入推进、每批按依赖串行；批次由 per-batch AbortController 拥有，工具 signal 只管准入段。）
 
@@ -272,32 +276,34 @@ S4-E 在主管自动候选执行前完成：冻结任务/输入快照、裁判�
 
 运行时生成实际工具集合和 allowedActions，提示词讲如何使用它们。使用 [Prompt 指导](agent-prompt-contracts.md)中的角色文本和 schema 合同；不把未来工具名提前写进已部署 prompt。
 
-Prompt 按角色政策（稳定）、不可变契约、当前上下文投影、工具 schemas 分层。事实渲染不执行模板插值。promptVersion/template hash 和 sourceRevision 可追溯；快照测试必须比对真实装配后的系统文本与工具集，而非只测字符串 helper。
+Prompt 按角色政策（稳定）、不可变契约、当前上下文投影、工具 schemas 分层。事实渲染不执行模板插值。优先沿用已有配置版本和来源引用，不为追踪文本再加无消费者的 hash 字段；装配测试检查实际系统文本与工具集，而非只测字符串 helper。
+
+R0 按角色与实际启用能力收敛工具面，部署未启用 Evolution 时不出现其工具/协议；已启用的管理流程保持既有校验和授权。通用 root 不内置 BB 流程。提示词中的行为建议可以由模型实验评价；权限、状态转换、成功宣告等保证必须由运行时执行，不能要求每句自然语言都新增一条机器规则。
 
 尤其要改正 root 中“L4 stays manual”、worker 中“make command exit 0”和“模糊就问人”的当前措辞：实现应满足语义、保留受保护判据，先查上下文/问父，L4 是例外决策。decomposable 意图允许父做规划委派，但必须明确是父指定协调任务还是缺能力暂未可执行，不能同一段同时命令“必须拆”与“不合适就自己做”。
 
 ## 10. 分批建设合同
 
-派发严格遵守 [建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一顺序与交付组，每次读取 [公共执行合同](execution-prompts/README.md)，更新主 guide、计划及本文当前状态。A 编号仍未实现。下表只定义责任与验收，不另构成可跳过前置的路线。
+派发严格遵守 [建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一顺序与交付组，每次读取 [公共执行合同](execution-prompts/README.md)，更新主 guide、计划及本文当前状态。A3 已交付，其他 A 票待建；A0 与 R0 同组，之后 R1/R2，再复定后续票。下表保留责任与不变量，不是另一条派发顺序；待复定票的数据字段和通用化程度以实际场景裁剪。
 
 | 票 | 前置与落点 | 必交付与确定性验收 |
 |---|---|---|
 | A0 真实根契约入口 | T1、S1-V 切片 2、T2/T3 组；graphs/createRootTask、root 角色 | setup 不消费根分解；无契约时 task_read 返回未激活；graph name 不冒充目标；新根有独立 AC；子全通过但根错误仍拒绝；off/all 与激活崩溃恢复完整；拒绝草案零派发；旧图不改历史 |
 | A1 全局上下文投影 | A0/A2、S1-C；handoff/contract、scoped prompt | 三层递归能读 root/贡献/来源决定/依赖；复用 A2 授权读取；无关正文不默认注入；压缩/重启可恢复；超预算有引用与诊断；多个 depth=0/replay 不串根；文本不变权限 |
-| A2 任务导航与合法动作 | A0/A3、S1-C；task_read/status、权限域 | 自己/祖先/邻域分页与状态准确；未激活/等待状态不误报；跨 graph/隐藏组拒绝；不同 cwd 失败明确；ready 不允许接管；陈旧 revision 重检；空模板仍能生成；工具显示与准入相同合同 |
+| A2 任务导航与合法动作 | A0/A3、S1-C，R1/R2 后复定；task_read/status、权限域 | 实际所需授权切片与状态准确，有界结果不冒充全图；未激活/等待不误报；跨 graph/隐藏组拒绝；ready 不允许接管；动作前重检；空模板仍能生成；需要分页时另验 revision 一致性 |
 | A3 非阻塞批次与协调相位（已交付，2026-09-22；验收见建设计划「A3 执行与验收记录」，落地事实已回写 §7.1/§7.2/§7.4） | T1、S1-V 切片 2、S1-C；Task runtime/reducer、agent-runtime | 分解立即返回且父可继续；waiting idle 不验收；显式提交/父独立验收；依赖串行、取消/恢复/卸载完整；提交/派发去重；迟到写入、跨批次/跨根工作区冲突被阻挡；普通/replay 同守状态规则；根预算不因新 Run/重启重置，无进展停止 |
 | A4 父子问题/回答 | A1–A3；TaskQuestion、消息适配、scoped 工具 | 真实 DSH loop 父子问答完成，无同步死锁；孙问子、子问根后 batch 与写闸保留；一个答案不清空其他阻塞，unresolved/改契约不放行；重复/迟到/伪造身份/跨组/缺父拒绝；ask 先落账、无回复不成功；入箱及 claim 后 reject/crash 可恢复且不重复领域副作用；问题不新增 graph 边；闭包缺口不自动提权 |
 | A5 因果诊断与 supervisor 触发 | A1/A2/A4、S4-E；与 S2-E 同组 | 一个上游错误仅一次 incident；引用真实边与原始证据；伪造 ref 拒绝；裁判/任务错误分开；根预算与 frontier；候选交接落账但自动执行未开放；重启不重复通知/主管任务 |
 | A6 自主改进和恢复 | A5/S2-E 组、S4-E；与 S2-R/S3 同组 | 缺能力时自主组合，另例实现候选并独立验证；坏候选拒绝、正确候选人审 apply 后恢复；拒绝/重启/预算停止/回滚完整；有效兄弟证据复用、失效证据拒绝；新能力用新 Run，零人工补写 Skill |
 
-所有前置按建设计划的完成闸检查。T2/T3、A5/S2-E、A6/S2-R/S3 分别作为交付组，不留下需下一组补齐的已承诺行为。新增问答等后续能力未完成时不暴露其工具或假装可用，已交付的执行/取消/恢复不能依赖未来工具。模块可分内部提交，不能把半成品提交标成完成。
+所有前置按建设计划完成闸检查，交付组以其唯一表为准。新增问答等后续能力未完成时不暴露其工具或假装可用，已交付的执行/取消/恢复不能依赖未来工具。模块可分内部提交，不能把半成品标成完成；基础执行验证不等于自主进化完成。
 
-A3 是本组风险最高的基础改动，应先提交事件/状态迁移矩阵和受控模型 fixture，评审合同后实现；这里的“评审”是后续工程的交付物，不要求人替 agent 设计所有细节。代码需要的审批仍按现有用户授权，不额外设开发许可流程。
+A3 的历史状态/事件矩阵与受控模型测试继续作为回归依据；R2 针对有证据的重复职责整理，不因原设计复杂就重写整个驱动。人不替 agent 设计所有细节，也不额外设开发许可流程。
 
 ## 11. 架构是否有效，怎样测量
 
 协议正确性与模型效果分别验收。协议用真实 store/DSH loop 配合 scripted provider，断言状态、权限、消息、重复副作用；模型实验固定目标集/环境/模型/预算，对比有无 root brief/澄清路径的目标成功率、父目标违背率、有效澄清率、token/工具成本和无进展次数。不能只因 token 下降或模型会复述 prompt 就宣布效果更好。
 
-首个领域选择便宜确定性的接口组合/小型工程目标，至少包含：子全通过但父接口不一致、缺一个关键决定、父正等待子时子提问、上游失败传播到两个下游、坏 verifier、拒绝候选后重新修订。确定性 fixture 通过不等同真实模型实验；结果在计划中分别记录。
+R1 先测根入口、独立根验收及根语义歧义，场景和完成闸以建设计划为准。父等待时子提问、上游失败传播、坏 verifier 与候选拒绝后修订，随 A4/S4-E/A5/A6 的对应能力逐项验收，不作为 R1 的隐藏前置。每项沿用同一实现并分别记录确定性协议结果与真实模型效果。
 
 仍有边界：自然语言目标完整性、prompt 注入下的语义鲁棒性、跨进程 exactly-once、恶意共享文件系统写入、所有目标可自动修复均不作保证。架构降低错误传播并使其可诊断，不以“自由探索”要求无限预算或承诺所有问题有解。

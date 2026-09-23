@@ -5,7 +5,7 @@
 
 方向入口为 [主指南](singularity-harness-guide.md)，派发顺序以 [建设计划](2026-09-20-vrtc-code-change-plan.md)为准；本文件细化 Task 契约与生成审核，不替代两者。
 
-后续 [探索与自进化架构](exploration-evolution-architecture.md)细化上下文、非阻塞批次、问父与 supervisor。T1–T3 只建设子任务契约/审核；根 intake 独立列 A0。按建设计划唯一顺序，A3 完成后 T2/T3 作为一个交付组复用其提交/恢复，整组验收后再建 A0，禁止另建推进器。
+后续 [探索与自进化架构](exploration-evolution-architecture.md)细化上下文、非阻塞批次、问父与 supervisor。T1–T3 只建设子任务契约/审核，均已交付；根 intake 属 A0。2026-09-23 顺序修订后，下一项为 A0 + R0，再进入 R1 真实运行及 R2 整理；唯一顺序见建设计划，禁止另建推进器。
 
 ## 1. 要解决的问题
 
@@ -15,18 +15,20 @@
 
 本轮建设限定当前父任务下的子任务批次。T1–T3 不改根入口；后续 A0 单独解决真实根契约激活。根目标修订、Task 模板库、通用规划器、OR/循环组合语言不在 T1–T3 范围。
 
+**根目标语义边界（A0 待实现）**：原请求及澄清需有可读取来源，模型假设不冒充用户要求；影响目标/验收的歧义先澄清，实现方法仍自主决定。可选契约审核 `off/all` 与必要语义澄清是两回事，不为所有任务强制人审。非 composite 判据或摘要正确只证明结构/身份，不证明目标解释正确；须有针对实际交付物的独立根检查。复用已有 Session 引用与 TaskContract，不预建通用需求解析器。
+
 ## 2. 已有基础与实际缺口
 
 | 现有能力 | 源码锚 | 不能据此推断的能力 |
 |---|---|---|
 | Task 定义、实例、Run、AC 类型 | `task/src/types.ts` | 完整不可变 TaskDefinition 注册库 |
-| 节点动态提交 objective、AC、能力、依赖、assumptions | `agent-singularity/src/tools/task-decompose.ts` | 必须从已有模板选择；已有生成人审开关 |
+| 节点动态提交 objective、AC、能力、依赖、assumptions；T2/T3 已有生成审核 | `agent-singularity/src/tools/task-decompose.ts` | 必须从已有模板选择；结构准入保证用户语义正确 |
 | AC 默认值与自动编号 | `task-runtime/src/normalize.ts:normalizeDecomposition`（T1 前为 `task-runtime/src/index.ts:normalizeCriteria`，已删除） | 工具 schema 是所有入口的统一运行时校验 |
 | 深度、数量、依赖无环及部分判据结构准入 | `task-runtime/src/admission.ts` | 父目标与所有子契约之间的自然语言蕴含证明 |
 | P4 父证据映射、独立判据、原始/已验证输入区分 | `independentAcceptanceDefects`、composite verifier | C3 假设满足性完整证明、任何父任务都已有独立判据 |
-| 一批子任务准入后落库并顺序执行 | `decomposeAndRun`、`decomposeIn` | 审批暂停/重启后的幂等恢复和执行一次保障 |
+| A3 非阻塞顺序执行；T2/T3 提案审核/幂等恢复 | `decomposeAndRun`、`continueProposal`、`reconcileStore` | 任意外部副作用 exactly-once；多进程竞争写同一 store |
 
-当前 `TaskInstance` 不保存 assumptions；它们经 ChildPlan 进入 handoff。预算来自运行时配置，不能声称已经作为完整 Task 契约保存。能力缺口准入可能记录 Obligation，因此后续所谓“预检无副作用”必须拆出纯校验，不能直接重复调用现有执行入口。
+T1 已将 assumptions/constraints 存入 `TaskInstance.contract` 并渲染至 handoff；旧记录缺字段不伪造历史。预算来自运行时配置及 A3 根预算规则，不能声称可由生成契约任意覆盖。能力缺口路径可能记录 Obligation；纯预检与执行入口分开，不能通过重复调用有副作用的入口实现重检。
 
 ## 3. 区分四种操作
 

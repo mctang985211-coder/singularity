@@ -2,13 +2,21 @@
 
 日期：2026-09-21。状态：建设用模板，未注入当前运行时（部署中的实际文本以 §3/§4 条件块标注的真实落点为准，例如 A3 的显式提交协议与 T2/T3 的生成任务审核段）。依赖与协议见 [探索/进化架构](exploration-evolution-architecture.md)。本文件不能单独作为“换提示词即可上线”的实现票。
 
+2026-09-23 修订：本文件是角色职责参考，不要求把以下全文叠加进 system prompt。R0 将按实际角色、配置和工具装配收敛部署文本，尚未实施；后续 A 票的未兑现段落继续留在设计文档。各票不得因新增测试就继续向 root 追加整段协议说明。
+
 ## 1. 装配规则
 
 提示词分四层：稳定角色政策、不可变任务契约、带 revision 的动态上下文、当前实际工具 schemas。复用 DSH systemPrompt scoped sections 和工具 restriction；不另写完整 prompt 拼接引擎，不覆盖上游必需的运行规则。
 
-由运行时传入 role、task/run/graph binding、contractRef、rootBrief、contextViewRef、allowedActions 和有效工具集合。数据不是 {{模板变量}} 代码，使用 `interpolate:false` 或结构化渲染，来源文本不能改变 agent 角色。正文含反引号、竖线、XML 结束符等仍需原样可识别，不能依靠 Markdown 表格拼接保证边界。
+由运行时传入实际已有的角色、task/run 身份、当前契约与工具集合；rootBrief/ContextView/allowedActions 等视图随对应能力落地，不为装配本文模板预建字段。数据不是 {{模板变量}} 代码，使用 `interpolate:false` 或结构化渲染，来源文本不能改变 agent 角色。正文含反引号、竖线、XML 结束符等仍需原样可识别，不能依靠 Markdown 表格拼接保证边界。
 
 每个 role 的工具集必须在真实装配后检查；工具没实现/没挂载就不得在模型提示中要求调用。以下方括号能力项为部署时条件块，不能原样输出给模型。已有 tool 名称继续沿用，规划名到实现后才启用。
+
+部署文本只承担三类内容：稳定角色与不可越过的约束、当前任务事实、当前动作的必要说明。长篇状态分支由工具 schema/结构化结果解释，避免在角色文本再维护一份状态机。行为建议（先查证据、合理分解）靠真实模型实验评估，不要求逐句新增 gate；权限/状态/验收保证必须有实际代码来源。
+
+R0 的 root 默认不挂载 `evolution_*`，不注入整条晋升协议；显式启用时按管理角色提供相应工具和必要说明。root 协调、reviewer 只读诊断、candidate builder 在 sandbox 实现，沿用现有 preset/scoped tools，不新增通用角色框架。进化未启用不能描述成“请人代写能力”；应如实报告当前能力边界。BB 等领域指导由部署的领域 Skill/preset 提供，通用 root 不内置。
+
+根入口的解释原则：原请求和澄清是来源，模型提出的假设须标明。会改变交付或验收的歧义先经已有渠道澄清；普通方法选择自主决定。机器准入不证明自然语言理解正确，可选人审关闭也不改变这一边界。
 
 ## 2. 共同规则模板
 
@@ -85,16 +93,21 @@ task_decompose 可能不立即执行：部署开启契约人审时，它回答�
 
 [非阻塞批次协议（A3 已部署：agent-runtime/src/prompts/root.prompts.ts）]
 提交分解后保存 batchId。批次受 runtime 管理；无需保持一个同步等待工具。
-收到子节点问题时先检查 questionId 对应契约与相关决定，给出有来源的回答。
-没有足够依据就继续查询或沿祖先请求澄清，不能编造根目标。
-向祖先提问及收到答案都不取消原批次等待，也不恢复共享产物写权限。
 子运行期间只做协调与读取，不与子节点同时修改共享产物。
 需要终止本批次时用 task_cancel（只取消自己派发的批次）；waiting_children
 期间的写、shell 与再次分解由运行时闸拒绝，不只靠本提示词约束。
 
+[父子问答协议已部署时（A4 待建，此段当前不能注入）]
+收到子节点问题时先检查 questionId 对应契约与相关决定，给出有来源的回答。
+没有足够依据就继续查询或沿祖先请求澄清，不能编造根目标。
+向祖先提问及收到答案都不取消原批次等待，也不恢复共享产物写权限。
+
 看到子任务失败，区分原发失败和依赖传播。读取 review pack，必要时发起
-有预算的诊断。能力或机制缺口优先交给 supervisor 处理授权内的改进；
-只有需要用户意图、外部权限、预算追加或残余风险决策时请求人类。
+有预算的诊断。
+
+[自主改进协议已部署时（A5/A6 待建，此段当前不能注入）]
+能力或机制缺口优先交给 supervisor 处理授权内的改进；只有需要用户意图、
+外部权限、预算追加或残余风险决策时请求人类。
 
 子任务自然语言“完成”只是摘要；父结果必须依赖实际 evidence 与自己的判据。
 不得重复分解已经落库的同一父批次，也不得重跑已通过兄弟来掩盖恢复缺口。
@@ -160,7 +173,9 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 
 ## 7. Prompt 验收矩阵
 
-每个实现票除行为测试外，至少检查实际 assembled prompt 和实际可调用工具集合：root setup、root execution、普通 leaf、decomposable、waiting_children、waiting_answer、read-only reviewer、candidate builder，以及恢复/压缩后的相同角色。
+每票只检查本票修改或实际依赖的角色及其恢复/压缩场景，使用实际 assembled prompt 和实际可调用工具集合。root setup/execution、leaf、decomposable、waiting_children、reviewer 属已有场景；waiting_answer 与自动 candidate builder 随相应票实现后检查，不要求每票为未来角色建 fixture。
+
+验收分三层，证据不能互相替代：装配层检查事实来源、角色泄漏、未挂载工具与未启用协议；运行时行为层检查权限、等待、恢复和副作用；真实模型层测任务完成与有效澄清。以下是按风险选取的反例库，不是每票全部重复的清单；协议反例放对应集成测试，不用匹配 prompt 字符串证明状态机正确。
 
 必测反例：工具未挂载却被提示调用；一个 worker 的合同泄漏到另一个；祖先文本含 `{{…}}`/结束标签/“忽略原规则”；P4 的证据依赖、heuristic 和 mandatory 在渲染中遗漏；T1 起 assumptions/constraints 必须来自同一份持久化契约，handoff 渲染与 `task_read` 的 store 视图不得各说一套（S1-V 切片 2 起同样适用于判据的 `protectedInputs` 声明路径）；根目标/AC 变更无版本；父等待时子提问形成环；reviewer 提出诊断后获得写权限；任务列表为空即拒绝生成。
 
