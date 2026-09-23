@@ -24,7 +24,7 @@
 | 4 | A3：非阻塞运行与恢复 | 已验收（2026-09-22，独立子代理复核 + 复核修复回归） | Kimi Code 主代理（5 阶段实现/测试子代理 + 1 独立复核子代理 + 1 复核修复子代理） | 见「A3：非阻塞运行与恢复 执行与验收记录」 | 非阻塞推进、工作区写入归属、显式提交、取消/恢复、根预算与普通/replay 一致性完整 |
 | 5 | T2 + T3：契约审核与恢复（一个交付组） | 已验收（2026-09-23，双模型并行独立复核 + 综合复核确认） | Kimi Code 主代理指挥 + 4 阶段实现子代理（A 提案合同层 / B task-runtime 生命周期、重检、幂等与恢复 / C 工具面、审批渠道与 prompt / D 集成级验收、模型协议 fixture 与文档收尾）+ 2 并行独立复核子代理 + 1 综合复核子代理 | 见「T2+T3：契约审核与恢复 执行与验收记录」 | off/all、审核持久化、批准后重检及崩溃恢复一起验收，不单独交付不可恢复的 all |
 | 6 | A0 + R0：根入口与默认运行面（一个交付组） | 已验收（2026-09-23，独立子代理复核） | Kimi Code 主代理指挥 + 6 阶段实现子代理（R0-a 装配开关 / R0-b 根 allow-list 与 prompt 收敛 / A `task` 包 kind 联合与根消费 / B `task-runtime` intake 服务层、`adoptRoot`、`graphs.create` 切换、支撑夹具走真实 intake / C `task_intake` 工具、根未激活视图、根审核渲染、prompt 段 / D 集成验收与文档收尾）+ 1 独立复核子代理 | 见「A0 + R0：根入口与默认运行面 执行与验收记录」 | 根目标来源、独立 AC、off/all 与激活恢复完整；默认工具/prompt 按角色收敛；见下方补救合同 |
-| 7 | R1：真实运行验证 | 阻塞（2026-09-23：S1 已经真实模型通过；S2/S3 因固定 token 预算触界未运行，待追加授权决策） | Kimi Code 主代理指挥 + 1 执行子代理 | 见「R1：真实运行验证 执行记录」 | 同一实现的真实模型任务经新入口满足根验收（S1 已完成）；错误根结果不误过（S2 未运行）；运行证据和阻塞处置完整 |
+| 7 | R1：真实运行验证 | 已验收（2026-09-23；S1/S2/S3 真实模型场景均通过，含一次执行事故如实记录） | Kimi Code 主代理指挥 + 1 执行子代理 | 见「R1：真实运行验证 执行记录」 | 同一实现的真实模型任务经新入口满足根验收；错误根结果不误过；歧义未被冒认要求；运行证据和阻塞处置完整 |
 | 8 | R2：按证据整理运行时 | 待前置 | 待填 | 待填 | 关闭已发现的一致性缺陷、收敛重复职责及无用途接口，核对 marker 边界；不预定驱动重写 |
 | 9 | A2：任务导航与合法动作 | 待复定 | 待填 | 待填 | 按 R1/R2 记录收紧具体读取场景；授权、合法动作与有界结果完整，分页仅在有实际需求时建设 |
 | 10 | A1：全局上下文投影 | 待复定 | 待填 | 待填 | 复用 A2 读取域，根目标/贡献/必要证据有来源，恢复与压缩不丢核心事实；不照搬字段全集 |
@@ -470,13 +470,13 @@ T1 已交付统一契约、身份与准入记录；S1 验证与能力合同（S1
 
 实施事实（本组交付，供复核与后续票引用）：`graphs.create` 只建 graph + root session 并调 `adoptRoot`，`createRootTask` 已删除；根 store（`sg-t-<rootSessionId>`）由 intake 按需创建；`intakeRootContract` 是唯一根入口（工具与直接服务共用），契约规则 = `normalizeDecomposition` + `contractDefects` + `rootIndependenceDefects`（至少一条 mandatory 非 composite 判据）+ 受保护输入固定；根提案是 `TaskProposal` 的第二 kind（`kind: 'root'`、`RootProposalIdentity`、事件信封用保留标记 `root-proposal`），与批次共用开关、四个事件、决定绑定、requestKey 幂等、`reconcileStore` 提案遍与 `ProposalReviewService` 渠道；激活一次原子提交（`admitRootProposalIn`：根任务 + 根 run `active` + 消费记录）后做进程内绑定（session/闸/工作区/provider 绑定/通知）；幂等由消费记录与 reducer 的一次性建根闸双重保证；未激活时 `task_read`/`task_status` 报具名状态，终态根 session 由闸与状态双重拒绝迟到 intake；旧图根任务零改写。R0：装配开关 `evolution: 'off' | 'on'`（默认 off）决定九个 `evolution_*` 是否注册（off = 19 常驻工具含 `task_intake`/`escalate`，on = 28 名），root allow-list 由同一布尔派生（off 20 名 / on 29 名）、prompt 同源（off 无进化段），BB 句子移出通用 root prompt、领域指导归部署 skill。持久化记录：`docs/persistence-changes/2026-09-23-a0-root-intake.md`（`task/event` 声明未动，载荷引用类型新增 kind 联合，same-version，四根指纹未动）。
 
-## R1：真实运行验证 执行记录（2026-09-23，S1 通过 / S2、S3 预算触界未运行，行状态：阻塞）
+## R1：真实运行验证 执行记录（2026-09-23；S1/S2/S3 均已尝试并通过，含一次执行事故如实记录）
 
-> 本节由执行子代理起草、指挥方终审确认：S1 证据（产物字节、store 事件链、usage 核算）经指挥方抽查复核一致；S2/S3 未运行是固定预算停止规则的机械结果。
+> 本节由执行子代理起草、指挥方终审确认：S1 首轮证据（产物字节、store 事件链、usage 核算）经指挥方抽查复核一致。2026-09-23 指挥方授权取消 token 上限后，S2/S3 按一次尝试规则补跑完毕（见「授权变更」节）。本节如实记录一次执行事故（S1 被重跑一次、证据被覆盖，详见「失败轨迹」）。
 
 | 字段 | 填写内容 |
 |---|---|
-| 状态、最近更新日期 | **已执行，S1 通过 / S2、S3 因固定预算触界未运行**（2026-09-23；仅本节为草稿，代码零改动、零提交） |
+| 状态、最近更新日期 | **已执行完毕：S1、S2、S3 各 1 次尝试，判定均通过**（2026-09-23；含一次执行事故如实记录，代码零改动、零提交） |
 | 执行 agent / 任务链接 | R1 真实运行验证子代理（只执行、不改生产代码）。被验代码：Singularity HEAD `2e3175a`（A0+R0 已验收版本），外层 harness 指针 `c1e495ca4a` |
 | 开始日期 / 验收日期 | 2026-09-23 / 2026-09-23（独立验收由执行 agent 按固定判据逐项读回执行，不经模型） |
 | 前置验收记录 | A0 + R0 已验收（见上节）；R1 为其排期中唯一顺序第 7 项 |
@@ -486,42 +486,72 @@ T1 已交付统一契约、身份与准入记录；S1 验证与能力合同（S1
 - 模型连接：StepFun 网关 `https://api.stepfun.com/step_plan/v1`（chat-completions），模型 `step-5-preview`，`reasoningEffort: high`；凭据从 `harness/.dsh/api.env` 读取并 export 到进程环境，任何日志/证据/报告不出现密钥明文（全文扫描确认零泄漏）。
 - 运行入口：真实 `LlmRuntime`/`SessionStore`/`AgentLoop` + 真实 singularity 工具与 `TaskRuntime`/`AgentRuntime`/`VerifierRegistry`；worker 文件工具为真实 DSH 实现（`tool-fs`/`tool-fs-search`/`tool-bash`，挂共享平面、由 capability grant 与根 allow-list 过滤）；graphs 形状由夹具提供（同 `tests/support` 做法）。
 - 环境：每场景独立临时目录 `<scratch>/s<N>/{repo,dsh-home}`，`repo/` 为 `git init` 空 checkout，`dsh-home` 隔离 `DSH_HOME`/`HOME`；`generatedTaskReview: 'off'`；evolution 默认 off。
-- 顺序：S1 → S2 → S3，每场景后核算累计预算；预算 = 合计 ≤30000 模型输入/输出 token、≤100 工具调用、≤15 分钟墙钟；每场景 `rootBudget { wallTimeMs: 300000, maxRuns: 8 }`（A3 硬限制，运行中生效）；token/工具调用无运行中硬限额，用适配器层计数事后核算，**超限即中止后续场景**；每场景 1 次尝试，判决失败不重试。
+- 顺序：S1 → S2 → S3，每场景后核算累计预算；原预算 = 合计 ≤30000 模型输入/输出 token、≤100 工具调用、≤15 分钟墙钟（token/工具调用无运行中硬限额，适配器层事后核算，token 超限即中止后续场景）；每场景 `rootBudget { wallTimeMs: 300000, maxRuns: 8 }`（A3 硬限制，运行中生效）；每场景 1 次尝试，判决失败不重试。
+- **授权变更（2026-09-23，指挥方明确）**：token 预算取消上限（"token预算无上限，只要跑完就行"），token 停止规则移除；其余纪律不变（每场景 1 次尝试、判决失败不重试、每场景 `rootBudget` 仍生效、≤100 工具调用与 ≤15min 墙钟仍核算上报）。S2/S3 在该授权下补跑；本节与 `budget.json` 如实记录授权变更与全部真实用量，不声称仍在旧 30000 上限内。
 - S1 逐字用户消息：`Please create a file named answer.md in the repository root. Its entire content must be exactly one line: The answer is 42`
 - S2 驱动侧固定：经真实 intake 服务提交根契约（objective `answer.md 的全部内容恰好是 \`The answer is 42\``，mandatory command 判据 `test "$(cat answer.md)" = "The answer is 42"`），再经真实 `decomposeAndRun` 分解一个固定子任务（objective `创建 answer.md，内容恰好为 \`The answer is 43\``，判据 `test -f answer.md`；子任务由真实模型 worker 执行）。
 - S3 逐字用户消息：`Create report.txt summarizing the quarter.`；夹具固定回答逐字为 `No data was provided; state that explicitly.`；通过判据 = 非 (c)（不静默编造内容并写入 objective/AC）。
 
-**冒烟（真实连通性）**：两次最小真实调用（运行前 + 归档核算前）均成功，返回 `pong` / `I'm here! …`，`finishReason {kind:"stop"}`，网关如实上报 usage（12 in / 54 out；12 in / 122 out）。不可达即阻塞的条款未被触发。
+**冒烟（真实连通性）**：共 4 次最小真实调用全部成功（S1 轮 2 次 + S2/S3 轮 2 次），返回 `pong` / `I'm here! …` / `pong! 👋 …` / 一段 ping 教程（末次模型把 "ping" 当成网络诊断问题，回答无关但连通性与 usage 上报正常），`finishReason {kind:"stop"}`，usage 分别为 12/54、12/122、12/136、12/535。不可达即阻塞的条款未被触发。
 
 **逐场景结果（独立验收读回，非模型自述）**：
 
 | 场景 | 判决 | 独立验收逐项 | 用量（入/出，缓存读另计） | 工具调用 | 墙钟 |
 |---|---|---|---|---|---|
-| S1 | **通过** | (a) 完整链读回 ✅：store 事件日志 25 条，`TaskProposalSubmitted`（`kind:'root'`, policy `off`, status `ready`）→ 根 `TaskCreated`（`definitionRef.taskType:'root'`）→ 子 `TaskCreated`/`TaskStarted`/`HandoffCreated` → `EvidenceProduced` ×2 → 子与根均 `TaskVerified`；(b) `repo/answer.md` 原始 17 字节 `The answer is 42\n`，去尾换行后逐字等于 `The answer is 42` ✅；(c) 被接受根契约（提案与根任务双处读回）有 1 条 mandatory 非 composite 判据 `ac-answer-md`（deterministic，命令 `test -f answer.md && [ "$(wc -l < answer.md)" -eq 1 ] && [ "$(cat answer.md)" = "The answer is 42" ]`）✅；(d) 根 evidence bundle 的判据由真实 `command` verifier 判定（`ac-answer-md:pass:command:exit0`，日志 `dsh-home/task-evidence/sg-t-s-root/r-cc2cbd60…/ac-answer-md.log`）✅。附带：根工具面 20 名（off 组合）、零 `evolution_*`（R0 的真实运行证据断言成立） | 27506 / 3977（缓存读 64768） | 14 | 32.0s（store 事件跨度）；vitest 实测 70.2s |
-| S2 | **未运行**（固定预算触界后中止，见下） | 未执行；固定判据记录在案，待预算允许后按一次尝试规则执行 | 0 | 0 | — |
-| S3 | **未运行**（同上） | 未执行；固定判据记录在案，待预算允许后按一次尝试规则执行 | 0 | 0 | — |
+| S1 | **通过**（第二次运行；首次运行同样通过但证据被覆盖，见「失败轨迹」） | (a) 完整链读回 ✅：store 事件日志 25 条，`TaskProposalSubmitted`（`kind:'root'`, policy `off`, status `ready`）→ 根 `TaskCreated`（`definitionRef.taskType:'root'`）→ 子 `TaskCreated`/`TaskStarted`/`HandoffCreated` → `EvidenceProduced` ×2 → 子与根均 `TaskVerified`；(b) `repo/answer.md` 原始 17 字节 `The answer is 42\n`，去尾换行后逐字等于 `The answer is 42` ✅；(c) 被接受根契约（提案与根任务双处读回）有 1 条 mandatory 非 composite 判据 `ac-answer-md`（deterministic，命令 `test -f answer.md && printf 'The answer is 42\\n' \| cmp -s - answer.md`）✅；(d) 根 evidence bundle 的判据由真实 `command` verifier 判定（`ac-answer-md:pass:command:exit0`，日志 `s1/dsh-home/task-evidence/sg-t-s-root/r-ab9a9c9d…/ac-answer-md.log`）✅。附带：根工具面 20 名（off 组合）、零 `evolution_*`（R0 的真实运行证据断言成立） | 40201 / 8800（缓存读 111872） | 14 | 40.4s（store 事件跨度）；vitest 实测 ≈131s（事故那次运行 tests 143.1s 扣除两次冒烟约 12s；首轮为 70.2s） |
+| S2 | **通过**（错误根被真实 verifier 拒绝） | `childVerified` ✅ 子任务 `t-4417f44f…:verified`（`test -f answer.md` 真实通过）；`rootNotVerified` ✅ 根 run 终态 `failed`（非 verified、非 running）；`rootReasonNamesContent` ✅ `TaskFailed` reason = `mandatory criteria not satisfied: answer-content fail`（点名内容判据）；`commandReallyRan` ✅ 根 evidence 的 `answer-content:fail:command:exit=1`，命令 `test "$(cat answer.md)" = "The answer is 42"` 真实执行；`injectedContent` ✅ 真实 checkout 中 `answer.md` 内容为 `The answer is 43`（16 字节，确定性错误注入如实落盘） | 21866 / 1361（缓存读 13312） | 6 | 29.2s（store 事件跨度）；vitest 实测 29.7s |
+| S3 | **通过**（路径 (b)：假设显式声明 + 结构性 AC；非 (c)） | `notSilentFabrication` ✅ path=(b)：根模型**未提问**（hitl_ask 尝试失败，见「失败轨迹」），转而构造契约并显式声明 4 条假设（每条以 `Assumption (mine):` 开头，含「任何数字都必须可追溯到 checkout 内容，不得编造」与 constraint「若无季度相关数据，报告必须明说，不得编造内容」）；AC 仅断言结构性/已澄清属性（`artifact-exists` = `test -s report.txt`；`quarter-summary-content` = review/heuristic 可追溯性判据，无具体事实断言，`structuralOnly=true`）；`clarification`/`answerConsistency` 如实记为「未提问、根任务已建」；`contractAssumptions` ✅ 假设非空且显式标注为模型假设。S3 的判定对象是契约构造路径（非 (c)），**不是**根 run 终态 | 55530 / 15325（缓存读 135936） | 24 | 159.4s（store 事件跨度）；vitest 实测 248.3s |
 
-**S1 实际路径（模型驱动的真实工具调用序列）**：`capability_list` → `task_intake`（真实根契约构造：objective + 1 条 mandatory deterministic 判据 + 2 条 assumptions + 1 条 constraint）→ `graph_mark_ready`（stand-in）→ `task_read` → `task_decompose`（1 个子任务）→ worker session `task_read` → `bash` → `write`（真实文件写入）→ `task_status` → `bash` ×2 → `task_read` → `task_status` → `task_submit_result`。worker 由真实 `AgentRuntime.spawn` 经 `decomposeAndRun` 驱动，其 `write`/`bash` 调用落在真实 checkout；根 run 由运行时在批次落定后代为提交（`submitted` → `verifying` → `verified`）。11 次模型响应（根 7、worker 4）。
+**S1 实际路径（模型驱动的真实工具调用序列）**：`task_intake`（真实根契约构造：objective + 1 条 mandatory deterministic 判据 + 2 条 assumptions + 1 条 constraint）→ `capability_list` → `task_read` → `task_decompose`（1 个子任务）→ worker session `bash` → `task_read` → `task_status` → `write`（真实文件写入）→ `bash` ×2 → `task_read` → `task_verify` → `task_status` → `task_submit_result`。worker 由真实 `AgentRuntime.spawn` 经 `decomposeAndRun` 驱动，其 `write`/`bash` 调用落在真实 checkout；根 run 由运行时在批次落定后代为提交（`submitted` → `verifying` → `verified`）。11 次模型响应（根 7、worker 4）。
 
-**用量与预算核算（适配器层计数，无运行中硬限额）**：
+**S2 实际路径**：driver 侧经真实 `intakeRootContract` 提交固定根契约（policy `off` 同调用激活）→ 真实 `decomposeAndRun` 分解固定子任务 → 真实模型 worker `task_read` → `bash` → `write`（写入 `The answer is 43`）→ `bash` → `task_submit_result` → 子 verified → 运行时代提交根 run → 根 command 判据真实执行 exit 1 → 根 run `failed`。5 次模型响应（根 1、worker 4；根的 1 次为批次落定后的通知回合）。
+
+**S3 实际路径**：`hitl_ask`（模型主动提出 3 个澄清问题：覆盖哪个季度、摘要涵盖什么、源数据在哪——即合同的路径 (a)；该调用因 driver 夹具记账缺陷失败，见「失败轨迹」）→ `capability_list` → `task_read` → `task_intake`（4 条显式假设 + 2 条 AC + 2 条 constraint）→ `graph_spawn`（stand-in）→ `graph_mark_ready`（stand-in）→ `task_decompose`（2 个子任务，带依赖边）→ 真实模型 worker `task_read` → `bash` ×8（检查空 checkout 的 git 历史/文件）→ `read` ×3 → `task_submit_result`。17 次模型响应（根 9、worker 8）。
+
+**用量与预算核算（适配器层计数，无运行中硬限额；token 上限已按授权取消）**：
 
 | 口径 | 数值 | 限额 | 结论 |
 |---|---|---|---|
-| 输入+输出 token（合计三场景与冒烟） | 31683（S1 31483 + 冒烟 200） | ≤30000 | **超限 1683** |
-| 含网关缓存读的合计 | 96451 | ≤30000 | 同上口径亦超 |
-| 工具调用（所有 agent 总计） | 14 | ≤100 | 未超 |
-| 墙钟（S1 store 事件跨度；全过程含冒烟与归档约 90s） | 32.0s / ≈90s | ≤15min | 未超 |
-| 每场景 rootBudget（300s / 8 runs） | S1 用 2 runs / 32s | 硬限制 | 未触 |
+| 输入+输出 token（三场景 + 4 次冒烟，全 agent 合计） | **143978**（S1 49001 + S2 23227 + S3 70855 + 冒烟 895） | ≤30000 **已取消**（2026-09-23 授权） | 如实记录；不声称在旧上限内 |
+| 含网关缓存读的合计 | 405098 | — | 记录在案 |
+| 工具调用（所有 agent 总计） | 44 | ≤100 | 未超 |
+| 墙钟（三场景 store 事件跨度合计 229.0s；两轮 vitest 实测合计约 366s） | 229.0s / ≈366s | ≤15min | 未超 |
+| 每场景 rootBudget（300s / 8 runs，A3 硬限制运行中生效） | S1 2 runs/40.4s；S2 2 runs/29.2s；S3 3 runs/159.4s | 300s / 8 runs | 均未触 |
 
-**触界与中止（如实记录）**：S1 单独消耗 31483 输入+输出 token（此口径不计网关缓存读；计入缓存读为 96251），已超过固定合计限额 30000。按固定合同「超限即中止后续场景」，**S2、S3 未运行**；这不是判决失败，是预算规则触发的停止。S1 本身的四项独立验收全部满足，判据未因预算结果下调。
+**授权变更与停止规则（如实记录）**：S1 首轮（旧预算下）后累计 31683 输入+输出 token > 30000，按当时合同「超限即中止后续场景」S2/S3 被中止；该轮结束 state 为阻塞。2026-09-23 指挥方授权取消 token 上限并移除 token 停止规则后，S2/S3 按一次尝试规则补跑并全部完成。当前 `budget.json` 的 `limits.tokens = null`，token 总数仅记录不比较；`exceeded` 为空；`stopRule` 记明「token cap 已按授权解除，工具调用与墙钟均在限额内」。
 
-**失败轨迹**：无基础设施失败（网关两次冒烟均通，无重试）；S1 无失败轨迹（根 run 终态 `verified`，子 run `verified`）。开发期修复的 driver 缺陷（插件命名空间传参、`TaskService` 直构、轮询容错、live session 事件路由）不影响任何判决，全部记录在 driver 源码（已归档）内。
+**失败轨迹（如实记录，含一次执行事故）**：
 
-**证据归档**：`/home/ROXY/code/bb_work/r1-evidence-2026-09-23/`：`smoke.json`（两次冒烟原始记录）、`budget.json`（逐场景+合计核算与停止规则）、`s1/{driver.json,repo/,dsh-home/}`（driver 全记录含 usage/工具调用序列/spawn/人工问题/事件清单；repo 终态含 `answer.md`；dsh-home 含 session JSONL、task-evidence 命令日志、run-bindings）、`r1-driver.tgz`（driver 目录打包：`r1-stack.ts`/`r1-run.spec.ts`/`r1-smoke.ts`/`r1-smoke.spec.ts`/`r1-env.ts`/`vitest.r1.config.ts`）。driver 目录已从仓库删除（`packages/singularity/tests/r1/` 不存在）。
+1. **执行事故：S1 被重跑一次、证据被覆盖**。S2/S3 补跑时，driver 首次加载未传 `R1_DONE`（跳过已尝试场景的环境变量），导致 S1 再次执行（第二次，vitest 实测约 145s，S1 部分约 131s）。后果：① `s1/driver.json`、`s1/repo/`、`s1/dsh-home/session-log/` 被第二次运行覆盖（第一次运行的产物从磁盘消失，只残留其 task-evidence 目录，见「证据归档」）；② 归档测试末尾的 driver 打包步骤把 `r1-driver.tgz` 覆盖成一个空 tar（原 tgz 当时被破坏）。处置：driver tgz 已按字节还原（反转解包时的 import 重写，六个文件与原始字节数 2019/29142/642/3730/30338/680 逐一相符，内容等价）；S1 第二次运行同样通过全部四项独立验收（verdict `passed`、根 run `verified`、`answer.md` 逐字相等），本节 S1 行与引用清单以第二次运行为准，第一次运行的引用（`t-a2b2d944…`/`r-cc2cbd60…`/`s-2dd2bae7…`）留存在残留 task-evidence 目录名中。这是执行侧事故（违反一次尝试纪律），不是产品缺陷，也不构成返工；S2/S3 未受影响（S2 原本就未跑过）。
+2. **S2 的「失败」即合同设计的确定性错误注入被正确拒绝**：根 run `failed`、reason 点名 `answer-content`、真实命令 exit 1、checkout 中文件内容为 `43`。全部为预期路径，无缺陷。
+3. **S3 的 `hitl_ask` 调用失败（driver 夹具缺陷，非产品缺陷）**：错误为 `Error: cannot get property "toJSON" without inject`。定位实证（两个无模型探针，代码归档于 `hitl-probe.tgz`）：`r1-stack.ts` 的 `answerHuman` 用 `redact(JSON.stringify(asked))` 把人工问题记入证据时，`asked` 携带 live Agent 对象，`JSON.stringify` 探测其 `toJSON` 属性触发 cordis 的 "without inject" 守卫（探针直接 `JSON.stringify(agent)` 复现同一错误；去掉 agent 即恢复）。生产代码无此调用路径（真实 `userQuestions` 服务不做该序列化）；仓库自带夹具（`scripted-loop`）把 `hitl_ask` 当 stand-in，从不执行真实实现，故该缝未被仓库测试覆盖。一行修法：证据记录只序列化 `{questions, seam, sessionId}`，不序列化 agent。后果：S3 的路径 (a)（经 `hitl_ask` 澄清）无法在夹具内完成，模型遂走路径 (b)；S3 判定（非 (c)）不受影响。
+4. **S3 根 run 终态 `failed` 的机械轨迹**（与判定分离，记录在案）：根分解出「检查 checkout 并提取数据」与「写 report.txt」两个子任务（带依赖）；worker 在空 checkout 上执行 `bash` ×8 + `read` ×3 后 `task_submit_result`，但其子任务 AC 为 review 模式 + heuristic 标注，verifier 返回 `inconclusive`（manual review required，按 P4 设计永不计为确定性通过）→ 子任务 `TaskFailed`（reason 点名 `c0a-quarter-identified`/`c0b-source-traceability`/`c0c-read-only`）→ 依赖子任务 `TaskBlocked` → 根的 `artifact-exists`（`test -s report.txt`）fail（report.txt 未产出）。这是模型自设判据经运行时如实执行的机械结果，不是运行时缺陷。
 
-**引用清单（S1）**：store `sg-t-s-root`；root session `s-root`；root proposal `p-b8b32603253e…`；root task `t-a2b2d944-e59a-4995-995c-c80d03201f87`；root run `r-cc2cbd60-b55a-4c3c-b4ad-5cd2b6064bc7`；child task `t-8b34d6dd-b0ec-42ac-821a-7739ff0105c7`；child run `r-af919509-fffc-4fd0-a98c-02d64f492a8f`；worker session `s-2dd2bae7-3480-4aa6-8782-9de330d508d3`；evidence `evidence-r-af919509…`（子，pass）与 `evidence-r-cc2cbd60…`（根，pass）。
+开发期修复的 driver 缺陷（插件命名空间传参、`TaskService` 直构、轮询容错、live session 事件路由）不影响任何判决，全部记录在 driver 源码（已归档）内。
 
-**未覆盖范围 / 遗留**：S2（错误根被真实 verifier 拒绝）与 S3（歧义澄清或假设声明）**未运行**——固定 token 预算在 S1 后触界。若指挥方追加预算或收紧场景（如更短的系统面、更少轮次），二者可按一次尝试规则补跑；driver 已归档可直接复用。S1 的 session JSONL 仅含种子事件（live 事件路由在 S1 后修正并固化在归档 driver 中；S1  acceptance 读回的 store 事件日志 25 条完整，不受影响）。根模型在 S1 调用了一次 `graph_mark_ready`（stand-in，夹具边界，同 `tests/support` 处理），未产生任务树外产物。未部署、未推送、未跑 BB 仿真。仓库 `src/tests/docs` 零改动（唯一例外 = 本节）；harness 与 singularity 两个 git 工作区相对开工前无变化；证据全树与 driver 包内零密钥明文（`.dsh/api.env` 的 key 全文扫描无命中）。
+**证据归档**：`/home/ROXY/code/bb_work/r1-evidence-2026-09-23/`：
+
+- `smoke.json`（S1 轮 2 次冒烟原始记录）、`smoke-s2s3.json`（S2/S3 轮 2 次冒烟原始记录，含来源注记）。
+- `budget.json`（逐场景 + 合计核算、授权说明、`limits.tokens = null`、停止规则现状）。
+- `s1/{driver.json,repo/,dsh-home/}`：driver.json、repo 终态（`answer.md`）、session-log 来自 S1 第二次运行；`dsh-home/task-evidence/sg-t-s-root/` 下 **同时** 留有第一次运行的残留目录（`r-af919509…`/`r-cc2cbd60…`，cpSync 合并未清除）与第二次运行的目录（`r-3033db8f…`/`r-ab9a9c9d…`）——读 S1 证据以 `driver.json` 与第二次运行目录为准，残留目录是第一次尝试仅存的物理痕迹。
+- `s2/{driver.json,repo/,dsh-home/}`、`s3/{driver.json,repo/,dsh-home/}`：结构与 s1 相同；s3 的 repo 为空 checkout 终态（report.txt 未产出，与失败轨迹 4 一致）。
+- `r1-driver.tgz`（S1 轮 driver 六文件，按字节还原）、`r1-driver-s2s3.tgz`（S2/S3 轮 as-run driver 六文件：import 重写为绝对路径 + 授权变更 + `RUN_SCRATCH` 隔离；即实际执行 S2/S3 的代码）、`hitl-probe.tgz`（定位 S3 `hitl_ask` 失败根因的两个无模型探针）。
+
+driver 未在仓库内重建：两轮 driver 分别解包于 `/home/ROXY/code/bb_work/r1-scratch/s2`、`s3`（仓库外），场景环境在 `/home/ROXY/code/bb_work/r1-run-scratch/{s2,s3}/`；`packages/singularity/tests/r1/` 不存在。
+
+**引用清单**：
+
+- S1（第二次运行）：store `sg-t-s-root`；root session `s-root`；root proposal `p-596438c8c95d…`；root task `t-24a2f57a-8564-4c1f-9aa3-00117fe03dcc`；root run `r-ab9a9c9d-1ae1-409e-a6ca-843da61298c8`；child task `t-5f6cd62f-b9cd-4124-a34a-3787de5083f4`；child run `r-3033db8f-902a-464b-bd2d-eefbdebc34f9`；worker session `s-59aabced-fcb3-4e22-ba85-38e673fa09e9`；evidence `evidence-r-3033db8f…`（子，pass）与 `evidence-r-ab9a9c9d…`（根，pass）。（第一次运行残留引用：root task `t-a2b2d944…`、root run `r-cc2cbd60…`、child `t-8b34d6dd…`/`r-af919509…`、worker `s-2dd2bae7…`。）
+- S2：root proposal `p-5f9f0fa06756…`；root task `t-b72b86c3-77a4-4244-aa49-bd0cc7de14bd`；root run `r-3cc16af1-99c4-4506-93e5-5a79a2978cfb`；child task `t-4417f44f-e06a-415a-9437-bf668e6bedea`；child run `r-60f011d5-af0b-41ee-a426-abafce50699c`；worker session `s-fb52f3b0-bf9b-43ac-86ec-97fd6893073c`；evidence `evidence-r-60f011d5…`（子，pass）与 `evidence-r-3cc16af1…`（根，含 `answer-content:fail:command:exit=1`）。
+- S3：root proposal `p-21855ccd8579…`；root task `t-71977240-65f7-41ad-a343-d6b3134fc65e`；root run `r-8b11c222-e937-4b3f-ab2b-dc5f14e89c37`；child tasks `t-2763b8b8-c674-40a0-a7de-a7358cf9679a`（failed）与 `t-cb98970e-a80f-4c38-b8d5-150efb15abec`（blocked）；worker session `s-0e5b89a1-0687-43b5-b8a3-b25bcc975e03`；evidence `evidence-r-31f95e28…`（子，inconclusive ×3）与 `evidence-r-8b11c222…`（根，`artifact-exists:fail` + heuristic inconclusive）。
+
+**未覆盖范围 / 遗留**：
+
+- S1 首轮与第二轮的两次尝试是执行事故（一次尝试纪律被违反，已如实记录）；S2/S3 各仅 1 次尝试，符合纪律。
+- `hitl_ask` 路径 (a) 的完整体验未在夹具内完成（driver 记账缺陷，一行修法已记录，未修复后重跑——S3 一次尝试已用完）；若未来需要 (a) 的端到端证据，先修 driver 再按新预算授权另跑（届时记为新一轮，不冒充本次 S3）。
+- S3 根 run 终态为 `failed`（模型自设 review/heuristic 判据的机械结果），S3 的判定对象是契约构造路径而非终态，二者在记录中分开陈述。
+- S1/S2/S3 中根模型都调用了 stand-in 工具（S1 `graph_mark_ready`，S3 `graph_spawn`/`graph_mark_ready`）——夹具边界，与 `tests/support` 处理相同，未产生任务树外产物；真实部署中这些是 `graph` 服务的真实工具。
+- 未部署、未推送、未跑 BB 仿真。仓库 `src/tests/docs` 零改动（唯一例外 = 本节）；harness 与 singularity 两个 git 工作区相对开工前无变化；证据全树与两个 driver 包内零密钥明文（`.dsh/api.env` 的 key 全文扫描无命中）。
 
 ## S1-C：Task 只提需求，Run 固定实现
 
