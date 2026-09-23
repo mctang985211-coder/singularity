@@ -560,6 +560,45 @@ describe('A3 recovery from the real session log', () => {
     await b.dispose()
   })
 
+  it('gates a session the second process rebound by the phase the store records, not by the dead process’s memory', async () => {
+    const dir = workspace()
+    const a = await boot(dir, { worker: () => new Promise<void>(() => {}) })
+    const root = await seedLegacyRoot(a, 'ship the release')
+    const { batchId } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
+      reason: 'split the work',
+      children: children('long child'),
+    })
+    // The crash point: the parent is waiting_children with a child in flight.
+    await vi.waitFor(async () => expect((await a.snapshot()).runs).toHaveLength(2))
+    const crashedParent = (await a.snapshot()).runs.find(run => run.runId === root.runId)!
+    expect(crashedParent.executionPhase).toBe('waiting_children')
+    await a.crash()
+
+    // The second process parks the restarted driver in the parent's own write
+    // drain — the convergence step a real driver spends time in — so the phase
+    // the store holds is the phase the session is rebound under, with no timer
+    // deciding the interleaving.
+    const b = await boot(dir, { parkDrain: (sessionId, index) => sessionId === ROOT && index === 1 })
+    // The door a resumed session's first tool call takes after a restart: the
+    // session is in no index, so the store is opened, recovered, and the
+    // session is bound to the run the store names.
+    const bound = await b.runtime.runForSession(ROOT)
+    expect(bound.run.runId).toBe(root.runId)
+    // The gate is a handle on the run's phase, and the phase is the store's
+    // fact: the rebound session is gated as what its run is. The dead
+    // process's memory is gone, so a waiting parent may not write into the
+    // checkout its restarted batch works in, and a late call is named as one.
+    expect(b.runtime.gate.phaseOf(ROOT)).toBe('waiting_children')
+    expect(b.runtime.gate.decide(ROOT, 'write').allow).toBe(false)
+    expect(b.runtime.gate.decide(ROOT, 'bash').allow).toBe(false)
+    expect(b.runtime.gate.decide(ROOT, 'task_decompose').allow).toBe(false)
+    expect(b.runtime.gate.decide(ROOT, 'task_submit_result').allow).toBe(false)
+    expect(b.runtime.gate.decide(ROOT, 'task_read').allow).toBe(true)
+    expect(b.runtime.gate.decide(ROOT, 'task_cancel').allow).toBe(true)
+    // The parked driver is left for the bounded teardown: cancelling would wait
+    // on the drain that never confirms.
+  })
+
   it('verifies a run that submitted before the crash, without starting or charging it again', async () => {
     const dir = workspace()
     // The worker's own drain is the one its submission runs: the phase change is

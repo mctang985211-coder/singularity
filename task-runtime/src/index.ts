@@ -1616,7 +1616,7 @@ export class TaskRuntime extends Service {
         )
       }
     }
-    const phase = this.rootSessionPhase(run)
+    const phase = this.runGatePhase(run)
     this.sessions.set(rootSessionId, { storeId, taskId: root.taskId, runId: run.runId })
     this.startedSessions.add(rootSessionId)
     if (phase === 'terminal') this.executionGate.setTerminal(rootSessionId)
@@ -1638,12 +1638,18 @@ export class TaskRuntime extends Service {
   }
 
   /**
-   * The gate phase one stored root run implies: its coordination phase while it
-   * is running, `terminal` once it is not, and `undefined` for a record that
+   * The gate phase one stored run implies: its coordination phase while it is
+   * running, `terminal` once it is not, and `undefined` for a record that
    * predates coordination phases (A3's own boundary — such a run is not gated,
    * and its only legal continuation is cancellation).
+   *
+   * The derivation every rebinding door performs ({@link adoptRoot} for a root
+   * session, {@link gatePhaseFromStore} for any other): the gate is a handle on
+   * the run's phase, and the phase is the store's fact, so a session this
+   * process never held — or one whose phase moved under an in-flight call — is
+   * gated as what its run is, never as what this process happens to remember.
    */
-  private rootSessionPhase(run: TaskRun): ExecutionPhase | 'terminal' | undefined {
+  private runGatePhase(run: TaskRun): ExecutionPhase | 'terminal' | undefined {
     if (run.status !== 'running') return 'terminal'
     return run.executionPhase
   }
@@ -3849,7 +3855,7 @@ export class TaskRuntime extends Service {
     this.startedSessions.add(rootSessionId)
     let phase: ExecutionPhase | 'terminal' | undefined
     try {
-      phase = this.rootSessionPhase(await this.ctx.task.runIn(storeId, runId))
+      phase = this.runGatePhase(await this.ctx.task.runIn(storeId, runId))
     } catch {
       // A run this process cannot read is not a phase to guess at: the session is
       // bound for lookups, and the gate stays as the store's own recovery left it.
@@ -4714,11 +4720,29 @@ export class TaskRuntime extends Service {
     return found
   }
 
+  /**
+   * The gate phase one bound session's run implies, applied on every rebinding.
+   * The gate is a handle on the run's phase and the phase is the store's fact,
+   * so a session this process rebound — from its index, from a reopened store,
+   * or with a phase that moved under an in-flight call — is gated as what its
+   * run is. `undefined` (a record that predates phases) leaves the session
+   * ungated, which is the gate's own contract for an unbindable phase, and a
+   * session with no run is never gated at all.
+   */
+  private gatePhaseFromStore(sessionId: string, run: TaskRun): void {
+    const phase = this.runGatePhase(run)
+    if (phase === 'terminal') this.executionGate.setTerminal(sessionId)
+    else if (phase !== undefined) this.executionGate.setPhase(sessionId, phase)
+  }
+
   private async lookupRun(sessionId: string): Promise<{ storeId: string; task: TaskInstance; run: TaskRun } | undefined> {
     const binding = this.sessions.get(sessionId)
     if (binding !== undefined) {
       const resolved = await this.resolveBinding(binding)
-      if (resolved !== undefined) return resolved
+      if (resolved !== undefined) {
+        this.gatePhaseFromStore(sessionId, resolved.run)
+        return resolved
+      }
       this.sessions.delete(sessionId)
     }
     let rootSessionId: string
@@ -4746,7 +4770,9 @@ export class TaskRuntime extends Service {
     }
     const rebinding = this.sessions.get(sessionId)
     if (rebinding === undefined) return undefined
-    return this.resolveBinding(rebinding)
+    const resolved = await this.resolveBinding(rebinding)
+    if (resolved !== undefined) this.gatePhaseFromStore(sessionId, resolved.run)
+    return resolved
   }
 
   private async resolveBinding(binding: RunBinding): Promise<{ storeId: string; task: TaskInstance; run: TaskRun } | undefined> {

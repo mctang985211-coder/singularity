@@ -6,7 +6,6 @@ import { describe, expect, test, vi } from 'vitest'
 import type {
   AcceptanceCriterion,
   EvidenceBundle,
-  EvidenceClaim,
   TaskInstance,
   TaskRun,
   TaskSnapshot,
@@ -85,28 +84,6 @@ function emptySnapshot(evidence: EvidenceBundle[]): TaskSnapshot {
   }
 }
 
-function claimOf(verifierId: string, verifierVersion?: string): EvidenceClaim {
-  return {
-    claimId: `claim-${verifierId}-${verifierVersion ?? 'legacy'}`,
-    criterionId: 'c1',
-    status: 'pass',
-    verifierId,
-    ...(verifierVersion === undefined ? {} : { verifierVersion }),
-    artifactRefs: [],
-  }
-}
-
-function bundleOf(evidenceId: string, claims: EvidenceClaim[]): EvidenceBundle {
-  return {
-    evidenceId,
-    taskRunId: 'r1',
-    taskId: 't1',
-    artifacts: [],
-    verifierResults: [],
-    claims,
-    generatedAt: NOW,
-  }
-}
 
 /** A judge whose verdicts the test dictates; registered through the explicit test-double channel. */
 function testDouble(id: string, verify: Verifier['verify'], overrides: Partial<Verifier> = {}): Verifier {
@@ -747,33 +724,6 @@ describe('VerifierRegistry verifier version identity (V2-3, KISS §8.2)', () => 
     const bundle = await registry.verifyRun(STORE, 'r1', { cwd })
     expect(bundle.verifierResults[0]!.verifierVersion).toBe('1')
     expect(bundle.claims[0]!.verifierVersion).toBe('1')
-  })
-
-  test('evidenceByVerifier indexes by (verifierRef, version) and keeps legacy evidence readable', async () => {
-    const legacy = bundleOf('evidence-a-legacy', [claimOf('recaller')])
-    const versionOne = bundleOf('evidence-b-v1', [claimOf('recaller', '1')])
-    const versionTwo = bundleOf('evidence-c-v2', [claimOf('recaller', '2')])
-    const otherJudge = bundleOf('evidence-d-other', [claimOf('someone-else', '1')])
-    const { registry } = await setup({ task: task([]), evidence: [versionTwo, legacy, otherJudge, versionOne] })
-    expect((await registry.evidenceByVerifier(STORE, 'recaller')).map(bundle => bundle.evidenceId)).toEqual([
-      'evidence-a-legacy', 'evidence-b-v1', 'evidence-c-v2',
-    ])
-    expect((await registry.evidenceByVerifier(STORE, 'recaller', '1')).map(bundle => bundle.evidenceId)).toEqual(['evidence-b-v1'])
-    expect((await registry.evidenceByVerifier(STORE, 'recaller', '2')).map(bundle => bundle.evidenceId)).toEqual(['evidence-c-v2'])
-    expect(await registry.evidenceByVerifier(STORE, 'recaller', '3')).toEqual([])
-    expect(await registry.evidenceByVerifier(STORE, 'nobody')).toEqual([])
-  })
-
-  test('a verdict recorded by verifyRun is found again by the version it was stamped with', async () => {
-    const { registry } = await setup({ task: task([criterion({ verifierRef: 'versioned' })]) })
-    await registry.register(testDouble('versioned', async req => req.criteria.map(c => ({
-      criterionId: c.criterionId,
-      status: 'pass' as const,
-      verifierId: 'versioned',
-    })), { version: '7' }), { testDouble: true })
-    const bundle = await registry.verifyRun(STORE, 'r1')
-    expect((await registry.evidenceByVerifier(STORE, 'versioned', '7')).map(item => item.evidenceId)).toEqual([bundle.evidenceId])
-    expect(await registry.evidenceByVerifier(STORE, 'versioned', '8')).toEqual([])
   })
 })
 

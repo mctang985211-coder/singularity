@@ -611,8 +611,8 @@ var VerifierRegistry = class extends Service {
 	/**
 	* Register the three built-ins through the same executable selftest gate
 	* every other judge passes. Cordis calls this after construction
-	* (`Service.init`); {@link verifyRun} and {@link evidenceByVerifier} await it
-	* too, so a caller that never awaited it still gets a readied registry.
+	* (`Service.init`); {@link verifyRun} awaits it too, so a caller that never
+	* awaited it still gets a readied registry.
 	*
 	* Idempotent — the first call does the work, every later call awaits the same
 	* promise (a rejection stays a rejection: a built-in that fails its own
@@ -772,21 +772,6 @@ var VerifierRegistry = class extends Service {
 		};
 		await this.ctx.task.recordEvidenceIn(storeId, bundle, "verifier");
 		return bundle;
-	}
-	/**
-	* The `(verifierRef, version)` index of KISS §8.2: every bundle in the store
-	* whose claims were signed by `verifierRef`, optionally narrowed to one
-	* registered `version`. Omitted, the version filter is off — evidence written
-	* before the field existed stays readable, and a version change never
-	* rewrites what was already recorded. Given, only that exact version's claims
-	* match. Sorted by `evidenceId`, so a caller's iteration is deterministic.
-	*
-	* The index only: nothing here downgrades a historical pass to suspect or
-	* re-runs a verification. Verdict recall itself is not built.
-	*/
-	async evidenceByVerifier(storeId, verifierRef, version) {
-		await this.ready();
-		return (await this.ctx.task.snapshotIn(storeId)).evidence.filter((bundle) => bundle.claims.some((claim) => claim.verifierId === verifierRef && (version === void 0 || claim.verifierVersion === version))).sort((left, right) => left.evidenceId < right.evidenceId ? -1 : left.evidenceId > right.evidenceId ? 1 : 0);
 	}
 	async verifyCriterion(storeId, request, criterion) {
 		const verifier = criterion.verifierRef === void 0 ? this.findVerifier(criterion.verificationMode) : this.verifiers.get(criterion.verifierRef);

@@ -1223,7 +1223,18 @@ declare class WorkspaceRegistry {
   private readonly markerRoot;
   private readonly pid;
   private readonly stacks;
+  /**
+   * One marker-mutation chain per workspace: every write and delete joins the
+   * tail of its workspace's chain, so overlapping mutations of one marker land
+   * in the order they were called — the same order the stack was mutated in.
+   * A rejected mutation is carried past, never stored: a write that failed
+   * (a permission, a full disk) must not wedge the mutations behind it, and its
+   * caller still sees the rejection it has to report.
+   */
+  private readonly markerWrites;
   constructor(options: WorkspaceRegistryOptions);
+  /** Queue one marker mutation after the ones this workspace already has in flight, in call order. */
+  private queueMarkerMutation;
   /** Where one workspace's marker lives — derived from the path as given, so it is the same key the stack uses. */
   markerPath(workspace: string): string;
   /** The owner on top of the stack, or `undefined` when this process holds nothing for the workspace. */
@@ -3135,12 +3146,18 @@ declare class TaskRuntime extends Service {
    */
   adoptRoot(storeId: string, rootSessionId: string): Promise<RootAdoption>;
   /**
-   * The gate phase one stored root run implies: its coordination phase while it
-   * is running, `terminal` once it is not, and `undefined` for a record that
+   * The gate phase one stored run implies: its coordination phase while it is
+   * running, `terminal` once it is not, and `undefined` for a record that
    * predates coordination phases (A3's own boundary — such a run is not gated,
    * and its only legal continuation is cancellation).
+   *
+   * The derivation every rebinding door performs ({@link adoptRoot} for a root
+   * session, {@link gatePhaseFromStore} for any other): the gate is a handle on
+   * the run's phase, and the phase is the store's fact, so a session this
+   * process never held — or one whose phase moved under an in-flight call — is
+   * gated as what its run is, never as what this process happens to remember.
    */
-  private rootSessionPhase;
+  private runGatePhase;
   /** Create the store, or open the one that already exists — the two ways a store can be there (A0 §1.1). */
   private openOrCreateStore;
   /**
@@ -3934,6 +3951,16 @@ declare class TaskRuntime extends Service {
     task: TaskInstance;
     run: TaskRun;
   }>;
+  /**
+   * The gate phase one bound session's run implies, applied on every rebinding.
+   * The gate is a handle on the run's phase and the phase is the store's fact,
+   * so a session this process rebound — from its index, from a reopened store,
+   * or with a phase that moved under an in-flight call — is gated as what its
+   * run is. `undefined` (a record that predates phases) leaves the session
+   * ungated, which is the gate's own contract for an unbindable phase, and a
+   * session with no run is never gated at all.
+   */
+  private gatePhaseFromStore;
   private lookupRun;
   private resolveBinding;
   private reindex;

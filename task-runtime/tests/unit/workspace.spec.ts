@@ -250,11 +250,48 @@ describe('overlapping marker writes', () => {
     const marker = JSON.parse(await markerText(reg)) as { path: string; pid: number; owner: WorkspaceOwner }
     expect(marker.path).toBe(checkout)
     expect(marker.pid).toBe(process.pid)
-    // Whichever of the concurrent writers landed last, what is on disk is one
-    // whole marker naming one of them — never a half-written or foreign record.
-    expect([run, ...batches]).toContainEqual(marker.owner)
+    // The mutations are applied in call order, so the file on disk ends as the
+    // last one called left it: the bottom holder, which is what the stack says
+    // is on top. Never a half-written record, and never an owner the stack has
+    // already popped — which is what makes a later process's reading honest.
+    expect(marker.owner).toEqual(run)
     // And a settled write leaves no temporary file behind.
     expect(await readdir(markerRoot)).toEqual([`${sha256Hex(checkout)}.json`])
+  })
+
+  test('mutations that empty the stack leave no marker, whoever landed their write first', async () => {
+    const reg = registry()
+    const run = runOwner()
+    await reg.claim(checkout, run)
+    const batches: WorkspaceOwner[] = Array.from({ length: 8 }, (_unused, index) => ({
+      kind: 'batch',
+      storeId: 'sg-t-root',
+      batchId: `b-t-1-${index}`,
+      since: `2026-09-22T00:00:${String(index + 1).padStart(2, '0')}.000Z`,
+    }))
+    let top: WorkspaceOwner = run
+    for (const batch of batches) {
+      await reg.push(checkout, top, batch)
+      top = batch
+    }
+
+    // The whole stack comes off in one tick, the bottom release included: each
+    // call pops the holder it finds on top, so every one proceeds — and the last
+    // one deletes the marker while the others still have writes in flight.
+    const settling = [...[...batches].reverse(), run].map(owner => reg.release(checkout, owner))
+    const results = await Promise.allSettled(settling)
+    expect(results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')).toEqual([])
+
+    expect(reg.ownerOf(checkout)).toBeUndefined()
+    // The stack is empty, so no marker may name a holder: a rename that landed
+    // after the last release's delete would leave the workspace claiming a live
+    // owner it does not have — this process's own pid, which no claim and no
+    // reconcileAdopt is allowed to take over, so the checkout would stay
+    // unclaimable until the process exits.
+    expect(await markerExists()).toBe(false)
+    // A fully released workspace is therefore claimable again, at once.
+    await reg.claim(checkout, verifierOwner())
+    expect(reg.ownerOf(checkout)).toEqual(verifierOwner())
   })
 })
 

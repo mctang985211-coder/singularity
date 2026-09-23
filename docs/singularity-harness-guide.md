@@ -26,6 +26,8 @@ DSH 提供 agent/session、skill 发现与加载、preset、MCP、上下文与�
 
 **当前阶段判断**：已有递归执行、证据、审核、恢复骨架与根契约入口，仍未做真实模型端到端效果记录。Review/Evolution 的机械链路不能证明整个系统可用。A0 + R0（根入口 + 默认运行面收敛）已验收（2026-09-23，§5.11）；R1 三场景已全部用真实模型（step-5-preview，生产连接复用）完成并通过（2026-09-23，证据见建设计划 R1 记录与 `/home/ROXY/code/bb_work/r1-evidence-2026-09-23/`）：明确交付从用户输入经新 intake、分解、执行到独立根验收 verified；错误根（子通过、根交付错误）被真实 verifier 点名拒绝；歧义目标下模型先尝试经 hitl 澄清未果后构造显式「Assumption (mine)」假设与结构性 AC，未把编造内容冒充用户要求。token 用量合计 143978（用户授权取消上限），工具调用 44/100、墙钟未超 15 分钟，每场景 rootBudget 未触。S3 一步说明：夹具执行真实 `hitl_ask` 的记账缺陷（driver 侧序列化 live Agent）使路径 (a) 未能在夹具内完成，模型以 (b) 满足判定；该缝未被仓库测试覆盖（夹具把 `hitl_ask` 当 stand-in），记入 R1 记录。语义澄清效果的进一步实验证据仍缺。不继续扩大 Evolution 自动化。
 
+R2 已按证据整理运行时并验收（2026-09-23，§5.12）：给出准入/推进/工作区三块职责与调用方映射；以先红后绿关闭两项实际缺陷（marker 并发变更可留下与栈矛盾的残留、`lookupRun` 重绑定不恢复 gate 相位）；撤回无消费者的 `evidenceByVerifier` 查询面、将 `templateDigest` 标为仅诊断、收回三个无消费者导出；driver 推状态模型不预定 pull 化，按调用方证据保留。A2 已复定为待派发（合同要点见建设计划 R2 记录 D 节）。
+
 ### 1.1 需要干预的建设倾向
 
 2026-09-21 的工程判断：核心方向保留，建设范围收缩。KISS 是目标约束清单，不是要求一次实现所有对象、四值判决、成熟度、召回和进化管理的产品清单。已有 Evolution 链路保留使用；新增工作优先支持一个能验证、能失败、能恢复的小型端到端任务。
@@ -166,7 +168,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 详细票据见 [建设计划](2026-09-20-vrtc-code-change-plan.md)。以下是依赖顺序，不是任务执行 workflow。
 
-先期工程记录见 [执行入口](execution-prompts/README.md)与建设计划：P1–P4、T1、S1-V 切片 2、S1-C、A3、T2/T3 均有已完成记录，A0 + R0 已验收（2026-09-23，§5.11），详细范围见 §5。下一项为 R1 真实运行，随后 R2 按证据整理；后续上下文/问答按运行证据复定。S4-E 评估基础先于自动候选执行，不阻塞 R1 的基础执行验证。具体次序只在建设计划维护；已有机械保障不替代自主修复与恢复，也不证明自然语言验收完整或证据来源真实。
+先期工程记录见 [执行入口](execution-prompts/README.md)与建设计划：P1–P4、T1、S1-V 切片 2、S1-C、A3、T2/T3、A0 + R0、R1、R2 均有已完成记录，详细范围见 §5。下一项为 A2（任务导航与合法动作，2026-09-23 由 R2 按运行证据复定为待派发，合同要点见建设计划 R2 记录 D 节）；后续上下文/问答按运行证据复定。S4-E 评估基础先于自动候选执行，不阻塞 R1 的基础执行验证。具体次序只在建设计划维护；已有机械保障不替代自主修复与恢复，也不证明自然语言验收完整或证据来源真实。
 
 | 顺序 | 建设目标 | 完成条件 |
 |---|---|---|
@@ -201,7 +203,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 | Evidence 依赖 | `requiresArtifact` 只认 verified run 且带 pass 判据的证据；`acceptsArtifact` 只要求存在。普通分解缺失时 blocked + Obligation；replay 的 spawn 开/关路径使用同一检查，缺失时在建任务/Run 前抛错，零派发/零成功记录。不自动生成上游，不验证匹配证据的版本和适用性 | `orchestrate.ts:missingRequiredArtifacts`、`runReplayTask` |
 | Obligation | 记录缺能力/缺产物；模板 coverage 由任务声明 capability 或文字提及匹配；不是义务已被证据满足，更不是防漏的硬闸 | `task-runtime/src/obligation.ts:checkObligationCoverage` |
 | 判决 | `pass/fail/inconclusive`；部分 unknown 有 task/verifier 分类；没有 PARTIAL 状态与剩余义务自动派发；未通过 mandatory 判据仍走失败路径；`heuristic` 标记的判据永远不计入确定性通过 | `task/src/types.ts:VerificationResult`；`orchestrate.ts:unmetMandatory` |
-| Verifier 边界 | 注册即执行可执行自测（`VerifierSelftest.samples` 正负样本；缺样本、描述性样本或漏检样本拒绝注册，唯一例外是调用者显式声明的 `{ testDouble: true }` 并记录警告）。判决与 claim 记录**实际注册实例**的 `version`（插件自报一律被覆盖；版本归属规则见 §5.7：只有实际判决、或由 registry 归因到已解析裁判实例的拒绝才带版本，未知 ref 与不支持 mode 的拒绝不带）；证据可按 `(verifierRef, version)` 索引（`evidenceByVerifier`；KISS §8.2 的裁决召回本身未建）。criterion 声明的受保护验收输入在准入时固定 `{ path, sha256 }`（读不到即整批拒绝），判决前复检：缺失或被改 → `fail` 点名路径且不派发；store 里畸形声明（绕过准入口直写）得到点名条目的可读 `fail`，不是崩溃。仍未建：verifier 与执行者的独立性隔离（`owner` 只是元数据）、证据来源真实性认证、自测样本“有意义”的证明 | `verifier/src/index.ts:register`、`selftestGate`、`verifyCriterion`、`evidenceByVerifier`；`verifier/src/protected-inputs.ts`；`task-runtime/src/protected-inputs.ts` |
+| Verifier 边界 | 注册即执行可执行自测（`VerifierSelftest.samples` 正负样本；缺样本、描述性样本或漏检样本拒绝注册，唯一例外是调用者显式声明的 `{ testDouble: true }` 并记录警告）。判决与 claim 记录**实际注册实例**的 `version`（插件自报一律被覆盖；版本归属规则见 §5.7：只有实际判决、或由 registry 归因到已解析裁判实例的拒绝才带版本，未知 ref 与不支持 mode 的拒绝不带）。criterion 声明的受保护验收输入在准入时固定 `{ path, sha256 }`（读不到即整批拒绝），判决前复检：缺失或被改 → `fail` 点名路径且不派发；store 里畸形声明（绕过准入口直写）得到点名条目的可读 `fail`，不是崩溃。仍未建：verifier 与执行者的独立性隔离（`owner` 只是元数据）、证据来源真实性认证、自测样本“有意义”的证明；KISS §8.2 的裁决召回未建（R2 已撤回无消费者的 `(verifierRef, version)` 查询入口 `evidenceByVerifier`，§5.12） | `verifier/src/index.ts:register`、`selftestGate`、`verifyCriterion`；`verifier/src/protected-inputs.ts`；`task-runtime/src/protected-inputs.ts` |
 | 父验收 | 默认无映射 composite 保持子全 verified；childEvidence 必须存在且来自 verified run，被引用子判据为 heuristic 时拒绝。registry 在自定义 verifier 执行前同样检查映射，合法映射仍须通过所选 verifier，插件不能覆盖映射规则。父 mandatory heuristic 不计确定性通过；requiresIndependentAcceptance 缺映射时准入拒绝 | `composite-verifier.ts:entryDefect`；`verifier/src/index.ts:verifyCriterion`；`admission.ts:independentAcceptanceDefects` |
 | 预算 | A3 已建根预算（§5.9）：`Config.rootBudget`（wallTimeMs/maxRuns/maxConcurrentWrites=1，闭合 schema，未知成员具名拒启）；run 期限 = min（配置 wallTimeMs，根剩余），从持久化 run.startedAt 起算、重启不重计时；maxRuns 按 runId 记账、崩溃重数不退款不重置；replay 经 rootTaskStoreId 根绑定共享 store 根总额；无进展相位机（标记→一次提醒→到限停止）已接线。tools/tokens 仍仅终态软统计（unknown 不记零）；attempts 仅声明 | `root-budget.ts:resolveRootBudget/checkRunStart/hasRootLimits`；`orchestrate.ts:observeWorkerRun`、`budgetBreaches`；`task-runtime/src/index.ts:Config` |
 | L4 上报 | root 的 `escalate` 工具与台账已有；模型主动调用，批准后才记 raised；运行时只输出提示，无自动触发、无处理结果/恢复闭环 | `agent-singularity/src/tools/escalate.ts`；`orchestrate.ts:escalationHint` |
@@ -228,7 +230,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 | G12 | 父同步等子的循环等待已由 A3 解除（§5.9：分解立即返回 batchId、waiting_children 运行时写闸、显式提交、无进展停止，idle 不再等同执行结束）。仍缺：持久 question/answer 与问答等待（task_ask_parent/task_answer 属 A4）；不能仅添加 ask_parent 或开放 send_message | A3（已交付）→ A4 |
 | G13 | task_status 全树文本不表达执行权/合法动作；session 同 cwd 可读比 group 边界宽；reviewer 局部 pack 不等于跨图因果 debug | A2/A5 |
 | G14 | root/worker prompt 与当前方向有漂移：L4/manual、直接问人、make command exit 0、分解意图矛盾；未来工具必须随真实协议接线再写入提示。**R0 已关闭工具面的漂移部分（2026-09-23，已验收，§5.11）**：allow-list 与 prompt 由同一开关布尔派生（off 时提示词不含进化协议段、工具面不含九个 `evolution_*`），并新增根 intake 段（`task_intake`、未激活视图、审核策略、激活前不得 `task_decompose`）；其余角色模板（A1–A6）仍逐票同步 | R0（已验收）→ A0–A6 逐票同步 Prompt 合同 |
-| G15 | 根工具无条件暴露进化链、通用 prompt 混入 BB 指导；runtime 职责集中，未使用接口/仅诊断摘要易被误读为完整保证；缺真实模型运行反馈。**R0 部分关闭（2026-09-23，已验收，§5.11）**：进化链改由装配开关决定是否注册（off = 只注册 19 个常驻工具，on = 28 个，与之前逐名相同），BB 句子从通用 root prompt 移除、领域指导归部署的领域 skill；不新增主管、不合并审批。仍待：R1 真实运行反馈、R2 按证据整理；runtime 职责集中与「未使用接口易被误读」未动 | R0（已验收）→ R1、R2 |
+| G15 | 根工具无条件暴露进化链、通用 prompt 混入 BB 指导；runtime 职责集中，未使用接口/仅诊断摘要易被误读为完整保证；缺真实模型运行反馈。**R0 部分关闭（2026-09-23，已验收，§5.11）**：进化链改由装配开关决定是否注册（off = 只注册 19 个常驻工具，on = 28 个，与之前逐名相同），BB 句子从通用 root prompt 移除、领域指导归部署的领域 skill；不新增主管、不合并审批。R1 已补真实运行反馈（2026-09-23）。**R2 关闭「未使用接口/仅诊断摘要」部分（2026-09-23，已验收，§5.12）**：`evidenceByVerifier` 无消费者已撤回；`templateDigest` 标明仅诊断、无身份保证；三个无消费者导出（`TaskProposalKind`/`TaskProposalDecision`/`TASK_PROPOSAL_ID_PREFIX`）收回。仍待：runtime 职责集中（drivers 推状态模型）按证据保留、不预定 pull 化 | R0（已验收）+ R1 + R2（已验收） |
 
 历史记录中的 M1–M9 为此前会话的实跑声明，保留于历史指南。本次回归结果见建设计划 S0；本次没有重跑 LLM、BB 构建仿真或生产 Evolution 链路。旧环境可用性、外部 bbdev 缺陷和部署阈值在使用前需重新读取对应部署，不能从旧日志推断当前状态。
 
@@ -314,16 +316,16 @@ T1 把“任务契约”从散落在工具 schema、runtime 局部函数与事�
 
 范围（S1-V 三个切片中，父级验收与证据依赖由 P4 交付；本票只做切片 2，不重做父级映射与产物依赖语义，也不提前做 S1-C 的统一校验入口）：
 
-- **可执行自测与注册闸**：`Verifier.selftest` 从描述性文字改为可执行样本 `{ role, name, criterion, expect, store? }`（`task/src/types.ts:VerifierSelftestSample`）。`VerifierRegistry.register` 改为 async：注册前按顺序真实执行每个样本——只带 criterion 的走 `verify()`，带 `store` 视图的（目前只有 composite，且由 registry 自己的实例执行）走导出的纯函数 `judgeCompositeCriterion`——再用与生产完全相同的校验（数量、criterionId、verifierId、状态、unknownKind）比对 `expect`（`pass`/`fail`/`not-pass`）。漏检负样本、正样本未被通过、缺样本、混合形状、无法执行的 store 样本都使该裁判**不可用**并给出点名原因；结论来自执行。三个内建各自带真实样本（command：`true`→pass、`false`→fail；review：已知好/坏样本都不得被判 pass——不可自动通过裁判的等价形态；composite：满足/不满足 `childEvidence` 映射的两个 store 样本）。生产注册只有 `register` 一条替换路径（已核实无其他入口）；测试替身必须由调用者显式声明 `{ testDouble: true }` 并记警告（警告经 cordis logger 输出，未挂载 logger 的上下文不会打印，但跳过本身就是显式声明，不是静默推断），没有“缺 selftest 就跳过”或“形状不对就降级”的静默后门。内建经幂等 `ready()` 注册，cordis `Service.init` 调用它，`verifyRun`/`evidenceByVerifier` 也先 await；ready 之前注册表为空、派发拒绝（fail-closed）。
-- **裁判版本**：`verifyCriterion` 用**实际注册实例**的 `version` 覆盖/移除插件自报值并写入 `VerificationResult.verifierVersion`，`claim()` 同步复制；`evidenceByVerifier(storeId, verifierRef, version?)` 按 `(verifierRef, version)` 从 store 读回证据（省略 version 时旧的无版本证据仍返回；给定时只匹配该版本）；版本变更不改写历史证据（事件只追加）。版本归属规则：registry 自己做出、且解析出了裁判实例的拒绝（受保护输入失配、映射不通过）带该实例版本；无法解析出裁判的判决（未知 ref、不支持 mode、裁判抛出）不带版本——不冒充“裁判给出了判决”。
+- **可执行自测与注册闸**：`Verifier.selftest` 从描述性文字改为可执行样本 `{ role, name, criterion, expect, store? }`（`task/src/types.ts:VerifierSelftestSample`）。`VerifierRegistry.register` 改为 async：注册前按顺序真实执行每个样本——只带 criterion 的走 `verify()`，带 `store` 视图的（目前只有 composite，且由 registry 自己的实例执行）走导出的纯函数 `judgeCompositeCriterion`——再用与生产完全相同的校验（数量、criterionId、verifierId、状态、unknownKind）比对 `expect`（`pass`/`fail`/`not-pass`）。漏检负样本、正样本未被通过、缺样本、混合形状、无法执行的 store 样本都使该裁判**不可用**并给出点名原因；结论来自执行。三个内建各自带真实样本（command：`true`→pass、`false`→fail；review：已知好/坏样本都不得被判 pass——不可自动通过裁判的等价形态；composite：满足/不满足 `childEvidence` 映射的两个 store 样本）。生产注册只有 `register` 一条替换路径（已核实无其他入口）；测试替身必须由调用者显式声明 `{ testDouble: true }` 并记警告（警告经 cordis logger 输出，未挂载 logger 的上下文不会打印，但跳过本身就是显式声明，不是静默推断），没有“缺 selftest 就跳过”或“形状不对就降级”的静默后门。内建经幂等 `ready()` 注册，cordis `Service.init` 调用它，`verifyRun` 也先 await；ready 之前注册表为空、派发拒绝（fail-closed）。
+- **裁判版本**：`verifyCriterion` 用**实际注册实例**的 `version` 覆盖/移除插件自报值并写入 `VerificationResult.verifierVersion`，`claim()` 同步复制；版本变更不改写历史证据（事件只追加）。版本归属规则：registry 自己做出、且解析出了裁判实例的拒绝（受保护输入失配、映射不通过）带该实例版本；无法解析出裁判的判决（未知 ref、不支持 mode、裁判抛出）不带版本——不冒充“裁判给出了判决”。按 `(verifierRef, version)` 查询证据的索引入口曾在本票交付、无生产消费者，2026-09-23 R2 已撤回（§5.12）。
 - **受保护验收输入**：`AcceptanceCriterion.protectedInputs` 由调用者按路径声明（`CriterionSpec` 与工具 schema 接受字符串）。`decomposeAndRun` 在唯一规范化入口**之前**用 `fixSpecProtectedInputs` 对着会话 checkout 逐个读文件、把路径替换为 `{ path, sha256 }`；路径读不到或 checkout 无法解析则整批拒绝、零副作用。固定形态由 `contractDefects`（经 `protectedInputDefects`）在普通分解与 replay 共用的规则里校验，内容摘要覆盖固定后的身份。replay：候选契约的字符串形态按 replay 调用者的 checkout 固定；冠军任务已存的固定形态原样携带，不重读、不发明。判决前 registry 用 `protectedInputDefects(request.cwd, inputs)` 复检：缺失或被改 → 该判据 `fail`（点名路径与摘要变化）且**不派发**裁判。未声明（或空声明）的判据不读、不检查，也不得被描述为“已保护”。
 - **渲染消费者**：spawn prompt 与 worker 契约块的判据表新增 `protected inputs` 列（未声明为 `—`），并加一条“不得修改声明的受保护输入”的行为规则；`task_read` 的判据行同样列出声明路径；`task_decompose` schema 增加 `protectedInputs`；review record 与 review pack 带 `verifierId`/`verifierVersion`（如 ` [command@1]`）。
 
-源码锚：`verifier/src/index.ts`（`register`、`selftestGate`、`executeSamples`、`stampVersion`、`verifyCriterion`、`evidenceByVerifier`、`ready`、`[Service.init]`）、`verifier/src/{command,review,composite}-verifier.ts`、`verifier/src/protected-inputs.ts`；`task-runtime/src/protected-inputs.ts`、`task-runtime/src/index.ts`（`decomposeAndRun`、`replayTask`、`sessionEnv`/`envPathForSession`）、`task-runtime/src/admission.ts:contractDefects`、`task-runtime/src/normalize.ts`（`protectedInputs` 进入闭合字段集、形状规则仍在 admission）、`task-runtime/src/{contract,handoff}.ts` 的判据表、`task/src/types.ts` 的样本/版本/受保护输入类型、`task/src/contract.ts:sha256Hex`。
+源码锚：`verifier/src/index.ts`（`register`、`selftestGate`、`executeSamples`、`stampVersion`、`verifyCriterion`、`ready`、`[Service.init]`）、`verifier/src/{command,review,composite}-verifier.ts`、`verifier/src/protected-inputs.ts`；`task-runtime/src/protected-inputs.ts`、`task-runtime/src/index.ts`（`decomposeAndRun`、`replayTask`、`sessionEnv`/`envPathForSession`）、`task-runtime/src/admission.ts:contractDefects`、`task-runtime/src/normalize.ts`（`protectedInputs` 进入闭合字段集、形状规则仍在 admission）、`task-runtime/src/{contract,handoff}.ts` 的判据表、`task/src/types.ts` 的样本/版本/受保护输入类型、`task/src/contract.ts:sha256Hex`。
 
 测试锚：`verifier/tests/unit/verifier-registry.spec.ts`（注册闸正反例、testDouble 显式通道、版本覆盖、受保护输入失配/缺失且不派发、索引与旧证据）、`verifier/tests/unit/{composite,command}-verifier.spec.ts`（可执行样本）、`task-runtime/tests/unit/protected-inputs.spec.ts`（fixing、形状、摘要敏感度、零副作用）、`task-runtime/tests/unit/{orchestrate,admission,normalize,contract,handoff,review-record}.spec.ts`、`agent-singularity/tests/unit/task-tools.spec.ts`（schema 与渲染、review pack）、`tests/integration/verifier-selftest-inputs.spec.ts`（真实 TaskService+TaskRuntime+VerifierRegistry：worker 改写受保护脚本的反例、合法正例、未声明边界、注册闸、版本与索引、拒绝零副作用，结论全部从持久化事件日志读回）。实跑命令与数量见建设计划「S1-V 切片 2 执行与验收记录」。
 
-未覆盖/边界（如实记录）：criterion 只保护**它声明的**路径，未声明的不受保护；没有内容来源真实性认证（字节是谁在何时产生的仍不可证）；自测样本由裁判自己声明，本票只证明“能区分声明的样本”，不证明样本有意义；`verifierIds()` 同步读取，未 ready 的手工构造上下文会看到空表（生产由 `Service.init` 覆盖，集成测试显式 `await ready()`）；`targetType: verifier` 的 Evolution 候选仍只记账、无机械执行器，显式拒绝不变；KISS §8.2 的裁决召回（漏检裁判的历史 PASS 自动降级重验）未建，`evidenceByVerifier` 只是可查询的索引。
+未覆盖/边界（如实记录）：criterion 只保护**它声明的**路径，未声明的不受保护；没有内容来源真实性认证（字节是谁在何时产生的仍不可证）；自测样本由裁判自己声明，本票只证明“能区分声明的样本”，不证明样本有意义；`verifierIds()` 同步读取，未 ready 的手工构造上下文会看到空表（生产由 `Service.init` 覆盖，集成测试显式 `await ready()`）；`targetType: verifier` 的 Evolution 候选仍只记账、无机械执行器，显式拒绝不变；KISS §8.2 的裁决召回（漏检裁判的历史 PASS 自动降级重验）未建——`(verifierRef, version)` 查询入口（`evidenceByVerifier`）已在 2026-09-23 R2 因无消费者撤回（§5.12），召回有真实消费者时按新票重建。
 
 ### 5.8 能力预检与版本绑定（2026-09-22 S1-C）
 
@@ -338,7 +340,7 @@ T1 把“任务契约”从散落在工具 schema、runtime 局部函数与事�
 
 测试锚：`task/tests/unit/skill-contract.spec.ts`、`task-runtime/tests/unit/{sidecar,verified-read,provider-precheck,provider-load,run-binding,carried-precheck,capability}.spec.ts`、`tests/integration/{provider-precheck,worker-binding,provider-promotion,provider-version-binding,knowledge-provider,recursive-capability,run-skill-loading}.spec.ts`、`agent-singularity/tests/unit/{evolution,task-tools}.spec.ts`。实跑命令与数量见建设计划「S1-C 执行与验收记录」。
 
-未覆盖/边界（如实记录）：配置载入只报告不硬 fail（语义与理由见 `providerLoadReport` docblock）；skill 晋升执行器只支持单文件 `SKILL.md`（含侧车/资源候选显式拒绝）；guidance 快照的 `uncovered` 复检只覆盖"快照出现身份未覆盖条目"方向（记录列出的源目录条目本来就不复制进快照，反向不是差异）；MCP 工具覆盖是前缀判定，server 真实工具表只有 spawn 才知道；run 快照无 GC/配额（A3/S2-R 领域）；`mcpServers[].templateDigest` 只记录渲染、无回读复检（spawn 对缺失 server 具名失败）；worker 仍可读到部署 catalog 里未选 skill 的正文（DSH 无 per-agent 隐藏；授权面未变，有加载未选 skill 不扩权的回归）；预检视角不含仅 DSH 自带发现可见的 skill（该形态会 fail-closed 误拒，模块文档已点名）；快照只保证字节=准入身份，不证明内容正确；`contentCheck` 只识别并携带引用，没有 gate 执行它；效率对比实验（固定任务集与真实模型）是票后工作，不凭 token 变化宣布更高效。
+未覆盖/边界（如实记录）：配置载入只报告不硬 fail（语义与理由见 `providerLoadReport` docblock）；skill 晋升执行器只支持单文件 `SKILL.md`（含侧车/资源候选显式拒绝）；guidance 快照的 `uncovered` 复检只覆盖"快照出现身份未覆盖条目"方向（记录列出的源目录条目本来就不复制进快照，反向不是差异）；MCP 工具覆盖是前缀判定，server 真实工具表只有 spawn 才知道；run 快照无 GC/配额（A3/S2-R 领域）；`mcpServers[].templateDigest` 只记录渲染、无回读复检（R2 起类型文档标明：仅诊断、无身份保证；spawn 对缺失 server 具名失败）；worker 仍可读到部署 catalog 里未选 skill 的正文（DSH 无 per-agent 隐藏；授权面未变，有加载未选 skill 不扩权的回归）；预检视角不含仅 DSH 自带发现可见的 skill（该形态会 fail-closed 误拒，模块文档已点名）；快照只保证字节=准入身份，不证明内容正确；`contentCheck` 只识别并携带引用，没有 gate 执行它；效率对比实验（固定任务集与真实模型）是票后工作，不凭 token 变化宣布更高效。
 
 ### 5.9 非阻塞运行与恢复（2026-09-22 A3）
 
@@ -404,6 +406,23 @@ T1 把“任务契约”从散落在工具 schema、runtime 局部函数与事�
 - **根 intake 缺独立判据是结构规则**：它判定「判据种类」，不判定命令是否恒真、判据语义是否有意义；机器准入不证明模型对用户请求的解读正确（设计 §1.2/§1.10），语义澄清与来源可信度属 R1 的实验范围。
 - **未激活前的提案读取/续跑（本组交付内已修复，复核 A6 端到端证实）**：根 session 在契约激活前没有绑定 run，`task_proposal_read`/`task_proposal_continue` 原先以 `no task run is bound to session` 失败；现对该具名状态回退解析本 session 自有的根 store（`agent-singularity/src/tools/root-store.ts:proposalStoreFor`），其他错误原样抛出，服务层 owner/调用者校验不变；测试锚 `agent-singularity/tests/unit/task-proposal-tools.spec.ts`。剩余边界：`task_proposal_cancel` 仍是 run 解析（该状态下没有提示文本指向它，需要时按同一修法开放）；回退触发依赖该具名错误文案，runtime 提供结构化判别时可再收敛。
 - **根预算零改动**：接受前无根任务，`resolveRootBudget` 走既有具名恢复诊断；`run.startedAt` 即接受时点，A3 记账语义不变。A3 等待窗口本轮未调整（无因窗口失配的失败）。
+
+### 5.12 按证据整理运行时（2026-09-23 R2，已验收）
+
+范围（建设计划文首表第 8 行完成闸：关闭有证据的一致性缺陷、收敛无用途接口、核对 marker 边界、给出职责/调用方映射、复定下一票合同；不预定驱动重写。**独立复核未做，由执行者自记**）：
+
+- **职责/调用方映射**（准入 / 运行推进 / 工作区归属三块四问表：事实在哪、谁持久化、谁是消费者、哪些是内存投影）：完整表见建设计划「R2：按证据整理运行时 执行与验收记录」A 节。结论要点：准入链（受保护输入固定 → 规范化 → 结构/能力准入 → 提案记录 → 原子准入提交）全部从 store 或调用方输入判定，普通/replay/root 共用一套规则；推进侧 store 是事件真相，内存只有 handle（sessions 指针缓存、drivers 在飞表、executionGate 相位、per-batch AbortController）；工作区归属进程内栈是权威、marker 只给后来的进程。
+- **关闭的实际缺陷 1（marker 顺序）**：全栈并发 release 时最后一次 rename 可落在最后一次 delete 之后，留下命名本进程活 pid 的残留 marker，栈空但工作区在进程退出前不可 claim/reconcileAdopt（先红 5/5）。修复=`workspace.ts` 按 workspace 的 marker 变更串行链（调用序=落盘序），协议语义不变；回归 6/6 + 全量。部署路径上释放本由调用方串行，修复是把模块自身承诺升级为与栈一致。
+- **关闭的实际缺陷 2（gate 相位重绑定）**：`lookupRun` 重绑定门（`runForSession`，全部任务工具的入口）不还原 gate 相位——进程重启后恢复的 waiting_children 父 session 对写/bash/再分解/提交不设防（真实 JSONL 重开 + park 在父 drain，先红）。修复=两条重绑定路径都从 store 的 run 记录派生相位（与 `adoptRoot` 同规则，`rootSessionPhase` 泛化为 `runGatePhase`），未建第二份相位。
+- **观察项判定（A0+R0 O1）**：根身份=首个 parentless 任务、replay 也造 parentless——判定无真实故障路径（replay 的 champion 要求同 store 已有终态任务，A0 store 里根必在 replay 前；预算 owner 按 session 绑定解析并有多绑定具名拒绝），保留并说明。
+- **公共面收敛**：`evidenceByVerifier` 无生产/审计消费者 → 撤回方法与 3 个测试（KISS §8.2 召回不建）；`templateDigest` 无消费者依赖执行身份 → 类型文档标明仅诊断、无身份保证；`TaskProposalKind`/`TaskProposalDecision`/`TASK_PROPOSAL_ID_PREFIX` 无文件外消费者 → 收回导出（结构可读性不变）。
+- **保留项（有理由）**：drivers 推状态模型、`replayLineage` 进程内 Map、`serializeParent` 互斥、T2/T3 提案生命周期、A3 的 workspace/取消/恢复规则全部按调用方证据保留，未動；跨进程 marker 无 CAS、双 claim 同 tick 窗口、共享文件系统外部写入者均为既有边界，本轮未改也未宣称。
+
+源码锚：`task-runtime/src/workspace.ts`（`queueMarkerMutation` 与 claim/push/release/reconcileAdopt/close 入链）、`task-runtime/src/index.ts`（`runGatePhase`/`gatePhaseFromStore`/`lookupRun`）、`verifier/src/index.ts`（`evidenceByVerifier` 移除）、`task/src/proposal.ts`（三个导出收回）、`task/src/types.ts:RunMcpServerBinding`（诊断标注）。
+
+测试锚：`task-runtime/tests/unit/workspace.spec.ts`（并发 mutation 两例）、`tests/integration/a3-recovery.spec.ts`（重绑定 gate 相位）、`verifier/tests/unit/verifier-registry.spec.ts` 与 `tests/integration/verifier-selftest-inputs.spec.ts`（撤回后回归）。
+
+未覆盖/边界（如实记录）：独立复核未做；未跑真实模型/BB/部署；B1 修复的部署可达性依赖调用方串行（当前调用图满足）；A2 只复定不实施；召回重建与否由未来消费者决定。
 
 ## 6. 文档维护
 

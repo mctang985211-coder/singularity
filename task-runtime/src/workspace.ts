@@ -21,18 +21,23 @@
  *    workspace's marker at the same time while a run settles, and one shared
  *    temporary path would let the first `rename` consume the file the second was
  *    about to move — an ENOENT out of a release that is nobody's protocol error.
- *    Concurrent writes therefore leave one whole marker, the write that landed
- *    last; which owner that is remains the caller's business, because the
- *    in-process stack is the truth for this process and handovers are meant to be
- *    serialized. This is what a *later* process reads, and all it can honestly
- *    say is "the pid in here was alive when I looked" — the boundary §3.4 states
- *    rather than hides: `process.kill(pid, 0)` reports EPERM for another user's
- *    process and must count as alive; a reused pid makes a dead owner look alive
- *    (the marker carries the kernel's own start-time token, compared with the live
+ *    Overlapping mutations are applied in *call order* — one promise chain per
+ *    workspace — so the file on disk always ends in the state of the mutation
+ *    that was called last, which is the holder the stack's own last mutation
+ *    left on top. Landing order alone is not good enough: a rename that landed
+ *    after the last release's delete would leave a marker naming an owner the
+ *    stack no longer holds, and a marker naming this process's live pid with no
+ *    holder behind it is one no claim and no `reconcileAdopt` may clear — the
+ *    workspace would stay unclaimable until the process exited. This is what a
+ *    *later* process reads, and all it can honestly say is "the pid in here was
+ *    alive when I looked" — the boundary §3.4 states rather than hides:
+ *    `process.kill(pid, 0)` reports EPERM for another user's process and must
+ *    count as alive; a reused pid makes a dead owner look alive (the marker
+ *    carries the kernel's own start-time token, compared with the live
  *    process's and *reported* when they disagree — a reused pid is still a live
- *    pid, so the comparison is a diagnostic, not an authorisation: only a pid that
- *    is provably gone is adopted); and a `DSH_HOME` shared across machines makes
- *    the pid meaningless.
+ *    pid, so the comparison is a diagnostic, not an authorisation: only a pid
+ *    that is provably gone is adopted); and a `DSH_HOME` shared across machines
+ *    makes the pid meaningless.
  *
  * What that means for the rules, and why they are this strict:
  *
@@ -301,10 +306,35 @@ export class WorkspaceRegistry {
   private readonly markerRoot: string
   private readonly pid: number
   private readonly stacks = new Map<string, WorkspaceOwner[]>()
+  /**
+   * One marker-mutation chain per workspace: every write and delete joins the
+   * tail of its workspace's chain, so overlapping mutations of one marker land
+   * in the order they were called — the same order the stack was mutated in.
+   * A rejected mutation is carried past, never stored: a write that failed
+   * (a permission, a full disk) must not wedge the mutations behind it, and its
+   * caller still sees the rejection it has to report.
+   */
+  private readonly markerWrites = new Map<string, Promise<void>>()
 
   constructor(options: WorkspaceRegistryOptions) {
     this.markerRoot = options.markerRoot
     this.pid = options.pid ?? process.pid
+  }
+
+  /** Queue one marker mutation after the ones this workspace already has in flight, in call order. */
+  private queueMarkerMutation(workspace: string, mutate: () => Promise<void>): Promise<void> {
+    const run = (this.markerWrites.get(workspace) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(mutate)
+    const stored = run.catch(() => undefined)
+    this.markerWrites.set(workspace, stored)
+    // The chain is a queue, not a ledger: once it drains, the workspace's entry
+    // goes, so a long-lived registry does not accumulate one per workspace it
+    // ever touched. A mutation queued behind a drained one starts a fresh chain.
+    void stored.then(() => {
+      if (this.markerWrites.get(workspace) === stored) this.markerWrites.delete(workspace)
+    })
+    return run
   }
 
   /** Where one workspace's marker lives — derived from the path as given, so it is the same key the stack uses. */
@@ -330,7 +360,7 @@ export class WorkspaceRegistry {
     }
     const read = await this.readMarker(workspace)
     if (read.kind !== 'absent') throw await this.busyFromMarker(workspace, read)
-    await this.writeMarker(workspace, owner)
+    await this.queueMarkerMutation(workspace, () => this.writeMarker(workspace, owner))
     this.stacks.set(workspace, [owner])
   }
 
@@ -353,7 +383,7 @@ export class WorkspaceRegistry {
       )
     }
     held.push(to)
-    await this.writeMarker(workspace, to)
+    await this.queueMarkerMutation(workspace, () => this.writeMarker(workspace, to))
   }
 
   /**
@@ -377,9 +407,13 @@ export class WorkspaceRegistry {
     held.pop()
     if (held.length === 0) {
       this.stacks.delete(workspace)
-      await this.removeMarker(workspace)
+      await this.queueMarkerMutation(workspace, () => this.removeMarker(workspace))
     } else {
-      await this.writeMarker(workspace, held[held.length - 1])
+      // The owner this release leaves behind is captured here, where the stack
+      // has just said it — a mutation that ran later would read whatever holder
+      // the next release already left.
+      const remaining = held[held.length - 1]!
+      await this.queueMarkerMutation(workspace, () => this.writeMarker(workspace, remaining))
     }
   }
 
@@ -403,7 +437,7 @@ export class WorkspaceRegistry {
       return { adopted: false, reason: `workspace ${workspace} still has a holder: ${owner}` }
     }
     this.stacks.delete(workspace)
-    await this.removeMarker(workspace)
+    await this.queueMarkerMutation(workspace, () => this.removeMarker(workspace))
     return { adopted: true }
   }
 
@@ -420,7 +454,7 @@ export class WorkspaceRegistry {
       const read = await this.readMarker(workspace)
       if (read.kind !== 'held') continue
       if (read.marker.pid !== this.pid) continue
-      await this.removeMarker(workspace)
+      await this.queueMarkerMutation(workspace, () => this.removeMarker(workspace))
     }
   }
 

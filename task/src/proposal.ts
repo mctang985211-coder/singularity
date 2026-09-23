@@ -98,8 +98,13 @@ export type TaskProposalPolicy = 'off' | 'all'
  * session's contract. Absent means `decomposition` — every record written
  * before the field existed — so a reader must treat the two the same and never
  * invent a kind for a stored record.
+ *
+ * Module-local on purpose: the record's own discriminant is the literal on each
+ * arm (`kind?: 'batch'`, `kind: 'root'`), and the only reader of this union is
+ * the validation vocabulary below. Nothing outside this file names it, so it is
+ * not part of the package's public surface (R2).
  */
-export type TaskProposalKind = 'decomposition' | 'root'
+type TaskProposalKind = 'decomposition' | 'root'
 
 /** Every proposal kind, for validation and rendering. */
 export const TASK_PROPOSAL_KINDS: readonly TaskProposalKind[] = ['decomposition', 'root']
@@ -278,8 +283,13 @@ export interface RootProposalIdentity {
  * `proposalDigest`, `admissionContextDigest` or `reviewContextDigest` disagrees
  * with the stored proposal, so a decision can only ever mean "this exact batch,
  * under these exact limits, with this exact resolution".
+ *
+ * Module-local on purpose: the exported vocabulary of a decision is
+ * {@link TaskProposalDecisionClaim} (the persisted event payload), which this
+ * interface is the base of; a reader narrowing the stored record structurally
+ * never needs the base's name (R2).
  */
-export interface TaskProposalDecision {
+interface TaskProposalDecision {
   /** What was decided. Only `approved` can lead to admission, through `approved → ready`. */
   outcome: TaskProposalDecisionOutcome
   /** The batch identity the decision was made against; must equal the stored proposal's. */
@@ -546,8 +556,12 @@ export interface TaskProposalIndex {
   readonly byParentTask: Readonly<Record<string, readonly TaskProposal[]>>
 }
 
-/** The `p-` prefix every proposal id carries, so an id is recognizable as one wherever it is printed. */
-export const TASK_PROPOSAL_ID_PREFIX = 'p-'
+/**
+ * The `p-` prefix every proposal id carries, so an id is recognizable as one
+ * wherever it is printed. Module-local: the two id derivations below are its
+ * only callers, and no other file names it (R2).
+ */
+const TASK_PROPOSAL_ID_PREFIX = 'p-'
 
 /**
  * The proposal id one batch identity gets: `p-` plus {@link decompositionDigest}

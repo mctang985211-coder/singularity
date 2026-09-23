@@ -253,11 +253,18 @@ export interface RunSkillBinding {
  * machine paths, so the template — the part a deployment edits — is what is
  * digestible; `null` means the registry held no such key, which the spawn then
  * refuses by name.
+ *
+ * **Diagnostic only.** The digest records what the run *rendered* at bind
+ * time; nothing re-reads the registry to compare, so it is not an execution
+ * identity and no consumer may treat a matching digest as proof that the
+ * server that actually started mounted those bytes. The spawn's own failure is
+ * the enforcement for a missing server; a template edited between binding and
+ * spawn is not caught here.
  */
 export interface RunMcpServerBinding {
   /** The server name the capability declared and the worker's tools are namespaced under. */
   serverName: string
-  /** SHA-256 over the registry template the name resolved to, or `null` when the registry holds no such name. */
+  /** SHA-256 over the registry template the name resolved to, or `null` when the registry holds no such name. Diagnostic (see the interface note): never an execution identity. */
   templateDigest: string | null
 }
 

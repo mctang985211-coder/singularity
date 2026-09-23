@@ -98,7 +98,11 @@ const TASK_PROPOSAL_DECISION_OUTCOMES = [
 	"cancelled",
 	"expired"
 ];
-/** The `p-` prefix every proposal id carries, so an id is recognizable as one wherever it is printed. */
+/**
+* The `p-` prefix every proposal id carries, so an id is recognizable as one
+* wherever it is printed. Module-local: the two id derivations below are its
+* only callers, and no other file names it (R2).
+*/
 const TASK_PROPOSAL_ID_PREFIX = "p-";
 /**
 * The proposal id one batch identity gets: `p-` plus {@link decompositionDigest}
@@ -2455,4 +2459,4 @@ var TaskService = class extends Service {
 var src_default = TaskService;
 
 //#endregion
-export { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, ROOT_PROPOSAL_TASK_ID, RootTaskSpec, SKILL_CONTRACT_VERSION, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_ID_PREFIX, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskService, TaskState, admissionContextDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, src_default as default, isSupportedSkillResourcePath, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, sha256Hex, skillContentDigest, skillContractDefects, skillContractDigest, taskProposalId };
+export { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, ROOT_PROPOSAL_TASK_ID, RootTaskSpec, SKILL_CONTRACT_VERSION, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskService, TaskState, admissionContextDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, src_default as default, isSupportedSkillResourcePath, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, sha256Hex, skillContentDigest, skillContractDefects, skillContractDigest, taskProposalId };

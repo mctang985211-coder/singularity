@@ -142,6 +142,11 @@ type TaskProposalPolicy = 'off' | 'all';
  * session's contract. Absent means `decomposition` — every record written
  * before the field existed — so a reader must treat the two the same and never
  * invent a kind for a stored record.
+ *
+ * Module-local on purpose: the record's own discriminant is the literal on each
+ * arm (`kind?: 'batch'`, `kind: 'root'`), and the only reader of this union is
+ * the validation vocabulary below. Nothing outside this file names it, so it is
+ * not part of the package's public surface (R2).
  */
 type TaskProposalKind = 'decomposition' | 'root';
 /** Every proposal kind, for validation and rendering. */
@@ -297,6 +302,11 @@ interface RootProposalIdentity {
  * `proposalDigest`, `admissionContextDigest` or `reviewContextDigest` disagrees
  * with the stored proposal, so a decision can only ever mean "this exact batch,
  * under these exact limits, with this exact resolution".
+ *
+ * Module-local on purpose: the exported vocabulary of a decision is
+ * {@link TaskProposalDecisionClaim} (the persisted event payload), which this
+ * interface is the base of; a reader narrowing the stored record structurally
+ * never needs the base's name (R2).
  */
 interface TaskProposalDecision {
   /** What was decided. Only `approved` can lead to admission, through `approved → ready`. */
@@ -554,8 +564,6 @@ interface TaskProposalIndex {
   /** `parentTaskId` → that task's proposals, in submission order. A root contract is in no entry here. */
   readonly byParentTask: Readonly<Record<string, readonly TaskProposal[]>>;
 }
-/** The `p-` prefix every proposal id carries, so an id is recognizable as one wherever it is printed. */
-declare const TASK_PROPOSAL_ID_PREFIX = "p-";
 /**
  * The proposal id one batch identity gets: `p-` plus {@link decompositionDigest}
  * of the identity. One implementation, used by every writer and by the
@@ -866,11 +874,18 @@ interface RunSkillBinding {
  * machine paths, so the template — the part a deployment edits — is what is
  * digestible; `null` means the registry held no such key, which the spawn then
  * refuses by name.
+ *
+ * **Diagnostic only.** The digest records what the run *rendered* at bind
+ * time; nothing re-reads the registry to compare, so it is not an execution
+ * identity and no consumer may treat a matching digest as proof that the
+ * server that actually started mounted those bytes. The spawn's own failure is
+ * the enforcement for a missing server; a template edited between binding and
+ * spawn is not caught here.
  */
 interface RunMcpServerBinding {
   /** The server name the capability declared and the worker's tools are namespaced under. */
   serverName: string;
-  /** SHA-256 over the registry template the name resolved to, or `null` when the registry holds no such name. */
+  /** SHA-256 over the registry template the name resolved to, or `null` when the registry holds no such name. Diagnostic (see the interface note): never an execution identity. */
   templateDigest: string | null;
 }
 /**
@@ -2612,4 +2627,4 @@ declare class TaskService extends Service {
   private header;
 }
 //#endregion
-export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, ExecutionPhase, ExecutionSkillSidecar, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, KnowledgeContentCheck, KnowledgeSkillSidecar, NoProgressRecord, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ProtectedInputRef, ROOT_PROPOSAL_TASK_ID, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootProposalIdentity, RootTaskSpec, RunId, RunMcpServerBinding, RunProviderBinding, RunSkillBinding, RunStatus, SKILL_CONTRACT_VERSION, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, SkillContentIdentity, SkillContractDefect, SkillContractDefectCode, SkillContractVersion, SkillFitFacts, SkillPort, SkillResourceIdentity, SkillSidecar, SkillVerifierRef, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_ID_PREFIX, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskContract, TaskContractVersion, TaskDefinition, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecision, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalKind, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifierSelftestSample, VerifierSelftestStore, VerifyRequest, admissionContextDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, isSupportedSkillResourcePath, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, sha256Hex, skillContentDigest, skillContractDefects, skillContractDigest, taskProposalId };
+export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, ExecutionPhase, ExecutionSkillSidecar, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, KnowledgeContentCheck, KnowledgeSkillSidecar, NoProgressRecord, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ProtectedInputRef, ROOT_PROPOSAL_TASK_ID, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootProposalIdentity, RootTaskSpec, RunId, RunMcpServerBinding, RunProviderBinding, RunSkillBinding, RunStatus, SKILL_CONTRACT_VERSION, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, SkillContentIdentity, SkillContractDefect, SkillContractDefectCode, SkillContractVersion, SkillFitFacts, SkillPort, SkillResourceIdentity, SkillSidecar, SkillVerifierRef, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskContract, TaskContractVersion, TaskDefinition, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifierSelftestSample, VerifierSelftestStore, VerifyRequest, admissionContextDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, isSupportedSkillResourcePath, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, sha256Hex, skillContentDigest, skillContractDefects, skillContractDigest, taskProposalId };

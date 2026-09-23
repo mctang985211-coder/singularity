@@ -25,8 +25,8 @@
 | 5 | T2 + T3：契约审核与恢复（一个交付组） | 已验收（2026-09-23，双模型并行独立复核 + 综合复核确认） | Kimi Code 主代理指挥 + 4 阶段实现子代理（A 提案合同层 / B task-runtime 生命周期、重检、幂等与恢复 / C 工具面、审批渠道与 prompt / D 集成级验收、模型协议 fixture 与文档收尾）+ 2 并行独立复核子代理 + 1 综合复核子代理 | 见「T2+T3：契约审核与恢复 执行与验收记录」 | off/all、审核持久化、批准后重检及崩溃恢复一起验收，不单独交付不可恢复的 all |
 | 6 | A0 + R0：根入口与默认运行面（一个交付组） | 已验收（2026-09-23，独立子代理复核） | Kimi Code 主代理指挥 + 6 阶段实现子代理（R0-a 装配开关 / R0-b 根 allow-list 与 prompt 收敛 / A `task` 包 kind 联合与根消费 / B `task-runtime` intake 服务层、`adoptRoot`、`graphs.create` 切换、支撑夹具走真实 intake / C `task_intake` 工具、根未激活视图、根审核渲染、prompt 段 / D 集成验收与文档收尾）+ 1 独立复核子代理 | 见「A0 + R0：根入口与默认运行面 执行与验收记录」 | 根目标来源、独立 AC、off/all 与激活恢复完整；默认工具/prompt 按角色收敛；见下方补救合同 |
 | 7 | R1：真实运行验证 | 已验收（2026-09-23；S1/S2/S3 真实模型场景均通过，含一次执行事故如实记录） | Kimi Code 主代理指挥 + 1 执行子代理 | 见「R1：真实运行验证 执行记录」 | 同一实现的真实模型任务经新入口满足根验收；错误根结果不误过；歧义未被冒认要求；运行证据和阻塞处置完整 |
-| 8 | R2：按证据整理运行时 | 待前置 | 待填 | 待填 | 关闭已发现的一致性缺陷、收敛重复职责及无用途接口，核对 marker 边界；不预定驱动重写 |
-| 9 | A2：任务导航与合法动作 | 待复定 | 待填 | 待填 | 按 R1/R2 记录收紧具体读取场景；授权、合法动作与有界结果完整，分页仅在有实际需求时建设 |
+| 8 | R2：按证据整理运行时 | 已验收（2026-09-23，独立子代理复核 + 复核缺陷已修复） | Kimi Code 主代理指挥 + R2 实现子代理 + 1 独立复核子代理 | 见「R2：按证据整理运行时 执行与验收记录」 | 关闭已发现的一致性缺陷、收敛重复职责及无用途接口，核对 marker 边界；不预定驱动重写 |
+| 9 | A2：任务导航与合法动作 | 待派发 | 待填 | 见「R2：按证据整理运行时 执行与验收记录」D 节（A2 最小合同复定） | 按 R1/R2 记录收紧具体读取场景；授权、合法动作与有界结果完整，分页仅在有实际需求时建设 |
 | 10 | A1：全局上下文投影 | 待复定 | 待填 | 待填 | 复用 A2 读取域，根目标/贡献/必要证据有来源，恢复与压缩不丢核心事实；不照搬字段全集 |
 | 11 | A4：父子澄清 | 待复定 | 待填 | 待填 | 父子与三层问答、消息故障恢复、写闸及多阻塞处置完整 |
 | 12 | S4-E：评估基础（S4 内的子票） | 待复定 | 待填 | 待填 | 先服务一种候选对象：可比实验、真实证据、冻结评价与回归闸；不建全对象评估平台 |
@@ -69,7 +69,7 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。P1–P4 与 T1 已完成，S1-V 切片 2、S1-C、A3、T2/T3 的验收记录见下文。下一项是第 7 项 R1（真实运行验证）：第 6 项 A0 + R0 已验收（2026-09-23，记录见「A0 + R0：根入口与默认运行面 执行与验收记录」）；使用[架构补救指挥 prompt](execution-prompts/05-architecture-remediation.md)连续处理第 6–8 项。Task 主线见 [Task 自主构造建设指导](task-contract-construction-guide.md)，协作主线见 [探索与自进化架构](exploration-evolution-architecture.md)与 [Prompt 合同](agent-prompt-contracts.md)。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。P1–P4 与 T1 已完成，S1-V 切片 2、S1-C、A3、T2/T3、A0 + R0、R1、R2 的验收记录见下文。第 6–8 项（A0 + R0 → R1 → R2）已按[架构补救指挥 prompt](execution-prompts/05-architecture-remediation.md)连续处理完毕；下一项是第 9 项 A2（已由 R2 按运行证据复定为待派发，合同要点见 R2 记录 D 节）。Task 主线见 [Task 自主构造建设指导](task-contract-construction-guide.md)，协作主线见 [探索与自进化架构](exploration-evolution-architecture.md)与 [Prompt 合同](agent-prompt-contracts.md)。
 
 ### 补救范围与验收合同（R0–R2；A0 + R0 已验收（2026-09-23），R1/R2 未实现）
 
@@ -118,7 +118,7 @@ T1 已交付统一契约、身份与准入记录；S1 验证与能力合同（S1
 |---|---|---|---|
 | A0 真实根契约入口 | 已验收（2026-09-23），与 R0 同组；见「A0 + R0：根入口与默认运行面 执行与验收记录」 | T1、S1-V 切片 2、T2/T3 组 | 根来源/语义边界、独立 AC、审核与幂等激活恢复完整，旧图不改历史。**已交付机制**：`task_intake` + 根契约审核/激活/幂等恢复 + 未激活视图 + 旧图具名拒绝；**未证明**：模型对用户请求的解读正确（属 R1） |
 | A1 全局上下文投影 | 待复定 | A0/A2、S1-C；R1/R2 证据 | 根目标、贡献、必要证据及来源的授权投影；压缩不丢契约，不预建字段全集 |
-| A2 Task 导航与合法动作 | 待复定 | A0/A3、S1-C；R1/R2 证据 | 实际需要的授权任务切片、owner/阻塞/合法动作；分页按需要建设，不能看见即领取 |
+| A2 Task 导航与合法动作 | 待派发（2026-09-23 R2 按运行证据复定，合同见「R2 记录」D 节） | A0/A3、S1-C；R1/R2 证据 | 授权任务切片、owner/阻塞、合法动作三件套从 store 既有记录派生（不新增持久字段，与 gate 放行表同源）；worker 只见自己的子树与根目标投影，可见≠可领取；有界结果=条目/字节上限+稳定排序+omittedRefs 明示，**分页不建设**（R1 轨迹无规模压力，无实需不建）；验收=真实 loop 断言读取切片恰为授权范围、合法动作与实际相位一致、越权读取具名拒绝、恢复后与 store 一致 |
 | A3 非阻塞批次与协调相位 | 已完成（2026-09-22，见「A3 执行与验收记录」） | T1、S1-V 切片 2、S1-C | 统一迁移与串行推进、工作区写入归属、显式提交、根预算、取消/恢复及 replay 一致性 |
 | A4 父子澄清 | 待复定 | A1/A2/A3 | 问题身份与父子授权、持久投递；逐级问答保留批次与写闸；claim 后故障可恢复；未知/部分回答不解除全部阻塞 |
 | A5 因果诊断与主管触发 | 待复定，与 S2-E 同组 | A1/A2/A4、S4-E | 从一个真实失败场景贯通依赖/证据下钻、去重/预算、候选交接；不提前执行候选 |
@@ -552,6 +552,123 @@ driver 未在仓库内重建：两轮 driver 分别解包于 `/home/ROXY/code/bb
 - S3 根 run 终态为 `failed`（模型自设 review/heuristic 判据的机械结果），S3 的判定对象是契约构造路径而非终态，二者在记录中分开陈述。
 - S1/S2/S3 中根模型都调用了 stand-in 工具（S1 `graph_mark_ready`，S3 `graph_spawn`/`graph_mark_ready`）——夹具边界，与 `tests/support` 处理相同，未产生任务树外产物；真实部署中这些是 `graph` 服务的真实工具。
 - 未部署、未推送、未跑 BB 仿真。仓库 `src/tests/docs` 零改动（唯一例外 = 本节）；harness 与 singularity 两个 git 工作区相对开工前无变化；证据全树与两个 driver 包内零密钥明文（`.dsh/api.env` 的 key 全文扫描无命中）。
+
+## R2：按证据整理运行时 执行与验收记录（2026-09-23）
+
+| 字段 | 填写内容 |
+|---|---|
+| 状态、最近更新日期 | 已验收（2026-09-23；完成闸证据见下。独立复核已完成：非实现者子代理只读复核 + 2 组变异探针 + 2 个自建反例，结论通过，2 项文档级缺陷已由指挥方修复） |
+| 执行 agent / 任务链接 | Kimi Code 主代理指挥 + R2 实现子代理（R1 轨迹与源码取证 → 映射 → 缺陷红绿 → 公共面收敛 → 复定 A2） |
+| 开始日期 / 验收日期 | 2026-09-23 / 2026-09-23 |
+| 前置验收记录 | R1：Singularity HEAD `7595b6d`（S1/S2/S3 真实模型场景均通过，含一次执行事故如实记录，证据在 `/home/ROXY/code/bb_work/r1-evidence-2026-09-23/`）。开工前实跑复核该前置：`pnpm build` 通过；外层单测 44 文件 / 1454 项、集成 37 文件 / 258 项全绿；`verify-persistence` 4 根匹配；六包 tsc = task 0 / verifier 0 / agent-singularity 0 / agent-runtime 2 / task-runtime 3 / graphs 6（既有诊断，逐条与各票记录核对同源）。两个 git 工作区干净（外层仅 thirdparty 未跟踪内容）——前置成立 |
+| 修改前基线 | Singularity `7595b6d`（R1 验收提交），外层 harness `6428b8ae30`（同步 R1 验收指针） |
+| 交付版本 | **未提交**（工作区修改：`task-runtime/src/{index,workspace}.ts`、`task/src/{proposal,types}.ts`、`verifier/src/index.ts` 五个生产文件 + 四个测试文件 + 三个包的构建产物 `lib/` + 两处文档；提交由派发方决定） |
+| 验收项对应 | A → 本记录「职责/调用方映射」三表 + 内存 handle 读点清单；B1（marker 顺序）→ `task-runtime/tests/unit/workspace.spec.ts` 新用例（先红 5/5 后绿 6/6）+ `workspace.ts` 调用链分析；B2（gate 相位重绑定）→ `tests/integration/a3-recovery.spec.ts` 新用例（先红后绿）+ `index.ts:lookupRun`；B3（O1）→ 本记录「O1 判定」段（无故障路径，保留并说明）；C1 → `verifier/src/index.ts` 撤回 `evidenceByVerifier` + 删除其 3 个测试；C2 → `task/src/types.ts:RunMcpServerBinding` 诊断语义标注；C3 → `task/src/proposal.ts` 三个无消费者导出改模块内；D → 本计划文首表第 9 行 + A 表 A2 行 + 本记录 D 节 |
+| 实际检查 | 1. `packages/singularity` 下 `pnpm build`：通过。2. 外层 `pnpm vitest run --project unit packages/singularity`：44 文件 / **1453 项**通过（基线 1454；B1 +1、C1 −2）。3. 外层 `pnpm vitest run --project integration packages/singularity`：37 文件 / **258 项**通过（基线 258；B2 +1、C1 −1）。4. `pnpm run verify-persistence`：OK，4 个事件根指纹匹配（未 `--write`；本轮无事件声明变化）。5. `git diff --check`：通过。6. 各包 `pnpm exec tsc --noEmit`：task 0、verifier 0、agent-singularity 0、agent-runtime 2、task-runtime 3（逐条核对与基线同源，其中 1 条因新增代码行号 5221→5247 位移）、graphs 6——与基线逐项一致，无新增。7. 复跑稳定性：`workspace.spec.ts` 连跑 6 次 21/21 全绿。8. 未运行：真实模型、BB 构建/仿真、部署、推送 |
+| 跨入口/组合反例 | B1 先红后绿：全栈并发 release（8 批次层 + 底层 run 同一 tick 全部合法 pop）→ 修复前 marker 残留（`markerExists()` 为 true，5/5 确定性复现，最后一次 rename 落在最后一次 delete 之后）→  Claim 被「marker names this process's own pid but this process holds no claim」永久拒绝；修复（按 workspace 的 marker 变更串行链）后 marker 缺席、可立即重新 claim，6/6 稳定。B2 先红后绿：真实 JSONL 重开 + 第二进程经 `runForSession` 重绑定（恢复驱动被 park 在父 session 的首次写 drain，无计时器）→ 修复前 `gate.phaseOf(ROOT)` 为 `undefined`（waiting_children 的父 session 不设防，写/bash/再分解/提交全部放行）→ 修复后由 store 记录派生相位、协调工具放行、写工具具名拒绝。合法正例：普通分解/提交/验收/取消/恢复/重开全链路与 off/all 审核不变（全量回归）。拒绝路径断言：B1 修复不改变任何拒绝语义（claim 仍拒绝、reconcileAdopt 仍是唯一 stale 接管者）；C1/C3 为纯公共面收敛，行为不变由全量回归证明 |
+| 独立复核 | 子代理（deepseek 默认模型，非实现者；只读复核 + 全量实跑 + 2 组变异探针 + 2 个自建反例 + `7595b6d` 基线对照；探针 sha256 还原、零残留）：结论**通过**。B1：变异（舍去 marker 串行队列）→ 新用例 5/5 确定性红、自建反例经真实 `claim`/`reconcileAdopt` 证明工作区进程存活期不可用（活 pid 残留 marker，栈空但 busy）；归语义未弱化（栈仍是单进程权威、reclaim 只走 reconcileAdopt）。B2：变异（`gatePhaseFromStore` 设 no-op）→ 自建真实 JSONL 重开反例经**真实 DSH 工具流水线** `ctx.tools.execute` 断言 `write`/`bash`/`task_decompose`/`task_submit_result` 被拒且点名 `waiting_children`，3/3 红；未绑定 session 语义不变。C1：全仓（含 buckyball 与 r1 证据目录）grep 确认 `evidenceByVerifier` 零消费者后删除，`verifier/lib` 无残留、生产 `verifierVersion` 消费不动。C2：`templateDigest` 确仅 docblock 标注、无挂载处复检新增。C3：三个导出文件外零消费者、`task/lib` 导出清单确已不含。A 节职责映射 5/5 论断源码核实属实；R1 取证引用抽查一致；A2 复定仅文档零实现。复核发现 2 项文档级缺陷（D1 S1 工具调用次数 23→14；D2 一处 describe/it 合行格式），均已由指挥方修复；修复后实测 unit 1453/1453、integration 258/258、`verify-persistence` OK、`git diff --check` 0 |
+| 文档同步 | 主 guide：§1 当前阶段判断补 R2 事实、§3 状态行下一项、§4.1 Verifier 边界行（撤回索引入口）、§4.2 G15（R2 已关闭「未使用接口」部分）、§5.7（三处 `evidenceByVerifier` 表述改为撤回记录）、§5.8（`templateDigest` 边界句补诊断标注）、新增 §5.12；本计划：文首表第 8/9 行、派发入口下一项句、A 表 A2 行、本记录；`execution-prompts/README.md` 未动（其状态行由派发入口维护，本轮未越权改） |
+| 模拟与未覆盖范围 | 未调用真实模型、未跑 BB 仿真、未部署、未推送。B1 的复现用单元级并发构造（与 T2/T3 M6 同一形状，补上底层 release）；部署路径上 marker 变更本由调用方串行（见 B1「部署可达性」段），修复使模块自身保证与栈一致，未改变任何调用方时序。B2 的复现是真实进程死亡 + JSONL 重开，但第二进程的首个工具调用选取 `runForSession` 门；DSH 侧会话恢复由部署负责，本仓不声称驱动它。driver 推状态模型（内存 drivers 表）未动（不预定 pull 化）；`replayLineage` 进程内 Map（重启丢 lineage tag）维持 A3 既有边界记录；双 claim 同 tick 的窗口见 B1「保留边界」段。O1/A2 语义效果无真实模型实验 |
+| 未解决缺陷 / 阻塞 | 无未解决的本票缺陷。保留边界（有证据地保留，非承诺缺口）：(1) marker 的单进程串行交接仍由调用方保证，跨进程无 CAS、不防御共享文件系统外部写入者（A3 既有边界，本轮未改）；(2) 同一 workspace 两个 claim 在同一 tick 都通过 marker 读取的窗口仍在（生产 claim 由 graphs transition / reconcile 顺序 / replay top 检查串行，本轮未构造出可达反例，如实保留）；(3) O1 根身份=首个 parentless 任务无真实故障路径（见 B3）；(4) KISS §8.2 裁决召回仍未建（本轮只撤回无消费者的查询面，不建召回系统）；(5) A2 合同已复定但未实施 |
+| 最终验收结论 | 通过（依据：上述实跑命令与数量、B1/B2 先红后绿与独立复核变异/反例证据、C1–C3 公共面收敛及行为不变证明、六包 tsc 与基线逐项一致、`verify-persistence` 四根未动、独立复核结论通过且其 2 项文档缺陷已修复回归；确认者：指挥方主代理 + 独立复核子代理，未由人类验收） |
+| 下一项 | 唯一顺序第 9 项 A2（任务导航与合法动作）：R2 已将其从「待复定」复定为「待派发」，合同要点见本记录 D 节。前置 A0/A3、S1-C 均已验收，前置满足 |
+
+### A. 职责/调用方映射（准入、运行推进、工作区归属）
+
+消费对象：R1 三个场景的真实运行轨迹（S1 14 次工具调用、S2 6 次、S3 24 次，见 R1 记录）+ 当前源码。三块各回答四问：状态转换/事实在哪、谁持久化、谁是消费者、哪些是内存投影。
+
+**A.1 准入链（admission/normalize/proposal）**
+
+| 环节 | 状态转换/事实 | 谁持久化 | 消费者 | 内存投影 |
+|---|---|---|---|---|
+| 受保护输入固定 | 字符串路径 → `{ path, sha256 }`（读会话 checkout） | `task/src/contract.ts` 词汇，不单独落库 | `deriveBatch`（唯一固定点） | 无 |
+| 规范化 | 闭合字段集、默认值、criterion id、批次摘要 | 随子任务 `TaskCreated.payload.task.contract` 落 store | `deriveBatch`/`storedBatchOf`（提案回放）/replay/root intake 共用 | 无（纯函数） |
+| 结构/能力准入 | contractDefects、independentAcceptanceDefects、resolveCapabilities（closed/gap）、provider 预检、verifierRef | 子任务落库时带 `CapabilityManifest`；缺口记 Obligation | `checkDerivedBatch`、`precheckProviders` | 无 |
+| 提案记录 | `TaskProposal`（content-derived id、requestKey、策略、两个上下文指纹、完整批内容） | `submitProposalIn`（T2/T3 四事件）→ store | `continueProposal`（唯一变任务入口）、`decideProposal`、审核渠道渲染、reconcile 提案遍 | `serializeParent` 每 store+父互斥（handle） |
+| 原子准入提交 | 子任务+依赖边+父 `TaskDecomposed.admission`+父相位 waiting_children+提案消费，一次 commit | `admitBatchIn` / 根 `admitRootProposalIn` | `decomposeAndRun`/`intakeRootContract`/reconcile | 无 |
+| 提交→推进分离 | 准入后立即返回 `{ batchId, childTaskIds }` | 相位事件 `RunPhaseChanged` | 工具 `task_decompose`/`task_intake`（模型面） | per-batch AbortController（driver 表，见 A.2） |
+
+普通分解、replay、root intake 三入口共用同一规范化/结构规则（`normalizeDecomposition` + `contractDefects` + `rootIndependenceDefects`），准入链无第二套状态分支。**内存当事实的读点：无**——准入的每次判定都从 store 或调用方输入重算（`storedBatchOf` 从提案记录重建批次，恢复进程无提交方内存也能续跑）。
+
+**A.2 运行推进（orchestrate/gate/batch driver）**
+
+| 环节 | 状态转换/事实 | 谁持久化 | 消费者 | 内存投影 |
+|---|---|---|---|---|
+| 批次推进 | 每轮从 store 重读子状态，按依赖串行，验证规则沿用原 cascade | driver 只写 store 事件（`markRunStatusIn`/`recordReviewIn`/`recordEvidenceIn`） | `driveBatch`/`driveRounds`；`awaitBatch`（无 driver 时落 store 派生） | `this.drivers` 表（AbortController + promise）；child handle/watcher |
+| 协调相位 | active→waiting_children→submitted 迁移闸 | `RunPhaseChanged` + reducer 闸 | gate、submitResult、cancelBatch、reconcile、`task_read`/`task_status` 派生 | `executionGate` 相位 Map（**handle，非事实**；B2 前重绑定门不派生） |
+| 显式提交 | submission 记录 + drain + verifier 排他 | `changeRunPhaseIn` → 既有终态链 | `task_submit_result`、settleParentBatch（父代提交） | drain 的在途调用登记 |
+| 无进展停止 | `RunProgressMarked` 计数（快照可计算的子树条目和） | 相位机事件 | `observeWorkerRun` | 无 |
+| 取消/恢复 | 取消源传播、reconcile 按 run 粒度幂等 | store 事件为仲裁 | cancelBatch/cancelGraph/dispose/reconcileStore | driver 表登记跳过；`replayLineage` Map（重启丢失，A3 边界） |
+| 写闸 | 相位≠active 只放行 18 个协调工具 | 无（纯 handle） | DSH `tools/pre-execute`+`tools/result` | `executionGate` + 在途 calls |
+
+**被当作第二份业务事实的内存读点（实际发生过）：`executionGate` 相位在 `lookupRun` 重绑定门上**——持久事实是 run 的 `executionPhase`（store），gate 只是本进程 handle；`adoptRoot` 从 store 派生，而 `runForSession`→`lookupRun` 门原先不派生，重绑定的 session 拿到 `undefined`（不设防）。已修（B2）。其余内存表（sessions=指针缓存、drivers=在飞工作、序列化互斥）每次都回落 store 判定，不是第二事实源。
+
+**A.3 工作区归属（workspace.ts 归属栈 + marker）**
+
+| 环节 | 状态转换/事实 | 谁持久化 | 消费者 | 内存投影 |
+|---|---|---|---|---|
+| 进程内栈 | run→batch→子 run→verifier，claim/push/release 全键 top 检查 | 无 | claim/push/release/releaseLayer（审批期 verifier 层进出、批次结算释放、replay 进出） | `stacks` Map（**本进程权威**） |
+| marker 文件 | `<sha256(path)>.json`：owner+pid+starttime，tmp+rename、唯一临时名、**按 workspace 串行链** | 磁盘文件（给后来的进程） | claim（拒绝任何已存在 marker）、`reconcileAdopt`（恢复唯一接管者）、`close`（卸载） | 无 |
+| 冲突拒绝 | `WorkspaceBusyError`（点名持有者 store/task/run 与起始时间） | 无 | decomposeAndRun/claimReplayWorkspace/rebuildWorkspaceOwnership | 无 |
+| stale 判定 | pid 活性 + starttime 比对（pid 复用是诊断不是授权） | 无 | reconcileAdopt | 无 |
+
+跨进程只靠 marker+pid 探测（EPERM=活、pid 复用是诊断、跨机 DSH_HOME 无意义），不宣称跨进程锁（A3 既有边界，本轮未改）。
+
+### B. 实际缺陷关闭（先红后绿）
+
+**B1 marker 写入顺序：并发 mutation 下「最后落地写」可留下与栈矛盾的 marker（已修）**
+- 复现：`workspace.spec.ts`「mutations that empty the stack leave no marker, whoever landed their write first」——claim + push 8 个批次层，同一 tick 内自顶向下全部合法 release（含底层 run）。修复前：某次 rename 落在最后一次 delete 之后 → 栈空但 marker 存在且命名本进程活 pid → 同进程再 claim 被「marker names this process's own pid, but this process holds no claim」永久拒绝（reconcileAdopt 也拒绝活 pid），工作区在进程退出前不可用；5/5 确定性复现。
+- 修复：`workspace.ts` 新增按 workspace 的 marker 变更串行链（`queueMarkerMutation`，调用序即落盘序，rejection 不毒化队列），claim/push/release/reconcileAdopt/close 的 marker 写入全部入链；release 在入链前捕获「留下的新栈顶」。未改协议语义（唯一临时名保留、栈仍是本进程权威、claim 拒绝条件不变）。
+- 回归：新用例 6/6 绿；既有「mutations started in one tick」用例收紧为「marker 恒等于最后调用的写入者（栈顶）」，20→21 项全绿；全量单测/集成不变。
+- 部署可达性（如实记录）：生产 release 序列本由调用方串行（settleParentBatch 先 awaiting 批次层释放才置父终态；cancelGraph 先 await drivers；onRunSettled 与调用方自身释放由同步 pop 互斥），因此该残留窗口在当前调用图上不可达；但模块自身文档承诺「并发写留下一整个 marker」且未承诺内容与栈一致，此修复把该承诺升级为调用序保证（与栈严格一致），并顺带覆盖 failBatch 与 driver 并发结算这类「排序只靠 usually」的路径。若只记录不修也可接受，选择修的理由：修法是 20 行内的纯本地串行化、零协议变化、红测确定。
+- 保留边界：同一 tick 两个 claim 都通过 marker 读取的窗口仍在（生产 claim 由 graphs `transition`/reconcile 顺序/replay top 检查串行，本轮未构造出可达反例，记录保留）；跨进程仍无 CAS。
+
+**B2 恢复/重入：`lookupRun` 重绑定不恢复 gate 相位，内存 handle 与持久记录不一致（已修）**
+- 复现：`a3-recovery.spec.ts`「gates a session the second process rebound by the phase the store records…」——真实 JSONL 重开；父 run 持久相位 `waiting_children`、子在飞；第二进程首个工具调用经 `runForSession`→`lookupRun` 开门+reconcile+重绑定，恢复驱动被 park 在父 session 首次写 drain（无计时器）。修复前：`gate.phaseOf(ROOT)` = `undefined` = 不设防 → 该 session 可写/bash/再次 `task_decompose`/`task_submit_result`（store 侧相位检查仍会拒任务树动作，但共享 checkout 的裸写只有 gate 挡）；确定性红。
+- 修复：`index.ts` 新增 `gatePhaseFromStore`，`lookupRun` 两条重绑定路径（进程内索引命中、开门重建）都从 store 的 run 记录派生 gate 相位（running→executionPhase、终态→terminal、旧无相位记录→不设防，与 `adoptRoot` 同规则；`rootSessionPhase` 泛化为 `runGatePhase`）。store 是唯一事实源，未建第二份相位。
+- 回归：新用例绿；全量单测/集成不变（单元 1453/集成 258）；`waitRunSettled` 对「gate 不认识的 session」语义不变（未绑定 run 的 session 仍返回 undefined）。
+- 调用方清单：`runForSession` 是唯一入口（工具层 task_read/task_status/task_submit_result/task_decompose/task_proposal_* 等经它）；replay/cancelGraph/reconcile 不经此门。
+
+**B3 A0+R0 复核观察项 O1（根身份=首个 parentless 任务；replay 在图 store 造 parentless）——判定：无真实故障路径，保留并说明**
+- 证据：(a) `replayTask` 要求 champion 是**同一 store** 内 verified/failed 任务；A0 store 里首个 parentless 任务即根任务（一次性消费闸保证只有一个根），任何 replay 任务只能在其后创建，`find(parentless)` 仍返回根；(b) 旧 store 的根任务在 graph setup 时已存在，replay 更在其后；(c) 不存在「先有 replay 任务、后建根」的路径——replay 的 champion 本身要求 store 已有终态任务；(d) 根预算 owner 解析（`root-budget.ts`）不靠创建序：按 `rootTaskStoreId(run.sessionId)` 绑定筛 parentless，0 个或多个绑定均具名拒绝；(e) 重绑定门 `rebindActivatedRoot` 用消费记录铸出的 taskId，不做 parentless 扫描。
+- 结论：保留「首个 parentless」这一实现（旧 store 兼容 + 恢复路径简单），其正确性依赖一次性建根闸与 store 拒绝第二根，不依赖 marker/锁；记录为边界不列为缺陷。
+
+### C. 无用途查询面/摘要语义（逐个结论）
+
+**C1 `evidenceByVerifier`（verifier/src/index.ts）——收回公共面（删导出 + 删调用点/测试），行为不变证明**
+- grep 证据：全仓（含 harness 其余包与 buckyball）无生产调用方；唯一消费者是 `verifier/tests/unit/verifier-registry.spec.ts` 2 项与 `tests/integration/verifier-selftest-inputs.spec.ts` 1 项 describe（为它自己写的测试不构成审计用途）。KISS §8.2 裁决召回未建且本轮不建召回系统（派发合同明确），故不留「将来也许有用」的查询面。
+- 动作：删除 `VerifierRegistry.evidenceByVerifier` 方法（含 docblock）、`ready()` docblock 中的引用、上述 3 个测试及仅它们使用的夹具（`bundleOf`/`claimOf`/`onlyBundle`/`seedLegacyBundle`/内联 `ids`）；构建产物 `verifier/lib` 不再含该名（grep 0）。
+- 行为不变证明：纯只读查询，无调用方即无行为变化；`verifyRun`/`claim`/版本 stamp/受保护输入复检全链路回归全绿。版本索引的「旧证据无版本仍可读」随读取面一起消失（持久化词汇未动，事件照旧可读）；`(verifierRef, version)` 索引本身不再提供——召回真正有消费者时按新票重建。
+- 保留：`VerificationResult.verifierVersion`/`EvidenceClaim.verifierVersion` 持久字段与其全部生产/测试消费不动（历史字段兼容读取纪律）。
+
+**C2 `templateDigest`（`RunMcpServerBinding`）——保留并标明「仅诊断、无身份保证」**
+- 消费者盘点：`state.ts` 形状校验（reducer）、`run-binding.ts` 计算、`renderRunBinding` 渲染（worker 合同块展示 `(template <短摘要>)`）、测试断言。**无任何消费者隐含依赖执行身份**（没有回读 registry 比对、没有 spawn 时复检、没有凭它拒绝/放行）。
+- 结论：不在挂载处补配置校验（无消费者需要身份保证，退出时复检反而会制造「校验了但只覆盖 editor 路径」的假保证）；改语义标注：`task/src/types.ts` 的 `RunMcpServerBinding` docblock 明示 Diagnostic only、`templateDigest` 行内再注；缺失 server 的拒绝仍由 spawn 具名失败执行。
+
+**C3 本组新增导出无外部消费者（D4 类）——收回三个名字，结构可读性不变**
+- 逐个 grep（跨 task/task-runtime/agent-singularity/agent-runtime/verifier/graphs/tests 全仓）：`TaskProposalKind` 0 个文件外消费者（记录判别用的是各 arm 字面量 `kind?: 'batch'`/`kind: 'root'`，不是该联合）；`TaskProposalDecision` 0 个文件外消费者（导出的决策词汇是 `TaskProposalDecisionClaim`，它是前者基类，读者按结构窄化无需基类名）；`TASK_PROPOSAL_ID_PREFIX` 0 个文件外消费者（只有 `taskProposalId`/`rootProposalId` 两个内部派生用它）。
+- 动作：三者保留在 `task/src/proposal.ts` 内改为模块内（非导出），`export *` 不再公开；构建产物 `task/lib/index.d.ts` 的 export 清单已不含这三个名（本地声明仍在，结构读取不受影响）；其余有消费者的导出（`TASK_PROPOSAL_KINDS`/`TASK_PROPOSAL_PHASES`/`TASK_PROPOSAL_DECISION_OUTCOMES`/`TaskProposalPhase`/`TaskProposalBase`/`TaskProposalIndex` 等，均被 `task/src/service/state.ts` 或 `types.ts` 消费）保留。
+- 保留理由记录：`ROOT_PROPOSAL_TASK_ID`、`TaskProposal`/`TaskProposalRoot`/`RootProposalIdentity` 等有真实跨包消费者，不动。
+
+**公开接口变化清单（逐个列调用方）**
+1. `VerifierRegistry.evidenceByVerifier`（移除）：调用方=无（测试 3 处同删）。消费者影响：无。
+2. `TaskProposalKind`/`TaskProposalDecision`/`TASK_PROPOSAL_ID_PREFIX`（自 `@dangosys/dsh-singularity-task` 导出面移除）：调用方=无；结构读取不受影响（d.ts 本地声明仍在）。
+3. `RunMcpServerBinding.templateDigest` 语义标注（无代码行为变化）：消费方=reducer 形状校验、`renderRunBinding` 渲染、测试；标注后行为不变。
+4. 内部私有改名 `rootSessionPhase`→`runGatePhase`（私有，无外部面）。
+5. `task-runtime/src/workspace.ts` 新增私有 `queueMarkerMutation`（无外部面）；`WorkspaceRegistry` 公开方法签名与行为语义不变（marker 内容从「任意最后落地」变为「调用序最后」，对读取方更严格一致）。
+
+### D. A2 最小合同复定（只写进本计划与 notes，不实施）
+
+**R1 取证——模型实际调用的读取面**：S1 根/worker 实际调用 = `task_intake`、`capability_list`、`task_read`（多次）、`task_status`、`task_decompose`、`task_verify`、`task_submit_result` + 文件/bash；S3 增加 `read`×3、`bash`×8。**从未被调用**：`task_review_pack`、`task_diagnose`、session_query 族、任何分页/搜索参数。结论：A2 的实际需要的读取场景 = (a) 当前任务契约与状态（`task_read` 已交付）；(b) 本树/本批次的任务与相位状态（`task_status` 已交付）；(c) **缺失的一块=「我在哪、我能合法做什么」**：run 的协调相位 → 合法动作投影（gate 放行表的可读化），根未激活视图已由 A0 交付。
+
+**复定后的 A2 最小合同**（状态 → 待派发；要点写入本表第 9 行与 A 表 A2 行）：
+1. 范围：授权任务切片 + owner/阻塞 + **合法动作**三件套，供 root 与 worker 读取；不建模板库、不建搜索、不建全局调度。
+2. 数据来源：全部从 store 既有记录派生（Task/TaskRun/相位/义务/batch），不新增持久化字段；与 gate 的放行表同一来源，不许两套答案。
+3. 授权边界：worker 只见自己的任务子树与根目标投影；兄弟证据/跨 store 不可见（「可见≠可领取」，A3 写闸与 workspace 归属不变）。
+4. 有界结果：条目/字节上限 + 稳定排序 + **omittedRefs 明示省略**（不得静默截断，参考架构指导 §5.3）；**分页不建设**——R1 轨迹无任何规模压力（三场景任务树 ≤3 节点、`task_status` 文本无超限），无实需不建分页机制；超限走具名拒绝/分解。
+5. 验收（确定性）：真实 DSH loop + scripted provider 断言模型读到的切片恰为授权范围（根/worker 两面）、合法动作与实际相位一致、等待相位只读、终态/未激活有具名视图；拒绝越权读取具名失败；恢复/重开后视图与 store 一致（复用 B2 的相位派生，不再造第二份状态）。
+
+**A2 行正文（状态 → 待派发 + 合同要点）**：见上文首表第 9 行与 A 表 A2 行；完整要点即本 D 节。A1/A4 仍待复定，不在本轮提前实施。
 
 ## S1-C：Task 只提需求，Run 固定实现
 

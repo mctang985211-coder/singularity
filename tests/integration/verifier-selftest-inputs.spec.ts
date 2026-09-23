@@ -191,19 +191,6 @@ function evidenceFor(h: Harness, runId: string): EvidenceBundle[] {
   return taskEvents(h).flatMap(item => item.kind === 'EvidenceProduced' && item.runId === runId ? [item.payload.evidence] : [])
 }
 
-/**
- * The one bundle a settled run left. Named as a check rather than asserted with
- * `[0]!`, which would make a missing bundle read as a TypeError on undefined
- * instead of as "this run produced no evidence, and why not is the question".
- */
-function onlyBundle(h: Harness, runId: string): EvidenceBundle {
-  const bundles = evidenceFor(h, runId)
-  if (bundles.length !== 1) {
-    throw new Error(`run "${runId}" left ${bundles.length} evidence bundle(s); exactly one is expected`)
-  }
-  return bundles[0]!
-}
-
 /** The one verdict about one criterion across those bundles. */
 function verdictFor(bundles: readonly EvidenceBundle[], criterionId: string): VerificationResult | undefined {
   return bundles.flatMap(bundle => bundle.verifierResults).find(result => result.criterionId === criterionId)
@@ -383,48 +370,6 @@ function alwaysPassJudge(): Verifier {
       verifierId: 'always-pass',
     })),
   }
-}
-
-/**
- * A bundle a deployment that predated `verifierVersion` would have written:
- * recorded through the real store while its run is running, with a claim by the
- * command judge that carries no version at all.
- */
-async function seedLegacyBundle(h: Harness, evidenceId: string): Promise<void> {
-  const taskId = 't-legacy'
-  const runId = 'r-legacy'
-  await h.task.createTaskIn(STORE, {
-    taskId,
-    definitionRef: { taskType: 'subtask', version: 1 },
-    objective: 'the task judged before the version field existed',
-    depth: 0,
-    acceptanceCriteria: [{
-      criterionId: 'legacy-1',
-      description: 'the legacy claim',
-      verificationMode: 'deterministic',
-      requiredEvidence: [],
-      mandatory: true,
-      command: 'true',
-    }],
-    requestedCapabilities: [],
-    decompositionStatus: 'leaf',
-    status: 'created',
-    runIds: [],
-    childTaskIds: [],
-  }, 'tester')
-  await h.task.admitTaskIn(STORE, taskId, 'tester', { decompositionStatus: 'leaf' })
-  await h.task.startRunIn(STORE, {
-    runId, taskId, sessionId: ROOT_SESSION, capabilitySnapshot: [], artifacts: [], verifierResults: [], status: 'running', startedAt: new Date().toISOString(),
-  }, 'tester')
-  await h.task.recordEvidenceIn(STORE, {
-    evidenceId,
-    taskRunId: runId,
-    taskId,
-    artifacts: [],
-    verifierResults: [{ criterionId: 'legacy-1', status: 'pass', verifierId: 'command' }],
-    claims: [{ claimId: `${evidenceId}#legacy-1`, criterionId: 'legacy-1', status: 'pass', verifierId: 'command', artifactRefs: [] }],
-    generatedAt: new Date().toISOString(),
-  }, 'tester')
 }
 
 describe('V2-4: a protected acceptance input is fixed at admission and re-read before judging', () => {
@@ -618,44 +563,5 @@ describe('V2-1/V2-2: the executable selftest gate at the real registry', () => {
     // Only the double's registration warned; the gated judge went through silently.
     expect(h.warnings).toHaveLength(1)
     expect(h.warnings[0]).toContain('declared-double')
-  })
-})
-
-describe('V2-3: the (verifierRef, version) index over the real store', () => {
-  it('returns exactly the command verdicts for the admitted version, none for a wrong one, and keeps a legacy bundle readable', async () => {
-    const h = await harness()
-    await writeFile(join(h.checkout, 'product.txt'), 'ok\n')
-    await writeFile(join(h.checkout, ACCEPTANCE), ACCEPTANCE_SCRIPT)
-
-    const { parentTaskId, childTaskId } = await decomposeToChild(h, [productCriterion()])
-    const childRun = runOf(h, childTaskId)
-    const parentRun = runOf(h, parentTaskId)
-    const judged = onlyBundle(h, childRun)
-    const combined = onlyBundle(h, parentRun)
-    // The real judges that ran, read back off the persisted bundles: the child's
-    // command judge, and — for the root — both the goal's own command criterion and
-    // the conjunction over the children (A0 §1.2: a root contract carries an
-    // independent check *and* the conjunction its tree has always been accepted by,
-    // so the order of the two claims is the contract's, not this test's).
-    expect(judged.claims.map(claim => claim.verifierId)).toEqual(['command'])
-    expect(judged.claims.every(claim => claim.verifierVersion === '1')).toBe(true)
-    expect([...new Set(combined.claims.map(claim => claim.verifierId))].sort()).toEqual(['command', 'composite'])
-    expect(combined.claims.every(claim => claim.verifierVersion === '1')).toBe(true)
-
-    // A bundle from before the field existed: no claim carries a version.
-    await seedLegacyBundle(h, 'evidence-legacy')
-    const legacy = (await h.task.snapshotIn(STORE)).evidence.find(bundle => bundle.evidenceId === 'evidence-legacy')!
-    expect(legacy.claims[0]).not.toHaveProperty('verifierVersion')
-
-    const ids = (bundles: readonly EvidenceBundle[]) => bundles.map(bundle => bundle.evidenceId).sort()
-    // The command judge is the one the child's criterion and the root's own
-    // independent criterion both resolve to, so its index holds both bundles —
-    // `combined` is the root's, whose command claim is the goal's own check.
-    expect(ids(await h.verifier.evidenceByVerifier(STORE, 'command', '1'))).toEqual(ids([judged, combined]))
-    expect(await h.verifier.evidenceByVerifier(STORE, 'command', '2')).toEqual([])
-    expect(ids(await h.verifier.evidenceByVerifier(STORE, 'command'))).toEqual(ids([judged, combined, legacy]))
-    // The index is per judge: the parent's combination verdict is its own entry.
-    expect(ids(await h.verifier.evidenceByVerifier(STORE, 'composite', '1'))).toEqual([combined.evidenceId])
-    expect(await h.verifier.evidenceByVerifier(STORE, 'nobody')).toEqual([])
   })
 })

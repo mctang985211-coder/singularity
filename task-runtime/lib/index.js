@@ -3210,9 +3210,28 @@ var WorkspaceRegistry = class {
 	markerRoot;
 	pid;
 	stacks = /* @__PURE__ */ new Map();
+	/**
+	* One marker-mutation chain per workspace: every write and delete joins the
+	* tail of its workspace's chain, so overlapping mutations of one marker land
+	* in the order they were called — the same order the stack was mutated in.
+	* A rejected mutation is carried past, never stored: a write that failed
+	* (a permission, a full disk) must not wedge the mutations behind it, and its
+	* caller still sees the rejection it has to report.
+	*/
+	markerWrites = /* @__PURE__ */ new Map();
 	constructor(options) {
 		this.markerRoot = options.markerRoot;
 		this.pid = options.pid ?? process.pid;
+	}
+	/** Queue one marker mutation after the ones this workspace already has in flight, in call order. */
+	queueMarkerMutation(workspace, mutate) {
+		const run = (this.markerWrites.get(workspace) ?? Promise.resolve()).catch(() => void 0).then(mutate);
+		const stored = run.catch(() => void 0);
+		this.markerWrites.set(workspace, stored);
+		stored.then(() => {
+			if (this.markerWrites.get(workspace) === stored) this.markerWrites.delete(workspace);
+		});
+		return run;
 	}
 	/** Where one workspace's marker lives — derived from the path as given, so it is the same key the stack uses. */
 	markerPath(workspace) {
@@ -3233,7 +3252,7 @@ var WorkspaceRegistry = class {
 		if (top !== void 0) throw new WorkspaceBusyError(workspace, top, top.since, "this process already holds the workspace; release the holder before claiming it again");
 		const read = await this.readMarker(workspace);
 		if (read.kind !== "absent") throw await this.busyFromMarker(workspace, read);
-		await this.writeMarker(workspace, owner);
+		await this.queueMarkerMutation(workspace, () => this.writeMarker(workspace, owner));
 		this.stacks.set(workspace, [owner]);
 	}
 	/**
@@ -3248,7 +3267,7 @@ var WorkspaceRegistry = class {
 		const top = held[held.length - 1];
 		if (ownerKey(top) !== ownerKey(from)) throw new Error(`workspace ${workspace} cannot be handed over: its current holder is ${describeOwner(top)} (since ${top.since}), not ${describeOwner(from)} (since ${from.since}); a handover names the holder that is actually there`);
 		held.push(to);
-		await this.writeMarker(workspace, to);
+		await this.queueMarkerMutation(workspace, () => this.writeMarker(workspace, to));
 	}
 	/**
 	* Release `owner`, which must be the current holder. A mismatch throws with
@@ -3264,8 +3283,11 @@ var WorkspaceRegistry = class {
 		held.pop();
 		if (held.length === 0) {
 			this.stacks.delete(workspace);
-			await this.removeMarker(workspace);
-		} else await this.writeMarker(workspace, held[held.length - 1]);
+			await this.queueMarkerMutation(workspace, () => this.removeMarker(workspace));
+		} else {
+			const remaining = held[held.length - 1];
+			await this.queueMarkerMutation(workspace, () => this.writeMarker(workspace, remaining));
+		}
 	}
 	/**
 	* Take over a marker whose owning process is gone — the recovery path only,
@@ -3288,7 +3310,7 @@ var WorkspaceRegistry = class {
 			reason: `workspace ${workspace} still has a holder: ${marker.pid === this.pid ? `the marker names this process's own pid ${marker.pid}, so no liveness probe can tell its holder apart from this process — settle this process's own claims instead` : `the marker names pid ${marker.pid}, which is alive${marker.processStartedAt === void 0 ? "" : ` (start time ${marker.processStartedAt})`}; a live owner is never taken over, however the recovery path explains it`}`
 		};
 		this.stacks.delete(workspace);
-		await this.removeMarker(workspace);
+		await this.queueMarkerMutation(workspace, () => this.removeMarker(workspace));
 		return { adopted: true };
 	}
 	/**
@@ -3304,7 +3326,7 @@ var WorkspaceRegistry = class {
 			const read = await this.readMarker(workspace);
 			if (read.kind !== "held") continue;
 			if (read.marker.pid !== this.pid) continue;
-			await this.removeMarker(workspace);
+			await this.queueMarkerMutation(workspace, () => this.removeMarker(workspace));
 		}
 	}
 	/** The busy error a marker earns: whose, why, and — when the recorded start time disagrees — that the pid was reused. */
@@ -5787,7 +5809,7 @@ var TaskRuntime = class extends Service {
 			const read = await readRunBinding(run.providerBinding);
 			if (read !== void 0 && read.defects.length > 0) throw new Error(`task-runtime: run "${run.runId}" cannot be re-entered: the content it is bound to is not readable:\n- ${read.defects.join("\n- ")}`);
 		}
-		const phase = this.rootSessionPhase(run);
+		const phase = this.runGatePhase(run);
 		this.sessions.set(rootSessionId, {
 			storeId,
 			taskId: root.taskId,
@@ -5807,12 +5829,18 @@ var TaskRuntime = class extends Service {
 		};
 	}
 	/**
-	* The gate phase one stored root run implies: its coordination phase while it
-	* is running, `terminal` once it is not, and `undefined` for a record that
+	* The gate phase one stored run implies: its coordination phase while it is
+	* running, `terminal` once it is not, and `undefined` for a record that
 	* predates coordination phases (A3's own boundary — such a run is not gated,
 	* and its only legal continuation is cancellation).
+	*
+	* The derivation every rebinding door performs ({@link adoptRoot} for a root
+	* session, {@link gatePhaseFromStore} for any other): the gate is a handle on
+	* the run's phase, and the phase is the store's fact, so a session this
+	* process never held — or one whose phase moved under an in-flight call — is
+	* gated as what its run is, never as what this process happens to remember.
 	*/
-	rootSessionPhase(run) {
+	runGatePhase(run) {
 		if (run.status !== "running") return "terminal";
 		return run.executionPhase;
 	}
@@ -7549,7 +7577,7 @@ var TaskRuntime = class extends Service {
 		this.startedSessions.add(rootSessionId);
 		let phase;
 		try {
-			phase = this.rootSessionPhase(await this.ctx.task.runIn(storeId, runId));
+			phase = this.runGatePhase(await this.ctx.task.runIn(storeId, runId));
 		} catch {
 			phase = void 0;
 		}
@@ -8191,11 +8219,28 @@ var TaskRuntime = class extends Service {
 		if (found === void 0) throw new Error(`task-runtime: no task run is bound to session "${sessionId}"`);
 		return found;
 	}
+	/**
+	* The gate phase one bound session's run implies, applied on every rebinding.
+	* The gate is a handle on the run's phase and the phase is the store's fact,
+	* so a session this process rebound — from its index, from a reopened store,
+	* or with a phase that moved under an in-flight call — is gated as what its
+	* run is. `undefined` (a record that predates phases) leaves the session
+	* ungated, which is the gate's own contract for an unbindable phase, and a
+	* session with no run is never gated at all.
+	*/
+	gatePhaseFromStore(sessionId, run) {
+		const phase = this.runGatePhase(run);
+		if (phase === "terminal") this.executionGate.setTerminal(sessionId);
+		else if (phase !== void 0) this.executionGate.setPhase(sessionId, phase);
+	}
 	async lookupRun(sessionId) {
 		const binding = this.sessions.get(sessionId);
 		if (binding !== void 0) {
-			const resolved = await this.resolveBinding(binding);
-			if (resolved !== void 0) return resolved;
+			const resolved$1 = await this.resolveBinding(binding);
+			if (resolved$1 !== void 0) {
+				this.gatePhaseFromStore(sessionId, resolved$1.run);
+				return resolved$1;
+			}
 			this.sessions.delete(sessionId);
 		}
 		let rootSessionId;
@@ -8219,7 +8264,9 @@ var TaskRuntime = class extends Service {
 		}
 		const rebinding = this.sessions.get(sessionId);
 		if (rebinding === void 0) return void 0;
-		return this.resolveBinding(rebinding);
+		const resolved = await this.resolveBinding(rebinding);
+		if (resolved !== void 0) this.gatePhaseFromStore(sessionId, resolved.run);
+		return resolved;
 	}
 	async resolveBinding(binding) {
 		try {
