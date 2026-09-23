@@ -38,6 +38,7 @@ import { bindRunProviders } from './run-binding.ts'
 import { manifestMcpServers, resolveMcpServerSpecs, type McpEnvBinding } from './mcp-servers.ts'
 import { buildHandoff, renderWorkerPrompt } from './handoff.ts'
 import { renderWorkerContract } from './contract.ts'
+import { openProposalOf } from './proposal.ts'
 
 /** Raised when the verifier service (ticket C2) is not loaded in the context. */
 export class VerifierUnavailableError extends Error {
@@ -1268,6 +1269,18 @@ async function observeWorkerRun(
     }
     if (agentIsRunning(handle)) continue
     const snapshot = await env.task.snapshotIn(storeId)
+    // The known wait (T2/T3 §6, §7.4): a run whose own batch is waiting for a
+    // review — or for the admission its approval authorizes — is idle on
+    // purpose. Counting that idle as stagnation would stop a worker for
+    // waiting exactly where the protocol told it to wait, so the wait is
+    // treated like `waiting_children`: no round is marked, and the run stays
+    // bounded by the same two limits it always was — its own deadline (and what
+    // is left of the root's) and the batch's abort. Neither is paused or reset
+    // for the review; a review that outlives them ends the run as the budget
+    // stop it is, and the proposal is left where it stands.
+    if (openProposalOf(snapshot, task.taskId, run.runId) !== undefined) {
+      return await awaitWaitingTerminal(env, run, handle, signal, rootDeadline, terminal)
+    }
     const factCount = countSubtreeFacts(snapshot, task.taskId)
     const previous = current.noProgress
     const rounds = (previous?.factCount === factCount ? previous.rounds : 0) + 1

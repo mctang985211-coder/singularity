@@ -13,6 +13,12 @@
  *   really appended through. Living sessions route their events into their
  *   write handle, which is what makes `eventsOf` a read of the durable surface
  *   and not of a fixture copy.
+ * - the human seam (`ctx.approval`) — the review channel of the deployment is
+ *   mounted as the deployment mounts it (`ProposalReviewService` at the service
+ *   assembly) and asks through an answerer the spec drives: {@link
+ *   ScriptedLoopOptions.approvalAnswer} decides each ask, or holds it until the
+ *   spec answers it ({@link ScriptedLoop.review}). What the review *does* with
+ *   an answer is the deployment's own code, never a fixture shortcut.
  *
  * Everything else is the deployment's own: `LlmRuntime`, `SessionStore`,
  * `SessionProjectionRegistry`, `SystemPrompt`, `ToolRuntime`, `AgentRegistry`,
@@ -45,15 +51,20 @@ import SystemPrompt from '../../../../thirdparty/deepseek-harness/packages/core/
 import ToolRuntime from '../../../../thirdparty/deepseek-harness/packages/core/tools/lib/index.js'
 import { AgentRegistry } from '../../../../thirdparty/deepseek-harness/packages/core/agent/lib/index.js'
 import AgentLoop from '../../../../thirdparty/deepseek-harness/packages/core/agent-loop/lib/index.js'
+import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import type { Agent, ToolDefinition } from '@deepseek-ai/dsh-agent'
 import type { TaskInstance, TaskRun } from '../../task/src/types.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
 import type { TaskEvent, TaskSnapshot } from '../../task/src/index.ts'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
+import { ProposalReviewService } from '../../agent-singularity/src/proposal-review.ts'
 import { defineCapabilityListTool } from '../../agent-singularity/src/tools/capability-list.ts'
 import { defineTaskCancelTool } from '../../agent-singularity/src/tools/task-cancel.ts'
 import { defineTaskDecomposeTool } from '../../agent-singularity/src/tools/task-decompose.ts'
+import { defineTaskProposalCancelTool } from '../../agent-singularity/src/tools/task-proposal-cancel.ts'
+import { defineTaskProposalContinueTool } from '../../agent-singularity/src/tools/task-proposal-continue.ts'
+import { defineTaskProposalReadTool } from '../../agent-singularity/src/tools/task-proposal-read.ts'
 import { defineTaskReadTool } from '../../agent-singularity/src/tools/task-read.ts'
 import { defineTaskStatusTool } from '../../agent-singularity/src/tools/task-status.ts'
 import { defineTaskSubmitResultTool } from '../../agent-singularity/src/tools/task-submit-result.ts'
@@ -64,7 +75,7 @@ import { VerifierRegistry } from '../../verifier/src/index.ts'
 /** The root agent's allow-list, exactly as `agent-runtime` composes it. Exported so a fixture that mounts no loop still composes the deployment's root surface. */
 export const ROOT_TOOLS = [
   'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'skill', 'task_decompose',
-  'task_submit_result', 'task_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
+  'task_submit_result', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
   'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
 
@@ -75,11 +86,24 @@ export const OTHER_TOOLS = [
 ]
 
 /** The tools this fixture registers for real; every other name is a stand-in. */
-const REAL_TOOLS = ['task_read', 'task_status', 'capability_list', 'task_decompose', 'task_submit_result', 'task_cancel']
+const REAL_TOOLS = [
+  'task_read', 'task_status', 'capability_list', 'task_decompose', 'task_submit_result', 'task_cancel',
+  'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel',
+]
+
+/**
+ * The arguments of one scripted tool call: fixed, or derived at request time
+ * from the calls already dispatched. The derived form is what lets a script
+ * model a caller that acts on what it was told — a proposal id the previous
+ * answer named, for instance — without the spec having to know it in advance.
+ */
+export type ScriptArguments =
+  | Readonly<Record<string, unknown>>
+  | ((calls: readonly ToolCallRecord[]) => Readonly<Record<string, unknown>>)
 
 /** One scripted model answer: a tool call, a final text, a latch that blocks the request, or a hang. */
 export type ScriptEntry =
-  | { readonly tool: string; readonly args?: Readonly<Record<string, unknown>> }
+  | { readonly tool: string; readonly args?: ScriptArguments }
   | { readonly text: string }
   /**
    * Block this request until the latch resolves, then answer from the *next*
@@ -127,6 +151,17 @@ export interface ScriptedLoopOptions {
   readonly objective?: string
   /** Tools whose recorded execution also keeps its arguments — the side-effect probe a denial is asserted against. */
   readonly probes?: readonly string[]
+  /** The review policy this deployment runs under (`Config.generatedTaskReview`). Defaults to the runtime's own (`off`). */
+  readonly generatedTaskReview?: 'off' | 'all'
+  /**
+   * How the approval seam answers one review ask. Defaults to answering every
+   * ask `allowed-once` — an answerer that decides without a person. Returning
+   * `undefined`, or a promise for it, holds the ask open until the spec answers
+   * it through {@link ScriptedReview.answer}, which is how a spec decides *when*
+   * a person decides; the other three outcomes are the seam's own
+   * (`rejected`, `cancelled`, `unavailable`).
+   */
+  readonly approvalAnswer?: (ask: ScriptedReviewAsk, index: number) => ApprovalOutcome | undefined | Promise<ApprovalOutcome | undefined>
   /**
    * The script of one session: index 0 is the primary root, 1..n the sessions
    * the runtime spawned, in spawn order. Entries are consumed one request at a
@@ -135,11 +170,40 @@ export interface ScriptedLoopOptions {
   readonly script: (sessionId: string, index: number) => readonly ScriptEntry[]
 }
 
+/** One review request the channel put to the approval seam, as the answerer saw it. */
+export interface ScriptedReviewAsk {
+  /** The owner session the review was shown in — the channel's own routing. */
+  readonly sessionId: string
+  /** The tool the ask names; the deployment's channel names `task_decompose`. */
+  readonly toolName: string
+  /** The rendered review material: the whole batch, the limits and the identity a decision would bind. */
+  readonly reason: string
+}
+
+/**
+ * The human seam of this deployment (T2/T3 §5–§6): the real review channel
+ * mounted at the service assembly, over an approval answerer the spec drives.
+ * Every ask is recorded, unanswered asks stay open for as long as the spec
+ * wants a person to think, and the answer travels back through the channel's
+ * own `decideProposal` path — so what a spec asserts is the deployment's
+ * routing, not a fixture's shortcut.
+ */
+export interface ScriptedReview {
+  /** Every review ask, in ask order — the channel call count a refusal asserts on. */
+  readonly asks: readonly ScriptedReviewAsk[]
+  /** Answer one held ask (ask order). An ask that has no answer held is refused by name. */
+  answer(index: number, outcome: ApprovalOutcome): void
+  /** How many asks were made and not answered yet. */
+  pending(): number
+}
+
 export interface ScriptedLoop {
   readonly ctx: Context
   readonly runtime: TaskRuntime
   readonly task: TaskService
   readonly verifier: VerifierRegistry
+  /** The review channel's asks and answers (T2/T3). */
+  readonly review: ScriptedReview
   /** The tmp directory the whole fixture lives in. */
   readonly workspace: string
   /** The pinned `$DSH_HOME`/`$HOME`. */
@@ -158,6 +222,10 @@ export interface ScriptedLoop {
   eventsOf(sessionId: SessionId | string): readonly SessionEvent[]
   /** The store's snapshot as the store itself holds it. */
   snapshot(storeId: string): Promise<TaskSnapshot>
+  /** The live agent of one session, as the registry holds it. */
+  agent(sessionId?: SessionId | string): Agent
+  /** The tool names one agent's own composition offers, from the registry's view. */
+  visible(agent: Agent): string[]
   /** Create the root run and start the root's first turn. */
   begin(): Promise<{ storeId: string; taskId: string; runId: string }>
   /** The run a session is bound to, with the store and task it belongs to. */
@@ -238,6 +306,7 @@ class ScriptedModelAdapter extends LlmAdapter {
   constructor(
     private readonly script: (sessionId: string, index: number) => readonly ScriptEntry[],
     private readonly indexOf: (sessionId: string) => number,
+    private readonly calls: () => readonly ToolCallRecord[],
   ) {
     super()
   }
@@ -294,7 +363,8 @@ class ScriptedModelAdapter extends LlmAdapter {
       return
     }
     this.callSeq += 1
-    yield* toolCallResponse(`call-${sessionId}-${this.callSeq}`, entry.tool, { ...(entry.args ?? {}) })
+    const args = typeof entry.args === 'function' ? entry.args(this.calls()) : entry.args ?? {}
+    yield* toolCallResponse(`call-${sessionId}-${this.callSeq}`, entry.tool, { ...args })
   }
 }
 
@@ -304,6 +374,42 @@ interface StoredSession {
   events: SessionEvent[]
 }
 
+/**
+ * The answerer half of the deployment's review channel: it records every ask,
+ * and answers each one only when the spec says so — or immediately, when an
+ * `approvalAnswer` is configured. A held ask is the seam's own shape: a person
+ * takes as long as they take, and the channel settles it asynchronously.
+ */
+class ReviewDesk implements ScriptedReview {
+  readonly asks: ScriptedReviewAsk[] = []
+  private readonly held = new Map<number, (outcome: ApprovalOutcome) => void>()
+
+  constructor(private readonly answer_: ScriptedLoopOptions['approvalAnswer']) {}
+
+  async request(request: { toolName?: string; reason?: string; agent?: { id?: string } }): Promise<ApprovalOutcome> {
+    const index = this.asks.length
+    this.asks.push({
+      sessionId: String(request.agent?.id ?? ''),
+      toolName: String(request.toolName ?? ''),
+      reason: String(request.reason ?? ''),
+    })
+    const decided = await this.answer_?.(this.asks[index]!, index)
+    if (decided !== undefined) return decided
+    return await new Promise<ApprovalOutcome>(resolve => { this.held.set(index, resolve) })
+  }
+
+  answer(index: number, outcome: ApprovalOutcome): void {
+    const resolve = this.held.get(index)
+    if (resolve === undefined) throw new Error(`review ask ${index} is not waiting for an answer`)
+    this.held.delete(index)
+    resolve(outcome)
+  }
+
+  pending(): number {
+    return this.held.size
+  }
+}
+
 class ScriptedLoopImpl implements ScriptedLoop {
   readonly workspace: string
   readonly home: string
@@ -311,6 +417,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
   private readonly roots: readonly SessionId[]
   readonly ctx: Context
   readonly task: TaskService
+  readonly review: ReviewDesk
   /** Assigned by `start()`, after the plugins they are mounted as. */
   verifier!: VerifierRegistry
   runtime!: TaskRuntime
@@ -340,12 +447,13 @@ class ScriptedLoopImpl implements ScriptedLoop {
     vi.stubEnv('HOME', this.home)
     process.env.DSH_HOME = this.home
     for (const root of this.roots) this.sessionRoot.set(root, root)
+    this.review = new ReviewDesk(options.approvalAnswer)
     this.adapter = new ScriptedModelAdapter(options.script, sessionId => {
       const rootIndex = this.roots.indexOf(sessionId as SessionId)
       if (rootIndex >= 0) return rootIndex
       const spawned = this.spawnRecords.findIndex(record => record.sessionId === sessionId)
       return spawned < 0 ? this.roots.length : this.roots.length + spawned
-    })
+    }, () => this.callRecords)
     this.task = new TaskService(this.ctx)
   }
 
@@ -389,7 +497,9 @@ class ScriptedLoopImpl implements ScriptedLoop {
     ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'mock', model: 'mock' }) })
     ctx.provide('agentPresets', { defaultId: 'standard', mount: async () => {}, resolve: async () => ({}) })
     ctx.provide('permissionPresets', { set: vi.fn(), resolve: () => ({}) })
-    ctx.provide('approval', { request: vi.fn(async () => 'allowed-once') })
+    // The human seam, driven by the spec: the channel below asks through it, and
+    // a spec that cares about *whether* a person was asked asserts on `review`.
+    ctx.provide('approval', { request: (request: { toolName?: string; reason?: string; agent?: { id?: string } }) => this.review.request(request) })
     ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) })
     ctx.provide('layout', { setIn: async () => {} })
     const graphState = {
@@ -442,6 +552,9 @@ class ScriptedLoopImpl implements ScriptedLoop {
     ctx.tools.register(defineTaskDecomposeTool(ctx))
     ctx.tools.register(defineTaskSubmitResultTool(ctx))
     ctx.tools.register(defineTaskCancelTool(ctx))
+    ctx.tools.register(defineTaskProposalReadTool(ctx))
+    ctx.tools.register(defineTaskProposalContinueTool(ctx))
+    ctx.tools.register(defineTaskProposalCancelTool(ctx))
 
     // The dispatch record: every call the deployment ran through the registry,
     // deny included (a denied call reports a result too), in order.
@@ -476,9 +589,15 @@ class ScriptedLoopImpl implements ScriptedLoop {
       ...(this.options.noProgressRounds === undefined ? {} : { noProgressRounds: this.options.noProgressRounds }),
       ...(this.options.verifyTimeoutMs === undefined ? {} : { verifyTimeoutMs: this.options.verifyTimeoutMs }),
       ...(this.options.writeDrainTimeoutMs === undefined ? {} : { writeDrainTimeoutMs: this.options.writeDrainTimeoutMs }),
+      ...(this.options.generatedTaskReview === undefined ? {} : { generatedTaskReview: this.options.generatedTaskReview }),
       runBindingRoot: join(this.home, 'singularity', 'run-bindings'),
     } as Config)
     this.runtime = ctx.get('taskRuntime') as TaskRuntime
+    // The review channel, mounted where the deployment mounts it — at the service
+    // assembly, not on any agent's tool plane — so a review of this store's
+    // batches is routed through the approval seam above, and a worker can never
+    // decide one.
+    new ProposalReviewService(ctx)
     // The call record goes in front of the gate's own pre-execute listener,
     // because a denial short-circuits the waterfall and would otherwise leave a
     // refused call unrecorded. Registered here — after the runtime's own
@@ -550,10 +669,15 @@ class ScriptedLoopImpl implements ScriptedLoop {
   }
 
   /** The live agent of one session, from the real loop's registry. */
-  private agent(sessionId: SessionId | string = this.primary): Agent {
+  agent(sessionId: SessionId | string = this.primary): Agent {
     const agent = this.ctx.agents.get(String(sessionId))
     if (agent === undefined) throw new Error(`the stack holds no live agent for "${sessionId}"`)
     return agent
+  }
+
+  /** The tool names one agent's own composition offers, from the registry's view. */
+  visible(agent: Agent): string[] {
+    return this.ctx.tools.schemas(agent).map(schema => schema.name).sort()
   }
 
   async runForSession(sessionId: SessionId | string): Promise<{ storeId: string; task: TaskInstance; run: TaskRun }> {

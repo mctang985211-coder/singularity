@@ -131,7 +131,20 @@ describe('TaskService store lifecycle', () => {
     await expect(service.snapshotIn(STORE)).rejects.toThrow('not open')
 
     const empty = await service.createStore(STORE)
-    expect(empty).toEqual({ version: 1, id: STORE, tasks: [], runs: [], edges: [], evidence: [], handoffs: [], reviews: [], diagnoses: [], obligations: [], capabilities: {} })
+    expect(empty).toEqual({
+      version: 1,
+      id: STORE,
+      tasks: [],
+      runs: [],
+      edges: [],
+      evidence: [],
+      handoffs: [],
+      reviews: [],
+      diagnoses: [],
+      obligations: [],
+      capabilities: {},
+      proposals: { all: [], byId: {}, byRequestKey: {}, byParentTask: {} },
+    })
     await expect(service.createStore(STORE)).rejects.toThrow('already open')
     await expect(service.createStore('bad id!')).rejects.toThrow('invalid store id')
 

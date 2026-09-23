@@ -29,7 +29,16 @@ export interface AdmissionParent extends TaskInstance {
 
 /** One planned child at admission time; `dependsOn` indexes into the children array. */
 export interface AdmissionChild {
-  taskId: string
+  /**
+   * The child's task id, when it has one. It is **absent** for a batch that is
+   * being judged before any id was minted — the pre-check stage of admission
+   * (`TaskRuntime.precheckDecomposition`) deliberately mints nothing — and the
+   * refusal then names the child by its position instead. Two callers judging
+   * the same batch therefore get the same verdict either way; only the wording
+   * of the messages a refusal carries differs, and an id that was about to be
+   * thrown away was never information a caller could use.
+   */
+  taskId?: string
   objective: string
   acceptanceCriteria: readonly AcceptanceCriterion[]
   dependsOn?: readonly number[]
@@ -182,6 +191,28 @@ export function contractDefects(criteria: readonly AcceptanceCriterion[], label:
 }
 
 /**
+ * How one planned child is named in a refusal: its position always, its id when
+ * the batch has one yet ({@link AdmissionChild.taskId}). A batch is judged
+ * before its ids are minted (`TaskRuntime.deriveBatch` / `checkDerivedBatch`
+ * deliberately mint nothing), so a refusal names the child's position — and the
+ * same verdict comes out either way, because only the id in the message differs.
+ */
+function childLabel(child: AdmissionChild, index: number): string {
+  return child.taskId === undefined ? `child ${index}` : `child ${index} ("${child.taskId}")`
+}
+
+/**
+ * How one planned child is named inside a dependency message: its id when it
+ * has one, its batch position otherwise (`#0` is the first child). The two
+ * forms appear in `dependency "…" → "…"` messages only — the edges this
+ * function builds are the plan's own, checked for duplicates and cycles before
+ * any id exists.
+ */
+function childRef(child: AdmissionChild | undefined, index: number): string {
+  return child?.taskId ?? `#${index}`
+}
+
+/**
  * Structural admission checks for one decomposition batch (RFC §36). Pure:
  * every rule is validated up front and the caller persists only when the
  * verdict is `ok`, so admission is atomic for the whole batch.
@@ -220,7 +251,7 @@ export function checkDecomposition(
 
   const plannedEdges: DependencyEdge[] = []
   children.forEach((child, index) => {
-    const label = `child ${index} ("${child.taskId}")`
+    const label = childLabel(child, index)
     if (child.objective.trim().length === 0) reasons.push(`${label} objective must be non-empty`)
     // Two separate judgements, both required: the contract's own structure
     // ({@link contractDefects}, shared with the replay path) and the P4
@@ -252,7 +283,7 @@ export function checkDecomposition(
         reasons.push(`${label} cannot depend on itself`)
         continue
       }
-      plannedEdges.push({ from: children[dependency]!.taskId, to: child.taskId })
+      plannedEdges.push({ from: childRef(children[dependency], dependency), to: childRef(child, index) })
     }
   })
 

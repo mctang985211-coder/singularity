@@ -54,6 +54,7 @@ import type {
   AdmissionContext,
   ChildEvidenceRef,
   DecompositionAdmission,
+  DecompositionIdentity,
   ProtectedInputRef,
   TaskContract,
   TaskContractVersion,
@@ -83,9 +84,45 @@ export interface NormalizedChild {
 
 export interface NormalizedBatch {
   contractVersion: TaskContractVersion
+  /** The caller's reason, verbatim — part of {@link decompositionIdentity}, so a writer that records the batch's identity records this text. */
+  reason: string
   children: NormalizedChild[]
   /** The batch identity and the limits it was admitted under, ready to be recorded with the decomposition. */
   admission: DecompositionAdmission
+}
+
+/**
+ * The identity one batch is digested over (§4): where it came from, which
+ * contract language it is written in, the caller's reason, and the complete
+ * ordered children — each child reduced to its contract digest and the batch
+ * facts the identity covers.
+ *
+ * One construction, shared by {@link normalizeDecomposition} (which digs the
+ * batch) and by any writer that has to *name* the batch rather than digest it
+ * (the runtime's proposal record, whose `proposalDigest` has to be the same
+ * number the admission recorded). Two constructions of one identity would
+ * eventually disagree, and a proposal whose digest is not the batch's would
+ * make every approval binding meaningless.
+ */
+export function decompositionIdentity(
+  context: DecompositionIdentityContext,
+  reason: string,
+  children: readonly NormalizedChild[],
+): DecompositionIdentity {
+  return {
+    contractVersion: TASK_CONTRACT_VERSION,
+    storeId: context.storeId,
+    parentTaskId: context.parentTaskId,
+    parentRunId: context.parentRunId,
+    callerSessionId: context.callerSessionId,
+    reason,
+    children: children.map(child => ({
+      contractDigest: contractDigest(child.contract),
+      dependsOn: child.dependsOn,
+      decomposable: child.decomposable,
+      requiresIndependentAcceptance: child.requiresIndependentAcceptance,
+    })),
+  }
 }
 
 export type NormalizationResult = { ok: true; batch: NormalizedBatch } | { ok: false; reasons: string[] }
@@ -397,22 +434,10 @@ export function normalizeDecomposition(spec: unknown, context: NormalizationCont
       ok: true,
       batch: {
         contractVersion,
+        reason,
         children,
         admission: {
-          proposalDigest: decompositionDigest({
-            contractVersion,
-            storeId: context.storeId,
-            parentTaskId: context.parentTaskId,
-            parentRunId: context.parentRunId,
-            callerSessionId: context.callerSessionId,
-            reason,
-            children: children.map(child => ({
-              contractDigest: contractDigest(child.contract),
-              dependsOn: child.dependsOn,
-              decomposable: child.decomposable,
-              requiresIndependentAcceptance: child.requiresIndependentAcceptance,
-            })),
-          }),
+          proposalDigest: decompositionDigest(decompositionIdentity(context, reason, children)),
           context: copyValue(context.admissionContext),
         },
       },

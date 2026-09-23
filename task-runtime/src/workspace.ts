@@ -16,15 +16,23 @@
  *    over (`push`) and release are checked against it, and a stack that does not
  *    match the request is a loud diagnostic, never a silent pop.
  * 2. **On disk**: `<markerRoot>/<sha256(path)>.json`, written tmp+rename so a
- *    reader never sees a half-written marker. This is what a *later* process
- *    reads, and all it can honestly say is "the pid in here was alive when I
- *    looked" — the boundary §3.4 states rather than hides: `process.kill(pid, 0)`
- *    reports EPERM for another user's process and must count as alive; a reused
- *    pid makes a dead owner look alive (the marker carries the kernel's own
- *    start-time token, compared with the live process's and *reported* when they
- *    disagree — a reused pid is still a live pid, so the comparison is a
- *    diagnostic, not an authorisation: only a pid that is provably gone is
- *    adopted); and a `DSH_HOME` shared across machines makes the pid meaningless.
+ *    reader never sees a half-written marker. Every write uses its own temporary
+ *    name: a child's submission chain and the batch driver can mutate the same
+ *    workspace's marker at the same time while a run settles, and one shared
+ *    temporary path would let the first `rename` consume the file the second was
+ *    about to move — an ENOENT out of a release that is nobody's protocol error.
+ *    Concurrent writes therefore leave one whole marker, the write that landed
+ *    last; which owner that is remains the caller's business, because the
+ *    in-process stack is the truth for this process and handovers are meant to be
+ *    serialized. This is what a *later* process reads, and all it can honestly
+ *    say is "the pid in here was alive when I looked" — the boundary §3.4 states
+ *    rather than hides: `process.kill(pid, 0)` reports EPERM for another user's
+ *    process and must count as alive; a reused pid makes a dead owner look alive
+ *    (the marker carries the kernel's own start-time token, compared with the live
+ *    process's and *reported* when they disagree — a reused pid is still a live
+ *    pid, so the comparison is a diagnostic, not an authorisation: only a pid that
+ *    is provably gone is adopted); and a `DSH_HOME` shared across machines makes
+ *    the pid meaningless.
  *
  * What that means for the rules, and why they are this strict:
  *
@@ -211,6 +219,18 @@ function pidIsAlive(pid: number): boolean {
     return (error as NodeJS.ErrnoException).code === 'EPERM'
   }
 }
+
+/**
+ * How many marker writes this process has started; it names each write's
+ * temporary file. Two chains mutate one workspace's marker at the same time in a
+ * real deployment — a child's submission chain takes the verifier layer in and
+ * out while the batch driver releases the child it has seen settle — and with one
+ * shared temporary path the first `rename` takes the file away from the second,
+ * whose release then fails with ENOENT. A counter per process rather than per
+ * registry, because two registries in one process (a second graph's) write the
+ * same marker path for the same workspace.
+ */
+let markerWriteSeq = 0
 
 type MarkerRead =
   | { kind: 'absent' }
@@ -470,7 +490,8 @@ export class WorkspaceRegistry {
     const startedAt = await readProcessStartTime(this.pid)
     if (startedAt !== undefined) marker.processStartedAt = startedAt
     await mkdir(dirname(file), { recursive: true })
-    const tmp = `${file}.tmp`
+    markerWriteSeq += 1
+    const tmp = `${file}.${markerWriteSeq}.tmp`
     await writeFile(tmp, `${JSON.stringify(marker, null, 2)}\n`, 'utf8')
     await rename(tmp, file)
   }

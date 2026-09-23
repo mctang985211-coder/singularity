@@ -26,6 +26,8 @@ const CONTRACT_ALLOWED = [
   'skill',
   'task_cancel',
   'task_diagnose',
+  'task_proposal_cancel',
+  'task_proposal_read',
   'task_read',
   'task_review_pack',
   'task_status',
@@ -33,7 +35,7 @@ const CONTRACT_ALLOWED = [
 ]
 
 /** Tools the protocol closes in every non-active phase; the samples name their category. */
-const WRITE_TOOLS = ['write', 'edit', 'bash', 'job_list', 'job_kill', 'graph_spawn', 'evolution_apply', 'subagent_spawn', 'task_decompose', 'task_submit_result', 'task_verify']
+const WRITE_TOOLS = ['write', 'edit', 'bash', 'job_list', 'job_kill', 'graph_spawn', 'evolution_apply', 'subagent_spawn', 'task_decompose', 'task_submit_result', 'task_verify', 'task_proposal_continue']
 
 interface FakeJob {
   id: string
@@ -79,6 +81,28 @@ function fakeJobs(initial: FakeJob[], behaviour: JobsBehaviour = {}) {
 describe('COORDINATION_ALLOWED', () => {
   test('is exactly the coordination list the protocol names', () => {
     expect([...COORDINATION_ALLOWED].sort()).toEqual(CONTRACT_ALLOWED)
+  })
+
+  test('classifies the T2/T3 proposal tools with their task-domain siblings', () => {
+    // The classification is the contract: reading a proposal and withdrawing
+    // one's own batch are the looking-at and the ending of what this run asked
+    // for; continuing one can admit a batch, so it is a write exactly as
+    // `task_decompose` is.
+    const gate = new ExecutionGate()
+    gate.setPhase('s-1', 'waiting_children')
+    expect(gate.decide('s-1', 'task_proposal_read')).toEqual({ allow: true })
+    expect(gate.decide('s-1', 'task_proposal_cancel')).toEqual({ allow: true })
+    const denied = gate.decide('s-1', 'task_proposal_continue')
+    expect(denied.allow).toBe(false)
+    if (denied.allow) throw new Error('unreachable')
+    expect(denied.reason).toContain('"task_proposal_continue" is denied')
+
+    // A waiting proposal is drained like any other write: a continuation in
+    // flight is work the phase change has to wait for.
+    expect(gate.inFlightWrites('s-1')).toEqual([])
+    gate.trackAllowed('s-1', 'c-1', 'task_proposal_continue')
+    gate.trackAllowed('s-1', 'c-2', 'task_proposal_read')
+    expect(gate.inFlightWrites('s-1')).toEqual([{ callId: 'c-1', name: 'task_proposal_continue' }])
   })
 })
 

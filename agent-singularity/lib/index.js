@@ -5,8 +5,8 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, capabilityToolQuery, checkObligationCoverage, findRepoRoot, loadObligationTemplates, loadSkillSidecar, optionalService, precheckReplacedCapabilityRow, readVerifiedFile, registeredVerifierIds, renderRunBinding, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
-import { defineTool } from "@deepseek-ai/dsh-tools";
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
+import { defineTool } from "@deepseek-ai/dsh-tools";
 import { SessionId } from "@deepseek-ai/dsh-session";
 
 //#region src/hitl.ts
@@ -37,12 +37,12 @@ var HitlService = class extends Service {
 		ctx.on("user-questions/request", async (request, next) => {
 			if (request.questions.length !== 1) return next();
 			const question = request.questions[0];
-			const text$23 = await this.enqueue(request.agent?.id ?? "unknown", "ask", question.question, request.signal);
-			if (text$23.kind !== "ask") throw new Error("hitl: expected ask answer");
+			const text$26 = await this.enqueue(request.agent?.id ?? "unknown", "ask", question.question, request.signal);
+			if (text$26.kind !== "ask") throw new Error("hitl: expected ask answer");
 			return { answers: [{
 				id: question.id,
 				selected: [],
-				custom: text$23.text
+				custom: text$26.text
 			}] };
 		}, { prepend: true });
 		ctx.on("approval/request", async (request) => {
@@ -66,16 +66,16 @@ var HitlService = class extends Service {
 		waiter.resolve(answer);
 		this.ctx.emit("hitl/change", this.list());
 	}
-	enqueue(sessionId$18, kind, prompt, callerSignal) {
+	enqueue(sessionId$21, kind, prompt, callerSignal) {
 		const signal = callerSignal === void 0 ? this.lifetime.signal : AbortSignal.any([callerSignal, this.lifetime.signal]);
 		signal.throwIfAborted();
-		if (typeof sessionId$18 !== "string" || sessionId$18.length === 0) throw new Error("hitl: missing session id");
+		if (typeof sessionId$21 !== "string" || sessionId$21.length === 0) throw new Error("hitl: missing session id");
 		const id = randomUUID();
 		const pending = {
 			id,
 			kind,
 			prompt,
-			sessionId: sessionId$18,
+			sessionId: sessionId$21,
 			createdAt: Date.now()
 		};
 		const abort = () => {
@@ -228,14 +228,14 @@ var EscalationService = class extends Service {
 		return escalations;
 	}
 	async load() {
-		let text$23;
+		let text$26;
 		try {
-			text$23 = await readFile(this.file, "utf8");
+			text$26 = await readFile(this.file, "utf8");
 		} catch (error) {
 			if (error.code === "ENOENT") return;
 			throw error;
 		}
-		const records = text$23.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
+		const records = text$26.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
 			try {
 				return JSON.parse(line);
 			} catch {
@@ -480,9 +480,9 @@ function entryEnd(lines, head, regionEnd, headerIndent) {
 * task-runtime entry, more than one (the error names every matching line —
 * refusing to guess which one governs), or no capabilities mapping.
 */
-function locateCapabilityRow(text$23, name) {
-	const eol = text$23.includes("\r\n") ? "\r\n" : "\n";
-	const lines = text$23.split(eol);
+function locateCapabilityRow(text$26, name) {
+	const eol = text$26.includes("\r\n") ? "\r\n" : "\n";
+	const lines = text$26.split(eol);
 	const docEnd = lines.findIndex((line) => line.trim() === "---");
 	const doc1End = docEnd === -1 ? lines.length : docEnd;
 	const itemIndices = [];
@@ -554,8 +554,8 @@ function locateCapabilityRow(text$23, name) {
 * beats re-rendering the registry entry, whose schema fills default arrays the
 * source text never spelled out.
 */
-function readCapabilityRowSource(text$23, name) {
-	const located = locateCapabilityRow(text$23, name);
+function readCapabilityRowSource(text$26, name) {
+	const located = locateCapabilityRow(text$26, name);
 	if (located.rowStart === -1) return null;
 	return located.lines.slice(located.rowStart, located.rowStart + located.rowSpan).join("\n");
 }
@@ -565,8 +565,8 @@ function readCapabilityRowSource(text$23, name) {
 * row is gone, insert the lines where a new row would go. Every other byte of
 * the file is preserved, exactly as with `editCapabilityRow`.
 */
-function restoreCapabilityRowSource(text$23, name, source) {
-	const { lines, eol, capIndex, capIndent, capCollapsed, rowStart, rowSpan, insertAt } = locateCapabilityRow(text$23, name);
+function restoreCapabilityRowSource(text$26, name, source) {
+	const { lines, eol, capIndex, capIndent, capCollapsed, rowStart, rowSpan, insertAt } = locateCapabilityRow(text$26, name);
 	const sourceLines = source.replace(/\r?\n$/, "").split("\n");
 	if (rowStart !== -1) {
 		lines.splice(rowStart, rowSpan, ...sourceLines);
@@ -595,8 +595,8 @@ function restoreCapabilityRowSource(text$23, name, source) {
 * than one (the error names every matching line — refusing to guess which one
 * governs), no capabilities mapping, or a removal names no existing row.
 */
-function editCapabilityRow(text$23, name, entry) {
-	const { lines, eol, capIndex, capIndent, capCollapsed, regionEnd, rowStart, rowSpan, insertAt, entryIndent } = locateCapabilityRow(text$23, name);
+function editCapabilityRow(text$26, name, entry) {
+	const { lines, eol, capIndex, capIndent, capCollapsed, regionEnd, rowStart, rowSpan, insertAt, entryIndent } = locateCapabilityRow(text$26, name);
 	const rowLine = `${" ".repeat(rowStart === -1 ? entryIndent : indentOf(lines[rowStart]))}${keySpelling(name)}: ${flowEntry(entry ?? {})}`;
 	if (entry !== null && rowStart !== -1) {
 		lines.splice(rowStart, rowSpan, rowLine);
@@ -712,16 +712,16 @@ function assertOnlyKeys(value, allowed, field) {
 }
 /** A single safe path segment (one directory name): no separators, never `.`/`..`, never absolute. */
 function assertSegment(value, field) {
-	const text$23 = nonEmpty(value, field);
-	if (text$23 === "." || text$23 === ".." || text$23.includes("/") || text$23.includes("\\") || isAbsolute(text$23)) throw new Error(`evolution: ${field} must be a single safe path segment, got "${text$23}"`);
-	return text$23;
+	const text$26 = nonEmpty(value, field);
+	if (text$26 === "." || text$26 === ".." || text$26.includes("/") || text$26.includes("\\") || isAbsolute(text$26)) throw new Error(`evolution: ${field} must be a single safe path segment, got "${text$26}"`);
+	return text$26;
 }
 /** A clean relative path: never absolute (posix or drive-letter), no `\`, no empty / `.` / `..` segments. */
 function assertSandboxPath(value, field) {
-	const text$23 = nonEmpty(value, field);
-	if (isAbsolute(text$23) || /^[A-Za-z]:[\\/]/.test(text$23) || text$23.includes("\\") || text$23.includes("\0")) throw new Error(`evolution: ${field} must be a relative path inside the sandbox, got "${text$23}"`);
-	if (text$23.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) throw new Error(`evolution: ${field} must be a clean relative path (no empty / "." / ".." segments), got "${text$23}"`);
-	return text$23;
+	const text$26 = nonEmpty(value, field);
+	if (isAbsolute(text$26) || /^[A-Za-z]:[\\/]/.test(text$26) || text$26.includes("\\") || text$26.includes("\0")) throw new Error(`evolution: ${field} must be a relative path inside the sandbox, got "${text$26}"`);
+	if (text$26.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) throw new Error(`evolution: ${field} must be a clean relative path (no empty / "." / ".." segments), got "${text$26}"`);
+	return text$26;
 }
 /** Resolve `rel` under `base`, refusing anything that would land outside — the sandbox confinement belt. */
 function resolveWithin(base, rel) {
@@ -902,8 +902,8 @@ function championEntryYaml(name, entry) {
 	].join("\n");
 }
 /** Read back the champion capability snapshot: the single JSON line under the `#` header, keyed by the capability name. */
-function parseChampionEntry(text$23, name) {
-	const line = text$23.split("\n").map((item) => item.trim()).filter((item) => item.length > 0 && !item.startsWith("#")).at(-1);
+function parseChampionEntry(text$26, name) {
+	const line = text$26.split("\n").map((item) => item.trim()).filter((item) => item.length > 0 && !item.startsWith("#")).at(-1);
 	if (line === void 0) throw new Error("evolution: the champion capability snapshot carries no entry line");
 	const parsed = JSON.parse(line);
 	if (!isRecord$2(parsed) || !(name in parsed) || !isRecord$2(parsed[name])) throw new Error(`evolution: the champion capability snapshot does not hold an entry for "${name}"`);
@@ -1586,24 +1586,24 @@ var EvolutionService = class extends Service {
 			}
 			case "capability": {
 				const { name, entry } = proposal.mutation;
-				const text$23 = await readFile(this.configFile, "utf8");
+				const text$26 = await readFile(this.configFile, "utf8");
 				let row;
 				let edited;
 				if (direction === "apply") {
 					row = entry;
-					edited = editCapabilityRow(text$23, name, row);
+					edited = editCapabilityRow(text$26, name, row);
 				} else if (champion === "missing") {
 					row = null;
-					edited = editCapabilityRow(text$23, name, null);
+					edited = editCapabilityRow(text$26, name, null);
 				} else if (proposal.prepared?.championSource === "config-text") {
 					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = restoreCapabilityRowSource(text$23, name, await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.source.txt`), "utf8"));
+					edited = restoreCapabilityRowSource(text$26, name, await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.source.txt`), "utf8"));
 				} else if (proposal.prepared?.championSource === "code-default") {
 					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = editCapabilityRow(text$23, name, null);
+					edited = editCapabilityRow(text$26, name, null);
 				} else {
 					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = editCapabilityRow(text$23, name, row);
+					edited = editCapabilityRow(text$26, name, row);
 				}
 				await writeFile(this.configFile, edited.text, "utf8");
 				return {
@@ -1640,14 +1640,14 @@ var EvolutionService = class extends Service {
 	* apply would.
 	*/
 	async capabilityRowSource(name) {
-		let text$23;
+		let text$26;
 		try {
-			text$23 = await readFile(this.configFile, "utf8");
+			text$26 = await readFile(this.configFile, "utf8");
 		} catch (error) {
 			if (error.code === "ENOENT") return null;
 			throw error;
 		}
-		return readCapabilityRowSource(text$23, name);
+		return readCapabilityRowSource(text$26, name);
 	}
 	/**
 	* Early state-machine check so a wrong-state call reports the transition
@@ -1877,14 +1877,14 @@ var EvolutionService = class extends Service {
 		return proposals;
 	}
 	async load() {
-		let text$23;
+		let text$26;
 		try {
-			text$23 = await readFile(this.file, "utf8");
+			text$26 = await readFile(this.file, "utf8");
 		} catch (error) {
 			if (error.code === "ENOENT") return;
 			throw error;
 		}
-		const records = text$23.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
+		const records = text$26.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
 			try {
 				return JSON.parse(line);
 			} catch {
@@ -1910,8 +1910,350 @@ var EvolutionService = class extends Service {
 };
 
 //#endregion
+//#region src/proposal-review.ts
+/** The prefix `rootTaskStoreId` writes; see {@link ownerSessionOfStore} for why it is re-checked rather than trusted. */
+const STORE_PREFIX = "sg-t-";
+/** The tool name the review question is about: the decomposition the batch would become (audit and presentation). */
+const REVIEW_TOOL_NAME = "task_decompose";
+/**
+* The owner session of a task store — whose approval surface a review of that
+* store's batches belongs on — or `undefined` for an id this deployment did not
+* build.
+*
+* The parse is re-checked through {@link rootTaskStoreId} rather than trusted:
+* the mapping from a root session to its store belongs to the task package, and
+* a string that merely looks like one must not name a session that never owned
+* a store (which would route a review into a stranger's conversation).
+*/
+function ownerSessionOfStore(storeId) {
+	if (!storeId.startsWith(STORE_PREFIX)) return void 0;
+	const sessionId$21 = storeId.slice(5);
+	return sessionId$21.length > 0 && rootTaskStoreId(sessionId$21) === storeId ? sessionId$21 : void 0;
+}
+/**
+* The decider identity the channel records: the approval surface of the owner
+* session the review was shown in. Deliberately a channel-shaped value — the
+* same `approval:` family the native grants use (`escalate`, `evolution_decide`)
+* — because a reader of the record must be able to tell a human grant apart
+* from a session id and from anything a model could have written.
+*/
+function reviewDecider(ownerSessionId) {
+	return `approval:${ownerSessionId}`;
+}
+/** How a container field is listed, or that it held nothing — never an omitted line a reader has to notice. */
+function listField(title, items, empty) {
+	if (items.length === 0) return [`  ${title}: ${empty}`];
+	return [`  ${title}:`, ...items.map((item) => `  - ${item}`)];
+}
+/**
+* The protected acceptance inputs a criterion declares, with the identity fixed
+* at submission: a reviewer has to see that they are protected *and* which bytes
+* were fixed, because the verifier re-reads exactly these before judging.
+*/
+function protectedInputsPart$1(criterion) {
+	const declared = criterion.protectedInputs ?? [];
+	if (declared.length === 0) return "";
+	return ` [protected inputs: ${declared.map((ref) => `${ref.path} sha256:${ref.sha256}`).join(", ")}]`;
+}
+/** The evidence and artifact requirements a criterion declares, as one suffix — omitted entirely when it declares none. */
+function requirementParts(criterion) {
+	const parts = [];
+	if (criterion.requiredEvidence.length > 0) parts.push(`required evidence: ${criterion.requiredEvidence.join(", ")}`);
+	if ((criterion.requiresArtifact ?? []).length > 0) parts.push(`requires verified artifact: ${criterion.requiresArtifact.join(", ")}`);
+	if ((criterion.acceptsArtifact ?? []).length > 0) parts.push(`accepts artifact: ${criterion.acceptsArtifact.join(", ")}`);
+	if (criterion.childEvidence !== void 0 && criterion.childEvidence.length > 0) parts.push(`child evidence: ${criterion.childEvidence.map((item) => `child ${item.childIndex}${item.criterionId === void 0 ? "" : `:${item.criterionId}`}${item.evidenceRef === void 0 ? "" : `#${item.evidenceRef}`}`).join(", ")}`);
+	return parts;
+}
+/**
+* How a criterion reads to a reviewer: its id, its mode, whether it is mandatory,
+* whether it is a heuristic judgement (which never counts as a deterministic
+* pass — §5 requires the marking, not a footnote), what it says, and what it
+* pins (command, named verifier, protected inputs, artifact requirements).
+*/
+function criterionLine(criterion) {
+	const qualifiers = [
+		criterion.verificationMode,
+		...criterion.mandatory ? ["mandatory"] : ["optional"],
+		...criterion.heuristic === true ? ["heuristic — judged by a model, never a deterministic pass"] : []
+	];
+	const command = criterion.command === void 0 ? "" : ` — $ ${criterion.command}`;
+	const verifier = criterion.verifierRef === void 0 ? "" : ` [verifier: ${criterion.verifierRef}]`;
+	const requirements = requirementParts(criterion);
+	const requirementText = requirements.length === 0 ? "" : ` [${requirements.join("; ")}]`;
+	return `    - ${criterion.criterionId} [${qualifiers.join(", ")}] ${criterion.description}${command}${verifier}${protectedInputsPart$1(criterion)}${requirementText}`;
+}
+/**
+* How one declared capability resolved when this batch was proposed: the
+* manifest the runtime built for *this* child, with the skills and tools a
+* worker would be granted — and the capability gap named when a requirement is
+* not in the registry, rather than silently absent (§5's 声明能力及当前解析).
+*
+* `undefined` is the honest answer for a request that carried no manifest for
+* this child: the resolution is then not shown at all, and nothing is claimed
+* about it.
+*/
+function resolutionLines(manifest) {
+	if (manifest === void 0) return [];
+	const lines = Object.entries(manifest.capabilities).map(([name, entry]) => {
+		const parts = [
+			...entry.skills.length === 0 ? [] : [`skills: ${entry.skills.join(", ")}`],
+			...entry.tools.length === 0 ? [] : [`tools: ${entry.tools.join(", ")}`],
+			...entry.preset === void 0 ? [] : [`preset: ${entry.preset}`],
+			...entry.permission === void 0 ? [] : [`permission: ${entry.permission}`],
+			...entry.mcpServers === void 0 || entry.mcpServers.length === 0 ? [] : [`mcp servers: ${entry.mcpServers.join(", ")}`]
+		];
+		return `  - ${name} → ${parts.length === 0 ? "granted no skill or tool" : parts.join("; ")}`;
+	});
+	const missing = manifest.missing.map((name) => `  - ${name} → NOT GRANTED (capability gap: the registry has no such row, and this batch's admission recorded it)`);
+	return [
+		"  resolution (the manifests this batch resolved to):",
+		...lines,
+		...missing
+	];
+}
+/**
+* One child of the batch as a reviewer reads it (§5): its goal, its criteria,
+* what it inherits as assumptions and constraints, what it waits for, what it
+* requires, and how those requirements currently resolve.
+*
+* `dependsOn` names the sibling objective as well as the index: a batch whose
+* ordering matters must not require a reviewer to count positions.
+*/
+function renderProposalChild(child, options) {
+	const contract = child.contract;
+	const verifierRefs = [...new Set(contract.acceptanceCriteria.flatMap((criterion) => criterion.verifierRef ?? []))];
+	const dependencies = child.dependsOn.map((index) => {
+		const sibling = options.siblings[index];
+		return `child ${index}${sibling === void 0 ? "" : ` (${sibling.contract.objective})`}`;
+	});
+	return [
+		`- child ${options.index}: ${contract.objective}`,
+		...options.contractDigest === void 0 ? [] : [`  contract digest (sha256): ${options.contractDigest}`],
+		`  contract version: ${contract.contractVersion}`,
+		"  acceptance criteria:",
+		...contract.acceptanceCriteria.map(criterionLine),
+		...verifierRefs.length === 0 ? [] : [`  pinned verifiers: ${verifierRefs.join(", ")}`],
+		...listField("assumptions", contract.assumptions, "(none declared — the contract rests on nothing stated)"),
+		...listField("constraints", contract.constraints, "(none declared)"),
+		...listField("required capabilities", contract.requiredCapabilities, "(none)"),
+		...resolutionLines(options.manifest),
+		...listField("depends on", dependencies, "(nothing — this child may start first)"),
+		`  decomposable: ${child.decomposable ? "yes" : "no"}; requires independent acceptance: ${child.requiresIndependentAcceptance ? "yes" : "no"}`
+	];
+}
+/**
+* The complete batch content of a stored proposal, one block per child in batch
+* order — the whole set, never a prefix. `manifests`, when a caller has them,
+* are the resolution recorded with the request and are aligned with the
+* children positionally.
+*/
+function renderProposalChildren(proposal, manifests) {
+	return proposal.batch.flatMap((child, index) => [...renderProposalChild(child, {
+		index,
+		siblings: proposal.batch,
+		...proposal.identity.children[index]?.contractDigest === void 0 ? {} : { contractDigest: proposal.identity.children[index].contractDigest },
+		...manifests?.[index] === void 0 ? {} : { manifest: manifests[index] }
+	}), ""]);
+}
+/** The limits one batch was admitted under, as the record holds them, with the enforced and the audited values kept apart. */
+function limitLines(proposal) {
+	const context = proposal.admissionContext;
+	const audited = [
+		...context.auditOnly.maxToolCalls === void 0 ? [] : [`maxToolCalls ${context.auditOnly.maxToolCalls}`],
+		...context.auditOnly.tokens === void 0 ? [] : [`tokens ${context.auditOnly.tokens}`],
+		...context.auditOnly.attempts === void 0 ? [] : [`attempts ${context.auditOnly.attempts}`]
+	];
+	return [
+		`- enforced at admission: maxDepth ${context.maxDepth}, maxChildren ${context.maxChildren}`,
+		`- enforced in flight: ${context.wallTimeMs === void 0 ? "no wall-clock ceiling was configured" : `wallTimeMs ${context.wallTimeMs}`}`,
+		`- audited after the run (never enforced in flight): ${audited.length === 0 ? "none configured" : audited.join(", ")}`
+	];
+}
+/**
+* The review material one person is shown (§5), rendered from the saved facts:
+* the parent, every child, the limits, the obligations, the identity a decision
+* binds, and what this record honestly cannot promise.
+*
+* A pure function of the request, so what a deployment shows and what a test
+* asserts are the same rendering.
+*/
+function renderProposalReview(request) {
+	const proposal = request.proposal;
+	const parent = request.parentTask;
+	proposal.identity.children;
+	return [
+		`Batch review — proposal ${proposal.proposalId} [${proposal.status}] (policy ${proposal.policy}, trigger: ${request.trigger})`,
+		`store: ${request.storeId}`,
+		"",
+		"A decision answers one question: should this batch run as it is written here? Approving it does not mean the work is",
+		"accepted (the verifiers still judge every criterion), does not grant a capability, and does not close a gap. The",
+		"decision binds the batch digest and both context fingerprints printed below: a revision, a re-resolution or a",
+		"changed limit is a different proposal.",
+		"",
+		"## Parent task",
+		`- ${parent.taskId} [${parent.status}/${parent.decompositionStatus}] depth ${parent.depth}`,
+		`- objective: ${parent.objective}`,
+		"- acceptance criteria:",
+		...parent.acceptanceCriteria.map((criterion) => `  - ${criterion.criterionId} [${criterion.verificationMode}${criterion.mandatory ? ", mandatory" : ""}] ${criterion.description}`),
+		`- run: ${proposal.identity.parentRunId} (proposing session ${proposal.identity.callerSessionId})`,
+		`- reason recorded for this batch: ${proposal.identity.reason}`,
+		"",
+		`## Children (${request.batch.children.length})`,
+		...renderProposalChildren(proposal, request.manifests),
+		"## Limits this batch is admitted under",
+		...limitLines(proposal),
+		"",
+		`## Unmet obligations on the parent (${request.obligations.length})`,
+		...request.obligations.length === 0 ? ["(none recorded when this review was requested)"] : request.obligations.map((obligation) => `- ${obligation.obligationId}: ${obligation.goal} — judged by: ${obligation.criterion}`),
+		"",
+		"## Identity — what an approval would bind",
+		`- proposal digest (sha256): ${proposal.proposalDigest}`,
+		`- admission context digest (the limits above): ${proposal.admissionContextDigest}`,
+		`- review context digest (the resolution above): ${proposal.reviewContextDigest}`,
+		`- capability manifest digest: ${proposal.reviewContext.capabilityManifestDigest}`,
+		`- judging verifiers (the ids this batch's criteria pin): ${proposal.reviewContext.verifiers.length === 0 ? "(none pinned — criteria dispatch by mode)" : proposal.reviewContext.verifiers.map((verifier) => verifier.verifierId).join(", ")}`,
+		...request.registeredVerifiers === void 0 ? ["- the deployment could not list its verifier registry when this review was requested"] : [`- registered verifiers now: ${request.registeredVerifiers.join(", ")}`],
+		`- request key: ${proposal.requestKey}`,
+		...proposal.supersedes === void 0 ? [] : [`- supersedes: ${proposal.supersedes}`],
+		`- submitted at: ${proposal.createdAt}`,
+		"",
+		"## What this review cannot promise",
+		"- the manifests above name skills, tools, presets and MCP servers — names, not the bytes behind them. What a worker",
+		"  actually loads is pinned per run at spawn, which happens after this decision.",
+		"- a verifier is named by the registered id its criteria pin. This deployment cannot name the version or the",
+		"  configuration that registration currently stands for.",
+		"- a criterion marked heuristic is judged by a model; nothing in this batch turns it into a deterministic pass."
+	].join("\n");
+}
+/**
+* The review channel this deployment mounts (T2/T3 §5–§6). It renders, asks, and
+* records; it never admits anything itself — a recorded decision is what moves a
+* proposal, and the runtime performs the post-approval re-check and the
+* admission on its own.
+*/
+var ProposalReviewService = class extends Service {
+	lifetime = new AbortController();
+	constructor(ctx) {
+		super(ctx, "proposalReviewChannel");
+		ctx.effect(() => () => this.lifetime.abort(/* @__PURE__ */ new Error("proposal-review: service disposed")), "proposal-review: pending asks");
+	}
+	async requestReview(request) {
+		const ownerSessionId = ownerSessionOfStore(request.storeId);
+		if (ownerSessionId === void 0) return {
+			requested: false,
+			detail: `store "${request.storeId}" does not name the root session a review has to be shown in, so nobody was asked; the proposal stays pending_review`
+		};
+		const agent = this.liveAgent(ownerSessionId);
+		if (agent === void 0) return {
+			requested: false,
+			detail: `the owner session "${ownerSessionId}" has no live agent, so nobody was asked; the proposal stays pending_review until a decision is recorded (opening the graph again asks on the next request)`
+		};
+		if (!this.asksAPerson(agent)) return {
+			requested: false,
+			detail: `the owner session "${ownerSessionId}" runs with approval policy "never": an ask here is auto-rejected before any answerer sees it, which would record a refusal nobody made. Nobody was asked; the proposal stays pending_review`
+		};
+		const ask = this.ctx.approval.request({
+			agent,
+			toolName: REVIEW_TOOL_NAME,
+			reason: renderProposalReview(request),
+			signal: this.lifetime.signal
+		});
+		let reached;
+		try {
+			reached = await Promise.race([ask, Promise.resolve("pending")]);
+		} catch (error) {
+			return {
+				requested: false,
+				detail: `the approval channel could not ask the owner session "${ownerSessionId}" (${message(error)}), so nobody was asked; the proposal stays pending_review`
+			};
+		}
+		if (reached === "pending") {
+			ask.then((outcome) => this.record(request, ownerSessionId, outcome)).catch((error) => this.warn(`proposal ${request.proposal.proposalId}: the review request to session "${ownerSessionId}" ended without a usable answer (${message(error)}); the proposal keeps the status the store holds`));
+			return {
+				requested: true,
+				detail: `the review was put to the owner session "${ownerSessionId}" through the approval channel; the proposal stays pending_review until the decision is recorded, and the runtime continues the batch when it is`
+			};
+		}
+		if (reached === "allowed-once" || reached === "rejected") {
+			this.record(request, ownerSessionId, reached).catch((error) => this.warn(`proposal ${request.proposal.proposalId}: the answer of session "${ownerSessionId}" could not be recorded (${message(error)}); the proposal keeps the status the store holds`));
+			return {
+				requested: true,
+				detail: `the owner session "${ownerSessionId}" answered the review with ${reached === "allowed-once" ? "approval" : "a refusal"}; the decision is being recorded on the proposal`
+			};
+		}
+		return {
+			requested: false,
+			detail: reached === "cancelled" ? "the review request was withdrawn before a person decided, so no decision was recorded; the proposal stays pending_review" : "no approval answerer was available, so nobody was asked; the proposal stays pending_review"
+		};
+	}
+	/**
+	* One human answer, turned into the only thing that can move a waiting
+	* proposal: a decision on the record. An approval is recorded as `approved`
+	* (the runtime then re-checks the batch and admits it); an explicit refusal as
+	* `rejected`, naming who refused. Nothing else is written: `unavailable` and
+	* `cancelled` are states of the ask, and §6 allows exactly one decision per
+	* proposal — so a store that refuses this write because the proposal moved on
+	* meanwhile is warned about, never retried into a second decision.
+	*/
+	async record(request, ownerSessionId, outcome) {
+		const proposalId = request.proposal.proposalId;
+		const decidedBy = reviewDecider(ownerSessionId);
+		if (outcome === "allowed-once") {
+			const result = await this.runtime().decideProposal(request.storeId, proposalId, { outcome: "approved" }, decidedBy);
+			this.info(`proposal ${proposalId}: the owner session "${ownerSessionId}" approved the batch — ${result.detail}`);
+			return;
+		}
+		if (outcome === "rejected") {
+			const result = await this.runtime().decideProposal(request.storeId, proposalId, {
+				outcome: "rejected",
+				reason: `the owner refused this batch through the approval channel (session "${ownerSessionId}")`
+			}, decidedBy);
+			this.info(`proposal ${proposalId}: the owner session "${ownerSessionId}" refused the batch — ${result.detail}`);
+		}
+	}
+	/** The live agent behind one session, or `undefined` — an absent registry or a departed session is a state, not a throw. */
+	liveAgent(sessionId$21) {
+		const holder = this.ctx;
+		const registry = (typeof holder.get === "function" ? holder.get("agents") : void 0) ?? holder.agents;
+		try {
+			return registry?.get?.(sessionId$21);
+		} catch {
+			return;
+		}
+	}
+	/**
+	* Whether one session's approval policy asks a person at all. The policy is
+	* the approval service's own (a session override, else the configured
+	* default): under `never` the service answers `rejected` without dispatching
+	* anything, so a request routed there would look like a human refusal.
+	* Reading it before asking is what keeps that outcome from being invented.
+	*/
+	asksAPerson(agent) {
+		const service = this.ctx.approval;
+		return (service?.overrideOf?.(agent.session) ?? service?.config?.policy ?? "ask") === "ask";
+	}
+	/** The runtime that owns the store; resolved lazily, because the store is opened after this service is mounted. */
+	runtime() {
+		return this.ctx.taskRuntime;
+	}
+	/** Best-effort warn through the cordis logger when one is mounted; tests and minimal contexts may not have it. */
+	warn(message$1) {
+		const logger = this.ctx.logger;
+		logger?.("proposal-review").warn(message$1);
+	}
+	/** The same seam at info level, for the trace of a decision that landed. */
+	info(message$1) {
+		const logger = this.ctx.logger;
+		logger?.("proposal-review").info(message$1);
+	}
+};
+function message(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+
+//#endregion
 //#region src/tools/approve.ts
-const text$22 = (value) => [{
+const text$25 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -1926,7 +2268,7 @@ function defineApproveTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$22(v)
+			render: (_a, v) => text$25(v)
 		},
 		execute: async (args, exec) => {
 			if (args.prompt.trim().length === 0) throw new Error("hitl_approve: prompt is empty");
@@ -1950,7 +2292,7 @@ function defineApproveTool(ctx) {
 
 //#endregion
 //#region src/tools/ask.ts
-const text$21 = (value) => [{
+const text$24 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -1966,7 +2308,7 @@ function defineAskTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$21(v)
+			render: (_a, v) => text$24(v)
 		},
 		execute: async (args, exec) => {
 			if (args.prompt.trim().length === 0) throw new Error("hitl_ask: prompt is empty");
@@ -1985,7 +2327,7 @@ function defineAskTool(ctx) {
 
 //#endregion
 //#region src/tools/capability-list.ts
-const text$20 = (value) => [{
+const text$23 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2044,7 +2386,7 @@ function defineCapabilityListTool(ctx) {
 		parameters: {},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$20(v)
+			render: (_a, v) => text$23(v)
 		},
 		execute: async (_args, exec) => {
 			const capabilities = ctx.taskRuntime.listCapabilities();
@@ -2085,11 +2427,11 @@ function defineCapabilityListTool(ctx) {
 
 //#endregion
 //#region src/tools/escalate.ts
-const text$19 = (value) => [{
+const text$22 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$17(exec) {
+function sessionId$20(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("escalate: missing agent id");
 	return id;
@@ -2162,7 +2504,7 @@ function defineEscalateTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$19(v)
+			render: (_a, v) => text$22(v)
 		},
 		execute: async (args, exec) => {
 			if (args.list === true) {
@@ -2170,7 +2512,7 @@ function defineEscalateTool(ctx) {
 				if (escalations.length === 0) return "escalations: none recorded";
 				return [`escalations (${escalations.length}):`, ...escalations.map(renderEscalation$1)].join("\n");
 			}
-			const caller = sessionId$17(exec);
+			const caller = sessionId$20(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("escalate: missing agent");
 			const missing = ELEMENTS.filter((element) => {
@@ -2222,11 +2564,11 @@ function defineEscalateTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-apply.ts
-const text$18 = (value) => [{
+const text$21 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$16(exec) {
+function sessionId$19(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_apply: missing agent id");
 	return id;
@@ -2260,10 +2602,10 @@ function defineEvolutionApplyTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$18(v)
+			render: (_a, v) => text$21(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$16(exec);
+			const caller = sessionId$19(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("evolution_apply: missing agent");
 			let proposal;
@@ -2328,11 +2670,11 @@ function defineEvolutionApplyTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-candidate.ts
-const text$17 = (value) => [{
+const text$20 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$15(exec) {
+function sessionId$18(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_candidate: missing agent id");
 	return id;
@@ -2361,10 +2703,10 @@ function defineEvolutionCandidateTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$17(v)
+			render: (_a, v) => text$20(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$15(exec);
+			const caller = sessionId$18(exec);
 			const versions = args.versionSet;
 			try {
 				const proposal = await ctx.evolution.candidate(args.proposalId, versions, caller, args.mutation);
@@ -2380,11 +2722,11 @@ function defineEvolutionCandidateTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-decide.ts
-const text$16 = (value) => [{
+const text$19 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$14(exec) {
+function sessionId$17(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_decide: missing agent id");
 	return id;
@@ -2412,10 +2754,10 @@ function defineEvolutionDecideTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$16(v)
+			render: (_a, v) => text$19(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$14(exec);
+			const caller = sessionId$17(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("evolution_decide: missing agent");
 			let proposal;
@@ -2465,11 +2807,11 @@ function defineEvolutionDecideTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-gate.ts
-const text$15 = (value) => [{
+const text$18 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$13(exec) {
+function sessionId$16(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_gate: missing agent id");
 	return id;
@@ -2523,10 +2865,10 @@ function defineEvolutionGateTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$15(v)
+			render: (_a, v) => text$18(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$13(exec);
+			const caller = sessionId$16(exec);
 			let evidenceIds = /* @__PURE__ */ new Set();
 			try {
 				const graph = await ctx.graphs.graphForSession(caller);
@@ -2555,7 +2897,7 @@ function defineEvolutionGateTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-list.ts
-const text$14 = (value) => [{
+const text$17 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2601,7 +2943,7 @@ function defineEvolutionListTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$14(v)
+			render: (_a, v) => text$17(v)
 		},
 		execute: async (args) => {
 			const proposals = await ctx.evolution.list({
@@ -2648,11 +2990,11 @@ function defineEvolutionListTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-prepare.ts
-const text$13 = (value) => [{
+const text$16 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$12(exec) {
+function sessionId$15(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_prepare: missing agent id");
 	return id;
@@ -2695,10 +3037,10 @@ function defineEvolutionPrepareTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$13(v)
+			render: (_a, v) => text$16(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$12(exec);
+			const caller = sessionId$15(exec);
 			let proposal;
 			try {
 				proposal = await ctx.evolution.get(args.proposalId);
@@ -2733,7 +3075,7 @@ function defineEvolutionPrepareTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-propose.ts
-const text$12 = (value) => [{
+const text$15 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2752,7 +3094,7 @@ const TARGET_TYPE_SET$1 = new Set(TARGET_TYPES$1);
 function isProposalTargetType$1(value) {
 	return typeof value === "string" && TARGET_TYPE_SET$1.has(value);
 }
-function sessionId$11(exec) {
+function sessionId$14(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_propose: missing agent id");
 	return id;
@@ -2821,10 +3163,10 @@ function defineEvolutionProposeTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$12(v)
+			render: (_a, v) => text$15(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$11(exec);
+			const caller = sessionId$14(exec);
 			let targetType = args.targetType;
 			let targetId = args.targetId;
 			let rationale = args.rationale;
@@ -2867,7 +3209,7 @@ function defineEvolutionProposeTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-replay.ts
-const text$11 = (value) => [{
+const text$14 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2885,7 +3227,7 @@ const VERIFICATION_MODES = [
 	"review",
 	"composite"
 ];
-function sessionId$10(exec) {
+function sessionId$13(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_replay: missing agent id");
 	return id;
@@ -2987,10 +3329,10 @@ function defineEvolutionReplayTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$11(v)
+			render: (_a, v) => text$14(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$10(exec);
+			const caller = sessionId$13(exec);
 			let proposal;
 			try {
 				proposal = await ctx.evolution.get(args.proposalId);
@@ -3132,11 +3474,11 @@ function defineEvolutionReplayTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-rollback.ts
-const text$10 = (value) => [{
+const text$13 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$9(exec) {
+function sessionId$12(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_rollback: missing agent id");
 	return id;
@@ -3152,10 +3494,10 @@ function defineEvolutionRollbackTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$10(v)
+			render: (_a, v) => text$13(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$9(exec);
+			const caller = sessionId$12(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("evolution_rollback: missing agent");
 			let proposal;
@@ -3206,7 +3548,7 @@ function defineEvolutionRollbackTool(ctx) {
 
 //#endregion
 //#region src/tools/mark-ready.ts
-const text$9 = (value) => [{
+const text$12 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3217,12 +3559,12 @@ function defineMarkReadyTool(ctx) {
 		parameters: {},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$9(v)
+			render: (_a, v) => text$12(v)
 		},
 		execute: async (_args, exec) => {
-			const sessionId$18 = exec.agent?.id;
-			if (sessionId$18 === void 0) throw new Error("graph_mark_ready: missing agent id");
-			const graph = await ctx.graphs.graphForSession(sessionId$18);
+			const sessionId$21 = exec.agent?.id;
+			if (sessionId$21 === void 0) throw new Error("graph_mark_ready: missing agent id");
+			const graph = await ctx.graphs.graphForSession(sessionId$21);
 			await ctx.graphs.markReady(graph.id);
 			return `graph ${graph.id} ready`;
 		}
@@ -3283,11 +3625,11 @@ function defineSpawnTool(ctx) {
 
 //#endregion
 //#region src/tools/task-cancel.ts
-const text$8 = (value) => [{
+const text$11 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$8(exec) {
+function sessionId$11(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_cancel: missing agent id");
 	return id;
@@ -3307,10 +3649,10 @@ function defineTaskCancelTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$8(v)
+			render: (_a, v) => text$11(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$8(exec);
+			const caller = sessionId$11(exec);
 			const { storeId, run } = await ctx.taskRuntime.runForSession(caller);
 			if (run.executionPhase !== "waiting_children" || run.batchId === void 0) return `task_cancel: no batch is in flight for run "${run.runId}" (${run.status}${run.executionPhase === void 0 ? ", no coordination phase recorded" : `, phase ${run.executionPhase}`}); nothing was changed`;
 			const batchId = run.batchId;
@@ -3327,11 +3669,11 @@ function defineTaskCancelTool(ctx) {
 
 //#endregion
 //#region src/tools/task-decompose.ts
-const text$7 = (value) => [{
+const text$10 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$7(exec) {
+function sessionId$10(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_decompose: missing agent id");
 	return id;
@@ -3339,7 +3681,7 @@ function sessionId$7(exec) {
 function defineTaskDecomposeTool(ctx) {
 	return defineTool({
 		name: "task_decompose",
-		description: "Decompose the caller's current task into child tasks. The batch is admitted atomically and the runtime then runs them one at a time in dependency order; this call returns at admission and does not wait. Each child is verified independently; only verified children count as done.",
+		description: "Decompose the caller's current task into child tasks. The batch is admitted atomically and the runtime then runs them one at a time in dependency order; this call returns at admission and does not wait. Each child is verified independently; only verified children count as done. Where this deployment reviews generated tasks, the batch may instead come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it.",
 		parameters: {
 			reason: {
 				type: "string",
@@ -3349,6 +3691,14 @@ function defineTaskDecomposeTool(ctx) {
 			contractVersion: {
 				type: "integer",
 				description: "Contract version this batch is written under. The runtime stores version 1 and refuses a declared version it does not know, so callers normally omit this field and let the runtime write the current version"
+			},
+			requestKey: {
+				type: "string",
+				description: "The stable key this request is addressed by, when the caller has an identifier of its own (a message id, a plan row; the runtime derives one from the calling context and the batch content when this is omitted). One key names at most one proposal: repeating a request with the same key is answered with the proposal already stored, while the same key with different content is refused. A revision is different content, so it needs a new key"
+			},
+			supersedes: {
+				type: "string",
+				description: "The proposal id this batch revises — a rejected or stale one, whose record is kept. Naming it is what lets a reader follow the history; it does not transfer anything from that proposal (an approval never travels to new content) and it does not replace the new request key this submission needs"
 			},
 			children: {
 				type: "array",
@@ -3488,35 +3838,87 @@ function defineTaskDecomposeTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$7(v)
+			render: (_a, v) => text$10(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$7(exec);
+			const caller = sessionId$10(exec);
 			const { storeId, task, run } = await ctx.taskRuntime.runForSession(caller);
-			let admitted;
+			const { requestKey, supersedes,...spec } = args;
+			const callId = typeof exec.callId === "string" && exec.callId.length > 0 ? String(exec.callId) : void 0;
+			let submission;
+			let continued;
 			try {
-				admitted = await ctx.taskRuntime.decomposeAndRun(storeId, task.taskId, run.runId, caller, args, {
-					signal: exec.signal,
-					...typeof exec.callId === "string" && exec.callId.length > 0 ? { callId: String(exec.callId) } : {}
+				submission = await ctx.taskRuntime.submitDecompositionProposal(storeId, task.taskId, run.runId, caller, spec, {
+					...requestKey === void 0 ? {} : { requestKey: String(requestKey) },
+					...supersedes === void 0 ? {} : { supersedes: String(supersedes) },
+					exec: {
+						signal: exec.signal,
+						...callId === void 0 ? {} : { callId }
+					}
 				});
+				continued = await ctx.taskRuntime.continueProposal(storeId, submission.proposalId, caller, { ...callId === void 0 ? {} : { exec: { callId } } });
 			} catch (error) {
 				return `task_decompose rejected: ${error instanceof Error ? error.message : String(error)}`;
 			}
+			if (continued.status === "admitted") return admittedText(task.taskId, continued.batchId, continued.childTaskIds);
+			if (continued.status === "pending_review") return await pendingText(ctx, storeId, task.taskId, continued.proposalId, continued.detail);
 			return [
-				`decomposed ${task.taskId} into ${admitted.childTaskIds.length} children (batch ${admitted.batchId}):`,
-				...admitted.childTaskIds.map((taskId, index) => `- child ${index + 1}: ${taskId}`),
-				"",
-				`The runtime owns batch ${admitted.batchId} now: it starts the children one at a time in dependency order and settles this task when they are all terminal. This call returns at admission and does not wait for the batch.`,
-				"You are in phase waiting_children: read and query with `task_read`/`task_status` (and diagnose or inspect), or end the batch with `task_cancel`. Writes, shell commands, another decomposition and a submission of your own are refused while the children run — do not start work that would collide with theirs in the shared checkout.",
-				"You are notified when the batch settles; the runtime then submits this task for verification on your behalf, so an idle session is not a completion and needs no submission from you."
+				`task_decompose rejected: decomposition of "${task.taskId}" is ${continued.status} (proposal ${continued.proposalId}): ${continued.detail}${continued.reason === void 0 ? "" : ` — ${continued.reason}`}`,
+				"A rejected, cancelled, stale or expired batch never runs: revise it (a revision is new content, a new request key and a",
+				"new proposal) or do the work in this task instead. Nothing was admitted and nothing was spawned."
 			].join("\n");
 		}
 	});
 }
+/**
+* The batch is admitted, not finished (A3 §3.1): the call returns as soon as the
+* atomic commit landed, and the runtime drives the children from there. What the
+* caller may do next is not a matter of taste — the phase it is in decides it —
+* so the tool states the contract it is now under rather than leaving the model
+* to infer it from a status line.
+*/
+function admittedText(taskId, batchId, childTaskIds) {
+	return [
+		`decomposed ${taskId} into ${childTaskIds.length} children (batch ${batchId}):`,
+		...childTaskIds.map((childTaskId, index) => `- child ${index + 1}: ${childTaskId}`),
+		"",
+		`The runtime owns batch ${batchId} now: it starts the children one at a time in dependency order and settles this task when they are all terminal. This call returns at admission and does not wait for the batch.`,
+		"You are in phase waiting_children: read and query with `task_read`/`task_status` (and diagnose or inspect), or end the batch with `task_cancel`. Writes, shell commands, another decomposition and a submission of your own are refused while the children run — do not start work that would collide with theirs in the shared checkout.",
+		"You are notified when the batch settles; the runtime then submits this task for verification on your behalf, so an idle session is not a completion and needs no submission from you."
+	].join("\n");
+}
+/**
+* A batch waiting for a human review (T2/T3 §5–§6): the proposal holds the
+* whole batch, nothing was admitted, and the caller's next move is not another
+* submission — the same request answers with this same proposal. The policy is
+* read back from the proposal rather than assumed, because a proposal born under
+* `off` and sent to review by a tightened deployment keeps its birth policy on
+* the record; when the record cannot be read the text says so instead of
+* inventing one.
+*/
+async function pendingText(ctx, storeId, taskId, proposalId, detail) {
+	let policy = "unknown — the proposal record could not be read back";
+	try {
+		policy = `${(await ctx.taskRuntime.proposalIn(storeId, proposalId)).policy}`;
+	} catch {}
+	return [
+		`task_decompose is waiting for a review: proposal ${proposalId} (policy ${policy}) holds this batch, and ${taskId} has not been decomposed.`,
+		`- ${detail}`,
+		"- No child task exists, no worker was spawned, and this task is not decomposed: the batch is admitted only after the review",
+		"  decides and the runtime re-checks it against the limits, the capability resolution and the judging verifiers that were reviewed.",
+		`- Read the batch as it was recorded with \`task_proposal_read\` (${proposalId}).`,
+		"- An approval needs nothing further from you: the decision is recorded on the proposal and the runtime continues the batch",
+		"  immediately, so you are notified when it settles.",
+		"- A refusal is a fact on the record: revise the batch against its reason (fix the cause, never weaken a criterion or drop a",
+		"  mandatory one) and call `task_decompose` again — a revision is new content, hence a new proposal, and you may name the",
+		"  refused one with `supersedes`.",
+		"- Do not re-submit the same content while it waits: the same request key is answered with this same proposal."
+	].join("\n");
+}
 
 //#endregion
 //#region src/tools/task-diagnose.ts
-const text$6 = (value) => [{
+const text$9 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3559,7 +3961,7 @@ function toProposals(value) {
 		};
 	});
 }
-function sessionId$6(exec) {
+function sessionId$9(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_diagnose: missing agent id");
 	return id;
@@ -3648,10 +4050,10 @@ function defineTaskDiagnoseTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$6(v)
+			render: (_a, v) => text$9(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$6(exec);
+			const caller = sessionId$9(exec);
 			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(caller)).rootSessionId);
 			const diagnosis = {
 				diagnosisId: args.diagnosisId,
@@ -3676,6 +4078,227 @@ function defineTaskDiagnoseTool(ctx) {
 				`cause: ${diagnosis.localizedCause}`,
 				...proposals.length === 0 ? ["proposals: none"] : [`proposals (${proposals.length}, suggestions only — none auto-executes):`, ...proposals]
 			].join("\n");
+		}
+	});
+}
+
+//#endregion
+//#region src/tools/proposal-parameters.ts
+/**
+* The proposal tools' argument closure (T2/T3 stage C).
+*
+* A DSH tool's parameter map is an implicitly **open** object root
+* (`tools/schema.ts`: "The map itself is an implicit open object root"), so the
+* schema cannot refuse a key a tool does not declare — which is deliberate for
+* `task_decompose`, whose whole batch is handed to the runtime to refuse field
+* by field. The three proposal tools have the opposite need: their entire
+* contract is "a proposal id and nothing else", and in particular there is no
+* argument anywhere that could mean "approved". A caller that tries one — a
+* model inventing `approved: true`, or any other approval credential — must be
+* told *by name* that this tool has no such parameter, instead of having the
+* value silently ignored while the call runs as if it had been accepted.
+*
+* The check is the tool's own and runs before any service call, so a refused
+* call has no side effect at all (§6: 服务入口执行所有检查；工具层只是显示与发起请求).
+* @module dsh-singularity-agent/tools/proposal-parameters
+*/
+/**
+* Refuse a call that carries a key the tool does not declare.
+* @param args - the parsed arguments, as the model sent them.
+* @param declared - every parameter the tool declares.
+* @param toolName - the tool's own name, for the refusal text.
+* @returns the refusal text, or `undefined` when the call carries nothing undeclared.
+*/
+function undeclaredParameters(args, declared, toolName) {
+	const undeclared = Object.keys(args).filter((key) => !declared.includes(key));
+	if (undeclared.length === 0) return void 0;
+	return [
+		`${toolName} rejected: undeclared parameter${undeclared.length === 1 ? "" : "s"} ${undeclared.map((key) => `"${key}"`).join(", ")} —`,
+		`this tool accepts ${declared.join(", ")} and has no argument that approves, decides, or stands in for a review;`,
+		"nothing was read and nothing was changed."
+	].join(" ");
+}
+
+//#endregion
+//#region src/tools/task-proposal-cancel.ts
+const text$8 = (value) => [{
+	type: "text",
+	text: value
+}];
+function sessionId$8(exec) {
+	const id = exec.agent?.id;
+	if (typeof id !== "string" || id.length === 0) throw new Error("task_proposal_cancel: missing agent id");
+	return id;
+}
+function defineTaskProposalCancelTool(ctx) {
+	return defineTool({
+		name: "task_proposal_cancel",
+		description: "Withdraw a decomposition proposal this session submitted, before its batch is admitted: the proposal is recorded as cancelled and its record is kept. Only the session that proposed the batch may withdraw it — a withdrawal by anybody else is a decision, and is recorded as one by the review channel, not by this call. Cancelling admits nothing and spawns nothing; a batch that is already admitted is not affected (end it with task_cancel instead).",
+		parameters: { proposalId: {
+			type: "string",
+			required: true,
+			description: "The proposal id a previous task_decompose (or task_proposal_read) reported; an unknown id is refused"
+		} },
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text$8(v)
+		},
+		execute: async (args, exec) => {
+			const undeclared = undeclaredParameters(args, ["proposalId"], "task_proposal_cancel");
+			if (undeclared !== void 0) return undeclared;
+			const caller = sessionId$8(exec);
+			const { storeId } = await ctx.taskRuntime.runForSession(caller);
+			try {
+				return [`${(await ctx.taskRuntime.cancelProposal(storeId, args.proposalId, caller)).detail}`, "The record is kept: a cancelled proposal is a fact, and a revision is a new proposal with its own request key."].join("\n");
+			} catch (error) {
+				return `task_proposal_cancel rejected: ${error instanceof Error ? error.message : String(error)}`;
+			}
+		}
+	});
+}
+
+//#endregion
+//#region src/tools/task-proposal-continue.ts
+const text$7 = (value) => [{
+	type: "text",
+	text: value
+}];
+function sessionId$7(exec) {
+	const id = exec.agent?.id;
+	if (typeof id !== "string" || id.length === 0) throw new Error("task_proposal_continue: missing agent id");
+	return id;
+}
+/**
+* What one continuation settled, in the terms the caller acts on. A waiting
+* proposal is **not** an error and this text says so: the batch stays exactly
+* where it is, no child was created and nothing was spawned, and the caller
+* keeps working (or ends its turn) rather than asking again — a repeat of the
+* same request is answered by the same proposal.
+*/
+function renderContinuation(continuation) {
+	if (continuation.status === "admitted") return [
+		`proposal ${continuation.proposalId} was admitted as batch ${continuation.batchId}:`,
+		...continuation.childTaskIds.map((taskId, index) => `- child ${index + 1}: ${taskId}`),
+		"",
+		"The runtime owns the batch now: it starts the children one at a time in dependency order and settles this task when they",
+		"are all terminal. This call returns at admission and does not wait for the batch."
+	].join("\n");
+	const reason = continuation.reason === void 0 ? "" : ` — ${continuation.reason}`;
+	return [
+		`proposal ${continuation.proposalId} is ${continuation.status}: ${continuation.detail}${reason}`,
+		"",
+		...continuation.status === "pending_review" ? [
+			"Nothing was admitted and nothing is spawned while it waits: the review is the gate. Read the batch with",
+			"`task_proposal_read` (or wait for the notification) — a decision on the record continues the batch automatically,",
+			"and re-submitting the same content answers with this same proposal rather than building another one."
+		] : ["A terminal proposal is never re-run: revise the batch and propose it again — a revision is new content, a new request", "key and a new proposal that names this one in `supersedes`."]
+	].join("\n");
+}
+function defineTaskProposalContinueTool(ctx) {
+	return defineTool({
+		name: "task_proposal_continue",
+		description: "Continue a decomposition proposal this session submitted: re-check it against everything that was true when it was proposed (the parent's state, the limits, the capability resolution, the judging verifiers) and admit the batch if it still passes and carries an approval. A proposal still waiting for its review is reported as waiting — that is not an error and nothing changes; a rejected, cancelled, stale or expired one is reported with the reason it will never run. Only the session that proposed the batch can continue it, and this call cannot approve anything: the approval is a decision the review channel records.",
+		parameters: { proposalId: {
+			type: "string",
+			required: true,
+			description: "The proposal id a previous task_decompose (or task_proposal_read) reported; an unknown id is refused"
+		} },
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text$7(v)
+		},
+		execute: async (args, exec) => {
+			const undeclared = undeclaredParameters(args, ["proposalId"], "task_proposal_continue");
+			if (undeclared !== void 0) return undeclared;
+			const caller = sessionId$7(exec);
+			const { storeId } = await ctx.taskRuntime.runForSession(caller);
+			let continuation;
+			try {
+				continuation = await ctx.taskRuntime.continueProposal(storeId, args.proposalId, caller, { ...typeof exec.callId === "string" && exec.callId.length > 0 ? { exec: { callId: String(exec.callId) } } : {} });
+			} catch (error) {
+				return `task_proposal_continue rejected: ${error instanceof Error ? error.message : String(error)}`;
+			}
+			return renderContinuation(continuation);
+		}
+	});
+}
+
+//#endregion
+//#region src/tools/task-proposal-read.ts
+const text$6 = (value) => [{
+	type: "text",
+	text: value
+}];
+function sessionId$6(exec) {
+	const id = exec.agent?.id;
+	if (typeof id !== "string" || id.length === 0) throw new Error("task_proposal_read: missing agent id");
+	return id;
+}
+/** The decision on record, as a reader has to see it: what was decided, by whom, when, and why when a reason was given. */
+function decisionLines(proposal) {
+	const decision = proposal.decision;
+	if (decision === void 0) return [proposal.status === "pending_review" ? "decision: none yet — the batch waits for one, and only a recorded decision moves it" : "decision: none recorded"];
+	return [
+		`decision: ${decision.outcome} by ${decision.decidedBy} at ${decision.decidedAt}`,
+		...decision.reason === void 0 ? [] : [`decision reason: ${decision.reason}`],
+		`decision bound digest ${decision.proposalDigest} and admission context ${decision.admissionContextDigest}`
+	];
+}
+/** What the batch became, once it became one — the ids a retry must not mint again (§6). */
+function consumptionLines(proposal) {
+	const consumption = proposal.consumption;
+	if (consumption === void 0) return [];
+	return [`consumed as batch ${consumption.batchId} at ${consumption.admittedAt}:`, ...consumption.childTaskIds.map((taskId, index) => `- child ${index + 1}: ${taskId}`)];
+}
+/**
+* One saved proposal, as the record holds it — the whole batch, not a summary,
+* and nothing that is not on the record. There is no argument for a status: the
+* answer is the store's.
+*/
+function renderProposal(proposal) {
+	return [
+		`proposal ${proposal.proposalId} [${proposal.status}] policy ${proposal.policy}`,
+		`submitted ${proposal.createdAt}${proposal.updatedAt === void 0 ? "" : `, last moved ${proposal.updatedAt}`}`,
+		`parent task ${proposal.identity.parentTaskId} run ${proposal.identity.parentRunId} (session ${proposal.identity.callerSessionId})`,
+		`reason: ${proposal.identity.reason}`,
+		`request key: ${proposal.requestKey}${proposal.supersedes === void 0 ? "" : `; supersedes ${proposal.supersedes}`}`,
+		"",
+		`batch digest (sha256): ${proposal.proposalDigest}`,
+		`admission context digest: ${proposal.admissionContextDigest} (maxDepth ${proposal.admissionContext.maxDepth}, maxChildren ${proposal.admissionContext.maxChildren}${proposal.admissionContext.wallTimeMs === void 0 ? "" : `, wallTimeMs ${proposal.admissionContext.wallTimeMs}`})`,
+		`review context digest: ${proposal.reviewContextDigest} (capability manifest digest ${proposal.reviewContext.capabilityManifestDigest}; judging verifiers ${proposal.reviewContext.verifiers.map((verifier) => verifier.verifierId).join(", ") || "none pinned"})`,
+		"",
+		...decisionLines(proposal),
+		...consumptionLines(proposal),
+		"",
+		`children (${proposal.batch.length}):`,
+		...renderProposalChildren(proposal),
+		"The record is immutable: a revision is a new proposal with a new id and a new request key, and only a decision on this",
+		"record (written by the approval channel, never by a caller) can move it."
+	].join("\n");
+}
+function defineTaskProposalReadTool(ctx) {
+	return defineTool({
+		name: "task_proposal_read",
+		description: "Read one decomposition proposal by id: where it stands, the policy it was born under, the complete batch it carries — every child's objective, criteria, assumptions, constraints, dependencies and capability requirements — the digest, both context fingerprints, the decision on record and the batch it became, if it became one. Read-only, and the answer is always the stored record: there is no argument here that can claim a status or an approval.",
+		parameters: { proposalId: {
+			type: "string",
+			required: true,
+			description: "The proposal id a previous task_decompose answered with (or that task_proposal_continue reported); an unknown id is refused"
+		} },
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text$6(v)
+		},
+		execute: async (args, exec) => {
+			const undeclared = undeclaredParameters(args, ["proposalId"], "task_proposal_read");
+			if (undeclared !== void 0) return undeclared;
+			const caller = sessionId$6(exec);
+			const { storeId } = await ctx.taskRuntime.runForSession(caller);
+			try {
+				return renderProposal(await ctx.taskRuntime.proposalIn(storeId, args.proposalId));
+			} catch (error) {
+				return `task_proposal_read rejected: ${error instanceof Error ? error.message : String(error)}`;
+			}
 		}
 	});
 }
@@ -3930,15 +4553,15 @@ function reviewAgentBudget() {
 * reads as zero; a corrupt line throws rather than silently undercounting.
 */
 async function countReviewAgentRuns(rootStoreId) {
-	let text$23;
+	let text$26;
 	try {
-		text$23 = await readFile(reviewAgentLedgerFile(), "utf8");
+		text$26 = await readFile(reviewAgentLedgerFile(), "utf8");
 	} catch (error) {
 		if (error.code === "ENOENT") return 0;
 		throw error;
 	}
 	let count = 0;
-	text$23.split("\n").forEach((line, index) => {
+	text$26.split("\n").forEach((line, index) => {
 		if (line.trim().length === 0) return;
 		let record;
 		try {
@@ -4617,6 +5240,7 @@ var SingularityAgent = class extends Service {
 		ctx.plugin(HitlService);
 		new EvolutionService(ctx);
 		new EscalationService(ctx);
+		new ProposalReviewService(ctx);
 		ctx.tools.register(defineMarkReadyTool(ctx));
 		ctx.tools.register(defineSpawnTool(ctx));
 		ctx.tools.register(defineAskTool(ctx));
@@ -4624,6 +5248,9 @@ var SingularityAgent = class extends Service {
 		ctx.tools.register(defineTaskReadTool(ctx));
 		ctx.tools.register(defineCapabilityListTool(ctx));
 		ctx.tools.register(defineTaskDecomposeTool(ctx));
+		ctx.tools.register(defineTaskProposalReadTool(ctx));
+		ctx.tools.register(defineTaskProposalContinueTool(ctx));
+		ctx.tools.register(defineTaskProposalCancelTool(ctx));
 		ctx.tools.register(defineTaskStatusTool(ctx));
 		ctx.tools.register(defineTaskSubmitResultTool(ctx));
 		ctx.tools.register(defineTaskCancelTool(ctx));
@@ -4646,4 +5273,4 @@ var SingularityAgent = class extends Service {
 var src_default = SingularityAgent;
 
 //#endregion
-export { APPLYABLE_TARGET_TYPES, CHAMPION_SOURCES, CHAMPION_STATES, ESCALATION_TRIGGERS, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EscalationService, EvolutionService, HitlService, MECHANICAL_TARGET_TYPES, REPLAY_RELATIONS, REPLAY_VERDICTS, SingularityAgent, applyTargets, compareReplaySides, src_default as default, mutationMechanical, overallReplayVerdict };
+export { APPLYABLE_TARGET_TYPES, CHAMPION_SOURCES, CHAMPION_STATES, ESCALATION_TRIGGERS, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EscalationService, EvolutionService, HitlService, MECHANICAL_TARGET_TYPES, ProposalReviewService, REPLAY_RELATIONS, REPLAY_VERDICTS, SingularityAgent, applyTargets, compareReplaySides, src_default as default, mutationMechanical, overallReplayVerdict, ownerSessionOfStore, renderProposalReview, reviewDecider };

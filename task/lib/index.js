@@ -60,6 +60,119 @@ function decompositionDigest(identity) {
 }
 
 //#endregion
+//#region src/proposal.ts
+/** Every proposal status, for validation and rendering. */
+const TASK_PROPOSAL_STATUSES = [
+	"ready",
+	"pending_review",
+	"approved",
+	"rejected",
+	"cancelled",
+	"stale",
+	"admitted",
+	"expired"
+];
+/** Every proposal phase change, for validation and rendering. */
+const TASK_PROPOSAL_PHASES = [
+	"ready",
+	"pending_review",
+	"stale"
+];
+/** Every decision outcome, for validation and rendering. */
+const TASK_PROPOSAL_DECISION_OUTCOMES = [
+	"approved",
+	"rejected",
+	"cancelled",
+	"expired"
+];
+/** The `p-` prefix every proposal id carries, so an id is recognizable as one wherever it is printed. */
+const TASK_PROPOSAL_ID_PREFIX = "p-";
+/**
+* The proposal id one batch identity gets: `p-` plus {@link decompositionDigest}
+* of the identity. One implementation, used by every writer and by the
+* idempotency lookup, so "the proposal I sent before the restart" and "the
+* proposal in the store" cannot be two different addresses for one batch.
+*
+* The id is not part of the digest it is derived from, and neither is the
+* admission context: both contexts are recorded *beside* the id, so the same
+* batch re-submitted after a configuration change addresses the same proposal
+* and is refused as a duplicate (a genuinely new submission is new content, or
+* a new revision with its own key).
+*/
+function taskProposalId(identity) {
+	return `${TASK_PROPOSAL_ID_PREFIX}${decompositionDigest(identity)}`;
+}
+/**
+* The identity of the limits a batch was admitted under: SHA-256 over
+* {@link canonicalize} of the {@link AdmissionContext}. Key order and an
+* explicit `undefined` limit are not differences (the canonical form drops
+* them), so the same configuration always fingerprints the same way, and any
+* enforced or audited value that moves moves the fingerprint.
+*
+* The re-check between approval and admission compares this fingerprint
+* (§6: "有效预算…变化，首版保守标 stale"), which is why it covers the
+* audit-only values too: they are part of what a reviewer was shown.
+*/
+function admissionContextDigest(context) {
+	return sha256Hex(canonicalize(context));
+}
+/**
+* The identity of what a batch resolved against: SHA-256 over
+* {@link canonicalize} of every manifest the batch resolved, **in batch
+* order** — the order the children were proposed in, so two resolutions of the
+* same batch that assigned the manifests to different children are two
+* identities rather than one.
+*
+* One implementation so the writer and any later re-computation agree; the
+* digest covers exactly the manifests it is given (nothing about unrelated
+* registry rows), which is what keeps §6's "an unrelated registry edit must not
+* invalidate a reviewed proposal" true.
+*/
+function capabilityManifestDigest(manifests) {
+	return sha256Hex(canonicalize(manifests));
+}
+/**
+* The identity of the resolution a proposal was reviewed against: SHA-256 over
+* {@link canonicalize} of the {@link TaskProposalReviewContext} with its
+* verifier list normalized to ascending `(verifierId, version,
+* configurationDigest)`.
+*
+* The normalization is the point: the same set of judging instances resolved in
+* two orders is one identity, because the order a registry happened to hand
+* them over in says nothing about what was reviewed — and a fingerprint that
+* flapped with it would mark proposals stale for no reason. Sorting is a plain
+* codepoint comparison, never a locale-sensitive one, so a fingerprint does not
+* depend on the platform's collation.
+*
+* Like every other digest here it hashes what it is given: shape validation is
+* the entry's job (the reducer refuses a malformed record before comparing
+* fingerprints), and the covered field set is closed by
+* {@link TaskProposalReviewContext}.
+*/
+function reviewContextDigest(context) {
+	return sha256Hex(canonicalize(normalizeReviewContext(context)));
+}
+/** The review context with an order-independent verifier list, for hashing only — the stored list keeps the writer's order. */
+function normalizeReviewContext(context) {
+	return {
+		capabilityManifestDigest: context.capabilityManifestDigest,
+		verifiers: [...context.verifiers].sort((left, right) => compareVerifiers(left, right))
+	};
+}
+function compareVerifiers(left, right) {
+	const a = verifierKey(left);
+	const b = verifierKey(right);
+	return a < b ? -1 : a > b ? 1 : 0;
+}
+function verifierKey(verifier) {
+	return [
+		verifier.verifierId,
+		verifier.version ?? "",
+		verifier.configurationDigest ?? ""
+	].join("\0");
+}
+
+//#endregion
 //#region src/types.ts
 /** DFS over an edge list: true when `target` is reachable from `start`. */
 function reaches(edges, start, target) {
@@ -137,8 +250,77 @@ const PROPOSAL_TARGET_TYPES = [
 	"verifier",
 	"runtime_policy"
 ];
+/**
+* The statuses each decision may be taken from — the one thing a decision's
+* legality is checked against. `approved` and `rejected` require a proposal
+* that actually waited for review (a policy-off batch has no review to decide),
+* while `cancelled` and `expired` may also land on a `ready` or `approved`
+* proposal: withdrawing a batch and invalidating a late approval are things
+* that happen to a batch nobody is reviewing.
+*/
+const DECISION_SOURCES = {
+	approved: ["pending_review"],
+	rejected: ["pending_review"],
+	cancelled: [
+		"ready",
+		"pending_review",
+		"approved"
+	],
+	expired: [
+		"ready",
+		"pending_review",
+		"approved"
+	]
+};
+/**
+* The statuses each runtime phase change may come from. `pending_review` is
+* reachable only from `ready` (the deployment tightened to `all` before the
+* batch was admitted) and never from `pending_review` itself — re-asking for a
+* review a proposal is already waiting for would fake progress. `ready` is
+* reachable only from `approved`: that edge *is* the post-approval re-check
+* passing, so it cannot be written for a proposal nobody approved. `stale`
+* invalidates a re-check, so it applies to what a re-check can reach: a
+* re-checked approval or an un-admitted `ready` proposal (§6 runs the re-check
+* after approval and before admission; a proposal still awaiting review is not
+* re-checked — it expires or is decided instead).
+*/
+const PHASE_SOURCES = {
+	ready: ["approved"],
+	pending_review: ["ready"],
+	stale: ["ready", "approved"]
+};
+/** The only status a consumption may come from: the re-check has to have passed and be on the record. */
+const ADMISSION_SOURCES = ["ready"];
+/** The closed field set of a review context ({@link TaskProposalReviewContext}); an unread field must not move an identity. */
+const REVIEW_CONTEXT_FIELDS = ["capabilityManifestDigest", "verifiers"];
+/** The closed field set of one batch child ({@link TaskProposalChild}); an unread field must not enter an identity. */
+const PROPOSAL_CHILD_FIELDS = [
+	"contract",
+	"dependsOn",
+	"decomposable",
+	"requiresIndependentAcceptance"
+];
+/** The closed field set of one verifier identity ({@link TaskProposalVerifierIdentity}). */
+const VERIFIER_IDENTITY_FIELDS = [
+	"verifierId",
+	"version",
+	"configurationDigest"
+];
+/** One store's proposal index with nothing in it; what a store without proposals answers. */
+function emptyProposalIndex() {
+	return {
+		all: [],
+		byId: {},
+		byRequestKey: {},
+		byParentTask: {}
+	};
+}
 function nonEmpty(value) {
 	return typeof value === "string" && value.length > 0;
+}
+/** A lowercase SHA-256 hex digest: the only shape a content or context identity is accepted in. */
+function isDigest(value) {
+	return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 /** Plain-object test: `null` and arrays are not records, whatever `typeof` says. */
 function isRecord(value) {
@@ -158,7 +340,8 @@ var TaskState = class TaskState {
 			reviews: [],
 			diagnoses: [],
 			obligations: [],
-			capabilities: {}
+			capabilities: {},
+			proposals: emptyProposalIndex()
 		} : copy(snapshot);
 	}
 	clone() {
@@ -232,6 +415,18 @@ var TaskState = class TaskState {
 			case "ObligationRecorded":
 				this.recordObligation(event$1.payload.obligation);
 				return;
+			case "TaskProposalSubmitted":
+				this.submitProposal(event$1.taskId, event$1.payload.proposal);
+				return;
+			case "TaskProposalDecided":
+				this.decideProposal(event$1.taskId, event$1.payload, event$1.timestamp);
+				return;
+			case "TaskProposalPhaseChanged":
+				this.changeProposalPhase(event$1.taskId, event$1.payload, event$1.timestamp);
+				return;
+			case "TaskProposalAdmitted":
+				this.admitProposal(event$1.taskId, event$1.payload, event$1.timestamp);
+				return;
 			default: throw new Error(`task: unknown event kind "${event$1.kind}"`);
 		}
 	}
@@ -271,17 +466,30 @@ var TaskState = class TaskState {
 	* `canonicalize`, so key order in the stored payload is not a difference.
 	*/
 	assertContract(taskId, contract, task) {
-		if (contract.contractVersion !== TASK_CONTRACT_VERSION) throw new Error(`task: task "${taskId}" declares contract version ${String(contract.contractVersion)}; this build stores version ${TASK_CONTRACT_VERSION}`);
+		this.assertContractFields(`task "${taskId}"`, contract);
+		if (task.objective !== contract.objective) throw new Error(`task: task "${taskId}" objective disagrees with its contract objective`);
+		if (canonicalize(task.acceptanceCriteria) !== canonicalize(contract.acceptanceCriteria)) throw new Error(`task: task "${taskId}" acceptance criteria disagree with its contract`);
+		if (canonicalize(task.requestedCapabilities) !== canonicalize(contract.requiredCapabilities)) throw new Error(`task: task "${taskId}" requested capabilities disagree with its contract`);
+	}
+	/**
+	* The contract fields one normalized contract must carry, checked the same
+	* way wherever a contract is stored — on a task (T1) and on each child of a
+	* proposal's batch (T2). `where` names the record being checked, so a refusal
+	* says which contract it came from instead of "some contract is malformed".
+	*
+	* Shape only: whether the contract is the *right* one is a question the
+	* callers answer (a task's projections must agree with it; a proposal's batch
+	* must digest to its identity's child digest).
+	*/
+	assertContractFields(where, contract) {
+		if (contract.contractVersion !== TASK_CONTRACT_VERSION) throw new Error(`task: ${where} declares contract version ${String(contract.contractVersion)}; this build stores version ${TASK_CONTRACT_VERSION}`);
 		const lists = [
 			["assumptions", contract.assumptions],
 			["constraints", contract.constraints],
 			["requiredCapabilities", contract.requiredCapabilities]
 		];
-		for (const [name, value] of lists) if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error(`task: task "${taskId}" contract ${name} must be an array of strings`);
-		if (typeof contract.objective !== "string") throw new Error(`task: task "${taskId}" contract objective must be a string`);
-		if (task.objective !== contract.objective) throw new Error(`task: task "${taskId}" objective disagrees with its contract objective`);
-		if (canonicalize(task.acceptanceCriteria) !== canonicalize(contract.acceptanceCriteria)) throw new Error(`task: task "${taskId}" acceptance criteria disagree with its contract`);
-		if (canonicalize(task.requestedCapabilities) !== canonicalize(contract.requiredCapabilities)) throw new Error(`task: task "${taskId}" requested capabilities disagree with its contract`);
+		for (const [name, value] of lists) if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error(`task: ${where} contract ${name} must be an array of strings`);
+		if (typeof contract.objective !== "string") throw new Error(`task: ${where} contract objective must be a string`);
 	}
 	/**
 	* The batch record a decomposition carries is the identity a later review
@@ -293,16 +501,26 @@ var TaskState = class TaskState {
 		if (typeof admission.proposalDigest !== "string" || admission.proposalDigest.length === 0) throw new Error(`task: task "${taskId}" decomposition admission requires a proposal digest`);
 		const context = admission.context;
 		if (!isRecord(context)) throw new Error(`task: task "${taskId}" decomposition admission requires an admission context`);
-		for (const [name, value] of [["maxDepth", context.maxDepth], ["maxChildren", context.maxChildren]]) if (!Number.isInteger(value) || value < 0) throw new Error(`task: task "${taskId}" admission context ${name} must be a non-negative integer`);
+		this.assertAdmissionLimits(`task "${taskId}" admission context`, context);
+	}
+	/**
+	* The limits one admission context carries, checked the same way wherever one
+	* is stored — on a decomposition (T1) and on a proposal (T2: the limits the
+	* batch was submitted under, whose fingerprint an approval binds). `where`
+	* names the record being checked, so a refusal says which producer it came
+	* from instead of "some context is malformed".
+	*/
+	assertAdmissionLimits(where, context) {
+		for (const [name, value] of [["maxDepth", context.maxDepth], ["maxChildren", context.maxChildren]]) if (!Number.isInteger(value) || value < 0) throw new Error(`task: ${where} ${name} must be a non-negative integer`);
 		const auditOnly = context.auditOnly;
-		if (!isRecord(auditOnly)) throw new Error(`task: task "${taskId}" admission context auditOnly must be an object`);
+		if (!isRecord(auditOnly)) throw new Error(`task: ${where} auditOnly must be an object`);
 		const limits = [
 			["wallTimeMs", context.wallTimeMs],
 			["auditOnly.maxToolCalls", auditOnly.maxToolCalls],
 			["auditOnly.tokens", auditOnly.tokens],
 			["auditOnly.attempts", auditOnly.attempts]
 		];
-		for (const [name, value] of limits) if (value !== void 0 && (typeof value !== "number" || !Number.isFinite(value))) throw new Error(`task: task "${taskId}" admission context ${name} must be a finite number when present`);
+		for (const [name, value] of limits) if (value !== void 0 && (typeof value !== "number" || !Number.isFinite(value))) throw new Error(`task: ${where} ${name} must be a finite number when present`);
 	}
 	admit(taskId, decompositionStatus) {
 		this.assertTransition(taskId, ["created"], "admitted");
@@ -696,6 +914,361 @@ var TaskState = class TaskState {
 			...this.value,
 			obligations: [...this.value.obligations, copy(obligation)]
 		};
+	}
+	/**
+	* A proposal enters the store (T2/T3, §6). The reducer is the shape gate and
+	* the integrity gate, in that order: the record must be a well-formed
+	* proposal — the closed field set of its review context, a birth status
+	* matching the policy it was submitted under, an identity whose digests are
+	* really the digests of what it carries — and it must not collide with what
+	* the store already holds. One key names one proposal and one content
+	* identity names one id, so a repeated request can never build a second
+	* batch: the caller answers it from the index instead.
+	*
+	* The digest checks are the point of the submission being an event at all: a
+	* proposal whose `proposalDigest`, `admissionContextDigest` or
+	* `reviewContextDigest` disagrees with the content it carries would make the
+	* approval binding meaningless, because a later decision compares exactly
+	* these numbers.
+	*/
+	submitProposal(taskId, proposal) {
+		this.assertProposal(proposal);
+		this.assertProposalTask(proposal, taskId);
+		const index = this.index();
+		if (index.byId[proposal.proposalId] !== void 0) throw new Error(`task: proposal "${proposal.proposalId}" already exists`);
+		const bound = index.byRequestKey[proposal.requestKey];
+		if (bound !== void 0) throw new Error(`task: proposal request key "${proposal.requestKey}" is already bound to proposal "${bound.proposalId}"`);
+		const stored = copy(proposal);
+		const parentTaskId = stored.identity.parentTaskId;
+		this.value = {
+			...this.value,
+			proposals: {
+				all: [...index.all, stored],
+				byId: {
+					...index.byId,
+					[stored.proposalId]: stored
+				},
+				byRequestKey: {
+					...index.byRequestKey,
+					[stored.requestKey]: stored
+				},
+				byParentTask: {
+					...index.byParentTask,
+					[parentTaskId]: [...index.byParentTask[parentTaskId] ?? [], stored]
+				}
+			}
+		};
+	}
+	/**
+	* One review decision (T2/T3, §6): the outcome, bound to the dossier digest
+	* and both context fingerprints, checked against the stored proposal before
+	* anything is applied. A digest that disagrees is refused by name — an
+	* approval that does not name exactly this batch, under exactly these limits
+	* and exactly this resolution, is not an approval of it — and an outcome that
+	* is not legal from the current status is refused as a transition, so a
+	* second decision never overwrites the first and a policy-off proposal can
+	* never be recorded as reviewed.
+	*/
+	decideProposal(taskId, claim, timestamp) {
+		if (!isRecord(claim)) throw new Error("task: proposal decision must be an object");
+		const proposal = this.proposal(claim.proposalId);
+		this.assertProposalTask(proposal, taskId);
+		if (!TASK_PROPOSAL_DECISION_OUTCOMES.includes(claim.outcome)) throw new Error(`task: proposal "${proposal.proposalId}" decision outcome must be one of ${TASK_PROPOSAL_DECISION_OUTCOMES.join(", ")}`);
+		this.assertDecisionBinding(proposal, claim);
+		if (!nonEmpty(claim.decidedBy)) throw new Error(`task: proposal "${proposal.proposalId}" decision requires a decider`);
+		if (!nonEmpty(claim.decidedAt)) throw new Error(`task: proposal "${proposal.proposalId}" decision requires a decision time`);
+		if (claim.reason !== void 0 && !nonEmpty(claim.reason)) throw new Error(`task: proposal "${proposal.proposalId}" decision reason must be a non-empty string when present`);
+		if (claim.outcome === "expired" && !nonEmpty(claim.reason)) throw new Error(`task: proposal "${proposal.proposalId}" expiry requires a reason`);
+		this.assertProposalTransition(proposal, claim.outcome, DECISION_SOURCES[claim.outcome]);
+		this.setProposal(proposal.proposalId, {
+			status: claim.outcome,
+			updatedAt: timestamp,
+			decision: {
+				outcome: claim.outcome,
+				proposalDigest: claim.proposalDigest,
+				admissionContextDigest: claim.admissionContextDigest,
+				...claim.reviewContextDigest === void 0 ? {} : { reviewContextDigest: claim.reviewContextDigest },
+				decidedBy: claim.decidedBy,
+				decidedAt: claim.decidedAt,
+				...claim.reason === void 0 ? {} : { reason: claim.reason }
+			}
+		});
+	}
+	/**
+	* One runtime phase change (T2/T3, §6): the two edges that are not a person's
+	* decision or a consumption — `ready → pending_review` when the deployment
+	* tightened to `all` before admission, `approved → ready` when the
+	* post-approval re-check passed, and `→ stale` when it failed. The source
+	* statuses are the gate (see {@link PHASE_SOURCES}), and a `stale` marking
+	* must name what changed: an invalidation a reader cannot explain is a
+	* record that cannot be trusted.
+	*/
+	changeProposalPhase(taskId, change, timestamp) {
+		if (!isRecord(change)) throw new Error("task: proposal phase change must be an object");
+		const proposal = this.proposal(change.proposalId);
+		this.assertProposalTask(proposal, taskId);
+		if (!TASK_PROPOSAL_PHASES.includes(change.to)) throw new Error(`task: proposal "${proposal.proposalId}" phase must be one of ${TASK_PROPOSAL_PHASES.join(", ")}`);
+		if (change.to === "stale" && !nonEmpty(change.reason)) throw new Error(`task: proposal "${proposal.proposalId}" is marked stale without a reason`);
+		if (change.reason !== void 0 && !nonEmpty(change.reason)) throw new Error(`task: proposal "${proposal.proposalId}" phase change reason must be a non-empty string when present`);
+		this.assertProposalTransition(proposal, change.to, PHASE_SOURCES[change.to]);
+		this.setProposal(proposal.proposalId, {
+			status: change.to,
+			updatedAt: timestamp
+		});
+	}
+	/**
+	* A proposal is consumed (T2/T3, §6): the batch exists, and this record says
+	* which tasks it became. The status gate is the re-check having passed on the
+	* record (`ready` only — an approval alone never admits, so `approved →
+	* admitted` is refused), and the binding is checked in full: the dossier
+	* digest, the review-context fingerprint the admission confirmed, the batch
+	* id that belongs to this parent, and every child this consumption names
+	* being a task the store actually holds as a child of that parent. A second
+	* consumption is a transition refusal, so one proposal can never produce two
+	* batches.
+	*/
+	admitProposal(taskId, consumption, timestamp) {
+		if (!isRecord(consumption)) throw new Error("task: proposal consumption must be an object");
+		const proposal = this.proposal(consumption.proposalId);
+		this.assertProposalTask(proposal, taskId);
+		this.assertConsumptionBinding(proposal, consumption);
+		this.assertProposalTransition(proposal, "admitted", ADMISSION_SOURCES);
+		this.setProposal(proposal.proposalId, {
+			status: "admitted",
+			updatedAt: timestamp,
+			consumption: {
+				proposalId: consumption.proposalId,
+				proposalDigest: consumption.proposalDigest,
+				reviewContextDigest: consumption.reviewContextDigest,
+				batchId: consumption.batchId,
+				childTaskIds: [...consumption.childTaskIds],
+				admittedAt: consumption.admittedAt,
+				...consumption.reason === void 0 ? {} : { reason: consumption.reason }
+			}
+		});
+	}
+	/** The stored proposal one event names, or a refusal naming the id. */
+	proposal(proposalId) {
+		const proposal = this.index().byId[proposalId];
+		if (proposal === void 0) throw new Error(`task: unknown proposal "${String(proposalId)}"`);
+		return proposal;
+	}
+	/**
+	* The proposal index of the snapshot this state replays on. It is absent only
+	* when a foreign snapshot (a hand-built one from a reader that predates
+	* proposals) was replayed onto — never on this build's own value — and that
+	* is a refusal rather than an empty index: a reducer that cannot see the
+	* proposals would happily write a second one for the same request key.
+	*/
+	index() {
+		const index = this.value.proposals;
+		if (index === void 0) throw new Error("task: snapshot carries no proposal index");
+		return index;
+	}
+	/** Every proposal event is about one parent task's batch, so the envelope has to name that task. */
+	assertProposalTask(proposal, taskId) {
+		if (taskId !== proposal.identity.parentTaskId) throw new Error(`task: proposal "${proposal.proposalId}" belongs to task "${proposal.identity.parentTaskId}", not "${taskId}"`);
+	}
+	/** One proposal's status either admits this outcome or the event is a late or out-of-order write. */
+	assertProposalTransition(proposal, to, from) {
+		if (!from.includes(proposal.status)) throw new Error(`task: illegal proposal transition "${proposal.status}" → "${to}" for proposal "${proposal.proposalId}"`);
+	}
+	/** Replaces one proposal in place; the index's other views keep pointing at the same record. */
+	setProposal(proposalId, patch) {
+		const index = this.index();
+		const current = index.byId[proposalId];
+		if (current === void 0) throw new Error(`task: unknown proposal "${proposalId}"`);
+		const next = {
+			...current,
+			...patch
+		};
+		const replace = (proposals) => proposals.map((item) => item.proposalId === proposalId ? next : item);
+		this.value = {
+			...this.value,
+			proposals: {
+				all: replace(index.all),
+				byId: {
+					...index.byId,
+					[proposalId]: next
+				},
+				byRequestKey: {
+					...index.byRequestKey,
+					[next.requestKey]: next
+				},
+				byParentTask: Object.fromEntries(Object.entries(index.byParentTask).map(([parentTaskId, proposals]) => [parentTaskId, replace(proposals)]))
+			}
+		};
+	}
+	/**
+	* A submitted proposal has to be complete and internally consistent, because
+	* everything an approval binds is taken from it: the review context is a
+	* closed record (an unread field would silently become part of an identity),
+	* the birth status is the policy the deployment ran under (`off → ready`,
+	* `all → pending_review` — the audit of "no human review happened" depends on
+	* it), a revision must name a proposal that exists, and the three digests
+	* must be the digests of the data they claim to describe.
+	*/
+	assertProposal(proposal) {
+		if (!isRecord(proposal)) throw new Error("task: proposal must be an object");
+		if (!nonEmpty(proposal.proposalId)) throw new Error("task: proposal id must be a non-empty string");
+		const id = proposal.proposalId;
+		if (!nonEmpty(proposal.requestKey)) throw new Error(`task: proposal "${id}" request key must be a non-empty string`);
+		if (proposal.status !== "ready" && proposal.status !== "pending_review") throw new Error(`task: proposal "${id}" status "${String(proposal.status)}" is not a birth status`);
+		if (proposal.policy !== "off" && proposal.policy !== "all") throw new Error(`task: proposal "${id}" policy must be "off" or "all"`);
+		if (proposal.status === "ready" && proposal.policy === "all") throw new Error(`task: proposal "${id}" is submitted ready with policy "all"`);
+		if (proposal.status === "pending_review" && proposal.policy === "off") throw new Error(`task: proposal "${id}" is submitted pending_review with policy "off"`);
+		if (proposal.supersedes !== void 0) {
+			if (!nonEmpty(proposal.supersedes)) throw new Error(`task: proposal "${id}" supersedes must be a non-empty proposal id`);
+			if (proposal.supersedes === id) throw new Error(`task: proposal "${id}" cannot supersede itself`);
+			if (this.index().byId[proposal.supersedes] === void 0) throw new Error(`task: proposal "${id}" supersedes unknown proposal "${proposal.supersedes}"`);
+		}
+		this.assertProposalIdentity(id, proposal.identity);
+		this.assertProposalBatch(id, proposal.batch, proposal.identity);
+		if (proposal.proposalDigest !== decompositionDigest(proposal.identity)) throw new Error(`task: proposal "${id}" proposal digest "${String(proposal.proposalDigest)}" does not match its identity digest "${decompositionDigest(proposal.identity)}"`);
+		const context = proposal.admissionContext;
+		if (!isRecord(context)) throw new Error(`task: proposal "${id}" requires an admission context`);
+		this.assertAdmissionLimits(`proposal "${id}" admission context`, context);
+		const contextDigest = admissionContextDigest(proposal.admissionContext);
+		if (proposal.admissionContextDigest !== contextDigest) throw new Error(`task: proposal "${id}" admission context digest "${String(proposal.admissionContextDigest)}" does not match its context digest "${contextDigest}"`);
+		this.assertReviewContext(id, proposal.reviewContext);
+		const reviewDigest = reviewContextDigest(proposal.reviewContext);
+		if (proposal.reviewContextDigest !== reviewDigest) throw new Error(`task: proposal "${id}" review context digest "${String(proposal.reviewContextDigest)}" does not match its context digest "${reviewDigest}"`);
+		if (!nonEmpty(proposal.createdAt)) throw new Error(`task: proposal "${id}" requires a creation time`);
+		if (proposal.decision !== void 0) throw new Error(`task: proposal "${id}" is submitted with a decision`);
+		if (proposal.consumption !== void 0) throw new Error(`task: proposal "${id}" is submitted with a consumption`);
+	}
+	/**
+	* The batch identity a proposal carries, judged for shape only: the field
+	* semantics (a version this build knows, non-empty origins, one dependency
+	* index per child) are what a reader needs to interpret it, while the
+	* *rules* about a batch — depth, size, dependency cycles, capability gaps —
+	* belong to the admission entry that already enforces them (T1's
+	* `contractDefects` and the runtime's `checkDecomposition`). The parent task
+	* is the one exception, because a proposal naming a task the store does not
+	* hold could never be decided or admitted against a real parent.
+	*/
+	assertProposalIdentity(id, identity) {
+		if (!isRecord(identity)) throw new Error(`task: proposal "${id}" identity must be an object`);
+		if (identity.contractVersion !== TASK_CONTRACT_VERSION) throw new Error(`task: proposal "${id}" declares contract version ${String(identity.contractVersion)}; this build stores version ${TASK_CONTRACT_VERSION}`);
+		const names = [
+			["store id", identity.storeId],
+			["parent run id", identity.parentRunId],
+			["caller session id", identity.callerSessionId]
+		];
+		for (const [name, value] of names) if (!nonEmpty(value)) throw new Error(`task: proposal "${id}" identity ${name} must be a non-empty string`);
+		if (!nonEmpty(identity.parentTaskId)) throw new Error(`task: proposal "${id}" identity parent task id must be a non-empty string`);
+		if (typeof identity.reason !== "string") throw new Error(`task: proposal "${id}" identity reason must be a string`);
+		if (!Array.isArray(identity.children) || identity.children.length === 0) throw new Error(`task: proposal "${id}" identity requires at least one child`);
+		identity.children.forEach((child, index) => {
+			if (!isRecord(child)) throw new Error(`task: proposal "${id}" child ${index} must be an object`);
+			if (!isDigest(child.contractDigest)) throw new Error(`task: proposal "${id}" child ${index} contract digest must be a lowercase SHA-256 hex digest`);
+			if (!Array.isArray(child.dependsOn) || child.dependsOn.some((item) => !Number.isInteger(item) || item < 0)) throw new Error(`task: proposal "${id}" child ${index} dependsOn must be an array of non-negative integers`);
+			if (typeof child.decomposable !== "boolean") throw new Error(`task: proposal "${id}" child ${index} decomposable must be a boolean`);
+			if (typeof child.requiresIndependentAcceptance !== "boolean") throw new Error(`task: proposal "${id}" child ${index} requiresIndependentAcceptance must be a boolean`);
+		});
+		if (!this.value.tasks.some((item) => item.taskId === identity.parentTaskId)) throw new Error(`task: proposal "${id}" names unknown parent task "${identity.parentTaskId}"`);
+	}
+	/**
+	* The batch content a submission carries, bound to the identity it claims to
+	* be: one child per identity child, in the same order, each carrying the
+	* contract whose {@link contractDigest} is the identity's child digest and the
+	* three declarations the identity records. This is the reference constraint
+	* that keeps a proposal from being a set of digests with no content behind
+	* them — or content nobody committed to — and it is what makes "the batch a
+	* reviewer was shown", "the batch an approval binds" and "the batch the
+	* identity commits to" one thing rather than three.
+	*
+	* The content is judged for shape here (a closed field set per child, a
+	* contract this build can read, a dependency list of indices, the two flags),
+	* and for agreement with the identity in every field. Whether the *rules* of a
+	* batch hold — depth, size, cycles, capability gaps — is the admission
+	* entry's business, unchanged.
+	*/
+	assertProposalBatch(id, batch, identity) {
+		if (!Array.isArray(batch)) throw new Error(`task: proposal "${id}" batch must be an array`);
+		if (batch.length !== identity.children.length) throw new Error(`task: proposal "${id}" batch requires one child per identity child (identity children: ${identity.children.length}, batch children: ${batch.length})`);
+		batch.forEach((child, index) => {
+			const where = `proposal "${id}" child ${index}`;
+			const identityChild = identity.children[index];
+			if (!isRecord(child)) throw new Error(`task: ${where} must be an object`);
+			for (const key of Object.keys(child)) if (!PROPOSAL_CHILD_FIELDS.includes(key)) throw new Error(`task: ${where} has an unsupported field "${key}"`);
+			const contract = child.contract;
+			if (!isRecord(contract)) throw new Error(`task: ${where} requires a contract`);
+			this.assertContractFields(where, contract);
+			if (!Array.isArray(child.dependsOn) || child.dependsOn.some((item) => !Number.isInteger(item) || item < 0)) throw new Error(`task: ${where} dependsOn must be an array of non-negative integers`);
+			if (typeof child.decomposable !== "boolean") throw new Error(`task: ${where} decomposable must be a boolean`);
+			if (typeof child.requiresIndependentAcceptance !== "boolean") throw new Error(`task: ${where} requiresIndependentAcceptance must be a boolean`);
+			const digest = contractDigest(contract);
+			if (digest !== identityChild.contractDigest) throw new Error(`task: ${where} contract digest "${digest}" does not match its identity digest "${identityChild.contractDigest}"`);
+			if (!(child.dependsOn.length === identityChild.dependsOn.length && child.dependsOn.every((value, position) => value === identityChild.dependsOn[position]))) throw new Error(`task: ${where} dependsOn does not match its identity`);
+			if (child.decomposable !== identityChild.decomposable) throw new Error(`task: ${where} decomposable does not match its identity`);
+			if (child.requiresIndependentAcceptance !== identityChild.requiresIndependentAcceptance) throw new Error(`task: ${where} requiresIndependentAcceptance does not match its identity`);
+		});
+	}
+	/**
+	* A decision binds the proposal it was made against, so every identity it
+	* carries is compared with the stored record: the dossier digest, the
+	* admission context, and — for an approval, always — the review context the
+	* batch resolved against when it was shown. A mismatch is the one case the
+	* reducer must never accept: an approval that travels to other content is
+	* exactly the failure the digest binding exists to prevent.
+	*/
+	assertDecisionBinding(proposal, claim) {
+		if (claim.proposalDigest !== proposal.proposalDigest) throw new Error(`task: proposal "${proposal.proposalId}" decision digest "${String(claim.proposalDigest)}" does not match the stored proposal digest "${proposal.proposalDigest}"`);
+		if (claim.admissionContextDigest !== proposal.admissionContextDigest) throw new Error(`task: proposal "${proposal.proposalId}" decision admission context digest "${String(claim.admissionContextDigest)}" does not match the stored admission context digest "${proposal.admissionContextDigest}"`);
+		if (claim.outcome === "approved" && claim.reviewContextDigest === void 0) throw new Error(`task: proposal "${proposal.proposalId}" approval requires the review context digest it was decided against`);
+		if (claim.reviewContextDigest !== void 0 && claim.reviewContextDigest !== proposal.reviewContextDigest) throw new Error(`task: proposal "${proposal.proposalId}" decision review context digest "${claim.reviewContextDigest}" does not match the stored review context digest "${proposal.reviewContextDigest}"`);
+	}
+	/**
+	* A consumption binds a proposal to the batch it became, so it has to name
+	* the same dossier, the resolution the admission re-check confirmed, the
+	* batch id that belongs to this parent (`b-<parentTaskId>`), and children the
+	* store really holds under that parent — the record a crash recovery reads to
+	* find the batch it already admitted instead of admitting a second one.
+	*/
+	assertConsumptionBinding(proposal, consumption) {
+		const id = proposal.proposalId;
+		if (consumption.proposalDigest !== proposal.proposalDigest) throw new Error(`task: proposal "${id}" consumption digest "${String(consumption.proposalDigest)}" does not match the stored proposal digest "${proposal.proposalDigest}"`);
+		if (!nonEmpty(consumption.reviewContextDigest)) throw new Error(`task: proposal "${id}" consumption requires a review context digest`);
+		if (consumption.reviewContextDigest !== proposal.reviewContextDigest) throw new Error(`task: proposal "${id}" consumption review context digest "${consumption.reviewContextDigest}" does not match the stored review context digest "${proposal.reviewContextDigest}"`);
+		if (!nonEmpty(consumption.batchId)) throw new Error(`task: proposal "${id}" consumption requires a batch id`);
+		const batchId = `b-${proposal.identity.parentTaskId}`;
+		if (consumption.batchId !== batchId) throw new Error(`task: proposal "${id}" consumption batch "${consumption.batchId}" is not the batch of task "${proposal.identity.parentTaskId}"`);
+		if (!Array.isArray(consumption.childTaskIds) || consumption.childTaskIds.length === 0) throw new Error(`task: proposal "${id}" consumption requires at least one child task id`);
+		for (const childTaskId of consumption.childTaskIds) if (!nonEmpty(childTaskId)) throw new Error(`task: proposal "${id}" consumption child task ids must be non-empty strings`);
+		const seen = /* @__PURE__ */ new Set();
+		for (const childTaskId of consumption.childTaskIds) {
+			if (seen.has(childTaskId)) throw new Error(`task: proposal "${id}" consumption names task "${childTaskId}" twice`);
+			seen.add(childTaskId);
+		}
+		for (const childTaskId of consumption.childTaskIds) {
+			const child = this.value.tasks.find((item) => item.taskId === childTaskId);
+			if (child === void 0) throw new Error(`task: proposal "${id}" consumption names unknown task "${childTaskId}"`);
+			if (child.parentTaskId !== proposal.identity.parentTaskId) throw new Error(`task: proposal "${id}" consumption names task "${childTaskId}", which is not a child of "${proposal.identity.parentTaskId}"`);
+		}
+		if (!nonEmpty(consumption.admittedAt)) throw new Error(`task: proposal "${id}" consumption requires an admission time`);
+		if (consumption.reason !== void 0 && !nonEmpty(consumption.reason)) throw new Error(`task: proposal "${id}" consumption reason must be a non-empty string when present`);
+	}
+	/**
+	* The review context's closed shape. Its manifest fingerprint and every
+	* verifier id/version/configuration are checked for the shapes that make them
+	* comparable — a digest that is not a digest, or a verifier without an id,
+	* would leave `reviewContextDigest` comparing values nobody can interpret —
+	* and unknown fields are refused because the digest covers exactly the
+	* declared surface: a field no reader understands must not move an identity.
+	*/
+	assertReviewContext(id, context) {
+		if (!isRecord(context)) throw new Error(`task: proposal "${id}" requires a review context`);
+		for (const key of Object.keys(context)) if (!REVIEW_CONTEXT_FIELDS.includes(key)) throw new Error(`task: proposal "${id}" review context has an unsupported field "${key}"`);
+		if (!isDigest(context.capabilityManifestDigest)) throw new Error(`task: proposal "${id}" review context capability manifest digest must be a lowercase SHA-256 hex digest`);
+		if (!Array.isArray(context.verifiers)) throw new Error(`task: proposal "${id}" review context verifiers must be an array`);
+		for (const verifier of context.verifiers) {
+			if (!isRecord(verifier)) throw new Error(`task: proposal "${id}" review context verifiers must be objects`);
+			for (const key of Object.keys(verifier)) if (!VERIFIER_IDENTITY_FIELDS.includes(key)) throw new Error(`task: proposal "${id}" review context verifier has an unsupported field "${key}"`);
+			if (!nonEmpty(verifier.verifierId)) throw new Error(`task: proposal "${id}" review context verifier requires a verifier id`);
+			if (verifier.version !== void 0 && !nonEmpty(verifier.version)) throw new Error(`task: proposal "${id}" review context verifier "${verifier.verifierId}" version must be a non-empty string when present`);
+			if (verifier.configurationDigest !== void 0 && !isDigest(verifier.configurationDigest)) throw new Error(`task: proposal "${id}" review context verifier "${verifier.verifierId}" configuration digest must be a lowercase SHA-256 hex digest when present`);
+		}
 	}
 	transit(taskId, from, to) {
 		this.assertTransition(taskId, from, to);
@@ -1180,10 +1753,19 @@ var TaskService = class extends Service {
 	*
 	* `manifests` is aligned with `children` by index (the caller's own batch
 	* order): a list of another length is refused before anything is written.
+	*
+	* `proposal` consumes the proposal this batch *is* (T2/T3 §6): the
+	* `TaskProposalAdmitted` event joins the same commit, so "this proposal was
+	* consumed and these are its tasks" is one durable fact. The consumption must
+	* name exactly these children in this order — the batch and the record of it
+	* are the same batch, checked here because this is the one place that sees
+	* both — and the reducer then checks the rest of the binding (digests, batch
+	* id, the proposal's status, and that no second consumption is written).
 	*/
-	async admitBatchIn(storeId, parentTaskId, parentRunId, children, actor, edges = [], admission, manifests) {
+	async admitBatchIn(storeId, parentTaskId, parentRunId, children, actor, edges = [], admission, manifests, proposal) {
 		if (children.length === 0) throw new Error("task: admit batch requires at least one child");
 		if (manifests !== void 0 && manifests.length !== children.length) throw new Error(`task: admit batch requires one manifest per child (${children.length} children, ${manifests.length} manifests)`);
+		if (proposal !== void 0 && (proposal.childTaskIds.length !== children.length || !proposal.childTaskIds.every((childTaskId, index) => childTaskId === children[index]?.taskId))) throw new Error(`task: admit batch requires the proposal consumption to name its children in batch order (${children.length} children, ${proposal.childTaskIds.length} consumed)`);
 		const events = [];
 		for (const child of children) {
 			if (child.parentTaskId !== parentTaskId) throw new Error(`task: child "${child.taskId}" parentTaskId must be "${parentTaskId}"`);
@@ -1234,6 +1816,11 @@ var TaskService = class extends Service {
 				phase: "waiting_children",
 				batchId: `b-${parentTaskId}`
 			}
+		}));
+		if (proposal !== void 0) events.push(event("TaskProposalAdmitted", {
+			taskId: parentTaskId,
+			actor,
+			payload: proposal
 		}));
 		await this.commitIn(storeId, events);
 	}
@@ -1342,6 +1929,67 @@ var TaskService = class extends Service {
 			payload
 		})]);
 	}
+	/**
+	* Records one proposal submission (T2/T3 §6): the immutable batch record,
+	* the policy it was born under, the limits in force, the resolution it was
+	* reviewed against, and both context fingerprints. The envelope names the
+	* parent task the proposal belongs to, so every proposal event of one batch
+	* reads as one parent's business. The reducer is the gate: a malformed
+	* record, a digest that does not describe its content, a duplicate id, or a
+	* request key already bound to another proposal commits nothing.
+	*/
+	async submitProposalIn(storeId, proposal, actor) {
+		await this.commitIn(storeId, [event("TaskProposalSubmitted", {
+			taskId: proposal.identity.parentTaskId,
+			actor,
+			payload: { proposal }
+		})]);
+	}
+	/**
+	* Records one review decision (T2/T3 §6), bound to the dossier digest and
+	* both context fingerprints the reviewer was shown. An unknown proposal is
+	* refused here, before the commit; every binding is checked by the reducer,
+	* so a decision that does not name exactly the stored proposal applies
+	* nothing.
+	*/
+	async decideProposalIn(storeId, claim, actor) {
+		const taskId = await this.proposalParentIn(storeId, claim.proposalId);
+		await this.commitIn(storeId, [event("TaskProposalDecided", {
+			taskId,
+			actor,
+			payload: claim
+		})]);
+	}
+	/**
+	* Records one runtime phase change (T2/T3 §6): to `pending_review` when the
+	* deployment tightened to `all`, to `ready` when an approval passed its
+	* post-approval re-check, to `stale` when that re-check failed. The status
+	* table lives in the reducer; a change that is not legal from the proposal's
+	* current status applies nothing.
+	*/
+	async changeProposalPhaseIn(storeId, change, actor) {
+		const taskId = await this.proposalParentIn(storeId, change.proposalId);
+		await this.commitIn(storeId, [event("TaskProposalPhaseChanged", {
+			taskId,
+			actor,
+			payload: change
+		})]);
+	}
+	/**
+	* Records one consumption on its own (T2/T3 §6): the batch the proposal
+	* became, by child task id and batch id. `admitBatchIn` writes the same event
+	* inside the admission commit, which is the path that keeps the children and
+	* the record of them one fact; this entry exists for a caller that admitted
+	* the batch through another entry and is recording the consumption beside it.
+	*/
+	async consumeProposalIn(storeId, consumption, actor) {
+		const taskId = await this.proposalParentIn(storeId, consumption.proposalId);
+		await this.commitIn(storeId, [event("TaskProposalAdmitted", {
+			taskId,
+			actor,
+			payload: consumption
+		})]);
+	}
 	async recordEvidenceIn(storeId, evidence, actor) {
 		await this.commitIn(storeId, [event("EvidenceProduced", {
 			taskId: evidence.taskId,
@@ -1402,6 +2050,23 @@ var TaskService = class extends Service {
 		});
 		store.writes = run.then(() => void 0, () => void 0);
 		await run;
+	}
+	/**
+	* The parent task a proposal event is about, read from the store before the
+	* commit so the envelope names the task the proposal belongs to. Reading
+	* first is what makes an unknown proposal a refusal *before* anything is
+	* queued: the reducer would reject the event anyway, and a caller that asked
+	* about a proposal the store does not hold deserves to hear it from the entry
+	* it called. The value is advisory — the write lock is not held across it —
+	* and the reducer's own check is what actually binds the envelope.
+	*/
+	async proposalParentIn(storeId, proposalId) {
+		const store = this.requireStore(storeId);
+		await store.ready;
+		await store.writes;
+		const proposal = store.state.snapshot().proposals?.byId[proposalId];
+		if (proposal === void 0) throw new Error(`task: unknown proposal "${proposalId}"`);
+		return proposal.identity.parentTaskId;
 	}
 	requireStore(storeId) {
 		if (this.closing) throw new Error("task: service is closing");
@@ -1466,4 +2131,4 @@ var TaskService = class extends Service {
 var src_default = TaskService;
 
 //#endregion
-export { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, RootTaskSpec, SKILL_CONTRACT_VERSION, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TASK_CONTRACT_VERSION, TaskService, TaskState, canonicalize, contractDigest, decompositionDigest, src_default as default, isSupportedSkillResourcePath, reaches, rootTaskStoreId, sha256Hex, skillContentDigest, skillContractDefects, skillContractDigest };
+export { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, RootTaskSpec, SKILL_CONTRACT_VERSION, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_ID_PREFIX, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskService, TaskState, admissionContextDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, src_default as default, isSupportedSkillResourcePath, reaches, reviewContextDigest, rootTaskStoreId, sha256Hex, skillContentDigest, skillContractDefects, skillContractDigest, taskProposalId };

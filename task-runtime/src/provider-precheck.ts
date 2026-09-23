@@ -199,6 +199,19 @@ export interface ProviderPrecheck {
   readonly revision: string
 }
 
+/**
+ * One accepted provider's content identity, as the pre-check resolved it: the
+ * skill's name and the digest of the sidecar contract it declares.
+ * `contractDigest: null` is a skill that declares no sidecar — a knowledge or
+ * guidance skill whose *contract* this deployment cannot pin. What a caller
+ * records against this value (the run binding, the review context) is exactly
+ * what it says and no more.
+ */
+export interface ResolvedProviderIdentity {
+  readonly name: string
+  readonly contractDigest: string | null
+}
+
 /** What one pre-check needs beyond the view: the rows in play and their table. */
 export interface ProviderPrecheckRequest {
   /**
@@ -235,9 +248,32 @@ function undiscovered(name: string, roots: readonly string[]): RejectedProviderV
   }
 }
 
-/** The one provider identity a revision can cite: a validated sidecar, or `null` for a skill that declares none. */
-function providerIdentity(verdict: ExecutionProviderVerdict | KnowledgeProviderVerdict): { name: string; contractDigest: string } {
-  return { name: verdict.name, contractDigest: verdict.contractDigest }
+/**
+ * The one provider identity a revision can cite: a validated sidecar, or
+ * `null` for a skill that declares none. Guidance skills declare no execution
+ * contract, so they are cited as the name alone rather than given a digest
+ * that does not exist.
+ */
+function providerIdentity(verdict: SkillProviderVerdict): ResolvedProviderIdentity | undefined {
+  if (!verdict.valid) return undefined
+  return verdict.role === 'guidance' ? { name: verdict.name, contractDigest: null } : { name: verdict.name, contractDigest: verdict.contractDigest }
+}
+
+/**
+ * Every provider content identity one pre-check resolved, deduplicated by name
+ * and sorted by it: the list a caller folds into whatever it records about the
+ * resolution (the registry revision here, the review context in
+ * `./proposal.ts`). One function so those two cannot disagree about what
+ * "resolved" means: refused verdicts contribute nothing (a refused provider is
+ * never something a run resolved against), and a name that appears in two rows
+ * is one identity.
+ */
+export function providerContentIdentities(capabilities: readonly CapabilityProviderPrecheck[]): ResolvedProviderIdentity[] {
+  return capabilities
+    .flatMap(row => row.skills)
+    .flatMap(verdict => providerIdentity(verdict) ?? [])
+    .filter((identity, index, all) => all.findIndex(entry => entry.name === identity.name) === index)
+    .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
 }
 
 /**
@@ -285,14 +321,7 @@ export async function precheckProviders(request: ProviderPrecheckRequest): Promi
     }
     capabilities.push({ capability, skills })
   }
-  const providers = capabilities
-    .flatMap(row => row.skills)
-    .flatMap(verdict => {
-      if (!verdict.valid) return []
-      return [verdict.role === 'guidance' ? { name: verdict.name, contractDigest: null } : providerIdentity(verdict)]
-    })
-    .filter((identity, index, all) => all.findIndex(entry => entry.name === identity.name) === index)
-    .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
+  const providers = providerContentIdentities(capabilities)
   return {
     capabilities,
     roots,

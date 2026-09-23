@@ -2,7 +2,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
-import type { DecomposeSpec } from '@dangosys/dsh-singularity-task-runtime'
+import type { DecomposeSpec, ProposalContinuation, ProposalSubmission } from '@dangosys/dsh-singularity-task-runtime'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
@@ -18,7 +18,8 @@ export function defineTaskDecomposeTool(ctx: Context) {
     description:
       'Decompose the caller\'s current task into child tasks. The batch is admitted atomically and the runtime then runs them ' +
       'one at a time in dependency order; this call returns at admission and does not wait. Each child is verified ' +
-      'independently; only verified children count as done.',
+      'independently; only verified children count as done. Where this deployment reviews generated tasks, the batch may instead ' +
+      'come back waiting for a human review — nothing is admitted or spawned then, and the answer names the proposal that holds it.',
     parameters: {
       reason: { type: 'string', required: true, description: 'Why this delegation is needed; recorded in each child handoff' },
       contractVersion: {
@@ -26,6 +27,21 @@ export function defineTaskDecomposeTool(ctx: Context) {
         description:
           'Contract version this batch is written under. The runtime stores version 1 and refuses a declared version it does not know, ' +
           'so callers normally omit this field and let the runtime write the current version',
+      },
+      requestKey: {
+        type: 'string',
+        description:
+          'The stable key this request is addressed by, when the caller has an identifier of its own (a message id, a plan row; the runtime ' +
+          'derives one from the calling context and the batch content when this is omitted). One key names at most one proposal: repeating a ' +
+          'request with the same key is answered with the proposal already stored, while the same key with different content is refused. A ' +
+          'revision is different content, so it needs a new key',
+      },
+      supersedes: {
+        type: 'string',
+        description:
+          'The proposal id this batch revises — a rejected or stale one, whose record is kept. Naming it is what lets a reader follow the ' +
+          'history; it does not transfer anything from that proposal (an approval never travels to new content) and it does not replace the ' +
+          'new request key this submission needs',
       },
       children: {
         type: 'array',
@@ -139,51 +155,131 @@ export function defineTaskDecomposeTool(ctx: Context) {
     execute: async (args, exec) => {
       const caller = sessionId(exec)
       const { storeId, task, run } = await ctx.taskRuntime.runForSession(caller)
-      let admitted: { batchId: string; childTaskIds: string[] }
+      // The two service entries the compat entry `decomposeAndRun` composes, in
+      // the same order and with the same meanings (T2/T3 §6: 内部先提出提案，再按
+      // 策略推进). This tool composes them itself because the caller's own
+      // requestKey/supersedes have to reach the *submission*, and the service
+      // entry that does both takes no options. Every check stays in the runtime:
+      // nothing is normalized, judged or admitted here.
+      //
+      // The caller's whole spec goes to the runtime, which is the contract entry
+      // for it (T1 §4). The schema above validates the *declared surface* only:
+      // the types, the mode enum, and the closed child and criterion objects.
+      // Its parameter root is an implicitly open object, so a batch-level key
+      // this tool does not declare passes the schema and is refused by the
+      // runtime, by name — never dropped here, never accepted in silence. The
+      // cast is the seam where model arguments become the runtime's input; what
+      // makes it harmless is that nothing here reads the object first.
+      //
+      // The two keys this tool *does* declare are lifted out of the batch: they
+      // are options of the submission, not batch fields, and passing them along
+      // inside the spec would make the runtime refuse them by name.
+      const { requestKey, supersedes, ...spec } = args
+      const callId = typeof exec.callId === 'string' && exec.callId.length > 0 ? String(exec.callId) : undefined
+      let submission: ProposalSubmission
+      let continued: ProposalContinuation
       try {
-        admitted = await ctx.taskRuntime.decomposeAndRun(
+        submission = await ctx.taskRuntime.submitDecompositionProposal(
           storeId,
           task.taskId,
           run.runId,
           caller,
-          // The caller's whole spec goes to the runtime, which is the contract
-          // entry for it (T1 §4). The schema above validates the *declared
-          // surface* only: the types, the mode enum, and the closed child and
-          // criterion objects. Its parameter root is an implicitly open object,
-          // so a batch-level key this tool does not declare passes the schema
-          // and is refused by the runtime, by name — never dropped here, never
-          // accepted in silence. The cast is the seam where model arguments
-          // become the runtime's input; what makes it harmless is that nothing
-          // here reads the object first.
-          args as unknown as DecomposeSpec,
+          spec as unknown as DecomposeSpec,
           {
-            signal: exec.signal,
-            // The registration id of this call, so the batch's first drain does
-            // not wait for the call that is asking (A3 §3.3). A caller without
-            // one — a test double — drains without the exclusion.
-            ...(typeof exec.callId === 'string' && exec.callId.length > 0 ? { callId: String(exec.callId) } : {}),
+            ...(requestKey === undefined ? {} : { requestKey: String(requestKey) }),
+            ...(supersedes === undefined ? {} : { supersedes: String(supersedes) }),
+            exec: {
+              signal: exec.signal,
+              // The registration id of this call, so the batch's first drain
+              // does not wait for the call that is asking (A3 §3.3). A caller
+              // without one — a test double — drains without the exclusion.
+              ...(callId === undefined ? {} : { callId }),
+            },
           },
         )
+        // The submission's own signal dies with it: a call that returns, or a
+        // caller that aborts after the record exists, cannot stop a batch the
+        // store already holds (§3.7) — so only the call id rides along.
+        continued = await ctx.taskRuntime.continueProposal(storeId, submission.proposalId, caller, {
+          ...(callId === undefined ? {} : { exec: { callId } }),
+        })
       } catch (error) {
         return `task_decompose rejected: ${error instanceof Error ? error.message : String(error)}`
       }
-      // The batch is admitted, not finished (A3 §3.1): the call returns as soon
-      // as the atomic commit landed, and the runtime drives the children from
-      // there. What the caller may do next is not a matter of taste — the phase
-      // it is in decides it — so the tool states the contract it is now under
-      // rather than leaving the model to infer it from a status line.
+      if (continued.status === 'admitted') {
+        return admittedText(task.taskId, continued.batchId, continued.childTaskIds)
+      }
+      if (continued.status === 'pending_review') {
+        return await pendingText(ctx, storeId, task.taskId, continued.proposalId, continued.detail)
+      }
+      // Decided against between the submission and the continuation, or
+      // invalidated by the re-check: the status the store holds, named, with the
+      // one way forward (a revision) — the same conclusion the compat entry
+      // raises, reported instead of thrown so the caller keeps the diagnosis.
       return [
-        `decomposed ${task.taskId} into ${admitted.childTaskIds.length} children (batch ${admitted.batchId}):`,
-        ...admitted.childTaskIds.map((taskId, index) => `- child ${index + 1}: ${taskId}`),
-        '',
-        `The runtime owns batch ${admitted.batchId} now: it starts the children one at a time in dependency order and settles this ` +
-        'task when they are all terminal. This call returns at admission and does not wait for the batch.',
-        `You are in phase waiting_children: read and query with \`task_read\`/\`task_status\` (and diagnose or inspect), or end the ` +
-        'batch with `task_cancel`. Writes, shell commands, another decomposition and a submission of your own are refused while the ' +
-        'children run — do not start work that would collide with theirs in the shared checkout.',
-        'You are notified when the batch settles; the runtime then submits this task for verification on your behalf, so an idle ' +
-        'session is not a completion and needs no submission from you.',
+        `task_decompose rejected: decomposition of "${task.taskId}" is ${continued.status} (proposal ${continued.proposalId}): ${continued.detail}${continued.reason === undefined ? '' : ` — ${continued.reason}`}`,
+        'A rejected, cancelled, stale or expired batch never runs: revise it (a revision is new content, a new request key and a',
+        'new proposal) or do the work in this task instead. Nothing was admitted and nothing was spawned.',
       ].join('\n')
     },
   })
+}
+
+/**
+ * The batch is admitted, not finished (A3 §3.1): the call returns as soon as the
+ * atomic commit landed, and the runtime drives the children from there. What the
+ * caller may do next is not a matter of taste — the phase it is in decides it —
+ * so the tool states the contract it is now under rather than leaving the model
+ * to infer it from a status line.
+ */
+function admittedText(taskId: string, batchId: string, childTaskIds: readonly string[]): string {
+  return [
+    `decomposed ${taskId} into ${childTaskIds.length} children (batch ${batchId}):`,
+    ...childTaskIds.map((childTaskId, index) => `- child ${index + 1}: ${childTaskId}`),
+    '',
+    `The runtime owns batch ${batchId} now: it starts the children one at a time in dependency order and settles this ` +
+    'task when they are all terminal. This call returns at admission and does not wait for the batch.',
+    `You are in phase waiting_children: read and query with \`task_read\`/\`task_status\` (and diagnose or inspect), or end the ` +
+    'batch with `task_cancel`. Writes, shell commands, another decomposition and a submission of your own are refused while the ' +
+    'children run — do not start work that would collide with theirs in the shared checkout.',
+    'You are notified when the batch settles; the runtime then submits this task for verification on your behalf, so an idle ' +
+    'session is not a completion and needs no submission from you.',
+  ].join('\n')
+}
+
+/**
+ * A batch waiting for a human review (T2/T3 §5–§6): the proposal holds the
+ * whole batch, nothing was admitted, and the caller's next move is not another
+ * submission — the same request answers with this same proposal. The policy is
+ * read back from the proposal rather than assumed, because a proposal born under
+ * `off` and sent to review by a tightened deployment keeps its birth policy on
+ * the record; when the record cannot be read the text says so instead of
+ * inventing one.
+ */
+async function pendingText(
+  ctx: Context,
+  storeId: string,
+  taskId: string,
+  proposalId: string,
+  detail: string,
+): Promise<string> {
+  let policy = 'unknown — the proposal record could not be read back'
+  try {
+    policy = `${(await ctx.taskRuntime.proposalIn(storeId, proposalId)).policy}`
+  } catch {
+    // The batch is recorded and waiting either way; only this rendering is thin.
+  }
+  return [
+    `task_decompose is waiting for a review: proposal ${proposalId} (policy ${policy}) holds this batch, and ${taskId} has not been decomposed.`,
+    `- ${detail}`,
+    '- No child task exists, no worker was spawned, and this task is not decomposed: the batch is admitted only after the review',
+    '  decides and the runtime re-checks it against the limits, the capability resolution and the judging verifiers that were reviewed.',
+    `- Read the batch as it was recorded with \`task_proposal_read\` (${proposalId}).`,
+    '- An approval needs nothing further from you: the decision is recorded on the proposal and the runtime continues the batch',
+    '  immediately, so you are notified when it settles.',
+    '- A refusal is a fact on the record: revise the batch against its reason (fix the cause, never weaken a criterion or drop a',
+    '  mandatory one) and call `task_decompose` again — a revision is new content, hence a new proposal, and you may name the',
+    '  refused one with `supersedes`.',
+    '- Do not re-submit the same content while it waits: the same request key is answered with this same proposal.',
+  ].join('\n')
 }

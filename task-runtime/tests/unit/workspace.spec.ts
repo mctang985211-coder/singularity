@@ -204,6 +204,60 @@ describe('WorkspaceRegistry stack', () => {
   })
 })
 
+describe('overlapping marker writes', () => {
+  /**
+   * Two chains mutate one workspace's marker at the same time in a real
+   * deployment: a child's own submission chain takes the verifier layer in and
+   * out while the batch driver releases the child it has just seen settle. Each
+   * mutation is legal against the stack as that mutation finds it, so both
+   * write — and neither may corrupt the other's write.
+   *
+   * Every release below names the holder that is on top when its own check runs
+   * (the previous call has already popped it), so all of them proceed; they are
+   * started in one tick, with no timer or latch deciding the interleaving. The
+   * failure this pins down (observed in the A3 integration suite under load,
+   * 2026-09-23) was the marker's temporary path being the same for every write:
+   * the loser's `rename` then failed with ENOENT after the winner consumed that
+   * file, and the raw filesystem error came out of a release, failing a batch
+   * driver. Every settlement here must be the protocol's own outcome.
+   */
+  test('mutations started in one tick all settle, and the marker stays a marker', async () => {
+    const reg = registry()
+    const run = runOwner()
+    await reg.claim(checkout, run)
+    const batches: WorkspaceOwner[] = Array.from({ length: 8 }, (_unused, index) => ({
+      kind: 'batch',
+      storeId: 'sg-t-root',
+      batchId: `b-t-1-${index}`,
+      since: `2026-09-22T00:00:${String(index + 1).padStart(2, '0')}.000Z`,
+    }))
+    let top: WorkspaceOwner = run
+    for (const batch of batches) {
+      await reg.push(checkout, top, batch)
+      top = batch
+    }
+
+    const settling = [...batches].reverse().map(owner => reg.release(checkout, owner))
+    const results = await Promise.allSettled(settling)
+    // Every release settles as its own protocol outcome; a raw filesystem error
+    // here is the corruption this case exists for, so it is reported in full.
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map(result => String(result.reason))
+    expect(failures).toEqual([])
+
+    expect(reg.ownerOf(checkout)).toEqual(run)
+    const marker = JSON.parse(await markerText(reg)) as { path: string; pid: number; owner: WorkspaceOwner }
+    expect(marker.path).toBe(checkout)
+    expect(marker.pid).toBe(process.pid)
+    // Whichever of the concurrent writers landed last, what is on disk is one
+    // whole marker naming one of them — never a half-written or foreign record.
+    expect([run, ...batches]).toContainEqual(marker.owner)
+    // And a settled write leaves no temporary file behind.
+    expect(await readdir(markerRoot)).toEqual([`${sha256Hex(checkout)}.json`])
+  })
+})
+
 describe('stale markers', () => {
   test('a dead pid makes the claim busy, and only reconcileAdopt takes it over', async () => {
     const reg = registry()

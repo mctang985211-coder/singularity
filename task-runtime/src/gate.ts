@@ -52,6 +52,15 @@ import type { ExecutionPhase } from '@dangosys/dsh-singularity-task'
  * `task_cancel` is in the list because cancelling is the one write a waiting or
  * submitted run is allowed: the run has stopped deciding, and the owner may
  * still stop the tree.
+ *
+ * The proposal tools follow the same categories (T2/T3). `task_proposal_read`
+ * reads a saved proposal and `task_proposal_cancel` withdraws the batch its own
+ * session proposed: they are the looking-at and the ending of what this run
+ * already asked for, exactly the work `task_read` and `task_cancel` do.
+ * `task_proposal_continue` is deliberately **not** here: it can admit a batch,
+ * which is the same effect `task_decompose` has, so it is a write in every
+ * non-active phase — a run that has stopped deciding its own work does not get
+ * to turn a proposal into tasks.
  */
 export const COORDINATION_ALLOWED: ReadonlySet<string> = new Set([
   'task_read',
@@ -72,6 +81,8 @@ export const COORDINATION_ALLOWED: ReadonlySet<string> = new Set([
   'hitl_ask',
   'hitl_approve',
   'task_cancel',
+  'task_proposal_read',
+  'task_proposal_cancel',
 ])
 
 /** A tool call that was let through and has not reported its result yet. */

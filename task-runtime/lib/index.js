@@ -4,7 +4,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import { boundContextSummary, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
-import { RootTaskSpec, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TASK_CONTRACT_VERSION, canonicalize, contractDigest, decompositionDigest, reaches, rootTaskStoreId, sha256Hex, skillContentDigest, skillContractDefects, skillContractDigest } from "@dangosys/dsh-singularity-task";
+import { RootTaskSpec, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TASK_CONTRACT_VERSION, admissionContextDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, reaches, reviewContextDigest, rootTaskStoreId, sha256Hex, skillContentDigest, skillContractDefects, skillContractDigest, taskProposalId } from "@dangosys/dsh-singularity-task";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { findSkillFileIn, parseSkillFile, skillRootsFor } from "@dangosys/dsh-singularity-agent-runtime";
 import { homedir } from "node:os";
@@ -236,6 +236,18 @@ const WORKER_BASELINE_LABELS = [
 *   this call (A3 §3.6). It is also the one write the execution gate keeps for
 *   a run in `waiting_children` or `submitted` (`gate.ts:COORDINATION_ALLOWED`),
 *   so the tool has to be on the surface of every run that can hold a batch.
+* - `task_proposal_read`, `task_proposal_continue`, `task_proposal_cancel`
+*   (T2/T3) — a decomposition proposal is not always admitted on the spot: a
+*   reviewed deployment answers `task_decompose` with a proposal id and nothing
+*   admitted, and the tool's own answer points the caller at
+*   `task_proposal_read` for the batch as it was recorded. The other two are
+*   the coordination actions on that record — continuing it after a decision
+*   (which can admit the batch, so the gate classifies it with
+*   `task_decompose`) and withdrawing it before admission (classified with
+*   `task_cancel`). They are task-domain actions of a node that proposed work,
+*   not platform management: the human decision itself never happens in a
+*   worker's tool plane — the review channel is wired at the service assembly
+*   and a worker has no tool that could decide a proposal.
 *
 * `graph_spawn` is deliberately NOT here, even though the deployment registers
 * it for the root: it reaches the graph without Task Admission and returns the
@@ -257,7 +269,10 @@ const WORKER_BASELINE_TOOLS = [
 	"task_submit_result",
 	"task_cancel",
 	"task_verify",
-	"capability_list"
+	"capability_list",
+	"task_proposal_read",
+	"task_proposal_continue",
+	"task_proposal_cancel"
 ];
 /**
 * Every real tool name a capability worker keeps on top of what its
@@ -405,8 +420,8 @@ function declaredPaths(value) {
 * its position otherwise — the vocabulary `normalize.ts` names criteria with,
 * so a caller reading a refusal sees one numbering, not two.
 */
-function criterionLabel(childLabel, criterion, index) {
-	return `${childLabel} criterion ${nonBlank$1(criterion.criterionId) ? JSON.stringify(criterion.criterionId) : index + 1}`;
+function criterionLabel(childLabel$1, criterion, index) {
+	return `${childLabel$1} criterion ${nonBlank$1(criterion.criterionId) ? JSON.stringify(criterion.criterionId) : index + 1}`;
 }
 /**
 * Fix the byte identity of every declared protected input, against the
@@ -680,6 +695,26 @@ function contractDefects(criteria, label) {
 	return reasons;
 }
 /**
+* How one planned child is named in a refusal: its position always, its id when
+* the batch has one yet ({@link AdmissionChild.taskId}). A batch is judged
+* before its ids are minted (`TaskRuntime.deriveBatch` / `checkDerivedBatch`
+* deliberately mint nothing), so a refusal names the child's position — and the
+* same verdict comes out either way, because only the id in the message differs.
+*/
+function childLabel(child, index) {
+	return child.taskId === void 0 ? `child ${index}` : `child ${index} ("${child.taskId}")`;
+}
+/**
+* How one planned child is named inside a dependency message: its id when it
+* has one, its batch position otherwise (`#0` is the first child). The two
+* forms appear in `dependency "…" → "…"` messages only — the edges this
+* function builds are the plan's own, checked for duplicates and cycles before
+* any id exists.
+*/
+function childRef(child, index) {
+	return child?.taskId ?? `#${index}`;
+}
+/**
 * Structural admission checks for one decomposition batch (RFC §36). Pure:
 * every rule is validated up front and the caller persists only when the
 * verdict is `ok`, so admission is atomic for the whole batch.
@@ -694,7 +729,7 @@ function checkDecomposition(parent, children, existingEdges) {
 	reasons.push(...independentAcceptanceDefects(parent.acceptanceCriteria, parent.requiresIndependentAcceptance, `task "${parent.taskId}"`));
 	const plannedEdges = [];
 	children.forEach((child, index) => {
-		const label = `child ${index} ("${child.taskId}")`;
+		const label = childLabel(child, index);
 		if (child.objective.trim().length === 0) reasons.push(`${label} objective must be non-empty`);
 		reasons.push(...contractDefects(child.acceptanceCriteria, label));
 		reasons.push(...independentAcceptanceDefects(child.acceptanceCriteria, child.requiresIndependentAcceptance, label));
@@ -712,8 +747,8 @@ function checkDecomposition(parent, children, existingEdges) {
 				continue;
 			}
 			plannedEdges.push({
-				from: children[dependency].taskId,
-				to: child.taskId
+				from: childRef(children[dependency], dependency),
+				to: childRef(child, index)
 			});
 		}
 	});
@@ -742,6 +777,15 @@ function checkDecomposition(parent, children, existingEdges) {
 * `task_cancel` is in the list because cancelling is the one write a waiting or
 * submitted run is allowed: the run has stopped deciding, and the owner may
 * still stop the tree.
+*
+* The proposal tools follow the same categories (T2/T3). `task_proposal_read`
+* reads a saved proposal and `task_proposal_cancel` withdraws the batch its own
+* session proposed: they are the looking-at and the ending of what this run
+* already asked for, exactly the work `task_read` and `task_cancel` do.
+* `task_proposal_continue` is deliberately **not** here: it can admit a batch,
+* which is the same effect `task_decompose` has, so it is a write in every
+* non-active phase — a run that has stopped deciding its own work does not get
+* to turn a proposal into tasks.
 */
 const COORDINATION_ALLOWED = new Set([
 	"task_read",
@@ -761,7 +805,9 @@ const COORDINATION_ALLOWED = new Set([
 	"ask_user_question",
 	"hitl_ask",
 	"hitl_approve",
-	"task_cancel"
+	"task_cancel",
+	"task_proposal_read",
+	"task_proposal_cancel"
 ]);
 /** The job statuses that mean the work is over — the only statuses the drain accepts as confirmed. */
 const TERMINAL_JOB_STATUSES = new Set([
@@ -1579,12 +1625,33 @@ function undiscovered(name, roots) {
 		defects: [defect("skill-missing", `no SKILL.md for skill "${name}" is reachable from the worker's discovery roots; searched ${roots.join(", ")}`)]
 	};
 }
-/** The one provider identity a revision can cite: a validated sidecar, or `null` for a skill that declares none. */
+/**
+* The one provider identity a revision can cite: a validated sidecar, or
+* `null` for a skill that declares none. Guidance skills declare no execution
+* contract, so they are cited as the name alone rather than given a digest
+* that does not exist.
+*/
 function providerIdentity(verdict) {
-	return {
+	if (!verdict.valid) return void 0;
+	return verdict.role === "guidance" ? {
+		name: verdict.name,
+		contractDigest: null
+	} : {
 		name: verdict.name,
 		contractDigest: verdict.contractDigest
 	};
+}
+/**
+* Every provider content identity one pre-check resolved, deduplicated by name
+* and sorted by it: the list a caller folds into whatever it records about the
+* resolution (the registry revision here, the review context in
+* `./proposal.ts`). One function so those two cannot disagree about what
+* "resolved" means: refused verdicts contribute nothing (a refused provider is
+* never something a run resolved against), and a name that appears in two rows
+* is one identity.
+*/
+function providerContentIdentities(capabilities) {
+	return capabilities.flatMap((row) => row.skills).flatMap((verdict) => providerIdentity(verdict) ?? []).filter((identity, index, all) => all.findIndex((entry) => entry.name === identity.name) === index).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
 }
 /**
 * Check every skill every listed capability declares, from one discovery
@@ -1633,13 +1700,7 @@ async function precheckProviders(request) {
 			skills
 		});
 	}
-	const providers = capabilities.flatMap((row) => row.skills).flatMap((verdict) => {
-		if (!verdict.valid) return [];
-		return [verdict.role === "guidance" ? {
-			name: verdict.name,
-			contractDigest: null
-		} : providerIdentity(verdict)];
-	}).filter((identity, index, all) => all.findIndex((entry) => entry.name === identity.name) === index).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+	const providers = providerContentIdentities(capabilities);
 	return {
 		capabilities,
 		roots,
@@ -2385,6 +2446,8 @@ function renderWorkerPrompt(handoff, childTask, options) {
 		"- Full-text search is disabled in this deployment, so read parent events by sequence."
 	].join("\n");
 	const summary = renderRunBinding(options.binding);
+	const runtimeSplitRule = "- If the work turns out not to be atomic after all, call `task_decompose` yourself: this deployment admits a task's own decomposition, so your parent did not have to predict it. The call still has to clear admission — structure, acyclic dependencies, a command on every executable criterion, capability coverage, depth and batch-size limits — and a task may split only once; a refusal names the rule that blocked it, and that reason is what you act on. Split only into pieces a verifier can judge on its own; otherwise do the work here.";
+	const reviewRule = "- A decomposition can come back waiting for a human review: it answers with a proposal id and admits nothing, so no child exists and nothing is spawned until the review decides. Read the batch as it was recorded with `task_proposal_read`; do not re-submit the same batch while it waits, because the same request is answered with the same proposal. If the review refuses it, revise the batch from the reason on the record and decompose again — a revision is a new proposal, never a re-run of the refused one.";
 	const rules = [
 		"## Rules",
 		"",
@@ -2393,7 +2456,8 @@ function renderWorkerPrompt(handoff, childTask, options) {
 		"- A criterion's declared protected inputs must not be modified: the verifier re-checks their identity before judging, and a changed or missing input fails the criterion, naming the path.",
 		"- Keep changes scoped to this task. Need a human decision? Ask with `ask_user_question`.",
 		"- Cannot continue? Fail with a clear reason — the orchestrator blocks dependent tasks and reports to the parent task.",
-		...options.allowRuntimeDecomposition ? ["- If the work turns out not to be atomic after all, call `task_decompose` yourself: this deployment admits a task's own decomposition, so your parent did not have to predict it. The call still has to clear admission — structure, acyclic dependencies, a command on every executable criterion, capability coverage, depth and batch-size limits — and a task may split only once; a refusal names the rule that blocked it, and that reason is what you act on. Split only into pieces a verifier can judge on its own; otherwise do the work here."] : [],
+		...options.allowRuntimeDecomposition ? [runtimeSplitRule] : [],
+		...options.allowRuntimeDecomposition || childTask.decompositionStatus === "decomposable" ? [reviewRule] : [],
 		"- This prompt is where you start, not the whole truth: re-read your own contract and run with `task_read`, and the whole tree with `task_status`, whenever you need them.",
 		"- When the work is done, hand it in with `task_submit_result`: a summary of what you delivered plus the evidence references you produced. The call closes this run to further writes, drains the calls still in flight, and lets the runtime put the run in front of the verifier; the verdict comes back as its answer.",
 		"- Going idle is not a submission: the runtime sees an idle session where a submission was due, reminds you once, and stops the run under the no-progress budget if nothing changes. Submit when the work is done, or say what is missing with a clear failure.",
@@ -2412,6 +2476,35 @@ function renderWorkerPrompt(handoff, childTask, options) {
 
 //#endregion
 //#region src/normalize.ts
+/**
+* The identity one batch is digested over (§4): where it came from, which
+* contract language it is written in, the caller's reason, and the complete
+* ordered children — each child reduced to its contract digest and the batch
+* facts the identity covers.
+*
+* One construction, shared by {@link normalizeDecomposition} (which digs the
+* batch) and by any writer that has to *name* the batch rather than digest it
+* (the runtime's proposal record, whose `proposalDigest` has to be the same
+* number the admission recorded). Two constructions of one identity would
+* eventually disagree, and a proposal whose digest is not the batch's would
+* make every approval binding meaningless.
+*/
+function decompositionIdentity(context, reason, children) {
+	return {
+		contractVersion: TASK_CONTRACT_VERSION,
+		storeId: context.storeId,
+		parentTaskId: context.parentTaskId,
+		parentRunId: context.parentRunId,
+		callerSessionId: context.callerSessionId,
+		reason,
+		children: children.map((child) => ({
+			contractDigest: contractDigest(child.contract),
+			dependsOn: child.dependsOn,
+			decomposable: child.decomposable,
+			requiresIndependentAcceptance: child.requiresIndependentAcceptance
+		}))
+	};
+}
 /** The batch fields, and nothing else: a key outside this set is refused. */
 const BATCH_FIELDS = new Set([
 	"contractVersion",
@@ -2540,13 +2633,13 @@ function carried(value) {
 * is refused as a whole, and the contract must describe only what a well-formed
 * declaration asked for.
 */
-function normalizeCriteria(raw, childIndex, childLabel, reasons) {
+function normalizeCriteria(raw, childIndex, childLabel$1, reasons) {
 	const criteria = [];
 	const seen = /* @__PURE__ */ new Set();
 	const reportedDuplicate = /* @__PURE__ */ new Set();
 	raw.forEach((value, index) => {
 		const before = reasons.length;
-		const position = `${childLabel} criterion ${index + 1}`;
+		const position = `${childLabel$1} criterion ${index + 1}`;
 		if (!isPlainObject(value)) {
 			reasons.push(`${position} must be an object`);
 			return;
@@ -2554,10 +2647,10 @@ function normalizeCriteria(raw, childIndex, childLabel, reasons) {
 		const declaredId = value.criterionId;
 		if (declaredId !== void 0 && !nonBlank(declaredId)) reasons.push(`${position} criterionId must be a non-empty string`);
 		const criterionId = nonBlank(declaredId) ? declaredId : `ac${childIndex + 1}-${index + 1}`;
-		const label = `${childLabel} criterion ${JSON.stringify(criterionId)}`;
+		const label = `${childLabel$1} criterion ${JSON.stringify(criterionId)}`;
 		unknownFields(value, CRITERION_FIELDS, label, reasons);
 		if (seen.has(criterionId) && !reportedDuplicate.has(criterionId)) {
-			reasons.push(`${childLabel} declares criterion id ${JSON.stringify(criterionId)} more than once`);
+			reasons.push(`${childLabel$1} declares criterion id ${JSON.stringify(criterionId)} more than once`);
 			reportedDuplicate.add(criterionId);
 		}
 		seen.add(criterionId);
@@ -2656,22 +2749,10 @@ function normalizeDecomposition(spec, context) {
 			ok: true,
 			batch: {
 				contractVersion,
+				reason,
 				children,
 				admission: {
-					proposalDigest: decompositionDigest({
-						contractVersion,
-						storeId: context.storeId,
-						parentTaskId: context.parentTaskId,
-						parentRunId: context.parentRunId,
-						callerSessionId: context.callerSessionId,
-						reason,
-						children: children.map((child) => ({
-							contractDigest: contractDigest(child.contract),
-							dependsOn: child.dependsOn,
-							decomposable: child.decomposable,
-							requiresIndependentAcceptance: child.requiresIndependentAcceptance
-						}))
-					}),
+					proposalDigest: decompositionDigest(decompositionIdentity(context, reason, children)),
 					context: copyValue(context.admissionContext)
 				}
 			}
@@ -2682,6 +2763,150 @@ function normalizeDecomposition(spec, context) {
 			reasons: [`decomposition content cannot be canonicalized: ${message$2(error)}`]
 		};
 	}
+}
+
+//#endregion
+//#region src/proposal.ts
+/** The prefix every derived request key carries, so a key is recognizable as one wherever it is printed. */
+const PROPOSAL_REQUEST_KEY_PREFIX = "rk-";
+/**
+* The request key one call derives when its caller named none: `rk-` plus the
+* SHA-256 of {@link canonicalize} over
+* {@link ProposalRequestKeyContext} (key order is irrelevant; the same request
+* addresses the same key however it was written).
+*
+* A caller with its own stable identifier (a message id, a task row) may pass
+* it instead — the store refuses one key bound to two proposals either way,
+* so an explicit key is a promise the caller keeps, not a way around the rule.
+* The derived form is what makes a retry of the *same* batch idempotent
+* without any caller bookkeeping: a revision has different content, hence a
+* different digest, hence a new key.
+*/
+function proposalRequestKey(context) {
+	return `${PROPOSAL_REQUEST_KEY_PREFIX}${sha256Hex(canonicalize({
+		parentTaskId: context.parentTaskId,
+		parentRunId: context.parentRunId,
+		callerSessionId: context.callerSessionId,
+		proposalDigest: context.proposalDigest
+	}))}`;
+}
+/**
+* The statuses in which a proposal is still "in flight" for the task that made
+* it — submitted and not yet admitted, not yet decided, or decided and not yet
+* re-checked. `admitted` and the four terminal statuses are excluded: a task
+* with one of those has either a batch (the run is coordinated by A3 from
+* there) or nothing waiting.
+*/
+const OPEN_PROPOSAL_STATUSES = [
+	"ready",
+	"pending_review",
+	"approved"
+];
+/**
+* Whether one proposal is still in flight for the task that made it —
+* submitted and not yet admitted, not yet decided, or decided and not yet
+* re-checked (§6). `admitted` and the four terminal statuses are not open: a
+* task with one of those has either a batch (the run is coordinated by A3 from
+* there) or nothing waiting.
+*/
+function isOpenProposal(proposal) {
+	return OPEN_PROPOSAL_STATUSES.includes(proposal.status);
+}
+/**
+* The open proposal of one run, or `undefined` — §7.4's "已知等待": a run whose
+* own batch is waiting for a review (or for the admission its approval
+* authorizes) is idle on purpose, and an idle that is a known wait must not
+* count as stagnation.
+*
+* Both the task and the run are matched, not just the task: a proposal names
+* the run it was submitted from, and a *later* run of the same task is not
+* waiting on a batch its predecessor proposed.
+*
+* A snapshot with no proposal index (a hand-built one, or a store written
+* before proposals existed) answers `undefined` — the honest reading of "this
+* reader cannot see proposals", which is a run to be judged by the rules that
+* were in force when it was created rather than one this build's proposals
+* hold up.
+*/
+function openProposalOf(snapshot, taskId, runId) {
+	const proposals = (snapshot.proposals?.byParentTask[taskId] ?? []).filter((proposal) => proposal.identity.parentRunId === runId && OPEN_PROPOSAL_STATUSES.includes(proposal.status));
+	return proposals[proposals.length - 1];
+}
+/**
+* What a batch was reviewed against (§6), as this runtime can compute it.
+*
+* Two parts, and each has a stated boundary:
+*
+* - **The manifests**, through {@link capabilityManifestDigest}, folded with
+*   the provider content identity the admission-time pre-check resolved for
+*   the same rows. The manifest itself names skills, tools, presets,
+*   permissions and MCP servers — *names*, not bytes — so the fold adds what
+*   only discovery can answer: the `contractDigest` of every accepted
+*   provider (`null` for a skill that declares no sidecar, which is a skill
+*   whose content this deployment cannot pin). The fold covers the rows *this*
+*   batch matched and nothing else, which is what keeps §6's "an unrelated
+*   registry edit does not invalidate a reviewed proposal" true: a changed row
+*   the batch never resolved is not in this digest.
+* - **The judging verifiers**, as the ids the batch's criteria pin by
+*   `verifierRef`. Those are the only instances this runtime can name: the
+*   registered registry exposes its id vocabulary (`verifierIds()`), not the
+*   version or the configuration each id currently stands for, so
+*   `version`/`configurationDigest` are left off rather than invented (§6:
+*   "没有可信内容版本的资源必须标明身份保障有限"). A criterion with no
+*   `verifierRef` is dispatched by mode inside the verifier service and this
+*   runtime cannot see which instance that is; its mode is part of the batch
+*   content (the proposal digest covers the whole contract), so a *mode*
+*   change is a different proposal, while a re-registration that keeps an id
+*   and changes the behaviour behind it is **not** visible here and does not
+*   invalidate a reviewed proposal.
+*/
+function reviewContextOf(input) {
+	return {
+		capabilityManifestDigest: sha256Hex(canonicalize({
+			manifest: capabilityManifestDigest(input.manifests),
+			providers: input.providers.map((provider) => ({
+				name: provider.name,
+				contractDigest: provider.contractDigest
+			}))
+		})),
+		verifiers: verifierIdentitiesOf(input.criteria)
+	};
+}
+/**
+* The judging instances a batch's criteria pin by id, in first-appearance
+* order. See {@link reviewContextOf} for why this is an id list and not a
+* version binding; the digest over it is order-insensitive
+* (`task/src/proposal.ts:reviewContextDigest` sorts), the stored list keeps
+* the writer's order so a reader can see which criterion came first.
+*/
+function verifierIdentitiesOf(criteria) {
+	const identities = [];
+	const seen = /* @__PURE__ */ new Set();
+	for (const criterion of criteria) {
+		const verifierId = criterion.verifierRef;
+		if (verifierId === void 0 || seen.has(verifierId)) continue;
+		seen.add(verifierId);
+		identities.push({ verifierId });
+	}
+	return identities;
+}
+/**
+* Why two review contexts differ, as one line a refusal can carry: which part
+* of the resolution moved (the manifests and provider content, or the judging
+* verifiers). §6 requires the stale marking to name what changed — an
+* invalidation a reader cannot explain is a record that cannot be trusted —
+* and "the context changed" alone would be exactly that. The limits in force
+* are the other half of the re-check and have their own fingerprint
+* (`admissionContextDigest`), so a caller that has two of those reports the
+* difference itself.
+*/
+function reviewContextDelta(before, after) {
+	const parts = [];
+	if (before.capabilityManifestDigest !== after.capabilityManifestDigest) parts.push(`the capability resolution moved (manifest digest ${before.capabilityManifestDigest} → ${after.capabilityManifestDigest})`);
+	const beforeIds = before.verifiers.map((verifier) => verifier.verifierId).sort().join(", ");
+	const afterIds = after.verifiers.map((verifier) => verifier.verifierId).sort().join(", ");
+	if (beforeIds !== afterIds) parts.push(`the judging verifiers moved ([${beforeIds}] → [${afterIds}])`);
+	return parts.length === 0 ? "the review context moved" : parts.join("; ");
 }
 
 //#endregion
@@ -2777,6 +3002,17 @@ function pidIsAlive(pid) {
 		return error.code === "EPERM";
 	}
 }
+/**
+* How many marker writes this process has started; it names each write's
+* temporary file. Two chains mutate one workspace's marker at the same time in a
+* real deployment — a child's submission chain takes the verifier layer in and
+* out while the batch driver releases the child it has seen settle — and with one
+* shared temporary path the first `rename` takes the file away from the second,
+* whose release then fails with ENOENT. A counter per process rather than per
+* registry, because two registries in one process (a second graph's) write the
+* same marker path for the same workspace.
+*/
+let markerWriteSeq = 0;
 /** Parse a marker file's bytes; anything that is not a well-formed marker is reported, never repaired. */
 function parseMarker(raw, file) {
 	let declared;
@@ -2978,7 +3214,8 @@ var WorkspaceRegistry = class {
 		const startedAt = await readProcessStartTime(this.pid);
 		if (startedAt !== void 0) marker.processStartedAt = startedAt;
 		await mkdir(dirname(file), { recursive: true });
-		const tmp = `${file}.tmp`;
+		markerWriteSeq += 1;
+		const tmp = `${file}.${markerWriteSeq}.tmp`;
 		await writeFile(tmp, `${JSON.stringify(marker, null, 2)}\n`, "utf8");
 		await rename(tmp, file);
 	}
@@ -3713,7 +3950,9 @@ async function observeWorkerRun(env, storeId, task, run, handle, signal) {
 		const phase = current.executionPhase;
 		if (phase === "waiting_children" || phase === "submitted") return await awaitWaitingTerminal(env, run, handle, signal, rootDeadline, terminal);
 		if (agentIsRunning(handle)) continue;
-		const factCount = countSubtreeFacts(await env.task.snapshotIn(storeId), task.taskId);
+		const snapshot = await env.task.snapshotIn(storeId);
+		if (openProposalOf(snapshot, task.taskId, run.runId) !== void 0) return await awaitWaitingTerminal(env, run, handle, signal, rootDeadline, terminal);
+		const factCount = countSubtreeFacts(snapshot, task.taskId);
 		const previous = current.noProgress;
 		const rounds = (previous?.factCount === factCount ? previous.rounds : 0) + 1;
 		const note = `the worker session went idle without submitting; the subtree holds ${factCount} fact(s), ${previous?.factCount === factCount ? `unchanged since round ${previous?.rounds}` : "a change since the last marking"} (round ${rounds} of ${env.noProgressRounds})`;
@@ -4884,6 +5123,16 @@ const DEFAULT_BUDGET = {
 /** The shipped no-progress round count (KISS §5's `no_progress(3轮)`); enforced since A3 — see {@link Config.noProgressRounds}. */
 const DEFAULT_NO_PROGRESS_ROUNDS = 3;
 /**
+* The shipped review policy (T2/T3 §5): `off`. Every decomposition this
+* deployment has ever run was admitted on the machine rules alone, and the
+* guide's decision is that a human review is something a deployment *turns on*
+* (§5: no risk-based classifier, no "only when no template matched") rather
+* than something it turns off. `off` is not a silent state: the proposal
+* record carries the policy it was born under, which is what lets a reader
+* tell "this batch ran without a human review" from "a person approved it".
+*/
+const DEFAULT_GENERATED_TASK_REVIEW = "off";
+/**
 * The shipped write-drain window (A3 §3.3). Thirty seconds is far above the
 * settle time of a tool call this process can see finish — the drain waits on
 * in-flight registrations and the session's managed jobs, both of which either
@@ -5017,6 +5266,7 @@ const ConfigSchema = z.object({
 	}).default({ ...DEFAULT_BUDGET }),
 	noProgressRounds: z.number().default(DEFAULT_NO_PROGRESS_ROUNDS),
 	allowRuntimeDecomposition: z.boolean().default(DEFAULT_ALLOW_RUNTIME_DECOMPOSITION),
+	generatedTaskReview: z.union([z.const("off"), z.const("all")]).default(DEFAULT_GENERATED_TASK_REVIEW),
 	rootBudget: RootBudget,
 	writeDrainTimeoutMs: z.number().default(DEFAULT_WRITE_DRAIN_TIMEOUT_MS)
 });
@@ -5066,11 +5316,18 @@ var TaskRuntime = class extends Service {
 	workspaces;
 	/** The load-time provider scan, taken once ({@link providerLoadReport}). */
 	providerLoad;
+	/**
+	* One tail per store and parent task: the serialization §6 asks for, so two
+	* approved proposals competing for the same parent cannot interleave their
+	* re-checks and their commits. See {@link serializeParent}.
+	*/
+	parentChains = /* @__PURE__ */ new Map();
 	constructor(ctx, config) {
 		super(ctx, "taskRuntime");
 		const rootBudget = config?.rootBudget === void 0 ? void 0 : { ...config.rootBudget };
 		this.assertClosedRootBudget(rootBudget);
 		assertRootBudgetConfig(rootBudget ?? {});
+		this.assertGeneratedTaskReview(config?.generatedTaskReview);
 		this.config = {
 			capabilities: structuredClone(config?.capabilities ?? DEFAULT_CAPABILITIES),
 			...config?.defaultPreset !== void 0 ? { defaultPreset: config.defaultPreset } : {},
@@ -5083,6 +5340,7 @@ var TaskRuntime = class extends Service {
 			},
 			noProgressRounds: config?.noProgressRounds ?? DEFAULT_NO_PROGRESS_ROUNDS,
 			allowRuntimeDecomposition: config?.allowRuntimeDecomposition ?? DEFAULT_ALLOW_RUNTIME_DECOMPOSITION,
+			generatedTaskReview: config?.generatedTaskReview ?? DEFAULT_GENERATED_TASK_REVIEW,
 			runBindingRoot: config?.runBindingRoot ?? defaultRunBindingRoot(),
 			...rootBudget === void 0 ? {} : { rootBudget },
 			writeDrainTimeoutMs: config?.writeDrainTimeoutMs ?? DEFAULT_WRITE_DRAIN_TIMEOUT_MS
@@ -5107,6 +5365,19 @@ var TaskRuntime = class extends Service {
 		const unknown = Object.keys(budget).filter((key) => !known.has(key));
 		if (unknown.length === 0) return;
 		throw new Error(`task-runtime: rootBudget names [${unknown.join(", ")}], which this deployment does not enforce; a hard limit that cannot be executed refuses to start rather than running under a promise nobody keeps`);
+	}
+	/**
+	* Refuse a review policy this build does not implement. The configuration
+	* schema types the member, but a deployment that constructs the runtime
+	* directly (a test, an embedding process) bypasses the schema, and a policy
+	* nobody implements is worse than a refusal to start: a value like `"risk"`
+	* would read as "somebody decides which batches are reviewed" while this
+	* build quietly admits everything. `off` and `all` are the two modes §5
+	* defines; nothing is inferred from a near miss.
+	*/
+	assertGeneratedTaskReview(policy) {
+		if (policy === void 0 || policy === "off" || policy === "all") return;
+		throw new Error(`task-runtime: generatedTaskReview is ${JSON.stringify(policy)}; the review policy is "off" or "all" (§5 defines no other mode, and a policy this build cannot execute refuses to start rather than admitting unreviewed batches)`);
 	}
 	/**
 	* The unload path: abort every driver, await their settlements, close the gate
@@ -5250,6 +5521,18 @@ var TaskRuntime = class extends Service {
 	/** The resolved no-progress round count ({@link Config.noProgressRounds}); the batch driver's stop limit. */
 	get noProgressRounds() {
 		return this.config.noProgressRounds;
+	}
+	/**
+	* The review policy in force for batches that have not been admitted yet
+	* ({@link Config.generatedTaskReview}), exposed read-only: a deployment's own
+	* policy is not a secret, and a caller that has to say what happens next
+	* (`decomposeAndRun`'s pending answer, a tool's status line) should read it
+	* from the runtime rather than infer it from a proposal's birth policy — the
+	* two differ exactly when the deployment tightened it after that batch was
+	* proposed.
+	*/
+	get generatedTaskReview() {
+		return this.config.generatedTaskReview;
 	}
 	/**
 	* The tool-execution gate this runtime maintains (A3 §3.3), exposed read-only:
@@ -5420,22 +5703,31 @@ var TaskRuntime = class extends Service {
 	}
 	/**
 	* Admission and progress are two phases with two owners (A3 §3.1), and this
-	* entry is the boundary between them.
+	* entry is the boundary between them — now with the review gate of §5–§6 in
+	* front of it.
 	*
-	* **Admission** (governed by `exec.signal`): protected-input identity fixing,
+	* **Submission**: the batch is pre-checked (protected-input fixing,
 	* normalization, structural admission, capability admission, the provider
-	* pre-check and verifierRef validation all have to pass for the whole batch
-	* before anything is persisted — plus three checks that belong to the
-	* protocol rather than to the shape: the parent run must be `active`, the root
-	* budget must be able to reserve one run per child (§3.5), and the caller's
-	* checkout must already be held by this run or an ancestor of it (§3.4). Every
-	* refusal here is a refusal whole: no id minted, no event written, no worker
-	* started.
+	* pre-check, verifierRef validation — all before any write) and recorded as
+	* an immutable proposal carrying the policy it was born under, the limits in
+	* force and the resolution it was reviewed against
+	* ({@link submitDecompositionProposal}).
 	*
-	* **The atomic commit**: one `admitBatchIn` records the children, their
-	* admission, the dependency edges, the batch identity and the parent's
-	* `active → waiting_children` phase change (§1.3). It is the admission's
-	* closing act — from here the caller may only watch, read or cancel.
+	* **Continuation** (governed by `exec.signal` and the stored decision): the
+	* batch is re-checked against what it was proposed under — the parent's state,
+	* the limits, the capability resolution, the judging verifiers — and only then
+	* admitted ({@link continueProposal}). Under policy `all` that re-check has an
+	* approval behind it, or the batch waits; under `off` it runs immediately,
+	* exactly as it did before T2.
+	*
+	* **Admission and the atomic commit**: one `admitBatchIn` records the
+	* children, their admission, the dependency edges, the batch identity, the
+	* parent's `active → waiting_children` phase change (§1.3) *and* the proposal
+	* it consumed, in one commit — so "this proposal became these tasks" is one
+	* durable fact a crash can be recovered from. The root budget must be able to
+	* reserve one run per child (§3.5), and the caller's checkout must already be
+	* held by this run or an ancestor of it (§3.4). Every refusal here is a
+	* refusal whole: no id minted, no event written, no worker started.
 	*
 	* **Progress** (governed by the runtime): the batch is handed to a driver
 	* registered under the runtime's own controller, and this call returns
@@ -5444,48 +5736,297 @@ var TaskRuntime = class extends Service {
 	* cannot stop a batch the store already admitted (§3.7). {@link awaitBatch}
 	* and the owner notification are how a caller learns how it went.
 	*
-	* Protected acceptance inputs are fixed first (`protected-inputs.ts`): every
-	* criterion's declared paths are read against the session's checkout and
-	* recorded as the SHA-256 of their bytes, so the contract — and both content
-	* identities computed over it — describe the fixed identity, never a path
-	* that could be re-pointed or re-read later.
-	*
-	* The batch is then normalized ({@link normalizeDecomposition}): raw caller
-	* input becomes the contract of every child with its defaults filled and its
-	* criterion ids fixed, and the batch identity plus the limits in force become
-	* ready to be recorded with the decomposition. A refused batch — by the
-	* fixing or by normalization, in one message — is refused whole: no id is
-	* minted into the store, no capability is resolved into an event, and no
-	* obligation is recorded.
-	*
-	* The structural policy is `allowed` — a `leaf` task may decompose only while
-	* {@link Config.allowRuntimeDecomposition} is on — plus the configured growth
-	* guardrails ({@link DEFAULT_MAX_DEPTH}, {@link DEFAULT_MAX_CHILDREN}); a
-	* rejected batch names the rule it hit and persists and spawns nothing.
+	* This entry keeps its pre-T2 signature and its `off`-path behaviour (it
+	* returns the batch), and it is the gate, not the tool layer, that answers a
+	* batch under `all`: a direct call gets `{ status: 'pending_review' }` and no
+	* batch, exactly as the `task_decompose` tool does. A batch that was decided
+	* against between the two calls (rejected, cancelled, stale, expired) is
+	* refused by name — the caller has to revise and propose again, which is what
+	* the diagnostic says.
 	*/
 	async decomposeAndRun(storeId, parentTaskId, parentRunId, callerSessionId, spec, exec = {}) {
-		const actor = callerSessionId;
-		const parentTask = await this.ctx.task.taskIn(storeId, parentTaskId);
-		const parentRun = await this.ctx.task.runIn(storeId, parentRunId);
-		if (parentRun.taskId !== parentTaskId) throw new Error(`task-runtime: run "${parentRunId}" belongs to task "${parentRun.taskId}", not "${parentTaskId}"`);
-		if (parentRun.sessionId !== callerSessionId) throw new Error(`task-runtime: run "${parentRunId}" is bound to session "${parentRun.sessionId}", not caller "${callerSessionId}"`);
-		if (parentRun.executionPhase === void 0) throw new Error(`task-runtime: run "${parentRunId}" predates coordination phases; it needs recovery (cancel this task tree and re-create it) before it can decompose`);
-		if (parentRun.executionPhase !== "active") throw new Error(`task-runtime: run "${parentRunId}" is in phase "${parentRun.executionPhase}"; only an active run may decompose (a run with an admitted batch settles it before deciding anything else)`);
-		if (exec.signal?.aborted === true) throw new Error(`task-runtime: decomposition of "${parentTaskId}" was cancelled before anything was persisted`);
-		const envPath = await this.envPathForSession(callerSessionId);
+		const submission = await this.submitDecompositionProposal(storeId, parentTaskId, parentRunId, callerSessionId, spec, { ...exec.signal === void 0 && exec.callId === void 0 ? {} : { exec } });
+		const continued = await this.continueProposal(storeId, submission.proposalId, callerSessionId, { ...exec.callId === void 0 ? {} : { exec: { callId: exec.callId } } });
+		if (continued.status === "admitted") return {
+			status: "admitted",
+			proposalId: continued.proposalId,
+			batchId: continued.batchId,
+			childTaskIds: continued.childTaskIds
+		};
+		if (continued.status === "pending_review") return {
+			status: "pending_review",
+			proposalId: continued.proposalId,
+			detail: continued.detail,
+			batchId: void 0,
+			childTaskIds: void 0
+		};
+		throw new Error(`task-runtime: decomposition of "${parentTaskId}" is ${continued.status} (proposal ${continued.proposalId}): ${continued.detail}`);
+	}
+	/**
+	* One decomposition proposal is submitted (T2/T3 §5–§6): the pure pre-check,
+	* the immutable record with the policy it was born under, and — under `all` —
+	* the review request. Nothing is admitted here and no child id is minted,
+	* whatever the policy: submission is the record of what was asked for, and
+	* {@link continueProposal} is the only path that turns it into tasks.
+	*
+	* The order is the contract (§5: 坏提案不弹审批): an illegal batch is refused
+	* — with field-level reasons, and with the capability gaps the existing
+	* mechanism records as obligations — before a proposal exists and therefore
+	* before anything can be shown to a person. A batch that passes is recorded
+	* once: the id is derived from its content and the request key from its
+	* calling context, so a retry of the same request answers with the stored
+	* proposal (`existing: true`) instead of building a second one, a different
+	* content under the same explicit key is refused by name, and a revision is
+	* new content and a new key.
+	*
+	* The proposal carries the batch's content, not only its digest (§6), so what
+	* a reviewer reads, what a decision binds and what a continuation admits are
+	* one record — and an approval taken in one process is continuable in another
+	* with nothing but the store.
+	*/
+	async submitDecompositionProposal(storeId, parentTaskId, parentRunId, callerSessionId, spec, options = {}) {
+		return await this.serializeParent(storeId, parentTaskId, () => this.submitProposalOnce(storeId, parentTaskId, parentRunId, callerSessionId, spec, options));
+	}
+	/**
+	* One continuation (§6): the post-approval (and post-restart) re-check, and
+	* the only place a proposal becomes tasks.
+	*
+	* The re-check is the whole point of an approval being a *record* rather than
+	* a switch. Before anything is admitted, the parent's own state, the limits in
+	* force, the capability resolution, the judging verifiers and the batch
+	* content are recomputed and compared with the fingerprints the approval bound
+	* — a batch whose context moved is marked `stale` with the difference named
+	* (§6: 不把旧批准转移给新上下文), and a parent run that ended takes the
+	* approval down with it (`expired`, never a dispatch). Only a batch that still
+	* is what was reviewed is admitted, from `ready`, with its consumption in the
+	* same commit.
+	*
+	* Idempotent from the outside: an already-admitted proposal answers with the
+	* batch its consumption recorded (no second batch, no second commit), a
+	* waiting one answers `pending_review` without writing anything, and a
+	* terminal one answers with the status the store holds.
+	*
+	* `options.spec` re-presents the batch a caller believes this proposal means.
+	* It is only ever a *confirmation*: the re-presented batch is derived and
+	* compared with the stored identity, and a different batch — or one whose
+	* protected acceptance inputs no longer reproduce the fixed identity — is
+	* refused by name. The batch that is admitted is always the stored one, which
+	* is what the approval was made against.
+	*/
+	async continueProposal(storeId, proposalId, caller, options = {}) {
+		const proposal = await this.requireProposal(storeId, proposalId);
+		return await this.serializeParent(storeId, proposal.identity.parentTaskId, () => this.continueProposalIn(storeId, proposalId, caller, options));
+	}
+	/**
+	* One review decision is recorded (T2/T3 §6) — the trusted entry the approval
+	* channel (stage C) and tests call, never a model tool with a decision
+	* argument. Everything it writes is read from the stored proposal: the
+	* dossier digest and both context fingerprints come from the record, so a
+	* decision cannot name a different batch than the one it is about, and the
+	* reducer refuses a claim that disagrees with what is stored.
+	*
+	* An approval whose parent run has ended is **not** recorded as an approval:
+	* §6's rule is that a late approval may only invalidate the proposal, so the
+	* entry records `expired` with the reason that made it late and dispatches
+	* nothing. An approval that lands is continued immediately
+	* ({@link continueProposal}) — and a continuation that could not be performed
+	* is reported in the result rather than thrown away: the approval is on the
+	* record either way, and the caller learns why the batch did not run.
+	*/
+	async decideProposal(storeId, proposalId, decision, decidedBy, exec = {}) {
+		const proposal = await this.requireProposal(storeId, proposalId);
+		return await this.serializeParent(storeId, proposal.identity.parentTaskId, async () => {
+			const current = await this.requireProposal(storeId, proposalId);
+			if (decidedBy.trim().length === 0) throw new Error(`task-runtime: a decision on proposal "${proposalId}" requires a decider`);
+			if (decision.reason !== void 0 && decision.reason.trim().length === 0) throw new Error(`task-runtime: a decision reason on proposal "${proposalId}" must be non-empty when given`);
+			const decidedAt = decision.decidedAt ?? now();
+			let outcome = decision.outcome;
+			let reason = decision.reason;
+			if (outcome === "approved") {
+				const ended = await this.parentRunEndedReason(storeId, current);
+				if (ended !== void 0) {
+					outcome = "expired";
+					reason = `the approval arrived after the batch could be dispatched: ${ended}`;
+				}
+			}
+			if (outcome === "expired" && reason === void 0) throw new Error(`task-runtime: an expiry of proposal "${proposalId}" must state what ended the batch`);
+			await this.ctx.task.decideProposalIn(storeId, {
+				proposalId,
+				outcome,
+				proposalDigest: current.proposalDigest,
+				admissionContextDigest: current.admissionContextDigest,
+				...outcome === "approved" ? { reviewContextDigest: current.reviewContextDigest } : {},
+				decidedBy,
+				decidedAt,
+				...reason === void 0 ? {} : { reason }
+			}, decidedBy);
+			if (outcome !== "approved") return {
+				proposalId,
+				outcome,
+				status: outcome,
+				detail: `proposal "${proposalId}" is ${outcome}${reason === void 0 ? "" : `: ${reason}`}`,
+				...reason === void 0 ? {} : { reason }
+			};
+			try {
+				const continuation = await this.continueProposalIn(storeId, proposalId, current.identity.callerSessionId, { exec });
+				return {
+					proposalId,
+					outcome,
+					status: continuation.status,
+					continuation,
+					detail: `proposal "${proposalId}" is approved; ${continuation.detail}`
+				};
+			} catch (error) {
+				const detail = error instanceof Error ? error.message : String(error);
+				this.warn(`proposal ${proposalId}: the approval is recorded but the batch was not continued (${detail})`);
+				const stored = await this.readProposal(storeId, proposalId).catch(() => void 0);
+				return {
+					proposalId,
+					outcome,
+					status: stored?.status ?? outcome,
+					detail: `the approval of proposal "${proposalId}" is recorded; the batch was not admitted: ${detail}`
+				};
+			}
+		});
+	}
+	/**
+	* One explicit withdrawal of a batch (T2/T3 §6): a `cancelled` decision, by
+	* the session whose run proposed it. A withdrawal from anywhere else — a
+	* deployment retiring a proposal, a reviewer refusing one — goes through
+	* {@link decideProposal} with `cancelled` or `rejected`, which records *who*
+	* decided instead of hiding it behind the caller's identity.
+	*/
+	async cancelProposal(storeId, proposalId, caller) {
+		const proposal = await this.requireProposal(storeId, proposalId);
+		if (caller !== proposal.identity.callerSessionId) throw new Error(`task-runtime: proposal "${proposalId}" was submitted by session "${proposal.identity.callerSessionId}"; session "${caller}" cannot withdraw it (a withdrawal by anybody else is a decision, and is recorded as one — decideProposal with "cancelled")`);
+		return await this.decideProposal(storeId, proposalId, { outcome: "cancelled" }, caller);
+	}
+	/**
+	* The proposal one id names, as the store holds it (§6) — the read side a
+	* tool renders. A proposal is addressed by `proposalId` and by nothing else:
+	* there is no "is it approved?" question a caller can assert, and no approval
+	* credential this entry would accept, because the answer is the stored record
+	* or a refusal naming the id.
+	*/
+	async proposalIn(storeId, proposalId) {
+		return await this.requireProposal(storeId, proposalId);
+	}
+	/** Every proposal one parent task holds, in submission order — what a task's own view of its batches reads. */
+	async proposalsForParent(storeId, parentTaskId) {
+		return [...(await this.ctx.task.snapshotIn(storeId)).proposals?.byParentTask[parentTaskId] ?? []];
+	}
+	/**
+	* The first half of the pure pre-check (T2/T3 §2): the caller's declared
+	* batch becomes a normalized one — protected acceptance inputs fixed against
+	* the caller's own checkout (S1-V slice 2), the one normalization entry over
+	* them, and the content identity out.
+	*
+	* It writes nothing: no event, no obligation, no child id, no proposal. The
+	* derivation is separate from {@link checkDerivedBatch} because the *request*
+	* a caller presents is decided by this value alone — the digest is what a
+	* request key is derived from and what the store is searched by — while the
+	* batch's admission rules are asked only once it is clear that this is not
+	* simply a request the store already answers (T3 §6 idempotency).
+	*
+	* Protected inputs are fixed here, not in normalization: by the time the
+	* single entry reads the batch there is one form and one form only, and a
+	* refused fixing joins the normalization refusal — same error, same no-op.
+	*/
+	async deriveBatch(identity, spec) {
+		const envPath = await this.envPathForSession(identity.callerSessionId);
 		const fixed = await fixSpecProtectedInputs(spec, envPath);
 		const normalized = normalizeDecomposition(fixed.spec, {
-			storeId,
-			parentTaskId,
-			parentRunId,
-			callerSessionId,
+			...identity,
 			admissionContext: this.admissionContext()
 		});
 		const reasons = [...fixed.reasons, ...normalized.ok ? [] : normalized.reasons];
-		if (!normalized.ok || reasons.length > 0) throw this.contractRefusal(parentTaskId, reasons);
-		const batch = normalized.batch;
-		const childTaskIds = batch.children.map(() => `t-${randomUUID()}`);
-		const snapshot = await this.ctx.task.snapshotIn(storeId);
+		if (!normalized.ok || reasons.length > 0) return {
+			ok: false,
+			refusal: {
+				error: this.contractRefusal(identity.parentTaskId, reasons),
+				reasons,
+				gaps: []
+			}
+		};
+		return {
+			ok: true,
+			batch: normalized.batch,
+			...envPath === void 0 ? {} : { envPath }
+		};
+	}
+	/** The manifests one normalized batch resolves to, in batch order — the same list the admission records per child. */
+	manifestsOf(batch) {
+		return batch.children.map((child) => this.resolveCapabilities(child.contract.requiredCapabilities));
+	}
+	/**
+	* The batch one stored proposal holds, in the shape admission consumes (§6):
+	* the contracts and declarations a reviewer read, the caller's reason from the
+	* identity, and the limits and digest the proposal recorded. The store is the
+	* source of truth — a proposal carries its content, not only its digest — so a
+	* continuation, a review request and a recovery in a process that never
+	* submitted the batch all render and re-check the same batch from the saved
+	* facts.
+	*
+	* Rebuilding cannot smuggle other content in: the record's own reducer refused
+	* a submission whose {@link TaskProposalChild} entries disagree with the
+	* identity (same order, same contract digests, same declarations), and the
+	* continuation re-derives the identity from this batch and compares the digest
+	* with the stored one before anything is admitted.
+	*/
+	storedBatchOf(proposal) {
+		return {
+			contractVersion: proposal.identity.contractVersion,
+			reason: proposal.identity.reason,
+			children: proposal.batch.map((child) => ({
+				contract: structuredClone(child.contract),
+				dependsOn: [...child.dependsOn],
+				decomposable: child.decomposable,
+				requiresIndependentAcceptance: child.requiresIndependentAcceptance
+			})),
+			admission: {
+				proposalDigest: proposal.proposalDigest,
+				context: structuredClone(proposal.admissionContext)
+			}
+		};
+	}
+	/**
+	* The run protocol one decomposition has to satisfy before anything is
+	* proposed: the run belongs to this task, it is bound to this caller, it is
+	* `active` (the admission gate — a run with an admitted batch settles it
+	* before deciding anything else), and the call was not already cancelled.
+	* Unknown and non-`active` phases are refusals rather than guesses, and a
+	* phase-less run is an old record whose only legal continuation is
+	* cancellation.
+	*
+	* These checks are asked *after* a request the store already answers has been
+	* answered from the record: a retry of a request the run has already proposed
+	* is that proposal, whatever state the run is in now (T3 §6 — the same request
+	* never builds a second batch), while a genuinely new batch may only be
+	* proposed by a run that is still deciding its own work.
+	*/
+	assertDecomposableRun(parentTask, parentRun, callerSessionId, signal) {
+		const parentTaskId = parentTask.taskId;
+		if (parentRun.taskId !== parentTaskId) throw new Error(`task-runtime: run "${parentRun.runId}" belongs to task "${parentRun.taskId}", not "${parentTaskId}"`);
+		if (parentRun.sessionId !== callerSessionId) throw new Error(`task-runtime: run "${parentRun.runId}" is bound to session "${parentRun.sessionId}", not caller "${callerSessionId}"`);
+		if (parentRun.executionPhase === void 0) throw new Error(`task-runtime: run "${parentRun.runId}" predates coordination phases; it needs recovery (cancel this task tree and re-create it) before it can decompose`);
+		if (parentRun.executionPhase !== "active") throw new Error(`task-runtime: run "${parentRun.runId}" is in phase "${parentRun.executionPhase}"; only an active run may decompose (a run with an admitted batch settles it before deciding anything else)`);
+		if (signal?.aborted === true) throw new Error(`task-runtime: decomposition of "${parentTaskId}" was cancelled before anything was persisted`);
+	}
+	/**
+	* The second half of the pure pre-check (§2): the batch's own admission rules
+	* over a derived batch — structural admission (`contractDefects`,
+	* `independentAcceptanceDefects`, the growth guardrails, dependency
+	* acyclicity), capability resolution and the gap rule, the provider
+	* pre-check, and verifierRef validation.
+	*
+	* Pure and reusable: this is exactly what the post-approval re-check asks
+	* again (§6), and it answers with a value ({@link DecompositionRefusal}) so
+	* the caller decides whether a refusal is a refusal or an invalidation.
+	*/
+	async checkDerivedBatch(request) {
+		const { identity, parentTask, batch } = request;
+		const parentTaskId = identity.parentTaskId;
+		const snapshot = await this.ctx.task.snapshotIn(identity.storeId);
 		const leaf = parentTask.decompositionStatus === "leaf";
 		const verdict = checkDecomposition({
 			...parentTask,
@@ -5495,15 +6036,21 @@ var TaskRuntime = class extends Service {
 				maxDepth: this.config.maxDepth,
 				maxChildren: this.config.maxChildren
 			}
-		}, batch.children.map((child, index) => ({
-			taskId: childTaskIds[index],
+		}, batch.children.map((child) => ({
 			objective: child.contract.objective,
 			acceptanceCriteria: child.contract.acceptanceCriteria,
 			dependsOn: child.dependsOn,
 			requiresIndependentAcceptance: child.requiresIndependentAcceptance
 		})), snapshot.edges);
-		if (!verdict.ok) throw new Error(`task-runtime: admission rejected decomposition of "${parentTaskId}":\n- ${verdict.reasons.join("\n- ")}`);
-		const manifests = batch.children.map((child) => this.resolveCapabilities(child.contract.requiredCapabilities));
+		if (!verdict.ok) return {
+			ok: false,
+			refusal: {
+				error: /* @__PURE__ */ new Error(`task-runtime: admission rejected decomposition of "${parentTaskId}":\n- ${verdict.reasons.join("\n- ")}`),
+				reasons: verdict.reasons,
+				gaps: []
+			}
+		};
+		const manifests = this.manifestsOf(batch);
 		const rejected = batch.children.map((child, index) => ({
 			child,
 			index,
@@ -5511,22 +6058,84 @@ var TaskRuntime = class extends Service {
 		})).filter(({ child, manifest }) => manifest.missing.length > 0 && !child.decomposable);
 		if (rejected.length > 0) {
 			const detail = rejected.map(({ index, manifest }) => `child ${index} is missing [${manifest.missing.join(", ")}] and may not decompose`).join("; ");
-			for (const { index, manifest } of rejected) for (const missing of manifest.missing) await this.ctx.task.recordObligationIn(storeId, {
-				obligationId: `o-${randomUUID()}`,
-				goal: `capability "${missing}" required by child ${index} ("${batch.children[index].contract.objective}") of "${parentTaskId}" is not granted by the registry`,
-				criterion: `capability "${missing}" resolves in the capability registry (capability_list shows it)`,
-				sourceTaskId: parentTaskId
-			}, actor);
+			const gaps = rejected.map(({ index, manifest }) => ({
+				childIndex: index,
+				objective: batch.children[index].contract.objective,
+				missing: [...manifest.missing]
+			}));
 			const gapNames = [...new Set(rejected.flatMap(({ manifest }) => manifest.missing))];
-			throw new Error(`task-runtime: admission rejected decomposition of "${parentTaskId}": capability gap: ${detail}; ` + escalationHint(`capabilities [${gapNames.join(", ")}] are not granted by the capability registry`, "capability_list and the children's declared capabilities", "grant the capability in the registry, or mark the child decomposable"));
+			return {
+				ok: false,
+				refusal: {
+					error: /* @__PURE__ */ new Error(`task-runtime: admission rejected decomposition of "${parentTaskId}": capability gap: ${detail}; ` + escalationHint(`capabilities [${gapNames.join(", ")}] are not granted by the capability registry`, "capability_list and the children's declared capabilities", "grant the capability in the registry, or mark the child decomposable")),
+					reasons: [detail],
+					gaps
+				}
+			};
 		}
-		const precheck = await this.providerPrecheck([...new Set(manifests.flatMap((manifest) => Object.keys(manifest.capabilities)))], { ...envPath === void 0 ? {} : { cwd: envPath } });
+		const precheck = await this.providerPrecheck([...new Set(manifests.flatMap((manifest) => Object.keys(manifest.capabilities)))], { ...request.envPath === void 0 ? {} : { cwd: request.envPath } });
 		const refusals = providerRefusals(precheck);
-		if (refusals.length > 0) throw new Error(`task-runtime: provider pre-check rejected decomposition of "${parentTaskId}":\n- ${refusals.join("\n- ")}`);
-		this.assertKnownVerifierRefs(batch.children.flatMap((child, childIndex) => child.contract.acceptanceCriteria.map((criterion) => ({
-			childIndex,
-			criterion
-		}))), `decomposition of "${parentTaskId}"`);
+		if (refusals.length > 0) return {
+			ok: false,
+			refusal: {
+				error: /* @__PURE__ */ new Error(`task-runtime: provider pre-check rejected decomposition of "${parentTaskId}":\n- ${refusals.join("\n- ")}`),
+				reasons: refusals,
+				gaps: []
+			}
+		};
+		try {
+			await this.assertKnownVerifierRefs(batch.children.flatMap((child, childIndex) => child.contract.acceptanceCriteria.map((criterion) => ({
+				childIndex,
+				criterion
+			}))), `decomposition of "${parentTaskId}"`);
+		} catch (error) {
+			const failure = error instanceof Error ? error : new Error(String(error));
+			return {
+				ok: false,
+				refusal: {
+					error: failure,
+					reasons: [failure.message],
+					gaps: []
+				}
+			};
+		}
+		return {
+			ok: true,
+			batch,
+			manifests,
+			providers: precheck
+		};
+	}
+	/**
+	* The admission half of one batch that passed the pre-check (T2/T3 §6): the
+	* protocol's own commitments, made only now — the root budget reserves one run
+	* per child (§3.5), the caller's checkout must be this run's or an ancestor's
+	* (§3.4), the child ids are minted, and one `admitBatchIn` commit records the
+	* children, their admission, the dependency edges, the batch identity, the
+	* parent's `active → waiting_children` phase change and the proposal
+	* consumption together (§1.3). The driver is started last, so progress belongs
+	* to the runtime before the caller hears anything.
+	*
+	* The proposal is what makes this half addressable: its consumption names the
+	* very children this commit creates, so "the proposal was consumed and these
+	* are its tasks" is one durable fact — the record a recovery reads instead of
+	* admitting a second batch.
+	*
+	* A refusal here is a refusal whole (nothing is minted or committed), and it
+	* leaves the proposal where it was: `ready` under policy `off`, or `approved`
+	* for a batch that was approved and could not be started yet. Nothing is spent
+	* by a budget that says no, and a later continuation retries the same batch.
+	*/
+	async admitPrecheckedBatch(request) {
+		const { proposal, parentTask, parentRun, batch, manifests, exec = {} } = request;
+		const providers = request.providers;
+		const storeId = proposal.identity.storeId;
+		const parentTaskId = parentTask.taskId;
+		const callerSessionId = proposal.identity.callerSessionId;
+		const actor = callerSessionId;
+		if (exec.signal?.aborted === true) throw new Error(`task-runtime: decomposition of "${parentTaskId}" was cancelled before anything was persisted`);
+		const childTaskIds = batch.children.map(() => `t-${randomUUID()}`);
+		const snapshot = await this.ctx.task.snapshotIn(storeId);
 		const budget = resolveRootBudget(snapshot, this.config.rootBudget ?? {});
 		if (!budget.ok) {
 			if (hasRootLimits(this.config.rootBudget)) throw new Error(`task-runtime: decomposition of "${parentTaskId}" refused: the root budget cannot be resolved: ${budget.reason}`);
@@ -5535,7 +6144,7 @@ var TaskRuntime = class extends Service {
 			if (!reserved.allowed) throw new Error(`task-runtime: decomposition of "${parentTaskId}" refused: ${reserved.reason}`);
 		}
 		const workspacePath = await this.workspacePathForSession(callerSessionId);
-		if (workspacePath !== void 0) await this.assertWorkspaceHeldBy(workspacePath, storeId, parentTask, parentRunId);
+		if (workspacePath !== void 0) await this.assertWorkspaceHeldBy(workspacePath, storeId, parentTask, parentRun.runId);
 		const children = batch.children.map((child, index) => ({
 			taskId: childTaskIds[index],
 			definitionRef: {
@@ -5559,7 +6168,14 @@ var TaskRuntime = class extends Service {
 			to: childTaskIds[to]
 		})));
 		const batchId = batchIdFor(parentTaskId);
-		await this.ctx.task.admitBatchIn(storeId, parentTaskId, parentRunId, children, actor, edges, batch.admission, manifests);
+		await this.ctx.task.admitBatchIn(storeId, parentTaskId, parentRun.runId, children, actor, edges, batch.admission, manifests, {
+			proposalId: proposal.proposalId,
+			proposalDigest: proposal.proposalDigest,
+			reviewContextDigest: proposal.reviewContextDigest,
+			batchId,
+			childTaskIds,
+			admittedAt: now()
+		});
 		this.executionGate.setPhase(callerSessionId, "waiting_children");
 		if (workspacePath !== void 0 && this.workspaces !== void 0) {
 			const held = this.workspaces.ownerOf(workspacePath);
@@ -5574,17 +6190,556 @@ var TaskRuntime = class extends Service {
 		this.startBatchDriver({
 			storeId,
 			parentTaskId,
-			parentRunId,
+			parentRunId: parentRun.runId,
 			batchId,
 			callerSessionId,
-			reason: spec.reason,
-			providers: precheck,
+			reason: batch.reason,
+			providers,
 			...exec.callId === void 0 ? {} : { excludeCallId: exec.callId }
 		});
 		return {
 			batchId,
 			childTaskIds
 		};
+	}
+	/**
+	* One submission, inside the parent's serialization: derivation, idempotency,
+	* the run protocol, the batch's admission rules, the record, and — under
+	* `all` — the review request. The order is the contract:
+	*
+	* 1. the presented batch is derived (protected inputs fixed, one
+	*    normalization), and an illegal batch is refused here, field by field,
+	*    *before* a proposal exists — §5's 坏提案不弹审批, and the capability gaps
+	*    of such a refusal are recorded as obligations by the same mechanism the
+	*    admission chain always used, because the derivation and the batch
+	*    judgement write nothing;
+	* 2. a request the store already answers (the same key and the same content)
+	*    is answered from the record — `existing: true`, the stored status, and,
+	*    for a proposal that is still waiting, the review requested again, because
+	*    a caller asking again is evidence that somebody is still waiting. This
+	*    comes *before* the run protocol, so a retry of a request the run has
+	*    already proposed is that proposal whatever state the run is in now;
+	* 3. a genuinely new batch takes the run protocol (only a run that may still
+	*    decide its own work may propose one) and every admission rule, then the
+	*    record is written once behind a content-derived id — carrying the batch
+	*    content itself, so the review, the decision and a later continuation all
+	*    rest on the same stored facts.
+	*/
+	async submitProposalOnce(storeId, parentTaskId, parentRunId, callerSessionId, spec, options) {
+		const actor = callerSessionId;
+		const identity = {
+			storeId,
+			parentTaskId,
+			parentRunId,
+			callerSessionId
+		};
+		const parentTask = await this.ctx.task.taskIn(storeId, parentTaskId);
+		const parentRun = await this.ctx.task.runIn(storeId, parentRunId);
+		const derived = await this.deriveBatch(identity, spec);
+		if (!derived.ok) return await this.refusePrecheck(storeId, parentTaskId, actor, derived.refusal);
+		const { batch } = derived;
+		const requestKey = options.requestKey ?? proposalRequestKey({
+			...identity,
+			proposalDigest: batch.admission.proposalDigest
+		});
+		const stored = await this.proposalForRequest(storeId, requestKey, batch.admission.proposalDigest);
+		if (stored !== void 0) {
+			const storedBatch = this.storedBatchOf(stored);
+			const review$1 = stored.status === "pending_review" ? await this.requestProposalReview({
+				storeId,
+				trigger: "submitted",
+				proposal: stored,
+				parentTask,
+				batch: storedBatch,
+				manifests: this.manifestsOf(storedBatch)
+			}) : void 0;
+			return {
+				proposalId: stored.proposalId,
+				status: stored.status,
+				policy: stored.policy,
+				existing: true,
+				detail: this.submissionDetail(stored, true),
+				...review$1 === void 0 ? {} : { review: review$1 }
+			};
+		}
+		this.assertDecomposableRun(parentTask, parentRun, callerSessionId, options.exec?.signal);
+		const checked = await this.checkDerivedBatch({
+			identity,
+			parentTask,
+			batch,
+			...derived.envPath === void 0 ? {} : { envPath: derived.envPath }
+		});
+		if (!checked.ok) return await this.refusePrecheck(storeId, parentTaskId, actor, checked.refusal);
+		const { manifests, providers } = checked;
+		const reviewContext = reviewContextOf({
+			manifests,
+			criteria: batch.children.flatMap((child) => child.contract.acceptanceCriteria),
+			providers: providerContentIdentities(providers.capabilities)
+		});
+		const policy = this.config.generatedTaskReview;
+		const proposalIdentity = decompositionIdentity(identity, batch.reason, batch.children);
+		const proposal = {
+			proposalId: taskProposalId(proposalIdentity),
+			requestKey,
+			...options.supersedes === void 0 ? {} : { supersedes: options.supersedes },
+			status: policy === "all" ? "pending_review" : "ready",
+			policy,
+			identity: proposalIdentity,
+			batch: batch.children,
+			proposalDigest: batch.admission.proposalDigest,
+			admissionContext: batch.admission.context,
+			admissionContextDigest: admissionContextDigest(batch.admission.context),
+			reviewContext,
+			reviewContextDigest: reviewContextDigest(reviewContext),
+			createdAt: now()
+		};
+		try {
+			await this.ctx.task.submitProposalIn(storeId, proposal, actor);
+		} catch (error) {
+			const raced = await this.readProposal(storeId, proposal.proposalId).catch(() => void 0);
+			if (raced === void 0 || raced.proposalDigest !== proposal.proposalDigest) throw error;
+			return {
+				proposalId: raced.proposalId,
+				status: raced.status,
+				policy: raced.policy,
+				existing: true,
+				detail: this.submissionDetail(raced, true)
+			};
+		}
+		if (proposal.status !== "pending_review") return {
+			proposalId: proposal.proposalId,
+			status: proposal.status,
+			policy: proposal.policy,
+			existing: false,
+			detail: this.submissionDetail(proposal, false)
+		};
+		const review = await this.requestProposalReview({
+			storeId,
+			trigger: "submitted",
+			proposal,
+			parentTask,
+			batch,
+			manifests
+		});
+		return {
+			proposalId: proposal.proposalId,
+			status: proposal.status,
+			policy: proposal.policy,
+			existing: false,
+			detail: this.submissionDetail(proposal, false),
+			review
+		};
+	}
+	/**
+	* One continuation, inside the parent's serialization (§6's "单进程串行"):
+	* the state ladder first, then the re-check, then — only if the batch still is
+	* what was reviewed — admission.
+	*
+	* The ladder answers without writing wherever the answer is already on the
+	* record: an admitted proposal answers with its own consumption (so a
+	* duplicate continuation cannot build a second batch), a waiting one answers
+	* `pending_review`, and a terminal one answers with the status the store
+	* holds. The re-check then resolves the four ways §6 describes — the parent
+	* already has a batch (`stale`), the parent run ended (`expired`), the context
+	* moved (`stale`, with the difference named), or the batch still is what was
+	* reviewed (`approved → ready` and admit).
+	*/
+	async continueProposalIn(storeId, proposalId, caller, options) {
+		const proposal = await this.requireProposal(storeId, proposalId);
+		if (caller !== proposal.identity.callerSessionId) throw new Error(`task-runtime: proposal "${proposalId}" was submitted by session "${proposal.identity.callerSessionId}"; session "${caller}" cannot continue it (a batch belongs to the run that proposed it, and an approval is continued on that run's behalf)`);
+		switch (proposal.status) {
+			case "admitted": {
+				const consumption = proposal.consumption;
+				if (consumption === void 0) throw new Error(`task-runtime: proposal "${proposalId}" is admitted without a consumption record; the store is inconsistent and nothing is dispatched`);
+				return {
+					proposalId,
+					status: "admitted",
+					batchId: consumption.batchId,
+					childTaskIds: [...consumption.childTaskIds],
+					detail: `proposal "${proposalId}" is admitted as batch ${consumption.batchId}; the runtime owns that batch and it is not admitted again`
+				};
+			}
+			case "pending_review": return {
+				proposalId,
+				status: "pending_review",
+				detail: `proposal "${proposalId}" is waiting for a review; only a decision on the record advances it (§6)`
+			};
+			case "rejected":
+			case "cancelled":
+			case "stale":
+			case "expired": return {
+				proposalId,
+				status: proposal.status,
+				detail: `proposal "${proposalId}" is ${proposal.status}; nothing was admitted and nothing is dispatched`,
+				...proposal.decision?.reason === void 0 ? {} : { reason: proposal.decision.reason }
+			};
+			default: break;
+		}
+		const parentTaskId = proposal.identity.parentTaskId;
+		const parentTask = await this.ctx.task.taskIn(storeId, parentTaskId);
+		const parentRun = await this.ctx.task.runIn(storeId, proposal.identity.parentRunId);
+		if (parentTask.decompositionStatus === "decomposed") return await this.staleProposal(storeId, proposal, `the parent task "${parentTaskId}" already has a batch, so this proposal's batch cannot become it (a task decomposes once); the approval is not transferred to another batch`);
+		const ended = await this.parentRunEndedReason(storeId, proposal);
+		if (ended !== void 0) return await this.expireProposal(storeId, proposal, `the batch can no longer be dispatched: ${ended}`);
+		const envPath = await this.envPathForSession(proposal.identity.callerSessionId);
+		if (proposal.status === "ready" && proposal.policy === "off" && this.config.generatedTaskReview === "all") {
+			await this.ctx.task.changeProposalPhaseIn(storeId, {
+				proposalId,
+				to: "pending_review",
+				reason: "the deployment tightened the review policy to \"all\" while this batch had not been admitted yet (§5: only tightening is allowed, and it reaches whatever has not run)"
+			}, proposal.identity.callerSessionId);
+			const tightened = await this.requireProposal(storeId, proposalId);
+			const tightenedBatch = this.storedBatchOf(tightened);
+			let detail = "it is now waiting for a review";
+			const reviewed = await this.checkDerivedBatch({
+				identity: {
+					storeId,
+					parentTaskId: tightened.identity.parentTaskId,
+					parentRunId: tightened.identity.parentRunId,
+					callerSessionId: tightened.identity.callerSessionId
+				},
+				parentTask,
+				batch: tightenedBatch,
+				...envPath === void 0 ? {} : { envPath }
+			});
+			if (reviewed.ok) {
+				const review = await this.requestProposalReview({
+					storeId,
+					trigger: "tightened",
+					proposal: tightened,
+					parentTask,
+					batch: tightenedBatch,
+					manifests: reviewed.manifests
+				});
+				detail += `; ${review.detail}`;
+			} else detail += `, and its batch no longer passes admission (${reviewed.refusal.reasons.join("; ")})`;
+			return {
+				proposalId,
+				status: "pending_review",
+				detail: `proposal "${proposalId}" was sent for review: ${detail}`
+			};
+		}
+		const identity = {
+			storeId,
+			parentTaskId: proposal.identity.parentTaskId,
+			parentRunId: proposal.identity.parentRunId,
+			callerSessionId: proposal.identity.callerSessionId
+		};
+		if (options.spec !== void 0) {
+			const presented = await this.deriveBatch(identity, options.spec);
+			if (!presented.ok) throw new Error(`task-runtime: the batch presented for proposal "${proposalId}" is not a usable one: ${presented.refusal.reasons.join("; ")}`);
+			if (presented.batch.admission.proposalDigest !== proposal.proposalDigest) throw new Error(`task-runtime: the batch presented for proposal "${proposalId}" is a different one (digest ${presented.batch.admission.proposalDigest} ≠ the stored ${proposal.proposalDigest}); an approval never travels to other content, and nothing was admitted`);
+		}
+		const batch = this.storedBatchOf(proposal);
+		const checked = await this.checkDerivedBatch({
+			identity,
+			parentTask,
+			batch,
+			...envPath === void 0 ? {} : { envPath }
+		});
+		if (!checked.ok) {
+			if (checked.refusal.error instanceof VerifierUnavailableError) throw checked.refusal.error;
+			return await this.staleProposal(storeId, proposal, `the batch no longer passes admission: ${checked.refusal.reasons.join("; ")}`);
+		}
+		const { manifests, providers } = checked;
+		const contextDigest = admissionContextDigest(this.admissionContext());
+		if (contextDigest !== proposal.admissionContextDigest) return await this.staleProposal(storeId, proposal, `the limits in force moved since the batch was proposed and reviewed (admission context ${proposal.admissionContextDigest} → ${contextDigest})`);
+		const reviewContext = reviewContextOf({
+			manifests,
+			criteria: batch.children.flatMap((child) => child.contract.acceptanceCriteria),
+			providers: providerContentIdentities(providers.capabilities)
+		});
+		if (reviewContextDigest(reviewContext) !== proposal.reviewContextDigest) return await this.staleProposal(storeId, proposal, `the resolution this batch was reviewed against moved: ${reviewContextDelta(proposal.reviewContext, reviewContext)}`);
+		if (proposal.status === "approved") await this.ctx.task.changeProposalPhaseIn(storeId, {
+			proposalId,
+			to: "ready",
+			reason: "the post-approval re-check passed: the parent, the limits, the capability resolution, the judging verifiers and the batch content are the ones that were reviewed"
+		}, proposal.identity.callerSessionId);
+		const admitted = await this.admitPrecheckedBatch({
+			proposal,
+			parentTask,
+			parentRun,
+			batch,
+			manifests,
+			providers,
+			...options.exec === void 0 ? {} : { exec: options.exec }
+		});
+		return {
+			proposalId,
+			status: "admitted",
+			batchId: admitted.batchId,
+			childTaskIds: admitted.childTaskIds,
+			detail: `proposal "${proposalId}" is admitted as batch ${admitted.batchId} with ${admitted.childTaskIds.length} child task(s)`
+		};
+	}
+	/**
+	* Invalidate one proposal whose context moved (§6), and remember that on the
+	* record: `stale` is terminal, it needs its reason, and it is a statement
+	* about the batch rather than a deletion of it — the record and its approval
+	* stay readable, and a revision is new content under a new key.
+	*/
+	async staleProposal(storeId, proposal, reason) {
+		await this.ctx.task.changeProposalPhaseIn(storeId, {
+			proposalId: proposal.proposalId,
+			to: "stale",
+			reason
+		}, proposal.identity.callerSessionId);
+		return {
+			proposalId: proposal.proposalId,
+			status: "stale",
+			detail: `proposal "${proposal.proposalId}" is stale: ${reason}`,
+			reason
+		};
+	}
+	/**
+	* Invalidate one proposal whose parent run can no longer dispatch it (§6: a
+	* late approval may only invalidate). The write is a *decision* — `expired`
+	* is one of the four outcomes the store records with a decider and a reason —
+	* and the decider is named `task-runtime`, because this invalidation is the
+	* runtime's own reading of the run's state rather than a person's decision.
+	*/
+	async expireProposal(storeId, proposal, reason) {
+		await this.ctx.task.decideProposalIn(storeId, {
+			proposalId: proposal.proposalId,
+			outcome: "expired",
+			proposalDigest: proposal.proposalDigest,
+			admissionContextDigest: proposal.admissionContextDigest,
+			decidedBy: "task-runtime",
+			decidedAt: now(),
+			reason
+		}, "task-runtime");
+		return {
+			proposalId: proposal.proposalId,
+			status: "expired",
+			detail: `proposal "${proposal.proposalId}" is expired: ${reason}`,
+			reason
+		};
+	}
+	/**
+	* Why the parent run can no longer host a batch, or `undefined` when it can.
+	* Three states, each named by what it means rather than by the field:
+	* the run is no longer running (cancelled, failed, verified), it predates the
+	* coordination phases (an old record whose only legal continuation is
+	* cancellation), or it has left the deciding phase by submitting its own
+	* result. A parent that *is* decomposed is not answered here: §6 treats that
+	* as a lost race (`stale`, a context that moved) rather than as a run that
+	* ended.
+	*/
+	async parentRunEndedReason(storeId, proposal) {
+		const run = await this.ctx.task.runIn(storeId, proposal.identity.parentRunId);
+		if (run.status !== "running") return `the parent run "${run.runId}" is ${run.status}`;
+		if (run.executionPhase === void 0) return `the parent run "${run.runId}" predates coordination phases`;
+		if (run.executionPhase !== "active") return `the parent run "${run.runId}" is in phase "${run.executionPhase}"`;
+	}
+	/** The proposal a request key already names, or `undefined` when the key is free; a key bound to other content is a refusal by name (§6). */
+	async proposalForRequest(storeId, requestKey, proposalDigest) {
+		const stored = (await this.ctx.task.snapshotIn(storeId)).proposals?.byRequestKey[requestKey];
+		if (stored === void 0) return void 0;
+		if (stored.proposalDigest !== proposalDigest) throw new Error(`task-runtime: request key "${requestKey}" is already bound to proposal "${stored.proposalId}", whose batch is a different one (digest ${stored.proposalDigest} ≠ ${proposalDigest}); a revision is new content under a new key (§6)`);
+		return stored;
+	}
+	/** The proposal one id names, or a refusal naming the id — the read every public entry starts from. */
+	async requireProposal(storeId, proposalId) {
+		const proposal = await this.readProposal(storeId, proposalId);
+		if (proposal === void 0) throw new Error(`task-runtime: store "${storeId}" holds no proposal "${proposalId}"`);
+		return proposal;
+	}
+	/**
+	* The proposal one id names, or `undefined`. The index is optional at the type
+	* level (snapshots built by hand predate proposals), and an index this reader
+	* cannot see is answered as "not this store's proposal" rather than guessed
+	* at.
+	*/
+	async readProposal(storeId, proposalId) {
+		return (await this.ctx.task.snapshotIn(storeId)).proposals?.byId[proposalId];
+	}
+	/**
+	* One submission's answer, in one sentence: the policy it was born under, the
+	* status it holds, and what the caller owes next. A re-answer says so, because
+	* "the proposal you sent before is still the one this request means" is a
+	* different fact from "a new proposal was written".
+	*/
+	submissionDetail(proposal, existing) {
+		const head = existing ? `request answered from proposal "${proposal.proposalId}" (policy ${proposal.policy}, status ${proposal.status})` : `proposal "${proposal.proposalId}" was recorded under policy ${proposal.policy} as ${proposal.status}`;
+		switch (proposal.status) {
+			case "ready": return `${head}; continue it to admit the batch (policy off admits without a review, and the record says policy-off)`;
+			case "pending_review": return `${head}; it needs a recorded decision before its batch can run, and its batch is not admitted, not spawned and its parent is not decomposed`;
+			case "approved": return `${head}; the approval is on record and the batch has not been admitted yet — continue it to run the post-approval re-check`;
+			case "admitted": return `${head}; its batch is admitted already and will not be admitted again`;
+			default: return `${head}; a ${proposal.status} proposal is not dispatched, and a revision is new content under a new key`;
+		}
+	}
+	/**
+	* Ask the deployment's review channel about one waiting proposal (§5–§6).
+	* A channel is optional and its answer is only ever a notice: absent, it
+	* answers "nobody was asked" and the proposal stays `pending_review`; present,
+	* it may ask a person and report what it did; a channel that throws is warned
+	* about and reported, never swallowed — and none of those outcomes can turn
+	* into an approval, because the only thing that advances a waiting proposal is
+	* a persisted decision.
+	*/
+	async requestProposalReview(request) {
+		const channel = this.softService("proposalReviewChannel");
+		if (channel === void 0 || typeof channel.requestReview !== "function") return {
+			requested: false,
+			detail: "no review channel is mounted (ctx.proposalReviewChannel), so nobody was asked; the proposal stays pending_review and only a recorded decision moves it"
+		};
+		const registeredVerifiers = await this.registeredVerifierIds();
+		const obligations = await this.ctx.task.snapshotIn(request.storeId).then((snapshot) => snapshot.obligations.filter((obligation) => obligation.sourceTaskId === request.parentTask.taskId)).catch(() => []);
+		try {
+			const notice = await channel.requestReview({
+				storeId: request.storeId,
+				trigger: request.trigger,
+				proposal: request.proposal,
+				parentTask: request.parentTask,
+				batch: request.batch,
+				manifests: request.manifests,
+				...registeredVerifiers === void 0 ? {} : { registeredVerifiers },
+				obligations
+			});
+			return {
+				requested: notice.requested,
+				detail: notice.detail ?? (notice.requested ? "the review was requested" : "the review channel did not request a review")
+			};
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			this.warn(`proposal ${request.proposal.proposalId}: the review channel failed (${detail}); the proposal stays pending_review`);
+			return {
+				requested: false,
+				detail: `the review channel failed: ${detail}`
+			};
+		}
+	}
+	/**
+	* Raise the obligations a capability-gap refusal owes, then raise the refusal
+	* itself: one obligation per missing capability, on the parent, with the
+	* wording the admission chain has always used (KISS §7 — a gap is a normal
+	* state with a record, not a silence). The pre-check wrote nothing, so this is
+	* the only place the *fact* of the gap is recorded, and it happens before the
+	* batch is refused — never twice, because a refused batch has no proposal to
+	* re-refuse.
+	*/
+	async refusePrecheck(storeId, parentTaskId, actor, refusal) {
+		for (const gap of refusal.gaps) for (const missing of gap.missing) await this.ctx.task.recordObligationIn(storeId, {
+			obligationId: `o-${randomUUID()}`,
+			goal: `capability "${missing}" required by child ${gap.childIndex} ("${gap.objective}") of "${parentTaskId}" is not granted by the registry`,
+			criterion: `capability "${missing}" resolves in the capability registry (capability_list shows it)`,
+			sourceTaskId: parentTaskId
+		}, actor);
+		throw refusal.error;
+	}
+	/**
+	* One parent's proposal operations, one at a time (§6: "单进程同一父分解的
+	* 重检、提案消费及子任务绑定应串行"). What this buys: two approved proposals
+	* competing for the same parent can only ever admit one batch — the loser's
+	* continuation reads the parent's state *after* the winner's commit, sees it
+	* decomposed, and is marked stale by name. The chain is this process's own, per
+	* store and parent; a second process is covered by the store's own refusals
+	* (a decomposed parent, a duplicate proposal id, a consumed proposal), never
+	* by this map.
+	*/
+	async serializeParent(storeId, parentTaskId, work) {
+		const key = `${storeId}/${parentTaskId}`;
+		const run = (this.parentChains.get(key) ?? Promise.resolve()).then(work, work);
+		const settled = run.then(() => void 0, () => void 0);
+		this.parentChains.set(key, settled);
+		settled.then(() => {
+			if (this.parentChains.get(key) === settled) this.parentChains.delete(key);
+		});
+		return await run;
+	}
+	/**
+	* The proposal pass of recovery (T3 §5), run at the end of
+	* {@link reconcileStore} — after the runs, so a batch this pass admits is
+	* either picked up by the run pass or driven by the driver this pass starts,
+	* and after the workspace adoption, so an admission is not attempted into a
+	* checkout somebody else holds.
+	*
+	* Per proposal, and in one sentence each: a proposal waiting for a review is
+	* *never* advanced by recovery — only a persisted decision moves it (§6) —
+	* and its review is requested again when this process can show the batch; a
+	* proposal that is `ready` or `approved` is continued (which is where §5's
+	* tightening reaches a batch that was born under `off` and the post-approval
+	* re-check decides whether the approval still covers the batch); everything
+	* terminal is left alone, including `admitted`, whose batch the run pass has
+	* already dealt with.
+	*
+	* Anything this pass could not finish is returned and warned about — never
+	* guessed at. An approval that survives a restart is continued from the store
+	* alone, because a proposal carries the batch it is about; a review request is
+	* re-sent with the same saved facts (the parent, the children's contracts, the
+	* resolution), so what a person is asked to review after a crash is what the
+	* record holds rather than whatever a live process happened to remember.
+	*/
+	async reconcileProposals(storeId) {
+		let snapshot;
+		try {
+			snapshot = await this.ctx.task.snapshotIn(storeId);
+		} catch (error) {
+			this.warn(`store ${storeId}: the proposals could not be read for recovery (${error instanceof Error ? error.message : String(error)})`);
+			return [];
+		}
+		const unresolved = [];
+		const report = async (proposal, status, reason) => {
+			this.warn(`store ${storeId}: proposal ${proposal.proposalId}: ${reason}`);
+			unresolved.push({
+				proposalId: proposal.proposalId,
+				status,
+				reason
+			});
+		};
+		for (const proposal of snapshot.proposals?.all ?? []) {
+			if (!isOpenProposal(proposal)) continue;
+			const proposalId = proposal.proposalId;
+			try {
+				if (proposal.status === "pending_review") {
+					const ended = await this.parentRunEndedReason(storeId, proposal);
+					if (ended !== void 0) {
+						await report(proposal, proposal.status, `it waits for a review it can no longer be dispatched from (${ended}); only a recorded decision moves it (§6)`);
+						continue;
+					}
+					const parentTask = await this.ctx.task.taskIn(storeId, proposal.identity.parentTaskId);
+					const identity = {
+						storeId,
+						parentTaskId: proposal.identity.parentTaskId,
+						parentRunId: proposal.identity.parentRunId,
+						callerSessionId: proposal.identity.callerSessionId
+					};
+					const batch = this.storedBatchOf(proposal);
+					const envPath = await this.envPathForSession(proposal.identity.callerSessionId);
+					const checked = await this.checkDerivedBatch({
+						identity,
+						parentTask,
+						batch,
+						...envPath === void 0 ? {} : { envPath }
+					});
+					if (!checked.ok) {
+						await report(proposal, proposal.status, `it waits for a review and its batch no longer passes admission (${checked.refusal.reasons.join("; ")}); the proposal stays pending_review`);
+						continue;
+					}
+					await this.requestProposalReview({
+						storeId,
+						trigger: "recovered",
+						proposal,
+						parentTask,
+						batch,
+						manifests: checked.manifests
+					});
+					continue;
+				}
+				const continuation = await this.serializeParent(storeId, proposal.identity.parentTaskId, () => this.continueProposalIn(storeId, proposalId, proposal.identity.callerSessionId, {}));
+				if (continuation.status !== "admitted") await report(proposal, continuation.status, continuation.detail);
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				this.warn(`store ${storeId}: proposal ${proposalId} could not be continued during recovery (${reason}); it stays ${proposal.status}`);
+				unresolved.push({
+					proposalId,
+					status: proposal.status,
+					reason
+				});
+			}
+		}
+		return unresolved;
 	}
 	/**
 	* Replay one historical terminal task under a candidate overlay (guide
@@ -5642,7 +6797,7 @@ var TaskRuntime = class extends Service {
 			...independentAcceptanceDefects(fixed.criteria, champion.requiresIndependentAcceptance, label)
 		];
 		if (acceptanceDefects.length > 0) throw new Error(`task-runtime: replay of "${championTaskId}" rejected:\n- ${acceptanceDefects.join("\n- ")}`);
-		this.assertKnownVerifierRefs(fixed.criteria.map((criterion) => ({
+		await this.assertKnownVerifierRefs(fixed.criteria.map((criterion) => ({
 			childIndex: 0,
 			criterion
 		})), `replay of "${championTaskId}"`);
@@ -6021,6 +7176,20 @@ var TaskRuntime = class extends Service {
 	* - `waiting_children` runs are restarted, unless the workspace is held by
 	*   another live process, in which case they fail by name rather than writing
 	*   into a checkout somebody else owns.
+	*
+	* The run pass is followed by the proposal pass (T2/T3 §5–§6,
+	* {@link reconcileProposals}): a proposal that is `ready` or `approved` is
+	* continued — the re-check decides whether its approval still covers the batch,
+	* and §5's tightening catches a batch that was born under `off` — while a
+	* proposal waiting for a review is only re-offered to the review channel, never
+	* advanced, because only a persisted decision moves it. The order is the
+	* point: the run pass settles and restarts what a previous process left in
+	* flight, the workspace question ("is this checkout ours?") is answered before
+	* anything is admitted into it, and a batch the proposal pass admits is driven
+	* by the driver *it* starts — there is nothing left for the run pass to see.
+	* The report says what could not be finished and why, so a caller (the boot
+	* path, an adoption) can see the proposals recovery left for a person instead
+	* of reading a silent void.
 	*/
 	async reconcileStore(storeId) {
 		let snapshot;
@@ -6028,7 +7197,7 @@ var TaskRuntime = class extends Service {
 			snapshot = await this.ctx.task.snapshotIn(storeId);
 		} catch (error) {
 			this.warn(`store ${storeId}: recovery could not read the store (${error instanceof Error ? error.message : String(error)}), so nothing was reconciled`);
-			return;
+			return { unresolvedProposals: [] };
 		}
 		this.reindex(storeId, snapshot);
 		const depthOf = (taskId) => snapshot.tasks.find((task) => task.taskId === taskId)?.depth ?? 0;
@@ -6059,28 +7228,30 @@ var TaskRuntime = class extends Service {
 			await settleRunFromRuntime(env, storeId, run, "cancelled", `recovery: run "${run.runId}" was in flight when this store was reopened and never submitted; the writes it may already have made cannot be confirmed, so it is settled cancelled and its managed jobs are reconciled`);
 			await this.reconcileSessionJobs(run.sessionId);
 		}
-		if (waiting.length === 0) return;
-		const sessionId = this.recoverySessionFor(snapshot, storeId);
-		const workspace = await this.workspacePathForSession(sessionId);
-		if (workspace !== void 0 && this.workspaces !== void 0) {
-			const adoption = await this.workspaces.ownerOf(workspace) === void 0 ? await this.workspaces.reconcileAdopt(workspace) : { adopted: true };
-			if (!adoption.adopted) {
-				for (const run of waiting) await settleRunFromRuntime(env, storeId, run, "failed", `the workspace cannot be taken over for recovery: ${adoption.reason}`);
-				return;
+		if (waiting.length > 0) {
+			const sessionId = this.recoverySessionFor(snapshot, storeId);
+			const workspace = await this.workspacePathForSession(sessionId);
+			let adoptable = true;
+			if (workspace !== void 0 && this.workspaces !== void 0) {
+				const adoption = await this.workspaces.ownerOf(workspace) === void 0 ? await this.workspaces.reconcileAdopt(workspace) : { adopted: true };
+				if (!adoption.adopted) {
+					for (const run of waiting) await settleRunFromRuntime(env, storeId, run, "failed", `the workspace cannot be taken over for recovery: ${adoption.reason}`);
+					adoptable = false;
+				} else await this.rebuildWorkspaceOwnership(storeId);
 			}
-			await this.rebuildWorkspaceOwnership(storeId);
+			if (adoptable) for (const run of waiting) {
+				if (run.batchId === void 0) continue;
+				this.startBatchDriver({
+					storeId,
+					parentTaskId: run.taskId,
+					parentRunId: run.runId,
+					batchId: run.batchId,
+					callerSessionId: run.sessionId,
+					reason: `recovered batch ${run.batchId} after a restart`
+				});
+			}
 		}
-		for (const run of waiting) {
-			if (run.batchId === void 0) continue;
-			this.startBatchDriver({
-				storeId,
-				parentTaskId: run.taskId,
-				parentRunId: run.runId,
-				batchId: run.batchId,
-				callerSessionId: run.sessionId,
-				reason: `recovered batch ${run.batchId} after a restart`
-			});
-		}
+		return { unresolvedProposals: await this.reconcileProposals(storeId) };
 	}
 	/**
 	* Rebuild this process's workspace ownership for one store from the store's
@@ -6740,14 +7911,18 @@ var TaskRuntime = class extends Service {
 	* verifierRef validation at creation/decomposition time, never spawn time
 	* (KISS §4.1 `verifier_ref`): every declared ref must name a registered
 	* verifier, or the whole batch is rejected before anything is persisted and
-	* the error lists the registered ids. A deployment whose verifier service is
-	* absent or cannot list its registry cannot make that promise, so a declared
-	* ref fails loudly there instead of passing through unchecked.
+	* the error lists the registered ids. The listing is read through the one
+	* helper every provider check shares (`registeredVerifierIds`), which readies
+	* the registry first — a service that has been constructed but not readied
+	* reports an empty list, and reading that as "nothing is registered" would
+	* refuse a healthy deployment's batches. A deployment whose verifier service is
+	* absent or cannot list its registry cannot make that promise either, so a
+	* declared ref fails loudly there instead of passing through unchecked.
 	*/
-	assertKnownVerifierRefs(declared, what) {
+	async assertKnownVerifierRefs(declared, what) {
 		const refs = declared.filter((item) => item.criterion.verifierRef !== void 0);
 		if (refs.length === 0) return;
-		const registered = this.runVerifier()?.verifierIds?.();
+		const registered = await this.registeredVerifierIds();
 		if (registered === void 0) throw new VerifierUnavailableError(`task-runtime: cannot validate verifierRef on ${what}: the verifier service is not loaded or cannot list its registry`);
 		const unknown = refs.filter((item) => !registered.includes(item.criterion.verifierRef));
 		if (unknown.length === 0) return;
@@ -6779,4 +7954,4 @@ var TaskRuntime = class extends Service {
 var src_default = TaskRuntime;
 
 //#endregion
-export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, assertRootBudgetConfig, bindRunProviders, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeWorkspacePath, optionalService, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, protectedInputDefects, providerDefectLines, providerRefusals, readProcessStartTime, readRunBinding, readVerifiedFile, registeredVerifierIds, registryRevision, renderRunBinding, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline };
+export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, PROPOSAL_REQUEST_KEY_PREFIX, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, assertRootBudgetConfig, bindRunProviders, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeWorkspacePath, openProposalOf, optionalService, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, readProcessStartTime, readRunBinding, readVerifiedFile, registeredVerifierIds, registryRevision, renderRunBinding, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, reviewContextDelta, reviewContextOf, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

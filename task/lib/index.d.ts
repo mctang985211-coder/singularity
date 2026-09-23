@@ -128,6 +128,355 @@ declare function contractDigest(contract: TaskContract): string;
 /** The whole-batch proposal identity: SHA-256 over {@link canonicalize} of the normalized proposal. */
 declare function decompositionDigest(identity: DecompositionIdentity): string;
 //#endregion
+//#region src/proposal.d.ts
+
+/**
+ * The review policy a proposal was submitted under (§5). Deployment
+ * configuration decides it; a node cannot switch it, and it is stored with the
+ * proposal because the audit has to be able to tell a batch that ran without a
+ * human review (`off`, recorded as `policy-off`) from one a person approved.
+ */
+type TaskProposalPolicy = 'off' | 'all';
+/**
+ * Where one proposal sits in the review lifecycle (§6). Separate from
+ * `TaskStatus` on purpose — a proposal is not a task, and none of these states
+ * may be read as "the task ran".
+ *
+ * | state | means | legal exits |
+ * |---|---|---|
+ * | `ready` | admitted to execution without waiting for a review: born `ready` under policy `off`, or an approval that passed its post-approval re-check | `admitted` (consumption), `pending_review` (deployment tightened to `all` before admission), `stale` (re-check failed), `expired` (parent run gone), `cancelled` (explicit) |
+ * | `pending_review` | waiting for a human decision. `TaskProposal.policy` still records the submit-time policy, so a proposal born `off` and later sent to review is a `pending_review` record with `policy: 'off'` | `approved`, `rejected`, `cancelled`, `expired` |
+ * | `approved` | the approval is on the record, the batch has not been re-checked yet | `ready` (re-check passed), `stale` (re-check failed), `expired`, `cancelled` |
+ * | `rejected` | a reviewer refused this batch; a revision is a new proposal (`supersedes`) | terminal |
+ * | `cancelled` | somebody withdrew the batch before it could run | terminal |
+ * | `stale` | the approval no longer covers the batch's context (§6: a capability, budget or verifier change), so it needs a new proposal | terminal |
+ * | `expired` | the parent run was cancelled or ended while the decision was in flight (§6: a late approval may only invalidate) | terminal |
+ * | `admitted` | consumed: the batch exists in the store, bound to `consumption.childTaskIds` and one batch id | terminal |
+ *
+ * Two rules the table encodes and a reader must not have to infer: an approval
+ * alone never admits a batch — the re-check between approval and admission is
+ * recorded as `approved → ready`, so admission always happens from `ready`;
+ * and a `pending_review` proposal is never released back to `ready` by a
+ * policy change to `off` (§5: only tightening is allowed, and a proposal
+ * already waiting keeps waiting).
+ */
+type TaskProposalStatus = 'ready' | 'pending_review' | 'approved' | 'rejected' | 'cancelled' | 'stale' | 'admitted' | 'expired';
+/** Every proposal status, for validation and rendering. */
+declare const TASK_PROPOSAL_STATUSES: readonly TaskProposalStatus[];
+/**
+ * The statuses a `TaskProposalPhaseChanged` event may write: what the runtime
+ * (as opposed to a person deciding or a batch being admitted) moves a proposal
+ * to. `pending_review` is on the list because §5's tightening path needs it;
+ * `admitted` is not, because that is the consumption event's business.
+ */
+type TaskProposalPhase = 'ready' | 'pending_review' | 'stale';
+/** Every proposal phase change, for validation and rendering. */
+declare const TASK_PROPOSAL_PHASES: readonly TaskProposalPhase[];
+/**
+ * What a decision may be. The four are kept apart because they mean different
+ * things to a reader and to the next stage: `approved` is the only one that can
+ * lead to execution, `rejected` says a reviewer refused the batch, `cancelled`
+ * says the batch was withdrawn (by a person or by the deployment), and
+ * `expired` says the decision arrived when the batch could no longer be
+ * dispatched (§6: a late approval may only invalidate the proposal).
+ */
+type TaskProposalDecisionOutcome = 'approved' | 'rejected' | 'cancelled' | 'expired';
+/** Every decision outcome, for validation and rendering. */
+declare const TASK_PROPOSAL_DECISION_OUTCOMES: readonly TaskProposalDecisionOutcome[];
+/**
+ * One judging instance a batch's criteria resolved to, as the review context
+ * records it (§6): the registered verifier's id, the version it declares, and —
+ * when the deployment can name one — the fingerprint of the configuration that
+ * instance was built from.
+ *
+ * `version` and `configurationDigest` are absent on a verifier that declares
+ * neither. That absence is itself information: a source with no content version
+ * cannot be held to one, and §6 says so rather than letting a reader assume
+ * version binding that does not exist.
+ */
+interface TaskProposalVerifierIdentity {
+  /** The registered verifier id a criterion of this batch resolves to. */
+  verifierId: string;
+  /** The version the registered instance declares, when it declares one. */
+  version?: string;
+  /** Fingerprint of the configuration the instance was built from, when the deployment can name one. */
+  configurationDigest?: string;
+}
+/**
+ * What a proposal's approval actually covered (§6): the capability manifests
+ * this batch resolved, and the judging instances its criteria resolved to.
+ * Deliberately narrow — §6: an unrelated registry edit must not invalidate a
+ * reviewed proposal, so nothing that is not about *this* batch belongs here.
+ *
+ * The manifests are the *resolution* identity (which capabilities, skills and
+ * presets the batch matched), which is what the runtime has at review time.
+ * The content identity of the skills behind them is pinned per run by S1-C's
+ * provider binding and is not part of a review context; see the module doc.
+ */
+interface TaskProposalReviewContext {
+  /** {@link capabilityManifestDigest} of the manifests this batch resolved, in batch order. */
+  capabilityManifestDigest: string;
+  /** Every judging instance the batch's criteria resolve to. Order is not part of {@link reviewContextDigest}. */
+  verifiers: TaskProposalVerifierIdentity[];
+}
+/**
+ * One child of a proposal's batch, in full (§5): the normalized contract a
+ * reviewer reads, plus the three declarations the batch identity digests. The
+ * proposal carries the content itself — not only its digest — because approval
+ * display, a canvas view of a waiting proposal, and a resumed approval request
+ * after a restart all have to render the batch from the saved facts alone, and
+ * because "what did a person approve" must be answerable from the store rather
+ * than from whatever the proposing caller still holds in memory.
+ *
+ * The correspondence with {@link DecompositionIdentity.children} is positional
+ * and one-to-one: entry `i` here is the content of entry `i` there, and the
+ * reducer refuses a submission where anything disagrees — the contract digest
+ * (`contractDigest(contract)`), `dependsOn`, `decomposable`, and
+ * `requiresIndependentAcceptance`. An identity without its content, or content
+ * without an identity, is never stored.
+ */
+interface TaskProposalChild {
+  /** The child's normalized contract (T1 §4): defaults filled, criterion ids fixed, lists present. */
+  contract: TaskContract;
+  /** Sibling indices (0-based, in batch order) this child's run waits for; order is insignificant to execution but part of the digest. */
+  dependsOn: readonly number[];
+  /** Whether the child may split further; a declaration, not a permission (admission still applies every guardrail). */
+  decomposable: boolean;
+  /** Whether the child demands independent parent acceptance (P4 marker). */
+  requiresIndependentAcceptance: boolean;
+}
+/**
+ * One review decision on record (§6): what was decided, against which dossier
+ * and which contexts, by whom and when. The three identity fields are what make
+ * an approval non-transferable — the reducer refuses a decision whose
+ * `proposalDigest`, `admissionContextDigest` or `reviewContextDigest` disagrees
+ * with the stored proposal, so a decision can only ever mean "this exact batch,
+ * under these exact limits, with this exact resolution".
+ */
+interface TaskProposalDecision {
+  /** What was decided. Only `approved` can lead to admission, through `approved → ready`. */
+  outcome: TaskProposalDecisionOutcome;
+  /** The batch identity the decision was made against; must equal the stored proposal's. */
+  proposalDigest: string;
+  /** The admission-context fingerprint shown with the proposal; must equal the stored one. */
+  admissionContextDigest: string;
+  /**
+   * The review-context fingerprint the decision was made against. Required for
+   * an approval — an approval that did not bind the resolution it reviewed is
+   * not an approval — and, when present on any other outcome, still checked
+   * against the stored one.
+   */
+  reviewContextDigest?: string;
+  /** Who decided: the approval channel's own identity, a session id, or the deployment for a withdrawal. Never a model-supplied reference. */
+  decidedBy: string;
+  /** When the decision was taken, as the writer recorded it. */
+  decidedAt: string;
+  /** Why, when the decider gave a reason. Required for an expiry, which must name what ended the batch. */
+  reason?: string;
+}
+/**
+ * One consumption (§6): the record that turns a proposal into a batch. Written
+ * in the same commit as the children it names, so the store can always answer
+ * "which proposal became which tasks" — and so a crash between the admission
+ * and the first spawn is recoverable from the log alone, without a second batch.
+ *
+ * The digest fields bind the consumption to what was approved: a proposal that
+ * was revised, re-resolved or re-checked into a different context cannot be
+ * consumed under this record, and the reducer refuses the attempt by name.
+ */
+interface TaskProposalConsumption {
+  /** The proposal being consumed. */
+  proposalId: string;
+  /** The batch identity that was admitted; must equal the stored proposal's. */
+  proposalDigest: string;
+  /** The review-context fingerprint the admission re-check confirmed; must equal the stored one. */
+  reviewContextDigest: string;
+  /** The batch's id in the run coordination protocol: `b-<parentTaskId>` (A3). */
+  batchId: string;
+  /** The children this proposal became, in batch order — the ids the admission commit created. */
+  childTaskIds: TaskId[];
+  /** When the batch was admitted, as the writer recorded it. */
+  admittedAt: string;
+  /** Anything further a reader should know; absent when the writer left none. */
+  reason?: string;
+}
+/**
+ * One submitted proposal: the batch to run, what it was judged against, and
+ * where it stands. Immutable in its content — `identity`, `batch`, the digests,
+ * the contexts and `policy` are written once at submission and never rewritten;
+ * only `status`, `updatedAt`, and the appended `decision` / `consumption`
+ * records move as the lifecycle advances (§6: a revision is a new proposal with
+ * a new id and a `supersedes` reference, never an edit).
+ */
+interface TaskProposal {
+  /**
+   * The proposal's identity: `p-` plus {@link taskProposalId}'s derivation from
+   * the proposal content. Content-derived rather than minted, so a retry —
+   * within a process or after a restart — addresses the same proposal, and the
+   * store refuses a second submission of the same content instead of building
+   * a second batch (§4: random ids must never make one operation into two).
+   */
+  proposalId: string;
+  /**
+   * The stable key the caller derived from its own context (§6). One key names
+   * at most one proposal: a repeated request with the same key is answered with
+   * the stored proposal, a new revision gets a new key, and the store refuses a
+   * key that is already bound to another proposal.
+   */
+  requestKey: string;
+  /**
+   * The proposal this one revises (§6), when the caller is replacing a rejected
+   * or stale one. The superseded record is kept — a rejection is a fact, not an
+   * edit — and a new *key* is what makes the revision new, so re-submitting the
+   * old key would be refused rather than silently superseding anything.
+   */
+  supersedes?: string;
+  /** Where the proposal stands. See {@link TaskProposalStatus} for the full table. */
+  status: TaskProposalStatus;
+  /**
+   * The review policy in force when the proposal was submitted (§5). Stored,
+   * never re-resolved: `off` is the audit record that this batch ran without a
+   * human review (`policy-off`, never a fake `human-approved`), and a later
+   * deployment change to `all` tightens `status` without rewriting this field.
+   */
+  policy: TaskProposalPolicy;
+  /** The complete batch identity, {@link decompositionDigest}'d into {@link proposalDigest}. */
+  identity: DecompositionIdentity;
+  /**
+   * The complete batch content, one {@link TaskProposalChild} per
+   * {@link identity} child and in the same order: the goals, criteria,
+   * assumptions, constraints, capability requirements, dependencies and flags a
+   * reviewer reads and a person approves. Bound to the identity by the
+   * reducer's consistency check (same length, same order, same contract digests,
+   * same declarations), so the content and its commitment can never disagree —
+   * and so a later approval request, a canvas view, or a recovery after a crash
+   * renders what was reviewed from the store alone.
+   */
+  batch: readonly TaskProposalChild[];
+  /** {@link decompositionDigest} of {@link identity} — the content identity an approval binds to. */
+  proposalDigest: string;
+  /** The limits in force when the proposal was submitted, recorded next to it, never derived from the contract. */
+  admissionContext: AdmissionContext;
+  /** {@link admissionContextDigest} of {@link admissionContext}. */
+  admissionContextDigest: string;
+  /** What the batch resolved against when it was submitted (capability manifests, judging verifiers). */
+  reviewContext: TaskProposalReviewContext;
+  /** {@link reviewContextDigest} of {@link reviewContext}. */
+  reviewContextDigest: string;
+  /** When the proposal was submitted. */
+  createdAt: string;
+  /** When the last lifecycle event applied to it was written; absent until one was. */
+  updatedAt?: string;
+  /** The decision on record, once one was made. Absent while the proposal is undecided. */
+  decision?: TaskProposalDecision;
+  /** The batch this proposal became, once it was admitted. Absent while it still might become one. */
+  consumption?: TaskProposalConsumption;
+}
+/**
+ * What a decision states when it is written (the payload of
+ * `TaskProposalDecided`): {@link TaskProposalDecision} plus the proposal it is
+ * about. The reducer checks every field against the stored proposal before the
+ * record is applied.
+ */
+interface TaskProposalDecisionClaim extends TaskProposalDecision {
+  /** The proposal this decision is about. */
+  proposalId: string;
+}
+/**
+ * One runtime-driven phase change (the payload of
+ * `TaskProposalPhaseChanged`): a proposal sent to review because the deployment
+ * tightened to `all`, an approval whose re-check passed (`approved → ready`,
+ * §6's "批准已落账、等待重检/准入"), or one whose re-check failed (`→ stale`).
+ */
+interface TaskProposalPhaseChange {
+  /** The proposal being moved. */
+  proposalId: string;
+  /** Where it moves to; see {@link TaskProposalPhase} and {@link TaskProposalStatus} for the legal sources. */
+  to: TaskProposalPhase;
+  /** Why the runtime moved it. Required for `stale` — an invalidation has to name what changed. */
+  reason?: string;
+}
+/**
+ * The proposal queries a snapshot answers (§6/§7): by id, by the request key a
+ * caller derived, and by parent task — the three questions a runtime asks when
+ * it decides whether to submit, decide, or resume a batch.
+ *
+ * A snapshot produced by a proposal-aware reducer always carries this index
+ * (with empty members for a store that holds no proposals). An absent index
+ * means the snapshot did not come from one — a test double or a foreign
+ * reader — and never that the store has no proposals, so a caller that cannot
+ * see the index must not read it as "no proposal exists for this key".
+ */
+interface TaskProposalIndex {
+  /** Every proposal the store holds, in submission order. */
+  readonly all: readonly TaskProposal[];
+  /** `proposalId` → the proposal. */
+  readonly byId: Readonly<Record<string, TaskProposal>>;
+  /** `requestKey` → the proposal bound to it. At most one, by construction. */
+  readonly byRequestKey: Readonly<Record<string, TaskProposal>>;
+  /** `parentTaskId` → that task's proposals, in submission order. */
+  readonly byParentTask: Readonly<Record<string, readonly TaskProposal[]>>;
+}
+/** The `p-` prefix every proposal id carries, so an id is recognizable as one wherever it is printed. */
+declare const TASK_PROPOSAL_ID_PREFIX = "p-";
+/**
+ * The proposal id one batch identity gets: `p-` plus {@link decompositionDigest}
+ * of the identity. One implementation, used by every writer and by the
+ * idempotency lookup, so "the proposal I sent before the restart" and "the
+ * proposal in the store" cannot be two different addresses for one batch.
+ *
+ * The id is not part of the digest it is derived from, and neither is the
+ * admission context: both contexts are recorded *beside* the id, so the same
+ * batch re-submitted after a configuration change addresses the same proposal
+ * and is refused as a duplicate (a genuinely new submission is new content, or
+ * a new revision with its own key).
+ */
+declare function taskProposalId(identity: DecompositionIdentity): string;
+/**
+ * The identity of the limits a batch was admitted under: SHA-256 over
+ * {@link canonicalize} of the {@link AdmissionContext}. Key order and an
+ * explicit `undefined` limit are not differences (the canonical form drops
+ * them), so the same configuration always fingerprints the same way, and any
+ * enforced or audited value that moves moves the fingerprint.
+ *
+ * The re-check between approval and admission compares this fingerprint
+ * (§6: "有效预算…变化，首版保守标 stale"), which is why it covers the
+ * audit-only values too: they are part of what a reviewer was shown.
+ */
+declare function admissionContextDigest(context: AdmissionContext): string;
+/**
+ * The identity of what a batch resolved against: SHA-256 over
+ * {@link canonicalize} of every manifest the batch resolved, **in batch
+ * order** — the order the children were proposed in, so two resolutions of the
+ * same batch that assigned the manifests to different children are two
+ * identities rather than one.
+ *
+ * One implementation so the writer and any later re-computation agree; the
+ * digest covers exactly the manifests it is given (nothing about unrelated
+ * registry rows), which is what keeps §6's "an unrelated registry edit must not
+ * invalidate a reviewed proposal" true.
+ */
+declare function capabilityManifestDigest(manifests: readonly CapabilityManifest[]): string;
+/**
+ * The identity of the resolution a proposal was reviewed against: SHA-256 over
+ * {@link canonicalize} of the {@link TaskProposalReviewContext} with its
+ * verifier list normalized to ascending `(verifierId, version,
+ * configurationDigest)`.
+ *
+ * The normalization is the point: the same set of judging instances resolved in
+ * two orders is one identity, because the order a registry happened to hand
+ * them over in says nothing about what was reviewed — and a fingerprint that
+ * flapped with it would mark proposals stale for no reason. Sorting is a plain
+ * codepoint comparison, never a locale-sensitive one, so a fingerprint does not
+ * depend on the platform's collation.
+ *
+ * Like every other digest here it hashes what it is given: shape validation is
+ * the entry's job (the reducer refuses a malformed record before comparing
+ * fingerprints), and the covered field set is closed by
+ * {@link TaskProposalReviewContext}.
+ */
+declare function reviewContextDigest(context: TaskProposalReviewContext): string;
+//#endregion
 //#region src/types.d.ts
 type TaskId = string;
 type RunId = string;
@@ -1155,6 +1504,18 @@ interface TaskSnapshot {
   readonly diagnoses: readonly Diagnosis[];
   readonly obligations: readonly Obligation[];
   readonly capabilities: Readonly<Record<string, CapabilityManifest>>;
+  /**
+   * The store's proposals, indexed for the three questions a review gate asks
+   * (§6/§7): by proposal id, by the caller's request key, and by parent task.
+   *
+   * Optional at the type level because a snapshot is also a shape other code
+   * builds by hand (a verifier's selftest store view, a test double), and those
+   * literals predate proposals. A snapshot produced by this build's reducer
+   * always carries it — empty members included — so an absent index means "this
+   * reader cannot see proposals", never "the store holds none"; see
+   * {@link TaskProposalIndex}.
+   */
+  readonly proposals?: TaskProposalIndex;
 }
 interface TaskEventPayloads {
   /** A task instance enters the store (created status, no runs or children attached). */
@@ -1283,6 +1644,59 @@ interface TaskEventPayloads {
   ObligationRecorded: {
     obligation: Obligation;
   };
+  /**
+   * A proposal enters the store (T2/T3, construction guide §6): one immutable
+   * batch submission with the policy it was born under, the complete normalized
+   * contracts of every child, the limits it was admitted under, the resolution
+   * it was reviewed against, and both context fingerprints. The batch content is
+   * what a reviewer reads and an approval covers, so it is stored here rather
+   * than referenced: a waiting proposal, a rejected one, or a re-opened store
+   * renders it from saved facts. A proposal is born `ready` under policy `off`
+   * (the batch runs without a human review, and the record says so) or
+   * `pending_review` under policy `all`; the reducer refuses a record that
+   * claims the other combination, refuses a batch that disagrees with the
+   * identity it accompanies (length, order, contract digest, dependencies,
+   * flags), and refuses a proposal whose digests do not match the content they
+   * claim to describe. Nothing is admitted, no child exists, and no parent is
+   * marked decomposed by this event — a proposal is a question, not work.
+   */
+  TaskProposalSubmitted: {
+    proposal: TaskProposal;
+  };
+  /**
+   * A human review decision (T2/T3, §6): approved, rejected, cancelled or
+   * expired, bound to the dossier digest and both context fingerprints shown
+   * when it was taken. The reducer refuses a decision whose digests disagree
+   * with the stored proposal and one that is not legal from the proposal's
+   * current status — so an approval can never travel to a revision, a
+   * re-resolution or a re-checked context, and a later approval of a batch
+   * whose parent run has ended is written as `expired` (an invalidation)
+   * rather than as an approval nobody could dispatch.
+   */
+  TaskProposalDecided: TaskProposalDecisionClaim;
+  /**
+   * A runtime-driven proposal phase change (T2/T3, §6): to `pending_review`
+   * when the deployment tightens to `all` while a policy-off proposal is still
+   * un-admitted (only tightening is allowed; a waiting proposal is never
+   * released), to `ready` when an approval passed its post-approval re-check,
+   * and to `stale` when that re-check found the context or the parent state
+   * changed. The reducer checks the change against the status table — a
+   * re-review of a proposal already awaiting review, a re-check pass without an
+   * approval, and a stale marking of an admitted batch are all refused.
+   */
+  TaskProposalPhaseChanged: TaskProposalPhaseChange;
+  /**
+   * A proposal is consumed (T2/T3, §6): the batch it named now exists, bound to
+   * the child task ids and the batch id this event carries. Written in the same
+   * commit as the children, the decomposition record and the parent run's
+   * `active → waiting_children` change (A3 `admitBatchIn`), so a crash after
+   * admission is recovered from the log alone — "this proposal was consumed and
+   * these are its tasks" is one durable fact, never a second batch. The reducer
+   * refuses a second consumption of one proposal and a consumption whose
+   * digests, batch id or child ids do not match what was approved or what the
+   * store holds.
+   */
+  TaskProposalAdmitted: TaskProposalConsumption;
 }
 type TaskEventKind = keyof TaskEventPayloads;
 interface TaskEventEnvelope<K$1 extends TaskEventKind, P> {
@@ -1507,12 +1921,31 @@ declare class TaskState {
    */
   private assertContract;
   /**
+   * The contract fields one normalized contract must carry, checked the same
+   * way wherever a contract is stored — on a task (T1) and on each child of a
+   * proposal's batch (T2). `where` names the record being checked, so a refusal
+   * says which contract it came from instead of "some contract is malformed".
+   *
+   * Shape only: whether the contract is the *right* one is a question the
+   * callers answer (a task's projections must agree with it; a proposal's batch
+   * must digest to its identity's child digest).
+   */
+  private assertContractFields;
+  /**
    * The batch record a decomposition carries is the identity a later review
    * gate binds an approval to, so a malformed one is refused rather than
    * stored: an empty proposal digest or a non-numeric limit would make the
    * record unusable exactly when someone needs to compare it.
    */
   private assertAdmission;
+  /**
+   * The limits one admission context carries, checked the same way wherever one
+   * is stored — on a decomposition (T1) and on a proposal (T2: the limits the
+   * batch was submitted under, whose fingerprint an approval binds). `where`
+   * names the record being checked, so a refusal says which producer it came
+   * from instead of "some context is malformed".
+   */
+  private assertAdmissionLimits;
   private admit;
   private decompose;
   /**
@@ -1628,6 +2061,136 @@ declare class TaskState {
    * non-empty goal and criterion, and a source task that exists in the store.
    */
   private recordObligation;
+  /**
+   * A proposal enters the store (T2/T3, §6). The reducer is the shape gate and
+   * the integrity gate, in that order: the record must be a well-formed
+   * proposal — the closed field set of its review context, a birth status
+   * matching the policy it was submitted under, an identity whose digests are
+   * really the digests of what it carries — and it must not collide with what
+   * the store already holds. One key names one proposal and one content
+   * identity names one id, so a repeated request can never build a second
+   * batch: the caller answers it from the index instead.
+   *
+   * The digest checks are the point of the submission being an event at all: a
+   * proposal whose `proposalDigest`, `admissionContextDigest` or
+   * `reviewContextDigest` disagrees with the content it carries would make the
+   * approval binding meaningless, because a later decision compares exactly
+   * these numbers.
+   */
+  private submitProposal;
+  /**
+   * One review decision (T2/T3, §6): the outcome, bound to the dossier digest
+   * and both context fingerprints, checked against the stored proposal before
+   * anything is applied. A digest that disagrees is refused by name — an
+   * approval that does not name exactly this batch, under exactly these limits
+   * and exactly this resolution, is not an approval of it — and an outcome that
+   * is not legal from the current status is refused as a transition, so a
+   * second decision never overwrites the first and a policy-off proposal can
+   * never be recorded as reviewed.
+   */
+  private decideProposal;
+  /**
+   * One runtime phase change (T2/T3, §6): the two edges that are not a person's
+   * decision or a consumption — `ready → pending_review` when the deployment
+   * tightened to `all` before admission, `approved → ready` when the
+   * post-approval re-check passed, and `→ stale` when it failed. The source
+   * statuses are the gate (see {@link PHASE_SOURCES}), and a `stale` marking
+   * must name what changed: an invalidation a reader cannot explain is a
+   * record that cannot be trusted.
+   */
+  private changeProposalPhase;
+  /**
+   * A proposal is consumed (T2/T3, §6): the batch exists, and this record says
+   * which tasks it became. The status gate is the re-check having passed on the
+   * record (`ready` only — an approval alone never admits, so `approved →
+   * admitted` is refused), and the binding is checked in full: the dossier
+   * digest, the review-context fingerprint the admission confirmed, the batch
+   * id that belongs to this parent, and every child this consumption names
+   * being a task the store actually holds as a child of that parent. A second
+   * consumption is a transition refusal, so one proposal can never produce two
+   * batches.
+   */
+  private admitProposal;
+  /** The stored proposal one event names, or a refusal naming the id. */
+  private proposal;
+  /**
+   * The proposal index of the snapshot this state replays on. It is absent only
+   * when a foreign snapshot (a hand-built one from a reader that predates
+   * proposals) was replayed onto — never on this build's own value — and that
+   * is a refusal rather than an empty index: a reducer that cannot see the
+   * proposals would happily write a second one for the same request key.
+   */
+  private index;
+  /** Every proposal event is about one parent task's batch, so the envelope has to name that task. */
+  private assertProposalTask;
+  /** One proposal's status either admits this outcome or the event is a late or out-of-order write. */
+  private assertProposalTransition;
+  /** Replaces one proposal in place; the index's other views keep pointing at the same record. */
+  private setProposal;
+  /**
+   * A submitted proposal has to be complete and internally consistent, because
+   * everything an approval binds is taken from it: the review context is a
+   * closed record (an unread field would silently become part of an identity),
+   * the birth status is the policy the deployment ran under (`off → ready`,
+   * `all → pending_review` — the audit of "no human review happened" depends on
+   * it), a revision must name a proposal that exists, and the three digests
+   * must be the digests of the data they claim to describe.
+   */
+  private assertProposal;
+  /**
+   * The batch identity a proposal carries, judged for shape only: the field
+   * semantics (a version this build knows, non-empty origins, one dependency
+   * index per child) are what a reader needs to interpret it, while the
+   * *rules* about a batch — depth, size, dependency cycles, capability gaps —
+   * belong to the admission entry that already enforces them (T1's
+   * `contractDefects` and the runtime's `checkDecomposition`). The parent task
+   * is the one exception, because a proposal naming a task the store does not
+   * hold could never be decided or admitted against a real parent.
+   */
+  private assertProposalIdentity;
+  /**
+   * The batch content a submission carries, bound to the identity it claims to
+   * be: one child per identity child, in the same order, each carrying the
+   * contract whose {@link contractDigest} is the identity's child digest and the
+   * three declarations the identity records. This is the reference constraint
+   * that keeps a proposal from being a set of digests with no content behind
+   * them — or content nobody committed to — and it is what makes "the batch a
+   * reviewer was shown", "the batch an approval binds" and "the batch the
+   * identity commits to" one thing rather than three.
+   *
+   * The content is judged for shape here (a closed field set per child, a
+   * contract this build can read, a dependency list of indices, the two flags),
+   * and for agreement with the identity in every field. Whether the *rules* of a
+   * batch hold — depth, size, cycles, capability gaps — is the admission
+   * entry's business, unchanged.
+   */
+  private assertProposalBatch;
+  /**
+   * A decision binds the proposal it was made against, so every identity it
+   * carries is compared with the stored record: the dossier digest, the
+   * admission context, and — for an approval, always — the review context the
+   * batch resolved against when it was shown. A mismatch is the one case the
+   * reducer must never accept: an approval that travels to other content is
+   * exactly the failure the digest binding exists to prevent.
+   */
+  private assertDecisionBinding;
+  /**
+   * A consumption binds a proposal to the batch it became, so it has to name
+   * the same dossier, the resolution the admission re-check confirmed, the
+   * batch id that belongs to this parent (`b-<parentTaskId>`), and children the
+   * store really holds under that parent — the record a crash recovery reads to
+   * find the batch it already admitted instead of admitting a second one.
+   */
+  private assertConsumptionBinding;
+  /**
+   * The review context's closed shape. Its manifest fingerprint and every
+   * verifier id/version/configuration are checked for the shapes that make them
+   * comparable — a digest that is not a digest, or a verifier without an id,
+   * would leave `reviewContextDigest` comparing values nobody can interpret —
+   * and unknown fields are refused because the digest covers exactly the
+   * declared surface: a field no reader understands must not move an identity.
+   */
+  private assertReviewContext;
   private transit;
   private assertTransition;
   private assertRunTransition;
@@ -1681,8 +2244,16 @@ declare class TaskService extends Service {
    *
    * `manifests` is aligned with `children` by index (the caller's own batch
    * order): a list of another length is refused before anything is written.
+   *
+   * `proposal` consumes the proposal this batch *is* (T2/T3 §6): the
+   * `TaskProposalAdmitted` event joins the same commit, so "this proposal was
+   * consumed and these are its tasks" is one durable fact. The consumption must
+   * name exactly these children in this order — the batch and the record of it
+   * are the same batch, checked here because this is the one place that sees
+   * both — and the reducer then checks the rest of the binding (digests, batch
+   * id, the proposal's status, and that no second consumption is written).
    */
-  admitBatchIn(storeId: string, parentTaskId: TaskId, parentRunId: RunId, children: readonly TaskInstance[], actor: string, edges?: readonly DependencyEdge[], admission?: DecompositionAdmission, manifests?: readonly CapabilityManifest[]): Promise<void>;
+  admitBatchIn(storeId: string, parentTaskId: TaskId, parentRunId: RunId, children: readonly TaskInstance[], actor: string, edges?: readonly DependencyEdge[], admission?: DecompositionAdmission, manifests?: readonly CapabilityManifest[], proposal?: TaskProposalConsumption): Promise<void>;
   addDependencyIn(storeId: string, edge: DependencyEdge, actor: string): Promise<void>;
   startRunIn(storeId: string, run: TaskRun, actor: string): Promise<void>;
   markRunStatusIn(storeId: string, taskId: TaskId, runId: RunId, status: RunStatus | 'verifying', actor: string, options?: {
@@ -1701,12 +2272,56 @@ declare class TaskService extends Service {
    * caller's consecutive count; the reducer records the value it is given.
    */
   markRunProgressIn(storeId: string, taskId: TaskId, runId: RunId, actor: string, payload: TaskEventPayloads['RunProgressMarked']): Promise<void>;
+  /**
+   * Records one proposal submission (T2/T3 §6): the immutable batch record,
+   * the policy it was born under, the limits in force, the resolution it was
+   * reviewed against, and both context fingerprints. The envelope names the
+   * parent task the proposal belongs to, so every proposal event of one batch
+   * reads as one parent's business. The reducer is the gate: a malformed
+   * record, a digest that does not describe its content, a duplicate id, or a
+   * request key already bound to another proposal commits nothing.
+   */
+  submitProposalIn(storeId: string, proposal: TaskProposal, actor: string): Promise<void>;
+  /**
+   * Records one review decision (T2/T3 §6), bound to the dossier digest and
+   * both context fingerprints the reviewer was shown. An unknown proposal is
+   * refused here, before the commit; every binding is checked by the reducer,
+   * so a decision that does not name exactly the stored proposal applies
+   * nothing.
+   */
+  decideProposalIn(storeId: string, claim: TaskProposalDecisionClaim, actor: string): Promise<void>;
+  /**
+   * Records one runtime phase change (T2/T3 §6): to `pending_review` when the
+   * deployment tightened to `all`, to `ready` when an approval passed its
+   * post-approval re-check, to `stale` when that re-check failed. The status
+   * table lives in the reducer; a change that is not legal from the proposal's
+   * current status applies nothing.
+   */
+  changeProposalPhaseIn(storeId: string, change: TaskProposalPhaseChange, actor: string): Promise<void>;
+  /**
+   * Records one consumption on its own (T2/T3 §6): the batch the proposal
+   * became, by child task id and batch id. `admitBatchIn` writes the same event
+   * inside the admission commit, which is the path that keeps the children and
+   * the record of them one fact; this entry exists for a caller that admitted
+   * the batch through another entry and is recording the consumption beside it.
+   */
+  consumeProposalIn(storeId: string, consumption: TaskProposalConsumption, actor: string): Promise<void>;
   recordEvidenceIn(storeId: string, evidence: EvidenceBundle, actor: string): Promise<void>;
   recordReviewIn(storeId: string, review: ReviewRecord, actor: string): Promise<void>;
   recordDiagnosisIn(storeId: string, diagnosis: Diagnosis, actor: string): Promise<void>;
   recordObligationIn(storeId: string, obligation: Obligation, actor: string): Promise<void>;
   recordHandoffIn(storeId: string, handoff: TaskHandoff, actor: string): Promise<void>;
   commitIn(storeId: string, events: readonly TaskEvent[]): Promise<void>;
+  /**
+   * The parent task a proposal event is about, read from the store before the
+   * commit so the envelope names the task the proposal belongs to. Reading
+   * first is what makes an unknown proposal a refusal *before* anything is
+   * queued: the reducer would reject the event anyway, and a caller that asked
+   * about a proposal the store does not hold deserves to hear it from the entry
+   * it called. The value is advisory — the write lock is not held across it —
+   * and the reducer's own check is what actually binds the envelope.
+   */
+  private proposalParentIn;
   private requireStore;
   private allocate;
   private open;
@@ -1714,4 +2329,4 @@ declare class TaskService extends Service {
   private header;
 }
 //#endregion
-export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, ExecutionPhase, ExecutionSkillSidecar, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, KnowledgeContentCheck, KnowledgeSkillSidecar, NoProgressRecord, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ProtectedInputRef, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootTaskSpec, RunId, RunMcpServerBinding, RunProviderBinding, RunSkillBinding, RunStatus, SKILL_CONTRACT_VERSION, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, SkillContentIdentity, SkillContractDefect, SkillContractDefectCode, SkillContractVersion, SkillFitFacts, SkillPort, SkillResourceIdentity, SkillSidecar, SkillVerifierRef, SubmissionRecord, TASK_CONTRACT_VERSION, TaskContract, TaskContractVersion, TaskDefinition, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifierSelftestSample, VerifierSelftestStore, VerifyRequest, canonicalize, contractDigest, decompositionDigest, isSupportedSkillResourcePath, reaches, rootTaskStoreId, sha256Hex, skillContentDigest, skillContractDefects, skillContractDigest };
+export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, ExecutionPhase, ExecutionSkillSidecar, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, KnowledgeContentCheck, KnowledgeSkillSidecar, NoProgressRecord, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ProtectedInputRef, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootTaskSpec, RunId, RunMcpServerBinding, RunProviderBinding, RunSkillBinding, RunStatus, SKILL_CONTRACT_VERSION, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, SkillContentIdentity, SkillContractDefect, SkillContractDefectCode, SkillContractVersion, SkillFitFacts, SkillPort, SkillResourceIdentity, SkillSidecar, SkillVerifierRef, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_ID_PREFIX, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskContract, TaskContractVersion, TaskDefinition, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalChild, TaskProposalConsumption, TaskProposalDecision, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalStatus, TaskProposalVerifierIdentity, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifierSelftestSample, VerifierSelftestStore, VerifyRequest, admissionContextDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, isSupportedSkillResourcePath, reaches, reviewContextDigest, rootTaskStoreId, sha256Hex, skillContentDigest, skillContractDefects, skillContractDigest, taskProposalId };

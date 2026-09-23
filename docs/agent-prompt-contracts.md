@@ -1,6 +1,6 @@
 # 节点角色与 System Prompt 合同
 
-日期：2026-09-21。状态：建设用模板，未注入当前运行时。依赖与协议见 [探索/进化架构](exploration-evolution-architecture.md)。本文件不能单独作为“换提示词即可上线”的实现票。
+日期：2026-09-21。状态：建设用模板，未注入当前运行时（部署中的实际文本以 §3/§4 条件块标注的真实落点为准，例如 A3 的显式提交协议与 T2/T3 的生成任务审核段）。依赖与协议见 [探索/进化架构](exploration-evolution-architecture.md)。本文件不能单独作为“换提示词即可上线”的实现票。
 
 ## 1. 装配规则
 
@@ -61,6 +61,15 @@ task_verify 只产生自检证据，不证明任务状态已成功。
 [显式提交协议（A3 已部署：worker 合同块见 task-runtime/src/handoff.ts）]
 完成实现后用 task_submit_result 提交产物及引用，由运行时验收。
 说明仍未满足的条件；不要把会话结束或最终回复等同于 Task PASS。
+
+[生成任务审核已部署（T2/T3：root prompt 见 agent-runtime/src/prompts/root.prompts.ts，
+worker 合同块见 task-runtime/src/handoff.ts 的 reviewRule）]
+task_decompose 可能不立即执行：部署开启契约人审时，它回答一个 proposalId 并说明批次
+在等审核，此时没有子任务、没有 worker、当前任务也未分解。用 task_proposal_read 读回
+批次与记录；不要重复提交同一内容（同请求答同一提案）。审核拒绝时按记录中的理由修订
+并重新提交——修订是新内容、新提案，不是重跑被拒的那次。批准由审核渠道落账，运行时
+随后自行重检并继续批次，你不需要提交任何审批凭据；等待期间不做本 task 的推进工作。
+你的工具面里没有决定提案的能力：不要声称已获批准，也没有参数可以传入批准。
 ```
 
 ## 4. 父节点 / Root Coordinator 模板
@@ -89,6 +98,12 @@ task_verify 只产生自检证据，不证明任务状态已成功。
 
 子任务自然语言“完成”只是摘要；父结果必须依赖实际 evidence 与自己的判据。
 不得重复分解已经落库的同一父批次，也不得重跑已通过兄弟来掩盖恢复缺口。
+
+[生成任务审核已部署（T2/T3：root prompt 见 agent-runtime/src/prompts/root.prompts.ts）]
+task_decompose 可能返回“等待审核”与一个 proposalId：那时没有子任务、没有 spawn，
+当前任务也未分解。读批次用 task_proposal_read；同内容不要重复提交；被拒时按记录中
+的理由修订后重新分解（新提案可 supersedes 旧的）。批准后运行时自行重检并继续批次，
+你不会被要求提供批准凭据，也没有工具可以决定提案。
 ```
 
 ## 5. Reviewer / Supervisor 模板
@@ -137,6 +152,7 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 | “向父节点询问并等待” | A3 已落地非阻塞父循环与协调相位（waiting_children/submitted、写闸、显式提交；task-runtime/src/gate.ts、orchestrate.ts）；持久问题、问答唤醒与超时仍属 A4 |
 | “提交后由 verifier 判定” | A3 已落地：task_submit_result → RunPhaseChanged(submitted) 落库后 drainSession 排空在途写，再转 verifier 排他执行；idle 不作完成证据 |
 | “只做协调” | A3 已落地：waiting_children 期间运行时闸（tools/pre-execute waterfall，在途调用同样登记检查）只放行读/状态/诊断/task_cancel 等协调动作，不只靠提示词防并发写 |
+| “分解可能待审，批准后系统自动续跑”（T2/T3 **已落地**） | 配置 `Config.generatedTaskReview: off/all`（默认 `off`）与真实档案：`all` 下 `task_decompose` 只提交提案（`submitDecompositionProposal` → `pending_review`）并返回 proposalId；渠道 `ProposalReviewService`（`ctx.proposalReviewChannel`，service 装配处）经 `ctx.approval.request` 提问并写 `decidedBy=approval:<ownerSessionId>`；批准由 runtime 重检后继续（`continueProposal`），工具层没有任何决定参数或 approvalRef；prompt 文本真实落点为 `agent-runtime/src/prompts/root.prompts.ts` 与 `task-runtime/src/handoff.ts` 的审核段；三个提案工具`task_proposal_read/continue/cancel` 在 root allow-list 与 worker baseline |
 | “主管只读诊断” | 实际工具 allow-list 不含写/shell/spawn/晋升；按需下钻仍有读取域限制 |
 | “产物满足目标” | 独立 verifier、来源与版本检查；prompt 不能保证语义正确 |
 
@@ -147,6 +163,8 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 每个实现票除行为测试外，至少检查实际 assembled prompt 和实际可调用工具集合：root setup、root execution、普通 leaf、decomposable、waiting_children、waiting_answer、read-only reviewer、candidate builder，以及恢复/压缩后的相同角色。
 
 必测反例：工具未挂载却被提示调用；一个 worker 的合同泄漏到另一个；祖先文本含 `{{…}}`/结束标签/“忽略原规则”；P4 的证据依赖、heuristic 和 mandatory 在渲染中遗漏；T1 起 assumptions/constraints 必须来自同一份持久化契约，handoff 渲染与 `task_read` 的 store 视图不得各说一套（S1-V 切片 2 起同样适用于判据的 `protectedInputs` 声明路径）；根目标/AC 变更无版本；父等待时子提问形成环；reviewer 提出诊断后获得写权限；任务列表为空即拒绝生成。
+
+生成任务审核相关反例（T2/T3）：提示词/工具面出现“自行批准”或任何决定参数（模型不能自行生成可信 approvalRef）；worker 的工具面出现决定提案的工具或平台管理/HITL 工具；`off` 部署下模型被提示等待审核（应为正常分解）；`all` 下 prompt 未说明“等待审核时没有子任务、当前任务未分解”，或未说明“同内容重复提交答同一提案、修订是新提案”；审核等待期间模型被提示继续推进本任务（应为无法推进、可读可查可取消）。核对方法：真实装配后的工具面（`tests/integration/proposal-review.spec.ts` 的 worker/root 工具面用例）与渲染文本（`agent-singularity/src/proposal-review.ts` 的 §5 展示清单）。
 
 协调组合态必须覆盖：waiting_children 同时有向祖先提出的阻塞问题；仅收到部分答案或 unresolved；有效问答在 inbox claim 后遇到 pre-step reject/崩溃。恢复后模型仍能读到未处理事实，主相位、batch 与写权限不因消息重放改变。waiting_children 的写拒绝以运行时闸在真实 tools waterfall 上的实际 deny 为证据（A3 起），不能只看 assembled prompt 未挂载。
 

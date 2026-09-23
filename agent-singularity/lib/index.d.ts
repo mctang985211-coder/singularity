@@ -1,5 +1,5 @@
 import { Context, Service } from "@deepseek-ai/cordis";
-import { CapabilityConfig } from "@dangosys/dsh-singularity-task-runtime";
+import { CapabilityConfig, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest } from "@dangosys/dsh-singularity-task-runtime";
 import { ProposalTargetType } from "@dangosys/dsh-singularity-task";
 
 //#region src/hitl.d.ts
@@ -164,6 +164,78 @@ declare class EscalationService extends Service {
   private load;
   /** Validate the staged fold first; memory commits only after the line is on disk. */
   private append;
+}
+//#endregion
+//#region src/proposal-review.d.ts
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    proposalReviewChannel: ProposalReviewService;
+  }
+}
+/**
+ * The owner session of a task store — whose approval surface a review of that
+ * store's batches belongs on — or `undefined` for an id this deployment did not
+ * build.
+ *
+ * The parse is re-checked through {@link rootTaskStoreId} rather than trusted:
+ * the mapping from a root session to its store belongs to the task package, and
+ * a string that merely looks like one must not name a session that never owned
+ * a store (which would route a review into a stranger's conversation).
+ */
+declare function ownerSessionOfStore(storeId: string): string | undefined;
+/**
+ * The decider identity the channel records: the approval surface of the owner
+ * session the review was shown in. Deliberately a channel-shaped value — the
+ * same `approval:` family the native grants use (`escalate`, `evolution_decide`)
+ * — because a reader of the record must be able to tell a human grant apart
+ * from a session id and from anything a model could have written.
+ */
+declare function reviewDecider(ownerSessionId: string): string;
+/**
+ * The review material one person is shown (§5), rendered from the saved facts:
+ * the parent, every child, the limits, the obligations, the identity a decision
+ * binds, and what this record honestly cannot promise.
+ *
+ * A pure function of the request, so what a deployment shows and what a test
+ * asserts are the same rendering.
+ */
+declare function renderProposalReview(request: ProposalReviewRequest): string;
+/**
+ * The review channel this deployment mounts (T2/T3 §5–§6). It renders, asks, and
+ * records; it never admits anything itself — a recorded decision is what moves a
+ * proposal, and the runtime performs the post-approval re-check and the
+ * admission on its own.
+ */
+declare class ProposalReviewService extends Service implements ProposalReviewChannel {
+  private readonly lifetime;
+  constructor(ctx: Context);
+  requestReview(request: ProposalReviewRequest): Promise<ProposalReviewNotice>;
+  /**
+   * One human answer, turned into the only thing that can move a waiting
+   * proposal: a decision on the record. An approval is recorded as `approved`
+   * (the runtime then re-checks the batch and admits it); an explicit refusal as
+   * `rejected`, naming who refused. Nothing else is written: `unavailable` and
+   * `cancelled` are states of the ask, and §6 allows exactly one decision per
+   * proposal — so a store that refuses this write because the proposal moved on
+   * meanwhile is warned about, never retried into a second decision.
+   */
+  private record;
+  /** The live agent behind one session, or `undefined` — an absent registry or a departed session is a state, not a throw. */
+  private liveAgent;
+  /**
+   * Whether one session's approval policy asks a person at all. The policy is
+   * the approval service's own (a session override, else the configured
+   * default): under `never` the service answers `rejected` without dispatching
+   * anything, so a request routed there would look like a human refusal.
+   * Reading it before asking is what keeps that outcome from being invented.
+   */
+  private asksAPerson;
+  /** The runtime that owns the store; resolved lazily, because the store is opened after this service is mounted. */
+  private runtime;
+  /** Best-effort warn through the cordis logger when one is mounted; tests and minimal contexts may not have it. */
+  private warn;
+  /** The same seam at info level, for the trace of a decision that landed. */
+  private info;
 }
 //#endregion
 //#region src/replay.d.ts
@@ -1004,4 +1076,4 @@ declare class SingularityAgent extends Service {
   constructor(ctx: Context);
 }
 //#endregion
-export { APPLYABLE_TARGET_TYPES, type AgentPresetMutation, type ApplyOutcome, type ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, type CapabilityMutation, type ChampionSource, type ChampionState, ESCALATION_TRIGGERS, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, type Escalation, type EscalationInput, type EscalationRecord, EscalationService, type EscalationTrigger, type EvolutionDecision, type EvolutionLevel, type EvolutionProposal, type EvolutionRecord, EvolutionService, type EvolutionStatus, type GateAnswers, type HitlAnswer, type HitlKind, type HitlPending, HitlService, type ListFilter, MECHANICAL_TARGET_TYPES, type MechanicalMutation, type PrepareChampion, type PreparedView, type ProposeInput, REPLAY_RELATIONS, REPLAY_VERDICTS, type ReplayCriterionDiff, type ReplayCriterionSummary, type ReplayRelation, type ReplayReport, type ReplaySideSummary, type ReplayTaskComparison, type ReplayVerdict, type ReplayedView, SingularityAgent, SingularityAgent as default, type SkillContentIdentity, type SkillMutation, type TaskDefinitionMutation, applyTargets, compareReplaySides, mutationMechanical, overallReplayVerdict };
+export { APPLYABLE_TARGET_TYPES, type AgentPresetMutation, type ApplyOutcome, type ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, type CapabilityMutation, type ChampionSource, type ChampionState, ESCALATION_TRIGGERS, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, type Escalation, type EscalationInput, type EscalationRecord, EscalationService, type EscalationTrigger, type EvolutionDecision, type EvolutionLevel, type EvolutionProposal, type EvolutionRecord, EvolutionService, type EvolutionStatus, type GateAnswers, type HitlAnswer, type HitlKind, type HitlPending, HitlService, type ListFilter, MECHANICAL_TARGET_TYPES, type MechanicalMutation, type PrepareChampion, type PreparedView, ProposalReviewService, type ProposeInput, REPLAY_RELATIONS, REPLAY_VERDICTS, type ReplayCriterionDiff, type ReplayCriterionSummary, type ReplayRelation, type ReplayReport, type ReplaySideSummary, type ReplayTaskComparison, type ReplayVerdict, type ReplayedView, SingularityAgent, SingularityAgent as default, type SkillContentIdentity, type SkillMutation, type TaskDefinitionMutation, applyTargets, compareReplaySides, mutationMechanical, overallReplayVerdict, ownerSessionOfStore, renderProposalReview, reviewDecider };

@@ -1,4 +1,11 @@
 import type { DecompositionAdmission, TaskContract } from './contract.ts'
+import type {
+  TaskProposal,
+  TaskProposalConsumption,
+  TaskProposalDecisionClaim,
+  TaskProposalIndex,
+  TaskProposalPhaseChange,
+} from './proposal.ts'
 
 export type TaskId = string
 export type RunId = string
@@ -1107,6 +1114,18 @@ export interface TaskSnapshot {
   readonly diagnoses: readonly Diagnosis[]
   readonly obligations: readonly Obligation[]
   readonly capabilities: Readonly<Record<string, CapabilityManifest>>
+  /**
+   * The store's proposals, indexed for the three questions a review gate asks
+   * (§6/§7): by proposal id, by the caller's request key, and by parent task.
+   *
+   * Optional at the type level because a snapshot is also a shape other code
+   * builds by hand (a verifier's selftest store view, a test double), and those
+   * literals predate proposals. A snapshot produced by this build's reducer
+   * always carries it — empty members included — so an absent index means "this
+   * reader cannot see proposals", never "the store holds none"; see
+   * {@link TaskProposalIndex}.
+   */
+  readonly proposals?: TaskProposalIndex
 }
 
 export interface TaskEventPayloads {
@@ -1202,6 +1221,57 @@ export interface TaskEventPayloads {
   DiagnosisRecorded: { diagnosis: Diagnosis }
   /** A structured "what is still missing" record raised by a failure, a block, or a capability gap; an Obligation is a question, never an action. */
   ObligationRecorded: { obligation: Obligation }
+  /**
+   * A proposal enters the store (T2/T3, construction guide §6): one immutable
+   * batch submission with the policy it was born under, the complete normalized
+   * contracts of every child, the limits it was admitted under, the resolution
+   * it was reviewed against, and both context fingerprints. The batch content is
+   * what a reviewer reads and an approval covers, so it is stored here rather
+   * than referenced: a waiting proposal, a rejected one, or a re-opened store
+   * renders it from saved facts. A proposal is born `ready` under policy `off`
+   * (the batch runs without a human review, and the record says so) or
+   * `pending_review` under policy `all`; the reducer refuses a record that
+   * claims the other combination, refuses a batch that disagrees with the
+   * identity it accompanies (length, order, contract digest, dependencies,
+   * flags), and refuses a proposal whose digests do not match the content they
+   * claim to describe. Nothing is admitted, no child exists, and no parent is
+   * marked decomposed by this event — a proposal is a question, not work.
+   */
+  TaskProposalSubmitted: { proposal: TaskProposal }
+  /**
+   * A human review decision (T2/T3, §6): approved, rejected, cancelled or
+   * expired, bound to the dossier digest and both context fingerprints shown
+   * when it was taken. The reducer refuses a decision whose digests disagree
+   * with the stored proposal and one that is not legal from the proposal's
+   * current status — so an approval can never travel to a revision, a
+   * re-resolution or a re-checked context, and a later approval of a batch
+   * whose parent run has ended is written as `expired` (an invalidation)
+   * rather than as an approval nobody could dispatch.
+   */
+  TaskProposalDecided: TaskProposalDecisionClaim
+  /**
+   * A runtime-driven proposal phase change (T2/T3, §6): to `pending_review`
+   * when the deployment tightens to `all` while a policy-off proposal is still
+   * un-admitted (only tightening is allowed; a waiting proposal is never
+   * released), to `ready` when an approval passed its post-approval re-check,
+   * and to `stale` when that re-check found the context or the parent state
+   * changed. The reducer checks the change against the status table — a
+   * re-review of a proposal already awaiting review, a re-check pass without an
+   * approval, and a stale marking of an admitted batch are all refused.
+   */
+  TaskProposalPhaseChanged: TaskProposalPhaseChange
+  /**
+   * A proposal is consumed (T2/T3, §6): the batch it named now exists, bound to
+   * the child task ids and the batch id this event carries. Written in the same
+   * commit as the children, the decomposition record and the parent run's
+   * `active → waiting_children` change (A3 `admitBatchIn`), so a crash after
+   * admission is recovered from the log alone — "this proposal was consumed and
+   * these are its tasks" is one durable fact, never a second batch. The reducer
+   * refuses a second consumption of one proposal and a consumption whose
+   * digests, batch id or child ids do not match what was approved or what the
+   * store holds.
+   */
+  TaskProposalAdmitted: TaskProposalConsumption
 }
 
 export type TaskEventKind = keyof TaskEventPayloads

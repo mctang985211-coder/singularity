@@ -164,6 +164,18 @@ export const WORKER_BASELINE_LABELS: readonly string[] = [
  *   this call (A3 §3.6). It is also the one write the execution gate keeps for
  *   a run in `waiting_children` or `submitted` (`gate.ts:COORDINATION_ALLOWED`),
  *   so the tool has to be on the surface of every run that can hold a batch.
+ * - `task_proposal_read`, `task_proposal_continue`, `task_proposal_cancel`
+ *   (T2/T3) — a decomposition proposal is not always admitted on the spot: a
+ *   reviewed deployment answers `task_decompose` with a proposal id and nothing
+ *   admitted, and the tool's own answer points the caller at
+ *   `task_proposal_read` for the batch as it was recorded. The other two are
+ *   the coordination actions on that record — continuing it after a decision
+ *   (which can admit the batch, so the gate classifies it with
+ *   `task_decompose`) and withdrawing it before admission (classified with
+ *   `task_cancel`). They are task-domain actions of a node that proposed work,
+ *   not platform management: the human decision itself never happens in a
+ *   worker's tool plane — the review channel is wired at the service assembly
+ *   and a worker has no tool that could decide a proposal.
  *
  * `graph_spawn` is deliberately NOT here, even though the deployment registers
  * it for the root: it reaches the graph without Task Admission and returns the
@@ -186,6 +198,9 @@ export const WORKER_BASELINE_TOOLS: readonly string[] = [
   'task_cancel',
   'task_verify',
   'capability_list',
+  'task_proposal_read',
+  'task_proposal_continue',
+  'task_proposal_cancel',
 ]
 
 /**

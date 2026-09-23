@@ -979,7 +979,9 @@ describe('A3: a cancellation during verification', () => {
     // The verdict now arrives: cancellation wins, nothing is written twice, and
     // the recovery pass reports no failure of its own.
     release.resolve()
-    await expect(recovering).resolves.toBeUndefined()
+    // Recovery now answers with the proposals it could not finish (T2/T3 §5):
+    // this store holds none, and the report says so.
+    await expect(recovering).resolves.toEqual({ unresolvedProposals: [] })
     const after = await b.snapshot()
     expect(after.runs.find(run => run.runId === crashed.runId)!.status).toBe('cancelled')
     expect(after.tasks.find(task => task.taskId === childTaskIds[0])!.status).toBe('cancelled')
@@ -1026,7 +1028,7 @@ describe('A3: a cancellation during verification', () => {
 
     await b.runtime.cancelGraph(STORE, 'graph removed')
     release.resolve()
-    await expect(recovering).resolves.toBeUndefined()
+    await expect(recovering).resolves.toEqual({ unresolvedProposals: [] })
     const after = await b.snapshot()
     // The store refused the late evidence, no verdict was written, and the one
     // review on the record is the cancellation's.

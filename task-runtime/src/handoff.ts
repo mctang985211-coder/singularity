@@ -147,6 +147,18 @@ export function renderWorkerPrompt(handoff: TaskHandoff, childTask: TaskInstance
     'executable criterion, capability coverage, depth and batch-size limits — and a task may split only once; a refusal names the rule that ' +
     'blocked it, and that reason is what you act on. Split only into pieces a verifier can judge on its own; otherwise do the work here.'
 
+  // A decomposition may instead come back waiting for a human review (T2/T3
+  // §5): the same answer tells the worker what the wait means, that repeating
+  // itself is pointless, and what a refusal asks of it. Rendered wherever this
+  // prompt tells the worker to decompose at all — the switch above, or a task
+  // admitted as decomposable, whose own block names the tool whatever the
+  // switch says.
+  const reviewRule =
+    '- A decomposition can come back waiting for a human review: it answers with a proposal id and admits nothing, so no child exists ' +
+    'and nothing is spawned until the review decides. Read the batch as it was recorded with `task_proposal_read`; do not re-submit the ' +
+    'same batch while it waits, because the same request is answered with the same proposal. If the review refuses it, revise the batch ' +
+    'from the reason on the record and decompose again — a revision is a new proposal, never a re-run of the refused one.'
+
   const rules = [
     '## Rules',
     '',
@@ -157,6 +169,7 @@ export function renderWorkerPrompt(handoff: TaskHandoff, childTask: TaskInstance
     '- Keep changes scoped to this task. Need a human decision? Ask with `ask_user_question`.',
     '- Cannot continue? Fail with a clear reason — the orchestrator blocks dependent tasks and reports to the parent task.',
     ...(options.allowRuntimeDecomposition ? [runtimeSplitRule] : []),
+    ...(options.allowRuntimeDecomposition || childTask.decompositionStatus === 'decomposable' ? [reviewRule] : []),
     '- This prompt is where you start, not the whole truth: re-read your own contract and run with `task_read`, and the whole tree with `task_status`, whenever you need them.',
     '- When the work is done, hand it in with `task_submit_result`: a summary of what you delivered plus the evidence references you produced. ' +
     'The call closes this run to further writes, drains the calls still in flight, and lets the runtime put the run in front of the verifier; ' +

@@ -12,6 +12,7 @@ import type {} from '@dangosys/dsh-singularity-task-runtime'
 import { HitlService } from './hitl.ts'
 import { EscalationService } from './escalation.ts'
 import { EvolutionService } from './evolution.ts'
+import { ProposalReviewService } from './proposal-review.ts'
 import { defineApproveTool } from './tools/approve.ts'
 import { defineAskTool } from './tools/ask.ts'
 import { defineCapabilityListTool } from './tools/capability-list.ts'
@@ -30,6 +31,9 @@ import { defineSpawnTool } from './tools/spawn.ts'
 import { defineTaskCancelTool } from './tools/task-cancel.ts'
 import { defineTaskDecomposeTool } from './tools/task-decompose.ts'
 import { defineTaskDiagnoseTool } from './tools/task-diagnose.ts'
+import { defineTaskProposalCancelTool } from './tools/task-proposal-cancel.ts'
+import { defineTaskProposalContinueTool } from './tools/task-proposal-continue.ts'
+import { defineTaskProposalReadTool } from './tools/task-proposal-read.ts'
 import { defineTaskReadTool } from './tools/task-read.ts'
 import { defineTaskReviewAgentTool } from './tools/review-agent.ts'
 import { defineTaskReviewPackTool } from './tools/task-review-pack.ts'
@@ -42,6 +46,7 @@ export type { HitlAnswer, HitlKind, HitlPending } from './hitl.ts'
 export { EscalationService } from './escalation.ts'
 export type { Escalation, EscalationInput, EscalationRecord, EscalationTrigger } from './escalation.ts'
 export { ESCALATION_TRIGGERS } from './escalation.ts'
+export { ProposalReviewService, ownerSessionOfStore, renderProposalReview, reviewDecider } from './proposal-review.ts'
 export { EvolutionService } from './evolution.ts'
 export type {
   AgentPresetMutation,
@@ -91,6 +96,11 @@ export class SingularityAgent extends Service {
     // Same discipline for the escalation ledger: the `escalate` tool reads
     // `ctx.escalation` from this fiber, and the parent never injects it.
     new EscalationService(ctx)
+    // And for the T2/T3 review channel: the task runtime resolves
+    // `ctx.proposalReviewChannel` softly and asks it when a batch waits for a
+    // human, so the channel has to be visible from the runtime's context. It is
+    // provided on this fiber for the same reason the two ledgers are.
+    new ProposalReviewService(ctx)
     ctx.tools.register(defineMarkReadyTool(ctx))
     ctx.tools.register(defineSpawnTool(ctx))
     ctx.tools.register(defineAskTool(ctx))
@@ -98,6 +108,9 @@ export class SingularityAgent extends Service {
     ctx.tools.register(defineTaskReadTool(ctx))
     ctx.tools.register(defineCapabilityListTool(ctx))
     ctx.tools.register(defineTaskDecomposeTool(ctx))
+    ctx.tools.register(defineTaskProposalReadTool(ctx))
+    ctx.tools.register(defineTaskProposalContinueTool(ctx))
+    ctx.tools.register(defineTaskProposalCancelTool(ctx))
     ctx.tools.register(defineTaskStatusTool(ctx))
     ctx.tools.register(defineTaskSubmitResultTool(ctx))
     ctx.tools.register(defineTaskCancelTool(ctx))

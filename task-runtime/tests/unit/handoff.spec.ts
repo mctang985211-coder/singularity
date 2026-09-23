@@ -179,6 +179,30 @@ describe('renderWorkerPrompt', () => {
     expect(decomposable).not.toContain(RUNTIME_SPLIT)
   })
 
+  test('tells a worker that can decompose what a waiting review means for its batch', () => {
+    const handoff = buildHandoff({
+      parentTask: task({ taskId: 'root', parentTaskId: undefined, depth: 0, objective: 'ship the release' }),
+      parentRun: run(),
+      childTask: task(),
+      reason: 'split the work',
+      callerSessionId: 'root-session',
+    })
+
+    const leaf = renderWorkerPrompt(handoff, task(), POLICY)
+    expect(leaf).toContain('waiting for a human review')
+    expect(leaf).toContain('`task_proposal_read`')
+    expect(leaf).toContain('re-submit the same batch while it waits')
+    expect(leaf).toContain('a revision is a new proposal')
+
+    // The deployment admits no runtime split, but a decomposable child is told to
+    // decompose by its own block: it gets the review rule too.
+    const decomposable = renderWorkerPrompt(handoff, task({ decompositionStatus: 'decomposable' }), POLICY_OFF)
+    expect(decomposable).toContain('waiting for a human review')
+
+    // A leaf worker whose prompt names no decomposition is told nothing about it.
+    expect(renderWorkerPrompt(handoff, task(), POLICY_OFF)).not.toContain('waiting for a human review')
+  })
+
   test('gives both child branches the delegating session and the exact-read route to it', () => {
     const handoff = buildHandoff({
       parentTask: task({ taskId: 'root', parentTaskId: undefined, depth: 0, objective: 'ship the release' }),

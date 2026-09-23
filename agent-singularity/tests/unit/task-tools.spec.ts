@@ -198,7 +198,10 @@ function fixture() {
         task: sessionId === 'root-1' ? rootTask : workerTask,
         run: sessionId === 'root-1' ? rootRun : workerRun,
       })),
-      decomposeAndRun: vi.fn(),
+      submitDecompositionProposal: vi.fn(),
+      continueProposal: vi.fn(),
+      proposalIn: vi.fn(),
+      cancelProposal: vi.fn(),
       listCapabilities: vi.fn(() => structuredClone(DEFAULT_CAPABILITIES)),
       capabilityProviderReport: vi.fn(async (_sessionId: string) => providerReport()),
       verifyTimeoutMs: 1234,
@@ -490,20 +493,36 @@ describe('task_decompose', () => {
     },
   ]
 
-  it('passes the spec through to decomposeAndRun and renders per-child results', async () => {
+  /** The submission the runtime would record, as the service reports it back. */
+  function submission(overrides: Record<string, unknown> = {}) {
+    return { proposalId: 'p-1', status: 'ready' as const, policy: 'off' as const, existing: false, detail: 'recorded', ...overrides }
+  }
+
+  it('proposes the batch and continues it, rendering the admitted children', async () => {
     const { ctx } = fixture()
     const signal = new AbortController().signal
-    ctx.taskRuntime.decomposeAndRun.mockResolvedValue({ batchId: 'b-t-root', childTaskIds: ['t-child-1', 't-child-2'] })
+    ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission())
+    ctx.taskRuntime.continueProposal.mockResolvedValue({
+      proposalId: 'p-1',
+      status: 'admitted',
+      batchId: 'b-t-root',
+      childTaskIds: ['t-child-1', 't-child-2'],
+      detail: 'admitted as batch b-t-root',
+    })
     const tool = defineTaskDecomposeTool(ctx as never)
     const result = (await tool.execute({ reason: 'split the work', children }, { agent: { id: 'root-1' }, signal } as never)) as string
-    expect(ctx.taskRuntime.decomposeAndRun).toHaveBeenCalledExactlyOnceWith(
+
+    // The tool composes the runtime's two entries — the submission carries the
+    // caller's own key options, the continuation is what admits the batch.
+    expect(ctx.taskRuntime.submitDecompositionProposal).toHaveBeenCalledExactlyOnceWith(
       'sg-t-root-1',
       't-root',
       'r-root',
       'root-1',
       { reason: 'split the work', children },
-      { signal },
+      { exec: { signal } },
     )
+    expect(ctx.taskRuntime.continueProposal).toHaveBeenCalledExactlyOnceWith('sg-t-root-1', 'p-1', 'root-1', {})
     // The tool returns at admission (A3 §3.1) and says so: it reports the batch
     // that was admitted, not outcomes nobody has produced yet.
     expect(result).toContain('decomposed t-root into 2 children (batch b-t-root):')
@@ -514,7 +533,14 @@ describe('task_decompose', () => {
 
   it('states the contract the caller is under while the batch runs', async () => {
     const { ctx } = fixture()
-    ctx.taskRuntime.decomposeAndRun.mockResolvedValue({ batchId: 'b-t-root', childTaskIds: ['t-child-1'] })
+    ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission())
+    ctx.taskRuntime.continueProposal.mockResolvedValue({
+      proposalId: 'p-1',
+      status: 'admitted',
+      batchId: 'b-t-root',
+      childTaskIds: ['t-child-1'],
+      detail: 'admitted as batch b-t-root',
+    })
     const tool = defineTaskDecomposeTool(ctx as never)
     const result = (await tool.execute({ reason: 'split the work', children }, exec('root-1'))) as string
 
@@ -528,9 +554,37 @@ describe('task_decompose', () => {
     expect(result).toContain('You are notified when the batch settles')
   })
 
+  it('registers the call id so the batch drain does not wait for the asking call', async () => {
+    const { ctx } = fixture()
+    const signal = new AbortController().signal
+    ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission())
+    ctx.taskRuntime.continueProposal.mockResolvedValue({
+      proposalId: 'p-1',
+      status: 'admitted',
+      batchId: 'b-t-root',
+      childTaskIds: ['t-child-1'],
+      detail: 'admitted as batch b-t-root',
+    })
+    const tool = defineTaskDecomposeTool(ctx as never)
+    await tool.execute({ reason: 'split the work', children }, { agent: { id: 'root-1' }, signal, callId: 'call-7' } as never)
+
+    expect(ctx.taskRuntime.submitDecompositionProposal).toHaveBeenCalledExactlyOnceWith(
+      'sg-t-root-1',
+      't-root',
+      'r-root',
+      'root-1',
+      { reason: 'split the work', children },
+      { exec: { signal, callId: 'call-7' } },
+    )
+    // Only the call id rides the continuation: the submission's signal dies with
+    // the submission, and a caller that aborts afterwards cannot stop a batch
+    // the store already decided about.
+    expect(ctx.taskRuntime.continueProposal).toHaveBeenCalledExactlyOnceWith('sg-t-root-1', 'p-1', 'root-1', { exec: { callId: 'call-7' } })
+  })
+
   it('returns the admission rejection as error text instead of throwing', async () => {
     const { ctx } = fixture()
-    ctx.taskRuntime.decomposeAndRun.mockRejectedValue(
+    ctx.taskRuntime.submitDecompositionProposal.mockRejectedValue(
       new Error('task-runtime: admission rejected decomposition of "t-root":\n- child 0 has no acceptance criteria'),
     )
     const tool = defineTaskDecomposeTool(ctx as never)
@@ -538,41 +592,14 @@ describe('task_decompose', () => {
     expect(result).toContain('task_decompose rejected:')
     expect(result).toContain('admission rejected decomposition of "t-root"')
     expect(result).toContain('child 0 has no acceptance criteria')
-  })
-
-  it('passes a declared contract version through to decomposeAndRun', async () => {
-    const { ctx } = fixture()
-    const signal = new AbortController().signal
-    ctx.taskRuntime.decomposeAndRun.mockResolvedValue({ batchId: 'b-t-root', childTaskIds: ['t-child-1'] })
-    const tool = defineTaskDecomposeTool(ctx as never)
-    await tool.execute({ reason: 'split the work', contractVersion: 1, children }, { agent: { id: 'root-1' }, signal } as never)
-    expect(ctx.taskRuntime.decomposeAndRun).toHaveBeenCalledExactlyOnceWith(
-      'sg-t-root-1',
-      't-root',
-      'r-root',
-      'root-1',
-      { reason: 'split the work', contractVersion: 1, children },
-      { signal },
-    )
-    // The key rides along only when declared: the pass-through test above omits it and stays unchanged.
-    expect(Object.keys(ctx.taskRuntime.decomposeAndRun.mock.calls[0]![4] as Record<string, unknown>).sort())
-      .toEqual(['children', 'contractVersion', 'reason'])
-  })
-
-  it('sends no contractVersion key when the caller declares none', async () => {
-    const { ctx } = fixture()
-    ctx.taskRuntime.decomposeAndRun.mockResolvedValue({ batchId: 'b-t-root', childTaskIds: ['t-child-1'] })
-    const tool = defineTaskDecomposeTool(ctx as never)
-    await tool.execute({ reason: 'split the work', children }, exec('root-1'))
-    // Deep equality alone also accepts a present key holding undefined, so the omission is asserted on the keys.
-    expect(Object.keys(ctx.taskRuntime.decomposeAndRun.mock.calls[0]![4] as Record<string, unknown>).sort())
-      .toEqual(['children', 'reason'])
+    // A refused batch is refused before anything was proposed: no continuation.
+    expect(ctx.taskRuntime.continueProposal).not.toHaveBeenCalled()
   })
 
   it('returns the runtime rejection of an unknown declared contract version as error text', async () => {
     const { ctx } = fixture()
     const signal = new AbortController().signal
-    ctx.taskRuntime.decomposeAndRun.mockRejectedValue(
+    ctx.taskRuntime.submitDecompositionProposal.mockRejectedValue(
       new Error('task-runtime: contract rejected decomposition of "t-root":\n- unknown contract version 2: this runtime writes version 1'),
     )
     const tool = defineTaskDecomposeTool(ctx as never)
@@ -580,22 +607,90 @@ describe('task_decompose', () => {
       { reason: 'split the work', contractVersion: 2, children },
       { agent: { id: 'root-1' }, signal } as never,
     )) as string
-    expect(ctx.taskRuntime.decomposeAndRun).toHaveBeenCalledExactlyOnceWith(
+    expect(ctx.taskRuntime.submitDecompositionProposal).toHaveBeenCalledExactlyOnceWith(
       'sg-t-root-1',
       't-root',
       'r-root',
       'root-1',
       { reason: 'split the work', contractVersion: 2, children },
-      { signal },
+      { exec: { signal } },
     )
     expect(result).toContain('task_decompose rejected:')
     expect(result).toContain('unknown contract version 2')
   })
 
+  it('sends no requestKey, supersedes or contractVersion key when the caller declares none', async () => {
+    const { ctx } = fixture()
+    ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission())
+    ctx.taskRuntime.continueProposal.mockResolvedValue({
+      proposalId: 'p-1',
+      status: 'admitted',
+      batchId: 'b-t-root',
+      childTaskIds: ['t-child-1'],
+      detail: 'admitted as batch b-t-root',
+    })
+    const tool = defineTaskDecomposeTool(ctx as never)
+    await tool.execute({ reason: 'split the work', children }, exec('root-1'))
+
+    // Deep equality alone also accepts a present key holding undefined, so the
+    // omissions are asserted on the keys — of the spec and of the options.
+    const options = ctx.taskRuntime.submitDecompositionProposal.mock.calls[0]![5] as Record<string, unknown>
+    expect(Object.keys(options).sort()).toEqual(['exec'])
+    expect(Object.keys(ctx.taskRuntime.submitDecompositionProposal.mock.calls[0]![4] as Record<string, unknown>).sort())
+      .toEqual(['children', 'reason'])
+  })
+
+  it('lifts a declared requestKey and supersedes out of the batch into the submission options', async () => {
+    const { ctx } = fixture()
+    ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission({ existing: true, status: 'pending_review', policy: 'all' }))
+    ctx.taskRuntime.continueProposal.mockResolvedValue({
+      proposalId: 'p-1',
+      status: 'pending_review',
+      detail: 'proposal "p-1" is waiting for a review; only a decision on the record advances it (§6)',
+    })
+    ctx.taskRuntime.proposalIn.mockResolvedValue({ proposalId: 'p-1', status: 'pending_review', policy: 'all' })
+    const tool = defineTaskDecomposeTool(ctx as never)
+    await tool.execute(
+      { reason: 'split the work', children, requestKey: 'rk-mine', supersedes: 'p-old' },
+      exec('root-1'),
+    )
+
+    // The two keys are options of the submission, not batch fields: passing them
+    // inside the spec would make the runtime refuse them as undeclared fields.
+    expect(ctx.taskRuntime.submitDecompositionProposal).toHaveBeenCalledExactlyOnceWith(
+      'sg-t-root-1',
+      't-root',
+      'r-root',
+      'root-1',
+      { reason: 'split the work', children },
+      { requestKey: 'rk-mine', supersedes: 'p-old', exec: expect.objectContaining({}) },
+    )
+  })
+
+  it('declares requestKey and supersedes on the schema, and keeps the batch open for the runtime', () => {
+    const { ctx } = fixture()
+    const tool = defineTaskDecomposeTool(ctx as never)
+    const parameters = (tool.parameters as { properties: Record<string, { type: unknown; description?: string }> }).properties
+
+    expect(parameters.requestKey?.type).toBe('string')
+    expect(parameters.requestKey?.description).toContain('the runtime derives one')
+    expect(parameters.requestKey?.description).toContain('new key')
+    expect(parameters.supersedes?.type).toBe('string')
+    expect(parameters.supersedes?.description).toContain('record is kept')
+    expect(parameters.supersedes?.description).toContain('does not transfer')
+  })
+
   it('passes declared criterion ids and child constraints through untouched', async () => {
     const { ctx } = fixture()
     const signal = new AbortController().signal
-    ctx.taskRuntime.decomposeAndRun.mockResolvedValue({ batchId: 'b-t-root', childTaskIds: ['t-child-1'] })
+    ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission())
+    ctx.taskRuntime.continueProposal.mockResolvedValue({
+      proposalId: 'p-1',
+      status: 'admitted',
+      batchId: 'b-t-root',
+      childTaskIds: ['t-child-1'],
+      detail: 'admitted as batch b-t-root',
+    })
     const declared = [
       {
         objective: 'Implement the parser',
@@ -605,20 +700,27 @@ describe('task_decompose', () => {
     ]
     const tool = defineTaskDecomposeTool(ctx as never)
     await tool.execute({ reason: 'split the work', children: declared }, { agent: { id: 'root-1' }, signal } as never)
-    expect(ctx.taskRuntime.decomposeAndRun).toHaveBeenCalledExactlyOnceWith(
+    expect(ctx.taskRuntime.submitDecompositionProposal).toHaveBeenCalledExactlyOnceWith(
       'sg-t-root-1',
       't-root',
       'r-root',
       'root-1',
       { reason: 'split the work', children: declared },
-      { signal },
+      { exec: { signal } },
     )
   })
 
   it('declares protectedInputs on the criterion schema and passes the declared paths through untouched', async () => {
     const { ctx } = fixture()
     const signal = new AbortController().signal
-    ctx.taskRuntime.decomposeAndRun.mockResolvedValue({ batchId: 'b-t-root', childTaskIds: ['t-child-1'] })
+    ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission())
+    ctx.taskRuntime.continueProposal.mockResolvedValue({
+      proposalId: 'p-1',
+      status: 'admitted',
+      batchId: 'b-t-root',
+      childTaskIds: ['t-child-1'],
+      detail: 'admitted as batch b-t-root',
+    })
     const tool = defineTaskDecomposeTool(ctx as never)
 
     // The schema is the model-facing half of the contract: the declared paths
@@ -644,14 +746,100 @@ describe('task_decompose', () => {
       },
     ]
     await tool.execute({ reason: 'split the work', children: declared }, { agent: { id: 'root-1' }, signal } as never)
-    expect(ctx.taskRuntime.decomposeAndRun).toHaveBeenCalledExactlyOnceWith(
+    expect(ctx.taskRuntime.submitDecompositionProposal).toHaveBeenCalledExactlyOnceWith(
       'sg-t-root-1',
       't-root',
       'r-root',
       'root-1',
       { reason: 'split the work', children: declared },
-      { signal },
+      { exec: { signal } },
     )
+  })
+
+  it('reports a batch waiting for its review, naming the proposal and the policy on its record', async () => {
+    const { ctx } = fixture()
+    ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission({ existing: false, status: 'pending_review', policy: 'all' }))
+    ctx.taskRuntime.continueProposal.mockResolvedValue({
+      proposalId: 'p-9',
+      status: 'pending_review',
+      detail: 'proposal "p-9" is waiting for a review; only a decision on the record advances it (§6)',
+    })
+    ctx.taskRuntime.proposalIn.mockResolvedValue({ proposalId: 'p-9', status: 'pending_review', policy: 'all' })
+    const tool = defineTaskDecomposeTool(ctx as never)
+    const result = (await tool.execute({ reason: 'split the work', children }, exec('root-1'))) as string
+
+    // §5–§6: the caller learns that nothing ran, what holds the batch, and that
+    // neither another submission nor a wait in this call is the way forward.
+    expect(result).toContain('task_decompose is waiting for a review')
+    expect(result).toContain('p-9')
+    expect(result).toContain('policy all')
+    expect(ctx.taskRuntime.proposalIn).toHaveBeenCalledExactlyOnceWith('sg-t-root-1', 'p-9')
+    expect(result).toContain('has not been decomposed')
+    expect(result).toContain('no worker was spawned')
+    expect(result).toContain('`task_proposal_read`')
+    expect(result).toContain('the runtime continues the batch')
+    expect(result).toContain('a revision is new content')
+    expect(result).toContain('Do not re-submit the same content while it waits')
+    // A waiting batch is not an error: the answer is the guidance, not a refusal.
+    expect(result).not.toContain('task_decompose rejected')
+  })
+
+  it('names the policy the proposal was born under, read from the record', async () => {
+    const { ctx } = fixture()
+    ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission({ status: 'pending_review', policy: 'off' }))
+    ctx.taskRuntime.continueProposal.mockResolvedValue({ proposalId: 'p-9', status: 'pending_review', detail: 'waiting' })
+    // A proposal born under `off` and tightened into review keeps its birth
+    // policy on the record, and the tool reports the record, not the config.
+    ctx.taskRuntime.proposalIn.mockResolvedValue({ proposalId: 'p-9', status: 'pending_review', policy: 'off' })
+    const tool = defineTaskDecomposeTool(ctx as never)
+    const result = (await tool.execute({ reason: 'split the work', children }, exec('root-1'))) as string
+    expect(result).toContain('policy off')
+  })
+
+  it('says the policy could not be read back rather than inventing one', async () => {
+    const { ctx } = fixture()
+    ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission({ status: 'pending_review', policy: 'all' }))
+    ctx.taskRuntime.continueProposal.mockResolvedValue({ proposalId: 'p-9', status: 'pending_review', detail: 'waiting' })
+    ctx.taskRuntime.proposalIn.mockRejectedValue(new Error('task: unknown proposal "p-9"'))
+    const tool = defineTaskDecomposeTool(ctx as never)
+    const result = (await tool.execute({ reason: 'split the work', children }, exec('root-1'))) as string
+    expect(result).toContain('policy unknown')
+    expect(result).toContain('task_decompose is waiting for a review')
+  })
+
+  it('names a proposal that was decided against, and points at the revision route', async () => {
+    const { ctx } = fixture()
+    ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission({ existing: true, status: 'rejected', policy: 'all' }))
+    ctx.taskRuntime.continueProposal.mockResolvedValue({
+      proposalId: 'p-3',
+      status: 'rejected',
+      detail: 'proposal "p-3" is rejected; nothing was admitted and nothing is dispatched',
+      reason: 'the owner refused this batch through the approval channel',
+    })
+    const tool = defineTaskDecomposeTool(ctx as never)
+    const result = (await tool.execute({ reason: 'split the work', children }, exec('root-1'))) as string
+
+    expect(result).toContain('task_decompose rejected: decomposition of "t-root" is rejected (proposal p-3)')
+    expect(result).toContain('the owner refused this batch through the approval channel')
+    expect(result).toContain('never runs: revise it')
+    expect(ctx.taskRuntime.proposalIn).not.toHaveBeenCalled()
+  })
+
+  it('asks no human itself: a refused batch reaches no approval channel', async () => {
+    const { ctx } = fixture()
+    const approval = { request: vi.fn() }
+    const withApproval = { ...ctx, approval }
+    ctx.taskRuntime.submitDecompositionProposal.mockRejectedValue(
+      new Error('task-runtime: admission rejected decomposition of "t-root":\n- child 0 declares no acceptance criteria'),
+    )
+    const tool = defineTaskDecomposeTool(withApproval as never)
+    const result = (await tool.execute({ reason: 'split the work', children }, exec('root-1'))) as string
+
+    // §5: a bad batch never reaches a person. The tool takes no human decision
+    // itself, and the runtime refuses the batch before a proposal exists.
+    expect(result).toContain('task_decompose rejected:')
+    expect(approval.request).not.toHaveBeenCalled()
+    expect(ctx.taskRuntime.continueProposal).not.toHaveBeenCalled()
   })
 })
 
@@ -677,7 +865,10 @@ describe('capability_list', () => {
     expect(result).toContain('bash')
     expect(result).toContain('baseline labels: ')
     // The machinery line is rendered from WORKER_BASELINE_TOOLS, so it cannot drift from the grant.
-    expect(result).toContain('task machinery: task_read, task_status, task_decompose, task_submit_result, task_cancel, task_verify, capability_list')
+    expect(result).toContain(
+      'task machinery: task_read, task_status, task_decompose, task_submit_result, task_cancel, task_verify, capability_list, ' +
+      'task_proposal_read, task_proposal_continue, task_proposal_cancel',
+    )
     expect(result).toContain('tool grants are fail-closed: ')
     expect(result).toContain('skill grants are not exclusive: DSH has no per-agent skill hiding')
     expect(result).toContain('mcpServers grant whole MCP servers')

@@ -2830,15 +2830,15 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
       ['an all-optional criterion list', {
         reason: 'split the work',
         children: children({ objective: 'child a', acceptanceCriteria: [{ description: 'nothing is required', command: 'true', mandatory: false }] }),
-      }, /admission rejected decomposition of "[^"]+":\n- child 0 \("[^"]+"\) requires at least one mandatory acceptance criterion/],
+      }, /admission rejected decomposition of "[^"]+":\n- child 0 requires at least one mandatory acceptance criterion/],
       ['a null mode', {
         reason: 'split the work',
         children: children({ objective: 'child a', acceptanceCriteria: [{ description: 'child a works', command: 'true', mode: null }] }),
-      }, /admission rejected decomposition of "[^"]+":\n- child 0 \("[^"]+"\) criterion "ac1-1" verificationMode "null" is not one of deterministic, simulation, formal, measurement, review, composite/],
+      }, /admission rejected decomposition of "[^"]+":\n- child 0 criterion "ac1-1" verificationMode "null" is not one of deterministic, simulation, formal, measurement, review, composite/],
       ['a numeric mode', {
         reason: 'split the work',
         children: children({ objective: 'child a', acceptanceCriteria: [{ description: 'child a works', command: 'true', mode: 0 }] }),
-      }, /admission rejected decomposition of "[^"]+":\n- child 0 \("[^"]+"\) criterion "ac1-1" verificationMode "0" is not one of deterministic, simulation, formal, measurement, review, composite/],
+      }, /admission rejected decomposition of "[^"]+":\n- child 0 criterion "ac1-1" verificationMode "0" is not one of deterministic, simulation, formal, measurement, review, composite/],
     ]
 
     for (const [label, spec, expected] of cases) {
@@ -3731,7 +3731,10 @@ describe('A3 coordination', () => {
     const original = h.task.snapshotIn.bind(h.task)
     let attempts = 0
     h.task.snapshotIn = async () => { attempts += 1; throw new Error('the log is unreadable') }
-    await expect(h.runtime.reconcileStore(STORE)).resolves.toBeUndefined()
+    // `reconcileStore` now answers with the proposals it could not finish
+    // (T2/T3 §5), so "nothing was reconciled" is the empty report — and the read
+    // is still attempted exactly once, before anything at all is touched.
+    await expect(h.runtime.reconcileStore(STORE)).resolves.toEqual({ unresolvedProposals: [] })
     h.task.snapshotIn = original
     expect(attempts).toBe(1)
     expect((await h.task.runIn(STORE, runId)).status).toBe('running')

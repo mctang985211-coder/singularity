@@ -249,6 +249,7 @@ describe('tool labels', () => {
       'session_event_read', 'session_event_trace', 'session_trace',
       'ask_user_question',
       'task_read', 'task_status', 'task_decompose', 'task_submit_result', 'task_cancel', 'task_verify', 'capability_list',
+      'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel',
     ])
     expect(baseline).toEqual([...new Set(baseline)])
     // The task machinery is the tail, in the order WORKER_BASELINE_TOOLS declares.
@@ -256,6 +257,13 @@ describe('tool labels', () => {
     // Growth happens through task_decompose admission; the graph surface is never a worker's.
     expect(baseline).not.toContain('graph_spawn')
     expect(baseline).not.toContain('graph_mark_ready')
+    // The T2/T3 proposal tools are task-domain coordination, not platform
+    // management: a worker can read, continue and withdraw what it proposed, and
+    // holds no tool that could decide a proposal or reach the platform surface.
+    expect(WORKER_BASELINE_TOOLS).toEqual(expect.arrayContaining(['task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel']))
+    for (const platformTool of ['hitl_ask', 'hitl_approve', 'evolution_decide', 'task_review_pack', 'task_diagnose', 'escalate', 'graph_spawn']) {
+      expect(baseline, platformTool).not.toContain(platformTool)
+    }
   })
 })
 

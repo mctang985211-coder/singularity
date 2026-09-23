@@ -26,10 +26,17 @@ import type {
   TaskSnapshot,
 } from './types.ts'
 import type { DecompositionAdmission } from './contract.ts'
+import type {
+  TaskProposal,
+  TaskProposalConsumption,
+  TaskProposalDecisionClaim,
+  TaskProposalPhaseChange,
+} from './proposal.ts'
 import { TaskState } from './service/state.ts'
 
 export * from './types.ts'
 export * from './contract.ts'
+export * from './proposal.ts'
 export * from './skill-contract.ts'
 export { TaskState } from './service/state.ts'
 
@@ -255,6 +262,14 @@ export class TaskService extends Service {
    *
    * `manifests` is aligned with `children` by index (the caller's own batch
    * order): a list of another length is refused before anything is written.
+   *
+   * `proposal` consumes the proposal this batch *is* (T2/T3 §6): the
+   * `TaskProposalAdmitted` event joins the same commit, so "this proposal was
+   * consumed and these are its tasks" is one durable fact. The consumption must
+   * name exactly these children in this order — the batch and the record of it
+   * are the same batch, checked here because this is the one place that sees
+   * both — and the reducer then checks the rest of the binding (digests, batch
+   * id, the proposal's status, and that no second consumption is written).
    */
   async admitBatchIn(
     storeId: string,
@@ -265,10 +280,18 @@ export class TaskService extends Service {
     edges: readonly DependencyEdge[] = [],
     admission?: DecompositionAdmission,
     manifests?: readonly CapabilityManifest[],
+    proposal?: TaskProposalConsumption,
   ): Promise<void> {
     if (children.length === 0) throw new Error('task: admit batch requires at least one child')
     if (manifests !== undefined && manifests.length !== children.length) {
       throw new Error(`task: admit batch requires one manifest per child (${children.length} children, ${manifests.length} manifests)`)
+    }
+    if (proposal !== undefined
+      && (proposal.childTaskIds.length !== children.length
+        || !proposal.childTaskIds.every((childTaskId, index) => childTaskId === children[index]?.taskId))) {
+      throw new Error(
+        `task: admit batch requires the proposal consumption to name its children in batch order (${children.length} children, ${proposal.childTaskIds.length} consumed)`,
+      )
     }
     const events: TaskEvent[] = []
     for (const child of children) {
@@ -302,6 +325,9 @@ export class TaskService extends Service {
       actor,
       payload: { phase: 'waiting_children', batchId: `b-${parentTaskId}` },
     }))
+    if (proposal !== undefined) {
+      events.push(event('TaskProposalAdmitted', { taskId: parentTaskId, actor, payload: proposal }))
+    }
     await this.commitIn(storeId, events)
   }
 
@@ -381,6 +407,57 @@ export class TaskService extends Service {
     await this.commitIn(storeId, [event('RunProgressMarked', { taskId, runId, actor, payload })])
   }
 
+  /**
+   * Records one proposal submission (T2/T3 §6): the immutable batch record,
+   * the policy it was born under, the limits in force, the resolution it was
+   * reviewed against, and both context fingerprints. The envelope names the
+   * parent task the proposal belongs to, so every proposal event of one batch
+   * reads as one parent's business. The reducer is the gate: a malformed
+   * record, a digest that does not describe its content, a duplicate id, or a
+   * request key already bound to another proposal commits nothing.
+   */
+  async submitProposalIn(storeId: string, proposal: TaskProposal, actor: string): Promise<void> {
+    await this.commitIn(storeId, [
+      event('TaskProposalSubmitted', { taskId: proposal.identity.parentTaskId, actor, payload: { proposal } }),
+    ])
+  }
+
+  /**
+   * Records one review decision (T2/T3 §6), bound to the dossier digest and
+   * both context fingerprints the reviewer was shown. An unknown proposal is
+   * refused here, before the commit; every binding is checked by the reducer,
+   * so a decision that does not name exactly the stored proposal applies
+   * nothing.
+   */
+  async decideProposalIn(storeId: string, claim: TaskProposalDecisionClaim, actor: string): Promise<void> {
+    const taskId = await this.proposalParentIn(storeId, claim.proposalId)
+    await this.commitIn(storeId, [event('TaskProposalDecided', { taskId, actor, payload: claim })])
+  }
+
+  /**
+   * Records one runtime phase change (T2/T3 §6): to `pending_review` when the
+   * deployment tightened to `all`, to `ready` when an approval passed its
+   * post-approval re-check, to `stale` when that re-check failed. The status
+   * table lives in the reducer; a change that is not legal from the proposal's
+   * current status applies nothing.
+   */
+  async changeProposalPhaseIn(storeId: string, change: TaskProposalPhaseChange, actor: string): Promise<void> {
+    const taskId = await this.proposalParentIn(storeId, change.proposalId)
+    await this.commitIn(storeId, [event('TaskProposalPhaseChanged', { taskId, actor, payload: change })])
+  }
+
+  /**
+   * Records one consumption on its own (T2/T3 §6): the batch the proposal
+   * became, by child task id and batch id. `admitBatchIn` writes the same event
+   * inside the admission commit, which is the path that keeps the children and
+   * the record of them one fact; this entry exists for a caller that admitted
+   * the batch through another entry and is recording the consumption beside it.
+   */
+  async consumeProposalIn(storeId: string, consumption: TaskProposalConsumption, actor: string): Promise<void> {
+    const taskId = await this.proposalParentIn(storeId, consumption.proposalId)
+    await this.commitIn(storeId, [event('TaskProposalAdmitted', { taskId, actor, payload: consumption })])
+  }
+
   async recordEvidenceIn(storeId: string, evidence: EvidenceBundle, actor: string): Promise<void> {
     await this.commitIn(storeId, [event('EvidenceProduced', { taskId: evidence.taskId, runId: evidence.taskRunId, actor, payload: { evidence } })])
   }
@@ -431,6 +508,24 @@ export class TaskService extends Service {
       () => undefined,
     )
     await run
+  }
+
+  /**
+   * The parent task a proposal event is about, read from the store before the
+   * commit so the envelope names the task the proposal belongs to. Reading
+   * first is what makes an unknown proposal a refusal *before* anything is
+   * queued: the reducer would reject the event anyway, and a caller that asked
+   * about a proposal the store does not hold deserves to hear it from the entry
+   * it called. The value is advisory — the write lock is not held across it —
+   * and the reducer's own check is what actually binds the envelope.
+   */
+  private async proposalParentIn(storeId: string, proposalId: string): Promise<TaskId> {
+    const store = this.requireStore(storeId)
+    await store.ready
+    await store.writes
+    const proposal = store.state.snapshot().proposals?.byId[proposalId]
+    if (proposal === undefined) throw new Error(`task: unknown proposal "${proposalId}"`)
+    return proposal.identity.parentTaskId
   }
 
   private requireStore(storeId: string): TaskStore {
