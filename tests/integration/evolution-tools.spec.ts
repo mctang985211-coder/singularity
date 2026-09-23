@@ -27,10 +27,17 @@ function toolRegistry() {
 }
 
 /**
- * Mounts the real root-agent plugin on a real context. Every dependency is a
+ * Mounts the real root-agent plugin on a real context, with the deployment's
+ * evolution chain explicitly ON (`{ evolution: 'on' }`). Every dependency is a
  * sibling plugin of its own, the way the loader mounts `dsh-base` next to this
  * bundle; the evolution ledger's service is the plugin's own, so nothing stands
  * in for it, and every tool under test is the one the plugin registered.
+ *
+ * The switch is not incidental to this spec: with the shipped default (off) the
+ * nine `evolution_*` tools are never registered, so `tools.get('evolution_*')`
+ * is undefined here by construction. These cases are the other half of R0 — the
+ * explicit opt-in keeps the previous chain, validation, approvals and history
+ * exactly as they were.
  */
 async function mountAgent() {
   const home = await mkdtemp(join(tmpdir(), 'singularity-evolution-'))
@@ -83,7 +90,9 @@ async function mountAgent() {
     ['approval', approval],
   ]
   for (const [name, value] of dependencies) await ctx.plugin(Stub(name, value))
-  await ctx.plugin(SingularityAgent)
+  // The one deployment choice this spec has to state out loud: the chain it
+  // drives is the one the deployment opted into.
+  await ctx.plugin(SingularityAgent, { evolution: 'on' })
   return { tools: registry.tools, approval, userQuestions, home, replayTask }
 }
 

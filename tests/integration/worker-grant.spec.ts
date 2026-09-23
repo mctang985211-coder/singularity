@@ -11,6 +11,7 @@ import * as SkillFilesystem from '../../../../thirdparty/deepseek-harness/packag
 import { createScope, type Scope } from '../../../../thirdparty/deepseek-harness/packages/core/scope/lib/index.js'
 import type { Agent, ToolDefinition } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import { SingularityAgent } from '../../agent-singularity/src/index.ts'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { WorkerGrant } from '../../agent-runtime/src/types.ts'
 import { workerBaseline } from '../../task-runtime/src/capability.ts'
@@ -19,23 +20,28 @@ import { workerBaseline } from '../../task-runtime/src/capability.ts'
  * The real thing on the tools and skills axes: the deployment's own
  * `ToolRuntime`, `SkillRegistry`, and scope planes (a preset plane is an
  * ancestor scope the agent joins by scope parentage, exactly as a standing
- * preset mount does), driven through `AgentRuntime.spawn` and the real agent
- * factory contract — `setup` runs after the scoped context is minted and before
- * the agent is published, so what is asserted here is what the worker's first
- * prompt would be assembled against. Only `dsh-agent-loop` (the model loop) is
- * replaced: the stub factory mints the scope and awaits `setup`, which is what
- * the loop itself does.
+ * preset mount does), the deployment's own composition — the real
+ * `SingularityAgent` plugin, which is what registers the root/worker surface
+ * under test, mounted with its injected siblings stubbed — and the real
+ * `AgentRuntime.spawn` driven through the real agent factory contract: `setup`
+ * runs after the scoped context is minted and before the agent is published, so
+ * what is asserted here is what the worker's first prompt would be assembled
+ * against. Only `dsh-agent-loop` (the model loop) is replaced: the stub factory
+ * mints the scope and awaits `setup`, which is what the loop itself does.
+ *
+ * The plugin is mounted rather than a hand-copied name list, so the surface
+ * under test is the deployment's registration: with the evolution chain off
+ * (the shipped default) the nine `evolution_*` tools do not exist at all and no
+ * grant, absence of a grant, or allow-list can conjure them.
  */
 
-/** Exactly the root agent's allow-list (`agent-runtime/src/index.ts`), so the root setup path is exercised for real. */
-const ROOT_TOOLS = [
-  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'skill', 'task_decompose',
-  'task_submit_result', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
-  'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
-]
-
-/** The global-plane machinery every agent inherits: our own tools sit here, as they do in the deployment. `skill` rides the preset plane (PRESET_TOOLS), as `tool-skill` mounts it there. */
-const GLOBAL_TOOLS = [...ROOT_TOOLS.filter(name => name !== 'skill'), 'session_search', 'session_event_read', 'session_trace']
+/**
+ * The global-plane machinery the singularity composition does not own: the
+ * deployment's own extras, which a worker inherits beside the plugin's tools.
+ * The plugin's surface is registered by the plugin itself — never copied here,
+ * or a fixture would keep passing after the assembly moved.
+ */
+const EXTRA_GLOBAL_TOOLS = ['session_search', 'session_event_read', 'session_trace']
 
 /** What the `standard`-style preset contributes on its own plane. */
 const PRESET_TOOLS = ['bash', 'read', 'write', 'edit', 'read_image', 'glob', 'grep', 'skill', 'job_output', 'job_list', 'job_kill', 'ask_user_question', 'web_fetch', 'subagent_fetchless']
@@ -81,8 +87,27 @@ interface Harness {
   spawnError(grant: WorkerGrant, presetTools?: readonly string[]): Promise<Error>
 }
 
-/** Boot the registry stack, mount one preset plane, and create the root agent through it. `discovery` additionally mounts the real filesystem skill provider, rooted at this test's cwd. */
-async function harness(presetTools: readonly string[] = PRESET_TOOLS, discovery = false): Promise<Harness> {
+interface HarnessOptions {
+  /** The worker-side preset plane under test. Defaults to the `standard`-style composition. */
+  readonly presetTools?: readonly string[]
+  /** Mount the real filesystem skill provider, rooted at this test's cwd. */
+  readonly discovery?: boolean
+  /**
+   * The deployment's evolution switch (`SingularityAgent`'s `evolution`). `on`
+   * by default because the grant cases are about a grant STRIPPING the chain,
+   * which is only observable where the chain exists; a case about the shipped
+   * default passes `off` and gets the composition nobody configured.
+   */
+  readonly evolution?: 'off' | 'on'
+}
+
+/**
+ * Boot the registry stack, mount one preset plane, mount the real composition,
+ * and create the root agent through it.
+ */
+async function harness(options: HarnessOptions = {}): Promise<Harness> {
+  const presetTools = options.presetTools ?? PRESET_TOOLS
+  const discovery = options.discovery ?? false
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(SystemPrompt, {})
@@ -97,7 +122,7 @@ async function harness(presetTools: readonly string[] = PRESET_TOOLS, discovery 
     })
   }
 
-  for (const name of GLOBAL_TOOLS) ctx.tools.register(tool(name))
+  for (const name of EXTRA_GLOBAL_TOOLS) ctx.tools.register(tool(name))
   ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'p', model: 'm' }) })
   ctx.provide('agentPresets', { defaultId: 'standard', mount: async () => {}, resolve: async () => ({}) })
   ctx.provide('permissionPresets', { set: vi.fn() })
@@ -115,6 +140,14 @@ async function harness(presetTools: readonly string[] = PRESET_TOOLS, discovery 
       graphAgents.push(agent)
     },
   })
+  // The composition's own injected siblings. They are stubs because none of
+  // them decides what this spec asserts — the tool SURFACE the plugin registers
+  // is the real registration, and the grant filter runs over it.
+  ctx.provide('graphs', { graphForSession: async () => ({ id: 'g1', envId: 'env1', rootSessionId: ROOT_SESSION }) } as never)
+  ctx.provide('task', {} as never)
+  ctx.provide('taskRuntime', {} as never)
+  ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) } as never)
+  ctx.provide('approval', { request: async () => 'allowed-once' } as never)
 
   // A preset's standing mount lives in its own scope; an agent joins it by scope parentage.
   const presetKey = { id: 'preset:standard' }
@@ -131,6 +164,10 @@ async function harness(presetTools: readonly string[] = PRESET_TOOLS, discovery 
   }, { inject: ['tools', 'systemPrompt'] }))
 
   const runtime = new AgentRuntime(ctx)
+  // The deployment's composition, mounted the way the loader mounts it: the
+  // plugin registers the root/worker tool surface this spec filters, and the
+  // switch decides whether the nine `evolution_*` names exist to be filtered.
+  await ctx.plugin(SingularityAgent, { evolution: options.evolution ?? 'on' })
   const live = new Map<string, Agent>()
   const scopes: Scope[] = []
   const mint = async (
@@ -230,7 +267,7 @@ describe('worker capability grants', () => {
     expect(h.visible(dropped)).not.toContain('subagent_fetchless')
     expect(h.visible(dropped)).not.toContain('web_fetch')
 
-    const verify = await harness(VERIFY_PRESET_TOOLS)
+    const verify = await harness({ presetTools: VERIFY_PRESET_TOOLS })
     const kept = await verify.spawn(grantOf({
       capabilities: [{ capability: 'verify-ball-functional', tools: [], skills: [] }],
       keepPresetTools: true,
@@ -270,7 +307,7 @@ describe('worker capability grants', () => {
   })
 
   it('rejects the spawn when a capability declares a tool the composition does not offer, publishing nothing', async () => {
-    const h = await harness(VERIFY_PRESET_TOOLS)
+    const h = await harness({ presetTools: VERIFY_PRESET_TOOLS })
     const error = await h.spawnError(grantOf({
       capabilities: [{ capability: 'verify-ball-functional', tools: ['bash'], skills: [] }],
     }))
@@ -309,14 +346,32 @@ describe('worker capability grants', () => {
   })
 
   it('leaves an unauthorized spawn (a graph_spawn setup worker) on its full composition surface', async () => {
-    const h = await harness()
+    // The composition that registered the chain: an un-granted spawn inherits
+    // the global plane, so what it may call is what the deployment registered —
+    // and this one registered the nine.
+    const h = await harness({ evolution: 'on' })
     const child = await h.spawn(undefined)
     expect(h.visible(child)).toContain('evolution_decide')
     expect(h.visible(child)).toContain('subagent_fetchless')
   })
 
+  it('leaves an unauthorized spawn without the evolution chain on the shipped default composition', async () => {
+    // No grant narrows this worker, so its surface is the composition's own:
+    // read back from the assembly (the registry the plugin registered into)
+    // rather than compared against a name list a fixture keeps by hand.
+    const h = await harness({ evolution: 'off' })
+    const child = await h.spawn(undefined)
+    const names = h.visible(child)
+    expect(names.filter(name => name.startsWith('evolution_'))).toEqual([])
+    // Everything else the composition carries is still there: the switch gates
+    // the chain, not the worker's right to inherit an un-granted surface.
+    expect(names).toContain('subagent_fetchless')
+    expect(names).toContain('graph_spawn')
+    expect(names).toContain('escalate')
+  })
+
   it('leaves the root the skill loader, and discovery reaches a repo-level .agents/skills skill', async () => {
-    const h = await harness(PRESET_TOOLS, true)
+    const h = await harness({ discovery: true })
     // The root's allow-list names the preset-plane loader: it stays while the
     // rest of the preset plane is filtered out.
     expect(h.visible(h.root)).toContain('skill')

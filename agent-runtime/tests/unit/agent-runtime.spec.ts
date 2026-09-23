@@ -9,7 +9,54 @@ function agent(value: string): Agent {
   return { id: id(value) } as Agent
 }
 
-function context(roots: readonly SessionId[], status: 'idle' | 'running' = 'idle') {
+type Spy = ReturnType<typeof vi.fn>
+
+/** The eighteen tools every root composition may call; the deployment's evolution switch does not touch them. */
+const ROOT_CORE_TOOLS = [
+  'graph_spawn',
+  'graph_mark_ready',
+  'hitl_ask',
+  'hitl_approve',
+  'task_read',
+  'capability_list',
+  'skill',
+  'task_decompose',
+  'task_submit_result',
+  'task_cancel',
+  'task_proposal_read',
+  'task_proposal_continue',
+  'task_proposal_cancel',
+  'task_status',
+  'task_verify',
+  'task_review_pack',
+  'task_review_agent',
+  'task_diagnose',
+]
+
+/** The nine tools `ctx.singularityEvolution.enabled` gates: registered by the deployment, named here only when it is on. */
+const EVOLUTION_TOOLS = [
+  'evolution_propose',
+  'evolution_candidate',
+  'evolution_prepare',
+  'evolution_replay',
+  'evolution_gate',
+  'evolution_decide',
+  'evolution_apply',
+  'evolution_rollback',
+  'evolution_list',
+]
+
+/** The root's allow-list with the chain off — the shipped default, and every composition that mounts no exposure. */
+const ROOT_TOOLS_CLOSED = [...ROOT_CORE_TOOLS, 'escalate']
+
+/** The same list with the chain on: the deployment's previous assembly, name for name. */
+const ROOT_TOOLS_OPEN = [...ROOT_CORE_TOOLS, ...EVOLUTION_TOOLS, 'escalate']
+
+function context(
+  roots: readonly SessionId[],
+  status: 'idle' | 'running' = 'idle',
+  services: { readonly evolution?: { readonly enabled: boolean } } = {},
+) {
   const root = agent('root')
   const created: string[] = []
   const resumed: string[] = []
@@ -26,6 +73,11 @@ function context(roots: readonly SessionId[], status: 'idle' | 'running' = 'idle
   const ctx = {
     reflect: { provide: () => {} },
     provide: () => {},
+    // The deployment's evolution switch, as `agent-singularity` provides it on
+    // the assembly (`ctx.get('singularityEvolution')`): a context with no such
+    // service — this default, and any composition that mounts no singularity
+    // agent plugin — answers `undefined`, which the root assembly reads as off.
+    get: (name: string) => (name === 'singularityEvolution' ? services.evolution : undefined),
     agentDefaultModel: { currentSelection: () => ({ provider: 'default-provider', model: 'default-model' }) },
     agentPresets: {
       defaultId: 'standard',
@@ -82,6 +134,31 @@ function context(roots: readonly SessionId[], status: 'idle' | 'running' = 'idle
     },
   }
   return { ctx, root, created, resumed, createOptions, resumeOptions, added, statuses, mounted, disposers }
+}
+
+interface Assembly {
+  /** The scoped context the agent factory hands `setup`, with the restrictions and the prompt section it wrote. */
+  readonly agentCtx: { tools: { restrict: Spy }; systemPrompt: { section: Spy } }
+  readonly session: { append: Spy }
+  /** What `tools.restrict` was called with: the root's actual allow-list. */
+  readonly restrict: Spy
+  /** What `systemPrompt.section` was called with: the root's actual prompt. */
+  readonly section: Spy
+}
+
+/** Runs one root assembly's `setup` the way the agent factory does — after the preset mount, before the first prompt. */
+async function assemble(options: unknown): Promise<Assembly> {
+  const restrict = vi.fn()
+  const section = vi.fn()
+  const session = { append: vi.fn() }
+  const agentCtx = { tools: { restrict }, systemPrompt: { section } }
+  await (options as { setup: (ctx: unknown, agent: unknown) => Promise<void> }).setup(agentCtx, { session })
+  return { agentCtx, session, restrict, section }
+}
+
+/** The prompt text one assembly registered, read back off the section call. */
+function promptTextOf(section: Spy): string {
+  return ((section.mock.calls[0]?.[0] ?? {}) as { text?: string }).text ?? ''
 }
 
 async function spawnContext() {
@@ -394,57 +471,57 @@ describe('AgentRuntime root lifecycle', () => {
         setup: expect.any(Function),
       },
     ])
-    const restrict = vi.fn()
-    const section = vi.fn()
-    const session = { append: vi.fn() }
-    const agentCtx = {
-      tools: { restrict },
-      systemPrompt: { section },
-    }
-    const agent = { session }
-    await (state.resumeOptions[0] as { setup: (ctx: unknown, agent: unknown) => Promise<void> }).setup(agentCtx, agent)
+    const { agentCtx, session, restrict, section } = await assemble(state.resumeOptions[0])
     expect(state.mounted).toEqual([[agentCtx, 'standard']])
     expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(session, 'danger-full-access')
     // hitl_approve routes through ctx.approval; the danger-full-access bundle's
     // 'never' policy would auto-reject it, so the root session is pinned to 'ask'.
     expect(session.append).toHaveBeenCalledExactlyOnceWith('approval/policy', { policy: 'ask' })
-    expect(restrict).toHaveBeenCalledWith({
-      allow: [
-        'graph_spawn',
-        'graph_mark_ready',
-        'hitl_ask',
-        'hitl_approve',
-        'task_read',
-        'capability_list',
-        'skill',
-        'task_decompose',
-        'task_submit_result',
-        'task_cancel',
-        'task_proposal_read',
-        'task_proposal_continue',
-        'task_proposal_cancel',
-        'task_status',
-        'task_verify',
-        'task_review_pack',
-        'task_review_agent',
-        'task_diagnose',
-        'evolution_propose',
-        'evolution_candidate',
-        'evolution_prepare',
-        'evolution_replay',
-        'evolution_gate',
-        'evolution_decide',
-        'evolution_apply',
-        'evolution_rollback',
-        'evolution_list',
-        'escalate',
-      ],
-    })
+    // The composition carries no evolution exposure (this context mounts none),
+    // so neither its allow-list nor its prompt names the chain: a root that
+    // cannot call evolution_propose must not be told to.
+    expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_CLOSED })
+    const prompt = promptTextOf(section)
     expect(section).toHaveBeenCalledWith({
       name: 'singularity:root',
       order: 70,
       text: expect.stringContaining('connect workers, not to implement tasks'),
     })
+    expect(prompt).not.toContain('evolution')
+    expect(prompt).not.toContain('stay manual')
+    expect(prompt).not.toContain('Buckyball')
+  })
+
+  test('resumes a root with the full allow-list and the evolution protocol when the deployment turned the chain on', async () => {
+    const state = context([id('root')], 'idle', { evolution: { enabled: true } })
+    const runtime = new AgentRuntime(state.ctx as never)
+    await runtime.ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
+
+    const { restrict, section } = await assemble(state.resumeOptions[0])
+    expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_OPEN })
+    const prompt = promptTextOf(section)
+    expect(prompt).toContain('To carry a diagnosed fix into the evolution track')
+    expect(prompt).toContain('L4 and bookkeeping-only types stay manual')
+    expect(prompt).toContain('evolution_list reads the ledger')
+    // The domain reference map is a deployed skill, not part of the general root prompt.
+    expect(prompt).not.toContain('Buckyball')
+  })
+
+  test('reads a context that provides no evolution exposure as the closed composition', async () => {
+    const state = context([id('root')])
+    const read = vi.fn(() => undefined)
+    Object.assign(state.ctx, { get: read })
+    const runtime = new AgentRuntime(state.ctx as never)
+    await runtime.ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
+
+    // A composition that mounts no singularity agent plugin is read as off —
+    // never as "assume the chain is there".
+    const { restrict, section } = await assemble(state.resumeOptions[0])
+    expect(read).toHaveBeenCalledWith('singularityEvolution')
+    const allow = (restrict.mock.calls[0]?.[0] as { allow: readonly string[] }).allow
+    expect(allow.filter(name => name.startsWith('evolution_'))).toEqual([])
+    expect(allow).toEqual(ROOT_TOOLS_CLOSED)
+    expect(promptTextOf(section)).not.toContain('evolution')
   })
 
   test('ensureRoot returns an interrupted running root to idle before resuming it', async () => {
@@ -473,17 +550,34 @@ describe('AgentRuntime root lifecycle', () => {
         setup: expect.any(Function),
       },
     ])
-    const restrict = vi.fn()
-    const section = vi.fn()
-    const session = { append: vi.fn() }
-    const agentCtx = {
-      tools: { restrict },
-      systemPrompt: { section },
-    }
-    const agent = { session }
-    await (state.createOptions[0] as { setup: (ctx: unknown, agent: unknown) => Promise<void> }).setup(agentCtx, agent)
+    const { session, restrict, section } = await assemble(state.createOptions[0])
     expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(session, 'danger-full-access')
     expect(session.append).toHaveBeenCalledExactlyOnceWith('approval/policy', { policy: 'ask' })
+    // A newly created root is assembled on the same facts as a resumed one: with
+    // no exposure mounted, the nine names and the protocol behind them are absent.
+    expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_CLOSED })
+    const prompt = promptTextOf(section)
+    expect(prompt).toContain('connect workers, not to implement tasks')
+    expect(prompt).not.toContain('evolution')
+    expect(prompt).not.toContain('Buckyball')
     expect(state.added).toEqual([['graph', { id: id('root'), name: 'Singularity', status: 'idle' }, true]])
+  })
+
+  test('createRoot assembles the evolution chain when the deployment turned it on', async () => {
+    const state = context([], 'idle', { evolution: { enabled: true } })
+    const runtime = new AgentRuntime(state.ctx as never)
+    await runtime.createRoot({
+      sessionId: id('root'),
+      cwd: '/workspace',
+      scope: { graphStoreId: 'graph', layoutStoreId: 'layout' },
+    })
+
+    const { restrict, section } = await assemble(state.createOptions[0])
+    expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_OPEN })
+    const prompt = promptTextOf(section)
+    expect(prompt).toContain('To carry a diagnosed fix into the evolution track')
+    expect(prompt).toContain('evolution_propose')
+    expect(prompt).toContain('evolution_list reads the ledger')
+    expect(prompt).not.toContain('Buckyball')
   })
 })

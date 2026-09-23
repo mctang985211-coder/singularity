@@ -21,7 +21,21 @@ import { applyWorkerGrant } from './grants.ts'
 import { installWorkerContract } from './contract-reinjection.ts'
 import { rootPromptText } from './prompts/root.prompts.ts'
 
-const ROOT_TOOLS = [
+/** The nine tools the evolution chain is reached through; a deployment's switch is what registers them. */
+const EVOLUTION_TOOLS = [
+  'evolution_propose',
+  'evolution_candidate',
+  'evolution_prepare',
+  'evolution_replay',
+  'evolution_gate',
+  'evolution_decide',
+  'evolution_apply',
+  'evolution_rollback',
+  'evolution_list',
+]
+
+/** The tools every root may call whatever the deployment's evolution switch says. */
+const ROOT_CORE_TOOLS = [
   'graph_spawn',
   'graph_mark_ready',
   'hitl_ask',
@@ -43,17 +57,37 @@ const ROOT_TOOLS = [
   'task_review_pack',
   'task_review_agent',
   'task_diagnose',
-  'evolution_propose',
-  'evolution_candidate',
-  'evolution_prepare',
-  'evolution_replay',
-  'evolution_gate',
-  'evolution_decide',
-  'evolution_apply',
-  'evolution_rollback',
-  'evolution_list',
-  'escalate',
 ]
+
+/** Structural view of the deployment's switch position (`ctx.singularityEvolution`), read softly so this package needs no dependency on the assembly that provides it. */
+interface EvolutionExposureLike {
+  readonly enabled: boolean
+}
+
+/**
+ * Whether this composition registered the nine `evolution_*` tools. Soft read:
+ * a context that mounts no singularity agent plugin provides no such service,
+ * and that absence is the closed state — never "assume the chain is there". The
+ * answer decides both the root's allow-list and its prompt, because a prompt
+ * that names a tool the surface does not carry asks for a call that cannot
+ * happen (prompt contracts §1/§7).
+ */
+function evolutionEnabled(ctx: Context): boolean {
+  return (ctx.get('singularityEvolution') as EvolutionExposureLike | undefined)?.enabled ?? false
+}
+
+/**
+ * The root's tool allow-list for one composition, single point: `createRoot` and
+ * `resumeRoot` both restrict with this, so a root cannot be assembled on one
+ * fact and prompted on another. Off, the nine names are absent — `restrict` is a
+ * mask over what exists, and with the chain off nothing registered them. On, the
+ * list is exactly the deployment's previous one, name for name.
+ */
+function rootToolsFor(enabled: boolean): readonly string[] {
+  // `escalate` trails the chain because it always has: the on-composition is the
+  // list this deployment ran before the switch existed.
+  return enabled ? [...ROOT_CORE_TOOLS, ...EVOLUTION_TOOLS, 'escalate'] : [...ROOT_CORE_TOOLS, 'escalate']
+}
 
 /**
  * `hitl_approve` asks through `ctx.approval`, whose 'never' policy (bundled into
@@ -173,8 +207,9 @@ export class AgentRuntime extends Service {
           await this.ctx.agentPresets.mount(agentCtx, agentPreset)
           this.ctx.permissionPresets.set(agent.session, 'danger-full-access')
           pinRootApprovalPolicy(agent.session)
-          agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText() })
-          agentCtx.tools.restrict({ allow: ROOT_TOOLS })
+          const evolution = evolutionEnabled(this.ctx)
+          agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText(evolution) })
+          agentCtx.tools.restrict({ allow: rootToolsFor(evolution) })
         },
       })
       this.handles.set(sessionId, handle)
@@ -202,8 +237,9 @@ export class AgentRuntime extends Service {
             await this.ctx.agentPresets.mount(agentCtx, agentPreset)
             this.ctx.permissionPresets.set(agent.session, 'danger-full-access')
             pinRootApprovalPolicy(agent.session)
-            agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText() })
-            agentCtx.tools.restrict({ allow: ROOT_TOOLS })
+            const evolution = evolutionEnabled(this.ctx)
+            agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText(evolution) })
+            agentCtx.tools.restrict({ allow: rootToolsFor(evolution) })
           },
         })
       } catch (error) {

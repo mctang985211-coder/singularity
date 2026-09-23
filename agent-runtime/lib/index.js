@@ -380,17 +380,49 @@ function installWorkerContract(agentCtx, contract) {
 
 //#endregion
 //#region src/prompts/root.prompts.ts
-function rootPromptText() {
+/**
+* The evolution protocol paragraph: written into the root prompt only when the
+* deployment registered the nine `evolution_*` tools. A prompt that names a
+* protocol its tool surface cannot carry out asks for a call that will never
+* happen (prompt contracts §1: a tool that is not mounted must not appear in
+* the prompt).
+*/
+const EVOLUTION_PROTOCOL = `To carry a diagnosed fix into the evolution track, register it with evolution_propose, then evolution_candidate; when the candidate carries a structured mutation, evolution_prepare materializes it into the proposal sandbox (never production), then evolution_replay runs the candidate against this graph's historical terminal tasks and records a candidate-vs-champion report before evolution_gate, and close it with evolution_decide — every decision asks a human first. A recorded PROMOTE takes effect only through evolution_apply (skill / agent_preset / capability at L1–L3 only, asking the human a second time and naming every production path it writes); evolution_rollback restores the champion snapshot, again with human approval. L4 and bookkeeping-only types stay manual. evolution_list reads the ledger.`;
+/**
+* The root coordinator's system prompt for one composition, from the same fact
+* the root's tool allow-list is read from (R0): `evolutionEnabled` false — a
+* deployment that did not turn the chain on — leaves out the protocol paragraph
+* entirely, so nothing in the text points at a tool that composition does not
+* carry. The escalation path and every other role rule are unchanged either way.
+*
+* Domain guidance is deliberately absent: a deployment's domain reference map
+* (the `bb-pipeline` skill, say) reaches the model through the `skill` tool from
+* that deployment's own configuration, not as part of the general root role.
+*/
+function rootPromptText(evolutionEnabled$1) {
 	return `You are the root router of a Singularity graph. Your job is to connect workers, not to implement tasks.
 
 Environment setup is delegated, never decomposed: call graph_spawn with a focused worker name and a complete task for each planned repository. Wait for worker results, decide whether more workers are needed, and synthesize the final answer. Do not inspect repositories, edit files, run commands, or use generic subagent tools yourself. Use hitl_ask or hitl_approve only when a human decision is required. Use graph_mark_ready after all environment setup workers succeed.
 
-Task delegation runs through the task runtime. When you receive an objective, call task_read to see your root task contract, then call task_decompose with a delegation reason and a list of children. That call is for the user objective only: setup and environment work is never decomposed, and the root task allows a single decomposition — spending it on setup fails the root task outright. Each child needs a self-contained objective and acceptance criteria a verifier can check; give deterministic criteria an exact command. Order work with dependsOn when one child needs another's verified result. task_decompose returns at admission with a batch id and does not wait: the runtime runs the children one at a time in dependency order. Where this deployment reviews generated tasks, that call may instead come back waiting for a human review, with a proposal id and nothing admitted: then no child exists, no worker is spawned and your task is not decomposed until the review decides, so read the batch with task_proposal_read, do not re-submit the same content while it waits (the same request is answered with the same proposal), and if the review refuses the batch, revise it against the reason on the record and decompose again — a revision is a new proposal, never a re-run of the refused one. While that batch runs you are in phase waiting_children — you may read, query and diagnose (task_read, task_status, task_review_pack, task_diagnose), but writes, shell commands and another decomposition are refused, and you must not work on shared artifacts while a child worker is writing them. You are notified when the batch settles, and the runtime then submits your task for verification; you never claim completion yourself — only the verifier marks a task verified, from evidence. If the batch cannot finish, task_cancel ends it and settles the children. Use task_status to track the tree between decompose calls and task_read to review your contract and child states. task_verify is a worker self-check and does not change task status. When a settled task needs a postmortem, call task_review_pack for its evidence pack, then record your explanation with task_diagnose — a diagnosis is data for humans and later review, and its proposals never execute by themselves. When that pack reports escalation: required, the record's facts alone cannot settle the six dimensions the reviewer judges (task_specification, acceptance, decomposition, skill_fit, tool_fit, context_efficiency), so call task_review_agent for the same task and let the review node conclude them — it writes that judgement as its own Diagnosis, and the budget it prints is the per-store review-agent allowance, so a spent budget means the pack says not required even though a signal held. To carry a diagnosed fix into the evolution track, register it with evolution_propose, then evolution_candidate; when the candidate carries a structured mutation, evolution_prepare materializes it into the proposal sandbox (never production), then evolution_replay runs the candidate against this graph's historical terminal tasks and records a candidate-vs-champion report before evolution_gate, and close it with evolution_decide — every decision asks a human first. A recorded PROMOTE takes effect only through evolution_apply (skill / agent_preset / capability at L1–L3 only, asking the human a second time and naming every production path it writes); evolution_rollback restores the champion snapshot, again with human approval. L4 and bookkeeping-only types stay manual. evolution_list reads the ledger. When a capability gap, an exhausted budget, or an UNKNOWN(verifier) verdict leaves work you cannot settle yourself, report it to a human with escalate: name what is missing, what you already tried, and what you suggest — an incomplete card is refused, and nothing is recorded until the human approves. When an objective concerns the Buckyball chip domain, call the skill tool to load the bb-pipeline reference map before decomposing — it maps domain stages to capability names and acceptance-criteria pitfalls; treat it as a map, not a fixed workflow.`;
+Task delegation runs through the task runtime. When you receive an objective, call task_read to see your root task contract, then call task_decompose with a delegation reason and a list of children. That call is for the user objective only: setup and environment work is never decomposed, and the root task allows a single decomposition — spending it on setup fails the root task outright. Each child needs a self-contained objective and acceptance criteria a verifier can check; give deterministic criteria an exact command. Order work with dependsOn when one child needs another's verified result. task_decompose returns at admission with a batch id and does not wait: the runtime runs the children one at a time in dependency order. Where this deployment reviews generated tasks, that call may instead come back waiting for a human review, with a proposal id and nothing admitted: then no child exists, no worker is spawned and your task is not decomposed until the review decides, so read the batch with task_proposal_read, do not re-submit the same content while it waits (the same request is answered with the same proposal), and if the review refuses the batch, revise it against the reason on the record and decompose again — a revision is a new proposal, never a re-run of the refused one. While that batch runs you are in phase waiting_children — you may read, query and diagnose (task_read, task_status, task_review_pack, task_diagnose), but writes, shell commands and another decomposition are refused, and you must not work on shared artifacts while a child worker is writing them. You are notified when the batch settles, and the runtime then submits your task for verification; you never claim completion yourself — only the verifier marks a task verified, from evidence. If the batch cannot finish, task_cancel ends it and settles the children. Use task_status to track the tree between decompose calls and task_read to review your contract and child states. task_verify is a worker self-check and does not change task status. When a settled task needs a postmortem, call task_review_pack for its evidence pack, then record your explanation with task_diagnose — a diagnosis is data for humans and later review, and its proposals never execute by themselves. When that pack reports escalation: required, the record's facts alone cannot settle the six dimensions the reviewer judges (task_specification, acceptance, decomposition, skill_fit, tool_fit, context_efficiency), so call task_review_agent for the same task and let the review node conclude them — it writes that judgement as its own Diagnosis, and the budget it prints is the per-store review-agent allowance, so a spent budget means the pack says not required even though a signal held.${evolutionEnabled$1 ? ` ${EVOLUTION_PROTOCOL}` : ""} When a capability gap, an exhausted budget, or an UNKNOWN(verifier) verdict leaves work you cannot settle yourself, report it to a human with escalate: name what is missing, what you already tried, and what you suggest — an incomplete card is refused, and nothing is recorded until the human approves.`;
 }
 
 //#endregion
 //#region src/index.ts
-const ROOT_TOOLS = [
+/** The nine tools the evolution chain is reached through; a deployment's switch is what registers them. */
+const EVOLUTION_TOOLS = [
+	"evolution_propose",
+	"evolution_candidate",
+	"evolution_prepare",
+	"evolution_replay",
+	"evolution_gate",
+	"evolution_decide",
+	"evolution_apply",
+	"evolution_rollback",
+	"evolution_list"
+];
+/** The tools every root may call whatever the deployment's evolution switch says. */
+const ROOT_CORE_TOOLS = [
 	"graph_spawn",
 	"graph_mark_ready",
 	"hitl_ask",
@@ -408,18 +440,33 @@ const ROOT_TOOLS = [
 	"task_verify",
 	"task_review_pack",
 	"task_review_agent",
-	"task_diagnose",
-	"evolution_propose",
-	"evolution_candidate",
-	"evolution_prepare",
-	"evolution_replay",
-	"evolution_gate",
-	"evolution_decide",
-	"evolution_apply",
-	"evolution_rollback",
-	"evolution_list",
-	"escalate"
+	"task_diagnose"
 ];
+/**
+* Whether this composition registered the nine `evolution_*` tools. Soft read:
+* a context that mounts no singularity agent plugin provides no such service,
+* and that absence is the closed state — never "assume the chain is there". The
+* answer decides both the root's allow-list and its prompt, because a prompt
+* that names a tool the surface does not carry asks for a call that cannot
+* happen (prompt contracts §1/§7).
+*/
+function evolutionEnabled(ctx) {
+	return ctx.get("singularityEvolution")?.enabled ?? false;
+}
+/**
+* The root's tool allow-list for one composition, single point: `createRoot` and
+* `resumeRoot` both restrict with this, so a root cannot be assembled on one
+* fact and prompted on another. Off, the nine names are absent — `restrict` is a
+* mask over what exists, and with the chain off nothing registered them. On, the
+* list is exactly the deployment's previous one, name for name.
+*/
+function rootToolsFor(enabled) {
+	return enabled ? [
+		...ROOT_CORE_TOOLS,
+		...EVOLUTION_TOOLS,
+		"escalate"
+	] : [...ROOT_CORE_TOOLS, "escalate"];
+}
 /**
 * `hitl_approve` asks through `ctx.approval`, whose 'never' policy (bundled into
 * danger-full-access) auto-rejects before any answerer sees the request. Root
@@ -506,12 +553,13 @@ var AgentRuntime = class extends Service {
 					await this.ctx.agentPresets.mount(agentCtx, agentPreset);
 					this.ctx.permissionPresets.set(agent.session, "danger-full-access");
 					pinRootApprovalPolicy(agent.session);
+					const evolution = evolutionEnabled(this.ctx);
 					agentCtx.systemPrompt.section({
 						name: "singularity:root",
 						order: 70,
-						text: rootPromptText()
+						text: rootPromptText(evolution)
 					});
-					agentCtx.tools.restrict({ allow: ROOT_TOOLS });
+					agentCtx.tools.restrict({ allow: rootToolsFor(evolution) });
 				}
 			});
 			this.handles.set(sessionId, handle);
@@ -544,12 +592,13 @@ var AgentRuntime = class extends Service {
 						await this.ctx.agentPresets.mount(agentCtx, agentPreset);
 						this.ctx.permissionPresets.set(agent.session, "danger-full-access");
 						pinRootApprovalPolicy(agent.session);
+						const evolution = evolutionEnabled(this.ctx);
 						agentCtx.systemPrompt.section({
 							name: "singularity:root",
 							order: 70,
-							text: rootPromptText()
+							text: rootPromptText(evolution)
 						});
-						agentCtx.tools.restrict({ allow: ROOT_TOOLS });
+						agentCtx.tools.restrict({ allow: rootToolsFor(evolution) });
 					}
 				});
 			} catch (error) {
