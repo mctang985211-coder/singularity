@@ -4,21 +4,31 @@ import {
   contractDigest,
   decompositionDigest,
   type DecompositionAdmission,
+  type DecompositionIdentity,
   type TaskContract,
 } from '../contract.ts'
 import {
+  ROOT_PROPOSAL_TASK_ID,
   TASK_PROPOSAL_DECISION_OUTCOMES,
+  TASK_PROPOSAL_KINDS,
   TASK_PROPOSAL_PHASES,
   admissionContextDigest,
   reviewContextDigest,
+  rootProposalDigest,
+  type RootProposalIdentity,
   type TaskProposal,
+  type TaskProposalBase,
+  type TaskProposalBatchConsumption,
   type TaskProposalChild,
   type TaskProposalConsumption,
   type TaskProposalDecisionClaim,
+  type TaskProposalDecomposition,
   type TaskProposalIndex,
   type TaskProposalPhase,
   type TaskProposalPhaseChange,
   type TaskProposalReviewContext,
+  type TaskProposalRoot,
+  type TaskProposalRootConsumption,
   type TaskProposalStatus,
 } from '../proposal.ts'
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, reaches } from '../types.ts'
@@ -99,6 +109,22 @@ const PROPOSAL_CHILD_FIELDS: readonly string[] = ['contract', 'dependsOn', 'deco
 
 /** The closed field set of one verifier identity ({@link TaskProposalVerifierIdentity}). */
 const VERIFIER_IDENTITY_FIELDS: readonly string[] = ['verifierId', 'version', 'configurationDigest']
+
+/** The closed field set of a decomposition identity ({@link DecompositionIdentity}): what its digest covers, and nothing else. */
+const DECOMPOSITION_IDENTITY_FIELDS: readonly string[] = [
+  'contractVersion', 'storeId', 'parentTaskId', 'parentRunId', 'callerSessionId', 'reason', 'children',
+]
+
+/** The closed field set of a root contract identity ({@link RootProposalIdentity}). */
+const ROOT_IDENTITY_FIELDS: readonly string[] = [
+  'contractVersion', 'storeId', 'rootSessionId', 'requestKey', 'contractDigest',
+]
+
+/** The batch vocabulary a root consumption must not carry: the ids it names are a task id and a run id, not a batch. */
+const BATCH_CONSUMPTION_FIELDS: readonly string[] = ['batchId', 'childTaskIds']
+
+/** The root vocabulary a batch consumption must not carry. */
+const ROOT_CONSUMPTION_FIELDS: readonly string[] = ['rootTaskId', 'rootRunId']
 
 /** One store's proposal index with nothing in it; what a store without proposals answers. */
 function emptyProposalIndex(): TaskProposalIndex {
@@ -807,14 +833,21 @@ export class TaskState {
   }
 
   /**
-   * A proposal enters the store (T2/T3, §6). The reducer is the shape gate and
-   * the integrity gate, in that order: the record must be a well-formed
-   * proposal — the closed field set of its review context, a birth status
-   * matching the policy it was submitted under, an identity whose digests are
-   * really the digests of what it carries — and it must not collide with what
-   * the store already holds. One key names one proposal and one content
-   * identity names one id, so a repeated request can never build a second
-   * batch: the caller answers it from the index instead.
+   * A proposal enters the store (T2/T3, §6; root contracts A0 §2). The reducer
+   * is the shape gate and the integrity gate, in that order: the record must be
+   * a well-formed proposal of its kind — the closed field set of its review
+   * context, a birth status matching the policy it was submitted under, an
+   * identity and a payload whose digests are really the digests of what it
+   * carries — and it must not collide with what the store already holds. One key
+   * names one proposal and one content identity names one id, so a repeated
+   * request can never build a second batch: the caller answers it from the index
+   * instead.
+   *
+   * A root contract has one more gate, and it is the store's, not the record's:
+   * a store that already holds a root task refuses root intake by name (A0 §1.6
+   * — an old graph's root is history and is not re-intaken, and a goal change is
+   * a new graph). The gate is checked here, before anything is stored, so an
+   * intake on such a store leaves no trace at all.
    *
    * The digest checks are the point of the submission being an event at all: a
    * proposal whose `proposalDigest`, `admissionContextDigest` or
@@ -833,7 +866,22 @@ export class TaskState {
     if (bound !== undefined) {
       throw new Error(`task: proposal request key "${proposal.requestKey}" is already bound to proposal "${bound.proposalId}"`)
     }
+    if (proposal.kind === 'root') this.assertRootIntakeOpen(proposal.proposalId)
     const stored: TaskProposal = copy(proposal)
+    if (stored.kind === 'root') {
+      // A root contract belongs to no task: it is in the index by id and by
+      // request key, and in no parent's list.
+      this.value = {
+        ...this.value,
+        proposals: {
+          all: [...index.all, stored],
+          byId: { ...index.byId, [stored.proposalId]: stored },
+          byRequestKey: { ...index.byRequestKey, [stored.requestKey]: stored },
+          byParentTask: index.byParentTask,
+        },
+      }
+      return
+    }
     const parentTaskId = stored.identity.parentTaskId
     this.value = {
       ...this.value,
@@ -920,15 +968,15 @@ export class TaskState {
   }
 
   /**
-   * A proposal is consumed (T2/T3, §6): the batch exists, and this record says
-   * which tasks it became. The status gate is the re-check having passed on the
-   * record (`ready` only — an approval alone never admits, so `approved →
-   * admitted` is refused), and the binding is checked in full: the dossier
-   * digest, the review-context fingerprint the admission confirmed, the batch
-   * id that belongs to this parent, and every child this consumption names
-   * being a task the store actually holds as a child of that parent. A second
-   * consumption is a transition refusal, so one proposal can never produce two
-   * batches.
+   * A proposal is consumed (§6): what it asked for exists, and this record says
+   * what it became. The status gate is the re-check having passed on the record
+   * (`ready` only — an approval alone never admits, so `approved → admitted` is
+   * refused), and the binding is checked in full for the proposal's kind: a
+   * decomposition batch names the batch of its parent and children the store
+   * holds under that parent; a root contract names the root task and root run of
+   * its activation, and the store refuses one intake that would leave it with
+   * two roots. A second consumption is a transition refusal, so one proposal can
+   * never produce two batches — or two roots.
    */
   private admitProposal(taskId: TaskId, consumption: TaskProposalConsumption, timestamp: string): void {
     if (!isRecord(consumption)) throw new Error('task: proposal consumption must be an object')
@@ -939,15 +987,27 @@ export class TaskState {
     this.setProposal(proposal.proposalId, {
       status: 'admitted',
       updatedAt: timestamp,
-      consumption: {
-        proposalId: consumption.proposalId,
-        proposalDigest: consumption.proposalDigest,
-        reviewContextDigest: consumption.reviewContextDigest,
-        batchId: consumption.batchId,
-        childTaskIds: [...consumption.childTaskIds],
-        admittedAt: consumption.admittedAt,
-        ...(consumption.reason === undefined ? {} : { reason: consumption.reason }),
-      },
+      consumption: consumption.kind === 'root'
+        ? {
+            kind: 'root',
+            proposalId: consumption.proposalId,
+            proposalDigest: consumption.proposalDigest,
+            reviewContextDigest: consumption.reviewContextDigest,
+            rootTaskId: consumption.rootTaskId,
+            rootRunId: consumption.rootRunId,
+            admittedAt: consumption.admittedAt,
+            ...(consumption.reason === undefined ? {} : { reason: consumption.reason }),
+          }
+        : {
+            ...(consumption.kind === undefined ? {} : { kind: consumption.kind }),
+            proposalId: consumption.proposalId,
+            proposalDigest: consumption.proposalDigest,
+            reviewContextDigest: consumption.reviewContextDigest,
+            batchId: consumption.batchId,
+            childTaskIds: [...consumption.childTaskIds],
+            admittedAt: consumption.admittedAt,
+            ...(consumption.reason === undefined ? {} : { reason: consumption.reason }),
+          },
     })
   }
 
@@ -971,10 +1031,42 @@ export class TaskState {
     return index
   }
 
-  /** Every proposal event is about one parent task's batch, so the envelope has to name that task. */
+  /**
+   * Every proposal event is about one subject, and the envelope has to name it:
+   * a decomposition proposal's events name the parent task whose batch it is; a
+   * root contract's events name the reserved {@link ROOT_PROPOSAL_TASK_ID}
+   * marker, because the task it becomes does not exist yet and naming a real
+   * task would read as that task's intake (A0 §2).
+   */
   private assertProposalTask(proposal: TaskProposal, taskId: TaskId): void {
+    if (proposal.kind === 'root') {
+      if (taskId !== ROOT_PROPOSAL_TASK_ID) {
+        throw new Error(
+          `task: proposal "${proposal.proposalId}" is a root contract; its events must carry the reserved proposal task id "${ROOT_PROPOSAL_TASK_ID}", not "${taskId}"`,
+        )
+      }
+      return
+    }
     if (taskId !== proposal.identity.parentTaskId) {
       throw new Error(`task: proposal "${proposal.proposalId}" belongs to task "${proposal.identity.parentTaskId}", not "${taskId}"`)
+    }
+  }
+
+  /** The store's root task, if it has one: the task a root intake may not sit beside or activate a second time. */
+  private rootTask(): TaskInstance | undefined {
+    return this.value.tasks.find(item => item.parentTaskId === undefined)
+  }
+
+  /**
+   * A store with a root task refuses root intake by name (A0 §1.6): the root it
+   * holds is somebody's goal, and a second intake would make "the store's root"
+   * answer differently at two reads. A goal change is a new graph, never a
+   * second root here.
+   */
+  private assertRootIntakeOpen(proposalId: string): void {
+    const root = this.rootTask()
+    if (root !== undefined) {
+      throw new Error(`task: store "${this.value.id}" already holds root task "${root.taskId}"; proposal "${proposalId}" is refused`)
     }
   }
 
@@ -986,7 +1078,7 @@ export class TaskState {
   }
 
   /** Replaces one proposal in place; the index's other views keep pointing at the same record. */
-  private setProposal(proposalId: string, patch: Partial<TaskProposal>): void {
+  private setProposal(proposalId: string, patch: Partial<TaskProposalBase>): void {
     const index = this.index()
     const current = index.byId[proposalId]
     if (current === undefined) throw new Error(`task: unknown proposal "${proposalId}"`)
@@ -1020,6 +1112,13 @@ export class TaskState {
     if (!nonEmpty(proposal.proposalId)) throw new Error('task: proposal id must be a non-empty string')
     const id = proposal.proposalId
     if (!nonEmpty(proposal.requestKey)) throw new Error(`task: proposal "${id}" request key must be a non-empty string`)
+    const kind: unknown = (proposal as { kind?: unknown }).kind
+    if (kind !== undefined && kind !== 'decomposition' && kind !== 'root') {
+      throw new Error(`task: proposal "${id}" kind must be one of ${TASK_PROPOSAL_KINDS.join(', ')}`)
+    }
+    if (kind === undefined && this.carriesRootContract(proposal)) {
+      throw new Error(`task: proposal "${id}" carries root contract fields without kind "root"`)
+    }
     if (proposal.status !== 'ready' && proposal.status !== 'pending_review') {
       throw new Error(`task: proposal "${id}" status "${String(proposal.status)}" is not a birth status`)
     }
@@ -1039,12 +1138,10 @@ export class TaskState {
         throw new Error(`task: proposal "${id}" supersedes unknown proposal "${proposal.supersedes}"`)
       }
     }
-    this.assertProposalIdentity(id, proposal.identity)
-    this.assertProposalBatch(id, proposal.batch, proposal.identity)
-    if (proposal.proposalDigest !== decompositionDigest(proposal.identity)) {
-      throw new Error(
-        `task: proposal "${id}" proposal digest "${String(proposal.proposalDigest)}" does not match its identity digest "${decompositionDigest(proposal.identity)}"`,
-      )
+    if (proposal.kind === 'root') {
+      this.assertRootProposal(id, proposal)
+    } else {
+      this.assertDecompositionProposal(id, proposal)
     }
     const context = proposal.admissionContext
     if (!isRecord(context)) throw new Error(`task: proposal "${id}" requires an admission context`)
@@ -1068,6 +1165,72 @@ export class TaskState {
   }
 
   /**
+   * A decomposition proposal's half of the record: the batch identity and the
+   * batch content that must be the content of that identity. Both digests are
+   * the ones they always were — this arm is the shape T2/T3 shipped, and adding
+   * a kind to the union does not move its identity.
+   */
+  private assertDecompositionProposal(id: string, proposal: TaskProposalDecomposition): void {
+    if ((proposal as { contract?: unknown }).contract !== undefined) {
+      throw new Error(`task: proposal "${id}" is a decomposition proposal and cannot carry a root contract`)
+    }
+    this.assertProposalIdentity(id, proposal.identity)
+    this.assertProposalBatch(id, proposal.batch, proposal.identity)
+    const expected = decompositionDigest(proposal.identity)
+    if (proposal.proposalDigest !== expected) {
+      throw new Error(`task: proposal "${id}" proposal digest "${String(proposal.proposalDigest)}" does not match its identity digest "${expected}"`)
+    }
+  }
+
+  /**
+   * A root contract proposal's half of the record: the root identity (store,
+   * root session, request key, contract digest — and no parent task) and the one
+   * normalized contract it must be the digest of. The two shapes are checked
+   * before the digest, so a mismatch is reported as the wrong content rather
+   * than as a wrong number.
+   */
+  private assertRootProposal(id: string, proposal: TaskProposalRoot): void {
+    if ((proposal as { batch?: unknown }).batch !== undefined) {
+      throw new Error(`task: proposal "${id}" is a root contract and cannot carry a batch`)
+    }
+    this.assertRootIdentity(id, proposal.identity)
+    if (proposal.identity.requestKey !== proposal.requestKey) {
+      throw new Error(
+        `task: proposal "${id}" identity request key "${proposal.identity.requestKey}" disagrees with its request key "${proposal.requestKey}"`,
+      )
+    }
+    const contract: unknown = proposal.contract
+    if (!isRecord(contract)) throw new Error(`task: proposal "${id}" requires a root contract`)
+    this.assertContractFields(`proposal "${id}" root`, contract as unknown as TaskContract)
+    if (!Array.isArray((contract as unknown as TaskContract).acceptanceCriteria)) {
+      throw new Error(`task: proposal "${id}" root contract acceptance criteria must be an array`)
+    }
+    const digest = contractDigest(contract as unknown as TaskContract)
+    if (digest !== proposal.identity.contractDigest) {
+      throw new Error(
+        `task: proposal "${id}" contract digest "${digest}" does not match its identity digest "${proposal.identity.contractDigest}"`,
+      )
+    }
+    const expected = rootProposalDigest(proposal.identity)
+    if (proposal.proposalDigest !== expected) {
+      throw new Error(`task: proposal "${id}" proposal digest "${String(proposal.proposalDigest)}" does not match its identity digest "${expected}"`)
+    }
+  }
+
+  /**
+   * Whether a record that does not claim `kind: 'root'` still carries a root
+   * contract's fields. Absence of the kind is legal for exactly one arm, so a
+   * record that holds a root payload without saying so is refused instead of
+   * being read as a decomposition of a parent that does not exist.
+   */
+  private carriesRootContract(proposal: TaskProposal): boolean {
+    const raw = proposal as unknown as { contract?: unknown; identity?: unknown }
+    if (raw.contract !== undefined) return true
+    const identity: unknown = raw.identity
+    return isRecord(identity) && identity.rootSessionId !== undefined
+  }
+
+  /**
    * The batch identity a proposal carries, judged for shape only: the field
    * semantics (a version this build knows, non-empty origins, one dependency
    * index per child) are what a reader needs to interpret it, while the
@@ -1075,10 +1238,17 @@ export class TaskState {
    * belong to the admission entry that already enforces them (T1's
    * `contractDefects` and the runtime's `checkDecomposition`). The parent task
    * is the one exception, because a proposal naming a task the store does not
-   * hold could never be decided or admitted against a real parent.
+   * hold could never be decided or admitted against a real parent. The field set
+   * is closed, like every other surface a digest covers: a field no reader
+   * understands must not travel inside an identity that a decision binds.
    */
-  private assertProposalIdentity(id: string, identity: TaskProposal['identity']): void {
+  private assertProposalIdentity(id: string, identity: DecompositionIdentity): void {
     if (!isRecord(identity)) throw new Error(`task: proposal "${id}" identity must be an object`)
+    for (const key of Object.keys(identity)) {
+      if (!DECOMPOSITION_IDENTITY_FIELDS.includes(key)) {
+        throw new Error(`task: proposal "${id}" identity has an unsupported field "${key}"`)
+      }
+    }
     if (identity.contractVersion !== TASK_CONTRACT_VERSION) {
       throw new Error(`task: proposal "${id}" declares contract version ${String(identity.contractVersion)}; this build stores version ${TASK_CONTRACT_VERSION}`)
     }
@@ -1118,6 +1288,39 @@ export class TaskState {
   }
 
   /**
+   * The root identity a root contract carries, judged for shape only: the
+   * version of the contract language, the store and root session it is for, its
+   * request key and the digest of the contract beside it. Its field set is
+   * closed — a root contract has no parent task or parent run, so a record that
+   * carries one is refused rather than read as something it is not — and nothing
+   * about the store's tasks is checked here: a root intake names no task, and its
+   * one store-level gate (the store does not already hold a root) belongs to the
+   * submission, not to the identity.
+   */
+  private assertRootIdentity(id: string, identity: RootProposalIdentity): void {
+    if (!isRecord(identity)) throw new Error(`task: proposal "${id}" identity must be an object`)
+    for (const key of Object.keys(identity)) {
+      if (!ROOT_IDENTITY_FIELDS.includes(key)) {
+        throw new Error(`task: proposal "${id}" identity has an unsupported field "${key}"`)
+      }
+    }
+    if (identity.contractVersion !== TASK_CONTRACT_VERSION) {
+      throw new Error(`task: proposal "${id}" declares contract version ${String(identity.contractVersion)}; this build stores version ${TASK_CONTRACT_VERSION}`)
+    }
+    const names: ReadonlyArray<readonly [string, unknown]> = [
+      ['store id', identity.storeId],
+      ['root session id', identity.rootSessionId],
+      ['request key', identity.requestKey],
+    ]
+    for (const [name, value] of names) {
+      if (!nonEmpty(value)) throw new Error(`task: proposal "${id}" identity ${name} must be a non-empty string`)
+    }
+    if (!isDigest(identity.contractDigest)) {
+      throw new Error(`task: proposal "${id}" identity contract digest must be a lowercase SHA-256 hex digest`)
+    }
+  }
+
+  /**
    * The batch content a submission carries, bound to the identity it claims to
    * be: one child per identity child, in the same order, each carrying the
    * contract whose {@link contractDigest} is the identity's child digest and the
@@ -1133,7 +1336,7 @@ export class TaskState {
    * batch hold — depth, size, cycles, capability gaps — is the admission
    * entry's business, unchanged.
    */
-  private assertProposalBatch(id: string, batch: readonly TaskProposalChild[], identity: TaskProposal['identity']): void {
+  private assertProposalBatch(id: string, batch: readonly TaskProposalChild[], identity: DecompositionIdentity): void {
     if (!Array.isArray(batch)) throw new Error(`task: proposal "${id}" batch must be an array`)
     if (batch.length !== identity.children.length) {
       throw new Error(
@@ -1206,11 +1409,13 @@ export class TaskState {
   }
 
   /**
-   * A consumption binds a proposal to the batch it became, so it has to name
-   * the same dossier, the resolution the admission re-check confirmed, the
-   * batch id that belongs to this parent (`b-<parentTaskId>`), and children the
-   * store really holds under that parent — the record a crash recovery reads to
-   * find the batch it already admitted instead of admitting a second one.
+   * A consumption binds a proposal to what it became, so it has to name the same
+   * dossier and the resolution the admission re-check confirmed — for both kinds
+   * — and then the kind's own shape: a batch names the batch id that belongs to
+   * its parent (`b-<parentTaskId>`) and children the store really holds under
+   * that parent; a root contract names the root task and root run of its
+   * activation. The common half is checked here so the two kinds cannot drift
+   * apart on the numbers that make an approval non-transferable.
    */
   private assertConsumptionBinding(proposal: TaskProposal, consumption: TaskProposalConsumption): void {
     const id = proposal.proposalId
@@ -1227,23 +1432,56 @@ export class TaskState {
         `task: proposal "${id}" consumption review context digest "${consumption.reviewContextDigest}" does not match the stored review context digest "${proposal.reviewContextDigest}"`,
       )
     }
-    if (!nonEmpty(consumption.batchId)) throw new Error(`task: proposal "${id}" consumption requires a batch id`)
-    const batchId = `b-${proposal.identity.parentTaskId}`
-    if (consumption.batchId !== batchId) {
-      throw new Error(`task: proposal "${id}" consumption batch "${consumption.batchId}" is not the batch of task "${proposal.identity.parentTaskId}"`)
+    if (proposal.kind === 'root') {
+      this.assertRootConsumptionShape(proposal, consumption)
+    } else {
+      this.assertBatchConsumptionShape(proposal, consumption)
     }
-    if (!Array.isArray(consumption.childTaskIds) || consumption.childTaskIds.length === 0) {
+    if (!nonEmpty(consumption.admittedAt)) throw new Error(`task: proposal "${id}" consumption requires an admission time`)
+    if (consumption.reason !== undefined && !nonEmpty(consumption.reason)) {
+      throw new Error(`task: proposal "${id}" consumption reason must be a non-empty string when present`)
+    }
+  }
+
+  /**
+   * The batch half of a consumption: the batch of this parent, and children the
+   * store really holds under it — the record a crash recovery reads to find the
+   * batch it already admitted instead of admitting a second one. The batch
+   * vocabulary is the only one this arm may use, and its `kind` may only be
+   * absent (a record written before kinds existed) or `batch`.
+   */
+  private assertBatchConsumptionShape(proposal: TaskProposalDecomposition, consumption: TaskProposalConsumption): void {
+    const id = proposal.proposalId
+    if (consumption.kind === 'root') {
+      throw new Error(`task: proposal "${id}" is a decomposition proposal and cannot be consumed as a root contract`)
+    }
+    if (consumption.kind !== undefined && consumption.kind !== 'batch') {
+      throw new Error(`task: proposal "${id}" consumption kind must be "batch"`)
+    }
+    const raw = consumption as unknown as Record<string, unknown>
+    for (const field of ROOT_CONSUMPTION_FIELDS) {
+      if (raw[field] !== undefined) {
+        throw new Error(`task: proposal "${id}" consumption carries the root field "${field}"; a batch consumption names batchId and childTaskIds`)
+      }
+    }
+    const batch = consumption as TaskProposalBatchConsumption
+    if (!nonEmpty(batch.batchId)) throw new Error(`task: proposal "${id}" consumption requires a batch id`)
+    const batchId = `b-${proposal.identity.parentTaskId}`
+    if (batch.batchId !== batchId) {
+      throw new Error(`task: proposal "${id}" consumption batch "${batch.batchId}" is not the batch of task "${proposal.identity.parentTaskId}"`)
+    }
+    if (!Array.isArray(batch.childTaskIds) || batch.childTaskIds.length === 0) {
       throw new Error(`task: proposal "${id}" consumption requires at least one child task id`)
     }
-    for (const childTaskId of consumption.childTaskIds) {
+    for (const childTaskId of batch.childTaskIds) {
       if (!nonEmpty(childTaskId)) throw new Error(`task: proposal "${id}" consumption child task ids must be non-empty strings`)
     }
     const seen = new Set<TaskId>()
-    for (const childTaskId of consumption.childTaskIds) {
+    for (const childTaskId of batch.childTaskIds) {
       if (seen.has(childTaskId)) throw new Error(`task: proposal "${id}" consumption names task "${childTaskId}" twice`)
       seen.add(childTaskId)
     }
-    for (const childTaskId of consumption.childTaskIds) {
+    for (const childTaskId of batch.childTaskIds) {
       const child = this.value.tasks.find(item => item.taskId === childTaskId)
       if (child === undefined) throw new Error(`task: proposal "${id}" consumption names unknown task "${childTaskId}"`)
       if (child.parentTaskId !== proposal.identity.parentTaskId) {
@@ -1252,9 +1490,75 @@ export class TaskState {
         )
       }
     }
-    if (!nonEmpty(consumption.admittedAt)) throw new Error(`task: proposal "${id}" consumption requires an admission time`)
-    if (consumption.reason !== undefined && !nonEmpty(consumption.reason)) {
-      throw new Error(`task: proposal "${id}" consumption reason must be a non-empty string when present`)
+  }
+
+  /**
+   * The root half of a consumption: the root task and the root run the
+   * activation minted, and the store's one-root rule. Every check is a way the
+   * record could name something other than "the root this contract became":
+   *
+   * - the root task must exist and be parentless (a child is not a root), and it
+   *   must be the store's *only* parentless task — the store refuses a second
+   *   root, so a consumption that would leave it with two is refused as the one
+   *   intake that tried to mint a second root (A0 §2: one consumption, one root);
+   * - it must carry the contract the proposal committed to, so "what was
+   *   approved" and "what was created" are one thing rather than two;
+   * - the run must exist, belong to that task, be born `active` and running, and
+   *   be in the proposal's root session — a root run is the root session's own
+   *   execution, so a run of another session or one already settled is not it.
+   */
+  private assertRootConsumptionShape(proposal: TaskProposalRoot, consumption: TaskProposalConsumption): void {
+    const id = proposal.proposalId
+    if (consumption.kind !== 'root') {
+      throw new Error(`task: proposal "${id}" consumption must declare kind "root"`)
+    }
+    const raw = consumption as unknown as Record<string, unknown>
+    for (const field of BATCH_CONSUMPTION_FIELDS) {
+      if (raw[field] !== undefined) {
+        throw new Error(`task: proposal "${id}" consumption carries the batch field "${field}"; a root consumption names rootTaskId and rootRunId`)
+      }
+    }
+    const root = consumption as TaskProposalRootConsumption
+    if (!nonEmpty(root.rootTaskId)) throw new Error(`task: proposal "${id}" consumption requires a root task id`)
+    if (!nonEmpty(root.rootRunId)) throw new Error(`task: proposal "${id}" consumption requires a root run id`)
+    const task = this.value.tasks.find(item => item.taskId === root.rootTaskId)
+    if (task === undefined) throw new Error(`task: proposal "${id}" consumption names unknown task "${root.rootTaskId}"`)
+    if (task.parentTaskId !== undefined) {
+      throw new Error(`task: proposal "${id}" consumption names task "${root.rootTaskId}", which is not a root task`)
+    }
+    const rival = this.value.tasks.find(item => item.parentTaskId === undefined && item.taskId !== root.rootTaskId)
+    if (rival !== undefined) {
+      throw new Error(
+        `task: proposal "${id}" consumption names root task "${root.rootTaskId}" but store "${this.value.id}" already holds root task "${rival.taskId}"`,
+      )
+    }
+    const contract: TaskContract | undefined = task.contract
+    if (contract === undefined) {
+      throw new Error(`task: proposal "${id}" consumption names root task "${root.rootTaskId}" without the contract the proposal committed to`)
+    }
+    const digest = contractDigest(contract)
+    if (digest !== proposal.identity.contractDigest) {
+      throw new Error(
+        `task: proposal "${id}" consumption names root task "${root.rootTaskId}" whose contract digest "${digest}" is not the committed "${proposal.identity.contractDigest}"`,
+      )
+    }
+    const run = this.value.runs.find(item => item.runId === root.rootRunId)
+    if (run === undefined) throw new Error(`task: proposal "${id}" consumption names unknown run "${root.rootRunId}"`)
+    if (run.taskId !== root.rootTaskId) {
+      throw new Error(`task: proposal "${id}" consumption names run "${root.rootRunId}", which belongs to task "${run.taskId}"`)
+    }
+    if (run.sessionId !== proposal.identity.rootSessionId) {
+      throw new Error(
+        `task: proposal "${id}" consumption names run "${root.rootRunId}" of session "${run.sessionId}", not the root session "${proposal.identity.rootSessionId}"`,
+      )
+    }
+    if (run.status !== 'running') {
+      throw new Error(`task: proposal "${id}" consumption names run "${root.rootRunId}" in status "${run.status}"; a root run is consumed running`)
+    }
+    if (run.executionPhase !== 'active') {
+      throw new Error(
+        `task: proposal "${id}" consumption names run "${root.rootRunId}" with execution phase "${String(run.executionPhase)}"; a root run is born active`,
+      )
     }
   }
 

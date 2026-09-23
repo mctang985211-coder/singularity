@@ -4,18 +4,26 @@ import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-se
 import type { AdmissionContext, DecompositionIdentity, TaskContract } from '../../src/contract.ts'
 import { TASK_CONTRACT_VERSION, canonicalize, contractDigest, decompositionDigest } from '../../src/contract.ts'
 import {
+  ROOT_PROPOSAL_TASK_ID,
   admissionContextDigest,
   capabilityManifestDigest,
   reviewContextDigest,
+  rootProposalDigest,
+  rootProposalId,
   taskProposalId,
 } from '../../src/proposal.ts'
 import type {
+  RootProposalIdentity,
   TaskProposal,
+  TaskProposalBatchConsumption,
   TaskProposalChild,
   TaskProposalConsumption,
   TaskProposalDecisionClaim,
+  TaskProposalDecomposition,
   TaskProposalPhaseChange,
   TaskProposalReviewContext,
+  TaskProposalRoot,
+  TaskProposalRootConsumption,
 } from '../../src/proposal.ts'
 import type {
   CapabilityManifest,
@@ -24,7 +32,9 @@ import type {
   TaskEventPayloads,
   TaskId,
   TaskInstance,
+  TaskRun,
 } from '../../src/types.ts'
+import { RootTaskSpec } from '../../src/types.ts'
 import { TaskService } from '../../src/index.ts'
 import { TaskState } from '../../src/service/state.ts'
 
@@ -161,7 +171,7 @@ function manifests(): CapabilityManifest[] {
   ]
 }
 
-function proposal(overrides: Partial<TaskProposal> = {}): TaskProposal {
+function proposal(overrides: Partial<TaskProposalDecomposition> = {}): TaskProposalDecomposition {
   return {
     proposalId: taskProposalId(IDENTITY),
     requestKey: 'k-1',
@@ -180,7 +190,7 @@ function proposal(overrides: Partial<TaskProposal> = {}): TaskProposal {
 }
 
 /** A proposal born under policy `all`: the shape a human review starts from. */
-function pendingProposal(overrides: Partial<TaskProposal> = {}): TaskProposal {
+function pendingProposal(overrides: Partial<TaskProposalDecomposition> = {}): TaskProposalDecomposition {
   return proposal({ status: 'pending_review', policy: 'all', ...overrides })
 }
 
@@ -198,7 +208,7 @@ function claim(overrides: Partial<TaskProposalDecisionClaim> = {}): TaskProposal
   }
 }
 
-function consumption(overrides: Partial<TaskProposalConsumption> = {}): TaskProposalConsumption {
+function consumption(overrides: Partial<TaskProposalBatchConsumption> = {}): TaskProposalBatchConsumption {
   const value = proposal()
   return {
     proposalId: value.proposalId,
@@ -307,11 +317,12 @@ describe('proposal identities', () => {
 function ev<K extends TaskEventKind>(
   kind: K,
   payload: TaskEventPayloads[K],
-  init: { taskId?: TaskId; parentTaskId?: TaskId } = {},
+  init: { taskId?: TaskId; runId?: string; parentTaskId?: TaskId } = {},
 ): TaskEvent {
   return {
     kind,
     taskId: init.taskId ?? 't1',
+    runId: init.runId,
     parentTaskId: init.parentTaskId,
     timestamp: NOW,
     actor: 'test',
@@ -392,8 +403,21 @@ function admittedState(): TaskState {
   return state
 }
 
-function stored(state: TaskState): TaskProposal | undefined {
-  return state.snapshot().proposals?.byId[PROPOSAL_ID]
+/** The stored proposal read as the decomposition arm: what every test in the decomposition sections holds. */
+function stored(state: TaskState): TaskProposalDecomposition | undefined {
+  const value = state.snapshot().proposals?.byId[PROPOSAL_ID]
+  return value === undefined || value.kind === 'root' ? undefined : value
+}
+
+/** A stored proposal narrowed to the decomposition arm; `undefined` for a root contract or an absent record. */
+function decompositionOf(value: TaskProposal | undefined): TaskProposalDecomposition | undefined {
+  return value === undefined || value.kind === 'root' ? undefined : value
+}
+
+/** A stored consumption narrowed to the batch arm: the kind a decomposition proposal is consumed as. */
+function batchConsumptionOf(value: TaskProposal | undefined): TaskProposalBatchConsumption | undefined {
+  const consumption = value?.consumption
+  return consumption === undefined || consumption.kind === 'root' ? undefined : consumption
 }
 
 describe('TaskState proposal submission', () => {
@@ -460,7 +484,7 @@ describe('TaskState proposal submission', () => {
     })
     submit(state, caller)
     caller.batch[0]!.contract.objective = 'tampered after submission'
-    expect(state.snapshot().proposals?.byId['p-copy']?.batch[0]?.contract.objective).toBe('collect the input')
+    expect(decompositionOf(state.snapshot().proposals?.byId['p-copy'])?.batch[0]?.contract.objective).toBe('collect the input')
   })
 
   test('records a revision that supersedes an existing proposal', () => {
@@ -624,7 +648,7 @@ describe('TaskState proposal decisions', () => {
     expect(index?.all[0]?.status).toBe('approved')
 
     const consumed = admittedState().snapshot().proposals
-    expect(consumed?.byRequestKey['k-1']?.consumption?.childTaskIds).toEqual(['c1', 'c2'])
+    expect(batchConsumptionOf(consumed?.byRequestKey['k-1'])?.childTaskIds).toEqual(['c1', 'c2'])
     expect(consumed?.byParentTask[PARENT]?.[0]?.status).toBe('admitted')
     expect(consumed?.all[0]?.status).toBe('admitted')
   })
@@ -837,7 +861,7 @@ describe('TaskService proposal entries', () => {
     expect(snapshot.proposals?.byRequestKey['k-1']?.proposalDigest).toBe(decompositionDigest(IDENTITY))
     // The whole batch is back from the log: a re-sent approval request (or a
     // canvas view) renders from the store, not from the caller's memory.
-    expect(snapshot.proposals?.byId[PROPOSAL_ID]?.batch).toEqual(BATCH)
+    expect(decompositionOf(snapshot.proposals?.byId[PROPOSAL_ID])?.batch).toEqual(BATCH)
 
     const before = storedEvents(h).length
     await expect(reopened.decideProposalIn(STORE, claim({ proposalDigest: DIGEST_A }), 'operator'))
@@ -867,7 +891,7 @@ describe('TaskService proposal entries', () => {
     ])
     const value = (await service.snapshotIn(STORE)).proposals?.byId[PROPOSAL_ID]
     expect(value?.status).toBe('admitted')
-    expect(value?.consumption?.childTaskIds).toEqual(['c1', 'c2'])
+    expect(batchConsumptionOf(value)?.childTaskIds).toEqual(['c1', 'c2'])
   })
 
   test('an entry for an unknown proposal is refused before anything is written', async () => {
@@ -912,7 +936,7 @@ describe('TaskService proposal entries', () => {
     const snapshot = await service.snapshotIn(STORE)
     expect((await service.taskIn(STORE, PARENT)).childTaskIds).toEqual(['c1', 'c2'])
     expect(snapshot.proposals?.byId[PROPOSAL_ID]?.status).toBe('admitted')
-    expect(snapshot.proposals?.byId[PROPOSAL_ID]?.consumption?.batchId).toBe(`b-${PARENT}`)
+    expect(batchConsumptionOf(snapshot.proposals?.byId[PROPOSAL_ID])?.batchId).toBe(`b-${PARENT}`)
   })
 
   test('a consumption misaligned with the batch refuses the whole commit', async () => {
@@ -979,7 +1003,7 @@ describe('TaskService proposal entries', () => {
     const snapshot = await reopened.openStore(STORE)
     const value = snapshot.proposals?.byId[PROPOSAL_ID]
     expect(value?.status).toBe('admitted')
-    expect(value?.consumption?.childTaskIds).toEqual(['c1', 'c2'])
+    expect(batchConsumptionOf(value)?.childTaskIds).toEqual(['c1', 'c2'])
     expect(value?.proposalDigest).toBe(decompositionDigest(IDENTITY))
   })
 })
@@ -1003,5 +1027,726 @@ describe('TaskService legacy stores', () => {
 
     await service.submitProposalIn(STORE, proposal(), 'tester')
     expect((await service.snapshotIn(STORE)).proposals?.byId[PROPOSAL_ID]?.status).toBe('ready')
+  })
+})
+
+/* ------------------------------------------------------------------------ *
+ * Root contract proposals (A0 design §2, stage A)
+ * ------------------------------------------------------------------------ */
+
+/**
+ * The approved root contract — the single normalized contract a root proposal
+ * carries — and the fixed vectors the root identity rests on. Both digests
+ * below were computed outside this repository (`sha256sum` over the canonical
+ * texts spelled out here), so a change in the root digest's field coverage or
+ * in `canonicalize` fails these tests instead of being confirmed by the
+ * implementation against itself.
+ */
+const ROOT_CONTRACT: TaskContract = {
+  contractVersion: TASK_CONTRACT_VERSION,
+  objective: 'ship the root deliverable',
+  acceptanceCriteria: [
+    {
+      criterionId: 'root-c1',
+      description: 'the deliverable exists',
+      verificationMode: 'deterministic',
+      requiredEvidence: [],
+      mandatory: true,
+      command: 'test -f deliverable.txt',
+    },
+  ],
+  assumptions: ['the workspace is writable'],
+  constraints: ['no network access'],
+  requiredCapabilities: ['build'],
+}
+const ROOT_CONTRACT_CANONICAL = [
+  '{"acceptanceCriteria":[{"command":"test -f deliverable.txt","criterionId":"root-c1","description":"the deliverable exists",',
+  '"mandatory":true,"requiredEvidence":[],"verificationMode":"deterministic"}],"assumptions":["the workspace is writable"],',
+  '"constraints":["no network access"],"contractVersion":1,"objective":"ship the root deliverable","requiredCapabilities":["build"]}',
+].join('')
+const ROOT_CONTRACT_SHA256 = '2dc943bb13aa81014235b3fa8b1d009dd5b91bfdc61393d8dd11514be35dbfaf'
+
+const ROOT_IDENTITY: RootProposalIdentity = {
+  contractVersion: TASK_CONTRACT_VERSION,
+  storeId: 'sg-t-root-session',
+  rootSessionId: 's-root',
+  requestKey: 'k-root-1',
+  contractDigest: ROOT_CONTRACT_SHA256,
+}
+const ROOT_IDENTITY_CANONICAL = [
+  `{"contractDigest":"${ROOT_CONTRACT_SHA256}","contractVersion":1,"requestKey":"k-root-1",`,
+  '"rootSessionId":"s-root","storeId":"sg-t-root-session"}',
+].join('')
+const ROOT_PROPOSAL_DIGEST = '6480614f435dda479ef7d39f7b79b879469192df7647b999bed5a794d6e2b6c5'
+const ROOT_PROPOSAL_ID = `p-${ROOT_PROPOSAL_DIGEST}`
+/** A second root contract for the same store: a revision or a competing request, with its own key and id. */
+const ROOT_IDENTITY_ALT: RootProposalIdentity = { ...ROOT_IDENTITY, requestKey: 'k-root-2' }
+
+const ROOT_SESSION = 's-root'
+const ROOT_TASK_ID = 't-root-1'
+const ROOT_RUN_ID = 'r-root-1'
+
+function rootIdentity(overrides: Partial<RootProposalIdentity> = {}): RootProposalIdentity {
+  return { ...ROOT_IDENTITY, ...overrides }
+}
+
+/**
+ * One root contract proposal. The id and the digest are derived from the
+ * identity it is built for — the identity's request key included, which is what
+ * makes a revision with a new key a new proposal — so a caller that passes its
+ * own identity gets a record whose digests describe that identity.
+ */
+function rootProposal(
+  overrides: Partial<TaskProposalRoot> = {},
+  identity: RootProposalIdentity = ROOT_IDENTITY,
+): TaskProposalRoot {
+  return {
+    kind: 'root',
+    proposalId: rootProposalId(identity),
+    requestKey: identity.requestKey,
+    status: 'ready',
+    policy: 'off',
+    identity,
+    // A fresh copy per proposal: a test that edits the caller's contract after
+    // submitting it must not be able to reach the shared fixture (or the store).
+    contract: structuredClone(ROOT_CONTRACT),
+    proposalDigest: rootProposalDigest(identity),
+    admissionContext: ADMISSION_CONTEXT,
+    admissionContextDigest: admissionContextDigest(ADMISSION_CONTEXT),
+    reviewContext: REVIEW_CONTEXT,
+    reviewContextDigest: reviewContextDigest(REVIEW_CONTEXT),
+    createdAt: NOW,
+    ...overrides,
+  }
+}
+
+function rootClaim(overrides: Partial<TaskProposalDecisionClaim> = {}): TaskProposalDecisionClaim {
+  const value = rootProposal()
+  return {
+    proposalId: value.proposalId,
+    proposalDigest: value.proposalDigest,
+    admissionContextDigest: value.admissionContextDigest,
+    reviewContextDigest: value.reviewContextDigest,
+    outcome: 'approved',
+    decidedBy: 'operator',
+    decidedAt: NOW,
+    ...overrides,
+  }
+}
+
+function rootConsumptionFor(
+  proposal: TaskProposalRoot,
+  overrides: Partial<TaskProposalRootConsumption> = {},
+): TaskProposalRootConsumption {
+  return {
+    kind: 'root',
+    proposalId: proposal.proposalId,
+    proposalDigest: proposal.proposalDigest,
+    reviewContextDigest: proposal.reviewContextDigest,
+    rootTaskId: ROOT_TASK_ID,
+    rootRunId: ROOT_RUN_ID,
+    admittedAt: NOW,
+    ...overrides,
+  }
+}
+
+function rootConsumption(overrides: Partial<TaskProposalRootConsumption> = {}): TaskProposalRootConsumption {
+  return rootConsumptionFor(rootProposal(), overrides)
+}
+
+/** The root task an activation mints: parentless, depth 0, carrying the contract the proposal approved. */
+function rootTask(overrides: Partial<TaskInstance> = {}): TaskInstance {
+  return {
+    taskId: ROOT_TASK_ID,
+    definitionRef: { taskType: RootTaskSpec.taskType, version: RootTaskSpec.version },
+    objective: ROOT_CONTRACT.objective,
+    depth: 0,
+    acceptanceCriteria: structuredClone(ROOT_CONTRACT.acceptanceCriteria),
+    requestedCapabilities: [...ROOT_CONTRACT.requiredCapabilities],
+    decompositionStatus: 'decomposable',
+    status: 'created',
+    runIds: [],
+    childTaskIds: [],
+    contract: structuredClone(ROOT_CONTRACT),
+    ...overrides,
+  }
+}
+
+/** The root run an activation mints: born `active`, running, in the root session. */
+function rootRun(overrides: Partial<TaskRun> = {}): TaskRun {
+  return {
+    runId: ROOT_RUN_ID,
+    taskId: ROOT_TASK_ID,
+    sessionId: ROOT_SESSION,
+    capabilitySnapshot: [],
+    executionPhase: 'active',
+    artifacts: [],
+    verifierResults: [],
+    status: 'running',
+    startedAt: NOW,
+    ...overrides,
+  }
+}
+
+/** A store with no task at all: the state root intake is legal in. */
+function emptyState(): TaskState {
+  return new TaskState(STORE)
+}
+
+function submitRoot(state: TaskState, value: TaskProposal): TaskState {
+  state.apply(ev('TaskProposalSubmitted', { proposal: value }, { taskId: ROOT_PROPOSAL_TASK_ID }))
+  return state
+}
+
+function readyRootState(): TaskState {
+  return submitRoot(emptyState(), rootProposal())
+}
+
+function pendingRootState(): TaskState {
+  return submitRoot(emptyState(), rootProposal({ status: 'pending_review', policy: 'all' }))
+}
+
+function decideRoot(state: TaskState, value: TaskProposalDecisionClaim): TaskState {
+  state.apply(ev('TaskProposalDecided', value, { taskId: ROOT_PROPOSAL_TASK_ID }))
+  return state
+}
+
+function changeRootPhase(state: TaskState, value: TaskProposalPhaseChange): TaskState {
+  state.apply(ev('TaskProposalPhaseChanged', value, { taskId: ROOT_PROPOSAL_TASK_ID }))
+  return state
+}
+
+function approvedRootState(): TaskState {
+  return decideRoot(pendingRootState(), rootClaim())
+}
+
+/** An approved root proposal that passed its post-approval re-check: `approved → ready`. */
+function recheckedRootState(): TaskState {
+  return changeRootPhase(approvedRootState(), { proposalId: ROOT_PROPOSAL_ID, to: 'ready' })
+}
+
+/**
+ * A re-checked root proposal with the task (and, unless `run` is null) the run an
+ * activation mints already in the store. Created outside the activation commit
+ * on purpose: these states stand in for the shapes a consumption can name —
+ * a missing task, a missing run, a run that is not the one this proposal
+ * approved — each of which the reducer has to refuse.
+ */
+function rootActivationState(task: TaskInstance | undefined = rootTask(), run: TaskRun | null = rootRun()): TaskState {
+  const state = recheckedRootState()
+  if (task !== undefined) {
+    state.apply(ev('TaskCreated', { task }, { taskId: task.taskId }))
+    state.apply(ev('TaskAdmitted', { decompositionStatus: 'decomposable' }, { taskId: task.taskId }))
+  }
+  if (run !== null) {
+    state.apply(ev('TaskStarted', { run }, { taskId: run.taskId, runId: run.runId }))
+  }
+  return state
+}
+
+/** The activated root plus one admitted child holding a run: the non-root shapes a consumption can point at. */
+function rootWithChildState(): TaskState {
+  const state = rootActivationState()
+  const child = rootTask({ taskId: 'c1', parentTaskId: ROOT_TASK_ID, depth: 1, decompositionStatus: 'leaf' })
+  state.apply(ev('TaskCreated', { task: child }, { taskId: 'c1', parentTaskId: ROOT_TASK_ID }))
+  state.apply(ev('TaskAdmitted', { decompositionStatus: 'leaf' }, { taskId: 'c1' }))
+  state.apply(ev('TaskStarted', { run: rootRun({ runId: 'r-c1', taskId: 'c1' }) }, { taskId: 'c1', runId: 'r-c1' }))
+  return state
+}
+
+/** A root proposal with the shapes an activation would mint already in the store, at the status the caller starts from. */
+function rootActivationStateFrom(from: TaskState): TaskState {
+  from.apply(ev('TaskCreated', { task: rootTask() }, { taskId: ROOT_TASK_ID }))
+  from.apply(ev('TaskAdmitted', { decompositionStatus: 'decomposable' }, { taskId: ROOT_TASK_ID }))
+  from.apply(ev('TaskStarted', { run: rootRun() }, { taskId: ROOT_TASK_ID, runId: ROOT_RUN_ID }))
+  return from
+}
+
+/** A stored proposal read as the root arm; `undefined` for a decomposition proposal or an absent record. */
+function rootOf(value: TaskProposal | undefined): TaskProposalRoot | undefined {
+  return value?.kind === 'root' ? value : undefined
+}
+
+function rootStored(state: TaskState): TaskProposalRoot | undefined {
+  return rootOf(state.snapshot().proposals?.byId[ROOT_PROPOSAL_ID])
+}
+
+describe('root proposal identities', () => {
+  test('hashes the root contract through its canonical text', () => {
+    expect(canonicalize(ROOT_CONTRACT)).toBe(ROOT_CONTRACT_CANONICAL)
+    expect(contractDigest(ROOT_CONTRACT)).toBe(ROOT_CONTRACT_SHA256)
+  })
+
+  test('hashes the root identity through its canonical text', () => {
+    expect(canonicalize(ROOT_IDENTITY)).toBe(ROOT_IDENTITY_CANONICAL)
+    expect(rootProposalDigest(ROOT_IDENTITY)).toBe(ROOT_PROPOSAL_DIGEST)
+    expect(rootProposalId(ROOT_IDENTITY)).toBe(ROOT_PROPOSAL_ID)
+  })
+
+  test('covers the store, the root session, the request key and the contract', () => {
+    const moves = [
+      rootProposalDigest(rootIdentity({ storeId: 'sg-t-other' })),
+      rootProposalDigest(rootIdentity({ rootSessionId: 's-other' })),
+      rootProposalDigest(rootIdentity({ requestKey: 'k-root-2' })),
+      rootProposalDigest(rootIdentity({ contractDigest: '0'.repeat(64) })),
+    ]
+    for (const digest of moves) expect(digest).not.toBe(ROOT_PROPOSAL_DIGEST)
+    // Two different contracts are two different proposals even when every other
+    // field is one: the identity commits to the contract digest, not to nothing.
+    expect(rootProposalId(rootIdentity({ contractDigest: contractDigest(CONTRACT_A) }))).not.toBe(ROOT_PROPOSAL_ID)
+  })
+
+  test('is unmoved by the order the identity was spelled in', () => {
+    const reordered: RootProposalIdentity = {
+      contractDigest: ROOT_IDENTITY.contractDigest,
+      requestKey: ROOT_IDENTITY.requestKey,
+      rootSessionId: ROOT_IDENTITY.rootSessionId,
+      storeId: ROOT_IDENTITY.storeId,
+      contractVersion: ROOT_IDENTITY.contractVersion,
+    }
+    expect(canonicalize(reordered)).toBe(ROOT_IDENTITY_CANONICAL)
+    expect(rootProposalId(reordered)).toBe(ROOT_PROPOSAL_ID)
+  })
+
+  test('reserves a proposal task id no minted task id can be', () => {
+    // Task ids are minted as `t-<randomUUID()>` (task-runtime: createRootTask,
+    // the decomposition batch, the replay path), so the reserved marker has to
+    // be outside that shape: a root proposal event can then never be read as
+    // naming a real task, and no task can ever shadow it.
+    expect(ROOT_PROPOSAL_TASK_ID).toBe('root-proposal')
+    expect(/^t-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(ROOT_PROPOSAL_TASK_ID)).toBe(false)
+    expect(/^t-[0-9a-f-]{36}$/.test(`t-${'0'.repeat(36)}`)).toBe(true)
+  })
+})
+
+describe('TaskState root contract proposals', () => {
+  test('a policy-off root proposal is born ready and is readable through the index', () => {
+    const state = readyRootState()
+    const value = rootStored(state)
+    expect(value?.status).toBe('ready')
+    expect(value?.policy).toBe('off')
+    expect(value?.kind).toBe('root')
+    expect(value?.contract).toEqual(ROOT_CONTRACT)
+    expect(value?.identity).toEqual(ROOT_IDENTITY)
+    expect(value?.proposalDigest).toBe(ROOT_PROPOSAL_DIGEST)
+    expect(value?.decision).toBeUndefined()
+    expect(value?.consumption).toBeUndefined()
+    const index = state.snapshot().proposals
+    expect(index?.all.map(item => item.proposalId)).toEqual([ROOT_PROPOSAL_ID])
+    expect(index?.byId[ROOT_PROPOSAL_ID]?.requestKey).toBe('k-root-1')
+    expect(index?.byRequestKey['k-root-1']?.proposalId).toBe(ROOT_PROPOSAL_ID)
+    // A root contract has no parent task, so it is not a parent's business:
+    // nothing is indexed under a task that does not exist.
+    expect(index?.byParentTask).toEqual({})
+  })
+
+  test('a policy-all root proposal is born pending_review', () => {
+    expect(rootStored(pendingRootState())?.status).toBe('pending_review')
+    expect(rootStored(pendingRootState())?.policy).toBe('all')
+  })
+
+  test('stores its own copy of the root contract: a later caller-side edit never reaches the store', () => {
+    const caller = rootProposal()
+    const state = submitRoot(emptyState(), caller)
+    caller.contract.objective = 'tampered after submission'
+    expect(rootStored(state)?.contract.objective).toBe('ship the root deliverable')
+  })
+
+  // One tampered identity per shape the reducer judges, so each refusal names the
+  // id a proposal for *that* identity would carry.
+  const noRootSession = rootIdentity({ rootSessionId: '' })
+  const noStoreId = rootIdentity({ storeId: '' })
+  const noIdentityKey = rootIdentity({ requestKey: '' })
+  const wrongVersion = rootIdentity({ contractVersion: 2 as 1 })
+  const badContractDigest = rootIdentity({ contractDigest: 'nope' })
+  const withParentTask = { ...ROOT_IDENTITY, parentTaskId: 'root' } as unknown as RootProposalIdentity
+
+  const refused: Array<[string, () => TaskState, TaskProposal, string]> = [
+    ['an unknown kind', emptyState, rootProposal({ kind: 'root_contract' as 'root' }), `task: proposal "${ROOT_PROPOSAL_ID}" kind must be one of decomposition, root`],
+    ['a root contract without its kind', emptyState, rootProposal({ kind: undefined as unknown as 'root' }), `task: proposal "${ROOT_PROPOSAL_ID}" carries root contract fields without kind "root"`],
+    ['a root contract carrying a batch', emptyState, rootProposal({ batch: BATCH } as unknown as Partial<TaskProposalRoot>), `task: proposal "${ROOT_PROPOSAL_ID}" is a root contract and cannot carry a batch`],
+    ['a root identity with no root session', emptyState, rootProposal({}, noRootSession), `task: proposal "${rootProposalId(noRootSession)}" identity root session id must be a non-empty string`],
+    ['a root identity with an empty store id', emptyState, rootProposal({}, noStoreId), `task: proposal "${rootProposalId(noStoreId)}" identity store id must be a non-empty string`],
+    ['a root proposal with no request key', emptyState, rootProposal({ requestKey: '' }, noIdentityKey), `task: proposal "${rootProposalId(noIdentityKey)}" request key must be a non-empty string`],
+    ['a root identity with no request key', emptyState, rootProposal({ requestKey: 'k-root-1' }, noIdentityKey), `task: proposal "${rootProposalId(noIdentityKey)}" identity request key must be a non-empty string`],
+    ['an unknown identity contract version', emptyState, rootProposal({}, wrongVersion), `task: proposal "${rootProposalId(wrongVersion)}" declares contract version 2; this build stores version 1`],
+    ['a root identity without a contract digest', emptyState, rootProposal({}, badContractDigest), `task: proposal "${rootProposalId(badContractDigest)}" identity contract digest must be a lowercase SHA-256 hex digest`],
+    ['a root identity carrying a parent task', emptyState, rootProposal({}, withParentTask), `task: proposal "${rootProposalId(withParentTask)}" identity has an unsupported field "parentTaskId"`],
+    ['a non-object root identity', emptyState, rootProposal({ identity: 'contract' as unknown as RootProposalIdentity }), `task: proposal "${ROOT_PROPOSAL_ID}" identity must be an object`],
+    ['an identity request key that disagrees with the record', emptyState, rootProposal({ requestKey: 'k-other' }), `task: proposal "${ROOT_PROPOSAL_ID}" identity request key "k-root-1" disagrees with its request key "k-other"`],
+    ['a root proposal without a contract', emptyState, rootProposal({ contract: undefined as unknown as TaskContract }), `task: proposal "${ROOT_PROPOSAL_ID}" requires a root contract`],
+    ['a root contract that is not an object', emptyState, rootProposal({ contract: 'objective' as unknown as TaskContract }), `task: proposal "${ROOT_PROPOSAL_ID}" requires a root contract`],
+    ['a root contract with an unknown version', emptyState, rootProposal({ contract: { ...ROOT_CONTRACT, contractVersion: 2 as 1 } }), `task: proposal "${ROOT_PROPOSAL_ID}" root declares contract version 2; this build stores version 1`],
+    ['a root contract with a non-string objective', emptyState, rootProposal({ contract: { ...ROOT_CONTRACT, objective: 7 as unknown as string } }), `task: proposal "${ROOT_PROPOSAL_ID}" root contract objective must be a string`],
+    ['a root contract with a malformed constraint list', emptyState, rootProposal({ contract: { ...ROOT_CONTRACT, constraints: 'none' as unknown as string[] } }), `task: proposal "${ROOT_PROPOSAL_ID}" root contract constraints must be an array of strings`],
+    ['a root contract with a malformed criteria list', emptyState, rootProposal({ contract: { ...ROOT_CONTRACT, acceptanceCriteria: 'all of them' as unknown as TaskContract['acceptanceCriteria'] } }), `task: proposal "${ROOT_PROPOSAL_ID}" root contract acceptance criteria must be an array`],
+    ['a root contract that is not the one the identity digests', emptyState, rootProposal({ contract: CONTRACT_A }), `task: proposal "${ROOT_PROPOSAL_ID}" contract digest "${DIGEST_A}" does not match its identity digest "${ROOT_CONTRACT_SHA256}"`],
+    ['a root contract whose objective moved after the digest was taken', emptyState, rootProposal({ contract: { ...ROOT_CONTRACT, objective: 'ship something else' } }), `task: proposal "${ROOT_PROPOSAL_ID}" contract digest "${contractDigest({ ...ROOT_CONTRACT, objective: 'ship something else' })}" does not match its identity digest "${ROOT_CONTRACT_SHA256}"`],
+    ['a forged root proposal digest', emptyState, rootProposal({ proposalDigest: DIGEST_A }), `task: proposal "${ROOT_PROPOSAL_ID}" proposal digest "${DIGEST_A}" does not match its identity digest "${ROOT_PROPOSAL_DIGEST}"`],
+    ['a root proposal submitted with a decision', emptyState, rootProposal({ decision: { outcome: 'approved', proposalDigest: ROOT_PROPOSAL_DIGEST, admissionContextDigest: ADMISSION_CONTEXT_SHA256, decidedBy: 'operator', decidedAt: NOW } }), `task: proposal "${ROOT_PROPOSAL_ID}" is submitted with a decision`],
+    ['a duplicate root proposal id', readyRootState, rootProposal(), `task: proposal "${ROOT_PROPOSAL_ID}" already exists`],
+    ['a second root proposal on one request key', readyRootState, rootProposal({ proposalId: 'p-other' }), `task: proposal request key "k-root-1" is already bound to proposal "${ROOT_PROPOSAL_ID}"`],
+    ['a root contract for a store that already holds a root task', rootState, rootProposal(), `task: store "store" already holds root task "root"; proposal "${ROOT_PROPOSAL_ID}" is refused`],
+  ]
+
+  test.each(refused)('refuses %s and stores nothing', (_name, setup, value, message) => {
+    const state = setup()
+    const before = state.snapshot()
+    expect(() => submitRoot(state, value)).toThrow(message)
+    expect(state.snapshot()).toEqual(before)
+  })
+
+  test('refuses a decomposition proposal that carries a root contract', () => {
+    const state = emptyState()
+    const before = state.snapshot()
+    const value = proposal({ kind: 'decomposition', contract: ROOT_CONTRACT } as unknown as Partial<TaskProposalDecomposition>)
+    expect(() => submitRoot(state, value)).toThrow(`task: proposal "${PROPOSAL_ID}" is a decomposition proposal and cannot carry a root contract`)
+    expect(state.snapshot()).toEqual(before)
+  })
+
+  test('refuses a root contract event whose envelope names anything but the reserved marker', () => {
+    const state = readyRootState()
+    const before = state.snapshot()
+    const second = rootProposal({ proposalId: 'p-second' }, rootIdentity({ requestKey: 'k-second' }))
+    expect(() => state.apply(ev('TaskProposalSubmitted', { proposal: second }, { taskId: 't-real' })))
+      .toThrow(`task: proposal "p-second" is a root contract; its events must carry the reserved proposal task id "${ROOT_PROPOSAL_TASK_ID}", not "t-real"`)
+    expect(state.snapshot()).toEqual(before)
+  })
+
+  test('refuses the reserved marker on a decomposition proposal event', () => {
+    const state = rootState()
+    const before = state.snapshot()
+    expect(() => state.apply(ev('TaskProposalSubmitted', { proposal: proposal() }, { taskId: ROOT_PROPOSAL_TASK_ID })))
+      .toThrow(`task: proposal "${PROPOSAL_ID}" belongs to task "root", not "${ROOT_PROPOSAL_TASK_ID}"`)
+    expect(state.snapshot()).toEqual(before)
+  })
+
+  test('reads a proposal written before the kind field as a decomposition proposal, and one that states its kind the same', () => {
+    const legacy = JSON.parse(JSON.stringify(proposal())) as TaskProposalDecomposition
+    expect('kind' in legacy ? legacy.kind : undefined).toBeUndefined()
+    const storedLegacy = submit(rootState(), legacy)
+    expect(decompositionOf(storedLegacy.snapshot().proposals?.byId[PROPOSAL_ID])?.batch).toEqual(BATCH)
+    expect(storedLegacy.snapshot().proposals?.byParentTask[PARENT]?.map(item => item.proposalId)).toEqual([PROPOSAL_ID])
+
+    // An explicit `kind: 'decomposition'` is the same record: the identity, the
+    // digest and the id are the ones they always were, so nothing in the
+    // decomposition path moved when the field was added.
+    const explicit = submit(rootState(), proposal({ kind: 'decomposition' }))
+    const value = decompositionOf(explicit.snapshot().proposals?.byId[PROPOSAL_ID])
+    expect(value?.kind).toBe('decomposition')
+    expect(value?.proposalId).toBe(PROPOSAL_ID)
+    expect(value?.proposalDigest).toBe(decompositionDigest(IDENTITY))
+    expect(canonicalize(value?.identity)).toBe(IDENTITY_CANONICAL)
+  })
+})
+
+describe('TaskState root contract decisions and phases', () => {
+  test('records a root approval bound to the three digests', () => {
+    const state = decideRoot(pendingRootState(), rootClaim())
+    const value = rootStored(state)
+    expect(value?.status).toBe('approved')
+    expect(value?.updatedAt).toBe(NOW)
+    expect(value?.decision).toEqual({
+      outcome: 'approved',
+      proposalDigest: ROOT_PROPOSAL_DIGEST,
+      admissionContextDigest: ADMISSION_CONTEXT_SHA256,
+      reviewContextDigest: REVIEW_CONTEXT_SHA256,
+      decidedBy: 'operator',
+      decidedAt: NOW,
+    })
+  })
+
+  test('a root rejection, a tightening and a post-approval re-check follow the same tables', () => {
+    expect(rootStored(decideRoot(pendingRootState(), rootClaim({ outcome: 'rejected', reason: 'not the goal the user asked for' })))?.status).toBe('rejected')
+    expect(rootStored(changeRootPhase(readyRootState(), { proposalId: ROOT_PROPOSAL_ID, to: 'pending_review' }))?.policy).toBe('off')
+    expect(rootStored(recheckedRootState())?.status).toBe('ready')
+    expect(rootStored(changeRootPhase(recheckedRootState(), { proposalId: ROOT_PROPOSAL_ID, to: 'stale', reason: 'root contract moved' }))?.status).toBe('stale')
+  })
+
+  const refused: Array<[string, () => TaskState, TaskProposalDecisionClaim | TaskProposalPhaseChange, string]> = [
+    ['a root decision digest that is not the stored one', pendingRootState, rootClaim({ proposalDigest: DIGEST_A }), `task: proposal "${ROOT_PROPOSAL_ID}" decision digest "${DIGEST_A}" does not match the stored proposal digest "${ROOT_PROPOSAL_DIGEST}"`],
+    ['a root decision admission context that is not the stored one', pendingRootState, rootClaim({ admissionContextDigest: DIGEST_B }), `task: proposal "${ROOT_PROPOSAL_ID}" decision admission context digest "${DIGEST_B}" does not match the stored admission context digest "${ADMISSION_CONTEXT_SHA256}"`],
+    ['a root approval without the review context it was decided against', pendingRootState, rootClaim({ reviewContextDigest: undefined }), `task: proposal "${ROOT_PROPOSAL_ID}" approval requires the review context digest it was decided against`],
+    ['a root approval whose review context moved', pendingRootState, rootClaim({ reviewContextDigest: DIGEST_A }), `task: proposal "${ROOT_PROPOSAL_ID}" decision review context digest "${DIGEST_A}" does not match the stored review context digest "${REVIEW_CONTEXT_SHA256}"`],
+    ['an approval of a policy-off root proposal', readyRootState, rootClaim(), `task: illegal proposal transition "ready" → "approved" for proposal "${ROOT_PROPOSAL_ID}"`],
+    ['a root re-check pass without an approval', readyRootState, { proposalId: ROOT_PROPOSAL_ID, to: 'ready' }, `task: illegal proposal transition "ready" → "ready" for proposal "${ROOT_PROPOSAL_ID}"`],
+    ['a root stale marking without a reason', readyRootState, { proposalId: ROOT_PROPOSAL_ID, to: 'stale' }, `task: proposal "${ROOT_PROPOSAL_ID}" is marked stale without a reason`],
+  ]
+
+  test.each(refused)('refuses %s and leaves the proposal as it was', (_name, setup, value, message) => {
+    const state = setup()
+    const before = state.snapshot()
+    const apply = 'outcome' in value ? decideRoot : changeRootPhase
+    expect(() => apply(state, value as never)).toThrow(message)
+    expect(state.snapshot()).toEqual(before)
+  })
+
+  test('refuses a root decision whose envelope names a real task', () => {
+    const state = pendingRootState()
+    const before = state.snapshot()
+    expect(() => state.apply(ev('TaskProposalDecided', rootClaim(), { taskId: ROOT_TASK_ID })))
+      .toThrow(`task: proposal "${ROOT_PROPOSAL_ID}" is a root contract; its events must carry the reserved proposal task id "${ROOT_PROPOSAL_TASK_ID}", not "${ROOT_TASK_ID}"`)
+    expect(state.snapshot()).toEqual(before)
+  })
+})
+
+describe('TaskState root contract consumption', () => {
+  test('one consumption binds the proposal to the root task and run it was activated as', () => {
+    const state = rootActivationState()
+    state.apply(ev('TaskProposalAdmitted', rootConsumption(), { taskId: ROOT_PROPOSAL_TASK_ID }))
+    const value = rootStored(state)
+    expect(value?.status).toBe('admitted')
+    expect(value?.consumption).toEqual(rootConsumption())
+    expect(value?.updatedAt).toBe(NOW)
+    expect(value?.consumption?.kind).toBe('root')
+    const snapshot = state.snapshot()
+    expect(snapshot.tasks.map(item => item.taskId)).toEqual([ROOT_TASK_ID])
+    expect(snapshot.runs.map(item => item.runId)).toEqual([ROOT_RUN_ID])
+  })
+
+  const refused: Array<[string, () => TaskState, TaskProposalRootConsumption, string]> = [
+    ['a consumption that does not declare its kind', recheckedRootState, rootConsumption({ kind: undefined as unknown as 'root' }), `task: proposal "${ROOT_PROPOSAL_ID}" consumption must declare kind "root"`],
+    ['a consumption carrying the batch vocabulary', rootActivationState, rootConsumption({ batchId: 'b-root' } as unknown as Partial<TaskProposalRootConsumption>), `task: proposal "${ROOT_PROPOSAL_ID}" consumption carries the batch field "batchId"; a root consumption names rootTaskId and rootRunId`],
+    ['a consumption carrying the batch child list', rootActivationState, rootConsumption({ childTaskIds: [ROOT_TASK_ID] } as unknown as Partial<TaskProposalRootConsumption>), `task: proposal "${ROOT_PROPOSAL_ID}" consumption carries the batch field "childTaskIds"; a root consumption names rootTaskId and rootRunId`],
+    ['a consumption without a root task id', rootActivationState, rootConsumption({ rootTaskId: '' }), `task: proposal "${ROOT_PROPOSAL_ID}" consumption requires a root task id`],
+    ['a consumption without a root run id', rootActivationState, rootConsumption({ rootRunId: '' }), `task: proposal "${ROOT_PROPOSAL_ID}" consumption requires a root run id`],
+    ['a consumption naming a root task the store does not hold', readyRootState, rootConsumption(), `task: proposal "${ROOT_PROPOSAL_ID}" consumption names unknown task "${ROOT_TASK_ID}"`],
+    ['a consumption naming a task that is not a root task', rootWithChildState, rootConsumption({ rootTaskId: 'c1' }), `task: proposal "${ROOT_PROPOSAL_ID}" consumption names task "c1", which is not a root task`],
+    ['a consumption naming a root task without the contract the proposal approved', () => rootActivationState(rootTask({ contract: undefined })), rootConsumption(), `task: proposal "${ROOT_PROPOSAL_ID}" consumption names root task "${ROOT_TASK_ID}" without the contract the proposal committed to`],
+    ['a consumption naming a root task whose contract moved', () => rootActivationState(rootTask({ contract: { ...ROOT_CONTRACT, objective: 'another goal' }, objective: 'another goal' })), rootConsumption(), `task: proposal "${ROOT_PROPOSAL_ID}" consumption names root task "${ROOT_TASK_ID}" whose contract digest "${contractDigest({ ...ROOT_CONTRACT, objective: 'another goal' })}" is not the committed "${ROOT_CONTRACT_SHA256}"`],
+    ['a consumption naming a root run the store does not hold', () => rootActivationState(rootTask(), null), rootConsumption(), `task: proposal "${ROOT_PROPOSAL_ID}" consumption names unknown run "${ROOT_RUN_ID}"`],
+    ['a consumption naming a run that belongs to another task', rootWithChildState, rootConsumption({ rootRunId: 'r-c1' }), `task: proposal "${ROOT_PROPOSAL_ID}" consumption names run "r-c1", which belongs to task "c1"`],
+    ['a consumption naming a run of another session', () => rootActivationState(rootTask(), rootRun({ sessionId: 's-other' })), rootConsumption(), `task: proposal "${ROOT_PROPOSAL_ID}" consumption names run "${ROOT_RUN_ID}" of session "s-other", not the root session "${ROOT_SESSION}"`],
+    ['a consumption naming a run that is no longer active', () => {
+      const state = rootActivationState(rootTask(), rootRun({ executionPhase: 'submitted', submission: { summary: 'no worker', evidenceRefs: [], origin: 'runtime', submittedAt: NOW } }))
+      return state
+    }, rootConsumption(), `task: proposal "${ROOT_PROPOSAL_ID}" consumption names run "${ROOT_RUN_ID}" with execution phase "submitted"; a root run is born active`],
+    ['a consumption naming a run that already ended', () => {
+      const state = rootActivationState()
+      state.apply(ev('TaskFailed', { finishedAt: NOW, reason: 'the worker died' }, { taskId: ROOT_TASK_ID, runId: ROOT_RUN_ID }))
+      return state
+    }, rootConsumption(), `task: proposal "${ROOT_PROPOSAL_ID}" consumption names run "${ROOT_RUN_ID}" in status "failed"; a root run is consumed running`],
+    ['a consumption of a root proposal still awaiting review', () => rootActivationStateFrom(pendingRootState()), rootConsumption(), `task: illegal proposal transition "pending_review" → "admitted" for proposal "${ROOT_PROPOSAL_ID}"`],
+    ['a consumption of a root proposal that never passed its re-check', () => rootActivationStateFrom(approvedRootState()), rootConsumption(), `task: illegal proposal transition "approved" → "admitted" for proposal "${ROOT_PROPOSAL_ID}"`],
+    ['a second consumption of one root proposal', () => {
+      const state = rootActivationState()
+      state.apply(ev('TaskProposalAdmitted', rootConsumption(), { taskId: ROOT_PROPOSAL_TASK_ID }))
+      return state
+    }, rootConsumption(), `task: illegal proposal transition "admitted" → "admitted" for proposal "${ROOT_PROPOSAL_ID}"`],
+    ['a root consumption with a forged proposal digest', rootActivationState, rootConsumption({ proposalDigest: DIGEST_A }), `task: proposal "${ROOT_PROPOSAL_ID}" consumption digest "${DIGEST_A}" does not match the stored proposal digest "${ROOT_PROPOSAL_DIGEST}"`],
+    ['a root consumption whose review context moved', rootActivationState, rootConsumption({ reviewContextDigest: DIGEST_B }), `task: proposal "${ROOT_PROPOSAL_ID}" consumption review context digest "${DIGEST_B}" does not match the stored review context digest "${REVIEW_CONTEXT_SHA256}"`],
+    ['a root consumption without an admission time', rootActivationState, rootConsumption({ admittedAt: '' }), `task: proposal "${ROOT_PROPOSAL_ID}" consumption requires an admission time`],
+    ['a root consumption whose envelope names a real task', rootActivationState, rootConsumption(), `task: proposal "${ROOT_PROPOSAL_ID}" is a root contract; its events must carry the reserved proposal task id "${ROOT_PROPOSAL_TASK_ID}", not "${ROOT_TASK_ID}"`],
+  ]
+
+  test.each(refused)('refuses %s and stores no consumption', (_name, setup, value, message) => {
+    const state = setup()
+    const before = state.snapshot()
+    // The last row is about the envelope, not the record: every other row has to
+    // be refused by the consumption itself.
+    const envelope = _name.includes('envelope') ? { taskId: ROOT_TASK_ID } : { taskId: ROOT_PROPOSAL_TASK_ID }
+    expect(() => state.apply(ev('TaskProposalAdmitted', value, envelope))).toThrow(message)
+    expect(state.snapshot()).toEqual(before)
+  })
+
+  test('a root consumption cannot name a root task the store already had', () => {
+    // Two root contracts can both be submitted before either is activated —
+    // nothing but a task closes intake — and the store then refuses the second
+    // activation rather than letting one intake mint two roots.
+    const second = rootProposal({}, ROOT_IDENTITY_ALT)
+    const state = submitRoot(submitRoot(emptyState(), rootProposal()), second)
+    state.apply(ev('TaskCreated', { task: rootTask() }, { taskId: ROOT_TASK_ID }))
+    state.apply(ev('TaskAdmitted', { decompositionStatus: 'decomposable' }, { taskId: ROOT_TASK_ID }))
+    state.apply(ev('TaskStarted', { run: rootRun() }, { taskId: ROOT_TASK_ID, runId: ROOT_RUN_ID }))
+    state.apply(ev('TaskProposalAdmitted', rootConsumption(), { taskId: ROOT_PROPOSAL_TASK_ID }))
+    expect(rootStored(state)?.status).toBe('admitted')
+
+    const rivalTask = rootTask({ taskId: 't-root-2' })
+    const rivalRun = rootRun({ runId: 'r-root-2', taskId: 't-root-2' })
+    state.apply(ev('TaskCreated', { task: rivalTask }, { taskId: rivalTask.taskId }))
+    state.apply(ev('TaskAdmitted', { decompositionStatus: 'decomposable' }, { taskId: rivalTask.taskId }))
+    state.apply(ev('TaskStarted', { run: rivalRun }, { taskId: rivalTask.taskId, runId: rivalRun.runId }))
+    expect(() => state.apply(ev(
+      'TaskProposalAdmitted',
+      rootConsumptionFor(second, { rootTaskId: rivalTask.taskId, rootRunId: rivalRun.runId }),
+      { taskId: ROOT_PROPOSAL_TASK_ID },
+    ))).toThrow(`task: proposal "${second.proposalId}" consumption names root task "t-root-2" but store "${STORE}" already holds root task "${ROOT_TASK_ID}"`)
+    expect(rootOf(state.snapshot().proposals?.byId[second.proposalId])?.status).toBe('ready')
+  })
+})
+
+/** A store with no task at all: what a root intake starts from. */
+async function emptyService(): Promise<{ h: Harness; service: TaskService }> {
+  const h = harness()
+  const service = new TaskService(h.ctx as never)
+  await service.createStore(STORE)
+  return { h, service }
+}
+
+/** The persisted events as the reducer saw them. */
+function storedTaskEvents(h: Harness): TaskEvent[] {
+  return storedEvents(h).map(item => item.data as TaskEvent)
+}
+
+describe('TaskService root activation', () => {
+  test('submitProposalIn addresses a root contract through the reserved marker', async () => {
+    const { h, service } = await emptyService()
+    await service.submitProposalIn(STORE, rootProposal(), 'root-session')
+    expect(persistedKinds(h)).toEqual(['TaskProposalSubmitted'])
+    expect(storedTaskEvents(h).map(item => item.taskId)).toEqual([ROOT_PROPOSAL_TASK_ID])
+    const snapshot = await service.snapshotIn(STORE)
+    expect(snapshot.proposals?.byId[ROOT_PROPOSAL_ID]?.kind).toBe('root')
+    expect(snapshot.proposals?.byRequestKey['k-root-1']?.proposalId).toBe(ROOT_PROPOSAL_ID)
+    expect(snapshot.proposals?.byParentTask).toEqual({})
+  })
+
+  test('the decision and phase entries address a root contract through the same marker', async () => {
+    const { h, service } = await emptyService()
+    await service.submitProposalIn(STORE, rootProposal({ status: 'pending_review', policy: 'all' }), 'root-session')
+    await service.decideProposalIn(STORE, rootClaim(), 'operator')
+    await service.changeProposalPhaseIn(STORE, { proposalId: ROOT_PROPOSAL_ID, to: 'ready' }, 'runtime')
+    expect(persistedKinds(h).map(kind => kind)).toEqual(['TaskProposalSubmitted', 'TaskProposalDecided', 'TaskProposalPhaseChanged'])
+    expect(storedTaskEvents(h).map(item => item.taskId)).toEqual([ROOT_PROPOSAL_TASK_ID, ROOT_PROPOSAL_TASK_ID, ROOT_PROPOSAL_TASK_ID])
+    expect((await service.snapshotIn(STORE)).proposals?.byId[ROOT_PROPOSAL_ID]?.status).toBe('ready')
+  })
+
+  test('admitRootProposalIn lands the root task, its run and the consumption in one commit', async () => {
+    const { h, service } = await emptyService()
+    await service.submitProposalIn(STORE, rootProposal(), 'root-session')
+    const before = storedEvents(h).length
+    await service.admitRootProposalIn(STORE, rootTask(), rootRun(), 'root-session', { consumption: rootConsumption() })
+    expect(persistedKinds(h).slice(before)).toEqual(['TaskCreated', 'TaskAdmitted', 'TaskStarted', 'TaskProposalAdmitted'])
+    expect(storedTaskEvents(h).filter(item => item.kind.startsWith('TaskProposal')).map(item => item.taskId))
+      .toEqual([ROOT_PROPOSAL_TASK_ID, ROOT_PROPOSAL_TASK_ID])
+
+    const snapshot = await service.snapshotIn(STORE)
+    const root = snapshot.tasks[0]
+    expect(snapshot.tasks).toHaveLength(1)
+    expect(root?.taskId).toBe(ROOT_TASK_ID)
+    expect(root?.parentTaskId).toBeUndefined()
+    expect(root?.depth).toBe(0)
+    expect(root?.objective).toBe(ROOT_CONTRACT.objective)
+    expect(root?.contract).toEqual(ROOT_CONTRACT)
+    expect(root?.status).toBe('running')
+    expect(snapshot.runs.map(item => ({ runId: item.runId, sessionId: item.sessionId, phase: item.executionPhase, status: item.status })))
+      .toEqual([{ runId: ROOT_RUN_ID, sessionId: ROOT_SESSION, phase: 'active', status: 'running' }])
+    const value = snapshot.proposals?.byId[ROOT_PROPOSAL_ID]
+    expect(value?.status).toBe('admitted')
+    expect(value?.consumption).toEqual(rootConsumption())
+  })
+
+  test('a second root activation is refused and writes nothing', async () => {
+    const { h, service } = await emptyService()
+    await service.submitProposalIn(STORE, rootProposal(), 'root-session')
+    await service.admitRootProposalIn(STORE, rootTask(), rootRun(), 'root-session', { consumption: rootConsumption() })
+    const before = persistedKinds(h)
+    const second = rootTask({ taskId: 't-root-2' })
+    await expect(service.admitRootProposalIn(
+      STORE,
+      second,
+      rootRun({ runId: 'r-root-2', taskId: second.taskId }),
+      'root-session',
+      { consumption: rootConsumption({ rootTaskId: second.taskId, rootRunId: 'r-root-2' }) },
+    )).rejects.toThrow(`task: store "${STORE}" already holds root task "${ROOT_TASK_ID}"; proposal "${ROOT_PROPOSAL_ID}" is refused`)
+    expect(persistedKinds(h)).toEqual(before)
+    const snapshot = await service.snapshotIn(STORE)
+    expect(snapshot.tasks).toHaveLength(1)
+    expect(snapshot.runs).toHaveLength(1)
+  })
+
+  test('an activation whose consumption does not name the task and run it creates writes nothing', async () => {
+    const { h, service } = await emptyService()
+    await service.submitProposalIn(STORE, rootProposal(), 'root-session')
+    const before = persistedKinds(h)
+    await expect(service.admitRootProposalIn(STORE, rootTask(), rootRun(), 'root-session', { consumption: rootConsumption({ rootRunId: 'r-other' }) }))
+      .rejects.toThrow('task: admit root proposal requires the consumption to name the root task and run it creates')
+    expect(persistedKinds(h)).toEqual(before)
+    expect((await service.snapshotIn(STORE)).tasks).toEqual([])
+  })
+
+  test('a root activation that never got a root task on record cannot be consumed on its own', async () => {
+    const { h, service } = await emptyService()
+    await service.submitProposalIn(STORE, rootProposal({ status: 'pending_review', policy: 'all' }), 'root-session')
+    await service.decideProposalIn(STORE, rootClaim(), 'operator')
+    await service.changeProposalPhaseIn(STORE, { proposalId: ROOT_PROPOSAL_ID, to: 'ready' }, 'runtime')
+    const before = persistedKinds(h)
+    await expect(service.consumeProposalIn(STORE, rootConsumption(), 'runtime'))
+      .rejects.toThrow(`task: proposal "${ROOT_PROPOSAL_ID}" consumption names unknown task "${ROOT_TASK_ID}"`)
+    expect(persistedKinds(h)).toEqual(before)
+    expect((await service.snapshotIn(STORE)).proposals?.byId[ROOT_PROPOSAL_ID]?.status).toBe('ready')
+  })
+
+  test('a decomposition proposal cannot be activated as a root contract, and admitBatchIn cannot consume one', async () => {
+    const { h, service } = await rootService()
+    await service.submitProposalIn(STORE, proposal(), 'tester')
+    await startParentRun(service)
+    const before = persistedKinds(h)
+    await expect(service.admitRootProposalIn(
+      STORE,
+      rootTask({ taskId: 't-root-2' }),
+      rootRun({ runId: 'r-root-2', taskId: 't-root-2' }),
+      'tester',
+      { consumption: rootConsumption({ proposalId: PROPOSAL_ID, proposalDigest: decompositionDigest(IDENTITY) }) },
+    )).rejects.toThrow(`task: proposal "${PROPOSAL_ID}" is a decomposition proposal; its children are admitted with admitBatchIn`)
+    await expect(service.admitBatchIn(
+      STORE,
+      PARENT,
+      'r-root',
+      [task({ taskId: 'c1', parentTaskId: PARENT, depth: 1 })],
+      'runtime',
+      [],
+      undefined,
+      undefined,
+      rootConsumption({ proposalId: PROPOSAL_ID, proposalDigest: decompositionDigest(IDENTITY) }),
+    )).rejects.toThrow(`task: admit batch cannot record the root consumption of proposal "${PROPOSAL_ID}"`)
+    expect(persistedKinds(h)).toEqual(before)
+  })
+
+  test('a store that already holds a root task refuses a root contract by name', async () => {
+    const { h, service } = await rootService()
+    const before = persistedKinds(h)
+    await expect(service.submitProposalIn(STORE, rootProposal(), 'root-session'))
+      .rejects.toThrow(`task: store "${STORE}" already holds root task "${PARENT}"; proposal "${ROOT_PROPOSAL_ID}" is refused`)
+    expect(persistedKinds(h)).toEqual(before)
+  })
+
+  test('a root activation survives a restart with its contract, its task and its run', async () => {
+    const { h, service } = await emptyService()
+    await service.submitProposalIn(STORE, rootProposal(), 'root-session')
+    await service.admitRootProposalIn(STORE, rootTask(), rootRun(), 'root-session', { consumption: rootConsumption() })
+    for (const item of storedEvents(h)) {
+      expect(JSON.parse(JSON.stringify(item))).toStrictEqual(item)
+    }
+    const reopened = new TaskService(harness(h.sessions).ctx as never)
+    const snapshot = await reopened.openStore(STORE)
+    const value = rootOf(snapshot.proposals?.byId[ROOT_PROPOSAL_ID])
+    expect(value?.kind).toBe('root')
+    expect(value?.contract).toEqual(ROOT_CONTRACT)
+    expect(value?.identity.rootSessionId).toBe(ROOT_SESSION)
+    expect(value?.status).toBe('admitted')
+    expect(value?.consumption).toEqual(rootConsumption())
+    expect(snapshot.proposals?.byParentTask).toEqual({})
+    expect(snapshot.tasks[0]?.parentTaskId).toBeUndefined()
+    expect(snapshot.runs[0]?.sessionId).toBe(ROOT_SESSION)
+  })
+
+  test('a store whose proposal events predate the kind field still opens and indexes them by parent task', async () => {
+    const sessions = new Map<string, StoredSession>()
+    const header: SessionHeader = { version: SESSION_FORMAT_VERSION, id: makeSessionId(STORE), createdAt: 0, isSeeded: false }
+    const legacy = JSON.parse(JSON.stringify(proposal())) as TaskProposal
+    sessions.set(STORE, {
+      header,
+      events: [
+        { type: 'task/event', seq: SessionSeq(0), time: 0, ignorable: true, data: ev('TaskCreated', { task: task({ taskId: PARENT, decompositionStatus: 'decomposable' }) }, { taskId: PARENT }) },
+        { type: 'task/event', seq: SessionSeq(1), time: 0, ignorable: true, data: ev('TaskAdmitted', { decompositionStatus: 'decomposable' }, { taskId: PARENT }) },
+        { type: 'task/event', seq: SessionSeq(2), time: 0, ignorable: true, data: ev('TaskProposalSubmitted', { proposal: legacy }, { taskId: PARENT }) },
+      ] as SessionEvent[],
+    })
+    const h = harness(sessions)
+    const service = new TaskService(h.ctx as never)
+    const snapshot = await service.openStore(STORE)
+    expect(snapshot.proposals?.byId[PROPOSAL_ID]?.kind).toBeUndefined()
+    expect(decompositionOf(snapshot.proposals?.byId[PROPOSAL_ID])?.batch).toEqual(BATCH)
+    expect(snapshot.proposals?.byParentTask[PARENT]?.map(item => item.proposalId)).toEqual([PROPOSAL_ID])
   })
 })

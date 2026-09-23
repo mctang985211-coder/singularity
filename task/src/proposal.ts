@@ -42,6 +42,27 @@
  *   unrelated registry edit does not invalidate a reviewed proposal while a
  *   change to *this* batch's resolution does.
  *
+ * Two kinds, one lifecycle (A0 §2): a proposal is either a **decomposition**
+ * batch — a parent task's children, the shape T2/T3 built — or a **root
+ * contract**, the single normalized contract a root session is admitted as,
+ * carried as {@link TaskProposalRoot.contract} instead of a child batch and
+ * identified by {@link RootProposalIdentity} (store, root session, request key,
+ * contract digest) instead of a parent task and run. The kind is a discriminant
+ * on the record, and its absence means `decomposition`: a proposal written
+ * before the field existed is read exactly as it was, and the decomposition
+ * path's identities do not move when a writer states `kind: 'decomposition'`
+ * explicitly — the kind is not part of either identity. The lifecycle is not
+ * duplicated for the second kind: the same statuses, the same decision binding
+ * (dossier digest plus both context fingerprints), the same post-approval
+ * re-check and the same consumption discipline apply to both, and only the
+ * shape a decision or a consumption is checked against is branched by kind.
+ *
+ * A root proposal has no parent task, so its events cannot name one: they carry
+ * the reserved {@link ROOT_PROPOSAL_TASK_ID} marker in the envelope's `taskId`,
+ * which the reducer requires for `kind: 'root'` and refuses everywhere else —
+ * a real task id must never be able to impersonate a root intake, and no intake
+ * may name a task that does not exist.
+ *
  * An approval binds all three: the decision event carries the dossier digest
  * and both fingerprints, and the reducer refuses a decision whose numbers do
  * not match the stored proposal. Approving "this batch, as reviewed, under
@@ -61,8 +82,8 @@
  */
 
 import { canonicalize, decompositionDigest, sha256Hex } from './contract.ts'
-import type { AdmissionContext, DecompositionIdentity, TaskContract } from './contract.ts'
-import type { CapabilityManifest, TaskId } from './types.ts'
+import type { AdmissionContext, DecompositionIdentity, TaskContract, TaskContractVersion } from './contract.ts'
+import type { CapabilityManifest, RunId, TaskId } from './types.ts'
 
 /**
  * The review policy a proposal was submitted under (§5). Deployment
@@ -71,6 +92,29 @@ import type { CapabilityManifest, TaskId } from './types.ts'
  * human review (`off`, recorded as `policy-off`) from one a person approved.
  */
 export type TaskProposalPolicy = 'off' | 'all'
+
+/**
+ * What a proposal proposes (§2): a parent task's decomposition batch, or a root
+ * session's contract. Absent means `decomposition` — every record written
+ * before the field existed — so a reader must treat the two the same and never
+ * invent a kind for a stored record.
+ */
+export type TaskProposalKind = 'decomposition' | 'root'
+
+/** Every proposal kind, for validation and rendering. */
+export const TASK_PROPOSAL_KINDS: readonly TaskProposalKind[] = ['decomposition', 'root']
+
+/**
+ * The reserved `taskId` a root proposal's events carry on the envelope. A root
+ * contract belongs to no task — the task it becomes does not exist until it is
+ * activated — so its events cannot name one, and naming a task that happens to
+ * exist would make an intake read as that task's business. The marker is
+ * deliberately outside the shape mints use (`t-<uuid>` in task-runtime's root,
+ * batch and replay paths), so it can never collide with a real task id and no
+ * task can ever shadow it; the reducer requires it for `kind: 'root'` and
+ * refuses it for `decomposition`.
+ */
+export const ROOT_PROPOSAL_TASK_ID = 'root-proposal'
 
 /**
  * Where one proposal sits in the review lifecycle (§6). Separate from
@@ -202,6 +246,32 @@ export interface TaskProposalChild {
 }
 
 /**
+ * Everything a root contract proposal's identity covers (§2): which store and
+ * which root session the contract is for, the caller's request key, and the
+ * digest of the single normalized contract stored beside it. There is no parent
+ * task and no parent run — the root task is what this proposal *becomes* — so
+ * the identity names the root session instead, and nothing about a task the
+ * store has not admitted yet can enter it.
+ *
+ * The request key is inside this identity (unlike a decomposition batch, which
+ * records the key beside the identity): a root intake is answered by key, and
+ * §2 derives a default key from the store, the root session and the contract
+ * content — so the same request for the same contract addresses one proposal
+ * and a revision, which gets a new key, is a new one. The reducer holds the
+ * record to that: the identity's key must be the record's key.
+ */
+export interface RootProposalIdentity {
+  contractVersion: TaskContractVersion
+  storeId: string
+  /** The root session this contract is the goal of; the store is its `sg-t-<rootSessionId>` store. */
+  rootSessionId: string
+  /** The caller's stable request key (§6); must equal the proposal record's own. */
+  requestKey: string
+  /** {@link contractDigest} of the normalized root contract stored beside it. */
+  contractDigest: string
+}
+
+/**
  * One review decision on record (§6): what was decided, against which dossier
  * and which contexts, by whom and when. The three identity fields are what make
  * an approval non-transferable — the reducer refuses a decision whose
@@ -232,16 +302,25 @@ export interface TaskProposalDecision {
 }
 
 /**
- * One consumption (§6): the record that turns a proposal into a batch. Written
- * in the same commit as the children it names, so the store can always answer
+ * One consumption (§6): the record that turns a proposal into what it became.
+ * Written in the same commit as that thing, so the store can always answer
  * "which proposal became which tasks" — and so a crash between the admission
- * and the first spawn is recoverable from the log alone, without a second batch.
+ * and the first spawn is recoverable from the log alone, without a second
+ * batch. The digest fields bind the consumption to what was approved: a
+ * proposal that was revised, re-resolved or re-checked into a different context
+ * cannot be consumed under this record, and the reducer refuses the attempt by
+ * name.
  *
- * The digest fields bind the consumption to what was approved: a proposal that
- * was revised, re-resolved or re-checked into a different context cannot be
- * consumed under this record, and the reducer refuses the attempt by name.
+ * Two shapes for the two kinds (A0 §2). A decomposition batch is consumed as
+ * `b-<parentTaskId>` plus its children; a root contract is consumed as the one
+ * root task and root run the activation minted, because there is no parent to
+ * derive a batch id from and "one intake, one root" is not a batch at all. The
+ * kind is a discriminant on the record, and its absence means the batch arm —
+ * a consumption written before root intake existed still reads as it was.
  */
-export interface TaskProposalConsumption {
+export interface TaskProposalBatchConsumption {
+  /** The kind, when the writer stated it. Absent means this arm. */
+  kind?: 'batch'
   /** The proposal being consumed. */
   proposalId: string
   /** The batch identity that was admitted; must equal the stored proposal's. */
@@ -259,14 +338,53 @@ export interface TaskProposalConsumption {
 }
 
 /**
- * One submitted proposal: the batch to run, what it was judged against, and
- * where it stands. Immutable in its content — `identity`, `batch`, the digests,
- * the contexts and `policy` are written once at submission and never rewritten;
- * only `status`, `updatedAt`, and the appended `decision` / `consumption`
- * records move as the lifecycle advances (§6: a revision is a new proposal with
- * a new id and a `supersedes` reference, never an edit).
+ * What a root contract was activated as (A0 §2): the root task and the root run
+ * the activation commit created, named by id. The batch vocabulary does not
+ * apply — a root intake has no parent to derive `b-<parentTaskId>` from — so the
+ * consumption names the minted ids instead, and the reducer checks that they
+ * are the store's one root task and a run born `active` in the proposal's root
+ * session, carrying the contract the proposal committed to.
+ *
+ * `kind: 'root'` is required: a root activation is written by one entry
+ * (`admitRootProposalIn`), so there is no legacy record to stay compatible
+ * with, and a record that does not say what it is could be read as a batch.
  */
-export interface TaskProposal {
+export interface TaskProposalRootConsumption {
+  kind: 'root'
+  /** The proposal being consumed. */
+  proposalId: string
+  /** The batch identity that was admitted; must equal the stored proposal's. */
+  proposalDigest: string
+  /** The review-context fingerprint the admission re-check confirmed; must equal the stored one. */
+  reviewContextDigest: string
+  /** The root task the activation minted: parentless, depth 0, carrying the approved contract. */
+  rootTaskId: TaskId
+  /** The root run the activation minted: born `active`, running, in the proposal's root session. */
+  rootRunId: RunId
+  /** When the contract was activated, as the writer recorded it. */
+  admittedAt: string
+  /** Anything further a reader should know; absent when the writer left none. */
+  reason?: string
+}
+
+/** A consumption, of either kind; a reader narrows by `kind` before reading the ids. */
+export type TaskProposalConsumption = TaskProposalBatchConsumption | TaskProposalRootConsumption
+
+/**
+ * One submitted proposal: the batch or the root contract to run, what it was
+ * judged against, and where it stands. Immutable in its content — `identity`,
+ * the payload (`batch` or `contract`), the digests, the contexts and `policy`
+ * are written once at submission and never rewritten; only `status`,
+ * `updatedAt`, and the appended `decision` / `consumption` records move as the
+ * lifecycle advances (§6: a revision is a new proposal with a new id and a
+ * `supersedes` reference, never an edit).
+ *
+ * The record is discriminated by {@link TaskProposalKind}: a root contract is
+ * not a one-child batch, it is a different payload for a different subject, and
+ * a reader that cannot tell them apart could render a root goal as a
+ * decomposition of a task nobody named.
+ */
+export interface TaskProposalBase {
   /**
    * The proposal's identity: `p-` plus {@link taskProposalId}'s derivation from
    * the proposal content. Content-derived rather than minted, so a retry —
@@ -298,6 +416,39 @@ export interface TaskProposal {
    * deployment change to `all` tightens `status` without rewriting this field.
    */
   policy: TaskProposalPolicy
+  /** {@link decompositionDigest} of a decomposition identity, {@link rootProposalDigest} of a root one: the content identity an approval binds to. */
+  proposalDigest: string
+  /** The limits in force when the proposal was submitted, recorded next to it, never derived from the contract. */
+  admissionContext: AdmissionContext
+  /** {@link admissionContextDigest} of {@link admissionContext}. */
+  admissionContextDigest: string
+  /** What the payload resolved against when it was submitted (capability manifests, judging verifiers). */
+  reviewContext: TaskProposalReviewContext
+  /** {@link reviewContextDigest} of {@link reviewContext}. */
+  reviewContextDigest: string
+  /** When the proposal was submitted. */
+  createdAt: string
+  /** When the last lifecycle event applied to it was written; absent until one was. */
+  updatedAt?: string
+  /** The decision on record, once one was made. Absent while the proposal is undecided. */
+  decision?: TaskProposalDecision
+  /**
+   * What this proposal became, once it was admitted. Absent while it still
+   * might become something. The kind of the stored consumption always agrees
+   * with the kind of the proposal that carries it — the reducer refuses the
+   * other combination — so a reader narrows it the way it narrowed this record.
+   */
+  consumption?: TaskProposalConsumption
+}
+
+/**
+ * One decomposition proposal (T2/T3): a parent task's children, submitted as a
+ * batch. `kind` is optional so a record written before the field existed — and
+ * a writer that has no reason to state the obvious — still reads as this arm.
+ */
+export interface TaskProposalDecomposition extends TaskProposalBase {
+  /** The kind, when the writer stated it. Absent means this arm. */
+  kind?: 'decomposition'
   /** The complete batch identity, {@link decompositionDigest}'d into {@link proposalDigest}. */
   identity: DecompositionIdentity
   /**
@@ -311,25 +462,35 @@ export interface TaskProposal {
    * renders what was reviewed from the store alone.
    */
   batch: readonly TaskProposalChild[]
-  /** {@link decompositionDigest} of {@link identity} — the content identity an approval binds to. */
-  proposalDigest: string
-  /** The limits in force when the proposal was submitted, recorded next to it, never derived from the contract. */
-  admissionContext: AdmissionContext
-  /** {@link admissionContextDigest} of {@link admissionContext}. */
-  admissionContextDigest: string
-  /** What the batch resolved against when it was submitted (capability manifests, judging verifiers). */
-  reviewContext: TaskProposalReviewContext
-  /** {@link reviewContextDigest} of {@link reviewContext}. */
-  reviewContextDigest: string
-  /** When the proposal was submitted. */
-  createdAt: string
-  /** When the last lifecycle event applied to it was written; absent until one was. */
-  updatedAt?: string
-  /** The decision on record, once one was made. Absent while the proposal is undecided. */
-  decision?: TaskProposalDecision
-  /** The batch this proposal became, once it was admitted. Absent while it still might become one. */
-  consumption?: TaskProposalConsumption
 }
+
+/**
+ * One root contract proposal (A0 §2): the goal of a root session, normalized —
+ * objective, assumptions, constraints, mandatory acceptance criteria — and
+ * submitted as a single contract rather than as children. `kind: 'root'` is
+ * required: a root contract has no parent task to place it under, so nothing
+ * about the record can be read as a decomposition of something.
+ */
+export interface TaskProposalRoot extends TaskProposalBase {
+  kind: 'root'
+  /** The root contract's identity: {@link rootProposalDigest}'d into {@link proposalDigest}. */
+  identity: RootProposalIdentity
+  /**
+   * The single normalized root contract this proposal asks to run (the content
+   * an approval covers and a reviewer reads, stored whole for the same reasons
+   * a batch is). Bound to the identity: the reducer refuses a submission whose
+   * contract does not digest to {@link RootProposalIdentity.contractDigest}, and
+   * the admission entry refuses a root task that does not carry this contract.
+   */
+  contract: TaskContract
+}
+
+/**
+ * One submitted proposal, either kind. A reader must narrow by `kind` before
+ * touching the payload — that is the whole point of the union: `batch` and
+ * `contract` are alternatives, and neither exists on the other arm.
+ */
+export type TaskProposal = TaskProposalDecomposition | TaskProposalRoot
 
 /**
  * What a decision states when it is written (the payload of
@@ -367,6 +528,12 @@ export interface TaskProposalPhaseChange {
  * means the snapshot did not come from one — a test double or a foreign
  * reader — and never that the store has no proposals, so a caller that cannot
  * see the index must not read it as "no proposal exists for this key".
+ *
+ * A root contract proposal has no parent task, so it appears in `all`, `byId`
+ * and `byRequestKey` and in no `byParentTask` entry: nothing is indexed under a
+ * task the store does not hold, and a reader that wants a store's root intake
+ * asks by request key (or reads the root task's own existence) rather than
+ * inventing a parent for it.
  */
 export interface TaskProposalIndex {
   /** Every proposal the store holds, in submission order. */
@@ -375,7 +542,7 @@ export interface TaskProposalIndex {
   readonly byId: Readonly<Record<string, TaskProposal>>
   /** `requestKey` → the proposal bound to it. At most one, by construction. */
   readonly byRequestKey: Readonly<Record<string, TaskProposal>>
-  /** `parentTaskId` → that task's proposals, in submission order. */
+  /** `parentTaskId` → that task's proposals, in submission order. A root contract is in no entry here. */
   readonly byParentTask: Readonly<Record<string, readonly TaskProposal[]>>
 }
 
@@ -396,6 +563,29 @@ export const TASK_PROPOSAL_ID_PREFIX = 'p-'
  */
 export function taskProposalId(identity: DecompositionIdentity): string {
   return `${TASK_PROPOSAL_ID_PREFIX}${decompositionDigest(identity)}`
+}
+
+/**
+ * The root contract's identity: SHA-256 over {@link canonicalize} of
+ * {@link RootProposalIdentity} — which store, which root session, which request
+ * key, and the digest of the normalized root contract. Exactly those fields and
+ * nothing else (A0 §2), so the same contract asked for again by the same key is
+ * one proposal, a revision is a different one, and no id minted at activation
+ * is in it.
+ */
+export function rootProposalDigest(identity: RootProposalIdentity): string {
+  return sha256Hex(canonicalize(identity))
+}
+
+/**
+ * The proposal id one root contract identity gets: `p-` plus
+ * {@link rootProposalDigest} of the identity. The same derivation and the same
+ * prefix as a batch proposal (§4: content-derived ids, never minted), so an id
+ * is one kind of thing wherever it is printed and a retry addresses the same
+ * proposal.
+ */
+export function rootProposalId(identity: RootProposalIdentity): string {
+  return `${TASK_PROPOSAL_ID_PREFIX}${rootProposalDigest(identity)}`
 }
 
 /**

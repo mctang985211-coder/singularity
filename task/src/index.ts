@@ -26,11 +26,13 @@ import type {
   TaskSnapshot,
 } from './types.ts'
 import type { DecompositionAdmission } from './contract.ts'
+import { ROOT_PROPOSAL_TASK_ID } from './proposal.ts'
 import type {
   TaskProposal,
   TaskProposalConsumption,
   TaskProposalDecisionClaim,
   TaskProposalPhaseChange,
+  TaskProposalRootConsumption,
 } from './proposal.ts'
 import { TaskState } from './service/state.ts'
 
@@ -286,6 +288,11 @@ export class TaskService extends Service {
     if (manifests !== undefined && manifests.length !== children.length) {
       throw new Error(`task: admit batch requires one manifest per child (${children.length} children, ${manifests.length} manifests)`)
     }
+    if (proposal?.kind === 'root') {
+      throw new Error(
+        `task: admit batch cannot record the root consumption of proposal "${proposal.proposalId}"; a root contract is activated with admitRootProposalIn`,
+      )
+    }
     if (proposal !== undefined
       && (proposal.childTaskIds.length !== children.length
         || !proposal.childTaskIds.every((childTaskId, index) => childTaskId === children[index]?.taskId))) {
@@ -328,6 +335,69 @@ export class TaskService extends Service {
     if (proposal !== undefined) {
       events.push(event('TaskProposalAdmitted', { taskId: parentTaskId, actor, payload: proposal }))
     }
+    await this.commitIn(storeId, events)
+  }
+
+  /**
+   * The root activation commit (A0 §1.4, §2): the root task, its run and the
+   * proposal that asked for them land in **one** commit — a contract is either
+   * active with its task, its run and its consumption on record, or the store is
+   * untouched. There is no second entry that creates a root task, so this is the
+   * only way a root comes to exist, and it always consumes a proposal: the
+   * consumption names the minted task id and run id, and the reducer checks that
+   * they are the store's one root task and a run born `active` in the proposal's
+   * root session, carrying the contract the proposal committed to.
+   *
+   * Two refusals happen here, before anything is queued, because they are the
+   * caller's to get right: a proposal that is not a root contract (children go
+   * through `admitBatchIn`), and a consumption that does not name the task and
+   * run this call creates. The store's own gate — a store that already holds a
+   * root task refuses root intake (§1.6: one intake, one root, and an old
+   * graph's root is history) — is re-checked by the reducer inside the commit, so
+   * a racing second activation writes nothing even if it passed this read.
+   */
+  async admitRootProposalIn(
+    storeId: string,
+    task: TaskInstance,
+    run: TaskRun,
+    actor: string,
+    options: { consumption: TaskProposalRootConsumption; manifest?: CapabilityManifest },
+  ): Promise<void> {
+    const store = this.requireStore(storeId)
+    await store.ready
+    await store.writes
+    const snapshot = store.state.snapshot()
+    const consumption = options.consumption
+    const proposal = snapshot.proposals?.byId[consumption.proposalId]
+    if (proposal === undefined) throw new Error(`task: unknown proposal "${consumption.proposalId}"`)
+    if (proposal.kind !== 'root') {
+      throw new Error(`task: proposal "${consumption.proposalId}" is a decomposition proposal; its children are admitted with admitBatchIn`)
+    }
+    const existing = snapshot.tasks.find(item => item.parentTaskId === undefined)
+    if (existing !== undefined) {
+      throw new Error(`task: store "${storeId}" already holds root task "${existing.taskId}"; proposal "${consumption.proposalId}" is refused`)
+    }
+    if (consumption.rootTaskId !== task.taskId || consumption.rootRunId !== run.runId) {
+      throw new Error(
+        `task: admit root proposal requires the consumption to name the root task and run it creates ` +
+        `(the consumption names "${consumption.rootTaskId}"/"${consumption.rootRunId}", the call admits "${task.taskId}"/"${run.runId}")`,
+      )
+    }
+    if (task.decompositionStatus !== 'leaf' && task.decompositionStatus !== 'decomposable') {
+      throw new Error(`task: root task "${task.taskId}" decomposition status must be "leaf" or "decomposable"`)
+    }
+    const events: TaskEvent[] = [
+      event('TaskCreated', { taskId: task.taskId, parentTaskId: task.parentTaskId, actor, payload: { task } }),
+      event('TaskAdmitted', { taskId: task.taskId, actor, payload: { decompositionStatus: task.decompositionStatus } }),
+    ]
+    if (options.manifest !== undefined) {
+      events.push(event('CapabilityResolved', { taskId: task.taskId, actor, payload: { manifest: options.manifest } }))
+      if (options.manifest.missing.length > 0) {
+        events.push(event('CapabilityGapDetected', { taskId: task.taskId, actor, payload: { missing: options.manifest.missing } }))
+      }
+    }
+    events.push(event('TaskStarted', { taskId: task.taskId, runId: run.runId, sessionId: run.sessionId, actor, payload: { run } }))
+    events.push(event('TaskProposalAdmitted', { taskId: ROOT_PROPOSAL_TASK_ID, actor, payload: consumption }))
     await this.commitIn(storeId, events)
   }
 
@@ -408,17 +478,22 @@ export class TaskService extends Service {
   }
 
   /**
-   * Records one proposal submission (T2/T3 §6): the immutable batch record,
-   * the policy it was born under, the limits in force, the resolution it was
-   * reviewed against, and both context fingerprints. The envelope names the
-   * parent task the proposal belongs to, so every proposal event of one batch
-   * reads as one parent's business. The reducer is the gate: a malformed
-   * record, a digest that does not describe its content, a duplicate id, or a
-   * request key already bound to another proposal commits nothing.
+   * Records one proposal submission (T2/T3 §6; root contracts A0 §2). The
+   * immutable record, the policy it was born under, the limits in force, the
+   * resolution it was reviewed against, and both context fingerprints. The
+   * envelope names the proposal's subject — the parent task for a decomposition
+   * batch, the reserved root marker for a root contract. The reducer is the gate:
+   * a malformed record, a digest that does not describe its content, a duplicate
+   * id, a request key already bound to another proposal, a root intake on a store
+   * that already holds a root task — each commits nothing.
    */
   async submitProposalIn(storeId: string, proposal: TaskProposal, actor: string): Promise<void> {
     await this.commitIn(storeId, [
-      event('TaskProposalSubmitted', { taskId: proposal.identity.parentTaskId, actor, payload: { proposal } }),
+      event('TaskProposalSubmitted', {
+        taskId: proposal.kind === 'root' ? ROOT_PROPOSAL_TASK_ID : proposal.identity.parentTaskId,
+        actor,
+        payload: { proposal },
+      }),
     ])
   }
 
@@ -430,7 +505,7 @@ export class TaskService extends Service {
    * nothing.
    */
   async decideProposalIn(storeId: string, claim: TaskProposalDecisionClaim, actor: string): Promise<void> {
-    const taskId = await this.proposalParentIn(storeId, claim.proposalId)
+    const taskId = await this.proposalEnvelopeTaskIn(storeId, claim.proposalId)
     await this.commitIn(storeId, [event('TaskProposalDecided', { taskId, actor, payload: claim })])
   }
 
@@ -442,7 +517,7 @@ export class TaskService extends Service {
    * current status applies nothing.
    */
   async changeProposalPhaseIn(storeId: string, change: TaskProposalPhaseChange, actor: string): Promise<void> {
-    const taskId = await this.proposalParentIn(storeId, change.proposalId)
+    const taskId = await this.proposalEnvelopeTaskIn(storeId, change.proposalId)
     await this.commitIn(storeId, [event('TaskProposalPhaseChanged', { taskId, actor, payload: change })])
   }
 
@@ -454,7 +529,7 @@ export class TaskService extends Service {
    * the batch through another entry and is recording the consumption beside it.
    */
   async consumeProposalIn(storeId: string, consumption: TaskProposalConsumption, actor: string): Promise<void> {
-    const taskId = await this.proposalParentIn(storeId, consumption.proposalId)
+    const taskId = await this.proposalEnvelopeTaskIn(storeId, consumption.proposalId)
     await this.commitIn(storeId, [event('TaskProposalAdmitted', { taskId, actor, payload: consumption })])
   }
 
@@ -511,21 +586,31 @@ export class TaskService extends Service {
   }
 
   /**
-   * The parent task a proposal event is about, read from the store before the
-   * commit so the envelope names the task the proposal belongs to. Reading
-   * first is what makes an unknown proposal a refusal *before* anything is
-   * queued: the reducer would reject the event anyway, and a caller that asked
-   * about a proposal the store does not hold deserves to hear it from the entry
-   * it called. The value is advisory — the write lock is not held across it —
-   * and the reducer's own check is what actually binds the envelope.
+   * The proposal one event names, read from the store before the commit so an
+   * unknown proposal is a refusal *before* anything is queued: the reducer would
+   * reject the event anyway, and a caller that asked about a proposal the store
+   * does not hold deserves to hear it from the entry it called. The value is
+   * advisory — the write lock is not held across it — and the reducer's own check
+   * is what actually binds the record.
    */
-  private async proposalParentIn(storeId: string, proposalId: string): Promise<TaskId> {
+  private async requireProposalIn(storeId: string, proposalId: string): Promise<TaskProposal> {
     const store = this.requireStore(storeId)
     await store.ready
     await store.writes
     const proposal = store.state.snapshot().proposals?.byId[proposalId]
     if (proposal === undefined) throw new Error(`task: unknown proposal "${proposalId}"`)
-    return proposal.identity.parentTaskId
+    return proposal
+  }
+
+  /**
+   * The task id a proposal's events carry on the envelope: the parent task a
+   * decomposition batch belongs to, or the reserved root marker for a root
+   * contract, which has no parent to name (A0 §2). The reducer requires exactly
+   * this, so a root event cannot hide behind a real task id.
+   */
+  private async proposalEnvelopeTaskIn(storeId: string, proposalId: string): Promise<TaskId> {
+    const proposal = await this.requireProposalIn(storeId, proposalId)
+    return proposal.kind === 'root' ? ROOT_PROPOSAL_TASK_ID : proposal.identity.parentTaskId
   }
 
   private requireStore(storeId: string): TaskStore {

@@ -1117,6 +1117,8 @@ export interface TaskSnapshot {
   /**
    * The store's proposals, indexed for the three questions a review gate asks
    * (§6/§7): by proposal id, by the caller's request key, and by parent task.
+   * Root contracts (A0 §2) are in the first two views only: they have no parent
+   * task to be indexed under.
    *
    * Optional at the type level because a snapshot is also a shape other code
    * builds by hand (a verifier's selftest store view, a test double), and those
@@ -1222,20 +1224,30 @@ export interface TaskEventPayloads {
   /** A structured "what is still missing" record raised by a failure, a block, or a capability gap; an Obligation is a question, never an action. */
   ObligationRecorded: { obligation: Obligation }
   /**
-   * A proposal enters the store (T2/T3, construction guide §6): one immutable
-   * batch submission with the policy it was born under, the complete normalized
-   * contracts of every child, the limits it was admitted under, the resolution
-   * it was reviewed against, and both context fingerprints. The batch content is
-   * what a reviewer reads and an approval covers, so it is stored here rather
-   * than referenced: a waiting proposal, a rejected one, or a re-opened store
-   * renders it from saved facts. A proposal is born `ready` under policy `off`
-   * (the batch runs without a human review, and the record says so) or
-   * `pending_review` under policy `all`; the reducer refuses a record that
-   * claims the other combination, refuses a batch that disagrees with the
-   * identity it accompanies (length, order, contract digest, dependencies,
-   * flags), and refuses a proposal whose digests do not match the content they
-   * claim to describe. Nothing is admitted, no child exists, and no parent is
-   * marked decomposed by this event — a proposal is a question, not work.
+   * A proposal enters the store (T2/T3, construction guide §6; root contracts
+   * A0 §2): one immutable submission with the policy it was born under, the
+   * complete normalized contracts it proposes, the limits it was admitted
+   * under, the resolution it was reviewed against, and both context
+   * fingerprints. The batch content is what a reviewer reads and an approval
+   * covers, so it is stored here rather than referenced: a waiting proposal, a
+   * rejected one, or a re-opened store renders it from saved facts. A proposal
+   * is born `ready` under policy `off` (the batch runs without a human review,
+   * and the record says so) or `pending_review` under policy `all`; the reducer
+   * refuses a record that claims the other combination, refuses a payload that
+   * disagrees with the identity it accompanies (length, order, contract digest,
+   * dependencies, flags — or, for a root contract, a contract that is not the
+   * one the identity digests), and refuses a proposal whose digests do not
+   * match the content they claim to describe. Nothing is admitted, no child
+   * exists, and no parent is marked decomposed by this event — a proposal is a
+   * question, not work.
+   *
+   * The record is discriminated by `kind` (`decomposition`, the batch shape
+   * above, or `root`, a single root contract for a root session); an absent kind
+   * is a decomposition proposal, which is what every record written before the
+   * field existed is. A root contract has no parent task, so its events carry
+   * the reserved `ROOT_PROPOSAL_TASK_ID` marker on the envelope instead — never
+   * a real task id, and a decomposition proposal's events may never carry the
+   * marker.
    */
   TaskProposalSubmitted: { proposal: TaskProposal }
   /**
@@ -1261,15 +1273,20 @@ export interface TaskEventPayloads {
    */
   TaskProposalPhaseChanged: TaskProposalPhaseChange
   /**
-   * A proposal is consumed (T2/T3, §6): the batch it named now exists, bound to
-   * the child task ids and the batch id this event carries. Written in the same
-   * commit as the children, the decomposition record and the parent run's
-   * `active → waiting_children` change (A3 `admitBatchIn`), so a crash after
-   * admission is recovered from the log alone — "this proposal was consumed and
-   * these are its tasks" is one durable fact, never a second batch. The reducer
-   * refuses a second consumption of one proposal and a consumption whose
-   * digests, batch id or child ids do not match what was approved or what the
-   * store holds.
+   * A proposal is consumed (T2/T3, §6; root contracts A0 §2): what it asked for
+   * now exists, bound to the ids this event carries. For a decomposition batch
+   * that means the child task ids and the batch id, written in the same commit as
+   * the children, the decomposition record and the parent run's `active →
+   * waiting_children` change (A3 `admitBatchIn`), so a crash after admission is
+   * recovered from the log alone — "this proposal was consumed and these are its
+   * tasks" is one durable fact, never a second batch. For a root contract it
+   * means the one root task and root run the activation minted, written in the
+   * same commit as both (`admitRootProposalIn`), so the same crash is recovered
+   * the same way and never mints a second root. The reducer refuses a second
+   * consumption of one proposal, a consumption whose digests do not match what
+   * was approved, a batch consumption whose batch id or child ids do not match
+   * what the store holds, and a root consumption naming anything but the store's
+   * one parentless task and its own born-active root run.
    */
   TaskProposalAdmitted: TaskProposalConsumption
 }
