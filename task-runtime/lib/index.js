@@ -5468,6 +5468,20 @@ var TaskRuntime = class extends Service {
 	replayLineage = /* @__PURE__ */ new Map();
 	/** The tool-execution gate and the write drain (A3 §3.3); this runtime owns every phase it writes. */
 	executionGate;
+	/**
+	* The stores a cancellation is closing right now ({@link cancelGraph}), from
+	* the instant its gate was closed to the instant the operation is done with
+	* the store.
+	*
+	* A cancellation is the one transition that puts a barrier in effect *before*
+	* the store records it, so during that window the record still says `running`
+	* and phase `active` — older than the barrier already in effect here. A read
+	* path that rebinds a session in the window would re-apply that older phase
+	* and lift the barrier, so {@link gatePhaseFromStore} refuses to move a phase
+	* a session already holds while its store is in this set. The store is the
+	* truth again the moment the entry goes.
+	*/
+	closingStores = /* @__PURE__ */ new Set();
 	/** The one-writer-per-workspace ownership registry (A3 §3.4). */
 	workspaces;
 	/** The load-time provider scan, taken once ({@link providerLoadReport}). */
@@ -8123,16 +8137,21 @@ var TaskRuntime = class extends Service {
 			this.warn(`store ${storeId}: it could not be read for the cancellation "${reason}" (${error instanceof Error ? error.message : String(error)}), so nothing was cancelled`);
 			return;
 		}
-		for (const [sessionId, binding] of this.sessions) if (binding.storeId === storeId) this.executionGate.setTerminal(sessionId);
-		const entries = [...this.drivers.values()].filter((entry) => entry.storeId === storeId);
-		for (const entry of entries) entry.controller.abort();
-		await Promise.all(entries.map((entry) => entry.promise.catch(() => [])));
-		const snapshot = await this.ctx.task.snapshotIn(storeId);
-		const env = await this.orchestrateEnv(this.recoverySessionFor(snapshot, storeId), `cancel-graph:${storeId}`);
-		const stillRunning = snapshot.runs.filter((run) => run.status === "running");
-		for (const run of stillRunning) await settleRunFromRuntime(env, storeId, run, "cancelled", `cancelled with the graph: ${reason}`);
-		for (const run of stillRunning) await this.reconcileSessionJobs(run.sessionId);
-		await this.releaseStoreWorkspace(storeId);
+		this.closingStores.add(storeId);
+		try {
+			for (const [sessionId, binding] of this.sessions) if (binding.storeId === storeId) this.executionGate.setTerminal(sessionId);
+			const entries = [...this.drivers.values()].filter((entry) => entry.storeId === storeId);
+			for (const entry of entries) entry.controller.abort();
+			await Promise.all(entries.map((entry) => entry.promise.catch(() => [])));
+			const snapshot = await this.ctx.task.snapshotIn(storeId);
+			const env = await this.orchestrateEnv(this.recoverySessionFor(snapshot, storeId), `cancel-graph:${storeId}`);
+			const stillRunning = snapshot.runs.filter((run) => run.status === "running");
+			for (const run of stillRunning) await settleRunFromRuntime(env, storeId, run, "cancelled", `cancelled with the graph: ${reason}`);
+			for (const run of stillRunning) await this.reconcileSessionJobs(run.sessionId);
+			await this.releaseStoreWorkspace(storeId);
+		} finally {
+			this.closingStores.delete(storeId);
+		}
 	}
 	/**
 	* The settlement of one batch, from the outside: the registered driver's own
@@ -8376,8 +8395,17 @@ var TaskRuntime = class extends Service {
 	* run is. `undefined` (a record that predates phases) leaves the session
 	* ungated, which is the gate's own contract for an unbindable phase, and a
 	* session with no run is never gated at all.
+	*
+	* The one exception is a store this process is closing ({@link cancelGraph},
+	* whose barrier is in effect before it is persisted): there the record read
+	* back is older than a phase this process already closed, so a rebinding may
+	* not move a phase that session holds. Whether it holds one is the whole
+	* distinction — a session the cancellation never reached has none, and the
+	* store decides for it exactly as it does everywhere else, which is what keeps
+	* the restore path (`waiting_children`, terminal records) working.
 	*/
-	gatePhaseFromStore(sessionId, run) {
+	gatePhaseFromStore(sessionId, run, storeId) {
+		if (this.closingStores.has(storeId) && this.executionGate.phaseOf(sessionId) !== void 0) return;
 		const phase = this.runGatePhase(run);
 		if (phase === "terminal") this.executionGate.setTerminal(sessionId);
 		else if (phase !== void 0) this.executionGate.setPhase(sessionId, phase);
@@ -8387,7 +8415,7 @@ var TaskRuntime = class extends Service {
 		if (binding !== void 0) {
 			const resolved$1 = await this.resolveBinding(binding);
 			if (resolved$1 !== void 0) {
-				this.gatePhaseFromStore(sessionId, resolved$1.run);
+				this.gatePhaseFromStore(sessionId, resolved$1.run, binding.storeId);
 				return resolved$1;
 			}
 			this.sessions.delete(sessionId);
@@ -8414,7 +8442,7 @@ var TaskRuntime = class extends Service {
 		const rebinding = this.sessions.get(sessionId);
 		if (rebinding === void 0) return void 0;
 		const resolved = await this.resolveBinding(rebinding);
-		if (resolved !== void 0) this.gatePhaseFromStore(sessionId, resolved.run);
+		if (resolved !== void 0) this.gatePhaseFromStore(sessionId, resolved.run, rebinding.storeId);
 		return resolved;
 	}
 	async resolveBinding(binding) {

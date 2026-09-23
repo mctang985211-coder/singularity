@@ -1251,6 +1251,20 @@ export class TaskRuntime extends Service {
   private readonly replayLineage = new Map<TaskId, string>()
   /** The tool-execution gate and the write drain (A3 §3.3); this runtime owns every phase it writes. */
   private readonly executionGate: ExecutionGate
+  /**
+   * The stores a cancellation is closing right now ({@link cancelGraph}), from
+   * the instant its gate was closed to the instant the operation is done with
+   * the store.
+   *
+   * A cancellation is the one transition that puts a barrier in effect *before*
+   * the store records it, so during that window the record still says `running`
+   * and phase `active` — older than the barrier already in effect here. A read
+   * path that rebinds a session in the window would re-apply that older phase
+   * and lift the barrier, so {@link gatePhaseFromStore} refuses to move a phase
+   * a session already holds while its store is in this set. The store is the
+   * truth again the moment the entry goes.
+   */
+  private readonly closingStores = new Set<string>()
   /** The one-writer-per-workspace ownership registry (A3 §3.4). */
   private readonly workspaces: WorkspaceRegistry
   /** The load-time provider scan, taken once ({@link providerLoadReport}). */
@@ -4631,21 +4645,33 @@ export class TaskRuntime extends Service {
       this.warn(`store ${storeId}: it could not be read for the cancellation "${reason}" (${error instanceof Error ? error.message : String(error)}), so nothing was cancelled`)
       return
     }
-    for (const [sessionId, binding] of this.sessions) {
-      if (binding.storeId === storeId) this.executionGate.setTerminal(sessionId)
-    }
-    const entries = [...this.drivers.values()].filter(entry => entry.storeId === storeId)
-    for (const entry of entries) entry.controller.abort()
-    await Promise.all(entries.map(entry => entry.promise.catch(() => [])))
+    // The barrier below is in effect before it is durable, so the store is marked
+    // as being closed *before* the gate loop: from here until this method returns,
+    // a rebinding that resolves a session of this store may not use the record —
+    // which still says `running` because the settlement has not been persisted yet
+    // — to lift a phase this cancellation already closed. The `finally` removes the
+    // entry, so the barrier never outlives the operation and the store is the truth
+    // for these sessions again afterwards.
+    this.closingStores.add(storeId)
+    try {
+      for (const [sessionId, binding] of this.sessions) {
+        if (binding.storeId === storeId) this.executionGate.setTerminal(sessionId)
+      }
+      const entries = [...this.drivers.values()].filter(entry => entry.storeId === storeId)
+      for (const entry of entries) entry.controller.abort()
+      await Promise.all(entries.map(entry => entry.promise.catch(() => [])))
 
-    const snapshot = await this.ctx.task.snapshotIn(storeId)
-    const env = await this.orchestrateEnv(this.recoverySessionFor(snapshot, storeId), `cancel-graph:${storeId}`)
-    const stillRunning = snapshot.runs.filter(run => run.status === 'running')
-    for (const run of stillRunning) {
-      await settleRunFromRuntime(env, storeId, run, 'cancelled', `cancelled with the graph: ${reason}`)
+      const snapshot = await this.ctx.task.snapshotIn(storeId)
+      const env = await this.orchestrateEnv(this.recoverySessionFor(snapshot, storeId), `cancel-graph:${storeId}`)
+      const stillRunning = snapshot.runs.filter(run => run.status === 'running')
+      for (const run of stillRunning) {
+        await settleRunFromRuntime(env, storeId, run, 'cancelled', `cancelled with the graph: ${reason}`)
+      }
+      for (const run of stillRunning) await this.reconcileSessionJobs(run.sessionId)
+      await this.releaseStoreWorkspace(storeId)
+    } finally {
+      this.closingStores.delete(storeId)
     }
-    for (const run of stillRunning) await this.reconcileSessionJobs(run.sessionId)
-    await this.releaseStoreWorkspace(storeId)
   }
 
   /**
@@ -4955,8 +4981,17 @@ export class TaskRuntime extends Service {
    * run is. `undefined` (a record that predates phases) leaves the session
    * ungated, which is the gate's own contract for an unbindable phase, and a
    * session with no run is never gated at all.
+   *
+   * The one exception is a store this process is closing ({@link cancelGraph},
+   * whose barrier is in effect before it is persisted): there the record read
+   * back is older than a phase this process already closed, so a rebinding may
+   * not move a phase that session holds. Whether it holds one is the whole
+   * distinction — a session the cancellation never reached has none, and the
+   * store decides for it exactly as it does everywhere else, which is what keeps
+   * the restore path (`waiting_children`, terminal records) working.
    */
-  private gatePhaseFromStore(sessionId: string, run: TaskRun): void {
+  private gatePhaseFromStore(sessionId: string, run: TaskRun, storeId: string): void {
+    if (this.closingStores.has(storeId) && this.executionGate.phaseOf(sessionId) !== undefined) return
     const phase = this.runGatePhase(run)
     if (phase === 'terminal') this.executionGate.setTerminal(sessionId)
     else if (phase !== undefined) this.executionGate.setPhase(sessionId, phase)
@@ -4967,7 +5002,7 @@ export class TaskRuntime extends Service {
     if (binding !== undefined) {
       const resolved = await this.resolveBinding(binding)
       if (resolved !== undefined) {
-        this.gatePhaseFromStore(sessionId, resolved.run)
+        this.gatePhaseFromStore(sessionId, resolved.run, binding.storeId)
         return resolved
       }
       this.sessions.delete(sessionId)
@@ -4998,7 +5033,7 @@ export class TaskRuntime extends Service {
     const rebinding = this.sessions.get(sessionId)
     if (rebinding === undefined) return undefined
     const resolved = await this.resolveBinding(rebinding)
-    if (resolved !== undefined) this.gatePhaseFromStore(sessionId, resolved.run)
+    if (resolved !== undefined) this.gatePhaseFromStore(sessionId, resolved.run, rebinding.storeId)
     return resolved
   }
 

@@ -2964,6 +2964,20 @@ declare class TaskRuntime extends Service {
   private readonly replayLineage;
   /** The tool-execution gate and the write drain (A3 §3.3); this runtime owns every phase it writes. */
   private readonly executionGate;
+  /**
+   * The stores a cancellation is closing right now ({@link cancelGraph}), from
+   * the instant its gate was closed to the instant the operation is done with
+   * the store.
+   *
+   * A cancellation is the one transition that puts a barrier in effect *before*
+   * the store records it, so during that window the record still says `running`
+   * and phase `active` — older than the barrier already in effect here. A read
+   * path that rebinds a session in the window would re-apply that older phase
+   * and lift the barrier, so {@link gatePhaseFromStore} refuses to move a phase
+   * a session already holds while its store is in this set. The store is the
+   * truth again the moment the entry goes.
+   */
+  private readonly closingStores;
   /** The one-writer-per-workspace ownership registry (A3 §3.4). */
   private readonly workspaces;
   /** The load-time provider scan, taken once ({@link providerLoadReport}). */
@@ -4073,6 +4087,14 @@ declare class TaskRuntime extends Service {
    * run is. `undefined` (a record that predates phases) leaves the session
    * ungated, which is the gate's own contract for an unbindable phase, and a
    * session with no run is never gated at all.
+   *
+   * The one exception is a store this process is closing ({@link cancelGraph},
+   * whose barrier is in effect before it is persisted): there the record read
+   * back is older than a phase this process already closed, so a rebinding may
+   * not move a phase that session holds. Whether it holds one is the whole
+   * distinction — a session the cancellation never reached has none, and the
+   * store decides for it exactly as it does everywhere else, which is what keeps
+   * the restore path (`waiting_children`, terminal records) working.
    */
   private gatePhaseFromStore;
   private lookupRun;

@@ -171,6 +171,13 @@ interface Boot {
   readonly runtime: TaskRuntime
   /** Every spawn this boot's runtime asked for. */
   readonly spawns: SpawnRecord[]
+  /**
+   * The stand-in tool bodies that really ran, by registered name. The tools this
+   * deployment registers stand in for the real ones and record nothing, so this
+   * is the whole "was the body reached" evidence a gate assertion needs: a name
+   * that is absent never ran.
+   */
+  readonly ranTools: readonly string[]
   /** The store's snapshot as the store itself holds it. */
   snapshot(storeId?: string): Promise<TaskSnapshot>
   /** The store's own event log, read back from the JSONL backend as a reader. */
@@ -250,7 +257,9 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
   await ctx.plugin(SkillRegistry, {})
   // The deployment's tool plane: stand-ins for every name the root's own
   // allow-list and a worker's grant resolve against, and the real `task_read`
-  // for the read side this spec asserts on.
+  // for the read side this spec asserts on. The stand-ins record their own runs,
+  // which is the "was the body reached" evidence a gate case reads.
+  const ranTools: string[] = []
   for (const name of [...ROOT_TOOLS, ...OTHER_TOOLS]) {
     if (name === 'task_read') continue
     ctx.tools.register({
@@ -258,7 +267,10 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
       description: `tool ${name}`,
       parameters: { type: 'object', properties: {} },
       output: { schema: { type: 'string' }, render: (_args: unknown, value: unknown) => [{ type: 'text', text: value as string }] },
-      execute: async () => `${name}: fixture answer`,
+      execute: async () => {
+        ranTools.push(name)
+        return `${name}: fixture answer`
+      },
     })
   }
   ctx.tools.register(defineTaskReadTool(ctx))
@@ -391,6 +403,7 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
     task,
     runtime,
     spawns,
+    ranTools,
     snapshot: async (storeId = STORE) => await task.snapshotIn(storeId),
     events: async (storeId = STORE) => {
       const handle = await (persistence as unknown as { open: (id: SessionId, access: 'read') => Promise<{ read: () => Promise<{ events: readonly SessionEvent[] }>; close: () => Promise<void> }> }).open(SessionId(storeId), 'read')
@@ -432,6 +445,26 @@ async function mountRuntime(ctx: Context, options: BootOptions): Promise<TaskRun
 /** Every task event one store appended, filtered out of its session log. */
 function taskEvents(events: readonly SessionEvent[]): TaskEvent[] {
   return events.flatMap(event => (event.type === 'task/event' ? [event.data as unknown as TaskEvent] : []))
+}
+
+/**
+ * Run one tool through the real registry and the real waterfall — denials
+ * included, since a denied call still reports a result — and render its answer.
+ * The gate is on `tools/pre-execute`, so what this reads is the decision the
+ * deployment's own pipeline made for this agent.
+ */
+async function throughPipeline(b: Boot, sessionId: string, name: string, callId: string): Promise<{ isError: boolean; text: string }> {
+  const answer = await b.ctx.tools.execute({
+    callId,
+    name,
+    arguments: {},
+    agent: { id: sessionId } as never,
+    signal: new AbortController().signal,
+  })
+  return {
+    isError: answer.isError === true,
+    text: answer.content.map(block => (block.type === 'text' ? block.text : `[${block.type}]`)).join('\n'),
+  }
 }
 
 /** The one run that is not the root's, in a store with one child. */
@@ -597,6 +630,69 @@ describe('A3 recovery from the real session log', () => {
     expect(b.runtime.gate.decide(ROOT, 'task_cancel').allow).toBe(true)
     // The parked driver is left for the bounded teardown: cancelling would wait
     // on the drain that never confirms.
+  })
+
+  it('refuses a write for a rebound waiting parent and a terminal child through the real pipeline, while the coordination read still answers', async () => {
+    const dir = workspace()
+    const a = await boot(dir, { worker: () => new Promise<void>(() => {}) })
+    const root = await seedLegacyRoot(a, 'ship the release')
+    await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
+      reason: 'split the work',
+      children: children('long child'),
+    })
+    // The crash point: the parent is waiting_children with a child in flight.
+    await vi.waitFor(async () => expect((await a.snapshot()).runs).toHaveLength(2))
+    const crashedChild = childRunOf(await a.snapshot(), root.taskId)
+    expect(crashedChild.executionPhase).toBe('active')
+    await a.crash()
+
+    // The second process parks the restarted batch in the parent's own drain, so
+    // the store holds both phases this case is about: the parent waiting_children,
+    // and the child recovery cancelled — it was in flight when the process died
+    // and nothing can confirm the writes it may have made.
+    const b = await boot(dir, { parkDrain: (sessionId, index) => sessionId === ROOT && index === 1 })
+    // Both bindings are taken through the door a resumed session's first tool call
+    // takes: `runForSession` reads the store and gates the session as what it
+    // records, never as what the dead process remembered.
+    const parent = await b.runtime.runForSession(ROOT)
+    expect(parent.run.runId).toBe(root.runId)
+    expect(parent.run.executionPhase).toBe('waiting_children')
+    const child = await b.runtime.runForSession(crashedChild.sessionId)
+    expect(child.run.status).toBe('cancelled')
+    expect(b.runtime.gate.phaseOf(ROOT)).toBe('waiting_children')
+    expect(b.runtime.gate.phaseOf(crashedChild.sessionId)).toBe('terminal')
+
+    // A write in either session is refused through the real tool pipeline — the
+    // real registry and the real waterfall, not `gate.decide` — and the stand-in
+    // body never runs. The count is taken per call, so the evidence is "this call
+    // reached no body" rather than "no write body ran anywhere in this boot".
+    const before = b.ranTools.length
+    const parentWrite = await throughPipeline(b, ROOT, 'write', 'call-write-parent')
+    expect(parentWrite.isError).toBe(true)
+    expect(parentWrite.text).toContain('phase "waiting_children"')
+    expect(b.ranTools.slice(before)).toEqual([])
+    const afterParent = b.ranTools.length
+    const childWrite = await throughPipeline(b, crashedChild.sessionId, 'write', 'call-write-child')
+    expect(childWrite.isError).toBe(true)
+    expect(childWrite.text).toContain('phase "terminal"')
+    expect(b.ranTools.slice(afterParent)).toEqual([])
+
+    // The coordination read answers in both phases, and the phases survive it. The
+    // child's read is the one that goes through the rebinding door — a non-root
+    // caller resolves its store from the run (`task-read.ts:91`), which is the path
+    // a refresh would travel — while the root's own read renders the snapshot it
+    // resolves from the graph, and its phase is the gate's own.
+    const parentRead = await throughPipeline(b, ROOT, 'task_read', 'call-read-parent')
+    expect(parentRead.isError).toBe(false)
+    expect(parentRead.text).toContain('objective: ship the release')
+    expect(parentRead.text).toContain('children: 1')
+    expect(parentRead.text).toContain(`run ${crashedChild.runId} [cancelled]`)
+    expect(b.runtime.gate.phaseOf(ROOT)).toBe('waiting_children')
+    const childRead = await throughPipeline(b, crashedChild.sessionId, 'task_read', 'call-read-child')
+    expect(childRead.isError).toBe(false)
+    expect(childRead.text).toContain(`run ${crashedChild.runId} [cancelled]`)
+    expect(b.runtime.gate.phaseOf(crashedChild.sessionId)).toBe('terminal')
+    expect(b.ranTools.slice(before)).toEqual([])
   })
 
   it('verifies a run that submitted before the crash, without starting or charging it again', async () => {
