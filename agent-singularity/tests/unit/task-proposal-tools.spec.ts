@@ -66,6 +66,7 @@ const manifest: CapabilityManifest = { capabilities: {}, missing: [], closure: '
 
 function fixture() {
   const ctx = {
+    graphs: { graphForSession: vi.fn(async () => ({ id: 'g1', rootSessionId: 'root-1' })) },
     taskRuntime: {
       runForSession: vi.fn(async () => ({
         storeId: 'sg-t-root-1',
@@ -303,5 +304,183 @@ describe('task_proposal_cancel', () => {
     const ctx = fixture()
     const tool = defineTaskProposalCancelTool(ctx as never)
     expect(Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)).toEqual(['proposalId'])
+  })
+})
+
+/**
+ * A proposal of the other kind (A0 §2): a root contract is read and continued
+ * through the same tools as a batch, so both have to narrow on `kind` before
+ * touching the payload — a root contract has no parent task and no children,
+ * and rendering one as a one-child decomposition of nobody is exactly the drift
+ * the union exists to prevent.
+ */
+function rootProposal(overrides: Partial<TaskProposal> = {}): TaskProposal {
+  return {
+    kind: 'root',
+    proposalId: 'p-root-1',
+    requestKey: 'rk-root-1',
+    status: 'pending_review',
+    policy: 'all',
+    identity: {
+      contractVersion: 1,
+      storeId: 'sg-t-root-1',
+      rootSessionId: 'root-1',
+      requestKey: 'rk-root-1',
+      contractDigest: 'f'.repeat(64),
+    },
+    contract: contract('Ship the release artifact'),
+    proposalDigest: 'b'.repeat(64),
+    admissionContext: { maxDepth: 2, maxChildren: 4, auditOnly: {} },
+    admissionContextDigest: 'c'.repeat(64),
+    reviewContext: { capabilityManifestDigest: 'd'.repeat(64), verifiers: [{ verifierId: 'command' }] },
+    reviewContextDigest: 'e'.repeat(64),
+    createdAt: '2026-09-23T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+describe('a root contract proposal', () => {
+  it('renders the contract instead of a child batch, and its own consumption', async () => {
+    const ctx = fixture()
+    ctx.taskRuntime.proposalIn.mockResolvedValue(rootProposal({
+      status: 'admitted',
+      consumption: {
+        kind: 'root',
+        proposalId: 'p-root-1',
+        proposalDigest: 'b'.repeat(64),
+        reviewContextDigest: 'e'.repeat(64),
+        rootTaskId: 't-root-new',
+        rootRunId: 'r-root-new',
+        admittedAt: '2026-09-23T00:05:00.000Z',
+      },
+    }))
+    const tool = defineTaskProposalReadTool(ctx as never)
+    const result = (await tool.execute({ proposalId: 'p-root-1' }, exec())) as string
+
+    expect(result).toContain('proposal p-root-1 [admitted] policy all')
+    expect(result).toContain('root session root-1')
+    expect(result).toContain('Ship the release artifact')
+    expect(result).toContain('ac1-1')
+    expect(result).toContain('the checkout is writable')
+    expect(result).toContain('no network access')
+    expect(result).toContain('consumed as root task t-root-new with run r-root-new')
+    expect(result).not.toContain('children (')
+  })
+
+  it('renders the root activation a continuation settled, not a batch', async () => {
+    const ctx = fixture()
+    ctx.taskRuntime.continueProposal.mockResolvedValue({
+      proposalId: 'p-root-1',
+      status: 'activated' as const,
+      taskId: 't-root-new',
+      runId: 'r-root-new',
+      detail: 'root task "t-root-new" and run "r-root-new" were created',
+    })
+    const tool = defineTaskProposalContinueTool(ctx as never)
+    const result = (await tool.execute({ proposalId: 'p-root-1' }, exec())) as string
+
+    expect(result).toContain('proposal p-root-1 was activated as root task t-root-new with run r-root-new')
+    expect(result).toContain('task_decompose')
+    // Activation is not an admission: nothing here may read like the settled
+    // batch the other arm reports, because no child exists.
+    expect(result).not.toContain('was admitted as batch')
+    expect(result).not.toContain('child 1')
+  })
+})
+
+/**
+ * A root session before its contract is activated (A0 §1.5, stage-D defect 1):
+ * it has no task run — the root task is what an approved contract becomes — so
+ * the run lookup that resolves a worker's store answers "no task run is bound to
+ * session". That is precisely the state in which the session has to read the
+ * proposal holding its contract, and the state both `task_intake`'s answer and
+ * the root prompt send it to `task_proposal_read` in. The fallback is the store
+ * the session owns; every other caller keeps the runtime's own refusal.
+ */
+describe('a proposal call from a root session with no run', () => {
+  function unbound(ctx: ReturnType<typeof fixture>) {
+    ctx.taskRuntime.runForSession.mockRejectedValue(new Error('task-runtime: no task run is bound to session "root-1"'))
+    return ctx
+  }
+
+  it('reads the waiting root contract through the root store', async () => {
+    const ctx = unbound(fixture())
+    ctx.taskRuntime.proposalIn.mockResolvedValue(rootProposal())
+    const result = (await defineTaskProposalReadTool(ctx as never).execute({ proposalId: 'p-root-1' }, exec())) as string
+
+    // The store is the one the root session owns — `sg-t-<rootSessionId>` — not
+    // a store named by a run the session does not have.
+    expect(ctx.taskRuntime.proposalIn).toHaveBeenCalledExactlyOnceWith('sg-t-root-1', 'p-root-1')
+    expect(result).toContain('proposal p-root-1 [pending_review] policy all')
+    expect(result).toContain('root session root-1')
+    expect(result).toContain('root contract:')
+    expect(result).toContain('Ship the release artifact')
+    expect(result).toContain('request key: rk-root-1')
+  })
+
+  it('continues a recorded root contract into activation from that same session', async () => {
+    const ctx = unbound(fixture())
+    ctx.taskRuntime.continueProposal.mockResolvedValue({
+      proposalId: 'p-root-1',
+      status: 'activated' as const,
+      taskId: 't-root-new',
+      runId: 'r-root-new',
+      detail: 'proposal "p-root-1" is activated as root task t-root-new with run r-root-new',
+    })
+    const result = (await defineTaskProposalContinueTool(ctx as never).execute({ proposalId: 'p-root-1' }, exec())) as string
+
+    expect(ctx.taskRuntime.continueProposal).toHaveBeenCalledExactlyOnceWith('sg-t-root-1', 'p-root-1', 'root-1', {})
+    expect(result).toContain('was activated as root task t-root-new with run r-root-new')
+    expect(result).toContain('task_read')
+  })
+
+  it('reports a contract still waiting as waiting, and activates nothing', async () => {
+    const ctx = unbound(fixture())
+    ctx.taskRuntime.continueProposal.mockResolvedValue({
+      proposalId: 'p-root-1',
+      status: 'pending_review' as const,
+      detail: 'proposal "p-root-1" is waiting for a review; only a decision on the record advances it (§6)',
+    })
+    const result = (await defineTaskProposalContinueTool(ctx as never).execute({ proposalId: 'p-root-1' }, exec())) as string
+
+    expect(result).toContain('proposal p-root-1 is pending_review')
+    expect(result).toContain('Nothing was admitted and nothing is spawned while it waits')
+  })
+
+  it('keeps the runtime refusal for a session that is not the graph\'s root', async () => {
+    const ctx = fixture()
+    ctx.taskRuntime.runForSession.mockRejectedValue(new Error('task-runtime: no task run is bound to session "s-worker"'))
+    const result = (await defineTaskProposalReadTool(ctx as never).execute({ proposalId: 'p-7' }, exec('s-worker'))) as string
+
+    expect(result).toContain('task_proposal_read rejected: task-runtime: no task run is bound to session "s-worker"')
+    expect(ctx.taskRuntime.proposalIn).not.toHaveBeenCalled()
+  })
+
+  it('keeps the runtime refusal for a session that is in no graph at all', async () => {
+    const ctx = unbound(fixture())
+    ctx.graphs.graphForSession.mockRejectedValue(new Error('graphs: session "root-1" is not in a graph'))
+    const result = (await defineTaskProposalReadTool(ctx as never).execute({ proposalId: 'p-7' }, exec())) as string
+
+    // The caller cannot be shown to own a root store, so the answer is the
+    // runtime's own — never a store id guessed from a session nobody placed.
+    expect(result).toContain('task_proposal_read rejected: task-runtime: no task run is bound to session "root-1"')
+    expect(ctx.taskRuntime.proposalIn).not.toHaveBeenCalled()
+  })
+
+  it('keeps the store\'s own refusal when the root store does not exist yet', async () => {
+    const ctx = unbound(fixture())
+    ctx.taskRuntime.proposalIn.mockRejectedValue(new Error('task: store "sg-t-root-1" does not exist'))
+    const result = (await defineTaskProposalReadTool(ctx as never).execute({ proposalId: 'p-root-1' }, exec())) as string
+
+    expect(result).toContain('task_proposal_read rejected: task: store "sg-t-root-1" does not exist')
+  })
+
+  it('keeps the unknown-proposal refusal on the continue side', async () => {
+    const ctx = unbound(fixture())
+    ctx.taskRuntime.continueProposal.mockRejectedValue(new Error('task: unknown proposal "p-404"'))
+    const result = (await defineTaskProposalContinueTool(ctx as never).execute({ proposalId: 'p-404' }, exec())) as string
+
+    expect(result).toContain('task_proposal_continue rejected:')
+    expect(result).toContain('unknown proposal "p-404"')
   })
 })

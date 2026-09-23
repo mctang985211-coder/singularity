@@ -7,8 +7,8 @@
  * agent surface — the root's allow-list, a spawned worker's grant, or the
  * un-granted worker that keeps the global layer — can call one, and the ledger
  * behind them is unreachable rather than merely discouraged. Turning it on
- * leaves the previous assembly untouched: the same twenty-seven names the
- * deployment has always had.
+ * leaves the previous assembly untouched: the same names the deployment has
+ * always had, plus the root's own intake (A0), which no switch gates.
  *
  * Every case mounts the real plugin on a real context with sibling stubs for
  * its injected services, the way the loader mounts them, so what is asserted is
@@ -35,7 +35,7 @@ const EVOLUTION_TOOLS = [
   'evolution_list',
 ]
 
-/** The eighteen tools every composition registers, whatever the switch says (`escalate` included). */
+/** The nineteen tools every composition registers, whatever the switch says (`escalate` included). */
 const ALWAYS_TOOLS = [
   'graph_mark_ready',
   'graph_spawn',
@@ -43,6 +43,7 @@ const ALWAYS_TOOLS = [
   'hitl_approve',
   'task_read',
   'capability_list',
+  'task_intake',
   'task_decompose',
   'task_proposal_read',
   'task_proposal_continue',
@@ -105,7 +106,7 @@ afterEach(() => {
 })
 
 describe('SingularityAgent assembly', () => {
-  it('registers the eighteen unconditional tools and no evolution tool on the shipped default', async () => {
+  it('registers the nineteen unconditional tools and no evolution tool on the shipped default', async () => {
     const { tools } = await mount()
     expect(DEFAULT_EVOLUTION).toBe('off')
 
@@ -113,11 +114,11 @@ describe('SingularityAgent assembly', () => {
     for (const name of EVOLUTION_TOOLS) expect(tools.has(name), name).toBe(false)
     expect(tools.size).toBe(ALWAYS_TOOLS.length)
     // The name is the surface: a gate written as an internal permission check
-    // would still leave all twenty-seven reachable by an un-granted worker.
+    // would still leave all twenty-eight reachable by an un-granted worker.
     expect([...tools.keys()].filter(name => name.startsWith('evolution_'))).toEqual([])
   })
 
-  it('registers all twenty-seven tools when the deployment turns evolution on', async () => {
+  it('registers all twenty-eight tools when the deployment turns evolution on', async () => {
     const { tools } = await mount({ evolution: 'on' })
     for (const name of [...ALWAYS_TOOLS, ...EVOLUTION_TOOLS]) expect(tools.has(name), name).toBe(true)
     expect(tools.size).toBe(ALWAYS_TOOLS.length + EVOLUTION_TOOLS.length)

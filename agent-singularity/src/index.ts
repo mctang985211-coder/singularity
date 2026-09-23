@@ -32,6 +32,7 @@ import { defineSpawnTool } from './tools/spawn.ts'
 import { defineTaskCancelTool } from './tools/task-cancel.ts'
 import { defineTaskDecomposeTool } from './tools/task-decompose.ts'
 import { defineTaskDiagnoseTool } from './tools/task-diagnose.ts'
+import { defineTaskIntakeTool } from './tools/task-intake.ts'
 import { defineTaskProposalCancelTool } from './tools/task-proposal-cancel.ts'
 import { defineTaskProposalContinueTool } from './tools/task-proposal-continue.ts'
 import { defineTaskProposalReadTool } from './tools/task-proposal-read.ts'
@@ -187,6 +188,10 @@ export class SingularityAgent extends Service {
     ctx.tools.register(defineApproveTool(ctx))
     ctx.tools.register(defineTaskReadTool(ctx))
     ctx.tools.register(defineCapabilityListTool(ctx))
+    // The root's own goal is accepted here (A0): it is in ROOT_TOOLS only, and
+    // the deployment's evolution switch has nothing to do with it — a graph
+    // whose contract cannot be accepted has no goal to work on at all.
+    ctx.tools.register(defineTaskIntakeTool(ctx))
     ctx.tools.register(defineTaskDecomposeTool(ctx))
     ctx.tools.register(defineTaskProposalReadTool(ctx))
     ctx.tools.register(defineTaskProposalContinueTool(ctx))

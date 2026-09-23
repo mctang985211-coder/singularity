@@ -212,6 +212,19 @@ export function defineTaskDecomposeTool(ctx: Context) {
       if (continued.status === 'pending_review') {
         return await pendingText(ctx, storeId, task.taskId, continued.proposalId, continued.detail)
       }
+      if (continued.status === 'activated') {
+        // A root contract continued through this tool's service entry: no batch
+        // was proposed, nothing was decomposed and no child exists, so the two
+        // arms above do not apply and neither does the refusal text below. The
+        // ids are reported as the runtime gave them — a caller that reads
+        // "activated" as "decomposed" would go looking for children.
+        return [
+          `task_decompose: proposal ${continued.proposalId} activated root task ${continued.taskId} with run ${continued.runId} instead of admitting a batch.`,
+          `- ${continued.detail}`,
+          '- This is a root contract, not a decomposition: no child task exists and this task is not decomposed. Read the root',
+          '  contract with `task_read` and decompose it with `task_decompose` once it is the root task you are working on.',
+        ].join('\n')
+      }
       // Decided against between the submission and the continuation, or
       // invalidated by the re-check: the status the store holds, named, with the
       // one way forward (a revision) — the same conclusion the compat entry

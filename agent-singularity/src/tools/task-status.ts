@@ -6,6 +6,7 @@ import type {} from '@dangosys/dsh-singularity-graphs'
 import type { TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import { checkObligationCoverage, findRepoRoot, loadObligationTemplates } from '@dangosys/dsh-singularity-task-runtime'
+import { notActivatedLines, rootSnapshotOrUndefined, rootTaskIn } from './root-store.ts'
 import { runPhaseCell } from './run-phase.ts'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
@@ -53,13 +54,20 @@ async function obligationLines(ctx: Context, envId: string, snapshot: TaskSnapsh
 export function defineTaskStatusTool(ctx: Context) {
   return defineTool({
     name: 'task_status',
-    description: 'Compact snapshot of the caller\'s graph task tree: task id, objective, status, latest run status with its coordination phase (a phase-less non-terminal run reads needs-recovery), evidence ids, and terminal review outcome. Also lists recorded obligations and the domain-template coverage hint.',
+    description: 'Compact snapshot of the caller\'s graph task tree: task id, objective, status, latest run status with its coordination phase (a phase-less non-terminal run reads needs-recovery), evidence ids, and terminal review outcome. Before any root contract has been accepted it answers the named not-activated state (with whatever proposal is still open) instead of an empty tree. Also lists recorded obligations and the domain-template coverage hint.',
     parameters: {},
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (_args, exec) => {
       const graph = await ctx.graphs.graphForSession(sessionId(exec))
       const storeId = rootTaskStoreId(graph.rootSessionId)
-      const snapshot = await ctx.task.openStore(storeId)
+      const snapshot = await rootSnapshotOrUndefined(ctx, storeId)
+      const root = rootTaskIn(snapshot)
+      // The tree the root session would see does not exist yet (A0 §1.5): the
+      // same named state `task_read` answers with, rather than an empty tree a
+      // reader could mistake for a graph whose work is done.
+      if (snapshot === undefined || root === undefined) {
+        return notActivatedLines(graph.id, storeId, graph.rootSessionId, snapshot).join('\n')
+      }
       const lines = snapshot.tasks.map(task => {
         const runId = task.runIds[task.runIds.length - 1]
         const run = snapshot.runs.find(item => item.runId === runId)

@@ -9,9 +9,9 @@
  */
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
-import type { Obligation, TaskContract, TaskInstance, TaskProposal } from '@dangosys/dsh-singularity-task'
+import type { Obligation, TaskContract, TaskInstance, TaskProposal, TaskProposalRoot } from '@dangosys/dsh-singularity-task'
 import type { NormalizedBatch } from '../../../task-runtime/src/normalize.ts'
-import type { ProposalReviewRequest } from '../../../task-runtime/src/index.ts'
+import type { ProposalReviewRequest, RootContractReviewRequest } from '../../../task-runtime/src/index.ts'
 import { ProposalReviewService, ownerSessionOfStore, renderProposalReview } from '../../src/proposal-review.ts'
 
 const OWNER = 'root-1'
@@ -458,5 +458,178 @@ describe('ProposalReviewService.requestReview', () => {
     expect(ask.signal?.aborted).toBe(false)
     for (const dispose of h.disposers) dispose()
     expect(ask.signal?.aborted).toBe(true)
+  })
+})
+
+/**
+ * The same channel for the other kind of proposal (A0 §3 stage C): a root
+ * contract has no parent task and no children, so its review has to render the
+ * contract the root session would be admitted as — objective, every criterion
+ * with its markings, assumptions, constraints, declared capabilities with their
+ * resolution, the limits, the digests — and no parent section at all. Before
+ * this, a root request reached a renderer that read `parentTask` off it and
+ * threw, which the runtime recorded as "the review channel failed": the
+ * contract stayed `pending_review` with nobody asked.
+ */
+function rootContractValue(): TaskContract {
+  return {
+    contractVersion: 1,
+    objective: 'ship the release to the customer',
+    acceptanceCriteria: [
+      criterion({
+        criterionId: 'ac-1',
+        description: 'the release artifact is published',
+        protectedInputs: [{ path: 'release/check.sh', sha256: 'b'.repeat(64) }],
+      }),
+      criterion({
+        criterionId: 'ac-2',
+        description: 'the changelog reads honestly',
+        verificationMode: 'review',
+        heuristic: true,
+        command: undefined,
+      }),
+      criterion({
+        criterionId: 'ac-3',
+        description: 'every child of this goal is verified',
+        verificationMode: 'composite',
+        command: undefined,
+      }),
+    ],
+    assumptions: ['the release branch stays frozen'],
+    constraints: ['no network access'],
+    requiredCapabilities: ['design-ball'],
+  }
+}
+
+function rootProposal(overrides: Partial<TaskProposalRoot> = {}): TaskProposalRoot {
+  const contract = rootContractValue()
+  return {
+    kind: 'root',
+    proposalId: 'p-root-0123456789abcdef',
+    requestKey: 'rk-root',
+    status: 'pending_review',
+    policy: 'all',
+    identity: { contractVersion: 1, storeId: STORE, rootSessionId: OWNER, requestKey: 'rk-root', contractDigest: 'c'.repeat(64) },
+    contract,
+    proposalDigest: 'd'.repeat(64),
+    admissionContext: { maxDepth: 2, maxChildren: 4, wallTimeMs: 600_000, auditOnly: { maxToolCalls: 40, attempts: 1 } },
+    admissionContextDigest: 'e'.repeat(64),
+    reviewContext: { capabilityManifestDigest: 'f'.repeat(64), verifiers: [{ verifierId: 'command' }] },
+    reviewContextDigest: 'a'.repeat(64),
+    createdAt: '2026-09-23T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function rootReviewRequest(overrides: Partial<RootContractReviewRequest> = {}): RootContractReviewRequest {
+  const proposal = rootProposal()
+  return {
+    kind: 'root',
+    storeId: STORE,
+    trigger: 'submitted',
+    proposal,
+    rootSessionId: OWNER,
+    contract: proposal.contract,
+    manifests: [
+      { capabilities: { 'design-ball': { skills: ['ball-align'], tools: ['read', 'write'] } }, missing: [], closure: 'closed' },
+    ],
+    registeredVerifiers: ['command', 'review'],
+    obligations: [],
+    ...overrides,
+  }
+}
+
+describe('renderProposalReview for a root contract', () => {
+  const text = renderProposalReview(rootReviewRequest())
+
+  it('names the subject, the session and both context fingerprints in full', () => {
+    expect(text).toContain('Root contract review — proposal p-root-0123456789abcdef [pending_review] (policy all, trigger: submitted)')
+    expect(text).toContain(`store: ${STORE}`)
+    expect(text).toContain(`root session: ${OWNER}`)
+    expect(text).toContain('d'.repeat(64))
+    expect(text).toContain('e'.repeat(64))
+    expect(text).toContain('a'.repeat(64))
+    expect(text).toContain('rk-root')
+  })
+
+  it('renders the contract whole and invents no parent section', () => {
+    expect(text).toContain('ship the release to the customer')
+    expect(text).toContain('the release artifact is published')
+    expect(text).toContain('the changelog reads honestly')
+    expect(text).toContain('the release branch stays frozen')
+    expect(text).toContain('no network access')
+    expect(text).toContain('design-ball')
+    expect(text).toContain('ball-align')
+    expect(text).not.toContain('## Parent task')
+    expect(text).not.toContain('## Children')
+    // No parent task belongs to a contract that is not a task yet: the
+    // decomposition arm prints `parent task <id> run <id>`, this one prints the
+    // session it is the goal of and nothing above it.
+    expect(text).not.toContain('parent task')
+  })
+
+  it('marks every criterion: mode, mandatory or optional, heuristic, protected inputs and command', () => {
+    expect(text).toMatch(/ac-1 \[deterministic, mandatory\]/)
+    expect(text).toMatch(/ac-2 \[review, mandatory[^\]]*heuristic/)
+    expect(text).toMatch(/ac-3 \[composite, mandatory\]/)
+    expect(text).toContain('release/check.sh sha256:' + 'b'.repeat(64))
+  })
+
+  it('shows the declared capabilities with the resolution this intake recorded', () => {
+    expect(text).toContain('required capabilities:')
+    expect(text).toContain('resolution (the manifests this batch resolved to):')
+    expect(text).toContain('skills: ball-align')
+  })
+
+  it('states the limits, the digests a decision would bind, and what nothing here can promise', () => {
+    expect(text).toContain('maxDepth 2')
+    expect(text).toContain('wallTimeMs 600000')
+    expect(text).toContain('audited after the run')
+    expect(text).toContain("judging verifiers (the ids this contract's criteria pin): command")
+    expect(text).toContain('registered verifiers now: command, review')
+    // The two boundary statements §5 requires survive into this arm.
+    expect(text).toContain('not the bytes')
+    expect(text.toLowerCase()).toContain('cannot name the version')
+  })
+
+  it('says no root task exists while the decision waits', () => {
+    expect(text).toContain('no root task, no run and no worker')
+  })
+})
+
+describe('ProposalReviewService.requestReview for a root contract', () => {
+  it('asks about the intake under its own tool name and records the decision as it does for a batch', async () => {
+    const h = fixture()
+    const service = new ProposalReviewService(h.ctx)
+    const notice = await service.requestReview(rootReviewRequest())
+
+    expect(notice.requested).toBe(true)
+    expect(notice.detail).not.toContain('channel failed')
+    const ask = h.approval.request.mock.calls[0]![0] as unknown as { agent: unknown; reason: string; toolName: string }
+    expect(ask.agent).toBe(h.ownerAgent)
+    expect(ask.toolName).toBe('task_intake')
+    expect(ask.reason).toContain('Root contract review')
+    expect(ask.reason).toContain('ship the release to the customer')
+
+    h.setOutcome('allowed-once')
+    await vi.waitFor(() => expect(h.decideProposal).toHaveBeenCalledTimes(1))
+    // One decision path for both kinds: the channel's own identity, bound to the
+    // proposal the contract was submitted as.
+    expect(h.decideProposal).toHaveBeenCalledExactlyOnceWith(
+      STORE,
+      'p-root-0123456789abcdef',
+      { outcome: 'approved' },
+      `approval:${OWNER}`,
+    )
+  })
+
+  it('never throws on a root request: an absent owner session stays a reported state', async () => {
+    const h = fixture({ ownerLive: false })
+    const service = new ProposalReviewService(h.ctx)
+    const notice = await service.requestReview(rootReviewRequest())
+
+    expect(notice.requested).toBe(false)
+    expect(notice.detail).toContain(OWNER)
+    expect(h.decideProposal).not.toHaveBeenCalled()
   })
 })

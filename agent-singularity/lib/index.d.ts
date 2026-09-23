@@ -168,6 +168,7 @@ declare class EscalationService extends Service {
 }
 //#endregion
 //#region src/proposal-review.d.ts
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     proposalReviewChannel: ProposalReviewService;
@@ -194,8 +195,15 @@ declare function ownerSessionOfStore(storeId: string): string | undefined;
 declare function reviewDecider(ownerSessionId: string): string;
 /**
  * The review material one person is shown (§5), rendered from the saved facts:
- * the parent, every child, the limits, the obligations, the identity a decision
- * binds, and what this record honestly cannot promise.
+ * for a batch, the parent, every child, the limits, the obligations, the
+ * identity a decision binds and what this record honestly cannot promise; for a
+ * root contract, the contract itself and no parent at all — the task it becomes
+ * does not exist while it waits.
+ *
+ * The subject is discriminated by kind, and the two arms share every part that
+ * means the same thing in both (the limits, the identity, the boundary
+ * statements): a reviewer deciding a root intake is answering a different
+ * question, not reading a one-child batch of nobody.
  *
  * A pure function of the request, so what a deployment shows and what a test
  * asserts are the same rendering.

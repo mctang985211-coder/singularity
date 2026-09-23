@@ -7,6 +7,7 @@ import { renderRunBinding } from '@dangosys/dsh-singularity-task-runtime'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
 import type { AcceptanceCriterion, TaskInstance, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
+import { notActivatedLines, rootSnapshotOrUndefined, rootTaskIn } from './root-store.ts'
 import { runPhaseSuffix } from './run-phase.ts'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
@@ -77,7 +78,8 @@ export function defineTaskReadTool(ctx: Context) {
   return defineTool({
     name: 'task_read',
     description:
-      'Read the caller\'s task contract. The root session sees the root task, its acceptance criteria, and child task statuses; a worker sees its own task and run. ' +
+      'Read the caller\'s task contract. The root session sees the root task, its acceptance criteria, and child task statuses — or, before any root contract has ' +
+      'been accepted, the named state saying so together with whatever proposal is still open (the graph\'s name is never shown as an objective). A worker sees its own task and run. ' +
       'A run line carries the coordination phase this run is in — and its batch id, its submission and any no-progress marking when it has them; a run with no phase ' +
       'is an old record and is shown as needs-recovery.',
     parameters: {},
@@ -103,9 +105,15 @@ export function defineTaskReadTool(ctx: Context) {
       }
 
       const storeId = rootTaskStoreId(graph.rootSessionId)
-      const snapshot = await ctx.task.openStore(storeId)
-      const root = snapshot.tasks.find(task => task.depth === 0)
-      if (root === undefined) throw new Error(`task_read: store "${storeId}" has no root task`)
+      const snapshot = await rootSnapshotOrUndefined(ctx, storeId)
+      const root = rootTaskIn(snapshot)
+      // No root task is not a crash: before a contract is accepted the store
+      // may not exist and holds nothing (A0 §1.1). The session gets the named
+      // state, its open proposal and the action that changes it — never the
+      // graph's name standing in for a goal nobody has stated.
+      if (snapshot === undefined || root === undefined) {
+        return notActivatedLines(graph.id, storeId, graph.rootSessionId, snapshot).join('\n')
+      }
       const children = root.childTaskIds
         .map(taskId => snapshot.tasks.find(task => task.taskId === taskId))
         .filter(task => task !== undefined)

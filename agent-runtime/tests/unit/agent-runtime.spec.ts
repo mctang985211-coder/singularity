@@ -11,7 +11,7 @@ function agent(value: string): Agent {
 
 type Spy = ReturnType<typeof vi.fn>
 
-/** The eighteen tools every root composition may call; the deployment's evolution switch does not touch them. */
+/** The nineteen tools every root composition may call; the deployment's evolution switch does not touch them. */
 const ROOT_CORE_TOOLS = [
   'graph_spawn',
   'graph_mark_ready',
@@ -20,6 +20,7 @@ const ROOT_CORE_TOOLS = [
   'task_read',
   'capability_list',
   'skill',
+  'task_intake',
   'task_decompose',
   'task_submit_result',
   'task_cancel',
@@ -522,6 +523,37 @@ describe('AgentRuntime root lifecycle', () => {
     expect(allow.filter(name => name.startsWith('evolution_'))).toEqual([])
     expect(allow).toEqual(ROOT_TOOLS_CLOSED)
     expect(promptTextOf(section)).not.toContain('evolution')
+  })
+
+  test('carries the intake paragraph in every composition, with the chain still absent when it is off', async () => {
+    const closed = context([id('root')])
+    const closedRuntime = new AgentRuntime(closed.ctx as never)
+    await closedRuntime.ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
+    const closedAssembly = await assemble(closed.resumeOptions[0])
+    const closedPrompt = promptTextOf(closedAssembly.section)
+    const closedAllow = (closedAssembly.restrict.mock.calls[0]?.[0] as { allow: readonly string[] }).allow
+
+    // Accepting the user's own goal is the root's core path, not a deployment
+    // option: the tool is on the allow-list and the paragraph is there whatever
+    // the evolution switch says — and neither names a tool the closed
+    // composition does not carry.
+    expect(closedAllow).toContain('task_intake')
+    expect(closedPrompt).toContain('call task_intake')
+    expect(closedPrompt).toContain('there is no root task')
+    expect(closedPrompt).toContain('not activated')
+    expect(closedPrompt).toContain('Do not guess your way past that')
+    expect(closedPrompt).toContain('Nothing you can call approves a contract')
+    expect(closedPrompt).not.toContain('evolution')
+
+    const open = context([id('root')], 'idle', { evolution: { enabled: true } })
+    const openRuntime = new AgentRuntime(open.ctx as never)
+    await openRuntime.ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
+    const openAssembly = await assemble(open.resumeOptions[0])
+    const openAllow = (openAssembly.restrict.mock.calls[0]?.[0] as { allow: readonly string[] }).allow
+
+    expect(openAllow).toContain('task_intake')
+    expect(promptTextOf(openAssembly.section)).toContain('call task_intake')
+    expect(promptTextOf(openAssembly.section)).toContain('To carry a diagnosed fix into the evolution track')
   })
 
   test('ensureRoot returns an interrupted running root to idle before resuming it', async () => {

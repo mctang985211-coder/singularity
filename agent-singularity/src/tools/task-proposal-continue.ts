@@ -1,13 +1,15 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
 import type { ProposalContinuation } from '@dangosys/dsh-singularity-task-runtime'
 import { undeclaredParameters } from './proposal-parameters.ts'
+import { proposalStoreFor } from './root-store.ts'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
-function sessionId(exec: ToolRunContext): string {
+function sessionId(exec: ToolRunContext): SessionId {
   const id = exec.agent?.id
   if (typeof id !== 'string' || id.length === 0) throw new Error('task_proposal_continue: missing agent id')
   return id
@@ -19,6 +21,12 @@ function sessionId(exec: ToolRunContext): string {
  * where it is, no child was created and nothing was spawned, and the caller
  * keeps working (or ends its turn) rather than asking again — a repeat of the
  * same request is answered by the same proposal.
+ *
+ * A root contract continued here is reported as what it is (A0 §2): the runtime
+ * created the root task and its run, so the ids are named rather than folded
+ * into the batch vocabulary. Nothing about a batch was admitted, and saying so
+ * is the point — a reader that took this arm for an admission would go looking
+ * for children that do not exist.
  */
 function renderContinuation(continuation: ProposalContinuation): string {
   if (continuation.status === 'admitted') {
@@ -28,6 +36,16 @@ function renderContinuation(continuation: ProposalContinuation): string {
       '',
       'The runtime owns the batch now: it starts the children one at a time in dependency order and settles this task when they',
       'are all terminal. This call returns at admission and does not wait for the batch.',
+    ].join('\n')
+  }
+  if (continuation.status === 'activated') {
+    return [
+      `proposal ${continuation.proposalId} was activated as root task ${continuation.taskId} with run ${continuation.runId}:`,
+      `- ${continuation.detail}`,
+      '',
+      'This is a root contract: the runtime created the root task and its root run and bound this session to them, so no batch',
+      'was admitted and no child exists yet. `task_read` shows the contract now, and `task_decompose` works on the root task from',
+      'here on.',
     ].join('\n')
   }
   const reason = continuation.reason === undefined ? '' : ` — ${continuation.reason}`
@@ -51,16 +69,19 @@ export function defineTaskProposalContinueTool(ctx: Context) {
   return defineTool({
     name: 'task_proposal_continue',
     description:
-      'Continue a decomposition proposal this session submitted: re-check it against everything that was true when it was proposed ' +
-      '(the parent\'s state, the limits, the capability resolution, the judging verifiers) and admit the batch if it still passes and ' +
-      'carries an approval. A proposal still waiting for its review is reported as waiting — that is not an error and nothing changes; ' +
-      'a rejected, cancelled, stale or expired one is reported with the reason it will never run. Only the session that proposed the ' +
-      'batch can continue it, and this call cannot approve anything: the approval is a decision the review channel records.',
+      'Continue a proposal this session submitted: re-check it against everything that was true when it was proposed ' +
+      '(what it belongs to, the limits, the capability resolution, the judging verifiers) and act on it if it still passes and ' +
+      'carries an approval — a decomposition batch is admitted, a root contract is activated as this session\'s root task and ' +
+      'run. A proposal still waiting for its review is reported as waiting — that is not an error and nothing changes; a ' +
+      'rejected, cancelled, stale or expired one is reported with the reason it will never run. Only the session that proposed ' +
+      'it can continue it, and this call cannot approve anything: the approval is a decision the review channel records. A root ' +
+      'session continues the contract it recorded before its root exists — with no run bound to it, the continuation falls back to ' +
+      'the store the session owns, and a ready or approved contract is activated from there.',
     parameters: {
       proposalId: {
         type: 'string',
         required: true,
-        description: 'The proposal id a previous task_decompose (or task_proposal_read) reported; an unknown id is refused',
+        description: 'The proposal id a previous task_decompose or task_intake (or task_proposal_read) reported; an unknown id is refused',
       },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
@@ -68,9 +89,9 @@ export function defineTaskProposalContinueTool(ctx: Context) {
       const undeclared = undeclaredParameters(args, ['proposalId'], 'task_proposal_continue')
       if (undeclared !== undefined) return undeclared
       const caller = sessionId(exec)
-      const { storeId } = await ctx.taskRuntime.runForSession(caller)
       let continuation: ProposalContinuation
       try {
+        const storeId = await proposalStoreFor(ctx, caller)
         continuation = await ctx.taskRuntime.continueProposal(storeId, args.proposalId, caller, {
           // The registration id of this call, so the batch's drain does not wait
           // for the call that is asking (A3 §3.3). A caller without one — a test

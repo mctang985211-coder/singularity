@@ -46,6 +46,10 @@ const ROOT_CORE_TOOLS = [
   // global layer: allowing it here is what lets the root load domain reference
   // skills (e.g. bb-pipeline) discovered from the deployment's skill roots.
   'skill',
+  // Accepting the user's own goal is the root's core path (A0): the tool is
+  // unconditional, because a graph whose root contract cannot be accepted has
+  // no goal to delegate at all.
+  'task_intake',
   'task_decompose',
   'task_submit_result',
   'task_cancel',

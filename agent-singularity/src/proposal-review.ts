@@ -6,14 +6,18 @@
  *
  * Three things this module is, and one it is not:
  *
- * - **A rendering of the saved batch.** §5 fixes what a review request must show
- *   — the parent's goal and criteria, every child's goal, criteria, assumptions,
- *   constraints, dependencies and declared capabilities with their current
- *   resolution, the limits in force, the unmet obligations, the determinism and
- *   heuristic markings, the proposal id and the full digest, and both context
- *   fingerprints — and forbids approving a hidden contract. {@link
- *   renderProposalReview} walks *every* child of the stored proposal: the batch
- *   is already bounded by `maxChildren`, so nothing here may be summarized away.
+ * - **A rendering of the saved subject.** §5 fixes what a review request must
+ *   show for a batch — the parent's goal and criteria, every child's goal,
+ *   criteria, assumptions, constraints, dependencies and declared capabilities
+ *   with their current resolution, the limits in force, the unmet obligations,
+ *   the determinism and heuristic markings, the proposal id and the full digest,
+ *   and both context fingerprints — and forbids approving a hidden contract.
+ *   {@link renderProposalReview} walks *every* child of the stored proposal: the
+ *   batch is already bounded by `maxChildren`, so nothing here may be summarized
+ *   away. A root contract (A0) is the same demand on a different subject: the
+ *   goal a root session would be admitted as, rendered from the stored contract
+ *   with no parent section, because the root task it becomes exists only after
+ *   the decision.
  * - **A use of the existing approval seam.** The ask goes through
  *   `ctx.approval.request` — the same call `escalate`, `hitl_approve` and
  *   `evolution_decide` make — whose answerers are the deployment's own human
@@ -49,14 +53,19 @@ import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import type {
   AcceptanceCriterion,
   CapabilityManifest,
+  Obligation,
+  TaskContract,
   TaskInstance,
   TaskProposal,
   TaskProposalChild,
+  TaskProposalDecomposition,
 } from '@dangosys/dsh-singularity-task'
 import type {
+  DecompositionReviewRequest,
   ProposalReviewChannel,
   ProposalReviewNotice,
   ProposalReviewRequest,
+  RootContractReviewRequest,
   TaskRuntime,
 } from '@dangosys/dsh-singularity-task-runtime'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
@@ -64,8 +73,15 @@ import type {} from '@dangosys/dsh-singularity-task-runtime'
 /** The prefix `rootTaskStoreId` writes; see {@link ownerSessionOfStore} for why it is re-checked rather than trusted. */
 const STORE_PREFIX = 'sg-t-'
 
-/** The tool name the review question is about: the decomposition the batch would become (audit and presentation). */
-const REVIEW_TOOL_NAME = 'task_decompose'
+/** The tool name a batch review's question is about: the decomposition the batch would become (audit and presentation). */
+const BATCH_REVIEW_TOOL_NAME = 'task_decompose'
+
+/**
+ * The tool name a root contract review's question is about: the intake that
+ * submitted the contract. A root contract is nobody's decomposition, so a card
+ * labelled `task_decompose` would ask a person about a call that was never made.
+ */
+const ROOT_REVIEW_TOOL_NAME = 'task_intake'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -138,8 +154,12 @@ function requirementParts(criterion: AcceptanceCriterion): string[] {
  * whether it is a heuristic judgement (which never counts as a deterministic
  * pass — §5 requires the marking, not a footnote), what it says, and what it
  * pins (command, named verifier, protected inputs, artifact requirements).
+ *
+ * `indent` is the caller's, because the same criterion line is read under a
+ * child of a batch and under a root contract: the marking is the subject, the
+ * depth is the caller's business.
  */
-function criterionLine(criterion: AcceptanceCriterion): string {
+function criterionLine(criterion: AcceptanceCriterion, indent = '    '): string {
   const qualifiers = [
     criterion.verificationMode,
     ...(criterion.mandatory ? ['mandatory'] : ['optional']),
@@ -149,7 +169,7 @@ function criterionLine(criterion: AcceptanceCriterion): string {
   const verifier = criterion.verifierRef === undefined ? '' : ` [verifier: ${criterion.verifierRef}]`
   const requirements = requirementParts(criterion)
   const requirementText = requirements.length === 0 ? '' : ` [${requirements.join('; ')}]`
-  return `    - ${criterion.criterionId} [${qualifiers.join(', ')}] ${criterion.description}${command}${verifier}${protectedInputsPart(criterion)}${requirementText}`
+  return `${indent}- ${criterion.criterionId} [${qualifiers.join(', ')}] ${criterion.description}${command}${verifier}${protectedInputsPart(criterion)}${requirementText}`
 }
 
 /**
@@ -165,6 +185,9 @@ function criterionLine(criterion: AcceptanceCriterion): string {
 function resolutionLines(manifest: CapabilityManifest | undefined): string[] {
   if (manifest === undefined) return []
   const entries = Object.entries(manifest.capabilities)
+  // A contract that declared nothing resolves to nothing, and a bare header
+  // under it would read like a resolution that was withheld.
+  if (entries.length === 0 && manifest.missing.length === 0) return []
   const lines = entries.map(([name, entry]) => {
     const parts = [
       ...(entry.skills.length === 0 ? [] : [`skills: ${entry.skills.join(', ')}`]),
@@ -207,7 +230,7 @@ export function renderProposalChild(
     ...(options.contractDigest === undefined ? [] : [`  contract digest (sha256): ${options.contractDigest}`]),
     `  contract version: ${contract.contractVersion}`,
     '  acceptance criteria:',
-    ...contract.acceptanceCriteria.map(criterionLine),
+    ...contract.acceptanceCriteria.map(criterion => criterionLine(criterion)),
     ...(verifierRefs.length === 0 ? [] : [`  pinned verifiers: ${verifierRefs.join(', ')}`]),
     ...listField('assumptions', contract.assumptions, '(none declared — the contract rests on nothing stated)'),
     ...listField('constraints', contract.constraints, '(none declared)'),
@@ -223,8 +246,12 @@ export function renderProposalChild(
  * order — the whole set, never a prefix. `manifests`, when a caller has them,
  * are the resolution recorded with the request and are aligned with the
  * children positionally.
+ *
+ * The parameter is the decomposition arm of {@link TaskProposal} on purpose: a
+ * root contract has no batch, and a renderer that could still be handed one
+ * would be rendering a payload that does not exist as if it did.
  */
-export function renderProposalChildren(proposal: TaskProposal, manifests?: readonly CapabilityManifest[]): string[] {
+export function renderProposalChildren(proposal: TaskProposalDecomposition, manifests?: readonly CapabilityManifest[]): string[] {
   return proposal.batch.flatMap((child, index) => [
     ...renderProposalChild(child, {
       index,
@@ -236,7 +263,32 @@ export function renderProposalChildren(proposal: TaskProposal, manifests?: reado
   ])
 }
 
-/** The limits one batch was admitted under, as the record holds them, with the enforced and the audited values kept apart. */
+/**
+ * One root contract as a reviewer reads it (§5's display list for the subject
+ * that has no parent): the contract version, the objective, every criterion
+ * with the markings {@link criterionLine} prints, the assumptions and
+ * constraints it rests on, the capabilities it declares, and — when the caller
+ * has them — the resolution this intake recorded, whose single manifest covers
+ * the contract's declared capabilities.
+ *
+ * A pure rendering of the contract it is given: it shows what the record holds
+ * and nothing about a parent, a batch or a task, because none of those exist
+ * while a root contract waits.
+ */
+export function renderRootContract(contract: TaskContract, manifests?: readonly CapabilityManifest[]): string[] {
+  return [
+    `- contract version: ${contract.contractVersion}`,
+    `- objective: ${contract.objective}`,
+    '- acceptance criteria:',
+    ...contract.acceptanceCriteria.map(criterion => criterionLine(criterion, '  ')),
+    ...listField('assumptions', contract.assumptions, '(none declared — the contract rests on nothing stated)'),
+    ...listField('constraints', contract.constraints, '(none declared)'),
+    ...listField('required capabilities', contract.requiredCapabilities, '(none)'),
+    ...resolutionLines(manifests?.[0]),
+  ]
+}
+
+/** The limits one proposal was admitted under, as the record holds them, with the enforced and the audited values kept apart. */
 function limitLines(proposal: TaskProposal): string[] {
   const context = proposal.admissionContext
   const audited = [
@@ -253,16 +305,74 @@ function limitLines(proposal: TaskProposal): string[] {
 
 /**
  * The review material one person is shown (§5), rendered from the saved facts:
- * the parent, every child, the limits, the obligations, the identity a decision
- * binds, and what this record honestly cannot promise.
+ * for a batch, the parent, every child, the limits, the obligations, the
+ * identity a decision binds and what this record honestly cannot promise; for a
+ * root contract, the contract itself and no parent at all — the task it becomes
+ * does not exist while it waits.
+ *
+ * The subject is discriminated by kind, and the two arms share every part that
+ * means the same thing in both (the limits, the identity, the boundary
+ * statements): a reviewer deciding a root intake is answering a different
+ * question, not reading a one-child batch of nobody.
  *
  * A pure function of the request, so what a deployment shows and what a test
  * asserts are the same rendering.
  */
 export function renderProposalReview(request: ProposalReviewRequest): string {
+  return request.kind === 'root' ? renderRootReview(request) : renderBatchReview(request)
+}
+
+/**
+ * The identity a decision binds, as both subjects print it: the three digests,
+ * the resolution, the key and the submission time. `subject` only names what
+ * the pinned verifiers belong to.
+ */
+function identityLines(
+  proposal: TaskProposal,
+  subject: 'batch' | 'contract',
+  registeredVerifiers: readonly string[] | undefined,
+): string[] {
+  return [
+    `- proposal digest (sha256): ${proposal.proposalDigest}`,
+    `- admission context digest (the limits above): ${proposal.admissionContextDigest}`,
+    `- review context digest (the resolution above): ${proposal.reviewContextDigest}`,
+    `- capability manifest digest: ${proposal.reviewContext.capabilityManifestDigest}`,
+    `- judging verifiers (the ids this ${subject}'s criteria pin): ${proposal.reviewContext.verifiers.length === 0 ? '(none pinned — criteria dispatch by mode)' : proposal.reviewContext.verifiers.map(verifier => verifier.verifierId).join(', ')}`,
+    ...(registeredVerifiers === undefined
+      ? ['- the deployment could not list its verifier registry when this review was requested']
+      : [`- registered verifiers now: ${registeredVerifiers.join(', ')}`]),
+    `- request key: ${proposal.requestKey}`,
+    ...(proposal.supersedes === undefined ? [] : [`- supersedes: ${proposal.supersedes}`]),
+    `- submitted at: ${proposal.createdAt}`,
+  ]
+}
+
+/**
+ * The obligations a review lists, as the request carried them. An empty list is
+ * printed as one line rather than omitted: "nothing is on record" is what a
+ * reviewer has to be able to read, and a root contract has no task to raise one
+ * on, so its list is empty by construction rather than by omission.
+ */
+function reviewObligationLines(obligations: readonly Obligation[]): string[] {
+  return obligations.length === 0
+    ? ['(none recorded when this review was requested)']
+    : obligations.map(obligation => `- ${obligation.obligationId}: ${obligation.goal} — judged by: ${obligation.criterion}`)
+}
+
+/** The review of a decomposition batch (T2/T3 §5): the parent's own goal, every child, the limits and the obligations on the parent. */
+function renderBatchReview(request: DecompositionReviewRequest): string {
   const proposal = request.proposal
+  if (proposal.kind === 'root') {
+    // The subject and the payload disagree: a request typed as a batch can still
+    // carry a root contract (the request type keeps the two fields apart). There
+    // is no parent, no batch and no child to print, so this is reported instead
+    // of dressing a contract up as a decomposition of nobody — the runtime
+    // records the channel's failure and the proposal keeps waiting.
+    throw new Error(
+      `proposal-review: proposal "${proposal.proposalId}" is a root contract, which a batch review cannot carry`,
+    )
+  }
   const parent: TaskInstance = request.parentTask
-  const criteria = proposal.identity.children
   return [
     `Batch review — proposal ${proposal.proposalId} [${proposal.status}] (policy ${proposal.policy}, trigger: ${request.trigger})`,
     `store: ${request.storeId}`,
@@ -287,22 +397,10 @@ export function renderProposalReview(request: ProposalReviewRequest): string {
     ...limitLines(proposal),
     '',
     `## Unmet obligations on the parent (${request.obligations.length})`,
-    ...(request.obligations.length === 0
-      ? ['(none recorded when this review was requested)']
-      : request.obligations.map(obligation => `- ${obligation.obligationId}: ${obligation.goal} — judged by: ${obligation.criterion}`)),
+    ...reviewObligationLines(request.obligations),
     '',
     '## Identity — what an approval would bind',
-    `- proposal digest (sha256): ${proposal.proposalDigest}`,
-    `- admission context digest (the limits above): ${proposal.admissionContextDigest}`,
-    `- review context digest (the resolution above): ${proposal.reviewContextDigest}`,
-    `- capability manifest digest: ${proposal.reviewContext.capabilityManifestDigest}`,
-    `- judging verifiers (the ids this batch's criteria pin): ${proposal.reviewContext.verifiers.length === 0 ? '(none pinned — criteria dispatch by mode)' : proposal.reviewContext.verifiers.map(verifier => verifier.verifierId).join(', ')}`,
-    ...(request.registeredVerifiers === undefined
-      ? ['- the deployment could not list its verifier registry when this review was requested']
-      : [`- registered verifiers now: ${request.registeredVerifiers.join(', ')}`]),
-    `- request key: ${proposal.requestKey}`,
-    ...(proposal.supersedes === undefined ? [] : [`- supersedes: ${proposal.supersedes}`]),
-    `- submitted at: ${proposal.createdAt}`,
+    ...identityLines(proposal, 'batch', request.registeredVerifiers),
     '',
     '## What this review cannot promise',
     '- the manifests above name skills, tools, presets and MCP servers — names, not the bytes behind them. What a worker',
@@ -310,6 +408,53 @@ export function renderProposalReview(request: ProposalReviewRequest): string {
     '- a verifier is named by the registered id its criteria pin. This deployment cannot name the version or the',
     '  configuration that registration currently stands for.',
     '- a criterion marked heuristic is judged by a model; nothing in this batch turns it into a deterministic pass.',
+  ].join('\n')
+}
+
+/**
+ * The review of a root contract (A0 §3): the goal a root session would be
+ * admitted as, and no parent section — there is no parent task, and the root
+ * task this contract becomes does not exist while it waits.
+ *
+ * What a decision here binds is the contract: its objective and criteria are
+ * the goal the whole graph is later judged against, so the rendering walks
+ * every criterion with the markings §5 requires (mode, mandatory, heuristic,
+ * protected inputs, the command or verifier it pins) and prints the declared
+ * capabilities with the resolution this intake recorded.
+ */
+function renderRootReview(request: RootContractReviewRequest): string {
+  const proposal = request.proposal
+  return [
+    `Root contract review — proposal ${proposal.proposalId} [${proposal.status}] (policy ${proposal.policy}, trigger: ${request.trigger})`,
+    `store: ${request.storeId}`,
+    '',
+    'A decision answers one question: should this root contract be accepted as the goal this graph works toward? Approving',
+    'it does not mean the work is accepted (the verifiers still judge every criterion), does not grant a capability and does',
+    'not close a gap. Nothing exists while it waits — no root task, no run and no worker: the root task is what this contract',
+    'becomes once the runtime re-checks and activates it. The decision binds the contract digest and both context',
+    'fingerprints printed below: a revision, a re-resolution or a changed limit is a different proposal.',
+    '',
+    '## Root contract (the goal this session would be admitted as)',
+    `- root session: ${request.rootSessionId}`,
+    ...renderRootContract(request.contract, request.manifests),
+    '',
+    '## Limits this contract is admitted under',
+    ...limitLines(proposal),
+    '',
+    `## Unmet obligations on this root contract (${request.obligations.length})`,
+    ...reviewObligationLines(request.obligations),
+    '',
+    '## Identity — what an approval would bind',
+    ...identityLines(proposal, 'contract', request.registeredVerifiers),
+    '',
+    '## What this review cannot promise',
+    '- the manifests above name skills, tools, presets and MCP servers — names, not the bytes behind them. What the root run',
+    '  actually loads is pinned when it is activated, which happens after this decision.',
+    '- a verifier is named by the registered id its criteria pin. This deployment cannot name the version or the',
+    '  configuration that registration currently stands for.',
+    '- a criterion marked heuristic is judged by a model; nothing in this contract turns it into a deterministic pass.',
+    '- the objective above is the root agent\'s reading of the user\'s request. This card carries the contract, not the request',
+    '  it was built from, and machine admission does not prove that reading correct (A0 §1.10).',
   ].join('\n')
 }
 
@@ -360,7 +505,7 @@ export class ProposalReviewService extends Service implements ProposalReviewChan
 
     const ask = this.ctx.approval.request({
       agent,
-      toolName: REVIEW_TOOL_NAME,
+      toolName: request.kind === 'root' ? ROOT_REVIEW_TOOL_NAME : BATCH_REVIEW_TOOL_NAME,
       reason: renderProposalReview(request),
       signal: this.lifetime.signal,
     })
