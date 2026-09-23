@@ -117,6 +117,44 @@ export function independentAcceptanceDefects(
 }
 
 /**
+ * The one structural rule a **root contract** owes on top of
+ * {@link contractDefects} (A0 §1.2): at least one mandatory criterion whose
+ * judge is something other than the composite conjunction.
+ *
+ * Why it is a rule of its own and not folded into {@link contractDefects}: a
+ * decomposition child may legitimately be judged by "my children verified" —
+ * its parent owns the goal it was delegated — while a *root* has nobody above
+ * it, so a root whose only mandatory criterion is the composite conjunction is
+ * satisfied by its own decomposition and by nothing else. That is the shape the
+ * graph entry used to mint from its fixed spec, and it is exactly the shape
+ * this rule refuses to call a root goal. Applying it to every contract would
+ * break the delegated-children case; applying it to nothing would let a root
+ * re-enter through the old shape.
+ *
+ * Structural, and only structural: it says which *kind* of judge the contract
+ * names, never whether that judge is any good. A `command` that is a constant
+ * truth, a model's self-report, or a `heuristic` criterion are all outside what
+ * a shape rule can decide — §1.2 says so in as many words ("不能用恒真命令、
+ * 模型自述或 heuristic 冒充确定性根通过"), and P4 already labels a heuristic
+ * verdict as never a deterministic pass. What this rule does buy is that the
+ * root's acceptance cannot be *only* the conjunction of what it delegated.
+ *
+ * `label` names the contract under validation (`root contract`, `root
+ * contract of session "s-…"`); the reason is prefixed with it, like every other
+ * contract rule's.
+ */
+export function rootIndependenceDefects(criteria: readonly AcceptanceCriterion[], label: string): string[] {
+  const independent = criteria.some(criterion =>
+    criterion.mandatory === true && criterion.verificationMode !== 'composite')
+  if (independent) return []
+  return [
+    `${label} requires at least one mandatory acceptance criterion judged by something other than the composite conjunction ` +
+    '(verificationMode !== "composite"): a root whose only mandatory criterion is "all children verified" is satisfied by its own ' +
+    'decomposition and has no independent check of the goal it was given',
+  ]
+}
+
+/**
  * Whether a criterion declares a command a verifier could actually run. A
  * declared command that is blank — or not text at all — is as missing as an
  * absent one: nothing executable was handed to the judge.

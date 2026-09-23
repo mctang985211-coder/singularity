@@ -24,6 +24,7 @@ import type {
   ExecutionPhase,
   Obligation,
   ReviewTokenUsage,
+  RootProposalIdentity,
   RunId,
   RunProviderBinding,
   RunStatus,
@@ -33,23 +34,29 @@ import type {
   TaskId,
   TaskInstance,
   TaskProposal,
+  TaskProposalDecomposition,
   TaskProposalDecisionOutcome,
   TaskProposalPolicy,
+  TaskProposalRoot,
+  TaskProposalRootConsumption,
   TaskProposalStatus,
   TaskRun,
   TaskSnapshot,
   VerificationMode,
 } from '@dangosys/dsh-singularity-task'
 import {
-  RootTaskSpec,
+  ROOT_PROPOSAL_TASK_ID,
   TASK_CONTRACT_VERSION,
   admissionContextDigest,
+  contractDigest,
   reviewContextDigest,
+  rootProposalDigest,
+  rootProposalId,
   rootTaskStoreId,
   taskProposalId,
 } from '@dangosys/dsh-singularity-task'
 import { resolveCapabilities, capabilitySnapshot, resolvePreset, type CapabilityConfig, type PermissionSpec } from './capability.ts'
-import { checkDecomposition, contractDefects, independentAcceptanceDefects } from './admission.ts'
+import { checkDecomposition, contractDefects, independentAcceptanceDefects, rootIndependenceDefects } from './admission.ts'
 import { ExecutionGate, type DrainResult, type JobsView } from './gate.ts'
 import { optionalService, precheckProviders, precheckReplacedCapabilityRow, providerContentIdentities, providerDefectLines, providerRefusals, registeredVerifierIds } from './provider-precheck.ts'
 import type { ProviderPrecheck, SkillDiscoveryView } from './provider-precheck.ts'
@@ -58,9 +65,9 @@ import type { RootBudgetConfig } from './root-budget.ts'
 import { bindRunProviders, defaultRunBindingRoot, readRunBinding } from './run-binding.ts'
 import type { RunBindingRead } from './run-binding.ts'
 import { buildHandoff, renderWorkerPrompt } from './handoff.ts'
-import { normalizeDecomposition, decompositionIdentity } from './normalize.ts'
+import { normalizeDecomposition, normalizeRootContract, decompositionIdentity } from './normalize.ts'
 import type { DecompositionIdentityContext, NormalizedBatch } from './normalize.ts'
-import { isOpenProposal, proposalRequestKey, reviewContextDelta, reviewContextOf } from './proposal.ts'
+import { isOpenProposal, proposalRequestKey, reviewContextDelta, reviewContextOf, rootProposalRequestKey } from './proposal.ts'
 import {
   fixCriteriaProtectedInputs,
   fixSpecProtectedInputs,
@@ -123,7 +130,7 @@ export {
 } from './root-budget.ts'
 export type { BudgetVerdict, ResolvedRootBudget, RootBudgetConfig, RootBudgetResolution } from './root-budget.ts'
 export type { AdmissionChild, AdmissionParent, AdmissionVerdict } from './admission.ts'
-export { checkDecomposition, contractDefects, independentAcceptanceDefects } from './admission.ts'
+export { checkDecomposition, contractDefects, independentAcceptanceDefects, rootIndependenceDefects } from './admission.ts'
 export {
   fixCriteriaProtectedInputs,
   fixProtectedInputs,
@@ -136,11 +143,13 @@ export type {
   NormalizationResult,
   NormalizedBatch,
   NormalizedChild,
+  RootNormalizationResult,
 } from './normalize.ts'
-export { decompositionIdentity, normalizeDecomposition } from './normalize.ts'
+export { decompositionIdentity, normalizeDecomposition, normalizeRootContract } from './normalize.ts'
 export type {
   ProposalRequestKeyContext,
   ReviewContextInput,
+  RootRequestKeyContext,
 } from './proposal.ts'
 export {
   PROPOSAL_REQUEST_KEY_PREFIX,
@@ -149,6 +158,7 @@ export {
   proposalRequestKey,
   reviewContextDelta,
   reviewContextOf,
+  rootProposalRequestKey,
   verifierIdentitiesOf,
 } from './proposal.ts'
 export type { ObligationCoverage, ObligationTemplate, ObligationTemplateFile } from './obligation.ts'
@@ -446,6 +456,116 @@ export interface DecomposeSpec {
    */
   contractVersion?: number
 }
+
+/**
+ * One root contract as its caller presents it (A0 §1.2, §2): the goal of a root
+ * session — objective, acceptance criteria, assumptions, constraints, declared
+ * capabilities — in the authoring form the tools and the direct service entry
+ * share.
+ *
+ * The field set is the contract's own (`task/src/contract.ts:TaskContract`) and
+ * nothing else: a key this shape does not declare is refused by name rather than
+ * dropped, so a caller cannot smuggle a budget, a skill pin or a permission
+ * through a field the runtime never reads. Text is stored verbatim — blankness is
+ * refused, bytes are not rewritten — and criterion ids are fixed by the single
+ * normalization entry.
+ *
+ * What this shape deliberately does *not* carry: a mode that replaces the
+ * acceptance rule, a flag that skips the review, or a parent to hang the goal
+ * under. A root contract is the goal; how it is *reviewed* is the deployment's
+ * policy, and how it is *checked* is its criteria.
+ */
+export interface RootContractSpec {
+  objective: string
+  acceptanceCriteria: readonly CriterionSpec[]
+  assumptions?: readonly string[]
+  constraints?: readonly string[]
+  requiredCapabilities?: readonly string[]
+  /** The contract language, as {@link DecomposeSpec.contractVersion}: omitted means this build's version. */
+  contractVersion?: number
+}
+
+/**
+ * What a caller may say about one root intake beyond the contract itself. The
+ * fields mirror {@link DecomposeProposalOptions} because a root contract is a
+ * proposal too — same lifecycle, same key rules, same decision binding.
+ */
+export interface RootIntakeOptions {
+  /**
+   * The idempotency key this request is addressed by (§2). Absent, the runtime
+   * derives it from the store, the root session and the contract's own digest
+   * ({@link rootProposalRequestKey}) — so the same contract asked for again is
+   * answered from the record, and a revision (different content) is a different
+   * key. Given explicitly, the same rule applies: one key names one proposal,
+   * and a key already bound to other content is refused by name.
+   */
+  requestKey?: string
+  /** The proposal this one revises (§6): a rejected or stale root contract, whose record is kept. */
+  supersedes?: string
+  /**
+   * The call's own control: an already-aborted `signal` persists nothing. There is
+   * no `callId` here and no write drain behind it — nothing about an activation
+   * hands this checkout to another writer or closes this session's own ability to
+   * write (A3 §3.3's drain is the convergence *before* a batch or a verification
+   * takes the checkout, and a root run keeps its own), so the exclusion such a
+   * field exists for has no step to apply to.
+   */
+  exec?: { signal?: AbortSignal }
+}
+
+/**
+ * What one root intake settled (A0 §1.3–§1.4). `status` is the field to switch
+ * on.
+ *
+ * `pending_review` declares no ids rather than optional ones: a root contract
+ * waiting for a decision has no task and no run — that is the whole point of
+ * `all` — and a caller reading an id off this member would be reading a field
+ * that does not exist. `activated` carries the ids the activation commit minted,
+ * so the caller knows which root task and run its contract became without
+ * re-reading the store.
+ */
+export type RootIntakeResult =
+  | {
+      status: 'activated'
+      proposalId: string
+      taskId: TaskId
+      runId: RunId
+      detail: string
+    }
+  | {
+      status: 'pending_review'
+      proposalId: string
+      detail: string
+    }
+
+/**
+ * What {@link TaskRuntime.adoptRoot} found for one root session.
+ *
+ * Two outcomes, both normal: the store holds a root task bound to this session
+ * (`adopted`, with the task and run ids and the phase the session's gate was set
+ * to), or it does not (`adopted: false`) — a store can exist with no task at all
+ * (A0 §1.1: `graphs.create` opens it, the intake fills it), and that is not an
+ * error, it is the state before a contract was accepted.
+ */
+export type RootAdoption =
+  | {
+      adopted: true
+      taskId: TaskId
+      runId: RunId
+      /**
+       * The phase this session's execution gate now holds, derived from the
+       * store's own run record. A root run that reached a terminal state leaves
+       * `terminal`: a late intake or write on a finished root is refused by the
+       * gate as well as by the state, and a restart must re-derive that from the
+       * store rather than trust what a dead process remembered (§1.8).
+       */
+      phase: ExecutionPhase | 'terminal'
+      detail: string
+    }
+  | {
+      adopted: false
+      detail: string
+    }
 
 /**
  * Options for {@link TaskRuntime.replayTask} (guide §2.7.6, W15).
@@ -832,14 +952,21 @@ export type DecomposeAdmissionResult =
     }
 
 /**
- * What one continuation settled (T2/T3 §6). The two members are the whole
- * answer to "did this batch become tasks": `admitted` carries the batch and its
- * children, and every other member is a proposal that did **not** run — waiting
- * for a decision, invalidated (`stale`, `expired`), or already refused. A
- * continuation that cannot even be judged (the batch content is not in this
- * process, the deployment cannot list its verifiers, the root budget refuses
- * the batch, the workspace is somebody else's) is a *throw* instead: nothing
- * was decided about the batch, and the proposal is left exactly as it was.
+ * What one continuation settled (T2/T3 §6, root arms A0 §1.4). The members are
+ * the whole answer to "did this proposal become what it asked for": `admitted`
+ * carries the batch and its children, `activated` carries the root task and run
+ * a root contract became, and every other member is a proposal that did **not**
+ * run — waiting for a decision, invalidated (`stale`, `expired`), or already
+ * refused. A continuation that cannot even be judged (the batch content is not
+ * in this process, the deployment cannot list its verifiers, the root budget
+ * refuses the batch, the workspace is somebody else's) is a *throw* instead:
+ * nothing was decided about the proposal, and it is left exactly as it was.
+ *
+ * The two "it became something" arms are kept apart by `status` rather than
+ * sharing one member with optional ids: a root intake is not a batch, and a
+ * reader that had to test whether `batchId` happens to be there would be reading
+ * a claim the record does not make (§2: the batch vocabulary does not apply to a
+ * root).
  */
 export type ProposalContinuation =
   | {
@@ -847,6 +974,15 @@ export type ProposalContinuation =
       status: 'admitted'
       batchId: string
       childTaskIds: TaskId[]
+      detail: string
+    }
+  | {
+      proposalId: string
+      status: 'activated'
+      /** The root task the activation commit created, carrying the approved contract. */
+      taskId: TaskId
+      /** The root run the activation commit created, in the proposal's root session and born `active`. */
+      runId: RunId
       detail: string
     }
   | {
@@ -862,7 +998,8 @@ export interface ProposalDecisionResult {
   proposalId: string
   /** The outcome that was **recorded**, not the one that was asked for: a late approval becomes `expired` (§6). */
   outcome: TaskProposalDecisionOutcome
-  status: TaskProposalStatus
+  /** Where the proposal stands: its stored status, or `activated` once a root contract's approval has created it. */
+  status: TaskProposalStatus | 'activated'
   /** The continuation an approval triggered, when one was attempted. */
   continuation?: ProposalContinuation
   detail: string
@@ -900,15 +1037,35 @@ export interface DecompositionRefusal {
 export type ProposalReviewTrigger = 'submitted' | 'tightened' | 'recovered'
 
 /**
- * One request for a person to review a batch (§5). It carries the proposal
- * (what a decision binds) and — when this process holds it — the batch itself,
- * because §5 requires the review to show the children's objectives, criteria,
- * assumptions, dependencies and declared capabilities rather than a digest.
+ * One request for a person to review a proposal (§5). It carries the proposal
+ * (what a decision binds) and — when this process holds them — the facts §5
+ * requires the review to show: the children's objectives, criteria, assumptions,
+ * dependencies and declared capabilities for a batch, or the single root
+ * contract for a root intake, rather than a digest.
+ *
+ * The subject is discriminated by kind because the two are different things to
+ * show. A decomposition batch belongs to a parent task and is displayed under
+ * its goal; a root contract has no parent — the task it becomes does not exist
+ * while it waits — so the request names the root session instead and carries the
+ * contract itself. Neither arm invents the other's fields: a reviewer sees a
+ * root goal as a root goal, never as a one-child decomposition of nobody.
  */
-export interface ProposalReviewRequest {
+export interface ProposalReviewRequestBase {
   readonly storeId: string
   readonly trigger: ProposalReviewTrigger
   readonly proposal: TaskProposal
+  /** The manifests this proposal resolves to right now; aligned with the batch's children, or the root contract's declared capabilities. */
+  readonly manifests: readonly CapabilityManifest[]
+  /** The registered verifier ids at the moment of the request, when the deployment can list them. */
+  readonly registeredVerifiers?: readonly string[]
+  /** Every obligation raised on the subject so far — §5's "未满足义务说明", read from the store rather than summarized. */
+  readonly obligations: readonly Obligation[]
+}
+
+/** A batch to review: its parent's own record, and the children rebuilt from the store. */
+export interface DecompositionReviewRequest extends ProposalReviewRequestBase {
+  /** The kind, when the writer stated it. Absent means this arm — the shape every request had before root intake existed. */
+  readonly kind?: 'decomposition'
   /** The parent task the batch belongs to, as the store holds it. */
   readonly parentTask: TaskInstance
   /**
@@ -917,13 +1074,18 @@ export interface ProposalReviewRequest {
    * process happens to remember.
    */
   readonly batch: NormalizedBatch
-  /** The manifests that batch resolves to right now, aligned with `batch.children`. */
-  readonly manifests: readonly CapabilityManifest[]
-  /** The registered verifier ids at the moment of the request, when the deployment can list them. */
-  readonly registeredVerifiers?: readonly string[]
-  /** Every obligation raised on the parent so far — §5's "未满足义务说明", read from the store rather than summarized. */
-  readonly obligations: readonly Obligation[]
 }
+
+/** A root contract to review: the goal of one root session, and nothing above it. */
+export interface RootContractReviewRequest extends ProposalReviewRequestBase {
+  readonly kind: 'root'
+  /** The root session whose goal this contract is. There is no parent task to name, and none is invented. */
+  readonly rootSessionId: string
+  /** The normalized root contract the proposal asks to run, as stored — what a reviewer reads is what an approval binds. */
+  readonly contract: TaskContract
+}
+
+export type ProposalReviewRequest = DecompositionReviewRequest | RootContractReviewRequest
 
 /** What a review channel did with one request. Never a decision, never an approval. */
 export interface ProposalReviewNotice {
@@ -972,9 +1134,52 @@ type DecompositionPrecheck =
   | { ok: true; batch: NormalizedBatch; manifests: CapabilityManifest[]; providers: ProviderPrecheck }
   | { ok: false; refusal: DecompositionRefusal }
 
+/**
+ * What the root pre-check judged (A0 §3): the manifests the one contract resolves
+ * to and the provider verdicts behind them — everything the activation needs, and
+ * nothing persisted. There is no batch and no gap list: a root contract is one
+ * contract, and a capability it cannot resolve is a refusal rather than a
+ * delegable gap.
+ */
+type RootPrecheck =
+  | { ok: true; manifests: CapabilityManifest[]; providers: ProviderPrecheck }
+  | { ok: false; refusal: RootRefusal }
+
+/** One root pre-check refusal: the error the caller raises, and the reasons behind it. No gaps — a root has nobody to delegate one to. */
+interface RootRefusal {
+  readonly error: Error
+  readonly reasons: readonly string[]
+}
+
+/**
+ * What {@link TaskRuntime.requestProposalReview} is given: the subject's own
+ * facts, discriminated by kind, with the fields the request itself reports
+ * (`manifests`, the registered vocabulary, the obligations) looked up by the
+ * method rather than by its callers.
+ */
+type ReviewSubject =
+  | {
+      kind?: 'decomposition'
+      storeId: string
+      trigger: ProposalReviewTrigger
+      proposal: TaskProposal
+      parentTask: TaskInstance
+      batch: NormalizedBatch
+      manifests: readonly CapabilityManifest[]
+    }
+  | {
+      kind: 'root'
+      storeId: string
+      trigger: ProposalReviewTrigger
+      proposal: TaskProposal
+      rootSessionId: string
+      contract: TaskContract
+      manifests: readonly CapabilityManifest[]
+    }
+
 /** What the admission half of one pre-checked batch is given: the proposal, the batch and the run it belongs to. */
 interface AdmitBatchRequest {
-  proposal: TaskProposal
+  proposal: TaskProposalDecomposition
   parentTask: TaskInstance
   parentRun: TaskRun
   batch: NormalizedBatch
@@ -1347,119 +1552,182 @@ export class TaskRuntime extends Service {
     )
   }
 
-  /** Create (or reopen) the store, expand RootTaskSpec into the root task, and bind a run to the root session. */
-  async createRootTask(
-    storeId: string,
-    options: { objective: string; rootSessionId: string },
-    actor: string,
-  ): Promise<{ taskId: TaskId; runId: RunId }> {
+  /**
+   * Open one root session's store and adopt the root it already holds, or say
+   * that it holds none (A0 §3, the recovery half of the old `createRootTask`).
+   *
+   * **It creates nothing.** A root task comes into existence exactly one way —
+   * a root contract that passed the review gate and was activated
+   * ({@link intakeRootContract}) — and this entry refuses to be a second door:
+   * there is no parameter, flag or entry that mints a root without a proposal,
+   * which is what keeps §1.3's "批准前零根任务" a property of the system rather
+   * than of one call path.
+   *
+   * What it does, in order: create-or-open the store (`rootTaskStoreId`), index
+   * every run the store holds, and then —
+   *
+   * - **no root task**: answer `{ adopted: false }`. A store with no task is a
+   *   normal state since §1.1 (a graph's store is opened by its creation and
+   *   filled when a contract is accepted), not a failure to report;
+   * - **a root task, with a run bound to this root session**: re-check the run's
+   *   content binding (S1-C: a snapshot that is no longer readable refuses the
+   *   re-entry by name rather than resuming against whatever stands at that path
+   *   now), bind the session in this process, derive the session's gate phase
+   *   from the store's own run record, settle or restart whatever the store left
+   *   in flight (`reconcileStore`) and rebuild this process's workspace
+   *   ownership — the same recovery a reopen performs;
+   * - **a root task without a run for this session**: refuse by name. That state
+   *   is a store whose root was created for a different session or whose run
+   *   record is gone, and neither is something to guess a binding for.
+   *
+   * The gate phase is *derived*, never remembered: a root run that is no longer
+   * running — terminal, cancelled, failed, verified — leaves the session
+   * `terminal`, so a late intake or a late write on a finished root is refused by
+   * the gate as well as by the state (§1.8). Reading it back from the store is
+   * what makes that true after a restart, when no process holds the phase the
+   * dead one set.
+   */
+  async adoptRoot(storeId: string, rootSessionId: string): Promise<RootAdoption> {
+    await this.openOrCreateStore(storeId)
+    const snapshot = await this.ctx.task.snapshotIn(storeId)
+    this.reindex(storeId, snapshot)
+    const root = snapshot.tasks.find(task => task.parentTaskId === undefined)
+    if (root === undefined) {
+      return {
+        adopted: false,
+        detail:
+          `store "${storeId}" holds no root task, so there is nothing to adopt for session "${rootSessionId}"; ` +
+          'a root task is created by a root contract intake, never by adoption',
+      }
+    }
+    const run = [...snapshot.runs].reverse().find(item => item.taskId === root.taskId && item.sessionId === rootSessionId)
+    if (run === undefined) {
+      throw new Error(`task-runtime: store "${storeId}" already has root task "${root.taskId}" without a run for session "${rootSessionId}"`)
+    }
+    // Re-entering a run (a restarted root session adopts the run bound to it):
+    // the record's own content identity is re-checked before the run is handed
+    // back. A run whose bound content is no longer readable is refused by name
+    // rather than resumed against whatever stands at that path now.
+    if (run.providerBinding !== undefined) {
+      const read = await readRunBinding(run.providerBinding)
+      if (read !== undefined && read.defects.length > 0) {
+        throw new Error(
+          `task-runtime: run "${run.runId}" cannot be re-entered: the content it is bound to is not readable:\n- ${read.defects.join('\n- ')}`,
+        )
+      }
+    }
+    const phase = this.rootSessionPhase(run)
+    this.sessions.set(rootSessionId, { storeId, taskId: root.taskId, runId: run.runId })
+    this.startedSessions.add(rootSessionId)
+    if (phase === 'terminal') this.executionGate.setTerminal(rootSessionId)
+    else if (phase !== undefined) this.executionGate.setPhase(rootSessionId, phase)
+    // Adoption is the recovery entry (§3.6): runs this process is not driving
+    // are settled or restarted, and the workspace this tree holds is rebuilt
+    // from its own batch chain.
+    await this.reconcileStore(storeId)
+    await this.rebuildWorkspaceOwnership(storeId)
+    return {
+      adopted: true,
+      taskId: root.taskId,
+      runId: run.runId,
+      phase: phase ?? 'terminal',
+      detail:
+        `store "${storeId}" holds root task "${root.taskId}" with run "${run.runId}" for session "${rootSessionId}"; ` +
+        `the session is bound and its gate is "${phase ?? 'ungated'}"`,
+    }
+  }
+
+  /**
+   * The gate phase one stored root run implies: its coordination phase while it
+   * is running, `terminal` once it is not, and `undefined` for a record that
+   * predates coordination phases (A3's own boundary — such a run is not gated,
+   * and its only legal continuation is cancellation).
+   */
+  private rootSessionPhase(run: TaskRun): ExecutionPhase | 'terminal' | undefined {
+    if (run.status !== 'running') return 'terminal'
+    return run.executionPhase
+  }
+
+  /** Create the store, or open the one that already exists — the two ways a store can be there (A0 §1.1). */
+  private async openOrCreateStore(storeId: string): Promise<void> {
     try {
       await this.ctx.task.createStore(storeId)
     } catch (error) {
       if (!(error instanceof Error) || !/already (open|exists)/.test(error.message)) throw error
       await this.ctx.task.openStore(storeId)
     }
-    const snapshot = await this.ctx.task.snapshotIn(storeId)
-    this.reindex(storeId, snapshot)
-    const root = snapshot.tasks.find(task => task.parentTaskId === undefined)
-    if (root !== undefined) {
-      const run = [...snapshot.runs].reverse().find(item => item.taskId === root.taskId && item.sessionId === options.rootSessionId)
-      if (run === undefined) {
-        throw new Error(`task-runtime: store "${storeId}" already has root task "${root.taskId}" without a run for session "${options.rootSessionId}"`)
-      }
-      // Re-entering a run (a restarted root session adopts the run bound to it):
-      // the record's own content identity is re-checked before the run is handed
-      // back. A run whose bound content is no longer readable is refused by name
-      // rather than resumed against whatever stands at that path now.
-      if (run.providerBinding !== undefined) {
-        const read = await readRunBinding(run.providerBinding)
-        if (read !== undefined && read.defects.length > 0) {
-          throw new Error(
-            `task-runtime: run "${run.runId}" cannot be re-entered: the content it is bound to is not readable:\n- ${read.defects.join('\n- ')}`,
-          )
-        }
-      }
-      this.startedSessions.add(options.rootSessionId)
-      // Adoption is the recovery entry (§3.6): runs this process is not driving
-      // are settled or restarted, and the workspace this tree holds is rebuilt
-      // from its own batch chain.
-      await this.reconcileStore(storeId)
-      await this.rebuildWorkspaceOwnership(storeId)
-      return { taskId: root.taskId, runId: run.runId }
-    }
+  }
 
-    // The ids are minted before anything is written, so the checkout can be
-    // claimed for the run that is about to exist: a workspace another live owner
-    // holds fails the creation with nothing persisted (§3.4).
-    const taskId: TaskId = `t-${randomUUID()}`
-    const runId: RunId = `r-${randomUUID()}`
-    const workspacePath = await this.workspacePathForSession(options.rootSessionId)
-    if (workspacePath !== undefined && this.workspaces !== undefined) {
-      await this.workspaces.claim(workspacePath, { kind: 'run', storeId, taskId, runId, since: now() })
+  /**
+   * One root contract intake, all the way through (A0 §1.3–§1.4): the proposal
+   * is submitted, and — when it may run — activated in the same call. This is
+   * the entry the root agent's `task_intake` tool and a direct service call
+   * share, and there is no third one: an intake that stops at "the proposal was
+   * recorded" is {@link submitRootContractProposal}, and the only thing that
+   * turns a proposal into a root task is {@link continueProposal}.
+   *
+   * Under `off` the submission is born `ready` and the continuation runs
+   * immediately, so the *same* call both records `policy-off` and activates — the
+   * caller never has to ask twice for a contract that needs no review. Under
+   * `all` the proposal is born `pending_review` and this call returns with no
+   * task, no run, no spawn and no notification: nothing exists until a recorded
+   * decision approves it. A contract that fails the machine rules is refused
+   * with field-level reasons before a proposal exists at all.
+   */
+  async intakeRootContract(
+    storeId: string,
+    rootSessionId: string,
+    spec: RootContractSpec,
+    options: RootIntakeOptions = {},
+  ): Promise<RootIntakeResult> {
+    if (options.exec?.signal?.aborted === true) {
+      throw new Error(`task-runtime: the intake of a root contract for session "${rootSessionId}" was cancelled before anything was persisted`)
     }
-    const manifest = this.resolveCapabilities(RootTaskSpec.requiredCapabilities)
-    // The root carries a contract like every other task (T1): the criteria come
-    // from the fixed RootTaskSpec, deep-copied so the shared definition is
-    // never aliased into a store — a criterion field added to the spec later
-    // is copied by this clone without anyone having to remember it. The
-    // objective is the accepted one, and the root declares no assumptions or
-    // constraints of its own: the root session is where a human asks, not
-    // where a contract rests on text.
-    const contract: TaskContract = {
-      contractVersion: TASK_CONTRACT_VERSION,
-      objective: options.objective,
-      acceptanceCriteria: structuredClone(RootTaskSpec.acceptanceCriteria),
-      assumptions: [],
-      constraints: [],
-      requiredCapabilities: [...RootTaskSpec.requiredCapabilities],
+    const submission = await this.submitRootContractProposal(storeId, rootSessionId, spec, options)
+    const continued = await this.continueProposal(storeId, submission.proposalId, rootSessionId)
+    if (continued.status === 'activated') {
+      return {
+        status: 'activated',
+        proposalId: continued.proposalId,
+        taskId: continued.taskId,
+        runId: continued.runId,
+        detail: continued.detail,
+      }
     }
-    const task: TaskInstance = {
-      taskId,
-      definitionRef: { taskType: RootTaskSpec.taskType, version: RootTaskSpec.version },
-      objective: contract.objective,
-      depth: 0,
-      acceptanceCriteria: contract.acceptanceCriteria,
-      requestedCapabilities: [...contract.requiredCapabilities],
-      decompositionStatus: 'decomposable',
-      status: 'created',
-      runIds: [],
-      childTaskIds: [],
-      contract,
+    if (continued.status === 'pending_review') {
+      return { status: 'pending_review', proposalId: continued.proposalId, detail: continued.detail }
     }
-    await this.ctx.task.createTaskIn(storeId, task, actor)
-    await this.ctx.task.admitTaskIn(storeId, task.taskId, actor, { decompositionStatus: 'decomposable', manifest })
-    // The root binds a binding like every other run — the same builder, the same
-    // meaning — and for a root that grants nothing that is a record with no
-    // providers, no snapshot, and the registry revision the table stood at:
-    // nothing about content is invented for a run that loaded none.
-    const providerBinding = await bindRunProviders({
-      storeId,
-      runId,
-      manifest,
-      table: this.config.capabilities,
-      root: this.config.runBindingRoot,
-    })
-    const run: TaskRun = {
-      runId,
-      taskId: task.taskId,
-      sessionId: options.rootSessionId,
-      capabilitySnapshot: capabilitySnapshot(manifest),
-      providerBinding,
-      // Born active (§1.1): the root decides its own work — it may decompose,
-      // and it must submit — until its batch or its own submission closes the
-      // gate. A root run with no phase would be a record the phase gate cannot
-      // admit anything for.
-      executionPhase: 'active',
-      artifacts: [],
-      verifierResults: [],
-      status: 'running',
-      startedAt: now(),
-    }
-    await this.ctx.task.startRunIn(storeId, run, actor)
-    this.sessions.set(options.rootSessionId, { storeId, taskId: task.taskId, runId: run.runId })
-    this.startedSessions.add(options.rootSessionId)
-    this.executionGate.setPhase(options.rootSessionId, 'active')
-    return { taskId: task.taskId, runId: run.runId }
+    throw new Error(
+      `task-runtime: root contract of session "${rootSessionId}" is ${continued.status} (proposal ${continued.proposalId}): ${continued.detail}`,
+    )
+  }
+
+  /**
+   * One root contract proposal is submitted (A0 §1.2–§1.3): the pure pre-check,
+   * the immutable record with the policy it was born under, and — under `all` —
+   * the review request. Nothing is activated here, whatever the policy: no root
+   * task, no run, no spawn, and no id minted except the proposal's own
+   * content-derived one.
+   *
+   * The order is the same contract the batch path follows (§5: 坏提案不弹审批):
+   * the presented contract is fixed and normalized, then judged — structural
+   * rules, the root's independent-criterion rule, capability resolution and the
+   * gap rule, the provider pre-check, the verifier ids — and a contract that
+   * fails any of them is refused with field-level reasons *before* a proposal
+   * exists, so nothing is shown to a person about a contract that could never
+   * run. A contract that passes is recorded once behind its content-derived id,
+   * carrying the contract itself, and a retry of the same request (same key,
+   * same content) is answered from the record (`existing: true`) instead of
+   * building a second proposal.
+   */
+  async submitRootContractProposal(
+    storeId: string,
+    rootSessionId: string,
+    spec: RootContractSpec,
+    options: RootIntakeOptions = {},
+  ): Promise<ProposalSubmission> {
+    return await this.serializeRootIntake(storeId, () =>
+      this.submitRootProposalOnce(storeId, rootSessionId, spec, options))
   }
 
   /**
@@ -1572,21 +1840,22 @@ export class TaskRuntime extends Service {
 
   /**
    * One continuation (§6): the post-approval (and post-restart) re-check, and
-   * the only place a proposal becomes tasks.
+   * the only place a proposal becomes what it asked for — a batch of tasks, or
+   * (A0 §1.4) a root task with its run.
    *
    * The re-check is the whole point of an approval being a *record* rather than
-   * a switch. Before anything is admitted, the parent's own state, the limits in
-   * force, the capability resolution, the judging verifiers and the batch
-   * content are recomputed and compared with the fingerprints the approval bound
-   * — a batch whose context moved is marked `stale` with the difference named
-   * (§6: 不把旧批准转移给新上下文), and a parent run that ended takes the
-   * approval down with it (`expired`, never a dispatch). Only a batch that still
-   * is what was reviewed is admitted, from `ready`, with its consumption in the
-   * same commit.
+   * a switch. Before anything is admitted, the subject's own state, the limits in
+   * force, the capability resolution, the judging verifiers and the content are
+   * recomputed and compared with the fingerprints the approval bound — content
+   * whose context moved is marked `stale` with the difference named (§6: 不把旧批准
+   * 转移给新上下文), and a parent run that ended — or a store that already holds a
+   * root, for a root contract — takes the approval down with it (`expired`, never
+   * a dispatch). Only a proposal that still is what was reviewed is admitted,
+   * from `ready`, with its consumption in the same commit.
    *
-   * Idempotent from the outside: an already-admitted proposal answers with the
-   * batch its consumption recorded (no second batch, no second commit), a
-   * waiting one answers `pending_review` without writing anything, and a
+   * Idempotent from the outside: an already-admitted proposal answers with what
+   * its consumption recorded (no second batch, no second root, no second commit),
+   * a waiting one answers `pending_review` without writing anything, and a
    * terminal one answers with the status the store holds.
    *
    * `options.spec` re-presents the batch a caller believes this proposal means.
@@ -1594,7 +1863,9 @@ export class TaskRuntime extends Service {
    * compared with the stored identity, and a different batch — or one whose
    * protected acceptance inputs no longer reproduce the fixed identity — is
    * refused by name. The batch that is admitted is always the stored one, which
-   * is what the approval was made against.
+   * is what the approval was made against. A root contract needs no such
+   * re-presentation: its subject is the store and the session, not a parent whose
+   * batch a caller could have confused.
    */
   async continueProposal(
     storeId: string,
@@ -1603,6 +1874,10 @@ export class TaskRuntime extends Service {
     options: { spec?: DecomposeSpec; exec?: { callId?: string } } = {},
   ): Promise<ProposalContinuation> {
     const proposal = await this.requireProposal(storeId, proposalId)
+    if (proposal.kind === 'root') {
+      return await this.serializeRootIntake(storeId, () =>
+        this.continueProposalIn(storeId, proposalId, caller, options))
+    }
     return await this.serializeParent(storeId, proposal.identity.parentTaskId, () =>
       this.continueProposalIn(storeId, proposalId, caller, options))
   }
@@ -1631,7 +1906,11 @@ export class TaskRuntime extends Service {
     exec: { callId?: string } = {},
   ): Promise<ProposalDecisionResult> {
     const proposal = await this.requireProposal(storeId, proposalId)
-    return await this.serializeParent(storeId, proposal.identity.parentTaskId, async () => {
+    const serialize = async <T>(work: () => Promise<T>): Promise<T> =>
+      proposal.kind === 'root'
+        ? await this.serializeRootIntake(storeId, work)
+        : await this.serializeParent(storeId, proposal.identity.parentTaskId, work)
+    return await serialize(async () => {
       const current = await this.requireProposal(storeId, proposalId)
       if (decidedBy.trim().length === 0) throw new Error(`task-runtime: a decision on proposal "${proposalId}" requires a decider`)
       if (decision.reason !== undefined && decision.reason.trim().length === 0) {
@@ -1641,10 +1920,14 @@ export class TaskRuntime extends Service {
       let outcome = decision.outcome
       let reason = decision.reason
       if (outcome === 'approved') {
-        const ended = await this.parentRunEndedReason(storeId, current)
+        // A late approval may only invalidate (§6), and what makes it late is the
+        // subject's own state: a parent run that ended, or — for a root contract —
+        // a store that already holds a root, because the intake this approval is
+        // about could no longer become the store's root.
+        const ended = await this.approvalLatenessReason(storeId, current)
         if (ended !== undefined) {
           outcome = 'expired'
-          reason = `the approval arrived after the batch could be dispatched: ${ended}`
+          reason = `the approval arrived after ${current.kind === 'root' ? 'the root contract' : 'the batch'} could be dispatched: ${ended}`
         }
       }
       if (outcome === 'expired' && reason === undefined) {
@@ -1670,7 +1953,7 @@ export class TaskRuntime extends Service {
         }
       }
       try {
-        const continuation = await this.continueProposalIn(storeId, proposalId, current.identity.callerSessionId, { exec })
+        const continuation = await this.continueProposalIn(storeId, proposalId, this.proposalCallerOf(current), { exec })
         return {
           proposalId,
           outcome,
@@ -1679,40 +1962,68 @@ export class TaskRuntime extends Service {
           detail: `proposal "${proposalId}" is approved; ${continuation.detail}`,
         }
       } catch (error) {
-        // The decision is on the record and the batch was not admitted. Both
-        // facts are reported: the proposal stays where the continuation left it
-        // (`approved`, or `ready` when its re-check had already passed), nothing
-        // is consumed, and the caller has the reason instead of a state that
-        // pretends the batch is running.
+        // The decision is on the record and what the proposal asked for was not
+        // created. Both facts are reported: the proposal stays where the
+        // continuation left it (`approved`, or `ready` when its re-check had
+        // already passed), nothing is consumed, and the caller has the reason
+        // instead of a state that pretends the work is running.
         const detail = error instanceof Error ? error.message : String(error)
-        this.warn(`proposal ${proposalId}: the approval is recorded but the batch was not continued (${detail})`)
+        this.warn(`proposal ${proposalId}: the approval is recorded but the continuation failed (${detail})`)
         const stored = await this.readProposal(storeId, proposalId).catch(() => undefined)
         return {
           proposalId,
           outcome,
           status: stored?.status ?? outcome,
-          detail: `the approval of proposal "${proposalId}" is recorded; the batch was not admitted: ${detail}`,
+          detail: `the approval of proposal "${proposalId}" is recorded; ` +
+            `${current.kind === 'root' ? 'the root was not activated' : 'the batch was not admitted'}: ${detail}`,
         }
       }
     })
   }
 
   /**
-   * One explicit withdrawal of a batch (T2/T3 §6): a `cancelled` decision, by
-   * the session whose run proposed it. A withdrawal from anywhere else — a
-   * deployment retiring a proposal, a reviewer refusing one — goes through
-   * {@link decideProposal} with `cancelled` or `rejected`, which records *who*
-   * decided instead of hiding it behind the caller's identity.
+   * Why an approval arriving now is too late to be honoured, or `undefined` when
+   * it is not. Two subjects, two questions: a decomposition batch is late when
+   * its parent run has left the deciding phase ({@link parentRunEndedReason}),
+   * and a root contract is late when the store already holds a root task — the
+   * intake could no longer become that store's root, whatever the contract says.
+   */
+  private async approvalLatenessReason(storeId: string, proposal: TaskProposal): Promise<string | undefined> {
+    if (proposal.kind !== 'root') return await this.parentRunEndedReason(storeId, proposal)
+    const existing = await this.existingRootTask(storeId)
+    if (existing === undefined) return undefined
+    return `store "${storeId}" already holds root task "${existing.taskId}"`
+  }
+
+  /**
+   * One explicit withdrawal of a proposal (T2/T3 §6; root contracts A0 §1.3): a
+   * `cancelled` decision, by the session the proposal belongs to — the run that
+   * proposed a batch, or the root session a contract is the goal of. A withdrawal
+   * from anywhere else — a deployment retiring a proposal, a reviewer refusing
+   * one — goes through {@link decideProposal} with `cancelled` or `rejected`,
+   * which records *who* decided instead of hiding it behind the caller's
+   * identity.
    */
   async cancelProposal(storeId: string, proposalId: string, caller: string): Promise<ProposalDecisionResult> {
     const proposal = await this.requireProposal(storeId, proposalId)
-    if (caller !== proposal.identity.callerSessionId) {
+    const owner = this.proposalCallerOf(proposal)
+    if (caller !== owner) {
       throw new Error(
-        `task-runtime: proposal "${proposalId}" was submitted by session "${proposal.identity.callerSessionId}"; session "${caller}" ` +
+        `task-runtime: proposal "${proposalId}" was submitted by session "${owner}"; session "${caller}" ` +
         'cannot withdraw it (a withdrawal by anybody else is a decision, and is recorded as one — decideProposal with "cancelled")',
       )
     }
     return await this.decideProposal(storeId, proposalId, { outcome: 'cancelled' }, caller)
+  }
+
+  /**
+   * The session a proposal belongs to: the caller whose run proposed a batch, or
+   * the root session a root contract is the goal of. One reader for the two
+   * owners, so "who may continue, decide or withdraw this" is answered once
+   * rather than re-derived — with the wrong field — at each entry.
+   */
+  private proposalCallerOf(proposal: TaskProposal): string {
+    return proposal.kind === 'root' ? proposal.identity.rootSessionId : proposal.identity.callerSessionId
   }
 
   /**
@@ -1793,6 +2104,12 @@ export class TaskRuntime extends Service {
    * with the stored one before anything is admitted.
    */
   private storedBatchOf(proposal: TaskProposal): NormalizedBatch {
+    if (proposal.kind === 'root') {
+      // An internal invariant rather than a caller's mistake: every call site knows
+      // it is holding a decomposition proposal, and one that does not is a bug the
+      // message names instead of a batch rebuilt from a contract that has none.
+      throw new Error(`task-runtime: proposal "${proposal.proposalId}" is a root contract; it holds one contract and no batch`)
+    }
     return {
       contractVersion: proposal.identity.contractVersion,
       reason: proposal.identity.reason,
@@ -2118,7 +2435,569 @@ export class TaskRuntime extends Service {
     return { batchId, childTaskIds }
   }
 
-  /* --- the proposal gate's own steps (T2/T3 §5–§6) ------------------------- */
+  /* --- the root intake's own steps (A0 §1–§2) ------------------------------ */
+
+  /**
+   * The request key one root intake is addressed by: the caller's own when it has
+   * one, otherwise derived from the store, the root session and the contract's
+   * digest (`proposal.ts:rootProposalRequestKey`). The same derivation in both
+   * the submission and the re-check, so "the request the store already answers"
+   * is one question with one answer.
+   */
+  private rootRequestKey(storeId: string, rootSessionId: string, contract: TaskContract, requested?: string): string {
+    return requested ?? rootProposalRequestKey({
+      storeId,
+      rootSessionId,
+      contractDigest: contractDigest(contract),
+    })
+  }
+
+  /** The root proposal one request key already names, or `undefined` when the key is free; other content under the key is refused by name (§6). */
+  private async rootProposalForRequest(storeId: string, requestKey: string, contract: TaskContract): Promise<TaskProposalRoot | undefined> {
+    const snapshot = await this.ctx.task.snapshotIn(storeId)
+    const stored = snapshot.proposals?.byRequestKey[requestKey]
+    if (stored === undefined) return undefined
+    if (stored.kind !== 'root') {
+      throw new Error(
+        `task-runtime: request key "${requestKey}" is already bound to proposal "${stored.proposalId}", which is a decomposition batch; ` +
+        'a request key names one proposal, and a root intake cannot take over a batch\'s key',
+      )
+    }
+    if (stored.identity.contractDigest !== contractDigest(contract)) {
+      throw new Error(
+        `task-runtime: request key "${requestKey}" is already bound to proposal "${stored.proposalId}", whose root contract is a different one ` +
+        `(digest ${stored.identity.contractDigest} ≠ ${contractDigest(contract)}); a revision is new content under a new key (§6)`,
+      )
+    }
+    return stored
+  }
+
+  /**
+   * One root submission, inside the store's root-intake serialization: the
+   * contract is fixed and normalized, a request the store already answers is
+   * answered from the record, everything else is judged, and the record is
+   * written once.
+   *
+   * The order is the batch path's, for the same reasons: §5's 坏提案不弹审批
+   * needs the judgement *before* the record, and T3 §6's idempotency needs the
+   * record lookup *before* the judgement — a retry of a request the store
+   * already answers is that proposal whatever state the store has moved to since.
+   */
+  private async submitRootProposalOnce(
+    storeId: string,
+    rootSessionId: string,
+    spec: RootContractSpec,
+    options: RootIntakeOptions,
+  ): Promise<ProposalSubmission> {
+    // An already-cancelled call persists nothing — the same rule the batch path
+    // holds its own admission call to (A3 §3.1's signal boundary).
+    if (options.exec?.signal?.aborted === true) {
+      throw new Error(`task-runtime: the intake of a root contract for session "${rootSessionId}" was cancelled before anything was persisted`)
+    }
+    // The root session's store exists before its contract does (A0 §1.1): a graph
+    // creates the session, and the intake is what fills the store — so this is the
+    // entry that opens it. A store that is already there is opened, never reset.
+    await this.openOrCreateStore(storeId)
+    // The session's checkout is resolved once: the directory the contract's
+    // protected acceptance inputs are read against, the provider pre-check
+    // discovers from, and the run the activation starts will work in. It is the
+    // root session's own graph env, exactly as a parent run's is its own.
+    const envPath = await this.envPathForSession(rootSessionId)
+    const derived = await this.deriveRootContract(spec, envPath)
+    if (!derived.ok) throw derived.refusal
+    const { contract } = derived
+    const requestKey = this.rootRequestKey(storeId, rootSessionId, contract, options.requestKey)
+    const stored = await this.rootProposalForRequest(storeId, requestKey, contract)
+    if (stored !== undefined) {
+      // The caller asked again for the contract this request names: the record
+      // already carries it, so the answer is the record — and a proposal still
+      // waiting gets the review asked again, because a caller asking again is
+      // evidence that somebody is still waiting for it.
+      const review = stored.status === 'pending_review'
+        ? await this.requestProposalReview({
+            kind: 'root',
+            storeId,
+            trigger: 'submitted',
+            proposal: stored,
+            rootSessionId,
+            contract: structuredClone(stored.contract),
+            manifests: this.rootManifests(stored.contract),
+          })
+        : undefined
+      return {
+        proposalId: stored.proposalId,
+        status: stored.status,
+        policy: stored.policy,
+        existing: true,
+        detail: this.rootSubmissionDetail(stored, true),
+        ...(review === undefined ? {} : { review }),
+      }
+    }
+
+    // A genuinely new root contract: the store must not already hold a root (the
+    // same gate the reducer enforces inside the commit, asked here so the caller
+    // hears it from the entry it called), and every admission rule has to pass.
+    const root = await this.existingRootTask(storeId)
+    if (root !== undefined) {
+      throw new Error(
+        `task-runtime: store "${storeId}" already holds root task "${root.taskId}", so a root contract cannot be intaken here (§1.6: ` +
+        'an old graph\'s root is history and is not re-intaken; a new goal is a new graph)',
+      )
+    }
+    const checked = await this.checkRootContract({ rootSessionId, contract, ...(envPath === undefined ? {} : { envPath }) })
+    if (!checked.ok) throw checked.refusal.error
+    const { manifests, providers } = checked
+    const reviewContext = reviewContextOf({
+      manifests,
+      criteria: contract.acceptanceCriteria,
+      providers: providerContentIdentities(providers.capabilities),
+    })
+    const policy = this.config.generatedTaskReview
+    const identity: RootProposalIdentity = {
+      contractVersion: TASK_CONTRACT_VERSION,
+      storeId,
+      rootSessionId,
+      requestKey,
+      contractDigest: contractDigest(contract),
+    }
+    const proposal: TaskProposalRoot = {
+      kind: 'root',
+      proposalId: rootProposalId(identity),
+      requestKey,
+      ...(options.supersedes === undefined ? {} : { supersedes: options.supersedes }),
+      status: policy === 'all' ? 'pending_review' : 'ready',
+      policy,
+      identity,
+      // The contract travels with the proposal, not only its digest: a reviewer,
+      // a resumed approval request after a restart and the activation itself all
+      // rest on the store alone (§2).
+      contract: structuredClone(contract),
+      proposalDigest: rootProposalDigest(identity),
+      admissionContext: this.admissionContext(),
+      admissionContextDigest: admissionContextDigest(this.admissionContext()),
+      reviewContext,
+      reviewContextDigest: reviewContextDigest(reviewContext),
+      createdAt: now(),
+    }
+    try {
+      await this.ctx.task.submitProposalIn(storeId, proposal, rootSessionId)
+    } catch (error) {
+      // A store that already holds *this* contract is a race, not a failure: the
+      // request is answered from the record exactly as a retry is. Anything else
+      // (a key bound to other content, a root task that appeared between the
+      // check above and this write) is raised unchanged.
+      const raced = await this.readProposal(storeId, proposal.proposalId).catch(() => undefined)
+      if (raced === undefined || raced.kind !== 'root' || raced.proposalDigest !== proposal.proposalDigest) throw error
+      return {
+        proposalId: raced.proposalId,
+        status: raced.status,
+        policy: raced.policy,
+        existing: true,
+        detail: this.rootSubmissionDetail(raced, true),
+      }
+    }
+    if (proposal.status !== 'pending_review') {
+      return {
+        proposalId: proposal.proposalId,
+        status: proposal.status,
+        policy: proposal.policy,
+        existing: false,
+        detail: this.rootSubmissionDetail(proposal, false),
+      }
+    }
+    const review = await this.requestProposalReview({
+      kind: 'root',
+      storeId,
+      trigger: 'submitted',
+      proposal,
+      rootSessionId,
+      contract: structuredClone(contract),
+      manifests,
+    })
+    return {
+      proposalId: proposal.proposalId,
+      status: proposal.status,
+      policy: proposal.policy,
+      existing: false,
+      detail: this.rootSubmissionDetail(proposal, false),
+      review,
+    }
+  }
+
+  /**
+   * The first half of the root pre-check: the declared contract's protected
+   * acceptance inputs are fixed against the root session's checkout (S1-V slice
+   * 2 — a path that cannot be read, or a session whose checkout cannot be
+   * resolved, refuses the whole contract), and the single root normalization
+   * entry reads the result. Writes nothing.
+   */
+  private async deriveRootContract(
+    spec: RootContractSpec,
+    envPath: string | undefined,
+  ): Promise<{ ok: true; contract: TaskContract } | { ok: false; refusal: Error }> {
+    const declared = Array.isArray(spec?.acceptanceCriteria) ? spec.acceptanceCriteria : []
+    const fixed = await fixCriteriaProtectedInputs(declared, envPath, 'root contract')
+    const presented = fixed.reasons.length === 0 ? { ...spec, acceptanceCriteria: fixed.criteria } : spec
+    const normalized = normalizeRootContract(presented)
+    const reasons = [...fixed.reasons, ...(normalized.ok ? [] : normalized.reasons)]
+    if (!normalized.ok || reasons.length > 0) return { ok: false, refusal: this.rootRefusal(reasons) }
+    return { ok: true, contract: normalized.contract }
+  }
+
+  /** The one refusal text a root contract is rejected at the contract stage with, whichever step produced the reasons. */
+  private rootRefusal(reasons: readonly string[]): Error {
+    return new Error(`task-runtime: root contract rejected:\n- ${reasons.join('\n- ')}`)
+  }
+
+  /** The manifests one root contract resolves to, from its declared capabilities — the list the activation records. */
+  private rootManifests(contract: TaskContract): CapabilityManifest[] {
+    return [this.resolveCapabilities(contract.requiredCapabilities)]
+  }
+
+  /** The store's root task, if it has one, read from the store rather than remembered. */
+  private async existingRootTask(storeId: string): Promise<TaskInstance | undefined> {
+    const snapshot = await this.ctx.task.snapshotIn(storeId)
+    return snapshot.tasks.find(task => task.parentTaskId === undefined)
+  }
+
+  /**
+   * The second half of the root pre-check (A0 §3): every rule a root contract
+   * has to clear before it can be proposed — structural (`contractDefects`), the
+   * independent-criterion rule that makes it a *goal* rather than a restatement
+   * of its own decomposition ({@link rootIndependenceDefects}), the capability
+   * resolution with the gap rule, the provider pre-check from the root session's
+   * own viewpoint, and the verifier ids its criteria pin.
+   *
+   * The gap rule differs from a batch child's by design: a child that is missing
+   * a capability and may decompose is admitted with the gap recorded as an
+   * obligation (its parent delegated the gap down), while a root intake has
+   * nobody above it to delegate to and nothing to record the gap *on* — the task
+   * does not exist yet — so a declared capability this deployment cannot grant is
+   * a named refusal. Zero side effects: no obligation, no task, no run, and no
+   * file written (the protected inputs were read, never rewritten).
+   *
+   * Pure and reusable: this is what the post-approval re-check asks again, so a
+   * contract whose resolution moved is judged by the same rules that judged it at
+   * submission.
+   */
+  private async checkRootContract(request: {
+    rootSessionId: string
+    contract: TaskContract
+    envPath?: string
+  }): Promise<RootPrecheck> {
+    const { rootSessionId, contract } = request
+    const label = `root contract of session "${rootSessionId}"`
+    const defects = [
+      ...contractDefects(contract.acceptanceCriteria, label),
+      ...rootIndependenceDefects(contract.acceptanceCriteria, label),
+    ]
+    if (defects.length > 0) {
+      return { ok: false, refusal: { error: this.rootRefusal(defects), reasons: defects } }
+    }
+    const manifests = this.rootManifests(contract)
+    const manifest = manifests[0] as CapabilityManifest
+    if (manifest.missing.length > 0) {
+      const detail = `${label} is missing [${manifest.missing.join(', ')}] and a root has no parent to delegate them to`
+      return { ok: false, refusal: { error: this.rootRefusal([detail]), reasons: [detail] } }
+    }
+    const precheck = await this.providerPrecheck(Object.keys(manifest.capabilities), {
+      ...(request.envPath === undefined ? {} : { cwd: request.envPath }),
+    })
+    const refusals = providerRefusals(precheck)
+    if (refusals.length > 0) {
+      return {
+        ok: false,
+        refusal: { error: this.rootRefusal([`the provider pre-check rejected ${label}:`, ...refusals]), reasons: refusals },
+      }
+    }
+    try {
+      await this.assertKnownVerifierRefs(
+        contract.acceptanceCriteria.map(criterion => ({ childIndex: 0, criterion })),
+        label,
+      )
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error))
+      return { ok: false, refusal: { error: failure, reasons: [failure.message] } }
+    }
+    return { ok: true, manifests, providers: precheck }
+  }
+
+  /**
+   * One root continuation: the re-check ladder, and — if it passes — the
+   * activation. §1.4's rule is that a root contract becomes a task *only* here
+   * and only after the approval's own context is re-confirmed.
+   *
+   * The ladder, in the order the facts become decisive:
+   *
+   * 1. the store's root task — a store that already holds one refuses every
+   *    further root intake. If the root on record is the one *this* proposal
+   *    consumed, the proposal is already admitted and the status ladder above has
+   *    answered; anything else is another root (a goal change is a new graph),
+   *    and this proposal can never become one, so it is `expired` by name;
+   * 2. the limits in force, against the fingerprint the approval bound — a
+   *    deployment that moved them after the review invalidates it (§6);
+   * 3. the resolution this contract was reviewed against — its declared
+   *    capabilities, the providers behind them and the verifiers its criteria
+   *    pin — recomputed and compared, with the difference named.
+   *
+   * Only then does it activate, and the activation is one atomic commit
+   * ({@link activateRootContract}) followed by this process's own binding, so a
+   * crash between the two is recovered by re-running this ladder: the consumption
+   * on record is what makes the second run an answer rather than a second root.
+   */
+  private async continueRootProposalIn(
+    storeId: string,
+    proposal: TaskProposalRoot,
+  ): Promise<ProposalContinuation> {
+    const rootSessionId = proposal.identity.rootSessionId
+    const existing = await this.existingRootTask(storeId)
+    if (existing !== undefined) {
+      return await this.expireProposal(
+        storeId,
+        proposal,
+        `store "${storeId}" already holds root task "${existing.taskId}"; a root contract is one per store and a changed goal is a new graph ` +
+        '(§1.6), so this proposal can no longer become the store\'s root',
+      )
+    }
+    // The policy gate (§5), the same rule the batch path follows: a contract born
+    // under `off` that has not been activated is subject to the deployment's
+    // *current* policy, so a deployment that tightened to `all` sends it for the
+    // review it never had. The other direction is not a release — a waiting
+    // proposal is never freed by a change to `off`, which is why this reads the
+    // stored policy as well as this one — and the review itself is requested from
+    // the stored contract when this process can still show it.
+    const envPath = await this.envPathForSession(rootSessionId)
+    const contract = structuredClone(proposal.contract)
+    if (proposal.status === 'ready' && proposal.policy === 'off' && this.config.generatedTaskReview === 'all') {
+      await this.ctx.task.changeProposalPhaseIn(storeId, {
+        proposalId: proposal.proposalId,
+        to: 'pending_review',
+        reason: 'the deployment tightened the review policy to "all" while this contract had not been activated yet (§5: only tightening is allowed, and it reaches whatever has not run)',
+      }, rootSessionId)
+      let detail = 'it is now waiting for a review'
+      const reviewed = await this.checkRootContract({ rootSessionId, contract, ...(envPath === undefined ? {} : { envPath }) })
+      const tightened = await this.requireProposal(storeId, proposal.proposalId)
+      if (reviewed.ok) {
+        const review = await this.requestProposalReview({
+          kind: 'root',
+          storeId,
+          trigger: 'tightened',
+          proposal: tightened,
+          rootSessionId,
+          contract,
+          manifests: reviewed.manifests,
+        })
+        detail += `; ${review.detail}`
+      } else {
+        detail += `, and its contract no longer passes admission (${reviewed.refusal.reasons.join('; ')})`
+      }
+      return { proposalId: proposal.proposalId, status: 'pending_review', detail: `proposal "${proposal.proposalId}" was sent for review: ${detail}` }
+    }
+    const contextDigest = admissionContextDigest(this.admissionContext())
+    if (contextDigest !== proposal.admissionContextDigest) {
+      return await this.staleProposal(
+        storeId,
+        proposal,
+        `the limits in force moved since the contract was proposed and reviewed (admission context ${proposal.admissionContextDigest} → ${contextDigest})`,
+      )
+    }
+    const checked = await this.checkRootContract({ rootSessionId, contract, ...(envPath === undefined ? {} : { envPath }) })
+    if (!checked.ok) {
+      if (checked.refusal.error instanceof VerifierUnavailableError) throw checked.refusal.error
+      return await this.staleProposal(
+        storeId,
+        proposal,
+        `the contract no longer passes admission: ${checked.refusal.reasons.join('; ')}`,
+      )
+    }
+    const { manifests, providers } = checked
+    const reviewContext = reviewContextOf({
+      manifests,
+      criteria: contract.acceptanceCriteria,
+      providers: providerContentIdentities(providers.capabilities),
+    })
+    const reviewDigest = reviewContextDigest(reviewContext)
+    if (reviewDigest !== proposal.reviewContextDigest) {
+      return await this.staleProposal(
+        storeId,
+        proposal,
+        `the resolution this contract was reviewed against moved: ${reviewContextDelta(proposal.reviewContext, reviewContext)}`,
+      )
+    }
+    if (proposal.status === 'approved') {
+      await this.ctx.task.changeProposalPhaseIn(storeId, {
+        proposalId: proposal.proposalId,
+        to: 'ready',
+        reason: 'the post-approval re-check passed: the store holds no root, the limits are the ones reviewed, and the capability resolution and the judging verifiers are the ones reviewed',
+      }, rootSessionId)
+    }
+    return await this.activateRootContract({
+      storeId,
+      rootSessionId,
+      proposal,
+      contract,
+      manifests,
+    })
+  }
+
+  /**
+   * The activation (A0 §1.4): one atomic commit creates the root task (parentless,
+   * depth 0, carrying the approved contract), its run (born `active`, in the
+   * proposal's root session) and the proposal's consumption — and then this
+   * process binds what only a process can hold.
+   *
+   * The order, and why each step is where it is:
+   *
+   * 1. **the checkout is claimed before anything is written.** A workspace another
+   *    live owner holds fails the activation with nothing persisted
+   *    ({@link WorkspaceBusyError}, §3.4), which is the same claim-before-write
+   *    order every run creation follows; a claim this call made and then lost the
+   *    commit for is released, so a refused activation leaves no ownership of a
+   *    root that does not exist;
+   * 2. **the run's content binding is materialized** (S1-C) — the same builder
+   *    every run uses, so a root that grants nothing still gets the honest empty
+   *    record rather than no record at all;
+   * 3. **the commit** (`admitRootProposalIn`) writes the task, the admission, the
+   *    capability manifest, the run and the consumption together. The reducer
+   *    refuses a store that already has a root, a consumption naming other
+   *    content, and a run that is not born active in this session — so a racing
+   *    second activation writes nothing;
+   * 4. **the in-process binding**: the session map, the started-session set and
+   *    the gate, which is what makes the root session's own tools — decompose,
+   *    submit, cancel — legal from here on;
+   * 5. **the notification** (best-effort, through the existing owner notice): a
+   *    root session that was waiting for its intake hears that its contract is
+   *    live. It is a notice, never a wake-up obligation: a session with no live
+   *    agent is skipped, and nothing about the activation depends on it.
+   *
+   * Idempotent from the outside by construction: the ladder in
+   * {@link continueRootProposalIn} answers an admitted proposal from its own
+   * consumption, and the reducer refuses a second activation even if two callers
+   * raced past that read. One accepted fact, one root.
+   */
+  private async activateRootContract(request: {
+    storeId: string
+    rootSessionId: string
+    proposal: TaskProposalRoot
+    contract: TaskContract
+    manifests: readonly CapabilityManifest[]
+  }): Promise<ProposalContinuation> {
+    const { storeId, rootSessionId, proposal, contract } = request
+    const manifest = request.manifests[0] as CapabilityManifest
+    const taskId: TaskId = `t-${randomUUID()}`
+    const runId: RunId = `r-${randomUUID()}`
+    const workspacePath = await this.workspacePathForSession(rootSessionId)
+    let claimed: WorkspaceOwner | undefined
+    if (workspacePath !== undefined && this.workspaces !== undefined) {
+      await this.workspaces.claim(workspacePath, { kind: 'run', storeId, taskId, runId, since: now() })
+      claimed = this.workspaces.ownerOf(workspacePath)
+    }
+    try {
+      const providerBinding = await bindRunProviders({
+        storeId,
+        runId,
+        manifest,
+        table: this.config.capabilities,
+        root: this.config.runBindingRoot,
+      })
+      const task: TaskInstance = {
+        taskId,
+        definitionRef: { taskType: 'root', version: 1 },
+        objective: contract.objective,
+        depth: 0,
+        acceptanceCriteria: contract.acceptanceCriteria,
+        requestedCapabilities: [...contract.requiredCapabilities],
+        decompositionStatus: 'decomposable',
+        status: 'created',
+        runIds: [],
+        childTaskIds: [],
+        contract: structuredClone(contract),
+      }
+      const run: TaskRun = {
+        runId,
+        taskId,
+        sessionId: rootSessionId,
+        capabilitySnapshot: capabilitySnapshot(manifest),
+        providerBinding,
+        // Born active (§1.1): the root decides its own work — it may decompose,
+        // and it must submit — until its batch or its own submission closes the
+        // gate. A root run with no phase would be a record the phase gate cannot
+        // admit anything for.
+        executionPhase: 'active',
+        artifacts: [],
+        verifierResults: [],
+        status: 'running',
+        startedAt: now(),
+      }
+      const consumption: TaskProposalRootConsumption = {
+        kind: 'root',
+        proposalId: proposal.proposalId,
+        proposalDigest: proposal.proposalDigest,
+        reviewContextDigest: proposal.reviewContextDigest,
+        rootTaskId: taskId,
+        rootRunId: runId,
+        admittedAt: now(),
+      }
+      await this.ctx.task.admitRootProposalIn(storeId, task, run, rootSessionId, { consumption, manifest })
+    } catch (error) {
+      // Nothing was committed (the commit is all-or-nothing), so the claim this
+      // call made is the only thing to undo: leaving it would hold a checkout for
+      // a root that does not exist.
+      if (workspacePath !== undefined && claimed !== undefined) {
+        await this.workspaces?.release(workspacePath, claimed).catch(cause => {
+          this.warn(`workspace ${workspacePath} could not be released after a refused activation (${cause instanceof Error ? cause.message : String(cause)})`)
+        })
+      }
+      throw error
+    }
+    this.sessions.set(rootSessionId, { storeId, taskId, runId })
+    this.startedSessions.add(rootSessionId)
+    this.executionGate.setPhase(rootSessionId, 'active')
+    this.notify(
+      rootSessionId,
+      `the root contract of this session was activated: task ${taskId}, run ${runId} (proposal ${proposal.proposalId}, policy ${proposal.policy}). ` +
+      'This session may now decompose, submit its own result, or cancel.',
+    )
+    return {
+      proposalId: proposal.proposalId,
+      status: 'activated',
+      taskId,
+      runId,
+      detail: `proposal "${proposal.proposalId}" is activated as root task ${taskId} with run ${runId}`,
+    }
+  }
+
+  /** One root submission's answer, in one sentence: the policy it was born under, the status it holds, and what the caller owes next. */
+  private rootSubmissionDetail(proposal: TaskProposal, existing: boolean): string {
+    const head = existing
+      ? `request answered from proposal "${proposal.proposalId}" (policy ${proposal.policy}, status ${proposal.status})`
+      : `proposal "${proposal.proposalId}" was recorded under policy ${proposal.policy} as ${proposal.status}`
+    switch (proposal.status) {
+      case 'ready':
+        return `${head}; continue it to activate the root (policy off activates without a review, and the record says policy-off)`
+      case 'pending_review':
+        return `${head}; it needs a recorded decision before the root may exist, and nothing is created, spawned or notified until then`
+      case 'approved':
+        return `${head}; the approval is on record and the root is not activated yet — continue it to run the post-approval re-check`
+      case 'admitted':
+        return `${head}; its root is activated already and will not be activated again`
+      default:
+        return `${head}; a ${proposal.status} proposal is not activated, and a revision is new content under a new key`
+    }
+  }
+
+  /**
+   * One store's root intakes, one at a time. The batch path serializes per
+   * parent (§6's "单进程同一父分解…应串行"); a root contract has no parent, so the
+   * subject that has to be serialized is the store itself — two intakes racing
+   * into one store must not both read "no root task yet" and both commit. The
+   * store's own reducer is the second line of defence (a store that already
+   * holds a root refuses the second activation), and a second *process* is
+   * covered by it alone, never by this map.
+   */
+  private async serializeRootIntake<T>(storeId: string, work: () => Promise<T>): Promise<T> {
+    return await this.serializeParent(storeId, ROOT_PROPOSAL_TASK_ID, work)
+  }
 
   /**
    * One submission, inside the parent's serialization: derivation, idempotency,
@@ -2274,18 +3153,20 @@ export class TaskRuntime extends Service {
   }
 
   /**
-   * One continuation, inside the parent's serialization (§6's "单进程串行"):
-   * the state ladder first, then the re-check, then — only if the batch still is
-   * what was reviewed — admission.
+   * One continuation, inside the subject's serialization (§6's "单进程串行"): the
+   * state ladder first, then the re-check, then — only if the proposal still is
+   * what was reviewed — admission (a batch) or activation (a root contract).
    *
    * The ladder answers without writing wherever the answer is already on the
-   * record: an admitted proposal answers with its own consumption (so a
-   * duplicate continuation cannot build a second batch), a waiting one answers
-   * `pending_review`, and a terminal one answers with the status the store
-   * holds. The re-check then resolves the four ways §6 describes — the parent
-   * already has a batch (`stale`), the parent run ended (`expired`), the context
-   * moved (`stale`, with the difference named), or the batch still is what was
-   * reviewed (`approved → ready` and admit).
+   * record: a consumed proposal answers with its own consumption (so a duplicate
+   * continuation cannot build a second batch or a second root), a waiting one
+   * answers `pending_review`, and a terminal one answers with the status the
+   * store holds. The re-check then resolves the four ways §6 describes — the
+   * subject already has what this proposal wanted (`stale` for a decomposed
+   * parent, `expired` for a store that holds another root), the parent run ended
+   * or the store's root appeared (`expired`), the context moved (`stale`, with
+   * the difference named), or the proposal still is what was reviewed
+   * (`approved → ready` and admit/activate).
    */
   private async continueProposalIn(
     storeId: string,
@@ -2294,10 +3175,11 @@ export class TaskRuntime extends Service {
     options: { spec?: DecomposeSpec; exec?: { callId?: string } },
   ): Promise<ProposalContinuation> {
     const proposal = await this.requireProposal(storeId, proposalId)
-    if (caller !== proposal.identity.callerSessionId) {
+    const owner = this.proposalCallerOf(proposal)
+    if (caller !== owner) {
       throw new Error(
-        `task-runtime: proposal "${proposalId}" was submitted by session "${proposal.identity.callerSessionId}"; session "${caller}" cannot continue it ` +
-        '(a batch belongs to the run that proposed it, and an approval is continued on that run\'s behalf)',
+        `task-runtime: proposal "${proposalId}" was submitted by session "${owner}"; session "${caller}" cannot continue it ` +
+        '(a proposal belongs to the session that made it, and an approval is continued on that session\'s behalf)',
       )
     }
     switch (proposal.status) {
@@ -2307,6 +3189,21 @@ export class TaskRuntime extends Service {
           throw new Error(
             `task-runtime: proposal "${proposalId}" is admitted without a consumption record; the store is inconsistent and nothing is dispatched`,
           )
+        }
+        // What the proposal became is read off the consumption, by kind: a batch
+        // names its children, a root contract names the task and run it became.
+        // Both answers are the record's own — a duplicate continuation cannot
+        // build a second one.
+        if (consumption.kind === 'root') {
+          return {
+            proposalId,
+            status: 'activated',
+            taskId: consumption.rootTaskId,
+            runId: consumption.rootRunId,
+            detail:
+              `proposal "${proposalId}" is activated as root task ${consumption.rootTaskId} with run ${consumption.rootRunId}; ` +
+              'that root is not activated again',
+          }
         }
         return {
           proposalId,
@@ -2336,6 +3233,13 @@ export class TaskRuntime extends Service {
         break
     }
 
+    // A root contract's continuation is a different ladder from a batch's — one
+    // store-level gate and two fingerprints, with no parent task and no parent
+    // run to ask about — so it is answered by its own step.
+    if (proposal.kind === 'root') {
+      return await this.continueRootProposalIn(storeId, proposal)
+    }
+
     const parentTaskId = proposal.identity.parentTaskId
     const parentTask = await this.ctx.task.taskIn(storeId, parentTaskId)
     const parentRun = await this.ctx.task.runIn(storeId, proposal.identity.parentRunId)
@@ -2363,22 +3267,22 @@ export class TaskRuntime extends Service {
     //
     // The checkout is resolved once here, for the provider pre-check the review
     // request and the re-check both need.
-    const envPath = await this.envPathForSession(proposal.identity.callerSessionId)
+    const envPath = await this.envPathForSession(owner)
     if (proposal.status === 'ready' && proposal.policy === 'off' && this.config.generatedTaskReview === 'all') {
       await this.ctx.task.changeProposalPhaseIn(storeId, {
         proposalId,
         to: 'pending_review',
         reason: 'the deployment tightened the review policy to "all" while this batch had not been admitted yet (§5: only tightening is allowed, and it reaches whatever has not run)',
-      }, proposal.identity.callerSessionId)
+      }, owner)
       const tightened = await this.requireProposal(storeId, proposalId)
       const tightenedBatch = this.storedBatchOf(tightened)
       let detail = 'it is now waiting for a review'
       const reviewed = await this.checkDerivedBatch({
         identity: {
           storeId,
-          parentTaskId: tightened.identity.parentTaskId,
-          parentRunId: tightened.identity.parentRunId,
-          callerSessionId: tightened.identity.callerSessionId,
+          parentTaskId: proposal.identity.parentTaskId,
+          parentRunId: proposal.identity.parentRunId,
+          callerSessionId: proposal.identity.callerSessionId,
         },
         parentTask,
         batch: tightenedBatch,
@@ -2518,20 +3422,22 @@ export class TaskRuntime extends Service {
   /**
    * Invalidate one proposal whose context moved (§6), and remember that on the
    * record: `stale` is terminal, it needs its reason, and it is a statement
-   * about the batch rather than a deletion of it — the record and its approval
+   * about the proposal rather than a deletion of it — the record and its approval
    * stay readable, and a revision is new content under a new key.
    */
   private async staleProposal(storeId: string, proposal: TaskProposal, reason: string): Promise<ProposalContinuation> {
-    await this.ctx.task.changeProposalPhaseIn(storeId, { proposalId: proposal.proposalId, to: 'stale', reason }, proposal.identity.callerSessionId)
+    await this.ctx.task.changeProposalPhaseIn(storeId, { proposalId: proposal.proposalId, to: 'stale', reason }, this.proposalCallerOf(proposal))
     return { proposalId: proposal.proposalId, status: 'stale', detail: `proposal "${proposal.proposalId}" is stale: ${reason}`, reason }
   }
 
   /**
-   * Invalidate one proposal whose parent run can no longer dispatch it (§6: a
-   * late approval may only invalidate). The write is a *decision* — `expired`
-   * is one of the four outcomes the store records with a decider and a reason —
-   * and the decider is named `task-runtime`, because this invalidation is the
-   * runtime's own reading of the run's state rather than a person's decision.
+   * Invalidate one proposal the subject can no longer dispatch (§6: a late
+   * approval may only invalidate) — a batch whose parent run ended, a root
+   * contract whose store already holds a root. The write is a *decision* —
+   * `expired` is one of the four outcomes the store records with a decider and a
+   * reason — and the decider is named `task-runtime`, because this invalidation
+   * is the runtime's own reading of the store's state rather than a person's
+   * decision.
    */
   private async expireProposal(storeId: string, proposal: TaskProposal, reason: string): Promise<ProposalContinuation> {
     await this.ctx.task.decideProposalIn(storeId, {
@@ -2557,6 +3463,10 @@ export class TaskRuntime extends Service {
    * ended.
    */
   private async parentRunEndedReason(storeId: string, proposal: TaskProposal): Promise<string | undefined> {
+    // Only a decomposition batch has a parent run to ask about: a root contract's
+    // dispatchability is the store's one-root gate, which `approvalLatenessReason`
+    // and the continuation's own ladder answer.
+    if (proposal.kind === 'root') return undefined
     const run = await this.ctx.task.runIn(storeId, proposal.identity.parentRunId)
     if (run.status !== 'running') return `the parent run "${run.runId}" is ${run.status}`
     if (run.executionPhase === undefined) return `the parent run "${run.runId}" predates coordination phases`
@@ -2569,6 +3479,16 @@ export class TaskRuntime extends Service {
     const snapshot = await this.ctx.task.snapshotIn(storeId)
     const stored = snapshot.proposals?.byRequestKey[requestKey]
     if (stored === undefined) return undefined
+    if (stored.kind === 'root') {
+      // A batch request cannot be answered by a root contract, even under the same
+      // key: the two address different subjects, and treating one as the other
+      // would answer with a goal nobody asked of this parent. The key is the
+      // caller's, so this is a refusal by name rather than a silent re-mint.
+      throw new Error(
+        `task-runtime: request key "${requestKey}" is already bound to proposal "${stored.proposalId}", which is a root contract; ` +
+        'a request key names one proposal, and a batch cannot take over a root intake\'s key',
+      )
+    }
     if (stored.proposalDigest !== proposalDigest) {
       throw new Error(
         `task-runtime: request key "${requestKey}" is already bound to proposal "${stored.proposalId}", whose batch is a different one ` +
@@ -2630,15 +3550,15 @@ export class TaskRuntime extends Service {
    * about and reported, never swallowed — and none of those outcomes can turn
    * into an approval, because the only thing that advances a waiting proposal is
    * a persisted decision.
+   *
+   * What the request carries is the subject as the store holds it: for a batch the
+   * parent task, the children and the obligations raised on that parent; for a
+   * root contract the contract itself and no parent — the task it would become
+   * does not exist while it waits, so there is nothing to read obligations off
+   * and nothing to pretend. Every arm is built here from stored facts, so a
+   * review requested after a restart shows what the record holds.
    */
-  private async requestProposalReview(request: {
-    storeId: string
-    trigger: ProposalReviewTrigger
-    proposal: TaskProposal
-    parentTask: TaskInstance
-    batch: NormalizedBatch
-    manifests: readonly CapabilityManifest[]
-  }): Promise<{ requested: boolean; detail: string }> {
+  private async requestProposalReview(request: ReviewSubject): Promise<{ requested: boolean; detail: string }> {
     const channel = this.softService<ProposalReviewChannel>('proposalReviewChannel')
     if (channel === undefined || typeof channel.requestReview !== 'function') {
       return {
@@ -2649,21 +3569,39 @@ export class TaskRuntime extends Service {
       }
     }
     const registeredVerifiers = await this.registeredVerifierIds()
-    const obligations = await this.ctx.task
-      .snapshotIn(request.storeId)
-      .then(snapshot => snapshot.obligations.filter(obligation => obligation.sourceTaskId === request.parentTask.taskId))
-      .catch(() => [])
+    const obligations = request.kind === 'root'
+      // A root contract has no task yet, so no obligation can have been raised on
+      // it; an empty list says "nothing is on record", which is what a reviewer
+      // needs to know rather than a list borrowed from another subject.
+      ? []
+      : await this.ctx.task
+        .snapshotIn(request.storeId)
+        .then(snapshot => snapshot.obligations.filter(obligation => obligation.sourceTaskId === request.parentTask.taskId))
+        .catch(() => [])
     try {
-      const notice = await channel.requestReview({
-        storeId: request.storeId,
-        trigger: request.trigger,
-        proposal: request.proposal,
-        parentTask: request.parentTask,
-        batch: request.batch,
-        manifests: request.manifests,
-        ...(registeredVerifiers === undefined ? {} : { registeredVerifiers }),
-        obligations,
-      })
+      const subject: ProposalReviewRequest = request.kind === 'root'
+        ? {
+            kind: 'root',
+            storeId: request.storeId,
+            trigger: request.trigger,
+            proposal: request.proposal,
+            rootSessionId: request.rootSessionId,
+            contract: structuredClone(request.contract),
+            manifests: request.manifests,
+            ...(registeredVerifiers === undefined ? {} : { registeredVerifiers }),
+            obligations,
+          }
+        : {
+            storeId: request.storeId,
+            trigger: request.trigger,
+            proposal: request.proposal,
+            parentTask: request.parentTask,
+            batch: request.batch,
+            manifests: request.manifests,
+            ...(registeredVerifiers === undefined ? {} : { registeredVerifiers }),
+            obligations,
+          }
+      const notice = await channel.requestReview(subject)
       return {
         requested: notice.requested,
         detail: notice.detail ?? (notice.requested ? 'the review was requested' : 'the review channel did not request a review'),
@@ -2759,6 +3697,10 @@ export class TaskRuntime extends Service {
       if (!isOpenProposal(proposal)) continue
       const proposalId = proposal.proposalId
       try {
+        if (proposal.kind === 'root') {
+          await this.reconcileRootProposal(storeId, proposal, report)
+          continue
+        }
         if (proposal.status === 'pending_review') {
           const ended = await this.parentRunEndedReason(storeId, proposal)
           if (ended !== undefined) {
@@ -2800,7 +3742,7 @@ export class TaskRuntime extends Service {
         }
         const continuation = await this.serializeParent(storeId, proposal.identity.parentTaskId, () =>
           this.continueProposalIn(storeId, proposalId, proposal.identity.callerSessionId, {}))
-        if (continuation.status !== 'admitted') {
+        if (continuation.status !== 'admitted' && continuation.status !== 'activated') {
           await report(proposal, continuation.status, continuation.detail)
         }
       } catch (error) {
@@ -2810,6 +3752,117 @@ export class TaskRuntime extends Service {
       }
     }
     return unresolved
+  }
+
+  /**
+   * One root contract's turn in the proposal pass (A0 §5): the same discipline as
+   * a batch's, with the subjects a root contract has instead of a parent task.
+   *
+   * A `pending_review` root contract is never advanced by recovery — only a
+   * persisted decision moves it — and its review is requested again from the
+   * stored contract when this process can still show it; a contract whose
+   * resolution no longer passes admission is reported and left waiting, exactly
+   * as a batch is. A `ready`/`approved` one is continued, which is where §5's
+   * tightening reaches a contract born under `off` and where the post-approval
+   * re-check decides whether an approval still covers it.
+   *
+   * The crash points this covers, both of them one call away from a root that
+   * exists:
+   *
+   * - **the decision is on the record and the activation never ran** — the
+   *   continuation re-checks and activates, and the store's own reducer is what
+   *   keeps it to one root;
+   * - **the activation commit landed and this process died before it bound the
+   *   session** — the status ladder answers `activated` from the consumption
+   *   itself, so recovery re-binds rather than minting a second task and run
+   *   ({@link adoptRoot} is that re-binding's other door, for a process that
+   *   starts from a graph entry instead).
+   */
+  private async reconcileRootProposal(
+    storeId: string,
+    proposal: TaskProposalRoot,
+    report: (proposal: TaskProposal, status: TaskProposalStatus, reason: string) => Promise<void>,
+  ): Promise<void> {
+    const proposalId = proposal.proposalId
+    if (proposal.status === 'pending_review') {
+      const existing = await this.existingRootTask(storeId)
+      if (existing !== undefined) {
+        // Somebody else became this store's root while the contract waited. It can
+        // no longer become one, so the proposal is expired with the reason named
+        // — a decision or an activation would both be operations on a root that
+        // is already spoken for.
+        const expired = await this.expireProposal(
+          storeId,
+          proposal,
+          `store "${storeId}" already holds root task "${existing.taskId}", so this contract can no longer become its root`,
+        )
+        await report(proposal, 'expired', expired.detail)
+        return
+      }
+      const rootSessionId = proposal.identity.rootSessionId
+      const contract = structuredClone(proposal.contract)
+      const envPath = await this.envPathForSession(rootSessionId)
+      const checked = await this.checkRootContract({ rootSessionId, contract, ...(envPath === undefined ? {} : { envPath }) })
+      if (!checked.ok) {
+        await report(
+          proposal,
+          proposal.status,
+          `it waits for a review and its contract no longer passes admission (${checked.refusal.reasons.join('; ')}); the proposal stays pending_review`,
+        )
+        return
+      }
+      await this.requestProposalReview({
+        kind: 'root',
+        storeId,
+        trigger: 'recovered',
+        proposal,
+        rootSessionId,
+        contract,
+        manifests: checked.manifests,
+      })
+      return
+    }
+    // `ready` or `approved`: the tightening rule and the post-approval re-check
+    // both live in the continuation, which is also what re-binds an activation
+    // whose process died after the commit.
+    const continuation = await this.serializeRootIntake(storeId, () =>
+      this.continueProposalIn(storeId, proposalId, proposal.identity.rootSessionId, {}))
+    if (continuation.status === 'activated') {
+      // The root is live; this process binds it (and derives the phase rather than
+      // assuming one).
+      await this.rebindActivatedRoot(storeId, proposal.identity.rootSessionId, continuation.taskId, continuation.runId)
+      return
+    }
+    await report(proposal, continuation.status, continuation.detail)
+  }
+
+  /**
+   * Bind a root this process just learned is activated — the crash case where the
+   * commit is durable and the session of the process that wrote it is gone. The
+   * store is the source of truth for the ids *and* for the phase: a root run that
+   * already reached a terminal state leaves the session `terminal` rather than
+   * open, so a late intake is refused by the gate as well as by the one-root rule
+   * (§1.8), and only a still-running root is bound `active`.
+   */
+  private async rebindActivatedRoot(storeId: string, rootSessionId: string, taskId: TaskId, runId: RunId): Promise<void> {
+    this.sessions.set(rootSessionId, { storeId, taskId, runId })
+    this.startedSessions.add(rootSessionId)
+    let phase: ExecutionPhase | 'terminal' | undefined
+    try {
+      phase = this.rootSessionPhase(await this.ctx.task.runIn(storeId, runId))
+    } catch {
+      // A run this process cannot read is not a phase to guess at: the session is
+      // bound for lookups, and the gate stays as the store's own recovery left it.
+      phase = undefined
+    }
+    if (phase === 'terminal') this.executionGate.setTerminal(rootSessionId)
+    else if (phase !== undefined) this.executionGate.setPhase(rootSessionId, phase)
+    this.notify(
+      rootSessionId,
+      `recovery bound this session to its activated root contract: task ${taskId}, run ${runId}` +
+      `${phase === 'terminal' ? ' (that run is terminal, so this session is closed to new work)' : ''}. ` +
+      'A late intake for a different contract is refused because the store already holds this root.',
+    )
   }
 
   /**
@@ -4283,7 +5336,7 @@ export class TaskRuntime extends Service {
   /**
    * Re-check the content a run's binding recorded against the bytes its snapshot
    * holds now (S1-C item 4) — the read a historical view (`task_read`) and a
-   * re-entry (`createRootTask` adopting an existing run) both perform before
+   * re-entry (`adoptRoot` adopting an existing root run) both perform before
    * trusting the record.
    *
    * `undefined` means the record names no snapshot: a run that loaded no content

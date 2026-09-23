@@ -8,7 +8,7 @@ import type { AcceptanceCriterion, EvidenceBundle, TaskEvent, TaskInstance, Task
 import { TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
 import { CompositeVerifier } from '../../../verifier/src/composite-verifier.ts'
 import { pinSkillHome, releaseSkillHomes } from '../support/skill-roots.ts'
-import type { Config, DecomposeSpec, ChildOutcome } from '../../src/index.ts'
+import type { Config, DecomposeSpec, ChildOutcome, RootContractSpec } from '../../src/index.ts'
 import { WorkspaceBusyError, normalizeDecomposition } from '../../src/index.ts'
 import type { WorkspaceRegistry } from '../../src/index.ts'
 import {
@@ -290,8 +290,25 @@ function childSpec(objective: string, overrides: Record<string, unknown> = {}) {
   } as DecomposeSpec['children'][number]
 }
 
-async function createRoot(h: Harness, objective = 'ship the release') {
-  return h.runtime.createRootTask(STORE, { objective, rootSessionId: ROOT_SESSION }, ROOT_SESSION)
+/**
+ * Activate one root through the real intake entry (A0 §1.2–§1.4) and hand back
+ * what it became. These cases are about what happens *after* a root exists — the
+ * orchestration of its batches — so the contract is the test's own fixture, and
+ * it is stated here rather than assumed: a root contract must carry at least one
+ * mandatory criterion judged by something other than the composite conjunction,
+ * which is exactly what the old fixed spec did not.
+ */
+function rootContract(objective: string): RootContractSpec {
+  return {
+    objective,
+    acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
+  }
+}
+
+async function createRoot(h: Harness, objective = 'ship the release'): Promise<{ taskId: string; runId: string }> {
+  const activated = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract(objective))
+  if (activated.status !== 'activated') throw new Error(`the root contract was not activated: ${activated.detail}`)
+  return { taskId: activated.taskId, runId: activated.runId }
 }
 
 /**
@@ -424,8 +441,8 @@ async function seedProducer(
 /**
  * A parent task authored directly in the store with caller-chosen acceptance
  * criteria — the shape a parent-level evidence map arrives on, since
- * `createRootTask` expands the fixed RootTaskSpec and a stored task's criteria
- * are immutable. Returns the ids the cascade then runs under.
+ * the intake's contract is the caller's own and a stored task's criteria are
+ * immutable. Returns the ids the cascade then runs under.
  */
 async function createAcceptanceParent(
   h: Harness,
@@ -516,28 +533,65 @@ function runEventKinds(h: Harness, runId: string): string[] {
     .map(item => item.kind)
 }
 
-describe('TaskRuntime.createRootTask', () => {
-  test('creates the store, admits a decomposable root, and binds a run to the root session', async () => {
+describe('TaskRuntime.intakeRootContract', () => {
+  test('activates one root through the real intake, and answers a retry from the record instead of building a second', async () => {
     const h = harness()
     const { taskId, runId } = await createRoot(h)
 
+    // What the activation committed: one parentless task at depth 0 carrying the
+    // contract that was intaken, and one run of the root session, born active.
     const root = await h.task.taskIn(STORE, taskId)
     expect(root.depth).toBe(0)
+    expect(root.parentTaskId).toBeUndefined()
     expect(root.decompositionStatus).toBe('decomposable')
     expect(root.status).toBe('running')
+    expect(root.contract?.objective).toBe('ship the release')
+    expect(root.contract?.acceptanceCriteria.map(criterion => criterion.criterionId)).toEqual(['root-goal'])
     const run = await h.task.runIn(STORE, runId)
     expect(run.sessionId).toBe(ROOT_SESSION)
     expect(run.status).toBe('running')
+    expect(run.executionPhase).toBe('active')
 
     const bound = await h.runtime.runForSession(ROOT_SESSION)
     expect(bound.task.taskId).toBe(taskId)
     expect(bound.run.runId).toBe(runId)
+    // The gate is open for the session the contract belongs to: the root decides
+    // its own work from here.
+    expect(h.runtime.gate.phaseOf(ROOT_SESSION)).toBe('active')
 
+    // The same contract asked for again is the same request: one proposal, one
+    // root, and the consumption answers with the ids it minted.
     const again = await createRoot(h)
     expect(again).toEqual({ taskId, runId })
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.tasks).toHaveLength(1)
+    expect(snapshot.runs).toHaveLength(1)
+    expect(snapshot.proposals?.all).toHaveLength(1)
+    expect(snapshot.proposals?.all[0]?.status).toBe('admitted')
+    // The root's own event log says it was started once.
+    expect(taskEvents(h).filter(event => event.kind === 'TaskStarted' && event.taskId === taskId)).toHaveLength(1)
   })
 
-  test('reopens an existing store and returns the persisted root instead of duplicating it', async () => {
+  test('refuses a contract whose only mandatory criterion is the composite conjunction, with nothing written', async () => {
+    const h = harness()
+    await expect(h.runtime.intakeRootContract(STORE, ROOT_SESSION, {
+      objective: 'the goal nobody stated',
+      acceptanceCriteria: [{
+        criterionId: 'root-children-verified',
+        description: 'all mandatory children verified',
+        mode: 'composite',
+        mandatory: true,
+      }],
+    })).rejects.toThrow(/requires at least one mandatory acceptance criterion judged by something other than the composite conjunction/)
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.tasks).toHaveLength(0)
+    expect(snapshot.runs).toHaveLength(0)
+    expect(snapshot.proposals?.all).toHaveLength(0)
+  })
+})
+
+describe('TaskRuntime.adoptRoot', () => {
+  test('binds an existing root after a restart, and answers a store without one as such', async () => {
     const h = harness()
     const first = await createRoot(h)
     await Promise.all(h.disposers.map(dispose => dispose()))
@@ -545,10 +599,43 @@ describe('TaskRuntime.createRootTask', () => {
     const h2 = harness()
     h2.sessions.clear()
     for (const [id, stored] of h.sessions) h2.sessions.set(id, stored)
-    const runtime2 = new TaskRuntime(h2.ctx as never)
-    const reopened = await runtime2.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION)
-    expect(reopened).toEqual(first)
+    const runtime2 = new TaskRuntime(h2.ctx as never, {} as Config)
+    const reopened = await runtime2.adoptRoot(STORE, ROOT_SESSION)
+    expect(reopened).toMatchObject({ adopted: true, taskId: first.taskId, runId: first.runId, phase: 'active' })
+    // Adoption binds the session and opens its gate, exactly as the activation did.
+    expect(runtime2.gate.phaseOf(ROOT_SESSION)).toBe('active')
+    expect((await runtime2.runForSession(ROOT_SESSION)).run.runId).toBe(first.runId)
     expect((await h2.task.snapshotIn(STORE)).tasks).toHaveLength(1)
+
+    // A store with no root at all is the state a graph's store starts in, not a
+    // failure: adoption reports it and writes nothing.
+    const empty = rootTaskStoreId('a-fresh-session')
+    const nothing = await runtime2.adoptRoot(empty, 'a-fresh-session')
+    expect(nothing.adopted).toBe(false)
+    expect((await runtime2.adoptRoot(empty, 'a-fresh-session')).adopted).toBe(false)
+    expect((await h2.task.snapshotIn(empty)).tasks).toHaveLength(0)
+  })
+
+  test('derives a terminal gate phase from a finished root run', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+    // The root run reaches a terminal state (the shape a finished tree has).
+    await h.task.markRunStatusIn(STORE, taskId, runId, 'cancelled', ROOT_SESSION, { reason: 'the goal changed' })
+    await Promise.all(h.disposers.map(dispose => dispose()))
+
+    const h2 = harness()
+    h2.sessions.clear()
+    for (const [id, stored] of h.sessions) h2.sessions.set(id, stored)
+    const runtime2 = new TaskRuntime(h2.ctx as never, {} as Config)
+    await h2.task.openStore(STORE)
+    const adopted = await runtime2.adoptRoot(STORE, ROOT_SESSION)
+    expect(adopted).toMatchObject({ adopted: true, taskId, runId, phase: 'terminal' })
+    // §1.8: a late write on a finished root is refused by the gate as well as by
+    // the state — the phase came back off the store, not out of this process.
+    expect(runtime2.gate.phaseOf(ROOT_SESSION)).toBe('terminal')
+    expect(runtime2.gate.decide(ROOT_SESSION, 'write').allow).toBe(false)
+    expect(runtime2.gate.decide(ROOT_SESSION, 'task_decompose').allow).toBe(false)
+    expect(runtime2.gate.decide(ROOT_SESSION, 'task_read').allow).toBe(true)
   })
 })
 
@@ -3258,12 +3345,17 @@ describe('A3 coordination', () => {
     // named, and nothing persisted.
     const other = harness({ config: { runBindingRoot: bindingRoot } })
     other.ctx.envBuilder = { store: { get: () => ({ path: checkoutRoot }) } }
-    await expect(other.runtime.createRootTask(
+    await expect(other.runtime.intakeRootContract(
       rootTaskStoreId('other-root'),
-      { objective: 'second tree', rootSessionId: 'other-root' },
       'other-root',
+      rootContract('second tree'),
     )).rejects.toThrow(WorkspaceBusyError)
-    expect((await other.task.snapshotIn(rootTaskStoreId('other-root'))).tasks).toHaveLength(0)
+    // The refused activation wrote no root: the store holds no task and no run. The
+    // proposal the attempt recorded is the one durable trace, and it is what makes
+    // the retry the same request rather than a second one.
+    const otherSnapshot = await other.task.snapshotIn(rootTaskStoreId('other-root'))
+    expect(otherSnapshot.tasks).toHaveLength(0)
+    expect(otherSnapshot.runs).toHaveLength(0)
     expect(await ownershipMarkers(bindingRoot)).toHaveLength(1)
 
     // Decomposing under the holder works, and the batch's children hand the

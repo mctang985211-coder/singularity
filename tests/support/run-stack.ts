@@ -1,7 +1,8 @@
 /**
  * One deployment-shaped stack for the S1-C integration specs that need the real
  * agent plane, not only the store: the real `TaskService` store and reducer, the
- * real `TaskRuntime` entries (`createRootTask`, `decomposeAndRun`, `replayTask`),
+ * real `TaskRuntime` entries (`intakeRootContract` / `adoptRoot`, `decomposeAndRun`,
+ * `replayTask`),
  * the real `AgentRuntime.spawn` over the real DSH tool/skill planes, the real
  * `VerifierRegistry` with its built-in `CommandVerifier`, and the real
  * filesystem the skills live on.
@@ -55,7 +56,7 @@ import { defineTaskReadTool } from '../../agent-singularity/src/tools/task-read.
 import { defineTaskSubmitResultTool } from '../../agent-singularity/src/tools/task-submit-result.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
 import type { TaskEvent, TaskSnapshot } from '../../task/src/index.ts'
-import type { CapabilityConfig, Config } from '../../task-runtime/src/index.ts'
+import type { CapabilityConfig, Config, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 
@@ -142,8 +143,18 @@ export interface RunStack {
   events(storeId: string): TaskEvent[]
   /** The store's snapshot as the store itself holds it. */
   snapshot(storeId: string): Promise<TaskSnapshot>
-  /** Create (or reopen) one root session's store and bind its root run. */
-  root(sessionId?: SessionId, objective?: string): Promise<{ storeId: string; taskId: string; runId: string }>
+  /**
+   * Activate one root session's tree through the real intake entry, with the root
+   * contract the *spec* hands in (A0 §1.2): the proposal is submitted, a policy of
+   * `off` continues it in the same call, and the root task and run this returns are
+   * the ones the activation committed.
+   *
+   * There is no default contract, on purpose. The harness cannot know what a spec's
+   * root is *for*, and the acceptance rule a root owes (at least one mandatory
+   * criterion judged by something other than the composite conjunction) is exactly
+   * the thing a plausible-looking default would paper over.
+   */
+  root(sessionId: SessionId, contract: RootContractSpec): Promise<{ storeId: string; taskId: string; runId: string }>
   /** Dispatch one tool call on behalf of one agent, the way the loop does. */
   call(agent: Agent, name: string, args: Record<string, unknown>): Promise<ToolCallResult>
 }
@@ -423,10 +434,15 @@ class RunStackImpl implements RunStack {
     return this.task.snapshotIn(storeId)
   }
 
-  async root(sessionId: SessionId = this.primary, objective = 'ship the release'): Promise<{ storeId: string; taskId: string; runId: string }> {
+  async root(sessionId: SessionId, contract: RootContractSpec): Promise<{ storeId: string; taskId: string; runId: string }> {
     const storeId = rootTaskStoreId(sessionId)
-    const { taskId, runId } = await this.runtime.createRootTask(storeId, { objective, rootSessionId: sessionId }, sessionId)
-    return { storeId, taskId, runId }
+    const activated = await this.runtime.intakeRootContract(storeId, sessionId, contract)
+    if (activated.status !== 'activated') {
+      throw new Error(
+        `the fixture expected an activated root for session "${sessionId}" but the intake answered "${activated.status}": ${activated.detail}`,
+      )
+    }
+    return { storeId, taskId: activated.taskId, runId: activated.runId }
   }
 
   async call(agent: Agent, name: string, args: Record<string, unknown>): Promise<ToolCallResult> {

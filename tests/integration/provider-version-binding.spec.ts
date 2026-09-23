@@ -8,7 +8,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { canonicalize } from '../../task/src/contract.ts'
 import { rootTaskStoreId } from '../../task/src/index.ts'
 import type { TaskEvent, TaskInstance } from '../../task/src/index.ts'
-import type { CapabilityConfig, DecomposeSpec } from '../../task-runtime/src/index.ts'
+import type { CapabilityConfig, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { disposeRunStacks, skillText, startRunStack, writeGuidanceSkill, type RunStack } from '../support/run-stack.ts'
 
 /**
@@ -83,7 +83,7 @@ function child(objective: string, requiredCapabilities: readonly string[]): Deco
 
 /** Admit one child under a root session and return the runs that settled. */
 async function runOne(h: RunStack, sessionId: SessionId = ROOT_A, capability = ROW): Promise<{ storeId: string; taskId: string; runId: string }> {
-  const root = await h.root(sessionId)
+  const root = await h.root(sessionId, rootContract('ship the release'))
   const batch = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, sessionId, {
     reason: 'split the work',
     children: [child('align the ball', [capability])],
@@ -176,6 +176,22 @@ async function applySkillVersion(h: RunStack, name: string, content: string, pro
   const applied = (await defineEvolutionApplyTool(h.ctx).execute({ proposalId }, exec(h.rootAgent(ROOT_A), 'call-apply'))) as string
   expect(applied).toContain('[applied]')
   return applied
+}
+
+
+/**
+ * The root contract this spec's trees run under (A0 §1.2): one goal, one
+ * criterion a command settles. The intake is real here — these cases are about
+ * what happens to a live tree — so the contract is stated explicitly rather than
+ * defaulted: a root contract owes at least one mandatory criterion judged by
+ * something other than the composite conjunction, and a fixture that supplied one
+ * silently would be answering the question under test.
+ */
+function rootContract(objective: string): RootContractSpec {
+  return {
+    objective,
+    acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
+  }
 }
 
 describe('a new version in production and the runs that are already bound (S1-C)', () => {
@@ -470,10 +486,12 @@ describe('a new version in production and the runs that are already bound (S1-C)
     await applySkillVersion(h, SKILL, skillText(V2, SKILL), 'p-skill-reentry')
     expect(await readFile(join(h.home, 'skills', SKILL, 'SKILL.md'), 'utf8')).toBe(skillText(V2, SKILL))
 
-    // Re-entry refuses, naming the skill and the path the record points at…
-    await expect(h.runtime.createRootTask(storeId, { objective: 'ship the release', rootSessionId: ROOT_A }, ROOT_A))
-      .rejects.toThrow(new RegExp(SKILL))
-    await expect(h.runtime.createRootTask(storeId, { objective: 'ship the release', rootSessionId: ROOT_A }, ROOT_A))
+    // Re-entry refuses, naming the skill and the path the record points at. The
+    // entry is `adoptRoot` — the one that opens a store and binds the root it
+    // already holds — and it re-checks the run's own content identity before
+    // handing the run back.
+    await expect(h.runtime.adoptRoot(storeId, ROOT_A)).rejects.toThrow(new RegExp(SKILL))
+    await expect(h.runtime.adoptRoot(storeId, ROOT_A))
       .rejects.toThrow(new RegExp(snapshotRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
 
     // …and nothing moved: the run still names its own content, no event was

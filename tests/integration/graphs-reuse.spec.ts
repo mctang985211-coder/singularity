@@ -62,7 +62,9 @@ function harness() {
     clearActive: vi.fn(),
   }
   const taskRuntime = {
-    createRootTask: vi.fn(async () => ({ taskId: 'task-root', runId: 'run-root' })),
+    // The graph entry opens its root session's store and adopts the root it already
+    // holds (A0 §1.1); creating a graph mints no task.
+    adoptRoot: vi.fn(async () => ({ adopted: false as const, detail: 'the fresh store holds no root task yet' })),
   }
   ctx.provide('sessionPersistence', { list: async () => [], create: async () => handle } as never)
   ctx.provide('envBuilder', { store } as never)

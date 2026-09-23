@@ -13,16 +13,19 @@ import type {
   EvidenceBundle,
   TaskEvent,
   TaskProposal,
+  TaskProposalBatchConsumption,
   VerificationResult,
 } from '../../../task/src/index.ts'
-import { TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
-import type { Config, DecomposeSpec } from '../../src/index.ts'
+import { ROOT_PROPOSAL_TASK_ID, TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
+import type { Config, DecomposeSpec, RootContractSpec } from '../../src/index.ts'
 import {
   TaskRuntime,
   isOpenProposal,
   openProposalOf,
+  resolveRootBudget,
 } from '../../src/index.ts'
-import { releaseSkillHomes } from '../support/skill-roots.ts'
+import { seedLegacyRoot } from '../../../tests/support/legacy-root.ts'
+import { pinSkillHome, releaseSkillHomes } from '../support/skill-roots.ts'
 
 const ROOT_SESSION = 'root-session'
 const REVIEWER = 'reviewer-session'
@@ -35,14 +38,19 @@ interface StoredSession {
   events: SessionEvent[]
 }
 
-/** One review request the runtime made, as the channel saw it. */
+/**
+ * One review request the runtime made, as the channel saw it. The subject is
+ * discriminated by kind because the two arms show different material: a batch is
+ * displayed under its parent's goal, a root contract *is* the goal.
+ */
 interface ReviewCall {
   readonly storeId: string
   readonly trigger: string
   readonly proposalId: string
   readonly status: string
+  readonly kind: 'decomposition' | 'root'
   readonly hasBatch: boolean
-  /** §5's display content, as the request carried it: the parent's objective, the children's contracts, the obligations on the parent. */
+  /** §5's display content: the parent's objective for a batch, the contract's own objective for a root contract. */
   readonly parentObjective: string
   readonly childObjectives: readonly string[]
   readonly childCriteria: readonly string[]
@@ -171,25 +179,31 @@ function harness(
    */
   const reviewCalls: ReviewCall[] = []
   let reviewRequested = true
+  type ReviewSubject = {
+    storeId: string
+    trigger: string
+    proposal: TaskProposal
+    obligations: readonly unknown[]
+  } & (
+    | { kind?: undefined; parentTask: { objective: string }; batch: { children: readonly { contract: { objective: string; acceptanceCriteria: readonly { criterionId: string; description: string }[] } }[] } }
+    | { kind: 'root'; contract: { objective: string; acceptanceCriteria: readonly { criterionId: string; description: string }[] }; rootSessionId: string }
+  )
   const channel = {
-    requestReview: vi.fn(async (request: {
-      storeId: string
-      trigger: string
-      proposal: TaskProposal
-      parentTask: { objective: string }
-      batch: { children: readonly { contract: { objective: string; acceptanceCriteria: readonly { criterionId: string; description: string }[] } }[] }
-      obligations: readonly unknown[]
-    }) => {
+    requestReview: vi.fn(async (request: ReviewSubject) => {
+      const root = request.kind === 'root'
       reviewCalls.push({
         storeId: request.storeId,
         trigger: request.trigger,
         proposalId: request.proposal.proposalId,
         status: request.proposal.status,
-        hasBatch: request.batch !== undefined,
-        parentObjective: request.parentTask.objective,
-        childObjectives: request.batch.children.map(child => child.contract.objective),
-        childCriteria: request.batch.children.flatMap(child =>
-          child.contract.acceptanceCriteria.map(criterion => `${child.contract.objective}:${criterion.criterionId}:${criterion.description}`)),
+        kind: root ? 'root' : 'decomposition',
+        hasBatch: !root,
+        parentObjective: root ? request.contract.objective : request.parentTask.objective,
+        childObjectives: root ? [] : request.batch.children.map(child => child.contract.objective),
+        childCriteria: root
+          ? request.contract.acceptanceCriteria.map(criterion => `${request.contract.objective}:${criterion.criterionId}:${criterion.description}`)
+          : request.batch.children.flatMap(child =>
+            child.contract.acceptanceCriteria.map(criterion => `${child.contract.objective}:${criterion.criterionId}:${criterion.description}`)),
         obligations: request.obligations.length,
       })
       return reviewRequested ? { requested: true, detail: 'asked the reviewer' } : { requested: false, detail: 'nobody is watching' }
@@ -244,8 +258,52 @@ function harness(
 
 type Harness = ReturnType<typeof harness>
 
-async function createRoot(h: Harness, objective = 'ship the release') {
-  return h.runtime.createRootTask(STORE, { objective, rootSessionId: ROOT_SESSION }, ROOT_SESSION)
+/**
+ * Activate a root the way a deployment does — through the intake entry (A0
+ * §1.2–§1.4) — with this spec's own root contract. Most cases below are about what
+ * happens to a *proposal* after a root exists, so the contract is the fixture; it
+ * is stated here rather than defaulted because the root's acceptance is its own
+ * decision (at least one mandatory criterion judged by something other than the
+ * composite conjunction) and a plausible-looking default would hide the rule.
+ */
+function rootContract(objective: string): RootContractSpec {
+  return {
+    objective,
+    acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
+  }
+}
+
+async function createRoot(h: Harness, objective = 'ship the release'): Promise<{ taskId: string; runId: string }> {
+  const submitted = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract(objective))
+  if (submitted.status === 'activated') return { taskId: submitted.taskId, runId: submitted.runId }
+  // Under policy `all` a root contract waits for a decision like every other
+  // proposal (§1.3): the setup approves it the way a reviewer would, so the case
+  // under test starts from an activated root rather than from a waiting one.
+  const decided = await h.runtime.decideProposal(STORE, submitted.proposalId, { outcome: 'approved' }, REVIEWER)
+  if (decided.continuation?.status !== 'activated') {
+    throw new Error(`the root contract was not activated: ${decided.detail}`)
+  }
+  return { taskId: decided.continuation.taskId, runId: decided.continuation.runId }
+}
+
+/**
+ * The batch consumption one stored proposal recorded. A proposal record is a
+ * union of two kinds, and every case in this file is about a decomposition batch:
+ * a root contract reaching this reader would be a different bug, so it is named
+ * rather than read as a batch.
+ */
+function consumedBatch(proposal: TaskProposal): TaskProposalBatchConsumption {
+  const consumption = proposal.consumption
+  if (consumption === undefined || consumption.kind === 'root') {
+    throw new Error(`proposal "${proposal.proposalId}" holds no batch consumption (status ${proposal.status})`)
+  }
+  return consumption
+}
+
+/** One stored proposal's batch content, with the kind named rather than assumed. */
+function storedBatch(proposal: TaskProposal): readonly { contract: { objective: string; acceptanceCriteria: readonly { criterionId: string; description: string }[] } }[] {
+  if (proposal.kind === 'root') throw new Error(`proposal "${proposal.proposalId}" is a root contract; it carries one contract and no batch`)
+  return proposal.batch
 }
 
 function childSpec(objective: string, overrides: Record<string, unknown> = {}) {
@@ -258,6 +316,29 @@ function childSpec(objective: string, overrides: Record<string, unknown> = {}) {
 
 function batchSpec(children: DecomposeSpec['children'], reason = 'split the work'): DecomposeSpec {
   return { reason, children }
+}
+
+/**
+ * Every proposal event this store recorded for a **batch**. A root contract's own
+ * proposal rides the reserved envelope task id (`ROOT_PROPOSAL_TASK_ID`), so a
+ * case about a batch's proposal never counts the root intake's records — those are
+ * a different subject with its own cases.
+ */
+function batchProposalEvents(h: Harness): TaskEvent[] {
+  return taskEvents(h).filter(event =>
+    event.kind.startsWith('TaskProposal') && event.taskId !== ROOT_PROPOSAL_TASK_ID)
+}
+
+/**
+ * The proposal-admitted events this store recorded for a **batch**. Every root
+ * contract activation writes one of its own (the consumption that records which
+ * proposal became the root), and a case about a batch's consumption must not count
+ * it — the two are different records of different kinds.
+ */
+function batchAdmissions(h: Harness): TaskEvent[] {
+  return taskEvents(h).filter(event =>
+    event.kind === 'TaskProposalAdmitted'
+    && (event.payload as { kind?: string }).kind !== 'root')
 }
 
 function taskEvents(h: Harness): TaskEvent[] {
@@ -362,7 +443,7 @@ describe('TaskRuntime review policy (§5)', () => {
     expect(proposal.policy).toBe('off')
     expect(proposal.status).toBe('admitted')
     expect(proposal.decision).toBeUndefined()
-    expect(proposal.consumption?.childTaskIds).toEqual(admitted.childTaskIds)
+    expect(consumedBatch(proposal).childTaskIds).toEqual(admitted.childTaskIds)
     expect(h.reviewCalls).toHaveLength(0)
     expect(h.channel.requestReview).not.toHaveBeenCalled()
 
@@ -397,15 +478,18 @@ describe('TaskRuntime review policy (§5)', () => {
     expect(h.spawned).toHaveLength(0)
     expect(taskEvents(h).some(event => event.kind === 'TaskCreated' && event.taskId !== taskId)).toBe(false)
     expect(taskEvents(h).some(event => event.kind === 'TaskDecomposed')).toBe(false)
-    expect(taskEvents(h).some(event => event.kind === 'TaskProposalAdmitted')).toBe(false)
+    expect(batchAdmissions(h)).toHaveLength(0)
 
-    // The review was requested exactly once, and the request carried the batch
-    // (a reviewer has to be shown the contracts, not only a digest).
-    expect(h.reviewCalls).toEqual([{
+    // The review of *this batch* was requested exactly once, and the request
+    // carried the batch (a reviewer has to be shown the contracts, not only a
+    // digest). The root's own intake asked for its contract in the setup, which is
+    // the subject of its own case below.
+    expect(h.reviewCalls.filter(call => call.kind === 'decomposition')).toEqual([{
       storeId: STORE,
       trigger: 'submitted',
       proposalId: pending.proposalId,
       status: 'pending_review',
+      kind: 'decomposition',
       hasBatch: true,
       parentObjective: 'ship the release',
       childObjectives: ['task a'],
@@ -431,8 +515,7 @@ describe('TaskRuntime review policy (§5)', () => {
       childSpec('task a', { acceptanceCriteria: [{ description: 'nothing is required', command: 'true', mandatory: false }] }),
     ]))).rejects.toThrow(/requires at least one mandatory acceptance criterion/)
 
-    expect(h.channel.requestReview).not.toHaveBeenCalled()
-    expect(h.reviewCalls).toHaveLength(0)
+    expect(h.reviewCalls.filter(call => call.kind === 'decomposition')).toHaveLength(0)
     expect(await h.task.snapshotIn(STORE)).toEqual(before)
     expect(h.spawned).toHaveLength(0)
   })
@@ -480,7 +563,7 @@ describe('TaskRuntime proposal decisions (§6)', () => {
       decidedAt: expect.any(String),
     })
     // The approved batch became exactly the tasks the consumption names.
-    expect(childTasks(await h.task.snapshotIn(STORE), taskId).map(task => task.taskId)).toEqual(proposal.consumption?.childTaskIds)
+    expect(childTasks(await h.task.snapshotIn(STORE), taskId).map(task => task.taskId)).toEqual(consumedBatch(proposal).childTaskIds)
     const outcomes = await h.runtime.awaitBatch(STORE, decided.continuation?.status === 'admitted' ? decided.continuation.batchId : '')
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
   })
@@ -594,7 +677,7 @@ describe('TaskRuntime proposal decisions (§6)', () => {
 
     // Nothing was persisted by either attempt.
     expect(await h.runtime.proposalsForParent(STORE, taskId)).toHaveLength(0)
-    expect(taskEvents(h).some(event => event.kind === 'TaskProposalSubmitted')).toBe(false)
+    expect(batchProposalEvents(h)).toHaveLength(0)
 
     // The legal fix — one mandatory criterion — is admitted, which is what makes
     // the two refusals above a rule rather than a wall.
@@ -668,7 +751,7 @@ describe('TaskRuntime request keys (§6)', () => {
     expect(second.existing).toBe(true)
     expect(second.status).toBe('pending_review')
     expect(await h.runtime.proposalsForParent(STORE, taskId)).toHaveLength(1)
-    expect(taskEvents(h).filter(event => event.kind === 'TaskProposalSubmitted')).toHaveLength(1)
+    expect(batchProposalEvents(h).filter(event => event.kind === 'TaskProposalSubmitted')).toHaveLength(1)
   })
 
   test('the same key with different content is refused by name, and a revision gets its own key', async () => {
@@ -712,7 +795,7 @@ describe('TaskRuntime post-approval re-check (§6)', () => {
     expect(proposal.decision?.outcome).toBe('expired')
     expect(proposal.decision?.decidedBy).toBe(REVIEWER)
     expect(h.spawned).toHaveLength(0)
-    expect(taskEvents(h).some(event => event.kind === 'TaskProposalAdmitted')).toBe(false)
+    expect(batchAdmissions(h)).toHaveLength(0)
   })
 
   test('a capability resolution that moved marks the approval stale, naming what moved', async () => {
@@ -808,8 +891,8 @@ describe('TaskRuntime post-approval re-check (§6)', () => {
     const winner = one.status === 'admitted' ? first : second
     const winnerProposal = await proposalOf(h, winner.proposalId)
     expect(winnerProposal.status).toBe('admitted')
-    expect(winnerProposal.consumption?.childTaskIds).toEqual(childTasks(snapshot, taskId).map(task => task.taskId))
-    expect(await h.runtime.awaitBatch(STORE, winnerProposal.consumption?.batchId as string))
+    expect(consumedBatch(winnerProposal).childTaskIds).toEqual(childTasks(snapshot, taskId).map(task => task.taskId))
+    expect(await h.runtime.awaitBatch(STORE, consumedBatch(winnerProposal).batchId))
       .toHaveLength(1)
   })
 
@@ -827,7 +910,7 @@ describe('TaskRuntime post-approval re-check (§6)', () => {
     if (again.status !== 'admitted') throw new Error('unreachable')
     expect(again.batchId).toBe(decided.continuation.batchId)
     expect(again.childTaskIds).toEqual(decided.continuation.childTaskIds)
-    expect(taskEvents(h).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
+    expect(batchAdmissions(h)).toHaveLength(1)
     expect(taskEvents(h).filter(event => event.kind === 'TaskCreated' && event.taskId !== taskId)).toHaveLength(1)
   })
 
@@ -849,12 +932,12 @@ describe('TaskRuntime post-approval re-check (§6)', () => {
     await restarted.runtime.awaitBatch(STORE, continued.batchId)
     expect(restarted.spawned).toHaveLength(1)
     const admitted = await restarted.runtime.proposalIn(STORE, pending.proposalId)
-    expect(admitted.consumption?.childTaskIds).toEqual(continued.childTaskIds)
+    expect(consumedBatch(admitted).childTaskIds).toEqual(continued.childTaskIds)
     // The tasks that exist are the stored batch's contracts — the content a
     // reviewer read, not a copy somebody re-sent.
     const child = (await restarted.task.snapshotIn(STORE)).tasks.find(task => task.taskId === continued.childTaskIds[0])
     expect(child?.contract?.objective).toBe('task a')
-    expect(child?.objective).toBe(admitted.batch[0]?.contract.objective)
+    expect(child?.objective).toBe(storedBatch(admitted)[0]?.contract.objective)
 
     // A re-presented batch is a confirmation, not a substitute. The same batch is
     // accepted (a second continuation is answered from the consumption anyway),
@@ -896,7 +979,11 @@ describe('TaskRuntime post-approval re-check (§6)', () => {
     // was submitted with. Nothing here goes through the service — the reducer is
     // what has to catch it, and it does so by name at replay.
     const events = h.sessions.get(STORE)?.events as unknown as { data: { kind: string; payload: { proposal?: { batch: { contract: { objective: string } }[] } } } }[]
-    const submitted = events.find(event => event.data.kind === 'TaskProposalSubmitted')
+    // The *batch's* submission, not the root intake's: the root's own proposal
+    // rides the reserved envelope id and carries a contract instead of children.
+    const submitted = events.find(event =>
+      event.data.kind === 'TaskProposalSubmitted'
+      && (event.data.payload.proposal as { batch?: unknown } | undefined)?.batch !== undefined)
     if (submitted?.data.payload.proposal === undefined) throw new Error('unreachable')
     submitted.data.payload.proposal.batch[0]!.contract.objective = 'task a, quietly rewritten'
 
@@ -934,12 +1021,13 @@ describe('TaskRuntime recovery (§6 restart and idempotency)', () => {
       trigger: 'recovered',
       proposalId: pending.proposalId,
       status: 'pending_review',
+      kind: 'decomposition',
       hasBatch: true,
       parentObjective: 'ship the release',
       childObjectives: ['task a'],
       // The display material is the *saved batch*: the criteria the proposal
       // recorded, criterion id and description included.
-      childCriteria: proposal.batch.flatMap(child =>
+      childCriteria: storedBatch(proposal).flatMap(child =>
         child.contract.acceptanceCriteria.map(criterion => `${child.contract.objective}:${criterion.criterionId}:${criterion.description}`)),
       obligations: 0,
     }])
@@ -952,7 +1040,7 @@ describe('TaskRuntime recovery (§6 restart and idempotency)', () => {
     if (decided.continuation?.status !== 'admitted') throw new Error('unreachable')
     await restarted.runtime.awaitBatch(STORE, decided.continuation.batchId)
     expect(restarted.spawned).toHaveLength(1)
-    expect(taskEvents(h).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
+    expect(batchAdmissions(h)).toHaveLength(1)
   })
 
   test('crash point 2: an approval saved before a restart is continued by the recovery pass, and the batch is admitted once', async () => {
@@ -983,19 +1071,19 @@ describe('TaskRuntime recovery (§6 restart and idempotency)', () => {
     expect(report.unresolvedProposals).toEqual([])
     const continued = await restarted.runtime.proposalIn(STORE, pending.proposalId)
     expect(continued.status).toBe('admitted')
-    expect(continued.consumption?.childTaskIds).toHaveLength(1)
+    expect(consumedBatch(continued).childTaskIds).toHaveLength(1)
     const snapshot = await restarted.task.snapshotIn(STORE)
-    expect(childTasks(snapshot, taskId).map(task => task.taskId)).toEqual(continued.consumption?.childTaskIds)
+    expect(childTasks(snapshot, taskId).map(task => task.taskId)).toEqual(consumedBatch(continued).childTaskIds)
     // No second batch, one consumption, and the recovered batch is driven to its
     // settlement by the process that adopted the store.
     expect(taskEvents(h).filter(event => event.kind === 'TaskDecomposed')).toHaveLength(1)
-    expect(taskEvents(h).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
-    const outcomes = await restarted.runtime.awaitBatch(STORE, continued.consumption?.batchId as string)
+    expect(batchAdmissions(h)).toHaveLength(1)
+    const outcomes = await restarted.runtime.awaitBatch(STORE, consumedBatch(continued).batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     // The tasks are the stored batch's content, and the ids are stable across the
     // recovery (a later continuation answers from the same consumption).
     const again = await restarted.runtime.continueProposal(STORE, pending.proposalId, ROOT_SESSION)
-    expect(again.status === 'admitted' ? again.childTaskIds : []).toEqual(continued.consumption?.childTaskIds)
+    expect(again.status === 'admitted' ? again.childTaskIds : []).toEqual(consumedBatch(continued).childTaskIds)
   })
 
   test('crash point 3: a committed admission is driven again from the same batch, never admitted a second time', async () => {
@@ -1070,7 +1158,7 @@ describe('TaskRuntime recovery (§6 restart and idempotency)', () => {
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
     expect(outcomes.map(outcome => outcome.taskId)).toEqual(childTaskIds)
     expect(childTasks(await restarted.task.snapshotIn(STORE), taskId).map(task => task.taskId)).toEqual(childTaskIds)
-    expect(taskEvents(h).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
+    expect(batchAdmissions(h)).toHaveLength(1)
   })
 
   test('crash point 4: a settled run is reconnected by identity and its batch is never rebuilt', async () => {
@@ -1093,7 +1181,7 @@ describe('TaskRuntime recovery (§6 restart and idempotency)', () => {
     expect(restarted.spawned).toHaveLength(0)
     const proposal = await restarted.runtime.proposalIn(STORE, admitted.proposalId)
     expect(proposal.status).toBe('admitted')
-    expect(proposal.consumption?.childTaskIds).toEqual(admitted.childTaskIds)
+    expect(consumedBatch(proposal).childTaskIds).toEqual(admitted.childTaskIds)
   })
 
   test('a restart with the policy tightened sends an unadmitted off-born batch for review, and never admits it unreviewed', async () => {
@@ -1165,7 +1253,7 @@ describe('TaskRuntime no-progress rule and known waits (§7.4)', () => {
       if (workerRun === undefined) throw new Error('the worker has no run')
       await h.runtime.decomposeAndRun(STORE, child.taskId, workerRun.runId, sessionId, batchSpec([childSpec('grandchild')]))
     })
-    await vi.waitFor(() => expect(h.reviewCalls.filter(call => call.trigger === 'submitted')).toHaveLength(2))
+    await vi.waitFor(() => expect(h.reviewCalls.filter(call => call.kind === 'decomposition' && call.trigger === 'submitted')).toHaveLength(2))
 
     const child = childTasks(await h.task.snapshotIn(STORE), taskId)[0] as { taskId: string }
     const workerRun = (await h.task.snapshotIn(STORE)).runs.find(run => run.taskId === child.taskId) as { runId: string }
@@ -1209,9 +1297,10 @@ describe('TaskRuntime pre-check scope and obligations (§2)', () => {
     expect(repeated).toHaveLength(2)
     expect(repeated[1]?.goal).toBe(obligations[0]?.goal)
 
-    // Refused batches leave no proposal and never ask a person.
+    // Refused batches leave no proposal and never ask a person (the root's own
+    // intake was reviewed in the setup; nothing was asked about either batch).
     expect(await h.runtime.proposalsForParent(STORE, taskId)).toHaveLength(0)
-    expect(h.channel.requestReview).not.toHaveBeenCalled()
+    expect(h.reviewCalls.filter(call => call.kind === 'decomposition')).toHaveLength(0)
     expect(h.spawned).toHaveLength(0)
   })
 
@@ -1358,5 +1447,520 @@ describe('TaskRuntime root budget through the proposal path (§6)', () => {
     expect(refusedProposal.consumption).toBeUndefined()
     expect(refusedProposal.decision?.outcome).toBe('approved')
     expect(h.spawned).toHaveLength(1)
+  })
+})
+
+/**
+ * The root contract's own lifecycle (A0 §1–§2), through the same entries and the
+ * same store as every batch above: the intake that submits *and* activates, the
+ * review gate that holds a goal before it becomes a task, the re-check ladder a
+ * root contract runs instead of a parent's state, the one-root rule, and the
+ * recovery pass that finishes what a crash interrupted.
+ *
+ * The subject is deliberately *not* a batch: a root contract has no parent task
+ * and no parent run, so every question the batch path asks of a parent is asked
+ * here of the store's own root — and the two answers that matter are "no root
+ * task exists yet" and "one already does".
+ */
+describe('TaskRuntime root contract intake (A0 §1–§2)', () => {
+  test('off activates one root in a single call, records policy-off, and answers a retry from the record', async () => {
+    const h = harness({ config: { generatedTaskReview: 'off' } })
+    // The store exists before the contract does (A0 §1.1): a graph opens it, the
+    // intake fills it. What it holds at that point is what the "before" state is.
+    await h.task.createStore(STORE)
+    const before = await h.task.snapshotIn(STORE)
+    expect(before.tasks).toHaveLength(0)
+    expect(before.runs).toHaveLength(0)
+    // The root budget's honest diagnostic before anything was accepted: there is
+    // no root task, so there is no owner to measure a tree against.
+    const unowned = resolveRootBudget(before, { wallTimeMs: 60_000 })
+    expect(unowned.ok).toBe(false)
+    if (unowned.ok) throw new Error('unreachable')
+    expect(unowned.reason).toContain('holds no root task')
+
+    const activated = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('ship the release'))
+    expect(activated.status).toBe('activated')
+    if (activated.status !== 'activated') throw new Error('unreachable')
+
+    // The audit record: born `ready` under policy `off`, activated with no
+    // decision on it — `policy-off` is a fact, not a missing approval — and the
+    // consumption names the very task and run the activation minted.
+    const proposal = await proposalOf(h, activated.proposalId)
+    expect(proposal.kind).toBe('root')
+    expect(proposal.policy).toBe('off')
+    expect(proposal.status).toBe('admitted')
+    expect(proposal.decision).toBeUndefined()
+    if (proposal.kind !== 'root' || proposal.consumption?.kind !== 'root') throw new Error('unreachable')
+    expect(proposal.consumption.rootTaskId).toBe(activated.taskId)
+    expect(proposal.consumption.rootRunId).toBe(activated.runId)
+    expect(proposal.identity.rootSessionId).toBe(ROOT_SESSION)
+    expect(h.reviewCalls).toHaveLength(0)
+
+    // One task, one run, one admission — and the root really decides its own work.
+    const after = await h.task.snapshotIn(STORE)
+    expect(after.tasks).toHaveLength(1)
+    expect(after.runs).toHaveLength(1)
+    expect(after.tasks[0]?.parentTaskId).toBeUndefined()
+    expect(after.tasks[0]?.depth).toBe(0)
+    expect(after.tasks[0]?.contract?.objective).toBe('ship the release')
+    expect(after.runs[0]?.sessionId).toBe(ROOT_SESSION)
+    expect(after.runs[0]?.status).toBe('running')
+    expect(after.runs[0]?.executionPhase).toBe('active')
+    expect(h.runtime.gate.phaseOf(ROOT_SESSION)).toBe('active')
+    expect((await h.runtime.runForSession(ROOT_SESSION)).run.runId).toBe(activated.runId)
+    expect(taskEvents(h).filter(event => event.kind === 'TaskCreated')).toHaveLength(1)
+    expect(taskEvents(h).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
+
+    // The budget now has its owner: the accepted instant is the root run's own
+    // `startedAt`, which is what "the root run's `startedAt` is the acceptance
+    // instant" means when a reader has only the store (A3 §3.5, A0 §1.7).
+    const owned = resolveRootBudget(after, { wallTimeMs: 60_000 })
+    expect(owned.ok).toBe(true)
+    if (!owned.ok) throw new Error('unreachable')
+    expect(owned.rootTaskId).toBe(activated.taskId)
+    expect(owned.acceptedAt).toBe(after.runs[0]?.startedAt)
+
+    // The same contract asked for again is the same request: one proposal, one
+    // root, and the answer is the record.
+    const again = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('ship the release'))
+    expect(again.status).toBe('activated')
+    if (again.status !== 'activated') throw new Error('unreachable')
+    expect(again.proposalId).toBe(activated.proposalId)
+    expect(again.taskId).toBe(activated.taskId)
+    expect(again.runId).toBe(activated.runId)
+    const repeated = await h.task.snapshotIn(STORE)
+    expect(repeated.tasks).toHaveLength(1)
+    expect(repeated.runs).toHaveLength(1)
+    expect(repeated.proposals?.all).toHaveLength(1)
+    expect(taskEvents(h).filter(event => event.kind === 'TaskCreated')).toHaveLength(1)
+
+    // And the root is a live tree: a batch under it is admitted and accounted to
+    // the same budget (the accounting the acceptance instant above is for).
+    const batch = await h.runtime.decomposeAndRun(STORE, activated.taskId, activated.runId, ROOT_SESSION, batchSpec([childSpec('task a')]))
+    if (batch.status !== 'admitted') throw new Error('unreachable')
+    expect((await h.runtime.awaitBatch(STORE, batch.batchId)).map(outcome => outcome.status)).toEqual(['verified'])
+  })
+
+  test('all holds the goal: no task, no run, no spawn, no wake-up until a recorded decision', async () => {
+    const h = harness({ config: { generatedTaskReview: 'all' } })
+    await h.task.createStore(STORE)
+    const before = await h.task.snapshotIn(STORE)
+
+    const pending = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('ship the release'))
+    expect(pending.status).toBe('pending_review')
+    if (pending.status !== 'pending_review') throw new Error('unreachable')
+
+    const waiting = await proposalOf(h, pending.proposalId)
+    expect(waiting.status).toBe('pending_review')
+    expect(waiting.policy).toBe('all')
+    expect(waiting.decision).toBeUndefined()
+    expect(waiting.consumption).toBeUndefined()
+    // Zero side effects beyond the proposal record: no task, no run, no
+    // notification, and no worker — the goal is not a tree yet.
+    const afterSubmit = await h.task.snapshotIn(STORE)
+    expect(afterSubmit.tasks).toHaveLength(before.tasks.length)
+    expect(afterSubmit.runs).toHaveLength(before.runs.length)
+    expect(taskEvents(h).filter(event => event.kind === 'TaskCreated')).toHaveLength(0)
+    expect(taskEvents(h).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(0)
+    expect(h.spawned).toHaveLength(0)
+    expect(h.notifications).toHaveLength(0)
+
+    // A person is shown the *contract*, not a digest: the review request carries
+    // the goal and its criteria, and says which kind of subject it is.
+    expect(h.reviewCalls).toEqual([{
+      storeId: STORE,
+      trigger: 'submitted',
+      proposalId: pending.proposalId,
+      status: 'pending_review',
+      kind: 'root',
+      hasBatch: false,
+      parentObjective: 'ship the release',
+      childObjectives: [],
+      childCriteria: ['ship the release:root-goal:ship the release is delivered'],
+      obligations: 0,
+    }])
+
+    // A continuation while it waits writes nothing and activates nothing.
+    const again = await h.runtime.continueProposal(STORE, pending.proposalId, ROOT_SESSION)
+    expect(again.status).toBe('pending_review')
+    expect((await proposalOf(h, pending.proposalId)).status).toBe('pending_review')
+
+    // The decision is what creates the root, and the approval is continued in the
+    // same call on the recorded facts.
+    const decided = await h.runtime.decideProposal(STORE, pending.proposalId, { outcome: 'approved' }, REVIEWER)
+    expect(decided.outcome).toBe('approved')
+    expect(decided.continuation?.status).toBe('activated')
+    if (decided.continuation?.status !== 'activated') throw new Error('unreachable')
+    const activated = decided.continuation
+    const live = await h.task.snapshotIn(STORE)
+    expect(live.tasks).toHaveLength(1)
+    expect(live.runs).toHaveLength(1)
+    expect(live.tasks[0]?.taskId).toBe(activated.taskId)
+    // The root session is told its goal is live (best-effort, through the existing
+    // owner notice): the session that asked is the session that hears about it.
+    expect(h.notifications.some(item => item.sessionId === ROOT_SESSION && item.text.includes('root contract'))).toBe(true)
+
+    // A decided proposal is not activated twice: the continuation answers from
+    // its own consumption, and no second root appears.
+    const repeated = await h.runtime.continueProposal(STORE, pending.proposalId, ROOT_SESSION)
+    expect(repeated.status).toBe('activated')
+    if (repeated.status !== 'activated') throw new Error('unreachable')
+    expect(repeated.taskId).toBe(activated.taskId)
+    expect(repeated.runId).toBe(activated.runId)
+    expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(1)
+  })
+
+  test('a replaced contract carries the policy it was born under: a rejection is terminal and a revision is a new proposal', async () => {
+    const h = harness({ config: { generatedTaskReview: 'all' } })
+    await h.task.createStore(STORE)
+    const first = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('ship the release'))
+    if (first.status !== 'pending_review') throw new Error('unreachable')
+
+    const rejected = await h.runtime.decideProposal(STORE, first.proposalId, {
+      outcome: 'rejected',
+      reason: 'the goal is not the one the user asked for',
+    }, REVIEWER)
+    expect(rejected.outcome).toBe('rejected')
+    expect(rejected.continuation).toBeUndefined()
+    const refused = await proposalOf(h, first.proposalId)
+    expect(refused.status).toBe('rejected')
+    expect(refused.consumption).toBeUndefined()
+    expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(0)
+    expect(h.spawned).toHaveLength(0)
+
+    // A revision is new content: a new key, a new proposal id, and it references
+    // the record it replaces instead of editing it.
+    const revised = await h.runtime.submitRootContractProposal(STORE, ROOT_SESSION, rootContract('ship the release on time'), {
+      supersedes: first.proposalId,
+    })
+    expect(revised.proposalId).not.toBe(first.proposalId)
+    expect(revised.status).toBe('pending_review')
+    const stored = await proposalOf(h, revised.proposalId)
+    expect(stored.supersedes).toBe(first.proposalId)
+    expect(stored.status).toBe('pending_review')
+    // The old record is kept exactly as it was — a rejection is a fact, not an edit.
+    expect((await proposalOf(h, first.proposalId)).status).toBe('rejected')
+
+    const decided = await h.runtime.decideProposal(STORE, revised.proposalId, { outcome: 'approved' }, REVIEWER)
+    expect(decided.continuation?.status).toBe('activated')
+  })
+
+  test('the re-check ladder refuses a moved admission context and a moved resolution, naming each, and activates nothing', async () => {
+    const h = harness({ config: { generatedTaskReview: 'off' } })
+    await h.task.createStore(STORE)
+    // Submission only: the proposal is recorded `ready` and nothing is created —
+    // the state an intake is in between its two halves (and the state a crash
+    // between them leaves behind).
+    const submitted = await h.runtime.submitRootContractProposal(STORE, ROOT_SESSION, rootContract('ship the release'))
+    expect(submitted.status).toBe('ready')
+    expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(0)
+
+    // The limits in force move before the contract is continued: the approval
+    // covered the limits it was reviewed under, and a deployment that changed them
+    // invalidates it rather than transferring it (T2/T3 §6, A0 §3).
+    const moved = h.restart({ maxChildren: 5 })
+    await moved.task.openStore(STORE)
+    const stale = await moved.runtime.continueProposal(STORE, submitted.proposalId, ROOT_SESSION)
+    expect(stale.status).toBe('stale')
+    expect(stale.detail).toContain('the limits in force moved')
+    expect((await proposalOf(moved, submitted.proposalId)).status).toBe('stale')
+    expect((await moved.task.snapshotIn(STORE)).tasks).toHaveLength(0)
+    expect(moved.spawned).toHaveLength(0)
+  })
+
+  test('the re-check ladder names a moved capability resolution as stale, and a second root as expired', async () => {
+    const home = pinSkillHome('ball-align')
+    expect(home).toBeDefined()
+    const h = harness({
+      config: {
+        generatedTaskReview: 'off',
+        capabilities: { 'design-ball': { skills: ['ball-align'] } },
+      },
+    })
+    await h.task.createStore(STORE)
+    const contract: RootContractSpec = {
+      objective: 'align the ball',
+      acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the ball is aligned', command: 'true' }],
+      requiredCapabilities: ['design-ball'],
+    }
+    const submitted = await h.runtime.submitRootContractProposal(STORE, ROOT_SESSION, contract)
+    expect(submitted.status).toBe('ready')
+    // Two more contracts are asked for while no root exists yet — the store's
+    // one-root gate is a fact about what it *holds*, so proposing beside a waiting
+    // proposal is allowed and only activation settles the competition.
+    const winner = await h.runtime.submitRootContractProposal(STORE, ROOT_SESSION, {
+      objective: 'a different goal entirely',
+      acceptanceCriteria: [{ criterionId: 'other', description: 'the other goal holds', command: 'true' }],
+    })
+    const loser = await h.runtime.submitRootContractProposal(STORE, ROOT_SESSION, {
+      objective: 'a third goal',
+      acceptanceCriteria: [{ criterionId: 'third', description: 'the third goal holds', command: 'true' }],
+    })
+
+    // The row this contract resolved is replaced: the contract text is untouched,
+    // but what it resolves to is not what was recorded — so the re-check marks the
+    // proposal stale and says which part moved.
+    const moved = h.restart({ capabilities: { 'design-ball': { skills: ['ball-align'], tools: ['filesystem'] } } })
+    await moved.task.openStore(STORE)
+    const stale = await moved.runtime.continueProposal(STORE, submitted.proposalId, ROOT_SESSION)
+    expect(stale.status).toBe('stale')
+    expect(stale.detail).toContain('the resolution this contract was reviewed against moved')
+    expect(stale.detail).toContain('the capability resolution moved')
+    expect((await moved.task.snapshotIn(STORE)).tasks).toHaveLength(0)
+
+    // The first contract to activate takes the store's one root; the other one can
+    // no longer become it, and is expired by name rather than queued behind the
+    // winner.
+    const activated = await moved.runtime.continueProposal(STORE, winner.proposalId, ROOT_SESSION)
+    expect(activated.status).toBe('activated')
+    const refused = await moved.runtime.continueProposal(STORE, loser.proposalId, ROOT_SESSION)
+    expect(refused.status).toBe('expired')
+    expect(refused.detail).toContain('already holds root task')
+    const snapshot = await moved.task.snapshotIn(STORE)
+    expect(snapshot.tasks).toHaveLength(1)
+    expect(snapshot.runs).toHaveLength(1)
+    expect(snapshot.proposals?.all.filter(proposal => proposal.status === 'admitted')).toHaveLength(1)
+  })
+
+  test('a restart with the policy tightened sends an unactivated off-born contract for review, and activates it only after the decision', async () => {
+    const h = harness({ config: { generatedTaskReview: 'off' } })
+    await h.task.createStore(STORE)
+    // Submitted but not continued: the state an intake born under `off` leaves if
+    // nothing ever continues it (`submitRootContractProposal` is the entry that
+    // stops there), and the state a crash between the two halves also leaves.
+    const submitted = await h.runtime.submitRootContractProposal(STORE, ROOT_SESSION, rootContract('ship the release'))
+    expect(submitted.status).toBe('ready')
+    expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(0)
+
+    // The deployment tightens to `all` before anything activated it: §5 reaches
+    // whatever has not run, root contracts included.
+    const tightened = h.restart({ generatedTaskReview: 'all' })
+    await tightened.task.openStore(STORE)
+    const waiting = await tightened.runtime.continueProposal(STORE, submitted.proposalId, ROOT_SESSION)
+    expect(waiting.status).toBe('pending_review')
+    expect(waiting.detail).toContain('was sent for review')
+    // Zero side effects: no root task, no run, no spawn — and the review is asked
+    // from the stored contract.
+    const afterTighten = await proposalOf(tightened, submitted.proposalId)
+    expect(afterTighten.status).toBe('pending_review')
+    expect(afterTighten.policy).toBe('off')
+    expect(afterTighten.decision).toBeUndefined()
+    expect((await tightened.task.snapshotIn(STORE)).tasks).toHaveLength(0)
+    expect(tightened.reviewCalls).toEqual([{
+      storeId: STORE,
+      trigger: 'tightened',
+      proposalId: submitted.proposalId,
+      status: 'pending_review',
+      kind: 'root',
+      hasBatch: false,
+      parentObjective: 'ship the release',
+      childObjectives: [],
+      childCriteria: ['ship the release:root-goal:ship the release is delivered'],
+      obligations: 0,
+    }])
+    expect(tightened.spawned).toHaveLength(0)
+
+    // Loosening the policy again is not a release: only a recorded decision moves
+    // a waiting proposal, and the decision activates it.
+    const loosened = tightened.restart({ generatedTaskReview: 'off' })
+    await loosened.task.openStore(STORE)
+    expect((await loosened.runtime.continueProposal(STORE, submitted.proposalId, ROOT_SESSION)).status).toBe('pending_review')
+    const decided = await loosened.runtime.decideProposal(STORE, submitted.proposalId, { outcome: 'approved' }, REVIEWER)
+    const continuation = decided.continuation
+    if (continuation?.status !== 'activated') throw new Error('unreachable')
+    const snapshot = await loosened.task.snapshotIn(STORE)
+    expect(snapshot.tasks).toHaveLength(1)
+    expect(snapshot.tasks[0]?.taskId).toBe(continuation.taskId)
+    expect(snapshot.runs).toHaveLength(1)
+  })
+
+  test('a late approval on a store that already holds a root is recorded as expired, never as an approval that creates one', async () => {
+    const h = harness({ config: { generatedTaskReview: 'all' } })
+    await h.task.createStore(STORE)
+    // Two proposals waiting at once: neither store has a root yet, so both may be
+    // submitted (the one-root gate is a fact about the store, and it holds).
+    const first = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('ship the release'))
+    const second = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('ship it again, differently'))
+    if (first.status !== 'pending_review' || second.status !== 'pending_review') throw new Error('unreachable')
+
+    const approved = await h.runtime.decideProposal(STORE, second.proposalId, { outcome: 'approved' }, REVIEWER)
+    expect(approved.continuation?.status).toBe('activated')
+
+    // The approval of the other contract arrives when the store already has its
+    // root: §6's rule is that a late approval may only invalidate, so what lands is
+    // `expired` with the root named — and the one root stays the one root.
+    const late = await h.runtime.decideProposal(STORE, first.proposalId, { outcome: 'approved' }, REVIEWER)
+    expect(late.outcome).toBe('expired')
+    expect(late.detail).toContain('already holds root task')
+    expect((await proposalOf(h, first.proposalId)).status).toBe('expired')
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.tasks).toHaveLength(1)
+    expect(snapshot.runs).toHaveLength(1)
+  })
+
+  test('recovery finishes a decision that was saved but never activated, and leaves an activated root alone', async () => {
+    const h = harness({ config: { generatedTaskReview: 'all' } })
+    await h.task.createStore(STORE)
+    const submitted = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('ship the release'))
+    if (submitted.status !== 'pending_review') throw new Error('unreachable')
+    // Crash point ①: the approval is on the record and the process that made it
+    // never continued it. Written through the store's own entry, which is what a
+    // process that died between the decision and the continuation leaves.
+    await approveInStore(h, submitted.proposalId)
+    expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(0)
+
+    const restarted = h.restart()
+    await restarted.task.openStore(STORE)
+    const report = await restarted.runtime.reconcileStore(STORE)
+    // The recovery pass re-checked the contract and activated it: one root, its run
+    // bound in this process, and nothing left unresolved.
+    expect(report.unresolvedProposals).toEqual([])
+    const activated = await proposalOf(restarted, submitted.proposalId)
+    expect(activated.status).toBe('admitted')
+    if (activated.kind !== 'root' || activated.consumption?.kind !== 'root') throw new Error('unreachable')
+    const snapshot = await restarted.task.snapshotIn(STORE)
+    expect(snapshot.tasks).toHaveLength(1)
+    expect(snapshot.runs).toHaveLength(1)
+    expect(snapshot.tasks[0]?.taskId).toBe(activated.consumption.rootTaskId)
+    expect((await restarted.runtime.runForSession(ROOT_SESSION)).run.runId).toBe(activated.consumption.rootRunId)
+    expect(restarted.runtime.gate.phaseOf(ROOT_SESSION)).toBe('active')
+    expect(restarted.notifications.some(item => item.text.includes('root contract'))).toBe(true)
+
+    // Crash point ②: the activation commit is durable and the process that wrote
+    // it is gone. The store's own root is the answer — reopened, adopted, bound —
+    // and no second task, run or proposal consumption appears.
+    const crashed = h.restart()
+    await crashed.task.openStore(STORE)
+    const adopted = await crashed.runtime.adoptRoot(STORE, ROOT_SESSION)
+    expect(adopted).toMatchObject({ adopted: true, taskId: activated.consumption.rootTaskId, runId: activated.consumption.rootRunId })
+    const report2 = await crashed.runtime.reconcileStore(STORE)
+    expect(report2.unresolvedProposals).toEqual([])
+    const after = await crashed.task.snapshotIn(STORE)
+    expect(after.tasks).toHaveLength(1)
+    expect(after.runs).toHaveLength(1)
+    expect(after.proposals?.all.filter(proposal => proposal.status === 'admitted')).toHaveLength(1)
+    expect(taskEvents(h).filter(event => event.kind === 'TaskCreated')).toHaveLength(1)
+  })
+
+  test('a waiting goal whose store found its root while the process was down is expired by the recovery pass', async () => {
+    const h = harness({ config: { generatedTaskReview: 'all' } })
+    await h.task.createStore(STORE)
+    const waiting = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('the goal that waits'))
+    const other = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('the goal that runs'))
+    if (waiting.status !== 'pending_review' || other.status !== 'pending_review') throw new Error('unreachable')
+    expect((await h.runtime.decideProposal(STORE, other.proposalId, { outcome: 'approved' }, REVIEWER)).continuation?.status).toBe('activated')
+
+    // The waiting proposal is still `pending_review` on the record while the store
+    // now holds a root: the recovery pass reads that as an intake that can no
+    // longer happen and expires it, naming the root it lost to.
+    const restarted = h.restart()
+    await restarted.task.openStore(STORE)
+    const report = await restarted.runtime.reconcileStore(STORE)
+    // The expiry is reported the way the batch path reports a stale loser: it is a
+    // terminal fact a reader should see, not a silent deletion of the record.
+    expect(report.unresolvedProposals).toHaveLength(1)
+    expect(report.unresolvedProposals[0]?.status).toBe('expired')
+    const expired = await proposalOf(restarted, waiting.proposalId)
+    expect(expired.status).toBe('expired')
+    expect(expired.decision?.reason).toContain('already holds root task')
+    const snapshot = await restarted.task.snapshotIn(STORE)
+    expect(snapshot.tasks).toHaveLength(1)
+    expect(snapshot.runs).toHaveLength(1)
+  })
+
+  test('a root contract that could never run is refused before a proposal exists, with nothing written', async () => {
+    const h = harness()
+    await h.task.createStore(STORE)
+    const before = await h.task.snapshotIn(STORE)
+
+    // The old shape: one mandatory criterion, the composite conjunction. It is a
+    // valid *child* contract and not a root goal, and the refusal says which rule
+    // it broke.
+    await expect(h.runtime.intakeRootContract(STORE, ROOT_SESSION, {
+      objective: 'all children verified',
+      acceptanceCriteria: [{
+        criterionId: 'root-children-verified',
+        description: 'all mandatory children verified',
+        mode: 'composite',
+        mandatory: true,
+      }],
+    })).rejects.toThrow(/verificationMode !== "composite"/)
+
+    // Every other machine rule still applies, and every refusal is whole: no
+    // proposal, no task, no obligation, no review request.
+    await expect(h.runtime.intakeRootContract(STORE, ROOT_SESSION, {
+      objective: '   ',
+      acceptanceCriteria: [{ description: 'it holds', command: 'true' }],
+    })).rejects.toThrow(/objective must be a non-empty string/)
+    await expect(h.runtime.intakeRootContract(STORE, ROOT_SESSION, {
+      objective: 'an unregistered judge',
+      acceptanceCriteria: [{
+        criterionId: 'x',
+        description: 'it holds',
+        mode: 'deterministic',
+        command: 'true',
+        mandatory: true,
+        verifierRef: 'no-such-verifier',
+      }],
+    })).rejects.toThrow(/no-such-verifier/)
+    await expect(h.runtime.intakeRootContract(STORE, ROOT_SESSION, {
+      objective: 'a field nobody reads',
+      acceptanceCriteria: [{ description: 'it holds', command: 'true' }],
+      budget: 1000,
+    } as unknown as RootContractSpec)).rejects.toThrow(/unknown field "budget"/)
+
+    expect(await h.task.snapshotIn(STORE)).toEqual(before)
+    expect(h.reviewCalls).toHaveLength(0)
+    expect(h.spawned).toHaveLength(0)
+    expect(h.notifications).toHaveLength(0)
+  })
+
+  test('a store that already holds a root refuses a new intake by name, whatever root it holds', async () => {
+    const h = harness()
+    await h.task.createStore(STORE)
+    const first = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('ship the release'))
+    if (first.status !== 'activated') throw new Error('unreachable')
+
+    await expect(h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('a different goal')))
+      .rejects.toThrow(/already holds root task/)
+    // Nothing about the second attempt exists: no proposal, no task, no run.
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.proposals?.all).toHaveLength(1)
+    expect(snapshot.tasks).toHaveLength(1)
+  })
+
+  test('an old graph is history: its legacy root is not re-intaken, and it still decomposes and completes', async () => {
+    const h = harness()
+    // The shape the graph entry used to create — objective = the graph's name, one
+    // mandatory composite criterion — seeded through the fixture that exists for
+    // exactly this, because no entry can produce it any more (A0 §1.6).
+    const legacy = await seedLegacyRoot({
+      task: h.task,
+      runtime: h.runtime,
+      storeId: STORE,
+      rootSessionId: ROOT_SESSION,
+      objective: 'the old graph name',
+    })
+    const stored = await h.task.taskIn(STORE, legacy.taskId)
+    expect(stored.contract?.objective).toBe('the old graph name')
+    expect(stored.contract?.acceptanceCriteria.map(criterion => criterion.criterionId)).toEqual(['root-children-verified'])
+
+    // An intake on such a store is refused by name: the root it holds is history,
+    // and a changed goal is a new graph rather than a second root here.
+    await expect(h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('a goal for today')))
+      .rejects.toThrow(/already holds root task/)
+    expect((await h.task.snapshotIn(STORE)).proposals?.all ?? []).toHaveLength(0)
+
+    // And the old tree still works: its batch is admitted, runs and completes, and
+    // the root's own composite criterion accepts it exactly as it always did.
+    const batch = await h.runtime.decomposeAndRun(STORE, legacy.taskId, legacy.runId, ROOT_SESSION, batchSpec([childSpec('legacy work')]))
+    if (batch.status !== 'admitted') throw new Error('unreachable')
+    expect((await h.runtime.awaitBatch(STORE, batch.batchId)).map(outcome => outcome.status)).toEqual(['verified'])
+    expect((await h.task.taskIn(STORE, legacy.taskId)).status).toBe('verified')
+    // Reading it is not a rewrite: the store still holds one task, one run and the
+    // contract it was created with.
+    const after = await h.task.snapshotIn(STORE)
+    expect(after.tasks).toHaveLength(2)
+    expect(after.tasks.find(task => task.taskId === legacy.taskId)?.contract?.objective).toBe('the old graph name')
   })
 })

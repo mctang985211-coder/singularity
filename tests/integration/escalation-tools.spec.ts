@@ -157,11 +157,12 @@ it('refuses an incomplete card without asking the human', async () => {
 it('carries a capability gap from the orchestrator feedback to the ledger through escalate', async () => {
   const { tools, task, runtime, home } = await mount()
   try {
-    const { taskId: rootTaskId } = await runtime.createRootTask(
-      STORE,
-      { objective: 'ship the release', rootSessionId: ROOT_SESSION },
-      ROOT_SESSION,
-    )
+    const activated = await runtime.intakeRootContract(STORE, ROOT_SESSION, {
+      objective: 'ship the release',
+      acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is delivered', command: 'true' }],
+    })
+    if (activated.status !== 'activated') throw new Error(`the root contract was not activated: ${activated.detail}`)
+    const rootTaskId = activated.taskId
 
     // The capability gap, exactly as the root's task_decompose call sees it:
     // the orchestrator's rejection text, which names the L4 exit.

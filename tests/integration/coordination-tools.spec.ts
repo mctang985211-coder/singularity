@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { DecomposeSpec } from '../../task-runtime/src/index.ts'
+import type { DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { disposeRunStacks, startRunStack, type RunStack, type ToolCallResult } from '../support/run-stack.ts'
 
 /**
@@ -46,6 +46,22 @@ async function batchIdOf(h: RunStack, storeId: string, runId: string): Promise<s
   return run.batchId
 }
 
+
+/**
+ * The root contract this spec's trees run under (A0 §1.2): one goal, one
+ * criterion a command settles. The intake is real here — these cases are about
+ * what happens to a live tree — so the contract is stated explicitly rather than
+ * defaulted: a root contract owes at least one mandatory criterion judged by
+ * something other than the composite conjunction, and a fixture that supplied one
+ * silently would be answering the question under test.
+ */
+function rootContract(objective: string): RootContractSpec {
+  return {
+    objective,
+    acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
+  }
+}
+
 describe('the coordination tools (A3)', () => {
   it('returns from task_decompose at admission, with the child still in flight', async () => {
     const release = Promise.withResolvers<void>()
@@ -54,7 +70,7 @@ describe('the coordination tools (A3)', () => {
       tools: true,
       worker: async () => { await release.promise },
     })
-    const root = await h.root(ROOT)
+    const root = await h.root(ROOT, rootContract('ship the release'))
 
     const answer = await h.call(h.rootAgent(ROOT), 'task_decompose', {
       reason: 'split the work',
@@ -109,7 +125,7 @@ describe('the coordination tools (A3)', () => {
         })
       },
     })
-    const root = await h.root(ROOT)
+    const root = await h.root(ROOT, rootContract('ship the release'))
 
     const answer = await h.call(h.rootAgent(ROOT), 'task_decompose', {
       reason: 'split the work',
@@ -151,7 +167,7 @@ describe('the coordination tools (A3)', () => {
       submit: false,
       worker: async () => { await release.promise },
     })
-    const root = await h.root(ROOT)
+    const root = await h.root(ROOT, rootContract('ship the release'))
 
     const answer = await h.call(h.rootAgent(ROOT), 'task_decompose', {
       reason: 'split the work',
@@ -184,7 +200,7 @@ describe('the coordination tools (A3)', () => {
 
   it('tells a run with no batch open that there is nothing to cancel', async () => {
     const h = await startRunStack({ roots: [ROOT], tools: true })
-    await h.root(ROOT)
+    await h.root(ROOT, rootContract('ship the release'))
 
     const cancelled = await h.call(h.rootAgent(ROOT), 'task_cancel', {})
     expect(cancelled.isError).toBe(false)

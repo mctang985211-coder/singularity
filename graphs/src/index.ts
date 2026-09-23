@@ -201,13 +201,22 @@ export class GraphsService extends Service {
         rootAgentId = handle.agent.id
         const taskRuntime = (this.ctx.get?.('taskRuntime') ?? this.ctx.taskRuntime) as Context['taskRuntime'] | undefined
         if (taskRuntime === undefined) {
-          throw new Error('graphs: taskRuntime service is not loaded; cannot create the root task')
+          throw new Error('graphs: taskRuntime service is not loaded; cannot open the root store')
         }
-        await taskRuntime.createRootTask(
-          rootTaskStoreId(handle.agent.id),
-          { objective: name, rootSessionId: handle.agent.id },
-          'graphs',
-        )
+        // **The graph creates no task** (A0 §1.1): it opens the root session's
+        // store and adopts whatever root that store already holds. Creating a
+        // graph used to mint a root task whose objective was this graph's own
+        // name — a goal nobody asked for, standing in for the user's request
+        // until a contract could replace it. A root task now exists exactly when
+        // a root contract passed intake, so this call is the store's door (open
+        // it, bind an existing root, recover it) and never a second way in.
+        //
+        // A fresh graph's store therefore holds no task at all until its root
+        // agent intakes a contract, which is what `adopted: false` says. The call
+        // is kept (rather than dropped) because a store reopened for an existing
+        // root session — a restart, a re-created graph handle — must still be
+        // bound to its root run and its workspace ownership rebuilt.
+        await taskRuntime.adoptRoot(rootTaskStoreId(handle.agent.id), handle.agent.id)
         this.ctx.envBuilder.store.attachSession(envId, handle.agent.id)
         attached = { envId, sessionId: handle.agent.id }
         this.ctx.envBuilder.store.select(envId)

@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { rootTaskStoreId } from '../../task/src/index.ts'
-import type { DecomposeSpec } from '../../task-runtime/src/index.ts'
+import type { DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { WorkspaceBusyError } from '../../task-runtime/src/index.ts'
 import { disposeRunStacks, startRunStack, type RunStack } from '../support/run-stack.ts'
 
@@ -14,9 +14,10 @@ import { disposeRunStacks, startRunStack, type RunStack } from '../support/run-s
  * The three cases here are the ones a per-entry test cannot show:
  *
  * 1. **Two roots, one checkout.** A root run holds its workspace for as long as
- *    it is non-terminal, so a second root's own `createRootTask` is refused
- *    before it writes anything — and once the first tree reaches a terminal
- *    state, the checkout is released and the second root may be created.
+ *    it is non-terminal, so a second root's own intake is refused at activation —
+ *    before its tree exists, with only the proposal record left to show the
+ *    attempt — and once the first tree reaches a terminal state, the checkout is
+ *    released and the second root may be created.
  * 2. **A replay obeys the same rules.** `replayTask` claims the caller's
  *    checkout too, so a replay from a second root into a checkout the first root
  *    holds is refused with nothing persisted; and a spawning replay's worker is
@@ -94,17 +95,33 @@ async function writeChampion(h: RunStack, storeId: string): Promise<{ taskId: st
   return { taskId, runId }
 }
 
+
+/**
+ * The root contract this spec's trees run under (A0 §1.2): one goal, one
+ * criterion a command settles. The intake is real here — these cases are about
+ * what happens to a live tree — so the contract is stated explicitly rather than
+ * defaulted: a root contract owes at least one mandatory criterion judged by
+ * something other than the composite conjunction, and a fixture that supplied one
+ * silently would be answering the question under test.
+ */
+function rootContract(objective: string): RootContractSpec {
+  return {
+    objective,
+    acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
+  }
+}
+
 describe('workspace ownership across entries (A3)', () => {
   it('refuses a second root on a held checkout with nothing written, and admits it once the first tree is terminal', async () => {
     const h = await startRunStack({ roots: [ROOT1, ROOT2] })
-    const first = await h.root(ROOT1, 'the first tree')
+    const first = await h.root(ROOT1, rootContract('the first tree'))
     // The first root's run is `active` and holds the checkout it will write into.
     expect((await h.runtime.runForSession(ROOT1)).run.executionPhase).toBe('active')
     expect(markers(h)).toHaveLength(1)
 
     // The second root's own entry is refused before anything of its tree exists —
     // and the refusal names the holder, not just "busy".
-    await expect(h.root(ROOT2, 'the second tree')).rejects.toThrow(WorkspaceBusyError)
+    await expect(h.root(ROOT2, rootContract('the second tree'))).rejects.toThrow(WorkspaceBusyError)
     const secondStoreId = rootTaskStoreId(ROOT2)
     const refused = await h.task.openStore(secondStoreId)
     expect(refused.tasks).toHaveLength(0)
@@ -120,7 +137,7 @@ describe('workspace ownership across entries (A3)', () => {
     expect(markers(h)).toHaveLength(0)
 
     // Now the second root may be created, and it takes the checkout for itself.
-    const second = await h.root(ROOT2, 'the second tree')
+    const second = await h.root(ROOT2, rootContract('the second tree'))
     expect(second.taskId).not.toBe(first.taskId)
     expect((await h.snapshot(second.storeId)).runs).toHaveLength(1)
     expect(markers(h)).toHaveLength(1)
@@ -128,7 +145,7 @@ describe('workspace ownership across entries (A3)', () => {
 
   it('holds a spawning replay to the completion protocol, and refuses a replay from a root that does not hold the checkout', async () => {
     const h = await startRunStack({ roots: [ROOT1, ROOT2], submit: false, worker: () => {} })
-    const first = await h.root(ROOT1, 'the first tree')
+    const first = await h.root(ROOT1, rootContract('the first tree'))
     const champion = await writeChampion(h, first.storeId)
 
     // (a) A replay from the *second* root would write into a checkout the first
@@ -165,7 +182,7 @@ describe('workspace ownership across entries (A3)', () => {
     // run it starts is charged to the same count, so the replay that would push
     // the tree past `maxRuns` is refused before anything is written.
     const h = await startRunStack({ roots: [ROOT1], rootBudget: { maxRuns: 3 } })
-    const first = await h.root(ROOT1, 'the first tree')
+    const first = await h.root(ROOT1, rootContract('the first tree'))
     const champion = await writeChampion(h, first.storeId)
 
     // root run + champion run = 2 recorded; one slot is left, and the replay uses it.
@@ -189,7 +206,7 @@ describe('workspace ownership across entries (A3)', () => {
     // whose run is bound to the store's root session, so the root's own
     // admission and its children's starts keep working under the same total.
     const h = await startRunStack({ roots: [ROOT1], rootBudget: { maxRuns: 8 } })
-    const first = await h.root(ROOT1, 'the first tree')
+    const first = await h.root(ROOT1, rootContract('the first tree'))
     const champion = await writeChampion(h, first.storeId)
 
     const replay = await h.runtime.replayTask(first.storeId, champion.taskId, { lineage: 'evolution-replay:p1', spawn: false }, ROOT1)
@@ -211,11 +228,11 @@ describe('workspace ownership across entries (A3)', () => {
 
   it('runs the same ownership admission for a direct service call as for the tool', async () => {
     const h = await startRunStack({ roots: [ROOT1, ROOT2] })
-    const first = await h.root(ROOT1, 'the first tree')
+    const first = await h.root(ROOT1, rootContract('the first tree'))
 
-    // A second root's tree written straight through the store service — no
-    // `createRootTask`, so it never claimed a checkout — with a live agent and an
-    // active run of its own.
+    // A second root's tree written straight through the store service — never
+    // through the intake, so it never claimed a checkout — with a live agent and
+    // an active run of its own.
     const secondStoreId = rootTaskStoreId(ROOT2)
     const secondTaskId = 't-second'
     const secondRunId = 'r-second'

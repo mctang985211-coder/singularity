@@ -11,7 +11,7 @@ import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evol
 import { defineEvolutionDecideTool } from '../../agent-singularity/src/tools/evolution-decide.ts'
 import type { TaskEvent } from '../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
-import type { CapabilityConfig, Config, DecomposeSpec } from '../../task-runtime/src/index.ts'
+import type { CapabilityConfig, Config, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 
@@ -272,10 +272,22 @@ async function harness(options: { capabilities?: Readonly<Record<string, Capabil
   }
 }
 
-/** The root task plus the run every entry resolves the caller through. */
+/**
+ * The root task plus the run every entry resolves the caller through — activated
+ * through the real intake (A0 §1.2) with this spec's own contract, stated here
+ * rather than defaulted.
+ */
+function rootContract(objective: string): RootContractSpec {
+  return {
+    objective,
+    acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
+  }
+}
+
 async function createRoot(h: Harness): Promise<{ storeId: string; taskId: string; runId: string }> {
-  const { taskId, runId } = await h.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION)
-  return { storeId: STORE, taskId, runId }
+  const activated = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('ship the release'))
+  if (activated.status !== 'activated') throw new Error(`the root contract was not activated: ${activated.detail}`)
+  return { storeId: STORE, taskId: activated.taskId, runId: activated.runId }
 }
 
 /** The refused admission the runtime answered with; an admitted batch is this test's own failure. */

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { AcceptanceCriterion, EvidenceBundle, TaskEvent, VerificationResult } from '../../../task/src/index.ts'
 import { TaskService, contractDigest, rootTaskStoreId } from '../../../task/src/index.ts'
-import type { ChildOutcome, Config, DecomposeSpec } from '../../src/index.ts'
+import type { ChildOutcome, Config, DecomposeSpec, RootContractSpec } from '../../src/index.ts'
 import {
   TaskRuntime,
   contractDefects,
@@ -205,8 +205,23 @@ function taskEvents(h: Harness): TaskEvent[] {
   return [...h.sessions.values()].flatMap(stored => stored.events.map(item => item.data as TaskEvent))
 }
 
-async function createRoot(h: Harness) {
-  return h.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION)
+/**
+ * The root contract these cases run under (A0 §1.2): one goal, one criterion a
+ * command settles. Plan and act — the intake, the review gate and the activation
+ * — are what these specs exercise; the root's own acceptance is stated here
+ * rather than assumed, because a root contract now has to carry at least one
+ * mandatory criterion judged by something other than the composite conjunction.
+ */
+const ROOT_CONTRACT: RootContractSpec = {
+  objective: 'ship the release',
+  acceptanceCriteria: [{ criterionId: 'root-ship', description: 'the release is shipped', command: 'true' }],
+}
+
+/** Activate the root through the real intake and hand back what it became. */
+async function intakeRoot(h: Harness): Promise<{ taskId: string; runId: string }> {
+  const activated = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, ROOT_CONTRACT)
+  if (activated.status !== 'activated') throw new Error(`the root contract was not activated: ${activated.detail}`)
+  return { taskId: activated.taskId, runId: activated.runId }
 }
 
 function childSpec(objective: string, overrides: Record<string, unknown> = {}) {
@@ -510,7 +525,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
     const file = join(checkout, 'check.sh')
     writeFileSync(file, 'exit 0\n')
     const h = harness({ checkout })
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const spec = protectedSpec('check.sh')
 
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, spec)
@@ -542,7 +557,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
   test('the worker sees the fixed protected input in its spawn prompt and contract block before any task_read', async () => {
     writeFileSync(join(checkout, 'check.sh'), 'exit 0\n')
     const h = harness({ checkout })
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
 
     await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, protectedSpec('check.sh'))
 
@@ -562,7 +577,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
     const file = join(checkout, 'check.sh')
     writeFileSync(file, 'exit 0\n')
     const h = harness({ checkout })
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const spec = protectedSpec('check.sh')
     const identity = async (directory: string) => {
       const fixed = await fixSpecProtectedInputs(spec, directory)
@@ -598,7 +613,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
 
   test('an unreadable declared path refuses the whole batch with zero side effects', async () => {
     const h = harness({ checkout })
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const eventsBefore = taskEvents(h).length
 
     await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, protectedSpec('tests/missing.sh')))
@@ -617,7 +632,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
 
   test('a declared input is refused when the session checkout cannot be resolved', async () => {
     const h = harness()
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const tasksBefore = (await h.task.snapshotIn(STORE)).tasks.length
 
     await expect(decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, protectedSpec('check.sh')))
@@ -629,7 +644,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
 
   test('a criterion with no declared input is not protected: nothing is read, nothing is claimed', async () => {
     const h = harness()
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
 
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
@@ -644,7 +659,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
 
   test('a malformed proposal is refused by normalization, not crashed on by the fixing step', async () => {
     const h = harness({ checkout })
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const cases: Array<[unknown, RegExp]> = [
       [{ reason: 'split the work' }, /decomposition requires at least one child/],
       [{ reason: 'split the work', children: 'child a' }, /decomposition children must be an array/],
@@ -665,7 +680,7 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
 
 describe('TaskRuntime.replayTask: protected inputs on the replay path', () => {
   async function champion(h: Harness) {
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('champion work')],
@@ -676,7 +691,7 @@ describe('TaskRuntime.replayTask: protected inputs on the replay path', () => {
 
   /** A terminal task whose criteria carry an already-fixed (or deliberately malformed) declaration. */
   async function storedChampion(h: Harness, criterion: Record<string, unknown>): Promise<string> {
-    const { taskId: rootTaskId } = await createRoot(h)
+    const { taskId: rootTaskId } = await intakeRoot(h)
     const taskId = 't-broken'
     const runId = 'r-broken'
     await h.task.createTaskIn(STORE, {
@@ -744,7 +759,7 @@ describe('TaskRuntime.replayTask: protected inputs on the replay path', () => {
     const file = join(checkout, 'champion-check.sh')
     writeFileSync(file, 'exit 0\n')
     const h = harness({ checkout })
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('champion work', { acceptanceCriteria: [declaredCriterion('ac1', 'champion-check.sh')] })],

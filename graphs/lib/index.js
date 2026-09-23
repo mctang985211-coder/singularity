@@ -252,11 +252,8 @@ var GraphsService = class extends Service {
 				});
 				rootAgentId = handle.agent.id;
 				const taskRuntime = this.ctx.get?.("taskRuntime") ?? this.ctx.taskRuntime;
-				if (taskRuntime === void 0) throw new Error("graphs: taskRuntime service is not loaded; cannot create the root task");
-				await taskRuntime.createRootTask(rootTaskStoreId(handle.agent.id), {
-					objective: name,
-					rootSessionId: handle.agent.id
-				}, "graphs");
+				if (taskRuntime === void 0) throw new Error("graphs: taskRuntime service is not loaded; cannot open the root store");
+				await taskRuntime.adoptRoot(rootTaskStoreId(handle.agent.id), handle.agent.id);
 				this.ctx.envBuilder.store.attachSession(envId, handle.agent.id);
 				attached = {
 					envId,

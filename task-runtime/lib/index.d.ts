@@ -1117,6 +1117,40 @@ type NormalizationResult = {
  * describe. A refusal is a value, never a throw.
  */
 declare function normalizeDecomposition(spec: unknown, context: NormalizationContext): NormalizationResult;
+type RootNormalizationResult = {
+  ok: true;
+  contract: TaskContract;
+} | {
+  ok: false;
+  reasons: string[];
+};
+/**
+ * Normalize one root contract (A0 §2–§3): the caller's single contract —
+ * objective, criteria, assumptions, constraints, declared capabilities — in,
+ * its canonical {@link TaskContract} out, or every reason it was refused.
+ *
+ * It shares the contract-level rules with {@link normalizeDecomposition} rather
+ * than restating them: the same closed field set per criterion (an undeclared
+ * key is refused by name, never dropped), the same verbatim text rule (blankness
+ * is refused, bytes are not rewritten), the same defaults (an omitted list is
+ * `[]`, an omitted `mandatory` is `true`, an absent mode follows the command),
+ * and the same criterion-id fixing — with the root's own id scheme
+ * ({@link rootCriterionId}).
+ *
+ * What it does *not* do: structural admission. `contractDefects`, the root's
+ * own independent-criterion rule (`admission.ts:rootIndependenceDefects`), the
+ * protected-input shape rule and every capability/provider/verifier question are
+ * asked by the intake entry over the value this returns, exactly as the
+ * decomposition path asks them over a normalized batch. And it writes nothing:
+ * the caller has the whole contract or a list of reasons, and a refused root
+ * contract leaves no id, no event and no file read behind it.
+ *
+ * The `contractVersion` gate is the batch's: absent is this build's version (the
+ * caller that does not version its input means the current language), and a
+ * declared version whose field semantics this build does not know is refused
+ * rather than read with today's reader.
+ */
+declare function normalizeRootContract(spec: unknown): RootNormalizationResult;
 //#endregion
 //#region src/workspace.d.ts
 /** The directory under a deployment's run-binding root that holds ownership markers (§3.4). */
@@ -1710,6 +1744,34 @@ type AdmissionVerdict = {
  */
 declare function independentAcceptanceDefects(criteria: readonly AcceptanceCriterion[], requiresIndependentAcceptance: boolean | undefined, label: string): string[];
 /**
+ * The one structural rule a **root contract** owes on top of
+ * {@link contractDefects} (A0 §1.2): at least one mandatory criterion whose
+ * judge is something other than the composite conjunction.
+ *
+ * Why it is a rule of its own and not folded into {@link contractDefects}: a
+ * decomposition child may legitimately be judged by "my children verified" —
+ * its parent owns the goal it was delegated — while a *root* has nobody above
+ * it, so a root whose only mandatory criterion is the composite conjunction is
+ * satisfied by its own decomposition and by nothing else. That is the shape the
+ * graph entry used to mint from its fixed spec, and it is exactly the shape
+ * this rule refuses to call a root goal. Applying it to every contract would
+ * break the delegated-children case; applying it to nothing would let a root
+ * re-enter through the old shape.
+ *
+ * Structural, and only structural: it says which *kind* of judge the contract
+ * names, never whether that judge is any good. A `command` that is a constant
+ * truth, a model's self-report, or a `heuristic` criterion are all outside what
+ * a shape rule can decide — §1.2 says so in as many words ("不能用恒真命令、
+ * 模型自述或 heuristic 冒充确定性根通过"), and P4 already labels a heuristic
+ * verdict as never a deterministic pass. What this rule does buy is that the
+ * root's acceptance cannot be *only* the conjunction of what it delegated.
+ *
+ * `label` names the contract under validation (`root contract`, `root
+ * contract of session "s-…"`); the reason is prefixed with it, like every other
+ * contract rule's.
+ */
+declare function rootIndependenceDefects(criteria: readonly AcceptanceCriterion[], label: string): string[];
+/**
  * Structural defects of one task's acceptance contract (T1, construction guide
  * §4): what has to hold before a contract can be admitted at all, whichever
  * entry wrote it — an ordinary decomposition child, a replay candidate, or
@@ -1852,6 +1914,36 @@ interface ProposalRequestKeyContext {
  * different digest, hence a new key.
  */
 declare function proposalRequestKey(context: ProposalRequestKeyContext): string;
+/**
+ * The calling context a *root* contract's request key is made of (A0 §2): which
+ * store and which root session the contract is the goal of, and the digest of
+ * the normalized contract itself.
+ *
+ * The parent task and parent run a batch's key names have no counterpart here —
+ * a root contract has no parent, and the task it becomes does not exist until it
+ * is activated — so the two fields that identify the subject are the store and
+ * the root session, and the content is the contract's own digest.
+ */
+interface RootRequestKeyContext {
+  storeId: string;
+  rootSessionId: string;
+  /** {@link contractDigest} of the normalized root contract the request carries. */
+  contractDigest: string;
+}
+/**
+ * The request key one root intake derives when its caller named none: `rk-` plus
+ * the SHA-256 of {@link canonicalize} over {@link RootRequestKeyContext}.
+ *
+ * What the derivation buys, in the order it matters: the same contract asked for
+ * again — in this process or after a restart — addresses the same proposal and is
+ * answered from the record instead of being written twice; a revision is
+ * different content, hence a different digest, hence a different key, which is
+ * exactly what §6 wants a revision to be; and no caller has to keep a key of its
+ * own to get that. A caller that *has* a stable identifier may pass it instead,
+ * and the store then holds it to the same rule — one key names one proposal, and
+ * a key already bound to other content is refused by name.
+ */
+declare function rootProposalRequestKey(context: RootRequestKeyContext): string;
 /**
  * Whether one proposal is still in flight for the task that made it —
  * submitted and not yet admitted, not yet decided, or decided and not yet
@@ -2265,6 +2357,110 @@ interface DecomposeSpec {
   contractVersion?: number;
 }
 /**
+ * One root contract as its caller presents it (A0 §1.2, §2): the goal of a root
+ * session — objective, acceptance criteria, assumptions, constraints, declared
+ * capabilities — in the authoring form the tools and the direct service entry
+ * share.
+ *
+ * The field set is the contract's own (`task/src/contract.ts:TaskContract`) and
+ * nothing else: a key this shape does not declare is refused by name rather than
+ * dropped, so a caller cannot smuggle a budget, a skill pin or a permission
+ * through a field the runtime never reads. Text is stored verbatim — blankness is
+ * refused, bytes are not rewritten — and criterion ids are fixed by the single
+ * normalization entry.
+ *
+ * What this shape deliberately does *not* carry: a mode that replaces the
+ * acceptance rule, a flag that skips the review, or a parent to hang the goal
+ * under. A root contract is the goal; how it is *reviewed* is the deployment's
+ * policy, and how it is *checked* is its criteria.
+ */
+interface RootContractSpec {
+  objective: string;
+  acceptanceCriteria: readonly CriterionSpec[];
+  assumptions?: readonly string[];
+  constraints?: readonly string[];
+  requiredCapabilities?: readonly string[];
+  /** The contract language, as {@link DecomposeSpec.contractVersion}: omitted means this build's version. */
+  contractVersion?: number;
+}
+/**
+ * What a caller may say about one root intake beyond the contract itself. The
+ * fields mirror {@link DecomposeProposalOptions} because a root contract is a
+ * proposal too — same lifecycle, same key rules, same decision binding.
+ */
+interface RootIntakeOptions {
+  /**
+   * The idempotency key this request is addressed by (§2). Absent, the runtime
+   * derives it from the store, the root session and the contract's own digest
+   * ({@link rootProposalRequestKey}) — so the same contract asked for again is
+   * answered from the record, and a revision (different content) is a different
+   * key. Given explicitly, the same rule applies: one key names one proposal,
+   * and a key already bound to other content is refused by name.
+   */
+  requestKey?: string;
+  /** The proposal this one revises (§6): a rejected or stale root contract, whose record is kept. */
+  supersedes?: string;
+  /**
+   * The call's own control: an already-aborted `signal` persists nothing. There is
+   * no `callId` here and no write drain behind it — nothing about an activation
+   * hands this checkout to another writer or closes this session's own ability to
+   * write (A3 §3.3's drain is the convergence *before* a batch or a verification
+   * takes the checkout, and a root run keeps its own), so the exclusion such a
+   * field exists for has no step to apply to.
+   */
+  exec?: {
+    signal?: AbortSignal;
+  };
+}
+/**
+ * What one root intake settled (A0 §1.3–§1.4). `status` is the field to switch
+ * on.
+ *
+ * `pending_review` declares no ids rather than optional ones: a root contract
+ * waiting for a decision has no task and no run — that is the whole point of
+ * `all` — and a caller reading an id off this member would be reading a field
+ * that does not exist. `activated` carries the ids the activation commit minted,
+ * so the caller knows which root task and run its contract became without
+ * re-reading the store.
+ */
+type RootIntakeResult = {
+  status: 'activated';
+  proposalId: string;
+  taskId: TaskId;
+  runId: RunId;
+  detail: string;
+} | {
+  status: 'pending_review';
+  proposalId: string;
+  detail: string;
+};
+/**
+ * What {@link TaskRuntime.adoptRoot} found for one root session.
+ *
+ * Two outcomes, both normal: the store holds a root task bound to this session
+ * (`adopted`, with the task and run ids and the phase the session's gate was set
+ * to), or it does not (`adopted: false`) — a store can exist with no task at all
+ * (A0 §1.1: `graphs.create` opens it, the intake fills it), and that is not an
+ * error, it is the state before a contract was accepted.
+ */
+type RootAdoption = {
+  adopted: true;
+  taskId: TaskId;
+  runId: RunId;
+  /**
+   * The phase this session's execution gate now holds, derived from the
+   * store's own run record. A root run that reached a terminal state leaves
+   * `terminal`: a late intake or write on a finished root is refused by the
+   * gate as well as by the state, and a restart must re-derive that from the
+   * store rather than trust what a dead process remembered (§1.8).
+   */
+  phase: ExecutionPhase | 'terminal';
+  detail: string;
+} | {
+  adopted: false;
+  detail: string;
+};
+/**
  * Options for {@link TaskRuntime.replayTask} (guide §2.7.6, W15).
  */
 interface ReplayTaskOptions {
@@ -2565,20 +2761,35 @@ type DecomposeAdmissionResult = {
   childTaskIds: never;
 };
 /**
- * What one continuation settled (T2/T3 §6). The two members are the whole
- * answer to "did this batch become tasks": `admitted` carries the batch and its
- * children, and every other member is a proposal that did **not** run — waiting
- * for a decision, invalidated (`stale`, `expired`), or already refused. A
- * continuation that cannot even be judged (the batch content is not in this
- * process, the deployment cannot list its verifiers, the root budget refuses
- * the batch, the workspace is somebody else's) is a *throw* instead: nothing
- * was decided about the batch, and the proposal is left exactly as it was.
+ * What one continuation settled (T2/T3 §6, root arms A0 §1.4). The members are
+ * the whole answer to "did this proposal become what it asked for": `admitted`
+ * carries the batch and its children, `activated` carries the root task and run
+ * a root contract became, and every other member is a proposal that did **not**
+ * run — waiting for a decision, invalidated (`stale`, `expired`), or already
+ * refused. A continuation that cannot even be judged (the batch content is not
+ * in this process, the deployment cannot list its verifiers, the root budget
+ * refuses the batch, the workspace is somebody else's) is a *throw* instead:
+ * nothing was decided about the proposal, and it is left exactly as it was.
+ *
+ * The two "it became something" arms are kept apart by `status` rather than
+ * sharing one member with optional ids: a root intake is not a batch, and a
+ * reader that had to test whether `batchId` happens to be there would be reading
+ * a claim the record does not make (§2: the batch vocabulary does not apply to a
+ * root).
  */
 type ProposalContinuation = {
   proposalId: string;
   status: 'admitted';
   batchId: string;
   childTaskIds: TaskId[];
+  detail: string;
+} | {
+  proposalId: string;
+  status: 'activated';
+  /** The root task the activation commit created, carrying the approved contract. */
+  taskId: TaskId;
+  /** The root run the activation commit created, in the proposal's root session and born `active`. */
+  runId: RunId;
   detail: string;
 } | {
   proposalId: string;
@@ -2592,7 +2803,8 @@ interface ProposalDecisionResult {
   proposalId: string;
   /** The outcome that was **recorded**, not the one that was asked for: a late approval becomes `expired` (§6). */
   outcome: TaskProposalDecisionOutcome;
-  status: TaskProposalStatus;
+  /** Where the proposal stands: its stored status, or `activated` once a root contract's approval has created it. */
+  status: TaskProposalStatus | 'activated';
   /** The continuation an approval triggered, when one was attempted. */
   continuation?: ProposalContinuation;
   detail: string;
@@ -2626,15 +2838,34 @@ interface DecompositionRefusal {
 /** Why a review is being requested of a person. */
 type ProposalReviewTrigger = 'submitted' | 'tightened' | 'recovered';
 /**
- * One request for a person to review a batch (§5). It carries the proposal
- * (what a decision binds) and — when this process holds it — the batch itself,
- * because §5 requires the review to show the children's objectives, criteria,
- * assumptions, dependencies and declared capabilities rather than a digest.
+ * One request for a person to review a proposal (§5). It carries the proposal
+ * (what a decision binds) and — when this process holds them — the facts §5
+ * requires the review to show: the children's objectives, criteria, assumptions,
+ * dependencies and declared capabilities for a batch, or the single root
+ * contract for a root intake, rather than a digest.
+ *
+ * The subject is discriminated by kind because the two are different things to
+ * show. A decomposition batch belongs to a parent task and is displayed under
+ * its goal; a root contract has no parent — the task it becomes does not exist
+ * while it waits — so the request names the root session instead and carries the
+ * contract itself. Neither arm invents the other's fields: a reviewer sees a
+ * root goal as a root goal, never as a one-child decomposition of nobody.
  */
-interface ProposalReviewRequest {
+interface ProposalReviewRequestBase {
   readonly storeId: string;
   readonly trigger: ProposalReviewTrigger;
   readonly proposal: TaskProposal;
+  /** The manifests this proposal resolves to right now; aligned with the batch's children, or the root contract's declared capabilities. */
+  readonly manifests: readonly CapabilityManifest[];
+  /** The registered verifier ids at the moment of the request, when the deployment can list them. */
+  readonly registeredVerifiers?: readonly string[];
+  /** Every obligation raised on the subject so far — §5's "未满足义务说明", read from the store rather than summarized. */
+  readonly obligations: readonly Obligation[];
+}
+/** A batch to review: its parent's own record, and the children rebuilt from the store. */
+interface DecompositionReviewRequest extends ProposalReviewRequestBase {
+  /** The kind, when the writer stated it. Absent means this arm — the shape every request had before root intake existed. */
+  readonly kind?: 'decomposition';
   /** The parent task the batch belongs to, as the store holds it. */
   readonly parentTask: TaskInstance;
   /**
@@ -2643,13 +2874,16 @@ interface ProposalReviewRequest {
    * process happens to remember.
    */
   readonly batch: NormalizedBatch;
-  /** The manifests that batch resolves to right now, aligned with `batch.children`. */
-  readonly manifests: readonly CapabilityManifest[];
-  /** The registered verifier ids at the moment of the request, when the deployment can list them. */
-  readonly registeredVerifiers?: readonly string[];
-  /** Every obligation raised on the parent so far — §5's "未满足义务说明", read from the store rather than summarized. */
-  readonly obligations: readonly Obligation[];
 }
+/** A root contract to review: the goal of one root session, and nothing above it. */
+interface RootContractReviewRequest extends ProposalReviewRequestBase {
+  readonly kind: 'root';
+  /** The root session whose goal this contract is. There is no parent task to name, and none is invented. */
+  readonly rootSessionId: string;
+  /** The normalized root contract the proposal asks to run, as stored — what a reviewer reads is what an approval binds. */
+  readonly contract: TaskContract;
+}
+type ProposalReviewRequest = DecompositionReviewRequest | RootContractReviewRequest;
 /** What a review channel did with one request. Never a decision, never an approval. */
 interface ProposalReviewNotice {
   /** Whether a person was actually asked. */
@@ -2864,14 +3098,87 @@ declare class TaskRuntime extends Service {
    * nothing, which is what makes the caller's table unchanged.
    */
   private assertReplacementRow;
-  /** Create (or reopen) the store, expand RootTaskSpec into the root task, and bind a run to the root session. */
-  createRootTask(storeId: string, options: {
-    objective: string;
-    rootSessionId: string;
-  }, actor: string): Promise<{
-    taskId: TaskId;
-    runId: RunId;
-  }>;
+  /**
+   * Open one root session's store and adopt the root it already holds, or say
+   * that it holds none (A0 §3, the recovery half of the old `createRootTask`).
+   *
+   * **It creates nothing.** A root task comes into existence exactly one way —
+   * a root contract that passed the review gate and was activated
+   * ({@link intakeRootContract}) — and this entry refuses to be a second door:
+   * there is no parameter, flag or entry that mints a root without a proposal,
+   * which is what keeps §1.3's "批准前零根任务" a property of the system rather
+   * than of one call path.
+   *
+   * What it does, in order: create-or-open the store (`rootTaskStoreId`), index
+   * every run the store holds, and then —
+   *
+   * - **no root task**: answer `{ adopted: false }`. A store with no task is a
+   *   normal state since §1.1 (a graph's store is opened by its creation and
+   *   filled when a contract is accepted), not a failure to report;
+   * - **a root task, with a run bound to this root session**: re-check the run's
+   *   content binding (S1-C: a snapshot that is no longer readable refuses the
+   *   re-entry by name rather than resuming against whatever stands at that path
+   *   now), bind the session in this process, derive the session's gate phase
+   *   from the store's own run record, settle or restart whatever the store left
+   *   in flight (`reconcileStore`) and rebuild this process's workspace
+   *   ownership — the same recovery a reopen performs;
+   * - **a root task without a run for this session**: refuse by name. That state
+   *   is a store whose root was created for a different session or whose run
+   *   record is gone, and neither is something to guess a binding for.
+   *
+   * The gate phase is *derived*, never remembered: a root run that is no longer
+   * running — terminal, cancelled, failed, verified — leaves the session
+   * `terminal`, so a late intake or a late write on a finished root is refused by
+   * the gate as well as by the state (§1.8). Reading it back from the store is
+   * what makes that true after a restart, when no process holds the phase the
+   * dead one set.
+   */
+  adoptRoot(storeId: string, rootSessionId: string): Promise<RootAdoption>;
+  /**
+   * The gate phase one stored root run implies: its coordination phase while it
+   * is running, `terminal` once it is not, and `undefined` for a record that
+   * predates coordination phases (A3's own boundary — such a run is not gated,
+   * and its only legal continuation is cancellation).
+   */
+  private rootSessionPhase;
+  /** Create the store, or open the one that already exists — the two ways a store can be there (A0 §1.1). */
+  private openOrCreateStore;
+  /**
+   * One root contract intake, all the way through (A0 §1.3–§1.4): the proposal
+   * is submitted, and — when it may run — activated in the same call. This is
+   * the entry the root agent's `task_intake` tool and a direct service call
+   * share, and there is no third one: an intake that stops at "the proposal was
+   * recorded" is {@link submitRootContractProposal}, and the only thing that
+   * turns a proposal into a root task is {@link continueProposal}.
+   *
+   * Under `off` the submission is born `ready` and the continuation runs
+   * immediately, so the *same* call both records `policy-off` and activates — the
+   * caller never has to ask twice for a contract that needs no review. Under
+   * `all` the proposal is born `pending_review` and this call returns with no
+   * task, no run, no spawn and no notification: nothing exists until a recorded
+   * decision approves it. A contract that fails the machine rules is refused
+   * with field-level reasons before a proposal exists at all.
+   */
+  intakeRootContract(storeId: string, rootSessionId: string, spec: RootContractSpec, options?: RootIntakeOptions): Promise<RootIntakeResult>;
+  /**
+   * One root contract proposal is submitted (A0 §1.2–§1.3): the pure pre-check,
+   * the immutable record with the policy it was born under, and — under `all` —
+   * the review request. Nothing is activated here, whatever the policy: no root
+   * task, no run, no spawn, and no id minted except the proposal's own
+   * content-derived one.
+   *
+   * The order is the same contract the batch path follows (§5: 坏提案不弹审批):
+   * the presented contract is fixed and normalized, then judged — structural
+   * rules, the root's independent-criterion rule, capability resolution and the
+   * gap rule, the provider pre-check, the verifier ids — and a contract that
+   * fails any of them is refused with field-level reasons *before* a proposal
+   * exists, so nothing is shown to a person about a contract that could never
+   * run. A contract that passes is recorded once behind its content-derived id,
+   * carrying the contract itself, and a retry of the same request (same key,
+   * same content) is answered from the record (`existing: true`) instead of
+   * building a second proposal.
+   */
+  submitRootContractProposal(storeId: string, rootSessionId: string, spec: RootContractSpec, options?: RootIntakeOptions): Promise<ProposalSubmission>;
   /**
    * Admission and progress are two phases with two owners (A3 §3.1), and this
    * entry is the boundary between them — now with the review gate of §5–§6 in
@@ -2944,21 +3251,22 @@ declare class TaskRuntime extends Service {
   submitDecompositionProposal(storeId: string, parentTaskId: TaskId, parentRunId: RunId, callerSessionId: string, spec: DecomposeSpec, options?: DecomposeProposalOptions): Promise<ProposalSubmission>;
   /**
    * One continuation (§6): the post-approval (and post-restart) re-check, and
-   * the only place a proposal becomes tasks.
+   * the only place a proposal becomes what it asked for — a batch of tasks, or
+   * (A0 §1.4) a root task with its run.
    *
    * The re-check is the whole point of an approval being a *record* rather than
-   * a switch. Before anything is admitted, the parent's own state, the limits in
-   * force, the capability resolution, the judging verifiers and the batch
-   * content are recomputed and compared with the fingerprints the approval bound
-   * — a batch whose context moved is marked `stale` with the difference named
-   * (§6: 不把旧批准转移给新上下文), and a parent run that ended takes the
-   * approval down with it (`expired`, never a dispatch). Only a batch that still
-   * is what was reviewed is admitted, from `ready`, with its consumption in the
-   * same commit.
+   * a switch. Before anything is admitted, the subject's own state, the limits in
+   * force, the capability resolution, the judging verifiers and the content are
+   * recomputed and compared with the fingerprints the approval bound — content
+   * whose context moved is marked `stale` with the difference named (§6: 不把旧批准
+   * 转移给新上下文), and a parent run that ended — or a store that already holds a
+   * root, for a root contract — takes the approval down with it (`expired`, never
+   * a dispatch). Only a proposal that still is what was reviewed is admitted,
+   * from `ready`, with its consumption in the same commit.
    *
-   * Idempotent from the outside: an already-admitted proposal answers with the
-   * batch its consumption recorded (no second batch, no second commit), a
-   * waiting one answers `pending_review` without writing anything, and a
+   * Idempotent from the outside: an already-admitted proposal answers with what
+   * its consumption recorded (no second batch, no second root, no second commit),
+   * a waiting one answers `pending_review` without writing anything, and a
    * terminal one answers with the status the store holds.
    *
    * `options.spec` re-presents the batch a caller believes this proposal means.
@@ -2966,7 +3274,9 @@ declare class TaskRuntime extends Service {
    * compared with the stored identity, and a different batch — or one whose
    * protected acceptance inputs no longer reproduce the fixed identity — is
    * refused by name. The batch that is admitted is always the stored one, which
-   * is what the approval was made against.
+   * is what the approval was made against. A root contract needs no such
+   * re-presentation: its subject is the store and the session, not a parent whose
+   * batch a caller could have confused.
    */
   continueProposal(storeId: string, proposalId: string, caller: string, options?: {
     spec?: DecomposeSpec;
@@ -2998,13 +3308,30 @@ declare class TaskRuntime extends Service {
     callId?: string;
   }): Promise<ProposalDecisionResult>;
   /**
-   * One explicit withdrawal of a batch (T2/T3 §6): a `cancelled` decision, by
-   * the session whose run proposed it. A withdrawal from anywhere else — a
-   * deployment retiring a proposal, a reviewer refusing one — goes through
-   * {@link decideProposal} with `cancelled` or `rejected`, which records *who*
-   * decided instead of hiding it behind the caller's identity.
+   * Why an approval arriving now is too late to be honoured, or `undefined` when
+   * it is not. Two subjects, two questions: a decomposition batch is late when
+   * its parent run has left the deciding phase ({@link parentRunEndedReason}),
+   * and a root contract is late when the store already holds a root task — the
+   * intake could no longer become that store's root, whatever the contract says.
+   */
+  private approvalLatenessReason;
+  /**
+   * One explicit withdrawal of a proposal (T2/T3 §6; root contracts A0 §1.3): a
+   * `cancelled` decision, by the session the proposal belongs to — the run that
+   * proposed a batch, or the root session a contract is the goal of. A withdrawal
+   * from anywhere else — a deployment retiring a proposal, a reviewer refusing
+   * one — goes through {@link decideProposal} with `cancelled` or `rejected`,
+   * which records *who* decided instead of hiding it behind the caller's
+   * identity.
    */
   cancelProposal(storeId: string, proposalId: string, caller: string): Promise<ProposalDecisionResult>;
+  /**
+   * The session a proposal belongs to: the caller whose run proposed a batch, or
+   * the root session a root contract is the goal of. One reader for the two
+   * owners, so "who may continue, decide or withdraw this" is answered once
+   * rather than re-derived — with the wrong field — at each entry.
+   */
+  private proposalCallerOf;
   /**
    * The proposal one id names, as the store holds it (§6) — the read side a
    * tool renders. A proposal is addressed by `proposalId` and by nothing else:
@@ -3101,6 +3428,135 @@ declare class TaskRuntime extends Service {
    */
   private admitPrecheckedBatch;
   /**
+   * The request key one root intake is addressed by: the caller's own when it has
+   * one, otherwise derived from the store, the root session and the contract's
+   * digest (`proposal.ts:rootProposalRequestKey`). The same derivation in both
+   * the submission and the re-check, so "the request the store already answers"
+   * is one question with one answer.
+   */
+  private rootRequestKey;
+  /** The root proposal one request key already names, or `undefined` when the key is free; other content under the key is refused by name (§6). */
+  private rootProposalForRequest;
+  /**
+   * One root submission, inside the store's root-intake serialization: the
+   * contract is fixed and normalized, a request the store already answers is
+   * answered from the record, everything else is judged, and the record is
+   * written once.
+   *
+   * The order is the batch path's, for the same reasons: §5's 坏提案不弹审批
+   * needs the judgement *before* the record, and T3 §6's idempotency needs the
+   * record lookup *before* the judgement — a retry of a request the store
+   * already answers is that proposal whatever state the store has moved to since.
+   */
+  private submitRootProposalOnce;
+  /**
+   * The first half of the root pre-check: the declared contract's protected
+   * acceptance inputs are fixed against the root session's checkout (S1-V slice
+   * 2 — a path that cannot be read, or a session whose checkout cannot be
+   * resolved, refuses the whole contract), and the single root normalization
+   * entry reads the result. Writes nothing.
+   */
+  private deriveRootContract;
+  /** The one refusal text a root contract is rejected at the contract stage with, whichever step produced the reasons. */
+  private rootRefusal;
+  /** The manifests one root contract resolves to, from its declared capabilities — the list the activation records. */
+  private rootManifests;
+  /** The store's root task, if it has one, read from the store rather than remembered. */
+  private existingRootTask;
+  /**
+   * The second half of the root pre-check (A0 §3): every rule a root contract
+   * has to clear before it can be proposed — structural (`contractDefects`), the
+   * independent-criterion rule that makes it a *goal* rather than a restatement
+   * of its own decomposition ({@link rootIndependenceDefects}), the capability
+   * resolution with the gap rule, the provider pre-check from the root session's
+   * own viewpoint, and the verifier ids its criteria pin.
+   *
+   * The gap rule differs from a batch child's by design: a child that is missing
+   * a capability and may decompose is admitted with the gap recorded as an
+   * obligation (its parent delegated the gap down), while a root intake has
+   * nobody above it to delegate to and nothing to record the gap *on* — the task
+   * does not exist yet — so a declared capability this deployment cannot grant is
+   * a named refusal. Zero side effects: no obligation, no task, no run, and no
+   * file written (the protected inputs were read, never rewritten).
+   *
+   * Pure and reusable: this is what the post-approval re-check asks again, so a
+   * contract whose resolution moved is judged by the same rules that judged it at
+   * submission.
+   */
+  private checkRootContract;
+  /**
+   * One root continuation: the re-check ladder, and — if it passes — the
+   * activation. §1.4's rule is that a root contract becomes a task *only* here
+   * and only after the approval's own context is re-confirmed.
+   *
+   * The ladder, in the order the facts become decisive:
+   *
+   * 1. the store's root task — a store that already holds one refuses every
+   *    further root intake. If the root on record is the one *this* proposal
+   *    consumed, the proposal is already admitted and the status ladder above has
+   *    answered; anything else is another root (a goal change is a new graph),
+   *    and this proposal can never become one, so it is `expired` by name;
+   * 2. the limits in force, against the fingerprint the approval bound — a
+   *    deployment that moved them after the review invalidates it (§6);
+   * 3. the resolution this contract was reviewed against — its declared
+   *    capabilities, the providers behind them and the verifiers its criteria
+   *    pin — recomputed and compared, with the difference named.
+   *
+   * Only then does it activate, and the activation is one atomic commit
+   * ({@link activateRootContract}) followed by this process's own binding, so a
+   * crash between the two is recovered by re-running this ladder: the consumption
+   * on record is what makes the second run an answer rather than a second root.
+   */
+  private continueRootProposalIn;
+  /**
+   * The activation (A0 §1.4): one atomic commit creates the root task (parentless,
+   * depth 0, carrying the approved contract), its run (born `active`, in the
+   * proposal's root session) and the proposal's consumption — and then this
+   * process binds what only a process can hold.
+   *
+   * The order, and why each step is where it is:
+   *
+   * 1. **the checkout is claimed before anything is written.** A workspace another
+   *    live owner holds fails the activation with nothing persisted
+   *    ({@link WorkspaceBusyError}, §3.4), which is the same claim-before-write
+   *    order every run creation follows; a claim this call made and then lost the
+   *    commit for is released, so a refused activation leaves no ownership of a
+   *    root that does not exist;
+   * 2. **the run's content binding is materialized** (S1-C) — the same builder
+   *    every run uses, so a root that grants nothing still gets the honest empty
+   *    record rather than no record at all;
+   * 3. **the commit** (`admitRootProposalIn`) writes the task, the admission, the
+   *    capability manifest, the run and the consumption together. The reducer
+   *    refuses a store that already has a root, a consumption naming other
+   *    content, and a run that is not born active in this session — so a racing
+   *    second activation writes nothing;
+   * 4. **the in-process binding**: the session map, the started-session set and
+   *    the gate, which is what makes the root session's own tools — decompose,
+   *    submit, cancel — legal from here on;
+   * 5. **the notification** (best-effort, through the existing owner notice): a
+   *    root session that was waiting for its intake hears that its contract is
+   *    live. It is a notice, never a wake-up obligation: a session with no live
+   *    agent is skipped, and nothing about the activation depends on it.
+   *
+   * Idempotent from the outside by construction: the ladder in
+   * {@link continueRootProposalIn} answers an admitted proposal from its own
+   * consumption, and the reducer refuses a second activation even if two callers
+   * raced past that read. One accepted fact, one root.
+   */
+  private activateRootContract;
+  /** One root submission's answer, in one sentence: the policy it was born under, the status it holds, and what the caller owes next. */
+  private rootSubmissionDetail;
+  /**
+   * One store's root intakes, one at a time. The batch path serializes per
+   * parent (§6's "单进程同一父分解…应串行"); a root contract has no parent, so the
+   * subject that has to be serialized is the store itself — two intakes racing
+   * into one store must not both read "no root task yet" and both commit. The
+   * store's own reducer is the second line of defence (a store that already
+   * holds a root refuses the second activation), and a second *process* is
+   * covered by it alone, never by this map.
+   */
+  private serializeRootIntake;
+  /**
    * One submission, inside the parent's serialization: derivation, idempotency,
    * the run protocol, the batch's admission rules, the record, and — under
    * `all` — the review request. The order is the contract:
@@ -3125,33 +3581,37 @@ declare class TaskRuntime extends Service {
    */
   private submitProposalOnce;
   /**
-   * One continuation, inside the parent's serialization (§6's "单进程串行"):
-   * the state ladder first, then the re-check, then — only if the batch still is
-   * what was reviewed — admission.
+   * One continuation, inside the subject's serialization (§6's "单进程串行"): the
+   * state ladder first, then the re-check, then — only if the proposal still is
+   * what was reviewed — admission (a batch) or activation (a root contract).
    *
    * The ladder answers without writing wherever the answer is already on the
-   * record: an admitted proposal answers with its own consumption (so a
-   * duplicate continuation cannot build a second batch), a waiting one answers
-   * `pending_review`, and a terminal one answers with the status the store
-   * holds. The re-check then resolves the four ways §6 describes — the parent
-   * already has a batch (`stale`), the parent run ended (`expired`), the context
-   * moved (`stale`, with the difference named), or the batch still is what was
-   * reviewed (`approved → ready` and admit).
+   * record: a consumed proposal answers with its own consumption (so a duplicate
+   * continuation cannot build a second batch or a second root), a waiting one
+   * answers `pending_review`, and a terminal one answers with the status the
+   * store holds. The re-check then resolves the four ways §6 describes — the
+   * subject already has what this proposal wanted (`stale` for a decomposed
+   * parent, `expired` for a store that holds another root), the parent run ended
+   * or the store's root appeared (`expired`), the context moved (`stale`, with
+   * the difference named), or the proposal still is what was reviewed
+   * (`approved → ready` and admit/activate).
    */
   private continueProposalIn;
   /**
    * Invalidate one proposal whose context moved (§6), and remember that on the
    * record: `stale` is terminal, it needs its reason, and it is a statement
-   * about the batch rather than a deletion of it — the record and its approval
+   * about the proposal rather than a deletion of it — the record and its approval
    * stay readable, and a revision is new content under a new key.
    */
   private staleProposal;
   /**
-   * Invalidate one proposal whose parent run can no longer dispatch it (§6: a
-   * late approval may only invalidate). The write is a *decision* — `expired`
-   * is one of the four outcomes the store records with a decider and a reason —
-   * and the decider is named `task-runtime`, because this invalidation is the
-   * runtime's own reading of the run's state rather than a person's decision.
+   * Invalidate one proposal the subject can no longer dispatch (§6: a late
+   * approval may only invalidate) — a batch whose parent run ended, a root
+   * contract whose store already holds a root. The write is a *decision* —
+   * `expired` is one of the four outcomes the store records with a decider and a
+   * reason — and the decider is named `task-runtime`, because this invalidation
+   * is the runtime's own reading of the store's state rather than a person's
+   * decision.
    */
   private expireProposal;
   /**
@@ -3191,6 +3651,13 @@ declare class TaskRuntime extends Service {
    * about and reported, never swallowed — and none of those outcomes can turn
    * into an approval, because the only thing that advances a waiting proposal is
    * a persisted decision.
+   *
+   * What the request carries is the subject as the store holds it: for a batch the
+   * parent task, the children and the obligations raised on that parent; for a
+   * root contract the contract itself and no parent — the task it would become
+   * does not exist while it waits, so there is nothing to read obligations off
+   * and nothing to pretend. Every arm is built here from stored facts, so a
+   * review requested after a restart shows what the record holds.
    */
   private requestProposalReview;
   /**
@@ -3238,6 +3705,40 @@ declare class TaskRuntime extends Service {
    * record holds rather than whatever a live process happened to remember.
    */
   private reconcileProposals;
+  /**
+   * One root contract's turn in the proposal pass (A0 §5): the same discipline as
+   * a batch's, with the subjects a root contract has instead of a parent task.
+   *
+   * A `pending_review` root contract is never advanced by recovery — only a
+   * persisted decision moves it — and its review is requested again from the
+   * stored contract when this process can still show it; a contract whose
+   * resolution no longer passes admission is reported and left waiting, exactly
+   * as a batch is. A `ready`/`approved` one is continued, which is where §5's
+   * tightening reaches a contract born under `off` and where the post-approval
+   * re-check decides whether an approval still covers it.
+   *
+   * The crash points this covers, both of them one call away from a root that
+   * exists:
+   *
+   * - **the decision is on the record and the activation never ran** — the
+   *   continuation re-checks and activates, and the store's own reducer is what
+   *   keeps it to one root;
+   * - **the activation commit landed and this process died before it bound the
+   *   session** — the status ladder answers `activated` from the consumption
+   *   itself, so recovery re-binds rather than minting a second task and run
+   *   ({@link adoptRoot} is that re-binding's other door, for a process that
+   *   starts from a graph entry instead).
+   */
+  private reconcileRootProposal;
+  /**
+   * Bind a root this process just learned is activated — the crash case where the
+   * commit is durable and the session of the process that wrote it is gone. The
+   * store is the source of truth for the ids *and* for the phase: a root run that
+   * already reached a terminal state leaves the session `terminal` rather than
+   * open, so a late intake is refused by the gate as well as by the one-root rule
+   * (§1.8), and only a still-running root is bound `active`.
+   */
+  private rebindActivatedRoot;
   /**
    * Replay one historical terminal task under a candidate overlay (guide
    * §2.7.6, W15; the only consumer is `evolution_replay`). The replayed task is
@@ -3612,7 +4113,7 @@ declare class TaskRuntime extends Service {
   /**
    * Re-check the content a run's binding recorded against the bytes its snapshot
    * holds now (S1-C item 4) — the read a historical view (`task_read`) and a
-   * re-entry (`createRootTask` adopting an existing run) both perform before
+   * re-entry (`adoptRoot` adopting an existing root run) both perform before
    * trusting the record.
    *
    * `undefined` means the record names no snapshot: a run that loaded no content
@@ -3646,4 +4147,4 @@ declare class TaskRuntime extends Service {
   private agentOrUndefined;
 }
 //#endregion
-export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BatchContext, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, type DrainOptions, type DrainResult, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, PROPOSAL_REQUEST_KEY_PREFIX, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, type RootBudgetConfig, type RootBudgetResolution, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, WORKSPACE_OWNERS_DIR, type WorkerPromptOptions, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, assertRootBudgetConfig, bindRunProviders, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeWorkspacePath, openProposalOf, optionalService, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, readProcessStartTime, readRunBinding, readVerifiedFile, registeredVerifierIds, registryRevision, renderRunBinding, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, reviewContextDelta, reviewContextOf, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BatchContext, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, PROPOSAL_REQUEST_KEY_PREFIX, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, WORKSPACE_OWNERS_DIR, type WorkerPromptOptions, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, assertRootBudgetConfig, bindRunProviders, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, readProcessStartTime, readRunBinding, readVerifiedFile, registeredVerifierIds, registryRevision, renderRunBinding, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

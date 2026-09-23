@@ -68,7 +68,7 @@ import { defineTaskProposalReadTool } from '../../agent-singularity/src/tools/ta
 import { defineTaskReadTool } from '../../agent-singularity/src/tools/task-read.ts'
 import { defineTaskStatusTool } from '../../agent-singularity/src/tools/task-status.ts'
 import { defineTaskSubmitResultTool } from '../../agent-singularity/src/tools/task-submit-result.ts'
-import type { CapabilityConfig, Config } from '../../task-runtime/src/index.ts'
+import type { CapabilityConfig, Config, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 
@@ -148,7 +148,6 @@ export interface ScriptedLoopOptions {
   readonly noProgressRounds?: number
   readonly verifyTimeoutMs?: number
   readonly writeDrainTimeoutMs?: number
-  readonly objective?: string
   /** Tools whose recorded execution also keeps its arguments — the side-effect probe a denial is asserted against. */
   readonly probes?: readonly string[]
   /** The review policy this deployment runs under (`Config.generatedTaskReview`). Defaults to the runtime's own (`off`). */
@@ -226,8 +225,14 @@ export interface ScriptedLoop {
   agent(sessionId?: SessionId | string): Agent
   /** The tool names one agent's own composition offers, from the registry's view. */
   visible(agent: Agent): string[]
-  /** Create the root run and start the root's first turn. */
-  begin(): Promise<{ storeId: string; taskId: string; runId: string }>
+  /**
+   * Activate the root session's tree through the real intake entry and start the
+   * root's first turn (A0 §1.1–§1.4): `task_intake` is a stage-C tool, so the spec
+   * calls the service entry the tool will call. The contract is the spec's own —
+   * there is no default, because the root's acceptance is the thing under test and
+   * a fixture that invented one would be answering the question for it.
+   */
+  begin(contract: RootContractSpec): Promise<{ storeId: string; taskId: string; runId: string }>
   /** The run a session is bound to, with the store and task it belongs to. */
   runForSession(sessionId: SessionId | string): Promise<{ storeId: string; task: TaskInstance; run: TaskRun }>
   dispose(): Promise<void>
@@ -684,14 +689,38 @@ class ScriptedLoopImpl implements ScriptedLoop {
     return await this.runtime.runForSession(String(sessionId))
   }
 
-  async begin(): Promise<{ storeId: string; taskId: string; runId: string }> {
-    const { taskId, runId } = await this.runtime.createRootTask(
-      this.storeId,
-      { objective: this.options.objective ?? 'ship the release', rootSessionId: this.primary },
-      this.primary,
-    )
+  async begin(contract: RootContractSpec): Promise<{ storeId: string; taskId: string; runId: string }> {
+    const submitted = await this.runtime.intakeRootContract(this.storeId, this.primary, contract)
+    let rootTaskId: string
+    let rootRunId: string
+    if (submitted.status === 'activated') {
+      rootTaskId = submitted.taskId
+      rootRunId = submitted.runId
+    } else {
+      // Under policy `all` the root contract is held for a review exactly as a
+      // batch is (A0 §1.3). The **fixture plays the reviewer here** — through the
+      // same decision entry the approval channel calls — because the cases in
+      // these specs are about the *batch's* review: which asks reached a person,
+      // what they showed and what a decision can move stays theirs, uncontaminated
+      // by the setup. The deployment's own channel is still the one that was asked:
+      // a root contract's rendering is stage C's, so today that request reports
+      // itself as failed and the proposal keeps waiting — which is precisely the
+      // state this branch reads.
+      const waiting = await this.runtime.proposalIn(this.storeId, submitted.proposalId)
+      if (waiting.status === 'pending_review') {
+        await this.runtime.decideProposal(this.storeId, submitted.proposalId, { outcome: 'approved' }, 'fixture-setup')
+      }
+      const continued = await this.runtime.continueProposal(this.storeId, submitted.proposalId, this.primary)
+      if (continued.status !== 'activated') {
+        throw new Error(
+          `the fixture expected an activated root for session "${this.primary}" but the intake answered "${continued.status}": ${continued.detail}`,
+        )
+      }
+      rootTaskId = continued.taskId
+      rootRunId = continued.runId
+    }
     this.agent(this.primary).followup(createUserMessage({ content: [{ type: 'text', text: 'begin' }], source: { kind: 'user' } }))
-    return { storeId: this.storeId, taskId, runId }
+    return { storeId: this.storeId, taskId: rootTaskId, runId: rootRunId }
   }
 
   async dispose(): Promise<void> {

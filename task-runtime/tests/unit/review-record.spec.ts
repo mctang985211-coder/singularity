@@ -3,7 +3,7 @@ import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-se
 import type { EvidenceBundle, ReviewRecord, TaskRun, VerificationResult } from '../../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
 import { pinSkillHome, releaseSkillHomes } from '../support/skill-roots.ts'
-import type { ChildOutcome, Config, DecomposeSpec } from '../../src/index.ts'
+import type { ChildOutcome, Config, DecomposeSpec, RootContractSpec } from '../../src/index.ts'
 import { TaskRuntime } from '../../src/index.ts'
 
 const ROOT_SESSION = 'root-session'
@@ -219,8 +219,23 @@ function childSpec(objective: string, overrides: Record<string, unknown> = {}) {
   } as DecomposeSpec['children'][number]
 }
 
-async function createRoot(h: Harness) {
-  return h.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION)
+/**
+ * The root contract these cases run under (A0 §1.2): one goal, one criterion a
+ * command settles. Plan and act — the intake, the review gate and the activation
+ * — are what these specs exercise; the root's own acceptance is stated here
+ * rather than assumed, because a root contract now has to carry at least one
+ * mandatory criterion judged by something other than the composite conjunction.
+ */
+const ROOT_CONTRACT: RootContractSpec = {
+  objective: 'ship the release',
+  acceptanceCriteria: [{ criterionId: 'root-ship', description: 'the release is shipped', command: 'true' }],
+}
+
+/** Activate the root through the real intake and hand back what it became. */
+async function intakeRoot(h: Harness): Promise<{ taskId: string; runId: string }> {
+  const activated = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, ROOT_CONTRACT)
+  if (activated.status !== 'activated') throw new Error(`the root contract was not activated: ${activated.detail}`)
+  return { taskId: activated.taskId, runId: activated.runId }
 }
 
 /** Admit a batch and wait for its settlement: the tool call returns at admission (A3 §3.1). */
@@ -301,7 +316,7 @@ function expectReviewInvariant(reviews: readonly ReviewRecord[], runs: readonly 
 describe('runChildrenCascade review records', () => {
   test('every terminal run settles with exactly one review; failed carries a cause, verified and blocked do not', async () => {
     const h = harness({ verifier: 'by-objective' })
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
@@ -364,12 +379,22 @@ describe('runChildrenCascade review records', () => {
     expect(root.outcome).toBe('verified')
     expect(root.runId).toBe(rootRunId)
     expect(root.relatedTaskIds).toEqual(outcomes.map(outcome => outcome.taskId))
-    expect(root.criteria).toEqual([{ criterionId: 'root-children-verified', verdict: 'pass', verifierId: 'fake-verifier' }])
+    // The root's own criteria are the ones its contract carried (A0 §1.2): the
+    // intake no longer expands a fixed composite spec, so what a root review
+    // records is the goal's own criterion, not a conjunction standing in for it.
+    expect(root.criteria).toEqual([{
+      criterionId: 'root-ship',
+      verdict: 'pass',
+      verifierId: 'fake-verifier',
+      command: 'true',
+      exitCode: 0,
+      logRef: `${STORE}/${rootRunId}/root-ship.log`,
+    }])
   })
 
   test('a cancelled run leaves a review without a cause; the siblings it never started leave one blocked', async () => {
     const h = harness()
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     // A worker mid-turn: only the batch's own cancellation ends it.
     h.setIdleBehavior(() => new Promise<void>(() => {}))
 
@@ -402,7 +427,7 @@ describe('runChildrenCascade review records', () => {
 
   test('a spawn refusal still settles the run with exactly one review carrying the spawn cause', async () => {
     const h = harness({ spawnError: 'agent-presets: preset "default" not found (available: standard)' })
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [
@@ -429,7 +454,7 @@ describe('runChildrenCascade review records', () => {
 
   test('a run settled by a nested cascade carries exactly one review, written by the nested side', async () => {
     const h = harness()
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     h.setIdleBehavior(async sessionId => {
       const bound = await h.runtime.runForSession(sessionId)
       await settleRunNested(h.task, bound.storeId, bound.task.taskId, bound.run.runId, sessionId)
@@ -463,7 +488,7 @@ function sessionEvent(type: string, data: Record<string, unknown>, seq: number):
 describe('review dimensions and metrics (P4)', () => {
   test('without a session plane the record keeps the store-derived facts and claims no session counters', async () => {
     const h = harness({ verifier: 'by-objective' })
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('fail-me now'), childSpec('downstream', { dependsOn: [0] })],
@@ -509,7 +534,7 @@ describe('review dimensions and metrics (P4)', () => {
         ],
       },
     })
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('child work', { requiredCapabilities: ['design-ball'] })],
@@ -561,7 +586,7 @@ describe('review dimensions and metrics (P4)', () => {
 
   test('a session log read that throws costs the record nothing', async () => {
     const h = harness({ session: { readSessionError: true, tokens: { uncachedInputTokens: 7, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 } } })
-    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('child work')],

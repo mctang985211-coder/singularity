@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { DecomposeSpec } from '../../task-runtime/src/index.ts'
+import type { DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { disposeScriptedLoops, startScriptedLoop, type ScriptedLoop, type ScriptEntry } from '../support/scripted-loop.ts'
 
 /**
@@ -75,6 +75,19 @@ function childSession(h: ScriptedLoop, index = 0): string {
   return spawn.sessionId
 }
 
+
+/**
+ * The root contract every case in this file runs under (A0 §1.2): one goal, one
+ * criterion a command settles. The intake is the real one — a root exists only
+ * because a contract passed it — so the contract is stated here explicitly rather
+ * than defaulted: a root contract owes at least one mandatory criterion judged by
+ * something other than the composite conjunction.
+ */
+const ROOT_CONTRACT: RootContractSpec = {
+  objective: 'ship the release',
+  acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'true' }],
+}
+
 describe('the coordination protocol on the real loop (A3)', () => {
   it('returns from task_decompose at admission, and the root keeps working while the child is in flight', async () => {
     const childInFlight = Promise.withResolvers<void>()
@@ -96,7 +109,7 @@ describe('the coordination protocol on the real loop (A3)', () => {
           { text: 'worker: handed in' },
         ],
     })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
 
     // Park the root's own turn until the child's run exists, so the ordering
     // below is the protocol's and not a scheduling accident.
@@ -140,10 +153,12 @@ describe('the coordination protocol on the real loop (A3)', () => {
     expect(parentRun.submission?.origin).toBe('runtime')
 
     // The owner is told, in a new turn of its own loop: a plugin-sourced notice
-    // carrying the batch summary and the parent's verdict.
-    await vi.waitFor(() => expect(h.requestsOf(ROOT).length).toBeGreaterThanOrEqual(4))
-    const notice = h.requestsOf(ROOT)[3]!
-    expect(notice.texts.join('\n')).toContain(`batch ${batchId} settled`)
+    // carrying the batch summary and the parent's verdict. The turn is found by
+    // what it carries rather than by its position — the intake's own activation
+    // notice is another turn of the same session, and counting turns would make
+    // this assertion depend on it.
+    await vi.waitFor(() => expect(h.requestsOf(ROOT).some(request => request.texts.join('\n').includes(`batch ${batchId} settled`))).toBe(true))
+    const notice = h.requestsOf(ROOT).find(request => request.texts.join('\n').includes(`batch ${batchId} settled`))!
     expect(notice.texts.join('\n')).toContain('is verified')
     const last = notice.options.messages[notice.options.messages.length - 1]!
     expect(last.source).toMatchObject({ kind: 'plugin', plugin: 'task-runtime', form: 'notice' })
@@ -158,7 +173,7 @@ describe('the coordination protocol on the real loop (A3)', () => {
         ? [{ tool: 'task_decompose', args: { reason: 'split the work', children: children('stuck child') } }]
         : [{ text: 'working on it' }, { text: 'still working on it' }, { text: 'looking at it' }, { text: 'nearly there' }],
     })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     const batchId = await batchIdOf(h)
 
     const outcomes = await h.runtime.awaitBatch(root.storeId, batchId)
@@ -220,7 +235,7 @@ describe('the coordination protocol on the real loop (A3)', () => {
           { text: 'worker: handed in' },
         ],
     })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     // The batch is admitted and the child is truly mid-turn before the root's
     // next request runs, so every call below is judged in waiting_children.
     const batchId = await batchIdOf(h)
@@ -280,7 +295,7 @@ describe('the coordination protocol on the real loop (A3)', () => {
         // The worker never finishes on its own: only the cancellation ends it.
         : [{ hang: true }],
     })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     const batchId = await batchIdOf(h)
     await vi.waitFor(() => expect(h.spawns).toHaveLength(1))
     const child = childSession(h)
@@ -343,7 +358,7 @@ describe('the coordination protocol on the real loop (A3)', () => {
           // The grandchild never finishes on its own: only the cancellation ends it.
           : [{ hang: true }],
     })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     const batchId = await batchIdOf(h)
     await vi.waitFor(() => expect(h.spawns).toHaveLength(2))
     const child = childSession(h)
@@ -412,7 +427,7 @@ describe('the coordination protocol on the real loop (A3)', () => {
           { text: 'child: handed in' },
         ],
     })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     const batchId = await batchIdOf(h)
     await vi.waitFor(() => expect(h.spawns).toHaveLength(1))
     const child = childSession(h)

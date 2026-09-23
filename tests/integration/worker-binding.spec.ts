@@ -16,7 +16,7 @@ import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import { listSkillFiles } from '../../agent-runtime/src/skill-file.ts'
 import type { EvidenceBundle, TaskEvent, VerificationResult } from '../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
-import type { Config } from '../../task-runtime/src/index.ts'
+import type { Config, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 
 /**
@@ -279,7 +279,7 @@ function child(objective: string, requiredCapabilities: readonly string[]) {
 }
 
 async function runOne(h: Harness, objective = 'align the ball', capabilities: readonly string[] = ['design-ball']): Promise<{ taskId: string; runId: string }> {
-  const { taskId, runId } = await h.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION)
+  const { taskId, runId } = await activateRoot(h)
   const batch = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
     reason: 'split the work',
     children: [child(objective, capabilities)],
@@ -296,6 +296,30 @@ async function registeredSkill(h: Harness, agent: Agent, name: string): Promise<
   const skill = await h.ctx.skills.get(name, { scope: agent, cwd })
   if (skill === undefined) throw new Error(`the worker's skill layer holds no "${name}"`)
   return skill as { content: string; path?: string; resourceBase?: { path: string } }
+}
+
+
+/**
+ * The root contract this spec's trees run under (A0 §1.2): one goal, one
+ * criterion a command settles — and the conjunction, because these cases read
+ * the root's own acceptance off the children's verdicts. The intake is real, so
+ * the contract is stated here rather than defaulted.
+ */
+function rootContract(objective: string): RootContractSpec {
+  return {
+    objective,
+    acceptanceCriteria: [
+      { criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' },
+      { criterionId: 'root-children-verified', description: 'all mandatory children verified', mode: 'composite', mandatory: true },
+    ],
+  }
+}
+
+/** Activate a root through the real intake and hand back what it became. */
+async function activateRoot(h: Harness, objective = 'ship the release'): Promise<{ taskId: string; runId: string }> {
+  const activated = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract(objective))
+  if (activated.status !== 'activated') throw new Error(`the root contract was not activated: ${activated.detail}`)
+  return { taskId: activated.taskId, runId: activated.runId }
 }
 
 describe('the content a worker loads (S1-C)', () => {
@@ -410,7 +434,7 @@ describe('the binding record (S1-C)', () => {
   it('is written for the child run and the root run from the same builder, and persists as store state', async () => {
     install('ball-align', 'ADMITTED BODY')
     const h = await harness()
-    const { taskId, runId: rootRunId } = await h.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION)
+    const { taskId, runId: rootRunId } = await activateRoot(h)
     const rootRun = await h.task.runIn(STORE, rootRunId)
     // The root grants no capability, so it binds no provider — and says so with
     // empty lists rather than inventing content: `capabilitySnapshot` is empty
@@ -450,7 +474,7 @@ describe('the binding record (S1-C)', () => {
     const h = await harness({
       capabilities: { 'check-ball-registration': { skills: ['ball-align'], tools: ['filesystem', 'bash', 'jobs'], mcpServers: ['bbdev'] } },
     })
-    const { taskId, runId } = await h.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION)
+    const { taskId, runId } = await activateRoot(h)
     const batch = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',
       children: [child('check the registration', ['check-ball-registration'])],
@@ -536,16 +560,17 @@ describe('the binding record (S1-C)', () => {
       startedAt: new Date().toISOString(),
     }, ROOT_SESSION)
 
-    await expect(h.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION))
-      .rejects.toThrow(/ball-align/)
-    await expect(h.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION))
+    // Adoption is the re-entry: it opens the store, re-checks the content the run's
+    // binding names, and only then hands the run back.
+    await expect(h.runtime.adoptRoot(STORE, ROOT_SESSION)).rejects.toThrow(/ball-align/)
+    await expect(h.runtime.adoptRoot(STORE, ROOT_SESSION))
       .rejects.toThrow(new RegExp(missing.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
 
     // The same store hands back its root run when the record names nothing:
     // there is no content to re-check, so a re-entry is not refused.
     const plain = await harness()
-    const first = await plain.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION)
-    await expect(plain.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION))
-      .resolves.toEqual(first)
+    const first = await activateRoot(plain)
+    await expect(plain.runtime.adoptRoot(STORE, ROOT_SESSION)).resolves
+      .toMatchObject({ adopted: true, taskId: first.taskId, runId: first.runId })
   })
 })

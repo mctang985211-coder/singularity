@@ -14,6 +14,7 @@ import type { SessionEvent } from '../../../../thirdparty/deepseek-harness/packa
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { rootTaskStoreId, TaskService } from '../../task/src/index.ts'
 import type { RunProviderBinding, TaskEvent, TaskSnapshot } from '../../task/src/index.ts'
+import { seedLegacyRoot as seedLegacyRootFixture } from '../support/legacy-root.ts'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
 import { defineTaskReadTool } from '../../agent-singularity/src/tools/task-read.ts'
@@ -84,7 +85,7 @@ const children = (objective: string): DecomposeSpec['children'] => [{
  * Write one terminal champion task straight into the store — the record a replay
  * descends from — through the store's own service, so the replay's subject is the
  * historical shape and not a fixture invention. The caller creates the store: a
- * case that already ran `createRootTask` must not try to create it twice.
+ * case that already seeded its root must not try to seed it twice.
  */
 async function writeChampion(boot: Boot): Promise<string> {
   const taskId = 't-champion'
@@ -440,13 +441,34 @@ function childRunOf(snapshot: TaskSnapshot, rootTaskId: string): TaskSnapshot['r
   return run
 }
 
+
+/**
+ * Seed one boot's **legacy** root — the shape the graph entry used to create:
+ * a root task whose objective is the graph's own name and whose only mandatory
+ * criterion is the composite conjunction — and adopt it (A0 §1.6). These cases
+ * are about A3's coordination state machine and its crash points, so the root is
+ * setup, and the history such stores carry is exactly the shape the fixture
+ * plants: a new root cannot be created this way at all, because the intake
+ * refuses a contract whose only mandatory criterion is the conjunction.
+ */
+async function seedLegacyRoot(boot: Boot, objective: string): Promise<{ taskId: string; runId: string }> {
+  return await seedLegacyRootFixture({
+    task: boot.task,
+    runtime: boot.runtime,
+    storeId: STORE,
+    rootSessionId: ROOT,
+    objective,
+    runBindingRoot: join(process.env.DSH_HOME ?? '.', 'run-bindings'),
+  })
+}
+
 describe('A3 recovery from the real session log', () => {
   it('resumes an admitted batch whose first child never started, without paying for the root twice', async () => {
     const dir = workspace()
     // The root's first drain is the batch's admission drain: the atomic commit is
     // durable, the driver is frozen behind it, and no child has been started.
     const a = await boot(dir, { parkDrain: (sessionId, index) => sessionId === ROOT && index === 1 })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await seedLegacyRoot(a, 'ship the release')
     const { batchId, childTaskIds } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
       children: children('first child'),
@@ -496,7 +518,7 @@ describe('A3 recovery from the real session log', () => {
   it('cancels a worker that was in flight when the process died, and settles its batch by the rules', async () => {
     const dir = workspace()
     const a = await boot(dir, { worker: () => new Promise<void>(() => {}) })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await seedLegacyRoot(a, 'ship the release')
     const { batchId, childTaskIds } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
       children: children('long child'),
@@ -543,7 +565,7 @@ describe('A3 recovery from the real session log', () => {
     // The worker's own drain is the one its submission runs: the phase change is
     // durable, the settlement is frozen behind it, and no verdict exists.
     const a = await boot(dir, { parkDrain: sessionId => sessionId !== ROOT })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await seedLegacyRoot(a, 'ship the release')
     const { batchId, childTaskIds } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
       children: children('submitted child'),
@@ -591,7 +613,7 @@ describe('A3 recovery from the real session log', () => {
     // exactly between "every child is terminal" and the parent's verdict, with the
     // children's own verifications untouched.
     const a = await boot(dir, { parkDrain: (sessionId, index) => sessionId === ROOT && index === 2 })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await seedLegacyRoot(a, 'ship the release')
     const { batchId, childTaskIds } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
       children: children('terminal child'),
@@ -741,7 +763,7 @@ describe('A3 recovery from the real session log', () => {
       // The worker's own drain is the one its submission runs.
       parkDrain: sessionId => sessionId !== ROOT,
     })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await seedLegacyRoot(a, 'ship the release')
     const { batchId, childTaskIds } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
       children: [{ ...children('bound child')[0]!, requiredCapabilities: [SKILL_ROW] }],
@@ -799,7 +821,7 @@ describe('A3 recovery: a crash inside the verification call', () => {
     // never returns: the phase and `TaskVerifying` are committed, and no verdict
     // exists.
     const a = await boot(dir, { gateVerification: callIndex => (callIndex === 0 ? never() : undefined) })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await seedLegacyRoot(a, 'ship the release')
     const { childTaskIds } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
       children: children('interrupted child'),
@@ -842,7 +864,7 @@ describe('A3 recovery: a crash inside the verification call', () => {
     // the second, and it never returns — the crash lands after every child is
     // terminal and after the parent's own `TaskVerifying`.
     const a = await boot(dir, { gateVerification: callIndex => (callIndex === 1 ? never() : undefined) })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await seedLegacyRoot(a, 'ship the release')
     const { batchId, childTaskIds } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
       children: children('interrupted parent'),
@@ -938,7 +960,7 @@ describe('A3: a cancellation during verification', () => {
     // The first boot dies inside the child's verification: `task=verifying`,
     // `phase=submitted`, and the verifier call never returns.
     const a = await boot(dir, { gateVerification: callIndex => (callIndex === 0 ? never() : undefined) })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await seedLegacyRoot(a, 'ship the release')
     const { batchId, childTaskIds } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
       children: children('cancelled while verifying'),
@@ -998,7 +1020,7 @@ describe('A3: a cancellation during verification', () => {
   it('refuses the evidence a cancelled run\'s late verifier tries to record', async () => {
     const dir = workspace()
     const a = await boot(dir, { gateVerification: callIndex => (callIndex === 0 ? never() : undefined) })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await seedLegacyRoot(a, 'ship the release')
     const { childTaskIds } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
       children: children('cancelled before verifying'),
@@ -1054,7 +1076,7 @@ describe('A3 recovery: an in-flight replay is not a root', () => {
   it('cancels the replay whose worker was in flight, and leaves the root run alone', async () => {
     const dir = workspace()
     const a = await boot(dir, { worker: () => new Promise<void>(() => {}) })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await seedLegacyRoot(a, 'ship the release')
     const championTaskId = await writeChampion(a)
     // A spawning replay: its worker never returns, so the crash lands with the
     // replay run `active` and its session bound to a worker that no longer exists.
@@ -1104,7 +1126,7 @@ describe('A3 recovery: the root budget counts a replay\u2019s run again after a 
   it('refuses the next replay once the recorded runs have spent the shared total', async () => {
     const dir = workspace()
     const a = await boot(dir, { rootBudget: { maxRuns: 3 } })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await seedLegacyRoot(a, 'ship the release')
     const championTaskId = await writeChampion(a)
     // root run + champion run = 2 recorded; the replay takes the last slot.
     const admitted = await a.runtime.replayTask(STORE, championTaskId, { lineage: 'evolution-replay:p1', spawn: false }, ROOT)

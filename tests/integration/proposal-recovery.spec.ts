@@ -12,7 +12,7 @@ import JsonlSessionPersistence from '../../../../thirdparty/deepseek-harness/pac
 import SessionStore, { SessionId } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { SessionEvent } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { rootTaskStoreId, TaskService } from '../../task/src/index.ts'
+import { ROOT_PROPOSAL_TASK_ID, rootTaskStoreId, TaskService } from '../../task/src/index.ts'
 import type { TaskEvent, TaskProposal, TaskSnapshot } from '../../task/src/index.ts'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
@@ -23,6 +23,7 @@ import type {
   ProposalReviewChannel,
   ProposalReviewNotice,
   ProposalReviewRequest,
+  RootContractSpec,
 } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
@@ -94,12 +95,17 @@ class RecordingReviewChannel implements ProposalReviewChannel {
   readonly asks: ReviewAsk[] = []
 
   async requestReview(request: ProposalReviewRequest): Promise<ProposalReviewNotice> {
-    this.asks.push({
-      trigger: request.trigger,
-      storeId: request.storeId,
-      proposalId: request.proposal.proposalId,
-      request,
-    })
+    // A root contract's own review is recorded nowhere here: its rendering is
+    // stage C's, and every case in this file is about a batch's proposal — which
+    // is what an ask list should contain for a reader to reason about.
+    if (request.kind !== 'root') {
+      this.asks.push({
+        trigger: request.trigger,
+        storeId: request.storeId,
+        proposalId: request.proposal.proposalId,
+        request,
+      })
+    }
     return { requested: true, detail: 'the fixture channel asked a person' }
   }
 }
@@ -372,8 +378,22 @@ async function proposalOf(boot: Boot, proposalId: string): Promise<TaskProposal>
 }
 
 /** The one the store holds, for a case that made exactly one. */
+/**
+ * The proposal events one store recorded for a **batch**. The root session's own
+ * intake wrote records of its own — the contract that became the root — and it
+ * rides the reserved envelope task id, so a case about a batch's proposal counts
+ * batches.
+ */
+function batchProposalEvents(events: readonly TaskEvent[]): TaskEvent[] {
+  return events.filter(event =>
+    event.kind.startsWith('TaskProposal') && event.taskId !== ROOT_PROPOSAL_TASK_ID)
+}
+
 async function onlyProposal(boot: Boot): Promise<TaskProposal> {
-  const proposals = (await boot.snapshot()).proposals?.all ?? []
+  // The **batch** proposal, and exactly one of them: the root session's own intake
+  // record is a different subject (the contract that became the root), so a case
+  // about a batch's proposal counts batches.
+  const proposals = ((await boot.snapshot()).proposals?.all ?? []).filter(proposal => proposal.kind !== 'root')
   expect(proposals).toHaveLength(1)
   return proposals[0]!
 }
@@ -413,11 +433,55 @@ async function spawned(boot: Boot, count: number): Promise<void> {
   }
 }
 
+
+/**
+ * The root contract these cases run under (A0 §1.2): one goal, one criterion a
+ * command settles. The intake is the real one, so the contract is stated here
+ * rather than defaulted — a root contract owes at least one mandatory criterion
+ * judged by something other than the composite conjunction.
+ */
+function rootContract(objective: string): RootContractSpec {
+  return {
+    objective,
+    acceptanceCriteria: [
+      // The goal's own independent check (A0 §1.2's structural rule needs at
+      // least one of these) …
+      { criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' },
+      // … and the conjunction this deployment's trees have always been accepted
+      // by: a batch that did not verify cannot be a delivered goal, which is what
+      // the recovery cases below read a failed root off.
+      { criterionId: 'root-children-verified', description: 'all mandatory children verified', mode: 'composite', mandatory: true },
+    ],
+  }
+}
+
+/**
+ * Activate one boot's root through the real intake (A0 §1.3–§1.4) and hand back
+ * what it became. Under policy `all` the contract waits for a review like every
+ * other proposal; **the fixture records that decision**, through the same entry
+ * the channel calls, because every case in this file is about a *batch's*
+ * proposal recovery. The root contract's own review — its rendering and its
+ * routing to a person — is stage C's, and the fixture's channel is the stub the
+ * module doc describes: it answers `requested: true` and keeps the requests it
+ * was handed, which for a contract it cannot render is exactly the batch's.
+ */
+async function activateRoot(boot: Boot, objective = 'ship the release'): Promise<{ taskId: string; runId: string }> {
+  const submitted = await boot.runtime.intakeRootContract(STORE, ROOT, rootContract(objective))
+  if (submitted.status === 'activated') return { taskId: submitted.taskId, runId: submitted.runId }
+  const waiting = await boot.runtime.proposalIn(STORE, submitted.proposalId)
+  if (waiting.status === 'pending_review') {
+    await boot.runtime.decideProposal(STORE, submitted.proposalId, { outcome: 'approved' }, 'fixture-setup')
+  }
+  const continued = await boot.runtime.continueProposal(STORE, submitted.proposalId, ROOT)
+  if (continued.status !== 'activated') throw new Error(`the root contract was not activated: ${continued.detail}`)
+  return { taskId: continued.taskId, runId: continued.runId }
+}
+
 describe('proposal recovery from the real session log (T3 §6)', () => {
   it('keeps a waiting proposal waiting across a restart, re-asks from the saved facts, and is advanced only by a decision', async () => {
     const dir = workspace()
     const a = await boot(dir, { generatedTaskReview: 'all' })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await activateRoot(a)
     const pending = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, specOf('first child'))
     expect(pending.status).toBe('pending_review')
     const proposalId = pending.proposalId
@@ -435,7 +499,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     expect(snapshot.reviews).toHaveLength(0)
     expect(b.spawns).toHaveLength(0)
     expect(taskEvents(await b.events()).filter(event => event.kind === 'TaskDecomposed')).toHaveLength(0)
-    expect(taskEvents(await b.events()).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(0)
+    expect(batchProposalEvents(taskEvents(await b.events())).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(0)
     // …and the person is asked again, from the record: the same proposal, the
     // same batch, the same parent — nothing a live process remembered.
     expect(b.review.asks.map(ask => ask.trigger)).toEqual(['recovered'])
@@ -464,7 +528,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
   it('continues an approval that was recorded before the crash, in one batch with stable child ids', async () => {
     const dir = workspace()
     const a = await boot(dir, { generatedTaskReview: 'all' })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await activateRoot(a)
     const pending = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, specOf('first child'))
     expect(pending.status).toBe('pending_review')
     const proposalId = pending.proposalId
@@ -506,20 +570,20 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     // The re-check is on the record, and the whole log holds one admission, one
     // batch and one child task — a second recovery pass changes nothing.
     const events = taskEvents(await b.events())
-    const phases = events.filter(event => event.kind === 'TaskProposalPhaseChanged')
+    const phases = batchProposalEvents(events).filter(event => event.kind === 'TaskProposalPhaseChanged')
     expect(phases.map(event => event.payload.to)).toEqual(['ready'])
-    expect(events.filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
+    expect(batchProposalEvents(events).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
     expect(events.filter(event => event.kind === 'TaskCreated')).toHaveLength(2)
     expect(events.filter(event => event.kind === 'TaskDecomposed')).toHaveLength(1)
     const settled = await b.snapshot()
     expect(settled.tasks).toHaveLength(2)
     expect(settled.runs).toHaveLength(2)
-    expect(settled.proposals!.all).toHaveLength(1)
+    expect(settled.proposals!.all.filter(proposal => proposal.kind !== 'root')).toHaveLength(1)
     await b.runtime.reconcileStore(STORE)
     const again = await b.snapshot()
     expect(again.tasks.map(task => task.taskId)).toEqual(settled.tasks.map(task => task.taskId))
     expect(again.runs.map(run => run.runId)).toEqual(settled.runs.map(run => run.runId))
-    expect(taskEvents(await b.events()).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
+    expect(batchProposalEvents(taskEvents(await b.events())).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
     expect(b.spawns).toHaveLength(1)
     await b.dispose()
   })
@@ -531,7 +595,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     // admission is refused whole — nothing is minted, no run is charged, and the
     // decision stays on the record.
     const a = await boot(dir, { generatedTaskReview: 'all', rootBudget: { maxRuns: 1 } })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await activateRoot(a)
     const pending = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, specOf('first child'))
     expect(pending.status).toBe('pending_review')
     const proposalId = pending.proposalId
@@ -545,7 +609,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     expect(refused.status).toBe('ready')
     expect(refused.decision!.outcome).toBe('approved')
     expect(refused.consumption).toBeUndefined()
-    expect(taskEvents(await a.events()).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(0)
+    expect(batchProposalEvents(taskEvents(await a.events())).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(0)
     await a.crash()
 
     // A deployment that can afford the batch now recovers the approval and
@@ -559,7 +623,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     expect(outcomes.map(outcome => outcome.taskId)).toEqual(consumption.childTaskIds)
     expect((await b.task.taskIn(STORE, outcomes[0]!.taskId)).status).toBe('verified')
     expect((await b.task.taskIn(STORE, root.taskId)).status).toBe('verified')
-    expect(taskEvents(await b.events()).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
+    expect(batchProposalEvents(taskEvents(await b.events())).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
     expect((await b.snapshot()).tasks).toHaveLength(2)
     expect(b.spawns).toHaveLength(1)
     await b.dispose()
@@ -571,7 +635,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     // children, admission, phase change and the proposal's consumption — is
     // durable, and the driver is frozen behind it before any child started.
     const a = await boot(dir, { parkDrain: (sessionId, index) => sessionId === ROOT && index === 1 })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await activateRoot(a)
     const admitted = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, specOf('first child'))
     expect(admitted.status).toBe('admitted')
     if (admitted.status !== 'admitted') throw new Error('unreachable')
@@ -596,7 +660,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     expect(after.tasks.map(task => task.taskId).sort()).toEqual([root.taskId, ...consumption.childTaskIds].sort())
     expect(after.runs).toHaveLength(2)
     const events = taskEvents(await b.events())
-    expect(events.filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
+    expect(batchProposalEvents(events).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
     expect(events.filter(event => event.kind === 'TaskStarted' && event.taskId === consumption.childTaskIds[0])).toHaveLength(1)
     expect((await b.task.taskIn(STORE, consumption.childTaskIds[0]!)).status).toBe('verified')
     expect((await b.task.taskIn(STORE, root.taskId)).status).toBe('verified')
@@ -606,7 +670,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
   it('settles a run that was in flight when the process died without executing it again', async () => {
     const dir = workspace()
     const a = await boot(dir, { worker: () => new Promise(() => {}) })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await activateRoot(a)
     const admitted = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, specOf('long child'))
     if (admitted.status !== 'admitted') throw new Error('unreachable')
     await spawned(a, 1)
@@ -639,7 +703,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
   it('answers a repeated request from the record, in the first process and after a restart', async () => {
     const dir = workspace()
     const a = await boot(dir)
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await activateRoot(a)
     const first = await a.runtime.submitDecompositionProposal(STORE, root.taskId, root.runId, ROOT, specOf('first child'))
     expect(first.existing).toBe(false)
     // The same request — the same calling context and the same content — is the
@@ -647,13 +711,13 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     const repeat = await a.runtime.submitDecompositionProposal(STORE, root.taskId, root.runId, ROOT, specOf('first child'))
     expect(repeat.existing).toBe(true)
     expect(repeat.proposalId).toBe(first.proposalId)
-    expect((await a.snapshot()).proposals!.all).toHaveLength(1)
+    expect(((await a.snapshot()).proposals!.all).filter(proposal => proposal.kind !== 'root')).toHaveLength(1)
     expect((await a.snapshot()).tasks).toHaveLength(1)
     // A different batch under the same calling context is a different proposal,
     // and a revision is a different request.
     const other = await a.runtime.submitDecompositionProposal(STORE, root.taskId, root.runId, ROOT, specOf('a different child'))
     expect(other.proposalId).not.toBe(first.proposalId)
-    expect((await a.snapshot()).proposals!.all).toHaveLength(2)
+    expect((await a.snapshot()).proposals!.all.filter(proposal => proposal.kind !== 'root')).toHaveLength(2)
     const continued = await a.runtime.continueProposal(STORE, first.proposalId, ROOT)
     expect(continued.status).toBe('admitted')
     const outcomes = await a.runtime.awaitBatch(STORE, batchOf(root.taskId))
@@ -669,7 +733,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     expect(again.proposalId).toBe(first.proposalId)
     expect(again.status).toBe('admitted')
     const after = await b.snapshot()
-    expect(after.proposals!.all).toHaveLength(2)
+    expect(after.proposals!.all.filter(proposal => proposal.kind !== 'root')).toHaveLength(2)
     expect(after.tasks).toHaveLength(2)
     expect(after.runs).toHaveLength(2)
     expect(b.spawns).toHaveLength(0)
@@ -694,7 +758,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
       },
     })
     const a = stack
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await activateRoot(a)
     const admitted = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
       children: [...children('first child'), ...children('second child', { dependsOn: [0] })],
@@ -732,7 +796,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
   it('admits one of two proposals competing for the same parent, and names the loser', async () => {
     const dir = workspace()
     const a = await boot(dir, { generatedTaskReview: 'all' })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await activateRoot(a)
     const first = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, specOf('first batch child'))
     const second = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, specOf('second batch child'))
     if (first.status !== 'pending_review' || second.status !== 'pending_review') throw new Error('unreachable')
@@ -757,7 +821,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     const after = await a.snapshot()
     expect(after.proposals!.byId[second.proposalId]!.status).toBe('admitted')
     expect(after.tasks).toHaveLength(2)
-    expect(taskEvents(await a.events()).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
+    expect(batchProposalEvents(taskEvents(await a.events())).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
     // The child that ran is the winner's, and the loser's batch never existed.
     const childTask = after.tasks.find(task => task.parentTaskId === root.taskId)!
     expect(childTask.contract!.objective).toBe('second batch child')
@@ -770,7 +834,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
   it('marks a competing proposal stale when it is continued after the parent already decomposed', async () => {
     const dir = workspace()
     const a = await boot(dir)
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await activateRoot(a)
     // Two un-reviewed batches for one parent, both `ready`: whichever is
     // continued second finds the parent already decomposed, and a task
     // decomposes once.
@@ -791,7 +855,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     expect(after.proposals!.byId[second.proposalId]!.status).toBe('admitted')
     expect(after.tasks).toHaveLength(2)
     expect(after.tasks.find(task => task.parentTaskId === root.taskId)!.contract!.objective).toBe('second batch child')
-    expect(taskEvents(await a.events()).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
+    expect(batchProposalEvents(taskEvents(await a.events())).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
     expect((await a.task.taskIn(STORE, outcomes[0]!.taskId)).status).toBe('verified')
     expect((await a.task.taskIn(STORE, root.taskId)).status).toBe('verified')
     expect(a.spawns).toHaveLength(1)
@@ -801,7 +865,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
   it('sends a policy-off proposal that never ran to review when the deployment tightened, and admits it only after the decision', async () => {
     const dir = workspace()
     const a = await boot(dir, { generatedTaskReview: 'off' })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await activateRoot(a)
     // Submitted, not continued: under `off` the batch would run at once, but this
     // request stops at the record, which is the shape a running caller leaves
     // behind when it dies between the two halves.
@@ -823,7 +887,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     expect(waiting.tasks).toHaveLength(1)
     expect(waiting.runs).toHaveLength(1)
     expect(b.spawns).toHaveLength(0)
-    expect(taskEvents(await b.events()).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(0)
+    expect(batchProposalEvents(taskEvents(await b.events())).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(0)
     // A continuation adds nothing while it waits.
     expect((await b.runtime.continueProposal(STORE, submission.proposalId, ROOT)).status).toBe('pending_review')
     expect(b.spawns).toHaveLength(0)
@@ -843,7 +907,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
   it('never releases a waiting proposal by loosening the policy to off', async () => {
     const dir = workspace()
     const a = await boot(dir, { generatedTaskReview: 'all' })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await activateRoot(a)
     const pending = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, specOf('first child'))
     if (pending.status !== 'pending_review') throw new Error('unreachable')
     await a.crash()
@@ -866,7 +930,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     const again = await b.runtime.submitDecompositionProposal(STORE, root.taskId, root.runId, ROOT, specOf('first child'))
     expect(again.existing).toBe(true)
     expect(again.status).toBe('rejected')
-    expect((await b.snapshot()).proposals!.all).toHaveLength(1)
+    expect((await b.snapshot()).proposals!.all.filter(proposal => proposal.kind !== 'root')).toHaveLength(1)
     expect(b.spawns).toHaveLength(0)
     await b.dispose()
   })
@@ -874,7 +938,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
   it('marks an approval stale when the limits moved while it waited, and admits nothing', async () => {
     const dir = workspace()
     const a = await boot(dir, { generatedTaskReview: 'all', maxChildren: 1 })
-    const root = await a.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT }, ROOT)
+    const root = await activateRoot(a)
     const pending = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, specOf('first child'))
     if (pending.status !== 'pending_review') throw new Error('unreachable')
     const stored = await proposalOf(a, pending.proposalId)
@@ -892,14 +956,14 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     expect(stale.status).toBe('stale')
     expect(stale.consumption).toBeUndefined()
     expect(stale.decision!.outcome).toBe('approved')
-    const phases = taskEvents(await b.events()).filter(event => event.kind === 'TaskProposalPhaseChanged')
+    const phases = batchProposalEvents(taskEvents(await b.events())).filter(event => event.kind === 'TaskProposalPhaseChanged')
     expect(phases).toHaveLength(1)
     expect(phases[0]!.payload.to).toBe('stale')
     expect(phases[0]!.payload.reason).toContain('the limits in force moved since the batch was proposed and reviewed')
     expect(phases[0]!.payload.reason).toContain(stored.admissionContextDigest)
     expect(b.spawns).toHaveLength(0)
     expect((await b.snapshot()).tasks).toHaveLength(1)
-    expect(taskEvents(await b.events()).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(0)
+    expect(batchProposalEvents(taskEvents(await b.events())).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(0)
     await b.dispose()
   })
 })

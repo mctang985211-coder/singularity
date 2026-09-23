@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { join } from 'node:path'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import { TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
-import type { BatchContext, Config } from '../../src/index.ts'
+import type { BatchContext, Config, RootContractSpec } from '../../src/index.ts'
 import { TaskRuntime } from '../../src/index.ts'
 import { pinSkillHome, releaseSkillHomes } from '../support/skill-roots.ts'
 
@@ -88,15 +88,24 @@ function harness() {
   return { ctx, task, runtime, sessions }
 }
 
+/**
+ * The root contract this case runs under (A0 §1.2): one goal, one criterion a
+ * command settles. The pre-check travels with a *batch*, so the root is setup —
+ * but it is setup through the real intake, and its acceptance is stated here
+ * rather than assumed.
+ */
+const ROOT_CONTRACT: RootContractSpec = {
+  objective: 'ship the release',
+  acceptanceCriteria: [{ criterionId: 'root-ship', description: 'the release is shipped', command: 'true' }],
+}
+
 describe('the pre-check a batch passed travels with its batch (S1-C)', () => {
   test('the batch carries the verdicts, roots and registry revision admission judged, once', async () => {
     const home = pinSkillHome('ball-align')
     const h = harness()
-    const { taskId, runId } = await h.runtime.createRootTask(
-      STORE,
-      { objective: 'ship the release', rootSessionId: ROOT_SESSION },
-      ROOT_SESSION,
-    )
+    const activated = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, ROOT_CONTRACT)
+    if (activated.status !== 'activated') throw new Error(`the root contract was not activated: ${activated.detail}`)
+    const { taskId, runId } = activated
 
     const { batchId, childTaskIds } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
       reason: 'split the work',

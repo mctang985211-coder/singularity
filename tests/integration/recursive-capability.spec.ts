@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { CapabilityConfig, DecomposeSpec } from '../../task-runtime/src/index.ts'
+import type { CapabilityConfig, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { disposeRunStacks, startRunStack, writeKnowledgeSkill, type RunStack, type ToolCallResult } from '../support/run-stack.ts'
 
 /**
@@ -43,6 +43,22 @@ function summaryStart(capability: string, skill: string, role: string): string {
   return `- capability \`${capability}\` → skill \`${skill}\` [${role}] — `
 }
 
+
+/**
+ * The root contract this spec's trees run under (A0 §1.2): one goal, one
+ * criterion a command settles. The intake is real here — these cases are about
+ * what happens to a live tree — so the contract is stated explicitly rather than
+ * defaulted: a root contract owes at least one mandatory criterion judged by
+ * something other than the composite conjunction, and a fixture that supplied one
+ * silently would be answering the question under test.
+ */
+function rootContract(objective: string): RootContractSpec {
+  return {
+    objective,
+    acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
+  }
+}
+
 describe('a child that decomposes further (S1-C)', () => {
   it('tells the grandchild what its run chose, and lets it name the capability from that summary', async () => {
     const capabilities: Record<string, CapabilityConfig> = { [ROW]: { skills: [SKILL], tools: ['filesystem', 'bash'] } }
@@ -73,7 +89,7 @@ describe('a child that decomposes further (S1-C)', () => {
     })
     await writeKnowledgeSkill(join(h.home, 'skills'), SKILL, BODY)
 
-    const root = await h.root(ROOT)
+    const root = await h.root(ROOT, rootContract('ship the release'))
     const batch = await h.runtime.decomposeAndRun(root.storeId, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
       children: [{

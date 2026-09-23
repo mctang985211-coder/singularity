@@ -257,11 +257,10 @@ function carried<T>(value: unknown): T {
 }
 
 /**
- * One child's criteria list. Ids are fixed here — a declared id verbatim, an
- * absent one as `ac<childIndex + 1>-<criterionIndex + 1>`, the scheme the
- * runtime has always used — because the digest must not depend on spellings and
- * because a parent-level `childEvidence.criterionId` can only point at an id
- * that was fixed before its parent's criteria were accepted.
+ * One criterion list. Ids are fixed here — a declared id verbatim, an absent
+ * one from `idOf` — because the digest must not depend on spellings and because
+ * a parent-level `childEvidence.criterionId` can only point at an id that was
+ * fixed before its parent's criteria were accepted.
  *
  * A criterion that carried a defect is left out of the returned list: the batch
  * is refused as a whole, and the contract must describe only what a well-formed
@@ -269,8 +268,8 @@ function carried<T>(value: unknown): T {
  */
 function normalizeCriteria(
   raw: readonly unknown[],
-  childIndex: number,
-  childLabel: string,
+  label: string,
+  idOf: (index: number) => string,
   reasons: string[],
 ): AcceptanceCriterion[] {
   const criteria: AcceptanceCriterion[] = []
@@ -278,30 +277,30 @@ function normalizeCriteria(
   const reportedDuplicate = new Set<string>()
   raw.forEach((value, index) => {
     const before = reasons.length
-    const position = `${childLabel} criterion ${index + 1}`
+    const position = `${label} criterion ${index + 1}`
     if (!isPlainObject(value)) {
       reasons.push(`${position} must be an object`)
       return
     }
     const declaredId = value.criterionId
     if (declaredId !== undefined && !nonBlank(declaredId)) reasons.push(`${position} criterionId must be a non-empty string`)
-    const criterionId = nonBlank(declaredId) ? declaredId : `ac${childIndex + 1}-${index + 1}`
-    const label = `${childLabel} criterion ${JSON.stringify(criterionId)}`
+    const criterionId = nonBlank(declaredId) ? declaredId : idOf(index)
+    const criterionLabel = `${label} criterion ${JSON.stringify(criterionId)}`
 
-    unknownFields(value, CRITERION_FIELDS, label, reasons)
+    unknownFields(value, CRITERION_FIELDS, criterionLabel, reasons)
     // One reason per duplicated id, not one per extra occurrence: the caller has
     // to rename the id once, and a list of repeats would only pad the report.
     if (seen.has(criterionId) && !reportedDuplicate.has(criterionId)) {
-      reasons.push(`${childLabel} declares criterion id ${JSON.stringify(criterionId)} more than once`)
+      reasons.push(`${label} declares criterion id ${JSON.stringify(criterionId)} more than once`)
       reportedDuplicate.add(criterionId)
     }
     seen.add(criterionId)
 
-    const description = text(value.description, `${label} description`, reasons)
-    const mandatory = booleanField(value.mandatory, true, `${label} mandatory`, reasons)
+    const description = text(value.description, `${criterionLabel} description`, reasons)
+    const mandatory = booleanField(value.mandatory, true, `${criterionLabel} mandatory`, reasons)
     const requiredEvidence = value.requiredEvidence === undefined
       ? []
-      : stringList(value.requiredEvidence, `${label} requiredEvidence`, reasons)
+      : stringList(value.requiredEvidence, `${criterionLabel} requiredEvidence`, reasons)
 
     const command = value.command
     const criterion: AcceptanceCriterion = {
@@ -354,7 +353,7 @@ function normalizeChild(raw: unknown, index: number, reasons: string[]): Normali
   const rawCriteria = raw.acceptanceCriteria
   let criteria: AcceptanceCriterion[] = []
   if (!Array.isArray(rawCriteria)) reasons.push(`${label} acceptanceCriteria must be an array`)
-  else criteria = normalizeCriteria(rawCriteria, index, label, reasons)
+  else criteria = normalizeCriteria(rawCriteria, label, criterionIndex => `ac${index + 1}-${criterionIndex + 1}`, reasons)
 
   const requiredCapabilities = raw.requiredCapabilities === undefined
     ? []
@@ -447,5 +446,99 @@ export function normalizeDecomposition(spec: unknown, context: NormalizationCont
     // `NaN`, class instances): no digest of such a proposal could be compared
     // with a digest of a different value, so the batch is refused, not hashed.
     return { ok: false, reasons: [`decomposition content cannot be canonicalized: ${message(error)}`] }
+  }
+}
+
+/** The root contract's fields, and nothing else: a key outside this set is refused (A0 §2). */
+const ROOT_CONTRACT_FIELDS: ReadonlySet<string> = new Set([
+  'contractVersion',
+  'objective',
+  'acceptanceCriteria',
+  'assumptions',
+  'constraints',
+  'requiredCapabilities',
+])
+
+/**
+ * The criterion id a root contract's criterion gets when it declares none:
+ * `ac-<j>`, one flat list.
+ *
+ * Why not the batch scheme (`ac<child>-<j>`): a root contract has no batch
+ * position to be numbered by, so the child half of that name would have to be
+ * invented — and an invented `ac1-2` on a root would read as "the second
+ * criterion of the first child", which is a decomposition this contract is not.
+ * The form is fixed here rather than left to the caller because an absent id
+ * must be deterministic: the digest covers it, and two writers of the same root
+ * contract must not produce two identities.
+ */
+function rootCriterionId(index: number): string {
+  return `ac-${index + 1}`
+}
+
+export type RootNormalizationResult = { ok: true; contract: TaskContract } | { ok: false; reasons: string[] }
+
+/**
+ * Normalize one root contract (A0 §2–§3): the caller's single contract —
+ * objective, criteria, assumptions, constraints, declared capabilities — in,
+ * its canonical {@link TaskContract} out, or every reason it was refused.
+ *
+ * It shares the contract-level rules with {@link normalizeDecomposition} rather
+ * than restating them: the same closed field set per criterion (an undeclared
+ * key is refused by name, never dropped), the same verbatim text rule (blankness
+ * is refused, bytes are not rewritten), the same defaults (an omitted list is
+ * `[]`, an omitted `mandatory` is `true`, an absent mode follows the command),
+ * and the same criterion-id fixing — with the root's own id scheme
+ * ({@link rootCriterionId}).
+ *
+ * What it does *not* do: structural admission. `contractDefects`, the root's
+ * own independent-criterion rule (`admission.ts:rootIndependenceDefects`), the
+ * protected-input shape rule and every capability/provider/verifier question are
+ * asked by the intake entry over the value this returns, exactly as the
+ * decomposition path asks them over a normalized batch. And it writes nothing:
+ * the caller has the whole contract or a list of reasons, and a refused root
+ * contract leaves no id, no event and no file read behind it.
+ *
+ * The `contractVersion` gate is the batch's: absent is this build's version (the
+ * caller that does not version its input means the current language), and a
+ * declared version whose field semantics this build does not know is refused
+ * rather than read with today's reader.
+ */
+export function normalizeRootContract(spec: unknown): RootNormalizationResult {
+  const reasons: string[] = []
+  if (!isPlainObject(spec)) {
+    return { ok: false, reasons: ['root contract must be an object with an objective and an acceptanceCriteria array'] }
+  }
+  unknownFields(spec, ROOT_CONTRACT_FIELDS, 'root contract', reasons)
+
+  const declaredVersion = spec.contractVersion
+  if (declaredVersion !== undefined && declaredVersion !== TASK_CONTRACT_VERSION) {
+    reasons.push(`unknown contract version ${declaredText(declaredVersion)}: this runtime writes version ${TASK_CONTRACT_VERSION}`)
+  }
+
+  const label = 'root contract'
+  const objective = text(spec.objective, `${label} objective`, reasons)
+
+  const rawCriteria = spec.acceptanceCriteria
+  let criteria: AcceptanceCriterion[] = []
+  if (!Array.isArray(rawCriteria)) reasons.push(`${label} acceptanceCriteria must be an array`)
+  else criteria = normalizeCriteria(rawCriteria, label, rootCriterionId, reasons)
+
+  const assumptions = spec.assumptions === undefined ? [] : stringList(spec.assumptions, `${label} assumptions`, reasons)
+  const constraints = spec.constraints === undefined ? [] : stringList(spec.constraints, `${label} constraints`, reasons)
+  const requiredCapabilities = spec.requiredCapabilities === undefined
+    ? []
+    : stringList(spec.requiredCapabilities, `${label} requiredCapabilities`, reasons)
+
+  if (reasons.length > 0) return { ok: false, reasons }
+  return {
+    ok: true,
+    contract: {
+      contractVersion: TASK_CONTRACT_VERSION,
+      objective,
+      acceptanceCriteria: criteria,
+      assumptions,
+      constraints,
+      requiredCapabilities,
+    },
   }
 }

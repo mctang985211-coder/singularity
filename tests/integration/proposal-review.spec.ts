@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { rootTaskStoreId } from '../../task/src/index.ts'
-import type { TaskEvent, TaskProposal } from '../../task/src/index.ts'
-import type { DecomposeAdmissionResult, DecomposeChildSpec, DecomposeSpec } from '../../task-runtime/src/index.ts'
+import { ROOT_PROPOSAL_TASK_ID, rootTaskStoreId } from '../../task/src/index.ts'
+import type { TaskEvent, TaskProposal, TaskSnapshot } from '../../task/src/index.ts'
+import type { DecomposeAdmissionResult, DecomposeChildSpec, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import {
   disposeScriptedLoops,
   startScriptedLoop,
@@ -93,6 +93,22 @@ function taskEvents(h: ScriptedLoop, storeId: string): TaskEvent[] {
   return h.eventsOf(storeId).flatMap(event => (event.type === 'task/event' ? [event.data as unknown as TaskEvent] : []))
 }
 
+/**
+ * The **batch** proposals one store holds. The root session's own intake wrote a
+ * proposal too — the contract that became the root — and it is a different
+ * subject with its own lifecycle: every assertion below is about a batch, so the
+ * root's record is named away rather than counted as one.
+ */
+function batchProposals(snapshot: TaskSnapshot): TaskProposal[] {
+  return (snapshot.proposals?.all ?? []).filter(proposal => proposal.kind !== 'root')
+}
+
+/** The proposal events one store recorded for a **batch**: the root contract's own records ride the reserved envelope task id. */
+function batchProposalEvents(h: ScriptedLoop, storeId: string): TaskEvent[] {
+  return taskEvents(h, storeId).filter(event =>
+    event.kind.startsWith('TaskProposal') && event.taskId !== ROOT_PROPOSAL_TASK_ID)
+}
+
 /** The `ordinal`-th dispatch of one tool, once it reported a result. */
 async function answered(h: ScriptedLoop, name: string, ordinal = 0, sessionId: string = ROOT): Promise<ToolCallRecord> {
   await vi.waitFor(() => {
@@ -169,13 +185,26 @@ async function spawned(h: ScriptedLoop, count: number): Promise<void> {
   }
 }
 
+
+/**
+ * The root contract every case in this file runs under (A0 §1.2): one goal, one
+ * criterion a command settles. The intake is the real one — a root exists only
+ * because a contract passed it — so the contract is stated here explicitly rather
+ * than defaulted: a root contract owes at least one mandatory criterion judged by
+ * something other than the composite conjunction.
+ */
+const ROOT_CONTRACT: RootContractSpec = {
+  objective: 'ship the release',
+  acceptanceCriteria: [{ criterionId: 'root-goal', description: 'the release is shipped', command: 'true' }],
+}
+
 describe('the review policy on the real loop (T2 §5)', () => {
   it('runs the batch under policy off, asks nobody, and records that policy on the proposal', async () => {
     const h = await startScriptedLoop({
       generatedTaskReview: 'off',
       script: (_sessionId, index) => (index === 0 ? decomposeThenFinish('align the ball') : workerScript('aligned the ball')),
     })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     const answer = await answered(h, 'task_decompose')
     expect(answer.result?.isError).toBe(false)
     expect(answer.result?.text).toContain('decomposed')
@@ -187,13 +216,13 @@ describe('the review policy on the real loop (T2 §5)', () => {
     // Nobody was asked: under `off` the audit record is the policy itself, never
     // a missing approval.
     expect(h.review.asks).toHaveLength(0)
-    const proposal = (await h.snapshot(root.storeId)).proposals!.all[0]!
+    const proposal = batchProposals(await h.snapshot(root.storeId))[0]!
     expect(proposal.policy).toBe('off')
     expect(proposal.status).toBe('admitted')
     expect(proposal.decision).toBeUndefined()
     expect(proposal.consumption?.childTaskIds).toEqual(outcomes.map(outcome => outcome.taskId))
 
-    const events = taskEvents(h, root.storeId)
+    const events = batchProposalEvents(h, root.storeId)
     expect(events.filter(event => event.kind === 'TaskProposalSubmitted')).toHaveLength(1)
     expect(events.filter(event => event.kind === 'TaskProposalDecided')).toHaveLength(0)
     expect(events.filter(event => event.kind === 'TaskProposalPhaseChanged')).toHaveLength(0)
@@ -208,7 +237,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
       generatedTaskReview: 'all',
       script: (_sessionId, index) => (index === 0 ? decomposeThenFinish('align the ball') : workerScript('aligned the ball')),
     })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     const answer = await answered(h, 'task_decompose')
     expect(answer.result?.isError).toBe(false)
     expect(answer.result?.text).toContain('waiting for a review')
@@ -241,10 +270,12 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(before.reviews).toHaveLength(0)
     expect(before.tasks[0]!.decompositionStatus).toBe('decomposable')
     expect(before.tasks[0]!.childTaskIds).toEqual([])
+    // The root's own creation and activation are on the same log (the intake that
+    // made the session's root), so each count names the batch it is about.
     const events = taskEvents(h, root.storeId)
     expect(events.filter(event => event.kind === 'TaskCreated')).toHaveLength(1)
     expect(events.filter(event => event.kind === 'TaskDecomposed')).toHaveLength(0)
-    expect(events.filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(0)
+    expect(events.filter(event => event.kind === 'TaskProposalAdmitted' && event.taskId !== ROOT_PROPOSAL_TASK_ID)).toHaveLength(0)
 
     // The answer is what admits it, and the runtime then drives the batch by
     // itself: the model is not asked for anything further.
@@ -260,7 +291,8 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(admitted.decision?.proposalDigest).toBe(admitted.proposalDigest)
     expect(admitted.decision?.admissionContextDigest).toBe(admitted.admissionContextDigest)
     expect(admitted.decision?.reviewContextDigest).toBe(admitted.reviewContextDigest)
-    const admissions = taskEvents(h, root.storeId).filter(event => event.kind === 'TaskProposalAdmitted')
+    const admissions = taskEvents(h, root.storeId).filter(event =>
+      event.kind === 'TaskProposalAdmitted' && event.taskId !== ROOT_PROPOSAL_TASK_ID)
     expect(admissions).toHaveLength(1)
     expect(admissions[0]!.payload.childTaskIds).toEqual(admitted.consumption!.childTaskIds)
     const after = await h.snapshot(root.storeId)
@@ -287,7 +319,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
         { text: 'root: both were refused' },
       ],
     })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     const first = await answered(h, 'task_decompose', 0)
     const second = await answered(h, 'task_decompose', 1)
 
@@ -302,13 +334,13 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(h.review.asks).toHaveLength(0)
     expect(h.spawns).toHaveLength(0)
     const snapshot = await h.snapshot(root.storeId)
-    expect(snapshot.proposals?.all ?? []).toHaveLength(0)
+    expect(batchProposals(snapshot)).toHaveLength(0)
     expect(snapshot.tasks).toHaveLength(1)
     expect(snapshot.tasks[0]!.childTaskIds).toEqual([])
-    const events = taskEvents(h, root.storeId)
+    const events = batchProposalEvents(h, root.storeId)
     expect(events.filter(event => event.kind === 'TaskProposalSubmitted')).toHaveLength(0)
-    expect(events.filter(event => event.kind === 'TaskDecomposed')).toHaveLength(0)
-    expect(events.filter(event => event.kind === 'TaskCreated')).toHaveLength(1)
+    expect(taskEvents(h, root.storeId).filter(event => event.kind === 'TaskDecomposed')).toHaveLength(0)
+    expect(taskEvents(h, root.storeId).filter(event => event.kind === 'TaskCreated')).toHaveLength(1)
   })
 
   it.each(['rejected', 'cancelled', 'unavailable'] as const)('admits nothing when the answer is %s', async outcome => {
@@ -316,7 +348,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
       generatedTaskReview: 'all',
       script: (_sessionId, index) => (index === 0 ? decomposeThenFinish('align the ball') : workerScript('aligned the ball')),
     })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     const spec: DecomposeSpec = { reason: 'split the work', children: children('align the ball') }
     const answer = await answered(h, 'task_decompose')
     const proposalId = proposalIdOf(answer.result!.text)
@@ -351,8 +383,8 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(snapshot.tasks).toHaveLength(1)
     expect(snapshot.runs).toHaveLength(1)
     expect((await proposalOf(h, root.storeId, proposalId)).consumption).toBeUndefined()
-    const events = taskEvents(h, root.storeId)
-    expect(events.filter(event => event.kind === 'TaskDecomposed')).toHaveLength(0)
+    const events = batchProposalEvents(h, root.storeId)
+    expect(taskEvents(h, root.storeId).filter(event => event.kind === 'TaskDecomposed')).toHaveLength(0)
     expect(events.filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(0)
   })
 
@@ -385,7 +417,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
         ]
         : workerScript('aligned the ball and proved it'),
     })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     const firstAnswer = await answered(h, 'task_decompose', 0)
     const firstId = proposalIdOf(firstAnswer.result!.text)
     const ask = await askAt(h, 0)
@@ -435,7 +467,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
 
   it('holds a direct service call exactly as the tool, and admits it only from a recorded decision', async () => {
     const h = await startScriptedLoop({ generatedTaskReview: 'all', script: (_sessionId, index) => (index === 0 ? [] : workerScript('aligned the ball')) })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     const spec: DecomposeSpec = { reason: 'split the work', children: children('align the ball') }
 
     // No tool call anywhere: the compatibility entry is the same gate.
@@ -464,7 +496,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
 
   it('refuses a decision that names a different batch, a different limit set or a different resolution', async () => {
     const h = await startScriptedLoop({ generatedTaskReview: 'all', script: () => decomposeThenFinish('align the ball') })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     const answer = await answered(h, 'task_decompose')
     const proposalId = proposalIdOf(answer.result!.text)
     await askAt(h, 0)
@@ -496,7 +528,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(unchanged.status).toBe('pending_review')
     expect(unchanged.decision).toBeUndefined()
     expect(h.spawns).toHaveLength(0)
-    expect(taskEvents(h, root.storeId).filter(event => event.kind === 'TaskProposalDecided')).toHaveLength(0)
+    expect(batchProposalEvents(h, root.storeId).filter(event => event.kind === 'TaskProposalDecided')).toHaveLength(0)
 
     const decided = await h.runtime.decideProposal(root.storeId, proposalId, { outcome: 'approved' }, claim.decidedBy)
     expect(decided.status).toBe('admitted')
@@ -505,7 +537,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
 
   it('records a late approval as expired when the parent run has ended, and dispatches nothing', async () => {
     const h = await startScriptedLoop({ generatedTaskReview: 'all', script: () => decomposeThenFinish('align the ball') })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     const answer = await answered(h, 'task_decompose')
     const proposalId = proposalIdOf(answer.result!.text)
     await askAt(h, 0)
@@ -524,10 +556,10 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(h.spawns).toHaveLength(0)
     const snapshot = await h.snapshot(root.storeId)
     expect(snapshot.tasks).toHaveLength(1)
-    const decisions = taskEvents(h, root.storeId).filter(event => event.kind === 'TaskProposalDecided')
+    const decisions = batchProposalEvents(h, root.storeId).filter(event => event.kind === 'TaskProposalDecided')
     expect(decisions).toHaveLength(1)
     expect(decisions[0]!.payload.outcome).toBe('expired')
-    expect(taskEvents(h, root.storeId).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(0)
+    expect(batchProposalEvents(h, root.storeId).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(0)
   })
 
   it('marks an approved batch stale when its capability resolution moved, and never transfers the approval', async () => {
@@ -536,7 +568,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
       capabilities: { 'align-capability': { tools: ['bash'] } },
       script: () => decomposeThenFinish('align the ball with the granted tools', { requiredCapabilities: ['align-capability'] }),
     })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     const answer = await answered(h, 'task_decompose')
     const proposalId = proposalIdOf(answer.result!.text)
     const stored = await proposalOf(h, root.storeId, proposalId)
@@ -552,11 +584,11 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(stale.decision?.reviewContextDigest).toBe(stored.reviewContextDigest)
     expect(stale.consumption).toBeUndefined()
     expect(h.spawns).toHaveLength(0)
-    const phases = taskEvents(h, root.storeId).filter(event => event.kind === 'TaskProposalPhaseChanged')
+    const phases = batchProposalEvents(h, root.storeId).filter(event => event.kind === 'TaskProposalPhaseChanged')
     expect(phases).toHaveLength(1)
     expect(phases[0]!.payload.to).toBe('stale')
     expect(phases[0]!.payload.reason).toContain('the capability resolution moved (manifest digest')
-    expect(taskEvents(h, root.storeId).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(0)
+    expect(batchProposalEvents(h, root.storeId).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(0)
     const snapshot = await h.snapshot(root.storeId)
     expect(snapshot.tasks).toHaveLength(1)
   })
@@ -566,7 +598,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
       generatedTaskReview: 'off',
       script: (_sessionId, index) => (index === 0 ? decomposeThenFinish('align the ball') : workerScript('aligned the ball')),
     })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     await spawned(h, 1)
     const gateOutcomes = await h.runtime.awaitBatch(root.storeId, await rootBatchId(h))
     expect(gateOutcomes.map(outcome => outcome.status)).toEqual(['verified'])
@@ -626,12 +658,12 @@ describe('the review policy on the real loop (T2 §5)', () => {
           { text: 'worker: handed in' },
         ],
     })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     const answer = await answered(h, 'task_decompose')
     expect(answer.result?.isError).toBe(false)
     const batchId = await rootBatchId(h)
     await spawned(h, 1)
-    proposalId = (await h.snapshot(root.storeId)).proposals!.all[0]!.proposalId
+    proposalId = batchProposals(await h.snapshot(root.storeId))[0]!.proposalId
     childInFlight.resolve()
 
     const denied = await answered(h, 'task_proposal_continue')
@@ -665,7 +697,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
         { text: 'batch proposed' },
       ],
     })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     // The root's own batch is approved by the person, so the child really runs.
     await askAt(h, 0)
     h.review.answer(0, 'allowed-once')
@@ -695,7 +727,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
 
   it('never routes a replay through the review, whatever the policy', async () => {
     const h = await startScriptedLoop({ generatedTaskReview: 'all', script: () => [] })
-    const root = await h.begin()
+    const root = await h.begin(ROOT_CONTRACT)
     // A terminal champion to replay: written through the store's own service, so
     // the replay's subject is the historical record and not a fixture invention.
     const championTaskId = 't-champion'
@@ -739,8 +771,8 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(replay.status).toBe('verified')
     // No review, no proposal: a replay is an evaluation entry, not a new batch.
     expect(h.review.asks).toHaveLength(0)
-    expect((await h.snapshot(root.storeId)).proposals?.all ?? []).toHaveLength(0)
-    expect(taskEvents(h, root.storeId).filter(event => event.kind.startsWith('TaskProposal'))).toHaveLength(0)
+    expect(batchProposals(await h.snapshot(root.storeId))).toHaveLength(0)
+    expect(batchProposalEvents(h, root.storeId)).toHaveLength(0)
     expect(h.spawns).toHaveLength(0)
     expect(h.visible(h.agent(ROOT)).length).toBeGreaterThan(0)
   })

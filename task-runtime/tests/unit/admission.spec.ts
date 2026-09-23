@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import type { AcceptanceCriterion, DependencyEdge } from '../../../task/src/types.ts'
 import type { AdmissionChild, AdmissionParent } from '../../src/admission.ts'
-import { checkDecomposition, contractDefects } from '../../src/admission.ts'
+import { checkDecomposition, contractDefects, rootIndependenceDefects } from '../../src/admission.ts'
 
 function criterion(overrides: Partial<AcceptanceCriterion> = {}): AcceptanceCriterion {
   return {
@@ -451,5 +451,67 @@ describe('checkDecomposition contract defects (T1)', () => {
     if (!verdict.ok) {
       expect(verdict.reasons).toEqual(['child 0 ("c1") requires at least one mandatory acceptance criterion'])
     }
+  })
+})
+
+/**
+ * The root contract's own structural rule (A0 §1.2): at least one mandatory
+ * criterion judged by something other than the composite conjunction.
+ *
+ * It is a rule of its own rather than part of `contractDefects` because a
+ * *delegated child* may legitimately be judged by "my children verified" — its
+ * parent owns the goal it was handed — while a root has nobody above it, so a
+ * root whose only mandatory criterion is that conjunction is satisfied by its own
+ * decomposition. Both halves of that boundary are asserted here: the delegated
+ * case must keep passing the structural rules, and the root case must be refused.
+ */
+describe('rootIndependenceDefects', () => {
+  const LABEL = 'root contract of session "s-root"'
+
+  test('accepts a root with one mandatory criterion a judge other than the conjunction settles', () => {
+    expect(rootIndependenceDefects([criterion({ verificationMode: 'deterministic' })], LABEL)).toEqual([])
+    expect(rootIndependenceDefects([criterion({ verificationMode: 'review', command: undefined })], LABEL)).toEqual([])
+    expect(rootIndependenceDefects([
+      criterion({ verificationMode: 'composite', command: undefined }),
+      criterion({ criterionId: 'ac-2', verificationMode: 'measurement' }),
+    ], LABEL)).toEqual([])
+    // A *heuristic* criterion satisfies the structural rule and is still not a
+    // deterministic pass: the rule says which kind of judge is named, never how
+    // good that judge is (that boundary belongs to P4's labels, not here).
+    expect(rootIndependenceDefects([criterion({ criterionId: 'ac-3', heuristic: true, command: undefined, verificationMode: 'review' })], LABEL)).toEqual([])
+  })
+
+  test('refuses a root whose only mandatory criterion is the composite conjunction, naming the rule', () => {
+    const reasons = rootIndependenceDefects([criterion({ verificationMode: 'composite', command: undefined })], LABEL)
+    expect(reasons).toHaveLength(1)
+    expect(reasons[0]).toContain(LABEL)
+    expect(reasons[0]).toContain('verificationMode !== "composite"')
+    expect(reasons[0]).toContain('satisfied by its own decomposition')
+  })
+
+  test('does not count an optional non-composite criterion as the independent one', () => {
+    // The conjunction is what makes the goal pass; an optional extra criterion that
+    // is only consulted when the conjunction holds is not an independent check.
+    const reasons = rootIndependenceDefects([
+      criterion({ verificationMode: 'composite', command: undefined }),
+      criterion({ criterionId: 'ac-2', mandatory: false, verificationMode: 'deterministic' }),
+    ], LABEL)
+    expect(reasons).toHaveLength(1)
+  })
+
+  test('refuses an empty contract as one reason, without claiming a rule about a criterion that does not exist', () => {
+    const reasons = rootIndependenceDefects([], LABEL)
+    expect(reasons).toHaveLength(1)
+    expect(reasons[0]).toContain('requires at least one mandatory acceptance criterion judged by')
+  })
+
+  test('leaves the delegated-child case to the rules it already has', () => {
+    // A child of a decomposition may be judged by the conjunction of its own
+    // children: `contractDefects` accepts it, and the root rule is not applied
+    // anywhere in the batch path.
+    expect(contractDefects([criterion({ verificationMode: 'composite', command: undefined })], 'child 0')).toEqual([])
+    expect(checkDecomposition(parent(), [child({
+      acceptanceCriteria: [criterion({ verificationMode: 'composite', command: undefined })],
+    })], []).ok).toBe(true)
   })
 })

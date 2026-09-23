@@ -8,7 +8,7 @@ import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/l
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { EvidenceBundle, TaskEvent, VerificationResult, Verifier } from '../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
-import type { CriterionSpec, DecomposeSpec } from '../../task-runtime/src/index.ts'
+import type { CriterionSpec, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 
@@ -264,9 +264,28 @@ function pinnedCriterion(criterionId: string, verifierRef: string): CriterionSpe
   }
 }
 
-/** The session's real root task, bound to the run every entry resolves the caller through. */
+/**
+ * The session's real root task, bound to the run every entry resolves the caller
+ * through — activated through the real intake (A0 §1.2), with this spec's own
+ * root contract stated below rather than defaulted.
+ */
+function rootContract(objective: string): RootContractSpec {
+  return {
+    objective,
+    acceptanceCriteria: [
+      // The goal's own independent check (A0 §1.2's structural rule needs one) …
+      { criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' },
+      // … and the conjunction, because the cases below read the root's verdict as
+      // the tree's: a child that failed cannot be a delivered goal.
+      { criterionId: 'root-children-verified', description: 'all mandatory children verified', mode: 'composite', mandatory: true },
+    ],
+  }
+}
+
 async function createRoot(h: Harness): Promise<{ taskId: string; runId: string }> {
-  return h.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION)
+  const activated = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('ship the release'))
+  if (activated.status !== 'activated') throw new Error(`the root contract was not activated: ${activated.detail}`)
+  return { taskId: activated.taskId, runId: activated.runId }
 }
 
 /** Decompose the root into one child carrying exactly the given acceptance criteria. */
@@ -613,9 +632,15 @@ describe('V2-3: the (verifierRef, version) index over the real store', () => {
     const parentRun = runOf(h, parentTaskId)
     const judged = onlyBundle(h, childRun)
     const combined = onlyBundle(h, parentRun)
-    // The two real judges that ran, read back off the persisted bundles.
-    expect(judged.claims[0]).toMatchObject({ verifierId: 'command', verifierVersion: '1' })
-    expect(combined.claims[0]).toMatchObject({ verifierId: 'composite', verifierVersion: '1' })
+    // The real judges that ran, read back off the persisted bundles: the child's
+    // command judge, and — for the root — both the goal's own command criterion and
+    // the conjunction over the children (A0 §1.2: a root contract carries an
+    // independent check *and* the conjunction its tree has always been accepted by,
+    // so the order of the two claims is the contract's, not this test's).
+    expect(judged.claims.map(claim => claim.verifierId)).toEqual(['command'])
+    expect(judged.claims.every(claim => claim.verifierVersion === '1')).toBe(true)
+    expect([...new Set(combined.claims.map(claim => claim.verifierId))].sort()).toEqual(['command', 'composite'])
+    expect(combined.claims.every(claim => claim.verifierVersion === '1')).toBe(true)
 
     // A bundle from before the field existed: no claim carries a version.
     await seedLegacyBundle(h, 'evidence-legacy')
@@ -623,9 +648,12 @@ describe('V2-3: the (verifierRef, version) index over the real store', () => {
     expect(legacy.claims[0]).not.toHaveProperty('verifierVersion')
 
     const ids = (bundles: readonly EvidenceBundle[]) => bundles.map(bundle => bundle.evidenceId).sort()
-    expect(ids(await h.verifier.evidenceByVerifier(STORE, 'command', '1'))).toEqual([judged.evidenceId])
+    // The command judge is the one the child's criterion and the root's own
+    // independent criterion both resolve to, so its index holds both bundles —
+    // `combined` is the root's, whose command claim is the goal's own check.
+    expect(ids(await h.verifier.evidenceByVerifier(STORE, 'command', '1'))).toEqual(ids([judged, combined]))
     expect(await h.verifier.evidenceByVerifier(STORE, 'command', '2')).toEqual([])
-    expect(ids(await h.verifier.evidenceByVerifier(STORE, 'command'))).toEqual(ids([judged, legacy]))
+    expect(ids(await h.verifier.evidenceByVerifier(STORE, 'command'))).toEqual(ids([judged, combined, legacy]))
     // The index is per judge: the parent's combination verdict is its own entry.
     expect(ids(await h.verifier.evidenceByVerifier(STORE, 'composite', '1'))).toEqual([combined.evidenceId])
     expect(await h.verifier.evidenceByVerifier(STORE, 'nobody')).toEqual([])

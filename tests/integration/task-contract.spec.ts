@@ -7,7 +7,7 @@ import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-se
 import { SingularityAgent } from '../../agent-singularity/src/index.ts'
 import type { TaskEvent, TaskInstance, TaskSnapshot } from '../../task/src/index.ts'
 import { TaskService, canonicalize, contractDigest, decompositionDigest, rootTaskStoreId } from '../../task/src/index.ts'
-import type { Config, DecomposeSpec } from '../../task-runtime/src/index.ts'
+import type { Config, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 
@@ -227,11 +227,29 @@ function verifierIdsFor(snapshot: TaskSnapshot, taskId: string): string[] {
     .flatMap(item => item.verifierResults.map(result => result.verifierId))
 }
 
-/** The real root task of one session, bound to the run every entry resolves the caller through. */
+/**
+ * The real root task of one session, bound to the run every entry resolves the
+ * caller through — activated through the real intake (A0 §1.2) with the spec's
+ * own contract: one goal, one criterion a command settles, and the conjunction,
+ * because these cases read the root's verdict as the tree's. The contract is
+ * stated here rather than defaulted, since a root contract owes at least one
+ * mandatory criterion judged by something other than the composite conjunction.
+ */
+function rootContract(objective: string): RootContractSpec {
+  return {
+    objective,
+    acceptanceCriteria: [
+      { criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' },
+      { criterionId: 'root-children-verified', description: 'all mandatory children verified', mode: 'composite', mandatory: true },
+    ],
+  }
+}
+
 async function createRoot(h: Generation, objective: string, session = ROOT_SESSION): Promise<Root> {
   const storeId = rootTaskStoreId(session)
-  const { taskId, runId } = await h.runtime.createRootTask(storeId, { objective, rootSessionId: session }, session)
-  return { storeId, taskId, runId, session }
+  const activated = await h.runtime.intakeRootContract(storeId, session, rootContract(objective))
+  if (activated.status !== 'activated') throw new Error(`the root contract was not activated: ${activated.detail}`)
+  return { storeId, taskId: activated.taskId, runId: activated.runId, session }
 }
 
 /** The tool-run context the plugin reads the caller session off (`task-decompose.ts:9-13`). */
@@ -295,9 +313,10 @@ async function expectCreatedTask(h: Generation, root: Root, objective: string, c
   expect(created?.definitionRef).toEqual({ taskType: 'subtask', version: 1 })
   expect(created?.contract?.objective).toBe(objective)
   // The verdicts are the real verifiers': the command verifier judged the
-  // child's deterministic criterion, the composite verifier the root's own.
+  // child's deterministic criterion and the root's own independent one, the
+  // composite verifier the root's conjunction over the children.
   expect(verifierIdsFor(snapshot, child.taskId)).toEqual(['command'])
-  expect(verifierIdsFor(snapshot, root.taskId)).toEqual(['composite'])
+  expect(verifierIdsFor(snapshot, root.taskId)).toEqual(['command', 'composite'])
   expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('verified')
   return child
 }

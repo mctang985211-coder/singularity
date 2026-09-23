@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, test } from 'vitest'
-import { TASK_CONTRACT_VERSION } from '../../../task/src/contract.ts'
-import type { NormalizationContext, NormalizationResult } from '../../src/normalize.ts'
-import { normalizeDecomposition } from '../../src/normalize.ts'
+import { TASK_CONTRACT_VERSION, contractDigest } from '../../../task/src/contract.ts'
+import type { NormalizationContext, NormalizationResult, RootNormalizationResult } from '../../src/normalize.ts'
+import { normalizeDecomposition, normalizeRootContract } from '../../src/normalize.ts'
 
 /**
  * The context one batch is normalized in. Its `admissionContext` is the limits
@@ -477,5 +477,121 @@ describe('normalizeDecomposition', () => {
     }), CONTEXT))
     expect(reasons).toContain('decomposition content cannot be canonicalized')
     expect(reasons).toContain('cannot canonicalize')
+  })
+})
+
+/**
+ * The root contract's normalization (A0 §3): the same contract-level rules the
+ * batch path uses — a closed field set, verbatim text, the same defaults — with
+ * one scheme of its own, the criterion id a root contract's criteria are numbered
+ * by when the caller declares none.
+ */
+describe('normalizeRootContract', () => {
+  /** The normalized contract, or a failure naming every reason the entry reported. */
+  function normalized(result: RootNormalizationResult) {
+    if (!result.ok) throw new Error(`expected a normalized contract, got reasons:\n- ${result.reasons.join('\n- ')}`)
+    return result.contract
+  }
+
+  /** The reasons of a rejected contract, one per line. */
+  function refused(result: RootNormalizationResult): string {
+    if (result.ok) throw new Error('expected a rejected contract')
+    return result.reasons.join('\n')
+  }
+
+  function contract(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      objective: 'ship the release',
+      acceptanceCriteria: [{ description: 'the release is shipped', command: 'true' }],
+      ...overrides,
+    }
+  }
+
+  test('fills the contract defaults and fixes the criterion ids a root contract numbers by', () => {
+    const normalizedContract = normalized(normalizeRootContract(contract({
+      acceptanceCriteria: [
+        { description: 'the release is shipped', command: 'true' },
+        { criterionId: 'declared', description: 'the notes are written', command: 'true' },
+        { description: 'a human read it' },
+      ],
+    })))
+    expect(normalizedContract.contractVersion).toBe(TASK_CONTRACT_VERSION)
+    expect(normalizedContract.objective).toBe('ship the release')
+    // `ac-<j>`: one flat list, because a root contract has no batch position to be
+    // numbered by — `ac1-2` would read as "the second criterion of the first child",
+    // which is a decomposition this contract is not.
+    expect(normalizedContract.acceptanceCriteria.map(criterion => criterion.criterionId))
+      .toEqual(['ac-1', 'declared', 'ac-3'])
+    expect(normalizedContract.assumptions).toEqual([])
+    expect(normalizedContract.constraints).toEqual([])
+    expect(normalizedContract.requiredCapabilities).toEqual([])
+    // An absent mode follows the command, exactly as a child's does; the declared
+    // id is stored verbatim.
+    expect(normalizedContract.acceptanceCriteria.map(criterion => criterion.verificationMode))
+      .toEqual(['deterministic', 'deterministic', 'review'])
+    expect(normalizedContract.acceptanceCriteria.every(criterion => criterion.mandatory)).toBe(true)
+  })
+
+  test('keeps text verbatim and refuses blankness instead of rewriting it', () => {
+    const normalizedContract = normalized(normalizeRootContract(contract({ objective: '  ship the release  ' })))
+    expect(normalizedContract.objective).toBe('  ship the release  ')
+    expect(refused(normalizeRootContract(contract({ objective: '   ' })))).toContain('root contract objective must be a non-empty string')
+    expect(refused(normalizeRootContract(contract({ assumptions: ['  '] })))).toContain('assumptions must be an array of non-empty strings')
+  })
+
+  test('is closed: a field nobody reads is refused by name, never dropped', () => {
+    // The two ways a caller could try to raise a limit or pin an implementation
+    // through a field the runtime never reads.
+    expect(refused(normalizeRootContract(contract({ budget: 10_000 })))).toContain('declares unknown field "budget"')
+    expect(refused(normalizeRootContract(contract({ children: [] })))).toContain('declares unknown field "children"')
+    expect(refused(normalizeRootContract(contract({
+      acceptanceCriteria: [{ description: 'it holds', command: 'true', skills: ['verify'] }],
+    })))).toContain('declares unknown field "skills"')
+    // And a version this build does not know is refused rather than read.
+    expect(refused(normalizeRootContract(contract({ contractVersion: 2 })))).toContain('unknown contract version 2')
+    // An absent version is this build's language.
+    expect(normalized(normalizeRootContract(contract({ contractVersion: TASK_CONTRACT_VERSION }))).contractVersion).toBe(TASK_CONTRACT_VERSION)
+  })
+
+  test('refuses a duplicate criterion id and every malformed shape, without a partial contract', () => {
+    expect(refused(normalizeRootContract(contract({
+      acceptanceCriteria: [
+        { criterionId: 'same', description: 'one', command: 'true' },
+        { criterionId: 'same', description: 'two', command: 'true' },
+      ],
+    })))).toContain('declares criterion id "same" more than once')
+    const malformed: unknown[] = [
+      undefined,
+      null,
+      42,
+      'a contract',
+      [],
+      {},
+      { objective: 'a goal' },
+      { objective: 'a goal', acceptanceCriteria: 'all of them' },
+      { objective: 'a goal', acceptanceCriteria: [null] },
+      { objective: 'a goal', acceptanceCriteria: [{ description: 'it holds' }], requiredCapabilities: 'verify' },
+    ]
+    for (const spec of malformed) {
+      const result = normalizeRootContract(spec)
+      expect(result.ok, JSON.stringify(spec)).toBe(false)
+      if (!result.ok) expect(result.reasons.length, JSON.stringify(spec)).toBeGreaterThan(0)
+    }
+  })
+
+  test('produces one identity for the same contract however its keys were written', () => {
+    // Key order is not content: the digest a proposal binds covers the normalized
+    // contract, so two spellings of one contract are one goal.
+    const first = normalized(normalizeRootContract({
+      objective: 'ship the release',
+      acceptanceCriteria: [{ criterionId: 'ac-1', description: 'it is shipped', command: 'true' }],
+      constraints: ['no network'],
+    }))
+    const second = normalized(normalizeRootContract({
+      constraints: ['no network'],
+      acceptanceCriteria: [{ description: 'it is shipped', command: 'true' }],
+      objective: 'ship the release',
+    }))
+    expect(contractDigest(first)).toBe(contractDigest(second))
   })
 })

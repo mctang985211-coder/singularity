@@ -104,6 +104,30 @@ describe('COORDINATION_ALLOWED', () => {
     gate.trackAllowed('s-1', 'c-2', 'task_proposal_read')
     expect(gate.inFlightWrites('s-1')).toEqual([{ callId: 'c-1', name: 'task_proposal_continue' }])
   })
+
+  test('classifies the root intake as the write it is, by leaving it out of the list', () => {
+    // `task_intake` (A0 §1.9, stage C) writes a proposal and can activate a root
+    // task, so it is a write — and a write is exactly what *not* being in this
+    // table means: the default decision for a non-active phase is a refusal, and
+    // adding the name here would be the only way to open the gate for it. The
+    // classification needs no rule of its own; the assertion is that no future
+    // edit puts it in by accident.
+    expect(COORDINATION_ALLOWED.has('task_intake')).toBe(false)
+    const gate = new ExecutionGate()
+    gate.setPhase('s-1', 'waiting_children')
+    const denied = gate.decide('s-1', 'task_intake')
+    expect(denied.allow).toBe(false)
+    if (denied.allow) throw new Error('unreachable')
+    expect(denied.reason).toContain('"task_intake" is denied')
+    // A late intake on a terminal root is refused the same way, and names itself
+    // as the late call it is (§1.8).
+    gate.setTerminal('s-1')
+    const late = gate.decide('s-1', 'task_intake')
+    expect(late.allow).toBe(false)
+    if (late.allow) throw new Error('unreachable')
+    expect(late.reason).toContain('late call')
+    expect(gate.decide('s-1', 'task_read')).toEqual({ allow: true })
+  })
 })
 
 describe('ExecutionGate.decide', () => {

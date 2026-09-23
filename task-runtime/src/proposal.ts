@@ -84,6 +84,44 @@ export function proposalRequestKey(context: ProposalRequestKeyContext): string {
 }
 
 /**
+ * The calling context a *root* contract's request key is made of (A0 §2): which
+ * store and which root session the contract is the goal of, and the digest of
+ * the normalized contract itself.
+ *
+ * The parent task and parent run a batch's key names have no counterpart here —
+ * a root contract has no parent, and the task it becomes does not exist until it
+ * is activated — so the two fields that identify the subject are the store and
+ * the root session, and the content is the contract's own digest.
+ */
+export interface RootRequestKeyContext {
+  storeId: string
+  rootSessionId: string
+  /** {@link contractDigest} of the normalized root contract the request carries. */
+  contractDigest: string
+}
+
+/**
+ * The request key one root intake derives when its caller named none: `rk-` plus
+ * the SHA-256 of {@link canonicalize} over {@link RootRequestKeyContext}.
+ *
+ * What the derivation buys, in the order it matters: the same contract asked for
+ * again — in this process or after a restart — addresses the same proposal and is
+ * answered from the record instead of being written twice; a revision is
+ * different content, hence a different digest, hence a different key, which is
+ * exactly what §6 wants a revision to be; and no caller has to keep a key of its
+ * own to get that. A caller that *has* a stable identifier may pass it instead,
+ * and the store then holds it to the same rule — one key names one proposal, and
+ * a key already bound to other content is refused by name.
+ */
+export function rootProposalRequestKey(context: RootRequestKeyContext): string {
+  return `${PROPOSAL_REQUEST_KEY_PREFIX}${sha256Hex(canonicalize({
+    storeId: context.storeId,
+    rootSessionId: context.rootSessionId,
+    contractDigest: context.contractDigest,
+  }))}`
+}
+
+/**
  * The statuses in which a proposal is still "in flight" for the task that made
  * it — submitted and not yet admitted, not yet decided, or decided and not yet
  * re-checked. `admitted` and the four terminal statuses are excluded: a task
@@ -121,7 +159,9 @@ export function isOpenProposal(proposal: TaskProposal): boolean {
  */
 export function openProposalOf(snapshot: TaskSnapshot, taskId: string, runId: string): TaskProposal | undefined {
   const proposals = (snapshot.proposals?.byParentTask[taskId] ?? [])
-    .filter(proposal => proposal.identity.parentRunId === runId && OPEN_PROPOSAL_STATUSES.includes(proposal.status))
+    .filter(proposal => proposal.kind !== 'root'
+      && proposal.identity.parentRunId === runId
+      && OPEN_PROPOSAL_STATUSES.includes(proposal.status))
   return proposals[proposals.length - 1]
 }
 

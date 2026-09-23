@@ -6,6 +6,7 @@ import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/l
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { AcceptanceCriterion, EvidenceBundle, TaskEvent, TaskInstance, TaskRun } from '../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
+import type { RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 
@@ -113,7 +114,7 @@ function evidenceFor(h: Harness, runId: string): EvidenceBundle[] {
 /**
  * A parent task authored directly in the store with caller-chosen acceptance
  * criteria — the shape a parent-level evidence map arrives on, since
- * `createRootTask` expands the fixed RootTaskSpec and a stored task's criteria
+ * the intake's contract is the caller's own and a stored task's criteria
  * are immutable.
  */
 async function createParent(h: Harness, acceptanceCriteria: AcceptanceCriterion[]): Promise<{ taskId: string; runId: string }> {
@@ -244,6 +245,29 @@ async function createVerifiedChampion(h: Harness): Promise<string> {
   }, 'tester')
   await h.task.markRunStatusIn(STORE, taskId, 'r-champion', 'verified', 'tester')
   return taskId
+}
+
+
+/**
+ * Activate the root through the real intake (A0 §1.2–§1.4) and hand back what it
+ * became. The contract is the spec's own: the goal's independent criterion — which
+ * a root contract owes at least one of — and the conjunction, because these cases
+ * read the root's own verdict as the tree's.
+ */
+function rootContract(objective: string): RootContractSpec {
+  return {
+    objective,
+    acceptanceCriteria: [
+      { criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' },
+      { criterionId: 'root-children-verified', description: 'all mandatory children verified', mode: 'composite', mandatory: true },
+    ],
+  }
+}
+
+async function activateRoot(h: Harness): Promise<{ taskId: string; runId: string }> {
+  const activated = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('ship the release'))
+  if (activated.status !== 'activated') throw new Error(`the root contract was not activated: ${activated.detail}`)
+  return { taskId: activated.taskId, runId: activated.runId }
 }
 
 describe('parent acceptance and evidence identity, end to end (P4)', () => {
@@ -449,8 +473,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
 
   it('P4-C: a same-named product from a failed run does not satisfy requiresArtifact', async () => {
     const h = await harness()
-    const { taskId: rootTaskId, runId: rootRunId } =
-      await h.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION)
+    const { taskId: rootTaskId, runId: rootRunId } = await activateRoot(h)
     await seedProducer(h, 'failed', 'bemu_trace')
 
     const batch = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
@@ -475,8 +498,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
 
   it('P4-C: the verified run of the same producer satisfies the dependency', async () => {
     const h = await harness()
-    const { taskId: rootTaskId, runId: rootRunId } =
-      await h.runtime.createRootTask(STORE, { objective: 'ship the release', rootSessionId: ROOT_SESSION }, ROOT_SESSION)
+    const { taskId: rootTaskId, runId: rootRunId } = await activateRoot(h)
     await seedProducer(h, 'verified', 'bemu_trace')
 
     const batch = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {

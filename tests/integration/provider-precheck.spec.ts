@@ -9,7 +9,7 @@ import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-se
 import { SingularityAgent } from '../../agent-singularity/src/index.ts'
 import type { TaskEvent, TaskSnapshot } from '../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
-import type { CapabilityConfig, CapabilityProviderPrecheck, Config, DecomposeSpec, SkillProviderVerdict } from '../../task-runtime/src/index.ts'
+import type { CapabilityConfig, CapabilityProviderPrecheck, Config, DecomposeSpec, SkillProviderVerdict, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 
@@ -209,14 +209,23 @@ function taskEvents(h: Harness): TaskEvent[] {
     event.type === 'task/event' ? [event.data as unknown as TaskEvent] : []))
 }
 
-/** The root task plus the run every entry resolves the caller through. */
+/**
+ * The root task plus the run every entry resolves the caller through — activated
+ * through the real intake (A0 §1.2) with this spec's own contract. The contract
+ * is stated here rather than defaulted: a root contract owes at least one
+ * mandatory criterion judged by something other than the composite conjunction.
+ */
+function rootContract(objective: string): RootContractSpec {
+  return {
+    objective,
+    acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
+  }
+}
+
 async function createRoot(h: Harness): Promise<{ storeId: string; taskId: string; runId: string }> {
-  const { taskId, runId } = await h.runtime.createRootTask(
-    STORE,
-    { objective: 'ship the release', rootSessionId: ROOT_SESSION },
-    ROOT_SESSION,
-  )
-  return { storeId: STORE, taskId, runId }
+  const activated = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('ship the release'))
+  if (activated.status !== 'activated') throw new Error(`the root contract was not activated: ${activated.detail}`)
+  return { storeId: STORE, taskId: activated.taskId, runId: activated.runId }
 }
 
 function child(objective: string, requiredCapabilities: readonly string[], overrides: Record<string, unknown> = {}) {

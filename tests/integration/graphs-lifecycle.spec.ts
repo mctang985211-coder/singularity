@@ -65,9 +65,12 @@ function harness() {
   const detach = vi.spyOn(store, 'detachSession')
   const deleteEnv = vi.spyOn(store, 'delete')
   const taskRuntime = {
-    createRootTask: vi.fn(async (_storeId: string, _options: { objective: string; rootSessionId: string }, _actor: string) => ({
-      taskId: 'task-root',
-      runId: 'run-root',
+    // The graph entry opens its root session's store and adopts whatever root that
+    // store already holds (A0 §1.1): a fresh session's store holds none yet, which
+    // is what `adopted: false` says.
+    adoptRoot: vi.fn(async (_storeId: string, _rootSessionId: string) => ({
+      adopted: false as const,
+      detail: 'the fresh store holds no root task yet',
     })),
     // The A3 hook `GraphsService.remove` calls before it stops the graph: a batch
     // driver still running would keep spawning workers into an environment that
@@ -118,11 +121,10 @@ describe('graphs creation lifecycle', () => {
         scope: { graphStoreId: graph.graphStoreId, layoutStoreId: graph.layoutStoreId },
       }),
     )
-    expect(taskRuntime.createRootTask).toHaveBeenCalledExactlyOnceWith(
-      `sg-t-${graph.rootSessionId}`,
-      { objective: graph.name, rootSessionId: graph.rootSessionId },
-      'graphs',
-    )
+    // The graph creates no task: it opens the store and adopts the root it holds,
+    // and the graph's own name never becomes an objective (A0 §1.2, §1.5).
+    expect(taskRuntime.adoptRoot).toHaveBeenCalledExactlyOnceWith(`sg-t-${graph.rootSessionId}`, graph.rootSessionId)
+    expect(JSON.stringify(taskRuntime.adoptRoot.mock.calls)).not.toContain('objective')
     expect(events[0]).toMatchObject({ type: 'graphs/event', data: { kind: 'graph/add', graph } })
     expect(store.get(graph.envId).sessionIds).toEqual([graph.rootSessionId])
     expect(runtime.prompt).toHaveBeenCalledOnce()

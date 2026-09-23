@@ -7,6 +7,7 @@ import { tokenUsageProjectionDefinition } from '../../../../thirdparty/deepseek-
 import type { EvidenceBundle, ReviewRecord, VerificationResult } from '../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
 import { pinSkillHome, releaseSkillHomes } from '../../task-runtime/tests/support/skill-roots.ts'
+import type { RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 
 /**
@@ -153,17 +154,34 @@ function harness() {
   return { ctx, task, runtime, log, spawned, readSession, snapshot, foldTokenUsage: () => foldTokenUsage(workerSessionEvents) }
 }
 
+
+/**
+ * Activate the root through the real intake (A0 §1.2–§1.4) and hand back what it
+ * became. The contract is the spec's own — one goal, one criterion a command
+ * settles — and it is stated here rather than defaulted, because a root contract
+ * owes at least one mandatory criterion judged by something other than the
+ * composite conjunction and a fixture that supplied one silently would hide that.
+ */
+function rootContract(objective: string): RootContractSpec {
+  return {
+    objective,
+    acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
+  }
+}
+
+async function createRoot(h: Harness): Promise<{ storeId: string; taskId: string; runId: string }> {
+  const activated = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('ship the release'))
+  if (activated.status !== 'activated') throw new Error(`the root contract was not activated: ${activated.detail}`)
+  return { storeId: STORE, taskId: activated.taskId, runId: activated.runId }
+}
+
 describe('review record metrics and dimensions, end to end', () => {
   it('persists the dimensions and metrics inside the appended ReviewRecorded event', async () => {
     // The granted `ball-align` has to be discoverable from the worker's own
     // roots: admission checks that before it mints a child (S1-C).
     pinSkillHome('ball-align')
     const h = harness()
-    const { taskId: rootTaskId, runId: rootRunId } = await h.runtime.createRootTask(
-      STORE,
-      { objective: 'ship the release', rootSessionId: ROOT_SESSION },
-      ROOT_SESSION,
-    )
+    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const batch = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [{
@@ -226,11 +244,7 @@ describe('review record metrics and dimensions, end to end', () => {
 
   it('records no artifacts, no time and no score — the deliberate holes stay holes', async () => {
     const h = harness()
-    const { taskId: rootTaskId, runId: rootRunId } = await h.runtime.createRootTask(
-      STORE,
-      { objective: 'ship the release', rootSessionId: ROOT_SESSION },
-      ROOT_SESSION,
-    )
+    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const { batchId } = await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [{ objective: 'child work', acceptanceCriteria: [{ description: 'the child works', command: 'true' }] }],
