@@ -1,5 +1,7 @@
 # P3 Prompt：拒绝覆盖已变化的生产 Skill
 
+> 已完成任务的原始合同，保留用于追溯与回归；下文“当前”指派发时基线。不要重新执行，当前派发以[建设计划](../2026-09-20-vrtc-code-change-plan.md)为准。
+
 请实现本任务。首先阅读并遵循同目录 `README.md` 的全部公共执行合同。
 绝对路径：`/home/ROXY/code/bb_work/harness/packages/singularity/docs/execution-prompts/README.md`。
 前置：P1、P2 已验收并进入当前工作区。只执行 P3。

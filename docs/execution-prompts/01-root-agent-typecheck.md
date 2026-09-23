@@ -1,5 +1,7 @@
 # P1 Prompt：修复 root-agent 严格类型检查
 
+> 已完成任务的原始合同，保留用于追溯与回归；下文“当前”指派发时基线。不要重新执行，当前派发以[建设计划](../2026-09-20-vrtc-code-change-plan.md)为准。
+
 请实现本任务。首先阅读并遵循同目录 `README.md` 的全部公共执行合同。
 绝对路径：`/home/ROXY/code/bb_work/harness/packages/singularity/docs/execution-prompts/README.md`。
 本任务无 P 类前置依赖，不执行 P2/P3。

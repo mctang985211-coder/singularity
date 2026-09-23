@@ -4,12 +4,16 @@
 2026-09-23 更新：当前使用 [架构补救指挥 prompt](05-architecture-remediation.md)，范围为唯一计划第 6–8 项：A0 + R0、R1、R2，逐项完成再推进。以下 P1–P4 顺序是已完成任务的历史入口，不重新执行。
 准备文档前备份：Singularity `6fe9c26`，外层 harness `1afb656`。
 
-## 派发顺序
+进度核实与下一票编写使用[进度审核指挥 prompt](progress-review-and-dispatch.md)。它只审核、更新计划并准备一份派发材料，不自动执行后续代码任务；遇到返工或待验收就留在当前票。
+
+## 历史执行合同（P1–P4）
 
 1. [P1：严格类型检查](01-root-agent-typecheck.md)
 2. [P2：单文件 Skill 内容绑定](02-skill-content-binding.md)，基于 P1 验收后的代码执行。
 3. [P3：过期 Skill 候选拒绝](03-skill-champion-check.md)，基于 P2 验收后的代码执行。
 4. [P4：独立父验收与证据身份](04-parent-acceptance-evidence-identity.md)，基于 P3 验收后的代码执行；S1-V 切片 2（verifier selftest 执行）不在本票。
+
+## 当前派发
 
 下一项见 [建设计划](../2026-09-20-vrtc-code-change-plan.md)文首唯一顺序。T2/T3 已验收，**下一项是 A0 + R0，随后 R1 真实运行与 R2 按证据整理**。A2 及之后范围待实际运行后复定；不要按文件名、T/A/S 编号或历史段落推定下一项。补救指挥 prompt 覆盖连续三行，但不授权越过完成闸。
 

@@ -1,5 +1,7 @@
 # Singularity architecture review
 
+> Historical review of the 2026-09-11 tree, retained as evidence rather than a current defect list or dispatch order. Recheck findings against current code before acting. Current direction: [working guide](../singularity-harness-guide.md); current order: [build plan](../2026-09-20-vrtc-code-change-plan.md).
+
 Reviewed on 2026-09-11 against the current working tree, including the uncommitted fixes from this conversation. This is a code-level review and proposed contract, not a claim of browser end-to-end verification.
 
 ## Confirmed intent

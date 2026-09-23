@@ -1,5 +1,7 @@
 # P4 Prompt：独立父验收与证据身份（S1-V 切片 1+3）
 
+> 已完成并经后续修复的任务原始合同；下文“当前”指派发时基线。原交付的完成声明不能代替后续组合漏洞回归，详见[建设计划的 P4 修复复核](../2026-09-20-vrtc-code-change-plan.md)。不据本文重新派发 P4。
+
 请实现本任务。首先阅读并遵循同目录 `README.md` 的全部公共执行合同。
 绝对路径：`/home/ROXY/code/bb_work/harness/packages/singularity/docs/execution-prompts/README.md`。
 前置：P1/P2/P3 已验收并进入当前工作区（基线：Singularity `05cb27c`，外层 harness `c198457d56`，双仓 tag `baseline-p4-20260921`）。只执行 P4；S1-V 切片 2（verifier selftest 执行与输入身份）不在本票范围，后续单独派发。

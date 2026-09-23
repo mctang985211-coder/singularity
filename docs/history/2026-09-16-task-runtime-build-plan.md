@@ -1,6 +1,6 @@
 # Task Runtime Build Plan — 2026-09-16
 
-> Historical implementation plan. Its schemas, defaults, and out-of-scope list describe the 2026-09-16 build, not the current checkout. Current direction: [working guide](singularity-harness-guide.md); current tickets: [build plan](2026-09-20-vrtc-code-change-plan.md). Do not reimplement these completed tickets or use their inline types as the current API.
+> Historical implementation plan. Its schemas, defaults, and out-of-scope list describe the 2026-09-16 build, not the current checkout. Current direction: [working guide](../singularity-harness-guide.md); current tickets: [build plan](../2026-09-20-vrtc-code-change-plan.md). Do not reimplement these completed tickets or use their inline types as the current API.
 
 Source documents (read first, they are the contract):
 
