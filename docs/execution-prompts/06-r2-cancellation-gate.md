@@ -2,6 +2,20 @@
 
 你是本票的指挥与实现 agent。完成代码修复、验证和 guide 同步，不仅提出方案；只执行建设计划第 7 项 Q1，验收后停止。
 
+## 2026-09-24 进度审核补充返工合同
+
+`250a04f` / `edfcce3` 修复了查询在 cancelGraph 返回前回填的窗口，但 Q1 尚未关闭。最新审核基线 `0400d25`（与 edfcce3 内容相同），外层 `9f33ddc`。不重做已通过的路径，只补下面已复现的同一查询竞态：
+
+1. 真实 active 根运行，调用 `runForSession`；call-through spy 在 `task.runIn` 已读回旧 active 对象后，用 Promise 屏障暂停该调用返回，仅暂停第一笔目标读取。
+2. 真实 `cancelGraph` 完整结束；从真实 store 确认 run=cancelled，gate=terminal。
+3. 释放旧查询并 await；现实现得到 gate=active，预期 terminal，测试确定性失败。这是一次取消、一个普通查询，无需并发 cancel 或私有状态注入。
+
+C1 必须追加此跨完成点反例，并通过真实工具执行管线断言旧查询返回后写/spawn 仍被拒、工具体零副作用。保留原取消窗口内的读写测试、C2 恢复与 C3 正常 active 正例。测试以显式屏障控制，finally 释放与收尾。
+
+修复要处理“读取期间状态已变化”的结果适用性，不能仅判断应用结果时是否仍在 closingStores；不要单纯延迟清理集合、追加 sleep 或再次盲读，也不要用永久禁止相位更新破坏恢复。优先沿已有绑定/闸所有权保证旧查询不得撤销新屏障；新增机制须有本反例需要，不建设通用状态平台。原交付列出的其他并发边界不因记录就自动被证明安全，核对与本次修复直接有关的路径；没有可达证据不扩张任务。
+
+达到本补充反例和原 C1–C4 后再提交进度审核，本票不执行 R1。
+
 ## 输入与范围
 
 - 工作区：`/home/ROXY/code/bb_work/harness/packages/singularity`；外层：`/home/ROXY/code/bb_work/harness`。

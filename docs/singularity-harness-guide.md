@@ -1,5 +1,7 @@
 # Singularity Harness 工作指南
 
+最新进度审核（2026-09-24）：R2 仍需返工，暂不能派 R1。`edfcce3` 上确定性复现：查询先读到 active 快照，取消完成并清除 closingStores 后，该查询才返回并把 terminal 回填为 active。既有 1459 项单测 / 267 项集成通过不覆盖此交错。下方 2026-09-23 的关闭表述仅为当时交付结论，以建设计划「R2 进度审核」及更新后的 R2 prompt 为准。
+
 方向复核：2026-09-23，代码基线 `fda3d29`（T2/T3 交付）。该次文档修改前备份：Singularity `1430103`、外层 harness `31bcf3a`，包含 A0 草案与架构审查原文；第三方 DSH 原有未跟踪文件未纳入。
 后续更新（2026-09-23）：A0 定向返工（Q2/Q3）已通过进度审核（交付备份 Singularity `cce3157` / 外层 `2c299b7`，见 §5.13）。**第 7 项 R2 的返工点 Q1（查询在取消窗口内重开写闸）已修复并交付 `250a04f`**（见 §5.12；构建、1459 项单测、267 项集成、持久化检查与独立只读复核通过），停在进度审核，未部署；下一项是 R1 补验证（Q4/Q5），须另行派发。
 那次只修订指导与派发合同，未实现补救任务、未复跑历史测试。各票已有实跑记录仍按其日期与提交读取；返工记录单列，不覆盖历史结论。
@@ -414,9 +416,9 @@ T1 把“任务契约”从散落在工具 schema、runtime 局部函数与事�
 
 ### 5.12 按证据整理运行时（2026-09-23 R2，取消写闸返工）
 
-原交付与复核已提交在 `d5b0bb6`：`gatePhaseFromStore` 修复了恢复绑定，却在取消尚未持久化时把 terminal 回写为 active。**该缺陷（复核 Q1）已在本轮返工关闭**，交付 `250a04f`；返工记录与实跑数量见建设计划「R2 Q1 返工执行与验收记录」。以下先记本次关闭与证据，再保留原实现事实（原复核已成立的部分本轮未改，不能据此宣称 R2 之外的工作已完成）。
+原交付与复核已提交在 `d5b0bb6`：`gatePhaseFromStore` 修复了恢复绑定，却在取消尚未持久化时把 terminal 回写为 active。**该缺陷（复核 Q1）在取消窗口内的同步查询已修，但 2026-09-24 进度审核证实跨取消完成点的延迟查询仍会重开闸，整票返工**，交付 `250a04f`；返工记录与实跑数量见建设计划「R2 Q1 返工执行与验收记录」。以下先记本次关闭与证据，再保留原实现事实（原复核已成立的部分本轮未改，不能据此宣称 R2 之外的工作已完成）。
 
-- **Q1 关闭（取消窗口内的查询不得重开写闸）**：`cancelGraph` 的顺序本身是承诺——先关闸（每个绑定 session 置 terminal），再 abort/等待 driver，最后才把取消落盘（`settleRunFromRuntime` → `markRunStatusIn`），所以窗口内 store 仍写 `running`/`active`，而闸已生效。返工=运行时记「本进程正在关闭的 store」集合（`closingStores`：在 gate 循环前建立，`finally` 清除，随操作生命周期存在），`gatePhaseFromStore` 在 store 关闭期间不移动**已持有相位**的 session——较旧的持久化记录不能解除已生效的屏障；取消没触及的 session（无相位）仍照旧取 store 相位，所以重启恢复（waiting_children/终态）不受影响。没有第二份相位、没有给全部状态排单调等级、没有新锁/调度器/事件体系。
+- **Q1 部分修复（尚未覆盖延迟查询跨取消完成点）**：`cancelGraph` 的顺序本身是承诺——先关闸（每个绑定 session 置 terminal），再 abort/等待 driver，最后才把取消落盘（`settleRunFromRuntime` → `markRunStatusIn`），所以窗口内 store 仍写 `running`/`active`，而闸已生效。返工=运行时记「本进程正在关闭的 store」集合（`closingStores`：在 gate 循环前建立，`finally` 清除，随操作生命周期存在），`gatePhaseFromStore` 在 store 关闭期间不移动**已持有相位**的 session——较旧的持久化记录不能解除已生效的屏障；取消没触及的 session（无相位）仍照旧取 store 相位，所以重启恢复（waiting_children/终态）不受影响。没有第二份相位、没有给全部状态排单调等级、没有新锁/调度器/事件体系。
 - **C1 反例（真实回填路径 + 真实工具管线）**：`tests/integration/cancellation-gate.spec.ts`。用 call-through spy 暂停真实 `cancelGraph` 的**落盘**（暂停点只控制等待处，store 实现照跑），先断言窗口两侧事实（gate=`terminal`，store 仍 `running`/`active`），再由根 session 的真实 turn 依次发起：`graph_spawn`（读前）拒绝、`task_proposal_read`（经 `proposalStoreFor`→`runForSession`→`lookupRun`）成功且 gate 仍 `terminal`、`graph_spawn`（读后）拒绝；stand-in 工具体一次未执行、无在途写；释放屏障后取消落地（run/task `cancelled`，session 仍 `terminal`）。同一 spec 先在合法 `active` 相位放行同一个写工具（C3 见证），证明修复不是「一律拒绝」。**未修复实现上该测试红**：`AssertionError: expected 'active' to be 'terminal'`（读取把闸改回 active；同一窗口读后的写入获准且工具体执行）。
 - **C2 正例（恢复不因修复退化）**：`tests/integration/a3-recovery.spec.ts` 新用例——第二次启动（真实 JSONL）后经 `runForSession` 绑定，`waiting_children` 父 session 与终态子 session 经真实 `ctx.tools.execute` 均拒写（stand-in 体按次断言未执行），协调读（`task_read`）仍可用且读后相位不变；原「重绑定 gate 相位」用例未改、仍绿。
 - **C4 相关窗口（调用顺序依据，不枚举假想并发）**：逐点核对 `setPhase`/`setTerminal` 与相邻 store 写入——`admitBatch`（`admitBatchIn` → setPhase `waiting_children`）、根激活（`admitRootProposalIn` → `active`）、`submitResult` 与批次代父提交（`changeRunPhaseIn` → `submitted`）、`onRunSettled`（结算写 → `terminal`）、`adoptRoot`/`rebindActivatedRoot`（读回 snapshot 派生）、worker/replay 启动（`startRunIn` → `active`）**全部先落盘、后移闸**；只有 `cancelGraph` 是「先关闸、后落盘」，因此只有它存在该窗口，未为其他入口添加假想反例。
