@@ -24,8 +24,8 @@
 | 4 | A3：非阻塞运行与恢复 | 已验收（2026-09-22，独立子代理复核 + 复核修复回归） | Kimi Code 主代理（5 阶段实现/测试子代理 + 1 独立复核子代理 + 1 复核修复子代理） | 见「A3：非阻塞运行与恢复 执行与验收记录」 | 非阻塞推进、工作区写入归属、显式提交、取消/恢复、根预算与普通/replay 一致性完整 |
 | 5 | T2 + T3：契约审核与恢复（一个交付组） | 已验收（2026-09-23，双模型并行独立复核 + 综合复核确认） | Kimi Code 主代理指挥 + 4 阶段实现子代理（A 提案合同层 / B task-runtime 生命周期、重检、幂等与恢复 / C 工具面、审批渠道与 prompt / D 集成级验收、模型协议 fixture 与文档收尾）+ 2 并行独立复核子代理 + 1 综合复核子代理 | 见「T2+T3：契约审核与恢复 执行与验收记录」 | off/all、审核持久化、批准后重检及崩溃恢复一起验收，不单独交付不可恢复的 all |
 | 6 | A0 + R0：根入口与默认运行面（本票返工 A0） | 已验收（2026-09-23，进度审核复核 + 全量回归实跑） | Kimi Code 主代理（Q2/Q3 各一个实现子代理 + 1 个只读独立复核子代理，复核后一轮缺陷修复） | 原记录 +「补救交付复核」Q2/Q3 +「A0 返工（Q2/Q3）执行与验收记录」 | 已满足：根来源/归属（store↔session、顶层会话、本人消息）与 adoptRoot 恢复反例关闭，R0 证据保留，全量单测/集成与独立复核通过。进度审核已确认，下一项仅派第 7 项 |
-| 7 | R2：按证据整理运行时（当前只修取消写闸） | 返工（2026-09-24 进度审核：延迟查询跨取消完成点仍重开闸） | Kimi Code 主代理（1 个实现子代理 + 1 个只读独立复核子代理，复核后由主代理修测试证据口径） | 原记录 +「补救交付复核」Q1 +「R2 Q1 返工执行与验收记录」；[专项 prompt](execution-prompts/06-r2-cancellation-gate.md) | 原交付报告（已被下方 2026-09-24 审核反例推翻，Q1 未关闭）：查询不再弱化取消/收敛中的闸（C1 反例先在未修复实现上红）、重启恢复正例保留（C2）、合法 active 与既有回归通过（C3）、只 `cancelGraph` 存在落盘前窗口（C4 调用顺序依据）；已完成的接口/marker 收敛未重做 |
-| 8 | R1：真实运行验证（纠正 S3 与实验账） | 待前置：第 7 项仍需返工（A0 已验收） | 待填 | 原记录 +「补救交付复核」Q4/Q5；[补验证 prompt 与 V1–V6](execution-prompts/07-r1-supplemental-validation.md) | 先修夹具及判据，再补必要模型验证；保留 S1/S2 证据，全部尝试计入用量；材料已备不代表获准越过 R2 |
+| 7 | R2：按证据整理运行时（当前只修取消写闸） | 已交付待进度审核（2026-09-24 补充返工：`8f9086e`，Q1 两条轨迹关闭） | Kimi Code 主代理（两轮各 1 个实现子代理 + 1 个只读独立复核子代理，复核后由主代理修测试证据口径/加固断言） | 原记录 +「补救交付复核」Q1 +「R2 Q1 返工执行与验收记录」+「R2 进度审核（2026-09-24）」+「R2 Q1 补充返工执行与验收记录」；[专项 prompt](execution-prompts/06-r2-cancellation-gate.md) | 已满足（待审核确认）：窗口内读取与跨取消完成点的陈旧读取都不能重开闸（两例都先在未修复实现上红）、重启恢复正例保留（C2）、合法 active 与既有回归通过（C3）、只 `cancelGraph` 存在落盘前窗口且另两条裸写绑定门如实记为未关闭（C4）；已完成的接口/marker 收敛未重做 |
+| 8 | R1：真实运行验证（纠正 S3 与实验账） | 返工，待第 7 项经进度审核验收（A0 已验收；R2 补充返工已交付待审） | 待填 | 原记录 +「补救交付复核」Q4/Q5；[补验证 prompt 与 V1–V6](execution-prompts/07-r1-supplemental-validation.md) | 先修夹具及判据，再补必要模型验证；保留 S1/S2 证据，全部尝试计入用量；材料已备不代表获准越过 R2 |
 | 9 | A2：任务导航与合法动作 | 待前置 | 待填 | R2 记录 D 节为合同草案；补救复核关闭后核对 | 第 6–8 项重新验收后再派；读取权限和实际动作检查一致，不以 gate 放行集合冒充全部动作前置 |
 | 10 | A1：全局上下文投影 | 待复定 | 待填 | 待填 | 复用 A2 读取域，根目标/贡献/必要证据有来源，恢复与压缩不丢核心事实；不照搬字段全集 |
 | 11 | A4：父子澄清 | 待复定 | 待填 | 待填 | 父子与三层问答、消息故障恢复、写闸及多阻塞处置完整 |
@@ -69,7 +69,7 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 6 项 A0 的定向返工已验收（Q2/Q3 关闭，见下节进度审核记录）；**第 7 项 R2 的 Q1 返工已交付 `250a04f`**（见「R2 Q1 返工执行与验收记录」，停在进度审核）。**2026-09-24 进度审核未通过，继续返工 R2**；R2 经进度审核验收后，下一票是 [第 8 项 R1 补验证](execution-prompts/07-r1-supplemental-validation.md)。原建设顺序为 A0 + R0 → R1 → R2；本次因 R2 写闸回归影响真实运行，返工顺序调整为表中的 A0 → R2 → R1，A2 暂停。Task 与协作方向仍见 [Task 指导](task-contract-construction-guide.md)、[深入架构](exploration-evolution-architecture.md)与 [Prompt 合同](agent-prompt-contracts.md)。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 6 项 A0 的定向返工已验收（Q2/Q3 关闭，见下节进度审核记录）；**第 7 项 R2 的 Q1 经 2026-09-24 进度审核否决后已补充返工并交付 `8f9086e`**（见「R2 Q1 补充返工执行与验收记录」，停在进度审核）。**当前不派发新票**；R2 经进度审核验收后，下一票是 [第 8 项 R1 补验证](execution-prompts/07-r1-supplemental-validation.md)。原建设顺序为 A0 + R0 → R1 → R2；本次因 R2 写闸回归影响真实运行，返工顺序调整为表中的 A0 → R2 → R1，A2 暂停。Task 与协作方向仍见 [Task 指导](task-contract-construction-guide.md)、[深入架构](exploration-evolution-architecture.md)与 [Prompt 合同](agent-prompt-contracts.md)。
 
 ### 补救交付复核（2026-09-23，d5b0bb6）
 
@@ -85,7 +85,7 @@ S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进
 
 本轮实跑：`pnpm build` 通过；外层 unit 44 文件 / 1453 项、integration 37 文件 / 258 项通过；`pnpm run verify-persistence` 4 根匹配。主审临时集成探针在修正输入 schema/工具参数并使用挂载真实 gate 的 fixture 后，Q1/Q2 均按预期失败（Q1 的 graph_spawn 工具体为 stand-in，真实 gate/tools 流水线决定是否到达它，未创建真实图）；未使用初期夹具错误作缺陷证据，探针验证后删除。Q3 由独立子代理用真实 TaskService/TaskRuntime、内存事件持久层和新 runtime 重开复现；生产 JSONL 回归由返工补齐。未修改生产实现；全绿只能证明现有覆盖，不能覆盖这些新增反例。 文档检查：44 份 Markdown 围栏、100 个本地链接目标、16 份 JSON 解析与 `git diff --check` 通过。
 
-本轮建设粒度：A0 已验收；R2 Q1 已由「一个实现子代理 + 一个只读独立复核子代理 + 主代理集成/全量/文档」交付，但 2026-09-24 进度审核发现新的 Q1 反例，继续返工；R1 补验证材料已准备，须等第 7 项经进度审核验收。R1 先交接夹具与判据，再执行一次真实 S3，主代理负责集成、历史账与 guide，不把全部工作压给一个子代理。进度审核本身用[进度审核与下一票派发 prompt](execution-prompts/progress-review-and-dispatch.md)，它只审核与准备材料，不执行代码任务。
+本轮建设粒度：A0 已验收；R2 Q1 经 2026-09-24 进度审核否决后已补充返工交付（两轮各「一个实现子代理 + 一个只读独立复核子代理 + 主代理集成/全量/文档」），待进度审核；R1 补验证材料已准备，须等第 7 项经进度审核验收。R1 先交接夹具与判据，再执行一次真实 S3，主代理负责集成、历史账与 guide，不把全部工作压给一个子代理。进度审核本身用[进度审核与下一票派发 prompt](execution-prompts/progress-review-and-dispatch.md)，它只审核与准备材料，不执行代码任务。
 
 ### 补救范围与验收合同（原合同保留，当前返工按上表）
 
@@ -760,6 +760,30 @@ driver 未在仓库内重建：两轮 driver 分别解包于 `/home/ROXY/code/bb
 - 实跑确定性探针：真实 scripted-loop 的 intake 建 active 根；call-through spy 仅暂停第一笔目标 runIn 已读取后的返回；启动真实 runForSession，等待屏障；await 真实 cancelGraph，确认持久 run=cancelled 且 gate=terminal；释放查询后断言 terminal，实得 active。Vitest 1 项失败，错误 `expected 'active' to be 'terminal'`。探针只替换等待点，不替换 runtime/store/gate 判定；本轮未在该探针额外执行写工具，不把 gate 状态证明夸大为真实文件写入。临时探针已删除，生产文件零改动，重现步骤已写入原 R2 prompt，要求修复时保留正式回归并补工具体零副作用断言。
 - 本轮检查：构建完成；全量 unit 44 文件 / 1459 项、integration 38 文件 / 267 项通过；定向 cancellation-gate + a3-recovery 2 文件 / 16 项通过；持久化四根匹配；agent-singularity 类型检查通过。既有全绿不覆盖上述延迟结果交错。本轮没有真实模型调用，也没有重新确认原交付列出的四项边界为安全。两名只读子代理未启动完成、无复核产出，本轮不计为独立复核通过；阻塞结论依据主代理实际执行的反例。
 - 下一步：仅派 [R2 补充返工](execution-prompts/06-r2-cancellation-gate.md)，保留已成立修复，关闭跨取消完成点的陈旧查询回填；再次进度审核通过后才能派第 8 项 R1。原 R2 内部验收记录保留为历史，不覆盖本结论。
+
+## R2 Q1 补充返工（跨取消完成点的陈旧查询）执行与验收记录（2026-09-24）
+
+> 本记录只覆盖上节审核的返工合同：查询在取消窗口内已受保护，但**读取跨过取消完成点**时仍会回填旧相位。首轮交付 `250a04f`/`edfcce3` 的其余部分（marker 顺序、无用途 API 收敛、窗口内守卫、C2 恢复正例）保留未重做；R1/A2 未实施；未调用真实模型。
+
+| 字段 | 填写内容 |
+|---|---|
+| 状态、最近更新日期 | 已交付待进度审核，2026-09-24 |
+| 执行 agent / 任务链接 | Kimi Code 主代理（指挥/集成/全量/文档）+ 1 个实现子代理（补 applicability 机制 + 跨完成点反例）+ 1 个只读独立复核子代理（复核后由主代理加固一处断言）；合同见 [R2 prompt 的补充返工合同](execution-prompts/06-r2-cancellation-gate.md) |
+| 开始日期 / 验收日期 | 2026-09-24 / 待进度审核 |
+| 前置验收记录 | 上节「R2 进度审核（2026-09-24）」= 返工合同来源；第 6 项 A0 返工已验收；首轮修复 `250a04f` 的窗口内守卫保留 |
+| 修改前基线 | 审核基线 `cecc5b6`（内容等同 `0400d25`，含审核文档）/ 外层 `ae1a7227` |
+| 交付版本 | Singularity `8f9086e`（修复 + 测试；含重建的 `task-runtime/lib`），本记录随后单独提交，外层只提交子模块指针 |
+| 验收项对应 | C1 追加例 → 跨完成点的陈旧读取（spy 扣住真实 `task.runIn` 的返回）→ `tests/integration/cancellation-gate.spec.ts` 第二例；机制 → `task-runtime/src/gate.ts:decisionToken/applyStorePhase` + `task-runtime/src/index.ts:gatePhaseFromStore/lookupRun` → `task-runtime/tests/unit/gate.spec.ts`（`applyStorePhase` 组）；C2 → `tests/integration/a3-recovery.spec.ts`（两例，未改仍绿）；C3 → 两例都在 `active` 相位先放行同一写工具 + 全量回归；C4 → 另核对「store 派生相位在决定之后应用」一族（查询路径已并入 token，两条绑定门仍裸写、如实记为未关闭） |
+| 实际检查 | `packages/singularity`：`pnpm build` 通过（exit 0，11 包）。外层：unit 44 文件 / 1461 项通过（首轮 1459 + 2 项新单测）；integration 38 文件 / 268 项通过（首轮 267 + 1 项新集成例）。`pnpm run verify-persistence` = 4 根匹配（持久化合同未变）；`git diff --check` 干净；`agent-singularity` 的 `pnpm exec tsc --noEmit` 通过。任务运行时包自身 `tsc -p` 仍报 3 个**既有**错误（`src/index.ts:864`、`:5531`（基线 5509，行号随本次新增位移）、`../task/src/index.ts:54` 声明合并），与基线一致、非本次引入；该包按 G9 不在严格类型闸内 |
+| 跨入口/组合反例 | **先红后绿（两例都在未修复实现上红）**：新例在首轮修复后的树上仍红——`AssertionError: expected 'active' to be 'terminal'`（查询释放后把已取消 session 的 terminal 重开为 active），正是审核的复现轨迹；窗口内例在**首轮修复前**的树上红（`expected 'active' to be 'terminal'`），本轮未改动。修复后两例都绿并断言：读取仍成功、gate 保持 `terminal`、随后 `graph_spawn` 经真实管线被 `phase "terminal"` 拒绝、stand-in 工具体零执行、无在途写；测试自带「该 park 是本查询的读取且查询当时未作答」的断言，防止未来后台读取偷走屏障。机制两守卫各自承重，只保留其一会分别在这两例上失败（窗口内读取取到的 token 是新的；集合在 `finally` 已清）。 |
+| 独立复核 | **已实际执行**（只读子代理，对本票工作副本 + `cecc5b6` 基线逐点核对）：确认① 查询路径的 store 派生写入全部只经 `applyStorePhase`（仓库内 `applyStorePhase` 只有一个调用者，两分支 token 都取在被判定的读取之前）；② **未见回归**（`decisions` 只被 `decisionToken`/`applyStorePhase` 读取，其余消费者观察到的相位表形状不变）；③ 逐点检查「丢弃 store 值是否会丢合法迁移」——本进程决定都在自己的落盘之后、run 相位轴单调，唯二先于落盘的决定正是 `cancelGraph`/`unload`，重开恢复/`reconcile` 重启/`onRunSettled`/同 session 第二 run/旧无相位记录都不受影响；④ 两守卫互不可替代；⑤ 测试非空洞、无悬挂 latch。复核指出的两处轻微弱点：新例未断言「被扣住的是本查询的读取」（已由主代理补 `rootReads`/`querySettled` 断言）、「丢弃 vs 未应用」只在单测层精确区分（集成层由红/绿对照说明：未修复时同一断言实得 `active`，即该路径确实到达应用点） |
+| 文档同步 | 主 guide 文首 2026-09-24 行、§5.12（两条轨迹的关闭、两守卫分工、C1 两例、源码/测试锚、边界 1/2 的更新）与 §4.1 生命周期行、G15；本计划第 7/8 行、派发入口段、本轮建设粒度、本记录。审核结论与首轮交付记录保留为历史，不覆盖；[执行 prompt 入口](execution-prompts/README.md) 顶部当前态同步 |
+| 模拟与未覆盖范围 | 真实：DSH loop、`TaskRuntime`（`ctx.plugin`，闸真在 `tools/pre-execute`）、`TaskService`/reducer、`proposalStoreFor`/`runForSession`、`task_proposal_read`/`task_read`、真实 `cancelGraph`、真实工具注册与派发。模拟：模型输出（scripted）、`graph_spawn` 等 stand-in 工具体（只证明工具体未被触达，不证明真实文件写入）、spy 只控制等待点（store 实现照跑）。未覆盖：未跑真实模型/BB/部署；多进程写同一 store 只有推理无测试；`lib` 消费路径未实测；四条边界未建探针 |
+| 未解决缺陷 / 阻塞 | 本票合同内无未解决缺陷。如实上报、超出授权的既有边界（**未修、也不因记录即视为安全**）：(1) spawn 续跑（`orchestrate.ts` 两处无条件 `setPhase(session,'active')`）会把取消刚置的 terminal 改回 active，且取消结算抢先时 `settleChildRun` 提前返回不再 `onRunSettled`；它是「刚起了 run」的决定而非 store 读取，token 既不能拦也不该拦；复核确认机制存在，但未证实前提「`env.spawn` 可在批次 signal abort 后返回」（DSH signal 语义为创建期生效）；(2) `adoptRoot`/`rebindActivatedRoot` 两条绑定门是**裸写**的 store 派生相位，形状与已修缺陷完全相同，但复核只由调用图给出「未证明可达」（`graphs.create` 另铸 root session 且与 `graphs.remove` 同由 `transition` 串行；`rebindActivatedRoot` 需已关闭根 session 与未消费根提案同时在场）；(3) `closingStores` 是集合而非重入计数，同一 store 两次并发 `cancelGraph` 会在先完成者处删条目（graphs 的 create/remove 由 `transition` 串行，直调属调用方竞争）；(4) `unload` 的 terminal 无 store 记录，其 pre-execute 钩子随 `[Service.init]` effect 先撤除（按 disposables 顺序论证，未实测） |
+| 最终验收结论 | 待进度审核确认；本票内部验收（C1 两例 + C2/C3/C4 + 全量实跑 + 独立复核）通过 |
+| 下一项 | 唯一顺序第 8 项 R1 补验证（Q4/Q5）：**前置为第 7 项经进度审核验收**，使用 [补验证 prompt 与 V1–V6](execution-prompts/07-r1-supplemental-validation.md)；本票不执行，也未并行启动 |
+
+补充返工的「问题 → 入口 → 验收」映射（实施前固定）：问题=store 读取与其相位应用不是一次原子动作，读取跨越了一个决定（取消完成并落盘、`closingStores` 已清）时，读回的旧 `active` 会在决定之后被应用；入口=`gatePhaseFromStore`/`lookupRun` 两分支 + 真实查询路径 `task_proposal_read → proposalStoreFor → runForSession`；修复=把「本进程对该 session 做过几次相位决定」作为读取的有效性 token（`ExecutionGate.decisions`/`decisionToken`/`applyStorePhase`，token 在读取前取、应用时比对，不匹配即丢弃），与既有 `closingStores` 守卫各覆盖一条轨迹；验收=新增跨完成点反例（先红后绿、真实管线断言写/spawn 仍拒且工具体零副作用）+ 原 C1 窗口内例 + C2/C3 回归 + C4 与「store 派生相位」族群核对。
 
 ## S1-C：Task 只提需求，Run 固定实现
 
