@@ -82,7 +82,7 @@ The external Evolution ledger is untouched. A root proposal is the task store's 
 
 `pnpm run verify-persistence` passes with the unchanged inventory: `verify-persistence: OK — 4 event roots match docs/persistence-schema.json.` No `--write` was run and `docs/persistence-schema.json` was not touched, because no declaration moved — the four roots' digests are the ones `2026-09-22-task-proposal-review` recorded. The fingerprints were measured across the whole group (phases A and B): the inventory was read before and after the store-side and runtime-side work and reported the same four digests.
 
-`pnpm build` in `packages/singularity` passed for every workspace package. The group's own runs on the final tree (stage D, 2026-09-23, recorded in the plan's A0 + R0 entry): unit `44 files / 1441 tests`, integration `37 files / 258 tests`, both fully green; `git diff --check` clean.
+`pnpm build` in `packages/singularity` passed for every workspace package. The group's own runs on the final tree (stage D, 2026-09-23, recorded in the plan's A0 + R0 entry): unit `44 files / 1454 tests`, integration `37 files / 258 tests`, both fully green; `git diff --check` clean.
 
 Coverage of the shapes above, read back from the store rather than from a writer's return value:
 

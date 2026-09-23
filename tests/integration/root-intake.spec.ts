@@ -678,11 +678,12 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
     // request key, `supersedes` naming the refused one — which is then approved
     // and activated.
     //
-    // The refusal is read from the store's record here rather than through
-    // `task_proposal_read`: that reader resolves the caller's store through its
-    // *run*, and a root session has no run until its contract is activated, so the
-    // pre-activation read is a boundary this case does not stand on (recorded with
-    // the A0 contract notes; the id the caller needs is on its own intake answer).
+    // The refusal is read from the store's record here because the record is the
+    // ground truth this case asserts on. The tool path itself works on a
+    // pre-activation root session — `task_proposal_read` falls back to the
+    // session's own root store (proposalStoreFor), covered in
+    // task-proposal-tools.spec.ts — and the caller also gets the id on its intake
+    // answer.
     const refused = Promise.withResolvers<void>()
     const revisedGoal = 'publish the quarterly alignment report, with the audit appendix'
     const h = await startScriptedLoop({

@@ -2,7 +2,7 @@
 
 日期：2026-09-21。状态：建设用模板，未注入当前运行时（部署中的实际文本以 §3/§4 条件块标注的真实落点为准，例如 A3 的显式提交协议与 T2/T3 的生成任务审核段）。依赖与协议见 [探索/进化架构](exploration-evolution-architecture.md)。本文件不能单独作为“换提示词即可上线”的实现票。
 
-2026-09-23 修订：本文件是角色职责参考，不要求把以下全文叠加进 system prompt。**R0 已按实际角色、配置与工具装配收敛部署文本（2026-09-23，待验收；落地事实见 §1 与主 guide §5.11）**；后续 A 票的未兑现段落继续留在设计文档。各票不得因新增测试就继续向 root 追加整段协议说明。
+2026-09-23 修订：本文件是角色职责参考，不要求把以下全文叠加进 system prompt。**R0 已按实际角色、配置与工具装配收敛部署文本（2026-09-23，已验收；落地事实见 §1 与主 guide §5.11）**；后续 A 票的未兑现段落继续留在设计文档。各票不得因新增测试就继续向 root 追加整段协议说明。
 
 ## 1. 装配规则
 
@@ -16,7 +16,7 @@
 
 R0 的 root 默认不挂载 `evolution_*`，不注入整条晋升协议；显式启用时按管理角色提供相应工具和必要说明。root 协调、reviewer 只读诊断、candidate builder 在 sandbox 实现，沿用现有 preset/scoped tools，不新增通用角色框架。进化未启用不能描述成“请人代写能力”；应如实报告当前能力边界。BB 等领域指导由部署的领域 Skill/preset 提供，通用 root 不内置。
 
-**R0 落地事实（2026-09-23，待验收）**：装配开关是 `evolution: 'off' | 'on'`（默认 `off`，闭合 schema，未知值或未读成员构造期拒启）。off 的实际 composition：`agent-singularity` 注册 19 个常驻工具（含 `task_intake`、`escalate`），九个 `evolution_*` **不注册**（因此任何 agent 面都取不到，不靠权限检查劝阻），root allow-list 20 名（19 个 root 核心名 + `escalate`；核心名里的 `skill` 由 preset 平面挂载，不在常驻注册面），root prompt 无进化协议段；on：28 个常驻工具、allow-list 29 名，与 R0 之前逐名相同。allow-list 与 prompt 由同一布尔派生（`agent-runtime/src/index.ts:rootToolsFor` 消费 `ctx.singularityEvolution`，软读，缺失即 off），二者不可能互相矛盾；关闭只撤注册，不删账本、不降已有校验与授权规则。**BB 句子已从通用 root prompt 无条件移除**，领域指导归部署的领域 skill（本仓库的 `bb-pipeline` 等），通用角色文本不再内嵌领域内容。证据锚：`agent-singularity/tests/unit/assembly.spec.ts`（off = 19 常驻且零 `evolution_*`；on = 28）、`agent-runtime/tests/unit/agent-runtime.spec.ts`（`ROOT_TOOLS_CLOSED` 20 / `ROOT_TOOLS_OPEN` 29 与 prompt 同源）、`tests/integration/worker-grant.spec.ts`（off 组合下无 grant 的 worker 面不含任何 `evolution_*`）、`tests/integration/evolution-tools.spec.ts`（on 的既有回归）。
+**R0 落地事实（2026-09-23，已验收）**：装配开关是 `evolution: 'off' | 'on'`（默认 `off`，闭合 schema，未知值或未读成员构造期拒启）。off 的实际 composition：`agent-singularity` 注册 19 个常驻工具（含 `task_intake`、`escalate`），九个 `evolution_*` **不注册**（因此任何 agent 面都取不到，不靠权限检查劝阻），root allow-list 20 名（19 个 root 核心名 + `escalate`；核心名里的 `skill` 由 preset 平面挂载，不在常驻注册面），root prompt 无进化协议段；on：28 个常驻工具、allow-list 29 名，与 R0 之前逐名相同。allow-list 与 prompt 由同一布尔派生（`agent-runtime/src/index.ts:rootToolsFor` 消费 `ctx.singularityEvolution`，软读，缺失即 off），二者不可能互相矛盾；关闭只撤注册，不删账本、不降已有校验与授权规则。**BB 句子已从通用 root prompt 无条件移除**，领域指导归部署的领域 skill（本仓库的 `bb-pipeline` 等），通用角色文本不再内嵌领域内容。证据锚：`agent-singularity/tests/unit/assembly.spec.ts`（off = 19 常驻且零 `evolution_*`；on = 28）、`agent-runtime/tests/unit/agent-runtime.spec.ts`（`ROOT_TOOLS_CLOSED` 20 / `ROOT_TOOLS_OPEN` 29 与 prompt 同源）、`tests/integration/worker-grant.spec.ts`（off 组合下无 grant 的 worker 面不含任何 `evolution_*`）、`tests/integration/evolution-tools.spec.ts`（on 的既有回归）。
 
 根入口的解释原则：原请求和澄清是来源，模型提出的假设须标明。会改变交付或验收的歧义先经已有渠道澄清；普通方法选择自主决定。机器准入不证明自然语言理解正确，可选人审关闭也不改变这一边界。
 
@@ -196,7 +196,7 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 
 生成任务审核相关反例（T2/T3）：提示词/工具面出现“自行批准”或任何决定参数（模型不能自行生成可信 approvalRef）；worker 的工具面出现决定提案的工具或平台管理/HITL 工具；`off` 部署下模型被提示等待审核（应为正常分解）；`all` 下 prompt 未说明“等待审核时没有子任务、当前任务未分解”，或未说明“同内容重复提交答同一提案、修订是新提案”；审核等待期间模型被提示继续推进本任务（应为无法推进、可读可查可取消）。核对方法：真实装配后的工具面（`tests/integration/proposal-review.spec.ts` 的 worker/root 工具面用例）与渲染文本（`agent-singularity/src/proposal-review.ts` 的 §5 展示清单）。
 
-根入口与默认运行面相关反例（A0 + R0，2026-09-23 待验收）：`off` 组合的 root prompt 出现任何 `evolution_*` 名或晋升协议段（应为不注册也不提示）；`on` 组合缺少九个工具或漏掉协议段；prompt 与 allow-list 取自两个不同事实（本组由同一布尔派生，回归锚 `agent-runtime/tests/unit/agent-runtime.spec.ts`）；intake 段要求模型“自行接受/批准”契约或暗示可以绕过审核（部署的 intake 段明确“没有任何工具或参数能批准”）；未激活时提示模型 `task_decompose`（工具会具名拒绝，`task_read` 也报未激活）；worker 提示词/工具面出现 `task_intake`（它是 root 的路径，回归锚 `tests/integration/root-intake.spec.ts` 的 worker 工具面用例）。核对方法：真实装配后的 prompt 文本与工具面（`agent-runtime` 单测按 composition 逐名断言 allow-list、`assembly.spec.ts` 断言注册面），不用匹配自然语言句子证明状态机。
+根入口与默认运行面相关反例（A0 + R0，2026-09-23 已验收）：`off` 组合的 root prompt 出现任何 `evolution_*` 名或晋升协议段（应为不注册也不提示）；`on` 组合缺少九个工具或漏掉协议段；prompt 与 allow-list 取自两个不同事实（本组由同一布尔派生，回归锚 `agent-runtime/tests/unit/agent-runtime.spec.ts`）；intake 段要求模型“自行接受/批准”契约或暗示可以绕过审核（部署的 intake 段明确“没有任何工具或参数能批准”）；未激活时提示模型 `task_decompose`（工具会具名拒绝，`task_read` 也报未激活）；worker 提示词/工具面出现 `task_intake`（它是 root 的路径，回归锚 `tests/integration/root-intake.spec.ts` 的 worker 工具面用例）。核对方法：真实装配后的 prompt 文本与工具面（`agent-runtime` 单测按 composition 逐名断言 allow-list、`assembly.spec.ts` 断言注册面），不用匹配自然语言句子证明状态机。
 
 协调组合态必须覆盖：waiting_children 同时有向祖先提出的阻塞问题；仅收到部分答案或 unresolved；有效问答在 inbox claim 后遇到 pre-step reject/崩溃。恢复后模型仍能读到未处理事实，主相位、batch 与写权限不因消息重放改变。waiting_children 的写拒绝以运行时闸在真实 tools waterfall 上的实际 deny 为证据（A3 起），不能只看 assembled prompt 未挂载。
 
