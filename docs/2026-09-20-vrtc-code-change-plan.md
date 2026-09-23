@@ -24,7 +24,7 @@
 | 4 | A3：非阻塞运行与恢复 | 已验收（2026-09-22，独立子代理复核 + 复核修复回归） | Kimi Code 主代理（5 阶段实现/测试子代理 + 1 独立复核子代理 + 1 复核修复子代理） | 见「A3：非阻塞运行与恢复 执行与验收记录」 | 非阻塞推进、工作区写入归属、显式提交、取消/恢复、根预算与普通/replay 一致性完整 |
 | 5 | T2 + T3：契约审核与恢复（一个交付组） | 已验收（2026-09-23，双模型并行独立复核 + 综合复核确认） | Kimi Code 主代理指挥 + 4 阶段实现子代理（A 提案合同层 / B task-runtime 生命周期、重检、幂等与恢复 / C 工具面、审批渠道与 prompt / D 集成级验收、模型协议 fixture 与文档收尾）+ 2 并行独立复核子代理 + 1 综合复核子代理 | 见「T2+T3：契约审核与恢复 执行与验收记录」 | off/all、审核持久化、批准后重检及崩溃恢复一起验收，不单独交付不可恢复的 all |
 | 6 | A0 + R0：根入口与默认运行面（一个交付组） | 已验收（2026-09-23，独立子代理复核） | Kimi Code 主代理指挥 + 6 阶段实现子代理（R0-a 装配开关 / R0-b 根 allow-list 与 prompt 收敛 / A `task` 包 kind 联合与根消费 / B `task-runtime` intake 服务层、`adoptRoot`、`graphs.create` 切换、支撑夹具走真实 intake / C `task_intake` 工具、根未激活视图、根审核渲染、prompt 段 / D 集成验收与文档收尾）+ 1 独立复核子代理 | 见「A0 + R0：根入口与默认运行面 执行与验收记录」 | 根目标来源、独立 AC、off/all 与激活恢复完整；默认工具/prompt 按角色收敛；见下方补救合同 |
-| 7 | R1：真实运行验证 | 待前置 | 待填 | 待填 | 同一实现的真实模型任务经新入口满足根验收，错误根结果不误过；运行证据和阻塞处置完整 |
+| 7 | R1：真实运行验证 | 阻塞（2026-09-23：S1 已经真实模型通过；S2/S3 因固定 token 预算触界未运行，待追加授权决策） | Kimi Code 主代理指挥 + 1 执行子代理 | 见「R1：真实运行验证 执行记录」 | 同一实现的真实模型任务经新入口满足根验收（S1 已完成）；错误根结果不误过（S2 未运行）；运行证据和阻塞处置完整 |
 | 8 | R2：按证据整理运行时 | 待前置 | 待填 | 待填 | 关闭已发现的一致性缺陷、收敛重复职责及无用途接口，核对 marker 边界；不预定驱动重写 |
 | 9 | A2：任务导航与合法动作 | 待复定 | 待填 | 待填 | 按 R1/R2 记录收紧具体读取场景；授权、合法动作与有界结果完整，分页仅在有实际需求时建设 |
 | 10 | A1：全局上下文投影 | 待复定 | 待填 | 待填 | 复用 A2 读取域，根目标/贡献/必要证据有来源，恢复与压缩不丢核心事实；不照搬字段全集 |
@@ -469,6 +469,59 @@ T1 已交付统一契约、身份与准入记录；S1 验证与能力合同（S1
 | 下一项 | 唯一顺序第 7 项 R1（真实运行验证）：**前置满足**（本组已验收）。R1 可复用入口已就位：`task_intake` + 根契约激活/幂等恢复、`adoptRoot`、根未激活视图、`task_read`/`task_status`，以及 R0 收敛后的默认运行面（off 组合 19 常驻工具 / 根 allow-list 20 名；on 组合 28 / 29）。R1 约束按指挥 prompt：真实模型、临时仓库、预算受限（默认 ≤3 场景尝试、合计 ≤30000 token / ≤100 工具调用 / ≤15 分钟），不得以 scripted provider 冒充，一次通过只证明该场景可运行 |
 
 实施事实（本组交付，供复核与后续票引用）：`graphs.create` 只建 graph + root session 并调 `adoptRoot`，`createRootTask` 已删除；根 store（`sg-t-<rootSessionId>`）由 intake 按需创建；`intakeRootContract` 是唯一根入口（工具与直接服务共用），契约规则 = `normalizeDecomposition` + `contractDefects` + `rootIndependenceDefects`（至少一条 mandatory 非 composite 判据）+ 受保护输入固定；根提案是 `TaskProposal` 的第二 kind（`kind: 'root'`、`RootProposalIdentity`、事件信封用保留标记 `root-proposal`），与批次共用开关、四个事件、决定绑定、requestKey 幂等、`reconcileStore` 提案遍与 `ProposalReviewService` 渠道；激活一次原子提交（`admitRootProposalIn`：根任务 + 根 run `active` + 消费记录）后做进程内绑定（session/闸/工作区/provider 绑定/通知）；幂等由消费记录与 reducer 的一次性建根闸双重保证；未激活时 `task_read`/`task_status` 报具名状态，终态根 session 由闸与状态双重拒绝迟到 intake；旧图根任务零改写。R0：装配开关 `evolution: 'off' | 'on'`（默认 off）决定九个 `evolution_*` 是否注册（off = 19 常驻工具含 `task_intake`/`escalate`，on = 28 名），root allow-list 由同一布尔派生（off 20 名 / on 29 名）、prompt 同源（off 无进化段），BB 句子移出通用 root prompt、领域指导归部署 skill。持久化记录：`docs/persistence-changes/2026-09-23-a0-root-intake.md`（`task/event` 声明未动，载荷引用类型新增 kind 联合，same-version，四根指纹未动）。
+
+## R1：真实运行验证 执行记录（2026-09-23，S1 通过 / S2、S3 预算触界未运行，行状态：阻塞）
+
+> 本节由执行子代理起草、指挥方终审确认：S1 证据（产物字节、store 事件链、usage 核算）经指挥方抽查复核一致；S2/S3 未运行是固定预算停止规则的机械结果。
+
+| 字段 | 填写内容 |
+|---|---|
+| 状态、最近更新日期 | **已执行，S1 通过 / S2、S3 因固定预算触界未运行**（2026-09-23；仅本节为草稿，代码零改动、零提交） |
+| 执行 agent / 任务链接 | R1 真实运行验证子代理（只执行、不改生产代码）。被验代码：Singularity HEAD `2e3175a`（A0+R0 已验收版本），外层 harness 指针 `c1e495ca4a` |
+| 开始日期 / 验收日期 | 2026-09-23 / 2026-09-23（独立验收由执行 agent 按固定判据逐项读回执行，不经模型） |
+| 前置验收记录 | A0 + R0 已验收（见上节）；R1 为其排期中唯一顺序第 7 项 |
+
+**固定合同（运行前由指挥方固定，逐字）**：
+
+- 模型连接：StepFun 网关 `https://api.stepfun.com/step_plan/v1`（chat-completions），模型 `step-5-preview`，`reasoningEffort: high`；凭据从 `harness/.dsh/api.env` 读取并 export 到进程环境，任何日志/证据/报告不出现密钥明文（全文扫描确认零泄漏）。
+- 运行入口：真实 `LlmRuntime`/`SessionStore`/`AgentLoop` + 真实 singularity 工具与 `TaskRuntime`/`AgentRuntime`/`VerifierRegistry`；worker 文件工具为真实 DSH 实现（`tool-fs`/`tool-fs-search`/`tool-bash`，挂共享平面、由 capability grant 与根 allow-list 过滤）；graphs 形状由夹具提供（同 `tests/support` 做法）。
+- 环境：每场景独立临时目录 `<scratch>/s<N>/{repo,dsh-home}`，`repo/` 为 `git init` 空 checkout，`dsh-home` 隔离 `DSH_HOME`/`HOME`；`generatedTaskReview: 'off'`；evolution 默认 off。
+- 顺序：S1 → S2 → S3，每场景后核算累计预算；预算 = 合计 ≤30000 模型输入/输出 token、≤100 工具调用、≤15 分钟墙钟；每场景 `rootBudget { wallTimeMs: 300000, maxRuns: 8 }`（A3 硬限制，运行中生效）；token/工具调用无运行中硬限额，用适配器层计数事后核算，**超限即中止后续场景**；每场景 1 次尝试，判决失败不重试。
+- S1 逐字用户消息：`Please create a file named answer.md in the repository root. Its entire content must be exactly one line: The answer is 42`
+- S2 驱动侧固定：经真实 intake 服务提交根契约（objective `answer.md 的全部内容恰好是 \`The answer is 42\``，mandatory command 判据 `test "$(cat answer.md)" = "The answer is 42"`），再经真实 `decomposeAndRun` 分解一个固定子任务（objective `创建 answer.md，内容恰好为 \`The answer is 43\``，判据 `test -f answer.md`；子任务由真实模型 worker 执行）。
+- S3 逐字用户消息：`Create report.txt summarizing the quarter.`；夹具固定回答逐字为 `No data was provided; state that explicitly.`；通过判据 = 非 (c)（不静默编造内容并写入 objective/AC）。
+
+**冒烟（真实连通性）**：两次最小真实调用（运行前 + 归档核算前）均成功，返回 `pong` / `I'm here! …`，`finishReason {kind:"stop"}`，网关如实上报 usage（12 in / 54 out；12 in / 122 out）。不可达即阻塞的条款未被触发。
+
+**逐场景结果（独立验收读回，非模型自述）**：
+
+| 场景 | 判决 | 独立验收逐项 | 用量（入/出，缓存读另计） | 工具调用 | 墙钟 |
+|---|---|---|---|---|---|
+| S1 | **通过** | (a) 完整链读回 ✅：store 事件日志 25 条，`TaskProposalSubmitted`（`kind:'root'`, policy `off`, status `ready`）→ 根 `TaskCreated`（`definitionRef.taskType:'root'`）→ 子 `TaskCreated`/`TaskStarted`/`HandoffCreated` → `EvidenceProduced` ×2 → 子与根均 `TaskVerified`；(b) `repo/answer.md` 原始 17 字节 `The answer is 42\n`，去尾换行后逐字等于 `The answer is 42` ✅；(c) 被接受根契约（提案与根任务双处读回）有 1 条 mandatory 非 composite 判据 `ac-answer-md`（deterministic，命令 `test -f answer.md && [ "$(wc -l < answer.md)" -eq 1 ] && [ "$(cat answer.md)" = "The answer is 42" ]`）✅；(d) 根 evidence bundle 的判据由真实 `command` verifier 判定（`ac-answer-md:pass:command:exit0`，日志 `dsh-home/task-evidence/sg-t-s-root/r-cc2cbd60…/ac-answer-md.log`）✅。附带：根工具面 20 名（off 组合）、零 `evolution_*`（R0 的真实运行证据断言成立） | 27506 / 3977（缓存读 64768） | 14 | 32.0s（store 事件跨度）；vitest 实测 70.2s |
+| S2 | **未运行**（固定预算触界后中止，见下） | 未执行；固定判据记录在案，待预算允许后按一次尝试规则执行 | 0 | 0 | — |
+| S3 | **未运行**（同上） | 未执行；固定判据记录在案，待预算允许后按一次尝试规则执行 | 0 | 0 | — |
+
+**S1 实际路径（模型驱动的真实工具调用序列）**：`capability_list` → `task_intake`（真实根契约构造：objective + 1 条 mandatory deterministic 判据 + 2 条 assumptions + 1 条 constraint）→ `graph_mark_ready`（stand-in）→ `task_read` → `task_decompose`（1 个子任务）→ worker session `task_read` → `bash` → `write`（真实文件写入）→ `task_status` → `bash` ×2 → `task_read` → `task_status` → `task_submit_result`。worker 由真实 `AgentRuntime.spawn` 经 `decomposeAndRun` 驱动，其 `write`/`bash` 调用落在真实 checkout；根 run 由运行时在批次落定后代为提交（`submitted` → `verifying` → `verified`）。11 次模型响应（根 7、worker 4）。
+
+**用量与预算核算（适配器层计数，无运行中硬限额）**：
+
+| 口径 | 数值 | 限额 | 结论 |
+|---|---|---|---|
+| 输入+输出 token（合计三场景与冒烟） | 31683（S1 31483 + 冒烟 200） | ≤30000 | **超限 1683** |
+| 含网关缓存读的合计 | 96451 | ≤30000 | 同上口径亦超 |
+| 工具调用（所有 agent 总计） | 14 | ≤100 | 未超 |
+| 墙钟（S1 store 事件跨度；全过程含冒烟与归档约 90s） | 32.0s / ≈90s | ≤15min | 未超 |
+| 每场景 rootBudget（300s / 8 runs） | S1 用 2 runs / 32s | 硬限制 | 未触 |
+
+**触界与中止（如实记录）**：S1 单独消耗 31483 输入+输出 token（此口径不计网关缓存读；计入缓存读为 96251），已超过固定合计限额 30000。按固定合同「超限即中止后续场景」，**S2、S3 未运行**；这不是判决失败，是预算规则触发的停止。S1 本身的四项独立验收全部满足，判据未因预算结果下调。
+
+**失败轨迹**：无基础设施失败（网关两次冒烟均通，无重试）；S1 无失败轨迹（根 run 终态 `verified`，子 run `verified`）。开发期修复的 driver 缺陷（插件命名空间传参、`TaskService` 直构、轮询容错、live session 事件路由）不影响任何判决，全部记录在 driver 源码（已归档）内。
+
+**证据归档**：`/home/ROXY/code/bb_work/r1-evidence-2026-09-23/`：`smoke.json`（两次冒烟原始记录）、`budget.json`（逐场景+合计核算与停止规则）、`s1/{driver.json,repo/,dsh-home/}`（driver 全记录含 usage/工具调用序列/spawn/人工问题/事件清单；repo 终态含 `answer.md`；dsh-home 含 session JSONL、task-evidence 命令日志、run-bindings）、`r1-driver.tgz`（driver 目录打包：`r1-stack.ts`/`r1-run.spec.ts`/`r1-smoke.ts`/`r1-smoke.spec.ts`/`r1-env.ts`/`vitest.r1.config.ts`）。driver 目录已从仓库删除（`packages/singularity/tests/r1/` 不存在）。
+
+**引用清单（S1）**：store `sg-t-s-root`；root session `s-root`；root proposal `p-b8b32603253e…`；root task `t-a2b2d944-e59a-4995-995c-c80d03201f87`；root run `r-cc2cbd60-b55a-4c3c-b4ad-5cd2b6064bc7`；child task `t-8b34d6dd-b0ec-42ac-821a-7739ff0105c7`；child run `r-af919509-fffc-4fd0-a98c-02d64f492a8f`；worker session `s-2dd2bae7-3480-4aa6-8782-9de330d508d3`；evidence `evidence-r-af919509…`（子，pass）与 `evidence-r-cc2cbd60…`（根，pass）。
+
+**未覆盖范围 / 遗留**：S2（错误根被真实 verifier 拒绝）与 S3（歧义澄清或假设声明）**未运行**——固定 token 预算在 S1 后触界。若指挥方追加预算或收紧场景（如更短的系统面、更少轮次），二者可按一次尝试规则补跑；driver 已归档可直接复用。S1 的 session JSONL 仅含种子事件（live 事件路由在 S1 后修正并固化在归档 driver 中；S1  acceptance 读回的 store 事件日志 25 条完整，不受影响）。根模型在 S1 调用了一次 `graph_mark_ready`（stand-in，夹具边界，同 `tests/support` 处理），未产生任务树外产物。未部署、未推送、未跑 BB 仿真。仓库 `src/tests/docs` 零改动（唯一例外 = 本节）；harness 与 singularity 两个 git 工作区相对开工前无变化；证据全树与 driver 包内零密钥明文（`.dsh/api.env` 的 key 全文扫描无命中）。
 
 ## S1-C：Task 只提需求，Run 固定实现
 
