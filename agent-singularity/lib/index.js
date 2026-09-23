@@ -1,4 +1,5 @@
 import { Context, Service } from "@deepseek-ai/cordis";
+import z from "@deepseek-ai/schemastery";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -5225,6 +5226,42 @@ function defineTaskVerifyTool(ctx) {
 
 //#endregion
 //#region src/index.ts
+/**
+* The shipped switch position: `off`.
+*
+* The default run is the one nobody configured, and R0 asks that this run not
+* carry the evolution chain (guide §1.3: "默认运行只提供当前角色需要的能力").
+* `on` is therefore an explicit act by a deployment, and what it resolved to is
+* readable back from the context ({@link EvolutionExposure}) — a switch whose
+* position cannot be read is one nobody can tell from an unwired exposure.
+*/
+const DEFAULT_EVOLUTION = "off";
+const ConfigSchema = z.object({ evolution: z.union([z.const("off"), z.const("on")]).default(DEFAULT_EVOLUTION) });
+/**
+* The evolution exposure this composition resolved, provided on the agent's own
+* fiber as `ctx.singularityEvolution`.
+*
+* The registration gate in {@link SingularityAgent} is the enforcement; this
+* service is the fact a sibling assembly reads to keep its own surface in step
+* — the root agent's tool allow-list names these nine names and has to leave
+* them out when they were never registered. Read it softly:
+*
+* ```ts
+* const evolution = ctx.get('singularityEvolution')?.enabled ?? false
+* ```
+*
+* A composition that does not mount this plugin provides no such service, and
+* that absence reads as the closed state: a deployment that never turned the
+* chain on must not be assembled as if it had.
+*/
+var EvolutionExposure = class extends Service {
+	/** `true` when `Config.evolution` is `on`, i.e. the nine `evolution_*` tools are registered. */
+	enabled;
+	constructor(ctx, enabled) {
+		super(ctx, "singularityEvolution");
+		this.enabled = enabled;
+	}
+};
 var SingularityAgent = class extends Service {
 	static inject = [
 		"tools",
@@ -5235,12 +5272,16 @@ var SingularityAgent = class extends Service {
 		"userQuestions",
 		"approval"
 	];
-	constructor(ctx) {
+	static Config = ConfigSchema;
+	constructor(ctx, config) {
 		super(ctx, "singularityAgent");
+		this.assertClosedConfig(config);
+		const evolution = this.resolveEvolution(config);
 		ctx.plugin(HitlService);
 		new EvolutionService(ctx);
 		new EscalationService(ctx);
 		new ProposalReviewService(ctx);
+		new EvolutionExposure(ctx, evolution === "on");
 		ctx.tools.register(defineMarkReadyTool(ctx));
 		ctx.tools.register(defineSpawnTool(ctx));
 		ctx.tools.register(defineAskTool(ctx));
@@ -5258,19 +5299,47 @@ var SingularityAgent = class extends Service {
 		ctx.tools.register(defineTaskReviewPackTool(ctx));
 		ctx.tools.register(defineTaskReviewAgentTool(ctx));
 		ctx.tools.register(defineTaskDiagnoseTool(ctx));
-		ctx.tools.register(defineEvolutionProposeTool(ctx));
-		ctx.tools.register(defineEvolutionCandidateTool(ctx));
-		ctx.tools.register(defineEvolutionPrepareTool(ctx));
-		ctx.tools.register(defineEvolutionReplayTool(ctx));
-		ctx.tools.register(defineEvolutionGateTool(ctx));
-		ctx.tools.register(defineEvolutionDecideTool(ctx));
-		ctx.tools.register(defineEvolutionApplyTool(ctx));
-		ctx.tools.register(defineEvolutionRollbackTool(ctx));
-		ctx.tools.register(defineEvolutionListTool(ctx));
+		if (evolution === "on") {
+			ctx.tools.register(defineEvolutionProposeTool(ctx));
+			ctx.tools.register(defineEvolutionCandidateTool(ctx));
+			ctx.tools.register(defineEvolutionPrepareTool(ctx));
+			ctx.tools.register(defineEvolutionReplayTool(ctx));
+			ctx.tools.register(defineEvolutionGateTool(ctx));
+			ctx.tools.register(defineEvolutionDecideTool(ctx));
+			ctx.tools.register(defineEvolutionApplyTool(ctx));
+			ctx.tools.register(defineEvolutionRollbackTool(ctx));
+			ctx.tools.register(defineEvolutionListTool(ctx));
+		}
 		ctx.tools.register(defineEscalateTool(ctx));
+	}
+	/**
+	* Refuse a configuration member this plugin does not read. The schema keeps
+	* unknown keys on the object it validates, so this is where a caller's typo
+	* is caught: a misspelled member would otherwise read as a configuration that
+	* took effect while the switch stayed at its default.
+	*/
+	assertClosedConfig(config) {
+		if (config === void 0) return;
+		const known = new Set(["evolution"]);
+		const unknown = Object.keys(config).filter((key) => !known.has(key));
+		if (unknown.length === 0) return;
+		throw new Error(`singularity-agent: the configuration names [${unknown.join(", ")}], which this plugin does not read; a member nobody reads refuses to start rather than being silently ignored`);
+	}
+	/**
+	* The switch position this assembly acts on. The schema types the member, but
+	* a deployment that constructs this plugin directly (a test, an embedding
+	* process) bypasses the schema, and a near miss must not be read as "not on,
+	* therefore off": a caller who asked for something this build does not
+	* implement would get the closed composition while believing otherwise.
+	*/
+	resolveEvolution(config) {
+		const value = config?.evolution;
+		if (value === void 0) return DEFAULT_EVOLUTION;
+		if (value === "off" || value === "on") return value;
+		throw new Error(`singularity-agent: evolution is ${JSON.stringify(value)}; it is "off" or "on" (a switch this build cannot execute refuses to start rather than assembling an exposure nobody chose)`);
 	}
 };
 var src_default = SingularityAgent;
 
 //#endregion
-export { APPLYABLE_TARGET_TYPES, CHAMPION_SOURCES, CHAMPION_STATES, ESCALATION_TRIGGERS, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EscalationService, EvolutionService, HitlService, MECHANICAL_TARGET_TYPES, ProposalReviewService, REPLAY_RELATIONS, REPLAY_VERDICTS, SingularityAgent, applyTargets, compareReplaySides, src_default as default, mutationMechanical, overallReplayVerdict, ownerSessionOfStore, renderProposalReview, reviewDecider };
+export { APPLYABLE_TARGET_TYPES, CHAMPION_SOURCES, CHAMPION_STATES, DEFAULT_EVOLUTION, ESCALATION_TRIGGERS, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EscalationService, EvolutionExposure, EvolutionService, HitlService, MECHANICAL_TARGET_TYPES, ProposalReviewService, REPLAY_RELATIONS, REPLAY_VERDICTS, SingularityAgent, applyTargets, compareReplaySides, src_default as default, mutationMechanical, overallReplayVerdict, ownerSessionOfStore, renderProposalReview, reviewDecider };

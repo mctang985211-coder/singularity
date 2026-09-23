@@ -27,6 +27,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*",
     "@deepseek-ai/dsh-tools": "*",
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-llm": "*",
@@ -45,6 +46,7 @@
     "tsdown": "^0.15.0",
     "typescript": "^5.9.0",
     "@deepseek-ai/cordis": "link:../../../thirdparty/deepseek-harness/vendor/cordis",
+    "@deepseek-ai/schemastery": "link:../../../thirdparty/deepseek-harness/vendor/schemastery",
     "@deepseek-ai/dsh-tools": "link:../../../thirdparty/deepseek-harness/packages/core/tools",
     "@deepseek-ai/dsh-session": "link:../../../thirdparty/deepseek-harness/packages/core/session",
     "@deepseek-ai/dsh-llm": "link:../../../thirdparty/deepseek-harness/packages/llm/llm",

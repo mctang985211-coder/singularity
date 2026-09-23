@@ -1,4 +1,5 @@
 import { Context, Service } from "@deepseek-ai/cordis";
+import z from "@deepseek-ai/schemastery";
 import { CapabilityConfig, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest } from "@dangosys/dsh-singularity-task-runtime";
 import { ProposalTargetType } from "@dangosys/dsh-singularity-task";
 
@@ -115,7 +116,7 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 /** Plugin config; every field optional — the constructor resolves the default. */
-interface Config$1 {
+interface Config$2 {
   /**
    * Directory of the ledger file `escalations.jsonl`. Omitted resolves to
    * `$DSH_HOME`, falling back to `<repo root>/.dsh` when `DSH_HOME` is unset —
@@ -139,7 +140,7 @@ declare class EscalationService extends Service {
   private records;
   private readonly loaded;
   private writes;
-  constructor(ctx: Context, config?: Config$1);
+  constructor(ctx: Context, config?: Config$2);
   /** Ledger file path (`<root>/escalations.jsonl`). */
   get file(): string;
   /**
@@ -716,7 +717,7 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 /** Plugin config; every field optional — the constructor resolves defaults. */
-interface Config {
+interface Config$1 {
   /**
    * Directory of the ledger file `proposals.jsonl`; sandboxes materialize under
    * `<root>/sandbox/<proposalId>/`. Omitted resolves to `$DSH_HOME/evolution`,
@@ -767,7 +768,7 @@ declare class EvolutionService extends Service {
   private records;
   private readonly loaded;
   private writes;
-  constructor(ctx: Context, config?: Config);
+  constructor(ctx: Context, config?: Config$1);
   /** Ledger file path (`<root>/proposals.jsonl`). */
   get file(): string;
   propose(input: ProposeInput, actor: string): Promise<EvolutionProposal>;
@@ -1071,9 +1072,86 @@ declare class EvolutionService extends Service {
 }
 //#endregion
 //#region src/index.d.ts
+/**
+ * Plugin configuration — the deployment's composition, not a model's choice.
+ *
+ * R0's contract (§1.3 of the guide, defect G15) is that the default run
+ * exposes only what the current role needs, so the evolution chain is something
+ * a deployment turns *on*: the tools it is reached through are registered by
+ * this plugin, and with the chain off none of them exists on any surface. The
+ * switch cannot be a permission check inside a tool for the same reason: a
+ * spawned worker keeps the global layer when its grant does not override it, so
+ * "who may call this" is not a question this deployment gets to ask at call
+ * time — "does this tool exist here" is.
+ */
+interface Config {
+  /**
+   * Whether this composition registers the nine `evolution_*` tools on the
+   * global layer. `off` — the shipped default, see {@link DEFAULT_EVOLUTION} —
+   * registers none of them: no model surface (root, granted worker, or the
+   * un-granted spawn worker that inherits the global layer) can call one, and
+   * the ledger, its history, its validation and its approvals are left exactly
+   * as they are rather than deleted. `on` registers all nine and changes
+   * nothing else about them: the previous assembly, byte for byte.
+   */
+  evolution: 'off' | 'on';
+}
+/**
+ * The shipped switch position: `off`.
+ *
+ * The default run is the one nobody configured, and R0 asks that this run not
+ * carry the evolution chain (guide §1.3: "默认运行只提供当前角色需要的能力").
+ * `on` is therefore an explicit act by a deployment, and what it resolved to is
+ * readable back from the context ({@link EvolutionExposure}) — a switch whose
+ * position cannot be read is one nobody can tell from an unwired exposure.
+ */
+declare const DEFAULT_EVOLUTION: 'off';
+/**
+ * The evolution exposure this composition resolved, provided on the agent's own
+ * fiber as `ctx.singularityEvolution`.
+ *
+ * The registration gate in {@link SingularityAgent} is the enforcement; this
+ * service is the fact a sibling assembly reads to keep its own surface in step
+ * — the root agent's tool allow-list names these nine names and has to leave
+ * them out when they were never registered. Read it softly:
+ *
+ * ```ts
+ * const evolution = ctx.get('singularityEvolution')?.enabled ?? false
+ * ```
+ *
+ * A composition that does not mount this plugin provides no such service, and
+ * that absence reads as the closed state: a deployment that never turned the
+ * chain on must not be assembled as if it had.
+ */
+declare class EvolutionExposure extends Service {
+  /** `true` when `Config.evolution` is `on`, i.e. the nine `evolution_*` tools are registered. */
+  readonly enabled: boolean;
+  constructor(ctx: Context, enabled: boolean);
+}
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    singularityEvolution: EvolutionExposure;
+  }
+}
 declare class SingularityAgent extends Service {
   static inject: string[];
-  constructor(ctx: Context);
+  static Config: z<Config>;
+  constructor(ctx: Context, config?: Config);
+  /**
+   * Refuse a configuration member this plugin does not read. The schema keeps
+   * unknown keys on the object it validates, so this is where a caller's typo
+   * is caught: a misspelled member would otherwise read as a configuration that
+   * took effect while the switch stayed at its default.
+   */
+  private assertClosedConfig;
+  /**
+   * The switch position this assembly acts on. The schema types the member, but
+   * a deployment that constructs this plugin directly (a test, an embedding
+   * process) bypasses the schema, and a near miss must not be read as "not on,
+   * therefore off": a caller who asked for something this build does not
+   * implement would get the closed composition while believing otherwise.
+   */
+  private resolveEvolution;
 }
 //#endregion
-export { APPLYABLE_TARGET_TYPES, type AgentPresetMutation, type ApplyOutcome, type ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, type CapabilityMutation, type ChampionSource, type ChampionState, ESCALATION_TRIGGERS, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, type Escalation, type EscalationInput, type EscalationRecord, EscalationService, type EscalationTrigger, type EvolutionDecision, type EvolutionLevel, type EvolutionProposal, type EvolutionRecord, EvolutionService, type EvolutionStatus, type GateAnswers, type HitlAnswer, type HitlKind, type HitlPending, HitlService, type ListFilter, MECHANICAL_TARGET_TYPES, type MechanicalMutation, type PrepareChampion, type PreparedView, ProposalReviewService, type ProposeInput, REPLAY_RELATIONS, REPLAY_VERDICTS, type ReplayCriterionDiff, type ReplayCriterionSummary, type ReplayRelation, type ReplayReport, type ReplaySideSummary, type ReplayTaskComparison, type ReplayVerdict, type ReplayedView, SingularityAgent, SingularityAgent as default, type SkillContentIdentity, type SkillMutation, type TaskDefinitionMutation, applyTargets, compareReplaySides, mutationMechanical, overallReplayVerdict, ownerSessionOfStore, renderProposalReview, reviewDecider };
+export { APPLYABLE_TARGET_TYPES, type AgentPresetMutation, type ApplyOutcome, type ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, type CapabilityMutation, type ChampionSource, type ChampionState, Config, DEFAULT_EVOLUTION, ESCALATION_TRIGGERS, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, type Escalation, type EscalationInput, type EscalationRecord, EscalationService, type EscalationTrigger, type EvolutionDecision, EvolutionExposure, type EvolutionLevel, type EvolutionProposal, type EvolutionRecord, EvolutionService, type EvolutionStatus, type GateAnswers, type HitlAnswer, type HitlKind, type HitlPending, HitlService, type ListFilter, MECHANICAL_TARGET_TYPES, type MechanicalMutation, type PrepareChampion, type PreparedView, ProposalReviewService, type ProposeInput, REPLAY_RELATIONS, REPLAY_VERDICTS, type ReplayCriterionDiff, type ReplayCriterionSummary, type ReplayRelation, type ReplayReport, type ReplaySideSummary, type ReplayTaskComparison, type ReplayVerdict, type ReplayedView, SingularityAgent, SingularityAgent as default, type SkillContentIdentity, type SkillMutation, type TaskDefinitionMutation, applyTargets, compareReplaySides, mutationMechanical, overallReplayVerdict, ownerSessionOfStore, renderProposalReview, reviewDecider };

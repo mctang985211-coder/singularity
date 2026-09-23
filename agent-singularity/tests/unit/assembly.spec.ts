@@ -1,0 +1,151 @@
+/**
+ * The assembled tool surface of the root-agent plugin (R0): which tools land on
+ * the global layer for a given deployment configuration.
+ *
+ * The switch is the composition, not a permission check inside a tool: with
+ * `evolution` off, the nine `evolution_*` tools are never registered, so no
+ * agent surface — the root's allow-list, a spawned worker's grant, or the
+ * un-granted worker that keeps the global layer — can call one, and the ledger
+ * behind them is unreachable rather than merely discouraged. Turning it on
+ * leaves the previous assembly untouched: the same twenty-seven names the
+ * deployment has always had.
+ *
+ * Every case mounts the real plugin on a real context with sibling stubs for
+ * its injected services, the way the loader mounts them, so what is asserted is
+ * the plugin's own registration, not a fixture's list.
+ */
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Context, Service } from '@deepseek-ai/cordis'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { DEFAULT_EVOLUTION, SingularityAgent } from '../../src/index.ts'
+import type { Config } from '../../src/index.ts'
+
+/** The nine tools the switch gates; nothing else on the surface depends on it. */
+const EVOLUTION_TOOLS = [
+  'evolution_propose',
+  'evolution_candidate',
+  'evolution_prepare',
+  'evolution_replay',
+  'evolution_gate',
+  'evolution_decide',
+  'evolution_apply',
+  'evolution_rollback',
+  'evolution_list',
+]
+
+/** The eighteen tools every composition registers, whatever the switch says (`escalate` included). */
+const ALWAYS_TOOLS = [
+  'graph_mark_ready',
+  'graph_spawn',
+  'hitl_ask',
+  'hitl_approve',
+  'task_read',
+  'capability_list',
+  'task_decompose',
+  'task_proposal_read',
+  'task_proposal_continue',
+  'task_proposal_cancel',
+  'task_status',
+  'task_submit_result',
+  'task_cancel',
+  'task_verify',
+  'task_review_pack',
+  'task_review_agent',
+  'task_diagnose',
+  'escalate',
+]
+
+/** A sibling plugin providing one injected service, standing in for what the profile mounts beside this one. */
+function stub(name: string, value: object) {
+  return class extends Service {
+    constructor(ctx: Context) {
+      super(ctx, name)
+      Object.assign(this, value)
+    }
+  }
+}
+
+/**
+ * Mounts the plugin on a real context: the dependencies it injects are siblings
+ * of its own, and the tool registry is the deployment's (here, a map that keeps
+ * what the plugin registered).
+ */
+async function mount(config?: Config) {
+  const home = await mkdtemp(join(tmpdir(), 'singularity-assembly-'))
+  vi.stubEnv('DSH_HOME', home)
+  const tools = new Map<string, { name: string }>()
+  const ctx = new Context()
+  const dependencies: ReadonlyArray<readonly [string, object]> = [
+    ['tools', {
+      register(tool: { name: string }) {
+        tools.set(tool.name, tool)
+        return () => tools.delete(tool.name)
+      },
+    }],
+    ['graphs', {}],
+    ['agentRuntime', {}],
+    ['task', {}],
+    ['taskRuntime', {}],
+    ['userQuestions', {}],
+    ['approval', { request: vi.fn(async () => 'allowed-once') }],
+  ]
+  for (const [name, value] of dependencies) await ctx.plugin(stub(name, value))
+  if (config === undefined) {
+    await ctx.plugin(SingularityAgent)
+  } else {
+    await ctx.plugin(SingularityAgent, config)
+  }
+  return { ctx, tools }
+}
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
+
+describe('SingularityAgent assembly', () => {
+  it('registers the eighteen unconditional tools and no evolution tool on the shipped default', async () => {
+    const { tools } = await mount()
+    expect(DEFAULT_EVOLUTION).toBe('off')
+
+    for (const name of ALWAYS_TOOLS) expect(tools.has(name), name).toBe(true)
+    for (const name of EVOLUTION_TOOLS) expect(tools.has(name), name).toBe(false)
+    expect(tools.size).toBe(ALWAYS_TOOLS.length)
+    // The name is the surface: a gate written as an internal permission check
+    // would still leave all twenty-seven reachable by an un-granted worker.
+    expect([...tools.keys()].filter(name => name.startsWith('evolution_'))).toEqual([])
+  })
+
+  it('registers all twenty-seven tools when the deployment turns evolution on', async () => {
+    const { tools } = await mount({ evolution: 'on' })
+    for (const name of [...ALWAYS_TOOLS, ...EVOLUTION_TOOLS]) expect(tools.has(name), name).toBe(true)
+    expect(tools.size).toBe(ALWAYS_TOOLS.length + EVOLUTION_TOOLS.length)
+  })
+
+  it('refuses a switch value this build does not implement, naming the member', async () => {
+    await expect(mount({ evolution: 'sometimes' } as unknown as Config)).rejects.toThrow(/evolution/)
+    await expect(mount({ evolution: true } as unknown as Config)).rejects.toThrow(/evolution/)
+  })
+
+  it('refuses a configuration member this plugin does not read, naming it', async () => {
+    await expect(mount({ evolution: 'off', evolutionEnabled: true } as unknown as Config))
+      .rejects.toThrow(/evolutionEnabled/)
+  })
+
+  it('exposes the parsed switch on the context, for a sibling assembly to read softly', async () => {
+    // How the root assembly reads it (agent-runtime, at root creation): a soft
+    // query, so a composition with no singularity agent plugin reads the
+    // absence as off rather than failing to load.
+    const read = (ctx: Context): boolean => ctx.get('singularityEvolution')?.enabled ?? false
+
+    const off = await mount()
+    expect(read(off.ctx)).toBe(false)
+    await off.ctx.fiber.dispose()
+    expect(off.ctx.get('singularityEvolution')).toBeUndefined()
+
+    const on = await mount({ evolution: 'on' })
+    expect(read(on.ctx)).toBe(true)
+    await on.ctx.fiber.dispose()
+  })
+})

@@ -8,11 +8,11 @@
 
 依赖：graphs, tools
 
-依赖的config.yaml配置：无
+依赖的config.yaml配置：`evolution`（`off` | `on`，默认 `off`）——本组合是否把九个 `evolution_*` 工具注册到全局层。关闭（出厂默认，`DEFAULT_EVOLUTION`）时只注册下面 18 个，进化链一个都不注册：任何 agent 面都调不到，包括无 grant 的 spawn worker（它否则会保留全局层）。开启时注册全部 27 个，进化链的校验、人审、历史读取与回滚语义不变。本构建不实现的值、或它不读取的配置字段，构造期具名拒启。
 
 ### 可调用Tools
 
-全部 27 个工具注册在全局层；root agent 的 allow-list（`@dangosys/dsh-singularity-agent-runtime` 的 ROOT_TOOLS）恰好就是这份清单外加挂载 preset 提供的 `skill` 加载器，两者不会漂移。
+27 个里始终注册在全局层的是 18 个；九个 `evolution_*` 只在 `evolution: on` 时注册。默认部署的全局层携带前 18 个（下面编号 1–17 与 27），显式开启的部署携带全部 27 个。root agent 的 allow-list（`@dangosys/dsh-singularity-agent-runtime` 的 ROOT_TOOLS）恰好就是这份清单外加挂载 preset 提供的 `skill` 加载器，并从 `ctx.singularityEvolution` 读取这九个是否真实存在——root 面与这份清单漂移正是该开关要防的事。
 
 1. graph_spawn：通过 Singularity runtime 创建 worker 节点并等待其回复。
 2. graph_mark_ready：将调用 agent 所属的图标记为就绪。

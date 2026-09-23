@@ -4,6 +4,7 @@
  */
 
 import { Context, Service } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-agent-runtime'
@@ -83,11 +84,87 @@ export type {
 export { compareReplaySides, overallReplayVerdict, REPLAY_RELATIONS, REPLAY_VERDICTS } from './replay.ts'
 export type { ReplayedView } from './evolution.ts'
 
+/**
+ * Plugin configuration — the deployment's composition, not a model's choice.
+ *
+ * R0's contract (§1.3 of the guide, defect G15) is that the default run
+ * exposes only what the current role needs, so the evolution chain is something
+ * a deployment turns *on*: the tools it is reached through are registered by
+ * this plugin, and with the chain off none of them exists on any surface. The
+ * switch cannot be a permission check inside a tool for the same reason: a
+ * spawned worker keeps the global layer when its grant does not override it, so
+ * "who may call this" is not a question this deployment gets to ask at call
+ * time — "does this tool exist here" is.
+ */
+export interface Config {
+  /**
+   * Whether this composition registers the nine `evolution_*` tools on the
+   * global layer. `off` — the shipped default, see {@link DEFAULT_EVOLUTION} —
+   * registers none of them: no model surface (root, granted worker, or the
+   * un-granted spawn worker that inherits the global layer) can call one, and
+   * the ledger, its history, its validation and its approvals are left exactly
+   * as they are rather than deleted. `on` registers all nine and changes
+   * nothing else about them: the previous assembly, byte for byte.
+   */
+  evolution: 'off' | 'on'
+}
+
+/**
+ * The shipped switch position: `off`.
+ *
+ * The default run is the one nobody configured, and R0 asks that this run not
+ * carry the evolution chain (guide §1.3: "默认运行只提供当前角色需要的能力").
+ * `on` is therefore an explicit act by a deployment, and what it resolved to is
+ * readable back from the context ({@link EvolutionExposure}) — a switch whose
+ * position cannot be read is one nobody can tell from an unwired exposure.
+ */
+export const DEFAULT_EVOLUTION: 'off' = 'off'
+
+const ConfigSchema: z<Config> = z.object({
+  evolution: z.union([z.const('off'), z.const('on')]).default(DEFAULT_EVOLUTION),
+})
+
+/**
+ * The evolution exposure this composition resolved, provided on the agent's own
+ * fiber as `ctx.singularityEvolution`.
+ *
+ * The registration gate in {@link SingularityAgent} is the enforcement; this
+ * service is the fact a sibling assembly reads to keep its own surface in step
+ * — the root agent's tool allow-list names these nine names and has to leave
+ * them out when they were never registered. Read it softly:
+ *
+ * ```ts
+ * const evolution = ctx.get('singularityEvolution')?.enabled ?? false
+ * ```
+ *
+ * A composition that does not mount this plugin provides no such service, and
+ * that absence reads as the closed state: a deployment that never turned the
+ * chain on must not be assembled as if it had.
+ */
+export class EvolutionExposure extends Service {
+  /** `true` when `Config.evolution` is `on`, i.e. the nine `evolution_*` tools are registered. */
+  readonly enabled: boolean
+
+  constructor(ctx: Context, enabled: boolean) {
+    super(ctx, 'singularityEvolution')
+    this.enabled = enabled
+  }
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    singularityEvolution: EvolutionExposure
+  }
+}
+
 export class SingularityAgent extends Service {
   static inject = ['tools', 'graphs', 'agentRuntime', 'task', 'taskRuntime', 'userQuestions', 'approval']
+  static Config: z<Config> = ConfigSchema
 
-  constructor(ctx: Context) {
+  constructor(ctx: Context, config?: Config) {
     super(ctx, 'singularityAgent')
+    this.assertClosedConfig(config)
+    const evolution = this.resolveEvolution(config)
     ctx.plugin(HitlService)
     // The evolution tools read `ctx.evolution`, and a service a child fiber
     // provides is invisible to the parent that mounted it — so the ledger's
@@ -101,6 +178,9 @@ export class SingularityAgent extends Service {
     // human, so the channel has to be visible from the runtime's context. It is
     // provided on this fiber for the same reason the two ledgers are.
     new ProposalReviewService(ctx)
+    // What this assembly did, said where a sibling can read it (the root agent's
+    // tool allow-list is the consumer) — see {@link EvolutionExposure}.
+    new EvolutionExposure(ctx, evolution === 'on')
     ctx.tools.register(defineMarkReadyTool(ctx))
     ctx.tools.register(defineSpawnTool(ctx))
     ctx.tools.register(defineAskTool(ctx))
@@ -118,16 +198,59 @@ export class SingularityAgent extends Service {
     ctx.tools.register(defineTaskReviewPackTool(ctx))
     ctx.tools.register(defineTaskReviewAgentTool(ctx))
     ctx.tools.register(defineTaskDiagnoseTool(ctx))
-    ctx.tools.register(defineEvolutionProposeTool(ctx))
-    ctx.tools.register(defineEvolutionCandidateTool(ctx))
-    ctx.tools.register(defineEvolutionPrepareTool(ctx))
-    ctx.tools.register(defineEvolutionReplayTool(ctx))
-    ctx.tools.register(defineEvolutionGateTool(ctx))
-    ctx.tools.register(defineEvolutionDecideTool(ctx))
-    ctx.tools.register(defineEvolutionApplyTool(ctx))
-    ctx.tools.register(defineEvolutionRollbackTool(ctx))
-    ctx.tools.register(defineEvolutionListTool(ctx))
+    // The evolution chain is the one part of this surface a deployment may
+    // withhold (R0). Off, none of the nine is registered, so no agent surface
+    // can call one: the root's allow-list is a restriction over what exists, a
+    // worker's grant is applied to its own layer, and a worker spawned without
+    // one keeps the global layer — the door that only the absence of the tool
+    // closes. The ledger service above stays constructed either way: nothing
+    // here reads it, and its history is not this switch's to delete.
+    if (evolution === 'on') {
+      ctx.tools.register(defineEvolutionProposeTool(ctx))
+      ctx.tools.register(defineEvolutionCandidateTool(ctx))
+      ctx.tools.register(defineEvolutionPrepareTool(ctx))
+      ctx.tools.register(defineEvolutionReplayTool(ctx))
+      ctx.tools.register(defineEvolutionGateTool(ctx))
+      ctx.tools.register(defineEvolutionDecideTool(ctx))
+      ctx.tools.register(defineEvolutionApplyTool(ctx))
+      ctx.tools.register(defineEvolutionRollbackTool(ctx))
+      ctx.tools.register(defineEvolutionListTool(ctx))
+    }
     ctx.tools.register(defineEscalateTool(ctx))
+  }
+
+  /**
+   * Refuse a configuration member this plugin does not read. The schema keeps
+   * unknown keys on the object it validates, so this is where a caller's typo
+   * is caught: a misspelled member would otherwise read as a configuration that
+   * took effect while the switch stayed at its default.
+   */
+  private assertClosedConfig(config: Config | undefined): void {
+    if (config === undefined) return
+    const known = new Set(['evolution'])
+    const unknown = Object.keys(config).filter(key => !known.has(key))
+    if (unknown.length === 0) return
+    throw new Error(
+      `singularity-agent: the configuration names [${unknown.join(', ')}], which this plugin does not read; ` +
+      'a member nobody reads refuses to start rather than being silently ignored',
+    )
+  }
+
+  /**
+   * The switch position this assembly acts on. The schema types the member, but
+   * a deployment that constructs this plugin directly (a test, an embedding
+   * process) bypasses the schema, and a near miss must not be read as "not on,
+   * therefore off": a caller who asked for something this build does not
+   * implement would get the closed composition while believing otherwise.
+   */
+  private resolveEvolution(config: Config | undefined): 'off' | 'on' {
+    const value: unknown = config?.evolution
+    if (value === undefined) return DEFAULT_EVOLUTION
+    if (value === 'off' || value === 'on') return value
+    throw new Error(
+      `singularity-agent: evolution is ${JSON.stringify(value)}; it is "off" or "on" ` +
+      '(a switch this build cannot execute refuses to start rather than assembling an exposure nobody chose)',
+    )
   }
 }
 
