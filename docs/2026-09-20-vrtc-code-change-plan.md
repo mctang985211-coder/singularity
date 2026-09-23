@@ -8,11 +8,11 @@
 
 ### 唯一派发顺序与完成闸
 
-本次补救修订基线：代码 `fda3d29`；文档备份 Singularity `1430103`、外层 `31bcf3a`。以下表格是唯一派发顺序，替代旧的 A0 完成即直接派发 A2 的安排。不新增另一份路线图或临时产品版本；已完成记录保留，新补救任务均待实施。
+补救原始基线：代码 `fda3d29`；文档备份 Singularity `1430103`、外层 `31bcf3a`。2026-09-23 交付复核范围为 `7171747..d5b0bb6`，修改前备份为 Singularity `a4c1da0` / 外层 `fa4bc09`。以下表格是唯一当前顺序；历史记录保留当时结论，当前状态以本表及下方「补救交付复核」为准。
 
-本次仅修订 8 份指导/派发文档，52 个本地链接、代码围栏及 diff 检查通过；未改运行时代码，未运行构建、代码测试或真实模型。历史 1544 项测试记录不作为本次重新验证结果。
+本轮是代码与证据复核及文档修订，不实施业务修复、不调用真实模型。发现明确反例后重开对应项，保留其余已成立的交付证据。
 
-后续进度审核使用[进度审核指挥 prompt](execution-prompts/progress-review-and-dispatch.md)，单票内容按[派发模板](execution-prompts/task-dispatch-template.md)填写。本表是当前顺序；下文带日期的交付记录中“下一项”、提交和测试数只描述当时，不覆盖本表。本次文档维护不改变任何代码票的验收状态。
+后续进度审核使用[进度审核指挥 prompt](execution-prompts/progress-review-and-dispatch.md)，单票内容按[派发模板](execution-prompts/task-dispatch-template.md)填写。下文带日期的原交付记录中“下一项”、提交和测试数只描述当时，不覆盖本表。子代理任务按[公共派发粒度](execution-prompts/README.md#子代理派发粒度)拆分；主代理承担整票集成与验收，不把整组工作原样转派。
 
 下表同时作为可填写的任务流程表，保持一套顺序。`待填` 不表示已验收；负责人栏可填 agent 名称或任务链接。交付记录栏填写本文件内的验收记录锚点，提交、日期和阻塞详情放入下方单项模板，避免表格过宽。
 
@@ -23,10 +23,10 @@
 | 3 | S1-C：能力预检与版本绑定 | 已验收（2026-09-22，独立子代理复核） | Kimi Code 主代理（5 实现子代理 + 1 独立复核子代理 + 1 复核修复子代理） | 见「S1-C：能力预检与版本绑定 执行与验收记录」 | provider 预检、侧车契约、Run 绑定内容与旧版本读取完整；所有实际支持入口共用校验 |
 | 4 | A3：非阻塞运行与恢复 | 已验收（2026-09-22，独立子代理复核 + 复核修复回归） | Kimi Code 主代理（5 阶段实现/测试子代理 + 1 独立复核子代理 + 1 复核修复子代理） | 见「A3：非阻塞运行与恢复 执行与验收记录」 | 非阻塞推进、工作区写入归属、显式提交、取消/恢复、根预算与普通/replay 一致性完整 |
 | 5 | T2 + T3：契约审核与恢复（一个交付组） | 已验收（2026-09-23，双模型并行独立复核 + 综合复核确认） | Kimi Code 主代理指挥 + 4 阶段实现子代理（A 提案合同层 / B task-runtime 生命周期、重检、幂等与恢复 / C 工具面、审批渠道与 prompt / D 集成级验收、模型协议 fixture 与文档收尾）+ 2 并行独立复核子代理 + 1 综合复核子代理 | 见「T2+T3：契约审核与恢复 执行与验收记录」 | off/all、审核持久化、批准后重检及崩溃恢复一起验收，不单独交付不可恢复的 all |
-| 6 | A0 + R0：根入口与默认运行面（一个交付组） | 已验收（2026-09-23，独立子代理复核） | Kimi Code 主代理指挥 + 6 阶段实现子代理（R0-a 装配开关 / R0-b 根 allow-list 与 prompt 收敛 / A `task` 包 kind 联合与根消费 / B `task-runtime` intake 服务层、`adoptRoot`、`graphs.create` 切换、支撑夹具走真实 intake / C `task_intake` 工具、根未激活视图、根审核渲染、prompt 段 / D 集成验收与文档收尾）+ 1 独立复核子代理 | 见「A0 + R0：根入口与默认运行面 执行与验收记录」 | 根目标来源、独立 AC、off/all 与激活恢复完整；默认工具/prompt 按角色收敛；见下方补救合同 |
-| 7 | R1：真实运行验证 | 已验收（2026-09-23；S1/S2/S3 真实模型场景均通过，含一次执行事故如实记录） | Kimi Code 主代理指挥 + 1 执行子代理 | 见「R1：真实运行验证 执行记录」 | 同一实现的真实模型任务经新入口满足根验收；错误根结果不误过；歧义未被冒认要求；运行证据和阻塞处置完整 |
-| 8 | R2：按证据整理运行时 | 已验收（2026-09-23，独立子代理复核 + 复核缺陷已修复） | Kimi Code 主代理指挥 + R2 实现子代理 + 1 独立复核子代理 | 见「R2：按证据整理运行时 执行与验收记录」 | 关闭已发现的一致性缺陷、收敛重复职责及无用途接口，核对 marker 边界；不预定驱动重写 |
-| 9 | A2：任务导航与合法动作 | 待派发 | 待填 | 见「R2：按证据整理运行时 执行与验收记录」D 节（A2 最小合同复定） | 按 R1/R2 记录收紧具体读取场景；授权、合法动作与有界结果完整，分页仅在有实际需求时建设 |
+| 6 | A0 + R0：根入口与默认运行面（当前只返工 A0） | 返工 | 原交付：Kimi Code；返工负责人待填 | 原记录 +「补救交付复核」Q2/Q3 | 根来源/归属和 adoptRoot 恢复反例关闭；R0 已有证据保留；整组复核后停止 |
+| 7 | R2：按证据整理运行时（当前只修取消写闸） | 返工，待第 6 项 | 待填 | 原记录 +「补救交付复核」Q1 | 查询不得弱化取消/收敛中的闸；重启恢复正例保留；已完成的接口/marker 收敛不重做 |
+| 8 | R1：真实运行验证（纠正 S3 与实验账） | 返工，待第 6–7 项 | 待填 | 原记录 +「补救交付复核」Q4/Q5 | 先修夹具及判据，再补必要模型验证；保留 S1/S2 证据，全部尝试计入用量 |
+| 9 | A2：任务导航与合法动作 | 待前置 | 待填 | R2 记录 D 节为合同草案；补救复核关闭后核对 | 第 6–8 项重新验收后再派；读取权限和实际动作检查一致，不以 gate 放行集合冒充全部动作前置 |
 | 10 | A1：全局上下文投影 | 待复定 | 待填 | 待填 | 复用 A2 读取域，根目标/贡献/必要证据有来源，恢复与压缩不丢核心事实；不照搬字段全集 |
 | 11 | A4：父子澄清 | 待复定 | 待填 | 待填 | 父子与三层问答、消息故障恢复、写闸及多阻塞处置完整 |
 | 12 | S4-E：评估基础（S4 内的子票） | 待复定 | 待填 | 待填 | 先服务一种候选对象：可比实验、真实证据、冻结评价与回归闸；不建全对象评估平台 |
@@ -69,9 +69,25 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。P1–P4 与 T1 已完成，S1-V 切片 2、S1-C、A3、T2/T3、A0 + R0、R1、R2 的验收记录见下文。第 6–8 项（A0 + R0 → R1 → R2）已按[架构补救指挥 prompt](execution-prompts/05-architecture-remediation.md)连续处理完毕；下一项是第 9 项 A2（已由 R2 按运行证据复定为待派发，合同要点见 R2 记录 D 节）。Task 主线见 [Task 自主构造建设指导](task-contract-construction-guide.md)，协作主线见 [探索与自进化架构](exploration-evolution-architecture.md)与 [Prompt 合同](agent-prompt-contracts.md)。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。当前用[架构补救指挥 prompt](execution-prompts/05-architecture-remediation.md)只派第 6 项 A0 定向返工，完成后交独立审核再准备下一票。原建设顺序为 A0 + R0 → R1 → R2；本次因 R2 写闸回归影响真实运行，返工顺序调整为表中的 A0 → R2 → R1，A2 暂停。Task 与协作方向仍见 [Task 指导](task-contract-construction-guide.md)、[深入架构](exploration-evolution-architecture.md)与 [Prompt 合同](agent-prompt-contracts.md)。
 
-### 补救范围与验收合同（R0–R2；A0 + R0 已验收（2026-09-23），R1/R2 未实现）
+### 补救交付复核（2026-09-23，d5b0bb6）
+
+结论：机械实现有实质进展，但不能维持「补救全部验收」。主审复核代码、既有测试和 R1 原始 JSONL，另两名只读子代理分别检查 A0 恢复与 R0/R2 实现；未进行真实模型调用。R0 默认工具面、独立根 verifier、marker 顺序及无消费者 API 收回未发现新增反例，保留其交付。
+
+| 编号 | 严重度 / 归属 | 可复核事实 | 关闭条件 |
+|---|---|---|---|
+| Q1 | P1 / R2 | `task-runtime/src/index.ts:gatePhaseFromStore` 在每次 `runForSession` 查询时回写 gate。`cancelGraph` 已置 terminal、尚未落终态的窗口内，真实 `task_proposal_read` 将闸改回 active；真实 tools 流水线上的 `graph_spawn` 随后获准 | 恢复缺失绑定时补闸，查询不得弱化当前取消/收敛屏障；取消挂起→读取→副作用仍拒绝，且重启 waiting_children 仍受闸保护。不能仅让所有查询失败 |
+| Q2 | P2 / A0 | `submitRootProposalOnce` 信任传入 storeId/rootSessionId；临时反例把 `s-beta` 送入 `sg-t-s-alpha`，实际返回 activated。来源测试只核对预先放好的用户消息与同名 session，没有验证来源存在/归属；生产 intake 也不读取来源事件 | 在统一服务入口校验根、store 和可读取的用户请求/澄清来源；复用 DSH 事件引用，由可信入口绑定，不能接受模型自报「已确认」。工具和直调的合法/缺失/跨归属反例都覆盖；不构建自然语言蕴含验证器 |
+| Q3 | P2 / A0 | `adoptRoot` 在没有根任务时提前返回，不执行提案 reconcile。批准已存但尚未激活时重开，结果为 adopted=false / approved / 0 task / 0 run；显式补调 reconcile 才激活。现有恢复用例显式调用 reconcile，未覆盖该公共恢复入口 | 真实重开经 adoptRoot 自动恢复 ready/approved、重发 pending_review；重复调用不重复激活。保留无提案空 store、旧图与已激活根的行为 |
+| Q4 | P1 / R1 | S3 原始根 objective 已写入用户未指定的「最近完成的自然季度」「仅 checkout 来源」，澄清调用失败仍激活；driver 用「有假设且 AC 无数字」当 structuralOnly，最终 verdict 只看 notSilentFabrication，未消费答复一致性。违反 A0 §1.10 的实质歧义先澄清 | 修复 driver 的 live Agent 序列化；判据核对具体季度/来源是否仍未知或确由用户确认，澄清不可用时不激活依赖未知条件的业务目标。测试先拒绝现有轨迹，不能用无数字/写了 Assumption 代替语义检查，也不要求 runtime 理解任意自然语言 |
+| Q5 | P2 / R1、文档 | budget.json 的 143978 token / 44 calls 漏了被覆盖的首轮 S1；`3b446cb` 记录该轮为 31483 token / 14 calls（冒烟已在现总数中）。按已存记录合计至少 175461 token / 58 calls，含缓存至少 501349；首次完整日志丢失。多处入口仍称未实施/未提交/未复核 | 历史证据不覆写；另记更正口径与缺失项，不称全量原始证据齐备。新尝试使用独立目录，含失败和意外重跑。当前状态、提交、下一项在入口与指南同步 |
+
+本轮实跑：`pnpm build` 通过；外层 unit 44 文件 / 1453 项、integration 37 文件 / 258 项通过；`pnpm run verify-persistence` 4 根匹配。主审临时集成探针在修正输入 schema/工具参数并使用挂载真实 gate 的 fixture 后，Q1/Q2 均按预期失败（Q1 的 graph_spawn 工具体为 stand-in，真实 gate/tools 流水线决定是否到达它，未创建真实图）；未使用初期夹具错误作缺陷证据，探针验证后删除。Q3 由独立子代理用真实 TaskService/TaskRuntime、内存事件持久层和新 runtime 重开复现；生产 JSONL 回归由返工补齐。未修改生产实现；全绿只能证明现有覆盖，不能覆盖这些新增反例。 文档检查：44 份 Markdown 围栏、100 个本地链接目标、16 份 JSON 解析与 `git diff --check` 通过。
+
+本轮建设粒度：当前只派 A0；可把 Q2 来源归属、Q3 恢复入口分别作为子目标，依赖共享类型时串行集成，主代理负责跨入口回归和 guide。之后独立审核再派 R2，最后 R1 补验证，不把四项压给一个子代理。
+
+### 补救范围与验收合同（原合同保留，当前返工按上表）
 
 **A0 + R0：先使真实目标可执行，并收敛默认运行面。** A0 按[根入口合同](2026-09-23-a0-root-intake-design.md)交付，根验收必须针对用户交付物，不以任意非 composite 命令充数。R0 沿用现有 preset/scoped tools/配置装配：默认 root 不暴露 `evolution_*`，不注入未启用进化协议；显式启用的既有进化路径继续保留真实校验、人审、历史读取与回滚。记录关闭/开启两种实际 composition、工具集及入口；关闭时模型工具与自动触发均不可进入进化，保留人工管理接口须写明授权边界。BB 专用规则移至领域配置，未知角色/配置不得扩大权限。root 仅保留角色原则，具体状态由工具结果说明；语义建议不必全部写成机器闸，权限/状态保证必须有代码支撑。不新建角色平台，不新增自主候选执行器。验收包括实际 assembled prompt/工具集、服务授权边界、正常任务与显式开启进化的既有回归；prompt 字数仅作观测。A0 与 R0 可分内部提交，整组通过才进入 R1。
 
@@ -106,7 +122,7 @@ P1–P4 是构建基础与 S1-V/S1-C/S4 的有限工程切片。P2 不证明证�
 | T2 可选契约人审 | 已完成（2026-09-23 已验收，与 T3 同组，见「T2+T3：契约审核与恢复 执行与验收记录」） | T1/A3 已满足 | `Config.generatedTaskReview: off/all`（默认 `off`）、不可变提案（整批规范化契约内容 + 策略）、决定绑定三个摘要、批准后重检；`off` 记 `policy-off`、坏提案不弹审批、直接服务调用同受闸 |
 | T3 审核恢复与幂等派发 | 已完成（2026-09-23 已验收，与 T2 同组） | T1/A3 已满足；组内复用 T2 | 四个崩溃点（待审 / 批准已保存未准入 / 准入已提交未 spawn / run 已建立）真实 JSONL 重开恢复、requestKey 去重、单父分解竞争、模型协议 fixture；整组已验收，`all` 策略已具备完整恢复保障 |
 
-T1 已交付统一契约、身份与准入记录；S1 验证与能力合同（S1-V 切片 2、S1-C）与 A3 已交付；T2/T3 已验收（2026-09-23）。根契约入口（A0 + R0）已验收（2026-09-23，见本文件记录）。后续上下文/问答（A1/A2/A4）按唯一派发顺序在 R1/R2 之后复定。S2/S3 消费已验收的运行、评估与诊断接口，不能提前用人工补能力替代。T3 的审核交接恢复不等于 S2-R 的能力/产物缺口恢复。
+T1、S1-V 切片 2、S1-C、A3、T2/T3 已交付。根契约入口已实现，A0 来源/恢复返工见 Q2/Q3，R0 证据保留。A1/A2/A4 仍按唯一表在补救关闭后派发。S2/S3 消费已验收的运行、评估与诊断接口，不能用人工补能力替代；T3 审核恢复不等于 S2-R 的能力/产物缺口恢复。
 
 本组文档规划基线：Singularity `7be57a1`，外层 `9f818152bb`；工作区相关修改已在这些提交中保存。本次仅修改文档，P1–P4 的测试结果沿用各自历史记录，不将其算作 T1–T3 验收。
 
@@ -116,9 +132,9 @@ T1 已交付统一契约、身份与准入记录；S1 验证与能力合同（S1
 
 | 票据 | 状态 | 前置 | 单票完成边界 |
 |---|---|---|---|
-| A0 真实根契约入口 | 已验收（2026-09-23），与 R0 同组；见「A0 + R0：根入口与默认运行面 执行与验收记录」 | T1、S1-V 切片 2、T2/T3 组 | 根来源/语义边界、独立 AC、审核与幂等激活恢复完整，旧图不改历史。**已交付机制**：`task_intake` + 根契约审核/激活/幂等恢复 + 未激活视图 + 旧图具名拒绝；**未证明**：模型对用户请求的解读正确（属 R1） |
+| A0 真实根契约入口 | 返工，见 Q2/Q3；R0 保留 | T1、S1-V 切片 2、T2/T3 组 | intake、独立 AC、审核/原子激活与未激活视图已实现；统一服务入口来源归属和 adoptRoot 的无根提案恢复须补齐。模型理解与有效澄清另由 R1 具体场景验证 |
 | A1 全局上下文投影 | 待复定 | A0/A2、S1-C；R1/R2 证据 | 根目标、贡献、必要证据及来源的授权投影；压缩不丢契约，不预建字段全集 |
-| A2 Task 导航与合法动作 | 待派发（2026-09-23 R2 按运行证据复定，合同见「R2 记录」D 节） | A0/A3、S1-C；R1/R2 证据 | 授权任务切片、owner/阻塞、合法动作三件套从 store 既有记录派生（不新增持久字段，与 gate 放行表同源）；worker 只见自己的子树与根目标投影，可见≠可领取；有界结果=条目/字节上限+稳定排序+omittedRefs 明示，**分页不建设**（R1 轨迹无规模压力，无实需不建）；验收=真实 loop 断言读取切片恰为授权范围、合法动作与实际相位一致、越权读取具名拒绝、恢复后与 store 一致 |
+| A2 Task 导航与合法动作 | 待前置；R2 记录 D 节保留为草案 | A0/A3、S1-C；R1/R2 返工关闭 | 从现有记录派生授权任务切片、owner/阻塞和合法动作，不新增持久字段；动作同时满足实际身份、任务状态和 gate，不复制第二套规则。授权邻域、依赖证据读取与有界结果在补救后核对，分页无实需不建 |
 | A3 非阻塞批次与协调相位 | 已完成（2026-09-22，见「A3 执行与验收记录」） | T1、S1-V 切片 2、S1-C | 统一迁移与串行推进、工作区写入归属、显式提交、根预算、取消/恢复及 replay 一致性 |
 | A4 父子澄清 | 待复定 | A1/A2/A3 | 问题身份与父子授权、持久投递；逐级问答保留批次与写闸；claim 后故障可恢复；未知/部分回答不解除全部阻塞 |
 | A5 因果诊断与主管触发 | 待复定，与 S2-E 同组 | A1/A2/A4、S4-E | 从一个真实失败场景贯通依赖/证据下钻、去重/预算、候选交接；不提前执行候选 |
@@ -450,6 +466,8 @@ T1 已交付统一契约、身份与准入记录；S1 验证与能力合同（S1
 
 ## A0 + R0：根入口与默认运行面 执行与验收记录（2026-09-23）
 
+> 当前复核结论：A0 返工（Q2/Q3），R0 证据保留。以下是 `2e3175a` 的原验收记录，保留当时判断与测试，不作为当前派发授权。
+
 | 字段 | 填写内容 |
 |---|---|
 | 状态、最近更新日期 | **已验收**（2026-09-23；完成闸证据见下，独立复核为子代理只读 + 变异探针 + 自建反例复核，未由人类复核）。代码与文档均已提交（交付版本见下行） |
@@ -470,7 +488,9 @@ T1 已交付统一契约、身份与准入记录；S1 验证与能力合同（S1
 
 实施事实（本组交付，供复核与后续票引用）：`graphs.create` 只建 graph + root session 并调 `adoptRoot`，`createRootTask` 已删除；根 store（`sg-t-<rootSessionId>`）由 intake 按需创建；`intakeRootContract` 是唯一根入口（工具与直接服务共用），契约规则 = `normalizeDecomposition` + `contractDefects` + `rootIndependenceDefects`（至少一条 mandatory 非 composite 判据）+ 受保护输入固定；根提案是 `TaskProposal` 的第二 kind（`kind: 'root'`、`RootProposalIdentity`、事件信封用保留标记 `root-proposal`），与批次共用开关、四个事件、决定绑定、requestKey 幂等、`reconcileStore` 提案遍与 `ProposalReviewService` 渠道；激活一次原子提交（`admitRootProposalIn`：根任务 + 根 run `active` + 消费记录）后做进程内绑定（session/闸/工作区/provider 绑定/通知）；幂等由消费记录与 reducer 的一次性建根闸双重保证；未激活时 `task_read`/`task_status` 报具名状态，终态根 session 由闸与状态双重拒绝迟到 intake；旧图根任务零改写。R0：装配开关 `evolution: 'off' | 'on'`（默认 off）决定九个 `evolution_*` 是否注册（off = 19 常驻工具含 `task_intake`/`escalate`，on = 28 名），root allow-list 由同一布尔派生（off 20 名 / on 29 名）、prompt 同源（off 无进化段），BB 句子移出通用 root prompt、领域指导归部署 skill。持久化记录：`docs/persistence-changes/2026-09-23-a0-root-intake.md`（`task/event` 声明未动，载荷引用类型新增 kind 联合，same-version，四根指纹未动）。
 
-## R1：真实运行验证 执行记录（2026-09-23；S1/S2/S3 均已尝试并通过，含一次执行事故如实记录）
+## R1：真实运行验证 执行记录（2026-09-23，原三场景记录）
+
+> 当前复核结论：返工（Q4/Q5）。S1/S2 的有效证据保留，S3 原判据不足、不能接受；S1 实际两次尝试，原汇总漏计首轮。以下原判决与用量保留为历史，正确口径与关闭条件见「补救交付复核」，不因本文保留原表而称当前已通过。
 
 > 本节由执行子代理起草、指挥方终审确认：S1 首轮证据（产物字节、store 事件链、usage 核算）经指挥方抽查复核一致。2026-09-23 指挥方授权取消 token 上限后，S2/S3 按一次尝试规则补跑完毕（见「授权变更」节）。本节如实记录一次执行事故（S1 被重跑一次、证据被覆盖，详见「失败轨迹」）。
 
@@ -555,6 +575,8 @@ driver 未在仓库内重建：两轮 driver 分别解包于 `/home/ROXY/code/bb
 
 ## R2：按证据整理运行时 执行与验收记录（2026-09-23）
 
+> 当前复核结论：取消写闸返工（Q1）；其余已成立的改动保留。原交付已在 `d5b0bb6` 提交（该提交虽以 docs 命名，实际含生产代码和测试），外层 `251d35d83c`。以下保留当时验收证据，A2 的原待派发结论已被文首表的待前置取代。
+
 | 字段 | 填写内容 |
 |---|---|
 | 状态、最近更新日期 | 已验收（2026-09-23；完成闸证据见下。独立复核已完成：非实现者子代理只读复核 + 2 组变异探针 + 2 个自建反例，结论通过，2 项文档级缺陷已由指挥方修复） |
@@ -562,7 +584,7 @@ driver 未在仓库内重建：两轮 driver 分别解包于 `/home/ROXY/code/bb
 | 开始日期 / 验收日期 | 2026-09-23 / 2026-09-23 |
 | 前置验收记录 | R1：Singularity HEAD `7595b6d`（S1/S2/S3 真实模型场景均通过，含一次执行事故如实记录，证据在 `/home/ROXY/code/bb_work/r1-evidence-2026-09-23/`）。开工前实跑复核该前置：`pnpm build` 通过；外层单测 44 文件 / 1454 项、集成 37 文件 / 258 项全绿；`verify-persistence` 4 根匹配；六包 tsc = task 0 / verifier 0 / agent-singularity 0 / agent-runtime 2 / task-runtime 3 / graphs 6（既有诊断，逐条与各票记录核对同源）。两个 git 工作区干净（外层仅 thirdparty 未跟踪内容）——前置成立 |
 | 修改前基线 | Singularity `7595b6d`（R1 验收提交），外层 harness `6428b8ae30`（同步 R1 验收指针） |
-| 交付版本 | **未提交**（工作区修改：`task-runtime/src/{index,workspace}.ts`、`task/src/{proposal,types}.ts`、`verifier/src/index.ts` 五个生产文件 + 四个测试文件 + 三个包的构建产物 `lib/` + 两处文档；提交由派发方决定） |
+| 交付版本 | Singularity `d5b0bb6` / 外层 `251d35d83c`；包含五个生产文件、四个测试文件、相关 lib 与文档。本轮复核修正原记录的「未提交」状态 |
 | 验收项对应 | A → 本记录「职责/调用方映射」三表 + 内存 handle 读点清单；B1（marker 顺序）→ `task-runtime/tests/unit/workspace.spec.ts` 新用例（先红 5/5 后绿 6/6）+ `workspace.ts` 调用链分析；B2（gate 相位重绑定）→ `tests/integration/a3-recovery.spec.ts` 新用例（先红后绿）+ `index.ts:lookupRun`；B3（O1）→ 本记录「O1 判定」段（无故障路径，保留并说明）；C1 → `verifier/src/index.ts` 撤回 `evidenceByVerifier` + 删除其 3 个测试；C2 → `task/src/types.ts:RunMcpServerBinding` 诊断语义标注；C3 → `task/src/proposal.ts` 三个无消费者导出改模块内；D → 本计划文首表第 9 行 + A 表 A2 行 + 本记录 D 节 |
 | 实际检查 | 1. `packages/singularity` 下 `pnpm build`：通过。2. 外层 `pnpm vitest run --project unit packages/singularity`：44 文件 / **1453 项**通过（基线 1454；B1 +1、C1 −2）。3. 外层 `pnpm vitest run --project integration packages/singularity`：37 文件 / **258 项**通过（基线 258；B2 +1、C1 −1）。4. `pnpm run verify-persistence`：OK，4 个事件根指纹匹配（未 `--write`；本轮无事件声明变化）。5. `git diff --check`：通过。6. 各包 `pnpm exec tsc --noEmit`：task 0、verifier 0、agent-singularity 0、agent-runtime 2、task-runtime 3（逐条核对与基线同源，其中 1 条因新增代码行号 5221→5247 位移）、graphs 6——与基线逐项一致，无新增。7. 复跑稳定性：`workspace.spec.ts` 连跑 6 次 21/21 全绿。8. 未运行：真实模型、BB 构建/仿真、部署、推送 |
 | 跨入口/组合反例 | B1 先红后绿：全栈并发 release（8 批次层 + 底层 run 同一 tick 全部合法 pop）→ 修复前 marker 残留（`markerExists()` 为 true，5/5 确定性复现，最后一次 rename 落在最后一次 delete 之后）→  Claim 被「marker names this process's own pid but this process holds no claim」永久拒绝；修复（按 workspace 的 marker 变更串行链）后 marker 缺席、可立即重新 claim，6/6 稳定。B2 先红后绿：真实 JSONL 重开 + 第二进程经 `runForSession` 重绑定（恢复驱动被 park 在父 session 的首次写 drain，无计时器）→ 修复前 `gate.phaseOf(ROOT)` 为 `undefined`（waiting_children 的父 session 不设防，写/bash/再分解/提交全部放行）→ 修复后由 store 记录派生相位、协调工具放行、写工具具名拒绝。合法正例：普通分解/提交/验收/取消/恢复/重开全链路与 off/all 审核不变（全量回归）。拒绝路径断言：B1 修复不改变任何拒绝语义（claim 仍拒绝、reconcileAdopt 仍是唯一 stale 接管者）；C1/C3 为纯公共面收敛，行为不变由全量回归证明 |
@@ -658,6 +680,8 @@ driver 未在仓库内重建：两轮 driver 分别解包于 `/home/ROXY/code/bb
 5. `task-runtime/src/workspace.ts` 新增私有 `queueMarkerMutation`（无外部面）；`WorkspaceRegistry` 公开方法签名与行为语义不变（marker 内容从「任意最后落地」变为「调用序最后」，对读取方更严格一致）。
 
 ### D. A2 最小合同复定（只写进本计划与 notes，不实施）
+
+> 以下为 R2 原交付提出的合同草案，当前待前置。返工关闭后核对授权读取域和动作前置，不直接执行，也不把草案与模板示例取并集扩大范围。gate 允许协调工具，不代表该身份/状态能成功执行其每个动作。
 
 **R1 取证——模型实际调用的读取面**：S1 根/worker 实际调用 = `task_intake`、`capability_list`、`task_read`（多次）、`task_status`、`task_decompose`、`task_verify`、`task_submit_result` + 文件/bash；S3 增加 `read`×3、`bash`×8。**从未被调用**：`task_review_pack`、`task_diagnose`、session_query 族、任何分页/搜索参数。结论：A2 的实际需要的读取场景 = (a) 当前任务契约与状态（`task_read` 已交付）；(b) 本树/本批次的任务与相位状态（`task_status` 已交付）；(c) **缺失的一块=「我在哪、我能合法做什么」**：run 的协调相位 → 合法动作投影（gate 放行表的可读化），根未激活视图已由 A0 交付。
 

@@ -175,7 +175,7 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 | Prompt 中的说法 | 代码侧必须提供 |
 |---|---|
 | “你负责当前任务” | session→run→task 精确绑定，禁止同 session 冒领其他 Run |
-| “读取根目标和相关决定” | **A0 已落地（2026-09-23，待验收）**：真实的根契约（`task_intake` 接受后持久化的 objective/criteria/assumptions/constraints/requiredCapabilities）与来源 session 引用（根提案 `identity.rootSessionId`，承载用户输入的 session 日志里有该输入）；`task_read`/`task_status` 在未激活时给具名状态而非代用目标。**A1 未建**：ContextView、祖先决定投影与原始 refs 的授权读取仍待建，不能只加一句“考虑全局” |
+| “读取根目标和相关决定” | **A0 已实现，来源/恢复返工**：真实的根契约（`task_intake` 接受后持久化的 objective/criteria/assumptions/constraints/requiredCapabilities）与session 定位（`identity.rootSessionId`；尚未校验实际请求/澄清的存在与归属，不能称可信来源已完成）；`task_read`/`task_status` 在未激活时给具名状态而非代用目标。**A1 未建**：ContextView、祖先决定投影与原始 refs 的授权读取仍待建，不能只加一句“考虑全局” |
 | “可查看邻域任务” | A2 的可见域检查、revision、分页与合法动作；不能只有全树字符串 |
 | “向父节点询问并等待” | A3 已落地非阻塞父循环与协调相位（waiting_children/submitted、写闸、显式提交；task-runtime/src/gate.ts、orchestrate.ts）；持久问题、问答唤醒与超时仍属 A4 |
 | “提交后由 verifier 判定” | A3 已落地：task_submit_result → RunPhaseChanged(submitted) 落库后 drainSession 排空在途写，再转 verifier 排他执行；idle 不作完成证据 |
@@ -196,7 +196,7 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 
 生成任务审核相关反例（T2/T3）：提示词/工具面出现“自行批准”或任何决定参数（模型不能自行生成可信 approvalRef）；worker 的工具面出现决定提案的工具或平台管理/HITL 工具；`off` 部署下模型被提示等待审核（应为正常分解）；`all` 下 prompt 未说明“等待审核时没有子任务、当前任务未分解”，或未说明“同内容重复提交答同一提案、修订是新提案”；审核等待期间模型被提示继续推进本任务（应为无法推进、可读可查可取消）。核对方法：真实装配后的工具面（`tests/integration/proposal-review.spec.ts` 的 worker/root 工具面用例）与渲染文本（`agent-singularity/src/proposal-review.ts` 的 §5 展示清单）。
 
-根入口与默认运行面相关反例（A0 + R0，2026-09-23 已验收）：`off` 组合的 root prompt 出现任何 `evolution_*` 名或晋升协议段（应为不注册也不提示）；`on` 组合缺少九个工具或漏掉协议段；prompt 与 allow-list 取自两个不同事实（本组由同一布尔派生，回归锚 `agent-runtime/tests/unit/agent-runtime.spec.ts`）；intake 段要求模型“自行接受/批准”契约或暗示可以绕过审核（部署的 intake 段明确“没有任何工具或参数能批准”）；未激活时提示模型 `task_decompose`（工具会具名拒绝，`task_read` 也报未激活）；worker 提示词/工具面出现 `task_intake`（它是 root 的路径，回归锚 `tests/integration/root-intake.spec.ts` 的 worker 工具面用例）。核对方法：真实装配后的 prompt 文本与工具面（`agent-runtime` 单测按 composition 逐名断言 allow-list、`assembly.spec.ts` 断言注册面），不用匹配自然语言句子证明状态机。
+根入口与默认运行面相关反例（R0 已有证据保留；A0 Q2/Q3 返工）：`off` 组合的 root prompt 出现任何 `evolution_*` 名或晋升协议段（应为不注册也不提示）；`on` 组合缺少九个工具或漏掉协议段；prompt 与 allow-list 取自两个不同事实（本组由同一布尔派生，回归锚 `agent-runtime/tests/unit/agent-runtime.spec.ts`）；intake 段要求模型“自行接受/批准”契约或暗示可以绕过审核（部署的 intake 段明确“没有任何工具或参数能批准”）；未激活时提示模型 `task_decompose`（工具会具名拒绝，`task_read` 也报未激活）；worker 提示词/工具面出现 `task_intake`（它是 root 的路径，回归锚 `tests/integration/root-intake.spec.ts` 的 worker 工具面用例）。核对方法：真实装配后的 prompt 文本与工具面（`agent-runtime` 单测按 composition 逐名断言 allow-list、`assembly.spec.ts` 断言注册面），不用匹配自然语言句子证明状态机。
 
 协调组合态必须覆盖：waiting_children 同时有向祖先提出的阻塞问题；仅收到部分答案或 unresolved；有效问答在 inbox claim 后遇到 pre-step reject/崩溃。恢复后模型仍能读到未处理事实，主相位、batch 与写权限不因消息重放改变。waiting_children 的写拒绝以运行时闸在真实 tools waterfall 上的实际 deny 为证据（A3 起），不能只看 assembled prompt 未挂载。
 
