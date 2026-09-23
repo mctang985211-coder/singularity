@@ -1,6 +1,6 @@
 # VRTC-KISS 建设计划
 
-更新：2026-09-23。保留原文件名作为稳定入口；原临时计划在 [历史快照](history/2026-09-21-vrtc-plan-snapshot.md)。
+更新：2026-09-24。保留原文件名作为稳定入口；原临时计划在 [历史快照](history/2026-09-21-vrtc-plan-snapshot.md)。
 方向与实现事实以 [工作指南](singularity-harness-guide.md)为准；本文仅描述建设顺序、代码落点与可验收结果。
 基线备份：Singularity `b00915c`，外层 harness `6c5eb49894`。
 
@@ -24,8 +24,8 @@
 | 4 | A3：非阻塞运行与恢复 | 已验收（2026-09-22，独立子代理复核 + 复核修复回归） | Kimi Code 主代理（5 阶段实现/测试子代理 + 1 独立复核子代理 + 1 复核修复子代理） | 见「A3：非阻塞运行与恢复 执行与验收记录」 | 非阻塞推进、工作区写入归属、显式提交、取消/恢复、根预算与普通/replay 一致性完整 |
 | 5 | T2 + T3：契约审核与恢复（一个交付组） | 已验收（2026-09-23，双模型并行独立复核 + 综合复核确认） | Kimi Code 主代理指挥 + 4 阶段实现子代理（A 提案合同层 / B task-runtime 生命周期、重检、幂等与恢复 / C 工具面、审批渠道与 prompt / D 集成级验收、模型协议 fixture 与文档收尾）+ 2 并行独立复核子代理 + 1 综合复核子代理 | 见「T2+T3：契约审核与恢复 执行与验收记录」 | off/all、审核持久化、批准后重检及崩溃恢复一起验收，不单独交付不可恢复的 all |
 | 6 | A0 + R0：根入口与默认运行面（本票返工 A0） | 已验收（2026-09-23，进度审核复核 + 全量回归实跑） | Kimi Code 主代理（Q2/Q3 各一个实现子代理 + 1 个只读独立复核子代理，复核后一轮缺陷修复） | 原记录 +「补救交付复核」Q2/Q3 +「A0 返工（Q2/Q3）执行与验收记录」 | 已满足：根来源/归属（store↔session、顶层会话、本人消息）与 adoptRoot 恢复反例关闭，R0 证据保留，全量单测/集成与独立复核通过。进度审核已确认，下一项仅派第 7 项 |
-| 7 | R2：按证据整理运行时（当前只修取消写闸） | 已交付待进度审核（2026-09-24 补充返工：`8f9086e`，Q1 两条轨迹关闭） | Kimi Code 主代理（两轮各 1 个实现子代理 + 1 个只读独立复核子代理，复核后由主代理修测试证据口径/加固断言） | 原记录 +「补救交付复核」Q1 +「R2 Q1 返工执行与验收记录」+「R2 进度审核（2026-09-24）」+「R2 Q1 补充返工执行与验收记录」；[专项 prompt](execution-prompts/06-r2-cancellation-gate.md) | 已满足（待审核确认）：窗口内读取与跨取消完成点的陈旧读取都不能重开闸（两例都先在未修复实现上红）、重启恢复正例保留（C2）、合法 active 与既有回归通过（C3）、只 `cancelGraph` 存在落盘前窗口且另两条裸写绑定门如实记为未关闭（C4）；已完成的接口/marker 收敛未重做 |
-| 8 | R1：真实运行验证（纠正 S3 与实验账） | 返工，待第 7 项经进度审核验收（A0 已验收；R2 补充返工已交付待审） | 待填 | 原记录 +「补救交付复核」Q4/Q5；[补验证 prompt 与 V1–V6](execution-prompts/07-r1-supplemental-validation.md) | 先修夹具及判据，再补必要模型验证；保留 S1/S2 证据，全部尝试计入用量；材料已备不代表获准越过 R2 |
+| 7 | R2：按证据整理运行时（本轮只修取消写闸） | 已验收（2026-09-24，补充返工 `8f9086e` 经进度复核） | Kimi Code 主代理（两轮实现/复核）+ 本轮进度复核 | 原记录 +「R2 Q1 补充返工执行与验收记录」+「R2 补充返工进度验收（2026-09-24）」；[R2 合同](execution-prompts/06-r2-cancellation-gate.md) | C1 两条查询交错、C2 重启恢复、C3 合法 active、C4 相关调用顺序均通过；已记录未证实的取消边界不冒充本票保证 |
+| 8 | R1：真实运行验证（纠正 S3 与实验账） | 待派发（R2 前置已验收；Q4/Q5 尚未修复） | 待填 | 原记录 +「补救交付复核」Q4/Q5；[补验证 prompt 与 V1–V6](execution-prompts/07-r1-supplemental-validation.md) | 先修夹具及判据，再补必要模型验证；保留 S1/S2 证据，全部尝试计入用量；本票完成后再审 A2 |
 | 9 | A2：任务导航与合法动作 | 待前置 | 待填 | R2 记录 D 节为合同草案；补救复核关闭后核对 | 第 6–8 项重新验收后再派；读取权限和实际动作检查一致，不以 gate 放行集合冒充全部动作前置 |
 | 10 | A1：全局上下文投影 | 待复定 | 待填 | 待填 | 复用 A2 读取域，根目标/贡献/必要证据有来源，恢复与压缩不丢核心事实；不照搬字段全集 |
 | 11 | A4：父子澄清 | 待复定 | 待填 | 待填 | 父子与三层问答、消息故障恢复、写闸及多阻塞处置完整 |
@@ -69,7 +69,7 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 6 项 A0 的定向返工已验收（Q2/Q3 关闭，见下节进度审核记录）；**第 7 项 R2 的 Q1 经 2026-09-24 进度审核否决后已补充返工并交付 `8f9086e`**（见「R2 Q1 补充返工执行与验收记录」，停在进度审核）。**当前不派发新票**；R2 经进度审核验收后，下一票是 [第 8 项 R1 补验证](execution-prompts/07-r1-supplemental-validation.md)。原建设顺序为 A0 + R0 → R1 → R2；本次因 R2 写闸回归影响真实运行，返工顺序调整为表中的 A0 → R2 → R1，A2 暂停。Task 与协作方向仍见 [Task 指导](task-contract-construction-guide.md)、[深入架构](exploration-evolution-architecture.md)与 [Prompt 合同](agent-prompt-contracts.md)。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 6 项 A0 已验收；第 7 项 R2 的 Q1 补充返工 `8f9086e` 于 2026-09-24 经进度复核验收。当前可派 [第 8 项 R1 补验证](execution-prompts/07-r1-supplemental-validation.md)，一次只执行这一票；A2 仍待 R1 验收。原建设顺序为 A0 + R0 → R1 → R2；因 R2 写闸回归影响真实运行，返工顺序调整为表中的 A0 → R2 → R1。Task 与协作方向仍见 [Task 指导](task-contract-construction-guide.md)、[深入架构](exploration-evolution-architecture.md)与 [Prompt 合同](agent-prompt-contracts.md)。
 
 ### 补救交付复核（2026-09-23，d5b0bb6）
 
@@ -85,7 +85,7 @@ S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进
 
 本轮实跑：`pnpm build` 通过；外层 unit 44 文件 / 1453 项、integration 37 文件 / 258 项通过；`pnpm run verify-persistence` 4 根匹配。主审临时集成探针在修正输入 schema/工具参数并使用挂载真实 gate 的 fixture 后，Q1/Q2 均按预期失败（Q1 的 graph_spawn 工具体为 stand-in，真实 gate/tools 流水线决定是否到达它，未创建真实图）；未使用初期夹具错误作缺陷证据，探针验证后删除。Q3 由独立子代理用真实 TaskService/TaskRuntime、内存事件持久层和新 runtime 重开复现；生产 JSONL 回归由返工补齐。未修改生产实现；全绿只能证明现有覆盖，不能覆盖这些新增反例。 文档检查：44 份 Markdown 围栏、100 个本地链接目标、16 份 JSON 解析与 `git diff --check` 通过。
 
-本轮建设粒度：A0 已验收；R2 Q1 经 2026-09-24 进度审核否决后已补充返工交付（两轮各「一个实现子代理 + 一个只读独立复核子代理 + 主代理集成/全量/文档」），待进度审核；R1 补验证材料已准备，须等第 7 项经进度审核验收。R1 先交接夹具与判据，再执行一次真实 S3，主代理负责集成、历史账与 guide，不把全部工作压给一个子代理。进度审核本身用[进度审核与下一票派发 prompt](execution-prompts/progress-review-and-dispatch.md)，它只审核与准备材料，不执行代码任务。
+本轮建设粒度：A0 与 R2 Q1 已验收；下一票只执行 R1 Q4/Q5。R1 先交接夹具与判据，再执行一次真实 S3，主代理负责集成、历史账与 guide，不把全部工作压给一个子代理。进度审核本身用[进度审核与下一票派发 prompt](execution-prompts/progress-review-and-dispatch.md)，它只审核与准备材料，不执行代码任务。
 
 ### 补救范围与验收合同（原合同保留，当前返工按上表）
 
@@ -784,6 +784,13 @@ driver 未在仓库内重建：两轮 driver 分别解包于 `/home/ROXY/code/bb
 | 下一项 | 唯一顺序第 8 项 R1 补验证（Q4/Q5）：**前置为第 7 项经进度审核验收**，使用 [补验证 prompt 与 V1–V6](execution-prompts/07-r1-supplemental-validation.md)；本票不执行，也未并行启动 |
 
 补充返工的「问题 → 入口 → 验收」映射（实施前固定）：问题=store 读取与其相位应用不是一次原子动作，读取跨越了一个决定（取消完成并落盘、`closingStores` 已清）时，读回的旧 `active` 会在决定之后被应用；入口=`gatePhaseFromStore`/`lookupRun` 两分支 + 真实查询路径 `task_proposal_read → proposalStoreFor → runForSession`；修复=把「本进程对该 session 做过几次相位决定」作为读取的有效性 token（`ExecutionGate.decisions`/`decisionToken`/`applyStorePhase`，token 在读取前取、应用时比对，不匹配即丢弃），与既有 `closingStores` 守卫各覆盖一条轨迹；验收=新增跨完成点反例（先红后绿、真实管线断言写/spawn 仍拒且工具体零副作用）+ 原 C1 窗口内例 + C2/C3 回归 + C4 与「store 派生相位」族群核对。
+
+### R2 补充返工进度验收（2026-09-24）
+
+- **结论：第 7 项 R2 Q1 已验收，可派第 8 项 R1 Q4/Q5。** 被审实现为 `8f9086e`，文档交付为 `40aabb8`；修改本记录前备份 Singularity `e9f9a1b` / 外层 `a506806`。本轮没有修改生产代码、运行真实模型或提前实施 R1。
+- 针对上次失败轨迹，`lookupRun` 两条绑定路径均在读取前取执行闸决定 token；`cancelGraph` 设置 terminal 会递增该 token，跨完成点返回的旧 active 结果由 `applyStorePhase` 丢弃。原 `closingStores` 守卫仍覆盖取消已关闸而尚未落盘的读取。两种交错各有真实工具管线集成反例；新例确认真实 store 已 cancelled、读取可回答、随后 `graph_spawn` 被拒且测试工具体零执行。恢复时的 `waiting_children`/terminal 及正常 active 写入仍有正例。
+- 本轮实跑 `pnpm build` 通过；unit 44 文件 / **1461** 项、integration 38 文件 / **268** 项通过；`pnpm run verify-persistence` 四个事件根匹配；`git diff cecc5b6...40aabb8 --check` 与工作区检查通过。构建包含 agent-singularity 的严格类型检查。独立只读 Spec 复核另跑取消/恢复定向 2 文件 / 17 项通过，未发现本票合同内可达违约；Standards 复核未见硬违约，仅指出 `applyStorePhase` 的 boolean 返回值无生产消费者，属非阻塞的简化建议。
+- 本次验收**仅关闭 Q1 查询回填的两条已证实交错**。原记录的 spawn 续跑、`adoptRoot`/`rebindActivatedRoot` 裸写、同 store 并发直调 cancelGraph 与 unload 边界未由本轮证明安全；没有把它们改写为已验收保证。R1 聚焦 S3 澄清判据和实验账，继续按 [V1–V6 合同](execution-prompts/07-r1-supplemental-validation.md) 独立验收；A2 不因 R2 通过而提前派发。
 
 ## S1-C：Task 只提需求，Run 固定实现
 
