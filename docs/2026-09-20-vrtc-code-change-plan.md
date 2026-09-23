@@ -23,8 +23,8 @@
 | 3 | S1-C：能力预检与版本绑定 | 已验收（2026-09-22，独立子代理复核） | Kimi Code 主代理（5 实现子代理 + 1 独立复核子代理 + 1 复核修复子代理） | 见「S1-C：能力预检与版本绑定 执行与验收记录」 | provider 预检、侧车契约、Run 绑定内容与旧版本读取完整；所有实际支持入口共用校验 |
 | 4 | A3：非阻塞运行与恢复 | 已验收（2026-09-22，独立子代理复核 + 复核修复回归） | Kimi Code 主代理（5 阶段实现/测试子代理 + 1 独立复核子代理 + 1 复核修复子代理） | 见「A3：非阻塞运行与恢复 执行与验收记录」 | 非阻塞推进、工作区写入归属、显式提交、取消/恢复、根预算与普通/replay 一致性完整 |
 | 5 | T2 + T3：契约审核与恢复（一个交付组） | 已验收（2026-09-23，双模型并行独立复核 + 综合复核确认） | Kimi Code 主代理指挥 + 4 阶段实现子代理（A 提案合同层 / B task-runtime 生命周期、重检、幂等与恢复 / C 工具面、审批渠道与 prompt / D 集成级验收、模型协议 fixture 与文档收尾）+ 2 并行独立复核子代理 + 1 综合复核子代理 | 见「T2+T3：契约审核与恢复 执行与验收记录」 | off/all、审核持久化、批准后重检及崩溃恢复一起验收，不单独交付不可恢复的 all |
-| 6 | A0 + R0：根入口与默认运行面（本票返工 A0） | 返工完成，待验收（2026-09-23 返工实跑 + 独立子代理复核通过，未由人类验收） | Kimi Code 主代理（Q2/Q3 各一个实现子代理 + 1 个只读独立复核子代理，复核后一轮缺陷修复） | 原记录 +「补救交付复核」Q2/Q3 +「A0 返工（Q2/Q3）执行与验收记录」 | 已满足：根来源/归属（store↔session、顶层会话、本人消息）与 adoptRoot 恢复反例关闭，R0 证据保留，全量单测/集成与独立复核通过。待进度审核确认后派第 7 项 |
-| 7 | R2：按证据整理运行时（当前只修取消写闸） | 返工，待第 6 项验收 | 待填 | 原记录 +「补救交付复核」Q1 | 查询不得弱化取消/收敛中的闸；重启恢复正例保留；已完成的接口/marker 收敛不重做 |
+| 6 | A0 + R0：根入口与默认运行面（本票返工 A0） | 已验收（2026-09-23，进度审核复核 + 全量回归实跑） | Kimi Code 主代理（Q2/Q3 各一个实现子代理 + 1 个只读独立复核子代理，复核后一轮缺陷修复） | 原记录 +「补救交付复核」Q2/Q3 +「A0 返工（Q2/Q3）执行与验收记录」 | 已满足：根来源/归属（store↔session、顶层会话、本人消息）与 adoptRoot 恢复反例关闭，R0 证据保留，全量单测/集成与独立复核通过。进度审核已确认，下一项仅派第 7 项 |
+| 7 | R2：按证据整理运行时（当前只修取消写闸） | 待派发（返工 Q1，A0 前置已验收） | 待填 | 原记录 +「补救交付复核」Q1；[专项 prompt](execution-prompts/06-r2-cancellation-gate.md) | 查询不得弱化取消/收敛中的闸；重启恢复正例保留；已完成的接口/marker 收敛不重做 |
 | 8 | R1：真实运行验证（纠正 S3 与实验账） | 返工，待第 6–7 项 | 待填 | 原记录 +「补救交付复核」Q4/Q5 | 先修夹具及判据，再补必要模型验证；保留 S1/S2 证据，全部尝试计入用量 |
 | 9 | A2：任务导航与合法动作 | 待前置 | 待填 | R2 记录 D 节为合同草案；补救复核关闭后核对 | 第 6–8 项重新验收后再派；读取权限和实际动作检查一致，不以 gate 放行集合冒充全部动作前置 |
 | 10 | A1：全局上下文投影 | 待复定 | 待填 | 待填 | 复用 A2 读取域，根目标/贡献/必要证据有来源，恢复与压缩不丢核心事实；不照搬字段全集 |
@@ -69,7 +69,7 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。当前第 6 项 A0 的定向返工已完成（Q2/Q3 关闭，见下节记录），按指挥合同停在此处等进度审核验收，再由审核准备第 7 项 R2。原建设顺序为 A0 + R0 → R1 → R2；本次因 R2 写闸回归影响真实运行，返工顺序调整为表中的 A0 → R2 → R1，A2 暂停。Task 与协作方向仍见 [Task 指导](task-contract-construction-guide.md)、[深入架构](exploration-evolution-architecture.md)与 [Prompt 合同](agent-prompt-contracts.md)。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 6 项 A0 的定向返工已验收（Q2/Q3 关闭，见下节进度审核记录），当前只派 [第 7 项 R2](execution-prompts/06-r2-cancellation-gate.md)。原建设顺序为 A0 + R0 → R1 → R2；本次因 R2 写闸回归影响真实运行，返工顺序调整为表中的 A0 → R2 → R1，A2 暂停。Task 与协作方向仍见 [Task 指导](task-contract-construction-guide.md)、[深入架构](exploration-evolution-architecture.md)与 [Prompt 合同](agent-prompt-contracts.md)。
 
 ### 补救交付复核（2026-09-23，d5b0bb6）
 
@@ -490,16 +490,16 @@ T1、S1-V 切片 2、S1-C、A3、T2/T3 已交付。根契约入口已实现，A0
 
 ## A0 返工（Q2/Q3）执行与验收记录（2026-09-23）
 
-> 本记录只覆盖第 6 项 A0 的定向返工（计划「补救交付复核」Q2/Q3）。R0 证据按原记录保留、本轮未改；原 A0 交付的其余验收项（§4 矩阵 16 行）沿用上节记录与其复核证据。整票仍在工作区未提交。
+> 本记录只覆盖第 6 项 A0 的定向返工（计划「补救交付复核」Q2/Q3）。R0 证据按原记录保留、本轮未改；原 A0 交付的其余验收项（§4 矩阵 16 行）沿用上节记录与其复核证据。交付现已保存为 `cce3157` / 外层 `2c299b7`；下表保留实现方记录，后附本轮进度审核实测结果。
 
 | 字段 | 填写内容 |
 |---|---|
-| 状态、最近更新日期 | **返工完成，待验收**（2026-09-23；完成闸证据见下，独立复核为子代理只读 + 对抗探针两轮，未由人类验收） |
+| 状态、最近更新日期 | **已验收**（2026-09-23；本轮进度审核代码复核 + 回归实跑，非人类逐项验收；实现方原独立复核记录保留） |
 | 执行 agent / 任务链接 | Kimi Code 主代理指挥与集成；Q2（来源归属）一个实现子代理、Q3（adoptRoot 恢复入口）一个实现子代理、复核缺陷修复一个实现子代理；1 个只读独立复核子代理（两轮：先攻出 D1–D5，修复后复验关闭） |
-| 开始日期 / 验收日期 | 2026-09-23 / 2026-09-23（待进度审核确认） |
+| 开始日期 / 验收日期 | 2026-09-23 / 2026-09-23（进度审核已确认） |
 | 前置验收记录 | 复核基线 `a4c1da0` / 外层 `fa4bc09`，返工开工基线 Singularity `de85ae0` / 外层 `3c4b4dbb7c`（仅文档检查点）。开工核对：两个仓库工作区干净（外层仅 `thirdparty/deepseek-harness` 的既有未跟踪内容），HEAD 与派发合同一致；第 6 项原验收证据、R0 工具面/allow-list 回归与 R2/R1 的记录未受影响 |
 | 修改前基线 | Singularity `de85ae0`（A0 返工基线，含文档复核检查点），外层 harness `3c4b4dbb7c` |
-| 交付版本 | **未提交**：工作区相对 `de85ae0` 共 29 条路径（28 改 + 1 新增 `task-runtime/tests/support/person-request.ts`），1523 insertions / 74 deletions；未推送、未部署。关键文件 sha256（前 20 位）：`task-runtime/src/index.ts ad3316f5`、`agent-runtime/src/types.ts 426cbb71`、`agent-runtime/src/index.ts 3cabe3b9`、`agent-singularity/src/tools/task-intake.ts 762b3f7d`、`tests/integration/root-intake.spec.ts cd529248`、`tests/integration/root-intake-recovery.spec.ts b9dead5f`、`tests/support/scripted-loop.ts bae0c560`、`tests/support/run-stack.ts d6cc5466` |
+| 交付版本 | `cce3157` / 外层 `2c299b7`：进度审核修改文档前保存完整交付（相对 `de85ae0` 37 文件，1744 insertions / 109 deletions，含来源持久化说明和测试 helper）；未推送、未部署。取代实现方收尾前的未提交文件数及短摘要 |
 | 验收项对应（Q2 → 入口 → 测试） | ① store↔session 归属（`assertRootContractOrigin`）→ `submitRootProposalOnce`（开 store 之前）与 `continueRootProposalIn`（阶梯首次写入之前）→ 单测 `proposal-lifecycle.spec.ts`「the root contract's origin」（跨归属提案直写 store 后续跑仍拒绝、零事件）+ 集成 `root-intake.spec.ts`「refuses a direct service call that hands in another session's store」（两个 store 都未创建）；② 顶层会话（`header.origin === 'subagent'` / `delegationDepth > 0`）→ 同上两处 → 集成「refuses a root for a spawned session's store」（worker 会话直调被具名拒绝、零副作用）；③ 本人请求来源（`user/message` 且 `source.kind === 'user'`，经 `sessionPersistence` 读）→ 同上 → 集成「refuses a contract the model offers for a session whose log holds only the runtime's own notices」「refuses a direct service call for a session that never asked」+ 单测同组（无本人消息、仅通知、日志不可读/无 reader 三种具名拒绝）；④ 生产者归因（`RuntimePromptSource` = `runtime-prompt`，`spawn`/`prompt` 两处不再冒充人类输入）→ `agent-runtime/src/types.ts`、`agent-runtime/src/index.ts` → 单测 `agent-runtime.spec.ts`（两个门都带自有来源）+ 集成「refuses a contract for a session whose only message is the deployment's own setup prompt」（工具与直调双入口）；⑤ 恢复不替坏来源开闸 → `reconcileRootProposal` 顶部同检查 → 单测 `proposal-lifecycle.spec.ts` 的 D3 用例（待审伪造记录既不再被问、也不被续跑，落 `unresolvedProposals`） |
 | 验收项对应（Q3 → 入口 → 测试） | ① 批准已存未激活 → `adoptRoot` 无根时跑既有 `reconcileStore` 再读回绑定 → 集成 `root-intake-recovery.spec.ts`「continues an approval recorded before the crash…」（崩溃后只调 `adoptRoot`，无显式 reconcile；一次消费、二次调用同 ids）；② `pending_review` 重发 → 同入口的提案遍 → 同文件「keeps a waiting contract waiting across a restart…」（`trigger: recovered` 的 ask、零 task/run/spawn）；③ 空 store 不造任务 → `nothingAdoptedDetail` 的负答案 → 同文件「answers a store with nothing to recover as nothing to adopt, and mints nothing」（0 task/run/proposal、无 task 事件、二次调用同样零写入）；④ 已激活幂等 / 旧图不改历史 → 同文件既有两例（并强化：旧图 store 日志逐字节相同、无提案）；⑤ 夹具纪律 → `reopen` 改为只经 `adoptRoot`（`openStore` + `reconcileStore` 的显式调用在该文件已不存在） |
 | 实际检查 | 1. `packages/singularity` 下 `pnpm build`：通过（含 `agent-singularity build$ tsc --noEmit && tsdown`）。2. 外层 `pnpm vitest run --project unit packages/singularity`：**44 文件 / 1459 项**通过（返工前基线 1453）。3. 外层 `pnpm vitest run --project integration packages/singularity`：**37 文件 / 265 项**通过（基线 258；`root-intake` 11→17、`root-intake-recovery` 7→8）。4. `pnpm run verify-persistence`：OK，4 个事件根指纹匹配（未 `--write`；本轮无事件/字段变化）。5. `git diff --check`：通过。6. `agent-runtime` 与 `task-runtime` 的 `tsc --noEmit`：2 / 3 处既有诊断，与基线同源（`agent-runtime.spec.ts` 的既有断言因本票新增用例使文件增长、行号由基线 403 移至 440；`task-runtime/src/index.ts` 与 `task/src/index.ts` 的既有项未动），改动行内无新增；`task`/`verifier`/`agent-singularity` 0 处、`graphs` 6 处既有，与各票记录一致。7. 未运行：真实模型、BB 构建/仿真、部署、推送 |
@@ -508,10 +508,18 @@ T1、S1-V 切片 2、S1-C、A3、T2/T3 已交付。根契约入口已实现，A0
 | 文档同步 | 主 guide：本次新增 §5.13（返工范围/源码锚/测试锚/边界）、§1 阶段判断、§3 状态与「根契约入口」段、§4.1 根目标入口行、§4.2 G11/G15；本计划：文首表第 6 行、入口段、Q2/Q3 关闭注、本记录；`docs/2026-09-23-a0-root-intake-design.md`（状态与 §1.10/§3 实现事实）；`docs/execution-prompts/README.md`、`exploration-evolution-architecture.md`、`agent-prompt-contracts.md`、`task-contract-construction-guide.md` 的当前状态句。历史记录原文未改。无事件/字段变化（四根指纹未动）；`user/message` 载荷的来源标记新增 `runtime-prompt` 属传递类型变更，按纪律另记 `docs/persistence-changes/2026-09-23-runtime-prompt-source.md`（非 SessionEventMap 根，无 schema 兄弟文件） |
 | 模拟与未覆盖范围 | 未调用真实模型、未跑 BB 仿真、未部署、未推送。集成用真实 DSH loop + scripted provider（真实 `task_intake`、真实 `TaskRuntime`/`AgentRuntime`/`ReviewChannel`/`VerifierRegistry`、真实 checkout），恢复用真实 JSONL 重开；真实模型语义验证仍属 R1。未覆盖：非 graph 归属的**顶层**会话直调（服务层不区分，工具层 graph/root 规则会拒；受信调用者边界）、宿主自身伪造 `user/message`（归因纪律而非证明）、重复 `adoptRoot` 会重复询问（D4，无决策不外泄、不激活）、`decideProposal` 对来源不成立的历史记录仍写决定（激活被拒）、`task_proposal_cancel` 未激活态仍是 run 解析（既有边界）、**澄清的两条通道**：人在会话里输入的答复是 `user` 消息（满足来源规则），经 `hitl_ask` 等工具通道返回的答复是工具结果、`approval/asked`/`approval/decided` 是运行时记录的批准决定（审核渠道与自动答复者都产生），二者都不作为「用户请求」接受 (fail-closed；正常流程里用户目标本就是本人消息，R1 若遇该形态再复定) |
 | 未解决缺陷 / 阻塞 | 无未解决缺陷。保留边界（如实记录，非承诺缺口）：(1) 来源闸的强度是「归因纪律 + 顶层会话」，DSH 把 `source.kind === 'user'` 定义为宿主证实的人类输入，宿主级伪造不在机械检查范围；(2) 服务层不校验「该顶层会话是某 graph 的 root session」，该规则仍在 `task_intake` 工具（模型面），直调属受信代码；(3) 会话日志不可读 ⇒ 不能激活/不能恢复等待中的根契约（fail-closed 的代价，需在部署上保证日志可用）；(4) D4 询问噪声；(5) 本票未改 R2/R1 的已知缺陷（Q1/Q4/Q5 仍待各自返工） |
-| 最终验收结论 | **通过（返工关闭）**——依据：Q2/Q3 全部关闭条件有实际先红后绿反例与合法正例、全量单测 1459 / 集成 265 与 `verify-persistence`、六包 tsc 与基线逐条一致、两轮独立只读复核（首轮攻出 3 项实质缺陷并全部修复回归，复验关闭）；确认者：主代理 + 独立复核子代理，未由人类验收；整票待进度审核 |
-| 下一项 | 唯一顺序第 7 项 R2（按证据整理运行时）：**前置 = 第 6 项经进度审核验收**。R2 的返工点见「补救交付复核」Q1（`gatePhaseFromStore` 在取消未持久化时把 terminal 回写为 active；查询不得弱化取消/收敛闸），其余已成立改动保留；之后才是 R1 补验证（Q4/Q5）。本票不实施 R2/R1/A2 |
+| 最终验收结论 | **通过（返工关闭）**——依据：Q2/Q3 全部关闭条件有实际先红后绿反例与合法正例、全量单测 1459 / 集成 265 与 `verify-persistence`、六包 tsc 与基线逐条一致、两轮独立只读复核（首轮攻出 3 项实质缺陷并全部修复回归，复验关闭）；确认者：主代理 + 独立复核子代理，未由人类验收；整票已由本轮进度审核确认（见下） |
+| 下一项 | 唯一顺序第 7 项 R2（按证据整理运行时）：**前置已满足：第 6 项经进度审核验收**，使用 [R2 专项 prompt](execution-prompts/06-r2-cancellation-gate.md)。R2 的返工点见「补救交付复核」Q1（`gatePhaseFromStore` 在取消未持久化时把 terminal 回写为 active；查询不得弱化取消/收敛闸），其余已成立改动保留；之后才是 R1 补验证（Q4/Q5）。本票不实施 R2/R1/A2 |
 
 实施事实（返工交付，供复核与后续票引用）：根契约的**来源与归属**由统一服务入口 `submitRootContractProposal`/`intakeRootContract` 与激活阶梯 `continueRootProposalIn`、恢复提案遍 `reconcileRootProposal` 三处共用的 `assertRootContractOrigin` 判定——(a) `storeId === rootTaskStoreId(rootSessionId)`；(b) 会话为顶层会话（头部 `origin !== 'subagent'` 且 `delegationDepth` 为 0/缺省）；(c) 会话自身持久日志中存在 `user/message` 且 `source.kind === 'user'`（DSH 的宿主证实人类输入标记）；日志不可读/无 reader/会话缺失 → 具名拒绝，全部发生在该入口首次写入之前（拒绝不创建 store）。生产者侧：`AgentRuntime.spawn`/`prompt` 改用本运行时自有来源 `RuntimePromptSource`（合并扩展 `@deepseek-ai/dsh-llm` 的 `MessageSourceMap`，`{ kind: 'runtime-prompt', channel: 'spawn' | 'prompt' }`），不再冒充人类输入；`notify` 仍是 `plugin`。`adoptRoot`：无根任务时先跑 `reconcileStore`（提案遍/运行遍/工作区）再读回——`ready`/`approved` 由既有续跑阶梯激活并绑定、`pending_review` 重发、否则返回 `{ adopted: false }` 并在 `detail` 里点名仍未关闭的提案（`nothingAdoptedDetail`），空 store 零写入。`RootAdoption` 类型未改，无新增事件/字段/导出（`RuntimePromptSource` 为可观测来源词汇）。
+
+### A0 进度审核确认（2026-09-23）
+
+- 被审交付：`de85ae0..cce3157`，外层保存为 `2c299b7`；先保存交付再修改指南。本轮不修改生产代码、不实施 R2、不调用真实模型。
+- 结论：第 6 项 A0 Q2/Q3 验收通过，R0 既有证据保留。主代理检查来源校验在提交、续跑和恢复前的实际调用与运行时消息归因；只读子代理复核 `graphs.create → adoptRoot → reconcileStore → reconcileRootProposal` 及公共入口恢复断言，未发现新的阻塞缺陷。子代理本轮只做静态复核，动态回归由主代理执行；没有把实现方的历史对抗探针记成本轮新实跑。
+- 本轮实跑：Singularity `pnpm build` 通过；外层 `pnpm vitest run --project unit packages/singularity` 为 44 文件 / 1459 项通过，`pnpm vitest run --project integration packages/singularity` 为 37 文件 / 265 项通过；`pnpm run verify-persistence` 四根匹配；agent-singularity `pnpm exec tsc --noEmit` 通过。构建后无生成文件差异。本轮不重跑其他包基线类型诊断，不声称全 workspace 严格类型检查全绿。
+- 保留限制：来源检查证明同一顶层会话存在被归因为用户的消息，不证明每条 AC 与用户意图语义一致；直调服务属受信宿主边界。历史已写为 user 的提示不被追溯重分类。自然语言歧义与澄清效果仍需 R1；没有另建需求认证系统。Q3 的公共入口恢复由集成测试覆盖，本轮未新增并发 adoptRoot 或恢复途中日志失读探针。
+- 下一项：第 7 项 R2 Q1 已可派发，使用 [R2 专项 prompt](execution-prompts/06-r2-cancellation-gate.md)。本轮只准备派发材料，不实施；R2 验收后再派 R1 Q4/Q5，补救尚未全部关闭。
 
 ## R1：真实运行验证 执行记录（2026-09-23，原三场景记录）
 
