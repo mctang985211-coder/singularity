@@ -15,6 +15,8 @@
 
 ## 当前派发
 
+已预备 [R1 补验证 prompt 与验收指标 V1–V6](07-r1-supplemental-validation.md)，仅在 R2 经进度审核验收后派发；本次只准备材料，未调用真实模型。它保留 S1/S2 历史证据，限定 S3 澄清补验证与全部尝试的实验账更正，不与 R2 并行执行。
+
 下一项见[建设计划](../2026-09-20-vrtc-code-change-plan.md)文首唯一顺序及「补救交付复核」。当前返工顺序为 A0 → R2 → R1：第 6 项 A0 的返工（Q2/Q3）已验收；使用 [R2 单票 prompt](06-r2-cancellation-gate.md) 修复 Q1，须先于 R1 补验证；一次只派一票，已有成立的交付证据保留。A2 不因原记录写过「待派发」而自动获得实施授权。
 
 全局上下文、父子澄清、任务发现和 supervisor 协议见 [深入架构](../exploration-evolution-architecture.md) §10，角色参考见 [Prompt 合同](../agent-prompt-contracts.md)。A3 已解除父工具长等待，但 A4 问答未建。S4-E 先于自动候选执行；基础执行的真实验证 R1 不依赖 S4-E。每次只执行当前行的有限合同，不另建提前运行版，也不逐字部署全部角色模板。
