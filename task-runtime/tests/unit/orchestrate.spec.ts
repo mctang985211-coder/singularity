@@ -7,6 +7,7 @@ import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-se
 import type { AcceptanceCriterion, EvidenceBundle, TaskEvent, TaskInstance, TaskRun, VerificationResult } from '../../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
 import { CompositeVerifier } from '../../../verifier/src/composite-verifier.ts'
+import { requestedSession } from '../support/person-request.ts'
 import { pinSkillHome, releaseSkillHomes } from '../support/skill-roots.ts'
 import type { Config, DecomposeSpec, ChildOutcome, RootContractSpec } from '../../src/index.ts'
 import { WorkspaceBusyError, normalizeDecomposition } from '../../src/index.ts'
@@ -65,6 +66,12 @@ function harness(
   sharedSessions?: Map<string, StoredSession>,
 ) {
   const sessions = sharedSessions ?? new Map<string, StoredSession>()
+  // The person's request, on the root session's own durable log: what a root
+  // contract's origin is read from (A0 §1.10), so an intake here stands on a
+  // request somebody made rather than on a session nobody ever spoke to. The rule
+  // is the *existence* of a user-sourced message, so one text stands for it; the
+  // shared map keeps it across a restart, as a durable log does.
+  if (!sessions.has(ROOT_SESSION)) sessions.set(ROOT_SESSION, requestedSession(ROOT_SESSION, 'ship the release'))
   const disposers: Array<() => unknown> = []
   const persistence = {
     list: vi.fn(async () => [...sessions.values()].map(item => ({ header: item.header }))),
@@ -3345,6 +3352,10 @@ describe('A3 coordination', () => {
     // named, and nothing persisted.
     const other = harness({ config: { runBindingRoot: bindingRoot } })
     other.ctx.envBuilder = { store: { get: () => ({ path: checkoutRoot }) } }
+    // That session's person asked for that tree: a root contract is intaken for a
+    // session whose own log carries a request (A0 §1.10), and this case is about
+    // the checkout, not about the origin rule.
+    other.sessions.set('other-root', requestedSession('other-root', 'second tree'))
     await expect(other.runtime.intakeRootContract(
       rootTaskStoreId('other-root'),
       'other-root',

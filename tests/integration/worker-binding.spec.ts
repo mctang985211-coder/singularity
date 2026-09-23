@@ -18,6 +18,7 @@ import type { EvidenceBundle, TaskEvent, VerificationResult } from '../../task/s
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
 import type { Config, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
+import { personRequest } from '../../task-runtime/tests/support/person-request.ts'
 
 /**
  * S1-C stage 3 on the full stack: the real `TaskService` store, the real
@@ -135,6 +136,10 @@ async function harness(options: { capabilities?: Record<string, { skills?: strin
 
   const log = new Map<string, SessionEvent[]>()
   const headers = new Map<string, SessionHeader>([[ROOT_SESSION, { id: ROOT_SESSION, cwd, agentPreset: 'standard' }]])
+  // The person's request, on the root session's own durable log: what a root
+  // contract's origin is read from (A0 §1.10). The rule is the *existence* of a
+  // user-sourced message, so one text stands for the request these cases intake on.
+  log.set(ROOT_SESSION, [personRequest('ship the release')])
   ctx.provide('sessionPersistence', {
     list: async () => [...headers.values()].map(header => ({ header })),
     create: async (header: SessionHeader) => {

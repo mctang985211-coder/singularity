@@ -5,7 +5,7 @@
 
 方向入口为 [主指南](singularity-harness-guide.md)，派发顺序以 [建设计划](2026-09-20-vrtc-code-change-plan.md)为准；本文件细化 Task 契约与生成审核，不替代两者。
 
-后续 [探索与自进化架构](exploration-evolution-architecture.md)细化上下文、非阻塞批次、问父与 supervisor。T1–T3 只建设子任务契约/审核，均已交付；根 intake 属 A0。2026-09-23 顺序修订后，下一项为 A0 + R0，再进入 R1 真实运行及 R2 整理；唯一顺序见建设计划，禁止另建推进器。
+后续 [探索与自进化架构](exploration-evolution-architecture.md)细化上下文、非阻塞批次、问父与 supervisor。T1–T3 只建设子任务契约/审核，均已交付；根 intake 属 A0（A0 + R0 已交付，来源/恢复返工 2026-09-23 关闭）。2026-09-23 顺序修订后，下一项按建设计划唯一表为 R2 整理与 R1 真实运行补验（均待返工），再进入 A2；唯一顺序见建设计划，禁止另建推进器。
 
 ## 1. 要解决的问题
 
@@ -13,9 +13,9 @@
 
 “任务语言已完成”不能只看 TypeScript interface：需要可序列化结构、字段语义、机器校验、持久化与重放规则、授权边界，以及从提案到执行的完整路径。自然语言语义无法全部机械证明，必须明确哪些检查是结构性的、哪些判断具有不确定性。
 
-本轮建设限定当前父任务下的子任务批次。T1–T3 不改根入口；后续 A0 单独解决真实根契约激活。根目标修订、Task 模板库、通用规划器、OR/循环组合语言不在 T1–T3 范围。
+本轮建设限定当前父任务下的子任务批次。T1–T3 不改根入口；后续 A0 单独解决真实根契约激活（已交付并验收；来源/恢复返工 2026-09-23 关闭，见 §1）。根目标修订、Task 模板库、通用规划器、OR/循环组合语言不在 T1–T3 范围。
 
-**根目标语义边界（A0 已实现，来源/恢复返工）**：原请求及澄清需有可读取且由服务校验归属的来源；当前只保存 rootSessionId 尚不满足这一保证。影响目标/验收的歧义先澄清，方法选择自主决定；给假设加标签不授权据此激活猜定目标。可选契约审核 `off/all` 与必要澄清是两回事，不为所有任务强制人审。非 composite 判据或摘要正确只证明结构/身份，不证明目标解释正确；用实际交付物独立根检查及 R1 语义场景验证，不预建通用需求解析器。当前返工与次序见建设计划 Q2–Q4。
+**根目标语义边界（A0 已实现；来源/恢复返工已关闭，2026-09-23）**：原请求及澄清需有可读取且由服务校验归属的来源——已由 `assertRootContractOrigin` 落实（store↔session、顶层会话、本人消息三规则，工具与服务入口共用，拒绝均在首次写入前且具名，日志不可读 fail-closed）。该判定是归因纪律加顶层会话判定，不证明来源真实性，也不校验「该顶层会话是某 graph 的 root session」（该规则仍在 `task_intake` 工具面）。影响目标/验收的歧义先澄清，方法选择自主决定；给假设加标签不授权据此激活猜定目标。可选契约审核 `off/all` 与必要澄清是两回事，不为所有任务强制人审。非 composite 判据或摘要正确只证明结构/身份，不证明目标解释正确；用实际交付物独立根检查及 R1 语义场景验证，不预建通用需求解析器。当前次序与未关闭返工（R2 的 Q1、R1 的 Q4/Q5）见建设计划。
 
 ## 2. 已有基础与实际缺口
 
@@ -51,7 +51,7 @@ S1-C（2026-09-22）把"Task 只提需求、Run 固定实现"落成机制：`req
 
 **T1 已实现部分（2026-09-21）**：数据定义 `task/src/contract.ts:TaskContract`（含 `contractVersion`、`assumptions`、`constraints`），唯一规范化与校验入口 `task-runtime/src/normalize.ts:normalizeDecomposition`（三层闭合字段集、默认值、criterion id 固定、未知版本拒绝），身份算法 `canonicalize`/`contractDigest`/`decompositionDigest`，批次准入记录 `TaskDecomposed.admission`（`proposalDigest` + `AdmissionContext`），以及普通分解/replay/root 三个入口的持久化与共用结构校验（`task-runtime/src/admission.ts:contractDefects`）。下表的 `contractVersion`、`assumptions`、`constraints`、`requiredCapabilities`、`dependsOn`、输入/证据、复合声明、分解意图各行的**当前实现状态**以主 guide §5.6 与建设计划 T1 节为准。
 
-**T2/T3 已实现部分（2026-09-23，已验收）**：本节 §5–§7 描述的策略、提案生命周期与恢复已落地，源码锚见主 guide §5.10、测试锚见建设计划 T2+T3 记录。三个上下文指纹——规范化单任务契约摘要（`contractDigest`）、整批提案摘要（`decompositionDigest`）、准入上下文指纹（`admissionContextDigest`，`task/src/proposal.ts`）——都已实现，并新增审核上下文指纹 `reviewContextDigest`（本批解析到的 manifest 折叠摘要 + 判据 pin 的 verifier 身份）与 `capabilityManifestDigest`。批准同时绑定 `proposalDigest` + `admissionContextDigest` + `reviewContextDigest`，reducer 逐项比对。仍未实现：Task 模板库、契约修订入口、根契约入口（A0）、多进程并发写同一 store 的恰好一次保证。
+**T2/T3 已实现部分（2026-09-23，已验收）**：本节 §5–§7 描述的策略、提案生命周期与恢复已落地，源码锚见主 guide §5.10、测试锚见建设计划 T2+T3 记录。三个上下文指纹——规范化单任务契约摘要（`contractDigest`）、整批提案摘要（`decompositionDigest`）、准入上下文指纹（`admissionContextDigest`，`task/src/proposal.ts`）——都已实现，并新增审核上下文指纹 `reviewContextDigest`（本批解析到的 manifest 折叠摘要 + 判据 pin 的 verifier 身份）与 `capabilityManifestDigest`。批准同时绑定 `proposalDigest` + `admissionContextDigest` + `reviewContextDigest`，reducer 逐项比对。仍未实现：Task 模板库、契约修订入口、多进程并发写同一 store 的恰好一次保证；**根契约入口（A0）已于 2026-09-23 交付并验收，其来源归属与 `adoptRoot` 恢复入口的返工（Q2/Q3）同日关闭**（见 §1 与建设计划「A0 返工（Q2/Q3）执行与验收记录」）。
 
 保留当前字段词汇，新增字段明确版本。以下是目标语义，不是当前工具参数示例：
 

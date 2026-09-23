@@ -18,7 +18,7 @@ R0 的 root 默认不挂载 `evolution_*`，不注入整条晋升协议；显式
 
 **R0 落地事实（2026-09-23，已验收）**：装配开关是 `evolution: 'off' | 'on'`（默认 `off`，闭合 schema，未知值或未读成员构造期拒启）。off 的实际 composition：`agent-singularity` 注册 19 个常驻工具（含 `task_intake`、`escalate`），九个 `evolution_*` **不注册**（因此任何 agent 面都取不到，不靠权限检查劝阻），root allow-list 20 名（19 个 root 核心名 + `escalate`；核心名里的 `skill` 由 preset 平面挂载，不在常驻注册面），root prompt 无进化协议段；on：28 个常驻工具、allow-list 29 名，与 R0 之前逐名相同。allow-list 与 prompt 由同一布尔派生（`agent-runtime/src/index.ts:rootToolsFor` 消费 `ctx.singularityEvolution`，软读，缺失即 off），二者不可能互相矛盾；关闭只撤注册，不删账本、不降已有校验与授权规则。**BB 句子已从通用 root prompt 无条件移除**，领域指导归部署的领域 skill（本仓库的 `bb-pipeline` 等），通用角色文本不再内嵌领域内容。证据锚：`agent-singularity/tests/unit/assembly.spec.ts`（off = 19 常驻且零 `evolution_*`；on = 28）、`agent-runtime/tests/unit/agent-runtime.spec.ts`（`ROOT_TOOLS_CLOSED` 20 / `ROOT_TOOLS_OPEN` 29 与 prompt 同源）、`tests/integration/worker-grant.spec.ts`（off 组合下无 grant 的 worker 面不含任何 `evolution_*`）、`tests/integration/evolution-tools.spec.ts`（on 的既有回归）。
 
-根入口的解释原则：原请求和澄清是来源，模型提出的假设须标明。会改变交付或验收的歧义先经已有渠道澄清；普通方法选择自主决定。机器准入不证明自然语言理解正确，可选人审关闭也不改变这一边界。
+根入口的解释原则：原请求和澄清是来源，模型提出的假设须标明。**A0 返工（2026-09-23，Q2 关闭）已把该原则做成服务层归属判定**：根契约只在顶层会话、且该会话自身日志中有 `source.kind === 'user'` 的本人消息时才能生效（`assertRootContractOrigin` 由三个入口共用，拒绝均在首次写入前且具名）；本运行时自己的提示词（`spawn` 的委派任务、`prompt` 的 setup 文本）按 `runtime-prompt` 记来源，只有人的消息记 `user`。这是归因纪律加顶层会话判定，不证明来源真实性。会改变交付或验收的歧义先经已有渠道澄清；普通方法选择自主决定。机器准入不证明自然语言理解正确，可选人审关闭也不改变这一边界。
 
 ## 2. 共同规则模板
 
@@ -121,7 +121,10 @@ task_decompose 可能返回“等待审核”与一个 proposalId：那时没有
 你不会被要求提供批准凭据，也没有工具可以决定提案。
 
 [根契约 intake 已部署（A0：真实落点 agent-runtime/src/prompts/root.prompts.ts 的
-intake 段；setup 文本见 graphs/src/prompts/setup.prompts.ts；工具 agent-singularity/src/tools/task-intake.ts）]
+intake 段；setup 文本见 graphs/src/prompts/setup.prompts.ts；工具 agent-singularity/src/tools/task-intake.ts。
+A0 返工（2026-09-23，Q2 关闭）未改本段文本：来源规则落在工具描述与运行时——只有 DSH 证实为
+人类输入的本人消息算请求来源，本部署自己的提示词按 runtime-prompt 归因，非顶层会话或没有
+本人消息时具名拒绝且不写任何东西）]
 用户说明了目标时，先把它写成根契约并用 task_intake 接受：objective 用用户自己的话，
 acceptance criteria 至少有一条 mandatory 判据直接检查交付物（“所有子任务通过”不能作为
 唯一判据——缺它会具名拒绝），并写出假设（标明是你的推断）、约束与所需能力。
@@ -175,7 +178,7 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 | Prompt 中的说法 | 代码侧必须提供 |
 |---|---|
 | “你负责当前任务” | session→run→task 精确绑定，禁止同 session 冒领其他 Run |
-| “读取根目标和相关决定” | **A0 已实现，来源/恢复返工**：真实的根契约（`task_intake` 接受后持久化的 objective/criteria/assumptions/constraints/requiredCapabilities）与session 定位（`identity.rootSessionId`；尚未校验实际请求/澄清的存在与归属，不能称可信来源已完成）；`task_read`/`task_status` 在未激活时给具名状态而非代用目标。**A1 未建**：ContextView、祖先决定投影与原始 refs 的授权读取仍待建，不能只加一句“考虑全局” |
+| “读取根目标和相关决定” | **A0 已实现，来源/恢复返工已关闭（2026-09-23）**：真实的根契约（`task_intake` 接受后持久化的 objective/criteria/assumptions/constraints/requiredCapabilities）与来源归属（`identity.rootSessionId` 经 `assertRootContractOrigin` 校验 store↔session、顶层会话与本人消息，三入口共用，拒绝在首次写入前且具名）；`task_read`/`task_status` 在未激活时给具名状态而非代用目标。边界：归因纪律不等于来源真实性证明，也不证明模型对用户请求的解读正确（语义效果属 R1）。**A1 未建**：ContextView、祖先决定投影与原始 refs 的授权读取仍待建，不能只加一句“考虑全局” |
 | “可查看邻域任务” | A2 的可见域检查、revision、分页与合法动作；不能只有全树字符串 |
 | “向父节点询问并等待” | A3 已落地非阻塞父循环与协调相位（waiting_children/submitted、写闸、显式提交；task-runtime/src/gate.ts、orchestrate.ts）；持久问题、问答唤醒与超时仍属 A4 |
 | “提交后由 verifier 判定” | A3 已落地：task_submit_result → RunPhaseChanged(submitted) 落库后 drainSession 排空在途写，再转 verifier 排他执行；idle 不作完成证据 |
@@ -196,7 +199,7 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 
 生成任务审核相关反例（T2/T3）：提示词/工具面出现“自行批准”或任何决定参数（模型不能自行生成可信 approvalRef）；worker 的工具面出现决定提案的工具或平台管理/HITL 工具；`off` 部署下模型被提示等待审核（应为正常分解）；`all` 下 prompt 未说明“等待审核时没有子任务、当前任务未分解”，或未说明“同内容重复提交答同一提案、修订是新提案”；审核等待期间模型被提示继续推进本任务（应为无法推进、可读可查可取消）。核对方法：真实装配后的工具面（`tests/integration/proposal-review.spec.ts` 的 worker/root 工具面用例）与渲染文本（`agent-singularity/src/proposal-review.ts` 的 §5 展示清单）。
 
-根入口与默认运行面相关反例（R0 已有证据保留；A0 Q2/Q3 返工）：`off` 组合的 root prompt 出现任何 `evolution_*` 名或晋升协议段（应为不注册也不提示）；`on` 组合缺少九个工具或漏掉协议段；prompt 与 allow-list 取自两个不同事实（本组由同一布尔派生，回归锚 `agent-runtime/tests/unit/agent-runtime.spec.ts`）；intake 段要求模型“自行接受/批准”契约或暗示可以绕过审核（部署的 intake 段明确“没有任何工具或参数能批准”）；未激活时提示模型 `task_decompose`（工具会具名拒绝，`task_read` 也报未激活）；worker 提示词/工具面出现 `task_intake`（它是 root 的路径，回归锚 `tests/integration/root-intake.spec.ts` 的 worker 工具面用例）。核对方法：真实装配后的 prompt 文本与工具面（`agent-runtime` 单测按 composition 逐名断言 allow-list、`assembly.spec.ts` 断言注册面），不用匹配自然语言句子证明状态机。
+根入口与默认运行面相关反例（R0 已有证据保留；A0 Q2/Q3 返工已关闭，2026-09-23）：`off` 组合的 root prompt 出现任何 `evolution_*` 名或晋升协议段（应为不注册也不提示）；`on` 组合缺少九个工具或漏掉协议段；prompt 与 allow-list 取自两个不同事实（本组由同一布尔派生，回归锚 `agent-runtime/tests/unit/agent-runtime.spec.ts`）；intake 段要求模型“自行接受/批准”契约或暗示可以绕过审核（部署的 intake 段明确“没有任何工具或参数能批准”）；未激活时提示模型 `task_decompose`（工具会具名拒绝，`task_read` 也报未激活）；worker 提示词/工具面出现 `task_intake`（它是 root 的路径，回归锚 `tests/integration/root-intake.spec.ts` 的 worker 工具面用例）。**A0 返工（Q2/Q3，2026-09-23 关闭）新增的根来源/恢复反例**：本运行时自己的提示词被记成人类输入（`spawn` 的委派任务与 `prompt` 的 setup 文本必须带 `runtime-prompt`，只有本人的消息是 `user`；回归锚 `agent-runtime/tests/unit/agent-runtime.spec.ts`）；仅凭部署自己的 setup 文本的会话可经工具与直调双入口激活契约（应具名拒绝，零 store/零提案/零 ask）；委派子会话的 store 可建根（应按顶层会话规则具名拒绝）；没有本人消息（含日志不可读/无 reader）仍能激活或续跑（应具名拒绝、零落库）；崩溃点恢复绕开公共入口（恢复用例的 `reopen` 只经 `adoptRoot`，`openStore` + `reconcileStore` 的显式调用在 `root-intake-recovery.spec.ts` 已不存在）。核对方法：真实装配后的 prompt 文本与工具面（`agent-runtime` 单测按 composition 逐名断言 allow-list、`assembly.spec.ts` 断言注册面），不用匹配自然语言句子证明状态机。
 
 协调组合态必须覆盖：waiting_children 同时有向祖先提出的阻塞问题；仅收到部分答案或 unresolved；有效问答在 inbox claim 后遇到 pre-step reject/崩溃。恢复后模型仍能读到未处理事实，主相位、batch 与写权限不因消息重放改变。waiting_children 的写拒绝以运行时闸在真实 tools waterfall 上的实际 deny 为证据（A3 起），不能只看 assembled prompt 未挂载。
 

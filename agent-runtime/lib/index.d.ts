@@ -20,6 +20,41 @@ declare module '@deepseek-ai/cordis' {
 interface SessionVisibility {
   readonly isVisible: (sessionId: SessionId$1) => boolean;
 }
+/**
+ * Durable attribution for one prompt this runtime wrote to a session of its own:
+ * the delegated task a `spawn` hands its worker, and the setup text a graph entry
+ * hands its root (`prompt`).
+ *
+ * It is its own kind rather than `kind: 'user'` because that kind is DSH's
+ * *host-attested human input* marker (`tool-goal/src/authority.ts`:
+ * `hasDirectHumanInput`; and the omitted-source rule that turns an
+ * `Agent.followup()` with no source into `user`), and the difference is a rule
+ * this deployment rests on: a root contract is attributed to the person whose
+ * request stands on the session's own log (A0 §1.10), and a session that only
+ * ever heard from the deployment has no such request. Writing our own prompts
+ * under `user` would have put the deployment's voice on the same record as a
+ * person's — an invented goal reported as the user's own.
+ *
+ * What changes is the attribution and nothing else: the loop appends a queued
+ * message verbatim whatever its source, so the model-visible content, the order
+ * of the turn and the durability of the event are exactly what they were.
+ *
+ * No `form` is declared: a form is a producer's declaration of how an injected
+ * *context* row presents itself (`notice`, `snapshot`, `relay`, …), and these are
+ * this deployment's own prompts, not context a subsystem contributed. The closest
+ * of the existing forms is `notice`, and a prompt is not an account of something
+ * that happened, so the undeclared default is the honest answer.
+ */
+interface RuntimePromptSource {
+  readonly kind: 'runtime-prompt';
+  /** Which of this runtime's own doors wrote the message. */
+  readonly channel: 'prompt' | 'spawn';
+}
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'runtime-prompt': RuntimePromptSource;
+  }
+}
 interface RootRequest {
   readonly sessionId: SessionId$1;
   readonly cwd: string;
@@ -233,4 +268,4 @@ declare class AgentRuntime extends Service {
   private scope;
 }
 //#endregion
-export { type AgentOptions, AgentRuntime, AgentRuntime as default, type CanvasNode, type ContentBlock, type GraphScope, type McpServerSpec, type ParsedSkillFile, type ResolvedGrant, type RootRequest, type SessionVisibility, type SpawnRequest, type WorkerCapabilityGrant, type WorkerGrant, applyWorkerGrant, findSkillFileIn, parseSkillFile, resolveGrant, skillRootsFor };
+export { type AgentOptions, AgentRuntime, AgentRuntime as default, type CanvasNode, type ContentBlock, type GraphScope, type McpServerSpec, type ParsedSkillFile, type ResolvedGrant, type RootRequest, type RuntimePromptSource, type SessionVisibility, type SpawnRequest, type WorkerCapabilityGrant, type WorkerGrant, applyWorkerGrant, findSkillFileIn, parseSkillFile, resolveGrant, skillRootsFor };

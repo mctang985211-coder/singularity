@@ -9,6 +9,7 @@ import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
 import type { RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
+import { personRequest } from '../../task-runtime/tests/support/person-request.ts'
 
 /**
  * P4 end to end on the real chain: the real `TaskService` store and reducer,
@@ -38,6 +39,10 @@ async function harness(): Promise<Harness> {
   const ctx = new Context()
   const log = new Map<string, SessionEvent[]>()
   const headers = new Map<string, SessionHeader>()
+  // The person's request, on the root session's own durable log: what a root
+  // contract's origin is read from (A0 §1.10). The rule is the *existence* of a
+  // user-sourced message, so one text stands for the request this harness intakes on.
+  log.set(ROOT_SESSION, [personRequest('ship the release')])
   ctx.provide('sessionPersistence', {
     list: async () => [...headers.values()].map(header => ({ header })),
     create: async (header: SessionHeader) => {

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { AcceptanceCriterion, EvidenceBundle, TaskEvent, VerificationResult } from '../../../task/src/index.ts'
 import { TaskService, contractDigest, rootTaskStoreId } from '../../../task/src/index.ts'
+import { requestedSession } from '../support/person-request.ts'
 import type { ChildOutcome, Config, DecomposeSpec, RootContractSpec } from '../../src/index.ts'
 import {
   TaskRuntime,
@@ -53,6 +54,11 @@ type Harness = ReturnType<typeof harness>
  */
 function harness(options: { checkout?: string } = {}) {
   const sessions = new Map<string, StoredSession>()
+  // The person's request, on the root session's own durable log: what a root
+  // contract's origin is read from (A0 §1.10). The rule is the *existence* of a
+  // user-sourced message, so one text stands for the request every intake here
+  // rests on.
+  sessions.set(ROOT_SESSION, requestedSession(ROOT_SESSION, 'ship the release'))
   const persistence = {
     list: vi.fn(async () => [...sessions.values()].map(item => ({ header: item.header }))),
     create: vi.fn(async (header: SessionHeader) => {

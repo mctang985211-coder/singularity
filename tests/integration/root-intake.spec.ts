@@ -3,6 +3,10 @@ import { stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+// The deployment's own setup text, taken from the module the graph entry renders
+// it with (`graphs/src/index.ts`): "the setup prompt" is that text, not a
+// paraphrase of it.
+import { setupPromptText } from '../../graphs/src/prompts/setup.prompts.ts'
 import { rootTaskStoreId } from '../../task/src/index.ts'
 import type {
   EvidenceBundle,
@@ -54,6 +58,8 @@ import {
  * | a refused draft dispatches nothing; a revision is new content with `supersedes` | 9 |
  * | a terminal root is not revived by a late intake | 10 |
  * | worker surface does not expand, and holds no deciding tool | 11 |
+ * | a contract for a session whose own log holds no request of the person is refused, zero side effects | 12, 14 |
+ * | a store/session a caller does not own is refused by name, and no store is even opened | 13, 15 |
  *
  * The batch-side half of the same gate (what a batch's review does under
  * `off`/`all`, its staleness and expiry rules) is `proposal-review.spec.ts`; the
@@ -645,6 +651,11 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
   it('holds a direct service call exactly as the tool does, under policy all', async () => {
     const h = await startScriptedLoop({ generatedTaskReview: 'all', script: () => [] })
     const storeId = rootTaskStoreId(String(ROOT))
+    // A direct call runs no turn, so nothing else would carry the request: the
+    // person's message is recorded on this session's own log — the surface the
+    // runtime reads the contract's origin from (A0 §1.10) — as the request the
+    // caller is asking about.
+    h.recordRequest(USER_GOAL)
 
     // No tool call anywhere: the service entry a caller reaches directly is the
     // same gate, and it answers the same wait.
@@ -830,5 +841,215 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
     const rootNames = h.visible(h.agent(ROOT))
     expect(rootNames).toContain('task_intake')
     expect(rootNames).toContain('task_decompose')
+  })
+
+  it('refuses a contract the model offers for a session whose log holds only the runtime\'s own notices', async () => {
+    const h = await startScriptedLoop({
+      generatedTaskReview: 'off',
+      script: (_sessionId, index) => index === 0
+        ? [
+          { tool: 'task_intake', args: intakeArgs(contractFor(USER_GOAL)) },
+          { text: 'root: the contract was refused' },
+        ]
+        : [],
+    })
+    const storeId = rootTaskStoreId(String(ROOT))
+    // The root's turn is driven by a notice, not by a person: the runtime sends a
+    // session messages this way (`notify`), so the log holds a `user/message` — and
+    // still nothing a contract can be attributed to. This is the case a model's own
+    // summary of the conversation used to stand in for (A0 §1.10).
+    const notice = 'task-runtime: batch b-1 verified'
+    const noticesBefore = wakeNotices(h, ROOT).length
+    h.pluginSays(notice)
+
+    const refused = await answered(h, 'task_intake')
+    // A refusal is an answer, not a crash: the model hears which rule it broke.
+    expect(refused.result?.isError).toBe(false)
+    expect(refused.result?.text).toContain('task_intake rejected')
+    expect(refused.result?.text).toContain('holds no message from the person')
+    expect(refused.result?.text).toContain('source.kind "runtime-prompt" (the graph setup text and a spawn\'s')
+    expect(refused.result?.text).toContain('delegated task) and its notices carry "plugin" — and neither is a request of the person\'s')
+
+    // Zero side effects, read from the deployment's own state: no store session was
+    // even created for the target store (A0 §1.1 — the refused intake must not open
+    // it), so no `task/event`, no proposal, no root task and no run can be in it; no
+    // worker was spawned, nobody was asked, and the refusal woke nobody (the only
+    // plugin message on the log is the one that drove the turn).
+    await expect(h.task.openStore(storeId)).rejects.toThrow(/does not exist/)
+    expect(taskEvents(h, storeId)).toEqual([])
+    expect(h.spawns).toHaveLength(0)
+    expect(h.review.asks).toHaveLength(0)
+    expect(wakeNotices(h, ROOT)).toHaveLength(noticesBefore + 1)
+    expect(wakeNotices(h, ROOT)).toContain(notice)
+  })
+
+  it('refuses a contract for a session whose only message is the deployment\'s own setup prompt', async () => {
+    const h = await startScriptedLoop({
+      generatedTaskReview: 'off',
+      script: (_sessionId, index) => index === 0
+        ? [
+          { tool: 'task_intake', args: intakeArgs(contractFor(USER_GOAL)) },
+          { text: 'root: the contract was refused' },
+        ]
+        : [],
+    })
+    const storeId = rootTaskStoreId(String(ROOT))
+    // The graph's own creation: `graphs.create` writes the setup prompt through
+    // `agentRuntime.prompt` — the deployment talking to its own root session, not
+    // a person asking for anything. Nobody has typed into this session, so that
+    // text is the *only* message on its log. This is the state a graph is
+    // actually in when its root is asked to accept a contract.
+    const setup = setupPromptText('g1', { id: 'env1', path: h.checkout, components: [] } as never)
+    expect(setup).toContain('Set up Singularity graph g1')
+    await h.agentRuntime.prompt(h.agent(ROOT), [{ type: 'text', text: setup }])
+
+    const refused = await answered(h, 'task_intake')
+    // A refusal is an answer, not a crash: the model hears which rule it broke.
+    expect(refused.result?.isError).toBe(false)
+    expect(refused.result?.text).toContain('task_intake rejected')
+    expect(refused.result?.text).toContain('holds no message from the person')
+
+    // The setup prompt is on the log — the deployment put it there — and it is
+    // attributed to its producer rather than to a person, which is what leaves
+    // this session with no request to attribute a contract to. What the model saw
+    // is the text the graph entry rendered, unchanged: only the attribution moved.
+    const said = h.eventsOf(ROOT).filter(event => event.type === 'user/message')
+    expect(said).toHaveLength(1)
+    expect((said[0]!.data as { source: unknown }).source).toEqual({ kind: 'runtime-prompt', channel: 'prompt' })
+    expect((said[0]!.data as { content: readonly { text?: string }[] }).content.map(block => block.text ?? '').join('\n')).toBe(setup)
+
+    // The same rule from the entry the tool calls — the gate is not the tool's —
+    // and it is the service's own refusal, named.
+    await expect(h.runtime.intakeRootContract(storeId, String(ROOT), contractFor(USER_GOAL)))
+      .rejects.toThrow(/holds no message from the person/)
+
+    // Zero side effects, read from the deployment's own state: no store session
+    // was even created for the target store (A0 §1.1 — the refused intake must not
+    // open it), so no `task/event`, no proposal, no root task and no run can be in
+    // it; no worker was spawned, nobody was asked, and the refusal woke nobody.
+    await expect(h.task.openStore(storeId)).rejects.toThrow(/does not exist/)
+    expect(taskEvents(h, storeId)).toEqual([])
+    expect(h.spawns).toHaveLength(0)
+    expect(h.review.asks).toHaveLength(0)
+    expect(wakeNotices(h, ROOT)).toEqual([])
+  })
+
+  it('refuses a direct root intake for a spawned worker session, naming the delegation', async () => {
+    const h = await startScriptedLoop({
+      generatedTaskReview: 'off',
+      script: (_sessionId, index) => index === 0 ? decomposeScript('align the ball') : workerScript('aligned the ball'),
+    })
+    const root = await h.begin(contractFor(USER_GOAL))
+    await spawned(h, root.storeId, 1)
+    await h.runtime.awaitBatch(root.storeId, await batchIdOf(h, ROOT))
+    await h.runtime.cancelGraph(root.storeId, 'the caller ended the graph')
+
+    // The worker's own turn was driven by the delegated task the runtime wrote for
+    // it, and its session is a delegated child — the lineage the spawn stamped on
+    // its header. A root contract belongs to the top-level session a graph
+    // created, never to a child: the task a spawned session works on was admitted
+    // by its parent already, whatever a caller claims.
+    const worker = h.spawns[0]!.sessionId
+    const workerStore = rootTaskStoreId(worker)
+    await expect(h.runtime.intakeRootContract(workerStore, worker, contractFor('a second goal nobody asked for')))
+      .rejects.toThrow(/is a delegated child \(its header records origin "subagent"\)/)
+
+    // Zero side effects: the worker's own store was never opened, its session log
+    // holds exactly what the tree put there, the tree still holds the one root the
+    // person's contract became (and the one child the batch admitted), nobody was
+    // asked and nothing was woken.
+    await expect(h.task.openStore(workerStore)).rejects.toThrow(/does not exist/)
+    expect(taskEvents(h, workerStore)).toEqual([])
+    // The delegated task on the worker's own log is byte-for-byte the prompt the
+    // spawn sent — this rule changed its attribution, not its content.
+    const delegated = h.eventsOf(worker).filter(event => event.type === 'user/message')
+    expect(delegated).toHaveLength(1)
+    expect((delegated[0]!.data as { source: unknown }).source).toEqual({ kind: 'runtime-prompt', channel: 'spawn' })
+    expect((delegated[0]!.data as { content: readonly { text?: string }[] }).content.map(block => block.text ?? '').join('\n'))
+      .toBe(h.spawns[0]!.prompt)
+    const snapshot = await h.snapshot(root.storeId)
+    expect(snapshot.tasks.filter(task => task.parentTaskId === undefined)).toHaveLength(1)
+    expect(snapshot.tasks[0]!.objective).toBe(USER_GOAL)
+    expect(snapshot.tasks.map(task => task.objective)).toEqual([USER_GOAL, 'align the ball'])
+    expect(snapshot.runs.map(run => run.sessionId)).toEqual([String(ROOT), worker])
+    expect(h.review.asks).toHaveLength(0)
+    expect(wakeNotices(h, worker)).toEqual([])
+  })
+
+  it('refuses the tool call of a session whose graph names another root, with nothing written', async () => {
+    const h = await startScriptedLoop({
+      generatedTaskReview: 'off',
+      roots: [ALPHA, BETA],
+      // The graph this deployment resolves for BETA names ALPHA as its root: a
+      // session calling `task_intake` for a graph it is not the root of. That rule
+      // is the tool's own (graph and root-session membership); the store, the
+      // session and the origin are the service's, which is why the two refusals
+      // name different things.
+      graphRootFor: sessionId => (sessionId === String(BETA) ? String(ALPHA) : undefined),
+      script: sessionId => sessionId === String(BETA)
+        ? [
+          { tool: 'task_intake', args: intakeArgs(contractFor(USER_GOAL)) },
+          { text: 'root: the contract was refused' },
+        ]
+        : [],
+    })
+    // The person did ask — this refusal is not about the origin, and a session with
+    // no request would be refused by the service before the tool's rule is reached.
+    h.userSays(USER_GOAL, BETA)
+
+    const refused = await answered(h, 'task_intake', 0, BETA)
+    expect(refused.result?.isError).toBe(false)
+    expect(refused.result?.text).toContain(`session "${String(BETA)}" is not the root session of graph`)
+    expect(refused.result?.text).toContain(`its root session is "${String(ALPHA)}"`)
+
+    // Neither store was opened, nobody was asked, and no worker exists: the refusal
+    // is the tool's own and it never reached the service.
+    await expect(h.task.openStore(rootTaskStoreId(String(BETA)))).rejects.toThrow(/does not exist/)
+    await expect(h.task.openStore(rootTaskStoreId(String(ALPHA)))).rejects.toThrow(/does not exist/)
+    expect(taskEvents(h, rootTaskStoreId(String(BETA)))).toEqual([])
+    expect(taskEvents(h, rootTaskStoreId(String(ALPHA)))).toEqual([])
+    expect(h.spawns).toHaveLength(0)
+    expect(h.review.asks).toHaveLength(0)
+  })
+
+  it('refuses a direct service call for a session that never asked, with nothing written', async () => {
+    const h = await startScriptedLoop({ generatedTaskReview: 'off', script: () => [] })
+    const storeId = rootTaskStoreId(String(ROOT))
+
+    // No turn, no tool, no message: the entry a caller reaches directly answers the
+    // same refusal the tool's path would, and it is the service's rule that decides
+    // it (the tool's membership rule has nothing to say about a session that is its
+    // own graph's root).
+    await expect(h.runtime.intakeRootContract(storeId, String(ROOT), contractFor(USER_GOAL)))
+      .rejects.toThrow(/holds no message from the person/)
+
+    await expect(h.task.openStore(storeId)).rejects.toThrow(/does not exist/)
+    expect(taskEvents(h, storeId)).toEqual([])
+    expect(h.spawns).toHaveLength(0)
+    expect(h.review.asks).toHaveLength(0)
+    expect(h.calls).toHaveLength(0)
+  })
+
+  it('refuses a direct service call that hands in another session\'s store, naming both ids and the session\'s own store', async () => {
+    const h = await startScriptedLoop({ generatedTaskReview: 'off', roots: [ALPHA, BETA], script: () => [] })
+    // The session that asked for the work is ALPHA; the store handed in belongs to
+    // BETA. Nothing about the contract is wrong, which is why the refusal names the
+    // attribution and not a rule of the contract.
+    h.recordRequest(USER_GOAL, ALPHA)
+
+    await expect(h.runtime.intakeRootContract(rootTaskStoreId(String(BETA)), String(ALPHA), contractFor(USER_GOAL)))
+      .rejects.toThrow(
+        new RegExp(`store "${rootTaskStoreId(String(BETA))}" is not this session's own store \\("${rootTaskStoreId(String(ALPHA))}"\\)`),
+      )
+
+    // The refused intake did not even open the target store, and the session that
+    // did ask has no proposal, no task and no run either: nothing was written for a
+    // call that could not be attributed (A0 §1.10).
+    await expect(h.task.openStore(rootTaskStoreId(String(BETA)))).rejects.toThrow(/does not exist/)
+    await expect(h.task.openStore(rootTaskStoreId(String(ALPHA)))).rejects.toThrow(/does not exist/)
+    expect(taskEvents(h, rootTaskStoreId(String(BETA)))).toEqual([])
+    expect(taskEvents(h, rootTaskStoreId(String(ALPHA)))).toEqual([])
+    expect(h.spawns).toHaveLength(0)
+    expect(h.review.asks).toHaveLength(0)
   })
 })

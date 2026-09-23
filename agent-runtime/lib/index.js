@@ -485,6 +485,13 @@ function rootToolsFor(enabled) {
 function pinRootApprovalPolicy(session) {
 	setApprovalPolicy(session, "ask");
 }
+/** One message source of this runtime's own, as {@link RuntimePromptSource} declares it. */
+function runtimePrompt(channel) {
+	return {
+		kind: "runtime-prompt",
+		channel
+	};
+}
 var AgentRuntime = class extends Service {
 	static inject = [
 		"agentDefaultModel",
@@ -710,7 +717,7 @@ var AgentRuntime = class extends Service {
 				});
 				handle.agent.followup(createUserMessage({
 					content: [...request.prompt],
-					source: { kind: "user" }
+					source: runtimePrompt("spawn")
 				}));
 				return handle;
 			} catch (error) {
@@ -766,7 +773,7 @@ var AgentRuntime = class extends Service {
 		this.live(agent);
 		agent.followup(createUserMessage({
 			content: [...prompt],
-			source: { kind: "user" }
+			source: runtimePrompt("prompt")
 		}));
 	}
 	inGraph(scope, work) {

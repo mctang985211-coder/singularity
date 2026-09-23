@@ -41,6 +41,8 @@ import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/l
 import SystemPrompt from '../../../../thirdparty/deepseek-harness/packages/core/system-prompt/lib/index.js'
 import ToolRuntime from '../../../../thirdparty/deepseek-harness/packages/core/tools/lib/index.js'
 import { AgentRegistry } from '../../../../thirdparty/deepseek-harness/packages/core/agent/lib/index.js'
+import { SessionSeq } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
+import { createUserMessage } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
 import SkillRegistry from '../../../../thirdparty/deepseek-harness/packages/skill/skill/lib/index.js'
 import * as SkillFilesystem from '../../../../thirdparty/deepseek-harness/packages/skill/skill-filesystem/lib/index.js'
 import * as SkillTool from '../../../../thirdparty/deepseek-harness/packages/skill/tool-skill/lib/index.js'
@@ -207,6 +209,18 @@ class RunStackImpl implements RunStack {
   readonly verifier: VerifierRegistry
   readonly agentRuntime: RecordingAgentRuntime
   readonly runtime: TaskRuntime
+  /**
+   * The persistence service this stack mounts, kept so {@link recordRequest} can
+   * write through the same handle a loop's own appends travel through. It is
+   * declared structurally — this fixture needs `open`/`append`/`close` and no
+   * more.
+   */
+  private persistence!: {
+    open(id: SessionId, access: 'write'): Promise<{
+      append(events: readonly SessionEvent[]): Promise<void>
+      close(): Promise<void>
+    }>
+  }
   private readonly log = new Map<string, SessionEvent[]>()
   private readonly headers = new Map<string, SessionHeader>()
   private readonly live = new Map<string, Agent>()
@@ -272,8 +286,14 @@ class RunStackImpl implements RunStack {
 
     for (const root of this.roots) {
       this.headers.set(root, { id: root, cwd: this.checkout, agentPreset: 'standard' } as unknown as SessionHeader)
+      // A root session's own log exists from the graph's creation — the surface a
+      // person's request lands on (A0 §1.10, {@link recordRequest}).
+      this.log.set(root, [])
     }
-    ctx.provide('sessionPersistence', {
+    // The persistence service every store and every session of this stack writes
+    // through: the JSONL-shaped handle the deployment mounts, with the write half
+    // this fixture needs to record a request on a session's own log.
+    const persistence = {
       list: async () => [...this.headers.values()].map(header => ({ header })),
       create: async (header: SessionHeader) => {
         this.headers.set(header.id, header)
@@ -284,7 +304,9 @@ class RunStackImpl implements RunStack {
         if (!this.log.has(id)) throw new Error(`missing session ${id}`)
         return this.handle(id)
       },
-    } as never)
+    }
+    this.persistence = persistence
+    ctx.provide('sessionPersistence', persistence as never)
     ctx.provide('layout', { setIn: async () => {} })
     const graphAgents = this.roots.map(id => ({ id, name: 'Singularity', status: 'idle' as const }))
     ctx.provide('graph', {
@@ -438,6 +460,11 @@ class RunStackImpl implements RunStack {
 
   async root(sessionId: SessionId, contract: RootContractSpec): Promise<{ storeId: string; taskId: string; runId: string }> {
     const storeId = rootTaskStoreId(sessionId)
+    // The person asked for this objective, and that request is recorded on the
+    // session's own durable log before the intake reads it (A0 §1.10): a root
+    // contract's origin is what the session's log holds, and a fixture that
+    // intaken without one would model a session nobody asked anything of.
+    await this.recordRequest(sessionId, contract.objective)
     const activated = await this.runtime.intakeRootContract(storeId, sessionId, contract)
     if (activated.status !== 'activated') {
       throw new Error(
@@ -445,6 +472,30 @@ class RunStackImpl implements RunStack {
       )
     }
     return { storeId, taskId: activated.taskId, runId: activated.runId }
+  }
+
+  /**
+   * Record one request of the person's own on a session's durable log: the
+   * `user/message` event with `source.kind === 'user'` that a root contract's
+   * origin is read from. This stack runs no model turn, so the message is written
+   * through the persistence handle the loop's own appends travel through instead of
+   * queued at an agent, in the shape the loop writes (surface intent included).
+   */
+  private async recordRequest(sessionId: SessionId, text: string): Promise<void> {
+    const stored = this.log.get(String(sessionId))
+    if (stored === undefined) throw new Error(`the fixture holds no session log for "${String(sessionId)}"`)
+    const handle = await this.persistence.open(sessionId, 'write')
+    try {
+      await handle.append([{
+        type: 'user/message',
+        seq: SessionSeq(stored.length),
+        time: Date.now(),
+        data: createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }),
+        surfaceOp: 'append',
+      }])
+    } finally {
+      await handle.close()
+    }
   }
 
   async call(agent: Agent, name: string, args: Record<string, unknown>): Promise<ToolCallResult> {

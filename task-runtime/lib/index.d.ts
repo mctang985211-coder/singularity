@@ -2452,7 +2452,10 @@ type RootIntakeResult = {
  * (`adopted`, with the task and run ids and the phase the session's gate was set
  * to), or it does not (`adopted: false`) — a store can exist with no task at all
  * (A0 §1.1: `graphs.create` opens it, the intake fills it), and that is not an
- * error, it is the state before a contract was accepted.
+ * error, it is the state before a contract was accepted. The negative answer is
+ * given *after* the adoption's own recovery pass has run (§3 stage B,
+ * {@link TaskRuntime.adoptRoot}), so its `detail` names the proposals that pass
+ * left open and states that nothing was created.
  */
 type RootAdoption = {
   adopted: true;
@@ -3123,9 +3126,20 @@ declare class TaskRuntime extends Service {
    * What it does, in order: create-or-open the store (`rootTaskStoreId`), index
    * every run the store holds, and then —
    *
-   * - **no root task**: answer `{ adopted: false }`. A store with no task is a
-   *   normal state since §1.1 (a graph's store is opened by its creation and
-   *   filled when a contract is accepted), not a failure to report;
+   * - **no root task**: run the store's own recovery pass (`reconcileStore`:
+   *   settle or restart what a dead process left in flight, then the proposals)
+   *   and answer from what that pass left. Adoption is the entry graphs and
+   *   recovery use (§3 stage B), so the pass runs *here*: a contract whose
+   *   approval is on the record and whose process died is carried into the root
+   *   it was about by exactly this pass, and a waiting contract's review is
+   *   re-asked from the stored facts by it — answering "nothing to adopt" before
+   *   that pass would leave a recorded decision uncontinued. A root the pass
+   *   activates is then bound the way the bullet below binds one; a store the
+   *   pass leaves without a root still answers `{ adopted: false }`, with the
+   *   proposals still open on it named by id and status and the fact that
+   *   nothing was created stated. A store with no task is a normal state since
+   *   §1.1 (a graph's store is opened by its creation and filled when a contract
+   *   is accepted), not a failure to report;
    * - **a root task, with a run bound to this root session**: re-check the run's
    *   content binding (S1-C: a snapshot that is no longer readable refuses the
    *   re-entry by name rather than resuming against whatever stands at that path
@@ -3145,6 +3159,19 @@ declare class TaskRuntime extends Service {
    * dead one set.
    */
   adoptRoot(storeId: string, rootSessionId: string): Promise<RootAdoption>;
+  /**
+   * What {@link adoptRoot} answers when the store still holds no root *after* its
+   * recovery pass ran (A0 §3 stage B): the proposals that pass left open, by id and
+   * status, and the fact that nothing was created.
+   *
+   * `adopted: false` is a normal answer (§1.1), and this detail is what keeps it an
+   * honest one. Recovery never advances a waiting contract and never mints a root
+   * without an accepted contract, so what a caller gets back is the state of the
+   * intake rather than a verdict: the pass ran, a named proposal is still waiting
+   * for a decision or a continuation, and adopting created no task, no run and no
+   * proposal of its own.
+   */
+  private nothingAdoptedDetail;
   /**
    * The gate phase one stored run implies: its coordination phase while it is
    * running, `terminal` once it is not, and `undefined` for a record that
@@ -3455,6 +3482,70 @@ declare class TaskRuntime extends Service {
   /** The root proposal one request key already names, or `undefined` when the key is free; other content under the key is refused by name (§6). */
   private rootProposalForRequest;
   /**
+   * One root contract's origin, established before anything is read or written on
+   * its behalf (A0 §1.10): the store must be the root session's own
+   * (`rootTaskStoreId`), that session must be a top-level one — a delegated child
+   * is a worker, and its task was admitted by its parent — and its own durable log
+   * must hold the person's request: a `user/message` event whose
+   * `source.kind === 'user'`, the kind DSH reserves for host-attested human input
+   * (`tool-goal/src/authority.ts:hasDirectHumanInput`).
+   *
+   * **Why the check is fail-closed.** The rules are mechanical and each is
+   * answered by a refusal rather than by a default: the store↔session mapping is
+   * arithmetic, the delegation facts are the header the spawn stamped, and the
+   * request half is *existence* — at least one message whose source is the person.
+   * Everything else that reaches a session's log is attributed to its **producer**:
+   * this deployment writes its own prompts under `runtime-prompt` (the graph setup
+   * text and a spawn's delegated task, `agent-runtime`'s own source) and its notices
+   * under `plugin` (`notify`), and neither counts — a session that only ever heard
+   * from the deployment has no request to attribute a contract to, and treating the
+   * model's summary of a conversation as the request is exactly the "model
+   * self-reported confirmation" §1.10 forbids. A log this deployment cannot read is
+   * refused for the same reason — "the source could not be checked" is not "the
+   * source is the person". Deliberately absent: any natural-language entailment.
+   * Whether the contract *states* the request well is the model's reasoning and the
+   * §1.2 rules judge the contract itself; this rule only tests that a request of
+   * the person's own is there.
+   *
+   * **Where each half belongs.** Which session may call `task_intake` — graph and
+   * root-session membership — is the tool's own rule, because the `graphs` record
+   * is the thing that knows it. What this check owns is the quadruple a caller can
+   * hand in wrongly: the store, the session, the session's kind and its origin
+   * (store ↔ session ↔ top-level ↔ origin), so both doors into a root — the tool's
+   * call and a direct service call — meet the same rule wherever a caller reaches
+   * the service from. A *top-level* session that no graph owns is deliberately not
+   * distinguished here: that is membership, the model-facing door and its tool rule
+   * own it, and a direct service caller is this deployment's own trusted code.
+   *
+   * **Zero side effects.** This is two reads (an id derivation and a log opened
+   * `read` and closed), so a refusal here leaves no store opened, no proposal, no
+   * task, no run, no worker and no notice — which is why both entries that could
+   * create a root call it before their first write.
+   */
+  private assertRootContractOrigin;
+  /**
+   * One root session's own durable log and header, read through
+   * `sessionPersistence` in one open/read/close — the surface a session's requests
+   * are recorded on, and the record of what kind of session it is — or a named
+   * refusal when this deployment cannot read it: no persistence service is
+   * mounted, the session is missing, or the open/read throws. The refusal is the
+   * answer rather than an empty log, because the rule it feeds is fail-closed
+   * ({@link assertRootContractOrigin}): an unreadable log is "the origin is not
+   * established", never "assume there is one". The header is handed back as the
+   * handle exposes it — a backend that models only the log answers `undefined`,
+   * which is read as "no delegation facts recorded" rather than as delegation.
+   */
+  private rootSessionLog;
+  /**
+   * The one refusal text a root contract whose origin could not be established is
+   * refused with, whichever rule (or which unreadable log) said so. It is a
+   * family of its own rather than {@link rootRefusal}'s: "the contract was judged
+   * and found wanting" and "the request behind it is not established" are
+   * different facts about a call, and a caller that revises a contract must not
+   * confuse the second for the first.
+   */
+  private originRefusal;
+  /**
    * One root submission, inside the store's root-intake serialization: the
    * contract is fixed and normalized, a request the store already answers is
    * answered from the record, everything else is judged, and the record is
@@ -3464,6 +3555,10 @@ declare class TaskRuntime extends Service {
    * needs the judgement *before* the record, and T3 §6's idempotency needs the
    * record lookup *before* the judgement — a retry of a request the store
    * already answers is that proposal whatever state the store has moved to since.
+   *
+   * Ahead of all of it is one rule that is not about the contract at all: the
+   * origin of the request it states (§1.10), checked before the store is even
+   * opened ({@link assertRootContractOrigin}).
    */
   private submitRootProposalOnce;
   /**
@@ -3508,14 +3603,19 @@ declare class TaskRuntime extends Service {
    *
    * The ladder, in the order the facts become decisive:
    *
-   * 1. the store's root task — a store that already holds one refuses every
+   * 1. the origin of the request the contract states (§1.10,
+   *    {@link assertRootContractOrigin}) — a store that is not the session's own, a
+   *    session that is a delegated child, or a session whose own log holds no
+   *    request of the person's, cannot carry a root at all, and this is decided
+   *    before the ladder's first write;
+   * 2. the store's root task — a store that already holds one refuses every
    *    further root intake. If the root on record is the one *this* proposal
    *    consumed, the proposal is already admitted and the status ladder above has
    *    answered; anything else is another root (a goal change is a new graph),
    *    and this proposal can never become one, so it is `expired` by name;
-   * 2. the limits in force, against the fingerprint the approval bound — a
+   * 3. the limits in force, against the fingerprint the approval bound — a
    *    deployment that moved them after the review invalidates it (§6);
-   * 3. the resolution this contract was reviewed against — its declared
+   * 4. the resolution this contract was reviewed against — its declared
    *    capabilities, the providers behind them and the verifiers its criteria
    *    pin — recomputed and compared, with the difference named.
    *
@@ -3745,6 +3845,20 @@ declare class TaskRuntime extends Service {
    *   itself, so recovery re-binds rather than minting a second task and run
    *   ({@link adoptRoot} is that re-binding's other door, for a process that
    *   starts from a graph entry instead).
+   *
+   * Ahead of both arms is the origin rule (§1.10,
+   * {@link assertRootContractOrigin}): a record whose request cannot be
+   * established is not something to ask a person about — a decision on it could
+   * never activate anything, because the ladder refuses the same fact at
+   * activation — and it is not something to continue either. The refusal travels
+   * out of this call so the proposal pass reports it unresolved by name.
+   *
+   * **The boundary this check does not cross.** {@link decideProposal} is left
+   * exactly as it was: a person's decision on a record that exists is a
+   * record-level fact, and it is written whether or not the contract could ever
+   * activate — the activation it would cause is the thing that is refused, here
+   * and at every other door into a root. Recovery's pass is not a decision, so it
+   * is the one place where "do not ask" can be honoured.
    */
   private reconcileRootProposal;
   /**

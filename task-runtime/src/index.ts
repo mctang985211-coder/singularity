@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@dangosys/dsh-singularity-agent-runtime'
@@ -290,6 +290,30 @@ interface SessionLogSource {
 }
 
 /**
+ * Soft view of the session-persistence service: one session's own durable log,
+ * opened read-only (the handle shape `@deepseek-ai/dsh-session-persistence`
+ * defines, declared structurally so this module needs no dependency on it).
+ *
+ * This is the surface a person's request is recorded on — the one a root
+ * contract's origin is established from (A0 §1.10) — rather than
+ * {@link SessionLogSource}, which is the replay-validated *read* view mounted
+ * for review evidence and may be absent where the durable log is present.
+ */
+interface SessionLogReader {
+  open(id: SessionId, access: 'read'): Promise<{
+    /**
+     * The stored header — the immutable session metadata a delegated child is
+     * recognised by ({@link assertRootContractOrigin} reads its `origin` and
+     * `delegationDepth`). Declared optional because a backend stub may model the
+     * log alone; the real handle always carries it.
+     */
+    readonly header?: SessionHeader
+    read(offset?: number, length?: number): Promise<{ readonly events: readonly SessionEvent[] }>
+    close(): Promise<void>
+  }>
+}
+
+/**
  * Tools that put a question or an approval in front of a human. `hitl_ask` and
  * `hitl_approve` are this deployment's root tools
  * (`agent-singularity/src/tools/ask.ts:11`, `approve.ts:9`); `ask_user_question`
@@ -545,7 +569,10 @@ export type RootIntakeResult =
  * (`adopted`, with the task and run ids and the phase the session's gate was set
  * to), or it does not (`adopted: false`) — a store can exist with no task at all
  * (A0 §1.1: `graphs.create` opens it, the intake fills it), and that is not an
- * error, it is the state before a contract was accepted.
+ * error, it is the state before a contract was accepted. The negative answer is
+ * given *after* the adoption's own recovery pass has run (§3 stage B,
+ * {@link TaskRuntime.adoptRoot}), so its `detail` names the proposals that pass
+ * left open and states that nothing was created.
  */
 export type RootAdoption =
   | {
@@ -1566,9 +1593,20 @@ export class TaskRuntime extends Service {
    * What it does, in order: create-or-open the store (`rootTaskStoreId`), index
    * every run the store holds, and then —
    *
-   * - **no root task**: answer `{ adopted: false }`. A store with no task is a
-   *   normal state since §1.1 (a graph's store is opened by its creation and
-   *   filled when a contract is accepted), not a failure to report;
+   * - **no root task**: run the store's own recovery pass (`reconcileStore`:
+   *   settle or restart what a dead process left in flight, then the proposals)
+   *   and answer from what that pass left. Adoption is the entry graphs and
+   *   recovery use (§3 stage B), so the pass runs *here*: a contract whose
+   *   approval is on the record and whose process died is carried into the root
+   *   it was about by exactly this pass, and a waiting contract's review is
+   *   re-asked from the stored facts by it — answering "nothing to adopt" before
+   *   that pass would leave a recorded decision uncontinued. A root the pass
+   *   activates is then bound the way the bullet below binds one; a store the
+   *   pass leaves without a root still answers `{ adopted: false }`, with the
+   *   proposals still open on it named by id and status and the fact that
+   *   nothing was created stated. A store with no task is a normal state since
+   *   §1.1 (a graph's store is opened by its creation and filled when a contract
+   *   is accepted), not a failure to report;
    * - **a root task, with a run bound to this root session**: re-check the run's
    *   content binding (S1-C: a snapshot that is no longer readable refuses the
    *   re-entry by name rather than resuming against whatever stands at that path
@@ -1589,15 +1627,19 @@ export class TaskRuntime extends Service {
    */
   async adoptRoot(storeId: string, rootSessionId: string): Promise<RootAdoption> {
     await this.openOrCreateStore(storeId)
-    const snapshot = await this.ctx.task.snapshotIn(storeId)
+    let snapshot = await this.ctx.task.snapshotIn(storeId)
     this.reindex(storeId, snapshot)
-    const root = snapshot.tasks.find(task => task.parentTaskId === undefined)
+    let root = snapshot.tasks.find(task => task.parentTaskId === undefined)
     if (root === undefined) {
-      return {
-        adopted: false,
-        detail:
-          `store "${storeId}" holds no root task, so there is nothing to adopt for session "${rootSessionId}"; ` +
-          'a root task is created by a root contract intake, never by adoption',
+      // No root on the record is not the end of the question: the recovery pass
+      // is what continues an approval that was recorded before the process died
+      // (and what re-asks a waiting contract's review from the stored facts), so
+      // it runs before the answer rather than after an explicit second call.
+      await this.reconcileStore(storeId)
+      snapshot = await this.ctx.task.snapshotIn(storeId)
+      root = snapshot.tasks.find(task => task.parentTaskId === undefined)
+      if (root === undefined) {
+        return { adopted: false, detail: this.nothingAdoptedDetail(storeId, rootSessionId, snapshot) }
       }
     }
     const run = [...snapshot.runs].reverse().find(item => item.taskId === root.taskId && item.sessionId === rootSessionId)
@@ -1635,6 +1677,30 @@ export class TaskRuntime extends Service {
         `store "${storeId}" holds root task "${root.taskId}" with run "${run.runId}" for session "${rootSessionId}"; ` +
         `the session is bound and its gate is "${phase ?? 'ungated'}"`,
     }
+  }
+
+  /**
+   * What {@link adoptRoot} answers when the store still holds no root *after* its
+   * recovery pass ran (A0 §3 stage B): the proposals that pass left open, by id and
+   * status, and the fact that nothing was created.
+   *
+   * `adopted: false` is a normal answer (§1.1), and this detail is what keeps it an
+   * honest one. Recovery never advances a waiting contract and never mints a root
+   * without an accepted contract, so what a caller gets back is the state of the
+   * intake rather than a verdict: the pass ran, a named proposal is still waiting
+   * for a decision or a continuation, and adopting created no task, no run and no
+   * proposal of its own.
+   */
+  private nothingAdoptedDetail(storeId: string, rootSessionId: string, snapshot: TaskSnapshot): string {
+    const open = (snapshot.proposals?.all ?? []).filter(isOpenProposal)
+    const waiting = open.length === 0
+      ? 'no proposal is open on it'
+      : `${open.length === 1 ? '1 proposal is' : `${open.length} proposals are`} still open: ` +
+        open.map(proposal => `"${proposal.proposalId}" (${proposal.status})`).join(', ')
+    return (
+      `store "${storeId}" holds no root task for session "${rootSessionId}" after its recovery pass, which created no task, no run and no proposal; ` +
+      `${waiting}; a root task is created by a root contract intake, never by adoption`
+    )
   }
 
   /**
@@ -2479,6 +2545,129 @@ export class TaskRuntime extends Service {
   }
 
   /**
+   * One root contract's origin, established before anything is read or written on
+   * its behalf (A0 §1.10): the store must be the root session's own
+   * (`rootTaskStoreId`), that session must be a top-level one — a delegated child
+   * is a worker, and its task was admitted by its parent — and its own durable log
+   * must hold the person's request: a `user/message` event whose
+   * `source.kind === 'user'`, the kind DSH reserves for host-attested human input
+   * (`tool-goal/src/authority.ts:hasDirectHumanInput`).
+   *
+   * **Why the check is fail-closed.** The rules are mechanical and each is
+   * answered by a refusal rather than by a default: the store↔session mapping is
+   * arithmetic, the delegation facts are the header the spawn stamped, and the
+   * request half is *existence* — at least one message whose source is the person.
+   * Everything else that reaches a session's log is attributed to its **producer**:
+   * this deployment writes its own prompts under `runtime-prompt` (the graph setup
+   * text and a spawn's delegated task, `agent-runtime`'s own source) and its notices
+   * under `plugin` (`notify`), and neither counts — a session that only ever heard
+   * from the deployment has no request to attribute a contract to, and treating the
+   * model's summary of a conversation as the request is exactly the "model
+   * self-reported confirmation" §1.10 forbids. A log this deployment cannot read is
+   * refused for the same reason — "the source could not be checked" is not "the
+   * source is the person". Deliberately absent: any natural-language entailment.
+   * Whether the contract *states* the request well is the model's reasoning and the
+   * §1.2 rules judge the contract itself; this rule only tests that a request of
+   * the person's own is there.
+   *
+   * **Where each half belongs.** Which session may call `task_intake` — graph and
+   * root-session membership — is the tool's own rule, because the `graphs` record
+   * is the thing that knows it. What this check owns is the quadruple a caller can
+   * hand in wrongly: the store, the session, the session's kind and its origin
+   * (store ↔ session ↔ top-level ↔ origin), so both doors into a root — the tool's
+   * call and a direct service call — meet the same rule wherever a caller reaches
+   * the service from. A *top-level* session that no graph owns is deliberately not
+   * distinguished here: that is membership, the model-facing door and its tool rule
+   * own it, and a direct service caller is this deployment's own trusted code.
+   *
+   * **Zero side effects.** This is two reads (an id derivation and a log opened
+   * `read` and closed), so a refusal here leaves no store opened, no proposal, no
+   * task, no run, no worker and no notice — which is why both entries that could
+   * create a root call it before their first write.
+   */
+  private async assertRootContractOrigin(storeId: string, rootSessionId: string): Promise<void> {
+    const own = rootTaskStoreId(rootSessionId)
+    if (storeId !== own) {
+      throw this.originRefusal(
+        rootSessionId,
+        `store "${storeId}" is not this session's own store ("${own}"), and a root contract is intaken into the store of the session that asked ` +
+        '(A0 §1.10) — never into another session\'s, whatever the contract says',
+      )
+    }
+    const { header, events } = await this.rootSessionLog(rootSessionId)
+    // The session's kind, before its log: a spawned session works on a task its
+    // parent already admitted, and no message on its log can make it the
+    // top-level session a graph created.
+    if (header?.origin === 'subagent') {
+      throw this.originRefusal(
+        rootSessionId,
+        'this session is a delegated child (its header records origin "subagent"), and a root contract belongs to the top-level session a graph ' +
+        'created — the task a spawned session works on was already admitted by its parent (A0 §1.10)',
+      )
+    }
+    const depth = header?.delegationDepth ?? 0
+    if (depth > 0) {
+      throw this.originRefusal(
+        rootSessionId,
+        `this session is a delegated child (its header records delegation depth ${depth}), and a root contract belongs to the top-level session a ` +
+        'graph created — the task a spawned session works on was already admitted by its parent (A0 §1.10)',
+      )
+    }
+    if (events.some(event => event.type === 'user/message' && event.data.source.kind === 'user')) return
+    throw this.originRefusal(
+      rootSessionId,
+      'this session\'s own log holds no message from the person (no `user/message` event with source.kind "user", the marker DSH reserves for ' +
+      'host-attested human input), so the request the contract stands on cannot be established here; the messages this deployment writes to a ' +
+      'session of its own are attributed to their producers — its prompts carry source.kind "runtime-prompt" (the graph setup text and a spawn\'s ' +
+      'delegated task) and its notices carry "plugin" — and neither is a request of the person\'s (A0 §1.10)',
+    )
+  }
+
+  /**
+   * One root session's own durable log and header, read through
+   * `sessionPersistence` in one open/read/close — the surface a session's requests
+   * are recorded on, and the record of what kind of session it is — or a named
+   * refusal when this deployment cannot read it: no persistence service is
+   * mounted, the session is missing, or the open/read throws. The refusal is the
+   * answer rather than an empty log, because the rule it feeds is fail-closed
+   * ({@link assertRootContractOrigin}): an unreadable log is "the origin is not
+   * established", never "assume there is one". The header is handed back as the
+   * handle exposes it — a backend that models only the log answers `undefined`,
+   * which is read as "no delegation facts recorded" rather than as delegation.
+   */
+  private async rootSessionLog(rootSessionId: string): Promise<{ readonly header: SessionHeader | undefined; readonly events: readonly SessionEvent[] }> {
+    const persistence = this.softService<SessionLogReader>('sessionPersistence')
+    if (persistence === undefined || typeof persistence.open !== 'function') {
+      throw this.originRefusal(rootSessionId, 'this deployment mounts no session-persistence service, so its own log cannot be read (A0 §1.10)')
+    }
+    let handle: Awaited<ReturnType<SessionLogReader['open']>> | undefined
+    try {
+      handle = await persistence.open(SessionId(rootSessionId), 'read')
+      const { events } = await handle.read(0)
+      return { header: handle.header, events }
+    } catch (error) {
+      throw this.originRefusal(rootSessionId, `its own log could not be read (${error instanceof Error ? error.message : String(error)})`)
+    } finally {
+      // A close that fails is not this call's answer: the log was already read —
+      // or already refused by name — and the handle's teardown is best-effort
+      // here as it is everywhere else in this module.
+      if (handle !== undefined) await handle.close().catch(() => undefined)
+    }
+  }
+
+  /**
+   * The one refusal text a root contract whose origin could not be established is
+   * refused with, whichever rule (or which unreadable log) said so. It is a
+   * family of its own rather than {@link rootRefusal}'s: "the contract was judged
+   * and found wanting" and "the request behind it is not established" are
+   * different facts about a call, and a caller that revises a contract must not
+   * confuse the second for the first.
+   */
+  private originRefusal(rootSessionId: string, reason: string): Error {
+    return new Error(`task-runtime: the root contract of session "${rootSessionId}" was refused: ${reason}`)
+  }
+
+  /**
    * One root submission, inside the store's root-intake serialization: the
    * contract is fixed and normalized, a request the store already answers is
    * answered from the record, everything else is judged, and the record is
@@ -2488,6 +2677,10 @@ export class TaskRuntime extends Service {
    * needs the judgement *before* the record, and T3 §6's idempotency needs the
    * record lookup *before* the judgement — a retry of a request the store
    * already answers is that proposal whatever state the store has moved to since.
+   *
+   * Ahead of all of it is one rule that is not about the contract at all: the
+   * origin of the request it states (§1.10), checked before the store is even
+   * opened ({@link assertRootContractOrigin}).
    */
   private async submitRootProposalOnce(
     storeId: string,
@@ -2500,6 +2693,13 @@ export class TaskRuntime extends Service {
     if (options.exec?.signal?.aborted === true) {
       throw new Error(`task-runtime: the intake of a root contract for session "${rootSessionId}" was cancelled before anything was persisted`)
     }
+    // Where the request came from, before anything is opened or written: a store
+    // that is not the session's own, a session that is a delegated child, or one
+    // whose own log holds no request of the person's, is a named refusal here and
+    // leaves no store behind
+    // (§1.10, {@link assertRootContractOrigin}) — a refused intake must not even
+    // create the target store.
+    await this.assertRootContractOrigin(storeId, rootSessionId)
     // The root session's store exists before its contract does (A0 §1.1): a graph
     // creates the session, and the intake is what fills the store — so this is the
     // entry that opens it. A store that is already there is opened, never reset.
@@ -2735,14 +2935,19 @@ export class TaskRuntime extends Service {
    *
    * The ladder, in the order the facts become decisive:
    *
-   * 1. the store's root task — a store that already holds one refuses every
+   * 1. the origin of the request the contract states (§1.10,
+   *    {@link assertRootContractOrigin}) — a store that is not the session's own, a
+   *    session that is a delegated child, or a session whose own log holds no
+   *    request of the person's, cannot carry a root at all, and this is decided
+   *    before the ladder's first write;
+   * 2. the store's root task — a store that already holds one refuses every
    *    further root intake. If the root on record is the one *this* proposal
    *    consumed, the proposal is already admitted and the status ladder above has
    *    answered; anything else is another root (a goal change is a new graph),
    *    and this proposal can never become one, so it is `expired` by name;
-   * 2. the limits in force, against the fingerprint the approval bound — a
+   * 3. the limits in force, against the fingerprint the approval bound — a
    *    deployment that moved them after the review invalidates it (§6);
-   * 3. the resolution this contract was reviewed against — its declared
+   * 4. the resolution this contract was reviewed against — its declared
    *    capabilities, the providers behind them and the verifiers its criteria
    *    pin — recomputed and compared, with the difference named.
    *
@@ -2756,6 +2961,13 @@ export class TaskRuntime extends Service {
     proposal: TaskProposalRoot,
   ): Promise<ProposalContinuation> {
     const rootSessionId = proposal.identity.rootSessionId
+    // The origin rule again, before the ladder's first write (§1.10): a proposal
+    // recorded before this rule existed, or written into the store by any other
+    // hand, must not be able to *become* the store's root either. Every step
+    // below this line — the expiry of a store that already holds a root, the
+    // tightening, the stale marking, the activation commit — is a write, and the
+    // refusal here leaves none of them attempted.
+    await this.assertRootContractOrigin(storeId, rootSessionId)
     const existing = await this.existingRootTask(storeId)
     if (existing !== undefined) {
       return await this.expireProposal(
@@ -3783,6 +3995,20 @@ export class TaskRuntime extends Service {
    *   itself, so recovery re-binds rather than minting a second task and run
    *   ({@link adoptRoot} is that re-binding's other door, for a process that
    *   starts from a graph entry instead).
+   *
+   * Ahead of both arms is the origin rule (§1.10,
+   * {@link assertRootContractOrigin}): a record whose request cannot be
+   * established is not something to ask a person about — a decision on it could
+   * never activate anything, because the ladder refuses the same fact at
+   * activation — and it is not something to continue either. The refusal travels
+   * out of this call so the proposal pass reports it unresolved by name.
+   *
+   * **The boundary this check does not cross.** {@link decideProposal} is left
+   * exactly as it was: a person's decision on a record that exists is a
+   * record-level fact, and it is written whether or not the contract could ever
+   * activate — the activation it would cause is the thing that is refused, here
+   * and at every other door into a root. Recovery's pass is not a decision, so it
+   * is the one place where "do not ask" can be honoured.
    */
   private async reconcileRootProposal(
     storeId: string,
@@ -3790,6 +4016,7 @@ export class TaskRuntime extends Service {
     report: (proposal: TaskProposal, status: TaskProposalStatus, reason: string) => Promise<void>,
   ): Promise<void> {
     const proposalId = proposal.proposalId
+    await this.assertRootContractOrigin(storeId, proposal.identity.rootSessionId)
     if (proposal.status === 'pending_review') {
       const existing = await this.existingRootTask(storeId)
       if (existing !== undefined) {

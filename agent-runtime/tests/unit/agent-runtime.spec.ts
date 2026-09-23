@@ -162,6 +162,15 @@ function promptTextOf(section: Spy): string {
   return ((section.mock.calls[0]?.[0] ?? {}) as { text?: string }).text ?? ''
 }
 
+/**
+ * The message source one `followup` carried, read back off the spy: the fact that
+ * decides whether a session's log holds a request of the person's or the
+ * deployment's own voice (A0 §1.10).
+ */
+function sourceOf(followup: Spy): unknown {
+  return (followup.mock.calls[0]?.[0] as { source?: unknown } | undefined)?.source
+}
+
 async function spawnContext() {
   const state = context([id('root')])
   const runtime = new AgentRuntime(state.ctx as never)
@@ -377,6 +386,34 @@ describe('AgentRuntime root lifecycle', () => {
     expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(childSession, 'danger-full-access')
     expect(order).toEqual(['topology', 'bind', 'prompt'])
     expect(followup).toHaveBeenCalledOnce()
+    // The delegated task is this runtime's own voice — the worker's turn was
+    // started by the deployment, not by a person — and it is attributed to its
+    // producer: `kind: 'user'` is DSH's host-attested human input marker, and a
+    // spawned session that carried it would read as a session somebody spoke to
+    // (A0 §1.10).
+    expect(sourceOf(followup)).toEqual({ kind: 'runtime-prompt', channel: 'spawn' })
+  })
+
+  test('attributes the prompts it writes to its own source, never to the person', async () => {
+    const state = context([id('root')])
+    const runtime = new AgentRuntime(state.ctx as never)
+    await runtime.ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
+    const followup = vi.fn()
+    Object.assign(state.root, {
+      session: { header: { id: id('root'), cwd: '/environment', agentPreset: 'standard' } },
+      followup,
+    })
+    Object.assign(state.ctx.agents, { get: () => state.root })
+    Object.assign(state.ctx.graph, {
+      snapshotIn: async () => ({ agents: [{ id: id('root'), name: 'Root', status: 'idle' }] }),
+    })
+
+    await runtime.prompt(state.root, [{ type: 'text', text: 'Set up Singularity graph g1.' }])
+
+    // The same rule from the other door: the graph's setup text is written by the
+    // deployment for its own root, and the log has to say so.
+    expect(followup).toHaveBeenCalledOnce()
+    expect(sourceOf(followup)).toEqual({ kind: 'runtime-prompt', channel: 'prompt' })
   })
 
   test('spawn setup applies the capability-granted permission preset instead of the default posture', async () => {

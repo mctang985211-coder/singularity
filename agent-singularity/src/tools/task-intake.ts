@@ -148,7 +148,11 @@ export function defineTaskIntakeTool(ctx: Context) {
     description:
       'Accept this root session\'s contract: the objective the graph works toward, the acceptance criteria a verifier will judge it by, ' +
       'the assumptions and constraints it rests on and the capabilities the work needs. Only the root session of a graph may call this — ' +
-      'the contract becomes that session\'s root task, and a worker\'s task was admitted by its parent already. The runtime normalizes ' +
+      'the contract becomes that session\'s root task, and a worker\'s task was admitted by its parent already. The runtime also checks ' +
+      'where the contract came from: only a message DSH attests as human input counts, so a session whose own log holds none of the ' +
+      'user\'s is refused — the prompts this deployment writes (the graph setup text, a spawn\'s delegated task) and the notices it sends ' +
+      'are attributed to their producers, not to a person. A delegated child session is refused too, and a contract is never intaken for ' +
+      'another session\'s store. The runtime normalizes ' +
       'and judges the contract first, and one rule is the root\'s own: at least one mandatory criterion must be judged by something ' +
       'other than the composite conjunction, so "all children verified" cannot be the only thing standing behind the goal. Where this ' +
       'deployment reviews contracts, the call then answers with a proposal id and nothing activated; the decision is recorded by the ' +

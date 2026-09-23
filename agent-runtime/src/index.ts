@@ -16,7 +16,7 @@ import type {} from '@deepseek-ai/dsh-permission-presets'
 import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import type {} from '@dangosys/dsh-singularity-layout'
 import { DEFAULT_ROOT } from '@dangosys/dsh-singularity-layout'
-import type { Agent, AgentHandle, ContentBlock, GraphEvent, GraphScope, RootRequest, SpawnRequest } from './types.ts'
+import type { Agent, AgentHandle, ContentBlock, GraphEvent, GraphScope, RootRequest, RuntimePromptSource, SpawnRequest } from './types.ts'
 import { applyWorkerGrant } from './grants.ts'
 import { installWorkerContract } from './contract-reinjection.ts'
 import { rootPromptText } from './prompts/root.prompts.ts'
@@ -102,6 +102,11 @@ function rootToolsFor(enabled: boolean): readonly string[] {
 function pinRootApprovalPolicy(session: Session): void {
   setApprovalPolicy(session, 'ask')
 }
+
+/** One message source of this runtime's own, as {@link RuntimePromptSource} declares it. */
+function runtimePrompt(channel: RuntimePromptSource['channel']): RuntimePromptSource {
+  return { kind: 'runtime-prompt', channel }
+}
 export type {
   AgentOptions,
   CanvasNode,
@@ -109,6 +114,7 @@ export type {
   GraphScope,
   McpServerSpec,
   RootRequest,
+  RuntimePromptSource,
   SessionVisibility,
   SpawnRequest,
   WorkerCapabilityGrant,
@@ -339,7 +345,10 @@ export class AgentRuntime extends Service {
         this.scopes.set(handle.agent.id, scope)
         this.handles.set(handle.agent.id, handle)
         await this.ctx.parallel('agentRuntime/spawned', { parentId: parent.id, sessionId: handle.agent.id })
-        handle.agent.followup(createUserMessage({ content: [...request.prompt], source: { kind: 'user' } }))
+        // The delegated task, under this runtime's own attribution: `kind: 'user'`
+        // is DSH's host-attested human input marker, and the worker's first turn is
+        // nobody's request but this deployment's (A0 §1.10, {@link RuntimePromptSource}).
+        handle.agent.followup(createUserMessage({ content: [...request.prompt], source: runtimePrompt('spawn') }))
         return handle
       } catch (error) {
         this.handles.delete(handle.agent.id)
@@ -406,7 +415,10 @@ export class AgentRuntime extends Service {
       throw new Error(`agent-runtime: agent "${agent.id}" is not in graph`)
     }
     this.live(agent)
-    agent.followup(createUserMessage({ content: [...prompt], source: { kind: 'user' } }))
+    // The graph's setup text is written by this runtime for its own root session
+    // (`graphs.create`), never by a person: it carries this runtime's own message
+    // source for the same reason a spawn does (A0 §1.10).
+    agent.followup(createUserMessage({ content: [...prompt], source: runtimePrompt('prompt') }))
   }
 
   private inGraph<T>(scope: GraphScope, work: () => Promise<T>): Promise<T> {

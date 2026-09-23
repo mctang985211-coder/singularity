@@ -9,8 +9,8 @@ import { AgentRegistry } from '../../../../thirdparty/deepseek-harness/packages/
 import SkillRegistry from '../../../../thirdparty/deepseek-harness/packages/skill/skill/lib/index.js'
 import { createScope } from '../../../../thirdparty/deepseek-harness/packages/core/scope/lib/index.js'
 import JsonlSessionPersistence from '../../../../thirdparty/deepseek-harness/packages/session/session-persistence-jsonl/lib/index.js'
-import SessionStore, { SessionId } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
-import type { SessionEvent } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
+import SessionStore, { SESSION_FORMAT_VERSION, SessionId } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
+import type { SessionEvent, SessionHeader } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ROOT_PROPOSAL_TASK_ID, rootTaskStoreId, TaskService } from '../../task/src/index.ts'
 import type { TaskEvent, TaskProposal, TaskSnapshot } from '../../task/src/index.ts'
@@ -27,6 +27,7 @@ import type {
 } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
+import { personRequest } from '../../task-runtime/tests/support/person-request.ts'
 import { OTHER_TOOLS, ROOT_TOOLS } from '../support/scripted-loop.ts'
 
 /**
@@ -325,6 +326,48 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
     return await originalSpawn(parent, request)
   }
   await agentRuntime.createRoot({ sessionId: SessionId(ROOT), scope: { graphStoreId: 'sg-g-root', layoutStoreId: 'sg-l-root' }, cwd: dir })
+
+  /**
+   * The person's request, on the root session's own durable log — the JSONL
+   * surface, written before any intake reads it (A0 §1.10). It is the *existence*
+   * of a user-sourced message that the rule asks for, so one text stands for the
+   * request this deployment's root contract states. A reopen finds it already on
+   * the log and writes nothing: the fact is durable, not this process's memory.
+   */
+  async function recordPersonRequest(): Promise<void> {
+    const handle = await openRootLog()
+    try {
+      const { events } = await handle.read(0)
+      if (events.some(event => event.type === 'user/message' && event.data.source.kind === 'user')) return
+      await handle.append([personRequest('ship the release', events.length)])
+      await backend.flush()
+    } finally {
+      await handle.close()
+    }
+  }
+
+  /**
+   * One write handle onto the root session's stored log. A real deployment stores
+   * the root session when the graph creates it — the loop's own write handle is
+   * what does it — and no model loop runs here, so the fixture creates that stored
+   * session itself when it is not there yet.
+   */
+  async function openRootLog(): Promise<Awaited<ReturnType<typeof persistence.open>>> {
+    try {
+      return await persistence.open(SessionId(ROOT), 'write')
+    } catch (error) {
+      if (!(error instanceof Error) || !/not found/.test(error.message)) throw error
+      return await persistence.create({
+        version: SESSION_FORMAT_VERSION,
+        id: SessionId(ROOT),
+        createdAt: Date.now(),
+        isSeeded: false,
+        cwd: dir,
+        agentPreset: 'standard',
+      } as unknown as SessionHeader)
+    }
+  }
+  await recordPersonRequest()
 
   const unit: Boot = {
     ctx,

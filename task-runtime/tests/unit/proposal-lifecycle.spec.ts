@@ -14,9 +14,10 @@ import type {
   TaskEvent,
   TaskProposal,
   TaskProposalBatchConsumption,
+  TaskProposalRoot,
   VerificationResult,
 } from '../../../task/src/index.ts'
-import { ROOT_PROPOSAL_TASK_ID, TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
+import { ROOT_PROPOSAL_TASK_ID, TaskService, rootProposalDigest, rootProposalId, rootTaskStoreId } from '../../../task/src/index.ts'
 import type { Config, DecomposeSpec, RootContractSpec } from '../../src/index.ts'
 import {
   TaskRuntime,
@@ -25,9 +26,12 @@ import {
   resolveRootBudget,
 } from '../../src/index.ts'
 import { seedLegacyRoot } from '../../../tests/support/legacy-root.ts'
+import { personRequest, pluginNotice } from '../support/person-request.ts'
 import { pinSkillHome, releaseSkillHomes } from '../support/skill-roots.ts'
 
 const ROOT_SESSION = 'root-session'
+/** A second root session, so "the store this contract was sent to" has a wrong answer available (A0 §1.10). */
+const BETA = 's-beta'
 const REVIEWER = 'reviewer-session'
 const STORE = rootTaskStoreId(ROOT_SESSION)
 
@@ -61,6 +65,17 @@ function harness(
   options: { config?: Partial<Config>; shared?: Map<string, StoredSession>; sessionIds?: string[] } = {},
 ) {
   const sessions = options.shared ?? new Map<string, StoredSession>()
+  // The person asked. This is the request every root intake below stands on, on
+  // the surface the runtime reads it from (A0 §1.10): the root session's own
+  // durable log, seeded once — `restart()` shares this map, exactly as a durable
+  // log outlives the process. The rule is the *existence* of a message whose
+  // source is the person, so one message stands for the request.
+  if (!sessions.has(ROOT_SESSION)) {
+    sessions.set(ROOT_SESSION, {
+      header: { id: ROOT_SESSION, cwd: '.', agentPreset: 'standard' } as unknown as SessionHeader,
+      events: [personRequest('ship the release')],
+    })
+  }
   const persistence = {
     list: vi.fn(async () => [...sessions.values()].map(item => ({ header: item.header }))),
     create: vi.fn(async (header: SessionHeader) => {
@@ -341,12 +356,30 @@ function batchAdmissions(h: Harness): TaskEvent[] {
     && (event.payload as { kind?: string }).kind !== 'root')
 }
 
-function taskEvents(h: Harness): TaskEvent[] {
-  const stored = h.sessions.get(STORE)
-  if (stored === undefined) throw new Error('no store session')
-  return stored.events
+/** Every task event one store appended, read back off the persistence log the store wrote through. */
+function taskEvents(h: Harness, storeId = STORE): TaskEvent[] {
+  if (!h.sessions.has(storeId)) throw new Error(`no session "${storeId}"`)
+  return storeTaskEvents(h, storeId)
+}
+
+/**
+ * Every task event one store appended — or none at all when the store was never
+ * created, which is a state a refusal can leave (A0 §1.1: the store a refused
+ * intake must not have opened). Both arms are what a side-effect check reads, so
+ * the reader tolerates the missing store instead of throwing at it.
+ */
+function storeTaskEvents(h: Harness, storeId: string): TaskEvent[] {
+  return (h.sessions.get(storeId)?.events ?? [])
     .filter(event => event.type === 'task/event')
     .map(event => (event as unknown as { data: TaskEvent }).data)
+}
+
+/** One session of this fixture's durable log, written where the persistence stub keeps it. */
+function seedSession(h: Harness, sessionId: string, events: readonly SessionEvent[]): void {
+  h.sessions.set(sessionId, {
+    header: { id: sessionId, cwd: '.', agentPreset: 'standard' } as unknown as SessionHeader,
+    events: [...events],
+  })
 }
 
 function childTasks(snapshot: { tasks: readonly { taskId: string; parentTaskId?: string }[] }, parentTaskId: string) {
@@ -1962,5 +1995,206 @@ describe('TaskRuntime root contract intake (A0 §1–§2)', () => {
     const after = await h.task.snapshotIn(STORE)
     expect(after.tasks).toHaveLength(2)
     expect(after.tasks.find(task => task.taskId === legacy.taskId)?.contract?.objective).toBe('the old graph name')
+  })
+})
+
+/**
+ * The origin rule (A0 §1.10): a root contract is intaken for a session whose own
+ * durable log carries a request of the person's, and only into that session's own
+ * store. The cases here are the counterexamples the rule exists for — a store
+ * that is not the session's, a session nobody spoke to, a log that cannot be read
+ * — plus the ladder's own door, because a record written before this rule existed
+ * must not be able to *become* a root either.
+ */
+describe('the root contract\'s origin (A0 §1.10)', () => {
+  test('refuses a contract sent to a store that is not the session\'s own, naming both ids and the session\'s own store', async () => {
+    const h = harness()
+    const other = rootTaskStoreId(BETA)
+
+    // The session that carried the request is the root session; the store handed
+    // in belongs to a different one. Nothing about the contract itself is wrong —
+    // this is attribution alone, which is why it is its own refusal.
+    await expect(h.runtime.intakeRootContract(other, ROOT_SESSION, rootContract('ship the release')))
+      .rejects.toThrow(
+        /the root contract of session "root-session" was refused: store "sg-t-s-beta" is not this session's own store \("sg-t-root-session"\)/,
+      )
+    // The other door into a submission — the half of the intake that records
+    // rather than activates — refuses it the same way, before any record exists.
+    await expect(h.runtime.submitRootContractProposal(other, ROOT_SESSION, rootContract('ship the release')))
+      .rejects.toThrow(/is not this session's own store/)
+
+    // Zero side effects, read back from the deployment rather than from the prose:
+    // neither store exists (the refused intake must not even create the target
+    // one), no task event was written anywhere, nobody was asked and every worker
+    // count stays zero.
+    expect(h.sessions.has(other)).toBe(false)
+    expect(h.sessions.has(STORE)).toBe(false)
+    expect(storeTaskEvents(h, other)).toEqual([])
+    expect(storeTaskEvents(h, STORE)).toEqual([])
+    expect(h.reviewCalls).toHaveLength(0)
+    expect(h.spawned).toHaveLength(0)
+    expect(h.notifications).toHaveLength(0)
+  })
+
+  test('refuses a contract for a session whose own log holds no request of the person — a notice the runtime sent is not one', async () => {
+    const h = harness()
+    const quiet = 's-quiet'
+    // The session heard from the runtime and from nobody else: `user/message`
+    // events exist on its log, all of them plugin-sourced. A model that read this
+    // session and reported "the user wants X" has no request behind the claim.
+    seedSession(h, quiet, [
+      pluginNotice('the root contract of this session was activated: task t-1, run r-1'),
+      pluginNotice('batch b-1 verified'),
+    ])
+    const quietStore = rootTaskStoreId(quiet)
+
+    await expect(h.runtime.intakeRootContract(quietStore, quiet, rootContract('a goal nobody asked for')))
+      .rejects.toThrow(
+        /the root contract of session "s-quiet" was refused: this session's own log holds no message from the person \(no `user\/message` event with source\.kind "user", the marker DSH reserves for host-attested human input\)/,
+      )
+
+    expect(h.sessions.has(quietStore)).toBe(false)
+    expect(storeTaskEvents(h, quietStore)).toEqual([])
+    expect(h.reviewCalls).toHaveLength(0)
+    expect(h.spawned).toHaveLength(0)
+    expect(h.notifications).toHaveLength(0)
+    // The session's own log is exactly what it was: a refusal reads, it never writes.
+    expect(h.sessions.get(quiet)?.events).toHaveLength(2)
+  })
+
+  test('refuses when the session\'s own log cannot be read: no reader mounted, or no such session', async () => {
+    const h = harness()
+    // A deployment that mounts no session-persistence service cannot establish the
+    // origin, and "could not check" is a refusal rather than a silent pass.
+    const mounted = h.ctx.sessionPersistence
+    delete h.ctx.sessionPersistence
+    await expect(h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('ship the release')))
+      .rejects.toThrow(/the root contract of session "root-session" was refused: this deployment mounts no session-persistence service/)
+    expect(h.sessions.has(STORE)).toBe(false)
+    h.ctx.sessionPersistence = mounted
+
+    // The same fact from the other side: a session whose log does not exist makes
+    // the open fail, and the failure is named rather than read as "no request".
+    const ghost = 's-ghost'
+    await expect(h.runtime.intakeRootContract(rootTaskStoreId(ghost), ghost, rootContract('ship the release')))
+      .rejects.toThrow(/the root contract of session "s-ghost" was refused: its own log could not be read \(missing session s-ghost\)/)
+    expect(h.sessions.has(rootTaskStoreId(ghost))).toBe(false)
+
+    // And a session that *does* have a log with the person's request is untouched
+    // by either refusal: the same contract intakes normally.
+    const activated = await h.runtime.intakeRootContract(STORE, ROOT_SESSION, rootContract('ship the release'))
+    expect(activated.status).toBe('activated')
+  })
+
+  test('an already-recorded cross-attributed proposal cannot be activated: the ladder refuses before its first write', async () => {
+    const h = harness({ config: { generatedTaskReview: 'off' } })
+    await h.task.createStore(STORE)
+    // A well-formed record of the shape the probe left behind: session BETA's
+    // contract, attributed to session BETA, and written into a store that is not
+    // that session's. The service refuses to *make* such a record now (the cases
+    // above); this one starts from one, which is what a store written before this
+    // rule existed holds.
+    const submitted = await h.runtime.submitRootContractProposal(STORE, ROOT_SESSION, rootContract('ship the release'))
+    const legit = await proposalOf(h, submitted.proposalId)
+    if (legit.kind !== 'root') throw new Error('unreachable')
+    const betaStore = rootTaskStoreId(BETA)
+    const requestKey = 'rk-beta-contract-in-a-store-that-is-not-hers'
+    const identity = { ...legit.identity, storeId: betaStore, rootSessionId: BETA, requestKey }
+    const cross: TaskProposalRoot = {
+      ...legit,
+      requestKey,
+      proposalId: rootProposalId(identity),
+      identity,
+      proposalDigest: rootProposalDigest(identity),
+    }
+    await h.task.submitProposalIn(STORE, cross, BETA)
+
+    // A root in that store, so the ladder's *first* step — the expiry of a store
+    // whose root somebody else became — is reachable too: the refusal has to come
+    // before that write, not merely before the activation.
+    await seedLegacyRoot({
+      task: h.task,
+      runtime: h.runtime,
+      storeId: STORE,
+      rootSessionId: ROOT_SESSION,
+      objective: 'the name of some old graph',
+    })
+
+    await expect(h.runtime.continueProposal(STORE, cross.proposalId, BETA))
+      .rejects.toThrow(
+        /the root contract of session "s-beta" was refused: store "sg-t-root-session" is not this session's own store \("sg-t-s-beta"\)/,
+      )
+
+    // Zero side effects: the proposal is exactly where it was — not expired by the
+    // ladder's first step, and with no phase change or admission behind it — and
+    // the store still holds the one legacy root it started with.
+    expect((await h.runtime.proposalIn(STORE, cross.proposalId)).status).toBe('ready')
+    expect(storeTaskEvents(h, STORE).filter(event => event.kind === 'TaskProposalPhaseChanged')).toEqual([])
+    expect(storeTaskEvents(h, STORE).filter(event => event.kind === 'TaskProposalAdmitted')).toEqual([])
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.tasks).toHaveLength(1)
+    expect(snapshot.runs).toHaveLength(1)
+    expect(snapshot.tasks[0]?.objective).toBe('the name of some old graph')
+    expect(h.spawned).toHaveLength(0)
+    expect(h.notifications).toHaveLength(0)
+  })
+
+  test('does not ask a person about a waiting contract whose origin is not established', async () => {
+    // The record is built through the runtime's own submission under `off` (which
+    // asks nobody) and then written into the quiet session's store through the
+    // store's own entry, as a `pending_review` contract — the shape a store
+    // written before this rule existed, or by any other hand, holds.
+    const h = harness({ config: { generatedTaskReview: 'off' } })
+    const quiet = 's-quiet'
+    // A session nobody spoke to: the runtime's own notice is all that is on it.
+    seedSession(h, quiet, [pluginNotice('batch b-1 verified')])
+    const quietStore = rootTaskStoreId(quiet)
+    await h.task.createStore(quietStore)
+    const submitted = await h.runtime.submitRootContractProposal(STORE, ROOT_SESSION, rootContract('a goal nobody asked for'))
+    const legit = await proposalOf(h, submitted.proposalId)
+    if (legit.kind !== 'root') throw new Error('unreachable')
+    const requestKey = 'rk-contract-for-a-session-nobody-spoke-to'
+    const identity = { ...legit.identity, storeId: quietStore, rootSessionId: quiet, requestKey }
+    const waiting: TaskProposalRoot = {
+      ...legit,
+      status: 'pending_review',
+      policy: 'all',
+      requestKey,
+      proposalId: rootProposalId(identity),
+      identity,
+      proposalDigest: rootProposalDigest(identity),
+    }
+    await h.task.submitProposalIn(quietStore, waiting, quiet)
+
+    // Recovery of that store. A contract whose request cannot be established can
+    // never activate, so a person must not be asked to decide it: the pass reports
+    // it unresolved by name instead, and asks nobody.
+    const report = await h.runtime.reconcileStore(quietStore)
+    expect(h.reviewCalls).toHaveLength(0)
+    expect(report.unresolvedProposals).toHaveLength(1)
+    expect(report.unresolvedProposals[0]).toMatchObject({ proposalId: waiting.proposalId, status: 'pending_review' })
+    expect(report.unresolvedProposals[0]!.reason).toContain('the root contract of session "s-quiet" was refused')
+    expect(report.unresolvedProposals[0]!.reason).toContain('holds no message from the person')
+
+    // Nothing was created and nothing was written: the contract still waits, and
+    // the pass left no phase change, no admission and no task behind it.
+    expect((await h.runtime.proposalIn(quietStore, waiting.proposalId)).status).toBe('pending_review')
+    expect(storeTaskEvents(h, quietStore).filter(event => event.kind === 'TaskProposalPhaseChanged')).toEqual([])
+    expect(storeTaskEvents(h, quietStore).filter(event => event.kind === 'TaskProposalAdmitted')).toEqual([])
+    expect(storeTaskEvents(h, quietStore).filter(event => event.kind === 'TaskCreated')).toEqual([])
+    const snapshot = await h.task.snapshotIn(quietStore)
+    expect(snapshot.tasks).toHaveLength(0)
+    expect(snapshot.runs).toHaveLength(0)
+    expect(h.spawned).toHaveLength(0)
+    expect(h.notifications).toHaveLength(0)
+
+    // The adoption door answers the same, and asks nobody either: it names the
+    // waiting proposal and reports that it created nothing.
+    const adopted = await h.runtime.adoptRoot(quietStore, quiet)
+    expect(adopted.adopted).toBe(false)
+    if (adopted.adopted) throw new Error('unreachable')
+    expect(adopted.detail).toContain(`"${waiting.proposalId}" (pending_review)`)
+    expect(adopted.detail).toContain('created no task, no run and no proposal')
+    expect(h.reviewCalls).toHaveLength(0)
   })
 })

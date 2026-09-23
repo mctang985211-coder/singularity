@@ -10,6 +10,7 @@ import { TaskService, canonicalize, contractDigest, decompositionDigest, rootTas
 import type { Config, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
+import { personRequest } from '../../task-runtime/tests/support/person-request.ts'
 
 /**
  * T1 (the unified normalized task contract) end to end on the real chain: the
@@ -247,6 +248,12 @@ function rootContract(objective: string): RootContractSpec {
 
 async function createRoot(h: Generation, objective: string, session = ROOT_SESSION): Promise<Root> {
   const storeId = rootTaskStoreId(session)
+  // The person asked for this objective, and that request is on the session's own
+  // durable log before the intake reads it (A0 §1.10): the origin rule is the
+  // *existence* of a user-sourced message, and these cases are about what follows
+  // the intake rather than about the rule itself.
+  h.memory.headers.set(session, { id: session, cwd: '.', agentPreset: 'standard' } as unknown as SessionHeader)
+  if (!h.memory.events.has(session)) h.memory.events.set(session, [personRequest(objective)])
   const activated = await h.runtime.intakeRootContract(storeId, session, rootContract(objective))
   if (activated.status !== 'activated') throw new Error(`the root contract was not activated: ${activated.detail}`)
   return { storeId, taskId: activated.taskId, runId: activated.runId, session }

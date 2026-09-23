@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { join } from 'node:path'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import { TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
+import { requestedSession } from '../support/person-request.ts'
 import type { BatchContext, Config, RootContractSpec } from '../../src/index.ts'
 import { TaskRuntime } from '../../src/index.ts'
 import { pinSkillHome, releaseSkillHomes } from '../support/skill-roots.ts'
@@ -45,6 +46,11 @@ afterEach(releaseSkillHomes)
 /** The smallest context the admission path needs: a session store, a graph, and a root agent. */
 function harness() {
   const sessions = new Map<string, { header: SessionHeader; events: SessionEvent[] }>()
+  // The person's request, on the root session's own durable log: what a root
+  // contract's origin is read from (A0 §1.10). The rule is the *existence* of a
+  // user-sourced message, so one text stands for the request this harness's
+  // intake rests on.
+  sessions.set(ROOT_SESSION, requestedSession(ROOT_SESSION, 'ship the release'))
   const handle = (id: SessionId) => ({
     read: async () => ({ events: sessions.get(id)?.events ?? [] }),
     append: async (records: readonly SessionEvent[]) => { sessions.get(id)?.events.push(...records) },

@@ -9,6 +9,7 @@ import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
 import { pinSkillHome, releaseSkillHomes } from '../../task-runtime/tests/support/skill-roots.ts'
 import type { RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
+import { personRequest } from '../../task-runtime/tests/support/person-request.ts'
 
 /**
  * P4's owed work, end to end: a review record really carries the eight
@@ -74,6 +75,10 @@ function harness() {
   const ctx = new Context()
   const log = new Map<string, SessionEvent[]>()
   const headers = new Map<string, SessionHeader>()
+  // The person's request, on the root session's own durable log: what a root
+  // contract's origin is read from (A0 §1.10). The rule is the *existence* of a
+  // user-sourced message, so one text stands for the request this harness intakes on.
+  log.set(ROOT_SESSION, [personRequest('ship the release')])
   const create = vi.fn(async (header: SessionHeader) => {
     headers.set(header.id, header)
     log.set(header.id, [])
@@ -87,6 +92,18 @@ function harness() {
   ctx.provide('sessionPersistence', {
     list: async () => [...headers.values()].map(header => ({ header })),
     create,
+    // The read half the runtime opens to establish a root contract's origin
+    // (A0 §1.10): the same handle shape the other fixtures mount.
+    open: async (id: SessionId) => {
+      const stored = log.get(id)
+      if (stored === undefined) throw new Error(`missing session ${id}`)
+      return {
+        read: async () => ({ events: stored }),
+        append: async (records: readonly SessionEvent[]) => { stored.push(...records) },
+        flush: async () => {},
+        close: async () => {},
+      }
+    },
   } as never)
 
   const spawned: string[] = []

@@ -9,8 +9,8 @@ import { AgentRegistry } from '../../../../thirdparty/deepseek-harness/packages/
 import SkillRegistry from '../../../../thirdparty/deepseek-harness/packages/skill/skill/lib/index.js'
 import { createScope } from '../../../../thirdparty/deepseek-harness/packages/core/scope/lib/index.js'
 import JsonlSessionPersistence from '../../../../thirdparty/deepseek-harness/packages/session/session-persistence-jsonl/lib/index.js'
-import SessionStore, { SessionId } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
-import type { SessionEvent } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
+import SessionStore, { SESSION_FORMAT_VERSION, SessionId } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
+import type { SessionEvent, SessionHeader } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { rootTaskStoreId, TaskService } from '../../task/src/index.ts'
 import type { TaskEvent, TaskProposalRoot, TaskSnapshot } from '../../task/src/index.ts'
@@ -22,6 +22,7 @@ import type { Config, DecomposeSpec, RootContractSpec } from '../../task-runtime
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 import { seedLegacyRoot } from '../support/legacy-root.ts'
+import { personRequest } from '../../task-runtime/tests/support/person-request.ts'
 import { OTHER_TOOLS, ROOT_TOOLS } from '../support/scripted-loop.ts'
 
 /**
@@ -37,6 +38,14 @@ import { OTHER_TOOLS, ROOT_TOOLS } from '../support/scripted-loop.ts'
  * `AgentRuntime` spawn path, the **deployment's own review channel**
  * (`ProposalReviewService`) over an approval seam this file records but never
  * answers, and the real `task_read` for the read side.
+ *
+ * **The door these cases use.** A restart is the deployment's own adoption —
+ * `adoptRoot`, which opens the store, runs the recovery pass and re-binds the root
+ * it holds (that is what `graphs.create` and every graph entry call) — never a
+ * hand-rolled `openStore` + `reconcileStore` pair the real entry might drift from.
+ * The one case that is *about* a single door (the recorded approval) calls
+ * `adoptRoot` and nothing else, so the recovery it exercises is the one a graph
+ * reopen performs.
  *
  * What is replaced, and why: the model loop — a stub agent factory mints an agent
  * whose `whenIdle` runs a scripted worker body and then hands its run in, the same
@@ -294,6 +303,48 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
   // to (opened here, adopted by the caller when the case wants that door).
   await agentRuntime.createRoot({ sessionId: SessionId(ROOT), scope: { graphStoreId: 'sg-g-root', layoutStoreId: 'sg-l-root' }, cwd: dir })
 
+  /**
+   * The person's request, on the root session's own durable log — written through
+   * the JSONL backend the runtime reads it from, and flushed, so the second boot
+   * finds exactly what the first left (A0 §1.10). The rule is the *existence* of a
+   * user-sourced message, so one text stands for the goal these cases intake; a
+   * reopen writes nothing, because the request is already on the log.
+   */
+  async function recordPersonRequest(): Promise<void> {
+    const handle = await openRootLog()
+    try {
+      const { events } = await handle.read(0)
+      if (events.some(event => event.type === 'user/message' && event.data.source.kind === 'user')) return
+      await handle.append([personRequest(GOAL, events.length)])
+      await backend.flush()
+    } finally {
+      await handle.close()
+    }
+  }
+
+  /**
+   * One write handle onto the root session's stored log. A real deployment stores
+   * the root session when the graph creates it — the loop's own write handle is
+   * what does it — and no model loop runs here, so the fixture creates that stored
+   * session itself when it is not there yet.
+   */
+  async function openRootLog(): Promise<Awaited<ReturnType<typeof persistence.open>>> {
+    try {
+      return await persistence.open(SessionId(ROOT), 'write')
+    } catch (error) {
+      if (!(error instanceof Error) || !/not found/.test(error.message)) throw error
+      return await persistence.create({
+        version: SESSION_FORMAT_VERSION,
+        id: SessionId(ROOT),
+        createdAt: Date.now(),
+        isSeeded: false,
+        cwd: dir,
+        agentPreset: 'standard',
+      } as unknown as SessionHeader)
+    }
+  }
+  await recordPersonRequest()
+
   let callSeq = 0
   const unit: Boot = {
     ctx,
@@ -341,11 +392,16 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
   return unit
 }
 
-/** Boot over the same directory and run the deployment's recovery pass, the way opening the graph does. */
+/**
+ * Boot over the same directory and adopt the store the way the deployment does:
+ * `graphs.create` and every graph entry call `adoptRoot`, which opens the store,
+ * runs the recovery pass and re-binds the root it holds. These cases therefore
+ * exercise the public door rather than a hand-rolled `openStore` +
+ * `reconcileStore` pair, so what a real reopen does is what they measure.
+ */
 async function reopen(dir: string, options: BootOptions = {}): Promise<Boot> {
   const next = await boot(dir, options)
-  await next.task.openStore(STORE)
-  await next.runtime.reconcileStore(STORE)
+  await next.runtime.adoptRoot(STORE, ROOT)
   return next
 }
 
@@ -398,12 +454,20 @@ describe('root intake recovery from the real session log (A0 §1.4, §3 stage B)
     expect(a.spawns).toHaveLength(0)
     await a.crash()
 
-    const b = await reopen(dir, { generatedTaskReview: 'all' })
+    const b = await boot(dir, { generatedTaskReview: 'all' })
+    // The public door, and nothing else. A waiting contract is not advanced by it
+    // — only a persisted decision moves one — but its review is re-asked out of
+    // the store's own facts, and the answer names what is left waiting instead of
+    // reporting a failure or minting anything.
+    const adopted = await b.runtime.adoptRoot(STORE, ROOT)
+    expect(adopted.adopted).toBe(false)
+    if (adopted.adopted) throw new Error('unreachable')
+    expect(adopted.detail).toContain('created no task, no run and no proposal')
+    expect(adopted.detail).toContain(`"${proposalId}" (pending_review)`)
     // Recovery never advances a waiting proposal, and it created nothing while
     // re-reading the log.
     const waiting = await b.runtime.proposalIn(STORE, proposalId)
     expect(waiting.status).toBe('pending_review')
-    expect(b.snapshot()).toBeDefined()
     expect((await b.snapshot()).tasks).toHaveLength(0)
     expect((await b.snapshot()).runs).toHaveLength(0)
     expect(b.spawns).toHaveLength(0)
@@ -431,7 +495,7 @@ describe('root intake recovery from the real session log (A0 §1.4, §3 stage B)
     expect(after.runs[0]!.runId).toBe(consumption.rootRunId)
     expect(after.runs[0]!.sessionId).toBe(ROOT)
     expect(b.spawns).toHaveLength(0)
-    expect(b.runtime.proposalIn(STORE, proposalId)).resolves.toMatchObject({ status: 'admitted' })
+    await expect(b.runtime.proposalIn(STORE, proposalId)).resolves.toMatchObject({ status: 'admitted' })
     await b.dispose()
   })
 
@@ -460,26 +524,78 @@ describe('root intake recovery from the real session log (A0 §1.4, §3 stage B)
     await a.crash()
 
     // The process that adopts the store re-checks the approval and activates the
-    // root itself: no caller re-presents anything.
-    const b = await reopen(dir, { generatedTaskReview: 'all' })
+    // root itself: no caller re-presents anything, and the adoption's own recovery
+    // pass is the only thing that runs — this case calls no other entry after the
+    // crash, and `reconcileStore` appears nowhere in it.
+    const b = await boot(dir, { generatedTaskReview: 'all' })
+    const adopted = await b.runtime.adoptRoot(STORE, ROOT)
+    // What the public door answered, in one assertion: this is the counterexample
+    // the review measured — an early-returning adoption reports `adopted: false`,
+    // leaves the store at 0 tasks and 0 runs and the proposal `approved`.
+    const atAdoption = await b.snapshot()
+    expect({
+      adopted: adopted.adopted,
+      tasks: atAdoption.tasks.length,
+      runs: atAdoption.runs.length,
+      proposal: (await rootProposalOf(b, proposalId)).status,
+    }).toEqual({ adopted: true, tasks: 1, runs: 1, proposal: 'admitted' })
+
+    // The ids the consumption names are the root the adoption binds, and the gate
+    // phase came off the run's own record.
     const admitted = await statusOf(b, proposalId, 'admitted')
     const consumption = admitted.consumption!
     if (consumption.kind !== 'root') throw new Error('the root proposal was consumed as a batch')
+    expect(adopted).toMatchObject({
+      adopted: true,
+      taskId: consumption.rootTaskId,
+      runId: consumption.rootRunId,
+      phase: 'active',
+    })
     const after = await b.snapshot()
-    expect(after.tasks).toHaveLength(1)
-    expect(after.runs).toHaveLength(1)
     expect(after.tasks[0]!.taskId).toBe(consumption.rootTaskId)
+    expect(after.tasks[0]!.objective).toBe(GOAL)
     expect(after.runs[0]!.runId).toBe(consumption.rootRunId)
+    expect(after.runs[0]!.sessionId).toBe(ROOT)
     expect(b.spawns).toHaveLength(0)
-    // One activation on the log, and a second recovery pass changes nothing.
+    // One activation on the log, and a second call through the same door activates
+    // nothing further: the same ids, still one admit event, still one task and run.
     expect(taskEvents(await b.events()).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
-    await b.runtime.reconcileStore(STORE)
-    const again = await b.snapshot()
-    expect(again.tasks.map(task => task.taskId)).toEqual([consumption.rootTaskId])
-    expect(again.runs.map(run => run.runId)).toEqual([consumption.rootRunId])
+    const again = await b.runtime.adoptRoot(STORE, ROOT)
+    expect(again).toMatchObject({ adopted: true, taskId: consumption.rootTaskId, runId: consumption.rootRunId })
+    const second = await b.snapshot()
+    expect(second.tasks.map(task => task.taskId)).toEqual([consumption.rootTaskId])
+    expect(second.runs.map(run => run.runId)).toEqual([consumption.rootRunId])
     expect(taskEvents(await b.events()).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
     expect(b.spawns).toHaveLength(0)
     await b.dispose()
+  })
+
+  it('answers a store with nothing to recover as nothing to adopt, and mints nothing', async () => {
+    const dir = workspace()
+    const a = await boot(dir, { generatedTaskReview: 'off' })
+    // The state a fresh graph starts in (A0 §1.1): the root session exists, no
+    // contract was ever intaken, and the adoption is what opens the store. An open
+    // store with nothing in it is normal, so the answer is `adopted: false` — not
+    // a failure — and the recovery pass behind it has nothing to continue.
+    const adopted = await a.runtime.adoptRoot(STORE, ROOT)
+    expect(adopted.adopted).toBe(false)
+    if (adopted.adopted) throw new Error('unreachable')
+    expect(adopted.detail).toContain(`store "${STORE}" holds no root task`)
+    expect(adopted.detail).toContain('created no task, no run and no proposal')
+    expect(adopted.detail).toContain('no proposal is open on it')
+    const snapshot = await a.snapshot()
+    expect(snapshot.tasks).toHaveLength(0)
+    expect(snapshot.runs).toHaveLength(0)
+    expect(snapshot.proposals?.all ?? []).toHaveLength(0)
+    // Nothing was written to the store's own log: adoption is not a second way to
+    // mint a root, and the empty answer is not a task event either.
+    expect(taskEvents(await a.events())).toHaveLength(0)
+    expect(a.review.asks).toHaveLength(0)
+    expect(a.spawns).toHaveLength(0)
+    // Asking again answers the same and still writes nothing.
+    expect((await a.runtime.adoptRoot(STORE, ROOT)).adopted).toBe(false)
+    expect(taskEvents(await a.events())).toHaveLength(0)
+    await a.dispose()
   })
 
   it('rebinds a root whose activation is durable and whose process is gone, without minting a second root', async () => {
@@ -567,14 +683,17 @@ describe('root intake recovery from the real session log (A0 §1.4, §3 stage B)
     expect(before.tasks[0]!.objective).toBe(legacyObjective)
     expect(before.tasks[0]!.acceptanceCriteria.map(criterion => criterion.verificationMode)).toEqual(['composite'])
     expect(a.spawns).toHaveLength(0)
+    // The store's own log as the first process left it.
+    const history = await a.events()
     await a.crash()
 
     const b = await boot(dir, { generatedTaskReview: 'off' })
     const adopted = await b.runtime.adoptRoot(STORE, ROOT)
     expect(adopted).toMatchObject({ adopted: true, taskId: seeded.taskId, runId: seeded.runId, phase: 'active' })
 
-    // Reading is unchanged: the goal is the one the old entry wrote, and the record
-    // the restart replays is byte-for-byte the one it holds.
+    // Reading is unchanged: the goal is the one the old entry wrote, the record
+    // the restart replays is byte-for-byte the one it holds, and the recovery pass
+    // the adoption now runs wrote no proposal onto the store.
     const read = await b.call('task_read')
     expect(read.isError).toBe(false)
     expect(read.text).toContain(`root task ${seeded.taskId}`)
@@ -582,6 +701,8 @@ describe('root intake recovery from the real session log (A0 §1.4, §3 stage B)
     const after = await b.snapshot()
     expect(after.tasks[0]!.taskId).toBe(seeded.taskId)
     expect(after.tasks[0]!.acceptanceCriteria).toEqual(before.tasks[0]!.acceptanceCriteria)
+    expect(after.proposals?.all ?? []).toHaveLength(0)
+    expect(await b.events()).toEqual(history)
 
     // An intake on top of it is refused by name: one root per store, and a changed
     // goal is a new graph (§1.6).

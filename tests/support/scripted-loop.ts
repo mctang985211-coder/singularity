@@ -42,8 +42,8 @@ import { join } from 'node:path'
 import { expect, vi } from 'vitest'
 import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
 import { toolCallResponse, textResponse } from '../../../../thirdparty/deepseek-harness/packages/core/agent-loop/tests/mock-adapter.ts'
-import LlmRuntime, { LlmAdapter, createUserMessage } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
-import type { GenerateOptions, Message, StreamChunk } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
+import LlmRuntime, { LlmAdapter, boundContextSummary, createUserMessage } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
+import type { ContentBlock, GenerateOptions, Message, StreamChunk } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
 import SessionStore, { SessionId, SESSION_FORMAT_VERSION } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { SessionEvent, SessionHeader } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import SessionProjectionRegistry from '../../../../thirdparty/deepseek-harness/packages/session/session-projection/lib/index.js'
@@ -151,6 +151,14 @@ export interface ScriptedLoopOptions {
   readonly writeDrainTimeoutMs?: number
   /** Tools whose recorded execution also keeps its arguments — the side-effect probe a denial is asserted against. */
   readonly probes?: readonly string[]
+  /**
+   * The root session the graph reports for one session, when a case needs a
+   * session whose graph root is somebody else — `task_intake`'s own membership
+   * rule (graph and root session) is then the thing under test. Defaults to the
+   * deployment's own mapping: a root session is its own graph's root, and a
+   * spawned session belongs to the tree that spawned it.
+   */
+  readonly graphRootFor?: (sessionId: string) => string | undefined
   /** The review policy this deployment runs under (`Config.generatedTaskReview`). Defaults to the runtime's own (`off`). */
   readonly generatedTaskReview?: 'off' | 'all'
   /**
@@ -221,6 +229,14 @@ export interface ScriptedLoop {
   readonly runtime: TaskRuntime
   readonly task: TaskService
   readonly verifier: VerifierRegistry
+  /**
+   * The real `AgentRuntime` this stack mounts, for the deployment's own door into
+   * a session: `prompt` is how `graphs.create` writes the setup text, and a case
+   * needs it to model a graph whose root session holds the deployment's message
+   * and no person's (A0 §1.10 — `source.kind === 'user'` is the person's marker).
+   * Typed structurally so the fixture's recording subclass stays private.
+   */
+  readonly agentRuntime: { prompt(agent: Agent, prompt: readonly ContentBlock[]): Promise<void> }
   /** The review channel's asks and answers (T2/T3). */
   readonly review: ScriptedReview
   /** The tmp directory the whole fixture lives in. */
@@ -274,6 +290,27 @@ export interface ScriptedLoop {
    * as the loop queues a person's follow-up.
    */
   userSays(text: string, sessionId?: SessionId | string): void
+  /**
+   * Put one **plugin-sourced** message on a session's log and let its turn read it
+   * — {@link ScriptedLoop.userSays} in the runtime's own voice (`notify`'s shape,
+   * `source.kind === 'plugin'`). A case that has to drive a root's turn *without*
+   * any request of the person's on that session's log uses this: what the session
+   * holds afterwards is a notice, which is exactly what a root contract's origin
+   * must not accept (A0 §1.10).
+   */
+  pluginSays(text: string, sessionId?: SessionId | string): void
+  /**
+   * Record the person's request on a session's own durable log, **without**
+   * driving a turn: the same `user/message` event with `source.kind === 'user'`
+   * that `userSays` produces once the loop claims the queued message — written
+   * through the session itself, so the logged event is the loop's own shape.
+   *
+   * A case whose subject is a *direct service call* states what the person asked
+   * with this (there is no turn to carry the request), and the fixture's own
+   * {@link ScriptedLoop.begin} does the same before it intakes — the runtime reads
+   * a root contract's origin from that log and from nowhere else (A0 §1.10).
+   */
+  recordRequest(text: string, sessionId?: SessionId | string): void
   /** The run a session is bound to, with the store and task it belongs to. */
   runForSession(sessionId: SessionId | string): Promise<{ storeId: string; task: TaskInstance; run: TaskRun }>
   dispose(): Promise<void>
@@ -599,7 +636,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
         id: 'g1',
         name: 'graph',
         envId: 'env1',
-        rootSessionId: this.sessionRoot.get(sessionId) ?? this.primary,
+        rootSessionId: this.options.graphRootFor?.(String(sessionId)) ?? this.sessionRoot.get(sessionId) ?? this.primary,
         graphStoreId: 'sg-g-root',
         layoutStoreId: 'sg-l-root',
       }),
@@ -762,6 +799,11 @@ class ScriptedLoopImpl implements ScriptedLoop {
   }
 
   async begin(contract: RootContractSpec): Promise<{ storeId: string; taskId: string; runId: string }> {
+    // The person asked for exactly this objective, and that request is on the root
+    // session's own durable log before the intake reads it (A0 §1.10): `begin` is a
+    // direct service call, so the request is recorded rather than queued, and the
+    // root's scripted turn below still starts with its script untouched.
+    this.recordRequest(contract.objective)
     const rootAsksBefore = this.review.rootAsks.length
     const submitted = await this.runtime.intakeRootContract(this.storeId, this.primary, contract)
     let rootTaskId: string
@@ -789,6 +831,26 @@ class ScriptedLoopImpl implements ScriptedLoop {
 
   userSays(text: string, sessionId: SessionId | string = this.primary): void {
     this.agent(sessionId).followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
+  }
+
+  pluginSays(text: string, sessionId: SessionId | string = this.primary): void {
+    this.agent(sessionId).followup(createUserMessage({
+      content: [{ type: 'text', text }],
+      source: { kind: 'plugin', plugin: 'task-runtime', form: 'notice', summary: boundContextSummary(text) },
+    }))
+  }
+
+  recordRequest(text: string, sessionId: SessionId | string = this.primary): void {
+    const id = SessionId(String(sessionId))
+    const session = this.ctx.sessions.get(id)
+    if (session === undefined) throw new Error(`the stack holds no live session for "${String(sessionId)}"`)
+    // The session's own `append` is what the loop itself uses to put the message it
+    // claimed on the log, so the event a reader finds here is the loop's shape —
+    // including the surface intent and the sequence number the session assigns.
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
   }
 
   /** Wait for the review the submission asked for to reach the desk, or report why no ask came. */

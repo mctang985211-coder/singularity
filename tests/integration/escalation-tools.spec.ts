@@ -3,10 +3,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
 import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
-import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import { SingularityAgent } from '../../agent-singularity/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
+import { requestedSession } from '../../task-runtime/tests/support/person-request.ts'
 
 const ROOT_SESSION = 's-root'
 const STORE = rootTaskStoreId(ROOT_SESSION)
@@ -47,11 +48,27 @@ async function mount(approvalOutcome: string = 'allowed-once') {
   const userQuestions = { ask: vi.fn(async () => ({ answers: [{ id: 'hitl-ask', selected: [], custom: 'buckyball' }] })) }
 
   const sessions = new Map<string, { header: SessionHeader; events: SessionEvent[] }>()
+  // The person's request, on the root session's own durable log: what the root
+  // contract's origin is read from (A0 §1.10). The rule is the *existence* of a
+  // user-sourced message, so one text stands for the request this mount intakes on.
+  sessions.set(ROOT_SESSION, requestedSession(ROOT_SESSION, 'ship the release'))
   ctx.provide('sessionPersistence', {
     list: async () => [...sessions.values()].map(item => ({ header: item.header })),
     create: async (header: SessionHeader) => {
       const stored = { header, events: [] as SessionEvent[] }
       sessions.set(header.id, stored)
+      return {
+        read: async () => ({ events: stored.events }),
+        append: async (records: readonly SessionEvent[]) => { stored.events.push(...records) },
+        flush: async () => {},
+        close: async () => {},
+      }
+    },
+    // The read half the runtime opens to establish a root contract's origin
+    // (A0 §1.10): the same handle shape the store's own writes travel through.
+    open: async (id: SessionId) => {
+      const stored = sessions.get(id)
+      if (stored === undefined) throw new Error(`missing session ${id}`)
       return {
         read: async () => ({ events: stored.events }),
         append: async (records: readonly SessionEvent[]) => { stored.events.push(...records) },
