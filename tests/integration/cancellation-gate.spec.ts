@@ -5,35 +5,49 @@ import type { RootContractSpec } from '../../task-runtime/src/index.ts'
 import { disposeScriptedLoops, startScriptedLoop, type ScriptedLoop, type ScriptEntry, type ToolCallRecord } from '../support/scripted-loop.ts'
 
 /**
- * A cancellation's write barrier against the record it has not written yet, on
- * the real tool waterfall.
+ * A cancellation's write barrier against a record read around it, on the real
+ * tool waterfall.
  *
  * `TaskRuntime.cancelGraph` closes the gate for every session of a store before
  * it persists the cancellation — §3.6's order is the promise: the gate, then the
- * drivers, then the settlement, then the jobs and the workspace. For the length
- * of that window the store still holds those runs as `running` with phase
- * `active`, a record *older* than the barrier this process already put in effect,
- * and a read path that rebinds the session in the window used to re-apply it:
- * `task_proposal_read` reaches `runForSession` through `proposalStoreFor`, and the
- * refresh set the phase back to `active`, re-opening a barrier a cancellation
- * owned.
+ * drivers, then the settlement, then the jobs and the workspace. That order puts
+ * the barrier in effect *ahead* of the record, and two reads of that record carry
+ * a value older than the barrier into the gate. They are different trajectories
+ * — one is a read inside the window, the other a read that straddled a decision
+ * that has already been persisted — and each has its own reason to be inapplicable:
  *
- * Three facts, and the third is what keeps the first two from being a way of
- * denying everything:
+ * 1. **A read taken inside the window.** While the cancellation is still running
+ *    the store holds the run as `running` with phase `active`: a record older
+ *    than the barrier, and one that predates nothing because the decision has not
+ *    been written yet. The rebinding door refuses to move a phase a session
+ *    already holds while its store is being closed, so the read leaves the
+ *    barrier exactly where it is.
+ * 2. **A read that straddled the decision.** A query starts its read before the
+ *    cancellation and the read *returns* the old record — but the completion
+ *    lands while that read is in flight, so by the time the value is applied the
+ *    store already records the cancellation and the closing set is empty again.
+ *    Nothing about the window applies; what makes the value inapplicable is the
+ *    decision that landed between the read and its application, and the gate's
+ *    own count of the decisions it made is what says so.
  *
- * 1. Inside the window a write is denied *before its body runs* while a
- *    coordination read still answers from the store, and the barrier survives
- *    that read. The window is decided by a latch — the cancellation's own
- *    persistence is paused — never by a timing guess: the store's write still
- *    runs through the real implementation, only its wait point is controlled.
- *    The turn is paced the way the coordination spec paces its own
- *    "a closed phase denies a write" case: a scripted request parks on the latch
- *    the spec resolves.
+ * `task_proposal_read` is the read path both cases travel: it reaches
+ * `runForSession` through `proposalStoreFor`, and a refresh that applied the
+ * value it read set the phase back to `active`, re-opening a barrier a
+ * cancellation owned.
+ *
+ * Both cases end in the same three facts, and the third is what keeps the first
+ * two from being a way of denying everything:
+ *
+ * 1. A write is denied *before its body runs* while a coordination read still
+ *    answers from the store, and the barrier survives that read. The
+ *    interleaving is decided by latches — in the first case the cancellation's
+ *    own persistence is paused, in the second the query's read is held — never by
+ *    a timing guess: the store's own implementation still runs, only its wait
+ *    point is controlled.
  * 2. The same write tool is admitted in the legitimate `active` phase before the
- *    cancellation starts, so what the window refuses is the closed phase and not
- *    the tool.
- * 3. Once the persistence is released the cancellation lands: the store records
- *    the run cancelled and the session stays closed.
+ *    cancellation starts, so what is refused is the closed phase and not the tool.
+ * 3. Once the barrier is released the cancellation lands: the store records the
+ *    run cancelled and the session stays closed.
  *
  * Everything but the model's answers is the deployment's own code: the real DSH
  * loop, the real `TaskRuntime` mounted with `ctx.plugin` (so the real gate sits on
@@ -50,6 +64,7 @@ const ACTIVE_WRITE = 'write while the run decides its own work'
 const WINDOW_ASK = 'read the proposal while the graph is being removed'
 const BEFORE_READ = 'write before the read'
 const AFTER_READ = 'write after the read'
+const LATE_WRITE = 'write after the completion landed'
 
 /** The root contract this store runs under (A0 §1.2): one goal, one criterion a command settles. */
 const CONTRACT: RootContractSpec = {
@@ -77,6 +92,31 @@ function textOf(call: ToolCallRecord): string {
 /** The stand-in bodies of one tool that really ran, in dispatch order. */
 function ran(h: ScriptedLoop, name: string): readonly string[] {
   return h.executed.filter(entry => entry.startsWith(`${name}:`))
+}
+
+/**
+ * One call through the real registry and the real waterfall — the gate's own
+ * decision, deny included — as the root session's own call. A direct call and a
+ * scripted one travel the same pipeline, so a case whose subject is the read path
+ * rather than the turn does not need a model request to reach it.
+ */
+async function throughPipeline(
+  h: ScriptedLoop,
+  callId: string,
+  name: string,
+  args: Readonly<Record<string, unknown>>,
+): Promise<{ isError: boolean; text: string }> {
+  const answer = await h.ctx.tools.execute({
+    callId,
+    name,
+    arguments: args,
+    agent: { id: ROOT } as never,
+    signal: new AbortController().signal,
+  })
+  return {
+    isError: answer.isError === true,
+    text: answer.content.map(block => (block.type === 'text' ? block.text : `[${block.type}]`)).join('\n'),
+  }
 }
 
 describe('a cancellation’s write barrier against the store’s older record', () => {
@@ -183,6 +223,121 @@ describe('a cancellation’s write barrier against the store’s older record', 
       release.resolve()
       await cancelling.catch(() => undefined)
       persisted.mockRestore()
+    }
+  })
+
+  it('drops the record a query read before the completion landed, and keeps the gate closed', async () => {
+    const turn = Promise.withResolvers<void>()
+    const readEntered = Promise.withResolvers<void>()
+    const readRelease = Promise.withResolvers<void>()
+    let proposalId = ''
+    const h = await startScriptedLoop({
+      probes: ['graph_spawn'],
+      script: (): readonly ScriptEntry[] => [
+        // The root's own turn is parked for the whole case: the run stays `active`
+        // and the session mid-turn, and the query below is a direct call rather
+        // than this turn, so nothing else dispatches into the session while the
+        // read is held.
+        { waitFor: () => turn.promise },
+        { text: 'root: nothing further' },
+      ],
+    })
+    const root = await h.begin(CONTRACT)
+    const proposals = (await h.snapshot(root.storeId)).proposals?.all ?? []
+    expect(proposals).toHaveLength(1)
+    proposalId = proposals[0]!.proposalId
+
+    // The write the late call below is measured against is admitted while the run
+    // decides its own work, and its body runs: what the completed cancellation
+    // refuses is the phase, not the tool.
+    expect(h.runtime.gate.phaseOf(ROOT)).toBe('active')
+    const whileActive = await throughPipeline(h, 'call-active-write', 'graph_spawn', { reason: ACTIVE_WRITE })
+    expect(whileActive.isError).toBe(false)
+    expect(ran(h, 'graph_spawn')).toHaveLength(1)
+    expect(ran(h, 'graph_spawn')[0]).toContain(ACTIVE_WRITE)
+
+    // The straddling read: a call-through spy on the store's own read. The real
+    // implementation runs and returns the run object it holds — what is held is
+    // only the *return*, so the value this query carries out of the read is the
+    // one the store held before the decision. Only the first read of the root's
+    // run parks, and the assertions below check that this park is the query's own
+    // read and not a background one: nothing read that run after the spy was
+    // installed, and the query is still unanswered while the read is held.
+    const storeRunIn = h.task.runIn.bind(h.task)
+    let rootReads = 0
+    let querySettled = false
+    const readSpy = vi.spyOn(h.task, 'runIn').mockImplementation(async (...args: Parameters<TaskService['runIn']>) => {
+      const run = await storeRunIn(...args)
+      const isRootRun = args[0] === root.storeId && args[1] === root.runId
+      if (isRootRun) rootReads += 1
+      if (isRootRun && rootReads === 1) {
+        readEntered.resolve()
+        await readRelease.promise
+      }
+      return run
+    })
+
+    // The real query path: `task_proposal_read` -> `proposalStoreFor` ->
+    // `runForSession` -> the read this case holds open.
+    const straddling = throughPipeline(h, 'call-straddling-read', 'task_proposal_read', { proposalId })
+    void straddling.then(() => { querySettled = true }, () => { querySettled = true })
+    try {
+      await readEntered.promise
+      // The held read is this query's own: it is the first read of the root's run
+      // since the spy was installed, and the query is still unanswered while it is
+      // held — so the value the release carries out of it is the value this query
+      // read, not somebody else's.
+      expect(rootReads).toBe(1)
+      expect(querySettled).toBe(false)
+      // Inside the read: the store still holds the older record, and that is the
+      // value this query is about to carry out of it (a read taken *around* the
+      // completion rather than inside the closing window).
+      const atRead = await h.task.runIn(root.storeId, root.runId)
+      expect(atRead.status).toBe('running')
+      expect(atRead.executionPhase).toBe('active')
+
+      // The real cancellation runs to its own end while the read is held: the
+      // record is written and the gate is closed before the value is applied.
+      await h.runtime.cancelGraph(root.storeId, 'the graph was removed')
+      const settled = await h.task.runIn(root.storeId, root.runId)
+      expect(settled.status).toBe('cancelled')
+      expect(h.runtime.gate.phaseOf(ROOT)).toBe('terminal')
+
+      // The read is released: the query answers from the record it read, and the
+      // gate is exactly where the completion put it — a value read before a
+      // decision may not be applied after it.
+      readRelease.resolve()
+      const answer = await straddling
+      expect(h.runtime.gate.phaseOf(ROOT)).toBe('terminal')
+      expect(answer.isError).toBe(false)
+      expect(answer.text).toContain(`proposal ${proposalId}`)
+      expect(answer.text).toContain('ship the release')
+      // The query went through the registry and the waterfall, not around them:
+      // the fixture's own dispatch record holds its call and its result.
+      expect((await answered(h, 'task_proposal_read')).result?.isError).toBeFalsy()
+
+      // The late write is refused by name, and the fixture's stand-in body is
+      // never reached — which proves the denial happened before any effect, and
+      // nothing about what a real `graph_spawn` would have written.
+      const lateWrite = await throughPipeline(h, 'call-late-write', 'graph_spawn', { reason: LATE_WRITE })
+      expect(lateWrite.isError).toBe(true)
+      expect(lateWrite.text).toContain('phase "terminal"')
+      expect(ran(h, 'graph_spawn')).toHaveLength(1)
+      expect(ran(h, 'graph_spawn')[0]).toContain(ACTIVE_WRITE)
+
+      // The coordination read still answers in the closed phase.
+      const lateRead = await throughPipeline(h, 'call-late-read', 'task_read', {})
+      expect(lateRead.isError).toBe(false)
+      expect(lateRead.text).toContain('objective: ship the release')
+      expect(h.runtime.gate.phaseOf(ROOT)).toBe('terminal')
+      expect(h.runtime.gate.inFlightWrites(ROOT)).toEqual([])
+    } finally {
+      // A failed assertion above must not leave a latch holding a promise: the
+      // read and the turn are always released, and the query is always awaited.
+      readRelease.resolve()
+      turn.resolve()
+      await straddling.catch(() => undefined)
+      readSpy.mockRestore()
     }
   })
 })

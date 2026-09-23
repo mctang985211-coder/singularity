@@ -35,9 +35,11 @@
  * the one honest input to the "no verification on an unconfirmed drain" rule.
  *
  * The phase is not stored here on its own account: the runtime moves it when the
- * store says so, and `undefined` therefore means something specific — this
- * session is not bound to a run (an env-clean helper, a reviewer session), and
- * nothing about it is gated.
+ * store says so — through {@link ExecutionGate.applyStorePhase}, so a value a
+ * read handed back before a decision of this process landed cannot move the
+ * phase back — and `undefined` therefore means something specific: this session
+ * is not bound to a run (an env-clean helper, a reviewer session), and nothing
+ * about it is gated.
  * @module @dangosys/dsh-singularity-task-runtime/gate
  */
 
@@ -159,15 +161,82 @@ export class ExecutionGate {
   private readonly phases = new Map<string, ExecutionPhase | 'terminal'>()
   /** Registering by call id (not by session) because `tools/result` carries only the call id. */
   private readonly calls = new Map<string, { sessionId: string; name: string }>()
+  /**
+   * How many times this process wrote one session's phase by its own authority
+   * ({@link setPhase}, {@link setTerminal}): the applicability token a
+   * store-derived phase is checked against.
+   */
+  private readonly decisions = new Map<string, number>()
 
-  /** Move a session's phase; the runtime calls this when the store recorded the transition. */
+  /**
+   * Move a session's phase: the runtime calls this when **it** is the authority
+   * for the transition — a committed admission or submission, a settled run, an
+   * unload, the binding of a session to its own run. This is one of the two
+   * writers that count as a decision ({@link decisionToken}); a phase that only
+   * the *store* implies goes through {@link applyStorePhase} instead, and does
+   * not count as one.
+   */
   setPhase(sessionId: string, phase: ExecutionPhase): void {
+    this.decisions.set(sessionId, this.decisionToken(sessionId) + 1)
     this.phases.set(sessionId, phase)
   }
 
-  /** Mark a session's run terminal: only the allow-list runs from here, and its reason says the call is late. */
+  /**
+   * Mark a session's run terminal: only the allow-list runs from here, and its
+   * reason says the call is late. A decision, like {@link setPhase} — it moves
+   * the phase because this process knows the run is over, not because a read of
+   * the store implied it.
+   */
   setTerminal(sessionId: string): void {
+    this.decisions.set(sessionId, this.decisionToken(sessionId) + 1)
     this.phases.set(sessionId, 'terminal')
+  }
+
+  /**
+   * How many times this process has written this session's phase by its own
+   * authority; `0` for a session it has never written one for. This is the
+   * applicability token for a phase read out of the store: take it *before* the
+   * read, hand it back with the value ({@link applyStorePhase}).
+   *
+   * What it answers is not "is this value current" — a second read would race
+   * the first exactly as it did — but "did anything of ours decide this session
+   * while the read was in flight". That is the only thing that can make a value
+   * the store returned older than the gate: the read happened, the store
+   * recorded a decision of ours, and the value the read handed back predates it.
+   */
+  decisionToken(sessionId: string): number {
+    return this.decisions.get(sessionId) ?? 0
+  }
+
+  /**
+   * Apply a phase the store implies — never one this process decided — and only
+   * when it is newer than everything decided here: `token` is the
+   * {@link decisionToken} taken before the read that produced `phase`, and a
+   * count that no longer matches means a decision landed while that read was in
+   * flight. The value is then older than the gate's, and it is dropped; the
+   * return says which of the two happened.
+   *
+   * Two trajectories reach a store-derived phase that is too old, and only one
+   * of them is this token's:
+   *
+   * - a read that **straddled** a decision — the store returned the old record,
+   *   and the decision landed before the value could be applied — is what this
+   *   token refuses: the decision is on the record by then, so the count moved
+   *   and the value is dropped. Applying it would re-open a gate a settled run
+   *   had closed, and no other guard can see it, because the wait was inside the
+   *   read and the store is already up to date when the value arrives.
+   * - a read taken **inside a window whose decision is in effect but not yet
+   *   persisted** (a cancellation raising its barrier before the store records
+   *   it) cannot be refused by this token: the read starts *after* the decision,
+   *   so the count it took is current, and the value is old only because the
+   *   store's write has not happened yet. That window belongs to the caller,
+   *   which refuses it before calling this — the token covers a read that
+   *   straddled a decision, never one that raced a write.
+   */
+  applyStorePhase(sessionId: string, phase: ExecutionPhase | 'terminal', token: number): boolean {
+    if (this.decisionToken(sessionId) !== token) return false
+    this.phases.set(sessionId, phase)
+    return true
   }
 
   /** The phase a session is under, or `undefined` when no run is bound to it (nothing is gated). */

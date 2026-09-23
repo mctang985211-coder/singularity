@@ -175,6 +175,50 @@ describe('ExecutionGate.decide', () => {
   })
 })
 
+describe('ExecutionGate.applyStorePhase', () => {
+  test('applies a store-derived phase read under a current token', () => {
+    const gate = new ExecutionGate()
+    // A session this process has never decided has the token zero, and the phase
+    // the store implies is what the session is gated as (a rebound session: the
+    // gate is a handle on its run's phase, and the phase is the store's fact).
+    expect(gate.decisionToken('s-1')).toBe(0)
+    expect(gate.applyStorePhase('s-1', 'waiting_children', 0)).toBe(true)
+    expect(gate.phaseOf('s-1')).toBe('waiting_children')
+    // Applying a store-derived value is not a decision: the token still says
+    // zero, so a later store-derived value read under the same token applies too.
+    expect(gate.decisionToken('s-1')).toBe(0)
+    expect(gate.applyStorePhase('s-1', 'submitted', 0)).toBe(true)
+    expect(gate.phaseOf('s-1')).toBe('submitted')
+    expect(gate.applyStorePhase('s-1', 'terminal', 0)).toBe(true)
+    expect(gate.phaseOf('s-1')).toBe('terminal')
+  })
+
+  test('a decision bumps the token, and a value read before it is dropped', () => {
+    const gate = new ExecutionGate()
+    // The read starts here (the token a query takes before reading the store)...
+    const token = gate.decisionToken('s-1')
+    // ...and a decision lands while it is in flight: the run settled, or an
+    // admission was committed, so the gate owns a phase the read does not know.
+    gate.setPhase('s-1', 'waiting_children')
+    expect(gate.decisionToken('s-1')).toBe(1)
+    // The read now returns the record it held before that decision — `active`,
+    // the older value — and it may not re-open a gate the decision closed.
+    expect(gate.applyStorePhase('s-1', 'active', token)).toBe(false)
+    expect(gate.phaseOf('s-1')).toBe('waiting_children')
+    // The terminal writer is a decision too, and a store value taken under it
+    // cannot lift the closure either.
+    const afterDecision = gate.decisionToken('s-1')
+    gate.setTerminal('s-1')
+    expect(gate.decisionToken('s-1')).toBe(afterDecision + 1)
+    expect(gate.applyStorePhase('s-1', 'active', afterDecision)).toBe(false)
+    expect(gate.phaseOf('s-1')).toBe('terminal')
+    // A read taken *after* the decision is current again: its token matches, so
+    // the store's own record still moves the gate when the value is newer.
+    expect(gate.applyStorePhase('s-1', 'active', gate.decisionToken('s-1'))).toBe(true)
+    expect(gate.phaseOf('s-1')).toBe('active')
+  })
+})
+
 describe('in-flight registration', () => {
   test('counts only names outside the allow-list, and settles by call id', () => {
     const gate = new ExecutionGate()

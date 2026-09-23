@@ -4982,27 +4982,44 @@ export class TaskRuntime extends Service {
    * ungated, which is the gate's own contract for an unbindable phase, and a
    * session with no run is never gated at all.
    *
-   * The one exception is a store this process is closing ({@link cancelGraph},
-   * whose barrier is in effect before it is persisted): there the record read
-   * back is older than a phase this process already closed, so a rebinding may
-   * not move a phase that session holds. Whether it holds one is the whole
-   * distinction — a session the cancellation never reached has none, and the
-   * store decides for it exactly as it does everywhere else, which is what keeps
-   * the restore path (`waiting_children`, terminal records) working.
+   * Two ways a read of that record can be too old to apply, and each has its own
+   * guard: the closing set checked below (a decision of this process that the
+   * store's write has not caught up with yet), and the `token` its caller took
+   * before the read ({@link ExecutionGate.applyStorePhase}, for a read that
+   * straddled a decision).
+   *
+   * - **A read taken inside a window whose decision is in effect but not yet
+   *   persisted** — a store this process is closing ({@link cancelGraph}, whose
+   *   barrier is raised before it is written): there the record read back is
+   *   older than a phase this process already closed, so a rebinding may not
+   *   move a phase that session holds. Whether it holds one is the whole
+   *   distinction — a session the cancellation never reached has none, and the
+   *   store decides for it exactly as it does everywhere else, which is what
+   *   keeps the restore path (`waiting_children`, terminal records) working.
+   * - **A read that straddled a decision** — the query read the record, a
+   *   decision landed, and the value is applied afterwards: `token` is the
+   *   gate's decision count taken before that read ({@link lookupRun}), and
+   *   {@link ExecutionGate.applyStorePhase} drops the value when it has moved
+   *   since. The closing set above cannot see this one — by then the store is
+   *   up to date and the store is not being closed any more.
    */
-  private gatePhaseFromStore(sessionId: string, run: TaskRun, storeId: string): void {
+  private gatePhaseFromStore(sessionId: string, run: TaskRun, storeId: string, token: number): void {
     if (this.closingStores.has(storeId) && this.executionGate.phaseOf(sessionId) !== undefined) return
     const phase = this.runGatePhase(run)
-    if (phase === 'terminal') this.executionGate.setTerminal(sessionId)
-    else if (phase !== undefined) this.executionGate.setPhase(sessionId, phase)
+    if (phase === undefined) return
+    this.executionGate.applyStorePhase(sessionId, phase, token)
   }
 
   private async lookupRun(sessionId: string): Promise<{ storeId: string; task: TaskInstance; run: TaskRun } | undefined> {
     const binding = this.sessions.get(sessionId)
     if (binding !== undefined) {
+      // The token is taken before the read whose value it judges: a decision that
+      // lands while `resolveBinding` is in flight makes the run it returns older
+      // than the gate, and the phase is then dropped rather than applied.
+      const token = this.executionGate.decisionToken(sessionId)
       const resolved = await this.resolveBinding(binding)
       if (resolved !== undefined) {
-        this.gatePhaseFromStore(sessionId, resolved.run, binding.storeId)
+        this.gatePhaseFromStore(sessionId, resolved.run, binding.storeId, token)
         return resolved
       }
       this.sessions.delete(sessionId)
@@ -5015,6 +5032,11 @@ export class TaskRuntime extends Service {
       return undefined
     }
     const storeId = rootTaskStoreId(rootSessionId)
+    // The whole reopening is one read as far as the token is concerned: it is
+    // taken before the store is opened, so a decision that lands anywhere in the
+    // rebinding — the recovery pass included — invalidates the run this branch
+    // resolves at the end of it.
+    const token = this.executionGate.decisionToken(sessionId)
     let snapshot: TaskSnapshot
     try {
       snapshot = await this.ctx.task.openStore(storeId)
@@ -5033,7 +5055,7 @@ export class TaskRuntime extends Service {
     const rebinding = this.sessions.get(sessionId)
     if (rebinding === undefined) return undefined
     const resolved = await this.resolveBinding(rebinding)
-    if (resolved !== undefined) this.gatePhaseFromStore(sessionId, resolved.run, rebinding.storeId)
+    if (resolved !== undefined) this.gatePhaseFromStore(sessionId, resolved.run, rebinding.storeId, token)
     return resolved
   }
 
