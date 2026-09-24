@@ -8,10 +8,8 @@ import type {
   TaskSnapshot,
   VerificationMode,
   VerificationResult,
-  Verifier,
-  VerifierSelftest,
-  VerifyRequest,
 } from '@dangosys/dsh-singularity-task'
+import type { Verifier, VerifierSelftest, VerifyRequest } from './types.ts'
 
 /** The slice of the task service the composite verifier reads. */
 export interface CompositeTaskSource {

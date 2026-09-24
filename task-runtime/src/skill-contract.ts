@@ -13,20 +13,24 @@
  * check the content, and it never closes an execution gap.
  *
  * The identities here are content identities, on the same discipline as the
- * task contract (`./contract.ts`): the digest covers exact bytes — no trim, no
- * newline conversion — and a skill whose directory holds a file the
- * declaration does not cover is not "mostly covered"; it is refused. A reader
- * must never be able to summarize one file and silently miss another part of
- * what a worker will read.
+ * task contract (`task/src/contract.ts`, still the one digest basis this
+ * module reuses): the digest covers exact bytes — no trim, no newline
+ * conversion — and a skill whose directory holds a file the declaration does
+ * not cover is not "mostly covered"; it is refused. A reader must never be
+ * able to summarize one file and silently miss another part of what a worker
+ * will read.
  *
  * This module owns the vocabulary and the shape rules only (both are pure): the
  * filesystem load, the identity comparison against real bytes, and the unified
- * pre-check live in `task-runtime/src/sidecar.ts`, which consumes these
- * definitions instead of restating them.
- * @module @dangosys/dsh-singularity-task/skill-contract
+ * pre-check live in `./sidecar.ts`, which consumes these definitions instead of
+ * restating them. It lives here, beside its only production consumers, as an
+ * internal module of the runtime's provider implementation (R3-1): a `TaskRun`
+ * records the content identity it used, and `task/src/types.ts` says so in
+ * prose without needing this vocabulary to be a task export.
+ * @module @dangosys/dsh-singularity-task-runtime/skill-contract
  */
 
-import { canonicalize, sha256Hex } from './contract.ts'
+import { canonicalize, sha256Hex } from '@dangosys/dsh-singularity-task'
 
 /**
  * The sidecar file, read as JSON, named exactly here so every producer and

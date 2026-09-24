@@ -34,11 +34,11 @@ import { createHash } from 'node:crypto'
 import type { AcceptanceCriterion } from './types.ts'
 
 /**
- * The normalized contract version this build writes. Separate from a
- * `TaskDefinition.version` (a template's own generation) and from the event
- * envelope's `schemaVersion` (the store's wire format): this one versions the
- * contract data definition, and an entry that declares a version this build
- * does not know is refused rather than read with the wrong field semantics.
+ * The normalized contract version this build writes. Separate from a task
+ * template's own generation number and from the event envelope's
+ * `schemaVersion` (the store's wire format): this one versions the contract
+ * data definition, and an entry that declares a version this build does not
+ * know is refused rather than read with the wrong field semantics.
  */
 export const TASK_CONTRACT_VERSION = 1 as const
 

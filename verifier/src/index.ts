@@ -9,7 +9,6 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import type {} from '@dangosys/dsh-singularity-task'
 import type {
   AcceptanceCriterion,
   EvidenceBundle,
@@ -18,17 +17,24 @@ import type {
   TaskSnapshot,
   VerificationMode,
   VerificationResult,
-  Verifier,
-  VerifierSelftestSample,
-  VerifierSelftestStore,
-  VerifyRequest,
 } from '@dangosys/dsh-singularity-task'
 import { CommandVerifier } from './command-verifier.ts'
 import { CompositeVerifier, judgeCompositeCriterion } from './composite-verifier.ts'
 import { protectedInputDefects } from './protected-inputs.ts'
 import { ReviewVerifier } from './review-verifier.ts'
-
-export type { VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifyRequest } from '@dangosys/dsh-singularity-task'
+import type {
+  Verifier,
+  VerifierSelftestSample,
+  VerifierSelftestStore,
+  VerifyRequest,
+} from './types.ts'
+export type {
+  Verifier,
+  VerifierSelftest,
+  VerifierSelftestSample,
+  VerifierSelftestStore,
+  VerifyRequest,
+} from './types.ts'
 export { CommandVerifier } from './command-verifier.ts'
 export { CompositeVerifier, judgeCompositeCriterion } from './composite-verifier.ts'
 export type { CompositeTaskSource } from './composite-verifier.ts'

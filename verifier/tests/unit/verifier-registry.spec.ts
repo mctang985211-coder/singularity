@@ -10,9 +10,8 @@ import type {
   TaskRun,
   TaskSnapshot,
   VerificationResult,
-  Verifier,
-  VerifyRequest,
 } from '../../../task/src/types.ts'
+import type { Verifier, VerifyRequest } from '../../src/types.ts'
 import { LOG_TAIL_MAX_CHARS, LOG_TAIL_MAX_LINES, ReviewVerifier, VerifierRegistry } from '../../src/index.ts'
 
 const NOW = '2026-09-16T00:00:00.000Z'

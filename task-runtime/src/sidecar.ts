@@ -37,15 +37,14 @@
 import { lstat, readdir, readFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { parseSkillFile } from '@dangosys/dsh-singularity-agent-runtime'
+import { canonicalize, sha256Hex } from '@dangosys/dsh-singularity-task'
 import {
   SKILL_SIDECAR_FILE,
   SUPPORTED_SKILL_RESOURCE_DIRS,
-  canonicalize,
-  sha256Hex,
   skillContentDigest,
   skillContractDefects,
   skillContractDigest,
-} from '@dangosys/dsh-singularity-task'
+} from './skill-contract.ts'
 import type {
   KnowledgeContentCheck,
   SkillContentIdentity,
@@ -53,7 +52,7 @@ import type {
   SkillPort,
   SkillResourceIdentity,
   SkillSidecar,
-} from '@dangosys/dsh-singularity-task'
+} from './skill-contract.ts'
 import { resolveCapabilities, type CapabilityConfig } from './capability.ts'
 import { walkVerified } from './verified-read.ts'
 

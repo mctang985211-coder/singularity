@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from 'vitest'
-import type { AcceptanceCriterion, EvidenceBundle, TaskInstance, TaskRun, TaskSnapshot, VerificationResult, VerifyRequest } from '../../../task/src/types.ts'
+import type { AcceptanceCriterion, EvidenceBundle, TaskInstance, TaskRun, TaskSnapshot, VerificationResult } from '../../../task/src/types.ts'
+import type { VerifyRequest } from '../../src/types.ts'
 import { CompositeVerifier, judgeCompositeCriterion } from '../../src/composite-verifier.ts'
 
 const NOW = '2026-09-16T00:00:00.000Z'

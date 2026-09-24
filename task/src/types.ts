@@ -132,15 +132,6 @@ export interface ChildEvidenceRef {
   evidenceRef?: string
 }
 
-export interface TaskDefinition {                   // (§5.1)
-  taskType: string
-  version: number
-  objective: string
-  acceptanceCriteria: AcceptanceCriterion[]
-  requiredCapabilities: string[]
-  decompositionPolicy: { allowed: boolean; maxDepth?: number; maxChildren?: number }
-}
-
 export type TaskStatus =
   | 'created' | 'admitted' | 'ready' | 'running' | 'blocked'
   | 'verifying' | 'verified' | 'failed' | 'cancelled'
@@ -972,96 +963,6 @@ export interface Diagnosis {
 }
 
 /**
- * One executable selftest sample (KISS §4.3): the criterion a verifier is
- * handed, the store view a store-reading judge is judged against, and the
- * verdict a healthy verifier must return for the sample to count as proof that
- * the verifier can tell the sample's side apart.
- *
- * Samples are data, and the registry executes them — a verifier cannot prove
- * its selftest by describing it. A sample the registry cannot execute (a store
- * view for a judge the registry cannot run against one) refuses registration
- * rather than being skipped.
- */
-export interface VerifierSelftestSample {
-  /** Which side of the discrimination this sample proves. */
-  role: 'positive' | 'negative'
-  /** Human-readable sample name; the refusal text names the missed sample by it. */
-  name: string
-  /** The sample criterion handed to the verifier. */
-  criterion: AcceptanceCriterion
-  /**
-   * The verdict a healthy verifier returns for this sample: `pass` for a
-   * known-good sample; `fail` for a known-bad sample; `not-pass` for a sample
-   * that must merely never be auto-passed (a never-auto-pass judge such as the
-   * review verifier, where "known-good is not auto-passed" plus "known-bad is
-   * not judged pass" is the equivalent form the sample pair takes).
-   */
-  expect: 'pass' | 'fail' | 'not-pass'
-  /** The store view a store-reading judge is judged against; absent for a judge that judges the criterion alone. */
-  store?: VerifierSelftestStore
-}
-
-/**
- * The task-store view one store-reading selftest sample is judged against
- * ({@link VerifierSelftestSample.store}): the child tasks the criterion is
- * judged over, plus the runs and evidence bundles a judge reads for the
- * children's verified states and verdicts. Everything else a full snapshot
- * carries is empty in a sample.
- */
-export interface VerifierSelftestStore {
-  /** The sample task's children, by batch position — exactly what a store-reading judge's child lookup returns. */
-  children: TaskInstance[]
-  /** Runs the sample judge reads (a child's verified run); `[]` when the sample needs none. */
-  runs?: TaskRun[]
-  /** Evidence bundles the sample judge reads; `[]` when the sample needs none. */
-  evidence?: EvidenceBundle[]
-}
-
-/**
- * A verifier's executable known-sample proof (KISS §4.3 `selftest`): the
- * samples the verifier must mechanically distinguish before the registry will
- * register it — at least one known-good sample and at least one known-bad one,
- * each executed through the verifier and compared against the verdict the
- * verifier declared. A missed negative sample (the known-bad case judged
- * `pass`) or a positive sample that is not accepted makes the verifier
- * unavailable, and the refusal names the sample.
- *
- * What this proves and what it does not: that the verifier, as registered,
- * returns the declared verdicts for its own declared samples — a regression
- * gate against a judge that cannot tell its known cases apart. It does not
- * prove the samples are meaningful, that the verifier is independent from any
- * executor, or that its verdicts are right on real products.
- */
-export interface VerifierSelftest {
-  /** Executable samples; a healthy verifier returns `expect` for every one of them. */
-  samples: VerifierSelftestSample[]
-}
-
-export interface Verifier {                         // implemented by verifier package
-  id: string
-  /**
-   * Registry metadata (KISS §4.3): a version so a later verdict recall can
-   * index evidence by `(verifierRef, version)` (KISS §8.2) — the registry
-   * stamps it onto every verdict and claim it dispatches, so the recorded
-   * version is the registered instance's, never a self-report — and an owner
-   * so the execution/judgement separation (I3) has something to compare
-   * against the executing skill's owner.
-   */
-  version?: string
-  owner?: string
-  /**
-   * The verifier's executable known-sample proof ({@link VerifierSelftest}).
-   * Required to register: {@link VerifierRegistry.register} executes every
-   * sample and refuses the verifier when one is missed, and refuses a
-   * registration without samples — a descriptive selftest is not a selftest.
-   * Only an explicit, documented test-double registration skips the gate.
-   */
-  selftest?: VerifierSelftest
-  supports(mode: VerificationMode): boolean
-  verify(req: VerifyRequest): Promise<VerificationResult[]>
-}
-
-/**
  * One structured record of what is still missing (KISS §2/§5): an Obligation
  * is a question, not an action — `goal` names the gap, `criterion` says how its
  * satisfaction would be judged, and `sourceTaskId` names the task whose
@@ -1076,32 +977,6 @@ export interface Obligation {
   criterion: string
   /** The task whose terminal transition (or rejected admission) raised it. */
   sourceTaskId: TaskId
-}
-
-export interface VerifyRequest {
-  taskId: TaskId
-  runId: RunId
-  criteria: AcceptanceCriterion[]
-  cwd: string          // absolute dir to run commands in (the graph env checkout)
-  logDir: string       // absolute dir for this run's logs; results store paths relative to evidenceRoot
-  timeoutMs?: number
-}
-
-/** Fixed definition fields of a graph's root task (see task-runtime createRootTask). */
-export const RootTaskSpec: Pick<TaskDefinition, 'taskType' | 'version' | 'acceptanceCriteria' | 'requiredCapabilities' | 'decompositionPolicy'> = {
-  taskType: 'root',
-  version: 1,
-  acceptanceCriteria: [
-    {
-      criterionId: 'root-children-verified',
-      description: 'all mandatory children verified',
-      verificationMode: 'composite',
-      requiredEvidence: [],
-      mandatory: true,
-    },
-  ],
-  requiredCapabilities: [],
-  decompositionPolicy: { allowed: true },
 }
 
 /** Store id convention: one task store per root session. */

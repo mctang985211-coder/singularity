@@ -1,6 +1,6 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { AcceptanceCriterion, AdmissionContext, ArtifactRef, CapabilityManifest, ChildEvidenceRef, DecompositionAdmission, DecompositionIdentity, DependencyEdge, EvidenceBundle, ExecutionPhase, KnowledgeContentCheck, Obligation, ProtectedInputRef, ReviewCriterion, ReviewTokenUsage, ReviewToolCall, RunId, RunProviderBinding, RunSkillBinding, RunStatus, SkillContentIdentity, SkillContractDefectCode, SkillPort, SkillSidecar, TaskContract, TaskContractVersion, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalDecisionOutcome, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalStatus, TaskProposalVerifierIdentity, TaskRun, TaskService, TaskSnapshot, VerificationMode } from "@dangosys/dsh-singularity-task";
+import { AcceptanceCriterion, AdmissionContext, ArtifactRef, CapabilityManifest, ChildEvidenceRef, DecompositionAdmission, DecompositionIdentity, DependencyEdge, EvidenceBundle, ExecutionPhase, Obligation, ProtectedInputRef, ReviewCriterion, ReviewTokenUsage, ReviewToolCall, RunId, RunProviderBinding, RunSkillBinding, RunStatus, TaskContract, TaskContractVersion, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalDecisionOutcome, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalStatus, TaskProposalVerifierIdentity, TaskRun, TaskService, TaskSnapshot, VerificationMode } from "@dangosys/dsh-singularity-task";
 import { McpServerSpec, WorkerGrant } from "@dangosys/dsh-singularity-agent-runtime";
 import { AgentHandle } from "@deepseek-ai/dsh-agent";
 
@@ -368,6 +368,116 @@ declare class ExecutionGate {
    */
   drainSession(sessionId: string, opts: DrainOptions): Promise<DrainResult>;
 }
+//#endregion
+//#region src/skill-contract.d.ts
+/**
+ * The sidecar contract version this build writes and reads. Like the task
+ * contract's `TASK_CONTRACT_VERSION` it versions the data definition, not a
+ * skill: a sidecar declaring a version this build does not know is refused
+ * rather than read with the wrong field semantics.
+ */
+declare const SKILL_CONTRACT_VERSION: 1;
+/** Every version of {@link SkillSidecar} this build can write or read. */
+type SkillContractVersion = typeof SKILL_CONTRACT_VERSION;
+/**
+ * One supporting file's identity: where it is inside the skill directory and the
+ * SHA-256 of its exact bytes.
+ */
+interface SkillResourceIdentity {
+  /** Path relative to the skill directory, POSIX separators, `<dir>/<file>` per {@link isSupportedSkillResourcePath}. */
+  path: string;
+  /** Lowercase SHA-256 hex over the exact file bytes — no trim, no newline conversion. */
+  sha256: string;
+}
+/**
+ * What a sidecar claims about the bytes a worker will read: the `SKILL.md`
+ * itself plus every supported resource, in one sorted list. A skill directory
+ * holding a file this identity does not name is refused by the loader — the
+ * point of the identity is that it covers the content, not most of it.
+ */
+interface SkillContentIdentity {
+  /** SHA-256 of the exact `SKILL.md` bytes. */
+  skillMdSha256: string;
+  /** Every supported resource the identity covers, sorted by `path`, each path once. */
+  resources: readonly SkillResourceIdentity[];
+}
+/**
+ * One declared input or output of an execution skill. Ports are named in the
+ * skill's own vocabulary; the runtime does not resolve them against artifacts
+ * or inputs in v1, so they are a readable contract, not a wiring.
+ */
+interface SkillPort {
+  /** Port name. */
+  name: string;
+  /** What the port carries, in the author's words, stored verbatim. */
+  description: string;
+  /** Whether the port must be satisfied for the skill to apply. */
+  required: boolean;
+}
+/**
+ * The registered judge an execution skill's result is verified by. Only the ref
+ * is bound in v1: the registry exposes its ids (`VerifierRegistry.verifierIds()`)
+ * and no per-ref version, so a version declared here could not be checked and
+ * would be a field nobody consumes.
+ */
+interface SkillVerifierRef {
+  /** Verifier id the registry is queried under; an unknown ref makes the skill an invalid provider. */
+  ref: string;
+}
+/** An execution skill: it provides capabilities and is judged by a verifier. */
+interface ExecutionSkillSidecar {
+  contractVersion: SkillContractVersion;
+  type: 'execution';
+  /** Capability names this skill serves; at least one, each unique. */
+  capabilities: readonly string[];
+  /** What must hold before the skill applies, verbatim. */
+  precondition: string;
+  /** Declared inputs; `[]` when the skill declares none. */
+  inputs: readonly SkillPort[];
+  /** Declared outputs; `[]` when the skill declares none. */
+  outputs: readonly SkillPort[];
+  /** Real DSH tool names the skill needs, in the same vocabulary a capability expands to. */
+  requiredTools: readonly string[];
+  verifier: SkillVerifierRef;
+  content: SkillContentIdentity;
+}
+/**
+ * How a knowledge skill's content is checked. v1 knows one kind, `command`: a
+ * check the deciding gate runs in the skill directory and reads the exit code
+ * of. Nothing in this module — or in the loader — executes it; the reference is
+ * validated as a declaration and carried, never run as a side effect of
+ * validation.
+ */
+interface KnowledgeContentCheck {
+  /** The one check kind this build recognizes. */
+  kind: 'command';
+  /** The command line, verbatim, to be executed by the gate that owns the decision. */
+  command: string;
+}
+/**
+ * A knowledge skill: guidance a worker may read, with no execution verifier and
+ * no place in the execution closure. It declares its source and scope so a
+ * reader can judge where the content came from and what it applies to.
+ */
+interface KnowledgeSkillSidecar {
+  contractVersion: SkillContractVersion;
+  type: 'knowledge';
+  /** Where the content comes from, verbatim. */
+  source: string;
+  /** What the content applies to, verbatim. */
+  scope: string;
+  content: SkillContentIdentity;
+  contentCheck: KnowledgeContentCheck;
+}
+/** The discriminated sidecar: `type` decides which field set is the closed one. */
+type SkillSidecar = ExecutionSkillSidecar | KnowledgeSkillSidecar;
+/**
+ * The named kind of one declaration refusal. `unknown-version` and
+ * `unknown-field` are their own codes because a caller acts differently on
+ * them (one build-versions the reader, the other says which fields a type
+ * carries); everything else is a shape defect inside the declared field set.
+ */
+type SkillContractDefectCode = 'sidecar-unknown-version' | 'sidecar-unknown-field' | 'sidecar-shape';
 //#endregion
 //#region src/sidecar.d.ts
 /** Every reason a provider is refused, named so a caller can act on the kind of problem. */

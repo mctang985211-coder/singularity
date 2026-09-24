@@ -27,15 +27,53 @@
  * exactly like an adopted one, which is how the recovery stats find it after a
  * restart.
  *
+ * The test-only convenience types live here too (R3-3): `TaskDefinition` (the
+ * §5.1 template shape) and `RootTaskSpec` (the fixed definition fields the old
+ * graph entry seeded a root with) had no production consumer left — the real
+ * root contract has come from the intake (`RootContractSpec`) since A0 — so
+ * production code must not import them and no package exports them.
+ *
  * @module tests/support/legacy-root
  */
 
 import { randomUUID } from 'node:crypto'
-import { RootTaskSpec } from '../../task/src/types.ts'
+import type { AcceptanceCriterion } from '../../task/src/types.ts'
 import type { TaskInstance, TaskRun } from '../../task/src/types.ts'
 import type { TaskService } from '../../task/src/index.ts'
 import type { CapabilityConfig, TaskRuntime } from '../../task-runtime/src/index.ts'
 import { bindRunProviders, resolveCapabilities } from '../../task-runtime/src/index.ts'
+
+/**
+ * The task-template definition shape (§5.1), kept only for the fixtures below:
+ * the definition fields a seeded task's `definitionRef` cites. Production holds
+ * no definitions registry (W14's fidelity cap), so nothing in `src/` uses this
+ * shape.
+ */
+export interface TaskDefinition {
+  taskType: string
+  version: number
+  objective: string
+  acceptanceCriteria: AcceptanceCriterion[]
+  requiredCapabilities: string[]
+  decompositionPolicy: { allowed: boolean; maxDepth?: number; maxChildren?: number }
+}
+
+/** The fixed definition fields of a graph's root task, as the old graph entry seeded them (see seedLegacyRoot). */
+export const RootTaskSpec: Pick<TaskDefinition, 'taskType' | 'version' | 'acceptanceCriteria' | 'requiredCapabilities' | 'decompositionPolicy'> = {
+  taskType: 'root',
+  version: 1,
+  acceptanceCriteria: [
+    {
+      criterionId: 'root-children-verified',
+      description: 'all mandatory children verified',
+      verificationMode: 'composite',
+      requiredEvidence: [],
+      mandatory: true,
+    },
+  ],
+  requiredCapabilities: [],
+  decompositionPolicy: { allowed: true },
+}
 
 export interface LegacyRootSeed {
   /** The store's own service: the fixture writes through it, exactly as a store's writer does. */

@@ -3,7 +3,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/pr
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { skillContractDigest } from '@dangosys/dsh-singularity-task'
+import { skillContractDigest } from '../../src/skill-contract.ts'
 import {
   capabilityToolQuery,
   executionProviders,

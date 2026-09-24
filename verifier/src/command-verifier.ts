@@ -2,14 +2,8 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { join, relative } from 'node:path'
-import type {
-  AcceptanceCriterion,
-  VerificationMode,
-  VerificationResult,
-  Verifier,
-  VerifierSelftest,
-  VerifyRequest,
-} from '@dangosys/dsh-singularity-task'
+import type { AcceptanceCriterion, VerificationMode, VerificationResult } from '@dangosys/dsh-singularity-task'
+import type { Verifier, VerifierSelftest, VerifyRequest } from './types.ts'
 
 const EXECUTABLE_MODES: readonly VerificationMode[] = ['deterministic', 'simulation', 'measurement']
 

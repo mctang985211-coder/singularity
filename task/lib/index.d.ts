@@ -3,11 +3,11 @@ import { Context, Service } from "@deepseek-ai/cordis";
 //#region src/contract.d.ts
 
 /**
- * The normalized contract version this build writes. Separate from a
- * `TaskDefinition.version` (a template's own generation) and from the event
- * envelope's `schemaVersion` (the store's wire format): this one versions the
- * contract data definition, and an entry that declares a version this build
- * does not know is refused rather than read with the wrong field semantics.
+ * The normalized contract version this build writes. Separate from a task
+ * template's own generation number and from the event envelope's
+ * `schemaVersion` (the store's wire format): this one versions the contract
+ * data definition, and an entry that declares a version this build does not
+ * know is refused rather than read with the wrong field semantics.
  */
 declare const TASK_CONTRACT_VERSION: 1;
 /** Every version of {@link TaskContract} this build can write or read. */
@@ -762,18 +762,6 @@ interface ChildEvidenceRef {
   criterionId?: string;
   /** The evidence id, artifact kind, or artifact id that must exist in the child's verified run evidence; absent requires only the child's evidence. */
   evidenceRef?: string;
-}
-interface TaskDefinition {
-  taskType: string;
-  version: number;
-  objective: string;
-  acceptanceCriteria: AcceptanceCriterion[];
-  requiredCapabilities: string[];
-  decompositionPolicy: {
-    allowed: boolean;
-    maxDepth?: number;
-    maxChildren?: number;
-  };
 }
 type TaskStatus = 'created' | 'admitted' | 'ready' | 'running' | 'blocked' | 'verifying' | 'verified' | 'failed' | 'cancelled';
 type DecompositionStatus = 'leaf' | 'decomposable' | 'decomposing' | 'decomposed';
@@ -1548,92 +1536,6 @@ interface Diagnosis {
   judgements?: ReviewJudgement[];
 }
 /**
- * One executable selftest sample (KISS §4.3): the criterion a verifier is
- * handed, the store view a store-reading judge is judged against, and the
- * verdict a healthy verifier must return for the sample to count as proof that
- * the verifier can tell the sample's side apart.
- *
- * Samples are data, and the registry executes them — a verifier cannot prove
- * its selftest by describing it. A sample the registry cannot execute (a store
- * view for a judge the registry cannot run against one) refuses registration
- * rather than being skipped.
- */
-interface VerifierSelftestSample {
-  /** Which side of the discrimination this sample proves. */
-  role: 'positive' | 'negative';
-  /** Human-readable sample name; the refusal text names the missed sample by it. */
-  name: string;
-  /** The sample criterion handed to the verifier. */
-  criterion: AcceptanceCriterion;
-  /**
-   * The verdict a healthy verifier returns for this sample: `pass` for a
-   * known-good sample; `fail` for a known-bad sample; `not-pass` for a sample
-   * that must merely never be auto-passed (a never-auto-pass judge such as the
-   * review verifier, where "known-good is not auto-passed" plus "known-bad is
-   * not judged pass" is the equivalent form the sample pair takes).
-   */
-  expect: 'pass' | 'fail' | 'not-pass';
-  /** The store view a store-reading judge is judged against; absent for a judge that judges the criterion alone. */
-  store?: VerifierSelftestStore;
-}
-/**
- * The task-store view one store-reading selftest sample is judged against
- * ({@link VerifierSelftestSample.store}): the child tasks the criterion is
- * judged over, plus the runs and evidence bundles a judge reads for the
- * children's verified states and verdicts. Everything else a full snapshot
- * carries is empty in a sample.
- */
-interface VerifierSelftestStore {
-  /** The sample task's children, by batch position — exactly what a store-reading judge's child lookup returns. */
-  children: TaskInstance[];
-  /** Runs the sample judge reads (a child's verified run); `[]` when the sample needs none. */
-  runs?: TaskRun[];
-  /** Evidence bundles the sample judge reads; `[]` when the sample needs none. */
-  evidence?: EvidenceBundle[];
-}
-/**
- * A verifier's executable known-sample proof (KISS §4.3 `selftest`): the
- * samples the verifier must mechanically distinguish before the registry will
- * register it — at least one known-good sample and at least one known-bad one,
- * each executed through the verifier and compared against the verdict the
- * verifier declared. A missed negative sample (the known-bad case judged
- * `pass`) or a positive sample that is not accepted makes the verifier
- * unavailable, and the refusal names the sample.
- *
- * What this proves and what it does not: that the verifier, as registered,
- * returns the declared verdicts for its own declared samples — a regression
- * gate against a judge that cannot tell its known cases apart. It does not
- * prove the samples are meaningful, that the verifier is independent from any
- * executor, or that its verdicts are right on real products.
- */
-interface VerifierSelftest {
-  /** Executable samples; a healthy verifier returns `expect` for every one of them. */
-  samples: VerifierSelftestSample[];
-}
-interface Verifier {
-  id: string;
-  /**
-   * Registry metadata (KISS §4.3): a version so a later verdict recall can
-   * index evidence by `(verifierRef, version)` (KISS §8.2) — the registry
-   * stamps it onto every verdict and claim it dispatches, so the recorded
-   * version is the registered instance's, never a self-report — and an owner
-   * so the execution/judgement separation (I3) has something to compare
-   * against the executing skill's owner.
-   */
-  version?: string;
-  owner?: string;
-  /**
-   * The verifier's executable known-sample proof ({@link VerifierSelftest}).
-   * Required to register: {@link VerifierRegistry.register} executes every
-   * sample and refuses the verifier when one is missed, and refuses a
-   * registration without samples — a descriptive selftest is not a selftest.
-   * Only an explicit, documented test-double registration skips the gate.
-   */
-  selftest?: VerifierSelftest;
-  supports(mode: VerificationMode): boolean;
-  verify(req: VerifyRequest): Promise<VerificationResult[]>;
-}
-/**
  * One structured record of what is still missing (KISS §2/§5): an Obligation
  * is a question, not an action — `goal` names the gap, `criterion` says how its
  * satisfaction would be judged, and `sourceTaskId` names the task whose
@@ -1649,16 +1551,6 @@ interface Obligation {
   /** The task whose terminal transition (or rejected admission) raised it. */
   sourceTaskId: TaskId;
 }
-interface VerifyRequest {
-  taskId: TaskId;
-  runId: RunId;
-  criteria: AcceptanceCriterion[];
-  cwd: string;
-  logDir: string;
-  timeoutMs?: number;
-}
-/** Fixed definition fields of a graph's root task (see task-runtime createRootTask). */
-declare const RootTaskSpec: Pick<TaskDefinition, 'taskType' | 'version' | 'acceptanceCriteria' | 'requiredCapabilities' | 'decompositionPolicy'>;
 /** Store id convention: one task store per root session. */
 declare function rootTaskStoreId(rootSessionId: string): string;
 interface TaskSnapshot {
@@ -1897,196 +1789,6 @@ interface TaskEventEnvelope<K$1 extends TaskEventKind, P> {
   readonly schemaVersion: 1;
 }
 type TaskEvent = { [K in TaskEventKind]: TaskEventEnvelope<K, TaskEventPayloads[K]> }[TaskEventKind];
-//#endregion
-//#region src/skill-contract.d.ts
-/**
- * The typed skill sidecar contract: the declaration that sits beside a skill's
- * `SKILL.md` (`SKILL.contract.json`) and says what kind of skill it is, what it
- * provides, and exactly which bytes it is.
- *
- * Why a sidecar exists at all (guide §2.4): DSH's `SKILL.md` carries both
- * executable capability and domain knowledge, and the two need different
- * guarantees. An execution skill must name the capabilities it serves, the real
- * DSH tools it needs, and the registered verifier that judges its result, so a
- * caller can refuse it *before* a run rather than discovering the gap at spawn.
- * A knowledge skill has no execution verifier and must not pretend to have one:
- * it declares where its content comes from, what it applies to, and how to
- * check the content, and it never closes an execution gap.
- *
- * The identities here are content identities, on the same discipline as the
- * task contract (`./contract.ts`): the digest covers exact bytes — no trim, no
- * newline conversion — and a skill whose directory holds a file the
- * declaration does not cover is not "mostly covered"; it is refused. A reader
- * must never be able to summarize one file and silently miss another part of
- * what a worker will read.
- *
- * This module owns the vocabulary and the shape rules only (both are pure): the
- * filesystem load, the identity comparison against real bytes, and the unified
- * pre-check live in `task-runtime/src/sidecar.ts`, which consumes these
- * definitions instead of restating them.
- * @module @dangosys/dsh-singularity-task/skill-contract
- */
-/**
- * The sidecar file, read as JSON, named exactly here so every producer and
- * reader of a skill directory agrees on one spelling.
- */
-declare const SKILL_SIDECAR_FILE = "SKILL.contract.json";
-/**
- * The sidecar contract version this build writes and reads. Like the task
- * contract's `TASK_CONTRACT_VERSION` it versions the data definition, not a
- * skill: a sidecar declaring a version this build does not know is refused
- * rather than read with the wrong field semantics.
- */
-declare const SKILL_CONTRACT_VERSION: 1;
-/** Every version of {@link SkillSidecar} this build can write or read. */
-type SkillContractVersion = typeof SKILL_CONTRACT_VERSION;
-/**
- * The directories a skill may hold supporting files in. The supported shape is
- * deliberately one level deep — `<dir>/<file>` — because a deeper tree cannot
- * be described by the identity without inventing rules for directories, and an
- * unsupported shape has to be refused by name rather than skipped.
- */
-declare const SUPPORTED_SKILL_RESOURCE_DIRS: readonly string[];
-/**
- * Whether one declared resource path is a path this contract can identify:
- * exactly `<dir>/<file>` with `<dir>` in {@link SUPPORTED_SKILL_RESOURCE_DIRS},
- * POSIX separators, no `.`/`..` segment, nothing absolute. Anything else —
- * nested trees, a second segment, backslashes, a bare directory — is outside
- * the supported shape and is refused by name.
- */
-declare function isSupportedSkillResourcePath(path: string): boolean;
-/**
- * One supporting file's identity: where it is inside the skill directory and the
- * SHA-256 of its exact bytes.
- */
-interface SkillResourceIdentity {
-  /** Path relative to the skill directory, POSIX separators, `<dir>/<file>` per {@link isSupportedSkillResourcePath}. */
-  path: string;
-  /** Lowercase SHA-256 hex over the exact file bytes — no trim, no newline conversion. */
-  sha256: string;
-}
-/**
- * What a sidecar claims about the bytes a worker will read: the `SKILL.md`
- * itself plus every supported resource, in one sorted list. A skill directory
- * holding a file this identity does not name is refused by the loader — the
- * point of the identity is that it covers the content, not most of it.
- */
-interface SkillContentIdentity {
-  /** SHA-256 of the exact `SKILL.md` bytes. */
-  skillMdSha256: string;
-  /** Every supported resource the identity covers, sorted by `path`, each path once. */
-  resources: readonly SkillResourceIdentity[];
-}
-/**
- * One declared input or output of an execution skill. Ports are named in the
- * skill's own vocabulary; the runtime does not resolve them against artifacts
- * or inputs in v1, so they are a readable contract, not a wiring.
- */
-interface SkillPort {
-  /** Port name. */
-  name: string;
-  /** What the port carries, in the author's words, stored verbatim. */
-  description: string;
-  /** Whether the port must be satisfied for the skill to apply. */
-  required: boolean;
-}
-/**
- * The registered judge an execution skill's result is verified by. Only the ref
- * is bound in v1: the registry exposes its ids (`VerifierRegistry.verifierIds()`)
- * and no per-ref version, so a version declared here could not be checked and
- * would be a field nobody consumes.
- */
-interface SkillVerifierRef {
-  /** Verifier id the registry is queried under; an unknown ref makes the skill an invalid provider. */
-  ref: string;
-}
-/** An execution skill: it provides capabilities and is judged by a verifier. */
-interface ExecutionSkillSidecar {
-  contractVersion: SkillContractVersion;
-  type: 'execution';
-  /** Capability names this skill serves; at least one, each unique. */
-  capabilities: readonly string[];
-  /** What must hold before the skill applies, verbatim. */
-  precondition: string;
-  /** Declared inputs; `[]` when the skill declares none. */
-  inputs: readonly SkillPort[];
-  /** Declared outputs; `[]` when the skill declares none. */
-  outputs: readonly SkillPort[];
-  /** Real DSH tool names the skill needs, in the same vocabulary a capability expands to. */
-  requiredTools: readonly string[];
-  verifier: SkillVerifierRef;
-  content: SkillContentIdentity;
-}
-/**
- * How a knowledge skill's content is checked. v1 knows one kind, `command`: a
- * check the deciding gate runs in the skill directory and reads the exit code
- * of. Nothing in this module — or in the loader — executes it; the reference is
- * validated as a declaration and carried, never run as a side effect of
- * validation.
- */
-interface KnowledgeContentCheck {
-  /** The one check kind this build recognizes. */
-  kind: 'command';
-  /** The command line, verbatim, to be executed by the gate that owns the decision. */
-  command: string;
-}
-/**
- * A knowledge skill: guidance a worker may read, with no execution verifier and
- * no place in the execution closure. It declares its source and scope so a
- * reader can judge where the content came from and what it applies to.
- */
-interface KnowledgeSkillSidecar {
-  contractVersion: SkillContractVersion;
-  type: 'knowledge';
-  /** Where the content comes from, verbatim. */
-  source: string;
-  /** What the content applies to, verbatim. */
-  scope: string;
-  content: SkillContentIdentity;
-  contentCheck: KnowledgeContentCheck;
-}
-/** The discriminated sidecar: `type` decides which field set is the closed one. */
-type SkillSidecar = ExecutionSkillSidecar | KnowledgeSkillSidecar;
-/**
- * The named kind of one declaration refusal. `unknown-version` and
- * `unknown-field` are their own codes because a caller acts differently on
- * them (one build-versions the reader, the other says which fields a type
- * carries); everything else is a shape defect inside the declared field set.
- */
-type SkillContractDefectCode = 'sidecar-unknown-version' | 'sidecar-unknown-field' | 'sidecar-shape';
-/** One reason a declared sidecar is not acceptable, with the kind of problem named. */
-interface SkillContractDefect {
-  code: SkillContractDefectCode;
-  /** The readable reason, naming the field and the vocabulary it was checked against. */
-  reason: string;
-}
-/**
- * Every reason one declared sidecar is not acceptable, in field order — never
- * just the first, so one refusal names everything wrong with the declaration.
- *
- * Purely declaration-level: the version, the closed field set of the declared
- * type, the shape of every field, and the internal consistency of the content
- * identity. It reads no files, so it cannot tell whether the digests are true —
- * that comparison needs the skill directory and lives in the loader. The
- * returned defects are values, not throws: a caller refusing a sidecar reports
- * all of them and writes nothing.
- */
-declare function skillContractDefects(value: unknown): SkillContractDefect[];
-/**
- * The identity of a whole sidecar: SHA-256 over {@link canonicalize} of the
- * declared data, so key order and `undefined`-valued keys do not move it while
- * any declared field does. Call it on a sidecar that passed
- * {@link skillContractDefects}: an unvalidated object can carry fields this
- * identity would then cover without a rule saying what they mean.
- */
-declare function skillContractDigest(sidecar: SkillSidecar): string;
-/**
- * The identity of one content identity: SHA-256 over {@link canonicalize} of the
- * `SKILL.md` digest and the resource list. Separate from
- * {@link skillContractDigest} so a caller can name the bytes (a run recording
- * what it read) without claiming a sidecar it did not read.
- */
-declare function skillContentDigest(content: SkillContentIdentity): string;
 //#endregion
 //#region src/service/state.d.ts
 declare class TaskState {
@@ -2627,4 +2329,4 @@ declare class TaskService extends Service {
   private header;
 }
 //#endregion
-export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, ExecutionPhase, ExecutionSkillSidecar, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, KnowledgeContentCheck, KnowledgeSkillSidecar, NoProgressRecord, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ProtectedInputRef, ROOT_PROPOSAL_TASK_ID, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootProposalIdentity, RootTaskSpec, RunId, RunMcpServerBinding, RunProviderBinding, RunSkillBinding, RunStatus, SKILL_CONTRACT_VERSION, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, SkillContentIdentity, SkillContractDefect, SkillContractDefectCode, SkillContractVersion, SkillFitFacts, SkillPort, SkillResourceIdentity, SkillSidecar, SkillVerifierRef, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskContract, TaskContractVersion, TaskDefinition, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifierSelftestSample, VerifierSelftestStore, VerifyRequest, admissionContextDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, isSupportedSkillResourcePath, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, sha256Hex, skillContentDigest, skillContractDefects, skillContractDigest, taskProposalId };
+export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, ExecutionPhase, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, NoProgressRecord, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ProtectedInputRef, ROOT_PROPOSAL_TASK_ID, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootProposalIdentity, RunId, RunMcpServerBinding, RunProviderBinding, RunSkillBinding, RunStatus, SkillFitFacts, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskContract, TaskContractVersion, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, admissionContextDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, sha256Hex, taskProposalId };

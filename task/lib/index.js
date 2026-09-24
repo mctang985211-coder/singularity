@@ -4,11 +4,11 @@ import { createHash } from "node:crypto";
 
 //#region src/contract.ts
 /**
-* The normalized contract version this build writes. Separate from a
-* `TaskDefinition.version` (a template's own generation) and from the event
-* envelope's `schemaVersion` (the store's wire format): this one versions the
-* contract data definition, and an entry that declares a version this build
-* does not know is refused rather than read with the wrong field semantics.
+* The normalized contract version this build writes. Separate from a task
+* template's own generation number and from the event envelope's
+* `schemaVersion` (the store's wire format): this one versions the contract
+* data definition, and an entry that declares a version this build does not
+* know is refused rather than read with the wrong field semantics.
 */
 const TASK_CONTRACT_VERSION = 1;
 /**
@@ -240,20 +240,6 @@ const JUDGEMENT_VERDICTS = [
 	"inadequate",
 	"unknown"
 ];
-/** Fixed definition fields of a graph's root task (see task-runtime createRootTask). */
-const RootTaskSpec = {
-	taskType: "root",
-	version: 1,
-	acceptanceCriteria: [{
-		criterionId: "root-children-verified",
-		description: "all mandatory children verified",
-		verificationMode: "composite",
-		requiredEvidence: [],
-		mandatory: true
-	}],
-	requiredCapabilities: [],
-	decompositionPolicy: { allowed: true }
-};
 /** Store id convention: one task store per root session. */
 function rootTaskStoreId(rootSessionId) {
 	return `sg-t-${rootSessionId}`;
@@ -1564,255 +1550,6 @@ var TaskState = class TaskState {
 };
 
 //#endregion
-//#region src/skill-contract.ts
-/**
-* The sidecar file, read as JSON, named exactly here so every producer and
-* reader of a skill directory agrees on one spelling.
-*/
-const SKILL_SIDECAR_FILE = "SKILL.contract.json";
-/**
-* The sidecar contract version this build writes and reads. Like the task
-* contract's `TASK_CONTRACT_VERSION` it versions the data definition, not a
-* skill: a sidecar declaring a version this build does not know is refused
-* rather than read with the wrong field semantics.
-*/
-const SKILL_CONTRACT_VERSION = 1;
-/**
-* The directories a skill may hold supporting files in. The supported shape is
-* deliberately one level deep — `<dir>/<file>` — because a deeper tree cannot
-* be described by the identity without inventing rules for directories, and an
-* unsupported shape has to be refused by name rather than skipped.
-*/
-const SUPPORTED_SKILL_RESOURCE_DIRS = ["references", "scripts"];
-/**
-* Whether one declared resource path is a path this contract can identify:
-* exactly `<dir>/<file>` with `<dir>` in {@link SUPPORTED_SKILL_RESOURCE_DIRS},
-* POSIX separators, no `.`/`..` segment, nothing absolute. Anything else —
-* nested trees, a second segment, backslashes, a bare directory — is outside
-* the supported shape and is refused by name.
-*/
-function isSupportedSkillResourcePath(path) {
-	const segments = path.split("/");
-	if (segments.length !== 2) return false;
-	const [directory, file] = segments;
-	if (!SUPPORTED_SKILL_RESOURCE_DIRS.includes(directory)) return false;
-	return file.length > 0 && file !== "." && file !== ".." && !file.includes("\\");
-}
-const EXECUTION_FIELDS = [
-	"contractVersion",
-	"type",
-	"capabilities",
-	"precondition",
-	"inputs",
-	"outputs",
-	"requiredTools",
-	"verifier",
-	"content"
-];
-const KNOWLEDGE_FIELDS = [
-	"contractVersion",
-	"type",
-	"source",
-	"scope",
-	"content",
-	"contentCheck"
-];
-const PORT_FIELDS = [
-	"name",
-	"description",
-	"required"
-];
-const RESOURCE_FIELDS = ["path", "sha256"];
-const VERIFIER_FIELDS = ["ref"];
-const CONTENT_CHECK_FIELDS = ["kind", "command"];
-const CONTENT_FIELDS = ["skillMdSha256", "resources"];
-function isPlainObject(value) {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
-}
-/** Non-blank text: the one check every string field shares, with no rewriting of the value. */
-function nonBlank(value) {
-	return typeof value === "string" && value.trim().length > 0;
-}
-function isSha256Hex(value) {
-	return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
-}
-/** How an unexpected value reads in a refusal: JSON for scalars, a noun for containers. */
-function described(value) {
-	if (value === null) return "null";
-	if (Array.isArray(value)) return "an array";
-	if (typeof value === "string") return JSON.stringify(value);
-	if (typeof value === "object") return "an object";
-	return String(value);
-}
-/** What a value *is*, for the one refusal that cannot name a field (the whole sidecar). */
-function kindOf(value) {
-	if (value === null) return "null";
-	if (Array.isArray(value)) return "an array";
-	return typeof value;
-}
-function shape(reason) {
-	return {
-		code: "sidecar-shape",
-		reason
-	};
-}
-function unknownFields(value, allowed, where, carries) {
-	return Object.keys(value).filter((key) => !allowed.includes(key)).sort().map((key) => ({
-		code: "sidecar-unknown-field",
-		reason: `${where} declares unknown field ${JSON.stringify(key)}; ${carries}`
-	}));
-}
-/** One string list: an array of non-blank names, each once, `[]` allowed unless `minItems` says otherwise. */
-function nameListDefects(value, where, missing, duplicate, minItems = 0) {
-	if (!Array.isArray(value) || minItems > 0 && value.length < minItems) return [shape(missing)];
-	const defects = [];
-	const seen = /* @__PURE__ */ new Set();
-	value.forEach((item, index) => {
-		if (!nonBlank(item)) {
-			defects.push(shape(`${where}[${index}] must be a non-blank string`));
-			return;
-		}
-		if (seen.has(item)) {
-			defects.push(shape(duplicate(item, index)));
-			return;
-		}
-		seen.add(item);
-	});
-	return defects;
-}
-/** Ports: closed objects, each list naming a port once. */
-function portDefects(value, where) {
-	if (!Array.isArray(value)) return [shape(`${where} must be an array of ports`)];
-	const defects = [];
-	const seen = /* @__PURE__ */ new Set();
-	value.forEach((port, index) => {
-		const at = `${where}[${index}]`;
-		if (!isPlainObject(port)) {
-			defects.push(shape(`${at} must be an object carrying name, description, required`));
-			return;
-		}
-		defects.push(...unknownFields(port, PORT_FIELDS, at, "a port carries name, description, required"));
-		if (!nonBlank(port.name)) defects.push(shape(`${at}.name must be a non-blank string`));
-		if (!nonBlank(port.description)) defects.push(shape(`${at}.description must be a non-blank string`));
-		if (typeof port.required !== "boolean") defects.push(shape(`${at}.required must be a boolean`));
-		if (nonBlank(port.name)) {
-			if (seen.has(port.name)) defects.push(shape(`${at} duplicates port ${JSON.stringify(port.name)}`));
-			seen.add(port.name);
-		}
-	});
-	return defects;
-}
-/** The content identity: exact digests, a supported path vocabulary, and one sorted list. */
-function contentDefects(value) {
-	if (!isPlainObject(value)) return [shape("sidecar.content must be an object carrying skillMdSha256 and resources")];
-	const defects = unknownFields(value, CONTENT_FIELDS, "sidecar.content", "a content identity carries skillMdSha256, resources");
-	if (!isSha256Hex(value.skillMdSha256)) defects.push(shape("sidecar.content.skillMdSha256 must be a lowercase 64-character hex digest"));
-	const resources = value.resources;
-	if (!Array.isArray(resources)) {
-		defects.push(shape("sidecar.content.resources must be an array of resource identities"));
-		return defects;
-	}
-	const seen = /* @__PURE__ */ new Set();
-	let previous;
-	resources.forEach((resource, index) => {
-		const at = `sidecar.content.resources[${index}]`;
-		if (!isPlainObject(resource)) {
-			defects.push(shape(`${at} must be an object carrying path, sha256`));
-			return;
-		}
-		defects.push(...unknownFields(resource, RESOURCE_FIELDS, at, "a resource identity carries path, sha256"));
-		if (!nonBlank(resource.path) || !isSupportedSkillResourcePath(resource.path)) defects.push(shape(`${at}.path ${described(resource.path)} is not a supported resource path (references/<file> or scripts/<file>)`));
-		else if (seen.has(resource.path)) defects.push(shape(`${at} duplicates ${JSON.stringify(resource.path)}`));
-		else {
-			if (previous !== void 0 && resource.path < previous) defects.push(shape(`${at} path ${JSON.stringify(resource.path)} precedes ${JSON.stringify(previous)}; the list must be sorted by path`));
-			seen.add(resource.path);
-			previous = resource.path;
-		}
-		if (!isSha256Hex(resource.sha256)) defects.push(shape(`${at}.sha256 must be a lowercase 64-character hex digest`));
-	});
-	return defects;
-}
-function verifierDefects(value) {
-	if (!isPlainObject(value)) return [shape("sidecar.verifier must be an object carrying a ref")];
-	const defects = unknownFields(value, VERIFIER_FIELDS, "sidecar.verifier", "a verifier reference carries ref");
-	if (!nonBlank(value.ref)) defects.push(shape("sidecar.verifier.ref must be a non-blank string"));
-	return defects;
-}
-function contentCheckDefects(value) {
-	if (!isPlainObject(value)) return [shape("sidecar.contentCheck must be an object carrying kind and command")];
-	const defects = unknownFields(value, CONTENT_CHECK_FIELDS, "sidecar.contentCheck", "a content check carries kind, command");
-	if (value.kind !== "command") defects.push(shape(`sidecar.contentCheck.kind ${described(value.kind)} is not one of command`));
-	if (!nonBlank(value.command)) defects.push(shape("sidecar.contentCheck.command must be a non-blank string"));
-	return defects;
-}
-/**
-* Every reason one declared sidecar is not acceptable, in field order — never
-* just the first, so one refusal names everything wrong with the declaration.
-*
-* Purely declaration-level: the version, the closed field set of the declared
-* type, the shape of every field, and the internal consistency of the content
-* identity. It reads no files, so it cannot tell whether the digests are true —
-* that comparison needs the skill directory and lives in the loader. The
-* returned defects are values, not throws: a caller refusing a sidecar reports
-* all of them and writes nothing.
-*/
-function skillContractDefects(value) {
-	if (!isPlainObject(value)) return [shape(`the sidecar must be a JSON object, got ${kindOf(value)}`)];
-	const defects = [];
-	if (value.contractVersion === void 0) defects.push({
-		code: "sidecar-unknown-version",
-		reason: `sidecar.contractVersion is missing; this build reads and writes version ${SKILL_CONTRACT_VERSION}`
-	});
-	else if (value.contractVersion !== SKILL_CONTRACT_VERSION) defects.push({
-		code: "sidecar-unknown-version",
-		reason: `sidecar.contractVersion ${described(value.contractVersion)} is not a version this build reads (${SKILL_CONTRACT_VERSION})`
-	});
-	const type = value.type;
-	if (type !== "execution" && type !== "knowledge") {
-		defects.push(shape(`sidecar.type ${described(type)} is not one of execution, knowledge`));
-		return defects;
-	}
-	if (type === "execution") {
-		defects.push(...unknownFields(value, EXECUTION_FIELDS, "sidecar", `an execution sidecar carries ${EXECUTION_FIELDS.join(", ")}`));
-		defects.push(...nameListDefects(value.capabilities, "sidecar.capabilities", "sidecar.capabilities must be a non-empty array of capability names", (name, index) => `sidecar.capabilities[${index}] duplicates ${JSON.stringify(name)}`, 1));
-		if (!nonBlank(value.precondition)) defects.push(shape("sidecar.precondition must be a non-blank string"));
-		defects.push(...portDefects(value.inputs, "sidecar.inputs"));
-		defects.push(...portDefects(value.outputs, "sidecar.outputs"));
-		defects.push(...nameListDefects(value.requiredTools, "sidecar.requiredTools", "sidecar.requiredTools must be an array of tool names", (name, index) => `sidecar.requiredTools[${index}] duplicates ${JSON.stringify(name)}`));
-		defects.push(...verifierDefects(value.verifier));
-		defects.push(...contentDefects(value.content));
-		return defects;
-	}
-	defects.push(...unknownFields(value, KNOWLEDGE_FIELDS, "sidecar", `a knowledge sidecar carries ${KNOWLEDGE_FIELDS.join(", ")}`));
-	if (!nonBlank(value.source)) defects.push(shape("sidecar.source must be a non-blank string"));
-	if (!nonBlank(value.scope)) defects.push(shape("sidecar.scope must be a non-blank string"));
-	defects.push(...contentDefects(value.content));
-	defects.push(...contentCheckDefects(value.contentCheck));
-	return defects;
-}
-/**
-* The identity of a whole sidecar: SHA-256 over {@link canonicalize} of the
-* declared data, so key order and `undefined`-valued keys do not move it while
-* any declared field does. Call it on a sidecar that passed
-* {@link skillContractDefects}: an unvalidated object can carry fields this
-* identity would then cover without a rule saying what they mean.
-*/
-function skillContractDigest(sidecar) {
-	return sha256Hex(canonicalize(sidecar));
-}
-/**
-* The identity of one content identity: SHA-256 over {@link canonicalize} of the
-* `SKILL.md` digest and the resource list. Separate from
-* {@link skillContractDigest} so a caller can name the bytes (a run recording
-* what it read) without claiming a sidecar it did not read.
-*/
-function skillContentDigest(content) {
-	return sha256Hex(canonicalize(content));
-}
-
-//#endregion
 //#region src/index.ts
 function assertStoreId(id) {
 	if (!/^[A-Za-z0-9._-]+$/.test(id)) throw new Error(`task: invalid store id "${id}"`);
@@ -2459,4 +2196,4 @@ var TaskService = class extends Service {
 var src_default = TaskService;
 
 //#endregion
-export { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, ROOT_PROPOSAL_TASK_ID, RootTaskSpec, SKILL_CONTRACT_VERSION, SKILL_SIDECAR_FILE, SUPPORTED_SKILL_RESOURCE_DIRS, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskService, TaskState, admissionContextDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, src_default as default, isSupportedSkillResourcePath, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, sha256Hex, skillContentDigest, skillContractDefects, skillContractDigest, taskProposalId };
+export { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskService, TaskState, admissionContextDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, src_default as default, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, sha256Hex, taskProposalId };

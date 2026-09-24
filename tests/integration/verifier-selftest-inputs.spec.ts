@@ -6,11 +6,12 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
-import type { EvidenceBundle, TaskEvent, VerificationResult, Verifier } from '../../task/src/index.ts'
+import type { EvidenceBundle, TaskEvent, VerificationResult } from '../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
 import type { CriterionSpec, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
+import type { Verifier } from '../../verifier/src/types.ts'
 import { personRequest } from '../../task-runtime/tests/support/person-request.ts'
 
 /**

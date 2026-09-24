@@ -34,7 +34,7 @@ import type {
   TaskInstance,
   TaskRun,
 } from '../../src/types.ts'
-import { RootTaskSpec } from '../../src/types.ts'
+import { RootTaskSpec } from '../../../tests/support/legacy-root.ts'
 import { TaskService } from '../../src/index.ts'
 import { TaskState } from '../../src/service/state.ts'
 

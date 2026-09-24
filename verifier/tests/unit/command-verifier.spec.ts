@@ -3,7 +3,8 @@ import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { describe, expect, test } from 'vitest'
-import type { AcceptanceCriterion, VerifyRequest } from '../../../task/src/types.ts'
+import type { AcceptanceCriterion } from '../../../task/src/types.ts'
+import type { VerifyRequest } from '../../src/types.ts'
 import { CommandVerifier } from '../../src/command-verifier.ts'
 
 function criterion(overrides: Partial<AcceptanceCriterion> = {}): AcceptanceCriterion {

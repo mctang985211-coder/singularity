@@ -1,4 +1,5 @@
-import type { AcceptanceCriterion, VerificationMode, VerificationResult, Verifier, VerifierSelftest, VerifyRequest } from '@dangosys/dsh-singularity-task'
+import type { AcceptanceCriterion, VerificationMode, VerificationResult } from '@dangosys/dsh-singularity-task'
+import type { Verifier, VerifierSelftest, VerifyRequest } from './types.ts'
 
 const REVIEW_MODES: readonly VerificationMode[] = ['review', 'formal']
 

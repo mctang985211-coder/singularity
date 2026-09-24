@@ -1,15 +1,112 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { AcceptanceCriterion, EvidenceBundle, ProtectedInputRef, RunId, TaskId, TaskInstance, TaskSnapshot, VerificationMode, VerificationMode as VerificationMode$1, VerificationResult, VerificationResult as VerificationResult$1, Verifier, Verifier as Verifier$1, VerifierSelftest, VerifierSelftest as VerifierSelftest$1, VerifyRequest, VerifyRequest as VerifyRequest$1 } from "@dangosys/dsh-singularity-task";
+import { AcceptanceCriterion, EvidenceBundle, ProtectedInputRef, RunId, TaskId, TaskInstance, TaskRun, TaskSnapshot, VerificationMode, VerificationResult } from "@dangosys/dsh-singularity-task";
 
+//#region src/types.d.ts
+
+/**
+ * One executable selftest sample (KISS §4.3): the criterion a verifier is
+ * handed, the store view a store-reading judge is judged against, and the
+ * verdict a healthy verifier must return for the sample to count as proof that
+ * the verifier can tell the sample's side apart.
+ *
+ * Samples are data, and the registry executes them — a verifier cannot prove
+ * its selftest by describing it. A sample the registry cannot execute (a store
+ * view for a judge the registry cannot run against one) refuses registration
+ * rather than being skipped.
+ */
+interface VerifierSelftestSample {
+  /** Which side of the discrimination this sample proves. */
+  role: 'positive' | 'negative';
+  /** Human-readable sample name; the refusal text names the missed sample by it. */
+  name: string;
+  /** The sample criterion handed to the verifier. */
+  criterion: AcceptanceCriterion;
+  /**
+   * The verdict a healthy verifier returns for this sample: `pass` for a
+   * known-good sample; `fail` for a known-bad sample; `not-pass` for a sample
+   * that must merely never be auto-passed (a never-auto-pass judge such as the
+   * review verifier, where "known-good is not auto-passed" plus "known-bad is
+   * not judged pass" is the equivalent form the sample pair takes).
+   */
+  expect: 'pass' | 'fail' | 'not-pass';
+  /** The store view a store-reading judge is judged against; absent for a judge that judges the criterion alone. */
+  store?: VerifierSelftestStore;
+}
+/**
+ * The task-store view one store-reading selftest sample is judged against
+ * ({@link VerifierSelftestSample.store}): the child tasks the criterion is
+ * judged over, plus the runs and evidence bundles a judge reads for the
+ * children's verified states and verdicts. Everything else a full snapshot
+ * carries is empty in a sample.
+ */
+interface VerifierSelftestStore {
+  /** The sample task's children, by batch position — exactly what a store-reading judge's child lookup returns. */
+  children: TaskInstance[];
+  /** Runs the sample judge reads (a child's verified run); `[]` when the sample needs none. */
+  runs?: TaskRun[];
+  /** Evidence bundles the sample judge reads; `[]` when the sample needs none. */
+  evidence?: EvidenceBundle[];
+}
+/**
+ * A verifier's executable known-sample proof (KISS §4.3 `selftest`): the
+ * samples the verifier must mechanically distinguish before the registry will
+ * register it — at least one known-good sample and at least one known-bad one,
+ * each executed through the verifier and compared against the verdict the
+ * verifier declared. A missed negative sample (the known-bad case judged
+ * `pass`) or a positive sample that is not accepted makes the verifier
+ * unavailable, and the refusal names the sample.
+ *
+ * What this proves and what it does not: that the verifier, as registered,
+ * returns the declared verdicts for its own declared samples — a regression
+ * gate against a judge that cannot tell its known cases apart. It does not
+ * prove the samples are meaningful, that the verifier is independent from any
+ * executor, or that its verdicts are right on real products.
+ */
+interface VerifierSelftest {
+  /** Executable samples; a healthy verifier returns `expect` for every one of them. */
+  samples: VerifierSelftestSample[];
+}
+/** The judge interface this package implements and the registry dispatches to. */
+interface Verifier {
+  id: string;
+  /**
+   * Registry metadata (KISS §4.3): a version so a later verdict recall can
+   * index evidence by `(verifierRef, version)` (KISS §8.2) — the registry
+   * stamps it onto every verdict and claim it dispatches, so the recorded
+   * version is the registered instance's, never a self-report — and an owner
+   * so the execution/judgement separation (I3) has something to compare
+   * against the executing skill's owner.
+   */
+  version?: string;
+  owner?: string;
+  /**
+   * The verifier's executable known-sample proof ({@link VerifierSelftest}).
+   * Required to register: {@link VerifierRegistry.register} executes every
+   * sample and refuses the verifier when one is missed, and refuses a
+   * registration without samples — a descriptive selftest is not a selftest.
+   * Only an explicit, documented test-double registration skips the gate.
+   */
+  selftest?: VerifierSelftest;
+  supports(mode: VerificationMode): boolean;
+  verify(req: VerifyRequest): Promise<VerificationResult[]>;
+}
+interface VerifyRequest {
+  taskId: TaskId;
+  runId: RunId;
+  criteria: AcceptanceCriterion[];
+  cwd: string;
+  logDir: string;
+  timeoutMs?: number;
+}
+//#endregion
 //#region src/command-verifier.d.ts
-
 /**
  * Runs each criterion's `command` through a shell in the request cwd and
  * judges by exit code. Combined stdout+stderr goes to
  * `<logDir>/<criterionId>.log`; results reference it relative to evidenceRoot.
  */
-declare class CommandVerifier implements Verifier$1 {
+declare class CommandVerifier implements Verifier {
   private readonly evidenceRoot;
   readonly id = "command";
   readonly version = "1";
@@ -21,10 +118,10 @@ declare class CommandVerifier implements Verifier$1 {
    * path production uses, so the proof is this verifier's own exit-code
    * reading, executed — not a description of it.
    */
-  readonly selftest: VerifierSelftest$1;
+  readonly selftest: VerifierSelftest;
   constructor(evidenceRoot: string);
-  supports(mode: VerificationMode$1): boolean;
-  verify(req: VerifyRequest$1): Promise<VerificationResult$1[]>;
+  supports(mode: VerificationMode): boolean;
+  verify(req: VerifyRequest): Promise<VerificationResult[]>;
   private runCriterion;
 }
 //#endregion
@@ -61,8 +158,8 @@ interface CompositeTaskSource {
  * production dispatches through {@link CompositeVerifier.verifyIn}; the plain
  * `verify` stays inconclusive.
  */
-declare function judgeCompositeCriterion(criterion: AcceptanceCriterion, children: readonly TaskInstance[], snapshot: () => Promise<TaskSnapshot>): Promise<VerificationResult$1>;
-declare class CompositeVerifier implements Verifier$1 {
+declare function judgeCompositeCriterion(criterion: AcceptanceCriterion, children: readonly TaskInstance[], snapshot: () => Promise<TaskSnapshot>): Promise<VerificationResult>;
+declare class CompositeVerifier implements Verifier {
   private readonly task;
   readonly id = "composite";
   readonly version = "1";
@@ -76,11 +173,11 @@ declare class CompositeVerifier implements Verifier$1 {
    * fixtures are read from a real store; the store *view* each sample declares
    * is the whole input (`VerifierSelftestSample.store`).
    */
-  readonly selftest: VerifierSelftest$1;
+  readonly selftest: VerifierSelftest;
   constructor(task: CompositeTaskSource);
-  supports(mode: VerificationMode$1): boolean;
-  verify(req: VerifyRequest$1): Promise<VerificationResult$1[]>;
-  verifyIn(storeId: string, req: VerifyRequest$1): Promise<VerificationResult$1[]>;
+  supports(mode: VerificationMode): boolean;
+  verify(req: VerifyRequest): Promise<VerificationResult[]>;
+  verifyIn(storeId: string, req: VerifyRequest): Promise<VerificationResult[]>;
 }
 //#endregion
 //#region src/review-verifier.d.ts
@@ -99,13 +196,13 @@ declare class CompositeVerifier implements Verifier$1 {
  * verdict meaningful. What closes a review criterion is the human review it
  * defers to, outside this verifier.
  */
-declare class ReviewVerifier implements Verifier$1 {
+declare class ReviewVerifier implements Verifier {
   readonly id = "review";
   readonly version = "1";
   readonly owner = "singularity";
-  readonly selftest: VerifierSelftest$1;
-  supports(mode: VerificationMode$1): boolean;
-  verify(req: VerifyRequest$1): Promise<VerificationResult$1[]>;
+  readonly selftest: VerifierSelftest;
+  supports(mode: VerificationMode): boolean;
+  verify(req: VerifyRequest): Promise<VerificationResult[]>;
 }
 //#endregion
 //#region src/protected-inputs.d.ts
@@ -205,7 +302,7 @@ declare class VerifierRegistry extends Service {
    * judge without being one. It is declared, never inferred, and logged as one
    * warning so the skip is visible in the run that took it.
    */
-  register(verifier: Verifier$1, options?: RegisterOptions): Promise<() => void>;
+  register(verifier: Verifier, options?: RegisterOptions): Promise<() => void>;
   /**
    * The executable selftest gate. Two refusals reach the caller, both naming
    * the verifier: `cannot be registered` for a declaration the gate could not
@@ -258,4 +355,4 @@ declare class VerifierRegistry extends Service {
   private claim;
 }
 //#endregion
-export { CommandVerifier, type CompositeTaskSource, CompositeVerifier, Config, LOG_TAIL_MAX_CHARS, LOG_TAIL_MAX_LINES, RegisterOptions, ReviewVerifier, type VerificationMode, type VerificationResult, type Verifier, VerifierRegistry, VerifierRegistry as default, type VerifierSelftest, type VerifyRequest, VerifyRunOptions, judgeCompositeCriterion, protectedInputDefects };
+export { CommandVerifier, type CompositeTaskSource, CompositeVerifier, Config, LOG_TAIL_MAX_CHARS, LOG_TAIL_MAX_LINES, RegisterOptions, ReviewVerifier, type Verifier, VerifierRegistry, VerifierRegistry as default, type VerifierSelftest, type VerifierSelftestSample, type VerifierSelftestStore, type VerifyRequest, VerifyRunOptions, judgeCompositeCriterion, protectedInputDefects };
