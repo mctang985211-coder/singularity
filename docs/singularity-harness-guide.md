@@ -1,10 +1,10 @@
 # Singularity Harness 工作指南
 
-最新（2026-09-24，R3 交付）：第 8a 项 R3（已有 Task 合同归位）**已交付待进度审核**。三项纯迁移按计划 E 节合同完成：Skill 侧车形状/路径/digest 规则迁至 `task-runtime/src/skill-contract.ts`（runtime provider 内部模块，不入包 index，不进 sidecar 大文件）；Verifier/VerifierSelftest（含 sample/store 形状）与 VerifyRequest 归入 `verifier/src/types.ts`，`VerificationMode`/`VerificationResult`/Evidence 持久事实仍由 task 持有，task 无 verifier 反向依赖；仅测试使用的 `RootTaskSpec`/`TaskDefinition` 归入 `tests/support/legacy-root.ts`，生产代码不再导出或导入。迁移前后同一 fixture 的 `skillContractDigest`/`skillContentDigest` 经真实生产入口复算完全一致（`a5ceee1b…`/`e7982b5c…`），迁移的 digest 向量 spec 原样通过；1461 项单测、268 项集成、`pnpm build`、`verify-persistence`、`agent-singularity tsc --noEmit` 全部通过且数量与基线一致；独立只读复核判 R3-1/R3-2/R3-3 全 pass（无第二套 digest、无转发层、无超授权改动）。执行记录见[建设计划 R3 节](2026-09-20-vrtc-code-change-plan.md#r3已有-task-合同归位-执行与验收记录2026-09-24)；完成后停在进度审核，不派第 9 项 A2+A1。
+最新（2026-09-24，R3 进度验收）：第 8a 项 R3（已有 Task 合同归位）**已验收**。三项纯迁移按计划 E 节合同完成：Skill 侧车形状/路径/digest 规则迁至 `task-runtime/src/skill-contract.ts`（runtime provider 内部模块，不入包 index，不进 sidecar 大文件）；Verifier/VerifierSelftest（含 sample/store 形状）与 VerifyRequest 归入 `verifier/src/types.ts`，`VerificationMode`/`VerificationResult`/Evidence 持久事实仍由 task 持有，task 无 verifier 反向依赖；仅测试使用的 `RootTaskSpec`/`TaskDefinition` 归入 `tests/support/legacy-root.ts`，生产代码不再导出或导入。迁移前后同一 fixture 的 `skillContractDigest`/`skillContentDigest` 经真实生产入口复算完全一致（`a5ceee1b…`/`e7982b5c…`），迁移的 digest 向量 spec 原样通过；1461 项单测、268 项集成、`pnpm build`、`verify-persistence`、`agent-singularity tsc --noEmit` 全部通过且数量与基线一致；独立只读复核判 R3-1/R3-2/R3-3 全 pass（无第二套 digest、无转发层、无超授权改动）。执行记录见[建设计划 R3 节](2026-09-20-vrtc-code-change-plan.md#r3已有-task-合同归位-执行与验收记录2026-09-24)；进度审核通过；下一项为第 9 项 A2+A1。
 上一轮（2026-09-24，R1 完成轮）：第 8 项 R1 补验证**已验收**。返工后的三个真实模型完成轮各自独立冻结、先复核后收费：完成轮 1、2 判 fail（未用澄清渠道固化 checkout-only 来源与季度规则；使用了澄清但契约仍夹带答复未支持的要求且 mandatory 判据用 review 模式），完成轮 3 判 **pass / path2-limited-goal**（`hitl_ask` 答复逐字送达并被消费、契约只承载用户答复支持的内容、4 条确定性判据全过、根 run `verified`、产物 719 字节）。三轮修复全部落在根 prompt / `task_intake` 说明（`99e1311`、`aa19637`、`9a3e508`）并由 assembly 用例钉住；判据 `s3-criteria/2` 与缓存写「未报告」口径保留；失败尝试原样保留。完成复核（`r1-final3-2026-09-24/REVIEW-completion.md`）判 pass 合法；其记录级发现已在 ledger/文档中披露，其中冻结 fixture 的 `cacheWriteTokens: 0` 仍是历史 caveat，未来轮次需修自己的 driver，不改写旧证据。详见 §5.14 完成轮记录与[建设计划](2026-09-20-vrtc-code-change-plan.md#r1-补验证完成轮2026-09-24真实模型执行与验收记录)。
 上一轮进度审核（2026-09-24）：R2 Q1 的补充返工 `8f9086e` 已验收。取消窗口内读取与跨取消完成点的陈旧读取都不能重开写闸；该轮构建、1461 项单测、268 项集成及持久化检查通过，独立只读复核未见本票合同内可达违约。§5.12 保留未证实的其他取消边界，不将 Q1 验收泛化为全部取消竞态安全。
 
-2026-09-24 设计补齐：此前留下的读取接口/可信绑定、显式恢复生命周期、后续交付组边界已固定在[建设计划 D/E/F](2026-09-20-vrtc-code-change-plan.md)。A2/A4/S4-E/A5/A6 均为合同已定、未实施；不将文档完善记为功能完成，第 8a 项 R3 已交付待进度审核。
+2026-09-24 设计补齐：此前留下的读取接口/可信绑定、显式恢复生命周期、后续交付组边界已固定在[建设计划 D/E/F](2026-09-20-vrtc-code-change-plan.md)。A2/A4/S4-E/A5/A6 均为合同已定、未实施；不将文档完善记为功能完成，第 8a 项 R3 已验收。
 
 方向复核：2026-09-23，代码基线 `fda3d29`（T2/T3 交付）。该次文档修改前备份：Singularity `1430103`、外层 harness `31bcf3a`，包含 A0 草案与架构审查原文；第三方 DSH 原有未跟踪文件未纳入。
 历史更新（2026-09-23）：A0 Q2/Q3 已验收；R2 首轮 `250a04f` 当时交付待审，后续审核发现跨取消完成点缺陷并由 `8f9086e` 修复。分轮证据见 §5.12 与建设计划，当前状态以上方 2026-09-24 审核为准。
@@ -31,7 +31,7 @@
 
 DSH 提供 agent/session、skill 发现与加载、preset、MCP、上下文与原生审批。Singularity 负责任务契约、能力选择、证据、组合验收、缺口恢复与复盘。继续使用现有服务，不另造通用 skill loader 或全局调度平台。
 
-**当前阶段判断（2026-09-24，R3 交付后）**：递归执行、证据、审核、恢复骨架和根契约入口已经接线。A0 Q2/Q3 与 R2 Q1 已按各自合同验收：根来源/恢复见 §5.13；取消期间及跨完成点的查询回填见 §5.12。**第 8 项 R1 已验收**：完成轮 3 的真实 S3 在冻结合同下判 `pass / path2-limited-goal`（澄清答复逐字送达并被消费、契约不夹带未确认条件、根 run `verified`、产物 719 字节），完成轮 1、2 的失败原样保留。R1 证明的是该固定场景可运行，不提供通用语义保证。§5.12 的其他取消边界未由 Q1 验收覆盖。**第 8a 项 R3 已交付待进度审核**（Skill/Verifier 合同与测试专用类型迁至各自所有者，行为不变）；其后第 9 项 A2+A1，待 R3 进度审核通过后派发。
+**当前阶段判断（2026-09-24，R3 交付后）**：递归执行、证据、审核、恢复骨架和根契约入口已经接线。A0 Q2/Q3 与 R2 Q1 已按各自合同验收：根来源/恢复见 §5.13；取消期间及跨完成点的查询回填见 §5.12。**第 8 项 R1 已验收**：完成轮 3 的真实 S3 在冻结合同下判 `pass / path2-limited-goal`（澄清答复逐字送达并被消费、契约不夹带未确认条件、根 run `verified`、产物 719 字节），完成轮 1、2 的失败原样保留。R1 证明的是该固定场景可运行，不提供通用语义保证。§5.12 的其他取消边界未由 Q1 验收覆盖。**第 8a 项 R3 已验收**（Skill/Verifier 合同与测试专用类型迁至各自所有者，行为不变）；其后第 9 项 A2+A1，可按唯一执行表派发。
 
 R0 的默认工具面收敛、R2 的 marker 顺序及无用途 API 清理保留有效，不重做整套框架。R1 的 V6 历史更正保留：按现存记录至少 175461 输入/输出 token、58 次工具调用（含缓存至少 501349），首轮完整日志缺失，为下界而非精确全量；后续各轮尝试另计（补验证轮 入+出 51036 / 工具调用 17 / 缓存读 168704；完成轮 1 61435+19961 / 23 / 199936；完成轮 2 57421+21536 / 22 / 239872；完成轮 3 25051+7733 / 14 / 106752），各轮缓存写列一律为**未报告**——原始 `usage` 对象没有该字段，真报 0 才算 0。自主改进闭环仍未交付。
 
@@ -116,7 +116,7 @@ A2 与 A1 合成一个可验收交付组：授权概览、按引用取细节、�
 
 R3 是避免共享导出同时迁移的串行维护安排，不是上下文能力的技术前置；禁止借此要求先整理完所有大文件。后续每票内部交接顺序见计划 F，主代理集成整组，子代理一次只领取一个确定目标。
 
-2026-09-24 派发前重读结论：保留上述架构和顺序。计划 F 已补明 replay 实验血缘不授权问父、task_recover 先由 evolution 核对晋升再由 runtime 重检执行、EVO-1 必须有真实 Agent 运行证据才能整组验收。A6 的工作量应按接口串行交接，不能整个转派一个子代理。**第 8 项 R1 已于 2026-09-24 验收**（无模型返工 + 三个完成轮，完成轮 3 判 `pass / path2-limited-goal`，§5.14 完成轮记录）；归档 S3（补验证轮）与完成轮 1、2 的失败保留为历史。第 8a 项 R3 已按唯一执行表交付待进度审核（见文首与 §1.5），不要重复派已完成的返工、补验证或 R3。
+2026-09-24 派发前重读结论：保留上述架构和顺序。计划 F 已补明 replay 实验血缘不授权问父、task_recover 先由 evolution 核对晋升再由 runtime 重检执行、EVO-1 必须有真实 Agent 运行证据才能整组验收。A6 的工作量应按接口串行交接，不能整个转派一个子代理。**第 8 项 R1 已于 2026-09-24 验收**（无模型返工 + 三个完成轮，完成轮 3 判 `pass / path2-limited-goal`，§5.14 完成轮记录）；归档 S3（补验证轮）与完成轮 1、2 的失败保留为历史。第 8a 项 R3 已按唯一执行表验收（见文首与 §1.5），不要重复派已完成的返工、补验证或 R3。
 
 每票派发必须列出“事实所有者、行为所有者、工具/提示词消费者、迁出与删除位置”。新增模型策略不能以 enum、固定错误目录或全局状态机烙进 task；新增知识不能自动成为契约或权限。取舍由当前消费者和真实失败说明，不以“未来也许需要”为由增加核心设施。用户审核改进与证据，不负责补写实现。
 
@@ -132,7 +132,7 @@ R3 是避免共享导出同时迁移的串行维护安排，不是上下文能�
 
 架构审核检查的是：修改一种规则需要找到几个地方、谁能写最终状态、调用一次读取会不会推进任务、删除旧实现后实际消费者是否仍完整。文件变短而这些问题未改善，不算完成；审计/恢复所需的字段即使模型不直接读取，也不是无消费者。后续实现者按有限合同施工，不能把这次清单当成全仓整理授权。
 
-**R3 执行事实（2026-09-24，已交付待进度审核）**：本节清单中标注 R3 的三项错位已按计划 E 节合同完成纯迁移，行为零变化：
+**R3 执行事实（2026-09-24，已验收）**：本节清单中标注 R3 的三项错位已按计划 E 节合同完成纯迁移，行为零变化：
 
 - **Skill 合同迁出 task**：`task/src/skill-contract.ts` 全文迁为 `task-runtime/src/skill-contract.ts`（runtime provider 内部模块，**不加入** `task-runtime` 的包 index，也不并入 `sidecar.ts` 大文件）；`canonicalize`/`sha256Hex` 仍从 `@dangosys/dsh-singularity-task` 导入，无第二套 digest 基础。消费者 `task-runtime/src/{sidecar,run-binding}.ts` 改从内部模块导入；task 的 `export * from './skill-contract.ts'` 与源文件已删除。`TaskRun.providerBinding` 与 `RunSkillBinding` 的内容身份记录、`registryRevision`、预检/绑定/晋升拒绝语义不变；迁移前后同一 fixture 经真实生产入口复算的 `skillContractDigest`（`a5ceee1b…`，与 spec 内仓库外 `sha256sum` 固定向量一致）与 `skillContentDigest`（`e7982b5c…`）完全相同。测试锚：`task-runtime/tests/unit/skill-contract.spec.ts`（22 项，自 task 迁移，向量与断言未改）+ 既有 `task-runtime/tests/unit/{sidecar,run-binding,provider-precheck,provider-load,carried-precheck}.spec.ts`。
 - **Verifier 执行接口归入 verifier**：`Verifier`、`VerifierSelftest`、`VerifierSelftestSample`、`VerifierSelftestStore`、`VerifyRequest` 自 `task/src/types.ts` 迁为 `verifier/src/types.ts`（verifier 依赖 task 的方向不变，`static inject = ['task']` 同构）；`VerificationMode`/`VerificationResult`/`EvidenceBundle`/`EvidenceClaim`/`AcceptanceCriterion` 等持久与契约事实仍由 task 持有，task 无任何 verifier 反向依赖。command/composite/review 三实现、注册自测闸、版本盖章（`stampVersion`）、受保护输入与 `verifyRun` 全部改用本包类型；verifier index 旧的对 task `VerificationMode`/`VerificationResult` re-export 已删除（无消费者，转发层不留）。测试锚：`verifier/tests/unit/{verifier-registry,command-verifier,composite-verifier}.spec.ts`、`tests/integration/verifier-selftest-inputs.spec.ts`（真实链路：插件先过自测闸才可注册、受保护输入改写判 fail、判决带注册实例版本）。
@@ -208,7 +208,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 ## 3. 建设顺序与完成条件
 
-执行只使用 [建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一表。补救返工顺序 A0 → R2 → R1 全部完成：A0 Q2/Q3、R2 Q1 已验收；第 8 项 [R1 补验证](execution-prompts/07-r1-supplemental-validation.md) 经无模型返工与三个完成轮后**于 2026-09-24 验收**（完成轮 3 判 `pass / path2-limited-goal`，独立复核判 pass 合法），失败尝试与生产修复记录保留。第 8a 项 R3（已有 Task 合同归位）已交付待进度审核，其后再第 9 项 A2+A1；A2 不因 R1 通过而扩大范围，也不把 R3 当作 A2 的功能前置。
+执行只使用 [建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一表。补救返工顺序 A0 → R2 → R1 全部完成：A0 Q2/Q3、R2 Q1 已验收；第 8 项 [R1 补验证](execution-prompts/07-r1-supplemental-validation.md) 经无模型返工与三个完成轮后**于 2026-09-24 验收**（完成轮 3 判 `pass / path2-limited-goal`，独立复核判 pass 合法），失败尝试与生产修复记录保留。第 8a 项 R3（已有 Task 合同归位）已验收，下一项第 9 项 A2+A1；A2 不因 R1 通过而扩大范围，也不把 R3 当作 A2 的功能前置。
 
 ### 上下文、协作与诊断的方向决定
 
@@ -374,7 +374,7 @@ T1 把“任务契约”从散落在工具 schema、runtime 局部函数与事�
 
 工具面：`task_decompose` 增加可选 `contractVersion`、判据级 `criterionId`、子任务级 `constraints`；工具把调用者给的整个批次对象交给 runtime，未声明的批次级字段由契约入口按名字拒绝（工具 schema 仍校验自己的声明面：类型、mode 枚举、子任务/判据闭合对象）。因此两个入口在“接受/拒绝”上不矛盾：schema 拒绝的输入直接调用 runtime 也被拒绝，schema 放行而不属于声明面的批次级字段由 runtime 点名拒绝；差异只在拒绝文本由哪一层给出。
 
-边界：`generatedTaskReview` 开关、提案状态机、批准后重检与崩溃恢复仍属 T2/T3；`childEvidence` 仍只做结构检查，不做索引范围与蕴含证明；契约修订协议与模板库未建；新增预算/限额字段会被当未知字段拒绝，预算只能在部署配置里改（本票不引入“请求预算”）。root 的契约由 `RootTaskSpec` 常量展开、未再经独立校验；`AdmissionContext` 的硬限制只保证配置值被如实记录并由既有准入规则执行，不新增运行期强制。reducer 只校验契约的形状与版本，不重复结构性规则（全 optional、重复 id 在三个入口判定），因此直接写 store 的调用方仍可落库一份自洽但结构不合规的契约；`assertAdmission` 也只校验摘要非空，不校验摘要与所存 children 相符——那是 T2 提案绑定的职责。
+边界：`generatedTaskReview` 开关、提案状态机、批准后重检与崩溃恢复仍属 T2/T3；`childEvidence` 仍只做结构检查，不做索引范围与蕴含证明；契约修订协议与模板库未建；新增预算/限额字段会被当未知字段拒绝，预算只能在部署配置里改（本票不引入“请求预算”）。T1 交付当时，root 契约由 `RootTaskSpec` 常量展开；A0 后生产根契约改由真实 intake 生成，`RootTaskSpec` 自 R3 起仅在 `tests/support/legacy-root.ts` 中供旧图夹具使用。`AdmissionContext` 的硬限制只保证配置值被如实记录并由既有准入规则执行，不新增运行期强制。reducer 只校验契约的形状与版本，不重复结构性规则（全 optional、重复 id 在三个入口判定），因此直接写 store 的调用方仍可落库一份自洽但结构不合规的契约；`assertAdmission` 也只校验摘要非空，不校验摘要与所存 children 相符——那是 T2 提案绑定的职责。
 
 验证与解析边界（T1 复核）：task-runtime 的 src 与单测按 workspace 链接解析 `@dangosys/dsh-singularity-task` 到 `task/lib`，所以 `task/src` 的改动在重新 build 之前不会反映到 task-runtime 侧测试——本票因此规定先 `pnpm build` 再跑测试；这是既有解析方式，不是 T1 引入的机制。`task-runtime` 的严格类型检查仍有 8 处既有诊断（G9，行号均在 T1 diff 之外），本票未新增、未修复。集成测试的 sessionPersistence 是内存假件并做 JSON 往返，真实 JSONL 写入与崩溃重启行为只由单测/集成 fixture 覆盖。
 
@@ -384,7 +384,7 @@ T1 把“任务契约”从散落在工具 schema、runtime 局部函数与事�
 
 范围（S1-V 三个切片中，父级验收与证据依赖由 P4 交付；本票只做切片 2，不重做父级映射与产物依赖语义，也不提前做 S1-C 的统一校验入口）：
 
-- **可执行自测与注册闸**：`Verifier.selftest` 从描述性文字改为可执行样本 `{ role, name, criterion, expect, store? }`（`task/src/types.ts:VerifierSelftestSample`）。`VerifierRegistry.register` 改为 async：注册前按顺序真实执行每个样本——只带 criterion 的走 `verify()`，带 `store` 视图的（目前只有 composite，且由 registry 自己的实例执行）走导出的纯函数 `judgeCompositeCriterion`——再用与生产完全相同的校验（数量、criterionId、verifierId、状态、unknownKind）比对 `expect`（`pass`/`fail`/`not-pass`）。漏检负样本、正样本未被通过、缺样本、混合形状、无法执行的 store 样本都使该裁判**不可用**并给出点名原因；结论来自执行。三个内建各自带真实样本（command：`true`→pass、`false`→fail；review：已知好/坏样本都不得被判 pass——不可自动通过裁判的等价形态；composite：满足/不满足 `childEvidence` 映射的两个 store 样本）。生产注册只有 `register` 一条替换路径（已核实无其他入口）；测试替身必须由调用者显式声明 `{ testDouble: true }` 并记警告（警告经 cordis logger 输出，未挂载 logger 的上下文不会打印，但跳过本身就是显式声明，不是静默推断），没有“缺 selftest 就跳过”或“形状不对就降级”的静默后门。内建经幂等 `ready()` 注册，cordis `Service.init` 调用它，`verifyRun` 也先 await；ready 之前注册表为空、派发拒绝（fail-closed）。
+- **可执行自测与注册闸**：`Verifier.selftest` 从描述性文字改为可执行样本 `{ role, name, criterion, expect, store? }`（`verifier/src/types.ts:VerifierSelftestSample`）。`VerifierRegistry.register` 改为 async：注册前按顺序真实执行每个样本——只带 criterion 的走 `verify()`，带 `store` 视图的（目前只有 composite，且由 registry 自己的实例执行）走导出的纯函数 `judgeCompositeCriterion`——再用与生产完全相同的校验（数量、criterionId、verifierId、状态、unknownKind）比对 `expect`（`pass`/`fail`/`not-pass`）。漏检负样本、正样本未被通过、缺样本、混合形状、无法执行的 store 样本都使该裁判**不可用**并给出点名原因；结论来自执行。三个内建各自带真实样本（command：`true`→pass、`false`→fail；review：已知好/坏样本都不得被判 pass——不可自动通过裁判的等价形态；composite：满足/不满足 `childEvidence` 映射的两个 store 样本）。生产注册只有 `register` 一条替换路径（已核实无其他入口）；测试替身必须由调用者显式声明 `{ testDouble: true }` 并记警告（警告经 cordis logger 输出，未挂载 logger 的上下文不会打印，但跳过本身就是显式声明，不是静默推断），没有“缺 selftest 就跳过”或“形状不对就降级”的静默后门。内建经幂等 `ready()` 注册，cordis `Service.init` 调用它，`verifyRun` 也先 await；ready 之前注册表为空、派发拒绝（fail-closed）。
 - **裁判版本**：`verifyCriterion` 用**实际注册实例**的 `version` 覆盖/移除插件自报值并写入 `VerificationResult.verifierVersion`，`claim()` 同步复制；版本变更不改写历史证据（事件只追加）。版本归属规则：registry 自己做出、且解析出了裁判实例的拒绝（受保护输入失配、映射不通过）带该实例版本；无法解析出裁判的判决（未知 ref、不支持 mode、裁判抛出）不带版本——不冒充“裁判给出了判决”。按 `(verifierRef, version)` 查询证据的索引入口曾在本票交付、无生产消费者，2026-09-23 R2 已撤回（§5.12）。
 - **受保护验收输入**：`AcceptanceCriterion.protectedInputs` 由调用者按路径声明（`CriterionSpec` 与工具 schema 接受字符串）。`decomposeAndRun` 在唯一规范化入口**之前**用 `fixSpecProtectedInputs` 对着会话 checkout 逐个读文件、把路径替换为 `{ path, sha256 }`；路径读不到或 checkout 无法解析则整批拒绝、零副作用。固定形态由 `contractDefects`（经 `protectedInputDefects`）在普通分解与 replay 共用的规则里校验，内容摘要覆盖固定后的身份。replay：候选契约的字符串形态按 replay 调用者的 checkout 固定；冠军任务已存的固定形态原样携带，不重读、不发明。判决前 registry 用 `protectedInputDefects(request.cwd, inputs)` 复检：缺失或被改 → 该判据 `fail`（点名路径与摘要变化）且**不派发**裁判。未声明（或空声明）的判据不读、不检查，也不得被描述为“已保护”。
 - **渲染消费者**：spawn prompt 与 worker 契约块的判据表新增 `protected inputs` 列（未声明为 `—`），并加一条“不得修改声明的受保护输入”的行为规则；`task_read` 的判据行同样列出声明路径；`task_decompose` schema 增加 `protectedInputs`；review record 与 review pack 带 `verifierId`/`verifierVersion`（如 ` [command@1]`）。

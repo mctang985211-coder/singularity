@@ -26,8 +26,8 @@
 | 6 | A0 + R0：根入口与默认运行面（本票返工 A0） | 已验收（2026-09-23，进度审核复核 + 全量回归实跑） | Kimi Code 主代理（Q2/Q3 各一个实现子代理 + 1 个只读独立复核子代理，复核后一轮缺陷修复） | 原记录 +「补救交付复核」Q2/Q3 +「A0 返工（Q2/Q3）执行与验收记录」 | 已满足：根来源/归属（store↔session、顶层会话、本人消息）与 adoptRoot 恢复反例关闭，R0 证据保留，全量单测/集成与独立复核通过。进度审核已确认，下一项仅派第 7 项 |
 | 7 | R2：按证据整理运行时（本轮只修取消写闸） | 已验收（2026-09-24，补充返工 `8f9086e` 经进度复核） | Kimi Code 主代理（两轮实现/复核）+ 本轮进度复核 | 原记录 +「R2 Q1 补充返工执行与验收记录」+「R2 补充返工进度验收（2026-09-24）」；[R2 合同](execution-prompts/06-r2-cancellation-gate.md) | C1 两条查询交错、C2 重启恢复、C3 合法 active、C4 相关调用顺序均通过；已记录未证实的取消边界不冒充本票保证 |
 | 8 | R1：真实运行验证（纠正 S3 与实验账） | **已验收（2026-09-24；完成轮 3 通过冻结合同，独立复核「pass 合法」）** | 原交付：Kimi Code 主代理；进度复核 + 独立规格审查；无模型返工与三个完成轮：主代理 + 每轮独立冻结检查 + 每轮独立语义复核 + 完成复核子代理 | 原记录 +「R1 补验证（Q4/Q5）执行与验收记录」+「R1 补验证进度审核」+「R1 补验证返工」+「R1 补验证完成轮」；[补验证 prompt](execution-prompts/07-r1-supplemental-validation.md) | 验收成立范围：V1–V4、V6 与完成轮 3 的真实路径通过；V2 `s3-criteria/2` 关闭两处漏验（红/绿反例），V5 ledger 将缓存写和无 usage 请求记为「未报告」，历史下界（≥175461 / ≥58 / ≥501349）保留。完成轮 3 满足 V3：`hitl_ask` 答复逐字送达并被消费、契约不夹带未确认条件、根 run `verified`、产物 719 字节、冻结判据判 `pass / path2-limited-goal`。冻结 fixture 的 `driver.json/run-meta.json` 仍有历史 `cacheWriteTokens: 0` caveat，未来轮次须修自己的 driver 副本，不改写本轮证据；三次生产修复 `99e1311`/`aa19637`/`9a3e508` 均落在根 prompt 与 `task_intake` 说明并由 assembly 用例钉住；完成轮 1、2 的失败原样保留。一次通过只证明该固定场景 |
-| 8a | R3：已有 Task 合同归位 | **交付待进度审核（2026-09-24，独立只读复核判 R3-1/2/3 全 pass）** | Trae 主代理（实现 + 集成 + 全量检查）+ 1 只读独立复核子代理 | 见「R3：已有 Task 合同归位 执行与验收记录」 | R1 验收后；迁出 Skill/Verifier 行为合同、删除测试专用生产类型，实际调用与测试同步；Task 持久格式、原子提交和执行行为保持，非全仓重构。已满足：迁移前后内容身份一致、task 无 verifier 反向依赖、生产无测试专用类型；进度审核通过后才派第 9 项 |
-| 9 | A2 + A1：Agent 状态上下文（一个交付组） | 待前置；合同已定、未实施 | 待填 | 本文 D/E 节、主 guide §1.4 | R3 验收后；先分开读取与显式恢复，再交付 context 及实际模型消费；依赖证据、根约束与重启/压缩恢复完整，旧渲染删除 |
+| 8a | R3：已有 Task 合同归位 | **已验收（2026-09-24，R3-1/2/3 全通过）** | Trae 主代理（实现 + 集成 + 全量检查）+ 1 只读独立复核子代理 | 见「R3：已有 Task 合同归位 执行与验收记录」 | R1 验收后；迁出 Skill/Verifier 行为合同、删除测试专用生产类型，实际调用与测试同步；Task 持久格式、原子提交和执行行为保持，非全仓重构。已满足：迁移前后内容身份一致、task 无 verifier 反向依赖、生产无测试专用类型；下一项为第 9 项 |
+| 9 | A2 + A1：Agent 状态上下文（一个交付组） | 待派发；前置已满足、合同已定、未实施 | 待填 | 本文 D/E 节、主 guide §1.4 | R3 验收后；先分开读取与显式恢复，再交付 context 及实际模型消费；依赖证据、根约束与重启/压缩恢复完整，旧渲染删除 |
 | 10 | A1 原独立排位 | 并入第 9 项，不单独派发 | — | 保留编号供历史引用 | 第 9 项整组验收后直接进入第 11 项 |
 | 11 | A4：父子澄清 | 待前置；合同已定、未实施 | 待填 | 本文 F.1、深入架构 §7 | agent-runtime + DSH 负责持久消息与投递；context 呈现，task-runtime 负责阻塞执行效果；父子/三层、故障恢复与写闸完整 |
 | 12 | S4-E：评估基础（S4 内的子票） | 待前置；合同已定、未实施 | 待填 | 本文 S4-E、F.2 | 现有 Evolution 生命周期随本票迁入 evolution 包；单文件 Skill 的可比实验、真实证据与晋升闸，旧 ledger/回滚保留 |
@@ -36,7 +36,7 @@
 
 状态填写：`待前置 → 待派发 → 进行中 → 待验收 → 已验收`；有未解决缺陷填 `返工`，因外部条件无法继续填 `阻塞` 并记录原因。实现者宣称完成仅进入待验收；“已验收”需要下述完成闸证据。依赖票的状态不能因内部部分提交而提前推进。每次更新本表，同时更新本文对应票据状态及主 guide，记录冲突时先核实证据。
 
-2026-09-24 既有大模块审计后加入 8a，保留原票号与历史记录。R3 是排期中的有限维护票，不是 A2 的功能依赖；保留串行安排以避免同时迁移共享导出，不能扩成“先整理完全部大文件”。其后上下文、通信和诊断迁移仍随各自票交付。已验收的 S1-C/T1/T2/T3 不重开重做，R3 用既有合同回归；R1 已于 2026-09-24 验收，R3 已于同日交付待进度审核（见下方 R3 记录）。
+2026-09-24 既有大模块审计后加入 8a，保留原票号与历史记录。R3 是排期中的有限维护票，不是 A2 的功能依赖；保留串行安排以避免同时迁移共享导出，不能扩成“先整理完全部大文件”。其后上下文、通信和诊断迁移仍随各自票交付。已验收的 S1-C/T1/T2/T3 不重开重做，R3 用既有合同回归；R1 已于 2026-09-24 验收，R3 已于同日经进度审核验收（见下方 R3 记录）。
 
 第 9、11–14 项的接口、归属、恢复和验收已在 D/E/F 节固定，不再要求执行者自行选定架构。到达该行时只核对前项实际接口与合同是否一致；一致就填写派发材料，存在具体冲突则修订本处对应合同并说明依据，不能重新泛化选型或削弱验收。私有文件组织、helper 命名及等价实现由执行者决定；改变读取域、写入所有者、候选范围或恢复语义不属于普通实现取舍。
 
@@ -72,7 +72,7 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 6 项 A0、第 7 项 R2 已验收；第 8 项 [R1 补验证](execution-prompts/07-r1-supplemental-validation.md) 经进度审核返工后，已完成无模型修正（判据修订、账目更正、归档轨迹重判）与三个完成轮的真实模型验证，**于 2026-09-24 验收**（完成轮 3 通过冻结合同，独立复核「pass 合法」），见下方「R1 补验证进度审核」「R1 补验证返工」与「R1 补验证完成轮」。第 8a 项 R3（已有 Task 合同归位，有限维护票，合同见 E 节）已于同日**交付待进度审核**（见下方「R3：已有 Task 合同归位 执行与验收记录」）；R3 进度审核通过后再派第 9 项 A2+A1 交付组；A2 不因 R1 通过而扩大范围，也不因 R3 排序而获得额外前置。原建设顺序为 A0 + R0 → R1 → R2；因 R2 写闸回归影响真实运行，返工顺序调整为表中的 A0 → R2 → R1。Task 与协作方向仍见 [Task 指导](task-contract-construction-guide.md)、[深入架构](exploration-evolution-architecture.md)与 [Prompt 合同](agent-prompt-contracts.md)。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 6 项 A0、第 7 项 R2 已验收；第 8 项 [R1 补验证](execution-prompts/07-r1-supplemental-validation.md) 经进度审核返工后，已完成无模型修正（判据修订、账目更正、归档轨迹重判）与三个完成轮的真实模型验证，**于 2026-09-24 验收**（完成轮 3 通过冻结合同，独立复核「pass 合法」），见下方「R1 补验证进度审核」「R1 补验证返工」与「R1 补验证完成轮」。第 8a 项 R3（已有 Task 合同归位，有限维护票，合同见 E 节）已于同日**经进度审核验收**（见下方「R3：已有 Task 合同归位 执行与验收记录」）；下一项可派第 9 项 A2+A1 交付组；A2 不因 R1 通过而扩大范围，也不因 R3 排序而获得额外前置。原建设顺序为 A0 + R0 → R1 → R2；因 R2 写闸回归影响真实运行，返工顺序调整为表中的 A0 → R2 → R1。Task 与协作方向仍见 [Task 指导](task-contract-construction-guide.md)、[深入架构](exploration-evolution-architecture.md)与 [Prompt 合同](agent-prompt-contracts.md)。
 
 ### 补救交付复核（2026-09-23，d5b0bb6）
 
@@ -138,7 +138,7 @@ T1、S1-V 切片 2、S1-C、A3、T2/T3 已交付。根契约入口已实现，A0
 | 票据 | 状态 | 前置 | 单票完成边界 |
 |---|---|---|---|
 | A0 真实根契约入口 | 已验收，Q2/Q3 已关闭（2026-09-23）；R0 保留 | T1、S1-V 切片 2、T2/T3 组 | intake、独立 AC、审核/原子激活与未激活视图、统一服务入口来源归属和 adoptRoot 无根提案恢复已交付。模型理解与有效澄清另由 R1 具体场景验证 |
-| A2 + A1 状态上下文 | 待前置；同一交付组，见 D/E 节 | A0/A3、S1-C；R1/R2、R3 验收 | context 包组织根/当前契约、贡献、依赖证据与历史引用，接入工具和真实模型请求；读取与恢复分开；压缩/重启能恢复 |
+| A2 + A1 状态上下文 | 前置已满足、可派发；同一交付组，见 D/E 节 | A0/A3、S1-C；R1/R2、R3 验收 | context 包组织根/当前契约、贡献、依赖证据与历史引用，接入工具和真实模型请求；读取与恢复分开；压缩/重启能恢复 |
 | A3 非阻塞批次与协调相位 | 已完成（2026-09-22，见「A3 执行与验收记录」） | T1、S1-V 切片 2、S1-C | 统一迁移与串行推进、工作区写入归属、显式提交、根预算、取消/恢复及 replay 一致性 |
 | A4 父子澄清 | 待前置，合同见 F.1 | A1/A2/A3 | 问题身份与父子授权、持久投递；逐级问答保留批次与写闸；claim 后故障可恢复；未知/部分回答不解除全部阻塞 |
 | A5 因果诊断与主管触发 | 待前置，与 S2-E 同组，合同见 F.3 | A1/A2/A4、S4-E | 指定失败 Review 触发、ledger 去重与原预算、Diagnosis 交接；不提前执行候选 |
@@ -391,7 +391,9 @@ T1、S1-V 切片 2、S1-C、A3、T2/T3 已交付。根契约入口已实现，A0
 6. 各包 `pnpm exec tsc --noEmit`：`task` 0、`verifier` 0、`agent-singularity` 0、`task-runtime` 8 处既有诊断（G9）。
 7. 未运行：真实 LLM、BB 构建/仿真、生产 Evolution、部署与推送。
 
-接口交接（给 S1-C 与后续票）：`VerifierSelftestSample`/`VerifierSelftestStore`/`VerifierSelftest`、`ProtectedInputRef`、`sha256Hex` 从 `@dangosys/dsh-singularity-task` 导出；`VerifierRegistry.register(verifier, { testDouble? })` 为 async，`ready()` 幂等且 `[Service.init]` 调用；`evidenceByVerifier(storeId, ref, version?)` 只做索引；`task-runtime/src/protected-inputs.ts` 的 `fixProtectedInputs`/`fixCriteriaProtectedInputs`/`fixSpecProtectedInputs`/`protectedInputDefects` 与 `verifier/src/protected-inputs.ts` 的 `protectedInputDefects` 可复用；`protectedInputs` 的固定形态（`{ path, sha256 }`）是持久化词汇，字符串形态只属于准入输入。
+历史接口交接（当时给 S1-C，已被 R2/R3 更新，不按此句施工）：`VerifierSelftestSample`/`VerifierSelftestStore`/`VerifierSelftest`、`ProtectedInputRef`、`sha256Hex` 当时从 `@dangosys/dsh-singularity-task` 导出；`VerifierRegistry.register(verifier, { testDouble? })` 为 async，`ready()` 幂等且 `[Service.init]` 调用；`evidenceByVerifier(storeId, ref, version?)` 只做索引；`task-runtime/src/protected-inputs.ts` 的 `fixProtectedInputs`/`fixCriteriaProtectedInputs`/`fixSpecProtectedInputs`/`protectedInputDefects` 与 `verifier/src/protected-inputs.ts` 的 `protectedInputDefects` 可复用；`protectedInputs` 的固定形态（`{ path, sha256 }`）是持久化词汇，字符串形态只属于准入输入。
+
+现行接口：`VerifierSelftestSample`/`VerifierSelftestStore`/`VerifierSelftest` 从 `verifier` 导出，`ProtectedInputRef`/`sha256Hex` 仍属 `task`；R2 已删除无消费者的 `evidenceByVerifier`。后续票按当前源码与本文 R2/R3 验收记录接线。
 
 ## S1-V：先保证验的是目标
 
@@ -713,7 +715,7 @@ driver 未在仓库内重建：两轮 driver 分别解包于 `/home/ROXY/code/bb
 
 ## R2：按证据整理运行时 执行与验收记录（2026-09-23）
 
-> 当前复核结论：取消写闸返工（Q1）；其余已成立的改动保留。原交付已在 `d5b0bb6` 提交（该提交虽以 docs 命名，实际含生产代码和测试），外层 `251d35d83c`。以下保留当时验收证据，A2 的原待派发结论已被文首表的待前置取代。
+> 当前复核结论：取消写闸返工（Q1）；其余已成立的改动保留。原交付已在 `d5b0bb6` 提交（该提交虽以 docs 命名，实际含生产代码和测试），外层 `251d35d83c`。以下保留当时验收证据，A2 的当时结论已经由文首唯一表及后续 R1/R3 验收记录更新。
 
 | 字段 | 填写内容 |
 |---|---|
@@ -898,7 +900,7 @@ ref 的形状固定沿现有身份：task/run/evidence/diagnosis 使用各自 id
 
 **R3：一票只解决已有合同放错位置**
 
-状态更新（2026-09-24）：**已实施并交付待进度审核**，执行与验收记录见下文「R3：已有 Task 合同归位 执行与验收记录」；以下原始合同保持不变。
+状态更新（2026-09-24）：**已实施并验收**，执行与验收记录见下文「R3：已有 Task 合同归位 执行与验收记录」；以下原始合同保持不变。
 
 先交接三个有限改动：Skill 合同与对应测试迁到 runtime；Verifier 执行接口迁到 verifier；测试专用 RootTaskSpec/TaskDefinition 迁到已有 legacy-root 支持文件。每个改动同时替换全部消费者并删除 task 的旧导出，不保留永久转发，也不修改 Skill 格式、digest 算法、准入政策或 Task 事件。task 类型的包内整理仅限本次迁出触及部分，不把整个 types.ts 重排列为本票验收；其余事实的正常导出与序列化数据保持。Skill 合同可以继续复用 task 的现有摘要基础函数，不再造通用 crypto 包。
 
@@ -1075,21 +1077,23 @@ EVO-1 的真实运行证据是第 14 项整组已验收的必要条件，不是�
 
 | 字段 | 填写内容 |
 |---|---|
-| 状态、最近更新日期 | 已交付待进度审核，2026-09-24 |
+| 状态、最近更新日期 | 已验收，2026-09-24 |
 | 执行 agent / 任务链接 | Trae 主代理（三段迁移、调用方替换、集成、全量检查、文档）+ 1 只读独立复核子代理；[R3 单票 prompt](execution-prompts/08-r3-task-contract-relocation.md) |
-| 开始日期 / 验收日期 | 2026-09-24 / 待进度审核 |
+| 开始日期 / 验收日期 | 2026-09-24 / 2026-09-24 |
 | 前置验收记录 | 第 8 项 R1 已验收（完成轮 3 判 `pass / path2-limited-goal`，独立复核「pass 合法」，见上节）；仓库外证据目录 `r1-*` 只读未触碰 |
 | 修改前基线 | Singularity `8c59f22` / 外层 `5d34edcddd`，两仓开工时均干净（R1 验收基线 `7f3d0ee`/`7e0652e4f8` 之后的 R3 prompt 发布提交）；外层 `thirdparty/deepseek-harness` 的既有未跟踪内容不属本票、未触碰 |
-| 交付版本 | Singularity `8ee49c6`（代码+测试+重建 lib；git 记录 `task→task-runtime/src/skill-contract.ts` 相似度 95%、spec 100% 纯移动）+ 本记录与 guide 的文档提交（随后单独提交）；外层只提交子模块指针 |
+| 交付版本 | Singularity `8ee49c6`（代码+测试+重建 lib；git 记录 `task→task-runtime/src/skill-contract.ts` 相似度 95%、spec 100% 纯移动）和 `8d1dce9`（交付文档）；进度审核前另建 `dd18d25` 基线 checkpoint，审核修订见后续提交；外层只提交子模块指针 |
 | 验收项对应 | R3-1 → `task-runtime/src/skill-contract.ts`（内部模块，不入包 index）+ `sidecar.ts`/`run-binding.ts` 消费 + `task/src/index.ts` 删 `export * from './skill-contract.ts'` → `task-runtime/tests/unit/skill-contract.spec.ts`（22 项，仓库外 `sha256sum` 固定向量原样通过）+ `sidecar`/`run-binding`/`provider-precheck`/`provider-load`/`carried-precheck` 既有套件；R3-2 → `verifier/src/types.ts` 新持五类型，`command-verifier`/`composite-verifier`/`review-verifier`/`index.ts` 及三个 spec + `tests/integration/verifier-selftest-inputs.spec.ts` 全部改用本包类型，task 零 verifier 导入（grep 复核）→ `verifier/tests/unit/verifier-registry.spec.ts` 52 项（注册闸、自测 fail 拒绝、版本盖章、logRef 逃逸）与 `verifier-selftest-inputs.spec.ts` 集成 6 项原样通过；R3-3 → `tests/support/legacy-root.ts` 持 `RootTaskSpec`/`TaskDefinition`（值与形状与删除前逐一相同），`task/tests/unit/proposal.spec.ts` 改从测试支持层导入，生产零导入 → `proposal.spec.ts` 219 项（提案恢复/原子提交反例）与 `a3-recovery`/`proposal-recovery` 等集成套件通过 |
 | 实际检查 | 按依赖顺序实跑：① `packages/singularity` `pnpm build` 通过（11 包；`verifier/lib/index.js` 字节不变，类型级迁移）；② 外层 `pnpm vitest run --project unit packages/singularity` = 44 文件 / **1461** 项通过；③ 外层 `pnpm vitest run --project integration packages/singularity` = 38 文件 / **268** 项通过（均与 R2 Q1 验收后基线数量一致，零增删）；④ `pnpm run verify-persistence` = 4 根匹配（声明根未动）+ `git diff --check` 干净；⑤ `agent-singularity` `pnpm exec tsc --noEmit` 通过（P1 基线未回退） |
 | 迁移前后证据（内容身份） | 经真实生产入口对同一执行型 sidecar fixture 复算：迁移前（`task/lib` 旧构建，实际生产导出）`skillContractDigest` = `a5ceee1b8e59556a1575044bebcb788ff255c4d452978075500ca85f4117d1e3`、`skillContentDigest` = `e7982b5c2d59d526dab6ad16c96b80672565769f7810e9c8b6543691e0ecc3ac`；迁移后（`task-runtime/src/skill-contract.ts` 经 node type-stripping 实跑）两值**完全相同**；合同 digest 与 spec 内仓库外 `sha256sum` 固定向量一致。旧 Run binding 读取（`readRunBinding`）、真实 provider precheck/绑定/晋升拒绝语义由既有 S1-C 套件原断言覆盖，全部未改 |
-| 独立复核 | **已实际执行**（只读独立复核子代理，Opus，对工作树 + 基线 `8c59f22` 逐点核对）：自算 diff 分类全部 25 个改动文件均属三项迁移或重建 lib，无超授权改动；新旧 `skill-contract.ts` 仅 import 源、docstring 与 `@module` 标签差异，校验规则/字段集/缺陷文本/digest 逻辑零变化；迁移 spec 相似度 100% 纯移动；verifier 五类型定义与删除的 task 段落逐字相同；`task/src/service/state.ts` 零 diff、`task/src/index.ts` 仅删一行导出；复核**自行重算** digest 并独立复跑 task/verifier/task-runtime 30 文件 / 982 项通过；workspace 级 grep 确认无生产代码从旧路径导入任何被迁符号、task/task-runtime 无 verifier 包导入。三条 note 级发现（verifier 删除对 task 事实类型的 re-export、task 字段注释保留 digest 规则名、`contract.ts` 注释去除 `TaskDefinition` 指涉）均为迁移的必要后果，判 pass |
+| 独立复核 | **已实际执行**（只读独立复核子代理，Opus，对工作树 + 基线 `8c59f22` 逐点核对）：自算 diff 分类全部 24 个改动文件均属三项迁移或重建 lib，无超授权改动；新旧 `skill-contract.ts` 仅 import 源、docstring 与 `@module` 标签差异，校验规则/字段集/缺陷文本/digest 逻辑零变化；迁移 spec 相似度 100% 纯移动；verifier 五类型定义与删除的 task 段落逐字相同；`task/src/service/state.ts` 零 diff、`task/src/index.ts` 仅删一行导出；复核**自行重算** digest 并独立复跑 task/verifier/task-runtime 30 文件 / 982 项通过；workspace 级 grep 确认无生产代码从旧路径导入任何被迁符号、task/task-runtime 无 verifier 包导入。三条 note 级发现（verifier 删除对 task 事实类型的 re-export、task 字段注释保留 digest 规则名、`contract.ts` 注释去除 `TaskDefinition` 指涉）均为迁移的必要后果，判 pass |
 | 文档同步 | 主 guide 文首最新行、§1.4 尾段、§1.5 R3 执行事实（源码/测试锚、迁出位置、保留边界、未完成项）、§3 派发顺序、§5.8 侧车契约与测试锚路径修正；本计划第 8a 行、E 节 R3 状态、派发入口段、本记录；[执行 prompt 入口](execution-prompts/README.md) 顶部与当前派发段。R1 历史记录与失败轨迹保留未覆盖 |
 | 模拟与未覆盖范围 | 真实：全部迁移后生产入口（sidecar 装载/预检、run 绑定、verifier 注册/自测/判决、提案恢复、replay、直接服务调用、插件替换）经既有真实链路套件；digest 复算经实际生产模块。模拟：无（本票零新 fixture、零 scripted 消费）。未覆盖：未跑真实模型/BB/部署；`lib` 消费路径的运行时行为由字节级对比与全量套件覆盖，未单独跑消费包集成 |
 | 未解决缺陷 / 阻塞 | 本票合同内无未解决缺陷。计划 E 节其余审计项（`types.ts` 包内整理、`index.ts`/`orchestrate.ts`、公开面收窄、`sidecar.ts` 内部模块化）按原安排属后续真实改动，**未做也不声称**；`§5.12` 四条既有取消边界未因本票改变 |
-| 最终验收结论 | R3-1/R3-2/R3-3 全部通过（内部验收 + 全量实跑 + 独立复核判 pass）；**交付待进度审核**，未派第 9 项 A2+A1 |
-| 下一项 | 唯一顺序第 9 项 A2+A1（Agent 状态上下文交付组）：**前置为 R3 经进度审核验收**；使用[进度审核 prompt](execution-prompts/progress-review-and-dispatch.md) 确认后再按计划 D/E 节合同派发；本票完成即停，未并行启动 |
+| 最终验收结论 | R3-1/R3-2/R3-3 全部通过（内部验收 + 全量实跑 + 独立复核判 pass）；**进度审核已验收**，下一项可派第 9 项 A2+A1 |
+| 下一项 | 唯一顺序第 9 项 A2+A1（Agent 状态上下文交付组）：**R3 进度审核已通过**；按计划 D/E 节和[第 9 项专项 prompt](execution-prompts/09-a2-a1-context.md) 派发；R3 本票已停止，未并行启动 |
+
+进度审核（2026-09-24）：以 `8c59f22...8d1dce9` 为差异基线，另按 Standards/Spec 两轴只读复核；代码职责迁移与 R3-1～R3-3 均成立。审核方实跑 `pnpm build`、44 文件/1461 项单测、38 文件/268 项集成、`verify-persistence`（4 个声明根）和 `agent-singularity tsc --noEmit`，均通过。发现主 guide 两处旧类型/根契约指向及多份派发文档仍称 R3 可派，已定向修正；交付记录“25 个改动文件”按 `8ee49c6` 实际 24 个文件更正。未改运行时代码、Skill 规则、旧 R1 证据；R3 验收放行第 9 项 A2+A1，后续仍按 D/E 完整合同验收。
 
 本票主代理的「要求 → 实际入口 → 验收」映射（实施前固定）：R3-1 内容身份不变 → `skill-contract.ts` 的 digest 函数（`sha256Hex∘canonicalize` 单点，仍 import 自 task）→ 固定向量 spec + 迁移前后实算对照；R3-1 旧 Run binding 可读 → `readRunBinding`（`run-binding.ts` 改内部导入后原断言）→ `run-binding.spec.ts`；R3-2 注册闸/自测/版本/受保护输入不变 → `verifier/src/index.ts` 注册、`selftestGate`、`stampVersion`、`protectedInputDefects`（仅类型来源变化）→ `verifier-registry.spec.ts` + `verifier-selftest-inputs.spec.ts`（真实链路含拒绝零副作用断言）；R3-3 生产无测试专用类型 → task 无导出 + 全仓 grep → `proposal.spec.ts`（自测试支持层导入后 219 项原断言通过）。拒绝路径均沿用既有套件的零意外写入/零派发/零审核副作用断言，未删任何断言或放宽任何导入。
 

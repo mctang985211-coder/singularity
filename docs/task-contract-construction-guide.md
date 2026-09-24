@@ -5,7 +5,7 @@
 
 方向入口为 [主指南](singularity-harness-guide.md)，派发顺序以 [建设计划](2026-09-20-vrtc-code-change-plan.md)为准；本文件细化 Task 契约与生成审核，不替代两者。
 
-后续 [探索与自进化架构](exploration-evolution-architecture.md)细化上下文、非阻塞批次、问父与 supervisor。T1–T3 只建设子任务契约/审核，均已交付；根 intake 属 A0（A0 + R0 已交付，来源/恢复返工 2026-09-23 关闭）。当前唯一顺序以建设计划为准：R2、R1 已验收，当前先派 R3；A2+A1 的 context 职责及完整消费设计见主 guide §1.4 与计划 D 节，不提前实施，也不将上下文主体继续放进 task。
+后续 [探索与自进化架构](exploration-evolution-architecture.md)细化上下文、非阻塞批次、问父与 supervisor。T1–T3 只建设子任务契约/审核，均已交付；根 intake 属 A0（A0 + R0 已交付，来源/恢复返工 2026-09-23 关闭）。当前唯一顺序以建设计划为准：R2、R1、R3 已验收，下一项为第 9 项 A2+A1；context 职责及完整消费设计见主 guide §1.4 与计划 D/E 节，不将上下文主体继续放进 task。
 
 后续恢复合同已固定在计划 F.4，尚未实现：task_recover 为失败原目标创建新 Run/Session，本次 task_decompose 依据持久恢复关联进入按 Run 的新批次准入；复用证据通过本次成员绑定解析，原 AC、旧已消费提案和旧终态不改。下文“一父一批”仍描述当前 T2/T3 行为，不能据此把 A6 写成重新消费旧 proposal，也不能在 A6 前放宽当前闸。
 
@@ -17,13 +17,13 @@
 
 本轮建设限定当前父任务下的子任务批次。T1–T3 不改根入口；后续 A0 单独解决真实根契约激活（已交付并验收；来源/恢复返工 2026-09-23 关闭，见 §1）。根目标修订、Task 模板库、通用规划器、OR/循环组合语言不在 T1–T3 范围。
 
-**根目标语义边界（A0 已实现；来源/恢复返工已关闭，2026-09-23）**：原请求及澄清需有可读取且由服务校验归属的来源——已由 `assertRootContractOrigin` 落实（store↔session、顶层会话、本人消息三规则，工具与服务入口共用，拒绝均在首次写入前且具名，日志不可读 fail-closed）。该判定是归因纪律加顶层会话判定，不证明来源真实性，也不校验「该顶层会话是某 graph 的 root session」（该规则仍在 `task_intake` 工具面）。影响目标/验收的歧义先澄清，方法选择自主决定；给假设加标签不授权据此激活猜定目标。可选契约审核 `off/all` 与必要澄清是两回事，不为所有任务强制人审。非 composite 判据或摘要正确只证明结构/身份，不证明目标解释正确；R1 完成轮 3 证明了固定场景的澄清消费与有限目标形成，但不构成通用语义证明，不预建通用需求解析器。当前次序与 R3 前置见建设计划。
+**根目标语义边界（A0 已实现；来源/恢复返工已关闭，2026-09-23）**：原请求及澄清需有可读取且由服务校验归属的来源——已由 `assertRootContractOrigin` 落实（store↔session、顶层会话、本人消息三规则，工具与服务入口共用，拒绝均在首次写入前且具名，日志不可读 fail-closed）。该判定是归因纪律加顶层会话判定，不证明来源真实性，也不校验「该顶层会话是某 graph 的 root session」（该规则仍在 `task_intake` 工具面）。影响目标/验收的歧义先澄清，方法选择自主决定；给假设加标签不授权据此激活猜定目标。可选契约审核 `off/all` 与必要澄清是两回事，不为所有任务强制人审。非 composite 判据或摘要正确只证明结构/身份，不证明目标解释正确；R1 完成轮 3 证明了固定场景的澄清消费与有限目标形成，但不构成通用语义证明，不预建通用需求解析器。当前次序见建设计划；R3 已验收。
 
 ## 2. 已有基础与实际缺口
 
 | 现有能力 | 源码锚 | 不能据此推断的能力 |
 |---|---|---|
-| Task 定义、实例、Run、AC 类型 | `task/src/types.ts` | 完整不可变 TaskDefinition 注册库 |
+| Task 契约、实例、Run、AC 类型 | `task/src/contract.ts`、`task/src/types.ts` | 完整不可变 TaskDefinition 注册库；R3 后测试专用 `TaskDefinition` 仅在 `tests/support/legacy-root.ts` |
 | 节点动态提交 objective、AC、能力、依赖、assumptions；T2/T3 已有生成审核 | `agent-singularity/src/tools/task-decompose.ts` | 必须从已有模板选择；结构准入保证用户语义正确 |
 | AC 默认值与自动编号 | `task-runtime/src/normalize.ts:normalizeDecomposition`（T1 前为 `task-runtime/src/index.ts:normalizeCriteria`，已删除） | 工具 schema 是所有入口的统一运行时校验 |
 | 深度、数量、依赖无环及部分判据结构准入 | `task-runtime/src/admission.ts` | 父目标与所有子契约之间的自然语言蕴含证明 |
