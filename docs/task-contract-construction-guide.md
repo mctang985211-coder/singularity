@@ -5,7 +5,7 @@
 
 方向入口为 [主指南](singularity-harness-guide.md)，派发顺序以 [建设计划](2026-09-20-vrtc-code-change-plan.md)为准；本文件细化 Task 契约与生成审核，不替代两者。
 
-后续 [探索与自进化架构](exploration-evolution-architecture.md)细化上下文、非阻塞批次、问父与 supervisor。T1–T3 只建设子任务契约/审核，均已交付；根 intake 属 A0（A0 + R0 已交付，来源/恢复返工 2026-09-23 关闭）。当前唯一顺序以建设计划为准：R2 已验收，R1 补验证经 2026-09-24 进度审核仍返工；A2 的简约方案只供后续派发，不提前实施。
+后续 [探索与自进化架构](exploration-evolution-architecture.md)细化上下文、非阻塞批次、问父与 supervisor。T1–T3 只建设子任务契约/审核，均已交付；根 intake 属 A0（A0 + R0 已交付，来源/恢复返工 2026-09-23 关闭）。当前唯一顺序以建设计划为准：R2 已验收，R1 补验证经 2026-09-24 进度审核仍返工；A2+A1 的 context 职责及完整消费设计见主 guide §1.4 与计划 D 节，不提前实施，也不将上下文主体继续放进 task。
 
 ## 1. 要解决的问题
 

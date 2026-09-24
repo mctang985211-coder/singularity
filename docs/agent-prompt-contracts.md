@@ -6,7 +6,7 @@
 
 ## 1. 装配规则
 
-提示词分四层：稳定角色政策、不可变任务契约、带 revision 的动态上下文、当前实际工具 schemas。复用 DSH systemPrompt scoped sections 和工具 restriction；不另写完整 prompt 拼接引擎，不覆盖上游必需的运行规则。
+提示词分四层：稳定角色政策、不可变任务契约、带来源的动态上下文、当前实际工具 schemas。A2+A1 的事实读取/投影归新 context 包，稳定政策归 agent-runtime，工具 schema 归 agent-singularity。复用 DSH scoped sections、异步 system-prompt/assemble 和工具 restriction；不另写拼接引擎或统一 revision。
 
 由运行时传入实际已有的角色、task/run 身份、当前契约与工具集合；rootBrief/ContextView/allowedActions 等视图随对应能力落地，不为装配本文模板预建字段。数据不是 {{模板变量}} 代码，使用 `interpolate:false` 或结构化渲染，来源文本不能改变 agent 角色。正文含反引号、竖线、XML 结束符等仍需原样可识别，不能依靠 Markdown 表格拼接保证边界。
 
@@ -142,8 +142,8 @@ proposalId 并说明契约在等审核（此时同样没有根任务、没有 ru
 ### 只读诊断角色
 
 ```text
-你负责定位问题，不修改生产或验收标准。以指定 incident 和 store revision
-为起点，先读 review pack，再沿相关 Task 依赖、父证据映射和产物来源查询。
+你负责定位问题，不修改生产或验收标准。从获派的 Task/Run 和证据引用出发，
+读取已有事实与诊断材料，自行选择相关依赖、父证据映射和产物来源查询。
 Graph 展示执行主体，Task 表示目标，Session 保存过程；不要混为同一棵树。
 
 每个结论必须引用可读取的原始 evidence、review、session event 或决策。
@@ -179,8 +179,8 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 |---|---|
 | “你负责当前任务” | session→run→task 精确绑定，禁止同 session 冒领其他 Run |
 | “读取根目标和相关决定” | **A0 已实现，来源/恢复返工已关闭（2026-09-23）**：真实的根契约（`task_intake` 接受后持久化的 objective/criteria/assumptions/constraints/requiredCapabilities）与来源归属（`identity.rootSessionId` 经 `assertRootContractOrigin` 校验 store↔session、顶层会话与本人消息，三入口共用，拒绝在首次写入前且具名）；`task_read`/`task_status` 在未激活时给具名状态而非代用目标。边界：归因纪律不等于来源真实性证明，也不证明模型对用户请求的解读正确；R1 固定场景只证明澄清答复到达模型，目标形成的验收仍返工（主 guide §5.14）。**A1 未建**：ContextView、祖先决定投影与原始 refs 的授权读取仍待建，不能只加一句“考虑全局” |
-| “可查看任务状态” | A2 先修现有 `task_status` 的 worker 全树读取：本人/直属子状态与根目标短句、相位和少量可核实的下一动作提示；实际执行入口重检。任意邻域、revision/分页没有当前消费者，不部署“可查看任意邻域”的提示词 |
-| “向父节点询问并等待” | A3 已落地非阻塞父循环与协调相位（waiting_children/submitted、写闸、显式提交；task-runtime/src/gate.ts、orchestrate.ts）；持久问题、问答唤醒与超时仍属 A4 |
+| “可查看项目状态与上下文” | A2+A1 的 context 包同源服务模型请求和主动查询：根约束/本人贡献/相关依赖默认注入，同 graph 任务及证据/会话按引用可读；跨 graph 拒绝且原始 Session 工具不能绕过。相关性不等于权限，不因兄弟身份拒绝读取依赖证据；执行限制仍由实际动作入口重检 |
+| “向父节点询问并等待” | A3 已落地非阻塞父循环与协调相位；A4 的消息/送达/恢复主体为 agent-runtime + DSH，context 展示问题和回答，task-runtime 仅仲裁执行阻塞。不能把通信正文与队列整体加进 task |
 | “提交后由 verifier 判定” | A3 已落地：task_submit_result → RunPhaseChanged(submitted) 落库后 drainSession 排空在途写，再转 verifier 排他执行；idle 不作完成证据 |
 | “只做协调” | A3 已落地：waiting_children 期间运行时闸（tools/pre-execute waterfall，在途调用同样登记检查）只放行读/状态/诊断/task_cancel 等协调动作，不只靠提示词防并发写 |
 | “分解可能待审，批准后系统自动续跑”（T2/T3 **已落地**） | 配置 `Config.generatedTaskReview: off/all`（默认 `off`）与真实档案：`all` 下 `task_decompose` 只提交提案（`submitDecompositionProposal` → `pending_review`）并返回 proposalId；渠道 `ProposalReviewService`（`ctx.proposalReviewChannel`，service 装配处）经 `ctx.approval.request` 提问并写 `decidedBy=approval:<ownerSessionId>`；批准由 runtime 重检后继续（`continueProposal`），工具层没有任何决定参数或 approvalRef；prompt 文本真实落点为 `agent-runtime/src/prompts/root.prompts.ts` 与 `task-runtime/src/handoff.ts` 的审核段；三个提案工具`task_proposal_read/continue/cancel` 在 root allow-list 与 worker baseline |
@@ -203,6 +203,6 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 
 协调组合态必须覆盖：waiting_children 同时有向祖先提出的阻塞问题；仅收到部分答案或 unresolved；有效问答在 inbox claim 后遇到 pre-step reject/崩溃。恢复后模型仍能读到未处理事实，主相位、batch 与写权限不因消息重放改变。waiting_children 的写拒绝以运行时闸在真实 tools waterfall 上的实际 deny 为证据（A3 起），不能只看 assembled prompt 未挂载。
 
-同一输入/revision 连续装配不产生不断增长的重复提示或写事件；输入变化有可追溯的模型可见事件。不要通过删除事实来满足 token 上限，也不要每步注入全图时间戳使缓存失效。
+相同事实连续装配不产生不断增长的重复提示或写事件；输入变化有可追溯的模型可见事件。复用 DSH context snapshot，异步 assemble 钩子遵守 scope/取消；无 agent 的诊断组装不得串入项目事实。不要通过删除核心契约满足上限，也不要每步注入全图时间戳使缓存失效。
 
 真实模型效果另用固定任务集测量：是否选择合法动作、是否在缺信息时提出有效问题、是否避免修改受保护验收、是否最终满足根目标。单测只能证明内容装配和机制，不证明模型一定遵守。受保护验收输入的准入身份固定与判决前复检机制已建（S1-V 切片 2，见主 guide §5.7）；模型是否遵守该约束仍需上述真实模型实验，机制本身不依赖模型自觉。worker 模板的"已选能力摘要"已有真实渲染（S1-C，见主 guide §5.8）：合同块/spawn prompt/`task_read` 三视图同源渲染本 run 选定的 capability/skill 角色、内容短摘要与 registry 修订，正文按需经 skill 工具读取；模型是否据此少做全库检索属票后效率实验，不以机制存在宣称效率结论。

@@ -7,8 +7,8 @@
 | 方向、当前事实与缺口 | [主 guide](singularity-harness-guide.md) |
 | 进度、派发顺序与验收记录 | [建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一表 |
 | 审核进度并准备下一票 | [进度审核指挥 prompt](execution-prompts/progress-review-and-dispatch.md) |
-| 实施当前补救任务 | [架构补救 prompt](execution-prompts/05-architecture-remediation.md) |
-| 填写后续单票 | [任务模板与 A2 示例](execution-prompts/task-dispatch-template.md) |
+| 实施当前任务 | [派发入口](execution-prompts/README.md)中的当前派发 |
+| 填写后续单票 | [任务模板与 A2+A1 示例](execution-prompts/task-dispatch-template.md) |
 | 修改与检查纪律 | [公共执行合同](execution-prompts/README.md) |
 
 专项设计通过主 guide 按需读取，不要求每票通读全部 docs。设计、原始审查和历史完成记录不能替代当前代码事实；当前进度不在本页复制维护。
