@@ -25,7 +25,7 @@
 | 5 | T2 + T3：契约审核与恢复（一个交付组） | 已验收（2026-09-23，双模型并行独立复核 + 综合复核确认） | Kimi Code 主代理指挥 + 4 阶段实现子代理（A 提案合同层 / B task-runtime 生命周期、重检、幂等与恢复 / C 工具面、审批渠道与 prompt / D 集成级验收、模型协议 fixture 与文档收尾）+ 2 并行独立复核子代理 + 1 综合复核子代理 | 见「T2+T3：契约审核与恢复 执行与验收记录」 | off/all、审核持久化、批准后重检及崩溃恢复一起验收，不单独交付不可恢复的 all |
 | 6 | A0 + R0：根入口与默认运行面（本票返工 A0） | 已验收（2026-09-23，进度审核复核 + 全量回归实跑） | Kimi Code 主代理（Q2/Q3 各一个实现子代理 + 1 个只读独立复核子代理，复核后一轮缺陷修复） | 原记录 +「补救交付复核」Q2/Q3 +「A0 返工（Q2/Q3）执行与验收记录」 | 已满足：根来源/归属（store↔session、顶层会话、本人消息）与 adoptRoot 恢复反例关闭，R0 证据保留，全量单测/集成与独立复核通过。进度审核已确认，下一项仅派第 7 项 |
 | 7 | R2：按证据整理运行时（本轮只修取消写闸） | 已验收（2026-09-24，补充返工 `8f9086e` 经进度复核） | Kimi Code 主代理（两轮实现/复核）+ 本轮进度复核 | 原记录 +「R2 Q1 补充返工执行与验收记录」+「R2 补充返工进度验收（2026-09-24）」；[R2 合同](execution-prompts/06-r2-cancellation-gate.md) | C1 两条查询交错、C2 重启恢复、C3 合法 active、C4 相关调用顺序均通过；已记录未证实的取消边界不冒充本票保证 |
-| 8 | R1：真实运行验证（纠正 S3 与实验账） | **返工（2026-09-24，进度审核未通过）** | 原交付：Kimi Code 主代理；本轮：进度复核 + 独立规格审查 | 原记录 +「R1 补验证（Q4/Q5）执行与验收记录」+ 下方「R1 补验证进度审核」；[补验证 prompt](execution-prompts/07-r1-supplemental-validation.md) | V1 接线与 V6 历史下界保留；V2 漏验固定答复及全部必需 verifier 结果，V5 将缺报缓存写记成 0，V3 的 `current/final quarter` 假设不符合无争议通过条件。先完成无模型返工与既有轨迹重判；若 S3 失败，另定生产修复与新实验授权，不覆盖旧尝试 |
+| 8 | R1：真实运行验证（纠正 S3 与实验账） | **返工（2026-09-24；无模型返工已完成，仍待生产修复与新授权重验）** | 原交付：Kimi Code 主代理；进度复核 + 独立规格审查；无模型返工：主代理 + 3 子目标 + 独立只读复核 | 原记录 +「R1 补验证（Q4/Q5）执行与验收记录」+ 下方「R1 补验证进度审核」与「R1 补验证返工」；[补验证 prompt](execution-prompts/07-r1-supplemental-validation.md) | V1 接线与 V6 历史下界保留；V2 两处漏验已修入 `s3-criteria/2` 并以红/绿反例钉住，V5 缺报缓存写更正为「未报告」，V3 的归档 S3 用完整契约重判为 **inconclusive（不得 pass）**。最小生产修复触发点在根 prompt / `task_intake` 的 assumptions 说明（只提出）；新的真实模型尝试须另定输入/判据/目录/次数与预算，不覆盖旧尝试 |
 | 8a | R3：已有 Task 合同归位 | 待前置；有限维护票 | 待填 | 本文 E 节、主 guide §1.5 | R1 验收后；迁出 Skill/Verifier 行为合同、删除测试专用生产类型，实际调用与测试同步；Task 持久格式、原子提交和执行行为保持，非全仓重构 |
 | 9 | A2 + A1：Agent 状态上下文（一个交付组） | 待前置；合同已定、未实施 | 待填 | 本文 D/E 节、主 guide §1.4 | R3 验收后；先分开读取与显式恢复，再交付 context 及实际模型消费；依赖证据、根约束与重启/压缩恢复完整，旧渲染删除 |
 | 10 | A1 原独立排位 | 并入第 9 项，不单独派发 | — | 保留编号供历史引用 | 第 9 项整组验收后直接进入第 11 项 |
@@ -72,7 +72,7 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 6 项 A0、第 7 项 R2 已验收；第 8 项 [R1 补验证](execution-prompts/07-r1-supplemental-validation.md) 的交付经本轮审核判为**返工**，具体差距见下方「R1 补验证进度审核」。当前只派 R1 的无模型判据、账目与归档轨迹重判；第 9 项 A2 暂不实施。原建设顺序为 A0 + R0 → R1 → R2；因 R2 写闸回归影响真实运行，返工顺序调整为表中的 A0 → R2 → R1。Task 与协作方向仍见 [Task 指导](task-contract-construction-guide.md)、[深入架构](exploration-evolution-architecture.md)与 [Prompt 合同](agent-prompt-contracts.md)。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 6 项 A0、第 7 项 R2 已验收；第 8 项 [R1 补验证](execution-prompts/07-r1-supplemental-validation.md) 的交付经审核判为**返工**，其无模型返工（判据修订、账目更正、归档轨迹重判）已完成并交付待进度审核，见下方「R1 补验证进度审核」与「R1 补验证返工」。当前停在第 8 项：先由进度审核确认返工交付，再决定最小生产修复与另立授权的新模型重验；第 9 项 A2 不实施。原建设顺序为 A0 + R0 → R1 → R2；因 R2 写闸回归影响真实运行，返工顺序调整为表中的 A0 → R2 → R1。Task 与协作方向仍见 [Task 指导](task-contract-construction-guide.md)、[深入架构](exploration-evolution-architecture.md)与 [Prompt 合同](agent-prompt-contracts.md)。
 
 ### 补救交付复核（2026-09-23，d5b0bb6）
 
@@ -674,6 +674,23 @@ driver 未在仓库内重建：两轮 driver 分别解包于 `/home/ROXY/code/bb
 | V6 | 既有记录至少 175461 输入+输出 token / 58 工具调用，含缓存读至少 501349 的去重算式可复算，保留历史下界，不因 V2/V3/V5 问题否定它。 |
 
 **最小返工顺序**：先在归档之外另建判据修订版和定向反例，钉住固定答复逐字相等、每个必需 verifier 的 pass 与缺失/失败的拒绝；冻结版哈希和原尝试不变。再更正 V5 的缺报口径并对已有 S3 原始轨迹做一次独立重判，明确 S4 如何适用于完整契约的 assumptions。若重判无法给出不放宽合同的 pass，就记录这一次尝试失败/不确定，依据实际根契约错误提出最小生产修复；新的真实模型尝试必须另定冻结判据、独立目录、次数和预算，不以本次 R1 授权自动重跑。完成这些并经进度审核后才解除 A2 前置。详见 [R1 prompt 的返工补充](execution-prompts/07-r1-supplemental-validation.md#进度审核返工补充2026-09-24)。
+
+## R1 补验证返工（2026-09-24，无模型；执行记录）
+
+> 本节只覆盖上节「最小返工顺序」派出的无模型返工：判据两处定向反例、缓存写缺报更正、用既有原始证据对归档 S3 的独立语义重判。**未发起任何网关调用、未改生产代码、未覆盖旧证据**；新产物全部在仓库外 `/home/ROXY/code/bb_work/r1-rework-2026-09-24/`，两份归档树逐文件哈希比对不变（`accounting/frozen-trees-manifest.txt`）。上节与更早记录保持原样。
+
+| 字段 | 填写内容 |
+|---|---|
+| 状态、最近更新日期 | **已交付待进度审核**（2026-09-24；无模型返工完成，第 8 项仍返工） |
+| 执行 agent / 任务链接 | Kimi Code 主代理（集成、历史账、全量检查、guide）+ 3 个有限子目标（①判据修订与定向反例/重放 ②缓存写重算与账目更正 ③归档 S3 的独立语义重判）+ 独立只读复核子代理 ×1（变异探针、4000 例差分扫描、strace、归档哈希） |
+| 修改前基线 | Singularity `8795a4e`、外层 harness `53c3a69212`；两工作区干净（外层仅既有的 `thirdparty/deepseek-harness` 脏标记，指针未变） |
+| 交付版本 | 生产代码与仓库测试**零改动**（Singularity 仍 `8795a4e`，`git status` 只列本次文档改动、无 `src/`/`tests/`/lib 变更）；交付 = 本计划 / 主 guide / 执行入口的文档提交 + 仓库外 `r1-rework-2026-09-24/` |
+| 验收项对应 | V2 → `criteria/s3-criteria-rev2.ts`（`s3-criteria/2`，sha256 `83d9ee31…`）、`criteria/s3-criteria-rev2.diff`、`criteria/s3-criteria-rev2.spec.ts`（红/绿反例）、`criteria/verdicts/*`；V3 → `adjudication/s3-run-rejudged.json`（sha256 `48af143e…`）+ `criteria/verdicts/matrix.json`；V5 → `accounting/{cache-write-recompute.py,V5-account-correction.md,V5-account-correction.json}`；V1/V4/V6 保留证据见 `GAP-TABLE.md` |
+| 实际检查 | 1. `packages/singularity` `pnpm build`：通过，产物无变更（`git status` 无 lib 改动）。2. 外层 `pnpm vitest run --project unit packages/singularity`：44 文件 / **1461 项**通过。3. `--project integration packages/singularity`：38 文件 / **268 项**通过；本轮 5 次全量中出现 **1 次间歇失败**——`tests/integration/a3-recovery.spec.ts`「refuses the evidence a cancelled run's late verifier tries to record」在并行负载下 `vi.waitFor` 超时（`expected 'admitted' to be 'verifying'`，默认 1 s），单跑该文件 3/3、其余 4/5 全绿；与本次零生产改动无关，属既有 A3 用例的时序稳健性问题，如实记录、不归入本票修复。4. `pnpm run verify-persistence`：OK，4 个事件根匹配。5. `agent-singularity` `pnpm exec tsc --noEmit`：exit 0。6. `git diff --check`：干净。7. 仓库外修订判据套件 `pnpm exec vitest run --config …/criteria/vitest.rev2.config.ts`：3 文件 / **14 项**通过（无网络：独立复核用 strace 核到 0 次出站连接） |
+| 独立复核 | 非实现者只读复核子代理（`REVIEW-independent.md`，sha256 `6dae98a3…`）：结论**本轮主张成立、未能证伪**——diff 逐字节回放一致、归档 13 用例在修订版 13/13、两组“去掉修复即复绿”的变异、4000 例差分扫描（0 处放松、200 处更严）、重算矩阵逐格一致、原始 usage 自行重数 15/15 无 cache-write 键、归档树哈希不变。复核发现两处文档级缺陷（`criteria/README.md` 的 C2b 标签行；把 `s-root.jsonl:63` 错称 inbox splice），已由指挥方更正并复跑确认 |
+| 语义重判要点 | 完整 `rootContract.assumptions[0]` 下，`quarter` 标 `unknown`（首句声明范围未定义，后句 `treats it generically as the current/final quarter` 两种读法都成立 ⇒ 冻结合同「无法判定 → inconclusive，不得 pass」）；`dataSource`/`deliveryScope` 由实际送达答复确认。两个判据版本在三种（记录 × 复核）组合上判决逐条一致：原 S3 `fail`/`fail`、本次 S3 + 原复核 `pass`/`pass`、本次 S3 + 重判 `inconclusive`/`inconclusive`——即修订判据没有改变任何既有判决，`pass` 不能维持来自语义重判 |
+| 未解决缺陷 / 阻塞 | 归档 S3 的语义通过不能成立（inconclusive），第 8 项**保持返工**。最小生产修复触发点（只提出、未实施）：根角色 prompt（`agent-runtime/src/prompts/root.prompts.ts`）与 `task_intake` 的 `assumptions` 字段说明未写出 A0 §10 的边界——假设不等于确认、不得为未确认的交付定义条件选定取值，未解决的条件须显式保留未知或回到用户。边界：提示词级最小修补，无语义分类器/运行时闸，效果只能由新的真实模型尝试检验 |
+| 下一项 | 第 8 项内：进度审核确认本节交付后，另行授权最小生产修复与新的真实模型重验（须另定输入/判据/独立目录/次数与预算，不覆盖旧 attempt）；A2 不因本节完成而派发 |
 
 ## R2：按证据整理运行时 执行与验收记录（2026-09-23）
 
