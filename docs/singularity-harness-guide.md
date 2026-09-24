@@ -1,6 +1,6 @@
 # Singularity Harness 工作指南
 
-最新（2026-09-24，R3 进度验收）：第 8a 项 R3（已有 Task 合同归位）**已验收**。三项纯迁移按计划 E 节合同完成：Skill 侧车形状/路径/digest 规则迁至 `task-runtime/src/skill-contract.ts`（runtime provider 内部模块，不入包 index，不进 sidecar 大文件）；Verifier/VerifierSelftest（含 sample/store 形状）与 VerifyRequest 归入 `verifier/src/types.ts`，`VerificationMode`/`VerificationResult`/Evidence 持久事实仍由 task 持有，task 无 verifier 反向依赖；仅测试使用的 `RootTaskSpec`/`TaskDefinition` 归入 `tests/support/legacy-root.ts`，生产代码不再导出或导入。迁移前后同一 fixture 的 `skillContractDigest`/`skillContentDigest` 经真实生产入口复算完全一致（`a5ceee1b…`/`e7982b5c…`），迁移的 digest 向量 spec 原样通过；1461 项单测、268 项集成、`pnpm build`、`verify-persistence`、`agent-singularity tsc --noEmit` 全部通过且数量与基线一致；独立只读复核判 R3-1/R3-2/R3-3 全 pass（无第二套 digest、无转发层、无超授权改动）。执行记录见[建设计划 R3 节](2026-09-20-vrtc-code-change-plan.md#r3已有-task-合同归位-执行与验收记录2026-09-24)；进度审核通过；下一项为第 9 项 A2+A1。
+最新（2026-09-24，R3 进度验收）：第 8a 项 R3（已有 Task 合同归位）**已验收**。三项纯迁移按计划 E 节合同完成：Skill 侧车形状/路径/digest 规则迁至 `task-runtime/src/skill-contract.ts`（runtime provider 内部模块，不入包 index，不进 sidecar 大文件）；Verifier/VerifierSelftest（含 sample/store 形状）与 VerifyRequest 归入 `verifier/src/types.ts`，`VerificationMode`/`VerificationResult`/Evidence 持久事实仍由 task 持有，task 无 verifier 反向依赖；仅测试使用的 `RootTaskSpec`/`TaskDefinition` 归入 `tests/support/legacy-root.ts`，生产代码不再导出或导入。迁移前后同一 fixture 的 `skillContractDigest`/`skillContentDigest` 经真实生产入口复算完全一致（`a5ceee1b…`/`e7982b5c…`），迁移的 digest 向量 spec 原样通过；1461 项单测、268 项集成、`pnpm build`、`verify-persistence`、`agent-singularity tsc --noEmit` 全部通过且数量与基线一致；独立只读复核判 R3-1/R3-2/R3-3 全 pass（无第二套 digest、无转发层、无超授权改动）。执行记录见[建设计划 R3 节](2026-09-20-vrtc-code-change-plan.md#r3已有-task-合同归位-执行与验收记录2026-09-24)；进度审核通过；第 9 项 A2+A1 已开始，子目标 1 提交 `4a510ed`，整组未验收。
 上一轮（2026-09-24，R1 完成轮）：第 8 项 R1 补验证**已验收**。返工后的三个真实模型完成轮各自独立冻结、先复核后收费：完成轮 1、2 判 fail（未用澄清渠道固化 checkout-only 来源与季度规则；使用了澄清但契约仍夹带答复未支持的要求且 mandatory 判据用 review 模式），完成轮 3 判 **pass / path2-limited-goal**（`hitl_ask` 答复逐字送达并被消费、契约只承载用户答复支持的内容、4 条确定性判据全过、根 run `verified`、产物 719 字节）。三轮修复全部落在根 prompt / `task_intake` 说明（`99e1311`、`aa19637`、`9a3e508`）并由 assembly 用例钉住；判据 `s3-criteria/2` 与缓存写「未报告」口径保留；失败尝试原样保留。完成复核（`r1-final3-2026-09-24/REVIEW-completion.md`）判 pass 合法；其记录级发现已在 ledger/文档中披露，其中冻结 fixture 的 `cacheWriteTokens: 0` 仍是历史 caveat，未来轮次需修自己的 driver，不改写旧证据。详见 §5.14 完成轮记录与[建设计划](2026-09-20-vrtc-code-change-plan.md#r1-补验证完成轮2026-09-24真实模型执行与验收记录)。
 上一轮进度审核（2026-09-24）：R2 Q1 的补充返工 `8f9086e` 已验收。取消窗口内读取与跨取消完成点的陈旧读取都不能重开写闸；该轮构建、1461 项单测、268 项集成及持久化检查通过，独立只读复核未见本票合同内可达违约。§5.12 保留未证实的其他取消边界，不将 Q1 验收泛化为全部取消竞态安全。
 
@@ -31,7 +31,7 @@
 
 DSH 提供 agent/session、skill 发现与加载、preset、MCP、上下文与原生审批。Singularity 负责任务契约、能力选择、证据、组合验收、缺口恢复与复盘。继续使用现有服务，不另造通用 skill loader 或全局调度平台。
 
-**当前阶段判断（2026-09-24，R3 交付后）**：递归执行、证据、审核、恢复骨架和根契约入口已经接线。A0 Q2/Q3 与 R2 Q1 已按各自合同验收：根来源/恢复见 §5.13；取消期间及跨完成点的查询回填见 §5.12。**第 8 项 R1 已验收**：完成轮 3 的真实 S3 在冻结合同下判 `pass / path2-limited-goal`（澄清答复逐字送达并被消费、契约不夹带未确认条件、根 run `verified`、产物 719 字节），完成轮 1、2 的失败原样保留。R1 证明的是该固定场景可运行，不提供通用语义保证。§5.12 的其他取消边界未由 Q1 验收覆盖。**第 8a 项 R3 已验收**（Skill/Verifier 合同与测试专用类型迁至各自所有者，行为不变）；其后第 9 项 A2+A1，可按唯一执行表派发。
+**当前阶段判断（2026-09-24，R3 交付后）**：递归执行、证据、审核、恢复骨架和根契约入口已经接线。A0 Q2/Q3 与 R2 Q1 已按各自合同验收：根来源/恢复见 §5.13；取消期间及跨完成点的查询回填见 §5.12。**第 8 项 R1 已验收**：完成轮 3 的真实 S3 在冻结合同下判 `pass / path2-limited-goal`（澄清答复逐字送达并被消费、契约不夹带未确认条件、根 run `verified`、产物 719 字节），完成轮 1、2 的失败原样保留。R1 证明的是该固定场景可运行，不提供通用语义保证。§5.12 的其他取消边界未由 Q1 验收覆盖。**第 8a 项 R3 已验收**（Skill/Verifier 合同与测试专用类型迁至各自所有者，行为不变）；第 9 项 A2+A1 已开始，显式恢复/纯读分离有子目标提交 `4a510ed`，其余接线与整组验收仍待完成。
 
 R0 的默认工具面收敛、R2 的 marker 顺序及无用途 API 清理保留有效，不重做整套框架。R1 的 V6 历史更正保留：按现存记录至少 175461 输入/输出 token、58 次工具调用（含缓存至少 501349），首轮完整日志缺失，为下界而非精确全量；后续各轮尝试另计（补验证轮 入+出 51036 / 工具调用 17 / 缓存读 168704；完成轮 1 61435+19961 / 23 / 199936；完成轮 2 57421+21536 / 22 / 239872；完成轮 3 25051+7733 / 14 / 106752），各轮缓存写列一律为**未报告**——原始 `usage` 对象没有该字段，真报 0 才算 0。自主改进闭环仍未交付。
 
@@ -132,6 +132,10 @@ R3 是避免共享导出同时迁移的串行维护安排，不是上下文能�
 
 架构审核检查的是：修改一种规则需要找到几个地方、谁能写最终状态、调用一次读取会不会推进任务、删除旧实现后实际消费者是否仍完整。文件变短而这些问题未改善，不算完成；审计/恢复所需的字段即使模型不直接读取，也不是无消费者。后续实现者按有限合同施工，不能把这次清单当成全仓整理授权。
 
+每票的简化义务与功能同批验收：只核对本票触及的职责和 400 行以上文件，说明留下、迁出或删除的依据；已声明迁出的旧实现、旧生产调用和同名转发须在本票交付时消失，不能让新包与旧包各保留一份判定。确实属于后续票的整理，写明触发票号和实际消费者，不因此另立全仓整理前置。
+
+完成记录要写迁移前后的实际调用链、行为所有者、被删除的旧位置和仍保留的执行/持久事实。按这些净变化判断可维护性，不以净行数、最大文件长度或导出数量评分；没有当前合同违约或重复职责的反例，不为“代码可能继续变大”预建额外包装层。第 9、11–14 项对应完成条件见建设计划 A2-6、A4-5、EVAL-5、REV-5、EVO-5。
+
 **R3 执行事实（2026-09-24，已验收）**：本节清单中标注 R3 的三项错位已按计划 E 节合同完成纯迁移，行为零变化：
 
 - **Skill 合同迁出 task**：`task/src/skill-contract.ts` 全文迁为 `task-runtime/src/skill-contract.ts`（runtime provider 内部模块，**不加入** `task-runtime` 的包 index，也不并入 `sidecar.ts` 大文件）；`canonicalize`/`sha256Hex` 仍从 `@dangosys/dsh-singularity-task` 导入，无第二套 digest 基础。消费者 `task-runtime/src/{sidecar,run-binding}.ts` 改从内部模块导入；task 的 `export * from './skill-contract.ts'` 与源文件已删除。`TaskRun.providerBinding` 与 `RunSkillBinding` 的内容身份记录、`registryRevision`、预检/绑定/晋升拒绝语义不变；迁移前后同一 fixture 经真实生产入口复算的 `skillContractDigest`（`a5ceee1b…`，与 spec 内仓库外 `sha256sum` 固定向量一致）与 `skillContentDigest`（`e7982b5c…`）完全相同。测试锚：`task-runtime/tests/unit/skill-contract.spec.ts`（22 项，自 task 迁移，向量与断言未改）+ 既有 `task-runtime/tests/unit/{sidecar,run-binding,provider-precheck,provider-load,carried-precheck}.spec.ts`。
@@ -208,7 +212,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 ## 3. 建设顺序与完成条件
 
-执行只使用 [建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一表。补救返工顺序 A0 → R2 → R1 全部完成：A0 Q2/Q3、R2 Q1 已验收；第 8 项 [R1 补验证](execution-prompts/07-r1-supplemental-validation.md) 经无模型返工与三个完成轮后**于 2026-09-24 验收**（完成轮 3 判 `pass / path2-limited-goal`，独立复核判 pass 合法），失败尝试与生产修复记录保留。第 8a 项 R3（已有 Task 合同归位）已验收，下一项第 9 项 A2+A1；A2 不因 R1 通过而扩大范围，也不把 R3 当作 A2 的功能前置。
+执行只使用 [建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一表。补救返工顺序 A0 → R2 → R1 全部完成：A0 Q2/Q3、R2 Q1 已验收；第 8 项 [R1 补验证](execution-prompts/07-r1-supplemental-validation.md) 经无模型返工与三个完成轮后**于 2026-09-24 验收**（完成轮 3 判 `pass / path2-limited-goal`，独立复核判 pass 合法），失败尝试与生产修复记录保留。第 8a 项 R3（已有 Task 合同归位）已验收，第 9 项 A2+A1 正在实施；A2 不因 R1 通过而扩大范围，也不把 R3 当作 A2 的功能前置。
 
 ### 上下文、协作与诊断的方向决定
 
@@ -549,7 +553,7 @@ T1 把“任务契约”从散落在工具 schema、runtime 局部函数与事�
 - **独立复核（`r1-final3-2026-09-24/REVIEW-completion.md`）**：判 **pass 合法**——冻结先于收费、单次尝试、判据哈希为已复核的 `s3-criteria/2`、记录与归档日志逐字一致、verifier 结果为真实 `command` pass、产物与哈希一致、复核引用全部解析；V1–V4/V6 成立。复核另发现三处记录级问题：D1 冻结 driver 的 `cacheWriteTokens ?? 0` 归一化使本轮 `driver.json`/`run-meta.json` 写 0（原始日志 13/13 无该字段；ledger 已按「未报告」记账并补 `recordCaveats`，历史 fixture 的 0 保留为 caveat，未来 driver 须修正）；D2 无 usage 的请求（root 9 次请求对 8 条记录；worker 日志止于 `step/start`）已在本轮 ledger 显式记为缺失；D3 文档同步由本节完成。D1 不改判决，但不宣称冻结 fixture 的记录器已被本轮修复。
 - **仍未证明 / 边界**：一次 S3 通过只证明该固定场景成立——不证明普遍澄清能力、成功率提升或自主进化完成；判据的语义面仍依赖显式独立复核（复核系统性漏报时判据无法自查）；fixture 仍含 stand-in 工具（`graph_spawn`/`graph_mark_ready`/`task_verify` 等）与 `?? 0` 归一化，未来轮次应在自己的 driver 副本里修掉；未部署、未推送、未跑 BB 仿真。
 
-**A2/A1 职责重定**：单纯收窄列表不足以支持递归和依赖协作，已由本文 §1.4 与[建设计划 D 节](2026-09-20-vrtc-code-change-plan.md)取代。新 context 包负责根/当前契约、相关状态、按引用取证和模型上下文消费；同 graph 可主动读取，默认少推相关信息，不将兄弟身份当作禁止依据。R1 前置仍未解除，本文不声称新包已经实现。
+**A2/A1 职责重定**：单纯收窄列表不足以支持递归和依赖协作，已由本文 §1.4 与[建设计划 D 节](2026-09-20-vrtc-code-change-plan.md)取代。新 context 包负责根/当前契约、相关状态、按引用取证和模型上下文消费；同 graph 可主动读取，默认少推相关信息，不将兄弟身份当作禁止依据。R1 前置已解除；第 9 项虽已开始，本文不声称 context 包或整组能力已经实现。
 
 ## 6. 文档维护
 
