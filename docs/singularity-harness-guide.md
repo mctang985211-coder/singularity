@@ -1,6 +1,6 @@
 # Singularity Harness 工作指南
 
-当前进度（2026-09-24）：R1、R2、R3 已验收；第 9 项 A2+A1 正在实施，子目标 1 提交 `4a510ed`，整组尚未验收。下一步以[建设计划文首表与 D/E/F 合同](2026-09-20-vrtc-code-change-plan.md)为准。历史验收与失败轨迹按需查[执行记录](history/2026-09-24-vrtc-execution-records.md)及[本指南旧实施细节](history/2026-09-24-guide-implementation-records.md)。
+当前进度（2026-09-25）：R1、R2、R3 已验收；第 9 项 A2+A1 已交付待进度审核（子目标 `4a510ed`/`f90d05b`/`0f41d91`/`6e0f651`，A2-1～A2-6 与迁移删除的实现侧证据齐全、独立复核 PASS，[交付记录](history/2026-09-25-a2-a1-delivery-record.md)）。进度审核确认前不派下一票。下一步以[建设计划文首表与 D/E/F 合同](2026-09-20-vrtc-code-change-plan.md)为准。历史验收与失败轨迹按需查[执行记录](history/2026-09-24-vrtc-execution-records.md)及[本指南旧实施细节](history/2026-09-24-guide-implementation-records.md)。
 
 本文负责方向、职责与当前事实；[术语表](../CONTEXT.md)定义概念。[历史指南](history/2026-09-21-harness-guide-snapshot.md)保留旧编号和操作经验。深入实施参考：[Task 契约与可选人审](task-contract-construction-guide.md)、[有目标的探索/自进化架构](exploration-evolution-architecture.md)、[角色与 System Prompt 合同](agent-prompt-contracts.md)。[开源机制调研](2026-09-21-open-source-agent-patterns.md)记录一手来源。
 
@@ -19,7 +19,7 @@
 
 DSH 提供 agent/session、skill 发现与加载、preset、MCP、上下文与原生审批。Singularity 负责任务契约、能力选择、证据、组合验收、缺口恢复与复盘。继续使用现有服务，不另造通用 skill loader 或全局调度平台。
 
-**当前阶段判断（2026-09-24，R3 交付后）**：递归执行、证据、审核、恢复骨架和根契约入口已经接线。A0 Q2/Q3 与 R2 Q1 已按各自合同验收：根来源/恢复见 §5.13；取消期间及跨完成点的查询回填见 §5.12。**第 8 项 R1 已验收**：完成轮 3 的真实 S3 在冻结合同下判 `pass / path2-limited-goal`（澄清答复逐字送达并被消费、契约不夹带未确认条件、根 run `verified`、产物 719 字节），完成轮 1、2 的失败原样保留。R1 证明的是该固定场景可运行，不提供通用语义保证。§5.12 的其他取消边界未由 Q1 验收覆盖。**第 8a 项 R3 已验收**（Skill/Verifier 合同与测试专用类型迁至各自所有者，行为不变）；第 9 项 A2+A1 已开始，显式恢复/纯读分离有子目标提交 `4a510ed`，其余接线与整组验收仍待完成。
+**当前阶段判断（2026-09-25，第 9 项交付后）**：递归执行、证据、审核、恢复骨架和根契约入口已经接线。A0 Q2/Q3 与 R2 Q1 已按各自合同验收：根来源/恢复见 §5.13；取消期间及跨完成点的查询回填见 §5.12。**第 8 项 R1 已验收**：完成轮 3 的真实 S3 在冻结合同下判 `pass / path2-limited-goal`（澄清答复逐字送达并被消费、契约不夹带未确认条件、根 run `verified`、产物 719 字节），完成轮 1、2 的失败原样保留。R1 证明的是该固定场景可运行，不提供通用语义保证。§5.12 的其他取消边界未由 Q1 验收覆盖。**第 8a 项 R3 已验收**（Skill/Verifier 合同与测试专用类型迁至各自所有者，行为不变）。**第 9 项 A2+A1 已交付待进度审核**：`context` 包接管授权读取/相关性投影/引用/输出界限与 DSH 装配接线（§5.15），显式恢复屏障先于首个业务输入，四个原始跨 Session 工具在有效工具面与执行闸同时封死，旧渲染实现已删除无双轨。
 
 R0 的默认工具面收敛、R2 的 marker 顺序及无用途 API 清理保留有效，不重做整套框架。R1 的 V6 历史更正保留：按现存记录至少 175461 输入/输出 token、58 次工具调用（含缓存至少 501349），首轮完整日志缺失，为下界而非精确全量；后续各轮尝试另计（补验证轮 入+出 51036 / 工具调用 17 / 缓存读 168704；完成轮 1 61435+19961 / 23 / 199936；完成轮 2 57421+21536 / 22 / 239872；完成轮 3 25051+7733 / 14 / 106752），各轮缓存写列一律为**未报告**——原始 `usage` 对象没有该字段，真报 0 才算 0。自主改进闭环仍未交付。
 
@@ -72,9 +72,9 @@ R1 的 [专项 prompt 与 V1–V6 验收指标](execution-prompts/07-r1-suppleme
 
 **目标是底层编排框架支撑 Agent 发现问题、形成任务、验证并改进能力。** 框架固定真实来源、权限、契约、生命周期、预算、独立验证和经批准的应用；Agent 决定查什么、如何理解失败、采用什么方法及提出什么候选。实际失败产生新的诊断/候选，不因设想某种失败就给核心增加状态、分类器或固定补救流程。已有正确性保证仍须保留。
 
-上轮把 A2 缩为 worker 只能看本人/直属子和一句根目标，不能满足依赖协作、祖先约束和深层取证。**默认相关性、读取授权和输出长度必须分开**：默认少推相关信息，但已授权的依赖证据及祖先原文须能按引用拉取。“兄弟”本身既不是可读凭证，也不是禁止依据。当前 `task_status` 同图全树输出是粗粒度读取/噪声问题；没有核实具体授权规则前，不笼统定性为安全泄漏，更不能据此随意改变权限。
+上轮把 A2 缩为 worker 只能看本人/直属子和一句根目标，不能满足依赖协作、祖先约束和深层取证。**默认相关性、读取授权和输出长度必须分开**：默认少推相关信息，但已授权的依赖证据及祖先原文须能按引用拉取。“兄弟”本身既不是可读凭证，也不是禁止依据。`task_status` 的同图全树输出已由第 9 项改为 `scope=related|graph`（默认 related）加稳定分页（§5.15）；它曾是粗粒度读取/噪声问题，不笼统定性为安全泄漏，也不据此随意改变权限。
 
-源码核实后固定本组读取域为**当前 graph**：同域任务/关联证据与会话可按引用主动读，跨 graph 拒绝；默认摘要按相关性选择。group 当前是成员/router 拓扑，不是读取 ACL，不建设推测中的隐藏组权限。原始 Session 查询按 cwd 授权偏宽，context 接线时须同批限制该旁路，并以同 cwd 的不同 graph 作反例。读取同域事实不授予运行或接管任务的权限。
+源码核实后固定本组读取域为**当前 graph**：同域任务/关联证据与会话可按引用主动读，跨 graph 拒绝；默认摘要按相关性选择。group 当前是成员/router 拓扑，不是读取 ACL，不建设推测中的隐藏组权限。原始 Session 查询按 cwd 授权偏宽，该旁路已随 context 接线同批封死（有效工具面 + 执行闸双重），同 cwd 的不同 graph 互读反例在 `tests/integration/context-assembly.spec.ts`。读取同域事实不授予运行或接管任务的权限。
 
 源码基线 `21ac1a1`：`task/src` 6 文件约 4,955 行；`task-runtime/src` 18 文件约 13,578 行，入口约 5,722 行；`agent-singularity/src/evolution.ts` 约 2,038 行。均为含注释物理行数，只定位集中点，不以减行数验收。真正的集中点包括 runtime 的 Session 观测、`orchestrate.reviewEnrichment` 的复盘派生，以及工具包内完整 Evolution 生命周期。目前 Singularity **没有 memory 包**；DSH 的 `session-query`、`session-reference`、`system-prompt`、compaction 已提供历史读取、引用、装配和压缩基础。
 
@@ -82,7 +82,7 @@ R1 的 [专项 prompt 与 V1–V6 验收指标](execution-prompts/07-r1-suppleme
 |---|---|---|
 | 契约、Task/Run/提案及其已提交事实 | 现有 `task` | 持久化、reducer、快照及原子提交；既有 Evidence/Review/Diagnosis 历史继续可读。不在这里构造 prompt、检索历史、评分、规划或选择候选 |
 | 准入、批次、提交、取消、恢复、执行预算与写闸 | 现有 `task-runtime` | 唯一执行状态与副作用仲裁；提供已存在事实及必要只读执行观测，不维护第二套上下文/记忆库，不承载 supervisor 推理 |
-| 目标/约束/依赖/产物/历史的相关性组织、来源引用、按需读取与上下文装配 | **A2+A1 新建 `context` 包**（尚未实施） | 读既有来源，供模型工具和 prompt 两个实际消费者共用；不复制任务真相、不改变相位，不默认调用 LLM 生成摘要。这里承担当前所谓“工作记忆”的读取组织 |
+| 目标/约束/依赖/产物/历史的相关性组织、来源引用、按需读取与上下文装配 | **`context` 包**（A2+A1 已交付待进度审核，2026-09-25） | 读既有来源，供模型工具和 prompt 两个实际消费者共用；不复制任务真相、不改变相位，不默认调用 LLM 生成摘要。这里承担当前所谓“工作记忆”的读取组织 |
 | 长期经验与共享知识 | 现有 Skill/文件、DSH 历史与 Evolution 记录；**暂不另建 memory 包** | 当前项目状态从权威记录重建；经验带来源、适用范围及验证状态。只有出现明确跨任务写入/检索消费者，才定独立 memory 持久合同，不让 memory 变成第二个 Task store |
 | Agent 创建、身份与消息投递 | 现有 `agent-runtime` + DSH Session/inbox | A4 的通信主体在这里；问题/答案正文沿 Session 持久记录，context 负责呈现，task-runtime 只管阻塞执行效果与取消恢复；不把消息收发器搬进 task |
 | 判据执行与 Evidence 生成 | 现有 `verifier` | 独立产物判断；不决定候选是否值得晋升 |
@@ -94,13 +94,13 @@ R1 的 [专项 prompt 与 V1–V6 验收指标](execution-prompts/07-r1-suppleme
 
 模型接线复用 DSH 的异步 `system-prompt/assemble` scoped waterfall（静态 section provider 仍是同步接口），由 context 在组装时读源；复用 DSH 动态 context snapshot、压缩和引用读取，不增加刷新循环或第二份日志。不可变契约、可变项目事实与稳定角色政策各有一个来源；实际请求装配、普通分解、replay、恢复的消费者须一起迁移。包数可以增加两个明确所有者（context、后续 evolution），但旧实现要被替换，不能在原巨型模块之上叠一层空转发。
 
-A2 与 A1 合成一个可验收交付组：授权概览、按引用取细节、实际 prompt 消费、重启/压缩重建一起交付。内部依次分为显式恢复/纯读分离、读取投影、模型接线、独立验收，不能每个子代理都承担整组。具体场景、读取授权和迁移清单见[建设计划 D/E 节](2026-09-20-vrtc-code-change-plan.md)。唯一顺序在 R1 后先安排有限的 R3 合同归位，再派 A2+A1；A4/S4-E/A5/A6 的职责迁移分别随各自票的行为同批验证，不纳入 A2+A1，不先建空包，也不等功能膨胀后另立无限重构阶段。
+A2 与 A1 合成一个可验收交付组：授权概览、按引用取细节、实际 prompt 消费、重启/压缩重建一起交付。内部依次分为显式恢复/纯读分离、读取投影、模型接线、独立验收，不能每个子代理都承担整组。具体场景、读取授权和迁移清单见[建设计划 D/E 节](2026-09-20-vrtc-code-change-plan.md)。唯一顺序在 R1 后先安排有限的 R3 合同归位，再派 A2+A1；A4/S4-E/A5/A6 的职责迁移分别随各自票的行为同批验证，不纳入 A2+A1，不先建空包，也不等功能膨胀后另立无限重构阶段。**该组已于 2026-09-25 交付待进度审核**：四个内部子目标按序交付（`4a510ed`/`f90d05b`/`0f41d91`/`6e0f651`），证据与未覆盖范围见[交付记录](history/2026-09-25-a2-a1-delivery-record.md)。
 
-三类未决事项现按下列合同施工，完整输入/失败语义与编号验收只维护在计划 D/E/F：
+三类事项的合同只维护在计划 D/E/F；其中**读取与恢复已随第 9 项交付**（2026-09-25，待进度审核，[交付记录](history/2026-09-25-a2-a1-delivery-record.md)）：
 
-- **读取**：task_read、task_status 与唯一 context_read；移除跨 Session 原始工具旁路并在执行面拒绝。无 Run reviewer 用既有 ledger 绑定，图节点发布后、首次输入前持久化，失败不启动模型。context 由装配层注入只读来源，不反向依赖工具包。
-- **恢复**：graphs.activate（含启动恢复）显式 await adoptRoot，创建也汇入该门；先完成对账/写闸/driver 登记，再开放业务输入，不等批次执行。直接执行入口未就绪即具名拒绝；查询只显示事实与恢复状态，不恢复也不写闸。技术失败与合法待审核/未激活区分，失败可诊断并由显式重试继续。
-- **后续闭环**：A4 的正文留 Session、Task 留引用/阻塞；A5 只按失败 Review 幂等启动诊断。S4-E 先完整支持单文件 Skill 替换的双侧评估；它不能关闭 missing capability。A6 明确承担 capability 行与可选执行型 Skill 的联合评估/应用/回滚，以及原目标的新 Run/批次恢复；人仍只审改进，框架不预置 Agent 的查因/修复策略。
+- **读取（已交付）**：task_read、task_status 与唯一 context_read 已就位，三者同为 context 读源的薄适配；四个跨 Session 原始工具（`session_event_read`/`session_event_trace`/`session_trace`/`session_search`）已从各角色有效工具面移除，并在每个 runtime 拥有 agent 的执行闸（`tools.guard`，单调只能否）上拒绝，preset/MCP 合并不能翻案。无 Run reviewer 用既有 ledger 绑定（spawn 的 `beforePrompt` 在图成员发布后、首条输入前写入并读回确认，失败零模型输入）。context 由装配层注入只读来源，不反向依赖工具包。
+- **恢复（已交付）**：graphs.activate（含启动恢复）显式 await adoptRoot，创建也汇入该门；先完成对账/写闸/driver 登记，再开放业务输入，不等批次执行。直接执行入口未就绪即具名拒绝；查询只显示事实与恢复状态，不恢复也不写闸。技术失败与合法待审核/未激活区分，失败可诊断并由显式重试继续。
+- **后续闭环（未建，不属本票）**：A4 的正文留 Session、Task 留引用/阻塞；A5 只按失败 Review 幂等启动诊断。S4-E 先完整支持单文件 Skill 替换的双侧评估；它不能关闭 missing capability。A6 明确承担 capability 行与可选执行型 Skill 的联合评估/应用/回滚，以及原目标的新 Run/批次恢复；人仍只审改进，框架不预置 Agent 的查因/修复策略。
 
 R3 是避免共享导出同时迁移的串行维护安排，不是上下文能力的技术前置；禁止借此要求先整理完所有大文件。后续每票内部交接顺序见计划 F，主代理集成整组，子代理一次只领取一个确定目标。
 
@@ -200,7 +200,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 ## 3. 建设顺序与完成条件
 
-执行只使用 [建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一表。A0、R2、R1、R3 已验收；第 9 项 A2+A1 正在实施且整组未验收。各轮证据见[历史执行记录](history/2026-09-24-vrtc-execution-records.md)。
+执行只使用 [建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一表。A0、R2、R1、R3 已验收；第 9 项 A2+A1 已交付待进度审核（2026-09-25）。各轮证据见[历史执行记录](history/2026-09-24-vrtc-execution-records.md)与[第 9 项交付记录](history/2026-09-25-a2-a1-delivery-record.md)。
 
 ### 上下文、协作与诊断的方向决定
 
@@ -212,7 +212,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 任务列表显示可读取的状态与有依据的执行限制，可见不等于可领取，动作仍由 runtime 实时重检。节点可查询与提出新 Task，不做全局工作窃取。Supervisor 由真实失败/缺口记录幂等触发，Agent 自行选择依赖与证据下钻路径，再由候选节点实现、独立验证和人审应用；复用已有记录身份，不新建 incident 平台，不以诊断自述取代正确性证据。
 
-根契约入口已实现（§5.11），其来源归属与恢复入口已返工关闭（§5.13）：setup 与目标激活分离，graph name 不再代替 objective，缺独立判据具名拒绝，旧任务不原地改题；根契约的来源由统一服务入口机械校验（store↔session、顶层会话、会话自身日志里的本人消息），模型自报不能替代，`adoptRoot` 无根时经既有恢复遍完成恢复。这些是机械合同，不能推给模型实验；R1 只验证了一个具体澄清场景，schema/hash 不证明语义正确。A2+A1 正在实施，A4 未建，设计方向见[深入架构](exploration-evolution-architecture.md)。
+根契约入口已实现（§5.11），其来源归属与恢复入口已返工关闭（§5.13）：setup 与目标激活分离，graph name 不再代替 objective，缺独立判据具名拒绝，旧任务不原地改题；根契约的来源由统一服务入口机械校验（store↔session、顶层会话、会话自身日志里的本人消息），模型自报不能替代，`adoptRoot` 无根时经既有恢复遍完成恢复。这些是机械合同，不能推给模型实验；R1 只验证了一个具体澄清场景，schema/hash 不证明语义正确。A2+A1 已交付待进度审核（§5.15），A4 未建，设计方向见[深入架构](exploration-evolution-architecture.md)。
 
 ### Task 自主构造与可选人审
 
@@ -253,11 +253,11 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 | Task / TaskRun / 递归分解 | 有独立对象、事件存储、结构准入、树与依赖 DAG、顺序级联；原子性和自然语言 AC 覆盖不由机器证明 | `task/src/types.ts`；`task-runtime/src/admission.ts:checkDecomposition` |
 | Task 语言与生成审核 | 已能现场生成子任务，无模板命中要求。T1 已收敛为单一规范化契约与身份（§5.6）：`TaskContract` 数据定义、闭合字段集与默认值、criterion id 固定、单契约/整批摘要、`contract` 与 assumptions/constraints 持久化，普通分解/replay/root 共用同一入口与结构校验。T2/T3 已补生成提案审核（§5.10）：`Config.generatedTaskReview: off/all`（默认 `off`）、不可变提案记录（整批契约内容 + 策略 + 两个上下文指纹）、`off` 只记 `policy-off` / `all` 批准并重检后才准入、提案决定绑定摘要、四个崩溃点的恢复与 requestKey 幂等。A0 让根契约走同一套记录与审核（§5.11，`TaskProposal.kind` 判别字段）。模板库与契约修订入口仍未建 | `task/src/contract.ts`；`task/src/proposal.ts`；`task-runtime/src/normalize.ts`；`task-runtime/src/proposal.ts`；`task-runtime/src/index.ts:submitDecompositionProposal`、`submitRootContractProposal`、`continueProposal`、`decideProposal`、`reconcileProposals`；`task/src/service/state.ts:assertContract`、`decideProposal` |
 | Task 定义版本 | 有 `definitionRef`；普通子任务使用 `subtask@1`，根任务使用 `root@1`，不等于完整不可变定义库和变更授权机制。T1 固定的是契约内容身份（`contractDigest`/`proposalDigest`），未建模板库 | `task-runtime/src/index.ts:decomposeAndRun`；`task/src/contract.ts:contractDigest` |
-| 根目标入口 | **A0 已实现，Q2/Q3 返工已关闭（§5.11、§5.13）**：`graphs.create` 只建 graph + root session 并调 `adoptRoot`，不再建根任务；`task_intake` 用真实用户目标构造契约（至少一条 mandatory 非 composite 判据，否则具名拒绝零副作用），经可选审核后一次原子提交激活根任务 + 根 run；契约接受前 `task_read`/`task_status` 返回具名「尚未激活」视图，graph name 不再进入 objective；旧图的根任务按历史读取/验收/完成，其上 intake 具名拒绝；终态根 session 不复活。**来源与归属**由统一服务入口（提交/续跑/恢复三处共用 `assertRootContractOrigin`）机械校验：store 必须等于该 session 自己的 store、会话必须是顶层会话（`origin: 'subagent'`/`delegationDepth` 拒绝）、会话自身日志必须有 `source.kind === 'user'` 的本人消息；日志不可读即具名拒绝，全部发生在首次写入之前（不创建 store）。本运行时的 `spawn`/`prompt` 提示词改记自有来源 `runtime-prompt`，不再冒充人类输入。`adoptRoot` 无根任务时先跑既有恢复遍再读回（`ready`/`approved` 激活并绑定、`pending_review` 重发、空 store 具名 `adopted:false` 零写入）。仍未建：契约修订入口（修订=新提案）、模板库、A1 上下文投影；R1 完成轮 3 证明固定场景下澄清答复可送达并被消费、契约可不夹带未确认条件并通过全部必需判据（§5.14 完成轮记录）；根 prompt 与 `task_intake` 说明现含三条契约边界（假设不得替代确认、缺失条件先问用户且不得由环境代答、契约只承载答复支持的内容且判据须可裁定，`99e1311`/`aa19637`/`9a3e508`）；服务层不校验「该顶层会话属于某 graph」（该规则仍在工具层） | `graphs/src/index.ts:create`（改调 `adoptRoot`）；`task-runtime/src/index.ts:intakeRootContract`、`submitRootProposalOnce`、`continueRootProposalIn`、`reconcileRootProposal`、`assertRootContractOrigin`、`adoptRoot`、`nothingAdoptedDetail`、`admitRootProposalIn`；`agent-runtime/src/{index,types}.ts`（`RuntimePromptSource`/`runtimePrompt`）；`agent-singularity/src/tools/{task-intake,root-store}.ts`；`task-runtime/src/admission.ts:rootIndependenceDefects` |
+| 根目标入口 | **A0 已实现，Q2/Q3 返工已关闭（§5.11、§5.13）**：`graphs.create` 只建 graph + root session 并调 `adoptRoot`，不再建根任务；`task_intake` 用真实用户目标构造契约（至少一条 mandatory 非 composite 判据，否则具名拒绝零副作用），经可选审核后一次原子提交激活根任务 + 根 run；契约接受前 `task_read`/`task_status` 返回具名「尚未激活」视图，graph name 不再进入 objective；旧图的根任务按历史读取/验收/完成，其上 intake 具名拒绝；终态根 session 不复活。**来源与归属**由统一服务入口（提交/续跑/恢复三处共用 `assertRootContractOrigin`）机械校验：store 必须等于该 session 自己的 store、会话必须是顶层会话（`origin: 'subagent'`/`delegationDepth` 拒绝）、会话自身日志必须有 `source.kind === 'user'` 的本人消息；日志不可读即具名拒绝，全部发生在首次写入之前（不创建 store）。本运行时的 `spawn`/`prompt` 提示词改记自有来源 `runtime-prompt`，不再冒充人类输入。`adoptRoot` 无根任务时先跑既有恢复遍再读回（`ready`/`approved` 激活并绑定、`pending_review` 重发、空 store 具名 `adopted:false` 零写入）。仍未建：契约修订入口（修订=新提案）、模板库；A1 上下文投影已随第 9 项交付（§5.15）；R1 完成轮 3 证明固定场景下澄清答复可送达并被消费、契约可不夹带未确认条件并通过全部必需判据（§5.14 完成轮记录）；根 prompt 与 `task_intake` 说明现含三条契约边界（假设不得替代确认、缺失条件先问用户且不得由环境代答、契约只承载答复支持的内容且判据须可裁定，`99e1311`/`aa19637`/`9a3e508`）；服务层不校验「该顶层会话属于某 graph」（该规则仍在工具层） | `graphs/src/index.ts:create`（改调 `adoptRoot`）；`task-runtime/src/index.ts:intakeRootContract`、`submitRootProposalOnce`、`continueRootProposalIn`、`reconcileRootProposal`、`assertRootContractOrigin`、`adoptRoot`、`nothingAdoptedDetail`、`admitRootProposalIn`；`agent-runtime/src/{index,types}.ts`（`RuntimePromptSource`/`runtimePrompt`）；`agent-singularity/src/tools/{task-intake,proposal-store}.ts`；`task-runtime/src/admission.ts:rootIndependenceDefects` |
 | Capability | 配置表解析、准入 provider 预检与真实 grant 已建；执行型/知识型侧车契约经统一校验，run 级内容绑定固定实际实现（§5.8）；没有可行性证明或多候选选择 | `capability.ts:resolveCapabilities`；`provider-precheck.ts`；`sidecar.ts:validateSkillProvider`；`run-binding.ts`；`grants.ts:grantSkills` |
-| Handoff / 上下文 | fresh session、handoff、父会话引用、契约系统投影已有；实际主要传父目标/依赖证据/assumptions，worker 摘要含本 run 选定 capability/skill 绑定（S1-C）；根全局 brief、带来源决定和动态有界 ContextView 待建；原始 session query 按 cwd 授权，不等于图/group 隔离 | `handoff.ts`、`orchestrate.ts:buildHandoff`；`run-binding.ts:renderRunBinding`；`agent-runtime/src/contract-reinjection.ts` |
-| 父子交互 / 生命周期 | A3 已改非阻塞（§5.9）：task_decompose 准入后立即返回 batchId，父进入 waiting_children（运行时闸只放行读/状态/诊断/task_cancel），子全部终态后父由 runtime 自动提交验收；worker 经 task_submit_result 显式提交，session idle 不再是完成证据（无进展相位机：标记→一次提醒→到限停止）；取消/恢复/卸载经 cancelBatch/cancelGraph/dispose/reconcileStore。A0 之后根 session 的生命周期不同：契约接受前没有 run（读作「尚未激活」），接受后根 run 出生 `active` 并自决工作，终态即 session 置 `terminal`、迟到 intake 被闸/状态双重拒绝（§5.11）。取消进行中（`cancelGraph` 已关闸、取消未落盘）时，只读查询与协调读不能把闸改回 `active`；取消已经跑完、只留旧读取的返回值时同样不能（闸按自己的决定计数丢弃陈旧值）：重启恢复（waiting_children/终态）仍照 store 补闸，合法 active 执行不受影响（§5.12）。持久 question/answer 与问答等待仍属 A4（字段挂载点已持久化）。DSH send_message 不能直接用于未注册 continuable activation 的这些子节点 | `task-runtime/src/index.ts:decomposeAndRun`、`adoptRoot`、`orchestrate.ts:driveBatch/observeWorkerRun`、`gate.ts`、`agent-singularity/src/tools/{task-submit-result,root-store}.ts`；`agent-runtime/src/index.ts:spawn` |
-| 任务导航 / 诊断 | task_read 当前任务、task_status 整树；review pack 有局部证据及父子摘要，只读 reviewer 可写 Diagnosis；context 的相关上下文/授权取证、自动 reviewer 触发与候选交接待建，不预建动作矩阵或机器因果遍历器 | `agent-singularity/src/tools/{task-read,task-status,task-review-pack,review-agent}.ts` |
+| Handoff / 上下文 | **第 9 项已交付（§5.15）**：worker 的契约/handoff/根简报由 context 在每次真实请求装配时从 store 投影为 `singularity:worker-contract` section（order 80，压缩存活），动态项目状态走 DSH runtime-context 快照；spawn 首消息只是 agent-runtime 的稳定 kickoff + 政策 section，不再夹带渲染内容。持久 handoff 数据仍由 runtime 生成保存；worker 摘要含本 run 选定 capability/skill 绑定（S1-C）；原始 session query 按 cwd 授权的旁路已封死（执行闸单调拒绝），历史读取统一经 `context_read` | `task-runtime/src/handoff.ts:buildHandoff`（数据）、`context/src/{assembly,projections,render}.ts`（投影）；`agent-runtime/src/prompts/worker.prompts.ts`（稳定政策） |
+| 父子交互 / 生命周期 | A3 已改非阻塞（§5.9）：task_decompose 准入后立即返回 batchId，父进入 waiting_children（运行时闸只放行读/状态/诊断/task_cancel），子全部终态后父由 runtime 自动提交验收；worker 经 task_submit_result 显式提交，session idle 不再是完成证据（无进展相位机：标记→一次提醒→到限停止）；取消/恢复/卸载经 cancelBatch/cancelGraph/dispose/reconcileStore。A0 之后根 session 的生命周期不同：契约接受前没有 run（读作「尚未激活」），接受后根 run 出生 `active` 并自决工作，终态即 session 置 `terminal`、迟到 intake 被闸/状态双重拒绝（§5.11）。取消进行中（`cancelGraph` 已关闸、取消未落盘）时，只读查询与协调读不能把闸改回 `active`；取消已经跑完、只留旧读取的返回值时同样不能（闸按自己的决定计数丢弃陈旧值）：重启恢复（waiting_children/终态）仍照 store 补闸，合法 active 执行不受影响（§5.12）。持久 question/answer 与问答等待仍属 A4（字段挂载点已持久化）。DSH send_message 不能直接用于未注册 continuable activation 的这些子节点 | `task-runtime/src/index.ts:decomposeAndRun`、`adoptRoot`、`orchestrate.ts:driveBatch/observeWorkerRun`、`gate.ts`、`agent-singularity/src/tools/task-submit-result.ts`；`agent-runtime/src/index.ts:spawn` |
+| 任务导航 / 诊断 | `task_read` 当前任务、`task_status`（`scope=related|graph`，默认 related，稳定分页）、`context_read` 六种引用读取均为 context 同一读源的薄适配（§5.15）；review pack 有局部证据及父子摘要，只读 reviewer 经既有 ledger 委派绑定、可写 Diagnosis；自动 reviewer 触发与候选交接仍待 A5，不预建动作矩阵或机器因果遍历器 | `context/src/{bindings,projections}.ts`；`agent-singularity/src/tools/{task-read,task-status,context-read,task-review-pack,review-agent}.ts` |
 | Evidence 依赖 | `requiresArtifact` 只认 verified run 且带 pass 判据的证据；`acceptsArtifact` 只要求存在。普通分解缺失时 blocked + Obligation；replay 的 spawn 开/关路径使用同一检查，缺失时在建任务/Run 前抛错，零派发/零成功记录。不自动生成上游，不验证匹配证据的版本和适用性 | `orchestrate.ts:missingRequiredArtifacts`、`runReplayTask` |
 | Obligation | 记录缺能力/缺产物；模板 coverage 由任务声明 capability 或文字提及匹配；不是义务已被证据满足，更不是防漏的硬闸 | `task-runtime/src/obligation.ts:checkObligationCoverage` |
 | 判决 | `pass/fail/inconclusive`；部分 unknown 有 task/verifier 分类；没有 PARTIAL 状态与剩余义务自动派发；未通过 mandatory 判据仍走失败路径；`heuristic` 标记的判据永远不计入确定性通过 | `task/src/types.ts:VerificationResult`；`orchestrate.ts:unmetMandatory` |
@@ -284,9 +284,9 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 | G8 | `task_decompose`/`escalate` 部分拒绝返回普通文本，上层不能可靠用工具错误信号判定 | S2-E / 旧 #33 |
 | G9 | 类型闸只覆盖 `agent-singularity`；其余 Singularity 包的 `build` 仍只有 tsdown，未接 `tsc --noEmit`，其严格类型状态未经本闸保证 | P1 范围外，待独立评估 |
 | G10 | 动态生成已存在，无生成提案审核协议的风险已由 T1+T2/T3 关闭（§5.6、§5.10）：统一可持久化契约、闭合字段集、内容摘要与准入记录（T1）；`generatedTaskReview` 策略、不可变提案与整批内容、决定绑定三个摘要、批准后重检、requestKey 幂等与四个崩溃点恢复（T2/T3，2026-09-23 已验收）。仍未建：Task 模板库（模板不是合法性白名单）、契约修订入口、多进程并发写同一 store 的恰好一次保证 | T1、T2/T3 交付组 / Task 自主构造指导 |
-| G11 | 根 objective/AC 入口过弱；上下文传递缺根目标、祖先决定来源与新鲜度；根目标错了时全局传播不能补救。**A0 已实现、Q2/Q3 返工已关闭（§5.11、§5.13）**：根任务延迟到真实用户目标/AC 被接受后激活，graph name 不再进入 objective，缺独立顶层判据具名拒绝；根契约的来源与归属由统一服务入口机械校验（store↔session、顶层会话、会话自身日志的本人消息；不可读即具名拒绝），本运行时提示词不再冒充人类输入，`adoptRoot` 无根时经既有恢复遍完成恢复；仍未建：A1 的上下文投影（根目标/祖先决定来源与新鲜度），以及「模型对用户请求的解读是否正确」的通用语义证明——机器准入只管结构、判据种类与来源归因；R1 的真实场景证明答复送达，且完成轮 3 在冻结合同下把该场景判为 `pass / path2-limited-goal`（§5.14 完成轮记录）；三条契约边界（假设不得替代确认、缺失条件先问用户、契约只承载答复支持的内容且判据须可裁定）已落在根 prompt / `task_intake` 说明。通用语义证明仍不在机器准入范围内——一次场景通过不等于普遍澄清能力 | A0（返工关闭）→ A1 |
+| G11 | 根 objective/AC 入口过弱；上下文传递缺根目标、祖先决定来源与新鲜度；根目标错了时全局传播不能补救。**A0 已实现、Q2/Q3 返工已关闭（§5.11、§5.13）**：根任务延迟到真实用户目标/AC 被接受后激活，graph name 不再进入 objective，缺独立顶层判据具名拒绝；根契约的来源与归属由统一服务入口机械校验（store↔session、顶层会话、会话自身日志的本人消息；不可读即具名拒绝），本运行时提示词不再冒充人类输入，`adoptRoot` 无根时经既有恢复遍完成恢复；A1 的上下文投影（根目标/硬约束与本人契约/贡献的来源化呈现）已随第 9 项交付（§5.15），「模型对用户请求的解读是否正确」的通用语义证明仍未建——机器准入只管结构、判据种类与来源归因；R1 的真实场景证明答复送达，且完成轮 3 在冻结合同下把该场景判为 `pass / path2-limited-goal`（§5.14 完成轮记录）；三条契约边界（假设不得替代确认、缺失条件先问用户、契约只承载答复支持的内容且判据须可裁定）已落在根 prompt / `task_intake` 说明。通用语义证明仍不在机器准入范围内——一次场景通过不等于普遍澄清能力 | A0（返工关闭）→ A1 |
 | G12 | 父同步等子的循环等待已由 A3 解除（§5.9：分解立即返回 batchId、waiting_children 运行时写闸、显式提交、无进展停止，idle 不再等同执行结束）。仍缺：持久 question/answer 与问答等待（task_ask_parent/task_answer 属 A4）；不能仅添加 ask_parent 或开放 send_message | A3（已交付）→ A4 |
-| G13 | task_status 全树文本不表达执行权/合法动作；session 同 cwd 可读比 group 边界宽；reviewer 局部 pack 不等于跨图因果 debug | A2/A5 |
+| G13 | ~~task_status 全树文本不表达执行权/合法动作~~（A2 已改为 related/graph 分页视图，仍不表达执行权）；~~session 同 cwd 可读比 group 边界宽~~（A2 已封死原始 session 工具，读取域=graph）；reviewer 局部 pack 不等于跨图因果 debug（仍属 A5） | ~~A2~~（已交付待审核）/A5 |
 | G14 | root/worker prompt 与当前方向有漂移：L4/manual、直接问人、make command exit 0、分解意图矛盾；未来工具必须随真实协议接线再写入提示。**R0 已关闭工具面的漂移部分（2026-09-23，已验收，§5.11）**：allow-list 与 prompt 由同一开关布尔派生（off 时提示词不含进化协议段、工具面不含九个 `evolution_*`），并新增根 intake 段（`task_intake`、未激活视图、审核策略、激活前不得 `task_decompose`）；其余角色模板（A1–A6）仍逐票同步 | R0（已验收）→ A0–A6 逐票同步 Prompt 合同 |
 | G15 | 根工具无条件暴露进化链、通用 prompt 混入 BB 指导；runtime 职责集中，未使用接口/仅诊断摘要易被误读为完整保证；缺真实模型运行反馈。**R0 部分关闭（2026-09-23，已验收，§5.11）**：进化链改由装配开关决定是否注册（off = 只注册 19 个常驻工具，on = 28 个，与之前逐名相同），BB 句子从通用 root prompt 移除、领域指导归部署的领域 skill；不新增主管、不合并审批。R1 已补真实运行反馈并于 2026-09-24 验收（完成轮 3 为 `pass / path2-limited-goal`，失败轮次保留）；**R2 已关闭「未使用接口/仅诊断摘要」部分与取消写闸返工（Q1，§5.12）**：`evidenceByVerifier` 无消费者已撤回；`templateDigest` 标明仅诊断、无身份保证；三个无消费者导出（`TaskProposalKind`/`TaskProposalDecision`/`TASK_PROPOSAL_ID_PREFIX`）收回；取消进行中的写闸不再被只读查询/协调读解除，跨取消完成点的陈旧读取也被闸的决定计数丢弃（`closingStores` + `applyStorePhase`，两轮交付 `250a04f`/`8f9086e`）。仍待：runtime 职责集中（drivers 推状态模型）按证据保留、不预定 pull 化；§5.12 记的四项既有取消边界（spawn 续跑、另两条 store 派生写相位入口、`closingStores` 非重入计数、`unload` 无 store 记录）未修。R1 的 V5 ledger 将缺失 cache-write/usage 记为未报告，但完成轮 fixture 的 `driver.json/run-meta.json` 历史 `0` 已披露为 caveat，未来轮次须修自己的 driver 副本；三次生产修复落在根 prompt / `task_intake` 说明。一次通过只证明该固定场景，不冒充效果验收或普遍澄清能力 | R0（证据保留）+ R2 Q1（已关闭）+ R1（已验收） |
 
@@ -379,6 +379,17 @@ A3 已交付非阻塞批次、执行相位、工作区写入归属、显式提�
 完成轮 1、2 为 fail，完成轮 3 在冻结判据下为 `pass / path2-limited-goal`，独立复核通过；这只证明该固定场景。历史失败轨迹、语义重判和缺报口径保留在历史执行记录，旧 fixture 的缓存写 `0` 不可当作已报告用量。
 
 上述切片的源码/测试锚、原始边界与逐轮证据见[本指南旧实施细节](history/2026-09-24-guide-implementation-records.md)和[执行记录](history/2026-09-24-vrtc-execution-records.md)。
+
+### 5.15 A2+A1：Agent 状态上下文（2026-09-25，交付待进度审核）
+
+第 9 项按 D/E 冻结合同整组交付，四个内部提交：`4a510ed`（显式恢复屏障/纯读拆分）、`f90d05b`（`context` 包读取核心）、`0f41d91`（装配接线/工具适配/迁移删除/旁路封闭）、`6e0f651`（独立复核缺口闭合）。当前事实：
+
+- **绑定与读取域**：`context/src/bindings.ts` 从持久事实解析调用者（已发布 graph 成员 + 持久 `TaskStarted`；reviewer 经注入的窄 `ReviewerBindingSource` 核实现有 ledger），不读 runtime 的内存绑定缓存；读取域=当前 graph，跨 graph 具名拒绝（`cross-graph`/`not-found`/`unbound`/`binding-conflict` 等 8 个具名结果词表在 `context/src/refusals.ts`）。
+- **三工具一面**：`task_read({})`、`task_status({scope:related|graph,offset,limit})`、`context_read({kind,ref,offset,limit})` 均为 agent-singularity 薄适配，共用 context 读源；16 KiB 上限唯一常量 `CONTEXT_OUTPUT_LIMIT_BYTES`，核心契约超限具名 `context-too-large` 不静默裁剪。
+- **装配**：`context/src/assembly.ts` 的 scoped `system-prompt/assemble` 监听把不可变半（根简报+契约+handoff）注入 `singularity:worker-contract` section（order 80，压缩存活），动态半注入 runtime-context 平面（`singularity:state`），重复装配不累加；诊断性组装（无 agent）与 graph_spawn 普通代理不注入。root 已接受契约同样注入；reviewer 注入委派目标契约（review-only）。
+- **旁路封闭**：四个原始跨 Session 工具（`session_event_read`/`session_event_trace`/`session_trace`/`session_search`）自各角色有效工具面移除，并由 `agent-runtime/src/raw-session-guard.ts` 在 createRoot/resumeRoot/spawn 三处安装 `tools.guard` 单调执行拒绝；worker/reviewer baseline 与 gate 白名单同步收口，root allow-list 增加 `context_read`。
+- **迁移闭合**：`renderWorkerPrompt`、`task-runtime/src/contract.ts`、`contract-reinjection.ts`、runtime 侧 `renderRunBinding`、`root-store.ts`、`run-phase.ts` 已删除；runtime 保留执行绑定校验（`bindRunProviders`/`readRunBinding`）、持久 handoff（`buildHandoff`/`recordHandoffIn`）与恢复闸；`SpawnRequest.contract` 移除，`taskWorker`/`beforePrompt` 进入 spawn 合同。
+- **测试锚**：`tests/integration/context-assembly.spec.ts`（三层链/域隔离/压缩重启/replay/reviewer/零副作用）、`worker-contract.spec.ts`（真实 SystemPromptProjection 与 RuntimeContextProjection 去重）、`cancellation-gate.spec.ts`（R2 反例保留，第 2 例锚定恢复屏障）、`context/tests/unit/*`（绑定/读取/界限/副作用）。证据、未覆盖范围（D3/D5/D8/D9 等）与独立复核结论见[交付记录](history/2026-09-25-a2-a1-delivery-record.md)。
 
 ## 6. 文档维护
 

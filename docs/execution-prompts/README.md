@@ -1,6 +1,6 @@
 # Singularity 构建任务派发入口
 
-当前（2026-09-24）：第 9 项 A2+A1 进行中，子目标 1 提交 `4a510ed`，整组未验收。已派发的实现主代理从该提交继续，使用[第 9 项专项 prompt](09-a2-a1-context.md)及下方公共合同；下一票以[建设计划文首唯一表](../2026-09-20-vrtc-code-change-plan.md)为准。R1、R2、R3 等已验收票不重复派发，逐轮证据见[历史执行记录](../history/2026-09-24-vrtc-execution-records.md)。
+当前（2026-09-25）：第 9 项 A2+A1 **已交付待进度审核**（交付 `4a510ed`/`f90d05b`/`0f41d91`/`6e0f651`，[交付记录](../history/2026-09-25-a2-a1-delivery-record.md)）。进度审核确认前不启动下一票；确认后下一票以[建设计划文首唯一表](../2026-09-20-vrtc-code-change-plan.md)为准。R1、R2、R3 等已验收票不重复派发，逐轮证据见[历史执行记录](../history/2026-09-24-vrtc-execution-records.md)。
 
 进度核实和下一票材料由[进度审核指挥 prompt](progress-review-and-dispatch.md)处理；已派发票尚未验收时不启动下一票。后续单票从[派发模板](task-dispatch-template.md)填写，直接引用计划 D/E/F，不复制旧方案或重新选型。P1–P4 的原始 prompt 保留在本目录供历史回归，不作为当前任务入口。子代理只读获派子目标的相关合同片段。
 
