@@ -25,7 +25,7 @@
 | 5 | T2 + T3：契约审核与恢复（一个交付组） | 已验收（2026-09-23，双模型并行独立复核 + 综合复核确认） | Kimi Code 主代理指挥 + 4 阶段实现子代理（A 提案合同层 / B task-runtime 生命周期、重检、幂等与恢复 / C 工具面、审批渠道与 prompt / D 集成级验收、模型协议 fixture 与文档收尾）+ 2 并行独立复核子代理 + 1 综合复核子代理 | 见「T2+T3：契约审核与恢复 执行与验收记录」 | off/all、审核持久化、批准后重检及崩溃恢复一起验收，不单独交付不可恢复的 all |
 | 6 | A0 + R0：根入口与默认运行面（本票返工 A0） | 已验收（2026-09-23，进度审核复核 + 全量回归实跑） | Kimi Code 主代理（Q2/Q3 各一个实现子代理 + 1 个只读独立复核子代理，复核后一轮缺陷修复） | 原记录 +「补救交付复核」Q2/Q3 +「A0 返工（Q2/Q3）执行与验收记录」 | 已满足：根来源/归属（store↔session、顶层会话、本人消息）与 adoptRoot 恢复反例关闭，R0 证据保留，全量单测/集成与独立复核通过。进度审核已确认，下一项仅派第 7 项 |
 | 7 | R2：按证据整理运行时（本轮只修取消写闸） | 已验收（2026-09-24，补充返工 `8f9086e` 经进度复核） | Kimi Code 主代理（两轮实现/复核）+ 本轮进度复核 | 原记录 +「R2 Q1 补充返工执行与验收记录」+「R2 补充返工进度验收（2026-09-24）」；[R2 合同](execution-prompts/06-r2-cancellation-gate.md) | C1 两条查询交错、C2 重启恢复、C3 合法 active、C4 相关调用顺序均通过；已记录未证实的取消边界不冒充本票保证 |
-| 8 | R1：真实运行验证（纠正 S3 与实验账） | 待派发（R2 前置已验收；Q4/Q5 尚未修复） | 待填 | 原记录 +「补救交付复核」Q4/Q5；[补验证 prompt 与 V1–V6](execution-prompts/07-r1-supplemental-validation.md) | 先修夹具及判据，再补必要模型验证；保留 S1/S2 证据，全部尝试计入用量；本票完成后再审 A2 |
+| 8 | R1：真实运行验证（纠正 S3 与实验账） | 已交付待进度审核（2026-09-24；Q4/Q5 按冻结合同重验） | Kimi Code 主代理（冻结合同、历史账、集成、全量、guide）+ 2 实现子代理 + 1 只读独立复核子代理（三轮） | 原记录 +「R1 补验证（Q4/Q5）执行与验收记录（2026-09-24）」+ [补验证 prompt 与 V1–V6](execution-prompts/07-r1-supplemental-validation.md) | 新判据把原 S3 判 fail；一次真实 S3 判 pass（path2：澄清可用、答复被消费、未固化未知）；V1–V6 与全量回归完成；审核通过后才准备 A2。生产代码零改动 |
 | 9 | A2：任务导航与合法动作 | 待前置 | 待填 | R2 记录 D 节为合同草案；补救复核关闭后核对 | 第 6–8 项重新验收后再派；读取权限和实际动作检查一致，不以 gate 放行集合冒充全部动作前置 |
 | 10 | A1：全局上下文投影 | 待复定 | 待填 | 待填 | 复用 A2 读取域，根目标/贡献/必要证据有来源，恢复与压缩不丢核心事实；不照搬字段全集 |
 | 11 | A4：父子澄清 | 待复定 | 待填 | 待填 | 父子与三层问答、消息故障恢复、写闸及多阻塞处置完整 |
@@ -69,7 +69,7 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 6 项 A0 已验收；第 7 项 R2 的 Q1 补充返工 `8f9086e` 于 2026-09-24 经进度复核验收。当前可派 [第 8 项 R1 补验证](execution-prompts/07-r1-supplemental-validation.md)，一次只执行这一票；A2 仍待 R1 验收。原建设顺序为 A0 + R0 → R1 → R2；因 R2 写闸回归影响真实运行，返工顺序调整为表中的 A0 → R2 → R1。Task 与协作方向仍见 [Task 指导](task-contract-construction-guide.md)、[深入架构](exploration-evolution-architecture.md)与 [Prompt 合同](agent-prompt-contracts.md)。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 6 项 A0 已验收；第 7 项 R2 的 Q1 补充返工 `8f9086e` 于 2026-09-24 经进度复核验收。第 8 项 [R1 补验证](execution-prompts/07-r1-supplemental-validation.md) 已于 2026-09-24 交付并**待进度审核**（记录见本节后「R1 补验证（Q4/Q5）执行与验收记录」），审核通过前不派第 9 项 A2、不并行执行其他票。原建设顺序为 A0 + R0 → R1 → R2；因 R2 写闸回归影响真实运行，返工顺序调整为表中的 A0 → R2 → R1。Task 与协作方向仍见 [Task 指导](task-contract-construction-guide.md)、[深入架构](exploration-evolution-architecture.md)与 [Prompt 合同](agent-prompt-contracts.md)。
 
 ### 补救交付复核（2026-09-23，d5b0bb6）
 
@@ -607,6 +607,55 @@ driver 未在仓库内重建：两轮 driver 分别解包于 `/home/ROXY/code/bb
 - S3 根 run 终态为 `failed`（模型自设 review/heuristic 判据的机械结果），S3 的判定对象是契约构造路径而非终态，二者在记录中分开陈述。
 - S1/S2/S3 中根模型都调用了 stand-in 工具（S1 `graph_mark_ready`，S3 `graph_spawn`/`graph_mark_ready`）——夹具边界，与 `tests/support` 处理相同，未产生任务树外产物；真实部署中这些是 `graph` 服务的真实工具。
 - 未部署、未推送、未跑 BB 仿真。仓库 `src/tests/docs` 零改动（唯一例外 = 本节）；harness 与 singularity 两个 git 工作区相对开工前无变化；证据全树与两个 driver 包内零密钥明文（`.dsh/api.env` 的 key 全文扫描无命中）。
+
+## R1 补验证（Q4/Q5：S3 澄清判据与实验账）执行与验收记录（2026-09-24）
+
+> 本节只覆盖第 8 项 R1 的 Q4/Q5：修复真实问答夹具、冻结并独立复核新判据、按冻结合同执行一次真实 S3、记录全部新尝试并更正历史实验账。S1/S2 历史证据保留、未重跑；A2 未实施；生产代码与仓库测试零改动，全部工作面在仓库外 `r1-supplemental-2026-09-24/`。原 R1 记录与「补救交付复核」Q4/Q5 保留为历史，不覆写。
+
+| 字段 | 填写内容 |
+|---|---|
+| 状态、最近更新日期 | **已交付待进度审核**（2026-09-24；本轮 Q4/Q5 按冻结合同重验完毕） |
+| 执行 agent / 任务链接 | Kimi Code 主代理（冻结合同、历史账、集成、全量、guide）+ 实现子代理 ×2（①夹具修复与 V1/V2/V4 定向测试；②冻结合同下的一次真实运行与证据整理）+ 只读独立复核子代理 ×1（三轮：收费前判据复核 → 真实运行判决 → V1–V6 与账目复核）。合同见[补验证 prompt 与 V1–V6](execution-prompts/07-r1-supplemental-validation.md) |
+| 开始日期 / 验收日期 | 2026-09-24 / 待进度审核 |
+| 前置验收记录 | 第 7 项 R2 Q1 补充返工 `8f9086e` 于 2026-09-24 经进度验收；开工读到唯一表第 8 行、本票 prompt 与派发入口 |
+| 修改前基线 | 开工实际 HEAD：Singularity `9f8ba92`（R2 验收文档提交）、外层 harness `c48a1cd7fb`；Singularity 工作区干净，外层仅既有的 `thirdparty/deepseek-harness` 子模块脏标记（指针未变 `0d1f5000…`） |
+| 交付版本 | 生产代码与仓库测试**零改动**（Singularity 仍 `9f8ba92`，无 `src/`、`tests/` 或 lib 改动）；交付 = 本计划 / 主 guide / 执行入口等文档提交（SHA 见本节「交付提交」行）+ 仓库外新树 `/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/{fixtures,driver,evidence,run}` |
+| 验收项对应 | V1 → `driver/r1-stack.ts` 的 `answerHuman` 修复 + `driver/r1-wiring.spec.ts`（真实 `hitl_ask`→`userQuestions`→会话 `tool/result`）与记录失败反向用例；V2 → `driver/s3-criteria.ts`（`s3-criteria/1`，sha256 `4ce8095c…`）+ `driver/s3-criteria.spec.ts` + 原轨迹重放 `fail`；V3 → `driver/r1-s3.spec.ts` 的一次真实运行与 `evidence/criteria-replay/s3-run.json`；V4 → 同一确定性套件的故障注入与合成轨迹用例；V5 → `evidence/ledger.json` 与各尝试独立目录；V6 → 本节「历史用量更正」+ `evidence/ledger.json:historyCorrection` |
+| 实际检查 | `packages/singularity` `pnpm build` 通过（11 包，exit 0）；外层 `pnpm vitest run --project unit packages/singularity` = 44 文件 / **1461** 项通过；`--project integration` = 38 文件 / **268** 项通过；`pnpm run verify-persistence` = 4 个事件根匹配；`agent-singularity` `pnpm exec tsc --noEmit` 通过（exit 0，零输出）；`git diff --check` 干净；仓库外判据套件 `pnpm exec vitest run --config …/driver/vitest.r1.config.ts` = **17/17** 通过（13 判据 + 4 接线）。以上与开工前基线逐项一致（本轮无生产改动） |
+| 独立复核 | 只读复核子代理三轮（非实现者）：① 收费前判据复核，发现 F1（显式内容不匹配落入 inconclusive）并在收费前由实现方最小修复；② 真实运行判决与 V1–V6 逐项（旧轨迹重放仍 `fail`、本次 `pass`、7 个变异测试、两处漏洞探针、账目复算）；③ 对 V5/V6 两项行政/算式修正的确认。实现者自述不替代复核 |
+| 文档同步 | 主 guide（文首审核行、§1 当前阶段判断、§3 派发顺序、§4.1 根目标入口行、§4.2 G11/G15、§4.1 未覆盖边界第 (8) 项、新增 §5.14）；本计划第 8 行、派发入口段、本节；[执行 prompt 入口](execution-prompts/README.md) 顶部与当前派发段。历史原判决、原 R1 记录、原始证据目录均未覆写 |
+| 模拟与未覆盖范围 | 真实：DSH loop、`TaskRuntime`/`AgentRuntime`/`VerifierRegistry`、真实 singularity 工具（含真实 `hitl_ask`）、真实网关模型 `step-5-preview`（reasoningEffort high）、真实 checkout 与隔离 `DSH_HOME`。scripted 模型仅用于确定性接线/故障注入用例（只替代模型输出，不替代 runtime/工具/verifier 接线），源码与本节均标明；`graph_spawn`/`graph_mark_ready` 等仍为 stand-in（同 `tests/support` 做法）。未覆盖：一次场景通过不证明普遍澄清能力或成功率提升；**没有**生产通用语义闸——判据的语义面依赖显式独立复核（边界见下）；未部署、未推送、未跑 BB 仿真 |
+| 未解决缺陷 / 阻塞 | 本票合同内无未解决缺陷。如实保留的边界：(1) 判据语义面依赖独立复核记录，复核若系统性漏报，判据无法自查——复核者已在本轮真实记录上构造并通过该漏洞示例，如实记录、未改判据掩盖；(2) 产物内容只在**宣称交付**时受 M3 约束；(3) 本轮合同的判据本身是浅 grep（`ac-1`–`ac-3` + composite），内容层面的实质判断来自独立复核与产物阅读，不是 verifier 的语义证明；(4) 记账仍是适配器层事后统计，本轮有一条 usage 记录缺失（记为缺失，未记零）；(5) 历史首轮完整日志不可恢复，V6 口径为下界 |
+| 最终验收结论 | 内部验收通过、待进度审核确认。依据：合同与判据在收费前冻结并经独立复核；新判据把原 S3 轨迹判 `fail`；本轮一次真实 S3 判 `pass`（path2-limited-goal，14 项检查全绿）；V1–V6 逐项证据与全量回归见下 |
+| 下一项 | 唯一顺序第 9 项 A2（任务导航与合法动作）：**前置为第 8 项经进度审核验收**；本票完成前不准备实施。一次 S3 通过只证明该固定场景成立 |
+
+**冻结合同与判据（先冻结后运行）**：逐字输入 `Create report.txt summarizing the quarter.`；澄清固定答复 `No data was provided; state that explicitly.`；环境为空临时 checkout（`git init`）、隔离 `DSH_HOME`/`HOME`、`generatedTaskReview: 'off'`、evolution 默认 off；请求经真实用户消息入口（`source.kind === 'user'`），满足 A0 来源合同，未伪造日志、未绕过 intake。运行时硬限制 = 每根 `rootBudget { wallTimeMs: 300000, maxRuns: 8 }`；软统计 = 工具调用 ≤100、墙钟 ≤15 分钟（含冒烟，事后核算）；token 沿用 2026-09-23 取消上限的授权（完整记录入/出与缓存，不声称在旧上限内）。合同、判据模块与套件哈希记于 `fixtures/frozen-contract.json` 与 `evidence/ledger.json:contractHashes`；收费调用发生在冻结与独立复核**之后**。运行前修正（§5a）：采纳复核 F1，显式 `artifactMatchesGoal:false` 归入 fail（未陈述仍为不得 pass 的阻塞项），并由新增用例钉住。
+
+**判据（V2）**：`driver/s3-criteria.ts`（纯函数；输入 = 原始记录 + 显式独立语义复核记录）。机械项：M1 真实 `hitl_ask`→`userQuestions`→固定答复→工具结果→会话 JSONL 工具结果逐字一致；M2 澄清被消费或根契约已激活，否则不得 pass；M3 宣称交付时须真实非空产物 + 真实 verifier 对目标的 `pass` + 复核认定产物匹配目标，否则 fail。语义项：S1 活动契约固化未确认条件 ⇒ fail（写进 assumptions 不算通过）；S2 目标交付依赖未解决条件 ⇒ fail；S3 `user-confirmed` 必须引用实际送达的答复；S4 有限目标夹带未确认内容或宣称完成季度分析 ⇒ fail。允许路径 path1（保留未知）/ path2（有限目标），无法判定记 inconclusive。对原 S3 轨迹（`r1-evidence-2026-09-23/s3/driver.json`，只读重放）判 **fail**（5×S1 + S2：objective/AC 固化「最近完成的自然季度」与「仅 checkout 来源」，且 `hitl_ask` 失败后仍激活）；复核者另以 7 个变异测试证明必需规则各自承重、并非空断言。
+
+**V1 夹具接线**：原缺陷是夹具 `answerHuman` 用 `JSON.stringify(asked)` 记录携带 live `Agent` 的请求，触发 cordis "without inject" 守卫；异常在返回答复前抛出 → 工具调用失败、答复根本没到模型（原 S3 走路径 (b) 的直接原因）。修复为只记录普通数据（seam/session/问题文本/答复文本），并把记录包在 `try/catch`（失败记入 `recordErrors`，绝不改变返回给服务的答复、不把失败算成成功）。链条逐环节可核对：工具调用 `chatcmpl-tool-947014ca192bbc58`（`isError:false`）→ desk 记录（`hitl-ask` 问题逐字）→ 工具结果逐字 = 固定答复 → 根会话 JSONL 该 callId 的 `tool/result` 逐字相同；模型下一条消息写着「The human channel confirms: **no data was provided**」并据此构造契约。另有无模型反向用例：注入记录失败后调用仍成功、答复仍到达、失败可见于 `recordErrors`、判据按 `unaccounted` 判 fail。
+
+**V3 本轮真实运行（一次尝试，无重跑）**：命令 `pnpm exec vitest run --config …/driver/vitest.r1-run.config.ts` 执行一次，先冒烟（ok，12/409，已计入本轮）再一次 S3（墙钟 204.7s，17 次工具调用、0 错）。澄清确实可用且答复被消费。被接受根契约 objective = 用户原话 `Create report.txt summarizing the quarter.`；AC = `report.txt` 存在非空、含 "quarter" 指涉、**明确声明未提供数据**，外加一条 composite；assumptions 明确写「'the quarter' has no defined date range」；constraints 写明不得编造数据。根 run 终态 `verified`；产物 `report.txt` 822 字节（sha256 `befd505d…`），开头即 "Note: No data was provided for this summary."，各小节为 `[To be filled in: …]` 占位；判据 7 项真实 `pass`（`command` exit 0 + `composite`）。判据判决 **`pass` / `path2-limited-goal`**（14 项检查全绿；path1 亦成立）。
+
+**语义复核的三个条件（引用真实字段）**：`quarter` = **保留未知**（引用 `rootContract.assumptions[0]`：「'the quarter' has no defined date range」；用户消息与答复都未给季度，objective 是用户原话，AC/constraint 未命名任何期间，产物无日期/年份）；`dataSource` = **用户已确认**（引用实际送达答复——确认的是「未提供数据」，不是任何正向来源，也不等于「仅 checkout」）；`deliveryScope` = **用户已确认**（同一答复限定交付为「明说未提供数据」，文件名来自用户原话与契约约束，`ac-3` 对文件实际校验）。**记录在案的判断题**：`assumptions[0]` 后句「treats it generically as the current/final quarter」被复核读作带保留的泛称而非固化（S1 作用域是 objective/AC/constraints，该短语本身就在记录「范围未定义」的分句内，产物与 verifier 均未实例化任何期间）；反向读法（视作固化 ⇒ S1 ⇒ fail）已写入复核记录，未隐藏。未知条件未被擅自固化。
+
+**V4 不可用分支（无收费模型）**：接线用例覆盖澄清失败（`isError` ⇒ `unavailable`）与未答复（`answerMissing`）——失败/未答复本身不单独定结论，但**不得被当成用户同意**：随后激活依赖未知条件的目标 ⇒ fail；显式保留未知的同形轨迹 ⇒ pass。判据级合成用例覆盖答复一致性失败、工具失败、未知未解决、交付声明缺产物或缺 verifier pass、产物内容与目标不匹配、记录失败注入。这些用例在源码与本记录明确标注为**判据/夹具验证**（scripted 模型只替代模型输出），不宣称生产通用语义闸已实现。
+
+**V5 实验账**：本轮两个新尝试各自独立目录——`evidence/smoke-1/`（连通性冒烟：1 次模型调用、0 工具调用、不建 store/task/run，具名说明未创建原因）与 `evidence/s3/`（`driver.json`、`run-meta.json`、`repo/`、`dsh-home/` 会话 JSONL 与 task-evidence）。逐项含输入配置、版本（Singularity SHA、driver 与合同哈希）、时间、Session/Task/Run/Evidence 引用、原始 usage（入 34518 / 出 16097 / 缓存读 168704 / 缓存写 0，按会话分列）、17 次工具调用、停止原因（根终态 `verified`）与判决。**缺一条 usage 记录（批次落定请求无响应）如实记为缺失，未记零**；缓存读单列不重复相加；未覆盖旧证据；`R1_ALLOW_RERUN` 未设、无意外重复。账本 `evidence/ledger.json`（判决列由主代理在判决后填 `pass` 并指向 `evidence/criteria-replay/s3-run.json`）。
+
+**V6 历史用量更正**（保留旧报告，另附更正；逐项可复算）：
+
+| 口径 | 数值 | 出处 |
+|---|---|---|
+| 已存记录输入+输出 token（**下界**） | **≥ 175461** | `budget.json` 143978（S1 第二次 49001 + S2 23227 + S3 70855 + 冒烟 895）+ 首轮 S1 31483（`3b446cb` 记录） |
+| 已存记录工具调用（**下界**） | **≥ 58** | `budget.json` 44（14+6+24）+ 首轮 S1 14（同上） |
+| 含网关缓存读（**下界**） | **≥ 501349** | 405098（`budget.json`：143978 + 缓存 261120）+ **96251**（首轮 S1：31483 + 缓存 64768） |
+| 首轮冒烟 | 200 token（12/54 + 12/122） | 已含在 `budget.json` 的 895 内，**不重复相加**；`3b446cb` 的同口径 96451 含这 200，不能作为累加项——冻结合同 §5 的括号算式笔误已在本记录与账本更正，总数 501349 不变 |
+| 缺失项 | 首轮完整会话日志被覆盖，仅残留 task-evidence 目录 | 以上均为下界：不称首轮原始证据齐备、不将下界写成精确全量 |
+| 本轮增量 | 入+出 **51036**、工具调用 **17**、缓存读 168704 | 本轮两尝试（12+409+34518+16097） |
+| 本轮后累计 | 入+出 **226497**、工具调用 **75**、含缓存读 **721089** | 175461+51036 / 58+17 / 501349+51036+168704 |
+
+**测试与回归**：仓库内零改动，全量回归与开工基线逐项一致（见上表「实际检查」）；新增测试全在仓库外 `driver/`（确定性、无收费调用），真实运行走单独 config（`vitest.r1-run.config.ts`），不混入默认回归。重放命令：确定性套件 `cd /home/ROXY/code/bb_work/harness && pnpm exec vitest run --config /home/ROXY/code/bb_work/r1-supplemental-2026-09-24/driver/vitest.r1.config.ts`；真实运行（需凭据、本轮已用完一次尝试，不重跑）`… --config …/driver/vitest.r1-run.config.ts`。
 
 ## R2：按证据整理运行时 执行与验收记录（2026-09-23）
 
