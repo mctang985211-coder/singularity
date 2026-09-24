@@ -1,0 +1,3 @@
+- insert:
+    - id: singularity-context
+      name: '@dangosys/dsh-singularity-context'

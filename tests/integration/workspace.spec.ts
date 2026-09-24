@@ -12,6 +12,7 @@ const cordisPlugins = [
   'task',
   'verifier',
   'task-runtime',
+  'context',
   'agent-runtime',
   'agent-singularity',
   'graph-web',

@@ -13,6 +13,8 @@
       name: '@dangosys/dsh-singularity-verifier'
     - id: task-runtime
       name: '@dangosys/dsh-singularity-task-runtime'
+    - id: singularity-context
+      name: '@dangosys/dsh-singularity-context'
     - id: agent-runtime
       name: '@dangosys/dsh-singularity-agent-runtime'
     - id: singularity-agent
