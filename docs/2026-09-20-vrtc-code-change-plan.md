@@ -629,7 +629,7 @@ driver 未在仓库内重建：两轮 driver 分别解包于 `/home/ROXY/code/bb
 | 最终验收结论 | 内部验收通过、待进度审核确认。依据：合同与判据在收费前冻结并经独立复核；新判据把原 S3 轨迹判 `fail`；本轮一次真实 S3 判 `pass`（path2-limited-goal，14 项检查全绿）；V1–V6 逐项证据与全量回归见下 |
 | 下一项 | 唯一顺序第 9 项 A2（任务导航与合法动作）：**前置为第 8 项经进度审核验收**；本票完成前不准备实施。一次 S3 通过只证明该固定场景成立 |
 
-**交付提交**：Singularity `fc71df0`（本记录的文档交付：计划 / 主 guide / 执行入口与相关入口状态）、外层 harness `d1b270a3d7`（只提交对应子模块指针，不推送）。提交后 Singularity 工作区干净；本轮回归与真实运行针对的都是 `9f8ba92`（生产代码与仓库测试未变）。仓库外证据树不进入仓库提交，按 `r1-supplemental-2026-09-24/` 路径读取，并在其 `evidence/ledger.json` 记账。
+**交付提交**：文档交付提交 Singularity `fc71df0`（计划 / 主 guide / 执行入口与相关入口状态），其后只有回填这一行的记录提交；外层 harness 只提交对应子模块指针（首个同步提交 `d1b270a3d7`，含其后的指针回填），均不推送。提交后 Singularity 工作区干净；本轮回归与真实运行针对的都是 `9f8ba92`（生产代码与仓库测试未变）。仓库外证据树不进入仓库提交，按 `r1-supplemental-2026-09-24/` 路径读取，并在其 `evidence/ledger.json` 记账。
 
 **冻结合同与判据（先冻结后运行）**：逐字输入 `Create report.txt summarizing the quarter.`；澄清固定答复 `No data was provided; state that explicitly.`；环境为空临时 checkout（`git init`）、隔离 `DSH_HOME`/`HOME`、`generatedTaskReview: 'off'`、evolution 默认 off；请求经真实用户消息入口（`source.kind === 'user'`），满足 A0 来源合同，未伪造日志、未绕过 intake。运行时硬限制 = 每根 `rootBudget { wallTimeMs: 300000, maxRuns: 8 }`；软统计 = 工具调用 ≤100、墙钟 ≤15 分钟（含冒烟，事后核算）；token 沿用 2026-09-23 取消上限的授权（完整记录入/出与缓存，不声称在旧上限内）。合同、判据模块与套件哈希记于 `fixtures/frozen-contract.json` 与 `evidence/ledger.json:contractHashes`；收费调用发生在冻结与独立复核**之后**。运行前修正（§5a）：采纳复核 F1，显式 `artifactMatchesGoal:false` 归入 fail（未陈述仍为不得 pass 的阻塞项），并由新增用例钉住。
 
