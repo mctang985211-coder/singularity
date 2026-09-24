@@ -528,6 +528,11 @@ describe('AgentRuntime root lifecycle', () => {
     expect(prompt).not.toContain('evolution')
     expect(prompt).not.toContain('stay manual')
     expect(prompt).not.toContain('Buckyball')
+    // The assumption boundary rides in every root prompt: an assumption records
+    // what the contract takes as given and may never settle a condition the
+    // user did not confirm (R1 S3 evidence: the quarter was fixed that way).
+    expect(prompt).toContain('An assumption is not an answer')
+    expect(prompt).toContain('must never settle a condition you could not confirm')
   })
 
   test('resumes a root with the full allow-list and the evolution protocol when the deployment turned the chain on', async () => {

@@ -229,7 +229,9 @@ export function defineTaskIntakeTool(ctx: Context) {
         items: { type: 'string' },
         description:
           'External conditions this contract rests on, in your words, each marked as an assumption rather than as something the user ' +
-          'asked for. They are persisted with the contract and shown to whoever reviews it',
+          'asked for. They are persisted with the contract and shown to whoever reviews it. An assumption is not a confirmation: it may ' +
+          'never settle a value the user did not give when that value would change the objective, the scope or the acceptance — keep such ' +
+          'a condition explicitly unknown, or ask the user again.',
       },
       constraints: {
         type: 'array',
