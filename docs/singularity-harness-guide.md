@@ -115,7 +115,7 @@ A2 与 A1 合成一个可验收交付组：授权概览、按引用取细节、�
 
 R3 是避免共享导出同时迁移的串行维护安排，不是上下文能力的技术前置；禁止借此要求先整理完所有大文件。后续每票内部交接顺序见计划 F，主代理集成整组，子代理一次只领取一个确定目标。
 
-2026-09-24 派发前重读结论：保留上述架构和顺序。计划 F 已补明 replay 实验血缘不授权问父、task_recover 先由 evolution 核对晋升再由 runtime 重检执行、EVO-1 必须有真实 Agent 运行证据才能整组验收。A6 的工作量应按接口串行交接，不能整个转派一个子代理。**当前 R1 无模型返工已交付待进度审核**，归档 S3 为 inconclusive（未通过），第 8 项仍返工；此时使用[进度审核 prompt](execution-prompts/progress-review-and-dispatch.md)，不要重复派已完成的返工。审核后仍按[唯一执行表](2026-09-20-vrtc-code-change-plan.md)决定后续。
+2026-09-24 派发前重读结论：保留上述架构和顺序。计划 F 已补明 replay 实验血缘不授权问父、task_recover 先由 evolution 核对晋升再由 runtime 重检执行、EVO-1 必须有真实 Agent 运行证据才能整组验收。A6 的工作量应按接口串行交接，不能整个转派一个子代理。**第 8 项 R1 已于 2026-09-24 验收**（无模型返工 + 三个完成轮，完成轮 3 判 `pass / path2-limited-goal`，§5.14 完成轮记录）；归档 S3（补验证轮）与完成轮 1、2 的失败保留为历史。下一票按[唯一执行表](2026-09-20-vrtc-code-change-plan.md)是第 8a 项 R3，不要重复派已完成的返工或补验证。
 
 每票派发必须列出“事实所有者、行为所有者、工具/提示词消费者、迁出与删除位置”。新增模型策略不能以 enum、固定错误目录或全局状态机烙进 task；新增知识不能自动成为契约或权限。取舍由当前消费者和真实失败说明，不以“未来也许需要”为由增加核心设施。用户审核改进与证据，不负责补写实现。
 
@@ -465,7 +465,7 @@ T1 把“任务契约”从散落在工具 schema、runtime 局部函数与事�
 - **工作区冲突时提案先落库的顺序选择**：`submitRootContractProposal` 先落提案，激活才 claim checkout。冲突（`WorkspaceBusyError`，点名持有者 store/task/run 与起始时间）使激活整段拒绝、零根任务零 run，但提案留在记录上（`ready`）——记录的是「谁问过」，效果另算；持有者释放后同一提案可由 `continueProposal` 续跑，不必重提。实测：第二根 intake 返回拒绝文本时该 store 已有 1 条 `TaskProposalSubmitted`、0 task、0 run。
 - **跨进程并发只依赖 store 自身拒绝**：进程内按 store 串行（`serializeRootIntake`），第二个进程的并发激活由 reducer 的一次性建根闸拒绝（store 已有根即拒），不引入跨进程锁，也不承诺「工具外部副作用恰好一次」。
 - **崩溃点「激活已提交未绑定」的重绑定门是 `adoptRoot`**：`reconcileStore` 的提案遍只处理 `ready`/`pending_review`/`approved`（`isOpenProposal` 不含 `admitted`），其 `rebindActivatedRoot` 分支在一次恢复激活之后冗余执行；进程死亡后的重绑定由 graph 入口 `adoptRoot` 承担（绑定 + 相位派生），补通知只在 `rebindActivatedRoot` 内（通知是须知，不是唤醒义务）。
-- **根 intake 缺独立判据是结构规则**：它判定判据种类，不判定命令是否恒真或目标解读是否正确；R1 固定场景证明澄清答复能到达模型，但其目标形成仍在返工（§5.14）；来源存在与归属由 A0 机械校验，两者不能互相替代。
+- **根 intake 缺独立判据是结构规则**：它判定判据种类，不判定命令是否恒真或目标解读是否正确；R1 完成轮 3 在固定场景下证明澄清答复能到达模型并被消费、契约可不夹带未确认条件并通过全部必需判据（§5.14 完成轮记录），但这不构成通用语义证明；来源存在与归属由 A0 机械校验，两者不能互相替代。
 - **未激活前的提案读取/续跑（本组交付内已修复，复核 A6 端到端证实）**：根 session 在契约激活前没有绑定 run，`task_proposal_read`/`task_proposal_continue` 原先以 `no task run is bound to session` 失败；现对该具名状态回退解析本 session 自有的根 store（`agent-singularity/src/tools/root-store.ts:proposalStoreFor`），其他错误原样抛出，服务层 owner/调用者校验不变；测试锚 `agent-singularity/tests/unit/task-proposal-tools.spec.ts`。剩余边界：`task_proposal_cancel` 仍是 run 解析（该状态下没有提示文本指向它，需要时按同一修法开放）；回退触发依赖该具名错误文案，runtime 提供结构化判别时可再收敛。
 - **根预算零改动**：接受前无根任务，`resolveRootBudget` 走既有具名恢复诊断；`run.startedAt` 即接受时点，A3 记账语义不变。A3 等待窗口本轮未调整（无因窗口失配的失败）。
 
