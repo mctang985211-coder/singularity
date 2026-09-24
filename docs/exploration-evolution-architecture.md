@@ -2,7 +2,7 @@
 
 日期：2026-09-21。状态：架构决定与待建合同，不是已上线功能。基线 Singularity `9900959`，外层 harness `51b6e2f`；本地 DSH `0d1f50007f9bca3f52b06e1c3074fa14d5fb0720`。
 
-2026-09-23 复核代码 `d5b0bb6`：A3 与 T2/T3 交付保留，A0 的来源/恢复、R2 的取消写闸、R1 的 S3 验收返工，R0 默认运行面证据保留；自主改进恢复仍未建。**2026-09-23 A0 返工（Q2/Q3）已关闭**：来源归属判定（store↔session、顶层会话、本人消息三规则，三入口共用，拒绝均在首次写入前）与 `adoptRoot` 公共恢复入口已落地，独立复核通过、未由人类验收；当时基线 Singularity `de85ae0`／外层 `3c4b4dbb7c`（当时工作区未提交，后已按建设计划归档）；记录见建设计划「A0 返工（Q2/Q3）执行与验收记录」与主 guide §5.13。R2 的取消写闸（Q1）已于 2026-09-24 验收，R1 的 S3 验收（Q4/Q5）经进度审核仍返工，下一项与前置以建设计划唯一表为准。以下未来字段是设计候选，不能逐字段照搬；已实现机制不等于全部入口已满足合同。
+2026-09-23 复核代码 `d5b0bb6`：A3 与 T2/T3 交付保留，A0 的来源/恢复、R2 的取消写闸、R1 的 S3 补验证已完成，R0 默认运行面证据保留；自主改进恢复仍未建。**2026-09-23 A0 返工（Q2/Q3）已关闭**：来源归属判定（store↔session、顶层会话、本人消息三规则，三入口共用，拒绝均在首次写入前）与 `adoptRoot` 公共恢复入口已落地，独立复核通过、未由人类验收；当时基线 Singularity `de85ae0`／外层 `3c4b4dbb7c`（当时工作区未提交，后已按建设计划归档）；记录见建设计划「A0 返工（Q2/Q3）执行与验收记录」与主 guide §5.13。R2 的取消写闸（Q1）与 R1 完成轮 3 已于 2026-09-24 验收，下一项与前置以建设计划唯一表为准。以下未来字段是设计候选，不能逐字段照搬；已实现机制不等于全部入口已满足合同。
 
 本文细化 [主指南](singularity-harness-guide.md)的上下文、协作与 supervisor 主线；Task 结构及可选契约审核见 [Task 自主构造指导](task-contract-construction-guide.md)，建设顺序见 [计划](2026-09-20-vrtc-code-change-plan.md)。外部事实及固定来源见 [开源调研](2026-09-21-open-source-agent-patterns.md)，角色提示词合同见 [Prompt 指导](agent-prompt-contracts.md)。
 
@@ -24,7 +24,7 @@
 | Task 发现与上下文 | task_read 读当前任务；task_status 列整 store；handoff 带一层父目标；capability_list 列 registry | 缺根约束、贡献、相关依赖证据的统一投影与按引用读取；A2/A1 由 context 一起交付。没有模板 catalog；revision/cursor 并非默认建设目标 |
 | 沿图 debug | task_review_pack 带当前任务的 reviews/父子摘要/相邻依赖；只读 task_review_agent 及 Diagnosis | 无自动 review 触发与跨任务因果遍历；reviewer prompt 限制“pack and nothing else”与读取更深证据的工具能力不协调 |
 | 改进执行 | Evolution proposal/prepare/replay/gate/approval/apply/rollback；P1–P4 | 无 supervisor 自动候选工作流、真实来源全绑定、blocked 恢复；多目标执行器仍缺失 |
-| 根目标 | **A0 已实现，Q2/Q3 返工已关闭（2026-09-23）**：`graphs.create` 只建 graph + root session 并调 `adoptRoot`；`task_intake` 用用户目标构造根契约，机器校验（含「至少一条 mandatory 非 composite 判据」）后可经 T2/T3 同套审核，激活即一次原子提交落根任务 + 根 run；未激活时 `task_read`/`task_status` 报具名状态；三个入口共用 `assertRootContractOrigin`（store↔session、顶层会话、本人消息三规则，拒绝均在首次写入前，日志不可读 fail-closed）；无根任务时 `adoptRoot` 先跑既有恢复遍再读回，否则答 `{ adopted: false }` 并点名仍未关闭的提案 | 仍未建：根契约修订入口（修订=新提案）、模板库、A1 上下文投影；机器准入不证明模型对用户请求的解读正确，R1 S3 误判待纠正；来源归属是归因纪律而非来源真实性证明（宿主伪造 `user` 消息仍被采信），服务层不校验顶层会话属某 graph 的 root（该规则仍在 `task_intake` 工具），日志不可读时不能激活/恢复 |
+| 根目标 | **A0 已实现，Q2/Q3 返工已关闭（2026-09-23）**：`graphs.create` 只建 graph + root session 并调 `adoptRoot`；`task_intake` 用用户目标构造根契约，机器校验（含「至少一条 mandatory 非 composite 判据」）后可经 T2/T3 同套审核，激活即一次原子提交落根任务 + 根 run；未激活时 `task_read`/`task_status` 报具名状态；三个入口共用 `assertRootContractOrigin`（store↔session、顶层会话、本人消息三规则，拒绝均在首次写入前，日志不可读 fail-closed）；无根任务时 `adoptRoot` 先跑既有恢复遍再读回，否则答 `{ adopted: false }` 并点名仍未关闭的提案 | 仍未建：根契约修订入口（修订=新提案）、模板库、A1 上下文投影；机器准入不证明模型对用户请求的解读正确，R1 完成轮 3 只证明固定场景的澄清消费与有限目标形成；来源归属是归因纪律而非来源真实性证明（宿主伪造 `user` 消息仍被采信），服务层不校验顶层会话属某 graph 的 root（该规则仍在 `task_intake` 工具），日志不可读时不能激活/恢复 |
 | Prompt 一致性 | root/worker 提示词在源码；工具按 grant 筛选；**R0 已交付（2026-09-23，已验收）**：装配开关 `evolution` 决定九个 `evolution_*` 是否注册，root allow-list 与 prompt 由同一布尔派生（off = 19 常驻工具 / 20 名 allow-list / 无进化协议段；on = 28 / 29，逐名与之前相同）；BB 句子移出通用 root prompt，领域指导归部署的领域 skill | 仍未做：A1–A6 各角色模板逐票同步（worker 的「make command exit 0」与「直接问人」措辞、decomposable 一段的自相矛盾表述在本组未改）；R1 需给出真实模型下的提示词效果证据 |
 
 主要源码：`task-runtime/src/{handoff,contract,orchestrate,index,capability}.ts`；`agent-runtime/src/{index,contract-reinjection,grants}.ts`；`agent-runtime/src/prompts/root.prompts.ts`；`agent-singularity/src/tools/{task-read,task-status,task-review-pack,review-agent}.ts`。
@@ -99,7 +99,7 @@ T2/T3 子批次协议已交付，A0 根入口复用摘要绑定、批准后重�
 
 根契约未知的语义可以向用户澄清，但日常拆分不依赖用户编写。只设“子任务都通过”不能验收一个新业务根目标；至少一个独立根判据要回答真实交付是否成立。本文不强迫所有根预先写 childEvidence 的未来索引，可沿 P4 的独立 command/实际 verifier 路径验收。未落实顶层判据前不得把子任务成功汇总宣称为整体成功。（**2026-09-23 落地，已验收**：`admission.ts:rootIndependenceDefects` 把「至少一条 mandatory 非 composite 判据」做成结构闸；集成「子全通过但根交付错误仍拒绝」用真实 command 判据与 checkout 里的真实产物验证，判据可指向受保护验收脚本。）
 
-根 intake 必须能追溯到实际用户请求及必要澄清，优先引用现有 Session 事件，不复制需求库。用户要求与模型假设分别展示；影响交付范围/验收的未知在澄清前不能激活为确定目标，即使假设已标注。普通方法选择自主进行，不新增普遍强制人审。至少一个非 composite 判据只是语法门槛；真实产物检查及“子全绿但根错误”已有证据。**服务层来源归属校验已随 A0 返工于 2026-09-23 补上**：三个入口共用 `assertRootContractOrigin`（store↔session、顶层会话、本人消息；拒绝在首次写入前且具名）。该判定是归因纪律加顶层会话判定，不证明来源真实性，也不校验该顶层会话是否某 graph 的 root session（后者仍在 `task_intake` 工具面，见主 guide §5.13）；R1 S3 的弱判据误判仍待纠正。二者分别验证机械事实与具体场景语义，不建设通用语义证明器。
+根 intake 必须能追溯到实际用户请求及必要澄清，优先引用现有 Session 事件，不复制需求库。用户要求与模型假设分别展示；影响交付范围/验收的未知在澄清前不能激活为确定目标，即使假设已标注。普通方法选择自主进行，不新增普遍强制人审。至少一个非 composite 判据只是语法门槛；真实产物检查及“子全绿但根错误”已有证据。**服务层来源归属校验已随 A0 返工于 2026-09-23 补上**：三个入口共用 `assertRootContractOrigin`（store↔session、顶层会话、本人消息；拒绝在首次写入前且具名）。该判定是归因纪律加顶层会话判定，不证明来源真实性，也不校验该顶层会话是否某 graph 的 root session（后者仍在 `task_intake` 工具面，见主 guide §5.13）；R1 完成轮 3 已在固定场景验证澄清消费与有限目标形成，但不提供通用语义保证。二者分别验证机械事实与具体场景语义，不建设通用语义证明器。
 
 ### 5.1 三层内容
 
@@ -274,11 +274,11 @@ R0 按角色与实际启用能力收敛工具面，部署未启用 Evolution 时
 
 ## 10. 分批建设合同
 
-派发严格遵守[建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一表，每次读取[公共执行合同](execution-prompts/README.md)，更新主 guide、计划及本文当前状态。A0 与 R2 的返工已验收，R1 补验证经进度审核仍返工，R0 证据保留，A2 待前置。下表仅作方向索引，不构成另一份派发授权；读取/恢复与后续各组的施工合同、验收编号使用计划 D/E/F。
+派发严格遵守[建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一表，每次读取[公共执行合同](execution-prompts/README.md)，更新主 guide、计划及本文当前状态。A0、R2 与 R1 完成轮 3 已验收，R0 证据保留，当前先派 R3，A2 仍待 R3 前置。下表仅作方向索引，不构成另一份派发授权；读取/恢复与后续各组的施工合同、验收编号使用计划 D/E/F。
 
 | 票 | 前置与落点 | 必交付与确定性验收 |
 |---|---|---|
-| A0 真实根契约入口 | T1、S1-V 切片 2、T2/T3 组；graphs/adoptRoot、root 角色 | setup 不消费根分解；无契约时 task_read 返回未激活；graph name 不冒充目标；新根有独立 AC；子全通过但根错误仍拒绝；off/all 与激活崩溃恢复完整；拒绝草案零派发；旧图不改历史；来源归属（store↔session、顶层会话、本人消息）与 `adoptRoot` 公共恢复入口的零副作用拒绝。**2026-09-23 实现事实（来源/恢复返工已关闭）**：`graphs.create` → `adoptRoot` 不再建根任务；`task_intake` + `assertRootContractOrigin` + `rootIndependenceDefects` + 同套审核/激活/幂等恢复 + 具名未激活视图；每条验收的测试位置见建设计划「A0 + R0 执行与验收记录」与「A0 返工（Q2/Q3）执行与验收记录」。仍未建：契约修订入口、模板库、A1 上下文投影；边界如实记录：归因纪律非来源真实性证明、服务层不校验顶层会话属某 graph 的 root、日志不可读时不能激活/恢复（fail-closed）、每次 `adoptRoot` 会重发等待中提案的审核请求；R1 另补 S3 语义验证（Q4/Q5 仍待返工） |
+| A0 真实根契约入口 | T1、S1-V 切片 2、T2/T3 组；graphs/adoptRoot、root 角色 | setup 不消费根分解；无契约时 task_read 返回未激活；graph name 不冒充目标；新根有独立 AC；子全通过但根错误仍拒绝；off/all 与激活崩溃恢复完整；拒绝草案零派发；旧图不改历史；来源归属（store↔session、顶层会话、本人消息）与 `adoptRoot` 公共恢复入口的零副作用拒绝。**2026-09-23 实现事实（来源/恢复返工已关闭）**：`graphs.create` → `adoptRoot` 不再建根任务；`task_intake` + `assertRootContractOrigin` + `rootIndependenceDefects` + 同套审核/激活/幂等恢复 + 具名未激活视图；每条验收的测试位置见建设计划「A0 + R0 执行与验收记录」与「A0 返工（Q2/Q3）执行与验收记录」。仍未建：契约修订入口、模板库、A1 上下文投影；边界如实记录：归因纪律非来源真实性证明、服务层不校验顶层会话属某 graph 的 root、日志不可读时不能激活/恢复（fail-closed）、每次 `adoptRoot` 会重发等待中提案的审核请求；R1 完成轮 3 已补充固定场景的澄清与有限目标验证，不提供通用语义保证 |
 | A2 + A1 状态上下文（同组） | A0/A3、S1-C，R1/R3 验收后；新 context、现有工具与 DSH 装配 | 显式恢复与读取分离；三层根约束/本人贡献进入实际请求；依赖兄弟证据和同 graph 详情按引用可读，无关历史默认不推；跨 graph 包括原始 Session 入口均拒绝；压缩/重启可重建、replay 不串根；普通/replay 消费者及旧渲染迁移闭合 |
 | A3 非阻塞批次与协调相位（已交付，2026-09-22；验收见建设计划「A3 执行与验收记录」，落地事实已回写 §7.1/§7.2/§7.4） | T1、S1-V 切片 2、S1-C；Task runtime/reducer、agent-runtime | 分解立即返回且父可继续；waiting idle 不验收；显式提交/父独立验收；依赖串行、取消/恢复/卸载完整；提交/派发去重；迟到写入、跨批次/跨根工作区冲突被阻挡；普通/replay 同守状态规则；根预算不因新 Run/重启重置，无进展停止 |
 | A4 父子问题/回答 | A2/A1、A3；agent-runtime + DSH 通信，context 呈现，runtime 执行阻塞 | 父子/三层问答无同步死锁；batch/写闸保留，一个答案不清空其他阻塞；未答不算同意，迟到不复活 Run；入箱及 claim 后 crash 可恢复，不重复领域副作用；正文不在 task 再存一份 |

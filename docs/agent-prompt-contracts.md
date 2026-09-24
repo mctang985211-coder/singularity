@@ -182,7 +182,7 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 | Prompt 中的说法 | 代码侧必须提供 |
 |---|---|
 | “你负责当前任务” | session→run→task 精确绑定，禁止同 session 冒领其他 Run |
-| “读取根目标和相关决定” | **A0 已实现，来源/恢复返工已关闭（2026-09-23）**：真实的根契约（`task_intake` 接受后持久化的 objective/criteria/assumptions/constraints/requiredCapabilities）与来源归属（`identity.rootSessionId` 经 `assertRootContractOrigin` 校验 store↔session、顶层会话与本人消息，三入口共用，拒绝在首次写入前且具名）；`task_read`/`task_status` 在未激活时给具名状态而非代用目标。边界：归因纪律不等于来源真实性证明，也不证明模型对用户请求的解读正确；R1 固定场景只证明澄清答复到达模型，目标形成的验收仍返工（主 guide §5.14）。**A1 未建**：ContextView、祖先决定投影与原始 refs 的授权读取仍待建，不能只加一句“考虑全局” |
+| “读取根目标和相关决定” | **A0 已实现，来源/恢复返工已关闭（2026-09-23）**：真实的根契约（`task_intake` 接受后持久化的 objective/criteria/assumptions/constraints/requiredCapabilities）与来源归属（`identity.rootSessionId` 经 `assertRootContractOrigin` 校验 store↔session、顶层会话与本人消息，三入口共用，拒绝在首次写入前且具名）；`task_read`/`task_status` 在未激活时给具名状态而非代用目标。边界：归因纪律不等于来源真实性证明，也不证明模型对用户请求的解读正确；R1 完成轮 3 只证明固定场景的澄清消费和有限目标形成，不能泛化为通用语义保证（主 guide §5.14）。**A1 未建**：ContextView、祖先决定投影与原始 refs 的授权读取仍待建，不能只加一句“考虑全局” |
 | “可查看项目状态与上下文” | A2+A1 的 context 包同源服务模型请求和主动查询：根约束/本人贡献/相关依赖默认注入，同 graph 任务及证据/会话按引用可读；跨 graph 拒绝且原始 Session 工具不能绕过。相关性不等于权限，不因兄弟身份拒绝读取依赖证据；执行限制仍由实际动作入口重检 |
 | “向父节点询问并等待” | A3 已落地非阻塞父循环与协调相位；A4 的消息/送达/恢复主体为 agent-runtime + DSH，context 展示问题和回答，task-runtime 仅仲裁执行阻塞。不能把通信正文与队列整体加进 task |
 | “提交后由 verifier 判定” | A3 已落地：task_submit_result → RunPhaseChanged(submitted) 落库后 drainSession 排空在途写，再转 verifier 排他执行；idle 不作完成证据 |
