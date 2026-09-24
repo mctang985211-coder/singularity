@@ -14,9 +14,10 @@ import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stac
  *
  * (a) A three-layer real chain — root → child → grandchild — assembled for the
  *     grandchild carries the root's goal and hard constraints, the grandchild's
- *     own complete contract and the handoff the parent wrote; the sibling's
- *     evidence and review are one reference read away, while the related view
- *     pushes only the caller's own relations.
+ *     own complete contract and the handoff the parent wrote; the parent's
+ *     evidence and review are one reference read away (a sibling dependency's
+ *     records read through the same door — that case is pinned at unit level),
+ *     while the related view pushes only the caller's own relations.
  * (b) Two graphs in one checkout cannot read each other: a store record of
  *     another graph is refused by name, a session of another graph is refused
  *     before its log is touched, and the four raw cross-session readers are
@@ -111,7 +112,7 @@ async function threeLayers(stack: AssemblyStack): Promise<{
 }
 
 describe('the assembled request of a three-layer chain (A2-1)', () => {
-  it('gives the grandchild the root goal and hard constraints, its own contract, and the handoff — while the sibling\'s evidence stays one reference away', async () => {
+  it('gives the grandchild the root goal and hard constraints, its own contract, and the handoff — while the parent\'s evidence stays one reference away', async () => {
     const stack = await boot({
       worker: async sessionId => {
         // The middle layer is the one that decomposes further: its own turn asks
@@ -150,7 +151,7 @@ describe('the assembled request of a three-layer chain (A2-1)', () => {
     expect(snapshot).not.toContain('## Handoff')
 
     // The dependency's records are readable by reference inside the same domain —
-    // the evidence the sibling produced and the review that settled it.
+    // the evidence the parent produced and the review that settled it.
     const state = await stack.snapshot(chain.storeId)
     const evidence = state.evidence.find(item => item.taskId === chain.childTaskId)!
     const review = state.reviews.find(item => item.taskId === chain.childTaskId)!
@@ -441,6 +442,10 @@ describe('reads and repeated assemblies are not side effects (A2-4/A2-3)', () =>
     const before = (await stack.events(storeId)).length
     const phaseBefore = stack.runtime.gate.phaseOf('s-root')
     const spawnsBefore = stack.spawns.length
+    // The two remaining named side-effect doors, counted from here on (A2-4):
+    // setup may have legitimately reached them, the measured section may not.
+    stack.approvalRequest.mockClear()
+    const verifySpy = vi.spyOn(stack.verifier, 'verifyRun')
 
     // A cold read, a hot read, and two assemblies of the root's own request.
     const cold = await stack.call('s-root', 'task_read')
@@ -472,6 +477,9 @@ describe('reads and repeated assemblies are not side effects (A2-4/A2-3)', () =>
     expect(refused.text).toContain('not-found')
     expect((await stack.events(storeId)).length).toBe(before)
     expect(stack.spawns.length).toBe(spawnsBefore)
+    // Zero approvals, zero verifier calls across every read and assembly above.
+    expect(stack.approvalRequest).not.toHaveBeenCalled()
+    expect(verifySpy).not.toHaveBeenCalled()
   })
 
   it('assembles nothing for a session outside the deployment\'s domain, and never for a diagnostic assembly', async () => {

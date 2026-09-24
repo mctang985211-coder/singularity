@@ -100,6 +100,8 @@ export class AssemblyStack {
   readonly roots: readonly string[]
   /** Every spawn the runtime asked the agent runtime for, in order. */
   readonly spawns: SpawnRequest[] = []
+  /** The approval door, counted: a read or an assembly must never reach it (A2-4). */
+  readonly approvalRequest = vi.fn(async () => 'allowed-once' as const)
   /** The stand-in bodies that really ran, by tool name. */
   private readonly ran: string[] = []
   private readonly handles: { close: () => Promise<void> }[] = []
@@ -171,7 +173,7 @@ export class AssemblyStack {
     ctx.provide('agentPresets', { defaultId: 'standard', mount: async () => {}, resolve: async () => ({}) })
     ctx.provide('permissionPresets', { set: vi.fn(), resolve: () => ({}) })
     ctx.provide('layout', { setIn: async () => {} })
-    ctx.provide('approval', { request: async () => 'allowed-once' })
+    ctx.provide('approval', { request: this.approvalRequest })
     ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) })
     const graphAgents = this.roots.map(id => ({ id, name: 'Singularity', status: 'idle' as const }))
     ctx.provide('graph', {

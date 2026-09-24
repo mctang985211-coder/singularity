@@ -19,21 +19,23 @@ import { disposeScriptedLoops, startScriptedLoop, type ScriptedLoop, type Script
  * 1. **A read taken inside the window.** While the cancellation is still running
  *    the store holds the run as `running` with phase `active`: a record older
  *    than the barrier, and one that predates nothing because the decision has not
- *    been written yet. The rebinding door refuses to move a phase a session
- *    already holds while its store is being closed, so the read leaves the
- *    barrier exactly where it is.
- * 2. **A read that straddled the decision.** A query starts its read before the
- *    cancellation and the read *returns* the old record — but the completion
+ *    been written yet. Reads are pure since A2 (no read ever applies a phase),
+ *    so the read leaves the barrier exactly where it is.
+ * 2. **A read that straddled the decision.** A read starts before the
+ *    cancellation and *returns* the old record — but the completion
  *    lands while that read is in flight, so by the time the value is applied the
  *    store already records the cancellation and the closing set is empty again.
  *    Nothing about the window applies; what makes the value inapplicable is the
  *    decision that landed between the read and its application, and the gate's
- *    own count of the decisions it made is what says so.
+ *    own count of the decisions it made is what says so. With reads pure, the
+ *    one store→gate application left is the recovery barrier's own, which is
+ *    the read this case holds.
  *
- * `task_proposal_read` is the read path both cases travel: it reaches
- * `runForSession` through `proposalStoreFor`, and a refresh that applied the
- * value it read set the phase back to `active`, re-opening a barrier a
- * cancellation owned.
+ * `task_proposal_read` is the case-1 read: it now travels the context read core
+ * (`resolveCaller`, a pure read). Case 2's held read is `adoptRoot`'s barrier
+ * snapshot, the only path that still derives gate phases from the store; the
+ * gate's token rule (`ExecutionGate.applyStorePhase`) is what refuses to apply
+ * a value that predates a decision.
  *
  * Both cases end in the same three facts, and the third is what keeps the first
  * two from being a way of denying everything:
@@ -134,8 +136,8 @@ describe('a cancellation’s write barrier against the store’s older record', 
         // The turn parks here, so nothing below is dispatched until this spec
         // opens the window: the interleaving is the latch, not a race.
         { waitFor: () => window.promise },
-        // The window: a write, the coordination read that reaches the rebinding
-        // door, and a write again — the order is the whole defect.
+        // The window: a write, a pure coordination read, and a write again —
+        // the order is the whole defect.
         { tool: 'graph_spawn', args: { reason: BEFORE_READ } },
         { tool: 'task_proposal_read', args: () => ({ proposalId }) },
         { tool: 'graph_spawn', args: { reason: AFTER_READ } },
@@ -191,8 +193,8 @@ describe('a cancellation’s write barrier against the store’s older record', 
       expect(textOf(read)).toContain(`proposal ${proposalId}`)
       expect(textOf(read)).toContain('ship the release')
 
-      // The read went through the rebinding door (`runForSession`) and left the
-      // barrier exactly where the cancellation put it.
+      // The read went through the context read core (`resolveCaller`, a pure
+      // read) and left the barrier exactly where the cancellation put it.
       expect(h.runtime.gate.phaseOf(ROOT)).toBe('terminal')
 
       const afterRead = await answered(h, 'graph_spawn', 2)

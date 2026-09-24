@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createUserMessage } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
-import { SystemPromptProjection } from '../../../../thirdparty/deepseek-harness/packages/core/agent-loop/lib/types/runtime-context.js'
+import { RuntimeContextProjection, SystemPromptProjection } from '../../../../thirdparty/deepseek-harness/packages/core/agent-loop/lib/types/runtime-context.js'
+import { joinContextSections, renderContextSections } from '../../../../thirdparty/deepseek-harness/packages/core/system-prompt/lib/index.js'
 import { SessionId } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stack.ts'
@@ -222,5 +223,30 @@ describe('what the projection does with the assembled contract, step after step'
     expect(session.deriveMessages().map(message => message.role)).toEqual(['system', 'user'])
     expect(textOf(session, 0)).toContain('# Immutable context (contract)')
     expect(projection.project(rendered, NEW_SERIES)).toEqual([])
+  })
+
+  it('commits the dynamic context snapshot once, then commits nothing while it is unchanged', async () => {
+    // The dynamic half rides DSH's runtime-context plane (A2 §D): this drives
+    // the loop's own RuntimeContextProjection the way agent.ts does — project
+    // the assembled contexts, commit the candidate, project again — so the
+    // dedup that keeps repeated assemblies from stacking snapshots is the real
+    // one, not a re-assertion of this package's byte-stability.
+    const stack = await boot()
+    const { workerSession } = await chain(stack)
+    const assembly = await stack.assemble(workerSession)
+    const sections = renderContextSections(assembly)
+    expect(sections.map(section => section.name)).toContain('singularity:state')
+    const current = joinContextSections(sections)
+
+    const session = stack.ctx.sessions.create(SessionId('s-worker'))
+    const projection = new RuntimeContextProjection(stack.ctx, session)
+    const first = projection.project(current, sections)
+    expect(first).toBeDefined()
+    await session.append('user/message', first!, { surfaceOp: 'append' })
+    expect(session.deriveMessages()).toHaveLength(1)
+
+    // Step after step with an unchanged projection: no candidate, no write.
+    expect(projection.project(current, sections)).toBeUndefined()
+    expect(session.deriveMessages()).toHaveLength(1)
   })
 })
