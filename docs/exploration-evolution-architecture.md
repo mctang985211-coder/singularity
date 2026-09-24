@@ -125,17 +125,17 @@ T2/T3 子批次协议已交付，A0 根入口复用摘要绑定、批准后重�
 
 ### 5.3 上下文预算与可见域
 
-核心契约不做静默截断；过大则准入明确拒绝或请求合理分解。外围信息使用可配置条目/字节预算、稳定排序和 omittedRefs；不得把缺省内容写成“不存在”。先用可测 UTF-8 上限，若沿用 DSH tokenizer 才报告 token 精确值，不自造估算器冒充计数。
+核心契约不做静默截断，自动装配无法完整容纳时具名拒绝该请求，不能改写已接受契约；工具返回可续读引用。外围信息沿计划 D 的统一 UTF-8 字节上限、稳定排序和有界续读引用，不新建预算配置，不把缺省内容写成“不存在”。沿用 DSH tokenizer 才报告 token 精确值，不自造估算器冒充计数。
 
 scoped system section 只放可信 runtime 生成的结构与合同。引用的历史文本、父回答和网页是带来源的数据，不继承其“忽略规则”等指令权限。动态消息通过 DSH 已记录输入投递；不私改 session surface。压缩后能依据引用恢复，保持 root/task 关键约束。
 
-当前 session query 按 cwd 精确相同授权；graph/group 当前只有拓扑，没有 group 读取 ACL。A2/A1 固定以可信 graph 绑定为项目读取域，同 graph 可按引用读、跨 graph 拒绝，默认相关性不改变此域。原始 session 查询须同批限制为该域或从相关角色工具面移除并由 context 替代；同 cwd 不同 graph 是必要反例。该设计是模型工具边界，不声称约束拥有共享 shell/文件系统权限的恶意进程，也不新增隐藏组权限系统。
+当前 session query 按 cwd 精确相同授权；graph/group 当前只有拓扑，没有 group 读取 ACL。A2/A1 固定以可信 graph 绑定为项目读取域，同 graph 可按引用读、跨 graph 拒绝，默认相关性不改变此域。固定从 Singularity 有效工具面移除原始跨 Session 入口，并在 pre-execute 拒绝旁路；由 context_read 调 DSH 读服务，不能由 preset/grant 合并重新放行。同 cwd 不同 graph 是必要反例。该设计是模型工具边界，不声称约束拥有共享 shell/文件系统权限的恶意进程，也不新增隐藏组权限系统。
 
 ## 6. Task 列表与“可用”的含义
 
 三个目录不能混用：实例视图列正在进行/历史任务；模板视图（尚未建）列可选契约模式；capability_list 列能力实现。首版不建模板库，不增加 Task 搜索向量数据库。
 
-第 9 项 A2+A1 合同见[唯一计划 D 节](2026-09-20-vrtc-code-change-plan.md)：context 提供根/当前目标、贡献、依赖状态与来源；默认视图少推相关信息，Agent 可主动请求同 graph 概览和按引用读 Task/Evidence/Session 细节。保留现有 `task_read/task_status` 名字，跨记录投影迁出工具；现有入口无法安全读引用时才增一个 `context_read`，不新建搜索语言或 catalog。单纯禁止兄弟读取会破坏真实 dependsOn 消费，不再采用。
+第 9 项 A2+A1 合同见[唯一计划 D 节](2026-09-20-vrtc-code-change-plan.md)：context 提供根/当前目标、贡献、依赖状态与来源；默认视图少推相关信息，Agent 可主动请求同 graph 概览和按引用读 Task/Evidence/Session 细节。入口固定为 task_read、task_status(scope=related|graph)、context_read(kind/ref)，schema/长度/续读单位以 D 节读取表为准；不新建搜索语言或 catalog。无 Run reviewer 用既有 ledger，由 spawn 的 beforePrompt 在图发布后、首输入前确认绑定；解析器由装配层注入，context 不反向依赖工具包。单纯禁止兄弟读取会破坏真实 dependsOn 消费，不再采用。
 
 核心契约完整可读；外围信息有输出上限、明确省略和可继续读取的来源，不能截断后丢失入口。细节优先复用 DSH 既有 offset/seq，不预造 cursor 协议。稳定角色政策归 agent-runtime，查询结果及自动装配归 context；普通和 replay 的 handoff 消费一起迁移。
 
@@ -196,7 +196,7 @@ A3 统一模块职责：Task runtime 对分解、提交、取消和恢复负责�
 
 身份从已绑定 run/Task parent 推导，节点不传任意 recipientId。首版只支持直属父子；跨组通过 router，兄弟协作由父路由。问答是消息/Task 事件，不增加 Graph spawn/handoff 边。
 
-工具工作名为 task_ask_parent、task_answer，名字不决定包归属。ask 先持久化可恢复的问题及所需执行阻塞，再投递，立即返回身份/送达状态，不同步等待答案。用相同消息身份对账 Session 与执行效果，恢复只补缺失效果；不能把进程内返回当持久回执，不能承诺跨进程 exactly-once。实施时先核对 DSH 已有回执/重放接口，再决定必要的最少桥接记录。
+工具固定为 task_ask_parent(requestKey, question, blocking?)、task_answer(questionId, requestKey, answer, resolves)，完整合同与验收见计划 F.1。正文引用发送 Session 的真实且已 flush 的 tool/call；Task 原子落关联/阻塞意图后，再按稳定 messageId 投递 inbox，目标 Session flush 成功才报告 delivered。立即返回，不等待答案。重启对账意图与 inbox/history，只补缺失投递；不新建消息数据库，不承诺跨进程 exactly-once。
 
 投递使用明确的 agent-message 来源，sender 由 live Agent 与 run binding 推导，不将委派消息标成人类输入。投递回执只有目标 Session 的 inbox/history 持久保存同一消息身份后才能记 delivered；消息正文由通信来源持有，Task 记录其引用与执行效果。
 
@@ -204,13 +204,13 @@ A3 统一模块职责：Task runtime 对分解、提交、取消和恢复负责�
 
 阻塞性问题加入该 Run 的 blockingQuestionIds，worker 停止受阻执行并等待唤醒；不阻塞父 loop、不轮询。已有子批次时仍保留 waiting_children，可处理协调消息并逐级提问。非阻塞问题仅在确有无依赖工作时允许继续。父从全局 brief/决定/证据回答，无足够依据明确说明未知，可逐级询问，不默认找人。涉及用户目标/新增权限/残余风险，root 使用已有 human 工具。
 
-answer 校验真实父身份、question 状态、对应 run 和契约；回答进入两端可追溯历史。clarification/decision 是父显式声明可解决问题的回答，仅在绑定仍适用时置 answered 并解除该项阻塞；runtime 不声称证明自然语言答案正确。unresolved 保持 open，可追加后续解决性回答；requires_contract_change 保持阻塞，转契约处置，不能当作普通回答放行。所有阻塞项解除后才允许原主相位下的执行动作，不能收到一个答案就恢复 active。父 Run/子 Run 已终态、问题取消、契约修订则拒绝迟到回答的执行效果，保留审计。重复相同 answerId 幂等，已解决问题的冲突答案拒绝；parent 不可用记录 unavailable 并等待恢复/期限，不隐式新建替代父节点。
+answer 校验真实父身份、question 状态、对应 run 和契约；回答进入两端可追溯历史。resolves:true 是父声明可解决当前问题，仅在绑定仍适用时解除该项；false 保持 open，未知或需要改契约均如此，不再建立回答类别枚举。runtime 不声称证明自然语言答案正确。所有阻塞解除后仍遵守原主相位，不能改为 active；已解除但尚未被模型读取的回答必须进入下一请求。父/子 Run 终态、问题取消或契约失效时拒绝迟到执行效果，保留审计。同 requestKey 同内容幂等、冲突拒绝；parent 不可用记录 unavailable 并等待恢复/期限，不隐式新建替代父节点。
 
 回答不能改变权限或验收。若要求改 AC，保留问题并回到契约变更渠道，不能据此私改契约继续。父明确作出的决定沿现有消息保存来源、适用范围并由 context 按需呈现，不为所有回答新建 Decision ledger；普通聊天不自动成为全局政策。
 
 ### 7.4 时间、循环与故障
 
-每 run 的提问数、同一问题无进展次数、未答数量有外置限额；问题重复按 requestKey/idempotency 管，不能只用字符串相似度静默合并。未回答不是失败答案。首版 wallTime 按原始 startedAt 继续计入等待，不重启计时；超限取消协调并保留问题，未来主动执行时间与等待时间拆账另立票。
+问答仅新增 maxQuestionsPerRun 一个外置正整数限额（默认 8），按首次接受的 questionId 计数并从记录恢复；重复按 requestKey 幂等，不以字符串相似度合并。无进展与截止沿原运行预算，不新增三套问答限额；已知阻塞不计空转提醒。未回答不是失败答案，wallTime 按原 startedAt 继续计入等待，截止取消协调并保留问题。已知问答等待的 Run 在重启后须能恢复同一 Session/阻塞，不能沿“在途未提交全部取消”分支处理；无法确认写入已停止时具名失败。
 
 A3 同时建立根目标预算归属：子任务、重试、诊断、候选和评估各有明细但共用根总额，replay 的 parentless Task 通过明确的资助根引用记账，不因 Task 无父亲获得新预算。独立评估请求必须有自己的显式预算 owner。时间从根接受时计，Run 期限不得晚于根期限；次数在准入时按稳定操作 id 预留/记账，崩溃恢复不重复计数，也不重置额度。A5/S2-R/S3/S4-E 接入该入口，不能新增各自独立的总预算。（A3 已落地 2026-09-22：`root-budget.ts`；owner = store 根任务（其 run 经 `rootTaskStoreId` 绑定回本 store），replay 的 parentless task 共享该根总额；maxRuns 按 runId 记账、崩溃重数不退款不重置。）
 
@@ -238,11 +238,11 @@ A5 的主体为 `agent-singularity/src/review/` 中的事后读包与 reviewer �
 
 ### 8.3 触发与角色
 
-先选一个已发生的终态 ReviewRecord 或能力缺口作为触发源，由 review 模块以已有源记录身份幂等启动 reviewer；重启不重复发起同一处理，沿用根预算。不先建 incident 平台、failureKind/revision 新词表或语义聚类。多条症状是否同因由 Agent 依据引用判断；重复事件处理与因果判断不能混为一个机器去重规则。
+固定选择 ReviewRecord.outcome=failed 为唯一自动触发源，包括无 Run 的 blocked Task 失败记录，能力/产物缺口作为引用，不再增加第二套触发器。review 按 `(store, task, run 或 no-run)` 认领，提交后及显式激活后扫描；终态不等待诊断。沿现有 reviewer ledger 串行持久 claim，预分配同一 session，自动/手动共用既有升级判定和每 store 预算。具体恢复与 REV-1–4 见计划 F.3。不建 incident 平台、failureKind/revision 词表或语义聚类；因果同源由 Agent 判断，不能与源记录去重混为一谈。
 
 保留现有 reviewer 只读工具集。它产生 Diagnosis/实验建议，不写生产、不修改其正在评价的判据。Supervisor orchestrator 消费 Diagnosis，给一个有范围的候选实现节点分配 sandbox 写权限；候选构建者、验证执行器、人类晋升决定分别有记录。逻辑角色可复用 preset/工具组合，不要求新增三个常驻服务或三种模型。
 
-当前 `task_review_agent` 有一次/每 store 默认预算及 escalation 判定，不等于持续 debug 服务。A5 接入实际触发时须明确与该限额的关系，不静默绕过也不默认增加 incident 预算轴。reviewer 可沿 context 的授权引用继续读取，不能只靠一个预拼 pack 下结论；所依据证据进入 Diagnosis 引用。
+当前 `task_review_agent` 有一次/每 store 默认预算及 escalation 判定，不等于持续 debug 服务。A5 保持默认 1，旧账照计，预算不足或既有升级规则不允许时显示 suppressed；claim 后崩溃恢复同 session 或记录 interrupted，不另起无限重试。reviewer 可沿 context 授权引用深入，不能只靠预拼 pack 下结论；Diagnosis 是交接身份，未启用 A6 时显示 pending，不假称已修复。
 
 ### 8.4 从建议到可用改进
 
@@ -250,7 +250,7 @@ A5 的主体为 `agent-singularity/src/review/` 中的事后读包与 reviewer �
 
 S4-E 同批将 `agent-singularity/src/evolution.ts` 及其 `replay.ts`、评估/晋升/回滚实现迁入独立 `evolution` 包，原九个工具为适配；依赖审计包含 config-edit 和 provider-precheck。执行 Run 的 replay/取消/恢复仍在 task-runtime，晋升闸不与执行写闸混用。旧 ledger 可读和已应用对象回滚同批验收，不新增空包后继续把主体写在工具包。
 
-A6 交付使用已完整验收的 skill/capability 实现路径，复用 T1、S1-C 和 P2/P3；没有独立的临时试点版本。新工具、verifier、任务模板及 runtime policy 逐个补目标执行器和评估，未支持类型在查询与执行入口一致说明并拒绝晋升；不能接受半成品后要求人补写。
+A6 使用 T1/S1-C/P2/P3，但不能把 S4-E 的单文件 Skill 替换当成新建执行能力。计划 F.4 固定在 A6 同组扩展一条 CapabilityMutation，可附 SKILL.md + 现有执行型 sidecar、零 resources、已有 verifier/授权工具；联合 overlay、评估、应用/registry 更新、恢复与回滚全部验收。新工具、verifier、任务模板及 runtime policy 尚不支持执行，具名拒绝；不能接受半成品后要求人补写。
 
 评估集分为失败复现集、既有回归集、开发验证集和未参与选择的最终保留集。不断查看并优化同一 holdout 就使其成为开发验证集；对未见泛化的宣称需新保留集。Skill 看目标修复+不退化+成本；Verifier 看负样本漏检和变异检出；Task 模板不能通过降低难度/删 AC 获得改进。
 
@@ -260,7 +260,7 @@ S4-E 在主管自动候选执行前完成：冻结任务/输入快照、裁判�
 
 人审材料由系统聚合候选 diff、源 Diagnosis、固定基线、评估/费用、已知限制、回滚与受影响任务，不让人去补实现。现有 decide/apply 两次人审仍保持；将来可绑定批准摘要合并为一次，但不得在此票偷偷改变授权。
 
-通过后系统重检原义务是否满足、资源是否可用、目标契约是否仍有效，再按 S2-R 创建或继续合法 Run。Task 的历史失败和证据不覆盖；不依赖父再次分解已落库批次。不是每次失败都能自动修复，预算/权限/裁判不可用时保留缺口并上报。
+通过后 task_recover 重检原义务、资源、契约与预算，为失败原根 Task 建新 Run/Session、按 Run 绑定的新批次及新 proposal；旧终态和旧批次/证据保留。有效兄弟以输入/产物/证据身份复用，失效则由新提案显式安排替代；原根 AC 仍须独立验收。不能重新消费旧 admitted proposal 或重开旧 session 来冒充恢复，完整规则见 F.4。不是每次失败都能自动修复，预算/权限/裁判不可用时保留缺口并上报。
 
 ## 9. 运行时与 Prompt 的分工
 
@@ -274,7 +274,7 @@ R0 按角色与实际启用能力收敛工具面，部署未启用 Evolution 时
 
 ## 10. 分批建设合同
 
-派发严格遵守[建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一表，每次读取[公共执行合同](execution-prompts/README.md)，更新主 guide、计划及本文当前状态。A0 与 R2 的返工已验收，R1 补验证经进度审核仍返工，R0 证据保留，A2 待前置。下表保留方向责任，不构成另一份派发授权；与计划 D 节不一致的旧 A2 字段清单均以后者为准。
+派发严格遵守[建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一表，每次读取[公共执行合同](execution-prompts/README.md)，更新主 guide、计划及本文当前状态。A0 与 R2 的返工已验收，R1 补验证经进度审核仍返工，R0 证据保留，A2 待前置。下表仅作方向索引，不构成另一份派发授权；读取/恢复与后续各组的施工合同、验收编号使用计划 D/E/F。
 
 | 票 | 前置与落点 | 必交付与确定性验收 |
 |---|---|---|
