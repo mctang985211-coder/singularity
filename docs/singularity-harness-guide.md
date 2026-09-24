@@ -77,6 +77,32 @@ R1 的 [专项 prompt 与 V1–V6 验收指标](execution-prompts/07-r1-suppleme
 - **重构依据重复职责和实际失败。** 正常执行、replay、恢复共用关键迁移规则；内存管理活跃 handle，持久记录保存恢复事实。先收敛准入、运行推进、工作区归属的职责，不预定 pull 化、通用 effect 框架或分布式锁平台。
 - **未来设计不是逐字段施工清单。** A1/A2/A4 等尚未实现的结构在派发前按实际场景复定；必要权限、证据、取消和恢复不变量保持，非必要字段与通用化可删。修订须同步唯一计划，不能由实现者把已承诺行为的缺陷改名为增强。
 
+### 1.4 包职责与 Agent 状态上下文（2026-09-24，取代上一轮 A2 收缩方案）
+
+**目标是底层编排框架支撑 Agent 发现问题、形成任务、验证并改进能力。** 框架固定真实来源、权限、契约、生命周期、预算、独立验证和经批准的应用；Agent 决定查什么、如何理解失败、采用什么方法及提出什么候选。实际失败产生新的诊断/候选，不因设想某种失败就给核心增加状态、分类器或固定补救流程。已有正确性保证仍须保留。
+
+上轮把 A2 缩为 worker 只能看本人/直属子和一句根目标，不能满足依赖协作、祖先约束和深层取证。**默认相关性、读取授权和输出长度必须分开**：默认少推相关信息，但已授权的依赖证据及祖先原文须能按引用拉取。“兄弟”本身既不是可读凭证，也不是禁止依据。当前 `task_status` 同图全树输出是粗粒度读取/噪声问题；没有核实具体授权规则前，不笼统定性为安全泄漏，更不能据此随意改变权限。
+
+源码基线 `21ac1a1`：`task/src` 6 文件约 4,955 行；`task-runtime/src` 18 文件约 13,578 行，入口约 5,722 行；`agent-singularity/src/evolution.ts` 约 2,038 行。均为含注释物理行数，只定位集中点，不以减行数验收。真正的集中点包括 runtime 的 Session 观测、`orchestrate.reviewEnrichment` 的复盘派生，以及工具包内完整 Evolution 生命周期。目前 Singularity **没有 memory 包**；DSH 的 `session-query`、`session-reference`、`system-prompt`、compaction 已提供历史读取、引用、装配和压缩基础。
+
+| 职责 | 当前归属 / 建设归属 | 接口与禁止承担的工作 |
+|---|---|---|
+| 契约、Task/Run/提案及其已提交事实 | 现有 `task` | 持久化、reducer、快照及原子提交；既有 Evidence/Review/Diagnosis 历史继续可读。不在这里构造 prompt、检索历史、评分、规划或选择候选 |
+| 准入、批次、提交、取消、恢复、执行预算与写闸 | 现有 `task-runtime` | 唯一执行状态与副作用仲裁；提供已存在事实及必要只读执行观测，不维护第二套上下文/记忆库，不承载 supervisor 推理 |
+| 目标/约束/依赖/产物/历史的相关性组织、来源引用、按需读取与上下文装配 | **A2+A1 新建 `context` 包**（尚未实施） | 读既有来源，供模型工具和 prompt 两个实际消费者共用；不复制任务真相、不改变相位，不默认调用 LLM 生成摘要。这里承担当前所谓“工作记忆”的读取组织 |
+| 长期经验与共享知识 | 现有 Skill/文件、DSH 历史与 Evolution 记录；**暂不另建 memory 包** | 当前项目状态从权威记录重建；经验带来源、适用范围及验证状态。只有出现明确跨任务写入/检索消费者，才定独立 memory 持久合同，不让 memory 变成第二个 Task store |
+| Agent 创建、身份与消息投递 | 现有 `agent-runtime` + DSH Session/inbox | A4 的通信主体在这里；问题/答案正文沿 Session 持久记录，context 负责呈现，task-runtime 只管阻塞执行效果与取消恢复；不把消息收发器搬进 task |
+| 判据执行与 Evidence 生成 | 现有 `verifier` | 独立产物判断；不决定候选是否值得晋升 |
+| 复盘事实、诊断读包及 reviewer 协调 | 当前散在 runtime/工具；A5 触及时归拢 `agent-singularity/src/review/` | context 提供授权事实读取，Agent 产生解释/实验建议；task 保留原历史类型/记录，runtime 保留终态原子写入。先用包内模块，未出现独立装配需求不新增 review 包 |
+| 候选、对照实验、晋升/回滚 | 当前 `agent-singularity/src/evolution.ts` 等；**S4-E 起迁入独立 `evolution` 包** | 已有完整生命周期及账本值得独立归属；Agent 构建候选，evolution 组织验证/批准后的应用。task-runtime 只接执行/恢复，不实现候选策略或评估平台 |
+| 模型工具 schema、工具绑定与组合装配 | 现有 `agent-singularity` | 薄适配到上述所有者；业务职责不能因为工具名含 task 就归入 task 包 |
+
+新 `context` 是 Singularity 的领域读取模块，复用 DSH 基础；不改上游 DSH 来承载 Singularity 任务语义。依赖方向：`agent-singularity → context → task / graphs / task-runtime 的只读观测 / DSH 查询与装配`；`task-runtime → task / agent-runtime`。**task、task-runtime、agent-runtime 不反向导入 context/evolution。** context 经 DSH 装配扩展接入模型请求；runtime 只提供事实，不能为让旧调用通过保留一份旧上下文实现。
+
+A2 与 A1 合成一个可验收交付组：授权概览、按引用取细节、实际 prompt 消费、重启/压缩重建一起交付。内部可分三个小子目标（读取投影 → 模型接线 → 独立验收），不能每个子代理都承担整组。具体场景、读取授权和迁移清单见[建设计划 D 节](2026-09-20-vrtc-code-change-plan.md)。A4/S4-E/A5/A6 的职责迁移随本票行为同批验证，不先建空包，也不等功能膨胀后另立无限重构阶段。
+
+每票派发必须列出“事实所有者、行为所有者、工具/提示词消费者、迁出与删除位置”。新增模型策略不能以 enum、固定错误目录或全局状态机烙进 task；新增知识不能自动成为契约或权限。取舍由当前消费者和真实失败说明，不以“未来也许需要”为由增加核心设施。用户审核改进与证据，不负责补写实现。
+
 ## 2. Task 与 Skill 怎样协作
 
 ### 2.1 选择：派发前解析，节点内按需加载

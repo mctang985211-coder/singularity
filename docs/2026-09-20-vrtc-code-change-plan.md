@@ -779,16 +779,47 @@ driver 未在仓库内重建：两轮 driver 分别解包于 `/home/ROXY/code/bb
 4. 内部私有改名 `rootSessionPhase`→`runGatePhase`（私有，无外部面）。
 5. `task-runtime/src/workspace.ts` 新增私有 `queueMarkerMutation`（无外部面）；`WorkspaceRegistry` 公开方法签名与行为语义不变（marker 内容从「任意最后落地」变为「调用序最后」，对读取方更严格一致）。
 
-### D. A2 简约构建合同（研究结论；第 8 项验收前不实施）
+### D. A2 + A1：Agent 状态上下文（2026-09-24 职责重定）
 
-**实际触发**：R1 根/worker 调用了现有 `task_read` 和 `task_status`，没有调用 taskId 搜索、分页或跨会话查询。当前 `task_read` 已按 session→run 给 worker 本人契约；但 `task_status` 对任意图内 session 都渲染整个根 store 的 `snapshot.tasks`，worker 因而可读兄弟任务目标、证据和 review。其描述和 worker handoff 还称“whole tree”。这是现有可达的读取错误，也是 A2 的首要消费者；无需先造 `TaskCatalog`、查询语言或新的持久化 `ContextView`。
+状态：设计已重定、未实施；第 8 项 R1 仍须验收。此次修订前备份为 Singularity `beb1350` / 外层 `a335606`。替代上一轮“只收窄 task_status”的方案；那一版不足以提供目标位置、依赖协作和历史细节，而且把相关性错误地当成了权限。主职责及依赖方向唯一来源为[主 guide §1.4](singularity-harness-guide.md)。
 
-**单个实现切片**：保留 `task_read`、`task_status` 两个工具和无参调用。`task_status` 在根 session 显示原树；在 worker session 从既有 `runForSession` 绑定取得本任务，只显示本任务、直接子任务状态及必要的根目标短句（仅根契约中的目标，不附带兄弟正文/证据/review）。需要定位深层子任务时由各自 owner 查询，不把同 store 当作全员可见；没有任意 taskId 钻取。若单层内容超过现有准入界限，先检查 `maxChildren` 和可见文本的真实上限，再选择具名过大错误或明确的省略提示，不预建 cursor/revision/分页。所有字段从现有 Task/Run/snapshot 派生，不新增事件、表、owner 索引或可领取队列。
+**直接消费者与需要回答的问题**
 
-**动作提示仅取可证明的交集**：在上述视图中显示本 session 的相位/阻塞原因，并只提示本角色已装配、当前 gate 放行且任务状态前置可判定的少数现有工具（例如可读、待审核提案的读取、active 时分解或提交）；查不全前置就不声称“可执行”，改为指向具体工具读取/拒绝原因。工具执行时原入口仍重新校验身份、状态、审批、能力及 gate；提示不授权任何动作。不要从 `COORDINATION_ALLOWED` 直接复制完整列表，因为 gate 只判相位，不判任务归属及工具业务前置。若准确投影需第二套状态机，应收缩提示而非新建动作引擎。
+| Agent 当下需要知道什么 | 权威来源 | 默认呈现 / 深入读取 |
+|---|---|---|
+| 最终目标、必须遵守什么、本人贡献 | 已接受根/当前契约、真实 parent 链、handoff 的委派原因 | 本人完整契约、根硬约束及目标、父目标/贡献；祖先详情保留来源可读，不编造缺失决定 |
+| 项目进行到哪里、什么阻塞了本人 | 当前 Task/Run、dependsOn、提案状态、已记录结果及有效 gate | 默认本人/直属子/直接依赖状态和阻塞；可请求同一授权域更宽的项目概览 |
+| 上游交付了什么、据何判通过 | Artifact/Evidence/Review 的实际引用 | 默认简要结果和引用；按需读直接依赖的证据与目标验收。依赖为兄弟时也须可用 |
+| 为什么作过该决定、压缩后如何恢复 | Session 原始事件、持久 handoff、相关来源引用 | DSH 精确读取/历史查询；摘要不是权威替代，查不到就明确缺失 |
+| 当前能怎样推进 | 已装配工具、执行相位、准入/审核返回 | 显示可确认的执行限制和入口，不做全量“必然可执行”矩阵；动作仍由原入口重检 |
 
-**完成闸**：真实工具入口的确定性测试覆盖根原树、worker 本人/直属子与根目标、兄弟及跨 graph 无泄漏、未激活/等待/终态、重开后的相位视图，以及提示为“可做”时真实动作可到达、状态变化后动作仍被原入口拒绝。原有 `task_status` 全树预期测试按授权行为迁移；worker prompt 的“whole tree”同步改成真实范围。一次只修这两个现有工具及直接消费者；A1 祖先决定、A4 问答、group 隐藏成员的跨会话路由、依赖图搜索、任意任务领取和分页均不在本票。共享 shell/文件系统是现有部署信任边界，A2 不声称封住它。第 8 项 R1 通过进度审核后，才可把此合同落成派发 prompt；不从旧 A2 示例叠加更多字段。
+这里的“项目”是当前 graph/env 下可验证的执行事实与已有产物引用，不预建 Git/CI 监控、全仓知识索引或项目管理平台；文件与仓库细节继续由已有工具获取。不会仅因 R1 小样本未调用某工具就证明该需求不存在；当前 `dependsOn`、递归 handoff、实际历史查询入口本身就是消费者证据。
 
+**包选择与接口**
+
+- 本组新增 `packages/singularity/context`，承载上下文读取、相关性选择、来源、输出界限和 DSH prompt 装配。它有“工具主动读取”和“模型请求前装配”两个实际消费者，职责跨 Task/Graph/Session，放在 task 或 task-runtime 都不合适。无需新 memory 数据库；未出现跨任务经验写入需求前也不新增 memory 包。
+- 保留现有 `task_read`（当前契约）与 `task_status`（项目状态）作为兼容的模型入口，工具实现只转调 context 并展示结果。按需扩展由结果返回的 Task/Evidence/Session 原始引用读取：复用已有工具能安全完成就复用；确需领域过滤时仅增一个 `context_read` 入口，按引用读取，不建第二套搜索语言或方法族。
+- 默认视图是相关片段，**不是新授权表**。调用者 graph/root/run 归属从可信绑定推导，不信任输入的 store/cwd。详情读取遵守现有 graph/group 的 router 可见域；先检查现有群组投影能否复用，不能仅用同 cwd 或同 store 代替授权。授权的依赖证据可按引用取得，未授权的引用只给可见端点/明确拒绝；引用本身不能扩权。无任务绑定的 reviewer 只能使用明确授予的读取域，不能自动当 root。
+- 若要缩窄原始 `session_event_read/session_trace` 的模型可读范围，必须同批调整 grant/工具装配并验证替代入口；不能只做一层过滤而保留旁路。共享 shell/文件系统权限仍是部署信任边界，不冒充恶意进程沙箱。
+- 不增加复制 store 的持久 ContextView、不引入刷新定时器和独立全局 revision。Task/Run 身份、已存在内容摘要、Session seq/offset 足够时直接复用；多个来源读取非原子要诚实标注观测范围，不发明“全项目一致快照”。核心契约不能静默截断，外围结果有总输出上限及具体续读引用；不强制固定字段全集、向量搜索或新分页协议。
+
+**迁移必须在本组完成**
+
+| 现有位置 | 本组处理 | 所有者 |
+|---|---|---|
+| `agent-singularity/src/tools/task-read.ts`、`task-status.ts` 中的跨记录筛选/相关性/上下文渲染 | 移入 context 共用读取，工具只保留 schema、可信调用者传递及输出适配；删去旧重复实现 | context |
+| `task-runtime/src/handoff.ts:renderWorkerPrompt` 的契约/handoff/引用内容渲染 | 按职责拆：runtime 继续生成并保存 TaskHandoff 数据；context 投影其内容；稳定 worker 行为政策由 agent-runtime prompt 持有。普通分解与 replay 的消费者一起迁移，禁止 runtime 反向依赖 context | 数据 task/runtime；上下文 context；角色 agent-runtime |
+| `runForSession`、gate、准入和持久提交 | 保留原所有者，context 只消费其可观察事实；缺一个必要只读观测才最小新增，不往 runtime 添加组装上下文方法 | task-runtime |
+| DSH Session 历史与请求准备 | 调用 `sessionQuery` / `sessionReferenceResolver`（按实际接口）、scoped `systemPrompt` 与 compaction 机制；不复制索引、日志或压缩器 | DSH；context 负责领域接线 |
+| 既有 Review/Diagnosis 事件类型与 reducer | 本组不迁移持久格式；只读取已授权记录。会话指标/诊断行为归拢见后续 A5，不因本组读到它们扩大范围 | 既有 task 记录 |
+
+**完整验收**：三层真实 Task 链中的 worker 能在实际模型请求里读到根目标/硬约束、本契约及贡献；一个跨兄弟的真实依赖能查到其验收与证据，无关正文默认不注入；显式图概览与详情都按实际授权返回，跨 graph/隐藏组不能凭猜 id 或原始 session 工具绕过；包含 replay 的 parentless Task 不串根；未激活、等待、已终态及未授权调用有明确结果，读取不改变生命周期。以 DSH 实际请求装配和实际历史读取验证重启/压缩后可从事实源恢复；同一事实的工具视图与自动上下文来源一致，引用失效/超限/缺失明确，不拿陈旧动作提示绕过闸。不做模型效果提升的虚假声明。
+
+内部依次派三个有限子目标：①来源绑定、授权读取和投影；②真实工具/请求装配与原 handoff 消费迁移；③独立组合验收。主代理负责整组集成与全量检查，不把三个子目标和全量文档原样转派一人；只有完整消费者接线及删除旧重复实现后，本组 A2/A1 一起验收，再进入 A4。无须先交付“只可查询、模型还不消费”的过渡功能。
+
+**后续各票的工程归属（不另增执行顺序）**：A4 的消息正文/送达/恢复主体在 agent-runtime + DSH Session，context 显示待答/回答引用，task-runtime 只负责该 Run 的阻塞效果与原相位保持；S4-E 随已有 `evolution.ts`、replay/gate/apply 生命周期迁出为 evolution 包，工具名保持，旧 ledger 可读；A5/S2-E 将既有 `reviewEnrichment`、Session 观测和 review pack 的复盘派生归拢 agent-singularity 的 review 模块，context 负责读源，终态原子记录仍由 runtime 提交；A6/S2-R/S3 在 evolution 中做候选编排，在 task-runtime 中做执行恢复，候选内容由 Agent 生成。每票迁移同批更新真实调用方与恢复/直接入口测试，旧入口如需转发只可有单一实现，不永久维护双轨。
+
+底层不硬编码 supervisor 的因果搜索顺序、失败分类全集或所有候选对象执行器。既有数据按原格式读取；新诊断只保留证据、假设、实验与候选的实际需要。未知问题由 Agent 使用已有工具研究和验证；一旦涉及改契约、提权、改裁判或应用共享能力，仍受既有批准与独立验证约束。
 ## R2 Q1 返工（查询重开取消中的执行闸）执行与验收记录（2026-09-23）
 
 > 本记录只覆盖第 7 项 R2 的返工点 Q1（计划「补救交付复核」Q1）：`gatePhaseFromStore` 在取消尚未持久化时用 store 的旧相位把闸改回 `active`。R2 原交付的 marker 顺序、无用途 API 收敛、恢复绑定派生等已成立部分未重做；R1/A2 未实施；未调用真实模型。
