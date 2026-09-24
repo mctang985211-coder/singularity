@@ -538,6 +538,12 @@ describe('AgentRuntime root lifecycle', () => {
     // quarter rule it never asked about, and delivered nothing).
     expect(prompt).toContain('put the question to the user through the channels you have before you accept the contract')
     expect(prompt).toContain('do not let the environment answer it for you')
+    // …the contract is bounded by what the user supported and by what the
+    // deployment's verifiers can settle (R1 S3 evidence: the third attempt kept
+    // a full-summary goal the answer never supported and left two mandatory
+    // criteria to a review that returned inconclusive).
+    expect(prompt).toContain('The contract carries only what the user\'s own words and answers support')
+    expect(prompt).toContain('do not make a mandatory criterion depend on a review that may never happen')
   })
 
   test('resumes a root with the full allow-list and the evolution protocol when the deployment turned the chain on', async () => {
