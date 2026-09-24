@@ -533,6 +533,11 @@ describe('AgentRuntime root lifecycle', () => {
     // user did not confirm (R1 S3 evidence: the quarter was fixed that way).
     expect(prompt).toContain('An assumption is not an answer')
     expect(prompt).toContain('must never settle a condition you could not confirm')
+    // …and the question goes to the user, not to the environment (R1 S3
+    // evidence: the second attempt normalized a checkout-only source and a
+    // quarter rule it never asked about, and delivered nothing).
+    expect(prompt).toContain('put the question to the user through the channels you have before you accept the contract')
+    expect(prompt).toContain('do not let the environment answer it for you')
   })
 
   test('resumes a root with the full allow-list and the evolution protocol when the deployment turned the chain on', async () => {
