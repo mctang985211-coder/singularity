@@ -1,0 +1,267 @@
+../r1-rework-2026-09-24/criteria/vitest.rev2.config.ts (1:380) [33m[UNRESOLVED_IMPORT] [0mCould not resolve 'vitest/config' in ../r1-rework-2026-09-24/criteria/vitest.rev2.config.ts
+ - Module not found, treating it as an external dependency in ../r1-rework-2026-09-24/criteria/vitest.rev2.config.ts at 380..395
+
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (../r1-rework-2026-09-24/criteria/vitest.rev2.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /home/ROXY/code/bb_work/harness
+
+ ❯ ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts (9 tests | 8 failed) 59ms
+     × C1 control: the real record with the frozen answer verbatim passes under both modules 12ms
+     × C1: an agreement on the wrong answer is a chain break only under s3-criteria/2 12ms
+     × C1b: without input.fixedAnswer the leg is unverified, so s3-criteria/2 never passes 5ms
+     × C2 control: with every required criterion passing, both modules pass 5ms
+     × C2a: a missing required criterion is offset by another pass only under s3-criteria/1 4ms
+     × C2b: a failing required criterion is offset by another pass only under s3-criteria/1 4ms
+     × C2c: an adjudicated criterion with no result at all is required too 4ms
+     × C2d: with a delivery claimed and no required criterion establishable, s3-criteria/2 refuses a pass 5ms
+     ✓ C2e: an extra required criterion absent from the evidence leaves the contract criteria all passing under the revision too 4ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 8 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts > s3-criteria/2 counterexamples (red on s3-criteria/1, green on the revision) > C1 control: the real record with the frozen answer verbatim passes under both modules
+AssertionError: the decision carries no check M1.fixedAnswer: {
+ "M1.chain": {
+  "ok": true,
+  "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+ },
+ "M1.accounted": {
+  "ok": true,
+  "detail": "1 complete, 0 unavailable, 0 unanswered, 0 inconsistent, 0 unverified, 0 unaccounted"
+ },
+ "M2.progress": {
+  "ok": true,
+  "detail": "clarification consumed: true; root contract activated: true (t-82a86cf4-2c27-41cb-a160-5e983d5e1f45)"
+ },
+ "M3.artifact": {
+  "ok": true,
+  "detail": "1 artifact(s), 822 byte(s): /home/ROXY/code/bb_work/r1-supplemental-2026-09-24/run/s3/repo/report.txt=822B"
+ },
+ "M3.verifierPass": {
+  "ok": true,
+  "detail": "verifier passes: ac-1:command, ac-2:command, ac-3:command for the adjudicated criteria ac-1, ac-2, ac-3"
+ },
+ "M3.content": {
+  "ok": true,
+  "detail": "the adjudication says the artifact matches the adjudicated goal: true"
+ },
+ "S1.freeze": {
+  "ok": true,
+  "detail": "no active contract fixes an unconfirmed condition (0 freeze claim(s) reviewed)"
+ },
+ "S2.dependency": {
+  "ok": true,
+  "detail": "the activated goal depends on no unresolved condition: false"
+ },
+ "S3.confirmation": {
+  "ok": true,
+  "detail": "every user-confirmed label cites a delivered user answer"
+ },
+ "S4.limitedGoal": {
+  "ok": true,
+  "detail": "the limited goal carries no unconfirmed content (0 claim(s)); completed-analysis claim: false"
+ },
+ "adjudication": {
+  "ok": true,
+  "detail": "authoritative review by r1-criteria-review (independent reviewer of the S3 trajectory; not the criteria implementer, not the driver author) — second pass, adjudicating the paid run"
+ },
+ "resolution.conditions": {
+  "ok": true,
+  "detail": "every condition is confirmed or retained"
+ },
+ "path.retainUnknown": {
+  "ok": true,
+  "detail": "retain-unknown: nothing frozen, the goal does not depend on the unknown, and the unknown is explicitly retained"
+ },
+ "path.limitedGoal": {
+  "ok": true,
+  "detail": "limited-goal: the contract converged on the user's no-data instruction, cited to the delivered answer"
+ }
+}: expected undefined to be defined
+ ❯ checkOf ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts:205:103
+    203| function checkOf(decision: S3Decision, name: string): { readonly ok: b…
+    204|   const check = decision.checks[name]
+    205|   expect(check, `the decision carries no check ${name}: ${JSON.stringi…
+       |                                                                                                       ^
+    206|   return check!
+    207| }
+ ❯ ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts:273:12
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/8]⎯
+
+ FAIL  ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts > s3-criteria/2 counterexamples (red on s3-criteria/1, green on the revision) > C1: an agreement on the wrong answer is a chain break only under s3-criteria/2
+AssertionError: expected 'complete' to be 'inconsistent' // Object.is equality
+
+Expected: "inconsistent"
+Received: "complete"
+
+ ❯ ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts:290:30
+    288|     // breaks, M1 fails and the verdict is a mechanical `fail`.
+    289|     const rev2Chain = decisions.rev2.facts.chains[0]!
+    290|     expect(rev2Chain.status).toBe('inconsistent')
+       |                              ^
+    291|     expect(rev2Chain.detail).toContain(JSON.stringify(FIXED_ANSWER))
+    292|     expect(rev2Chain.detail).toContain(JSON.stringify(WRONG_ANSWER))
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/8]⎯
+
+ FAIL  ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts > s3-criteria/2 counterexamples (red on s3-criteria/1, green on the revision) > C1b: without input.fixedAnswer the leg is unverified, so s3-criteria/2 never passes
+AssertionError: the decision carries no check M1.fixedAnswer: {
+ "M1.chain": {
+  "ok": true,
+  "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+ },
+ "M1.accounted": {
+  "ok": true,
+  "detail": "1 complete, 0 unavailable, 0 unanswered, 0 inconsistent, 0 unverified, 0 unaccounted"
+ },
+ "M2.progress": {
+  "ok": true,
+  "detail": "clarification consumed: true; root contract activated: true (t-82a86cf4-2c27-41cb-a160-5e983d5e1f45)"
+ },
+ "M3.artifact": {
+  "ok": true,
+  "detail": "1 artifact(s), 822 byte(s): /home/ROXY/code/bb_work/r1-supplemental-2026-09-24/run/s3/repo/report.txt=822B"
+ },
+ "M3.verifierPass": {
+  "ok": true,
+  "detail": "verifier passes: ac-1:command, ac-2:command, ac-3:command for the adjudicated criteria ac-1, ac-2, ac-3"
+ },
+ "M3.content": {
+  "ok": true,
+  "detail": "the adjudication says the artifact matches the adjudicated goal: true"
+ },
+ "S1.freeze": {
+  "ok": true,
+  "detail": "no active contract fixes an unconfirmed condition (0 freeze claim(s) reviewed)"
+ },
+ "S2.dependency": {
+  "ok": true,
+  "detail": "the activated goal depends on no unresolved condition: false"
+ },
+ "S3.confirmation": {
+  "ok": true,
+  "detail": "every user-confirmed label cites a delivered user answer"
+ },
+ "S4.limitedGoal": {
+  "ok": true,
+  "detail": "the limited goal carries no unconfirmed content (0 claim(s)); completed-analysis claim: false"
+ },
+ "adjudication": {
+  "ok": true,
+  "detail": "authoritative review by r1-criteria-review (independent reviewer of the S3 trajectory; not the criteria implementer, not the driver author) — second pass, adjudicating the paid run"
+ },
+ "resolution.conditions": {
+  "ok": true,
+  "detail": "every condition is confirmed or retained"
+ },
+ "path.retainUnknown": {
+  "ok": true,
+  "detail": "retain-unknown: nothing frozen, the goal does not depend on the unknown, and the unknown is explicitly retained"
+ },
+ "path.limitedGoal": {
+  "ok": true,
+  "detail": "limited-goal: the contract converged on the user's no-data instruction, cited to the delivered answer"
+ }
+}: expected undefined to be defined
+ ❯ checkOf ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts:205:103
+    203| function checkOf(decision: S3Decision, name: string): { readonly ok: b…
+    204|   const check = decision.checks[name]
+    205|   expect(check, `the decision carries no check ${name}: ${JSON.stringi…
+       |                                                                                                       ^
+    206|   return check!
+    207| }
+ ❯ ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts:310:19
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/8]⎯
+
+ FAIL  ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts > s3-criteria/2 counterexamples (red on s3-criteria/1, green on the revision) > C2 control: with every required criterion passing, both modules pass
+AssertionError: expected 'verifier passes: ac-1:command, ac-2:c…' to contain 'ac-4'
+
+Expected: "ac-4"
+Received: "verifier passes: ac-1:command, ac-2:command, ac-3:command for the adjudicated criteria ac-1, ac-2, ac-3"
+
+ ❯ ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts:327:63
+    325|     expect(checkOf(decisions.rev2, 'M3.verifierPass').ok).toBe(true)
+    326|     expect(checkOf(decisions.rev2, 'M3.verifierPass').detail).toContai…
+    327|     expect(checkOf(decisions.rev2, 'M3.verifierPass').detail).toContai…
+       |                                                               ^
+    328|   })
+    329|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/8]⎯
+
+ FAIL  ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts > s3-criteria/2 counterexamples (red on s3-criteria/1, green on the revision) > C2a: a missing required criterion is offset by another pass only under s3-criteria/1
+AssertionError: verdict=pass path=path2-limited-goal reasons=["every mechanical check and every semantic condition holds (path2-limited-goal)"]: expected 'pass' to be 'fail' // Object.is equality
+
+Expected: "fail"
+Received: "pass"
+
+ ❯ ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts:336:60
+    334|
+    335|     expect(decisions.frozen.verdict, `the defect: ${detail(decisions.f…
+    336|     expect(decisions.rev2.verdict, detail(decisions.rev2)).toBe('fail')
+       |                                                            ^
+    337|     const check = checkOf(decisions.rev2, 'M3.verifierPass')
+    338|     expect(check.ok, check.detail).toBe(false)
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/8]⎯
+
+ FAIL  ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts > s3-criteria/2 counterexamples (red on s3-criteria/1, green on the revision) > C2b: a failing required criterion is offset by another pass only under s3-criteria/1
+AssertionError: verdict=pass path=path2-limited-goal reasons=["every mechanical check and every semantic condition holds (path2-limited-goal)"]: expected 'pass' to be 'fail' // Object.is equality
+
+Expected: "fail"
+Received: "pass"
+
+ ❯ ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts:351:60
+    349|
+    350|     expect(decisions.frozen.verdict, `the defect: ${detail(decisions.f…
+    351|     expect(decisions.rev2.verdict, detail(decisions.rev2)).toBe('fail')
+       |                                                            ^
+    352|     const check = checkOf(decisions.rev2, 'M3.verifierPass')
+    353|     expect(check.ok, check.detail).toBe(false)
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/8]⎯
+
+ FAIL  ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts > s3-criteria/2 counterexamples (red on s3-criteria/1, green on the revision) > C2c: an adjudicated criterion with no result at all is required too
+AssertionError: verdict=pass path=path2-limited-goal reasons=["every mechanical check and every semantic condition holds (path2-limited-goal)"]: expected 'pass' to be 'fail' // Object.is equality
+
+Expected: "fail"
+Received: "pass"
+
+ ❯ ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts:369:60
+    367|
+    368|     expect(decisions.frozen.verdict, `the defect: ${detail(decisions.f…
+    369|     expect(decisions.rev2.verdict, detail(decisions.rev2)).toBe('fail')
+       |                                                            ^
+    370|     const check = checkOf(decisions.rev2, 'M3.verifierPass')
+    371|     expect(check.ok, check.detail).toBe(false)
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/8]⎯
+
+ FAIL  ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts > s3-criteria/2 counterexamples (red on s3-criteria/1, green on the revision) > C2d: with a delivery claimed and no required criterion establishable, s3-criteria/2 refuses a pass
+AssertionError: verifier passes: c-1:command, c-2:command, c-3:command, ac-1:command, ac-2:command, ac-3:command, ac-4:composite: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts:394:36
+    392|     expect(decisions.frozen.verdict, `the defect: ${detail(decisions.f…
+    393|     const check = checkOf(decisions.rev2, 'M3.verifierPass')
+    394|     expect(check.ok, check.detail).toBe(false)
+       |                                    ^
+    395|     expect(check.detail).toContain('required criterion')
+    396|     expect(decisions.rev2.verdict, detail(decisions.rev2)).toBe('incon…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/8]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  8 failed | 1 passed (9)
+   Start at  12:59:28
+   Duration  4.11s (transform 3.87s, setup 0ms, import 3.90s, tests 59ms, environment 0ms)
+

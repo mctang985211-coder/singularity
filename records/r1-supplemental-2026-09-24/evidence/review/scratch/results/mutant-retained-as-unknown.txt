@@ -1,0 +1,63 @@
+../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts (1:449) [33m[UNRESOLVED_IMPORT] [0mCould not resolve 'vitest/config' in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts
+ - Module not found, treating it as an external dependency in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts at 449..464
+
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /home/ROXY/code/bb_work/harness
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/retained-as-unknown/s3-criteria.spec.ts (12 tests | 2 failed) 21ms
+     ✓ replays the original S3 trajectory against its adjudication and rejects it 7ms
+     ✓ rejects a run whose desk answer reached the model as something else 1ms
+     ✓ rejects a run whose answer never reached the session at all 0ms
+     ✓ rejects a run whose clarification call failed and whose goal then depended on the unknown 1ms
+     ✓ rejects an activated goal whose delivery depends on an unresolved unknown 0ms
+     × passes an activated limited goal that explicitly retains the unknown while the clarification went unanswered 6ms
+     ✓ rejects a run that claims delivery with no non-empty artifact 1ms
+     ✓ rejects a run that claims delivery with no real verifier pass for the goal 0ms
+     × rejects a limited goal that still carries an unconfirmed quarter 1ms
+     ✓ rejects a user-confirmed label that cites no delivered user answer 1ms
+     ✓ never passes without a usable semantic adjudication 0ms
+     ✓ never passes on a review its own author marked draft 0ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/retained-as-unknown/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > passes an activated limited goal that explicitly retains the unknown while the clarification went unanswered
+AssertionError: expected 'no allowed path: the record cannot be…' to be 'path1-retain-unknown' // Object.is equality
+
+Expected: "path1-retain-unknown"
+Received: "no allowed path: the record cannot be decided"
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/retained-as-unknown/s3-criteria.spec.ts:362:27
+    360|     })
+    361|     expect(decision.facts.answerMissing).toBe(true)
+    362|     expect(decision.path).toBe('path1-retain-unknown')
+       |                           ^
+    363|     expectVerdict(decision, 'pass', 'path.retainUnknown')
+    364|   })
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/retained-as-unknown/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a limited goal that still carries an unconfirmed quarter
+AssertionError: expected 'inconclusive' to be 'pass' // Object.is equality
+
+Expected: "pass"
+Received: "inconclusive"
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/retained-as-unknown/s3-criteria.spec.ts:416:27
+    414|     const clean = decideS3({ record, adjudication: { ...passing, goal:…
+    415|     expect(clean.checks['S4.limitedGoal']!.ok).toBe(true)
+    416|     expect(clean.verdict).toBe('pass')
+       |                           ^
+    417|   })
+    418|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 10 passed (12)
+   Start at  01:34:49
+   Duration  241ms (transform 62ms, setup 0ms, import 87ms, tests 21ms, environment 0ms)
+

@@ -1,0 +1,25 @@
+../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts (1:449) [33m[UNRESOLVED_IMPORT] [0mCould not resolve 'vitest/config' in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts
+ - Module not found, treating it as an external dependency in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts at 449..464
+
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /home/ROXY/code/bb_work/harness
+
+stdout | ../r1-supplemental-2026-09-24/evidence/review/scratch/probes/pass2-loopholes.spec.ts > pass 2 loophole probes (paid record) > PROBE E: an explicitly mismatching artifact passes when the run claims no delivery
+PROBE E: verdict=pass path=path2-limited-goal deliveryClaimed=false
+  M3.content.ok=true :: the run claims no delivery
+  reasons=["every mechanical check and every semantic condition holds (path2-limited-goal)"]
+
+stdout | ../r1-supplemental-2026-09-24/evidence/review/scratch/probes/pass2-loopholes.spec.ts > pass 2 loophole probes (paid record) > PROBE F: a retention citation that resolves is enough, whatever it says
+PROBE F: verdict=pass path=path2-limited-goal
+  citation: {"of":"conditions.quarter (retained-unknown)","resolved":true,"detail":"rootContract.objective carries \"Create report.txt summarizing the quarter.\""}
+
+ ✓ ../r1-supplemental-2026-09-24/evidence/review/scratch/probes/pass2-loopholes.spec.ts (2 tests) 8ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  02:03:47
+   Duration  206ms (transform 51ms, setup 0ms, import 70ms, tests 8ms, environment 0ms)
+

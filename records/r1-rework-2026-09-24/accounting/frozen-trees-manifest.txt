@@ -1,0 +1,56 @@
+frozen trees — sha256 manifest and the non-modification check
+================================================================================
+
+Trees (both read-only for this recheck):
+  /home/ROXY/code/bb_work/r1-supplemental-2026-09-24/   the round's archive
+  /home/ROXY/code/bb_work/r1-evidence-2026-09-23/       the older round
+
+Method: for every regular file, `sha256 + two spaces + './' + path-relative-to-the-tree`,
+in byte order (LC_ALL=C), joined in sorted order and hashed once as a single block:
+
+  cd <tree> && LC_ALL=C find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum
+
+Per-file listings (the same command without the trailing `| sha256sum`):
+
+  archive-r1-supplemental-2026-09-24.sha256    158 files   manifest sha256 542789e03d2b2acb632f42660e9ca4b0b4ab71bb5f973f5b2439c029719e6f36
+  archive-r1-evidence-2026-09-23.sha256         87 files   manifest sha256 efdba0cb4f0496064e6f8f37e14d828181ed094d3a70b36a37ea3f5321df0ee8
+
+  Both manifest digests are recomputed on every run of
+  accounting/cache-write-recompute.py (section 8) and are carried in
+  accounting/V5-account-correction.json:frozenTrees.
+
+Check performed
+--------------------------------------------------------------------------------
+A per-file listing of both trees was captured before any file of this recheck was
+read (start of the recheck, 2026-09-24). After the deliverables were written, the
+listings were re-captured and compared:
+
+    diff <(LC_ALL=C sort <pre-work capture>) <(LC_ALL=C sort <re-capture>)   ->  empty, both trees
+
+Result: no file was added, removed or changed in either tree.
+
+The pre-work capture used the default locale collation
+(`cd <tree> && find . -type f -print0 | sort -z | xargs -0 sha256sum`) and hashed to:
+
+  394058227ac20be27265caa460f0191f4ff750506ca4ee701574bedb736b9a8f   r1-supplemental-2026-09-24 (158 lines)
+  54b6ae3d0cebdb2641864ada3d0c8a248390f152ab8d4856f0705d9604472d0a   r1-evidence-2026-09-23     (87 lines)
+
+The two .sha256 files beside this file are the same listings in byte order, which
+is locale-independent; sorted comparison of the two orderings is empty.
+
+Re-verification (reproducible in any locale)
+--------------------------------------------------------------------------------
+    cd /home/ROXY/code/bb_work/r1-supplemental-2026-09-24 && \
+      LC_ALL=C find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum \
+      | diff - /home/ROXY/code/bb_work/r1-rework-2026-09-24/accounting/archive-r1-supplemental-2026-09-24.sha256
+
+    cd /home/ROXY/code/bb_work/r1-evidence-2026-09-23 && \
+      LC_ALL=C find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum \
+      | diff - /home/ROXY/code/bb_work/r1-rework-2026-09-24/accounting/archive-r1-evidence-2026-09-23.sha256
+
+An empty diff means the tree still matches the frozen state recorded here.
+
+Note on the deliverables themselves: nothing of this recheck was written inside
+either tree. The correction record, the recompute script and its captured output
+all live under /home/ROXY/code/bb_work/r1-rework-2026-09-24/accounting/, which is
+outside both trees and is therefore not covered by the manifests above.

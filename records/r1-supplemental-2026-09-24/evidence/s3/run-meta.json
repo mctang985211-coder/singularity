@@ -1,0 +1,79 @@
+{
+  "startedAt": "2026-09-23T17:46:29.254Z",
+  "endedAt": "2026-09-23T17:49:53.932Z",
+  "wallTimeMs": 204678,
+  "scenario": "s3",
+  "input": {
+    "message": "Create report.txt summarizing the quarter.",
+    "fixedAnswer": "No data was provided; state that explicitly."
+  },
+  "model": {
+    "adapter": "DeepSeekAdapter (production)",
+    "provider": "deepseek-official",
+    "model": "step-5-preview",
+    "reasoningEffort": "high",
+    "gateway": "https://api.stepfun.com/step_plan/v1",
+    "credentialKeyLength": 65,
+    "note": "the credential itself is never printed or persisted; only its length appears here"
+  },
+  "singularitySha": "9f8ba92242c8ec650dcca23aedea4cd6c6492aa1",
+  "driverFiles": {
+    "r1-env.ts": "fd4a99db8bfded27e956a676aca70d05d1ff18722ea215a38b4874dc32f735b5",
+    "r1-record.ts": "15a207d91897976ad34b0d0fe944302fa8ed3dc84362935bea265308ccd047a9",
+    "r1-run.spec.ts": "0762775985d16dd40255dcce947cc001b413ae2cb4ece1cdfffc0aeabd3f6d32",
+    "r1-s3.spec.ts": "e099a1d49cf2b51faa27224cf5b73942eda34ad0f474096a414710f631e52773",
+    "r1-scripted-model.ts": "36b3201d96254ee3b5259954de0f658f2ce5866e9706b7c372fd782446457da4",
+    "r1-smoke.spec.ts": "c6688fb799712e2e029114f73fcdf718f388fc59b452262655d8d6829c8471af",
+    "r1-smoke.ts": "3e71b33571055a3e3bef22e59be7a57e91214a96bf5cfe513f8c404429c1d35e",
+    "r1-stack.ts": "c227e843bc3de0da372ea38197e5e731b04d75a9af2460c4e547056ec6391437",
+    "r1-wiring.spec.ts": "3e7be98072775579b76ae6b3f1cf1000570308e40b04bf94d84dd992bd3fca1e",
+    "s3-criteria.spec.ts": "a569f30d078580cd485e5a8ebc2f1718b081a75c3a8a909f5a6c7e2cc4b20a36",
+    "s3-criteria.ts": "4ce8095ca063924239cbadd8654284ae8a0d4b903961d1d604e4b046bdafe92c",
+    "vitest.r1-run.config.ts": "e13553befbe21a41bfb4164fa76178c73025db71d3f83ba0d602a8eb26b62ee6",
+    "vitest.r1.config.ts": "04960419469b5f38a5f15a044cdea12afc96e471c84cca11054ef5aeda57b862"
+  },
+  "budget": {
+    "hardInFlight": {
+      "rootBudget": {
+        "wallTimeMs": 300000,
+        "maxRuns": 8
+      },
+      "enforcedBy": "A3 runtime"
+    },
+    "soft": {
+      "limits": {
+        "toolCalls": 100,
+        "wallTimeMs": 900000
+      },
+      "usage": {
+        "inputTokens": 34518,
+        "outputTokens": 16097,
+        "cacheReadTokens": 168704,
+        "cacheWriteTokens": 0
+      },
+      "toolCalls": 17,
+      "wallTimeMs": 204678,
+      "exceeded": []
+    },
+    "tokens": null,
+    "tokenPolicy": "the 2026-09-23 authorization (cap lifted) carries over; usage recorded in full, no claim against the old 30000 ceiling"
+  },
+  "smoke": {
+    "ran": true,
+    "result": {
+      "ok": true,
+      "baseUrl": "https://api.stepfun.com/step_plan/v1",
+      "keyLength": 65,
+      "model": "step-5-preview",
+      "text": "**Ping** is a network diagnostic command used to test the connectivity (reachability) between your device and another host on an IP network.\n\n### How it works:\n1. It sends a small data packet (an **ICMP Echo Request**) to a target host (e.g., `ping google.com`).\n2. If the host is reachable, it replies with an **ICMP Echo Reply**.\n3. The output typically shows:\n   - **Response time** (latency, in milliseconds)\n   - **TTL** (Time To Live, hops)\n   - **Packet loss** (if any)\n\n### Example output:\n```\nPING google.com (142.250.185.78): 56 data bytes\n64 bytes from 142.250.185.78: icmp_seq=0 ttl=118 time=15.3 ms\n64 bytes from 142.250.185.78: icmp_seq=1 ttl=118 time=14.8 ms\n```\n\n### Common uses:\n- Check if a website/server is online.\n- Diagnose network issues (high latency, packet loss).\n- Troubleshoot DNS (by IP vs. hostname).\n\n### Limitations:\n- Some hosts/networks **block ICMP** (ping) for security.\n- Firewalls may filter ping packets.\n\n*(Note: In this chat interface, I can't actually send a ping—but I can explain the concept or simulate what you'd see!)*",
+      "finishReason": {
+        "kind": "stop"
+      },
+      "inputTokens": 12,
+      "outputTokens": 409
+    },
+    "blocked": null
+  },
+  "stopReason": "root terminal: verified",
+  "verdict": "not computed here: driver/s3-criteria.ts decides from driver.json plus an independent adjudication"
+}

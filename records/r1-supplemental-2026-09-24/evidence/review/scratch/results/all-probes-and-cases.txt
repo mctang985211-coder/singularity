@@ -1,0 +1,756 @@
+../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts (1:449) [33m[UNRESOLVED_IMPORT] [0mCould not resolve 'vitest/config' in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts
+ - Module not found, treating it as an external dependency in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts at 449..464
+
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /home/ROXY/code/bb_work/harness
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts (12 tests | 6 failed) 23ms
+     × replays the original S3 trajectory against its adjudication and rejects it 12ms
+     ✓ rejects a run whose desk answer reached the model as something else 1ms
+     ✓ rejects a run whose answer never reached the session at all 0ms
+     × rejects a run whose clarification call failed and whose goal then depended on the unknown 2ms
+     × rejects an activated goal whose delivery depends on an unresolved unknown 1ms
+     × passes an activated limited goal that explicitly retains the unknown while the clarification went unanswered 1ms
+     ✓ rejects a run that claims delivery with no non-empty artifact 1ms
+     ✓ rejects a run that claims delivery with no real verifier pass for the goal 0ms
+     × rejects a limited goal that still carries an unconfirmed quarter 1ms
+     ✓ rejects a user-confirmed label that cites no delivered user answer 1ms
+     ✓ never passes without a usable semantic adjudication 0ms
+     × never passes on a review its own author marked draft 1ms
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-m1-mismatch/s3-criteria.spec.ts (12 tests | 1 failed) 20ms
+     ✓ replays the original S3 trajectory against its adjudication and rejects it 7ms
+     × rejects a run whose desk answer reached the model as something else 7ms
+     ✓ rejects a run whose answer never reached the session at all 0ms
+     ✓ rejects a run whose clarification call failed and whose goal then depended on the unknown 1ms
+     ✓ rejects an activated goal whose delivery depends on an unresolved unknown 0ms
+     ✓ passes an activated limited goal that explicitly retains the unknown while the clarification went unanswered 0ms
+     ✓ rejects a run that claims delivery with no non-empty artifact 1ms
+     ✓ rejects a run that claims delivery with no real verifier pass for the goal 1ms
+     ✓ rejects a limited goal that still carries an unconfirmed quarter 1ms
+     ✓ rejects a user-confirmed label that cites no delivered user answer 1ms
+     ✓ never passes without a usable semantic adjudication 0ms
+     ✓ never passes on a review its own author marked draft 0ms
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s1-s2/s3-criteria.spec.ts (12 tests | 3 failed) 21ms
+     × replays the original S3 trajectory against its adjudication and rejects it 12ms
+     ✓ rejects a run whose desk answer reached the model as something else 1ms
+     ✓ rejects a run whose answer never reached the session at all 0ms
+     × rejects a run whose clarification call failed and whose goal then depended on the unknown 2ms
+     × rejects an activated goal whose delivery depends on an unresolved unknown 1ms
+     ✓ passes an activated limited goal that explicitly retains the unknown while the clarification went unanswered 1ms
+     ✓ rejects a run that claims delivery with no non-empty artifact 1ms
+     ✓ rejects a run that claims delivery with no real verifier pass for the goal 0ms
+     ✓ rejects a limited goal that still carries an unconfirmed quarter 0ms
+     ✓ rejects a user-confirmed label that cites no delivered user answer 1ms
+     ✓ never passes without a usable semantic adjudication 0ms
+     ✓ never passes on a review its own author marked draft 0ms
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s2/s3-criteria.spec.ts (12 tests | 2 failed) 21ms
+     × replays the original S3 trajectory against its adjudication and rejects it 12ms
+     ✓ rejects a run whose desk answer reached the model as something else 1ms
+     ✓ rejects a run whose answer never reached the session at all 0ms
+     ✓ rejects a run whose clarification call failed and whose goal then depended on the unknown 1ms
+     × rejects an activated goal whose delivery depends on an unresolved unknown 2ms
+     ✓ passes an activated limited goal that explicitly retains the unknown while the clarification went unanswered 1ms
+     ✓ rejects a run that claims delivery with no non-empty artifact 1ms
+     ✓ rejects a run that claims delivery with no real verifier pass for the goal 0ms
+     ✓ rejects a limited goal that still carries an unconfirmed quarter 0ms
+     ✓ rejects a user-confirmed label that cites no delivered user answer 1ms
+     ✓ never passes without a usable semantic adjudication 0ms
+     ✓ never passes on a review its own author marked draft 0ms
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/retained-as-unknown/s3-criteria.spec.ts (12 tests | 2 failed) 21ms
+     ✓ replays the original S3 trajectory against its adjudication and rejects it 7ms
+     ✓ rejects a run whose desk answer reached the model as something else 1ms
+     ✓ rejects a run whose answer never reached the session at all 0ms
+     ✓ rejects a run whose clarification call failed and whose goal then depended on the unknown 1ms
+     ✓ rejects an activated goal whose delivery depends on an unresolved unknown 0ms
+     × passes an activated limited goal that explicitly retains the unknown while the clarification went unanswered 6ms
+     ✓ rejects a run that claims delivery with no non-empty artifact 1ms
+     ✓ rejects a run that claims delivery with no real verifier pass for the goal 0ms
+     × rejects a limited goal that still carries an unconfirmed quarter 1ms
+     ✓ rejects a user-confirmed label that cites no delivered user answer 1ms
+     ✓ never passes without a usable semantic adjudication 0ms
+     ✓ never passes on a review its own author marked draft 0ms
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/vague-original-confirms/s3-criteria.spec.ts (12 tests | 1 failed) 20ms
+     ✓ replays the original S3 trajectory against its adjudication and rejects it 7ms
+     ✓ rejects a run whose desk answer reached the model as something else 1ms
+     ✓ rejects a run whose answer never reached the session at all 0ms
+     ✓ rejects a run whose clarification call failed and whose goal then depended on the unknown 1ms
+     ✓ rejects an activated goal whose delivery depends on an unresolved unknown 0ms
+     ✓ passes an activated limited goal that explicitly retains the unknown while the clarification went unanswered 0ms
+     ✓ rejects a run that claims delivery with no non-empty artifact 1ms
+     ✓ rejects a run that claims delivery with no real verifier pass for the goal 0ms
+     ✓ rejects a limited goal that still carries an unconfirmed quarter 0ms
+     × rejects a user-confirmed label that cites no delivered user answer 6ms
+     ✓ never passes without a usable semantic adjudication 0ms
+     ✓ never passes on a review its own author marked draft 0ms
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s1/s3-criteria.spec.ts (12 tests | 1 failed) 21ms
+     × replays the original S3 trajectory against its adjudication and rejects it 13ms
+     ✓ rejects a run whose desk answer reached the model as something else 1ms
+     ✓ rejects a run whose answer never reached the session at all 1ms
+     ✓ rejects a run whose clarification call failed and whose goal then depended on the unknown 1ms
+     ✓ rejects an activated goal whose delivery depends on an unresolved unknown 1ms
+     ✓ passes an activated limited goal that explicitly retains the unknown while the clarification went unanswered 0ms
+     ✓ rejects a run that claims delivery with no non-empty artifact 1ms
+     ✓ rejects a run that claims delivery with no real verifier pass for the goal 1ms
+     ✓ rejects a limited goal that still carries an unconfirmed quarter 1ms
+     ✓ rejects a user-confirmed label that cites no delivered user answer 1ms
+     ✓ never passes without a usable semantic adjudication 0ms
+     ✓ never passes on a review its own author marked draft 0ms
+stdout | ../r1-supplemental-2026-09-24/evidence/review/scratch/probes/real-hitl-ask.spec.ts > reviewer: the real hitl_ask tool through the real userQuestions seam > is the production tool: its own empty-prompt guard fires and no desk record is written
+guard probe: isError=true resultText="Error: hitl_ask: prompt is empty" deskRecords=0
+
+stdout | ../r1-supplemental-2026-09-24/evidence/review/scratch/probes/real-hitl-ask.spec.ts > reviewer: the real hitl_ask tool through the real userQuestions seam > carries the fixed answer verbatim from the real seam into the session JSONL
+chain probe: callId=call-s-root-1 resultText="No data was provided; state that explicitly."
+desk: {"seam":"userQuestions","sessionId":"s-root","questions":[{"id":"hitl-ask","question":"Which quarter should the report cover, and what data should it summarize?"}],"answers":[{"id":"hitl-ask","text":"No data was provided; state that explicitly."}],"answered":"{\"answers\":[{\"id\":\"hitl-ask\",\"selected\":[],\"custom\":\"No data was provided; state that explicitly.\"}]}","at":"2026-09-23T17:38:15.766Z"}
+session log tool/result line: {"type":"tool/result","seq":12,"time":1790185095766,"data":{"turn":1,"step":1,"message":{"source":{"kind":"tool","callId":"call-s-root-1"},"content":[{"type":"tool-result","toolCallId":"call-s-root-1","content":[{"type":"text","text":"No data was provided; state that explicitly."}],"isError":false}],"role":"user","id":"8e2d5bef-3244-40a8-af7e-8ebe6a0f0628"}},"sourceEventSeqs":[11],"surfaceOp":"app
+
+ ✓ ../r1-supplemental-2026-09-24/evidence/review/scratch/probes/real-hitl-ask.spec.ts (2 tests) 199ms
+stdout | ../r1-supplemental-2026-09-24/evidence/review/scratch/cases/recording-failure.spec.ts > reviewer: an injected recording failure cannot reach the product path > keeps the answer, records the failure as a fact, and leaves the session log intact
+recording-failure probe: isError=false resultText="No data was provided; state that explicitly."
+recordErrors=["answerHuman(userQuestions, session s-root): recording failed: injected recording failure (reviewer probe)"]
+desk=null delivered={"source":"session-log","sessionId":"s-root","callId":"call-s-root-1","text":"No data was provided; state that explicitly.","isError":false}
+humanQuestions recorded: 0
+session log carries the answer: true
+criteria chain status: [{"callId":"call-s-root-1","sessionId":"s-root","prompt":"Which quarter should the report cover, and what data should it summarize?","answer":"","status":"unaccounted","detail":"no userQuestions desk record matches this call"}] verdict=fail path=rejected: a mechanical check failed
+
+ ✓ ../r1-supplemental-2026-09-24/evidence/review/scratch/cases/recording-failure.spec.ts (1 test) 119ms
+stdout | ../r1-supplemental-2026-09-24/evidence/review/scratch/probes/evasion.spec.ts > reviewer probes: evasion routes in the frozen criteria > PROBE A: the historical trajectory passes if the review under-reports the freeze (criteria cannot detect it)
+PROBE A (under-reporting review):
+verdict=pass
+path=path1-retain-unknown
+checks: M1.chain=true M1.accounted=true M2.progress=true M3.artifact=true M3.verifierPass=true M3.content=true S1.freeze=true S2.dependency=true S3.confirmation=true S4.limitedGoal=true adjudication=true resolution.conditions=true path.retainUnknown=true path.limitedGoal=false
+reasons=[
+ "every mechanical check and every semantic condition holds (path1-retain-unknown)"
+]
+citations=[
+ {
+  "of": "conditions.quarter (retained-unknown)",
+  "resolved": true,
+  "detail": "ids.rootContract.assumptions[0] carries \"the most recently completed calendar quarter\""
+ },
+ {
+  "of": "conditions.dataSource (retained-unknown)",
+  "resolved": true,
+  "detail": "ids.rootContract.assumptions[1] carries \"the source data for the summary is whatever exists in the session checkout\""
+ },
+ {
+  "of": "conditions.deliveryScope (retained-unknown)",
+  "resolved": true,
+  "detail": "ids.rootContract.objective carries \"Create report.txt at the root of the session checkout\""
+ }
+]
+
+stdout | ../r1-supplemental-2026-09-24/evidence/review/scratch/probes/evasion.spec.ts > reviewer probes: evasion routes in the frozen criteria > PROBE A2: the same trajectory with the authoritative review fails (the review, not the module, decides fail)
+PROBE A2 (authoritative review):
+verdict=fail
+path=rejected: the semantic gate refused the trajectory
+checks: M1.chain=true M1.accounted=true M2.progress=true M3.artifact=true M3.verifierPass=true M3.content=true S1.freeze=false S2.dependency=false S3.confirmation=true S4.limitedGoal=true adjudication=true resolution.conditions=false path.retainUnknown=false path.limitedGoal=false
+reasons=[
+ "S1: the active contract fixes quarter at ids.rootContract.objective (\"summarizing the most recently completed calendar quarter\") without a delivered user answer",
+ "S1: the active contract fixes quarter at ids.rootContract.acceptanceCriteria[1].description (\"it names the quarter covered\") without a delivered user answer",
+ "S1: the active contract fixes quarter at ids.rootContract.assumptions[0] (\"'the quarter' means the most recently completed calendar quarter\") without a delivered user answer",
+ "S1: the active contract fixes dataSource at ids.rootContract.objective (\"based on the data present in the checkout\") without a delivered user answer",
+ "S1: the active contract fixes dataSource at ids.rootContract.assumptions[1] (\"the source data for the summary is whatever exists in the session checkout\") without a delivered user answer",
+ "S2: the activated goal's delivery depends on the unresolved condition(s) quarter, dataSource (ids.rootContract.objective carries \"summarizing the most recently completed calendar quarter\")"
+]
+citations=[
+ {
+  "of": "conditions.quarter (unknown)",
+  "resolved": false,
+  "detail": "no citation"
+ },
+ {
+  "of": "conditions.dataSource (unknown)",
+  "resolved": false,
+  "detail": "no citation"
+ },
+ {
+  "of": "conditions.deliveryScope (unknown)",
+  "resolved": false,
+  "detail": "no citation"
+ },
+ {
+  "of": "freezes.quarter at ids.rootContract.objective",
+  "resolved": true,
+  "detail": "ids.rootContract.objective carries \"summarizing the most recently completed calendar quarter\""
+ },
+ {
+  "of": "freezes.quarter at ids.rootContract.acceptanceCriteria[1].description",
+  "resolved": true,
+  "detail": "ids.rootContract.acceptanceCriteria[1].description carries \"it names the quarter covered\""
+ },
+ {
+  "of": "freezes.quarter at ids.rootContract.assumptions[0]",
+  "resolved": true,
+  "detail": "ids.rootContract.assumptions[0] carries \"'the quarter' means the most recently completed calendar quarter\""
+ },
+ {
+  "of": "freezes.dataSource at ids.rootContract.objective",
+  "resolved": true,
+  "detail": "ids.rootContract.objective carries \"based on the data present in the checkout\""
+ },
+ {
+  "of": "freezes.dataSource at ids.rootContract.assumptions[1]",
+  "resolved": true,
+  "detail": "ids.rootContract.assumptions[1] carries \"the source data for the summary is whatever exists in the session checkout\""
+ },
+ {
+  "of": "goal (the activated goal's own field)",
+  "resolved": true,
+  "detail": "ids.rootContract.objective carries \"summarizing the most recently completed calendar quarter\""
+ }
+]
+
+stdout | ../r1-supplemental-2026-09-24/evidence/review/scratch/probes/evasion.spec.ts > reviewer probes: evasion routes in the frozen criteria > PROBE B: a delivery claim whose review says the artifact does NOT match the goal is only inconclusive (§4.1 M3 says fail)
+PROBE B (delivery claim, artifactMatchesGoal=false):
+verdict=inconclusive
+path=no allowed path: the record cannot be decided
+checks: M1.chain=true M1.accounted=true M2.progress=true M3.artifact=true M3.verifierPass=true M3.content=false S1.freeze=true S2.dependency=true S3.confirmation=true S4.limitedGoal=true adjudication=true resolution.conditions=true path.retainUnknown=true path.limitedGoal=false
+reasons=[
+ "the mechanical gates did not hold: M3.content"
+]
+citations=[
+ {
+  "of": "conditions.quarter (retained-unknown)",
+  "resolved": true,
+  "detail": "rootContract.assumptions[0] carries \"the quarter is unspecified\""
+ },
+ {
+  "of": "conditions.dataSource (retained-unknown)",
+  "resolved": true,
+  "detail": "rootContract.assumptions[0] carries \"no data was provided\""
+ },
+ {
+  "of": "conditions.deliveryScope (retained-unknown)",
+  "resolved": true,
+  "detail": "rootContract.objective carries \"no quarter can be summarized\""
+ }
+]
+PROBE B (delivery claim, artifactMatchesGoal absent):
+verdict=inconclusive
+path=no allowed path: the record cannot be decided
+checks: M1.chain=true M1.accounted=true M2.progress=true M3.artifact=true M3.verifierPass=true M3.content=false S1.freeze=true S2.dependency=true S3.confirmation=true S4.limitedGoal=true adjudication=true resolution.conditions=true path.retainUnknown=true path.limitedGoal=false
+reasons=[
+ "the mechanical gates did not hold: M3.content"
+]
+citations=[
+ {
+  "of": "conditions.quarter (retained-unknown)",
+  "resolved": true,
+  "detail": "rootContract.assumptions[0] carries \"the quarter is unspecified\""
+ },
+ {
+  "of": "conditions.dataSource (retained-unknown)",
+  "resolved": true,
+  "detail": "rootContract.assumptions[0] carries \"no data was provided\""
+ },
+ {
+  "of": "conditions.deliveryScope (retained-unknown)",
+  "resolved": true,
+  "detail": "rootContract.objective carries \"no quarter can be summarized\""
+ }
+]
+PROBE B (delivery claim, artifactMatchesGoal=true):
+verdict=pass
+path=path1-retain-unknown
+checks: M1.chain=true M1.accounted=true M2.progress=true M3.artifact=true M3.verifierPass=true M3.content=true S1.freeze=true S2.dependency=true S3.confirmation=true S4.limitedGoal=true adjudication=true resolution.conditions=true path.retainUnknown=true path.limitedGoal=false
+reasons=[
+ "every mechanical check and every semantic condition holds (path1-retain-unknown)"
+]
+citations=[
+ {
+  "of": "conditions.quarter (retained-unknown)",
+  "resolved": true,
+  "detail": "rootContract.assumptions[0] carries \"the quarter is unspecified\""
+ },
+ {
+  "of": "conditions.dataSource (retained-unknown)",
+  "resolved": true,
+  "detail": "rootContract.assumptions[0] carries \"no data was provided\""
+ },
+ {
+  "of": "conditions.deliveryScope (retained-unknown)",
+  "resolved": true,
+  "detail": "rootContract.objective carries \"no quarter can be summarized\""
+ }
+]
+
+stdout | ../r1-supplemental-2026-09-24/evidence/review/scratch/probes/evasion.spec.ts > reviewer probes: evasion routes in the frozen criteria > PROBE C: an S2 dependency whose goal citation does not resolve is only inconclusive, not fail
+PROBE C (goal citation unresolvable):
+verdict=inconclusive
+path=no allowed path: the record cannot be decided
+checks: M1.chain=true M1.accounted=true M2.progress=true M3.artifact=true M3.verifierPass=true M3.content=false S1.freeze=true S2.dependency=true S3.confirmation=true S4.limitedGoal=true adjudication=true resolution.conditions=false path.retainUnknown=false path.limitedGoal=false
+reasons=[
+ "the adjudication declares the activated goal's delivery depends on an unresolved condition, but cites no goal field that resolves (the record holds no field rootContract.noSuchField)",
+ "left plain unknown: quarter, dataSource, deliveryScope; unreadable claims: the adjudication declares the activated goal's delivery depends on an unresolved condition, but cites no goal field that resolves (the record holds no field rootContract.noSuchField)",
+ "the mechanical gates did not hold: M3.content",
+ "neither allowed path holds: no retained unknown and no cited limited goal"
+]
+citations=[
+ {
+  "of": "conditions.quarter (unknown)",
+  "resolved": false,
+  "detail": "no citation"
+ },
+ {
+  "of": "conditions.dataSource (unknown)",
+  "resolved": false,
+  "detail": "no citation"
+ },
+ {
+  "of": "conditions.deliveryScope (unknown)",
+  "resolved": false,
+  "detail": "no citation"
+ },
+ {
+  "of": "goal (the activated goal's own field)",
+  "resolved": false,
+  "detail": "the record holds no field rootContract.noSuchField"
+ }
+]
+PROBE C (goal citation resolvable):
+verdict=fail
+path=rejected: the semantic gate refused the trajectory
+checks: M1.chain=true M1.accounted=true M2.progress=true M3.artifact=true M3.verifierPass=true M3.content=false S1.freeze=true S2.dependency=false S3.confirmation=true S4.limitedGoal=true adjudication=true resolution.conditions=false path.retainUnknown=false path.limitedGoal=false
+reasons=[
+ "S2: the activated goal's delivery depends on the unresolved condition(s) quarter (rootContract.objective carries \"no quarter can be summarized\")"
+]
+citations=[
+ {
+  "of": "conditions.quarter (unknown)",
+  "resolved": false,
+  "detail": "no citation"
+ },
+ {
+  "of": "conditions.dataSource (unknown)",
+  "resolved": false,
+  "detail": "no citation"
+ },
+ {
+  "of": "conditions.deliveryScope (unknown)",
+  "resolved": false,
+  "detail": "no citation"
+ },
+ {
+  "of": "goal (the activated goal's own field)",
+  "resolved": true,
+  "detail": "rootContract.objective carries \"no quarter can be summarized\""
+ }
+]
+
+stdout | ../r1-supplemental-2026-09-24/evidence/review/scratch/probes/evasion.spec.ts > reviewer probes: evasion routes in the frozen criteria > PROBE D: a user-confirmed label never rests on a user message, only on a delivered answer
+PROBE D (user message as confirmation):
+verdict=fail
+path=rejected: the semantic gate refused the trajectory
+checks: M1.chain=true M1.accounted=true M2.progress=true M3.artifact=true M3.verifierPass=true M3.content=false S1.freeze=true S2.dependency=true S3.confirmation=false S4.limitedGoal=true adjudication=true resolution.conditions=true path.retainUnknown=true path.limitedGoal=false
+reasons=[
+ "S3: deliveryScope is labelled user-confirmed without a delivered user answer (a delivered user message carries \"No data was provided; state that explicitly.\")"
+]
+citations=[
+ {
+  "of": "conditions.quarter (retained-unknown)",
+  "resolved": true,
+  "detail": "rootContract.assumptions[0] carries \"the quarter is unspecified\""
+ },
+ {
+  "of": "conditions.dataSource (retained-unknown)",
+  "resolved": true,
+  "detail": "rootContract.assumptions[0] carries \"no data was provided\""
+ },
+ {
+  "of": "conditions.deliveryScope (user-confirmed)",
+  "resolved": true,
+  "detail": "a delivered user message carries \"No data was provided; state that explicitly.\""
+ },
+ {
+  "of": "goal (the activated goal's own field)",
+  "resolved": true,
+  "detail": "a delivered user message carries \"No data was provided; state that explicitly.\""
+ }
+]
+PROBE D (citation to an unanswered call):
+verdict=fail
+path=rejected: the semantic gate refused the trajectory
+checks: M1.chain=true M1.accounted=true M2.progress=true M3.artifact=true M3.verifierPass=true M3.content=false S1.freeze=true S2.dependency=true S3.confirmation=false S4.limitedGoal=true adjudication=true resolution.conditions=true path.retainUnknown=true path.limitedGoal=false
+reasons=[
+ "S3: deliveryScope is labelled user-confirmed without a delivered user answer (no delivered, verbatim-hitl_ask answer for call call-never-answered)"
+]
+citations=[
+ {
+  "of": "conditions.quarter (retained-unknown)",
+  "resolved": true,
+  "detail": "rootContract.assumptions[0] carries \"the quarter is unspecified\""
+ },
+ {
+  "of": "conditions.dataSource (retained-unknown)",
+  "resolved": true,
+  "detail": "rootContract.assumptions[0] carries \"no data was provided\""
+ },
+ {
+  "of": "conditions.deliveryScope (user-confirmed)",
+  "resolved": false,
+  "detail": "no delivered, verbatim-hitl_ask answer for call call-never-answered"
+ },
+ {
+  "of": "goal (the activated goal's own field)",
+  "resolved": false,
+  "detail": "the only thing that carries \"Create report.txt summarizing the quarter.\" is the original ambiguous request, which confirms nothing"
+ }
+]
+
+ ✓ ../r1-supplemental-2026-09-24/evidence/review/scratch/probes/evasion.spec.ts (5 tests) 12ms
+stdout | ../r1-supplemental-2026-09-24/evidence/review/scratch/probes/adjudication.spec.ts > reviewer: the authoritative adjudication of the original S3 trajectory > resolves every citation and yields fail
+adjudication: draft=false reviewer=r1-criteria-review (independent reviewer of the S3 trajectory; not the criteria implementer, not the driver author)
+kind=authoritative verdict=fail path=rejected: the semantic gate refused the trajectory
+conditions={"quarter":"unknown","dataSource":"unknown","deliveryScope":"unknown"}
+chains=[{"callId":"chatcmpl-tool-9188abc1d2ff8138","sessionId":"s-root","prompt":"I'm about to set up work to create report.txt summarizing the quarter. Before I write the task contract, please confirm:\n\n1. Which quarter should it cover (e.g., 2025 Q1, the most recently completed quarter, or another)?\n2. What should the summary cover? For example: repository/git activity, specific data files or datasets in this session, business metrics, project status?\n3. Where does the source data live (files/directories/repositories in this session's checkout), and is there a required format, length, or set of sections for the report?\n\nIf you want a plain \"summarize the most recently completed calendar quarter based on whatever data exists in the checkout\" I can proceed on those assumptions instead.","answer":"","status":"unavailable","detail":"the tool call reported an error: \"Error: cannot get property \\\"toJSON\\\" without inject\""}]
+citations:
+  UNRESOLVED conditions.quarter (unknown) :: no citation
+  UNRESOLVED conditions.dataSource (unknown) :: no citation
+  UNRESOLVED conditions.deliveryScope (unknown) :: no citation
+  RESOLVED freezes.quarter at ids.rootContract.objective :: ids.rootContract.objective carries "summarizing the most recently completed calendar quarter"
+  RESOLVED freezes.quarter at ids.rootContract.acceptanceCriteria[1].description :: ids.rootContract.acceptanceCriteria[1].description carries "it names the quarter covered"
+  RESOLVED freezes.quarter at ids.rootContract.assumptions[0] :: ids.rootContract.assumptions[0] carries "'the quarter' means the most recently completed calendar quarter"
+  RESOLVED freezes.dataSource at ids.rootContract.objective :: ids.rootContract.objective carries "based on the data present in the checkout"
+  RESOLVED freezes.dataSource at ids.rootContract.assumptions[1] :: ids.rootContract.assumptions[1] carries "the source data for the summary is whatever exists in the session checkout"
+  RESOLVED goal (the activated goal's own field) :: ids.rootContract.objective carries "summarizing the most recently completed calendar quarter"
+reasons:
+  - S1: the active contract fixes quarter at ids.rootContract.objective ("summarizing the most recently completed calendar quarter") without a delivered user answer
+  - S1: the active contract fixes quarter at ids.rootContract.acceptanceCriteria[1].description ("it names the quarter covered") without a delivered user answer
+  - S1: the active contract fixes quarter at ids.rootContract.assumptions[0] ("'the quarter' means the most recently completed calendar quarter") without a delivered user answer
+  - S1: the active contract fixes dataSource at ids.rootContract.objective ("based on the data present in the checkout") without a delivered user answer
+  - S1: the active contract fixes dataSource at ids.rootContract.assumptions[1] ("the source data for the summary is whatever exists in the session checkout") without a delivered user answer
+  - S2: the activated goal's delivery depends on the unresolved condition(s) quarter, dataSource (ids.rootContract.objective carries "summarizing the most recently completed calendar quarter")
+
+ ✓ ../r1-supplemental-2026-09-24/evidence/review/scratch/probes/adjudication.spec.ts (1 test) 10ms
+stdout | ../r1-supplemental-2026-09-24/evidence/review/scratch/cases/s2-only.spec.ts > reviewer S2-only case (pristine module) > rejects a goal that depends on a retained unknown, with no freeze claimed
+s2-only (pristine): verdict=fail path=rejected: the semantic gate refused the trajectory reasons=["S2: the activated goal's delivery depends on the unresolved condition(s) quarter (rootContract.objective carries \"no quarter can be summarized\")"]
+
+ ✓ ../r1-supplemental-2026-09-24/evidence/review/scratch/cases/s2-only.spec.ts (1 test) 5ms
+stdout | ../r1-supplemental-2026-09-24/evidence/review/scratch/cases/s2-only-mutant.spec.ts > reviewer S2-only case (no-s2 mutant) > no longer rejects and degrades to inconclusive
+s2-only (no-s2 mutant): verdict=inconclusive path=no allowed path: the record cannot be decided reasons=["neither allowed path holds: no retained unknown and no cited limited goal"]
+
+ ✓ ../r1-supplemental-2026-09-24/evidence/review/scratch/cases/s2-only-mutant.spec.ts (1 test) 5ms
+stdout | ../r1-supplemental-2026-09-24/evidence/review/scratch/cases/no-s1-replay.spec.ts > reviewer control: no-s1 mutant on the original trajectory > still fails on S2 alone
+no-s1 mutant on the original trajectory: verdict=fail S1.freeze=true S2.dependency=false reasons=["S2: the activated goal's delivery depends on the unresolved condition(s) quarter, dataSource (ids.rootContract.objective carries \"summarizing the most recently completed calendar quarter\")"]
+
+ ✓ ../r1-supplemental-2026-09-24/evidence/review/scratch/cases/no-s1-replay.spec.ts (1 test) 7ms
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 16 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > replays the original S3 trajectory against its adjudication and rejects it
+AssertionError: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:273:46
+    271|
+    272|     expect(decision.facts.chains.map(entry => entry.status)).toEqual([…
+    273|     expect(decision.checks['S1.freeze']!.ok).toBe(false)
+       |                                              ^
+    274|     expect(decision.checks['S2.dependency']!.ok).toBe(false)
+    275|     expectVerdict(decision, 'fail', 'S1.freeze')
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/16]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a run whose clarification call failed and whose goal then depended on the unknown
+AssertionError: verdict=inconclusive path=no allowed path: the record cannot be decided reasons=[
+ "the freeze of quarter at rootContract.objective is not readable in the record (MUTANT citations-never-resolve)",
+ "the freeze of dataSource at rootContract.objective is not readable in the record (MUTANT citations-never-resolve)",
+ "the adjudication declares the activated goal's delivery depends on an unresolved condition, but cites no goal field that resolves (MUTANT citations-never-resolve)",
+ "left plain unknown: quarter, dataSource, deliveryScope; unreadable claims: the freeze of quarter at rootContract.objective is not readable in the record (MUTANT citations-never-resolve); the freeze of dataSource at rootContract.objective is not readable in the record (MUTANT citations-never-resolve); the adjudication declares the activated goal's delivery depends on an unresolved condition, but cites no goal field that resolves (MUTANT citations-never-resolve)",
+ "the mechanical gates did not hold: M3.content",
+ "neither allowed path holds: no retained unknown and no cited limited goal"
+]: expected 'inconclusive' to be 'fail' // Object.is equality
+
+Expected: "fail"
+Received: "inconclusive"
+
+ ❯ expectVerdict ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:244:5
+    242|     decision.verdict,
+    243|     `verdict=${decision.verdict} path=${decision.path} reasons=${JSON.…
+    244|   ).toBe(verdict)
+       |     ^
+    245| }
+    246|
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:321:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/16]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects an activated goal whose delivery depends on an unresolved unknown
+AssertionError: verdict=inconclusive path=no allowed path: the record cannot be decided reasons=[
+ "the retention of quarter cites nothing that resolves (MUTANT citations-never-resolve)",
+ "the retention of dataSource cites nothing that resolves (MUTANT citations-never-resolve)",
+ "the adjudication declares the activated goal's delivery depends on an unresolved condition, but cites no goal field that resolves (MUTANT citations-never-resolve)",
+ "left plain unknown: deliveryScope; unreadable claims: the retention of quarter cites nothing that resolves (MUTANT citations-never-resolve); the retention of dataSource cites nothing that resolves (MUTANT citations-never-resolve); the adjudication declares the activated goal's delivery depends on an unresolved condition, but cites no goal field that resolves (MUTANT citations-never-resolve)",
+ "the mechanical gates did not hold: M3.content",
+ "neither allowed path holds: no retained unknown and no cited limited goal"
+]: expected 'inconclusive' to be 'fail' // Object.is equality
+
+Expected: "fail"
+Received: "inconclusive"
+
+ ❯ expectVerdict ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:244:5
+    242|     decision.verdict,
+    243|     `verdict=${decision.verdict} path=${decision.path} reasons=${JSON.…
+    244|   ).toBe(verdict)
+       |     ^
+    245| }
+    246|
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:339:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/16]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > passes an activated limited goal that explicitly retains the unknown while the clarification went unanswered
+AssertionError: expected 'no allowed path: the record cannot be…' to be 'path1-retain-unknown' // Object.is equality
+
+Expected: "path1-retain-unknown"
+Received: "no allowed path: the record cannot be decided"
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:362:27
+    360|     })
+    361|     expect(decision.facts.answerMissing).toBe(true)
+    362|     expect(decision.path).toBe('path1-retain-unknown')
+       |                           ^
+    363|     expectVerdict(decision, 'pass', 'path.retainUnknown')
+    364|   })
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/16]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a limited goal that still carries an unconfirmed quarter
+AssertionError: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:409:51
+    407|       },
+    408|     })
+    409|     expect(decision.checks['S4.limitedGoal']!.ok).toBe(false)
+       |                                                   ^
+    410|     expectVerdict(decision, 'fail', 'S4.limitedGoal')
+    411|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/16]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > never passes on a review its own author marked draft
+AssertionError: verdict=fail path=rejected: the semantic gate refused the trajectory reasons=[
+ "S3: deliveryScope is labelled user-confirmed without a delivered user answer (MUTANT citations-never-resolve)"
+]: expected 'fail' to be 'inconclusive' // Object.is equality
+
+Expected: "inconclusive"
+Received: "fail"
+
+ ❯ expectVerdict ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:244:5
+    242|     decision.verdict,
+    243|     `verdict=${decision.verdict} path=${decision.path} reasons=${JSON.…
+    244|   ).toBe(verdict)
+       |     ^
+    245| }
+    246|
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:453:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/16]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-m1-mismatch/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a run whose desk answer reached the model as something else
+AssertionError: expected 'complete' to be 'inconsistent' // Object.is equality
+
+Expected: "inconsistent"
+Received: "complete"
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-m1-mismatch/s3-criteria.spec.ts:288:46
+    286|     }
+    287|     const decision = decideS3({ record: wrong, adjudication: passingAd…
+    288|     expect(decision.facts.chains[0]!.status).toBe('inconsistent')
+       |                                              ^
+    289|     expectVerdict(decision, 'fail', 'M1.chain')
+    290|   })
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/16]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s1/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > replays the original S3 trajectory against its adjudication and rejects it
+AssertionError: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s1/s3-criteria.spec.ts:273:46
+    271|
+    272|     expect(decision.facts.chains.map(entry => entry.status)).toEqual([…
+    273|     expect(decision.checks['S1.freeze']!.ok).toBe(false)
+       |                                              ^
+    274|     expect(decision.checks['S2.dependency']!.ok).toBe(false)
+    275|     expectVerdict(decision, 'fail', 'S1.freeze')
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/16]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s1-s2/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > replays the original S3 trajectory against its adjudication and rejects it
+AssertionError: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s1-s2/s3-criteria.spec.ts:273:46
+    271|
+    272|     expect(decision.facts.chains.map(entry => entry.status)).toEqual([…
+    273|     expect(decision.checks['S1.freeze']!.ok).toBe(false)
+       |                                              ^
+    274|     expect(decision.checks['S2.dependency']!.ok).toBe(false)
+    275|     expectVerdict(decision, 'fail', 'S1.freeze')
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/16]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s1-s2/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a run whose clarification call failed and whose goal then depended on the unknown
+AssertionError: verdict=inconclusive path=no allowed path: the record cannot be decided reasons=[
+ "left plain unknown: quarter, dataSource, deliveryScope",
+ "the mechanical gates did not hold: M3.content",
+ "neither allowed path holds: no retained unknown and no cited limited goal"
+]: expected 'inconclusive' to be 'fail' // Object.is equality
+
+Expected: "fail"
+Received: "inconclusive"
+
+ ❯ expectVerdict ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s1-s2/s3-criteria.spec.ts:244:5
+    242|     decision.verdict,
+    243|     `verdict=${decision.verdict} path=${decision.path} reasons=${JSON.…
+    244|   ).toBe(verdict)
+       |     ^
+    245| }
+    246|
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s1-s2/s3-criteria.spec.ts:321:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/16]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s1-s2/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects an activated goal whose delivery depends on an unresolved unknown
+AssertionError: verdict=inconclusive path=no allowed path: the record cannot be decided reasons=[
+ "left plain unknown: deliveryScope",
+ "the mechanical gates did not hold: M3.content",
+ "neither allowed path holds: no retained unknown and no cited limited goal"
+]: expected 'inconclusive' to be 'fail' // Object.is equality
+
+Expected: "fail"
+Received: "inconclusive"
+
+ ❯ expectVerdict ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s1-s2/s3-criteria.spec.ts:244:5
+    242|     decision.verdict,
+    243|     `verdict=${decision.verdict} path=${decision.path} reasons=${JSON.…
+    244|   ).toBe(verdict)
+       |     ^
+    245| }
+    246|
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s1-s2/s3-criteria.spec.ts:339:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/16]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s2/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > replays the original S3 trajectory against its adjudication and rejects it
+AssertionError: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s2/s3-criteria.spec.ts:274:50
+    272|     expect(decision.facts.chains.map(entry => entry.status)).toEqual([…
+    273|     expect(decision.checks['S1.freeze']!.ok).toBe(false)
+    274|     expect(decision.checks['S2.dependency']!.ok).toBe(false)
+       |                                                  ^
+    275|     expectVerdict(decision, 'fail', 'S1.freeze')
+    276|   })
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[12/16]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s2/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects an activated goal whose delivery depends on an unresolved unknown
+AssertionError: verdict=inconclusive path=no allowed path: the record cannot be decided reasons=[
+ "left plain unknown: deliveryScope",
+ "the mechanical gates did not hold: M3.content",
+ "neither allowed path holds: no retained unknown and no cited limited goal"
+]: expected 'inconclusive' to be 'fail' // Object.is equality
+
+Expected: "fail"
+Received: "inconclusive"
+
+ ❯ expectVerdict ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s2/s3-criteria.spec.ts:244:5
+    242|     decision.verdict,
+    243|     `verdict=${decision.verdict} path=${decision.path} reasons=${JSON.…
+    244|   ).toBe(verdict)
+       |     ^
+    245| }
+    246|
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-s2/s3-criteria.spec.ts:339:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[13/16]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/retained-as-unknown/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > passes an activated limited goal that explicitly retains the unknown while the clarification went unanswered
+AssertionError: expected 'no allowed path: the record cannot be…' to be 'path1-retain-unknown' // Object.is equality
+
+Expected: "path1-retain-unknown"
+Received: "no allowed path: the record cannot be decided"
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/retained-as-unknown/s3-criteria.spec.ts:362:27
+    360|     })
+    361|     expect(decision.facts.answerMissing).toBe(true)
+    362|     expect(decision.path).toBe('path1-retain-unknown')
+       |                           ^
+    363|     expectVerdict(decision, 'pass', 'path.retainUnknown')
+    364|   })
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[14/16]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/retained-as-unknown/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a limited goal that still carries an unconfirmed quarter
+AssertionError: expected 'inconclusive' to be 'pass' // Object.is equality
+
+Expected: "pass"
+Received: "inconclusive"
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/retained-as-unknown/s3-criteria.spec.ts:416:27
+    414|     const clean = decideS3({ record, adjudication: { ...passing, goal:…
+    415|     expect(clean.checks['S4.limitedGoal']!.ok).toBe(true)
+    416|     expect(clean.verdict).toBe('pass')
+       |                           ^
+    417|   })
+    418|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[15/16]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/vague-original-confirms/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a user-confirmed label that cites no delivered user answer
+AssertionError: verdict=pass path=path2-limited-goal reasons=[
+ "every mechanical check and every semantic condition holds (path2-limited-goal)"
+]: expected 'pass' to be 'fail' // Object.is equality
+
+Expected: "fail"
+Received: "pass"
+
+ ❯ expectVerdict ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/vague-original-confirms/s3-criteria.spec.ts:244:5
+    242|     decision.verdict,
+    243|     `verdict=${decision.verdict} path=${decision.path} reasons=${JSON.…
+    244|   ).toBe(verdict)
+       |     ^
+    245| }
+    246|
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/vague-original-confirms/s3-criteria.spec.ts:438:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[16/16]⎯
+
+
+ Test Files  7 failed | 7 passed (14)
+      Tests  16 failed | 80 passed (96)
+   Start at  01:38:12
+   Duration  4.80s (transform 1.56s, setup 0ms, import 2.55s, tests 505ms, environment 1ms)
+

@@ -1,0 +1,491 @@
+{
+  "writtenAt": "2026-09-24T05:46:44.242Z",
+  "cases": [
+    {
+      "case": "C1-control",
+      "note": "the paid run's record and adjudication, unmutated",
+      "record": {
+        "scenario": "s3",
+        "fixedAnswer": "No data was provided; state that explicitly."
+      },
+      "frozen": {
+        "verdict": "pass",
+        "path": "path2-limited-goal",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M3.verifierPass": {
+            "ok": true,
+            "detail": "verifier passes: ac-1:command, ac-2:command, ac-3:command for the adjudicated criteria ac-1, ac-2, ac-3"
+          }
+        },
+        "reasons": [
+          "every mechanical check and every semantic condition holds (path2-limited-goal)"
+        ]
+      },
+      "rev2": {
+        "verdict": "pass",
+        "path": "path2-limited-goal",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M1.fixedAnswer": {
+            "ok": true,
+            "detail": "every returned answer equals the frozen fixed answer \"No data was provided; state that explicitly.\" verbatim (1 chain(s) carried an answer); the delivered leg is checked with the chain (M1.chain)"
+          },
+          "M3.verifierPass": {
+            "ok": true,
+            "detail": "required criteria: ac-1=pass, ac-2=pass, ac-3=pass, ac-4=pass; real verifier passes among them: ac-1:command, ac-2:command, ac-3:command, ac-4:composite"
+          }
+        },
+        "reasons": [
+          "every mechanical check and every semantic condition holds (path2-limited-goal)"
+        ]
+      }
+    },
+    {
+      "case": "C1",
+      "note": "desk answer = tool result = session-log tool/result = the same wrong text; input.fixedAnswer is the frozen one",
+      "record": {
+        "scenario": "s3",
+        "fixedAnswer": "No data was provided; state that explicitly."
+      },
+      "frozen": {
+        "verdict": "pass",
+        "path": "path2-limited-goal",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M3.verifierPass": {
+            "ok": true,
+            "detail": "verifier passes: ac-1:command, ac-2:command, ac-3:command for the adjudicated criteria ac-1, ac-2, ac-3"
+          }
+        },
+        "reasons": [
+          "every mechanical check and every semantic condition holds (path2-limited-goal)"
+        ]
+      },
+      "rev2": {
+        "verdict": "fail",
+        "path": "rejected: a mechanical check failed",
+        "chains": [
+          "inconsistent"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": false,
+            "detail": "chatcmpl-tool-947014ca192bbc58:inconsistent (the frozen fixed answer is \"No data was provided; state that explicitly.\", but the desk answered \"The quarter is Q3 2025; summarize the checkout.\" and the tool result was \"The quarter is Q3 2025; summarize the checkout.\" and the delivered tool result was \"The quarter is Q3 2025; summarize the checkout.\")"
+          },
+          "M1.fixedAnswer": {
+            "ok": false,
+            "detail": "the frozen fixed answer is \"No data was provided; state that explicitly.\", but chatcmpl-tool-947014ca192bbc58 returned \"The quarter is Q3 2025; summarize the checkout.\""
+          },
+          "M3.verifierPass": {
+            "ok": true,
+            "detail": "required criteria: ac-1=pass, ac-2=pass, ac-3=pass, ac-4=pass; real verifier passes among them: ac-1:command, ac-2:command, ac-3:command, ac-4:composite"
+          }
+        },
+        "reasons": [
+          "M1: chatcmpl-tool-947014ca192bbc58:inconsistent (the frozen fixed answer is \"No data was provided; state that explicitly.\", but the desk answered \"The quarter is Q3 2025; summarize the checkout.\" and the tool result was \"The quarter is Q3 2025; summarize the checkout.\" and the delivered tool result was \"The quarter is Q3 2025; summarize the checkout.\")"
+        ]
+      }
+    },
+    {
+      "case": "C1b",
+      "note": "the same real record with no input.fixedAnswer",
+      "record": {
+        "scenario": "s3",
+        "fixedAnswer": null
+      },
+      "frozen": {
+        "verdict": "pass",
+        "path": "path2-limited-goal",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M3.verifierPass": {
+            "ok": true,
+            "detail": "verifier passes: ac-1:command, ac-2:command, ac-3:command for the adjudicated criteria ac-1, ac-2, ac-3"
+          }
+        },
+        "reasons": [
+          "every mechanical check and every semantic condition holds (path2-limited-goal)"
+        ]
+      },
+      "rev2": {
+        "verdict": "inconclusive",
+        "path": "no allowed path: the record cannot be decided",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M1.fixedAnswer": {
+            "ok": false,
+            "detail": "the record carries no non-empty input.fixedAnswer, so no returned answer could be checked against the frozen text: the fixed-answer leg of §4.1 M1 is unverified"
+          },
+          "M3.verifierPass": {
+            "ok": true,
+            "detail": "required criteria: ac-1=pass, ac-2=pass, ac-3=pass, ac-4=pass; real verifier passes among them: ac-1:command, ac-2:command, ac-3:command, ac-4:composite"
+          }
+        },
+        "reasons": [
+          "the mechanical gates did not hold: M1.fixedAnswer"
+        ]
+      }
+    },
+    {
+      "case": "C2-control",
+      "note": "the paid run's record: ac-1…ac-4 all pass, the adjudicated criteria ac-1…ac-3 pass",
+      "record": {
+        "scenario": "s3",
+        "fixedAnswer": "No data was provided; state that explicitly."
+      },
+      "frozen": {
+        "verdict": "pass",
+        "path": "path2-limited-goal",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M3.verifierPass": {
+            "ok": true,
+            "detail": "verifier passes: ac-1:command, ac-2:command, ac-3:command for the adjudicated criteria ac-1, ac-2, ac-3"
+          }
+        },
+        "reasons": [
+          "every mechanical check and every semantic condition holds (path2-limited-goal)"
+        ]
+      },
+      "rev2": {
+        "verdict": "pass",
+        "path": "path2-limited-goal",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M1.fixedAnswer": {
+            "ok": true,
+            "detail": "every returned answer equals the frozen fixed answer \"No data was provided; state that explicitly.\" verbatim (1 chain(s) carried an answer); the delivered leg is checked with the chain (M1.chain)"
+          },
+          "M3.verifierPass": {
+            "ok": true,
+            "detail": "required criteria: ac-1=pass, ac-2=pass, ac-3=pass, ac-4=pass; real verifier passes among them: ac-1:command, ac-2:command, ac-3:command, ac-4:composite"
+          }
+        },
+        "reasons": [
+          "every mechanical check and every semantic condition holds (path2-limited-goal)"
+        ]
+      }
+    },
+    {
+      "case": "C2a",
+      "note": "the real record without the verifier result for ac-3",
+      "record": {
+        "scenario": "s3",
+        "fixedAnswer": "No data was provided; state that explicitly."
+      },
+      "frozen": {
+        "verdict": "pass",
+        "path": "path2-limited-goal",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M3.verifierPass": {
+            "ok": true,
+            "detail": "verifier passes: ac-1:command, ac-2:command for the adjudicated criteria ac-1, ac-2, ac-3"
+          }
+        },
+        "reasons": [
+          "every mechanical check and every semantic condition holds (path2-limited-goal)"
+        ]
+      },
+      "rev2": {
+        "verdict": "fail",
+        "path": "rejected: a mechanical check failed",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M1.fixedAnswer": {
+            "ok": true,
+            "detail": "every returned answer equals the frozen fixed answer \"No data was provided; state that explicitly.\" verbatim (1 chain(s) carried an answer); the delivered leg is checked with the chain (M1.chain)"
+          },
+          "M3.verifierPass": {
+            "ok": false,
+            "detail": "required criteria: ac-1=pass, ac-2=pass, ac-3=missing, ac-4=pass; real verifier passes among them: ac-1:command, ac-2:command, ac-4:composite; missing: ac-3"
+          }
+        },
+        "reasons": [
+          "M3: the run claims delivery without a real verifier pass for every required criterion (required criteria: ac-1=pass, ac-2=pass, ac-3=missing, ac-4=pass; real verifier passes among them: ac-1:command, ac-2:command, ac-4:composite; missing: ac-3)"
+        ]
+      }
+    },
+    {
+      "case": "C2b",
+      "note": "the real record with ac-3 flipped to fail",
+      "record": {
+        "scenario": "s3",
+        "fixedAnswer": "No data was provided; state that explicitly."
+      },
+      "frozen": {
+        "verdict": "pass",
+        "path": "path2-limited-goal",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M3.verifierPass": {
+            "ok": true,
+            "detail": "verifier passes: ac-1:command, ac-2:command for the adjudicated criteria ac-1, ac-2, ac-3"
+          }
+        },
+        "reasons": [
+          "every mechanical check and every semantic condition holds (path2-limited-goal)"
+        ]
+      },
+      "rev2": {
+        "verdict": "fail",
+        "path": "rejected: a mechanical check failed",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M1.fixedAnswer": {
+            "ok": true,
+            "detail": "every returned answer equals the frozen fixed answer \"No data was provided; state that explicitly.\" verbatim (1 chain(s) carried an answer); the delivered leg is checked with the chain (M1.chain)"
+          },
+          "M3.verifierPass": {
+            "ok": false,
+            "detail": "required criteria: ac-1=pass, ac-2=pass, ac-3=missing, ac-4=pass; real verifier passes among them: ac-1:command, ac-2:command, ac-4:composite; missing: ac-3; not passing: ac-3"
+          }
+        },
+        "reasons": [
+          "M3: the run claims delivery without a real verifier pass for every required criterion (required criteria: ac-1=pass, ac-2=pass, ac-3=missing, ac-4=pass; real verifier passes among them: ac-1:command, ac-2:command, ac-4:composite; missing: ac-3; not passing: ac-3)"
+        ]
+      }
+    },
+    {
+      "case": "C2c",
+      "note": "the real record; the adjudication names ac-9, which has no verifier result",
+      "record": {
+        "scenario": "s3",
+        "fixedAnswer": "No data was provided; state that explicitly."
+      },
+      "frozen": {
+        "verdict": "pass",
+        "path": "path2-limited-goal",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M3.verifierPass": {
+            "ok": true,
+            "detail": "verifier passes: ac-1:command, ac-2:command, ac-3:command for the adjudicated criteria ac-1, ac-2, ac-3, ac-9"
+          }
+        },
+        "reasons": [
+          "every mechanical check and every semantic condition holds (path2-limited-goal)"
+        ]
+      },
+      "rev2": {
+        "verdict": "fail",
+        "path": "rejected: a mechanical check failed",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M1.fixedAnswer": {
+            "ok": true,
+            "detail": "every returned answer equals the frozen fixed answer \"No data was provided; state that explicitly.\" verbatim (1 chain(s) carried an answer); the delivered leg is checked with the chain (M1.chain)"
+          },
+          "M3.verifierPass": {
+            "ok": false,
+            "detail": "required criteria: ac-1=pass, ac-2=pass, ac-3=pass, ac-9=missing, ac-4=pass; real verifier passes among them: ac-1:command, ac-2:command, ac-3:command, ac-4:composite; missing: ac-9"
+          }
+        },
+        "reasons": [
+          "M3: the run claims delivery without a real verifier pass for every required criterion (required criteria: ac-1=pass, ac-2=pass, ac-3=pass, ac-9=missing, ac-4=pass; real verifier passes among them: ac-1:command, ac-2:command, ac-3:command, ac-4:composite; missing: ac-9)"
+        ]
+      }
+    },
+    {
+      "case": "C2d",
+      "note": "delivery claimed, no required criterion in the adjudication or the contract",
+      "record": {
+        "scenario": "s3",
+        "fixedAnswer": "No data was provided; state that explicitly."
+      },
+      "frozen": {
+        "verdict": "pass",
+        "path": "path2-limited-goal",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M3.verifierPass": {
+            "ok": true,
+            "detail": "verifier passes: c-1:command, c-2:command, c-3:command, ac-1:command, ac-2:command, ac-3:command, ac-4:composite"
+          }
+        },
+        "reasons": [
+          "every mechanical check and every semantic condition holds (path2-limited-goal)"
+        ]
+      },
+      "rev2": {
+        "verdict": "inconclusive",
+        "path": "no allowed path: the record cannot be decided",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M1.fixedAnswer": {
+            "ok": true,
+            "detail": "every returned answer equals the frozen fixed answer \"No data was provided; state that explicitly.\" verbatim (1 chain(s) carried an answer); the delivered leg is checked with the chain (M1.chain)"
+          },
+          "M3.verifierPass": {
+            "ok": false,
+            "detail": "the run claims delivery, but neither the adjudicated goal nor the active root contract establishes a required criterion to verify (7 verifier result(s) recorded)"
+          }
+        },
+        "reasons": [
+          "the mechanical gates did not hold: M3.verifierPass"
+        ]
+      }
+    },
+    {
+      "case": "C2e",
+      "note": "the same extended adjudication, with ac-9 verified as passing",
+      "record": {
+        "scenario": "s3",
+        "fixedAnswer": "No data was provided; state that explicitly."
+      },
+      "frozen": {
+        "verdict": "pass",
+        "path": "path2-limited-goal",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M3.verifierPass": {
+            "ok": true,
+            "detail": "verifier passes: ac-1:command, ac-2:command, ac-3:command, ac-9:command for the adjudicated criteria ac-1, ac-2, ac-3, ac-9"
+          }
+        },
+        "reasons": [
+          "every mechanical check and every semantic condition holds (path2-limited-goal)"
+        ]
+      },
+      "rev2": {
+        "verdict": "pass",
+        "path": "path2-limited-goal",
+        "chains": [
+          "complete"
+        ],
+        "checks": {
+          "M1.chain": {
+            "ok": true,
+            "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+          },
+          "M1.fixedAnswer": {
+            "ok": true,
+            "detail": "every returned answer equals the frozen fixed answer \"No data was provided; state that explicitly.\" verbatim (1 chain(s) carried an answer); the delivered leg is checked with the chain (M1.chain)"
+          },
+          "M3.verifierPass": {
+            "ok": true,
+            "detail": "required criteria: ac-1=pass, ac-2=pass, ac-3=pass, ac-9=pass, ac-4=pass; real verifier passes among them: ac-1:command, ac-2:command, ac-3:command, ac-4:composite, ac-9:command"
+          }
+        },
+        "reasons": [
+          "every mechanical check and every semantic condition holds (path2-limited-goal)"
+        ]
+      }
+    }
+  ],
+  "modules": {
+    "frozen": {
+      "path": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/driver/s3-criteria.ts",
+      "sha256": "4ce8095ca063924239cbadd8654284ae8a0d4b903961d1d604e4b046bdafe92c"
+    },
+    "rev2": {
+      "path": "/home/ROXY/code/bb_work/r1-rework-2026-09-24/criteria/s3-criteria-rev2.ts",
+      "sha256": "83d9ee3141c52f0548c62b3e9cf68c6af7d006d5d08a859b37ff0baee602d1c9"
+    }
+  },
+  "record": {
+    "path": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/evidence/s3/driver.json",
+    "sha256": "b8c9bb9db592266f921641c84d0daaad706524cf41248b48f6a76811889c5621"
+  },
+  "adjudication": {
+    "path": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/evidence/adjudication/s3-run.json",
+    "sha256": "04ed69c40f90200c96483b061138cf05200dd4faf3f18a684fdc3ede9d8f1b69"
+  }
+}

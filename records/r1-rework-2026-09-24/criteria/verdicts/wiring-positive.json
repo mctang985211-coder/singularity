@@ -1,0 +1,37 @@
+{
+  "writtenAt": "2026-09-24T05:46:42.975Z",
+  "case": "r1 rework wiring positive (scripted model, real wiring)",
+  "fixedAnswer": "No data was provided; state that explicitly.",
+  "networkAttempts": [],
+  "recordNotes": [
+    "scripted-model criteria/fixture validation: the model output stands in, the wiring does not",
+    "the adapter boundary saw 7 model request(s) for the root session"
+  ],
+  "frozen": {
+    "verdict": "pass",
+    "path": "path2-limited-goal",
+    "chains": [
+      "complete"
+    ],
+    "fixedAnswer": null,
+    "verifierPass": {
+      "ok": true,
+      "detail": "verifier passes: artifact-exists:command, artifact-exists:command, no-data-stated:command for the adjudicated criteria artifact-exists, no-data-stated"
+    }
+  },
+  "rev2": {
+    "verdict": "pass",
+    "path": "path2-limited-goal",
+    "chains": [
+      "complete"
+    ],
+    "fixedAnswer": {
+      "ok": true,
+      "detail": "every returned answer equals the frozen fixed answer \"No data was provided; state that explicitly.\" verbatim (1 chain(s) carried an answer); the delivered leg is checked with the chain (M1.chain)"
+    },
+    "verifierPass": {
+      "ok": true,
+      "detail": "required criteria: artifact-exists=pass, no-data-stated=pass; real verifier passes among them: artifact-exists:command, artifact-exists:command, no-data-stated:command"
+    }
+  }
+}

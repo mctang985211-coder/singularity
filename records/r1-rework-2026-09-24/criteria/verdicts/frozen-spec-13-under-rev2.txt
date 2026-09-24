@@ -1,0 +1,23 @@
+
+
+ RUN  v4.1.11 /home/ROXY/code/bb_work/harness
+
+ ✓ ../r1-rework-2026-09-24/criteria/tmp-frozen-spec-under-rev2.spec.ts > s3-criteria: the frozen S3 decision procedure > replays the original S3 trajectory against its adjudication and rejects it 7ms
+ ✓ ../r1-rework-2026-09-24/criteria/tmp-frozen-spec-under-rev2.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a run whose desk answer reached the model as something else 1ms
+ ✓ ../r1-rework-2026-09-24/criteria/tmp-frozen-spec-under-rev2.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a run whose answer never reached the session at all 0ms
+ ✓ ../r1-rework-2026-09-24/criteria/tmp-frozen-spec-under-rev2.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a run whose clarification call failed and whose goal then depended on the unknown 1ms
+ ✓ ../r1-rework-2026-09-24/criteria/tmp-frozen-spec-under-rev2.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects an activated goal whose delivery depends on an unresolved unknown 0ms
+ ✓ ../r1-rework-2026-09-24/criteria/tmp-frozen-spec-under-rev2.spec.ts > s3-criteria: the frozen S3 decision procedure > passes an activated limited goal that explicitly retains the unknown while the clarification went unanswered 0ms
+ ✓ ../r1-rework-2026-09-24/criteria/tmp-frozen-spec-under-rev2.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a run that claims delivery with no non-empty artifact 1ms
+ ✓ ../r1-rework-2026-09-24/criteria/tmp-frozen-spec-under-rev2.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a run that claims delivery with no real verifier pass for the goal 0ms
+ ✓ ../r1-rework-2026-09-24/criteria/tmp-frozen-spec-under-rev2.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a limited goal that still carries an unconfirmed quarter 1ms
+ ✓ ../r1-rework-2026-09-24/criteria/tmp-frozen-spec-under-rev2.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a delivered run whose adjudication states the artifact does not match the goal 1ms
+ ✓ ../r1-rework-2026-09-24/criteria/tmp-frozen-spec-under-rev2.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a user-confirmed label that cites no delivered user answer 1ms
+ ✓ ../r1-rework-2026-09-24/criteria/tmp-frozen-spec-under-rev2.spec.ts > s3-criteria: the frozen S3 decision procedure > never passes without a usable semantic adjudication 0ms
+ ✓ ../r1-rework-2026-09-24/criteria/tmp-frozen-spec-under-rev2.spec.ts > s3-criteria: the frozen S3 decision procedure > never passes on a review its own author marked draft 0ms
+
+ Test Files  1 passed (1)
+      Tests  13 passed (13)
+   Start at  13:02:08
+   Duration  250ms (transform 75ms, setup 0ms, import 99ms, tests 15ms, environment 0ms)
+

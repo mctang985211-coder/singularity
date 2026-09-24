@@ -1,0 +1,89 @@
+{
+ "schemaVersion": "r1-final-contract/1",
+ "round": "r1-final-2026-09-24",
+ "ticket": "plan-item-8-r1 (completion round after the progress-review rework)",
+ "frozenAt": "2026-09-24T14:35:00+08:00",
+ "singularitySha": "99e1311d7695f57bbb3557e74157bf94c8a695ff",
+ "singularityWorktreeCleanAtFreeze": true,
+ "productionFix": {
+  "commit": "99e1311d7695f57bbb3557e74157bf94c8a695ff",
+  "files": {
+   "agent-runtime/src/prompts/root.prompts.ts": "3fbc653ee11ae5f4dc51a8cc7e937fbc8b6e0f630c170fc57c81a6a6f53cc6f5",
+   "agent-singularity/src/tools/task-intake.ts": "cae4ecadfe95805db860b2904bcf2bf6ec4ee41b890015ebd726363d8815c3d1",
+   "agent-runtime/tests/unit/agent-runtime.spec.ts": "8ed5a1540ee12a2db243a79cc015f657b831fd83229212f57b64e79e904ec4a6"
+  },
+  "what": "root prompt + task_intake assumptions description: an assumption never settles an unconfirmed condition; the assembly test pins the clause"
+ },
+ "criteria": {
+  "module": "driver/s3-criteria.ts",
+  "sha256": "83d9ee3141c52f0548c62b3e9cf68c6af7d006d5d08a859b37ff0baee602d1c9",
+  "version": "s3-criteria/2 (byte copy of the rework-reviewed revision)",
+  "parent": "/home/ROXY/code/bb_work/r1-rework-2026-09-24/criteria/s3-criteria-rev2.ts sha256 83d9ee3141c52f0548c62b3e9cf68c6af7d006d5d08a859b37ff0baee602d1c9"
+ },
+ "driverFiles": {
+  "r1-env.ts": "fd4a99db8bfded27e956a676aca70d05d1ff18722ea215a38b4874dc32f735b5",
+  "r1-record.ts": "15a207d91897976ad34b0d0fe944302fa8ed3dc84362935bea265308ccd047a9",
+  "r1-s3.spec.ts": "b1a752ecc63baee8ac4b6e0dbfbaf4dce12defe4fcff422c92a05bd5657b2dd4",
+  "r1-smoke.spec.ts": "c6688fb799712e2e029114f73fcdf718f388fc59b452262655d8d6829c8471af",
+  "r1-smoke.ts": "3e71b33571055a3e3bef22e59be7a57e91214a96bf5cfe513f8c404429c1d35e",
+  "r1-stack.ts": "c227e843bc3de0da372ea38197e5e731b04d75a9af2460c4e547056ec6391437",
+  "s3-criteria.ts": "83d9ee3141c52f0548c62b3e9cf68c6af7d006d5d08a859b37ff0baee602d1c9",
+  "vitest.r1-run.config.ts": "ca6c132a91d193662f1eec86c2278e0289eb66c9d19dba37a73debdd1c4e8741"
+ },
+ "scenario": {
+  "message": "Create report.txt summarizing the quarter.",
+  "fixedAnswer": "No data was provided; state that explicitly.",
+  "env": "<run-scratch>/s3/{repo,dsh-home}; repo a fresh git init checkout; DSH_HOME/HOME isolated; generatedTaskReview off; evolution off",
+  "entry": "real user message (source.kind user), no fabricated log, no intake bypass"
+ },
+ "model": {
+  "gateway": "https://api.stepfun.com/step_plan/v1",
+  "provider": "deepseek-official",
+  "model": "step-5-preview",
+  "reasoningEffort": "high"
+ },
+ "budget": {
+  "attempts": {
+   "s3": 1,
+   "smoke": 1
+  },
+  "hardInFlight": {
+   "rootBudget": {
+    "wallTimeMs": 300000,
+    "maxRuns": 8
+   },
+   "enforcedBy": "A3 runtime"
+  },
+  "soft": {
+   "toolCalls": 100,
+   "wallTimeMs": 900000
+  },
+  "tokens": null,
+  "tokenPolicy": "the 2026-09-23 authorization (cap lifted) carries over; usage recorded in full, no claim against the old 30000 ceiling; no retry on a verdict failure"
+ },
+ "evidenceRoot": "/home/ROXY/code/bb_work/r1-final-2026-09-24/evidence",
+ "historyReadOnly": [
+  "/home/ROXY/code/bb_work/r1-evidence-2026-09-23/",
+  "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/",
+  "/home/ROXY/code/bb_work/r1-rework-2026-09-24/"
+ ],
+ "adjudication": {
+  "required": true,
+  "producedBy": "independent reviewer, not the criteria implementer and not the driver author",
+  "path": "evidence/adjudication/s3-run.json"
+ },
+ "contract": {
+  "md": "fixtures/frozen-contract.md",
+  "sha256": "b7cf225cb87b52ba539a55f12a824e69178e79aff4989543e10e734106627a6a"
+ },
+ "postRunJudging": {
+  "harness": {
+   "spec": "/home/ROXY/code/bb_work/r1-final-2026-09-24/judge/judge.spec.ts",
+   "sha256": "bebd8d14ab4acb6b0d60111b467690bc9a325e930be361a93b26b36970f2ab7e",
+   "config": "/home/ROXY/code/bb_work/r1-final-2026-09-24/judge/vitest.r1-judge.config.ts"
+  },
+  "command": "cd /home/ROXY/code/bb_work/harness && pnpm exec vitest run --config /home/ROXY/code/bb_work/r1-final-2026-09-24/judge/vitest.r1-judge.config.ts",
+  "writes": "evidence/criteria-replay/s3-run.json",
+  "note": "the harness is a tool, not a frozen input: it asserts only the frozen criteria hash and records the verdict rather than asserting it"
+ }
+}

@@ -1,0 +1,20 @@
+../r1-supplemental-2026-09-24/driver/vitest.r1.config.ts (1:388) [33m[UNRESOLVED_IMPORT] [0mCould not resolve 'vitest/config' in ../r1-supplemental-2026-09-24/driver/vitest.r1.config.ts
+ - Module not found, treating it as an external dependency in ../r1-supplemental-2026-09-24/driver/vitest.r1.config.ts at 388..403
+
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (../r1-supplemental-2026-09-24/driver/vitest.r1.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /home/ROXY/code/bb_work/harness
+
+ ✓ ../r1-supplemental-2026-09-24/driver/r1-wiring.spec.ts (3 tests) 1651ms
+     ✓ delivers the fixed answer verbatim through the real tool and the criteria pass the converged run  570ms
+     ✓ records the failed clarification and the criteria reject the frozen goal that follows it  547ms
+     ✓ records the unanswered clarification; a goal that depends on it is rejected, one that retains it is not  533ms
+ ✓ ../r1-supplemental-2026-09-24/driver/s3-criteria.spec.ts (12 tests) 14ms
+
+ Test Files  2 passed (2)
+      Tests  15 passed (15)
+   Start at  01:37:06
+   Duration  3.56s (transform 1.21s, setup 0ms, import 1.65s, tests 1.67s, environment 0ms)
+

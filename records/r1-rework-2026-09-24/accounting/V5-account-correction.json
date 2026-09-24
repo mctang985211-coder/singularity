@@ -1,0 +1,568 @@
+{
+ "schemaVersion": "r1-account-correction/1",
+ "record": "V5 account correction: the cache-write column of the r1-supplemental-2026-09-24 account",
+ "round": "r1-supplemental-2026-09-24",
+ "reworkRound": "r1-rework-2026-09-24",
+ "writtenAt": "2026-09-24",
+ "writtenOutsideTheArchive": true,
+ "corrects": {
+  "primary": "r1-supplemental-2026-09-24/evidence/ledger.json (the round's own ledger)",
+  "copiesOfTheSameColumn": [
+   "r1-supplemental-2026-09-24/evidence/ledger.json:116 (attempts[1].usage.cacheWriteTokens), :118-121 (bySession), :191 (thisRound.increment.attemptCacheWriteTokens)",
+   "r1-supplemental-2026-09-24/evidence/s3/run-meta.json:52 (budget.soft.usage.cacheWriteTokens)",
+   "r1-supplemental-2026-09-24/evidence/run-facts.json (usage.records[].cacheWriteTokens, usage.totals, softLimits.usage)",
+   "r1-supplemental-2026-09-24/evidence/run-console.log (the run's own stdout line)",
+   "r1-supplemental-2026-09-24/driver/r1-s3.spec.ts:153 (the spec sums the column handed to it)"
+  ],
+  "method": "no archived file was edited or created; this record lives outside the archive, under r1-rework-2026-09-24/accounting/",
+  "originalEntriesUntouched": "the ledger's 15 normalised records, the attempts, the historical historyCorrection and the smoke entry are left exactly as they stand"
+ },
+ "rule": {
+  "statement": "a figure the run never reported is recorded as 'not reported' (未报告), never as 0; a genuine reported 0 stays 0",
+  "theRoundAlreadyHeldThisRule": "r1-supplemental-2026-09-24/evidence/ledger.json:9 — \"a figure the run never reported is recorded as 'not recorded', never as 0\"",
+  "howItWasViolated": "the ledger's own usage block did not follow it: the recorder wrote a placeholder 0 and every reader (ledger, run-facts, run-meta, the run's console line) then printed it as a figure",
+  "collapse": "driver/r1-stack.ts:560 — `cacheWriteTokens: chunk.usage.cacheWriteTokens ?? 0` cannot tell 'the gateway reported 0' from 'the gateway reported nothing'",
+  "whichCaseHolds": "the second: 0 of the 15 durable usage objects of this run carry a cacheWriteTokens key",
+  "genuineZeroStaysZero": "the same objects show what a genuine reported zero looks like: cacheReadTokens is present on 15 of 15 (value 0 on 2) and reasoningTokens is present on 15 of 15 (value 0 on all 15). A field genuinely reported as 0 appears as a key with value 0; a field that was never reported does not appear at all.",
+  "whyTheFieldCouldNotExistHere": "the run used the chat-completions protocol, whose translate.ts maps no cache-write field at all (0 occurrences of `cacheWriteTokens`); messages/translate.ts maps cache_creation_input_tokens -> cacheWriteTokens, but that protocol was not used. The 0 is a structural fallback on every response, not a measurement."
+ },
+ "responses": [
+  {
+   "seq": 1,
+   "sessionId": "s-root",
+   "recordedCacheWrite": 0,
+   "rawCacheWriteReported": false,
+   "rawSource": "evidence/s3/dsh-home/session-log/s-root.jsonl:11 (data.usage of the assistant/message; log seq 10, turn 1 step 1)",
+   "rawLogSeq": 10,
+   "turn": 1,
+   "step": 1,
+   "rawTimeMs": 1790185617291,
+   "cacheReadTokens": 0,
+   "inputTokens": 6537,
+   "outputTokens": 2499,
+   "totalTokens": 9036,
+   "totalTokensIsInputPlusOutputPlusCacheRead": true
+  },
+  {
+   "seq": 2,
+   "sessionId": "s-root",
+   "recordedCacheWrite": 0,
+   "rawCacheWriteReported": false,
+   "rawSource": "evidence/s3/dsh-home/session-log/s-root.jsonl:18 (data.usage of the assistant/message; log seq 17, turn 1 step 2)",
+   "rawLogSeq": 17,
+   "turn": 1,
+   "step": 2,
+   "rawTimeMs": 1790185641312,
+   "cacheReadTokens": 6400,
+   "inputTokens": 2864,
+   "outputTokens": 1686,
+   "totalTokens": 10950,
+   "totalTokensIsInputPlusOutputPlusCacheRead": true
+  },
+  {
+   "seq": 3,
+   "sessionId": "s-root",
+   "recordedCacheWrite": 0,
+   "rawCacheWriteReported": false,
+   "rawSource": "evidence/s3/dsh-home/session-log/s-root.jsonl:23 (data.usage of the assistant/message; log seq 22, turn 1 step 3)",
+   "rawLogSeq": 22,
+   "turn": 1,
+   "step": 3,
+   "rawTimeMs": 1790185740069,
+   "cacheReadTokens": 9216,
+   "inputTokens": 1757,
+   "outputTokens": 7667,
+   "totalTokens": 18640,
+   "totalTokensIsInputPlusOutputPlusCacheRead": true
+  },
+  {
+   "seq": 4,
+   "sessionId": "s-root",
+   "recordedCacheWrite": 0,
+   "rawCacheWriteReported": false,
+   "rawSource": "evidence/s3/dsh-home/session-log/s-root.jsonl:29 (data.usage of the assistant/message; log seq 28, turn 1 step 4)",
+   "rawLogSeq": 28,
+   "turn": 1,
+   "step": 4,
+   "rawTimeMs": 1790185747256,
+   "cacheReadTokens": 10752,
+   "inputTokens": 8197,
+   "outputTokens": 500,
+   "totalTokens": 19449,
+   "totalTokensIsInputPlusOutputPlusCacheRead": true
+  },
+  {
+   "seq": 5,
+   "sessionId": "s-root",
+   "recordedCacheWrite": 0,
+   "rawCacheWriteReported": false,
+   "rawSource": "evidence/s3/dsh-home/session-log/s-root.jsonl:34 (data.usage of the assistant/message; log seq 33, turn 1 step 5)",
+   "rawLogSeq": 33,
+   "turn": 1,
+   "step": 5,
+   "rawTimeMs": 1790185764062,
+   "cacheReadTokens": 18688,
+   "inputTokens": 908,
+   "outputTokens": 1384,
+   "totalTokens": 20980,
+   "totalTokensIsInputPlusOutputPlusCacheRead": true
+  },
+  {
+   "seq": 6,
+   "sessionId": "s-root",
+   "recordedCacheWrite": 0,
+   "rawCacheWriteReported": false,
+   "rawSource": "evidence/s3/dsh-home/session-log/s-root.jsonl:39 (data.usage of the assistant/message; log seq 38, turn 1 step 6)",
+   "rawLogSeq": 38,
+   "turn": 1,
+   "step": 6,
+   "rawTimeMs": 1790185768294,
+   "cacheReadTokens": 19456,
+   "inputTokens": 1805,
+   "outputTokens": 329,
+   "totalTokens": 21590,
+   "totalTokensIsInputPlusOutputPlusCacheRead": true
+  },
+  {
+   "seq": 7,
+   "sessionId": "s-b62da3c5-9506-4a65-81f9-441fc72de7ea",
+   "recordedCacheWrite": 0,
+   "rawCacheWriteReported": false,
+   "rawSource": "evidence/s3/dsh-home/session-log/s-b62da3c5-9506-4a65-81f9-441fc72de7ea.jsonl:9 (data.usage of the assistant/message; log seq 8, turn 1 step 1)",
+   "rawLogSeq": 8,
+   "turn": 1,
+   "step": 1,
+   "rawTimeMs": 1790185768520,
+   "cacheReadTokens": 0,
+   "inputTokens": 7109,
+   "outputTokens": 180,
+   "totalTokens": 7289,
+   "totalTokensIsInputPlusOutputPlusCacheRead": true
+  },
+  {
+   "seq": 8,
+   "sessionId": "s-root",
+   "recordedCacheWrite": 0,
+   "rawCacheWriteReported": false,
+   "rawSource": "evidence/s3/dsh-home/session-log/s-root.jsonl:44 (data.usage of the assistant/message; log seq 43, turn 1 step 7)",
+   "rawLogSeq": 43,
+   "turn": 1,
+   "step": 7,
+   "rawTimeMs": 1790185773465,
+   "cacheReadTokens": 20992,
+   "inputTokens": 876,
+   "outputTokens": 322,
+   "totalTokens": 22190,
+   "totalTokensIsInputPlusOutputPlusCacheRead": true
+  },
+  {
+   "seq": 9,
+   "sessionId": "s-b62da3c5-9506-4a65-81f9-441fc72de7ea",
+   "recordedCacheWrite": 0,
+   "rawCacheWriteReported": false,
+   "rawSource": "evidence/s3/dsh-home/session-log/s-b62da3c5-9506-4a65-81f9-441fc72de7ea.jsonl:16 (data.usage of the assistant/message; log seq 15, turn 1 step 2)",
+   "rawLogSeq": 15,
+   "turn": 1,
+   "step": 2,
+   "rawTimeMs": 1790185774003,
+   "cacheReadTokens": 6912,
+   "inputTokens": 983,
+   "outputTokens": 217,
+   "totalTokens": 8112,
+   "totalTokensIsInputPlusOutputPlusCacheRead": true
+  },
+  {
+   "seq": 10,
+   "sessionId": "s-root",
+   "recordedCacheWrite": 0,
+   "rawCacheWriteReported": false,
+   "rawSource": "evidence/s3/dsh-home/session-log/s-root.jsonl:51 (data.usage of the assistant/message; log seq 50, turn 2 step 1)",
+   "rawLogSeq": 50,
+   "turn": 2,
+   "step": 1,
+   "rawTimeMs": 1790185777311,
+   "cacheReadTokens": 21504,
+   "inputTokens": 818,
+   "outputTokens": 203,
+   "totalTokens": 22525,
+   "totalTokensIsInputPlusOutputPlusCacheRead": true
+  },
+  {
+   "seq": 11,
+   "sessionId": "s-root",
+   "recordedCacheWrite": 0,
+   "rawCacheWriteReported": false,
+   "rawSource": "evidence/s3/dsh-home/session-log/s-root.jsonl:56 (data.usage of the assistant/message; log seq 55, turn 2 step 2)",
+   "rawLogSeq": 55,
+   "turn": 2,
+   "step": 2,
+   "rawTimeMs": 1790185780039,
+   "cacheReadTokens": 22016,
+   "inputTokens": 787,
+   "outputTokens": 137,
+   "totalTokens": 22940,
+   "totalTokensIsInputPlusOutputPlusCacheRead": true
+  },
+  {
+   "seq": 12,
+   "sessionId": "s-b62da3c5-9506-4a65-81f9-441fc72de7ea",
+   "recordedCacheWrite": 0,
+   "rawCacheWriteReported": false,
+   "rawSource": "evidence/s3/dsh-home/session-log/s-b62da3c5-9506-4a65-81f9-441fc72de7ea.jsonl:21 (data.usage of the assistant/message; log seq 20, turn 1 step 3)",
+   "rawLogSeq": 20,
+   "turn": 1,
+   "step": 3,
+   "rawTimeMs": 1790185780165,
+   "cacheReadTokens": 7680,
+   "inputTokens": 450,
+   "outputTokens": 285,
+   "totalTokens": 8415,
+   "totalTokensIsInputPlusOutputPlusCacheRead": true
+  },
+  {
+   "seq": 13,
+   "sessionId": "s-b62da3c5-9506-4a65-81f9-441fc72de7ea",
+   "recordedCacheWrite": 0,
+   "rawCacheWriteReported": false,
+   "rawSource": "evidence/s3/dsh-home/session-log/s-b62da3c5-9506-4a65-81f9-441fc72de7ea.jsonl:26 (data.usage of the assistant/message; log seq 25, turn 1 step 4)",
+   "rawLogSeq": 25,
+   "turn": 1,
+   "step": 4,
+   "rawTimeMs": 1790185785631,
+   "cacheReadTokens": 7936,
+   "inputTokens": 546,
+   "outputTokens": 281,
+   "totalTokens": 8763,
+   "totalTokensIsInputPlusOutputPlusCacheRead": true
+  },
+  {
+   "seq": 14,
+   "sessionId": "s-b62da3c5-9506-4a65-81f9-441fc72de7ea",
+   "recordedCacheWrite": 0,
+   "rawCacheWriteReported": false,
+   "rawSource": "evidence/s3/dsh-home/session-log/s-b62da3c5-9506-4a65-81f9-441fc72de7ea.jsonl:35 (data.usage of the assistant/message; log seq 34, turn 1 step 5)",
+   "rawLogSeq": 34,
+   "turn": 1,
+   "step": 5,
+   "rawTimeMs": 1790185789629,
+   "cacheReadTokens": 8448,
+   "inputTokens": 357,
+   "outputTokens": 107,
+   "totalTokens": 8912,
+   "totalTokensIsInputPlusOutputPlusCacheRead": true
+  },
+  {
+   "seq": 15,
+   "sessionId": "s-b62da3c5-9506-4a65-81f9-441fc72de7ea",
+   "recordedCacheWrite": 0,
+   "rawCacheWriteReported": false,
+   "rawSource": "evidence/s3/dsh-home/session-log/s-b62da3c5-9506-4a65-81f9-441fc72de7ea.jsonl:40 (data.usage of the assistant/message; log seq 39, turn 1 step 6)",
+   "rawLogSeq": 39,
+   "turn": 1,
+   "step": 6,
+   "rawTimeMs": 1790185793648,
+   "cacheReadTokens": 8704,
+   "inputTokens": 524,
+   "outputTokens": 300,
+   "totalTokens": 9528,
+   "totalTokensIsInputPlusOutputPlusCacheRead": true
+  }
+ ],
+ "totals": {
+  "records": 15,
+  "A_asComputedWithTheDoubleQuestionMarkDefault": {
+   "label": "as computed with `?? 0` — what the ledger states",
+   "inputTokens": 34518,
+   "outputTokens": 16097,
+   "cacheReadTokens": 168704,
+   "cacheWriteTokens": 0,
+   "inputPlusOutputTokens": 50615,
+   "sumOfTotalTokens": 219319,
+   "source": "r1-supplemental-2026-09-24/evidence/ledger.json:111-124 (attempts[1].usage), reproduced independently by accounting/cache-write-recompute.py"
+  },
+  "B_notReported": {
+   "label": "not reported (未报告)",
+   "inputTokens": 34518,
+   "outputTokens": 16097,
+   "cacheReadTokens": 168704,
+   "cacheWriteTokens": "未报告 (not reported) — not summable: no response of this run reported the field",
+   "inputPlusOutputTokens": 50615,
+   "sumOfTotalTokens": 219319,
+   "source": "accounting/cache-write-recompute.py, from the 15 durable usage objects"
+  },
+  "columnChanged": "cacheWriteTokens only: 0 -> 未报告 (not reported)",
+  "columnsUnchanged": [
+   "inputTokens 34518",
+   "outputTokens 16097",
+   "cacheReadTokens 168704",
+   "every per-record totalTokens and their sum 219319"
+  ],
+  "whyNoOtherFigureMoves": "on all 15 records totalTokens == inputTokens + outputTokens + cacheReadTokens (50615 input+output plus 168704 cacheRead = 219319), so a cache-write number is not an addend of any recorded total on this protocol; and cache reads stay in their own column, never folded into inputTokens/outputTokens",
+  "bySession": [
+   {
+    "sessionId": "s-b62da3c5-9506-4a65-81f9-441fc72de7ea",
+    "records": 6,
+    "inputTokens": 9969,
+    "outputTokens": 1370,
+    "cacheReadTokens": 39680,
+    "cacheWriteTokens": "未报告 (not reported)"
+   },
+   {
+    "sessionId": "s-root",
+    "records": 9,
+    "inputTokens": 24549,
+    "outputTokens": 14727,
+    "cacheReadTokens": 129024,
+    "cacheWriteTokens": "未报告 (not reported)"
+   }
+  ],
+  "whatTheCorrectedFigureMeansForThisRoundsAttempt": "the attempt's total cache write is not determinable from the archived evidence: the gateway/protocol reported no such field on any of the 15 responses, and nothing in the record bounds it from either side. It is 未报告 — not 0, and not a number. No other total of this round changes, because no total of this round ever contained a cache-write term."
+ },
+ "missingUsage": {
+  "what": "the last model request of the run that produced no usage record at all",
+  "sessionId": "s-root",
+  "request": "turn 3 step 1 (the post-terminal 'batch settled' turn)",
+  "rawSource": "r1-supplemental-2026-09-24/evidence/s3/dsh-home/session-log/s-root.jsonl:62 (step/start turn 3 step 1; the log ends at line 63 with the delivered user/message carrying the settled notice; the inbox splices are lines 59 and 61 — no step/end, no turn/end, no assistant/message follows)",
+  "turnsWithATurnStart": "1 (line 4), 2 (line 47), 3 (line 60)",
+  "turnsWithAModelResponse": [
+   1,
+   2
+  ],
+  "adapterBoundary": "10 model requests reached the adapter boundary for s-root against 9 usage records — r1-supplemental-2026-09-24/evidence/s3/driver.json notes[3]",
+  "value": "未报告 (missing)",
+  "staysMissing": true,
+  "notZero": "its tokens stay unrecorded; this correction does not turn them into 0",
+  "alreadyRecorded": "r1-supplemental-2026-09-24/evidence/ledger.json:122 (attempts[1].usage.notRecorded) already says 'Its tokens are unrecorded, not zero.' — left untouched"
+ },
+ "smoke": {
+  "source": "r1-supplemental-2026-09-24/evidence/smoke-1/result.json (keys: baseUrl, finishReason, inputTokens, keyLength, model, ok, outputTokens, text)",
+  "inputTokens": 12,
+  "outputTokens": 409,
+  "cacheReadTokens": "未报告 (not recorded at all)",
+  "cacheWriteTokens": "未报告 (not recorded at all)",
+  "why": "driver/r1-smoke.ts reads only chunk.usage.inputTokens and chunk.usage.outputTokens; the smoke's own SmokeResult type has no cache column, so neither 0 nor a number exists for it",
+  "notAffectedByThisCorrection": "the smoke never had a cache-write 0 to correct; the ledger already records 'not recorded' at evidence/ledger.json:185-186"
+ },
+ "historicalUnchanged": {
+  "status": "restated exactly as it stands — not recomputed, not extended, not turned into an exact total",
+  "sources": [
+   "r1-supplemental-2026-09-24/fixtures/frozen-contract.md §5 line 92 (the frozen V6 paragraph, quoted in full in V5-account-correction.md)",
+   "r1-supplemental-2026-09-24/evidence/ledger.json historyCorrection (the round's verbatim reproduction, with its arithmeticCorrection note)"
+  ],
+  "existingRecordsMinInputOutputTokens": 175461,
+  "existingRecordsMinToolCalls": 58,
+  "withCacheReadsMin": 501349,
+  "asWritten": "= budget.json 143978 input+output / 44 tool calls + the first round's S1 31483 / 14 recorded at 3b446cb; the first round's two smokes (200 tokens) are already inside the 143978 count and must not be added again; the cache-inclusive addend as corrected by the round is 96251, while the frozen paragraph's parenthetical prints 96451 (those 200 smoke tokens again) — the total 501349 is unaffected either way. The first round's complete session log was overwritten (only task-evidence directories survive): these are lower bounds from surviving records, not a full accounting.",
+  "oldRoundCacheWriteColumn": {
+   "verdict": "likewise 未报告 (not reported), not a measured 0",
+   "census": {
+    "durableUsageObjects": 36,
+    "logsSearched": 9,
+    "carryingACacheWriteTokensKey": 0,
+    "lackingTheKey": 36,
+    "carryingCacheReadTokens": 36,
+    "carryingCacheReadTokensValueZero_genuineReportedZero": 10,
+    "carryingReasoningTokens": 36
+   },
+   "whereTheZeroCameFrom": "r1-evidence-2026-09-23/budget.json:11 — \"cacheWriteTokens\": 0 — the same `?? 0` collapse on the same chat-completions protocol; the old round's normalised s1|s2|s3 driver.json files carry the same 0. Its surviving durable usage objects never reported the field either."
+  },
+  "effectOnTheLowerBound": {
+   "figure": "none: 175461 is input+output and 501349 is the cache-inclusive figure (input+output+cacheRead); neither sum contains a cache-write term, so re-reading the old 0 as 'not reported' moves neither",
+   "cannotBeStated": "no cache-write lower bound is stated for the old round, because the field was never reported there — and none is added here",
+   "outOfScope": "the historical lower bound itself is outside this correction and was not recomputed or extended"
+  }
+ },
+ "frozenTrees": [
+  {
+   "tree": "r1-supplemental-2026-09-24/",
+   "files": 158,
+   "manifestSha256": "542789e03d2b2acb632f42660e9ca4b0b4ab71bb5f973f5b2439c029719e6f36",
+   "manifestOrder": "byte order (LC_ALL=C): sha256 + two spaces + './' + path per file, joined in sorted order, hashed once"
+  },
+  {
+   "tree": "r1-evidence-2026-09-23/",
+   "files": 87,
+   "manifestSha256": "efdba0cb4f0496064e6f8f37e14d828181ed094d3a70b36a37ea3f5321df0ee8",
+   "manifestOrder": "byte order (LC_ALL=C): sha256 + two spaces + './' + path per file, joined in sorted order, hashed once"
+  }
+ ],
+ "notModified": {
+  "statement": "neither frozen tree was written to: this correction created, edited and removed nothing inside either tree",
+  "check": "the per-file manifest captured before any file of this recheck was read is byte-identical to the one recomputed afterwards (diff empty); both manifest digests are recorded here and recomputed on every run of accounting/cache-write-recompute.py section 8",
+  "artifacts": [
+   "r1-rework-2026-09-24/accounting/frozen-trees-manifest.txt (method and before/after digests)",
+   "r1-rework-2026-09-24/accounting/archive-r1-supplemental-2026-09-24.sha256 (158 files)",
+   "r1-rework-2026-09-24/accounting/archive-r1-evidence-2026-09-23.sha256 (87 files)"
+  ]
+ },
+ "provenance": [
+  {
+   "path": "r1-supplemental-2026-09-24/evidence/s3/driver.json",
+   "sha256": "b8c9bb9db592266f921641c84d0daaad706524cf41248b48f6a76811889c5621",
+   "bytes": 453593,
+   "role": "the run's normalised usage records (the 15 rows this correction restates)"
+  },
+  {
+   "path": "r1-supplemental-2026-09-24/evidence/ledger.json",
+   "sha256": "20de0d8419d774dbfd795013627fb267f7818cc5ff4c862928eb897d21f38d3e",
+   "bytes": 12798,
+   "role": "the round's ledger: the cache-write 0, the notRecorded and recorderCaveat notes, and the V6 historyCorrection"
+  },
+  {
+   "path": "r1-supplemental-2026-09-24/driver/r1-stack.ts",
+   "sha256": "c227e843bc3de0da372ea38197e5e731b04d75a9af2460c4e547056ec6391437",
+   "bytes": 44078,
+   "role": "the recorder: cacheWriteTokens: chunk.usage.cacheWriteTokens ?? 0 (line 560)"
+  },
+  {
+   "path": "r1-supplemental-2026-09-24/driver/r1-s3.spec.ts",
+   "sha256": "e099a1d49cf2b51faa27224cf5b73942eda34ad0f474096a414710f631e52773",
+   "bytes": 10421,
+   "role": "the spec that sums the normalised column and prints the run's own console line"
+  },
+  {
+   "path": "r1-supplemental-2026-09-24/driver/r1-smoke.ts",
+   "sha256": "3e71b33571055a3e3bef22e59be7a57e91214a96bf5cfe513f8c404429c1d35e",
+   "bytes": 3738,
+   "role": "the smoke's own accounting: reads inputTokens/outputTokens only"
+  },
+  {
+   "path": "r1-supplemental-2026-09-24/fixtures/frozen-contract.md",
+   "sha256": "1234da2fd0d5e43d9ef0eb693c617b99ed7708ab755debaa04a43dfd68b2df03",
+   "bytes": 11641,
+   "role": "frozen contract §5 (the V6 historical paragraph) and §5a"
+  },
+  {
+   "path": "r1-supplemental-2026-09-24/evidence/run-facts.json",
+   "sha256": "661a4a45e12ee84efbfd64c8c754265bdedbdb58f9cabd193b66b7494b77d5d0",
+   "bytes": 51351,
+   "role": "the round's derived view: per-record and total cache-write 0"
+  },
+  {
+   "path": "r1-supplemental-2026-09-24/evidence/s3/run-meta.json",
+   "sha256": "6c9420fb7462c6616fbe174ae96f2159e723ff00b27aec856f124ec27a1be5a0",
+   "bytes": 4130,
+   "role": "the run's own meta: budget.soft.usage.cacheWriteTokens 0 (line 52)"
+  },
+  {
+   "path": "r1-supplemental-2026-09-24/evidence/run-console.log",
+   "sha256": "8b18946220f4830edded3d9d78249cbe437b3a36ce5777e6c3be85a35cf914e8",
+   "bytes": 2807,
+   "role": "the run's stdout line, which prints usage with cacheWriteTokens 0"
+  },
+  {
+   "path": "r1-supplemental-2026-09-24/evidence/smoke-1/result.json",
+   "sha256": "88f18d2c9872d75a818a0bc53bb4896fd6a05e9f48b67177a1fbc2e6fd074c32",
+   "bytes": 1386,
+   "role": "the smoke record: inputTokens/outputTokens only, no cache column"
+  },
+  {
+   "path": "r1-evidence-2026-09-23/budget.json",
+   "sha256": "d0ab6b0434bc5d8b148c69c9f9bc253c2c76045dadc129a84ea3a029c46c0f16",
+   "bytes": 2153,
+   "role": "the old round's ledger: counted.cacheWriteTokens 0 (line 11)"
+  },
+  {
+   "path": "r1-evidence-2026-09-23/s1/driver.json",
+   "sha256": "68a45929ca91883e91bd0e38b700567c0446aa9180d9f128a62f268c97c5e88f",
+   "bytes": 24618,
+   "role": "the old round's normalised S1 usage records (cacheWriteTokens 0)"
+  },
+  {
+   "path": "r1-evidence-2026-09-23/s2/driver.json",
+   "sha256": "ae9fd6e4321001ec4f644eedca9836bccee4ac6f40ee33d2ba6d49c2f9b53545",
+   "bytes": 12631,
+   "role": "the old round's normalised S2 usage records (cacheWriteTokens 0)"
+  },
+  {
+   "path": "r1-evidence-2026-09-23/s3/driver.json",
+   "sha256": "349e6615f48bf096bf3e8d09f4185ed463bfa86e4330c9493082661d800c452a",
+   "bytes": 53483,
+   "role": "the old round's normalised S3 usage records (cacheWriteTokens 0)"
+  },
+  {
+   "path": "harness/thirdparty/deepseek-harness/packages/llm/llm-deepseek/src/protocols/chat-completions/translate.ts",
+   "sha256": "66e8b1f96a90404d4e5ca67fc85b9e37a96bbee78ed52521e7b8fdc3f336ba32",
+   "bytes": 8735,
+   "role": "chat-completions mapUsage: no cache-write field exists on this protocol"
+  },
+  {
+   "path": "harness/thirdparty/deepseek-harness/packages/llm/llm-deepseek/src/protocols/messages/translate.ts",
+   "sha256": "254f4b8fe292dadc5c24df3375b01920f5e5b345be09eae4290e91e9e810c1ba",
+   "bytes": 8030,
+   "role": "messages mapUsage: cache_creation_input_tokens -> cacheWriteTokens (the protocol this run did not use)"
+  },
+  {
+   "path": "r1-supplemental-2026-09-24/evidence/s3/dsh-home/session-log/s-b62da3c5-9506-4a65-81f9-441fc72de7ea.jsonl",
+   "sha256": "d50ad4be9afac4f4ae7e47489313a93c3ef8ae0525531fbaac5e718de839698a",
+   "bytes": 79533,
+   "role": "durable session log: the raw assistant/message usage objects"
+  },
+  {
+   "path": "r1-supplemental-2026-09-24/evidence/s3/dsh-home/session-log/s-root.jsonl",
+   "sha256": "51998c592a81278728ad331cdb23ceb41cca0bb347b4c26ae2dae58bd09be2b6",
+   "bytes": 291270,
+   "role": "durable session log: the raw assistant/message usage objects"
+  },
+  {
+   "path": "r1-supplemental-2026-09-24/evidence/s3/dsh-home/session-log/sg-t-s-root.jsonl",
+   "sha256": "770aeba92c473c8ceaab2bf072cb454b8529077e2603cb78d19a6ac759e3cc5f",
+   "bytes": 32722,
+   "role": "durable session log: the raw assistant/message usage objects"
+  },
+  {
+   "path": "r1-evidence-2026-09-23/s1/dsh-home/session-log/s-59aabced-fcb3-4e22-ba85-38e673fa09e9.jsonl",
+   "sha256": "21ad157f553fc3b555fdd123145a3f379c2cab57b1466b7200af034b91694a14",
+   "bytes": 57557,
+   "role": "old-round durable session log: field-presence census only"
+  },
+  {
+   "path": "r1-evidence-2026-09-23/s1/dsh-home/session-log/s-root.jsonl",
+   "sha256": "922102ccffc896de1ba91bbc6613c4fd156b8605619948b974bdd952c90dc2a5",
+   "bytes": 179500,
+   "role": "old-round durable session log: field-presence census only"
+  },
+  {
+   "path": "r1-evidence-2026-09-23/s1/dsh-home/session-log/sg-t-s-root.jsonl",
+   "sha256": "4a59a0d1d6db05c712f0540e7d99924a65b734da5506decdcc819b29d2721220",
+   "bytes": 23244,
+   "role": "old-round durable session log: field-presence census only"
+  },
+  {
+   "path": "r1-evidence-2026-09-23/s2/dsh-home/session-log/s-fb52f3b0-bf9b-43ac-86ec-97fd6893073c.jsonl",
+   "sha256": "ae1a03a98418055738d936c5fd0307e7ecc8bacf408f449784fa3b14d03a8ae1",
+   "bytes": 61115,
+   "role": "old-round durable session log: field-presence census only"
+  },
+  {
+   "path": "r1-evidence-2026-09-23/s2/dsh-home/session-log/s-root.jsonl",
+   "sha256": "24acd0de6b948e8fb02e2b45c42b20d9309a3424c32491eb8aa2ffc099476f57",
+   "bytes": 34084,
+   "role": "old-round durable session log: field-presence census only"
+  },
+  {
+   "path": "r1-evidence-2026-09-23/s2/dsh-home/session-log/sg-t-s-root.jsonl",
+   "sha256": "cc03d9ca9f47ede1b12e1a08a8bd52f5b1199ce7d6d9425e19ecb239f96c905e",
+   "bytes": 19505,
+   "role": "old-round durable session log: field-presence census only"
+  },
+  {
+   "path": "r1-evidence-2026-09-23/s3/dsh-home/session-log/s-0e5b89a1-0687-43b5-b8a3-b25bcc975e03.jsonl",
+   "sha256": "aea8e74760b6ea753258a88ebf7d28306f51c8e02e28b208b81b81d9244e4bde",
+   "bytes": 164129,
+   "role": "old-round durable session log: field-presence census only"
+  },
+  {
+   "path": "r1-evidence-2026-09-23/s3/dsh-home/session-log/s-root.jsonl",
+   "sha256": "7b053f4067b8b8302487d67dbcd01ec20cd1a27d3551501d59bc91143d67efe3",
+   "bytes": 213454,
+   "role": "old-round durable session log: field-presence census only"
+  },
+  {
+   "path": "r1-evidence-2026-09-23/s3/dsh-home/session-log/sg-t-s-root.jsonl",
+   "sha256": "8cdd7dae69a8dbeeb0e8881d6b4a91f0b94f8bedd3de80ba4c63314f95a7046d",
+   "bytes": 45787,
+   "role": "old-round durable session log: field-presence census only"
+  }
+ ]
+}

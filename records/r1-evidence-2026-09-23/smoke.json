@@ -1,0 +1,26 @@
+[
+  {
+    "ok": true,
+    "baseUrl": "https://api.stepfun.com/step_plan/v1",
+    "keyLength": 65,
+    "model": "step-5-preview",
+    "text": "pong",
+    "finishReason": { "kind": "stop" },
+    "inputTokens": 12,
+    "outputTokens": 54,
+    "error": null,
+    "_note": "the standalone smoke check run before the scenario sequence (packages/singularity/tests/r1/r1-smoke.spec.ts); recorded verbatim from its console output"
+  },
+  {
+    "ok": true,
+    "baseUrl": "https://api.stepfun.com/step_plan/v1",
+    "keyLength": 65,
+    "model": "step-5-preview",
+    "text": "I'm here! ✅  \nHow can I assist you today?",
+    "finishReason": { "kind": "stop" },
+    "inputTokens": 12,
+    "outputTokens": 122,
+    "error": null,
+    "_note": "the archive-pass smoke call from the S1 round (r1-run.spec.ts smoke test); recorded verbatim from its console output"
+  }
+]

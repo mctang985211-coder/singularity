@@ -1,0 +1,152 @@
+{
+  "decidedAt": "2026-09-23T18:02:31.846Z",
+  "decidedBy": "r1-criteria-review (independent reviewer), via driver/s3-criteria.ts decideS3",
+  "record": {
+    "path": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/evidence/s3/driver.json",
+    "sha256": "b8c9bb9db592266f921641c84d0daaad706524cf41248b48f6a76811889c5621"
+  },
+  "adjudication": {
+    "path": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/evidence/adjudication/s3-run.json",
+    "sha256": "04ed69c40f90200c96483b061138cf05200dd4faf3f18a684fdc3ede9d8f1b69",
+    "draft": false
+  },
+  "decision": {
+    "verdict": "pass",
+    "path": "path2-limited-goal",
+    "checks": {
+      "M1.chain": {
+        "ok": true,
+        "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+      },
+      "M1.accounted": {
+        "ok": true,
+        "detail": "1 complete, 0 unavailable, 0 unanswered, 0 inconsistent, 0 unverified, 0 unaccounted"
+      },
+      "M2.progress": {
+        "ok": true,
+        "detail": "clarification consumed: true; root contract activated: true (t-82a86cf4-2c27-41cb-a160-5e983d5e1f45)"
+      },
+      "M3.artifact": {
+        "ok": true,
+        "detail": "1 artifact(s), 822 byte(s): /home/ROXY/code/bb_work/r1-supplemental-2026-09-24/run/s3/repo/report.txt=822B"
+      },
+      "M3.verifierPass": {
+        "ok": true,
+        "detail": "verifier passes: ac-1:command, ac-2:command, ac-3:command for the adjudicated criteria ac-1, ac-2, ac-3"
+      },
+      "M3.content": {
+        "ok": true,
+        "detail": "the adjudication says the artifact matches the adjudicated goal: true"
+      },
+      "S1.freeze": {
+        "ok": true,
+        "detail": "no active contract fixes an unconfirmed condition (0 freeze claim(s) reviewed)"
+      },
+      "S2.dependency": {
+        "ok": true,
+        "detail": "the activated goal depends on no unresolved condition: false"
+      },
+      "S3.confirmation": {
+        "ok": true,
+        "detail": "every user-confirmed label cites a delivered user answer"
+      },
+      "S4.limitedGoal": {
+        "ok": true,
+        "detail": "the limited goal carries no unconfirmed content (0 claim(s)); completed-analysis claim: false"
+      },
+      "adjudication": {
+        "ok": true,
+        "detail": "authoritative review by r1-criteria-review (independent reviewer of the S3 trajectory; not the criteria implementer, not the driver author) — second pass, adjudicating the paid run"
+      },
+      "resolution.conditions": {
+        "ok": true,
+        "detail": "every condition is confirmed or retained"
+      },
+      "path.retainUnknown": {
+        "ok": true,
+        "detail": "retain-unknown: nothing frozen, the goal does not depend on the unknown, and the unknown is explicitly retained"
+      },
+      "path.limitedGoal": {
+        "ok": true,
+        "detail": "limited-goal: the contract converged on the user's no-data instruction, cited to the delivered answer"
+      }
+    },
+    "reasons": [
+      "every mechanical check and every semantic condition holds (path2-limited-goal)"
+    ],
+    "facts": {
+      "rootSessionId": "s-root",
+      "hitlAskCalls": 1,
+      "chains": [
+        {
+          "callId": "chatcmpl-tool-947014ca192bbc58",
+          "sessionId": "s-root",
+          "prompt": "I'm about to write the root contract to create report.txt. To summarize \"the quarter\" faithfully, I need three things:\n\n1. **Subject**: What should the report cover — project/engineering activity, sales/financials, team or product metrics, something else?\n2. **Data source**: Is there an existing data source I should summarize from (a repo, files, logs), or should this be a brief qualitative summary from what you tell me?\n3. **Where/how**: Should report.txt be created in the current working directory, and is there a preferred length or format (e.g., bullets vs. prose)?",
+          "answer": "No data was provided; state that explicitly.",
+          "status": "complete",
+          "detail": "prompt → desk → answer → tool result → session log, verbatim"
+        }
+      ],
+      "clarificationUnavailable": false,
+      "answerMissing": false,
+      "rootActivated": true,
+      "rootTerminal": "verified",
+      "deliveryClaimed": true,
+      "artifactBytes": 822,
+      "verifierPasses": [
+        "c-1:command",
+        "c-2:command",
+        "c-3:command",
+        "ac-1:command",
+        "ac-2:command",
+        "ac-3:command",
+        "ac-4:composite"
+      ],
+      "conditions": {
+        "quarter": "retained-unknown",
+        "dataSource": "user-confirmed",
+        "deliveryScope": "user-confirmed"
+      },
+      "adjudication": "authoritative",
+      "citations": [
+        {
+          "of": "conditions.quarter (retained-unknown)",
+          "resolved": true,
+          "detail": "rootContract.assumptions[0] carries \"'the quarter' has no defined date range\""
+        },
+        {
+          "of": "conditions.dataSource (user-confirmed)",
+          "resolved": true,
+          "detail": "the delivered answer of call chatcmpl-tool-947014ca192bbc58 carries \"No data was provided; state that explicitly.\""
+        },
+        {
+          "of": "conditions.deliveryScope (user-confirmed)",
+          "resolved": true,
+          "detail": "the delivered answer of call chatcmpl-tool-947014ca192bbc58 carries \"No data was provided; state that explicitly.\""
+        },
+        {
+          "of": "goal (the activated goal's own field)",
+          "resolved": true,
+          "detail": "the delivered answer of call chatcmpl-tool-947014ca192bbc58 carries \"No data was provided; state that explicitly.\""
+        }
+      ]
+    }
+  },
+  "counterfactual": {
+    "of": "artifactMatchesGoal flipped to false with the same record and review",
+    "reason": "the §5a amendment: an explicit content mismatch under a delivery claim must fail",
+    "decision": {
+      "verdict": "fail",
+      "path": "rejected: a mechanical check failed",
+      "reasons": [
+        "M3: the run claims delivery but the adjudication states the artifact does not match the adjudicated goal (the adjudication says the artifact matches the adjudicated goal: false)"
+      ],
+      "checks": {
+        "M3.content": {
+          "ok": false,
+          "detail": "the adjudication says the artifact matches the adjudicated goal: false"
+        }
+      }
+    }
+  }
+}

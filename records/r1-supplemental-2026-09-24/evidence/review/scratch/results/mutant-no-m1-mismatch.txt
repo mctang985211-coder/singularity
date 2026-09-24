@@ -1,0 +1,47 @@
+../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts (1:449) [33m[UNRESOLVED_IMPORT] [0mCould not resolve 'vitest/config' in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts
+ - Module not found, treating it as an external dependency in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts at 449..464
+
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /home/ROXY/code/bb_work/harness
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-m1-mismatch/s3-criteria.spec.ts (12 tests | 1 failed) 22ms
+     ✓ replays the original S3 trajectory against its adjudication and rejects it 8ms
+     × rejects a run whose desk answer reached the model as something else 7ms
+     ✓ rejects a run whose answer never reached the session at all 1ms
+     ✓ rejects a run whose clarification call failed and whose goal then depended on the unknown 1ms
+     ✓ rejects an activated goal whose delivery depends on an unresolved unknown 1ms
+     ✓ passes an activated limited goal that explicitly retains the unknown while the clarification went unanswered 1ms
+     ✓ rejects a run that claims delivery with no non-empty artifact 1ms
+     ✓ rejects a run that claims delivery with no real verifier pass for the goal 1ms
+     ✓ rejects a limited goal that still carries an unconfirmed quarter 1ms
+     ✓ rejects a user-confirmed label that cites no delivered user answer 1ms
+     ✓ never passes without a usable semantic adjudication 0ms
+     ✓ never passes on a review its own author marked draft 0ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-m1-mismatch/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a run whose desk answer reached the model as something else
+AssertionError: expected 'complete' to be 'inconsistent' // Object.is equality
+
+Expected: "inconsistent"
+Received: "complete"
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/no-m1-mismatch/s3-criteria.spec.ts:288:46
+    286|     }
+    287|     const decision = decideS3({ record: wrong, adjudication: passingAd…
+    288|     expect(decision.facts.chains[0]!.status).toBe('inconsistent')
+       |                                              ^
+    289|     expectVerdict(decision, 'fail', 'M1.chain')
+    290|   })
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 11 passed (12)
+   Start at  01:34:48
+   Duration  243ms (transform 65ms, setup 0ms, import 87ms, tests 22ms, environment 0ms)
+

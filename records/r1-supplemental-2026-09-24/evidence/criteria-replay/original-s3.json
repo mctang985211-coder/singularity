@@ -1,0 +1,160 @@
+{
+  "replayedAt": "2026-09-24T01:45:09.061Z",
+  "record": {
+    "path": "/home/ROXY/code/bb_work/r1-evidence-2026-09-23/s3/driver.json",
+    "sha256": "349e6615f48bf096bf3e8d09f4185ed463bfa86e4330c9493082661d800c452a"
+  },
+  "sessionLog": {
+    "path": "/home/ROXY/code/bb_work/r1-evidence-2026-09-23/s3/dsh-home/session-log/s-root.jsonl",
+    "sha256": "7b053f4067b8b8302487d67dbcd01ec20cd1a27d3551501d59bc91143d67efe3"
+  },
+  "adjudication": {
+    "path": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/evidence/adjudication/original-s3.json",
+    "sha256": "7d2b91fcbf8b7a87b51fdf05d81d68b001e90649aecd99d331cfbcd7b8386c36",
+    "provisional": false
+  },
+  "decision": {
+    "verdict": "fail",
+    "path": "rejected: the semantic gate refused the trajectory",
+    "checks": {
+      "M1.chain": {
+        "ok": true,
+        "detail": "chatcmpl-tool-9188abc1d2ff8138:unavailable (the tool call reported an error: \"Error: cannot get property \\\"toJSON\\\" without inject\")"
+      },
+      "M1.accounted": {
+        "ok": true,
+        "detail": "0 complete, 1 unavailable, 0 unanswered, 0 inconsistent, 0 unverified, 0 unaccounted"
+      },
+      "M2.progress": {
+        "ok": true,
+        "detail": "clarification consumed: false; root contract activated: true (t-71977240-65f7-41ad-a343-d6b3134fc65e)"
+      },
+      "M3.artifact": {
+        "ok": true,
+        "detail": "the run claims no delivery"
+      },
+      "M3.verifierPass": {
+        "ok": true,
+        "detail": "the run claims no delivery"
+      },
+      "M3.content": {
+        "ok": true,
+        "detail": "the run claims no delivery"
+      },
+      "S1.freeze": {
+        "ok": false,
+        "detail": "S1: the active contract fixes quarter at ids.rootContract.objective (\"summarizing the most recently completed calendar quarter\") without a delivered user answer; S1: the active contract fixes quarter at ids.rootContract.acceptanceCriteria[1].description (\"it names the quarter covered\") without a delivered user answer; S1: the active contract fixes quarter at ids.rootContract.assumptions[0] (\"'the quarter' means the most recently completed calendar quarter\") without a delivered user answer; S1: the active contract fixes dataSource at ids.rootContract.objective (\"based on the data present in the checkout\") without a delivered user answer; S1: the active contract fixes dataSource at ids.rootContract.assumptions[1] (\"the source data for the summary is whatever exists in the session checkout\") without a delivered user answer"
+      },
+      "S2.dependency": {
+        "ok": false,
+        "detail": "S2: the activated goal's delivery depends on the unresolved condition(s) quarter, dataSource (ids.rootContract.objective carries \"summarizing the most recently completed calendar quarter\")"
+      },
+      "S3.confirmation": {
+        "ok": true,
+        "detail": "every user-confirmed label cites a delivered user answer"
+      },
+      "S4.limitedGoal": {
+        "ok": true,
+        "detail": "S4 does not apply: the activated goal is not the user's limited goal (limitedGoal=false), so S1/S2 judge the contract"
+      },
+      "adjudication": {
+        "ok": true,
+        "detail": "authoritative review by r1-criteria-review (independent reviewer of the S3 trajectory; not the criteria implementer, not the driver author)"
+      },
+      "resolution.conditions": {
+        "ok": false,
+        "detail": "left plain unknown: quarter, dataSource, deliveryScope"
+      },
+      "path.retainUnknown": {
+        "ok": false,
+        "detail": "retain-unknown: nothing frozen, the goal does not depend on the unknown, and the unknown is explicitly retained"
+      },
+      "path.limitedGoal": {
+        "ok": false,
+        "detail": "limited-goal: the contract converged on the user's no-data instruction, cited to the delivered answer"
+      }
+    },
+    "reasons": [
+      "S1: the active contract fixes quarter at ids.rootContract.objective (\"summarizing the most recently completed calendar quarter\") without a delivered user answer",
+      "S1: the active contract fixes quarter at ids.rootContract.acceptanceCriteria[1].description (\"it names the quarter covered\") without a delivered user answer",
+      "S1: the active contract fixes quarter at ids.rootContract.assumptions[0] (\"'the quarter' means the most recently completed calendar quarter\") without a delivered user answer",
+      "S1: the active contract fixes dataSource at ids.rootContract.objective (\"based on the data present in the checkout\") without a delivered user answer",
+      "S1: the active contract fixes dataSource at ids.rootContract.assumptions[1] (\"the source data for the summary is whatever exists in the session checkout\") without a delivered user answer",
+      "S2: the activated goal's delivery depends on the unresolved condition(s) quarter, dataSource (ids.rootContract.objective carries \"summarizing the most recently completed calendar quarter\")"
+    ],
+    "facts": {
+      "rootSessionId": "s-root",
+      "hitlAskCalls": 1,
+      "chains": [
+        {
+          "callId": "chatcmpl-tool-9188abc1d2ff8138",
+          "sessionId": "s-root",
+          "prompt": "I'm about to set up work to create report.txt summarizing the quarter. Before I write the task contract, please confirm:\n\n1. Which quarter should it cover (e.g., 2025 Q1, the most recently completed quarter, or another)?\n2. What should the summary cover? For example: repository/git activity, specific data files or datasets in this session, business metrics, project status?\n3. Where does the source data live (files/directories/repositories in this session's checkout), and is there a required format, length, or set of sections for the report?\n\nIf you want a plain \"summarize the most recently completed calendar quarter based on whatever data exists in the checkout\" I can proceed on those assumptions instead.",
+          "answer": "",
+          "status": "unavailable",
+          "detail": "the tool call reported an error: \"Error: cannot get property \\\"toJSON\\\" without inject\""
+        }
+      ],
+      "clarificationUnavailable": true,
+      "answerMissing": false,
+      "rootActivated": true,
+      "rootTerminal": "failed",
+      "deliveryClaimed": false,
+      "artifactBytes": 0,
+      "verifierPasses": [],
+      "conditions": {
+        "quarter": "unknown",
+        "dataSource": "unknown",
+        "deliveryScope": "unknown"
+      },
+      "adjudication": "authoritative",
+      "citations": [
+        {
+          "of": "conditions.quarter (unknown)",
+          "resolved": false,
+          "detail": "no citation"
+        },
+        {
+          "of": "conditions.dataSource (unknown)",
+          "resolved": false,
+          "detail": "no citation"
+        },
+        {
+          "of": "conditions.deliveryScope (unknown)",
+          "resolved": false,
+          "detail": "no citation"
+        },
+        {
+          "of": "freezes.quarter at ids.rootContract.objective",
+          "resolved": true,
+          "detail": "ids.rootContract.objective carries \"summarizing the most recently completed calendar quarter\""
+        },
+        {
+          "of": "freezes.quarter at ids.rootContract.acceptanceCriteria[1].description",
+          "resolved": true,
+          "detail": "ids.rootContract.acceptanceCriteria[1].description carries \"it names the quarter covered\""
+        },
+        {
+          "of": "freezes.quarter at ids.rootContract.assumptions[0]",
+          "resolved": true,
+          "detail": "ids.rootContract.assumptions[0] carries \"'the quarter' means the most recently completed calendar quarter\""
+        },
+        {
+          "of": "freezes.dataSource at ids.rootContract.objective",
+          "resolved": true,
+          "detail": "ids.rootContract.objective carries \"based on the data present in the checkout\""
+        },
+        {
+          "of": "freezes.dataSource at ids.rootContract.assumptions[1]",
+          "resolved": true,
+          "detail": "ids.rootContract.assumptions[1] carries \"the source data for the summary is whatever exists in the session checkout\""
+        },
+        {
+          "of": "goal (the activated goal's own field)",
+          "resolved": true,
+          "detail": "ids.rootContract.objective carries \"summarizing the most recently completed calendar quarter\""
+        }
+      ]
+    }
+  }
+}

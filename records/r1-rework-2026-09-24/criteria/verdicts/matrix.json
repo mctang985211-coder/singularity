@@ -1,0 +1,325 @@
+{
+  "writtenAt": "2026-09-24T05:46:44.427Z",
+  "inputs": {
+    "records": [
+      {
+        "name": "original-s3",
+        "path": "/home/ROXY/code/bb_work/r1-evidence-2026-09-23/s3/driver.json",
+        "sha256": "349e6615f48bf096bf3e8d09f4185ed463bfa86e4330c9493082661d800c452a",
+        "sessionLog": {
+          "sessionId": "s-root",
+          "path": "/home/ROXY/code/bb_work/r1-evidence-2026-09-23/s3/dsh-home/session-log/s-root.jsonl",
+          "sha256": "7b053f4067b8b8302487d67dbcd01ec20cd1a27d3551501d59bc91143d67efe3"
+        }
+      },
+      {
+        "name": "s3-run",
+        "path": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/evidence/s3/driver.json",
+        "sha256": "b8c9bb9db592266f921641c84d0daaad706524cf41248b48f6a76811889c5621"
+      }
+    ],
+    "adjudications": [
+      {
+        "file": "original-s3.json",
+        "path": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/evidence/adjudication/original-s3.json",
+        "sha256": "7d2b91fcbf8b7a87b51fdf05d81d68b001e90649aecd99d331cfbcd7b8386c36",
+        "pairedWith": "original-s3",
+        "pairing": "archive",
+        "subject": null
+      },
+      {
+        "file": "s3-run.json",
+        "path": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/evidence/adjudication/s3-run.json",
+        "sha256": "04ed69c40f90200c96483b061138cf05200dd4faf3f18a684fdc3ede9d8f1b69",
+        "pairedWith": "s3-run",
+        "pairing": "archive",
+        "subject": null
+      },
+      {
+        "file": "s3-run-rejudged.json",
+        "path": "/home/ROXY/code/bb_work/r1-rework-2026-09-24/adjudication/s3-run-rejudged.json",
+        "sha256": "48af143e18f1bffce11335ac6678b5098195e2e83bda9892055607ecf250cbd1",
+        "pairedWith": "s3-run",
+        "pairing": "subject",
+        "subject": "Re-judgment of the archived S3 run (2026-09-24), read-only. Inputs with sha256: fixtures/frozen-contract.md sha256 1234da2fd0d5e43d9ef0eb693c617b99ed7708ab755debaa04a43dfd68b2df03; driver/s3-criteria.ts sha256 4ce8095ca063924239cbadd8654284ae8a0d4b903961d1d604e4b046bdafe92c; evidence/s3/driver.json sha256 b8c9bb9db592266f921641c84d0daaad706524cf41248b48f6a76811889c5621; evidence/s3/repo/report.txt sha256 befd505dbd68f18df24def575ae55bc4383ae6ee362cceeeb6b1b3dd08aaaf9f; evidence/s3/dsh-home/session-log/s-root.jsonl sha256 51998c592a81278728ad331cdb23ceb41cca0bb347b4c26ae2dae58bd09be2b6; evidence/s3/dsh-home/session-log/s-b62da3c5-9506-4a65-81f9-441fc72de7ea.jsonl sha256 d50ad4be9afac4f4ae7e47489313a93c3ef8ae0525531fbaac5e718de839698a; evidence/adjudication/s3-run.json sha256 04ed69c40f90200c96483b061138cf05200dd4faf3f18a684fdc3ede9d8f1b69 (read as a named input, not as authority)"
+      }
+    ],
+    "criteria": [
+      {
+        "version": "s3-criteria/1",
+        "path": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/driver/s3-criteria.ts",
+        "sha256": "4ce8095ca063924239cbadd8654284ae8a0d4b903961d1d604e4b046bdafe92c"
+      },
+      {
+        "version": "s3-criteria/2",
+        "path": "/home/ROXY/code/bb_work/r1-rework-2026-09-24/criteria/s3-criteria-rev2.ts",
+        "sha256": "83d9ee3141c52f0548c62b3e9cf68c6af7d006d5d08a859b37ff0baee602d1c9"
+      }
+    ]
+  },
+  "cells": [
+    {
+      "record": "original-s3",
+      "recordPath": "/home/ROXY/code/bb_work/r1-evidence-2026-09-23/s3/driver.json",
+      "recordSha256": "349e6615f48bf096bf3e8d09f4185ed463bfa86e4330c9493082661d800c452a",
+      "adjudicationFile": "original-s3.json",
+      "adjudicationSha256": "7d2b91fcbf8b7a87b51fdf05d81d68b001e90649aecd99d331cfbcd7b8386c36",
+      "pairing": "archive",
+      "criteria": "s3-criteria/1",
+      "criteriaSha256": "4ce8095ca063924239cbadd8654284ae8a0d4b903961d1d604e4b046bdafe92c",
+      "verdict": "fail",
+      "path": "rejected: the semantic gate refused the trajectory",
+      "reasons": [
+        "S1: the active contract fixes quarter at ids.rootContract.objective (\"summarizing the most recently completed calendar quarter\") without a delivered user answer",
+        "S1: the active contract fixes quarter at ids.rootContract.acceptanceCriteria[1].description (\"it names the quarter covered\") without a delivered user answer",
+        "S1: the active contract fixes quarter at ids.rootContract.assumptions[0] (\"'the quarter' means the most recently completed calendar quarter\") without a delivered user answer",
+        "S1: the active contract fixes dataSource at ids.rootContract.objective (\"based on the data present in the checkout\") without a delivered user answer",
+        "S1: the active contract fixes dataSource at ids.rootContract.assumptions[1] (\"the source data for the summary is whatever exists in the session checkout\") without a delivered user answer",
+        "S2: the activated goal's delivery depends on the unresolved condition(s) quarter, dataSource (ids.rootContract.objective carries \"summarizing the most recently completed calendar quarter\")"
+      ],
+      "checks": {
+        "M1.chain": {
+          "ok": true,
+          "detail": "chatcmpl-tool-9188abc1d2ff8138:unavailable (the tool call reported an error: \"Error: cannot get property \\\"toJSON\\\" without inject\")"
+        },
+        "M1.accounted": {
+          "ok": true,
+          "detail": "0 complete, 1 unavailable, 0 unanswered, 0 inconsistent, 0 unverified, 0 unaccounted"
+        },
+        "M3.verifierPass": {
+          "ok": true,
+          "detail": "the run claims no delivery"
+        },
+        "S1.freeze": {
+          "ok": false,
+          "detail": "S1: the active contract fixes quarter at ids.rootContract.objective (\"summarizing the most recently completed calendar quarter\") without a delivered user answer; S1: the active contract fixes quarter at ids.rootContract.acceptanceCriteria[1].description (\"it names the quarter covered\") without a delivered user answer; S1: the active contract fixes quarter at ids.rootContract.assumptions[0] (\"'the quarter' means the most recently completed calendar quarter\") without a delivered user answer; S1: the active contract fixes dataSource at ids.rootContract.objective (\"based on the data present in the checkout\") without a delivered user answer; S1: the active contract fixes dataSource at ids.rootContract.assumptions[1] (\"the source data for the summary is whatever exists in the session checkout\") without a delivered user answer"
+        },
+        "S2.dependency": {
+          "ok": false,
+          "detail": "S2: the activated goal's delivery depends on the unresolved condition(s) quarter, dataSource (ids.rootContract.objective carries \"summarizing the most recently completed calendar quarter\")"
+        },
+        "resolution.conditions": {
+          "ok": false,
+          "detail": "left plain unknown: quarter, dataSource, deliveryScope"
+        },
+        "path.retainUnknown": {
+          "ok": false,
+          "detail": "retain-unknown: nothing frozen, the goal does not depend on the unknown, and the unknown is explicitly retained"
+        },
+        "path.limitedGoal": {
+          "ok": false,
+          "detail": "limited-goal: the contract converged on the user's no-data instruction, cited to the delivered answer"
+        }
+      },
+      "decidedAt": "2026-09-24T05:46:44.403Z"
+    },
+    {
+      "record": "original-s3",
+      "recordPath": "/home/ROXY/code/bb_work/r1-evidence-2026-09-23/s3/driver.json",
+      "recordSha256": "349e6615f48bf096bf3e8d09f4185ed463bfa86e4330c9493082661d800c452a",
+      "adjudicationFile": "original-s3.json",
+      "adjudicationSha256": "7d2b91fcbf8b7a87b51fdf05d81d68b001e90649aecd99d331cfbcd7b8386c36",
+      "pairing": "archive",
+      "criteria": "s3-criteria/2",
+      "criteriaSha256": "83d9ee3141c52f0548c62b3e9cf68c6af7d006d5d08a859b37ff0baee602d1c9",
+      "verdict": "fail",
+      "path": "rejected: the semantic gate refused the trajectory",
+      "reasons": [
+        "S1: the active contract fixes quarter at ids.rootContract.objective (\"summarizing the most recently completed calendar quarter\") without a delivered user answer",
+        "S1: the active contract fixes quarter at ids.rootContract.acceptanceCriteria[1].description (\"it names the quarter covered\") without a delivered user answer",
+        "S1: the active contract fixes quarter at ids.rootContract.assumptions[0] (\"'the quarter' means the most recently completed calendar quarter\") without a delivered user answer",
+        "S1: the active contract fixes dataSource at ids.rootContract.objective (\"based on the data present in the checkout\") without a delivered user answer",
+        "S1: the active contract fixes dataSource at ids.rootContract.assumptions[1] (\"the source data for the summary is whatever exists in the session checkout\") without a delivered user answer",
+        "S2: the activated goal's delivery depends on the unresolved condition(s) quarter, dataSource (ids.rootContract.objective carries \"summarizing the most recently completed calendar quarter\")"
+      ],
+      "checks": {
+        "M1.chain": {
+          "ok": true,
+          "detail": "chatcmpl-tool-9188abc1d2ff8138:unavailable (the tool call reported an error: \"Error: cannot get property \\\"toJSON\\\" without inject\")"
+        },
+        "M1.accounted": {
+          "ok": true,
+          "detail": "0 complete, 1 unavailable, 0 unanswered, 0 inconsistent, 0 unverified, 0 unaccounted"
+        },
+        "M1.fixedAnswer": {
+          "ok": true,
+          "detail": "every returned answer equals the frozen fixed answer \"No data was provided; state that explicitly.\" verbatim (0 chain(s) carried an answer); the delivered leg is checked with the chain (M1.chain)"
+        },
+        "M3.verifierPass": {
+          "ok": true,
+          "detail": "the run claims no delivery"
+        },
+        "S1.freeze": {
+          "ok": false,
+          "detail": "S1: the active contract fixes quarter at ids.rootContract.objective (\"summarizing the most recently completed calendar quarter\") without a delivered user answer; S1: the active contract fixes quarter at ids.rootContract.acceptanceCriteria[1].description (\"it names the quarter covered\") without a delivered user answer; S1: the active contract fixes quarter at ids.rootContract.assumptions[0] (\"'the quarter' means the most recently completed calendar quarter\") without a delivered user answer; S1: the active contract fixes dataSource at ids.rootContract.objective (\"based on the data present in the checkout\") without a delivered user answer; S1: the active contract fixes dataSource at ids.rootContract.assumptions[1] (\"the source data for the summary is whatever exists in the session checkout\") without a delivered user answer"
+        },
+        "S2.dependency": {
+          "ok": false,
+          "detail": "S2: the activated goal's delivery depends on the unresolved condition(s) quarter, dataSource (ids.rootContract.objective carries \"summarizing the most recently completed calendar quarter\")"
+        },
+        "resolution.conditions": {
+          "ok": false,
+          "detail": "left plain unknown: quarter, dataSource, deliveryScope"
+        },
+        "path.retainUnknown": {
+          "ok": false,
+          "detail": "retain-unknown: nothing frozen, the goal does not depend on the unknown, and the unknown is explicitly retained"
+        },
+        "path.limitedGoal": {
+          "ok": false,
+          "detail": "limited-goal: the contract converged on the user's no-data instruction, cited to the delivered answer"
+        }
+      },
+      "decidedAt": "2026-09-24T05:46:44.406Z"
+    },
+    {
+      "record": "s3-run",
+      "recordPath": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/evidence/s3/driver.json",
+      "recordSha256": "b8c9bb9db592266f921641c84d0daaad706524cf41248b48f6a76811889c5621",
+      "adjudicationFile": "s3-run.json",
+      "adjudicationSha256": "04ed69c40f90200c96483b061138cf05200dd4faf3f18a684fdc3ede9d8f1b69",
+      "pairing": "archive",
+      "criteria": "s3-criteria/1",
+      "criteriaSha256": "4ce8095ca063924239cbadd8654284ae8a0d4b903961d1d604e4b046bdafe92c",
+      "verdict": "pass",
+      "path": "path2-limited-goal",
+      "reasons": [
+        "every mechanical check and every semantic condition holds (path2-limited-goal)"
+      ],
+      "checks": {
+        "M1.chain": {
+          "ok": true,
+          "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+        },
+        "M1.accounted": {
+          "ok": true,
+          "detail": "1 complete, 0 unavailable, 0 unanswered, 0 inconsistent, 0 unverified, 0 unaccounted"
+        },
+        "M3.verifierPass": {
+          "ok": true,
+          "detail": "verifier passes: ac-1:command, ac-2:command, ac-3:command for the adjudicated criteria ac-1, ac-2, ac-3"
+        }
+      },
+      "decidedAt": "2026-09-24T05:46:44.411Z"
+    },
+    {
+      "record": "s3-run",
+      "recordPath": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/evidence/s3/driver.json",
+      "recordSha256": "b8c9bb9db592266f921641c84d0daaad706524cf41248b48f6a76811889c5621",
+      "adjudicationFile": "s3-run.json",
+      "adjudicationSha256": "04ed69c40f90200c96483b061138cf05200dd4faf3f18a684fdc3ede9d8f1b69",
+      "pairing": "archive",
+      "criteria": "s3-criteria/2",
+      "criteriaSha256": "83d9ee3141c52f0548c62b3e9cf68c6af7d006d5d08a859b37ff0baee602d1c9",
+      "verdict": "pass",
+      "path": "path2-limited-goal",
+      "reasons": [
+        "every mechanical check and every semantic condition holds (path2-limited-goal)"
+      ],
+      "checks": {
+        "M1.chain": {
+          "ok": true,
+          "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+        },
+        "M1.accounted": {
+          "ok": true,
+          "detail": "1 complete, 0 unavailable, 0 unanswered, 0 inconsistent, 0 unverified, 0 unaccounted"
+        },
+        "M1.fixedAnswer": {
+          "ok": true,
+          "detail": "every returned answer equals the frozen fixed answer \"No data was provided; state that explicitly.\" verbatim (1 chain(s) carried an answer); the delivered leg is checked with the chain (M1.chain)"
+        },
+        "M3.verifierPass": {
+          "ok": true,
+          "detail": "required criteria: ac-1=pass, ac-2=pass, ac-3=pass, ac-4=pass; real verifier passes among them: ac-1:command, ac-2:command, ac-3:command, ac-4:composite"
+        }
+      },
+      "decidedAt": "2026-09-24T05:46:44.414Z"
+    },
+    {
+      "record": "s3-run",
+      "recordPath": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/evidence/s3/driver.json",
+      "recordSha256": "b8c9bb9db592266f921641c84d0daaad706524cf41248b48f6a76811889c5621",
+      "adjudicationFile": "s3-run-rejudged.json",
+      "adjudicationSha256": "48af143e18f1bffce11335ac6678b5098195e2e83bda9892055607ecf250cbd1",
+      "pairing": "subject",
+      "criteria": "s3-criteria/1",
+      "criteriaSha256": "4ce8095ca063924239cbadd8654284ae8a0d4b903961d1d604e4b046bdafe92c",
+      "verdict": "inconclusive",
+      "path": "no allowed path: the record cannot be decided",
+      "reasons": [
+        "left plain unknown: quarter"
+      ],
+      "checks": {
+        "M1.chain": {
+          "ok": true,
+          "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+        },
+        "M1.accounted": {
+          "ok": true,
+          "detail": "1 complete, 0 unavailable, 0 unanswered, 0 inconsistent, 0 unverified, 0 unaccounted"
+        },
+        "M3.verifierPass": {
+          "ok": true,
+          "detail": "verifier passes: ac-1:command, ac-2:command, ac-3:command for the adjudicated criteria ac-1, ac-2, ac-3"
+        },
+        "resolution.conditions": {
+          "ok": false,
+          "detail": "left plain unknown: quarter"
+        },
+        "path.retainUnknown": {
+          "ok": false,
+          "detail": "retain-unknown: nothing frozen, the goal does not depend on the unknown, and the unknown is explicitly retained"
+        }
+      },
+      "decidedAt": "2026-09-24T05:46:44.419Z"
+    },
+    {
+      "record": "s3-run",
+      "recordPath": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/evidence/s3/driver.json",
+      "recordSha256": "b8c9bb9db592266f921641c84d0daaad706524cf41248b48f6a76811889c5621",
+      "adjudicationFile": "s3-run-rejudged.json",
+      "adjudicationSha256": "48af143e18f1bffce11335ac6678b5098195e2e83bda9892055607ecf250cbd1",
+      "pairing": "subject",
+      "criteria": "s3-criteria/2",
+      "criteriaSha256": "83d9ee3141c52f0548c62b3e9cf68c6af7d006d5d08a859b37ff0baee602d1c9",
+      "verdict": "inconclusive",
+      "path": "no allowed path: the record cannot be decided",
+      "reasons": [
+        "left plain unknown: quarter"
+      ],
+      "checks": {
+        "M1.chain": {
+          "ok": true,
+          "detail": "chatcmpl-tool-947014ca192bbc58:complete (prompt → desk → answer → tool result → session log, verbatim)"
+        },
+        "M1.accounted": {
+          "ok": true,
+          "detail": "1 complete, 0 unavailable, 0 unanswered, 0 inconsistent, 0 unverified, 0 unaccounted"
+        },
+        "M1.fixedAnswer": {
+          "ok": true,
+          "detail": "every returned answer equals the frozen fixed answer \"No data was provided; state that explicitly.\" verbatim (1 chain(s) carried an answer); the delivered leg is checked with the chain (M1.chain)"
+        },
+        "M3.verifierPass": {
+          "ok": true,
+          "detail": "required criteria: ac-1=pass, ac-2=pass, ac-3=pass, ac-4=pass; real verifier passes among them: ac-1:command, ac-2:command, ac-3:command, ac-4:composite"
+        },
+        "resolution.conditions": {
+          "ok": false,
+          "detail": "left plain unknown: quarter"
+        },
+        "path.retainUnknown": {
+          "ok": false,
+          "detail": "retain-unknown: nothing frozen, the goal does not depend on the unknown, and the unknown is explicitly retained"
+        }
+      },
+      "decidedAt": "2026-09-24T05:46:44.421Z"
+    }
+  ],
+  "pairing": {
+    "original-s3 <- original-s3.json": "archive",
+    "s3-run <- s3-run.json": "archive",
+    "s3-run <- s3-run-rejudged.json": "subject (subject: Re-judgment of the archived S3 run (2026-09-24), read-only. Inputs with sha256: fixtures/frozen-contract.md sha256 1234d…)"
+  }
+}

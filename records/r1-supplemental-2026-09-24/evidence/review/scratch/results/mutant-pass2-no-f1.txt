@@ -1,0 +1,51 @@
+../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts (1:449) [33m[UNRESOLVED_IMPORT] [0mCould not resolve 'vitest/config' in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts
+ - Module not found, treating it as an external dependency in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts at 449..464
+
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /home/ROXY/code/bb_work/harness
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/pass2-no-f1/s3-criteria.spec.ts (13 tests | 1 failed) 20ms
+     ✓ replays the original S3 trajectory against its adjudication and rejects it 7ms
+     ✓ rejects a run whose desk answer reached the model as something else 1ms
+     ✓ rejects a run whose answer never reached the session at all 0ms
+     ✓ rejects a run whose clarification call failed and whose goal then depended on the unknown 1ms
+     ✓ rejects an activated goal whose delivery depends on an unresolved unknown 0ms
+     ✓ passes an activated limited goal that explicitly retains the unknown while the clarification went unanswered 0ms
+     ✓ rejects a run that claims delivery with no non-empty artifact 1ms
+     ✓ rejects a run that claims delivery with no real verifier pass for the goal 0ms
+     ✓ rejects a limited goal that still carries an unconfirmed quarter 0ms
+     × rejects a delivered run whose adjudication states the artifact does not match the goal 6ms
+     ✓ rejects a user-confirmed label that cites no delivered user answer 1ms
+     ✓ never passes without a usable semantic adjudication 0ms
+     ✓ never passes on a review its own author marked draft 0ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/pass2-no-f1/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a delivered run whose adjudication states the artifact does not match the goal
+AssertionError: verdict=inconclusive path=no allowed path: the record cannot be decided reasons=[
+ "the mechanical gates did not hold: M3.content"
+]: expected 'inconclusive' to be 'fail' // Object.is equality
+
+Expected: "fail"
+Received: "inconclusive"
+
+ ❯ expectVerdict ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/pass2-no-f1/s3-criteria.spec.ts:244:5
+    242|     decision.verdict,
+    243|     `verdict=${decision.verdict} path=${decision.path} reasons=${JSON.…
+    244|   ).toBe(verdict)
+       |     ^
+    245| }
+    246|
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/pass2-no-f1/s3-criteria.spec.ts:427:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 12 passed (13)
+   Start at  02:03:14
+   Duration  237ms (transform 63ms, setup 0ms, import 86ms, tests 20ms, environment 0ms)
+

@@ -1,0 +1,39 @@
+../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts (1:449) [33m[UNRESOLVED_IMPORT] [0mCould not resolve 'vitest/config' in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts
+ - Module not found, treating it as an external dependency in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts at 449..464
+
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /home/ROXY/code/bb_work/harness
+
+stdout | ../r1-supplemental-2026-09-24/evidence/review/scratch/cases/pass2-s3-run.spec.ts > pass 2: the paid S3 run against the frozen criteria > decides the run, records the decision, and flips on the F1 counterfactual
+verdict=pass path=path2-limited-goal
+checks: M1.chain=true M1.accounted=true M2.progress=true M3.artifact=true M3.verifierPass=true M3.content=true S1.freeze=true S2.dependency=true S3.confirmation=true S4.limitedGoal=true adjudication=true resolution.conditions=true path.retainUnknown=true path.limitedGoal=true
+reasons: [
+ "every mechanical check and every semantic condition holds (path2-limited-goal)"
+]
+chains: [
+ {
+  "callId": "chatcmpl-tool-947014ca192bbc58",
+  "status": "complete",
+  "detail": "prompt → desk → answer → tool result → session log, verbatim"
+ }
+]
+citations:
+  RESOLVED conditions.quarter (retained-unknown) :: rootContract.assumptions[0] carries "'the quarter' has no defined date range"
+  RESOLVED conditions.dataSource (user-confirmed) :: the delivered answer of call chatcmpl-tool-947014ca192bbc58 carries "No data was provided; state that explicitly."
+  RESOLVED conditions.deliveryScope (user-confirmed) :: the delivered answer of call chatcmpl-tool-947014ca192bbc58 carries "No data was provided; state that explicitly."
+  RESOLVED goal (the activated goal's own field) :: the delivered answer of call chatcmpl-tool-947014ca192bbc58 carries "No data was provided; state that explicitly."
+deliveryClaimed=true artifactBytes=822 verifierPasses=["c-1:command","c-2:command","c-3:command","ac-1:command","ac-2:command","ac-3:command","ac-4:composite"]
+adjudication=authoritative conditions={"quarter":"retained-unknown","dataSource":"user-confirmed","deliveryScope":"user-confirmed"}
+counterfactual artifactMatchesGoal=false: verdict=fail path=rejected: a mechanical check failed
+counterfactual reasons: ["M3: the run claims delivery but the adjudication states the artifact does not match the adjudicated goal (the adjudication says the artifact matches the adjudicated goal: false)"]
+
+ ✓ ../r1-supplemental-2026-09-24/evidence/review/scratch/cases/pass2-s3-run.spec.ts (1 test) 11ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  02:02:31
+   Duration  187ms (transform 51ms, setup 0ms, import 71ms, tests 11ms, environment 0ms)
+

@@ -1,0 +1,184 @@
+$ python3 /home/ROXY/code/bb_work/r1-rework-2026-09-24/accounting/cache-write-recompute.py
+
+======================================================================================================================
+V5 account correction — cache-write column recomputed from raw evidence
+======================================================================================================================
+archive (read-only)  /home/ROXY/code/bb_work/r1-supplemental-2026-09-24
+old round (read-only) /home/ROXY/code/bb_work/r1-evidence-2026-09-23
+rule                 a figure the run never reported is recorded as 'not reported' (未报告), never as 0; a genuine reported 0 stays 0
+
+The ledger's normalised column is written by driver/r1-stack.ts:
+  driver/r1-stack.ts:560  cacheWriteTokens: chunk.usage.cacheWriteTokens ?? 0
+
+======================================================================================================================
+1. per-response table — normalised record vs the durable usage object
+======================================================================================================================
+seq  sessionId                                  recorded  raw                       cacheRead        input       output        total  rawSource
+----------------------------------------------------------------------------------------------------------------------
+1    s-root                                     0         false (key absent)                0         6537         2499         9036  evidence/s3/dsh-home/session-log/s-root.jsonl:11 (data.usage, log seq 10, turn 1 step 1)
+2    s-root                                     0         false (key absent)             6400         2864         1686        10950  evidence/s3/dsh-home/session-log/s-root.jsonl:18 (data.usage, log seq 17, turn 1 step 2)
+3    s-root                                     0         false (key absent)             9216         1757         7667        18640  evidence/s3/dsh-home/session-log/s-root.jsonl:23 (data.usage, log seq 22, turn 1 step 3)
+4    s-root                                     0         false (key absent)            10752         8197          500        19449  evidence/s3/dsh-home/session-log/s-root.jsonl:29 (data.usage, log seq 28, turn 1 step 4)
+5    s-root                                     0         false (key absent)            18688          908         1384        20980  evidence/s3/dsh-home/session-log/s-root.jsonl:34 (data.usage, log seq 33, turn 1 step 5)
+6    s-root                                     0         false (key absent)            19456         1805          329        21590  evidence/s3/dsh-home/session-log/s-root.jsonl:39 (data.usage, log seq 38, turn 1 step 6)
+7    s-b62da3c5-9506-4a65-81f9-441fc72de7ea     0         false (key absent)                0         7109          180         7289  evidence/s3/dsh-home/session-log/s-b62da3c5-9506-4a65-81f9-441fc72de7ea.jsonl:9 (data.usage, log seq 8, turn 1 step 1)
+8    s-root                                     0         false (key absent)            20992          876          322        22190  evidence/s3/dsh-home/session-log/s-root.jsonl:44 (data.usage, log seq 43, turn 1 step 7)
+9    s-b62da3c5-9506-4a65-81f9-441fc72de7ea     0         false (key absent)             6912          983          217         8112  evidence/s3/dsh-home/session-log/s-b62da3c5-9506-4a65-81f9-441fc72de7ea.jsonl:16 (data.usage, log seq 15, turn 1 step 2)
+10   s-root                                     0         false (key absent)            21504          818          203        22525  evidence/s3/dsh-home/session-log/s-root.jsonl:51 (data.usage, log seq 50, turn 2 step 1)
+11   s-root                                     0         false (key absent)            22016          787          137        22940  evidence/s3/dsh-home/session-log/s-root.jsonl:56 (data.usage, log seq 55, turn 2 step 2)
+12   s-b62da3c5-9506-4a65-81f9-441fc72de7ea     0         false (key absent)             7680          450          285         8415  evidence/s3/dsh-home/session-log/s-b62da3c5-9506-4a65-81f9-441fc72de7ea.jsonl:21 (data.usage, log seq 20, turn 1 step 3)
+13   s-b62da3c5-9506-4a65-81f9-441fc72de7ea     0         false (key absent)             7936          546          281         8763  evidence/s3/dsh-home/session-log/s-b62da3c5-9506-4a65-81f9-441fc72de7ea.jsonl:26 (data.usage, log seq 25, turn 1 step 4)
+14   s-b62da3c5-9506-4a65-81f9-441fc72de7ea     0         false (key absent)             8448          357          107         8912  evidence/s3/dsh-home/session-log/s-b62da3c5-9506-4a65-81f9-441fc72de7ea.jsonl:35 (data.usage, log seq 34, turn 1 step 5)
+15   s-b62da3c5-9506-4a65-81f9-441fc72de7ea     0         false (key absent)             8704          524          300         9528  evidence/s3/dsh-home/session-log/s-b62da3c5-9506-4a65-81f9-441fc72de7ea.jsonl:40 (data.usage, log seq 39, turn 1 step 6)
+----------------------------------------------------------------------------------------------------------------------
+responses 15 | normalised cacheWriteTokens = 0 on all 15 | raw cacheWriteTokens key absent on 15 | present on 0
+genuine reported zeros that *are* visible in the raw objects (so absence would show as an absent key, not as 0):
+  raw cacheReadTokens present on 15 of 15, of which the value is 0 on 2
+  raw reasoningTokens present on 15 of 15, of which the value is 0 on 15
+
+======================================================================================================================
+2. totals under the two conventions
+======================================================================================================================
+A. as computed with `?? 0` (what the ledger states):
+     records            15
+     inputTokens        34518
+     outputTokens       16097
+     cacheReadTokens    168704
+     cacheWriteTokens   0
+     input+output       50615
+     sum totalTokens    219319
+
+B. not reported (`未报告`):
+     records            15
+     inputTokens        34518
+     outputTokens       16097
+     cacheReadTokens    168704
+     cacheWriteTokens   未报告 (not reported) — not summable: no response of this run reported the field
+     input+output       50615
+     sum totalTokens    219319
+
+column changed by this correction: cacheWriteTokens only (0 → 未报告). inputTokens, outputTokens, cacheReadTokens and every totalTokens are untouched.
+why nothing else can move: totalTokens == inputTokens + outputTokens + cacheReadTokens on 15 of 15 records, i.e. cache write is not an addend of any recorded total on this protocol.
+cache reads are kept in their own column and are not folded into inputTokens/outputTokens: input+output 50615, cacheRead 168704 (separate).
+
+======================================================================================================================
+3. missing usage — the request that produced no record at all
+======================================================================================================================
+sessionId            s-root
+request              turn 3 step 1 (the post-terminal 'batch settled' turn)
+last durable line    s-root.jsonl:62  {"type":"step/start","seq":61,"time":1790185793731,"data":{"turn":3,"step":1}}
+                     the log ends at line 63 (the inbox splice); no step/end, no turn/end, no assistant/message follows
+turns with a turn/start in s-root     1 (line 4), 2 (line 47), 3 (line 60)
+turns with a model response in s-root [1, 2]
+adapter boundary     10 model request(s) for s-root, 9 usage record(s) — source: evidence/s3/driver.json notes[3]
+value                未报告 (missing) — stays missing, never 0
+
+======================================================================================================================
+4. smoke — the connectivity gate's cache columns
+======================================================================================================================
+record               evidence/smoke-1/result.json (keys: baseUrl, finishReason, inputTokens, keyLength, model, ok, outputTokens, text)
+inputTokens          12
+outputTokens         409
+cacheReadTokens      未报告 (not recorded at all)
+cacheWriteTokens     未报告 (not recorded at all)
+why                  driver/r1-smoke.ts reads only chunk.usage.inputTokens/outputTokens; the smoke's own
+                     SmokeResult carries no cache column, so neither 0 nor a number exists for it
+
+======================================================================================================================
+5. historical lower bounds (V6) — restated exactly as they stand, not recomputed, not extended
+======================================================================================================================
+frozen-contract.md §5 (verbatim):
+  - 历史更正（V6）另附：已有记录至少 175461 输入/输出 token、58 次工具调用（= `budget.json` 143978/44 + `3b446cb` 记录的首轮 S1 31483/14；首轮两次冒烟 200 token 已在 143978 口径内，不重复相加）；含缓存至少 501349（= 405098 + 96451）。首轮完整日志缺失（仅残留 task-evidence 目录），为历史下界，不称精确全量。
+
+evidence/ledger.json:historyCorrection (verbatim):
+{
+  "provenance": "frozen contract §5 (and fixtures/frozen-contract.json:corrections); reproduced verbatim, not recomputed and not extended",
+  "existingRecordsMinTokens": 175461,
+  "existingRecordsMinToolCalls": 58,
+  "withCacheReadsMin": 501349,
+  "smokeNote": "the first round's two smokes (200 tokens) are already inside budget.json's 895 — do not add them again",
+  "missing": "the first round's complete session log was overwritten; the figures are a lower bound from surviving records, not a full accounting",
+  "arithmeticCorrection": "added by the round owner after the independent review (agent-1, pass 2): the cache-inclusive addend is 96251 (the first round's 31483 in+out plus 64768 cacheRead), so 501349 = 405098 (budget.json, cache-inclusive) + 96251. The frozen contract §5's parenthetical printed 96451, which is the first round's cache-inclusive total *including its own two smokes* (200 tokens already inside budget.json's 895); adding that fuller figure would double-count 200 tokens. The total 501349 is unaffected. The frozen contract file itself was not edited after the run (it is frozen); this note and the round record carry the correction."
+}
+
+old-round census (durable session logs, for the field's presence only — no figure is recomputed):
+  s1/dsh-home/session-log/s-59aabced-fcb3-4e22-ba85-38e673fa09e9.jsonl   usage objects 6
+  s1/dsh-home/session-log/s-root.jsonl                                   usage objects 8
+  s1/dsh-home/session-log/sg-t-s-root.jsonl                              usage objects 0
+  s2/dsh-home/session-log/s-fb52f3b0-bf9b-43ac-86ec-97fd6893073c.jsonl   usage objects 4
+  s2/dsh-home/session-log/s-root.jsonl                                   usage objects 1
+  s2/dsh-home/session-log/sg-t-s-root.jsonl                              usage objects 0
+  s3/dsh-home/session-log/s-0e5b89a1-0687-43b5-b8a3-b25bcc975e03.jsonl   usage objects 8
+  s3/dsh-home/session-log/s-root.jsonl                                   usage objects 9
+  s3/dsh-home/session-log/sg-t-s-root.jsonl                              usage objects 0
+  total                                                                  usage objects 36
+  of those, carrying a cacheWriteTokens key                              0
+  of those, lacking the key (=> 'not reported' there too)                36
+  of those, carrying a cacheReadTokens value of 0 (genuine reported zero) 10
+  of those, carrying reasoningTokens                                     36
+  old budget.json:11  "cacheWriteTokens": 0  — same collapse; every old-round response is in the 'absent' case,
+  so the old round's cache-write column is likewise 未报告, not a measured 0.
+
+effect on the lower bound: none, and none is claimed here.
+  175461 is input+output; 501349 is the cache-inclusive figure (input+output+cacheRead, ledger arithmeticCorrection).
+  Neither sum contains a cache-write term, so re-reading the old cache-write 0 as 'not reported' moves nothing.
+  No cache-write lower bound is stated for the old round: the field was never reported there, exactly as here.
+  The lower bound itself is restated, not recomputed and not extended.
+
+======================================================================================================================
+6. protocol structure — where a cache-write number could have come from
+======================================================================================================================
+protocol/chat-completions/translate.ts  'cacheWriteTokens' occurrences: 0
+  mapUsage emits, at most: inputTokens, outputTokens, totalTokens, cacheReadTokens, reasoningTokens
+  cache read comes from prompt_tokens_details.cached_tokens ?? prompt_cache_hit_tokens and is
+  subtracted out of inputTokens; there is no cache-write field on this wire mapping at all.
+protocol/messages/translate.ts          'cacheWriteTokens' occurrences: 2
+  (cache_creation_input_tokens -> cacheWriteTokens), so the optional field exists in the
+  harness TokenUsage type but only the messages protocol fills it. This run used chat-completions.
+
+=> `chunk.usage.cacheWriteTokens ?? 0` therefore fires on every response of this run. The recorded
+   0 is the fallback, not a gateway figure: the collapse is structural, not incidental.
+
+======================================================================================================================
+7. provenance — every file read, sha256 computed at run time
+======================================================================================================================
+  66e8b1f96a90404d4e5ca67fc85b9e37a96bbee78ed52521e7b8fdc3f336ba32      8735 bytes  /home/ROXY/code/bb_work/harness/thirdparty/deepseek-harness/packages/llm/llm-deepseek/src/protocols/chat-completions/translate.ts
+  254f4b8fe292dadc5c24df3375b01920f5e5b345be09eae4290e91e9e810c1ba      8030 bytes  /home/ROXY/code/bb_work/harness/thirdparty/deepseek-harness/packages/llm/llm-deepseek/src/protocols/messages/translate.ts
+  d0ab6b0434bc5d8b148c69c9f9bc253c2c76045dadc129a84ea3a029c46c0f16      2153 bytes  budget.json
+  21ad157f553fc3b555fdd123145a3f379c2cab57b1466b7200af034b91694a14     57557 bytes  s1/dsh-home/session-log/s-59aabced-fcb3-4e22-ba85-38e673fa09e9.jsonl
+  922102ccffc896de1ba91bbc6613c4fd156b8605619948b974bdd952c90dc2a5    179500 bytes  s1/dsh-home/session-log/s-root.jsonl
+  4a59a0d1d6db05c712f0540e7d99924a65b734da5506decdcc819b29d2721220     23244 bytes  s1/dsh-home/session-log/sg-t-s-root.jsonl
+  ae1a03a98418055738d936c5fd0307e7ecc8bacf408f449784fa3b14d03a8ae1     61115 bytes  s2/dsh-home/session-log/s-fb52f3b0-bf9b-43ac-86ec-97fd6893073c.jsonl
+  24acd0de6b948e8fb02e2b45c42b20d9309a3424c32491eb8aa2ffc099476f57     34084 bytes  s2/dsh-home/session-log/s-root.jsonl
+  cc03d9ca9f47ede1b12e1a08a8bd52f5b1199ce7d6d9425e19ecb239f96c905e     19505 bytes  s2/dsh-home/session-log/sg-t-s-root.jsonl
+  aea8e74760b6ea753258a88ebf7d28306f51c8e02e28b208b81b81d9244e4bde    164129 bytes  s3/dsh-home/session-log/s-0e5b89a1-0687-43b5-b8a3-b25bcc975e03.jsonl
+  7b053f4067b8b8302487d67dbcd01ec20cd1a27d3551501d59bc91143d67efe3    213454 bytes  s3/dsh-home/session-log/s-root.jsonl
+  8cdd7dae69a8dbeeb0e8881d6b4a91f0b94f8bedd3de80ba4c63314f95a7046d     45787 bytes  s3/dsh-home/session-log/sg-t-s-root.jsonl
+  3e71b33571055a3e3bef22e59be7a57e91214a96bf5cfe513f8c404429c1d35e      3738 bytes  driver/r1-smoke.ts
+  c227e843bc3de0da372ea38197e5e731b04d75a9af2460c4e547056ec6391437     44078 bytes  driver/r1-stack.ts
+  20de0d8419d774dbfd795013627fb267f7818cc5ff4c862928eb897d21f38d3e     12798 bytes  evidence/ledger.json
+  b8c9bb9db592266f921641c84d0daaad706524cf41248b48f6a76811889c5621    453593 bytes  evidence/s3/driver.json
+  d50ad4be9afac4f4ae7e47489313a93c3ef8ae0525531fbaac5e718de839698a     79533 bytes  evidence/s3/dsh-home/session-log/s-b62da3c5-9506-4a65-81f9-441fc72de7ea.jsonl
+  51998c592a81278728ad331cdb23ceb41cca0bb347b4c26ae2dae58bd09be2b6    291270 bytes  evidence/s3/dsh-home/session-log/s-root.jsonl
+  770aeba92c473c8ceaab2bf072cb454b8529077e2603cb78d19a6ac759e3cc5f     32722 bytes  evidence/s3/dsh-home/session-log/sg-t-s-root.jsonl
+  6c9420fb7462c6616fbe174ae96f2159e723ff00b27aec856f124ec27a1be5a0      4130 bytes  evidence/s3/run-meta.json
+  88f18d2c9872d75a818a0bc53bb4896fd6a05e9f48b67177a1fbc2e6fd074c32      1386 bytes  evidence/smoke-1/result.json
+  1234da2fd0d5e43d9ef0eb693c617b99ed7708ab755debaa04a43dfd68b2df03     11641 bytes  fixtures/frozen-contract.md
+
+  files read: 22
+
+======================================================================================================================
+8. frozen trees — manifest recomputed read-only from the trees themselves
+======================================================================================================================
+  r1-supplemental-2026-09-24                           158 files  manifest sha256 542789e03d2b2acb632f42660e9ca4b0b4ab71bb5f973f5b2439c029719e6f36
+  r1-evidence-2026-09-23                                87 files  manifest sha256 efdba0cb4f0496064e6f8f37e14d828181ed094d3a70b36a37ea3f5321df0ee8
+
+  The manifest is byte-ordered (LC_ALL=C): for every file, sha256 + two spaces + './' + path,
+  joined in sorted order, hashed once. The same digests come out of the shell equivalent
+  `cd <tree> && LC_ALL=C find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum`,
+  so any later change to either frozen tree shows up as a different digest.
+
+======================================================================================================================
+checks
+======================================================================================================================
+  all consistency checks pass

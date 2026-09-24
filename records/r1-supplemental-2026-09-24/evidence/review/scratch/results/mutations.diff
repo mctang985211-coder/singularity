@@ -1,0 +1,100 @@
+--- driver/s3-criteria.ts
++++ mutants/no-s1/s3-criteria.ts
+@@ -715,7 +715,7 @@
+         unverifiable.push(`the freeze of ${freeze.condition} at ${freeze.path} is not readable in the record (${check.detail})`)
+         continue
+       }
+-      if (confirmed.get(freeze.condition) !== true) {
++      if (false) { // MUTANT no-s1: the S1 rejection is removed
+         semanticFails.push(`S1: the active contract fixes ${freeze.condition} at ${freeze.path} (${JSON.stringify(freeze.quote)}) without a delivered user answer`)
+       }
+     }
+--- driver/s3-criteria.ts
++++ mutants/no-s1-s2/s3-criteria.ts
+@@ -715,7 +715,7 @@
+         unverifiable.push(`the freeze of ${freeze.condition} at ${freeze.path} is not readable in the record (${check.detail})`)
+         continue
+       }
+-      if (confirmed.get(freeze.condition) !== true) {
++      if (false) { // MUTANT no-s1-s2: the S1 rejection is removed
+         semanticFails.push(`S1: the active contract fixes ${freeze.condition} at ${freeze.path} (${JSON.stringify(freeze.quote)}) without a delivered user answer`)
+       }
+     }
+@@ -725,7 +725,7 @@
+       : resolve('goal (the activated goal\'s own field)', adj.goal.citation)
+     goalCitation = goalCitationCheck
+ 
+-    if (adj.goalDependsOnUnknowns === true) {
++    if (false) { // MUTANT no-s1-s2: the S2 rejection is removed
+       const subjects = adj.dependsOn ?? S3_CONDITION_IDS.filter(id => confirmed.get(id) !== true)
+       const unknownSubjects = subjects.filter(id => confirmed.get(id) !== true)
+       if (goalCitation === undefined || !goalCitation.resolved) {
+--- driver/s3-criteria.ts
++++ mutants/no-m1-mismatch/s3-criteria.ts
+@@ -528,7 +528,7 @@
+   if (answer === undefined || answer.length === 0) {
+     return { callId, sessionId, prompt, answer: deskAnswer, status: 'unanswered', detail: `the desk recorded the question but no non-empty answer for it (result ${JSON.stringify(resultText)})` }
+   }
+-  if (resultText !== answer) {
++  if (false) { // MUTANT no-m1-mismatch: a tool result that differs from the desk answer is accepted
+     return { callId, sessionId, prompt, answer: deskAnswer, status: 'inconsistent', detail: `the desk answered ${JSON.stringify(answer)} but the tool result was ${JSON.stringify(resultText)}` }
+   }
+   if (delivered === undefined) {
+@@ -539,7 +539,7 @@
+   if (delivered.isError) {
+     return { callId, sessionId, prompt, answer: deskAnswer, status: 'inconsistent', detail: `the delivered tool result is an error (${JSON.stringify(delivered.text)}) though the desk answered` }
+   }
+-  if (delivered.text !== answer) {
++  if (false) { // MUTANT no-m1-mismatch: a delivered text that differs from the desk answer is accepted
+     return { callId, sessionId, prompt, answer: deskAnswer, status: 'inconsistent', detail: `the delivered tool result is ${JSON.stringify(delivered.text)}, not the desk's ${JSON.stringify(answer)}` }
+   }
+   return { callId, sessionId, prompt, answer: deskAnswer, status: 'complete', detail: 'prompt → desk → answer → tool result → session log, verbatim' }
+--- driver/s3-criteria.ts
++++ mutants/retained-as-unknown/s3-criteria.ts
+@@ -831,7 +831,7 @@
+   }
+   const unresolvedConditions = adj === undefined
+     ? []
+-    : S3_CONDITION_IDS.filter(id => adj.conditions?.[id]?.label === 'unknown')
++    : S3_CONDITION_IDS.filter(id => { const label = adj.conditions?.[id]?.label; return label === 'unknown' || label === 'retained-unknown' }) // MUTANT retained-as-unknown
+   checks['resolution.conditions'] = {
+     ok: adj !== undefined && unresolvedConditions.length === 0 && unverifiable.length === 0,
+     detail: adj === undefined
+--- driver/s3-criteria.ts
++++ mutants/citations-never-resolve/s3-criteria.ts
+@@ -653,6 +653,7 @@
+       citations.push({ of, resolved: false, detail: 'no citation' })
+       return { resolved: false, deliveredAnswer: false, detail: 'the claim carries no citation' }
+     }
++    if (citation !== undefined) return { resolved: false, deliveredAnswer: false, detail: 'MUTANT citations-never-resolve' }
+     if (citation.kind === 'user-answer') {
+       const found = userAnswers.find(item => item.callId === citation.callId && (citation.sessionId === undefined || citation.sessionId === item.sessionId))
+       const hit = found !== undefined && citation.quote.length > 0 && found.text.includes(citation.quote)
+--- driver/s3-criteria.ts
++++ mutants/no-s2/s3-criteria.ts
+@@ -725,7 +725,7 @@
+       : resolve('goal (the activated goal\'s own field)', adj.goal.citation)
+     goalCitation = goalCitationCheck
+ 
+-    if (adj.goalDependsOnUnknowns === true) {
++    if (false) { // MUTANT no-s2: the S2 rejection is removed
+       const subjects = adj.dependsOn ?? S3_CONDITION_IDS.filter(id => confirmed.get(id) !== true)
+       const unknownSubjects = subjects.filter(id => confirmed.get(id) !== true)
+       if (goalCitation === undefined || !goalCitation.resolved) {
+--- driver/s3-criteria.ts
++++ mutants/vague-original-confirms/s3-criteria.ts
+@@ -665,12 +665,12 @@
+     if (citation.kind === 'user-message') {
+       const messages = [...loggedUserMessages(sessionLogs[citation.sessionId]), ...(citation.sessionId === rootSessionId && originalRequest.length > 0 ? [originalRequest] : [])]
+       const found = messages.some(message => message.includes(citation.quote) && citation.quote.length > 0)
+-      const vague = originalRequest.length > 0 && citation.quote.length > 0 && originalRequest.includes(citation.quote)
++      const vague = false // MUTANT vague-original-confirms: the original request is allowed to confirm
+       const detail = !found
+         ? `no delivered user message on session ${citation.sessionId} carries ${JSON.stringify(citation.quote)}`
+         : vague ? `the only thing that carries ${JSON.stringify(citation.quote)} is the original ambiguous request, which confirms nothing` : `a delivered user message carries ${JSON.stringify(citation.quote)}`
+       citations.push({ of, resolved: found && !vague, detail })
+-      return { resolved: found && !vague, deliveredAnswer: false, detail }
++      return { resolved: found && !vague, deliveredAnswer: true, detail } // MUTANT vague-original-confirms: a user message counts as a delivered answer
+     }
+     if (citation.kind === 'contract-field') {
+       const value = resolvePath(record, citation.path)

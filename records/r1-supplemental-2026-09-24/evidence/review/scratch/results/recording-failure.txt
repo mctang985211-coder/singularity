@@ -1,0 +1,24 @@
+../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts (1:449) [33m[UNRESOLVED_IMPORT] [0mCould not resolve 'vitest/config' in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts
+ - Module not found, treating it as an external dependency in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts at 449..464
+
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /home/ROXY/code/bb_work/harness
+
+stdout | ../r1-supplemental-2026-09-24/evidence/review/scratch/cases/recording-failure.spec.ts > reviewer: an injected recording failure cannot reach the product path > keeps the answer, records the failure as a fact, and leaves the session log intact
+recording-failure probe: isError=false resultText="No data was provided; state that explicitly."
+recordErrors=["answerHuman(userQuestions, session s-root): recording failed: injected recording failure (reviewer probe)"]
+desk=null delivered={"source":"session-log","sessionId":"s-root","callId":"call-s-root-1","text":"No data was provided; state that explicitly.","isError":false}
+humanQuestions recorded: 0
+session log carries the answer: true
+criteria chain status: [{"callId":"call-s-root-1","sessionId":"s-root","prompt":"Which quarter should the report cover, and what data should it summarize?","answer":"","status":"unaccounted","detail":"no userQuestions desk record matches this call"}] verdict=fail path=rejected: a mechanical check failed
+
+ ✓ ../r1-supplemental-2026-09-24/evidence/review/scratch/cases/recording-failure.spec.ts (1 test) 117ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  01:36:52
+   Duration  1.88s (transform 1.20s, setup 0ms, import 1.64s, tests 117ms, environment 0ms)
+

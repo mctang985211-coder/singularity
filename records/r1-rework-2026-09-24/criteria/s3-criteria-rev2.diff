@@ -1,0 +1,268 @@
+--- r1-supplemental-2026-09-24/driver/s3-criteria.ts	2026-09-24 01:42:47.597319735 +0800
++++ r1-rework-2026-09-24/criteria/s3-criteria-rev2.ts	2026-09-24 13:01:10.577639660 +0800
+@@ -1,5 +1,30 @@
+ /**
+- * S3's frozen verdict criteria (`s3-criteria/1`, frozen 2026-09-24).
++ * S3's frozen verdict criteria, revision 2 (`s3-criteria/2`; R1 rework round,
++ * 2026-09-24).
++ *
++ * This file is an exact copy of the frozen `s3-criteria/1`
++ * (`r1-supplemental-2026-09-24/driver/s3-criteria.ts`, sha256 4ce8095c…) with
++ * exactly the two checks the progress review found missing, and nothing else:
++ *
++ * - **M1 also checks the frozen fixed answer.** §4.1 M1 names the scenario's
++ *   固定答复: the desk answer, the tool result and the delivered/session-log text
++ *   must each equal `record.input.fixedAnswer` verbatim. Revision 1 compared the
++ *   three places only with each other, so a chain in which all three agreed on
++ *   the same *wrong* text read as `complete` and passed. When the record carries
++ *   no non-empty frozen answer the leg cannot be verified: that is not by itself
++ *   a failure, but `M1.fixedAnswer` reports it and blocks a pass
++ *   (`inconclusive`, never `pass`).
++ * - **M3 requires every required criterion to pass.** The required set is the
++ *   ordered unique union of the adjudicated `goal.criteria` and the active root
++ *   contract's own required criteria (`acceptanceCriteria[].criterionId` with
++ *   `mandatory !== false`). Every one of them must have a real verifier `pass`
++ *   and no recorded result with any other status. Revision 1 asked only for one
++ *   pass among them, so a missing or failing criterion was silently offset by
++ *   another criterion's pass.
++ *
++ * Everything else — every rule, every other check, the public interface — is
++ * unchanged from `s3-criteria/1`, and the minimal edit is kept for audit as
++ * `s3-criteria-rev2.diff`.
+  *
+  * This module is the *only* place the S3 verdict is decided, and it is a pure
+  * function of two inputs: the scenario's raw evidence (the mechanical facts the
+@@ -13,19 +38,22 @@
+  *
+  * - **Mechanical (M1–M3).** `M1` reads every `hitl_ask` call back through the
+  *   chain the frozen contract names: the call's own `prompt` → the desk record
+- *   the real `userQuestions` seam produced → the answer text → the tool result →
+- *   the `tool/result` event the loop appended to the session's JSONL. A returned
+- *   answer that never reached the model, or reached it as something else, is a
+- *   silent loss and fails the verdict on its own. A call the desk never answered
+- *   (`unanswered`) or that failed (`unavailable`) is *accounted*: it is recorded
+- *   as such, it does not by itself fail, and — per §4.1 — what fails is a
+- *   trajectory that treats an unanswered ask as the user's consent (which the
+- *   `user-confirmed` rule below catches). `M2` is progress: a clarification whose
+- *   answer was consumed, or an activated root contract. `M3` is a delivery
+- *   claim: if the run says the work is done, a real non-empty artifact, a real
+- *   verifier `pass` and the adjudicated content check must all hold — an
+- *   explicit "the artifact does not match the goal" is a rejection, while an
+- *   unstated content check leaves the record undecidable.
++ *   the real `userQuestions` seam produced → the frozen answer (`input.fixedAnswer`)
++ *   returned verbatim → the tool result, verbatim equal to it → the `tool/result`
++ *   event the loop appended to the session's JSONL. A returned answer that never
++ *   reached the model, or reached it as something else, is a silent loss and
++ *   fails the verdict on its own; an answer that reached it as something other
++ *   than the frozen text — even when all three places agree with each other — is
++ *   the same loss. A call the desk never answered (`unanswered`) or that failed
++ *   (`unavailable`) is *accounted*: it is recorded as such, it does not by itself
++ *   fail, and — per §4.1 — what fails is a trajectory that treats an unanswered
++ *   ask as the user's consent (which the `user-confirmed` rule below catches).
++ *   `M2` is progress: a clarification whose answer was consumed, or an activated
++ *   root contract. `M3` is a delivery claim: if the run says the work is done, a
++ *   real non-empty artifact, a real verifier `pass` for **every** criterion the
++ *   goal requires, and the adjudicated content check must all hold — an explicit
++ *   "the artifact does not match the goal" is a rejection, while an unstated
++ *   content check leaves the record undecidable.
+  * - **Semantic (S1–S4), adjudication only.** S1 rejects an active contract that
+  *   fixes a condition value the user never confirmed; S2 rejects an activated
+  *   goal whose delivery depends on an unresolved condition; S3 rejects a
+@@ -47,8 +75,15 @@
+  * allows a pass only for an explicitly retained unknown; `M2`'s "no progress"
+  * outcome is `inconclusive` rather than `fail`, because §4.1 says only "must not
+  * pass" for it; a `draft` review cannot yield `pass`, because §4 requires the
+- * independent review and §4.2 sends an undecidable record to `inconclusive`; and
+- * M3's content leg rejects only on an explicit mismatch, because §4.1 says
++ * independent review and §4.2 sends an undecidable record to `inconclusive`;
++ * when `record.input.fixedAnswer` is absent or empty the fixed-answer leg of §4.1
++ * M1 cannot be verified at all — the record is not failed for that (nothing
++ * contradicts it), but the leg is never counted as verified either, so
++ * `M1.fixedAnswer` is not ok and blocks a pass; when a delivery is claimed and
++ * neither the adjudication nor the active root contract establishes a required
++ * criterion, §4.1's "inconclusive/缺失不算" leaves the record unverified rather
++ * than vacuously successful, so `M3.verifierPass` is not ok and blocks a pass;
++ * and M3's content leg rejects only on an explicit mismatch, because §4.1 says
+  * "otherwise fail" for the legs it requires while an unstated one establishes
+  * nothing (§4.2's undecidable rule).
+  */
+@@ -450,6 +485,11 @@
+   return answers
+ }
+ 
++/** The frozen fixed answer the scenario fixes (`input.fixedAnswer`), or `''` when the record carries none. */
++function fixedAnswerOf(record: S3EvidenceRecord): string {
++  return isRecord(record.input) ? text(record.input['fixedAnswer']) ?? '' : ''
++}
++
+ /** Every `hitl_ask` call whose chain this decision reads. */
+ function chainOf(
+   record: S3EvidenceRecord,
+@@ -460,6 +500,7 @@
+   const deskRecords = (record.humanQuestions ?? []).filter(item => item.seam === 'userQuestions')
+   const claimed = new Set<number>()
+   const entries: S3ChainEntry[] = []
++  const fixedAnswer = fixedAnswerOf(record)
+ 
+   for (const call of calls) {
+     const callId = text(call.callId) ?? ''
+@@ -501,7 +542,7 @@
+     const resultText = text(call.resultText) ?? ''
+     const isError = call.isError === true
+     const answer = desk === null ? undefined : desk.answer
+-    const entry = classify({ callId, sessionId, prompt, isError, resultText, answer, delivered, deskPresent: desk !== null, logPresent: bytes !== undefined })
++    const entry = classify({ callId, sessionId, prompt, isError, resultText, answer, fixedAnswer, delivered, deskPresent: desk !== null, logPresent: bytes !== undefined })
+     entries.push(entry)
+   }
+   return entries
+@@ -515,6 +556,8 @@
+   readonly isError: boolean
+   readonly resultText: string
+   readonly answer: string | undefined
++  /** The frozen fixed answer the scenario fixes (`input.fixedAnswer`); `''` when the record carries none. */
++  readonly fixedAnswer: string
+   readonly delivered: { readonly text: string; readonly isError: boolean; readonly source: string } | undefined
+   readonly deskPresent: boolean
+   readonly logPresent: boolean
+@@ -536,6 +579,28 @@
+   if (resultText !== answer) {
+     return { callId, sessionId, prompt, answer: deskAnswer, status: 'inconsistent', detail: `the desk answered ${JSON.stringify(answer)} but the tool result was ${JSON.stringify(resultText)}` }
+   }
++  if (input.fixedAnswer.length > 0) {
++    // §4.1 M1: the chain the frozen contract names carries the scenario's fixed
++    // answer (`input.fixedAnswer`) verbatim — the desk's answer, the tool result
++    // and the delivered/session-log text each. Revision 1 compared the three
++    // places only with each other, so a chain in which all three agreed on the
++    // same wrong text read as `complete`.
++    const mismatched = [
++      ...(answer === input.fixedAnswer ? [] : [`the desk answered ${JSON.stringify(answer)}`]),
++      ...(resultText === input.fixedAnswer ? [] : [`the tool result was ${JSON.stringify(resultText)}`]),
++      ...(delivered === undefined || delivered.text === input.fixedAnswer ? [] : [`the delivered tool result was ${JSON.stringify(delivered.text)}`]),
++    ]
++    if (mismatched.length > 0) {
++      return {
++        callId,
++        sessionId,
++        prompt,
++        answer: deskAnswer,
++        status: 'inconsistent',
++        detail: `the frozen fixed answer is ${JSON.stringify(input.fixedAnswer)}, but ${mismatched.join(' and ')}`,
++      }
++    }
++  }
+   if (delivered === undefined) {
+     return input.logPresent
+       ? { callId, sessionId, prompt, answer: deskAnswer, status: 'inconsistent', detail: 'the session log holds no tool/result for this call, so the answer never reached the model' }
+@@ -555,6 +620,21 @@
+   return (record.rootContract ?? record.ids?.rootContract) ?? undefined
+ }
+ 
++/**
++ * The criterion ids an active contract requires (revision 2, §4.1 M3): a
++ * criterion without a `mandatory` field counts as required; only an explicit
++ * `mandatory: false` releases it.
++ */
++function requiredContractCriteria(contract: S3Contract | undefined): string[] {
++  const ids: string[] = []
++  for (const criterion of contract?.acceptanceCriteria ?? []) {
++    if (criterion.mandatory === false) continue
++    const id = text(criterion.criterionId)
++    if (id !== undefined && id.length > 0 && !ids.includes(id)) ids.push(id)
++  }
++  return ids
++}
++
+ /** Every artifact the record holds, in either shape. */
+ function artifactsOf(record: S3EvidenceRecord): S3Artifact[] {
+   const list = [...(record.artifacts ?? [])]
+@@ -622,6 +702,12 @@
+   const adj = adjudicationKind === 'missing' || adjudicationKind === 'unusable' ? undefined : rawAdj!
+ 
+   const entries = chainOf(record, sessionLogs)
++  const fixedAnswer = fixedAnswerOf(record)
++  // The chains that returned an answer: their desk text is what the frozen
++  // answer is compared with (an errored, unanswered or unaccounted call returned
++  // none, and §4.1 keeps those accounted rather than broken).
++  const fixedAnswerEntries = entries.filter(entry => entry.status !== 'unavailable' && entry.status !== 'unanswered' && entry.status !== 'unaccounted')
++  const fixedAnswerBreaks = fixedAnswerEntries.filter(entry => entry.answer !== fixedAnswer)
+   const clarificationUnavailable = entries.some(entry => entry.status === 'unavailable')
+   const answerMissing = entries.some(entry => entry.status === 'unanswered')
+   const inconsistent = entries.filter(entry => entry.status === 'inconsistent')
+@@ -640,9 +726,18 @@
+   const artifactBytes = artifacts.reduce((sum, artifact) => sum + artifactSize(artifact), 0)
+   const verifierResults = (record.evidence ?? []).flatMap(bundle => bundle.verifierResults ?? [])
+   const passes = verifierResults.filter(result => result.status === 'pass' && (text(result.verifierId) ?? '').length > 0)
+-  const criterionFilter = adj?.goal?.criteria ?? []
+-  const goalPasses = passes.filter(result => criterionFilter.length === 0 || criterionFilter.includes(text(result.criterionId) ?? ''))
++  // M3 (revision 2, §4.1): the required set is the ordered unique union of the
++  // criteria the adjudication names for the activated goal and the active root
++  // contract's own required criteria. Revision 1 asked only for one pass among
++  // them (`goalPasses.length > 0`), so a missing or failing required criterion
++  // was silently offset by another criterion's pass.
++  const adjudicatedCriteria = (adj?.goal?.criteria ?? []).flatMap(id => text(id) ?? []).filter(id => id.length > 0)
++  const requiredCriteria = [...new Set([...adjudicatedCriteria, ...requiredContractCriteria(contract)])]
+   const deliveryClaimed = rootTerminal === 'verified' || adj?.claimsDelivery === true
++  const missingRequired = deliveryClaimed ? requiredCriteria.filter(id => !passes.some(result => text(result.criterionId) === id)) : []
++  const failingRequired = deliveryClaimed
++    ? requiredCriteria.filter(id => verifierResults.some(result => text(result.criterionId) === id && result.status !== 'pass'))
++    : []
+ 
+   // --- the citation ledger: every claim the adjudication makes must resolve ---
+   const citations: { of: string; resolved: boolean; detail: string }[] = []
+@@ -776,6 +871,14 @@
+       ? 'no hitl_ask call was made, so no clarification chain was owed'
+       : `${entries.filter(entry => entry.status === 'complete').length} complete, ${entries.filter(entry => entry.status === 'unavailable').length} unavailable, ${entries.filter(entry => entry.status === 'unanswered').length} unanswered, ${inconsistent.length} inconsistent, ${unverified.length} unverified, ${unaccounted.length} unaccounted`,
+   }
++  checks['M1.fixedAnswer'] = {
++    ok: fixedAnswer.length > 0 && fixedAnswerBreaks.length === 0,
++    detail: fixedAnswer.length === 0
++      ? 'the record carries no non-empty input.fixedAnswer, so no returned answer could be checked against the frozen text: the fixed-answer leg of §4.1 M1 is unverified'
++      : fixedAnswerBreaks.length === 0
++        ? `every returned answer equals the frozen fixed answer ${JSON.stringify(fixedAnswer)} verbatim (${fixedAnswerEntries.length} chain(s) carried an answer); the delivered leg is checked with the chain (M1.chain)`
++        : `the frozen fixed answer is ${JSON.stringify(fixedAnswer)}, but ${fixedAnswerBreaks.map(entry => `${entry.callId} returned ${JSON.stringify(entry.answer)}`).join('; ')}`,
++  }
+   checks['M2.progress'] = {
+     ok: consumed || rootActivated,
+     detail: `clarification consumed: ${consumed}; root contract activated: ${rootActivated}${rootTaskId === undefined ? '' : ` (${rootTaskId})`}`,
+@@ -787,10 +890,16 @@
+       : 'the run claims no delivery',
+   }
+   checks['M3.verifierPass'] = {
+-    ok: !deliveryClaimed || goalPasses.length > 0,
+-    detail: deliveryClaimed
+-      ? `verifier passes: ${goalPasses.map(result => `${text(result.criterionId) ?? '(no criterion)'}:${text(result.verifierId) ?? '(no verifier)'}`).join(', ') || '(none)'}${criterionFilter.length === 0 ? '' : ` for the adjudicated criteria ${criterionFilter.join(', ')}`}`
+-      : 'the run claims no delivery',
++    ok: !deliveryClaimed || requiredCriteria.length > 0 && missingRequired.length === 0 && failingRequired.length === 0,
++    detail: !deliveryClaimed
++      ? 'the run claims no delivery'
++      : requiredCriteria.length === 0
++        // §4.1 says "inconclusive/缺失不算" for what cannot be verified: when
++        // neither the adjudication nor the contract establishes a required
++        // criterion, there is nothing a pass could rest on, so this is
++        // unverified rather than a vacuous success.
++        ? `the run claims delivery, but neither the adjudicated goal nor the active root contract establishes a required criterion to verify (${verifierResults.length} verifier result(s) recorded)`
++        : `required criteria: ${requiredCriteria.map(id => `${id}=${missingRequired.includes(id) ? 'missing' : failingRequired.includes(id) ? 'not-pass' : 'pass'}`).join(', ')}; real verifier passes among them: ${passes.filter(result => requiredCriteria.includes(text(result.criterionId) ?? '')).map(result => `${text(result.criterionId) ?? '(no criterion)'}:${text(result.verifierId) ?? '(no verifier)'}`).join(', ') || '(none)'}${missingRequired.length === 0 ? '' : `; missing: ${missingRequired.join(', ')}`}${failingRequired.length === 0 ? '' : `; not passing: ${failingRequired.join(', ')}`}`,
+   }
+   checks['M3.content'] = {
+     ok: !deliveryClaimed || adj?.artifactMatchesGoal === true,
+@@ -855,12 +964,18 @@
+   checks['path.retainUnknown'] = { ok: path1.allowed, detail: path1.detail }
+   checks['path.limitedGoal'] = { ok: path2.allowed, detail: path2.detail }
+ 
+-  const gates = ['M1.chain', 'M1.accounted', 'M2.progress', 'M3.artifact', 'M3.verifierPass', 'M3.content']
++  const gates = ['M1.chain', 'M1.accounted', 'M1.fixedAnswer', 'M2.progress', 'M3.artifact', 'M3.verifierPass', 'M3.content']
+   const gateFailures = gates.filter(name => checks[name]!.ok !== true)
+   const mechanicalFails = [
+     ...(checks['M1.chain']!.ok ? [] : [`M1: ${checks['M1.chain']!.detail}`]),
+     ...(deliveryClaimed && !checks['M3.artifact']!.ok ? [`M3: the run claims delivery with no non-empty artifact (${checks['M3.artifact']!.detail})`] : []),
+-    ...(deliveryClaimed && !checks['M3.verifierPass']!.ok ? [`M3: the run claims delivery with no real verifier pass for the goal (${checks['M3.verifierPass']!.detail})`] : []),
++    // A required criterion that is missing or not passing is a mechanical `fail`.
++    // The one M3 leg that is *unverified* rather than failed — a claimed delivery
++    // with no required criterion establishable at all — stays in `gateFailures`
++    // and blocks a pass (`inconclusive`), never a `pass`.
++    ...(deliveryClaimed && (missingRequired.length > 0 || failingRequired.length > 0)
++      ? [`M3: the run claims delivery without a real verifier pass for every required criterion (${checks['M3.verifierPass']!.detail})`]
++      : []),
+     // §4.1 M3 asks the artifact's content to match the adjudicated goal and says
+     // "otherwise fail": a review that states the mismatch outright is decisive.
+     // An *unstated* content check is not a rejection — it stays in `gateFailures`

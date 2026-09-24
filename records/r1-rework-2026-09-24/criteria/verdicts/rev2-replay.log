@@ -1,0 +1,19 @@
+../r1-rework-2026-09-24/criteria/vitest.rev2.config.ts (1:380) [33m[UNRESOLVED_IMPORT] [0mCould not resolve 'vitest/config' in ../r1-rework-2026-09-24/criteria/vitest.rev2.config.ts
+ - Module not found, treating it as an external dependency in ../r1-rework-2026-09-24/criteria/vitest.rev2.config.ts at 380..395
+
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (../r1-rework-2026-09-24/criteria/vitest.rev2.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /home/ROXY/code/bb_work/harness
+
+ ✓ ../r1-rework-2026-09-24/criteria/rev2-wiring.spec.ts (1 test) 575ms
+     ✓ passes identically under s3-criteria/1 and s3-criteria/2, with no network attempt  573ms
+ ✓ ../r1-rework-2026-09-24/criteria/s3-criteria-rev2.spec.ts (9 tests) 51ms
+ ✓ ../r1-rework-2026-09-24/criteria/verdict-matrix.spec.ts (4 tests) 26ms
+
+ Test Files  3 passed (3)
+      Tests  14 passed (14)
+   Start at  13:06:58
+   Duration  5.65s (transform 3.39s, setup 0ms, import 4.65s, tests 651ms, environment 0ms)
+

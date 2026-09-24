@@ -1,0 +1,78 @@
+{
+  "schemaVersion": "r1-supplemental-pre-run/1",
+  "round": "r1-supplemental-2026-09-24",
+  "ticket": "plan-item-8-r1-q4-q5",
+  "recordedAt": "2026-09-24T01:45:52+08:00",
+  "recordedBy": "run-subagent (single paid attempt executor)",
+  "repository": {
+    "path": "/home/ROXY/code/bb_work/harness",
+    "singularityPath": "/home/ROXY/code/bb_work/harness/packages/singularity",
+    "singularityHead": "9f8ba92242c8ec650dcca23aedea4cd6c6492aa1",
+    "singularityStatusPorcelain": "",
+    "singularityWorktreeClean": true,
+    "outerHarnessHead": "c48a1cd7fba6fb43fa1da777ca917487bda589d7",
+    "readOnly": true
+  },
+  "fixtures": {
+    "frozen-contract.md": {
+      "path": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/fixtures/frozen-contract.md",
+      "sha256": "1234da2fd0d5e43d9ef0eb693c617b99ed7708ab755debaa04a43dfd68b2df03"
+    },
+    "frozen-contract.json": {
+      "path": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/fixtures/frozen-contract.json",
+      "sha256": "22170e4341b73bc31c570ae5d0368a1725e3ca0fa70c57d943b44c33f3b29e3d"
+    },
+    "matchesFrozenContractJsonVerifiedBlock": true
+  },
+  "driverFilesToRun": {
+    "spec": "driver/r1-s3.spec.ts",
+    "config": "driver/vitest.r1-run.config.ts",
+    "transitiveImports": [
+      "driver/r1-stack.ts",
+      "driver/r1-record.ts",
+      "driver/r1-smoke.ts",
+      "driver/r1-env.ts"
+    ],
+    "sha256": {
+      "driver/r1-s3.spec.ts": "e099a1d49cf2b51faa27224cf5b73942eda34ad0f474096a414710f631e52773",
+      "driver/vitest.r1-run.config.ts": "e13553befbe21a41bfb4164fa76178c73025db71d3f83ba0d602a8eb26b62ee6",
+      "driver/r1-stack.ts": "c227e843bc3de0da372ea38197e5e731b04d75a9af2460c4e547056ec6391437",
+      "driver/r1-record.ts": "15a207d91897976ad34b0d0fe944302fa8ed3dc84362935bea265308ccd047a9",
+      "driver/r1-smoke.ts": "3e71b33571055a3e3bef22e59be7a57e91214a96bf5cfe513f8c404429c1d35e",
+      "driver/r1-env.ts": "fd4a99db8bfded27e956a676aca70d05d1ff18722ea215a38b4874dc32f735b5"
+    },
+    "matchesHandoffMdSection1": {
+      "driver/r1-s3.spec.ts": true,
+      "driver/vitest.r1-run.config.ts": true,
+      "driver/r1-stack.ts": true,
+      "driver/r1-record.ts": true,
+      "driver/r1-env.ts": "unchanged by design (not listed in HANDOFF.md §1 changed table)"
+    }
+  },
+  "frozenCriteriaHash": {
+    "driver/s3-criteria.ts": "4ce8095ca063924239cbadd8654284ae8a0d4b903961d1d604e4b046bdafe92c",
+    "matchesPreRunAmendmentCriteriaFrozenHash": true
+  },
+  "deterministicSuiteCommand": "cd /home/ROXY/code/bb_work/harness && pnpm exec vitest run --config /home/ROXY/code/bb_work/r1-supplemental-2026-09-24/driver/vitest.r1.config.ts",
+  "preRunAbsence": {
+    "evidence/s3/driver.json exists": false,
+    "evidence/s3/ directory exists": false,
+    "evidence/smoke-1/ directory exists": false,
+    "run/s3 exists": false,
+    "run/ directory exists": false
+  },
+  "deterministicSuiteResult": {
+    "ranAt": "2026-09-24T01:46:03+08:00",
+    "command": "cd /home/ROXY/code/bb_work/harness && pnpm exec vitest run --config /home/ROXY/code/bb_work/r1-supplemental-2026-09-24/driver/vitest.r1.config.ts",
+    "observed": {
+      "testFiles": "2 passed (2)",
+      "tests": "17 passed (17)",
+      "breakdown": "4 wiring + 13 criteria",
+      "duration": "4.16s",
+      "startAt": "01:46:03"
+    },
+    "green": true,
+    "gate": "17/17 required before the paid command; the paid command was allowed to proceed",
+    "noNetworkNoCredential": "the deterministic config excludes r1-s3.spec.ts and makes no paid model call"
+  }
+}

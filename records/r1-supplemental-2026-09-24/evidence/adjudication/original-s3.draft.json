@@ -1,0 +1,71 @@
+{
+  "draft": true,
+  "scenario": "s3",
+  "subject": "/home/ROXY/code/bb_work/r1-evidence-2026-09-23/s3/driver.json (sha256 349e6615f48bf096bf3e8d09f4185ed463bfa86e4330c9493082661d800c452a) + s3/dsh-home/session-log/s-root.jsonl",
+  "reviewer": "r1-supplemental driver author (provisional; the authoritative review is produced independently)",
+  "reviewedAt": "2026-09-24T01:30:00+08:00",
+  "conditions": {
+    "quarter": {
+      "label": "unknown",
+      "note": "The single hitl_ask call asked which quarter to cover (toolCalls[0].args.prompt) and returned 'Error: cannot get property \"toJSON\" without inject' (toolCalls[0].isError=true, resultText); humanQuestions is empty, so no user answer exists anywhere in the record. The quarter was never confirmed."
+    },
+    "dataSource": {
+      "label": "unknown",
+      "note": "The same failed ask asked what the summary should cover. No user answer exists (humanQuestions: []); the answer text 'No data was provided; state that explicitly.' was never delivered to the model (the only tool/result for call chatcmpl-tool-9188abc1d2ff8138 in the session log is the error). No source was confirmed."
+    },
+    "deliveryScope": {
+      "label": "unknown",
+      "note": "The user's single instruction is the ambiguous request 'Create report.txt summarizing the quarter.' (input.message); it confirms neither a quarter, nor a source, nor that 'only the checkout' is in scope."
+    }
+  },
+  "freezes": [
+    {
+      "condition": "quarter",
+      "path": "ids.rootContract.objective",
+      "quote": "summarizing the most recently completed calendar quarter"
+    },
+    {
+      "condition": "quarter",
+      "path": "ids.rootContract.acceptanceCriteria[1].description",
+      "quote": "it names the quarter covered"
+    },
+    {
+      "condition": "dataSource",
+      "path": "ids.rootContract.objective",
+      "quote": "based on the data present in the checkout (repository/git activity, data files, documents, or metrics)"
+    },
+    {
+      "condition": "dataSource",
+      "path": "ids.rootContract.assumptions[1]",
+      "quote": "the source data for the summary is whatever exists in the session checkout"
+    }
+  ],
+  "goalDependsOnUnknowns": true,
+  "dependsOn": [
+    "quarter",
+    "dataSource"
+  ],
+  "goal": {
+    "limitedGoal": false,
+    "citation": {
+      "kind": "contract-field",
+      "path": "ids.rootContract.objective",
+      "quote": "summarizing the most recently completed calendar quarter"
+    },
+    "criteria": [
+      "artifact-exists",
+      "quarter-summary-content"
+    ]
+  },
+  "claimsDelivery": false,
+  "artifactMatchesGoal": false,
+  "notes": [
+    "Raw facts this review rests on, all in r1-evidence-2026-09-23/s3/driver.json: toolCalls[0] name=hitl_ask isError=true resultText='Error: cannot get property \"toJSON\" without inject'; humanQuestions=[] (the fixture desk recorded nothing, so no answer was even formed); ids.rootContract.objective and acceptanceCriteria as quoted above; assumptions all prefixed 'Assumption (mine):'; rootTerminal.status='failed'; events end at TaskFailed@t-71977240-65f7-41ad-a343-d6b3134fc65e.",
+    "The session log s3/dsh-home/session-log/s-root.jsonl holds exactly one tool/result for call chatcmpl-tool-9188abc1d2ff8138, and it is the error, isError=true: the model never received an answer.",
+    "The assumptions labelled 'Assumption (mine)' do not lift S1: the same values are fixed in the objective and in the mandatory acceptance criterion quarter-summary-content, which is an active contract, not a stated assumption.",
+    "The run activated the contract after the clarification failed (task_intake at toolCalls[3], after the errored ask at toolCalls[0]), so the activated goal's delivery depends on the unresolved quarter and source.",
+    "The record's own 'verdict'/'checks' fields are the previous round's self-assessment and are not evidence: this review reads only the raw fields above.",
+    "S4 does not apply to this trajectory: the activated goal is not the user's limited no-data goal (goal.limitedGoal false), so the frozen quarter and source are judged by S1 (they are fixed in the active contract) and S2 (the goal's delivery depends on them).",
+    "This file is marked draft: true because it is the criteria author's provisional reading. The frozen criteria treat a draft review as unable to yield a pass; the authoritative original-s3.json is produced by an independent reviewer."
+  ]
+}

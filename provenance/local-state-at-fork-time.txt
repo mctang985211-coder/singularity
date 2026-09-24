@@ -1,0 +1,26 @@
+# Provenance — local development state at fork time
+
+Recorded: 2026-09-24T16:25:20+08:00
+Machine:  amax   User: ROXY
+
+## Singularity submodule (inner repo)
+  path            : /home/ROXY/code/bb_work/harness/packages/singularity
+  branch          : wip/task-runtime-20260917
+  tip             : 99e1311d7695f57bbb3557e74157bf94c8a695ff
+  upstream main   : c94024bb4980312de374e64cf8a14f0b75d2a0b2
+  commits ahead of upstream main : 75
+  local-only tag  : baseline-p4-20260921 -> 05cb27c5c89fb49f24139eec31234d06d0fa92e0
+  local main      : f7a83ad2232a30b98480b0b624280e848a608cc9 (behind upstream main, no unique commits)
+
+## Outer harness repo (not forked; recorded for reference)
+  path            : /home/ROXY/code/bb_work/harness
+  branch          : main
+  tip             : 66e6f2ff17c68690b540683acac3cc89af4a9c6b
+  upstream main   : 27b44a5ded1941a71d3dc7c23489503513eb9da4
+  commits ahead of upstream main : 82
+
+  submodule pointers at that tip:
+     7854ab501e9f108f8bb6b6fd6c90f1399fe15b98 .dsh/skills (heads/main)
+     2c0e0397e369943eba41d643ac4d61931a0adf37 packages/collaboration (heads/wip/local-collab-20260917)
+    +99e1311d7695f57bbb3557e74157bf94c8a695ff packages/singularity (baseline-p4-20260921-61-g99e1311)
+     0d1f50007f9bca3f52b06e1c3074fa14d5fb0720 thirdparty/deepseek-harness (dsh-v0.1.6-alpha.1-5-g0d1f50007f)

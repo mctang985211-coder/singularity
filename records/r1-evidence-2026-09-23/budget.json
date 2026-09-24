@@ -1,0 +1,62 @@
+{
+  "limits": {
+    "tokens": null,
+    "toolCalls": 100,
+    "wallTimeMs": 900000
+  },
+  "counted": {
+    "inputTokens": 117645,
+    "outputTokens": 26333,
+    "cacheReadTokens": 261120,
+    "cacheWriteTokens": 0,
+    "toolCalls": 44
+  },
+  "totalTokens": 143978,
+  "totalWithCacheReads": 405098,
+  "authorization": "2026-09-23 operator authorization: the token budget cap was lifted (\"token预算无上限，只要跑完就行\") and the token stop rule was removed; tool calls and wall clock are still accounted; one attempt per scenario, no retry on a verdict failure, per-scenario rootBudget unchanged.",
+  "scenarios": {
+    "s1": {
+      "status": "attempted",
+      "verdict": "passed",
+      "skipReason": null,
+      "wallTimeMs": 40370,
+      "inputTokens": 40201,
+      "outputTokens": 8800,
+      "cacheReadTokens": 111872,
+      "toolCalls": 14,
+      "rootTerminal": {
+        "status": "verified"
+      }
+    },
+    "s2": {
+      "status": "attempted",
+      "verdict": "passed",
+      "skipReason": null,
+      "wallTimeMs": 29199,
+      "inputTokens": 21866,
+      "outputTokens": 1361,
+      "cacheReadTokens": 13312,
+      "toolCalls": 6,
+      "rootTerminal": {
+        "status": "failed"
+      }
+    },
+    "s3": {
+      "status": "attempted",
+      "verdict": "passed",
+      "skipReason": null,
+      "wallTimeMs": 159429,
+      "inputTokens": 55530,
+      "outputTokens": 15325,
+      "cacheReadTokens": 135936,
+      "toolCalls": 24,
+      "rootTerminal": {
+        "status": "failed"
+      }
+    }
+  },
+  "exceeded": [],
+  "blocked": null,
+  "stopRule": "no limit was hit: the token cap was lifted by the operator authorization, and tool calls and wall clock are within their limits",
+  "note": "Counted from the adapter layer (llm/stream usage chunks) and the tools/pre-execute record; there was no in-flight enforcement. inputTokens are the gateway uncached prompt tokens; cacheReadTokens are the gateway cached-prompt tokens reported beside them. The token cap is lifted (limits.tokens === null) under the 2026-09-23 authorization, so the token total is reported, not enforced or claimed against the old 30000 ceiling."
+}

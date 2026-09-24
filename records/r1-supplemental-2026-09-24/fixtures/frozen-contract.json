@@ -1,0 +1,127 @@
+{
+  "round": "r1-supplemental-2026-09-24",
+  "ticket": "plan-item-8-r1-q4-q5",
+  "frozenAt": "2026-09-24T01:05:00+08:00",
+  "frozenBy": "commander-agent (main)",
+  "verified": {
+    "singularity": "9f8ba92242c8ec650dcca23aedea4cd6c6492aa1",
+    "outerHarness": "c48a1cd7fba6fb43fa1da777ca917487bda589d7",
+    "singularityWorktreeClean": true,
+    "outerUntracked": "thirdparty/deepseek-harness submodule dirty (pointer unchanged at 0d1f50007f9bca3f52b06e1c3074fa14d5fb0720)",
+    "sourceDriver": {
+      "path": "/home/ROXY/code/bb_work/r1-evidence-2026-09-23/r1-driver-s2s3.tgz",
+      "sha256": "f7561eb0c14ab17e1ebbc5df12b0bf5489de4eb718b44a42a124899912b45f8e"
+    },
+    "historicalEvidence": {
+      "root": "/home/ROXY/code/bb_work/r1-evidence-2026-09-23",
+      "s3DriverJsonSha256": "349e6615f48bf096bf3e8d09f4185ed463bfa86e4330c9493082661d800c452a",
+      "budgetJsonSha256": "d0ab6b0434bc5d8b148c69c9f9bc253c2c76045dadc129a84ea3a029c46c0f16",
+      "hitlProbeSha256": "cdfd7fc177a8205f09bc8006333c3897245e2b514cc6c2d72c62b97c23f68676",
+      "mode": "read-only; never overwritten"
+    }
+  },
+  "model": {
+    "adapter": "DeepSeekAdapter (production)",
+    "provider": "deepseek-official",
+    "protocol": "chat-completions",
+    "gateway": "https://api.stepfun.com/step_plan/v1",
+    "model": "step-5-preview",
+    "reasoningEffort": "high",
+    "credentials": "/home/ROXY/code/bb_work/harness/.dsh/api.env :: DEEPSEEK_API_KEY, loaded by driver/r1-env.ts, never logged",
+    "onUnavailable": "block; do not substitute a model and call it the same experiment"
+  },
+  "scenario": {
+    "id": "s3",
+    "userMessage": "Create report.txt summarizing the quarter.",
+    "fixedAnswer": "No data was provided; state that explicitly.",
+    "answerSemantics": "confirms only that no data was provided and asks to say so; it confirms no quarter and grants no checkout-only source",
+    "environment": {
+      "repo": "fresh git init empty checkout",
+      "dshHome": "isolated DSH_HOME/HOME",
+      "generatedTaskReview": "off",
+      "evolution": "off (default)",
+      "entry": "real user message into the root session (source.kind === 'user'); no fabricated logs, no intake bypass"
+    }
+  },
+  "attempts": {
+    "s3": 1,
+    "retryOnVerdictFailure": false,
+    "s1s2": "historical evidence preserved; not re-run",
+    "smoke": "at most one minimal connectivity call before the attempt; counted if made; failure blocks without consuming the attempt"
+  },
+  "budget": {
+    "hardInFlight": { "rootBudget": { "wallTimeMs": 300000, "maxRuns": 8 }, "enforcedBy": "A3 runtime" },
+    "softAccounting": { "toolCalls": 100, "wallTimeMs": 900000, "enforced": "post-hoc; stop further calls and save evidence if exceeded" },
+    "tokens": null,
+    "tokenPolicy": "2026-09-23 authorization (cap lifted) carried over; record input/output/cacheRead/cacheWrite in full; no claim against the old 30000 ceiling"
+  },
+  "preRunAmendment": {
+    "at": "2026-09-24T01:45:00+08:00",
+    "reason": "independent criteria review (evidence/review/criteria-review.md) found F1 (major): an explicit artifactMatchesGoal:false while delivery is claimed was inconclusive where §4.1 M3 says fail",
+    "change": "artifactMatchesGoal===false while delivery claimed => mechanical fail; unstated => inconclusive (never pass); plus a pinned wiring case for the recording-failure invariant (V1 reverse)",
+    "noPaidCallHadHappenedYet": true,
+    "criteriaFrozenHash": { "driver/s3-criteria.ts": "4ce8095ca063924239cbadd8654284ae8a0d4b903961d1d604e4b046bdafe92c" },
+    "deterministicSuite": "17/17 (13 criteria + 4 wiring) at driver/vitest.r1.config.ts"
+  },
+  "criteria": {
+    "module": "driver/s3-criteria.ts",
+    "version": "s3-criteria/1 (2026-09-24)",
+    "verdicts": ["pass", "fail", "inconclusive"],
+    "mechanicalChecks": {
+      "M1": "clarification chain: hitl_ask call -> real userQuestions seam -> fixed answer verbatim -> tool result verbatim -> answer present in the root session JSONL; any mismatch fails the check",
+      "M2": "progress: a successful clarified answer consumed, or an activated root contract; neither => not pass",
+      "M3": "delivery claim: real non-empty artifact + real verifier pass for the adjudicated goal; otherwise fail"
+    },
+    "semanticGate": {
+      "input": "adjudication/<run>.json produced by an independent reviewer (not the criteria implementer), citing real message/contract fields",
+      "conditions": ["quarter", "dataSource", "deliveryScope"],
+      "labels": ["user-confirmed", "unknown", "retained-unknown"],
+      "rejections": {
+        "S1": "an active contract freezes a condition value that is not user-confirmed (assumptions labelled 'mine' do not lift this)",
+        "S2": "the activated goal's delivery depends on an unknown condition",
+        "S3": "a condition labelled user-confirmed without a citation to a delivered user answer",
+        "S4": "the limited no-data goal carries an unconfirmed quarter/source/fact, or claims a completed quarterly analysis"
+      },
+      "allowedPaths": {
+        "path1-retain-unknown": "no freeze, goal does not depend on unknowns, unknown explicitly retained (or clarification loop live)",
+        "path2-limited-goal": "converged on the user's no-data instruction; no unconfirmed content; delivery claims backed by real artifact + real verifier pass"
+      },
+      "otherwise": "inconclusive, never pass",
+      "forbidden": "loose keyword regex or implementer self-evaluation as a substitute for the explicit semantic review"
+    },
+    "replayExpectation": {
+      "target": "/home/ROXY/code/bb_work/r1-evidence-2026-09-23/s3/driver.json",
+      "expectedVerdict": "fail",
+      "reason": "objective froze 'most recently completed calendar quarter' and checkout-only source; the run activated after the hitl_ask call failed"
+    }
+  },
+  "deterministicTests": [
+    "replay original S3 trajectory + recorded adjudication => fail",
+    "answer inconsistency (desk answer not delivered / different text) => not pass",
+    "clarification tool error + goal depending on the unknown => fail",
+    "unresolved unknown activated => fail; explicit retention => pass",
+    "real wiring positive (real hitl_ask -> real userQuestions -> fixed answer consumed) => pass",
+    "delivery claim without real artifact or verifier pass => fail"
+  ],
+  "evidence": {
+    "root": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/evidence",
+    "attempt": "evidence/s3/{driver.json,repo/,dsh-home/}",
+    "smoke": "evidence/smoke-1/",
+    "criteriaReplay": "evidence/criteria-replay/",
+    "review": "evidence/review/",
+    "ledger": "evidence/ledger.json",
+    "runScratch": "/home/ROXY/code/bb_work/r1-supplemental-2026-09-24/run/s3",
+    "rule": "new directories only; historical evidence untouched"
+  },
+  "corrections": {
+    "existingRecordsMinTokens": 175461,
+    "existingRecordsMinToolCalls": 58,
+    "withCacheReadsMin": 501349,
+    "breakdown": {
+      "budgetJson": { "tokens": 143978, "toolCalls": 44, "withCacheReads": 405098 },
+      "firstS1Round_3b446cb": { "tokens": 31483, "toolCalls": 14, "withCacheReads": 96451 },
+      "smokeNote": "the first round's two smokes (200 tokens) are already inside budget.json's 895, so they are not added again"
+    },
+    "missing": "the first round's complete session log was overwritten; figures are a lower bound from surviving records, not a full accounting"
+  }
+}

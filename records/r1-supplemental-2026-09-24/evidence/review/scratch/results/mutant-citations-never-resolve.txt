@@ -1,0 +1,152 @@
+../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts (1:449) [33m[UNRESOLVED_IMPORT] [0mCould not resolve 'vitest/config' in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts
+ - Module not found, treating it as an external dependency in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts at 449..464
+
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /home/ROXY/code/bb_work/harness
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts (12 tests | 6 failed) 22ms
+     × replays the original S3 trajectory against its adjudication and rejects it 12ms
+     ✓ rejects a run whose desk answer reached the model as something else 1ms
+     ✓ rejects a run whose answer never reached the session at all 0ms
+     × rejects a run whose clarification call failed and whose goal then depended on the unknown 2ms
+     × rejects an activated goal whose delivery depends on an unresolved unknown 1ms
+     × passes an activated limited goal that explicitly retains the unknown while the clarification went unanswered 1ms
+     ✓ rejects a run that claims delivery with no non-empty artifact 1ms
+     ✓ rejects a run that claims delivery with no real verifier pass for the goal 1ms
+     × rejects a limited goal that still carries an unconfirmed quarter 1ms
+     ✓ rejects a user-confirmed label that cites no delivered user answer 0ms
+     ✓ never passes without a usable semantic adjudication 0ms
+     × never passes on a review its own author marked draft 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 6 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > replays the original S3 trajectory against its adjudication and rejects it
+AssertionError: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:273:46
+    271|
+    272|     expect(decision.facts.chains.map(entry => entry.status)).toEqual([…
+    273|     expect(decision.checks['S1.freeze']!.ok).toBe(false)
+       |                                              ^
+    274|     expect(decision.checks['S2.dependency']!.ok).toBe(false)
+    275|     expectVerdict(decision, 'fail', 'S1.freeze')
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/6]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a run whose clarification call failed and whose goal then depended on the unknown
+AssertionError: verdict=inconclusive path=no allowed path: the record cannot be decided reasons=[
+ "the freeze of quarter at rootContract.objective is not readable in the record (MUTANT citations-never-resolve)",
+ "the freeze of dataSource at rootContract.objective is not readable in the record (MUTANT citations-never-resolve)",
+ "the adjudication declares the activated goal's delivery depends on an unresolved condition, but cites no goal field that resolves (MUTANT citations-never-resolve)",
+ "left plain unknown: quarter, dataSource, deliveryScope; unreadable claims: the freeze of quarter at rootContract.objective is not readable in the record (MUTANT citations-never-resolve); the freeze of dataSource at rootContract.objective is not readable in the record (MUTANT citations-never-resolve); the adjudication declares the activated goal's delivery depends on an unresolved condition, but cites no goal field that resolves (MUTANT citations-never-resolve)",
+ "the mechanical gates did not hold: M3.content",
+ "neither allowed path holds: no retained unknown and no cited limited goal"
+]: expected 'inconclusive' to be 'fail' // Object.is equality
+
+Expected: "fail"
+Received: "inconclusive"
+
+ ❯ expectVerdict ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:244:5
+    242|     decision.verdict,
+    243|     `verdict=${decision.verdict} path=${decision.path} reasons=${JSON.…
+    244|   ).toBe(verdict)
+       |     ^
+    245| }
+    246|
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:321:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/6]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects an activated goal whose delivery depends on an unresolved unknown
+AssertionError: verdict=inconclusive path=no allowed path: the record cannot be decided reasons=[
+ "the retention of quarter cites nothing that resolves (MUTANT citations-never-resolve)",
+ "the retention of dataSource cites nothing that resolves (MUTANT citations-never-resolve)",
+ "the adjudication declares the activated goal's delivery depends on an unresolved condition, but cites no goal field that resolves (MUTANT citations-never-resolve)",
+ "left plain unknown: deliveryScope; unreadable claims: the retention of quarter cites nothing that resolves (MUTANT citations-never-resolve); the retention of dataSource cites nothing that resolves (MUTANT citations-never-resolve); the adjudication declares the activated goal's delivery depends on an unresolved condition, but cites no goal field that resolves (MUTANT citations-never-resolve)",
+ "the mechanical gates did not hold: M3.content",
+ "neither allowed path holds: no retained unknown and no cited limited goal"
+]: expected 'inconclusive' to be 'fail' // Object.is equality
+
+Expected: "fail"
+Received: "inconclusive"
+
+ ❯ expectVerdict ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:244:5
+    242|     decision.verdict,
+    243|     `verdict=${decision.verdict} path=${decision.path} reasons=${JSON.…
+    244|   ).toBe(verdict)
+       |     ^
+    245| }
+    246|
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:339:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/6]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > passes an activated limited goal that explicitly retains the unknown while the clarification went unanswered
+AssertionError: expected 'no allowed path: the record cannot be…' to be 'path1-retain-unknown' // Object.is equality
+
+Expected: "path1-retain-unknown"
+Received: "no allowed path: the record cannot be decided"
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:362:27
+    360|     })
+    361|     expect(decision.facts.answerMissing).toBe(true)
+    362|     expect(decision.path).toBe('path1-retain-unknown')
+       |                           ^
+    363|     expectVerdict(decision, 'pass', 'path.retainUnknown')
+    364|   })
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/6]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > rejects a limited goal that still carries an unconfirmed quarter
+AssertionError: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:409:51
+    407|       },
+    408|     })
+    409|     expect(decision.checks['S4.limitedGoal']!.ok).toBe(false)
+       |                                                   ^
+    410|     expectVerdict(decision, 'fail', 'S4.limitedGoal')
+    411|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/6]⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts > s3-criteria: the frozen S3 decision procedure > never passes on a review its own author marked draft
+AssertionError: verdict=fail path=rejected: the semantic gate refused the trajectory reasons=[
+ "S3: deliveryScope is labelled user-confirmed without a delivered user answer (MUTANT citations-never-resolve)"
+]: expected 'fail' to be 'inconclusive' // Object.is equality
+
+Expected: "inconclusive"
+Received: "fail"
+
+ ❯ expectVerdict ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:244:5
+    242|     decision.verdict,
+    243|     `verdict=${decision.verdict} path=${decision.path} reasons=${JSON.…
+    244|   ).toBe(verdict)
+       |     ^
+    245| }
+    246|
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/citations-never-resolve/s3-criteria.spec.ts:453:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/6]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  6 failed | 6 passed (12)
+   Start at  01:34:51
+   Duration  246ms (transform 61ms, setup 0ms, import 85ms, tests 22ms, environment 0ms)
+

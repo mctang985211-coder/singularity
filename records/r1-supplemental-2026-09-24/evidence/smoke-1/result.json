@@ -1,0 +1,15 @@
+{
+  "at": "2026-09-23T17:46:29.244Z",
+  "smoke": {
+    "ok": true,
+    "baseUrl": "https://api.stepfun.com/step_plan/v1",
+    "keyLength": 65,
+    "model": "step-5-preview",
+    "text": "**Ping** is a network diagnostic command used to test the connectivity (reachability) between your device and another host on an IP network.\n\n### How it works:\n1. It sends a small data packet (an **ICMP Echo Request**) to a target host (e.g., `ping google.com`).\n2. If the host is reachable, it replies with an **ICMP Echo Reply**.\n3. The output typically shows:\n   - **Response time** (latency, in milliseconds)\n   - **TTL** (Time To Live, hops)\n   - **Packet loss** (if any)\n\n### Example output:\n```\nPING google.com (142.250.185.78): 56 data bytes\n64 bytes from 142.250.185.78: icmp_seq=0 ttl=118 time=15.3 ms\n64 bytes from 142.250.185.78: icmp_seq=1 ttl=118 time=14.8 ms\n```\n\n### Common uses:\n- Check if a website/server is online.\n- Diagnose network issues (high latency, packet loss).\n- Troubleshoot DNS (by IP vs. hostname).\n\n### Limitations:\n- Some hosts/networks **block ICMP** (ping) for security.\n- Firewalls may filter ping packets.\n\n*(Note: In this chat interface, I can't actually send a ping—but I can explain the concept or simulate what you'd see!)*",
+    "finishReason": {
+      "kind": "stop"
+    },
+    "inputTokens": 12,
+    "outputTokens": 409
+  }
+}

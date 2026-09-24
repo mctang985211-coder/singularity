@@ -1,0 +1,115 @@
+--- driver/s3-criteria.ts
++++ mutants/pass2-no-f1/s3-criteria.ts
+@@ -865,7 +865,7 @@
+     // "otherwise fail": a review that states the mismatch outright is decisive.
+     // An *unstated* content check is not a rejection — it stays in `gateFailures`
+     // and blocks a pass (`inconclusive`), never a `pass`.
+-    ...(deliveryClaimed && adj?.artifactMatchesGoal === false ? [`M3: the run claims delivery but the adjudication states the artifact does not match the adjudicated goal (${checks['M3.content']!.detail})`] : []),
++    // MUTANT pass2-no-f1: the explicit-content-mismatch rejection is removed
+   ]
+ 
+   let verdict: S3Verdict
+--- driver/r1-stack.ts
++++ mutants/pass2-no-hook/r1-stack.ts
+@@ -37,49 +37,49 @@
+ import { appendFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+ import { tmpdir } from 'node:os'
+ import { join } from 'node:path'
+-import { Context } from '../../harness/thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
+-import LlmRuntime, { createUserMessage } from '../../harness/thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
+-import type { GenerateOptions, StreamChunk } from '../../harness/thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
+-import SessionStore, { SESSION_FORMAT_VERSION } from '../../harness/thirdparty/deepseek-harness/packages/core/session/lib/index.js'
+-import type { SessionEvent, SessionHeader, SessionId } from '../../harness/thirdparty/deepseek-harness/packages/core/session/lib/index.js'
+-import SessionProjectionRegistry from '../../harness/thirdparty/deepseek-harness/packages/session/session-projection/lib/index.js'
+-import SystemPrompt from '../../harness/thirdparty/deepseek-harness/packages/core/system-prompt/lib/index.js'
+-import ToolRuntime from '../../harness/thirdparty/deepseek-harness/packages/core/tools/lib/index.js'
+-import { AgentRegistry } from '../../harness/thirdparty/deepseek-harness/packages/core/agent/lib/index.js'
+-import AgentLoop from '../../harness/thirdparty/deepseek-harness/packages/core/agent-loop/lib/index.js'
+-import { DeepSeekAdapter, resolveAdapterOptions } from '../../harness/thirdparty/deepseek-harness/packages/llm/llm-deepseek/lib/index.js'
+-import * as LocalFileSystem from '../../harness/thirdparty/deepseek-harness/packages/fs/fs-local/lib/index.js'
+-import * as FsPolicy from '../../harness/thirdparty/deepseek-harness/packages/fs/fs-observation-policy/lib/index.js'
+-import * as ToolFs from '../../harness/thirdparty/deepseek-harness/packages/fs/tool-fs/lib/index.js'
+-import * as ToolFsSearch from '../../harness/thirdparty/deepseek-harness/packages/fs/tool-fs-search/lib/index.js'
+-import * as LocalSubprocessRuntime from '../../harness/thirdparty/deepseek-harness/packages/subprocess/subprocess-local/lib/index.js'
+-import * as BashEnvPlugin from '../../harness/thirdparty/deepseek-harness/packages/shell/shell-env/lib/index.js'
+-import * as LocalBashExecutor from '../../harness/thirdparty/deepseek-harness/packages/shell/bash-local/lib/index.js'
+-import * as ToolBash from '../../harness/thirdparty/deepseek-harness/packages/shell/tool-bash/lib/index.js'
+-import * as LocalJobRegistry from '../../harness/thirdparty/deepseek-harness/packages/jobs/jobs-local/lib/index.js'
+-import * as ToolJobs from '../../harness/thirdparty/deepseek-harness/packages/jobs/tool-jobs/lib/index.js'
+-import * as ToolAskUser from '../../harness/thirdparty/deepseek-harness/packages/interaction/tool-ask-user/lib/index.js'
+-import type { TaskInstance, TaskRun } from '../../harness/packages/singularity/task/src/types.ts'
+-import { TaskService, rootTaskStoreId } from '../../harness/packages/singularity/task/src/index.ts'
+-import type { TaskEvent, TaskSnapshot } from '../../harness/packages/singularity/task/src/index.ts'
+-import { AgentRuntime } from '../../harness/packages/singularity/agent-runtime/src/index.ts'
+-import type { SpawnRequest } from '../../harness/packages/singularity/agent-runtime/src/types.ts'
+-import { ProposalReviewService } from '../../harness/packages/singularity/agent-singularity/src/proposal-review.ts'
+-import { defineCapabilityListTool } from '../../harness/packages/singularity/agent-singularity/src/tools/capability-list.ts'
+-import { defineTaskCancelTool } from '../../harness/packages/singularity/agent-singularity/src/tools/task-cancel.ts'
+-import { defineTaskDecomposeTool } from '../../harness/packages/singularity/agent-singularity/src/tools/task-decompose.ts'
+-import { defineTaskIntakeTool } from '../../harness/packages/singularity/agent-singularity/src/tools/task-intake.ts'
+-import { defineTaskProposalCancelTool } from '../../harness/packages/singularity/agent-singularity/src/tools/task-proposal-cancel.ts'
+-import { defineTaskProposalContinueTool } from '../../harness/packages/singularity/agent-singularity/src/tools/task-proposal-continue.ts'
+-import { defineTaskProposalReadTool } from '../../harness/packages/singularity/agent-singularity/src/tools/task-proposal-read.ts'
+-import { defineTaskReadTool } from '../../harness/packages/singularity/agent-singularity/src/tools/task-read.ts'
+-import { defineTaskStatusTool } from '../../harness/packages/singularity/agent-singularity/src/tools/task-status.ts'
+-import { defineTaskSubmitResultTool } from '../../harness/packages/singularity/agent-singularity/src/tools/task-submit-result.ts'
+-import { defineAskTool } from '../../harness/packages/singularity/agent-singularity/src/tools/ask.ts'
+-import { defineApproveTool } from '../../harness/packages/singularity/agent-singularity/src/tools/approve.ts'
+-import type { Config, RootContractSpec } from '../../harness/packages/singularity/task-runtime/src/index.ts'
+-import { TaskRuntime } from '../../harness/packages/singularity/task-runtime/src/index.ts'
+-import { VerifierRegistry } from '../../harness/packages/singularity/verifier/src/index.ts'
++import { Context } from '../../../../../../harness/thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
++import LlmRuntime, { createUserMessage } from '../../../../../../harness/thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
++import type { GenerateOptions, StreamChunk } from '../../../../../../harness/thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
++import SessionStore, { SESSION_FORMAT_VERSION } from '../../../../../../harness/thirdparty/deepseek-harness/packages/core/session/lib/index.js'
++import type { SessionEvent, SessionHeader, SessionId } from '../../../../../../harness/thirdparty/deepseek-harness/packages/core/session/lib/index.js'
++import SessionProjectionRegistry from '../../../../../../harness/thirdparty/deepseek-harness/packages/session/session-projection/lib/index.js'
++import SystemPrompt from '../../../../../../harness/thirdparty/deepseek-harness/packages/core/system-prompt/lib/index.js'
++import ToolRuntime from '../../../../../../harness/thirdparty/deepseek-harness/packages/core/tools/lib/index.js'
++import { AgentRegistry } from '../../../../../../harness/thirdparty/deepseek-harness/packages/core/agent/lib/index.js'
++import AgentLoop from '../../../../../../harness/thirdparty/deepseek-harness/packages/core/agent-loop/lib/index.js'
++import { DeepSeekAdapter, resolveAdapterOptions } from '../../../../../../harness/thirdparty/deepseek-harness/packages/llm/llm-deepseek/lib/index.js'
++import * as LocalFileSystem from '../../../../../../harness/thirdparty/deepseek-harness/packages/fs/fs-local/lib/index.js'
++import * as FsPolicy from '../../../../../../harness/thirdparty/deepseek-harness/packages/fs/fs-observation-policy/lib/index.js'
++import * as ToolFs from '../../../../../../harness/thirdparty/deepseek-harness/packages/fs/tool-fs/lib/index.js'
++import * as ToolFsSearch from '../../../../../../harness/thirdparty/deepseek-harness/packages/fs/tool-fs-search/lib/index.js'
++import * as LocalSubprocessRuntime from '../../../../../../harness/thirdparty/deepseek-harness/packages/subprocess/subprocess-local/lib/index.js'
++import * as BashEnvPlugin from '../../../../../../harness/thirdparty/deepseek-harness/packages/shell/shell-env/lib/index.js'
++import * as LocalBashExecutor from '../../../../../../harness/thirdparty/deepseek-harness/packages/shell/bash-local/lib/index.js'
++import * as ToolBash from '../../../../../../harness/thirdparty/deepseek-harness/packages/shell/tool-bash/lib/index.js'
++import * as LocalJobRegistry from '../../../../../../harness/thirdparty/deepseek-harness/packages/jobs/jobs-local/lib/index.js'
++import * as ToolJobs from '../../../../../../harness/thirdparty/deepseek-harness/packages/jobs/tool-jobs/lib/index.js'
++import * as ToolAskUser from '../../../../../../harness/thirdparty/deepseek-harness/packages/interaction/tool-ask-user/lib/index.js'
++import type { TaskInstance, TaskRun } from '../../../../../../harness/packages/singularity/task/src/types.ts'
++import { TaskService, rootTaskStoreId } from '../../../../../../harness/packages/singularity/task/src/index.ts'
++import type { TaskEvent, TaskSnapshot } from '../../../../../../harness/packages/singularity/task/src/index.ts'
++import { AgentRuntime } from '../../../../../../harness/packages/singularity/agent-runtime/src/index.ts'
++import type { SpawnRequest } from '../../../../../../harness/packages/singularity/agent-runtime/src/types.ts'
++import { ProposalReviewService } from '../../../../../../harness/packages/singularity/agent-singularity/src/proposal-review.ts'
++import { defineCapabilityListTool } from '../../../../../../harness/packages/singularity/agent-singularity/src/tools/capability-list.ts'
++import { defineTaskCancelTool } from '../../../../../../harness/packages/singularity/agent-singularity/src/tools/task-cancel.ts'
++import { defineTaskDecomposeTool } from '../../../../../../harness/packages/singularity/agent-singularity/src/tools/task-decompose.ts'
++import { defineTaskIntakeTool } from '../../../../../../harness/packages/singularity/agent-singularity/src/tools/task-intake.ts'
++import { defineTaskProposalCancelTool } from '../../../../../../harness/packages/singularity/agent-singularity/src/tools/task-proposal-cancel.ts'
++import { defineTaskProposalContinueTool } from '../../../../../../harness/packages/singularity/agent-singularity/src/tools/task-proposal-continue.ts'
++import { defineTaskProposalReadTool } from '../../../../../../harness/packages/singularity/agent-singularity/src/tools/task-proposal-read.ts'
++import { defineTaskReadTool } from '../../../../../../harness/packages/singularity/agent-singularity/src/tools/task-read.ts'
++import { defineTaskStatusTool } from '../../../../../../harness/packages/singularity/agent-singularity/src/tools/task-status.ts'
++import { defineTaskSubmitResultTool } from '../../../../../../harness/packages/singularity/agent-singularity/src/tools/task-submit-result.ts'
++import { defineAskTool } from '../../../../../../harness/packages/singularity/agent-singularity/src/tools/ask.ts'
++import { defineApproveTool } from '../../../../../../harness/packages/singularity/agent-singularity/src/tools/approve.ts'
++import type { Config, RootContractSpec } from '../../../../../../harness/packages/singularity/task-runtime/src/index.ts'
++import { TaskRuntime } from '../../../../../../harness/packages/singularity/task-runtime/src/index.ts'
++import { VerifierRegistry } from '../../../../../../harness/packages/singularity/verifier/src/index.ts'
+ import { MODEL, PROVIDER, gateway, redact } from './r1-env.ts'
+ import { ScriptedModelAdapter } from './r1-scripted-model.ts'
+ import type { ScriptEntry } from './r1-scripted-model.ts'
+@@ -485,7 +485,7 @@
+       // The fault hook throws inside the recording step alone — after the desk's
+       // answer is computed and before anything is pushed — which is exactly the
+       // pre-fix shape the old live-`Agent` serialization produced.
+-      if (options.recordingFault === true) throw new Error('cannot get property "toJSON" without inject')
++      // MUTANT pass2-no-hook: the recording-fault hook no longer fires
+       humanQuestions.push({
+         seam,
+         sessionId,

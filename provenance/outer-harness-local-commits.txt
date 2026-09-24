@@ -1,0 +1,82 @@
+66e6f2ff17 2026-09-24 docs: sync R1 progress review handoff
+421bdde7d2 2026-09-24 docs: checkpoint singularity R1 review pointer
+5c95240f49 2026-09-24 chore: sync singularity pointer for the R1 rework record
+b69c893ca8 2026-09-24 chore: sync singularity pointer for the R1 rework delivery record
+963b84ca1a 2026-09-24 chore: sync singularity pointer for the R1 supplemental rework
+53c3a69212 2026-09-24 docs: update singularity dispatch templates pointer
+319ab96fc0 2026-09-24 docs: checkpoint singularity dispatch review baseline
+032c37f3a3 2026-09-24 docs: update singularity architecture contract pointer
+5bcc23c946 2026-09-24 chore: checkpoint Singularity architecture contract decisions
+4ed964b72d 2026-09-24 chore: record Singularity task ownership audit guidance
+68cfc604cf 2026-09-24 chore: checkpoint Singularity task responsibility audit
+a2e97b339d 2026-09-24 chore: record Singularity context and evolution architecture guidance
+bdc2b9f710 2026-09-24 chore: checkpoint context ownership draft
+a3356062ea 2026-09-24 chore: checkpoint Singularity context architecture baseline
+ddc1ade3ee 2026-09-24 chore: record Singularity R1 review and A2 scope
+5db0efe0ab 2026-09-24 chore: checkpoint Singularity R1 review baseline
+ea9a3ad3f9 2026-09-24 chore: sync singularity pointer to the final R1 supplemental record
+c421cfb0ad 2026-09-24 chore: sync singularity pointer to the R1 delivery-commit record
+d1b270a3d7 2026-09-24 chore: sync singularity pointer to R1 supplemental validation delivery
+c48a1cd7fb 2026-09-24 chore: sync singularity R2 acceptance and R1 handoff
+a5068067ef 2026-09-24 chore: checkpoint singularity R2 acceptance baseline
+9b1b877d5f 2026-09-24 chore: sync singularity R2 Q1 supplemental rework (fix 8f9086e, records 40aabb8)
+ae1a722711 2026-09-24 chore: checkpoint R2 rework baseline (review findings committed)
+9f33ddc561 2026-09-24 chore: checkpoint singularity R2 progress review baseline
+2d1f943024 2026-09-23 chore: sync singularity R2 Q1 delivery (fix 250a04f, records edfcce3)
+3ac8676789 2026-09-23 chore: checkpoint singularity R2 dispatch baseline f9860b4
+e926045373 2026-09-23 chore: sync singularity review and R2 prompt baseline
+2c299b7d54 2026-09-23 chore: checkpoint singularity A0 rework delivery
+3c4b4dbb7c 2026-09-23 chore: sync singularity pointer to A0 rework baseline de85ae0
+fa4bc098d3 2026-09-23 chore: checkpoint singularity remediation review baseline
+251d35d83c 2026-09-23 chore: sync singularity pointer to R2 acceptance d5b0bb6
+6428b8ae30 2026-09-23 chore: sync singularity pointer to R1 acceptance
+15b0b63f80 2026-09-23 chore: sync singularity pointer to R1 blocked-state record 3b446cb
+c1e495ca4a 2026-09-23 chore: sync singularity pointer to A0+R0 acceptance 2e3175a
+e599b91994 2026-09-23 chore: sync singularity pointer to A0 phases B-D (214cd91..bd946ee)
+990f225ba6 2026-09-23 chore: sync singularity pointer to A0 phase A + R0-b internal commits
+34d889eccb 2026-09-23 chore: sync singularity pointer to R0-a baseline 391074a
+088a20f8cc 2026-09-23 chore: bump singularity submodule to guidance baseline 7171747
+5f6e7020e4 2026-09-23 chore: snapshot singularity before progress guidance and docs cleanup
+116e05e26f 2026-09-23 chore: preserve singularity remediation guidance baseline
+31bcf3a809 2026-09-23 chore: snapshot singularity before architecture documentation remediation
+a9254d46aa 2026-09-23 submodule: pin singularity fda3d29（T2+T3 契约审核与恢复交付基线）
+4d5d4b7812 2026-09-22 submodule: pin singularity 6d85c5e（A3 非阻塞运行与恢复交付基线）
+853e49a70c 2026-09-22 submodule: pin singularity eaa024f（S1-C 能力预检与版本绑定交付基线）
+7fadd85151 2026-09-22 submodule: pin singularity c2912af（S1-V 切片 2 验证器自测与受保护输入交付基线）
+f8839133e1 2026-09-21 submodule: pin singularity 741dcb2（T1 统一规范化契约交付基线）
+63c25a14b0 2026-09-21 submodule: pin singularity 8469388（T1 修改前基线：P4 修复文档的填表入口）
+b41bf0b41a 2026-09-21 submodule: pin P4 evidence regression fixes
+e658595809 2026-09-21 checkpoint: pin construction quality plan before P4 fixes
+dbca57cca7 2026-09-21 checkpoint: pin exploration architecture baseline
+cf6a4d6314 2026-09-21 submodule: singularity f6886cf（P4 第 3 轮终审文档修复：登记 entryDefect 防御性死分支已知边界，补录终审全链重跑与 heuristic 闸门变异复跑证据）
+dcd2fa0a00 2026-09-21 submodule: singularity b3d2a56（P4 第 2 轮复核文档修复：补录两个已知边界——replay 带映射契约失败关闭、真实链子 TaskRun.artifacts 恒空）
+51b6e2fd4a 2026-09-21 checkpoint: pin task construction design baseline
+9f818152bb 2026-09-21 submodule: singularity 7be57a1（P4 独立父验收与证据身份：父 AC childEvidence 映射 + acceptsArtifact + heuristic 标注）
+4bd9c42dce 2026-09-21 submodule: singularity 53b9831（P4 执行 prompt 派发入口基线备份）
+c198457d56 2026-09-21 submodule: singularity 05cb27c（P3 生产基线检查：apply 前复检生产 Skill 基线，冲突明确拒绝）
+a7df0ce6fd 2026-09-21 submodule: singularity 4c5308b（P2 单文件 Skill 候选内容绑定）
+531d85e132 2026-09-21 submodule: singularity 97f3118（P1 root-agent 严格类型闸）
+1497abcf58 2026-09-21 submodule: singularity 基线提交 c3cf7b3（P1/P2/P3 prompt 文档）
+1afb6567ac 2026-09-21 checkpoint: pin singularity validation gate baseline
+088a8d9193 2026-09-21 checkpoint: pin singularity before validation gate implementation
+3d07bb0f8c 2026-09-21 docs: align singularity domain guidance and planning entrypoints
+6c5eb49894 2026-09-21 checkpoint: preserve harness baseline before singularity guide audit
+6de1f78442 2026-09-17 chore(tools): bring the local gateway proxy back into tools/scripts
+9bf719eaec 2026-09-17 chore(harness-evolve): move the evaluation package and its scripts out to reference-only
+4f7a35b032 2026-09-17 chore(plugins): move workload-integration and pr-reviewer out to reference-only
+ac5f902033 2026-09-17 fix(dsh): honest gateway wiring in the launcher
+798a1b6021 2026-09-17 wip: carry over local harness-evolve, external-agents and design-doc work
+6a10fdbfb6 2026-09-17 fix(dsh): keep llm-deepseek on chat-completions for the OpenAI-compatible gateway
+a18afc120a 2026-09-17 chore(plugins): move ball-designer, chip-designer and verify-runner out to reference-only
+036c73fb91 2026-09-17 Merge origin/main (1b968f3f77 singularity UI fixes + 27b44a5ded dsh bump)
+4c17039096 2026-09-17 chore(submodules): pin preserved local work + upstream bumps
+32d969d02b 2026-09-16 feat(verify-runner): local verify-agent dispatch (spawn bb-verify child) replaces CI session plugin
+adf97c20e3 2026-09-16 chore(singularity): advance gitlink to 8e4988e (SpawnRequest.agentPreset + permissionPresets ctx fix)
+1c3006a298 2026-09-15 chore(verify-runner/ci): switch LLM route to tokenrhythm.studio (openai-completions)
+273c30232c 2026-09-15 feat(verify-runner/ci): wire EDA (dc/vcs/lc) into bb-verify complete layer
+db87c1a01c 2026-09-14 refactor(verify-runner/ci): split bb-verify.yml into thin workflow + step scripts
+c7ff1bbd29 2026-09-13 feat(verify-runner): absorb check.yaml pre-commit gate + regression.yml EDA lane contract
+ed15c82399 2026-09-13 feat(harness-evolve): local evaluation package (source only)
+9a7a13539c 2026-09-13 feat(tools): api-block gateway sync (sync-api/api-config) + dsh wiring
+8910398bbe 2026-09-13 feat(packages): deliver via ci-dispatch instead of gh pr create
+ff87caffe2 2026-09-13 feat(verify-runner): temp-branch dispatch verification (ref-only bb-verify)

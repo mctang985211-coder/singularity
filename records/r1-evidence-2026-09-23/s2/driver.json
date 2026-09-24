@@ -1,0 +1,248 @@
+{
+  "scenario": "s2",
+  "input": {
+    "rootContract": {
+      "objective": "answer.md 的全部内容恰好是 `The answer is 42`",
+      "acceptanceCriteria": [
+        {
+          "criterionId": "answer-content",
+          "command": "test \"$(cat answer.md)\" = \"The answer is 42\""
+        }
+      ]
+    },
+    "child": {
+      "objective": "创建 answer.md，内容恰好为 `The answer is 43`",
+      "acceptanceCriteria": [
+        {
+          "criterionId": "answer-exists",
+          "command": "test -f answer.md"
+        }
+      ]
+    }
+  },
+  "verdict": "passed",
+  "checks": {
+    "childVerified": {
+      "ok": true,
+      "detail": "t-4417f44f-e06a-415a-9437-bf668e6bedea:verified"
+    },
+    "rootNotVerified": {
+      "ok": true,
+      "detail": "root run failed"
+    },
+    "rootReasonNamesContent": {
+      "ok": true,
+      "detail": "mandatory criteria not satisfied: answer-content fail"
+    },
+    "commandReallyRan": {
+      "ok": true,
+      "detail": "answer-content:fail:exit=1:cmd=\"test \\\"$(cat answer.md)\\\" = \\\"The answer is 42\\\"\""
+    },
+    "injectedContent": {
+      "ok": true,
+      "detail": "raw=\"The answer is 43\""
+    }
+  },
+  "ids": {
+    "storeId": "sg-t-s-root",
+    "rootSessionId": "s-root",
+    "rootProposalId": "p-5f9f0fa06756e92b3025c0a52c45a58b751be6bc76a4920c4e7ec7f7ed723e0a",
+    "rootTaskId": "t-b72b86c3-77a4-4244-aa49-bd0cc7de14bd",
+    "rootRunId": "r-3cc16af1-99c4-4506-93e5-5a79a2978cfb",
+    "childTaskIds": [
+      "t-4417f44f-e06a-415a-9437-bf668e6bedea"
+    ],
+    "childRunIds": [
+      "r-60f011d5-af0b-41ee-a426-abafce50699c"
+    ],
+    "evidenceIds": [
+      "evidence-r-60f011d5-af0b-41ee-a426-abafce50699c-2d720fbe-7ba3-430f-934a-ea0d80204771",
+      "evidence-r-3cc16af1-99c4-4506-93e5-5a79a2978cfb-83d656e4-897e-46fd-ab92-1b13286abeaa"
+    ],
+    "workerSessions": [
+      "s-fb52f3b0-bf9b-43ac-86ec-97fd6893073c"
+    ]
+  },
+  "usage": [
+    {
+      "seq": 1,
+      "sessionId": "s-root",
+      "inputTokens": 6569,
+      "outputTokens": 43,
+      "cacheReadTokens": 0,
+      "cacheWriteTokens": 0,
+      "totalTokens": 6612,
+      "finishReason": "{\"kind\":\"tool-calls\"}"
+    },
+    {
+      "seq": 2,
+      "sessionId": "s-fb52f3b0-bf9b-43ac-86ec-97fd6893073c",
+      "inputTokens": 6333,
+      "outputTokens": 646,
+      "cacheReadTokens": 0,
+      "cacheWriteTokens": 0,
+      "totalTokens": 6979,
+      "finishReason": "{\"kind\":\"tool-calls\"}"
+    },
+    {
+      "seq": 3,
+      "sessionId": "s-fb52f3b0-bf9b-43ac-86ec-97fd6893073c",
+      "inputTokens": 7192,
+      "outputTokens": 210,
+      "cacheReadTokens": 0,
+      "cacheWriteTokens": 0,
+      "totalTokens": 7402,
+      "finishReason": "{\"kind\":\"tool-calls\"}"
+    },
+    {
+      "seq": 4,
+      "sessionId": "s-fb52f3b0-bf9b-43ac-86ec-97fd6893073c",
+      "inputTokens": 1317,
+      "outputTokens": 104,
+      "cacheReadTokens": 6144,
+      "cacheWriteTokens": 0,
+      "totalTokens": 7565,
+      "finishReason": "{\"kind\":\"tool-calls\"}"
+    },
+    {
+      "seq": 5,
+      "sessionId": "s-fb52f3b0-bf9b-43ac-86ec-97fd6893073c",
+      "inputTokens": 455,
+      "outputTokens": 358,
+      "cacheReadTokens": 7168,
+      "cacheWriteTokens": 0,
+      "totalTokens": 7981,
+      "finishReason": "{\"kind\":\"tool-calls\"}"
+    }
+  ],
+  "toolCalls": [
+    {
+      "seq": 1,
+      "sessionId": "s-root",
+      "callId": "chatcmpl-tool-a316edef18ffd7eb",
+      "name": "task_read",
+      "at": "2026-09-23T09:38:52.895Z",
+      "args": "{}",
+      "isError": false,
+      "resultText": "root task t-b72b86c3-77a4-4244-aa49-bd0cc7de14bd [running/decomposed]\nobjective: answer.md 的全部内容恰好是 `The answer is 42`\nacceptance criteria:\n- answer-content [deterministic] answer.md 的全部内容恰好是 `The answer is 42`\nchildren: 1\n- t-4417f44f-e06a-415a-9437-bf668e6bedea [running/leaf] run r-60f011d5-af0b-41ee-a426-abafce50699c [running] — phase active 创建 answer.md，内容恰好为 `The answer is 43`"
+    },
+    {
+      "seq": 2,
+      "sessionId": "s-fb52f3b0-bf9b-43ac-86ec-97fd6893073c",
+      "callId": "chatcmpl-tool-91c7a974c6616867",
+      "name": "task_read",
+      "at": "2026-09-23T09:38:59.040Z",
+      "args": "{}",
+      "isError": false,
+      "resultText": "task t-4417f44f-e06a-415a-9437-bf668e6bedea [running] depth 1\nobjective: 创建 answer.md，内容恰好为 `The answer is 43`\nacceptance criteria:\n- answer-exists [deterministic, mandatory] answer.md 存在 — $ test -f answer.md\nrun r-60f011d5-af0b-41ee-a426-abafce50699c [running] — phase active started 2026-09-23T09:38:48.457Z"
+    },
+    {
+      "seq": 3,
+      "sessionId": "s-fb52f3b0-bf9b-43ac-86ec-97fd6893073c",
+      "callId": "chatcmpl-tool-804552bf267b8fb8",
+      "name": "bash",
+      "at": "2026-09-23T09:38:59.044Z",
+      "args": "{\"command\":\"ls -la\",\"description\":\"List files in workspace directory\"}",
+      "isError": false,
+      "resultText": "total 12\ndrwxrwxr-x 3 ROXY ROXY 4096 Sep 23 17:38 .\ndrwxrwxr-x 4 ROXY ROXY 4096 Sep 23 17:38 ..\ndrwxrwxr-x 6 ROXY ROXY 4096 Sep 23 17:38 .git\n"
+    },
+    {
+      "seq": 4,
+      "sessionId": "s-fb52f3b0-bf9b-43ac-86ec-97fd6893073c",
+      "callId": "chatcmpl-tool-8561fa419e809749",
+      "name": "write",
+      "at": "2026-09-23T09:39:08.692Z",
+      "args": "{\"content\":\"The answer is 43\",\"file_path\":\"answer.md\"}",
+      "isError": false,
+      "resultText": "<path>/home/ROXY/code/bb_work/r1-run-scratch/s2/repo/answer.md</path>\n<type>file</type>\n<content>\nCreated file\n</content>"
+    },
+    {
+      "seq": 5,
+      "sessionId": "s-fb52f3b0-bf9b-43ac-86ec-97fd6893073c",
+      "callId": "chatcmpl-tool-bab16f66318a7afc",
+      "name": "bash",
+      "at": "2026-09-23T09:39:11.157Z",
+      "args": "{\"command\":\"test -f answer.md; echo \\\"test -f exit code: $?\\\"; xxd answer.md\",\"description\":\"Verify answer.md exists and show exact bytes\"}",
+      "isError": false,
+      "resultText": "test -f exit code: 0\n00000000: 5468 6520 616e 7377 6572 2069 7320 3433  The answer is 43\n"
+    },
+    {
+      "seq": 6,
+      "sessionId": "s-fb52f3b0-bf9b-43ac-86ec-97fd6893073c",
+      "callId": "chatcmpl-tool-9e0471ca5b499e72",
+      "name": "task_submit_result",
+      "at": "2026-09-23T09:39:17.562Z",
+      "args": "{\"summary\":\"Created answer.md containing exactly `The answer is 43` (16 bytes, no trailing newline). Verified the mandatory deterministic acceptance criterion: `test -f answer.md` exits 0.\"}",
+      "isError": false,
+      "resultText": "task_submit_result verified: run \"r-60f011d5-af0b-41ee-a426-abafce50699c\" submitted and verified."
+    }
+  ],
+  "spawns": [
+    {
+      "sessionId": "s-fb52f3b0-bf9b-43ac-86ec-97fd6893073c",
+      "name": "创建 answer.md，内容恰好为 `The answer is 43`",
+      "prompt": "# Delegated task t-4417f44f-e06a-415a-9437-bf668e6bedea\n\n创建 answer.md，内容恰好为 `The answer is 43`\n\n## Acceptance criteria\n\n| criterion | mode | mandatory | description | command | protected inputs |\n| --- | --- | --- | --- | --- | --- |\n| answer-exists | deterministic | yes | answer.md 存在 | test -f answer.md | — |\n\n## Handoff\n\n- Parent objective: answer.md 的全部内容恰好是 `The answer is 42`\n- Reason for delegation: one fixed child: the deterministic error injection\n\n## Constraints\n\n(none)\n\n## Decisions already made\n\n(none)\n\n## Relevant artifacts\n\n(none)\n\n## Relevant evidence\n\n(none)\n\n## Assumptions\n\n(none)\n\n## Open questions\n\n(none)\n\n## Parent session\n\n- The session that delegated this task is `s-root`.\n- Need more of that context? Read it exactly with `session_event_read` (one `seq`) or `session_trace` (lineage and neighborhood).\n- Full-text search is disabled in this deployment, so read parent events by sequence.\n\n## Rules\n\n- Do the work; never declare completion yourself — an external verifier checks every mandatory criterion.\n- Where a criterion lists a command, make that command exit 0 in the checkout.\n- A criterion's declared protected inputs must not be modified: the verifier re-checks their identity before judging, and a changed or missing input fails the criterion, naming the path.\n- Keep changes scoped to this task. Need a human decision? Ask with `ask_user_question`.\n- Cannot continue? Fail with a clear reason — the orchestrator blocks dependent tasks and reports to the parent task.\n- If the work turns out not to be atomic after all, call `task_decompose` yourself: this deployment admits a task's own decomposition, so your parent did not have to predict it. The call still has to clear admission — structure, acyclic dependencies, a command on every executable criterion, capability coverage, depth and batch-size limits — and a task may split only once; a refusal names the rule that blocked it, and that reason is what you act on. Split only into pieces a verifier can judge on its own; otherwise do the work here.\n- A decomposition can come back waiting for a human review: it answers with a proposal id and admits nothing, so no child exists and nothing is spawned until the review decides. Read the batch as it was recorded with `task_proposal_read`; do not re-submit the same batch while it waits, because the same request is answered with the same proposal. If the review refuses it, revise the batch from the reason on the record and decompose again — a revision is a new proposal, never a re-run of the refused one.\n- This prompt is where you start, not the whole truth: re-read your own contract and run with `task_read`, and the whole tree with `task_status`, whenever you need them.\n- When the work is done, hand it in with `task_submit_result`: a summary of what you delivered plus the evidence references you produced. The call closes this run to further writes, drains the calls still in flight, and lets the runtime put the run in front of the verifier; the verdict comes back as its answer.\n- Going idle is not a submission: the runtime sees an idle session where a submission was due, reminds you once, and stops the run under the no-progress budget if nothing changes. Submit when the work is done, or say what is missing with a clear failure.\n- `task_verify` is only a self-check: it re-runs the verifier and records the evidence it produces, never changes task status, and does not stand in for a submission.\n",
+      "at": "2026-09-23T09:38:48.460Z"
+    }
+  ],
+  "humanQuestions": [],
+  "rootToolSurface": [
+    "capability_list",
+    "escalate",
+    "graph_mark_ready",
+    "graph_spawn",
+    "hitl_approve",
+    "hitl_ask",
+    "skill",
+    "task_cancel",
+    "task_decompose",
+    "task_diagnose",
+    "task_intake",
+    "task_proposal_cancel",
+    "task_proposal_continue",
+    "task_proposal_read",
+    "task_read",
+    "task_review_agent",
+    "task_review_pack",
+    "task_status",
+    "task_submit_result",
+    "task_verify"
+  ],
+  "reviewAsks": [],
+  "answerFile": {
+    "path": "/home/ROXY/code/bb_work/r1-run-scratch/s2/repo/answer.md",
+    "raw": "The answer is 43",
+    "bytes": 16
+  },
+  "rootTerminal": {
+    "status": "failed"
+  },
+  "events": [
+    "TaskProposalSubmitted@root-proposal",
+    "TaskCreated@t-b72b86c3-77a4-4244-aa49-bd0cc7de14bd",
+    "TaskAdmitted@t-b72b86c3-77a4-4244-aa49-bd0cc7de14bd",
+    "CapabilityResolved@t-b72b86c3-77a4-4244-aa49-bd0cc7de14bd",
+    "TaskStarted@t-b72b86c3-77a4-4244-aa49-bd0cc7de14bd",
+    "TaskProposalAdmitted@root-proposal",
+    "TaskProposalSubmitted@t-b72b86c3-77a4-4244-aa49-bd0cc7de14bd",
+    "TaskCreated@t-4417f44f-e06a-415a-9437-bf668e6bedea",
+    "TaskAdmitted@t-4417f44f-e06a-415a-9437-bf668e6bedea",
+    "TaskDecomposed@t-b72b86c3-77a4-4244-aa49-bd0cc7de14bd",
+    "CapabilityResolved@t-4417f44f-e06a-415a-9437-bf668e6bedea",
+    "RunPhaseChanged@t-b72b86c3-77a4-4244-aa49-bd0cc7de14bd",
+    "TaskProposalAdmitted@t-b72b86c3-77a4-4244-aa49-bd0cc7de14bd",
+    "HandoffCreated@t-4417f44f-e06a-415a-9437-bf668e6bedea",
+    "TaskStarted@t-4417f44f-e06a-415a-9437-bf668e6bedea",
+    "RunPhaseChanged@t-4417f44f-e06a-415a-9437-bf668e6bedea",
+    "TaskVerifying@t-4417f44f-e06a-415a-9437-bf668e6bedea",
+    "EvidenceProduced@t-4417f44f-e06a-415a-9437-bf668e6bedea",
+    "TaskVerified@t-4417f44f-e06a-415a-9437-bf668e6bedea",
+    "ReviewRecorded@t-4417f44f-e06a-415a-9437-bf668e6bedea",
+    "RunPhaseChanged@t-b72b86c3-77a4-4244-aa49-bd0cc7de14bd",
+    "TaskVerifying@t-b72b86c3-77a4-4244-aa49-bd0cc7de14bd",
+    "EvidenceProduced@t-b72b86c3-77a4-4244-aa49-bd0cc7de14bd",
+    "TaskFailed@t-b72b86c3-77a4-4244-aa49-bd0cc7de14bd",
+    "ReviewRecorded@t-b72b86c3-77a4-4244-aa49-bd0cc7de14bd"
+  ],
+  "notes": []
+}

@@ -1,0 +1,217 @@
+{
+  "schemaVersion": "r1-supplemental-ledger/1",
+  "round": "r1-supplemental-2026-09-24",
+  "ticket": "plan-item-8-r1-q4-q5",
+  "generatedAt": "2026-09-24T01:54:30+08:00",
+  "generatedBy": "run-subagent (the round's single paid attempt)",
+  "accountingRules": [
+    "one entry per new attempt of this round; the connectivity smoke counts as an entry because it was made (frozen contract §3: 做了就计入)",
+    "a figure the run never reported is recorded as 'not recorded', never as 0",
+    "cacheRead is kept in its own column and is never added into the input/output total (no double counting of cached tokens)",
+    "historical figures are reproduced from frozen contract §5, not recomputed and not extended"
+  ],
+  "attempts": [
+    {
+      "id": "smoke-1",
+      "kind": "connectivity smoke (this round's gate; not consumed on failure)",
+      "directory": "evidence/smoke-1/",
+      "input": {
+        "literalMessage": "ping",
+        "literalFixedAnswer": null,
+        "model": "step-5-preview",
+        "provider": "deepseek-official",
+        "adapter": "DeepSeekAdapter (production), one ctx.llm.stream call (driver/r1-smoke.ts)",
+        "reasoningEffort": "high",
+        "gateway": "https://api.stepfun.com/step_plan/v1",
+        "environmentSwitches": "none: a bare cordis Context + LlmRuntime, no DSH_HOME, no scenario repo, no task runtime, no task review, no evolution"
+      },
+      "driverHashes": {
+        "driver/r1-s3.spec.ts": "e099a1d49cf2b51faa27224cf5b73942eda34ad0f474096a414710f631e52773",
+        "driver/vitest.r1-run.config.ts": "e13553befbe21a41bfb4164fa76178c73025db71d3f83ba0d602a8eb26b62ee6",
+        "driver/r1-smoke.ts": "3e71b33571055a3e3bef22e59be7a57e91214a96bf5cfe513f8c404429c1d35e",
+        "driver/r1-env.ts": "fd4a99db8bfded27e956a676aca70d05d1ff18722ea215a38b4874dc32f735b5"
+      },
+      "contractHashes": {
+        "fixtures/frozen-contract.md": "1234da2fd0d5e43d9ef0eb693c617b99ed7708ab755debaa04a43dfd68b2df03",
+        "fixtures/frozen-contract.json": "22170e4341b73bc31c570ae5d0368a1725e3ca0fa70c57d943b44c33f3b29e3d",
+        "driver/s3-criteria.ts": "4ce8095ca063924239cbadd8654284ae8a0d4b903961d1d604e4b046bdafe92c"
+      },
+      "startedAt": "2026-09-23T17:46:23.856Z (derived: result 'at' 17:46:29.244Z minus the vitest-reported 5388 ms; the call itself records only its completion)",
+      "endedAt": "2026-09-23T17:46:29.244Z (evidence/smoke-1/result.json 'at')",
+      "references": {
+        "session": "s-smoke (synthetic id passed to llm.stream; outside the scenario stack, so no session log is persisted)",
+        "task": null,
+        "run": null,
+        "evidence": null,
+        "reasonNothingCreated": "the smoke is a single adapter-level call: it opens no store, no task and no run, and writes only evidence/smoke-1/result.json"
+      },
+      "usage": {
+        "inputTokens": 12,
+        "outputTokens": 409,
+        "cacheReadTokens": "not recorded (driver/r1-smoke.ts reads only inputTokens/outputTokens from the usage chunk)",
+        "cacheWriteTokens": "not recorded (same reason)",
+        "finishReason": "{\"kind\":\"stop\"}"
+      },
+      "toolCalls": { "count": 0, "names": [] },
+      "modelCalls": 1,
+      "stopReason": "smoke ok=true: the gate passed and the S3 attempt was allowed to start",
+      "verdict": "not a scenario attempt: the connectivity gate reported ok=true with finishReason stop; it is judged by nothing but its own record",
+      "evidencePath": "evidence/smoke-1/result.json"
+    },
+    {
+      "id": "s3",
+      "kind": "the round's single S3 attempt (no retry; a rerun is refused unless R1_ALLOW_RERUN=1, which was never set)",
+      "directory": "evidence/s3/",
+      "input": {
+        "literalMessage": "Create report.txt summarizing the quarter.",
+        "literalFixedAnswer": "No data was provided; state that explicitly.",
+        "model": "step-5-preview",
+        "provider": "deepseek-official",
+        "adapter": "DeepSeekAdapter (production)",
+        "reasoningEffort": "high",
+        "gateway": "https://api.stepfun.com/step_plan/v1",
+        "environmentSwitches": [
+          "run scratch run/s3/{repo,dsh-home}; repo is a fresh `git init` empty checkout",
+          "DSH_HOME and HOME isolated to run/s3/dsh-home",
+          "generatedTaskReview: off",
+          "evolution: off (default)",
+          "rootBudget { wallTimeMs: 300000, maxRuns: 8 } (hard, enforced by the A3 runtime)",
+          "entry is the real user message through the session inbox (user/message with source.kind 'user'), no fabricated log, no intake bypass",
+          "R1_ALLOW_RERUN not set; recordingFault not set"
+        ]
+      },
+      "driverHashes": {
+        "driver/r1-s3.spec.ts": "e099a1d49cf2b51faa27224cf5b73942eda34ad0f474096a414710f631e52773",
+        "driver/vitest.r1-run.config.ts": "e13553befbe21a41bfb4164fa76178c73025db71d3f83ba0d602a8eb26b62ee6",
+        "driver/r1-stack.ts": "c227e843bc3de0da372ea38197e5e731b04d75a9af2460c4e547056ec6391437",
+        "driver/r1-record.ts": "15a207d91897976ad34b0d0fe944302fa8ed3dc84362935bea265308ccd047a9",
+        "driver/r1-env.ts": "fd4a99db8bfded27e956a676aca70d05d1ff18722ea215a38b4874dc32f735b5",
+        "note": "the full driver-file hash set the run itself recorded is in evidence/s3/run-meta.json:driverFiles"
+      },
+      "contractHashes": {
+        "fixtures/frozen-contract.md": "1234da2fd0d5e43d9ef0eb693c617b99ed7708ab755debaa04a43dfd68b2df03",
+        "fixtures/frozen-contract.json": "22170e4341b73bc31c570ae5d0368a1725e3ca0fa70c57d943b44c33f3b29e3d",
+        "driver/s3-criteria.ts": "4ce8095ca063924239cbadd8654284ae8a0d4b903961d1d604e4b046bdafe92c"
+      },
+      "startedAt": "2026-09-23T17:46:29.254Z",
+      "endedAt": "2026-09-23T17:49:53.932Z",
+      "wallTimeMs": 204678,
+      "references": {
+        "store": "sg-t-s-root",
+        "session": "s-root (root) and s-b62da3c5-9506-4a65-81f9-441fc72de7ea (the spawned worker)",
+        "task": "t-82a86cf4-2c27-41cb-a160-5e983d5e1f45 (root), t-2a3d249d-abfe-4ff9-9ea9-57401545ccca (child)",
+        "run": "r-19deee56-ea78-49e7-b5f5-8ed81cac7da3 (root), r-45b9575e-1646-4552-9712-7885db9a4787 (child)",
+        "proposal": "p-61df7112c8753fbccabccaa2b02ddc9105e5945510974fc06413ed8359c0354f",
+        "evidence": [
+          "evidence-r-19deee56-ea78-49e7-b5f5-8ed81cac7da3-afdb9844-5830-4a63-89d5-23a799365367 (root)",
+          "evidence-r-45b9575e-1646-4552-9712-7885db9a4787-a9d066ce-dcd4-41fc-bfb4-20207e28e876 (child)"
+        ],
+        "artifact": "run/s3/repo/report.txt, archived as evidence/s3/repo/report.txt, 822 bytes, sha256 befd505dbd68f18df24def575ae55bc4383ae6ee362cceeeb6b1b3dd08aaaf9f"
+      },
+      "usage": {
+        "records": 15,
+        "inputTokens": 34518,
+        "outputTokens": 16097,
+        "cacheReadTokens": 168704,
+        "cacheWriteTokens": 0,
+        "totalTokensReported": 219319,
+        "bySession": [
+          { "sessionId": "s-root", "records": 9, "inputTokens": 24549, "outputTokens": 14727, "cacheReadTokens": 129024, "cacheWriteTokens": 0 },
+          { "sessionId": "s-b62da3c5-9506-4a65-81f9-441fc72de7ea", "records": 6, "inputTokens": 9969, "outputTokens": 1370, "cacheReadTokens": 39680, "cacheWriteTokens": 0 }
+        ],
+        "notRecorded": "one root-session model request (turn 3 step 1, the post-terminal 'batch settled' turn) produced no usage record: 10 requests reached the adapter boundary for s-root, 9 usage records exist. Its tokens are unrecorded, not zero.",
+        "recorderCaveat": "r1-stack.ts stores `chunk.usage.cacheWriteTokens ?? 0`, so the 0 column means 'reported as 0 or absent'"
+      },
+      "toolCalls": {
+        "count": 17,
+        "errors": 0,
+        "namesInOrder": ["task_read", "capability_list", "hitl_ask", "task_intake", "task_read", "task_decompose", "task_status", "task_read", "bash", "bash", "task_status", "write", "bash", "bash", "bash", "read", "task_submit_result"]
+      },
+      "modelRequests": { "rootSession": 10, "workerSession": 6 },
+      "spawns": 1,
+      "rootTerminal": "verified",
+      "stopReason": "root terminal: verified",
+      "verifierVerdicts": {
+        "root": { "ac-1": "pass", "ac-2": "pass", "ac-3": "pass", "ac-4": "pass (composite)" },
+        "child": { "c-1": "pass", "c-2": "pass", "c-3": "pass" },
+        "failures": "none: 7 of 7 criteria pass, no review anomaly"
+      },
+      "softLimitCheck": {
+        "toolCallsLimit": 100,
+        "toolCallsObserved": 17,
+        "wallTimeLimitMs": 900000,
+        "wallTimeObservedScenarioMs": 204678,
+        "wallTimeObservedWholeCommandMs": 212785,
+        "exceeded": false,
+        "source": "evidence/s3/run-meta.json:budget.soft.exceeded is [] (empty)"
+      },
+      "verdict": "pass",
+      "verdictSource": "evidence/criteria-replay/s3-run.json — decided by the frozen driver/s3-criteria.ts (sha256 4ce8095c…) on this attempt's driver.json plus the independent adjudication evidence/adjudication/s3-run.json (reviewer agent-1, draft:false); path2-limited-goal, all 14 checks ok",
+      "evidencePath": "evidence/s3/",
+      "note": "the run spec computes no verdict; driver/s3-criteria.ts decides afterwards against an independent semantic adjudication of this record — this verdict was added by the round owner after that decision, and the verdict of the smoke above is left as its own record"
+    }
+  ],
+  "historyCorrection": {
+    "provenance": "frozen contract §5 (and fixtures/frozen-contract.json:corrections); reproduced verbatim, not recomputed and not extended",
+    "existingRecordsMinTokens": 175461,
+    "existingRecordsMinToolCalls": 58,
+    "withCacheReadsMin": 501349,
+    "smokeNote": "the first round's two smokes (200 tokens) are already inside budget.json's 895 — do not add them again",
+    "missing": "the first round's complete session log was overwritten; the figures are a lower bound from surviving records, not a full accounting",
+    "arithmeticCorrection": "added by the round owner after the independent review (agent-1, pass 2): the cache-inclusive addend is 96251 (the first round's 31483 in+out plus 64768 cacheRead), so 501349 = 405098 (budget.json, cache-inclusive) + 96251. The frozen contract §5's parenthetical printed 96451, which is the first round's cache-inclusive total *including its own two smokes* (200 tokens already inside budget.json's 895); adding that fuller figure would double-count 200 tokens. The total 501349 is unaffected. The frozen contract file itself was not edited after the run (it is frozen); this note and the round record carry the correction."
+  },
+  "delivery": {
+    "productionCodeChanged": false,
+    "singularity": {
+      "verifiedBaseline": "9f8ba92242c8ec650dcca23aedea4cd6c6492aa1",
+      "documentationDeliveryCommit": "fc71df0",
+      "followUpRecordCommits": ["49c91c9", "82aa37c"],
+      "worktreeAfterCommit": "clean"
+    },
+    "outerHarness": {
+      "baseline": "c48a1cd7fba6fb43fa1da777ca917487bda589d7",
+      "firstPointerSync": "d1b270a3d7",
+      "finalPointerSync": "ea9a3ad3f9",
+      "remainingWorktreeChange": "thirdparty/deepseek-harness submodule dirty marker (pre-existing, pointer unchanged)"
+    },
+    "pushed": false,
+    "deployed": false
+  },
+  "thisRound": {
+    "increment": {
+      "smokeModelCalls": 1,
+      "smokeInputTokens": 12,
+      "smokeOutputTokens": 409,
+      "smokeCacheReadTokens": "not recorded",
+      "smokeCacheWriteTokens": "not recorded",
+      "smokeToolCalls": 0,
+      "attemptInputTokens": 34518,
+      "attemptOutputTokens": 16097,
+      "attemptCacheReadTokens": 168704,
+      "attemptCacheWriteTokens": 0,
+      "attemptToolCalls": 17,
+      "inputPlusOutputTokens": 51036,
+      "toolCalls": 17,
+      "cacheReadTokensSeparateColumn": 168704,
+      "note": "the smoke contributes no tool calls; its input+output (421 tokens) is included in inputPlusOutputTokens"
+    },
+    "cumulative": {
+      "inputPlusOutputTokensLowerBound": 226497,
+      "toolCallsLowerBound": 75,
+      "withCacheReadsLowerBound": 721089,
+      "whyLowerBound": [
+        "the historical side is itself a lower bound (its first-round session log was overwritten)",
+        "one root-session model request of this attempt has no usage record",
+        "the smoke's cacheRead/cacheWrite were never reported by the smoke's own accounting"
+      ],
+      "cacheReadColumnKeptSeparate": "226497 (input+output) and 721089 (with cache reads) are two different columns; the 168704 cache-read tokens of this round are not inside the 226497, and the cache-inclusive figure is 175461+51036 (input+output) plus 325888+168704 (cacheRead) = 501349 + 219740"
+    },
+    "softLimitSummary": {
+      "toolCalls": 17,
+      "toolCallsLimit": 100,
+      "wallTimeMsWholePaidCommand": 212785,
+      "wallTimeLimitMs": 900000,
+      "exceeded": false
+    }
+  }
+}

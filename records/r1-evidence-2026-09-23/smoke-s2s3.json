@@ -1,0 +1,28 @@
+[
+  {
+    "ok": true,
+    "baseUrl": "https://api.stepfun.com/step_plan/v1",
+    "keyLength": 65,
+    "model": "step-5-preview",
+    "text": "pong! 👋 I'm here and responsive. What can I help you with today?",
+    "finishReason": {
+      "kind": "stop"
+    },
+    "inputTokens": 12,
+    "outputTokens": 136
+  },
+  {
+    "ok": true,
+    "baseUrl": "https://api.stepfun.com/step_plan/v1",
+    "keyLength": 65,
+    "model": "step-5-preview",
+    "text": "Ping is a network diagnostic tool used to test connectivity ... (the model read \"ping\" literally and answered with a tutorial; see run log)",
+    "finishReason": {
+      "kind": "stop"
+    },
+    "inputTokens": 12,
+    "outputTokens": 535,
+    "error": null,
+    "_note": "the standalone r1-smoke.spec.ts gate that ran in the same S2/S3 invocation; recorded from its console output in r1-run-scratch-s2s3.log, so the budget ledger counts every model call of the round"
+  }
+]

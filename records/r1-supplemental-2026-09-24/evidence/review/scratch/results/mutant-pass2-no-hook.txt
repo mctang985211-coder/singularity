@@ -1,0 +1,47 @@
+../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts (1:449) [33m[UNRESOLVED_IMPORT] [0mCould not resolve 'vitest/config' in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts
+ - Module not found, treating it as an external dependency in ../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts at 449..464
+
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (../r1-supplemental-2026-09-24/evidence/review/scratch/vitest.scratch.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /home/ROXY/code/bb_work/harness
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/pass2-no-hook/r1-wiring.spec.ts (4 tests | 1 failed) 2190ms
+     ✓ delivers the fixed answer verbatim through the real tool and the criteria pass the converged run  574ms
+     ✓ records the failed clarification and the criteria reject the frozen goal that follows it  545ms
+     ✓ records the unanswered clarification; a goal that depends on it is rejected, one that retains it is not  532ms
+     × pins that a recording failure cannot change or swallow the product path 537ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/pass2-no-hook/r1-wiring.spec.ts > r1 wiring (scripted model): the real hitl_ask chain and the frozen criteria > pins that a recording failure cannot change or swallow the product path
+AssertionError: expected { questionId: 'hitl-ask', …(3) } to be null
+
+- Expected:
+null
+
++ Received:
+{
+  "answer": "No data was provided; state that explicitly.",
+  "at": "2026-09-23T18:03:19.000Z",
+  "question": "Which quarter should the report cover, and what data should it summarize?",
+  "questionId": "hitl-ask",
+}
+
+ ❯ ../r1-supplemental-2026-09-24/evidence/review/scratch/mutants/pass2-no-hook/r1-wiring.spec.ts:421:25
+    419|       // The failure is not swallowed: the desk record is absent and t…
+    420|       // is recorded as its own fact, never turned into an answer or a…
+    421|       expect(call.desk).toBeNull()
+       |                         ^
+    422|       expect(record.recordErrors).toHaveLength(1)
+    423|       expect(record.recordErrors[0]).toContain('recording failed')
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 3 passed (4)
+   Start at  02:03:15
+   Duration  3.97s (transform 1.22s, setup 0ms, import 1.65s, tests 2.19s, environment 0ms)
+

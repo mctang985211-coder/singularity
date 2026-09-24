@@ -1,0 +1,75 @@
+99e1311 2026-09-24 fix(agent-runtime,agent-singularity): an assumption never settles an unconfirmed condition
+afb2a12 2026-09-24 docs: route completed R1 rework to progress review
+5bc69ac 2026-09-24 docs: checkpoint before R1 progress review handoff
+d98f8a7 2026-09-24 docs: name the R1 rework record commits in the plan entry
+385a39c 2026-09-24 docs: record the R1 rework delivery commit in the plan entry
+a85a05c 2026-09-24 docs: R1 supplemental rework — criteria fixes, cache-write correction, S3 re-judgment
+8795a4e 2026-09-24 docs: review architecture and add ready-to-dispatch prompts
+e762946 2026-09-24 docs: checkpoint before dispatch readiness review
+8aaf13a 2026-09-24 docs: freeze context recovery and evolution delivery contracts
+70bcf4c 2026-09-24 docs: checkpoint before freezing remaining architecture contracts
+49c24c8 2026-09-24 docs: audit task ownership and detail bounded runtime migrations
+50cb580 2026-09-24 docs: checkpoint before existing task responsibility audit
+236b86a 2026-09-24 docs: define context ownership and align evolution construction plans
+f9d1b7b 2026-09-24 docs: preserve context ownership draft before architecture synthesis
+beb1350 2026-09-24 docs: checkpoint before context ownership redesign
+21ac1a1 2026-09-24 docs: reject R1 acceptance and narrow A2 construction scope
+1cd0d8c 2026-09-24 docs: checkpoint R1 review baseline before plan correction
+82aa37c 2026-09-24 docs: make the R1 delivery-commit line self-contained (no chased SHAs)
+49c91c9 2026-09-24 docs: record the R1 supplemental delivery commits (singularity fc71df0, outer d1b270a3d7)
+fc71df0 2026-09-24 docs: R1 supplemental validation (Q4/Q5) — fixture fix, frozen criteria, one real S3
+9f8ba92 2026-09-24 docs: accept R2 Q1 rework and open R1 validation
+e9f9a1b 2026-09-24 chore: checkpoint R2 rework before progress acceptance
+40aabb8 2026-09-24 docs: R2 Q1 supplemental rework — record the straddled-read fix and its evidence
+8f9086e 2026-09-24 fix(task-runtime): a store read that straddled a decision may not move the gate
+cecc5b6 2026-09-24 docs: checkpoint 2026-09-24 R2 progress review (Q1 rework: stale query across the completion point)
+0400d25 2026-09-24 chore: checkpoint R2 delivery before progress review
+edfcce3 2026-09-23 docs: R2 Q1 — record the cancellation-window gate fix and its acceptance evidence
+250a04f 2026-09-23 fix(task-runtime): a cancellation's write barrier survives a query in its window
+f9860b4 2026-09-23 docs: checkpoint R2 dispatch baseline and R1 supplemental material
+4523ef1 2026-09-23 docs: checkpoint A0 acceptance and R2 dispatch
+cce3157 2026-09-23 chore: checkpoint A0 rework delivery before acceptance review
+de85ae0 2026-09-23 docs: checkpoint remediation review baseline before A0 rework
+a4c1da0 2026-09-23 chore: checkpoint remediation delivery before quality review
+d5b0bb6 2026-09-23 docs: R2 acceptance — record completion and review defect corrections
+7595b6d 2026-09-23 docs: R1 acceptance — all three scenarios passed with the real model
+3b446cb 2026-09-23 docs: R1 execution record — S1 passed with the real model, S2/S3 blocked by the fixed budget
+2e3175a 2026-09-23 docs: A0+R0 acceptance — record completion and review defect corrections
+bd946ee 2026-09-23 test(docs): A0 phase D — root intake integration acceptance and doc sync
+b3ee5f7 2026-09-23 feat(agent-singularity,agent-runtime,graphs): A0 phase C — task_intake tool, root views, intake prompt
+214cd91 2026-09-23 feat(task-runtime,graphs): A0 phase B — root contract intake service layer
+9c311fe 2026-09-23 feat(agent-runtime): R0-b converge default root surface on the evolution switch
+0a18318 2026-09-23 feat(task): A0 phase A — TaskProposal root kind with atomic root consumption
+391074a 2026-09-23 feat(agent-singularity): R0-a deployment switch gates evolution tool registration
+7171747 2026-09-23 docs: baseline guidance revision before A0+R0 remediation
+131ff54 2026-09-23 docs: preserve bounded single-task dispatch template
+917f585 2026-09-23 docs: align architecture remediation scope and dispatch guidance
+1430103 2026-09-23 docs: snapshot architecture review and root intake design before remediation
+fda3d29 2026-09-23 feat(task,task-runtime,agent-runtime,agent-singularity): T2+T3 contract review and recovery
+6d85c5e 2026-09-22 feat(task,task-runtime,agent-runtime,agent-singularity): A3 non-blocking batch coordination and recovery
+eaa024f 2026-09-22 feat(task,task-runtime,agent-runtime,agent-singularity): S1-C capability provider precheck and run version binding
+c2912af 2026-09-22 feat(verifier,task,task-runtime,agent-singularity): S1-V slice 2 verifier selftest and protected inputs
+741dcb2 2026-09-21 feat(task,task-runtime,agent-singularity): T1 normalized task contract and content identity
+8469388 2026-09-21 docs: make the dispatch order a fillable table with an acceptance record template
+f9039a4 2026-09-21 fix: enforce P4 evidence rules across replay and verifier dispatch
+ff259e0 2026-09-21 checkpoint: preserve construction quality plan before P4 fixes
+5a4f3b9 2026-09-21 checkpoint: preserve exploration architecture before iteration guidance
+f6886cf 2026-09-21 fix(docs): P4 final review — 登记 entryDefect 防御性死分支边界，补录终审全链重跑与 heuristic 闸门变异复跑证据
+b3d2a56 2026-09-21 docs: P4 review fixes — 记录两个已知边界（replay 带映射契约失败关闭；真实链子 TaskRun.artifacts 恒空，evidenceRef 只匹配 EvidenceBundle）
+9900959 2026-09-21 checkpoint: preserve task construction design before exploration architecture
+7be57a1 2026-09-21 feat(task,verifier,task-runtime): P4 独立父验收与证据身份（父 AC childEvidence 映射 + acceptsArtifact 原始输入 + heuristic 标注）
+53b9831 2026-09-21 docs: 添加 P4 执行 prompt 派发入口（独立父验收与证据身份）
+05cb27c 2026-09-21 P3: 生产基线检查（prepare 单次读取记录 skillBaseline → apply 人审前/写入前复检 → 冲突明确拒绝）
+4c5308b 2026-09-21 P2: 单文件 Skill 候选内容绑定（prepare 摘要 → replay 报告身份 → 晋升闸/apply 复检）
+97f3118 2026-09-21 P1: root-agent 严格类型闸（tsc 接入 build，12 处类型错误归零）
+c3cf7b3 2026-09-21 docs: 添加 P1/P2/P3 执行 prompt 派发入口（基线备份）
+6fe9c26 2026-09-21 checkpoint: preserve replay validation gates before task prompts
+da48925 2026-09-21 checkpoint: preserve autonomous evolution direction before validation gates
+f3842b5 2026-09-21 docs: align task and skill direction with runtime baseline
+b00915c 2026-09-21 checkpoint: preserve baseline before task and skill guide audit
+19af105 2026-09-20 checkpoint(2026-09-20): baseline before D1 remediation — rollback point
+0dd508a 2026-09-17 docs: working guide — DSH v0.1.6 upgrade notes and 2026-09-17 decisions
+d498752 2026-09-17 fix(graph,layout): contain a failed pre-open store instead of floating the rejection
+e634655 2026-09-17 wip: singularity task runtime + guide (preserved before upstream update)
+8e4988e 2026-09-15 fix(agent-runtime): resolve permissionPresets through the runtime context in agent setup
+1f93a36 2026-09-15 feat(agent-runtime): optional agentPreset on SpawnRequest

@@ -1,0 +1,73 @@
+{
+  "draft": false,
+  "scenario": "s3",
+  "subject": "r1-evidence-2026-09-23/s3/driver.json (sha256 349e6615f48bf096bf3e8d09f4185ed463bfa86e4330c9493082661d800c452a) + r1-evidence-2026-09-23/s3/dsh-home/session-log/s-root.jsonl (sha256 7b053f4067b8b8302487d67dbcd01ec20cd1a27d3551501d59bc91143d67efe3); reviewed read-only, nothing written to the historical tree",
+  "reviewer": "r1-criteria-review (independent reviewer of the S3 trajectory; not the criteria implementer, not the driver author)",
+  "reviewedAt": "2026-09-24T01:32:13+08:00",
+  "conditions": {
+    "quarter": {
+      "label": "unknown",
+      "note": "The one hitl_ask call asked the user to choose the quarter (toolCalls[0].args.prompt, which even offers 'the most recently completed quarter' as a fallback the user never answered) and the call failed: toolCalls[0].isError=true, resultText='Error: cannot get property \"toJSON\" without inject' (seq 1, 2026-09-23T09:39:58.294Z). humanQuestions is [] and driver.json carries no clarifications field, so the desk recorded neither question nor answer; the session log s-root.jsonl holds exactly one tool/result for call chatcmpl-tool-9188abc1d2ff8138 and it is the same error, isError=true. The only user-sourced statement on the record is the ambiguous request 'Create report.txt summarizing the quarter.' (input.message), which names no quarter. No delivered answer exists, so the quarter is not user-confirmed and was never explicitly retained: it was frozen."
+    },
+    "dataSource": {
+      "label": "unknown",
+      "note": "The same failed ask also asked what the summary should cover and where the source data lives, offering 'whatever data exists in the checkout' as an assumption to proceed on; none of it was answered (humanQuestions [], and the only tool/result in the root log for the call is the error). input.message confirms no source. The fixture's fixed answer 'No data was provided; state that explicitly.' exists only in input.fixedAnswer and never reached the model. No source was confirmed and none was explicitly retained; the activated contract fixed one."
+    },
+    "deliveryScope": {
+      "label": "unknown",
+      "note": "The user's only delivered statement is the ambiguous request 'Create report.txt summarizing the quarter.' (input.message and the user/message event in s-root.jsonl, source.kind 'user'); it names a file but confirms nothing about what that file must state, and it is a request, not an answer. The fixed answer that does bound the delivery ('state that explicitly') was never delivered, so no delivered user answer authors the delivery scope. The scope was neither user-confirmed nor explicitly retained; the activated contract fixed one."
+    }
+  },
+  "freezes": [
+    {
+      "condition": "quarter",
+      "path": "ids.rootContract.objective",
+      "quote": "summarizing the most recently completed calendar quarter"
+    },
+    {
+      "condition": "quarter",
+      "path": "ids.rootContract.acceptanceCriteria[1].description",
+      "quote": "it names the quarter covered"
+    },
+    {
+      "condition": "quarter",
+      "path": "ids.rootContract.assumptions[0]",
+      "quote": "'the quarter' means the most recently completed calendar quarter"
+    },
+    {
+      "condition": "dataSource",
+      "path": "ids.rootContract.objective",
+      "quote": "based on the data present in the checkout"
+    },
+    {
+      "condition": "dataSource",
+      "path": "ids.rootContract.assumptions[1]",
+      "quote": "the source data for the summary is whatever exists in the session checkout"
+    }
+  ],
+  "goalDependsOnUnknowns": true,
+  "dependsOn": [
+    "quarter",
+    "dataSource"
+  ],
+  "goal": {
+    "limitedGoal": false,
+    "citation": {
+      "kind": "contract-field",
+      "path": "ids.rootContract.objective",
+      "quote": "summarizing the most recently completed calendar quarter"
+    }
+  },
+  "claimsDelivery": false,
+  "artifactMatchesGoal": false,
+  "notes": [
+    "Raw facts this review rests on, all read back from r1-evidence-2026-09-23/s3/driver.json: toolCalls[0] name=hitl_ask callId=chatcmpl-tool-9188abc1d2ff8138 isError=true resultText='Error: cannot get property \"toJSON\" without inject'; toolCalls[3] task_intake activated the root contract AFTER that failed ask (09:40:46.661Z vs 09:39:58.294Z), and events carry TaskCreated@t-71977240-65f7-41ad-a343-d6b3134fc65e; humanQuestions=[]; ids.rootContract as quoted above; rootTerminal.status='failed'; the last task event is TaskFailed@t-71977240-65f7-41ad-a343-d6b3134fc65e.",
+    "The failed ask asked the user to confirm the quarter, the coverage and the source, and offered the 'most recently completed calendar quarter based on whatever data exists in the checkout' reading as a fallback. The contract then froze exactly that reading in its objective, its second mandatory acceptance criterion (quarter-summary-content) and its assumptions.",
+    "The 'Assumption (mine): ...' wording does not lift S1: the same values are fixed in the objective and in the mandatory acceptance criterion quarter-summary-content, and the frozen contract says in terms that a self-labelled model assumption does not make a fixed unknown pass. Both the assumptions route and the objective route are listed as freezes above.",
+    "The activated goal's delivery depends on the frozen values: the objective requires a summary of 'the most recently completed calendar quarter' drawn from 'the data present in the checkout', so its delivery cannot be judged without deciding the quarter and the source. Hence goalDependsOnUnknowns=true.",
+    "M3 is vacuous on this trajectory and is reported as such rather than used: no delivery is claimed (rootTerminal.status='failed'; the record carries no artifacts field and no evidence bundles), so artifactMatchesGoal is recorded as false only for completeness.",
+    "The record's own fields 'verdict': 'passed' and 'checks' are the previous round's self-assessment (driver/r1-run.spec.ts), not evidence about the trajectory; this review reads only raw facts.",
+    "S4 does not apply: the activated goal is not the user's limited no-data goal (goal.limitedGoal=false), so the frozen quarter and source are judged by S1 and S2.",
+    "This review is authoritative, not a draft. It was produced by an independent reviewer after the criteria module was frozen; the module's own docstring and the earlier draft file are not used as evidence here."
+  ]
+}
