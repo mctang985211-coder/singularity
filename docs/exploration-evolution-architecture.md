@@ -113,6 +113,8 @@ T2/T3 子批次协议已交付，A0 根入口复用摘要绑定、批准后重�
 
 工具主动查询和模型请求前投影共用 context 的来源定位、相关性和读取域。沿用 Task/Run 身份、契约摘要和 Session seq 等实际引用，不预建 viewId、统一 revision 或字段全集。DSH `system-prompt/assemble` 的异步 scoped waterfall 可读持久源并贡献内容；静态 section provider 同步，不能直接注册 async 文本函数。不新增轮询/压缩器，实际模型输入必须能验证来源、更新及恢复。
 
+现有 `runForSession/lookupRun` 会触发恢复并回填 gate，不是上述读取接口。A2+A1 先按计划 E 节接好显式 graph 激活/恢复，再装配纯读取的 context；不能让每次 prompt 组装顺便恢复批次。普通/replay 首请求、重启首个写动作及取消交错同批验证，原有终态/写闸保障不能因迁移失效。
+
 所有摘要段落带 sourceRefs 和 authoritative/derived 标注；LM 摘要不覆盖原始记录。规范约束优先级：运行时权限/部署限制 → 已接受根契约 → 当前任务契约 → 已记录决定 → 临时回答/摘要。发现冲突需显式诊断/提问，不能静默选一条、改变契约或提升权限。
 
 ### 5.2 根与祖先定位
@@ -277,7 +279,7 @@ R0 按角色与实际启用能力收敛工具面，部署未启用 Evolution 时
 | 票 | 前置与落点 | 必交付与确定性验收 |
 |---|---|---|
 | A0 真实根契约入口 | T1、S1-V 切片 2、T2/T3 组；graphs/adoptRoot、root 角色 | setup 不消费根分解；无契约时 task_read 返回未激活；graph name 不冒充目标；新根有独立 AC；子全通过但根错误仍拒绝；off/all 与激活崩溃恢复完整；拒绝草案零派发；旧图不改历史；来源归属（store↔session、顶层会话、本人消息）与 `adoptRoot` 公共恢复入口的零副作用拒绝。**2026-09-23 实现事实（来源/恢复返工已关闭）**：`graphs.create` → `adoptRoot` 不再建根任务；`task_intake` + `assertRootContractOrigin` + `rootIndependenceDefects` + 同套审核/激活/幂等恢复 + 具名未激活视图；每条验收的测试位置见建设计划「A0 + R0 执行与验收记录」与「A0 返工（Q2/Q3）执行与验收记录」。仍未建：契约修订入口、模板库、A1 上下文投影；边界如实记录：归因纪律非来源真实性证明、服务层不校验顶层会话属某 graph 的 root、日志不可读时不能激活/恢复（fail-closed）、每次 `adoptRoot` 会重发等待中提案的审核请求；R1 另补 S3 语义验证（Q4/Q5 仍待返工） |
-| A2 + A1 状态上下文（同组） | A0/A3、S1-C，R1 验收后；新 context、现有工具与 DSH 装配 | 三层根约束/本人贡献进入实际请求；依赖兄弟证据和同 graph 详情按引用可读，无关历史默认不推；跨 graph 包括原始 Session 入口均拒绝；压缩/重启可重建、replay 不串根；普通/replay 消费者及旧渲染迁移闭合 |
+| A2 + A1 状态上下文（同组） | A0/A3、S1-C，R1/R3 验收后；新 context、现有工具与 DSH 装配 | 显式恢复与读取分离；三层根约束/本人贡献进入实际请求；依赖兄弟证据和同 graph 详情按引用可读，无关历史默认不推；跨 graph 包括原始 Session 入口均拒绝；压缩/重启可重建、replay 不串根；普通/replay 消费者及旧渲染迁移闭合 |
 | A3 非阻塞批次与协调相位（已交付，2026-09-22；验收见建设计划「A3 执行与验收记录」，落地事实已回写 §7.1/§7.2/§7.4） | T1、S1-V 切片 2、S1-C；Task runtime/reducer、agent-runtime | 分解立即返回且父可继续；waiting idle 不验收；显式提交/父独立验收；依赖串行、取消/恢复/卸载完整；提交/派发去重；迟到写入、跨批次/跨根工作区冲突被阻挡；普通/replay 同守状态规则；根预算不因新 Run/重启重置，无进展停止 |
 | A4 父子问题/回答 | A2/A1、A3；agent-runtime + DSH 通信，context 呈现，runtime 执行阻塞 | 父子/三层问答无同步死锁；batch/写闸保留，一个答案不清空其他阻塞；未答不算同意，迟到不复活 Run；入箱及 claim 后 crash 可恢复，不重复领域副作用；正文不在 task 再存一份 |
 | S4-E 评估基础 | A4 后；新 evolution 包承接已有生命周期 | 先验一种候选的真实可比实验/独立判据；工具适配与实现迁移同批，旧 ledger 可读与既有回滚有效，不建全候选评估平台 |

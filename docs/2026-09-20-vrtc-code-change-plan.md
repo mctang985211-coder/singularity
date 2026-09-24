@@ -26,7 +26,8 @@
 | 6 | A0 + R0：根入口与默认运行面（本票返工 A0） | 已验收（2026-09-23，进度审核复核 + 全量回归实跑） | Kimi Code 主代理（Q2/Q3 各一个实现子代理 + 1 个只读独立复核子代理，复核后一轮缺陷修复） | 原记录 +「补救交付复核」Q2/Q3 +「A0 返工（Q2/Q3）执行与验收记录」 | 已满足：根来源/归属（store↔session、顶层会话、本人消息）与 adoptRoot 恢复反例关闭，R0 证据保留，全量单测/集成与独立复核通过。进度审核已确认，下一项仅派第 7 项 |
 | 7 | R2：按证据整理运行时（本轮只修取消写闸） | 已验收（2026-09-24，补充返工 `8f9086e` 经进度复核） | Kimi Code 主代理（两轮实现/复核）+ 本轮进度复核 | 原记录 +「R2 Q1 补充返工执行与验收记录」+「R2 补充返工进度验收（2026-09-24）」；[R2 合同](execution-prompts/06-r2-cancellation-gate.md) | C1 两条查询交错、C2 重启恢复、C3 合法 active、C4 相关调用顺序均通过；已记录未证实的取消边界不冒充本票保证 |
 | 8 | R1：真实运行验证（纠正 S3 与实验账） | **返工（2026-09-24，进度审核未通过）** | 原交付：Kimi Code 主代理；本轮：进度复核 + 独立规格审查 | 原记录 +「R1 补验证（Q4/Q5）执行与验收记录」+ 下方「R1 补验证进度审核」；[补验证 prompt](execution-prompts/07-r1-supplemental-validation.md) | V1 接线与 V6 历史下界保留；V2 漏验固定答复及全部必需 verifier 结果，V5 将缺报缓存写记成 0，V3 的 `current/final quarter` 假设不符合无争议通过条件。先完成无模型返工与既有轨迹重判；若 S3 失败，另定生产修复与新实验授权，不覆盖旧尝试 |
-| 9 | A2 + A1：Agent 状态上下文（一个交付组） | 待前置；职责合同已重定 | 待填 | 本文 D 节、主 guide §1.4 | R1 验收后；新 context 包统一概览、按引用读取和真实模型上下文消费，包含依赖证据、根约束与重启/压缩恢复；原渲染迁移完成，不在 task/runtime 另建记忆库 |
+| 8a | R3：已有 Task 合同归位 | 待前置；有限维护票 | 待填 | 本文 E 节、主 guide §1.5 | R1 验收后；迁出 Skill/Verifier 行为合同、删除测试专用生产类型，实际调用与测试同步；Task 持久格式、原子提交和执行行为保持，非全仓重构 |
+| 9 | A2 + A1：Agent 状态上下文（一个交付组） | 待前置；职责合同已重定 | 待填 | 本文 D/E 节、主 guide §1.4 | R3 验收后；先分开读取与显式恢复，再交付 context 及实际模型消费；依赖证据、根约束与重启/压缩恢复完整，旧渲染删除 |
 | 10 | A1 原独立排位 | 并入第 9 项，不单独派发 | — | 保留编号供历史引用 | 第 9 项整组验收后直接进入第 11 项 |
 | 11 | A4：父子澄清 | 待复定 | 待填 | 主 guide §1.4、深入架构 §7 | agent-runtime + DSH 负责持久消息与投递；context 呈现，task-runtime 负责阻塞执行效果；父子/三层、故障恢复与写闸完整 |
 | 12 | S4-E：评估基础（S4 内的子票） | 待复定 | 待填 | 主 guide §1.4、深入架构 §8 | 现有 Evolution 生命周期随本票迁入 evolution 包；先服务一种候选的可比实验、真实证据与晋升闸，旧 ledger/回滚保留，不建通用评估平台 |
@@ -34,6 +35,8 @@
 | 14 | A6 + S2-R + S3：自主改进与恢复（一个交付组） | 待复定 | 待填 | 主 guide §1.4、深入架构 §8 | evolution 组织候选/验证/批准应用，task-runtime 重检并恢复执行；Agent 生成方法，首个真实缺口完成闭环；不为假想失败预建执行器 |
 
 状态填写：`待前置 → 待派发 → 进行中 → 待验收 → 已验收`；有未解决缺陷填 `返工`，因外部条件无法继续填 `阻塞` 并记录原因。实现者宣称完成仅进入待验收；“已验收”需要下述完成闸证据。依赖票的状态不能因内部部分提交而提前推进。每次更新本表，同时更新本文对应票据状态及主 guide，记录冲突时先核实证据。
+
+2026-09-24 既有大模块审计后加入 8a，保留原票号与历史记录。R3 是一次有范围的合同归位，不能扩成“先整理完全部大文件”；其后上下文、通信和诊断迁移仍随各自票交付。已验收的 S1-C/T1/T2/T3 不重开重做，R3 用既有合同回归；当前首个待办仍为 R1。
 
 `待复定` 表示方向保留、详细实现合同尚不派发。到达该行前，依据前项实际运行记录删去没有消费者的字段/通用化，写明场景、接口和验收，再转为待派发；不能跳行先建设，也不能由执行者削弱已接受的正确性合同。复定就在本表及对应专项合同内进行，不追加竞争排期。
 
@@ -135,7 +138,7 @@ T1、S1-V 切片 2、S1-C、A3、T2/T3 已交付。根契约入口已实现，A0
 | 票据 | 状态 | 前置 | 单票完成边界 |
 |---|---|---|---|
 | A0 真实根契约入口 | 已验收，Q2/Q3 已关闭（2026-09-23）；R0 保留 | T1、S1-V 切片 2、T2/T3 组 | intake、独立 AC、审核/原子激活与未激活视图、统一服务入口来源归属和 adoptRoot 无根提案恢复已交付。模型理解与有效澄清另由 R1 具体场景验证 |
-| A2 + A1 状态上下文 | 待前置；同一交付组，见 D 节 | A0/A3、S1-C；R1/R2 验收 | context 包组织根/当前契约、贡献、依赖证据与历史引用，接入工具和真实模型请求；不混淆默认相关性与读取授权；压缩/重启能恢复 |
+| A2 + A1 状态上下文 | 待前置；同一交付组，见 D/E 节 | A0/A3、S1-C；R1/R2、R3 验收 | context 包组织根/当前契约、贡献、依赖证据与历史引用，接入工具和真实模型请求；读取与恢复分开；压缩/重启能恢复 |
 | A3 非阻塞批次与协调相位 | 已完成（2026-09-22，见「A3 执行与验收记录」） | T1、S1-V 切片 2、S1-C | 统一迁移与串行推进、工作区写入归属、显式提交、根预算、取消/恢复及 replay 一致性 |
 | A4 父子澄清 | 待复定 | A1/A2/A3 | 问题身份与父子授权、持久投递；逐级问答保留批次与写闸；claim 后故障可恢复；未知/部分回答不解除全部阻塞 |
 | A5 因果诊断与主管触发 | 待复定，与 S2-E 同组 | A1/A2/A4、S4-E | 从一个真实失败场景贯通依赖/证据下钻、去重/预算、候选交接；不提前执行候选 |
@@ -810,19 +813,68 @@ driver 未在仓库内重建：两轮 driver 分别解包于 `/home/ROXY/code/bb
 |---|---|---|
 | `agent-singularity/src/tools/task-read.ts`、`task-status.ts` 中的跨记录筛选/相关性/上下文渲染 | 移入 context 共用读取，工具只保留 schema、可信调用者传递及输出适配；删去旧重复实现 | context |
 | `task-runtime/src/handoff.ts:renderWorkerPrompt` 的契约/handoff/引用内容渲染 | 按职责拆：runtime 继续生成并保存 TaskHandoff 数据；context 投影其内容；稳定 worker 行为政策由 agent-runtime prompt 持有。普通分解与 replay 的消费者一起迁移，禁止 runtime 反向依赖 context | 数据 task/runtime；上下文 context；角色 agent-runtime |
-| `runForSession`、gate、准入和持久提交 | 保留原所有者，context 只消费其可观察事实；缺一个必要只读观测才最小新增，不往 runtime 添加组装上下文方法 | task-runtime |
+| `runForSession → lookupRun`、graph 激活/恢复入口 | 当前 lookup 会 reconcile 和回填 gate，不能直接用作 context 纯读。按 E 节把恢复接回显式生命周期；context 通过可信 graph/store 与 Task 快照读取，执行入口仍由 runtime 重检 | task-runtime 负责恢复；context 负责读取 |
+| `task-runtime/src/contract.ts`、`run-binding.ts:renderRunBinding`、工具 `root-store.ts` 的视图函数 | 契约/绑定摘要和未激活视图同批迁入 context；绑定文件校验及执行准入留 runtime，不能把整份 run-binding 搬进 context。稳定政策归 agent-runtime；替换既有 contract-reinjection 的数据提供方，避免双重注入 | context / agent-runtime |
 | DSH Session 历史与请求准备 | 调用 `sessionQuery` / `sessionReferenceResolver`（按实际接口）、scoped `systemPrompt` 与 compaction 机制；不复制索引、日志或压缩器 | DSH；context 负责领域接线 |
 | 既有 Review/Diagnosis 事件类型与 reducer | 本组不迁移持久格式；只读取已授权记录。会话指标/诊断行为归拢见后续 A5，不因本组读到它们扩大范围 | 既有 task 记录 |
 
 **完整验收**：三层真实 Task 链中的 worker 能在实际模型请求里读到根目标/硬约束、本契约及贡献；一个跨兄弟的真实依赖能查到其验收与证据，无关正文默认不注入但同 graph 内可主动读取；显式概览与详情不跨 graph，猜 id 或原始 session 工具不能绕过；包含 replay 的 parentless Task 不串根；未激活、等待、已终态及无绑定调用有明确结果，读取不改变生命周期。以 DSH 实际请求装配和实际历史读取验证重启/压缩后可从事实源恢复；工具与自动上下文同源，引用失效/超限/缺失明确，不拿陈旧动作提示绕过闸。不做模型效果提升的虚假声明。
 
-内部依次派三个有限子目标：①来源绑定、授权读取和投影；②真实工具/请求装配与原 handoff 消费迁移；③独立组合验收。主代理负责整组集成与全量检查，不把三个子目标和全量文档原样转派一人；只有完整消费者接线及删除旧重复实现后，本组 A2/A1 一起验收，再进入 A4。无须先交付“只可查询、模型还不消费”的过渡功能。
+内部顺序细化为：①显式恢复与只读定位分离；②context 来源授权/投影；③工具与真实模型装配、旧渲染迁移；④独立组合验收。每次仅委派其中一个子目标，接口交接后再派消费者；主代理负责整组集成与全量检查。它们是第 9 项内部提交，不是四个可提前宣布完成的阶段；只有完整消费者接线及删除旧重复实现后，本组 A2/A1 一起验收，再进入 A4。
 
 **后续各票的工程归属（不另增执行顺序）**：A4 的消息正文/送达/恢复主体在 agent-runtime + DSH Session，context 显示待答/回答引用，task-runtime 只负责该 Run 的阻塞效果与原相位保持；S4-E 将 `agent-singularity/src/evolution.ts`、`replay.ts` 及其评估/晋升/回滚归入 evolution 包，工具仍是适配，旧 ledger 可读。这里的 gate 是晋升闸，执行写闸 `task-runtime/src/gate.ts` 不迁出。A5/S2-E 的事后因果分析和 review pack 归 agent-singularity/review；`reviewEnrichment` 的终态基础派生及唯一 ReviewRecord 写入留在 runtime，通用 Session 观测可归 agent-runtime/DSH 只读接口，不能让终态结算反向依赖 review/context/evolution 是否装配。A6/S2-R/S3 在 evolution 中做候选编排，在 task-runtime 中重检和恢复执行。每票同批更新真实调用方，验证旧记录可读、取消/重启/直接入口及模块缺席时终态仍正确；删除被替换实现，避免长期双轨。
 
 底层不硬编码 supervisor 的因果搜索顺序、失败分类全集或所有候选对象执行器。既有数据按原格式读取；新诊断只保留证据、假设、实验与候选的实际需要。未知问题由 Agent 使用已有工具研究和验证；一旦涉及改契约、提权、改裁判或应用共享能力，仍受既有批准与独立验证约束。
 
-本轮只修订 9 份当前指南/模板：本地链接目标 104 个、代码围栏 15 个及 `git diff --check` 检查通过；未运行代码构建、运行测试或模型实验，不据此改变 R1 验收状态。源码调查已完成；新 context、evolution 及上述迁移均是后续工程合同，尚未实现。
+上一轮上下文职责修订涉及 9 份当前指南/模板：本地链接目标 104 个、代码围栏 15 个及 `git diff --check` 检查通过；未运行代码构建、运行测试或模型实验，不据此改变 R1 验收状态。新 context、evolution 及上述迁移均是后续工程合同，尚未实现；接续的大模块审计见 E 节。
+
+### E. 已有大模块的职责审计与迁移（2026-09-24）
+
+状态：只读审计与工程设计，尚未实施。备份 Singularity `50cb580` / 外层 `68cfc60`；基于 `236b86a` 的源码，由 GPT-6 Sol 调查 task、runtime 入口与执行模块，主代理综合。400 行以上为重点清单，计数含注释；不要求每个文件降到 400 行以下，不把源码搬家本身当成功能精简。
+
+**审计结论与处理位置**
+
+| 现有位置 / 行数 | 判断与迁移路径 | 安排 |
+|---|---|---|
+| `task/src/skill-contract.ts` / 426 | 侧车形状、路径规则、digest 的实际生产消费者为 runtime 的 sidecar/run-binding；迁为 runtime provider 内部模块，不追加进其 index 或 sidecar 大文件。TaskRun 保留所用内容身份 | R3 |
+| `task/src/types.ts` / 1317 | Verifier 执行、自测、VerifyRequest 接口归 verifier；RootTaskSpec/TaskDefinition 仅测试使用，移测试支持层；VerificationResult/Evidence 和其他持久形状留 task。按事实族在包内整理类型，保持单一来源，不新建共享 types 包 | R3；不要求一次拆完全部类型 |
+| `task/src/service/state.ts` / 1649；`index.ts` / 682 | 保留 TaskState 和 TaskService 的唯一状态、批次预验证与原子提交。若提取校验器，置包内且只返回检查结果；不能按事件种类建立各自持久化的 service。先不重写 reducer | R3 保持行为；A5 只改下述建议约束 |
+| `task/src/proposal.ts` / 674 | 提案形状、内容身份与校验属于事实完整性；不是 supervisor 策略，不应迁入 evolution 或删除。无消费的公开 helper 可收为包内，但不能据测试数量猜无用途 | 保留；只随实际相关改动整理 |
+| `task-runtime/src/index.ts` / 5722 | 同时装配提案、执行、恢复、会话观测；优先分开查询/恢复并迁出上下文与通用 Session 观测。提案与执行仍在 runtime 包，私有状态不向外暴露为共享 RuntimeInternals | A2+A1、A5 分别迁实际职责 |
+| `task-runtime/src/orchestrate.ts` / 2475 | 批次、worker 等待、提交/判决、replay 均有真实消费者；保留已共用的 observeWorkerRun/settleSubmittedRun，终态写入与资源释放的重复规则在包内归拢，不能另造 scheduler | A2 只迁渲染；A4 接阻塞前先归拢相关结算路径 |
+| `sidecar.ts` / 781；`provider-precheck.ts` / 409 | 前者读文件/校验内容，后者按真实 preset/capability 做准入预检；不是同一层重复校验。可将 sidecar 的文件装载与规则校验分为包内模块，保持同一 provider 判定入口 | R3 只迁合同；其余随真实修改，不预建 provider 包 |
+| `run-binding.ts` / 496 | 固定与校验实际 Skill 内容是执行保证；只有末尾的文本投影属于 context，不能为“只保留 id”丢掉快照内容与校验 | A2+A1 |
+| `normalize.ts` / 544；`workspace.ts` / 536 | 前者统一契约正规化，后者保持实际工作区归属与 marker 顺序；已有生产/恢复消费者。保留，不因长度再造规则引擎或分布式锁 | 不新增清理票 |
+
+公开面也要按调用方收窄：审计未找到 `decomposeAndRun`、`proposalsForParent`、`awaitBatch` 的非测试调用；`executionProviders` 只有测试消费，`skillSearchRoots`、`readProcessStartTime`、`RUN_BINDING_SKILLS_DIR` 有模块内用途但无包外生产消费者。后续改到对应职责时，先把测试改为真实生产入口或内部模块导入，再删无用便捷流程/包入口重导出；模块内部需要的实现仍保留。它们不并入 R3，也不为保留接口制造新消费者。`BudgetConfig.attempts` 当前无重试执行路径，只是声明与记录，不据此新建自动重试机制。与旧账、内容身份和准入相关的检查不能按“看起来重复”删除。
+
+**R3：一票只解决已有合同放错位置**
+
+先交接三个有限改动：Skill 合同与对应测试迁到 runtime；Verifier 执行接口迁到 verifier；测试专用 RootTaskSpec/TaskDefinition 迁到已有 legacy-root 支持文件。每个改动同时替换全部消费者并删除 task 的旧导出，不保留永久转发，也不修改 Skill 格式、digest 算法、准入政策或 Task 事件。task 类型的包内整理仅限本次迁出触及部分，不把整个 types.ts 重排列为本票验收；其余事实的正常导出与序列化数据保持。Skill 合同可以继续复用 task 的现有摘要基础函数，不再造通用 crypto 包。
+
+验收 R3-1：迁移前后同一侧车及内容产生相同 digest，旧 Run binding 仍可读取，真实 provider 预检、绑定、晋升拒绝路径保留。R3-2：verifier 插件和自测入口使用新类型，Task 不反向依赖 verifier；Evidence/VerificationResult 仍由事实层拥有。R3-3：测试 root 工厂继续从真实 store/runtime 接口建立夹具，生产无旧测试类型及跨职责导入；历史 JSONL 可读，原子提交反例和提案恢复回归保持。纯搬迁优先复用已有测试，不为每个新文件复制一套测试；主代理完成公共构建/类型/持久化检查。持久化检查只看声明根，指纹不变不能替代旧日志回放。
+
+**A2+A1：读取路径不能再承担恢复**
+
+当前冷查询会调用 `reconcileStore`，而 `graphs.create` 已显式 adoptRoot、`graphs.activate` 的恢复路径尚未如此接线。首个子目标先在现有 graph 激活/恢复流程中 await runtime 恢复，再交付可工作的会话；不通过第一次 task_read 或 prompt 装配触发恢复。沿现有 runtime 方法复用同一恢复实现，不能复制进 graphs/context；同时核对插件装配顺序，恢复未就绪的任务会话不得执行副作用。
+
+查询用可信 session→graph→root store，读取一次 Task 快照定位该 session 对应的 Run/Task；结果投影可在 context 内复用，不另建索引服务。必要的内存 gate 观测只能读。运行期重新绑定仍走明确的 runtime 执行入口，取消屏障及陈旧读取保护保留；不把 context 变成第二个生命周期裁判。恢复须覆盖待审根、waiting_children 父、已终态子、admitted 未 spawn 批次和 replay，旧入口有调用者时同批替换，不能简单删掉 lookup 的副作用就宣布完成。
+
+交接后再建 context 两个消费者。普通 worker 在 TaskStarted/handoff 已持久化、graph 成员已发布后才发首个模型输入；当前 onRunBound 在 spawn 返回后，context 首次读取不能依赖这个尚未回填的缓存。replay 的 parentRunId 是实验血缘，不是 Task 父子关系；由实际 Task 契约与该 Run 的 lineage 定位贡献和来源，不选择 store 中第一个 parentless Task 充当根。重启后也不能依赖内存 replayLineage 重建上下文。
+
+验收除 D 节外，补三组承重反例：冷/热上下文查询和实际 prompt 装配都不触发审批、spawn、verifier 或 Task 状态写入；重启后第一条请求之前已完成必要恢复，waiting/terminal 会话第一条写工具即被拒绝；取消前后及跨取消完成点查询不重开 gate。模型日志保存正常上下文快照不算领域写入。迁移已有 R2 回归到新的实际读取/恢复入口，保留原断言，不删除反例以迎合新结构。
+
+**A4/A5/S4-E：把已有主体迁走，再扩展行为**
+
+A4 在接入新的问题阻塞前，先将本票涉及的 Run 等待、判决和终态清理在 runtime 包内明确归属。一个结束入口处理已存在 Run 的终态竞争、Review 与资源释放，普通执行、replay、取消/恢复用同一规则；尚未创建 Run 的 blocked Task 仍用其自己的语义，不为复用而造假 Run。保留一次结算、取消优先和先关闸/排空写入的顺序，测试跨真实 store/gate/workspace。提案协议与批次推进不能共用一份可任意改写的内部状态；文件拆分不改变事件写入所有者。
+
+包内结构沿现有承重接口整理：运行观测保留 `observeWorkerRun`；终态模块集中 `settleSubmittedRun` 与基础 Review/清理；批次 driver 负责串行推进；replay runner 只组织一次实验执行并复用观测/结算。`index.ts` 持有配置、handle 和装配，直接调用这些内部模块，不保留同名大逻辑再套转发。A2 的绑定/恢复整理只向该模块传 Task 读源、ExecutionGate 与必要索引；以后修改提案流程时再将根/子提案的提交、继续、恢复归入一个 runtime 内部职责模块，根无 parent/run 的差异保持显式，不抽万能提案引擎。接口只交接必要能力，禁止把整个 `this`、全部 Context 或任意改写的状态大对象传给拆出的薄函数。未涉及的提案内部拆分不成为 A4 前置。
+
+A5 将 Session 工具调用/压缩/token 观测移到 agent-runtime/DSH 的只读模块，runtime 保留基础终态派生和唯一提交。`DiagnosisProposal.targetType` 改为非空字符串，删除 reducer 与 task_diagnose 的九类建议白名单；Evolution 自己拥有窄的可执行目标类型，在实际转换入口重新校验，不让开放的建议类型传播为执行授权。验收未知建议能记录并在重开 store 后读回；`evolution_propose.fromDiagnosis` 对不支持目标拒绝且不写 ledger，prepare/apply 各自的校验继续保留，不自动注册执行器。旧九类记录仍可读；新值可能不被旧读者接受，按持久化规则记录版本与回滚限制，不以顶层指纹未变省略兼容性说明。诊断字段完整性、来源及引用检查继续保留。
+
+S4-E 按 D 节整体迁移现有 Evolution 生命周期与工具消费者；不因新包出现再新增候选种类、评分平台或固定补丁目录。上述迁移各自在所属票完整验收，没有一项以“先留 stub，下票消费”通过。
+
+本轮文档验证：6 份修改文件的 89 个本地链接目标、9 个代码围栏与 `git diff --check` 通过。三名 GPT-6 Sol 完成只读源码调查，Task 调查者另复核本节；已据复核明确未知建议在 evolution_propose 的转换闸和 R3 类型整理的有限范围。未改运行时代码，未运行构建/运行测试/模型实验；这是设计交付，不是 R3 或 A2 的实现验收。
 
 ## R2 Q1 返工（查询重开取消中的执行闸）执行与验收记录（2026-09-23）
 
