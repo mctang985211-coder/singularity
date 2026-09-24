@@ -111,6 +111,21 @@ declare class GraphsService extends Service {
   markReady(id: string): Promise<GraphRecord>;
   graphForSession(sessionId: SessionId): Promise<GraphRecord>;
   remove(id: string): Promise<void>;
+  /**
+   * One graph becomes this process's running environment, in the fixed order
+   * (A2 §E): the root session's graph queue is drained by `ensureRoot` first,
+   * then the root store's recovery barrier runs to its end — the fact
+   * reconciliation, every known session's gate initialization and the driver
+   * registrations the pass owes, never the batch execution behind them — and
+   * only then does this process switch its stores and environment and deliver
+   * input. Boot recovery of the selected graph goes through here too, not
+   * through an asynchronous selected-listener.
+   *
+   * A barrier failure leaves the commit to the caller: `select` has not
+   * committed (the previous selection stands), `remove`'s re-activation of the
+   * next graph fails loudly, and `create` keeps the registered graph selected
+   * and shows the failure rather than pretending the old selection stood.
+   */
   private activate;
   private commit;
   private transition;

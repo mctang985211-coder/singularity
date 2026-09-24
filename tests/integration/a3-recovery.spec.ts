@@ -521,9 +521,11 @@ describe('A3 recovery from the real session log', () => {
     await a.crash()
 
     const b = await boot(dir)
-    const opened = await b.task.openStore(STORE)
-    expect(opened.runs).toHaveLength(1)
-    await b.runtime.reconcileStore(STORE)
+    // The deployment's own door (A2 §E): the second process recovers through
+    // the activation's barrier — `adoptRoot` — never a hand-rolled
+    // `openStore` + `reconcileStore` pair.
+    const adopted = await b.runtime.adoptRoot(STORE, ROOT)
+    expect(adopted).toMatchObject({ adopted: true, taskId: root.taskId, runId: root.runId })
 
     // The batch is driven to its end by the second process: one child, started
     // exactly once (the first process never started it), verified by the real
@@ -564,8 +566,7 @@ describe('A3 recovery from the real session log', () => {
     await a.crash()
 
     const b = await boot(dir)
-    await b.task.openStore(STORE)
-    await b.runtime.reconcileStore(STORE)
+    await b.runtime.adoptRoot(STORE, ROOT)
 
     // The in-flight worker is cancelled by name — nothing can confirm the writes
     // it may already have made — and the batch is settled by its own rules: a
@@ -612,9 +613,17 @@ describe('A3 recovery from the real session log', () => {
     // the store holds is the phase the session is rebound under, with no timer
     // deciding the interleaving.
     const b = await boot(dir, { parkDrain: (sessionId, index) => sessionId === ROOT && index === 1 })
-    // The door a resumed session's first tool call takes after a restart: the
-    // session is in no index, so the store is opened, recovered, and the
-    // session is bound to the run the store names.
+    // The door a restart actually goes through (A2 §E): the explicit
+    // activation barrier. It binds the session, initializes the gates and
+    // registers the waiting parent's driver — and it *returns* while that
+    // driver is still parked in its drain, because the barrier waits for the
+    // registration, never for the batch's execution.
+    const adopted = await b.runtime.adoptRoot(STORE, ROOT)
+    expect(adopted).toMatchObject({ adopted: true, taskId: root.taskId, runId: root.runId })
+    expect((await b.snapshot()).runs.find(run => run.runId === root.runId)!.executionPhase).toBe('waiting_children')
+    expect(b.spawns).toHaveLength(0)
+    // The read door a resumed session's first tool call takes: pure — it
+    // resolves the binding the barrier left and writes nothing.
     const bound = await b.runtime.runForSession(ROOT)
     expect(bound.run.runId).toBe(root.runId)
     // The gate is a handle on the run's phase, and the phase is the store's
@@ -651,9 +660,12 @@ describe('A3 recovery from the real session log', () => {
     // and the child recovery cancelled — it was in flight when the process died
     // and nothing can confirm the writes it may have made.
     const b = await boot(dir, { parkDrain: (sessionId, index) => sessionId === ROOT && index === 1 })
-    // Both bindings are taken through the door a resumed session's first tool call
-    // takes: `runForSession` reads the store and gates the session as what it
-    // records, never as what the dead process remembered.
+    // The restart's own door (A2 §E): the barrier reconciles the store, gates
+    // *every* session it knows — the waiting parent and the cancelled child
+    // alike — and registers the waiting parent's driver before it returns.
+    await b.runtime.adoptRoot(STORE, ROOT)
+    // The read door then resolves both bindings, and the gate each session
+    // holds is what the store records, never what the dead process remembered.
     const parent = await b.runtime.runForSession(ROOT)
     expect(parent.run.runId).toBe(root.runId)
     expect(parent.run.executionPhase).toBe('waiting_children')
@@ -719,8 +731,7 @@ describe('A3 recovery from the real session log', () => {
     await a.crash()
 
     const b = await boot(dir)
-    await b.task.openStore(STORE)
-    await b.runtime.reconcileStore(STORE)
+    await b.runtime.adoptRoot(STORE, ROOT)
 
     const outcomes = await b.runtime.awaitBatch(STORE, batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
@@ -767,8 +778,7 @@ describe('A3 recovery from the real session log', () => {
     await a.crash()
 
     const b = await boot(dir)
-    await b.task.openStore(STORE)
-    await b.runtime.reconcileStore(STORE)
+    await b.runtime.adoptRoot(STORE, ROOT)
 
     // The restarted batch adopts its terminal children and runs the parent's
     // acceptance: it is judged by the real verifier, with no new run and no new
@@ -844,8 +854,7 @@ describe('A3 recovery from the real session log', () => {
     await a.crash()
 
     const b = await boot(dir)
-    await b.task.openStore(STORE)
-    await b.runtime.reconcileStore(STORE)
+    await b.runtime.adoptRoot(STORE, ROOT)
 
     // Nothing was invented for either record: no phase, no terminal state, no
     // review, no evidence, and no run started on their behalf.
@@ -918,8 +927,7 @@ describe('A3 recovery from the real session log', () => {
     await a.crash()
 
     const b = await boot(dir, { capabilities: { [SKILL_ROW]: { skills: [SKILL_NAME] } } })
-    await b.task.openStore(STORE)
-    await b.runtime.reconcileStore(STORE)
+    await b.runtime.adoptRoot(STORE, ROOT)
 
     // The batch settles on the refused run rather than continuing past it.
     expect((await b.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['failed'])
@@ -971,8 +979,7 @@ describe('A3 recovery: a crash inside the verification call', () => {
     await a.crash()
 
     const b = await boot(dir)
-    await b.task.openStore(STORE)
-    await b.runtime.reconcileStore(STORE)
+    await b.runtime.adoptRoot(STORE, ROOT)
 
     // The second process finishes the verification the first one started: one
     // verdict for the run, one evidence bundle, and the batch that follows from it.
@@ -1017,8 +1024,7 @@ describe('A3 recovery: a crash inside the verification call', () => {
     await a.crash()
 
     const b = await boot(dir)
-    await b.task.openStore(STORE)
-    await b.runtime.reconcileStore(STORE)
+    await b.runtime.adoptRoot(STORE, ROOT)
 
     // The acceptance finishes in the second process: the composite criterion sees
     // its verified child and the parent settles verified.
@@ -1062,6 +1068,11 @@ describe('A3 recovery: a crash inside the verification call', () => {
     await a.crash()
 
     const b = await boot(dir)
+    // This store deliberately holds no root for the root session — the champion
+    // is its only parentless task, and `adoptRoot` refuses such a store by name
+    // (the champion's run belongs to another session) — so the recovery pass
+    // itself is the door here. A real deployment replays inside the tree's own
+    // store, whose activation barrier is the door.
     await b.task.openStore(STORE)
     await b.runtime.reconcileStore(STORE)
 
@@ -1119,7 +1130,10 @@ describe('A3: a cancellation during verification', () => {
       },
     })
     await b.task.openStore(STORE)
-    const recovering = b.runtime.reconcileStore(STORE)
+    // The activation's own barrier is the recovery in flight (A2 §E), and the
+    // cancellation below lands *inside* it — the window where the handle must
+    // be invalidated without waiting for the pass it interrupted.
+    const recovering = b.runtime.adoptRoot(STORE, ROOT)
     recovering.catch(() => {})
     await verdictPending.promise
     expect((await b.snapshot()).evidence.filter(item => item.taskRunId === crashed.runId)).toHaveLength(1)
@@ -1134,11 +1148,9 @@ describe('A3: a cancellation during verification', () => {
     expect(cancelled.reviews.filter(item => item.runId === crashed.runId).map(item => item.outcome)).toEqual(['cancelled'])
 
     // The verdict now arrives: cancellation wins, nothing is written twice, and
-    // the recovery pass reports no failure of its own.
+    // the invalidated barrier still completes its own pass cleanly.
     release.resolve()
-    // Recovery now answers with the proposals it could not finish (T2/T3 §5):
-    // this store holds none, and the report says so.
-    await expect(recovering).resolves.toEqual({ unresolvedProposals: [] })
+    await expect(recovering).resolves.toMatchObject({ adopted: true, runId: root.runId })
     const after = await b.snapshot()
     expect(after.runs.find(run => run.runId === crashed.runId)!.status).toBe('cancelled')
     expect(after.tasks.find(task => task.taskId === childTaskIds[0])!.status).toBe('cancelled')
@@ -1179,13 +1191,13 @@ describe('A3: a cancellation during verification', () => {
       },
     })
     await b.task.openStore(STORE)
-    const recovering = b.runtime.reconcileStore(STORE)
+    const recovering = b.runtime.adoptRoot(STORE, ROOT)
     recovering.catch(() => {})
     await entered.promise
 
     await b.runtime.cancelGraph(STORE, 'graph removed')
     release.resolve()
-    await expect(recovering).resolves.toEqual({ unresolvedProposals: [] })
+    await expect(recovering).resolves.toMatchObject({ adopted: true, runId: root.runId })
     const after = await b.snapshot()
     // The store refused the late evidence, no verdict was written, and the one
     // review on the record is the cancellation's.
@@ -1226,8 +1238,7 @@ describe('A3 recovery: an in-flight replay is not a root', () => {
     await a.crash()
 
     const b = await boot(dir)
-    await b.task.openStore(STORE)
-    await b.runtime.reconcileStore(STORE)
+    await b.runtime.adoptRoot(STORE, ROOT)
 
     const after = await b.snapshot()
     // The replay's worker is cancelled with the recovery named, not left running.
@@ -1270,7 +1281,7 @@ describe('A3 recovery: the root budget counts a replay\u2019s run again after a 
     await a.crash()
 
     const b = await boot(dir, { rootBudget: { maxRuns: 3 } })
-    await b.task.openStore(STORE)
+    await b.runtime.adoptRoot(STORE, ROOT)
     const before = await b.snapshot()
     expect(before.runs).toHaveLength(3)
     expect(before.runs.filter(run => run.taskId === root.taskId)).toHaveLength(1)
@@ -1282,6 +1293,186 @@ describe('A3 recovery: the root budget counts a replay\u2019s run again after a 
     expect(after.tasks).toHaveLength(before.tasks.length)
     expect(after.runs).toHaveLength(before.runs.length)
     expect(after.evidence).toHaveLength(before.evidence.length)
+    await b.dispose()
+  })
+})
+
+/**
+ * The explicit recovery barrier itself (A2 §E): the read door recovers
+ * nothing, business execution cannot bypass the door, a barrier that fails
+ * after registering a driver leaves that driver unstarted, and the named
+ * verdicts (`recovering`, `recovery-failed`, `recovery-required`) are what a
+ * caller reads while the store is not this process's to execute against.
+ */
+describe('A2: the explicit recovery barrier', () => {
+  it('recovers nothing on a cold read: the store answers exactly as the dead process left it', async () => {
+    const dir = workspace()
+    const a = await boot(dir, { worker: () => new Promise<void>(() => {}) })
+    const root = await seedLegacyRoot(a, 'ship the release')
+    await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
+      reason: 'split the work',
+      children: children('long child'),
+    })
+    await vi.waitFor(async () => expect((await a.snapshot()).runs).toHaveLength(2))
+    const crashedChild = childRunOf(await a.snapshot(), root.taskId)
+    const written = taskEvents(await a.events()).length
+    await a.crash()
+
+    const b = await boot(dir)
+    // The read door a resumed session's first tool call takes: it opens the
+    // store and resolves the binding, and that is all — no recovery pass, no
+    // gate write, no settlement, no spawn.
+    const bound = await b.runtime.runForSession(crashedChild.sessionId)
+    expect(bound.run.runId).toBe(crashedChild.runId)
+    expect(bound.run.status).toBe('running')
+    expect(bound.run.executionPhase).toBe('active')
+    expect(b.runtime.gate.phaseOf(crashedChild.sessionId)).toBeUndefined()
+    // The store is byte-for-byte what the dead process left.
+    const after = await b.snapshot()
+    expect(after.runs.every(run => run.status === 'running')).toBe(true)
+    expect(after.reviews).toHaveLength(0)
+    expect(b.spawns).toHaveLength(0)
+    expect(taskEvents(await b.events())).toHaveLength(written)
+    await b.dispose()
+  })
+
+  it('refuses business execution on a store this process has not recovered, by name and with nothing written', async () => {
+    const dir = workspace()
+    const a = await boot(dir, { worker: () => new Promise<void>(() => {}) })
+    const root = await seedLegacyRoot(a, 'ship the release')
+    await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
+      reason: 'split the work',
+      children: children('long child'),
+    })
+    await vi.waitFor(async () => expect((await a.snapshot()).runs).toHaveLength(2))
+    const crashedChild = childRunOf(await a.snapshot(), root.taskId)
+    const written = taskEvents(await a.events()).length
+    await a.crash()
+
+    const b = await boot(dir)
+    // A direct service call cannot bypass the recovery door (A2 §E): the store
+    // holds in-flight work this process did not recover, so the execution
+    // entries refuse by name before their first side effect.
+    await expect(b.runtime.submitResult(crashedChild.sessionId, { summary: 'late work' }))
+      .rejects.toThrow(/recovery-required/)
+    await expect(b.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
+      reason: 'split again',
+      children: children('another child'),
+    })).rejects.toThrow(/recovery-required/)
+    expect(taskEvents(await b.events())).toHaveLength(written)
+    expect(b.spawns).toHaveLength(0)
+    const refused = await b.snapshot()
+    expect(refused.runs.every(run => run.status === 'running')).toBe(true)
+    // The read door still answers — diagnosable, not executable.
+    await expect(b.runtime.runForSession(crashedChild.sessionId)).resolves.toMatchObject({ storeId: STORE })
+
+    // The explicit barrier is the retry: after it, the same submission is
+    // judged on the record (the in-flight child was settled cancelled by the
+    // barrier's own pass).
+    await b.runtime.adoptRoot(STORE, ROOT)
+    const settled = await b.runtime.submitResult(crashedChild.sessionId, { summary: 'late work' })
+    expect(settled.status).toBe('cancelled')
+    await b.dispose()
+  })
+
+  it('answers a business call with the named recovering verdict while the barrier is still running', async () => {
+    const dir = workspace()
+    const a = await boot(dir, { parkDrain: sessionId => sessionId !== ROOT })
+    const root = await seedLegacyRoot(a, 'ship the release')
+    await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
+      reason: 'split the work',
+      children: children('submitted child'),
+    })
+    await vi.waitFor(async () => {
+      const snapshot = await a.snapshot()
+      expect(snapshot.runs.find(run => run.taskId !== root.taskId)?.executionPhase).toBe('submitted')
+    })
+    await a.crash()
+
+    // The second boot's barrier is held inside the submitted child's
+    // verification — the pass is running and will not finish until released.
+    const entered = Promise.withResolvers<void>()
+    const b = await boot(dir, {
+      gateVerification: callIndex => {
+        if (callIndex !== 0) return undefined
+        entered.resolve()
+        return never()
+      },
+    })
+    const recovering = b.runtime.adoptRoot(STORE, ROOT)
+    recovering.catch(() => {})
+    await entered.promise
+    const written = taskEvents(await b.events()).length
+    // The named verdict is `recovering`, it writes nothing, and it does not
+    // wait for the barrier it names.
+    await expect(b.runtime.submitResult(ROOT, { summary: 'while recovering' })).rejects.toThrow(/recovering/)
+    await expect(b.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
+      reason: 'split while recovering',
+      children: children('another child'),
+    })).rejects.toThrow(/recovering/)
+    expect(taskEvents(await b.events())).toHaveLength(written)
+    expect(b.spawns).toHaveLength(0)
+    // The barrier stays parked for the bounded teardown: the verifier never
+    // returns, exactly like the cases above.
+  })
+
+  it('stands a registered driver down when the barrier fails after registering it, and the retry re-registers from the record', async () => {
+    const dir = workspace()
+    const a = await boot(dir, { worker: () => new Promise<void>(() => {}) })
+    const root = await seedLegacyRoot(a, 'ship the release')
+    const { batchId } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
+      reason: 'split the work',
+      children: children('long child'),
+    })
+    await vi.waitFor(async () => expect((await a.snapshot()).runs).toHaveLength(2))
+    await a.crash()
+
+    const b = await boot(dir)
+    // A storage failure armed after the run pass's last settlement write (the
+    // cancelled child's terminal review): the barrier registers the waiting
+    // parent's driver, then cannot read the store to initialize the gates —
+    // the read failure the contract says must fail the barrier rather than
+    // masquerade as ready.
+    const realSnapshotIn = b.task.snapshotIn.bind(b.task)
+    const realReview = b.task.recordReviewIn.bind(b.task)
+    let failReads = false
+    const reviewSpy = vi.spyOn(b.task, 'recordReviewIn').mockImplementation(async (...args: Parameters<TaskService['recordReviewIn']>) => {
+      const result = await realReview(...args)
+      failReads = true
+      return result
+    })
+    const snapshotSpy = vi.spyOn(b.task, 'snapshotIn').mockImplementation(async (storeId: string) => {
+      if (failReads) throw new Error('the store log became unreadable')
+      return await realSnapshotIn(storeId)
+    })
+    await expect(b.runtime.adoptRoot(STORE, ROOT)).rejects.toThrow(/could not be read to initialize its sessions' gates/)
+    snapshotSpy.mockRestore()
+    reviewSpy.mockRestore()
+
+    // The driver the barrier registered was stood down, not started: zero
+    // spawns, the registration is gone (awaitBatch answers from the store
+    // instead of hanging on a parked promise), and nothing wrote the batch's
+    // settlement on the driver's behalf.
+    expect(b.spawns).toHaveLength(0)
+    const parentRun = await b.task.runIn(STORE, root.runId)
+    expect(parentRun.status).toBe('running')
+    expect(parentRun.executionPhase).toBe('waiting_children')
+    expect((await b.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['cancelled'])
+
+    // The failure is the named verdict for the next business call, carrying
+    // the original reason.
+    await expect(b.runtime.submitResult(ROOT, { summary: 'after the failure' }))
+      .rejects.toThrow(/recovery-failed.*the store log became unreadable/)
+
+    // The next explicit activation is the retry: the driver is re-registered
+    // from the persistent record, released by the barrier, and the batch
+    // completes by its own rules (the child the first pass cancelled keeps
+    // its committed settlement).
+    const adopted = await b.runtime.adoptRoot(STORE, ROOT)
+    expect(adopted).toMatchObject({ adopted: true, taskId: root.taskId, runId: root.runId })
+    expect((await b.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['cancelled'])
+    const settled = await b.task.runIn(STORE, root.runId)
+    expect(['failed', 'cancelled']).toContain(settled.status)
     await b.dispose()
   })
 })

@@ -1843,11 +1843,13 @@ describe('TaskRuntime root contract intake (A0 §1–§2)', () => {
     expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(0)
 
     const restarted = h.restart()
-    await restarted.task.openStore(STORE)
-    const report = await restarted.runtime.reconcileStore(STORE)
-    // The recovery pass re-checked the contract and activated it: one root, its run
-    // bound in this process, and nothing left unresolved.
-    expect(report.unresolvedProposals).toEqual([])
+    // The restart's own door (A2 §E): the activation barrier, which runs the
+    // recovery pass *and* re-binds the session with its gate — the read door no
+    // longer writes the gate, so this is the one place the phase comes back.
+    const rebound = await restarted.runtime.adoptRoot(STORE, ROOT_SESSION)
+    // The barrier's pass re-checked the contract and activated it: one root,
+    // its run bound in this process, and nothing left unresolved.
+    expect(rebound).toMatchObject({ adopted: true })
     const activated = await proposalOf(restarted, submitted.proposalId)
     expect(activated.status).toBe('admitted')
     if (activated.kind !== 'root' || activated.consumption?.kind !== 'root') throw new Error('unreachable')

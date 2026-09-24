@@ -5796,6 +5796,14 @@ var TaskRuntime = class extends Service {
 	* truth again the moment the entry goes.
 	*/
 	closingStores = /* @__PURE__ */ new Set();
+	/**
+	* One recovery barrier per store (A2 §E): what an explicit activation
+	* awaits, what every business execution entry checks before its first side
+	* effect, and what a cancellation or the unload invalidates. The persistent
+	* record stays the source of truth; this map only says what this process has
+	* recovered — it is never persisted and never a second state machine.
+	*/
+	storeRecovery = /* @__PURE__ */ new Map();
 	/** The one-writer-per-workspace ownership registry (A3 §3.4). */
 	workspaces;
 	/** The load-time provider scan, taken once ({@link providerLoadReport}). */
@@ -5870,6 +5878,8 @@ var TaskRuntime = class extends Service {
 	* leave the rest of the process's disposal half-done.
 	*/
 	async unload() {
+		for (const storeId of [...this.storeRecovery.keys()]) this.invalidateStoreRecovery(storeId);
+		this.storeRecovery.clear();
 		const entries = [...this.drivers.values()];
 		for (const entry of entries) entry.controller.abort();
 		await Promise.all(entries.map((entry) => entry.promise.catch((error) => {
@@ -6132,8 +6142,68 @@ var TaskRuntime = class extends Service {
 	* the gate as well as by the state (§1.8). Reading it back from the store is
 	* what makes that true after a restart, when no process holds the phase the
 	* dead one set.
+	*
+	* **The recovery barrier (A2 §E).** This entry is what an explicit graph
+	* activation awaits, and the whole pass above is one barrier: reconciliation
+	* of the facts, the gate initialization for *every* session the store knows,
+	* and the registration of the drivers the pass restarts. The barrier waits
+	* for exactly those — never for a batch's execution or a model's output —
+	* because a driver it registers is parked (registered, so a cancellation
+	* finds it, but not started) until the barrier completes. A store-read
+	* failure, a workspace conflict or an exception in the pass fails the barrier
+	* rather than surfacing as a warning over an unrecovered store, and a
+	* cancellation or the unload invalidates the handle it leaves. Nothing here
+	* is a second persisted state machine: the store remains the only source of
+	* truth, the next explicit activation is the retry, and business execution
+	* checks the handle through {@link recoveryStatus} instead of re-running the
+	* pass.
 	*/
 	async adoptRoot(storeId, rootSessionId) {
+		const inflight = this.storeRecovery.get(storeId);
+		if (inflight !== void 0 && inflight.status === "recovering") {
+			await inflight.promise;
+			const settledStatus = (state$1) => state$1.status;
+			if (this.storeRecovery.get(storeId) === inflight && settledStatus(inflight) === "failed") throw inflight.failure;
+		}
+		const barrier = this.adoptRootThroughBarrier(storeId, rootSessionId);
+		let release;
+		const released = new Promise((resolve$1) => {
+			release = resolve$1;
+		});
+		const state = {
+			status: "recovering",
+			promise: barrier.then(() => void 0, () => void 0),
+			release,
+			released,
+			pendingDrivers: []
+		};
+		this.storeRecovery.set(storeId, state);
+		try {
+			const adoption = await barrier;
+			await this.initializeStoreGates(storeId);
+			if (state.cancelled) this.storeRecovery.delete(storeId);
+			else {
+				state.status = "ready";
+				state.pendingDrivers.length = 0;
+			}
+			release(!state.cancelled);
+			return adoption;
+		} catch (error) {
+			state.status = "failed";
+			state.reason = error instanceof Error ? error.message : String(error);
+			state.failure = error;
+			this.standDownPendingDrivers(state);
+			release(false);
+			try {
+				await this.releaseStoreWorkspace(storeId);
+			} catch (cleanup) {
+				this.warn(`store ${storeId}: its workspace could not be released after a failed recovery (${cleanup instanceof Error ? cleanup.message : String(cleanup)})`);
+			}
+			throw error;
+		}
+	}
+	/** {@link adoptRoot}'s own pass, as one barrier body: the adoption in the order it always ran. */
+	async adoptRootThroughBarrier(storeId, rootSessionId) {
 		await this.openOrCreateStore(storeId);
 		let snapshot = await this.ctx.task.snapshotIn(storeId);
 		this.reindex(storeId, snapshot);
@@ -6171,6 +6241,32 @@ var TaskRuntime = class extends Service {
 			phase: phase ?? "terminal",
 			detail: `store "${storeId}" holds root task "${root.taskId}" with run "${run.runId}" for session "${rootSessionId}"; the session is bound and its gate is "${phase ?? "ungated"}"`
 		};
+	}
+	/**
+	* The gate initialization the recovery barrier owes every session the store
+	* knows (A2 §E): one snapshot read taken *after* the pass, each run's phase
+	* derived and applied under the gate's own token rule — the token is taken
+	* before the read, so a decision that lands while it is in flight drops the
+	* value it was about to apply. A run that predates phases leaves its session
+	* ungated (A3's boundary: reading and cancelling are its only continuations),
+	* and {@link gatePhaseFromStore}'s closing-store guard keeps a cancellation's
+	* barrier ahead of this pass.
+	*
+	* This is the one place a restart's sessions get their phases back: the read
+	* door (`lookupRun`) no longer writes the gate, so a query cannot be the
+	* thing that recovers a store or re-gates a session. A store that cannot be
+	* read here fails the barrier — half-gated is not recovered.
+	*/
+	async initializeStoreGates(storeId) {
+		const tokens = /* @__PURE__ */ new Map();
+		for (const [sessionId, binding] of this.sessions) if (binding.storeId === storeId) tokens.set(sessionId, this.executionGate.decisionToken(sessionId));
+		let snapshot;
+		try {
+			snapshot = await this.ctx.task.snapshotIn(storeId);
+		} catch (error) {
+			throw new Error(`store ${storeId} could not be read to initialize its sessions' gates after recovery (${error instanceof Error ? error.message : String(error)}); the recovery barrier fails rather than leaving the store half-gated`);
+		}
+		for (const run of snapshot.runs) this.gatePhaseFromStore(run.sessionId, run, storeId, tokens.get(run.sessionId) ?? 0);
 	}
 	/**
 	* What {@link adoptRoot} answers when the store still holds no root *after* its
@@ -6231,6 +6327,7 @@ var TaskRuntime = class extends Service {
 	*/
 	async intakeRootContract(storeId, rootSessionId, spec, options = {}) {
 		if (options.exec?.signal?.aborted === true) throw new Error(`task-runtime: the intake of a root contract for session "${rootSessionId}" was cancelled before anything was persisted`);
+		await this.assertRecoveryReady(storeId, "the intake of a root contract");
 		const submission = await this.submitRootContractProposal(storeId, rootSessionId, spec, options);
 		const continued = await this.continueProposal(storeId, submission.proposalId, rootSessionId);
 		if (continued.status === "activated") return {
@@ -6266,6 +6363,7 @@ var TaskRuntime = class extends Service {
 	* building a second proposal.
 	*/
 	async submitRootContractProposal(storeId, rootSessionId, spec, options = {}) {
+		await this.assertRecoveryReady(storeId, "a root contract proposal");
 		return await this.serializeRootIntake(storeId, () => this.submitRootProposalOnce(storeId, rootSessionId, spec, options));
 	}
 	/**
@@ -6312,6 +6410,7 @@ var TaskRuntime = class extends Service {
 	* the diagnostic says.
 	*/
 	async decomposeAndRun(storeId, parentTaskId, parentRunId, callerSessionId, spec, exec = {}) {
+		await this.assertRecoveryReady(storeId, "a decomposition");
 		const submission = await this.submitDecompositionProposal(storeId, parentTaskId, parentRunId, callerSessionId, spec, { ...exec.signal === void 0 && exec.callId === void 0 ? {} : { exec } });
 		const continued = await this.continueProposal(storeId, submission.proposalId, callerSessionId, { ...exec.callId === void 0 ? {} : { exec: { callId: exec.callId } } });
 		if (continued.status === "admitted") return {
@@ -6352,6 +6451,7 @@ var TaskRuntime = class extends Service {
 	* with nothing but the store.
 	*/
 	async submitDecompositionProposal(storeId, parentTaskId, parentRunId, callerSessionId, spec, options = {}) {
+		await this.assertRecoveryReady(storeId, "a decomposition proposal");
 		return await this.serializeParent(storeId, parentTaskId, () => this.submitProposalOnce(storeId, parentTaskId, parentRunId, callerSessionId, spec, options));
 	}
 	/**
@@ -6384,6 +6484,7 @@ var TaskRuntime = class extends Service {
 	* batch a caller could have confused.
 	*/
 	async continueProposal(storeId, proposalId, caller, options = {}) {
+		await this.assertRecoveryReady(storeId, "the continuation of a proposal");
 		const proposal = await this.requireProposal(storeId, proposalId);
 		if (proposal.kind === "root") return await this.serializeRootIntake(storeId, () => this.continueProposalIn(storeId, proposalId, caller, options));
 		return await this.serializeParent(storeId, proposal.identity.parentTaskId, () => this.continueProposalIn(storeId, proposalId, caller, options));
@@ -6405,6 +6506,7 @@ var TaskRuntime = class extends Service {
 	* record either way, and the caller learns why the batch did not run.
 	*/
 	async decideProposal(storeId, proposalId, decision, decidedBy, exec = {}) {
+		await this.assertRecoveryReady(storeId, "a proposal decision");
 		const proposal = await this.requireProposal(storeId, proposalId);
 		const serialize = async (work) => proposal.kind === "root" ? await this.serializeRootIntake(storeId, work) : await this.serializeParent(storeId, proposal.identity.parentTaskId, work);
 		return await serialize(async () => {
@@ -8089,6 +8191,7 @@ var TaskRuntime = class extends Service {
 	* budget, not a batch's.
 	*/
 	async replayTask(storeId, championTaskId, options, callerSessionId) {
+		await this.assertRecoveryReady(storeId, "a replay");
 		const champion = await this.ctx.task.taskIn(storeId, championTaskId);
 		if (champion.status !== "verified" && champion.status !== "failed") throw new Error(`task-runtime: champion task "${championTaskId}" is ${champion.status}; only a terminal (verified or failed) task can be replayed`);
 		const championRunId = champion.runIds[champion.runIds.length - 1];
@@ -8235,14 +8338,46 @@ var TaskRuntime = class extends Service {
 		});
 	}
 	/**
+	* Abort and remove the drivers a barrier registered but never released to
+	* start (A2 §E). Not-started is not executed: no body runs, nothing is
+	* written on the batch's behalf, and the persistent record — which still
+	* says the parent waits on its children — is what the next explicit
+	* activation re-registers from.
+	*/
+	standDownPendingDrivers(state) {
+		for (const pending of state.pendingDrivers.splice(0)) {
+			if (this.drivers.get(pending.key)?.controller === pending.controller) this.drivers.delete(pending.key);
+			pending.controller.abort();
+		}
+	}
+	/**
+	* A cancellation or the unload invalidates a store's recovery handle (A2
+	* §E): a barrier still in flight finishes its own pass but leaves no ready
+	* handle and stands its not-yet-started drivers down; a settled handle is
+	* dropped. The store's persistent record is untouched — the next explicit
+	* activation (`adoptRoot`, through `graphs`' activate) is the retry.
+	*/
+	invalidateStoreRecovery(storeId) {
+		const state = this.storeRecovery.get(storeId);
+		if (state === void 0) return;
+		if (state.status === "recovering") {
+			state.cancelled = true;
+			this.standDownPendingDrivers(state);
+			state.release(false);
+		} else this.storeRecovery.delete(storeId);
+	}
+	/**
 	* Fail one batch's parent run without an `OrchestrateEnv`: the children that
 	* never started are blocked, the parent run is failed with the cause, and the
 	* owner is told. Store-level on purpose — the caller is here because the env
 	* could not be built, so the store service and the notification seam are all
 	* this path needs — and it never throws, so a driver's failure cannot become an
-	* unhandled rejection of its own.
+	* unhandled rejection of its own. `outcome` is `'cancelled'` only for a batch
+	* whose driver never started (a recovery barrier stood it down when the
+	* cancellation aborted it): the same writes a started driver's abort branch
+	* makes, from the one place that can still make them.
 	*/
-	async failBatchFromRuntime(storeId, key, reason) {
+	async failBatchFromRuntime(storeId, key, reason, outcome = "failed") {
 		const prefix = `${storeId}/b-`;
 		if (!key.startsWith(prefix)) return;
 		const parentTaskId = key.slice(prefix.length);
@@ -8265,18 +8400,18 @@ var TaskRuntime = class extends Service {
 				}, actor);
 			}
 			if (parentRun === void 0) return;
-			await this.ctx.task.markRunStatusIn(storeId, parentTaskId, parentRun.runId, "failed", actor, { reason });
+			await this.ctx.task.markRunStatusIn(storeId, parentTaskId, parentRun.runId, outcome, actor, { reason });
 			await this.ctx.task.recordReviewIn(storeId, {
 				taskId: parentTaskId,
 				runId: parentRun.runId,
 				sessionId: parentRun.sessionId,
-				outcome: "failed",
+				outcome,
 				evidenceRefs: [],
 				anomalies: [reason],
 				localizedCause: reason,
 				relatedTaskIds: parentTask?.childTaskIds ?? []
 			}, actor);
-			this.notify(parentRun.sessionId, `task-runtime: batch ${key.slice(prefix.length - 2)} failed: ${reason}`);
+			this.notify(parentRun.sessionId, `task-runtime: batch ${key.slice(prefix.length - 2)} ${outcome}: ${reason}`);
 		} catch (error) {
 			this.warn(`store ${storeId}: the failed driver ${key} could not be settled (${error instanceof Error ? error.message : String(error)})`);
 		}
@@ -8285,6 +8420,15 @@ var TaskRuntime = class extends Service {
 	* Start the driver for one admitted batch. The controller is registered
 	* before the driver runs, so a cancellation arriving immediately after
 	* admission finds something to abort.
+	*
+	* When the registration happens *inside* a recovery barrier (A2 §E) the
+	* driver is parked after registering: the barrier waits for the
+	* registration — reconciliation, gates and drivers are what an activation
+	* owes — never for the body, so a `waiting_children` parent recovered inside
+	* a graph activation cannot lock that activation on its own batch. The
+	* barrier's completion releases the body; its failure or a cancellation
+	* stands it down unstarted, and an abort that lands while it is parked
+	* resolves it without a spawn.
 	*/
 	startBatchDriver(options) {
 		const key = `${options.storeId}/${options.batchId}`;
@@ -8300,7 +8444,18 @@ var TaskRuntime = class extends Service {
 			...options.excludeCallId === void 0 ? {} : { excludeCallId: options.excludeCallId },
 			...options.providers === void 0 ? {} : { providers: options.providers }
 		};
+		const barrier = this.storeRecovery.get(options.storeId);
+		const gate = barrier !== void 0 && barrier.status === "recovering" ? barrier : void 0;
 		const promise = (async () => {
+			if (gate !== void 0) {
+				gate.pendingDrivers.push({
+					key,
+					controller
+				});
+				if (!await Promise.race([gate.released, new Promise((resolve$1) => {
+					controller.signal.addEventListener("abort", () => resolve$1(false), { once: true });
+				})]) || controller.signal.aborted) return [];
+			}
 			return await driveBatch(await this.orchestrateEnv(options.callerSessionId, options.callerSessionId), {
 				...batch,
 				signal: controller.signal
@@ -8322,6 +8477,7 @@ var TaskRuntime = class extends Service {
 	async submitResult(callerSessionId, spec, exec = {}) {
 		if (spec.summary.trim().length === 0) throw new Error("task-runtime: a submission requires a non-empty summary of what was delivered");
 		const { storeId, task, run } = await this.runForSession(callerSessionId);
+		await this.assertRecoveryReady(storeId, "a result submission");
 		if (run.status !== "running") return {
 			status: run.status,
 			detail: `run "${run.runId}" is already settled as "${run.status}"; the recorded submission stands and nothing was changed`
@@ -8381,7 +8537,10 @@ var TaskRuntime = class extends Service {
 		entry.controller.abort();
 		await this.abortDescendantBatches(storeId, parentTaskId);
 		await this.settleCancelledDescendants(storeId, parentTaskId, batchId, callerSessionId);
-		return await entry.promise;
+		const outcomes = await entry.promise;
+		const parentNow = await this.ctx.task.runIn(storeId, parentRun.runId).catch(() => void 0);
+		if (parentNow !== void 0 && parentNow.status === "running") await this.failBatchFromRuntime(storeId, `${storeId}/${batchId}`, `the batch was cancelled by its caller before its driver started: ${batchId}`, "cancelled");
+		return outcomes;
 	}
 	/**
 	* Settle every run below `taskId` that is still in flight as cancelled — the
@@ -8452,6 +8611,7 @@ var TaskRuntime = class extends Service {
 			return;
 		}
 		this.closingStores.add(storeId);
+		this.invalidateStoreRecovery(storeId);
 		try {
 			for (const [sessionId, binding] of this.sessions) if (binding.storeId === storeId) this.executionGate.setTerminal(sessionId);
 			const entries = [...this.drivers.values()].filter((entry) => entry.storeId === storeId);
@@ -8531,7 +8691,7 @@ var TaskRuntime = class extends Service {
 		const env = await this.orchestrateEnv(this.recoverySessionFor(snapshot, storeId), `recovery:${storeId}`);
 		const waiting = [];
 		for (const run of ordered) {
-			if (this.startedSessions.has(run.sessionId)) continue;
+			if (rootTaskStoreId(run.sessionId) !== storeId && this.startedSessions.has(run.sessionId)) continue;
 			if (run.batchId !== void 0 && this.drivers.has(`${storeId}/${run.batchId}`)) continue;
 			if (run.executionPhase === void 0) continue;
 			if (run.providerBinding !== void 0) {
@@ -8726,7 +8886,8 @@ var TaskRuntime = class extends Service {
 	*   keeps the restore path (`waiting_children`, terminal records) working.
 	* - **A read that straddled a decision** — the query read the record, a
 	*   decision landed, and the value is applied afterwards: `token` is the
-	*   gate's decision count taken before that read ({@link lookupRun}), and
+	*   gate's decision count taken before that read ({@link initializeStoreGates}
+	*   is the caller now — the read door no longer writes the gate), and
 	*   {@link ExecutionGate.applyStorePhase} drops the value when it has moved
 	*   since. The closing set above cannot see this one — by then the store is
 	*   up to date and the store is not being closed any more.
@@ -8737,15 +8898,22 @@ var TaskRuntime = class extends Service {
 		if (phase === void 0) return;
 		this.executionGate.applyStorePhase(sessionId, phase, token);
 	}
+	/**
+	* The read door a session's first lookup takes (A2 §E): a read, and only a
+	* read. A binding this process holds is resolved against the store; a
+	* session this process never held resolves its store from its graph, opens
+	* it, and indexes the snapshot so the binding the record implies answers.
+	* Nothing else happens here — no recovery pass, no gate write, no spawn —
+	* because a query cannot be the thing that recovers a store: recovery runs
+	* behind the explicit activation barrier ({@link adoptRoot}), which is also
+	* where every session the store knows gets its gate phase
+	* ({@link initializeStoreGates}).
+	*/
 	async lookupRun(sessionId) {
 		const binding = this.sessions.get(sessionId);
 		if (binding !== void 0) {
-			const token$1 = this.executionGate.decisionToken(sessionId);
-			const resolved$1 = await this.resolveBinding(binding);
-			if (resolved$1 !== void 0) {
-				this.gatePhaseFromStore(sessionId, resolved$1.run, binding.storeId, token$1);
-				return resolved$1;
-			}
+			const resolved = await this.resolveBinding(binding);
+			if (resolved !== void 0) return resolved;
 			this.sessions.delete(sessionId);
 		}
 		let rootSessionId;
@@ -8755,7 +8923,6 @@ var TaskRuntime = class extends Service {
 			return;
 		}
 		const storeId = rootTaskStoreId(rootSessionId);
-		const token = this.executionGate.decisionToken(sessionId);
 		let snapshot;
 		try {
 			snapshot = await this.ctx.task.openStore(storeId);
@@ -8763,16 +8930,81 @@ var TaskRuntime = class extends Service {
 		} catch {
 			return;
 		}
-		try {
-			await this.reconcileStore(storeId);
-		} catch (error) {
-			this.warn(`store ${storeId}: recovery after opening the store failed (${error instanceof Error ? error.message : String(error)})`);
-		}
 		const rebinding = this.sessions.get(sessionId);
 		if (rebinding === void 0) return void 0;
-		const resolved = await this.resolveBinding(rebinding);
-		if (resolved !== void 0) this.gatePhaseFromStore(sessionId, resolved.run, rebinding.storeId, token);
-		return resolved;
+		return await this.resolveBinding(rebinding);
+	}
+	/**
+	* The recovery state of one store, as a read sees it (A2 §E): the barrier
+	* handle first, and — when no barrier has run for this store in this process
+	* — the store's own record, read-only. Work this process drives (a root it
+	* activated here, a worker it spawned, a batch whose driver is registered)
+	* is live, not recovery's; a still-running run nobody here drives is what
+	* `recovery-required` names, unless it predates coordination phases, which
+	* is the `needs-recovery` that allows only reading and cancelling. The
+	* store's own root run is its session's, not recovery's — the same rule the
+	* recovery pass applies — so a root legitimately sitting `active` between
+	* its own decisions is not a recovery verdict, and the gate plus the state
+	* rules are what refuse a write on it.
+	*
+	* Never a trigger: this opens no gate, starts no driver and settles no run,
+	* so a context query, a diagnostic or the DSH first-request check can show
+	* where a store stands without executing anything.
+	*/
+	async recoveryStatus(storeId) {
+		const state = this.storeRecovery.get(storeId);
+		if (state !== void 0) {
+			if (state.status === "recovering") return { status: "recovering" };
+			if (state.status === "failed") return {
+				status: "recovery-failed",
+				reason: state.reason ?? "the recovery barrier failed"
+			};
+			return { status: "ready" };
+		}
+		let snapshot;
+		try {
+			snapshot = await this.ctx.task.openStore(storeId);
+		} catch (error) {
+			return {
+				status: "not-activated",
+				reason: error instanceof Error ? error.message : String(error)
+			};
+		}
+		for (const run of snapshot.runs) {
+			if (run.status !== "running") continue;
+			if (this.startedSessions.has(run.sessionId)) continue;
+			if (this.agentOrUndefined(run.sessionId) !== void 0) continue;
+			if (run.batchId !== void 0 && this.drivers.has(`${storeId}/${run.batchId}`)) continue;
+			if (rootTaskStoreId(run.sessionId) === storeId) continue;
+			if (run.executionPhase === void 0) return {
+				status: "needs-recovery",
+				reason: `run "${run.runId}" predates coordination phases and is not treated as active`
+			};
+			return {
+				status: "recovery-required",
+				reason: `run "${run.runId}" (phase "${run.executionPhase}") is in flight from a process that is gone`
+			};
+		}
+		return { status: "ready" };
+	}
+	/**
+	* The recovery door every business execution entry passes before its first
+	* side effect (A2 §E): the same condition the barrier establishes, refused
+	* by name — `recovering` while the barrier runs, `recovery-failed` with the
+	* original reason after one failed, `recovery-required` for work a dead
+	* process left, `needs-recovery` for a record that predates phases. The
+	* store-nothing refusals never trigger recovery themselves; cancellation,
+	* close and the read-only doors are not gated here.
+	*
+	* The `not-activated` answer proceeds: the legal root entry (an intake)
+	* creates the store, and every other caller is refused by the store's own
+	* unknown-store error rather than by a recovery verdict.
+	*/
+	async assertRecoveryReady(storeId, entry) {
+		const readiness = await this.recoveryStatus(storeId);
+		if (readiness.status === "ready" || readiness.status === "not-activated") return;
+		const because = readiness.status === "recovering" ? "its recovery barrier is still running; retry once the graph's activation completes" : readiness.status === "recovery-failed" ? `the last recovery failed: ${readiness.reason}; an explicit activation (adoptRoot) retries it` : readiness.status === "needs-recovery" ? `${readiness.reason}; only reading and cancelling are allowed` : `${readiness.reason}; await the graph's activation or adoptRoot before executing against this store`;
+		throw new Error(`task-runtime: ${entry} on store "${storeId}" is refused: the store is ${readiness.status} — ${because}`);
 	}
 	async resolveBinding(binding) {
 		try {

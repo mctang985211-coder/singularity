@@ -894,6 +894,36 @@ interface DriverEntry {
   readonly storeId: string
 }
 
+/**
+ * One store's recovery barrier (A2 §E): the in-flight promise an explicit
+ * activation awaits, the ready handle it leaves behind, and the release its
+ * registered drivers wait for. In-process only — the persistent record stays
+ * the source of truth, and this handle is never a second state machine: a
+ * cancellation or the unload invalidates it, and the next explicit
+ * `adoptRoot` is the retry.
+ */
+interface StoreRecoveryState {
+  /** `recovering` while the barrier runs, `ready` once it completed, `failed` when it threw. */
+  status: 'recovering' | 'ready' | 'failed'
+  /**
+   * The barrier's own completion, never rejecting: a joining `adoptRoot` awaits
+   * this and then re-reads {@link status} (and {@link failure}), so a failed
+   * barrier cannot surface as an unhandled rejection of its mirror.
+   */
+  readonly promise: Promise<void>
+  /** Resolves the drivers this barrier registered: `true` starts them, `false` stands them down unstarted. */
+  readonly release: (start: boolean) => void
+  readonly released: Promise<boolean>
+  /** The drivers this barrier registered but has not yet released to start. */
+  readonly pendingDrivers: { key: string; controller: AbortController }[]
+  /** Why a failed barrier failed, verbatim. */
+  reason?: string
+  /** The original error a failed barrier threw. */
+  failure?: unknown
+  /** A cancellation or the unload invalidated this barrier: it finishes its pass but leaves no ready handle. */
+  cancelled?: boolean
+}
+
 /** The batch id a parent's decomposition records: `b-<parentTaskId>`, deterministic because a task splits once (§1.2). */
 function batchIdFor(parentTaskId: TaskId): string {
   return `b-${parentTaskId}`
@@ -1153,6 +1183,34 @@ export interface ReconcileReport {
 }
 
 /**
+ * What a read sees about one store's recovery (A2 §E) — facts and markers,
+ * never a trigger: {@link TaskRuntime.recoveryStatus} recovers nothing, starts
+ * no driver and writes no gate, so a context query or a diagnostic can show
+ * exactly where a store stands without becoming the thing that recovers it.
+ *
+ * - `ready` — nothing needs recovering, or the explicit barrier completed;
+ * - `not-activated` — the store cannot be read yet: the legal root entry (an
+ *   intake) creates it, and every other caller is refused by the store's own
+ *   unknown-store error rather than by a recovery verdict;
+ * - `recovering` — an explicit activation's barrier is still running;
+ * - `recovery-required` — the store holds in-flight work this process is not
+ *   driving (a worker, a replay, a waiting parent); only an explicit
+ *   activation (`adoptRoot`, through `graphs`' activate) may recover it;
+ * - `needs-recovery` — the store holds a run that predates coordination
+ *   phases: reading and cancelling are its only continuations, and it is never
+ *   treated as active by default;
+ * - `recovery-failed` — the last explicit recovery failed; `reason` is the
+ *   original one, and the next explicit activation is the retry.
+ */
+export type StoreRecoveryStatus =
+  | { status: 'ready' }
+  | { status: 'not-activated'; reason: string }
+  | { status: 'recovering' }
+  | { status: 'recovery-required'; reason: string }
+  | { status: 'needs-recovery'; reason: string }
+  | { status: 'recovery-failed'; reason: string }
+
+/**
  * What the pre-check's second half judged (T2/T3 §2): the derived batch, the
  * manifests it resolved and the provider verdicts — everything admission needs,
  * and nothing persisted.
@@ -1265,6 +1323,14 @@ export class TaskRuntime extends Service {
    * truth again the moment the entry goes.
    */
   private readonly closingStores = new Set<string>()
+  /**
+   * One recovery barrier per store (A2 §E): what an explicit activation
+   * awaits, what every business execution entry checks before its first side
+   * effect, and what a cancellation or the unload invalidates. The persistent
+   * record stays the source of truth; this map only says what this process has
+   * recovered — it is never persisted and never a second state machine.
+   */
+  private readonly storeRecovery = new Map<string, StoreRecoveryState>()
   /** The one-writer-per-workspace ownership registry (A3 §3.4). */
   private readonly workspaces: WorkspaceRegistry
   /** The load-time provider scan, taken once ({@link providerLoadReport}). */
@@ -1352,6 +1418,12 @@ export class TaskRuntime extends Service {
    * leave the rest of the process's disposal half-done.
    */
   private async unload(): Promise<void> {
+    // The unload invalidates every recovery handle first (A2 §E): a driver
+    // parked behind a barrier would otherwise hold the await below on a
+    // barrier that no longer exists, and a store mid-recovery must not answer
+    // `ready` for a process that is on its way out.
+    for (const storeId of [...this.storeRecovery.keys()]) this.invalidateStoreRecovery(storeId)
+    this.storeRecovery.clear()
     const entries = [...this.drivers.values()]
     for (const entry of entries) entry.controller.abort()
     await Promise.all(entries.map(entry => entry.promise.catch(error => {
@@ -1638,8 +1710,96 @@ export class TaskRuntime extends Service {
    * the gate as well as by the state (§1.8). Reading it back from the store is
    * what makes that true after a restart, when no process holds the phase the
    * dead one set.
+   *
+   * **The recovery barrier (A2 §E).** This entry is what an explicit graph
+   * activation awaits, and the whole pass above is one barrier: reconciliation
+   * of the facts, the gate initialization for *every* session the store knows,
+   * and the registration of the drivers the pass restarts. The barrier waits
+   * for exactly those — never for a batch's execution or a model's output —
+   * because a driver it registers is parked (registered, so a cancellation
+   * finds it, but not started) until the barrier completes. A store-read
+   * failure, a workspace conflict or an exception in the pass fails the barrier
+   * rather than surfacing as a warning over an unrecovered store, and a
+   * cancellation or the unload invalidates the handle it leaves. Nothing here
+   * is a second persisted state machine: the store remains the only source of
+   * truth, the next explicit activation is the retry, and business execution
+   * checks the handle through {@link recoveryStatus} instead of re-running the
+   * pass.
    */
   async adoptRoot(storeId: string, rootSessionId: string): Promise<RootAdoption> {
+    // The barrier already in flight for this store is the one to wait for: the
+    // join is the dedupe, so two explicit entries cannot run two recovery
+    // passes concurrently — and a failed barrier's original error is this
+    // caller's error.
+    const inflight = this.storeRecovery.get(storeId)
+    if (inflight !== undefined && inflight.status === 'recovering') {
+      await inflight.promise
+      // Re-read through a function so the outer narrowing cannot freeze the
+      // verdict: the barrier this caller joined may have failed while awaited.
+      const settledStatus = (state: StoreRecoveryState): StoreRecoveryState['status'] => state.status
+      if (this.storeRecovery.get(storeId) === inflight && settledStatus(inflight) === 'failed') throw inflight.failure
+    }
+    const barrier = this.adoptRootThroughBarrier(storeId, rootSessionId)
+    let release!: (start: boolean) => void
+    const released = new Promise<boolean>(resolve => {
+      release = resolve
+    })
+    const state: StoreRecoveryState = {
+      status: 'recovering',
+      promise: barrier.then(
+        () => undefined,
+        () => undefined,
+      ),
+      release,
+      released,
+      pendingDrivers: [],
+    }
+    this.storeRecovery.set(storeId, state)
+    try {
+      const adoption = await barrier
+      // The barrier owes every session the store knows its gate phase (A2 §E):
+      // one read taken after the pass, applied under the gate's own token rule.
+      await this.initializeStoreGates(storeId)
+      if (state.cancelled) {
+        // A cancellation or the unload invalidated this barrier: it finished
+        // its pass into a store that cancellation owns, so it leaves no ready
+        // handle at all — the record, and the next explicit activation, decide
+        // what the store is now.
+        this.storeRecovery.delete(storeId)
+      } else {
+        state.status = 'ready'
+        state.pendingDrivers.length = 0
+      }
+      // The drivers start only now — after the facts, the gates and the
+      // registrations are settled. The barrier never waits for what they do;
+      // an invalidated barrier stands its registrations down instead.
+      release(!state.cancelled)
+      return adoption
+    } catch (error) {
+      state.status = 'failed'
+      state.reason = error instanceof Error ? error.message : String(error)
+      state.failure = error
+      // Not-started is not executed (A2 §E): the drivers this barrier
+      // registered are aborted and removed, nothing is written on their behalf,
+      // and the next explicit activation re-registers them from the persistent
+      // record, which still says what the store holds.
+      this.standDownPendingDrivers(state)
+      release(false)
+      // The temporary resources this barrier acquired go back; committed
+      // recovery facts stay on the record.
+      try {
+        await this.releaseStoreWorkspace(storeId)
+      } catch (cleanup) {
+        this.warn(
+          `store ${storeId}: its workspace could not be released after a failed recovery (${cleanup instanceof Error ? cleanup.message : String(cleanup)})`,
+        )
+      }
+      throw error
+    }
+  }
+
+  /** {@link adoptRoot}'s own pass, as one barrier body: the adoption in the order it always ran. */
+  private async adoptRootThroughBarrier(storeId: string, rootSessionId: string): Promise<RootAdoption> {
     await this.openOrCreateStore(storeId)
     let snapshot = await this.ctx.task.snapshotIn(storeId)
     this.reindex(storeId, snapshot)
@@ -1690,6 +1850,40 @@ export class TaskRuntime extends Service {
       detail:
         `store "${storeId}" holds root task "${root.taskId}" with run "${run.runId}" for session "${rootSessionId}"; ` +
         `the session is bound and its gate is "${phase ?? 'ungated'}"`,
+    }
+  }
+
+  /**
+   * The gate initialization the recovery barrier owes every session the store
+   * knows (A2 §E): one snapshot read taken *after* the pass, each run's phase
+   * derived and applied under the gate's own token rule — the token is taken
+   * before the read, so a decision that lands while it is in flight drops the
+   * value it was about to apply. A run that predates phases leaves its session
+   * ungated (A3's boundary: reading and cancelling are its only continuations),
+   * and {@link gatePhaseFromStore}'s closing-store guard keeps a cancellation's
+   * barrier ahead of this pass.
+   *
+   * This is the one place a restart's sessions get their phases back: the read
+   * door (`lookupRun`) no longer writes the gate, so a query cannot be the
+   * thing that recovers a store or re-gates a session. A store that cannot be
+   * read here fails the barrier — half-gated is not recovered.
+   */
+  private async initializeStoreGates(storeId: string): Promise<void> {
+    const tokens = new Map<string, number>()
+    for (const [sessionId, binding] of this.sessions) {
+      if (binding.storeId === storeId) tokens.set(sessionId, this.executionGate.decisionToken(sessionId))
+    }
+    let snapshot: TaskSnapshot
+    try {
+      snapshot = await this.ctx.task.snapshotIn(storeId)
+    } catch (error) {
+      throw new Error(
+        `store ${storeId} could not be read to initialize its sessions' gates after recovery ` +
+        `(${error instanceof Error ? error.message : String(error)}); the recovery barrier fails rather than leaving the store half-gated`,
+      )
+    }
+    for (const run of snapshot.runs) {
+      this.gatePhaseFromStore(run.sessionId, run, storeId, tokens.get(run.sessionId) ?? 0)
     }
   }
 
@@ -1769,6 +1963,7 @@ export class TaskRuntime extends Service {
     if (options.exec?.signal?.aborted === true) {
       throw new Error(`task-runtime: the intake of a root contract for session "${rootSessionId}" was cancelled before anything was persisted`)
     }
+    await this.assertRecoveryReady(storeId, 'the intake of a root contract')
     const submission = await this.submitRootContractProposal(storeId, rootSessionId, spec, options)
     const continued = await this.continueProposal(storeId, submission.proposalId, rootSessionId)
     if (continued.status === 'activated') {
@@ -1812,6 +2007,7 @@ export class TaskRuntime extends Service {
     spec: RootContractSpec,
     options: RootIntakeOptions = {},
   ): Promise<ProposalSubmission> {
+    await this.assertRecoveryReady(storeId, 'a root contract proposal')
     return await this.serializeRootIntake(storeId, () =>
       this.submitRootProposalOnce(storeId, rootSessionId, spec, options))
   }
@@ -1867,6 +2063,7 @@ export class TaskRuntime extends Service {
     spec: DecomposeSpec,
     exec: { signal?: AbortSignal; callId?: string } = {},
   ): Promise<DecomposeAdmissionResult> {
+    await this.assertRecoveryReady(storeId, 'a decomposition')
     const submission = await this.submitDecompositionProposal(storeId, parentTaskId, parentRunId, callerSessionId, spec, {
       ...(exec.signal === undefined && exec.callId === undefined ? {} : { exec }),
     })
@@ -1920,6 +2117,7 @@ export class TaskRuntime extends Service {
     spec: DecomposeSpec,
     options: DecomposeProposalOptions = {},
   ): Promise<ProposalSubmission> {
+    await this.assertRecoveryReady(storeId, 'a decomposition proposal')
     return await this.serializeParent(storeId, parentTaskId, () =>
       this.submitProposalOnce(storeId, parentTaskId, parentRunId, callerSessionId, spec, options))
   }
@@ -1959,6 +2157,7 @@ export class TaskRuntime extends Service {
     caller: string,
     options: { spec?: DecomposeSpec; exec?: { callId?: string } } = {},
   ): Promise<ProposalContinuation> {
+    await this.assertRecoveryReady(storeId, 'the continuation of a proposal')
     const proposal = await this.requireProposal(storeId, proposalId)
     if (proposal.kind === 'root') {
       return await this.serializeRootIntake(storeId, () =>
@@ -1991,6 +2190,7 @@ export class TaskRuntime extends Service {
     decidedBy: string,
     exec: { callId?: string } = {},
   ): Promise<ProposalDecisionResult> {
+    await this.assertRecoveryReady(storeId, 'a proposal decision')
     const proposal = await this.requireProposal(storeId, proposalId)
     const serialize = async <T>(work: () => Promise<T>): Promise<T> =>
       proposal.kind === 'root'
@@ -4144,6 +4344,7 @@ export class TaskRuntime extends Service {
     options: ReplayTaskOptions,
     callerSessionId: string,
   ): Promise<ReplayRunOutcome> {
+    await this.assertRecoveryReady(storeId, 'a replay')
     const champion = await this.ctx.task.taskIn(storeId, championTaskId)
     if (champion.status !== 'verified' && champion.status !== 'failed') {
       throw new Error(`task-runtime: champion task "${championTaskId}" is ${champion.status}; only a terminal (verified or failed) task can be replayed`)
@@ -4351,14 +4552,51 @@ export class TaskRuntime extends Service {
   }
 
   /**
+   * Abort and remove the drivers a barrier registered but never released to
+   * start (A2 §E). Not-started is not executed: no body runs, nothing is
+   * written on the batch's behalf, and the persistent record — which still
+   * says the parent waits on its children — is what the next explicit
+   * activation re-registers from.
+   */
+  private standDownPendingDrivers(state: StoreRecoveryState): void {
+    for (const pending of state.pendingDrivers.splice(0)) {
+      const entry = this.drivers.get(pending.key)
+      if (entry?.controller === pending.controller) this.drivers.delete(pending.key)
+      pending.controller.abort()
+    }
+  }
+
+  /**
+   * A cancellation or the unload invalidates a store's recovery handle (A2
+   * §E): a barrier still in flight finishes its own pass but leaves no ready
+   * handle and stands its not-yet-started drivers down; a settled handle is
+   * dropped. The store's persistent record is untouched — the next explicit
+   * activation (`adoptRoot`, through `graphs`' activate) is the retry.
+   */
+  private invalidateStoreRecovery(storeId: string): void {
+    const state = this.storeRecovery.get(storeId)
+    if (state === undefined) return
+    if (state.status === 'recovering') {
+      state.cancelled = true
+      this.standDownPendingDrivers(state)
+      state.release(false)
+    } else {
+      this.storeRecovery.delete(storeId)
+    }
+  }
+
+  /**
    * Fail one batch's parent run without an `OrchestrateEnv`: the children that
    * never started are blocked, the parent run is failed with the cause, and the
    * owner is told. Store-level on purpose — the caller is here because the env
    * could not be built, so the store service and the notification seam are all
    * this path needs — and it never throws, so a driver's failure cannot become an
-   * unhandled rejection of its own.
+   * unhandled rejection of its own. `outcome` is `'cancelled'` only for a batch
+   * whose driver never started (a recovery barrier stood it down when the
+   * cancellation aborted it): the same writes a started driver's abort branch
+   * makes, from the one place that can still make them.
    */
-  private async failBatchFromRuntime(storeId: string, key: string, reason: string): Promise<void> {
+  private async failBatchFromRuntime(storeId: string, key: string, reason: string, outcome: 'failed' | 'cancelled' = 'failed'): Promise<void> {
     const prefix = `${storeId}/b-`
     if (!key.startsWith(prefix)) return
     const parentTaskId = key.slice(prefix.length) as TaskId
@@ -4381,18 +4619,18 @@ export class TaskRuntime extends Service {
         }, actor)
       }
       if (parentRun === undefined) return
-      await this.ctx.task.markRunStatusIn(storeId, parentTaskId, parentRun.runId, 'failed', actor, { reason })
+      await this.ctx.task.markRunStatusIn(storeId, parentTaskId, parentRun.runId, outcome, actor, { reason })
       await this.ctx.task.recordReviewIn(storeId, {
         taskId: parentTaskId,
         runId: parentRun.runId,
         sessionId: parentRun.sessionId,
-        outcome: 'failed',
+        outcome,
         evidenceRefs: [],
         anomalies: [reason],
         localizedCause: reason,
         relatedTaskIds: parentTask?.childTaskIds ?? [],
       }, actor)
-      this.notify(parentRun.sessionId, `task-runtime: batch ${key.slice(prefix.length - 2)} failed: ${reason}`)
+      this.notify(parentRun.sessionId, `task-runtime: batch ${key.slice(prefix.length - 2)} ${outcome}: ${reason}`)
     } catch (error) {
       this.warn(`store ${storeId}: the failed driver ${key} could not be settled (${error instanceof Error ? error.message : String(error)})`)
     }
@@ -4402,6 +4640,15 @@ export class TaskRuntime extends Service {
    * Start the driver for one admitted batch. The controller is registered
    * before the driver runs, so a cancellation arriving immediately after
    * admission finds something to abort.
+   *
+   * When the registration happens *inside* a recovery barrier (A2 §E) the
+   * driver is parked after registering: the barrier waits for the
+   * registration — reconciliation, gates and drivers are what an activation
+   * owes — never for the body, so a `waiting_children` parent recovered inside
+   * a graph activation cannot lock that activation on its own batch. The
+   * barrier's completion releases the body; its failure or a cancellation
+   * stands it down unstarted, and an abort that lands while it is parked
+   * resolves it without a spawn.
    */
   private startBatchDriver(options: {
     storeId: string
@@ -4426,7 +4673,19 @@ export class TaskRuntime extends Service {
       ...(options.excludeCallId === undefined ? {} : { excludeCallId: options.excludeCallId }),
       ...(options.providers === undefined ? {} : { providers: options.providers }),
     }
+    const barrier = this.storeRecovery.get(options.storeId)
+    const gate = barrier !== undefined && barrier.status === 'recovering' ? barrier : undefined
     const promise = (async (): Promise<ChildOutcome[]> => {
+      if (gate !== undefined) {
+        gate.pendingDrivers.push({ key, controller })
+        const start = await Promise.race([
+          gate.released,
+          new Promise<false>(resolve => {
+            controller.signal.addEventListener('abort', () => resolve(false), { once: true })
+          }),
+        ])
+        if (!start || controller.signal.aborted) return []
+      }
       const env = await this.orchestrateEnv(options.callerSessionId, options.callerSessionId)
       return await driveBatch(env, { ...batch, signal: controller.signal })
     })()
@@ -4453,6 +4712,11 @@ export class TaskRuntime extends Service {
       throw new Error('task-runtime: a submission requires a non-empty summary of what was delivered')
     }
     const { storeId, task, run } = await this.runForSession(callerSessionId)
+    // The recovery door comes before the run's own verdicts (A2 §E): a store
+    // this process has not recovered is refused by name even when the run
+    // underneath would have answered, because the first side effect is what
+    // the door guards.
+    await this.assertRecoveryReady(storeId, 'a result submission')
     if (run.status !== 'running') {
       return {
         status: run.status,
@@ -4566,7 +4830,17 @@ export class TaskRuntime extends Service {
     // (`settleSubmittedRun`). `cancelGraph` settles the same way, which is why a
     // graph cancellation already voids that verdict.
     await this.settleCancelledDescendants(storeId, parentTaskId, batchId, callerSessionId)
-    return await entry.promise
+    const outcomes = await entry.promise
+    // A driver that never started (a recovery barrier stood it down when this
+    // cancellation aborted it) settles nothing itself: the parent run and the
+    // children that never started are cancelled here, idempotently — a started
+    // driver's own abort branch has already settled the parent by now, and the
+    // store's terminal record is what makes this a no-op for it.
+    const parentNow = await this.ctx.task.runIn(storeId, parentRun.runId).catch(() => undefined)
+    if (parentNow !== undefined && parentNow.status === 'running') {
+      await this.failBatchFromRuntime(storeId, `${storeId}/${batchId}`, `the batch was cancelled by its caller before its driver started: ${batchId}`, 'cancelled')
+    }
+    return outcomes
   }
 
   /**
@@ -4653,6 +4927,12 @@ export class TaskRuntime extends Service {
     // entry, so the barrier never outlives the operation and the store is the truth
     // for these sessions again afterwards.
     this.closingStores.add(storeId)
+    // A cancellation invalidates the recovery handle (A2 §E): drivers a still
+    // running barrier registered but not started stand down here — not-started
+    // is not executed — and that barrier completes its pass into a store whose
+    // runs this cancellation is already settling, leaving no ready handle
+    // behind. The next explicit activation is the retry.
+    this.invalidateStoreRecovery(storeId)
     try {
       for (const [sessionId, binding] of this.sessions) {
         if (binding.storeId === storeId) this.executionGate.setTerminal(sessionId)
@@ -4751,7 +5031,16 @@ export class TaskRuntime extends Service {
       // the next adoption has to settle it). Two holders are possible here — this
       // process started the session, or a registered driver owns the batch the run
       // waits on — and either one means the run is live work, not recovery's.
-      if (this.startedSessions.has(run.sessionId)) continue
+      //
+      // The store's own root run is the exception (A2 §E): adoption binds the
+      // root session *before* this pass, so "this process started the session"
+      // is true of every root an activation just recovered, and the phases that
+      // still need recovery — a `waiting_children` parent whose batch nobody
+      // drives, a `submitted` acceptance nobody is settling — must not be
+      // swallowed by that binding. What keeps a root's live work live is the
+      // phase checks below (an `active` root is left alone by its own rule) and
+      // the drivers map, which is what "is the batch being driven" answers.
+      if (rootTaskStoreId(run.sessionId) !== storeId && this.startedSessions.has(run.sessionId)) continue
       if (run.batchId !== undefined && this.drivers.has(`${storeId}/${run.batchId}`)) continue
       if (run.executionPhase === undefined) continue
       if (run.providerBinding !== undefined) {
@@ -4998,7 +5287,8 @@ export class TaskRuntime extends Service {
    *   keeps the restore path (`waiting_children`, terminal records) working.
    * - **A read that straddled a decision** — the query read the record, a
    *   decision landed, and the value is applied afterwards: `token` is the
-   *   gate's decision count taken before that read ({@link lookupRun}), and
+   *   gate's decision count taken before that read ({@link initializeStoreGates}
+   *   is the caller now — the read door no longer writes the gate), and
    *   {@link ExecutionGate.applyStorePhase} drops the value when it has moved
    *   since. The closing set above cannot see this one — by then the store is
    *   up to date and the store is not being closed any more.
@@ -5010,18 +5300,22 @@ export class TaskRuntime extends Service {
     this.executionGate.applyStorePhase(sessionId, phase, token)
   }
 
+  /**
+   * The read door a session's first lookup takes (A2 §E): a read, and only a
+   * read. A binding this process holds is resolved against the store; a
+   * session this process never held resolves its store from its graph, opens
+   * it, and indexes the snapshot so the binding the record implies answers.
+   * Nothing else happens here — no recovery pass, no gate write, no spawn —
+   * because a query cannot be the thing that recovers a store: recovery runs
+   * behind the explicit activation barrier ({@link adoptRoot}), which is also
+   * where every session the store knows gets its gate phase
+   * ({@link initializeStoreGates}).
+   */
   private async lookupRun(sessionId: string): Promise<{ storeId: string; task: TaskInstance; run: TaskRun } | undefined> {
     const binding = this.sessions.get(sessionId)
     if (binding !== undefined) {
-      // The token is taken before the read whose value it judges: a decision that
-      // lands while `resolveBinding` is in flight makes the run it returns older
-      // than the gate, and the phase is then dropped rather than applied.
-      const token = this.executionGate.decisionToken(sessionId)
       const resolved = await this.resolveBinding(binding)
-      if (resolved !== undefined) {
-        this.gatePhaseFromStore(sessionId, resolved.run, binding.storeId, token)
-        return resolved
-      }
+      if (resolved !== undefined) return resolved
       this.sessions.delete(sessionId)
     }
     let rootSessionId: string
@@ -5032,11 +5326,6 @@ export class TaskRuntime extends Service {
       return undefined
     }
     const storeId = rootTaskStoreId(rootSessionId)
-    // The whole reopening is one read as far as the token is concerned: it is
-    // taken before the store is opened, so a decision that lands anywhere in the
-    // rebinding — the recovery pass included — invalidates the run this branch
-    // resolves at the end of it.
-    const token = this.executionGate.decisionToken(sessionId)
     let snapshot: TaskSnapshot
     try {
       snapshot = await this.ctx.task.openStore(storeId)
@@ -5044,19 +5333,90 @@ export class TaskRuntime extends Service {
     } catch {
       return undefined
     }
-    // Opening a store this process was not driving is the recovery entry: a run
-    // the previous process left in flight is settled or restarted before this
-    // lookup hands the caller a run to work with (§3.6).
-    try {
-      await this.reconcileStore(storeId)
-    } catch (error) {
-      this.warn(`store ${storeId}: recovery after opening the store failed (${error instanceof Error ? error.message : String(error)})`)
-    }
     const rebinding = this.sessions.get(sessionId)
     if (rebinding === undefined) return undefined
-    const resolved = await this.resolveBinding(rebinding)
-    if (resolved !== undefined) this.gatePhaseFromStore(sessionId, resolved.run, rebinding.storeId, token)
-    return resolved
+    return await this.resolveBinding(rebinding)
+  }
+
+  /**
+   * The recovery state of one store, as a read sees it (A2 §E): the barrier
+   * handle first, and — when no barrier has run for this store in this process
+   * — the store's own record, read-only. Work this process drives (a root it
+   * activated here, a worker it spawned, a batch whose driver is registered)
+   * is live, not recovery's; a still-running run nobody here drives is what
+   * `recovery-required` names, unless it predates coordination phases, which
+   * is the `needs-recovery` that allows only reading and cancelling. The
+   * store's own root run is its session's, not recovery's — the same rule the
+   * recovery pass applies — so a root legitimately sitting `active` between
+   * its own decisions is not a recovery verdict, and the gate plus the state
+   * rules are what refuse a write on it.
+   *
+   * Never a trigger: this opens no gate, starts no driver and settles no run,
+   * so a context query, a diagnostic or the DSH first-request check can show
+   * where a store stands without executing anything.
+   */
+  async recoveryStatus(storeId: string): Promise<StoreRecoveryStatus> {
+    const state = this.storeRecovery.get(storeId)
+    if (state !== undefined) {
+      if (state.status === 'recovering') return { status: 'recovering' }
+      if (state.status === 'failed') return { status: 'recovery-failed', reason: state.reason ?? 'the recovery barrier failed' }
+      return { status: 'ready' }
+    }
+    let snapshot: TaskSnapshot
+    try {
+      snapshot = await this.ctx.task.openStore(storeId)
+    } catch (error) {
+      return { status: 'not-activated', reason: error instanceof Error ? error.message : String(error) }
+    }
+    for (const run of snapshot.runs) {
+      if (run.status !== 'running') continue
+      // Live work, not recovery's: a session this process started, or a session
+      // whose agent is live here (a resumed root, a spawned worker still in its
+      // turn) — the same distinction the runtime itself makes when it resolves
+      // a caller.
+      if (this.startedSessions.has(run.sessionId)) continue
+      if (this.agentOrUndefined(run.sessionId) !== undefined) continue
+      if (run.batchId !== undefined && this.drivers.has(`${storeId}/${run.batchId}`)) continue
+      if (rootTaskStoreId(run.sessionId) === storeId) continue
+      if (run.executionPhase === undefined) {
+        return {
+          status: 'needs-recovery',
+          reason: `run "${run.runId}" predates coordination phases and is not treated as active`,
+        }
+      }
+      return {
+        status: 'recovery-required',
+        reason: `run "${run.runId}" (phase "${run.executionPhase}") is in flight from a process that is gone`,
+      }
+    }
+    return { status: 'ready' }
+  }
+
+  /**
+   * The recovery door every business execution entry passes before its first
+   * side effect (A2 §E): the same condition the barrier establishes, refused
+   * by name — `recovering` while the barrier runs, `recovery-failed` with the
+   * original reason after one failed, `recovery-required` for work a dead
+   * process left, `needs-recovery` for a record that predates phases. The
+   * store-nothing refusals never trigger recovery themselves; cancellation,
+   * close and the read-only doors are not gated here.
+   *
+   * The `not-activated` answer proceeds: the legal root entry (an intake)
+   * creates the store, and every other caller is refused by the store's own
+   * unknown-store error rather than by a recovery verdict.
+   */
+  private async assertRecoveryReady(storeId: string, entry: string): Promise<void> {
+    const readiness = await this.recoveryStatus(storeId)
+    if (readiness.status === 'ready' || readiness.status === 'not-activated') return
+    const because =
+      readiness.status === 'recovering'
+        ? 'its recovery barrier is still running; retry once the graph\'s activation completes'
+        : readiness.status === 'recovery-failed'
+          ? `the last recovery failed: ${readiness.reason}; an explicit activation (adoptRoot) retries it`
+          : readiness.status === 'needs-recovery'
+            ? `${readiness.reason}; only reading and cancelling are allowed`
+            : `${readiness.reason}; await the graph's activation or adoptRoot before executing against this store`
+    throw new Error(`task-runtime: ${entry} on store "${storeId}" is refused: the store is ${readiness.status} — ${because}`)
   }
 
   private async resolveBinding(binding: RunBinding): Promise<{ storeId: string; task: TaskInstance; run: TaskRun } | undefined> {

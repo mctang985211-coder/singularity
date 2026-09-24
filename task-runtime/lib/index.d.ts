@@ -3100,6 +3100,43 @@ interface ReconcileReport {
     reason: string;
   }[];
 }
+/**
+ * What a read sees about one store's recovery (A2 §E) — facts and markers,
+ * never a trigger: {@link TaskRuntime.recoveryStatus} recovers nothing, starts
+ * no driver and writes no gate, so a context query or a diagnostic can show
+ * exactly where a store stands without becoming the thing that recovers it.
+ *
+ * - `ready` — nothing needs recovering, or the explicit barrier completed;
+ * - `not-activated` — the store cannot be read yet: the legal root entry (an
+ *   intake) creates it, and every other caller is refused by the store's own
+ *   unknown-store error rather than by a recovery verdict;
+ * - `recovering` — an explicit activation's barrier is still running;
+ * - `recovery-required` — the store holds in-flight work this process is not
+ *   driving (a worker, a replay, a waiting parent); only an explicit
+ *   activation (`adoptRoot`, through `graphs`' activate) may recover it;
+ * - `needs-recovery` — the store holds a run that predates coordination
+ *   phases: reading and cancelling are its only continuations, and it is never
+ *   treated as active by default;
+ * - `recovery-failed` — the last explicit recovery failed; `reason` is the
+ *   original one, and the next explicit activation is the retry.
+ */
+type StoreRecoveryStatus = {
+  status: 'ready';
+} | {
+  status: 'not-activated';
+  reason: string;
+} | {
+  status: 'recovering';
+} | {
+  status: 'recovery-required';
+  reason: string;
+} | {
+  status: 'needs-recovery';
+  reason: string;
+} | {
+  status: 'recovery-failed';
+  reason: string;
+};
 declare class TaskRuntime extends Service {
   static inject: string[];
   static Config: z<Config>;
@@ -3145,6 +3182,14 @@ declare class TaskRuntime extends Service {
    * truth again the moment the entry goes.
    */
   private readonly closingStores;
+  /**
+   * One recovery barrier per store (A2 §E): what an explicit activation
+   * awaits, what every business execution entry checks before its first side
+   * effect, and what a cancellation or the unload invalidates. The persistent
+   * record stays the source of truth; this map only says what this process has
+   * recovered — it is never persisted and never a second state machine.
+   */
+  private readonly storeRecovery;
   /** The one-writer-per-workspace ownership registry (A3 §3.4). */
   private readonly workspaces;
   /** The load-time provider scan, taken once ({@link providerLoadReport}). */
@@ -3338,8 +3383,41 @@ declare class TaskRuntime extends Service {
    * the gate as well as by the state (§1.8). Reading it back from the store is
    * what makes that true after a restart, when no process holds the phase the
    * dead one set.
+   *
+   * **The recovery barrier (A2 §E).** This entry is what an explicit graph
+   * activation awaits, and the whole pass above is one barrier: reconciliation
+   * of the facts, the gate initialization for *every* session the store knows,
+   * and the registration of the drivers the pass restarts. The barrier waits
+   * for exactly those — never for a batch's execution or a model's output —
+   * because a driver it registers is parked (registered, so a cancellation
+   * finds it, but not started) until the barrier completes. A store-read
+   * failure, a workspace conflict or an exception in the pass fails the barrier
+   * rather than surfacing as a warning over an unrecovered store, and a
+   * cancellation or the unload invalidates the handle it leaves. Nothing here
+   * is a second persisted state machine: the store remains the only source of
+   * truth, the next explicit activation is the retry, and business execution
+   * checks the handle through {@link recoveryStatus} instead of re-running the
+   * pass.
    */
   adoptRoot(storeId: string, rootSessionId: string): Promise<RootAdoption>;
+  /** {@link adoptRoot}'s own pass, as one barrier body: the adoption in the order it always ran. */
+  private adoptRootThroughBarrier;
+  /**
+   * The gate initialization the recovery barrier owes every session the store
+   * knows (A2 §E): one snapshot read taken *after* the pass, each run's phase
+   * derived and applied under the gate's own token rule — the token is taken
+   * before the read, so a decision that lands while it is in flight drops the
+   * value it was about to apply. A run that predates phases leaves its session
+   * ungated (A3's boundary: reading and cancelling are its only continuations),
+   * and {@link gatePhaseFromStore}'s closing-store guard keeps a cancellation's
+   * barrier ahead of this pass.
+   *
+   * This is the one place a restart's sessions get their phases back: the read
+   * door (`lookupRun`) no longer writes the gate, so a query cannot be the
+   * thing that recovers a store or re-gates a session. A store that cannot be
+   * read here fails the barrier — half-gated is not recovered.
+   */
+  private initializeStoreGates;
   /**
    * What {@link adoptRoot} answers when the store still holds no root *after* its
    * recovery pass ran (A0 §3 stage B): the proposals that pass left open, by id and
@@ -4093,18 +4171,46 @@ declare class TaskRuntime extends Service {
    */
   private registerDriver;
   /**
+   * Abort and remove the drivers a barrier registered but never released to
+   * start (A2 §E). Not-started is not executed: no body runs, nothing is
+   * written on the batch's behalf, and the persistent record — which still
+   * says the parent waits on its children — is what the next explicit
+   * activation re-registers from.
+   */
+  private standDownPendingDrivers;
+  /**
+   * A cancellation or the unload invalidates a store's recovery handle (A2
+   * §E): a barrier still in flight finishes its own pass but leaves no ready
+   * handle and stands its not-yet-started drivers down; a settled handle is
+   * dropped. The store's persistent record is untouched — the next explicit
+   * activation (`adoptRoot`, through `graphs`' activate) is the retry.
+   */
+  private invalidateStoreRecovery;
+  /**
    * Fail one batch's parent run without an `OrchestrateEnv`: the children that
    * never started are blocked, the parent run is failed with the cause, and the
    * owner is told. Store-level on purpose — the caller is here because the env
    * could not be built, so the store service and the notification seam are all
    * this path needs — and it never throws, so a driver's failure cannot become an
-   * unhandled rejection of its own.
+   * unhandled rejection of its own. `outcome` is `'cancelled'` only for a batch
+   * whose driver never started (a recovery barrier stood it down when the
+   * cancellation aborted it): the same writes a started driver's abort branch
+   * makes, from the one place that can still make them.
    */
   private failBatchFromRuntime;
   /**
    * Start the driver for one admitted batch. The controller is registered
    * before the driver runs, so a cancellation arriving immediately after
    * admission finds something to abort.
+   *
+   * When the registration happens *inside* a recovery barrier (A2 §E) the
+   * driver is parked after registering: the barrier waits for the
+   * registration — reconciliation, gates and drivers are what an activation
+   * owes — never for the body, so a `waiting_children` parent recovered inside
+   * a graph activation cannot lock that activation on its own batch. The
+   * barrier's completion releases the body; its failure or a cancellation
+   * stands it down unstarted, and an abort that lands while it is parked
+   * resolves it without a spawn.
    */
   private startBatchDriver;
   /**
@@ -4271,13 +4377,57 @@ declare class TaskRuntime extends Service {
    *   keeps the restore path (`waiting_children`, terminal records) working.
    * - **A read that straddled a decision** — the query read the record, a
    *   decision landed, and the value is applied afterwards: `token` is the
-   *   gate's decision count taken before that read ({@link lookupRun}), and
+   *   gate's decision count taken before that read ({@link initializeStoreGates}
+   *   is the caller now — the read door no longer writes the gate), and
    *   {@link ExecutionGate.applyStorePhase} drops the value when it has moved
    *   since. The closing set above cannot see this one — by then the store is
    *   up to date and the store is not being closed any more.
    */
   private gatePhaseFromStore;
+  /**
+   * The read door a session's first lookup takes (A2 §E): a read, and only a
+   * read. A binding this process holds is resolved against the store; a
+   * session this process never held resolves its store from its graph, opens
+   * it, and indexes the snapshot so the binding the record implies answers.
+   * Nothing else happens here — no recovery pass, no gate write, no spawn —
+   * because a query cannot be the thing that recovers a store: recovery runs
+   * behind the explicit activation barrier ({@link adoptRoot}), which is also
+   * where every session the store knows gets its gate phase
+   * ({@link initializeStoreGates}).
+   */
   private lookupRun;
+  /**
+   * The recovery state of one store, as a read sees it (A2 §E): the barrier
+   * handle first, and — when no barrier has run for this store in this process
+   * — the store's own record, read-only. Work this process drives (a root it
+   * activated here, a worker it spawned, a batch whose driver is registered)
+   * is live, not recovery's; a still-running run nobody here drives is what
+   * `recovery-required` names, unless it predates coordination phases, which
+   * is the `needs-recovery` that allows only reading and cancelling. The
+   * store's own root run is its session's, not recovery's — the same rule the
+   * recovery pass applies — so a root legitimately sitting `active` between
+   * its own decisions is not a recovery verdict, and the gate plus the state
+   * rules are what refuse a write on it.
+   *
+   * Never a trigger: this opens no gate, starts no driver and settles no run,
+   * so a context query, a diagnostic or the DSH first-request check can show
+   * where a store stands without executing anything.
+   */
+  recoveryStatus(storeId: string): Promise<StoreRecoveryStatus>;
+  /**
+   * The recovery door every business execution entry passes before its first
+   * side effect (A2 §E): the same condition the barrier establishes, refused
+   * by name — `recovering` while the barrier runs, `recovery-failed` with the
+   * original reason after one failed, `recovery-required` for work a dead
+   * process left, `needs-recovery` for a record that predates phases. The
+   * store-nothing refusals never trigger recovery themselves; cancellation,
+   * close and the read-only doors are not gated here.
+   *
+   * The `not-activated` answer proceeds: the legal root entry (an intake)
+   * creates the store, and every other caller is refused by the store's own
+   * unknown-store error rather than by a recovery verdict.
+   */
+  private assertRecoveryReady;
   private resolveBinding;
   private reindex;
   /**
@@ -4490,4 +4640,4 @@ declare class TaskRuntime extends Service {
   private agentOrUndefined;
 }
 //#endregion
-export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BatchContext, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, PROPOSAL_REQUEST_KEY_PREFIX, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, WORKSPACE_OWNERS_DIR, type WorkerPromptOptions, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, assertRootBudgetConfig, bindRunProviders, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, readProcessStartTime, readRunBinding, readVerifiedFile, registeredVerifierIds, registryRevision, renderRunBinding, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BatchContext, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, PROPOSAL_REQUEST_KEY_PREFIX, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, WORKSPACE_OWNERS_DIR, type WorkerPromptOptions, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, assertRootBudgetConfig, bindRunProviders, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, readProcessStartTime, readRunBinding, readVerifiedFile, registeredVerifierIds, registryRevision, renderRunBinding, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

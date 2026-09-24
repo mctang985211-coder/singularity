@@ -400,11 +400,10 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
   return unit
 }
 
-/** Boot over the same directory and run the deployment's recovery pass, the way opening the graph does. */
+/** Boot over the same directory and adopt the store the way the deployment does: the activation's recovery barrier. */
 async function reopen(dir: string, options: BootOptions = {}): Promise<Boot> {
   const next = await boot(dir, options)
-  await next.task.openStore(STORE)
-  await next.runtime.reconcileStore(STORE)
+  await next.runtime.adoptRoot(STORE, ROOT)
   return next
 }
 

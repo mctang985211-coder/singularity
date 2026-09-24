@@ -19,7 +19,7 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true })
 })
 
-function harness() {
+function harness(overrides: { sessionPersistence?: unknown } = {}) {
   const ctx = new Context()
   const store = new EnvStore(root)
   const events: SessionEvent[] = []
@@ -77,7 +77,7 @@ function harness() {
     // is being cleaned, so the store's task tree is cancelled first (§3.6).
     cancelGraph: vi.fn(async (_storeId: string, _reason: string) => {}),
   }
-  ctx.provide('sessionPersistence', { list: async () => [], create: async () => handle } as never)
+  ctx.provide('sessionPersistence', (overrides.sessionPersistence ?? { list: async () => [], create: async () => handle }) as never)
   ctx.provide('envBuilder', { store } as never)
   ctx.provide('graph', graph as never)
   ctx.provide('layout', layout as never)
@@ -169,6 +169,69 @@ describe('graphs creation lifecycle', () => {
     expect(runtime.stopAgents).not.toHaveBeenCalled()
     expect(detach).not.toHaveBeenCalled()
     expect(deleteEnv).not.toHaveBeenCalled()
+  })
+
+  it('keeps the registered graph selected and sends no setup when the recovery barrier fails', async () => {
+    const { service, store, runtime, taskRuntime, detach, deleteEnv } = harness()
+    // The activation's recovery barrier is the first thing that can fail after
+    // the graph is registered (A2 §E): the store's log is unreadable, so the
+    // barrier fails and the failure is what the caller sees.
+    taskRuntime.adoptRoot.mockRejectedValueOnce(new Error('the store log is unreadable'))
+    await expect(service.create({ createEnv: true, repos: ['acme/widget'] })).rejects.toThrow('the store log is unreadable')
+
+    // The graph stays registered and selected — visible as failed, never
+    // rolled back onto the previous selection — and the barrier ran exactly
+    // once, through the same activation entry every graph takes.
+    const graphs = await service.list()
+    expect(graphs).toHaveLength(1)
+    expect((await service.snapshot()).selectedId).toBe(graphs[0]!.id)
+    expect(taskRuntime.adoptRoot).toHaveBeenCalledExactlyOnceWith(`sg-t-${graphs[0]!.rootSessionId}`, graphs[0]!.rootSessionId)
+    // Zero model input: the setup prompt never went out.
+    expect(runtime.prompt).not.toHaveBeenCalled()
+    // The committed graph keeps its environment and root binding: the failure
+    // was the recovery, not the registration.
+    expect(store.get(graphs[0]!.envId).sessionIds).toEqual([graphs[0]!.rootSessionId])
+    expect(runtime.stopAgents).not.toHaveBeenCalled()
+    expect(detach).not.toHaveBeenCalled()
+    expect(deleteEnv).not.toHaveBeenCalled()
+  })
+})
+
+describe('graphs boot recovery', () => {
+  it('recovers the selected graph at boot through the same activation entry', async () => {
+    // A registry that already holds a selected graph — the state a restart
+    // replays — provided before the service opens its store, so what it reads
+    // is what the previous process left.
+    const rootSessionId = 's-root-1' as SessionId
+    const graph = {
+      id: 'graph1',
+      name: 'graph1',
+      envId: 'project1',
+      rootSessionId,
+      graphStoreId: 'sg-g-s-root-1',
+      layoutStoreId: 'sg-l-s-root-1',
+      createdAt: 1,
+      ready: false,
+    }
+    const seeded = {
+      list: async () => [{ header: { id: 'graphs-registry' } }],
+      create: async () => { throw new Error('unreachable') },
+      open: async () => ({
+        read: async () => ({ events: [{ type: 'graphs/event', seq: 0, time: 1, data: { kind: 'graph/add', graph }, ignorable: true }] }),
+        append: async () => {},
+        flush: async () => {},
+        close: async () => {},
+      }),
+    }
+    const { ctx, service, store, taskRuntime } = harness({ sessionPersistence: seeded })
+    store.create()
+
+    // The boot recovers the selected graph by activating it (A2 §E): the
+    // barrier is awaited before the environment switch, not chased by an
+    // asynchronous selected-listener.
+    await vi.waitFor(() => expect(taskRuntime.adoptRoot).toHaveBeenCalledExactlyOnceWith('sg-t-s-root-1', rootSessionId))
+    expect((await service.snapshot()).selectedId).toBe('graph1')
+    await ctx.fiber.dispose()
   })
 })
 

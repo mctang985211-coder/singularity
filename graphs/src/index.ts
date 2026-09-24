@@ -199,24 +199,15 @@ export class GraphsService extends Service {
           scope: { graphStoreId, layoutStoreId },
         })
         rootAgentId = handle.agent.id
-        const taskRuntime = (this.ctx.get?.('taskRuntime') ?? this.ctx.taskRuntime) as Context['taskRuntime'] | undefined
-        if (taskRuntime === undefined) {
-          throw new Error('graphs: taskRuntime service is not loaded; cannot open the root store')
-        }
-        // **The graph creates no task** (A0 §1.1): it opens the root session's
-        // store and adopts whatever root that store already holds. Creating a
-        // graph used to mint a root task whose objective was this graph's own
-        // name — a goal nobody asked for, standing in for the user's request
-        // until a contract could replace it. A root task now exists exactly when
-        // a root contract passed intake, so this call is the store's door (open
-        // it, bind an existing root, recover it) and never a second way in.
-        //
-        // A fresh graph's store therefore holds no task at all until its root
-        // agent intakes a contract, which is what `adopted: false` says. The call
-        // is kept (rather than dropped) because a store reopened for an existing
-        // root session — a restart, a re-created graph handle — must still be
-        // bound to its root run and its workspace ownership rebuilt.
-        await taskRuntime.adoptRoot(rootTaskStoreId(handle.agent.id), handle.agent.id)
+        // **The graph creates no task** (A0 §1.1) and it registers before it
+        // recovers (A2 §E): the environment is attached and `graph/add` commits —
+        // selectedId included, so the new graph is visible while it is still
+        // recovering — and the same activation entry below then runs its recovery
+        // barrier (`adoptRoot`: open the store, bind an existing root, recover
+        // it). A fresh graph's store therefore holds no task at all until its
+        // root agent intakes a contract; a barrier failure keeps the registered
+        // graph selected and shows the reason rather than pretending the
+        // previous selection stood, so the failure can be retried explicitly.
         this.ctx.envBuilder.store.attachSession(envId, handle.agent.id)
         attached = { envId, sessionId: handle.agent.id }
         this.ctx.envBuilder.store.select(envId)
@@ -360,11 +351,36 @@ export class GraphsService extends Service {
     })
   }
 
+  /**
+   * One graph becomes this process's running environment, in the fixed order
+   * (A2 §E): the root session's graph queue is drained by `ensureRoot` first,
+   * then the root store's recovery barrier runs to its end — the fact
+   * reconciliation, every known session's gate initialization and the driver
+   * registrations the pass owes, never the batch execution behind them — and
+   * only then does this process switch its stores and environment and deliver
+   * input. Boot recovery of the selected graph goes through here too, not
+   * through an asynchronous selected-listener.
+   *
+   * A barrier failure leaves the commit to the caller: `select` has not
+   * committed (the previous selection stands), `remove`'s re-activation of the
+   * next graph fails loudly, and `create` keeps the registered graph selected
+   * and shows the failure rather than pretending the old selection stood.
+   */
   private async activate(graph: GraphRecord): Promise<void> {
     await this.ctx.agentRuntime.ensureRoot(graph.rootSessionId, {
       graphStoreId: graph.graphStoreId,
       layoutStoreId: graph.layoutStoreId,
     })
+    // The recovery barrier, resolved lazily the way `create` resolves it:
+    // task-runtime injects graphs, so a hard inject here would deadlock the
+    // plugin loader. A deployment without the runtime cannot open a root
+    // store at all, so the activation refuses by name rather than skipping
+    // recovery.
+    const taskRuntime = (this.ctx.get?.('taskRuntime') ?? this.ctx.taskRuntime) as Context['taskRuntime'] | undefined
+    if (taskRuntime === undefined) {
+      throw new Error('graphs: taskRuntime service is not loaded; cannot recover the root store')
+    }
+    await taskRuntime.adoptRoot(rootTaskStoreId(graph.rootSessionId), graph.rootSessionId)
     await this.ctx.graph.switchStore(graph.graphStoreId)
     await this.ctx.layout.switchStore(graph.layoutStoreId)
     this.ctx.envBuilder.store.select(graph.envId)

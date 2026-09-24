@@ -262,9 +262,6 @@ var GraphsService = class extends Service {
 					}
 				});
 				rootAgentId = handle.agent.id;
-				const taskRuntime = this.ctx.get?.("taskRuntime") ?? this.ctx.taskRuntime;
-				if (taskRuntime === void 0) throw new Error("graphs: taskRuntime service is not loaded; cannot open the root store");
-				await taskRuntime.adoptRoot(rootTaskStoreId(handle.agent.id), handle.agent.id);
 				this.ctx.envBuilder.store.attachSession(envId, handle.agent.id);
 				attached = {
 					envId,
@@ -391,11 +388,29 @@ var GraphsService = class extends Service {
 			}
 		});
 	}
+	/**
+	* One graph becomes this process's running environment, in the fixed order
+	* (A2 §E): the root session's graph queue is drained by `ensureRoot` first,
+	* then the root store's recovery barrier runs to its end — the fact
+	* reconciliation, every known session's gate initialization and the driver
+	* registrations the pass owes, never the batch execution behind them — and
+	* only then does this process switch its stores and environment and deliver
+	* input. Boot recovery of the selected graph goes through here too, not
+	* through an asynchronous selected-listener.
+	*
+	* A barrier failure leaves the commit to the caller: `select` has not
+	* committed (the previous selection stands), `remove`'s re-activation of the
+	* next graph fails loudly, and `create` keeps the registered graph selected
+	* and shows the failure rather than pretending the old selection stood.
+	*/
 	async activate(graph) {
 		await this.ctx.agentRuntime.ensureRoot(graph.rootSessionId, {
 			graphStoreId: graph.graphStoreId,
 			layoutStoreId: graph.layoutStoreId
 		});
+		const taskRuntime = this.ctx.get?.("taskRuntime") ?? this.ctx.taskRuntime;
+		if (taskRuntime === void 0) throw new Error("graphs: taskRuntime service is not loaded; cannot recover the root store");
+		await taskRuntime.adoptRoot(rootTaskStoreId(graph.rootSessionId), graph.rootSessionId);
 		await this.ctx.graph.switchStore(graph.graphStoreId);
 		await this.ctx.layout.switchStore(graph.layoutStoreId);
 		this.ctx.envBuilder.store.select(graph.envId);
