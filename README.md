@@ -64,7 +64,7 @@ r1-supplemental-2026-09-24/evidence/s3/repo/.git
 r1-supplemental-2026-09-24/run/s3/repo/.git
 ```
 
-需要逐字节核对时用 `archives/` 里的 tarball（`sha256sum -c archives/SHA256SUMS`）。
+需要逐字节核对时用 `archives/` 里的 tarball（`cd archives && sha256sum -c SHA256SUMS`）。
 
 ## 不在本分支的内容
 
