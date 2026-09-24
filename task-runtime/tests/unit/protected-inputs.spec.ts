@@ -83,14 +83,16 @@ function harness(options: { checkout?: string } = {}) {
     }),
   }
 
-  const spawned: Array<{ sessionId: string; prompt: string; contract?: string }> = []
+  /** Every spawn request the runtime handed the agent runtime; a task worker carries no prompt and no contract text (A2). */
+  const spawned: Array<{ sessionId: string; prompt?: string; contract?: string; taskWorker?: boolean }> = []
   let idleBehavior: ((sessionId: string) => Promise<void>) | undefined
   const agentRuntime = {
-    spawn: vi.fn(async (_parent: unknown, request: { sessionId: string; prompt: Array<{ type: 'text'; text: string }>; contract?: string }) => {
+    spawn: vi.fn(async (_parent: unknown, request: { sessionId: string; prompt?: Array<{ type: 'text'; text: string }>; contract?: string; taskWorker?: boolean }) => {
       spawned.push({
         sessionId: request.sessionId,
-        prompt: request.prompt.map(block => block.text).join('\n'),
+        ...(request.prompt === undefined ? {} : { prompt: request.prompt.map(block => block.text).join('\n') }),
         ...(request.contract === undefined ? {} : { contract: request.contract }),
+        ...(request.taskWorker === undefined ? {} : { taskWorker: request.taskWorker }),
       })
       return {
         agent: {
@@ -560,23 +562,31 @@ describe('TaskRuntime.decomposeAndRun: protected inputs at admission', () => {
       .toBe(expected.ok ? expected.batch.admission.proposalDigest : undefined)
   })
 
-  test('the worker sees the fixed protected input in its spawn prompt and contract block before any task_read', async () => {
+  test('the worker is spawned as a task worker with no rendering of its own, and the store holds the fixed input its context is projected from', async () => {
     writeFileSync(join(checkout, 'check.sh'), 'exit 0\n')
     const h = harness({ checkout })
     const { taskId: rootTaskId, runId: rootRunId } = await intakeRoot(h)
 
-    await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, protectedSpec('check.sh'))
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, protectedSpec('check.sh'))
 
+    // A2: the runtime ships the child no prompt and no contract text. The one
+    // rendering a worker reads before its first `task_read` is the context
+    // projection over this store (the criterion row with `check.sh` in its
+    // protected-inputs cell), and the unconditional rule that a protected input
+    // must not be modified is the agent runtime's worker policy section — the
+    // assembled request is asserted end-to-end in
+    // `tests/integration/context-assembly.spec.ts`, and the policy text in
+    // `agent-runtime/tests/unit/agent-runtime.spec.ts`. What this spec owns is
+    // the source both of them read.
     const call = h.spawned[0]!
-    // Both surfaces a worker reads before its first `task_read` carry the same
-    // cell, rendered from the fixed refs the store holds rather than from the
-    // caller's declaration.
-    const row = '| ac1 | deterministic | yes | ac1 passes | true | check.sh |'
-    expect(call.prompt).toContain(row)
-    expect(call.contract).toBeDefined()
-    expect(call.contract).toContain(row)
-    expect(call.prompt).toContain('- A criterion\'s declared protected inputs must not be modified')
-    expect(call.prompt).toContain('a changed or missing input fails the criterion, naming the path')
+    expect(call.taskWorker).toBe(true)
+    expect(call.prompt).toBeUndefined()
+    expect(call.contract).toBeUndefined()
+
+    const created = taskEvents(h).find(item => item.kind === 'TaskCreated' && item.taskId === outcomes[0]!.taskId)
+    expect(created?.kind).toBe('TaskCreated')
+    const contract = created?.kind === 'TaskCreated' ? created.payload.task.contract : undefined
+    expect(contract!.acceptanceCriteria[0]!.protectedInputs).toEqual([fixedRef('check.sh', join(checkout, 'check.sh'))])
   })
 
   test('changing the protected file changes the child contract identity and the proposal identity', async () => {

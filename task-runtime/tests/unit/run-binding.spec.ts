@@ -10,7 +10,7 @@ import type { CapabilityConfig } from '../../src/capability.ts'
 import { MCP_SERVER_REGISTRY } from '../../src/mcp-servers.ts'
 import { precheckProviders } from '../../src/provider-precheck.ts'
 import type { ProviderPrecheck } from '../../src/provider-precheck.ts'
-import { bindRunProviders, readRunBinding, renderRunBinding, RUN_BINDING_SKILLS_DIR } from '../../src/run-binding.ts'
+import { bindRunProviders, readRunBinding, RUN_BINDING_SKILLS_DIR } from '../../src/run-binding.ts'
 
 /**
  * The run's content binding as a unit: identity, materialization, read-back and
@@ -301,69 +301,7 @@ describe('bindRunProviders', () => {
   })
 })
 
-describe('renderRunBinding', () => {
-  test('names every capability, its provider, the purpose and a short digest — never the body', async () => {
-    await install('ball-align')
-    await install('verify')
-    const binding = await bind({
-      capabilities: ['design-ball', 'verify-ball-functional'],
-      rows: { 'design-ball': ['ball-align'], 'verify-ball-functional': ['verify'] },
-    }) as RunProviderBinding
-    const summary = renderRunBinding(binding)
-
-    expect(summary).toContain('## Implementation chosen for this run')
-    expect(summary).toContain('capability `design-ball` → skill `ball-align` [knowledge]')
-    expect(summary).toContain('capability `verify-ball-functional` → skill `verify` [execution-provider]')
-    expect(summary).toContain(`(content ${binding.skills.find(skill => skill.name === 'verify')!.contentDigest.slice(0, 12)}`)
-    expect(summary).toContain('Align a Buckyball Ball')
-    expect(summary).toContain('`bbdev`')
-    expect(summary).toContain('read with the `skill` tool')
-    // Identity and purpose, not text: no body line of the fixture appears.
-    expect(summary).not.toContain('Gold is the **ctest semantics**')
-    expect(summary).not.toContain('Phase 1 — completeness')
-  })
-
-  test('names a capability that carries no provider skill instead of leaving it out', async () => {
-    await install('ball-align')
-    const binding = await bind({
-      capabilities: ['design-ball'],
-      // A row in the run's manifest that grants tools only: the summary names it
-      // and says so, rather than leaving a worker to wonder whether it exists.
-      rows: { 'design-ball': ['ball-align'], 'tools-only': [] },
-    }) as RunProviderBinding
-    const summary = renderRunBinding(binding)
-    expect(summary).toContain('capability `tools-only`: no provider skill')
-  })
-
-  test('renders nothing for a run with no binding, and no readability claim for a run nobody re-read', async () => {
-    expect(renderRunBinding(undefined)).toBe('')
-
-    await install('ball-align')
-    const binding = await bind({ capabilities: ['design-ball'], rows: { 'design-ball': ['ball-align'] } }) as RunProviderBinding
-    const withoutRead = renderRunBinding(binding)
-    expect(withoutRead).not.toContain('not readable')
-    expect(withoutRead).not.toContain('readable')
-
-    // With the read in hand and the snapshot gone, the refusal is explicit and
-    // points at the record, not at the production path.
-    await rm(binding.snapshotRoot!, { recursive: true, force: true })
-    const read = await readRunBinding(binding)
-    const refused = renderRunBinding(binding, read)
-    expect(refused).toContain('Bound content is not readable')
-    expect(refused).toContain('ball-align')
-    expect(refused).toContain(binding.snapshotRoot!)
-  })
-
-  test('lists what the binding does not cover for a guidance provider', async () => {
-    const directory = await install('ball-align', { sidecar: false })
-    await writeFile(join(directory, 'notes.md'), 'not covered\n')
-    const binding = await bind({ capabilities: ['design-ball'], rows: { 'design-ball': ['ball-align'] } }) as RunProviderBinding
-
-    expect(binding.skills[0]!.role).toBe('guidance')
-    expect(binding.skills[0]!.contractDigest).toBeNull()
-    expect(binding.skills[0]!.uncovered).toEqual(['notes.md'])
-    expect(renderRunBinding(binding)).toContain('not covered by this binding: notes.md')
-  })
+describe('run binding re-checks', () => {
   test('re-reads what a guidance snapshot leaves uncovered, in both directions', async () => {
     const directory = await install('ball-align', { sidecar: false })
     await writeFile(join(directory, 'notes.md'), 'not covered\n')
@@ -408,22 +346,5 @@ describe('renderRunBinding', () => {
     const deleted = await readRunBinding(binding)
     expect(deleted!.skills[0]!.readable).toBe(false)
     expect(deleted!.defects.join('\n')).toContain('skill-missing')
-  })
-
-  test('names the snapshot the run is bound to, in the summary the three views render', async () => {
-    await install('ball-align')
-    const binding = await bind({ capabilities: ['design-ball'], rows: { 'design-ball': ['ball-align'] } }) as RunProviderBinding
-    const summary = renderRunBinding(binding)
-    expect(summary).toContain(`- bound content snapshot: ${binding.snapshotRoot}`)
-    expect(summary).toContain('the revision, digests and snapshot path above are what this run is bound to')
-
-    // A run whose binding names no snapshot makes no such claim, and does not
-    // point a reader at a path that does not exist.
-    const toolsOnly = await bind({ capabilities: ['tools-only'], rows: { 'tools-only': [] } }) as RunProviderBinding
-    expect(toolsOnly.snapshotRoot).toBeUndefined()
-    const toolsOnlySummary = renderRunBinding(toolsOnly)
-    expect(toolsOnlySummary).toContain('capability `tools-only`: no provider skill')
-    expect(toolsOnlySummary).not.toContain('snapshot path above')
-    expect(toolsOnlySummary).toContain('bound no content snapshot')
   })
 })

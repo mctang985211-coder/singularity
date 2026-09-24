@@ -18,8 +18,9 @@ import type {} from '@dangosys/dsh-singularity-layout'
 import { DEFAULT_ROOT } from '@dangosys/dsh-singularity-layout'
 import type { Agent, AgentHandle, ContentBlock, GraphEvent, GraphScope, RootRequest, RuntimePromptSource, SpawnRequest } from './types.ts'
 import { applyWorkerGrant } from './grants.ts'
-import { installWorkerContract } from './contract-reinjection.ts'
 import { rootPromptText } from './prompts/root.prompts.ts'
+import { WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT } from './prompts/worker.prompts.ts'
+import { sealRawSessionReads } from './raw-session-guard.ts'
 
 /** The nine tools the evolution chain is reached through; a deployment's switch is what registers them. */
 const EVOLUTION_TOOLS = [
@@ -42,6 +43,11 @@ const ROOT_CORE_TOOLS = [
   'hitl_approve',
   'task_read',
   'capability_list',
+  // The one reference reader a root shares with every other role (A2): the
+  // records its own reads name — evidence, reviews, sessions — are read by id
+  // through this tool, which authorizes by the caller's graph domain. The raw
+  // cross-session readers were never on this surface and are sealed below.
+  'context_read',
   // The skill loader rides the mounted preset's plane (`tool-skill`), not the
   // global layer: allowing it here is what lets the root load domain reference
   // skills (e.g. bb-pipeline) discovered from the deployment's skill roots.
@@ -124,6 +130,8 @@ export { applyWorkerGrant, resolveGrant } from './grants.ts'
 export type { ResolvedGrant } from './grants.ts'
 export { findSkillFileIn, parseSkillFile, skillRootsFor } from './skill-file.ts'
 export type { ParsedSkillFile } from './skill-file.ts'
+export { WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT } from './prompts/worker.prompts.ts'
+export { RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, sealRawSessionReads } from './raw-session-guard.ts'
 
 export class AgentRuntime extends Service {
   static inject = [
@@ -220,6 +228,11 @@ export class AgentRuntime extends Service {
           const evolution = evolutionEnabled(this.ctx)
           agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText(evolution) })
           agentCtx.tools.restrict({ allow: rootToolsFor(evolution) })
+          // The raw cross-session readers are sealed at execution for every
+          // agent this runtime owns (raw-session-guard.ts): the root's
+          // allow-list already leaves them off the surface; this is the backstop
+          // a preset or MCP merge cannot lift.
+          sealRawSessionReads(agentCtx)
         },
       })
       this.handles.set(sessionId, handle)
@@ -250,6 +263,7 @@ export class AgentRuntime extends Service {
             const evolution = evolutionEnabled(this.ctx)
             agentCtx.systemPrompt.section({ name: 'singularity:root', order: 70, text: rootPromptText(evolution) })
             agentCtx.tools.restrict({ allow: rootToolsFor(evolution) })
+            sealRawSessionReads(agentCtx)
           },
         })
       } catch (error) {
@@ -281,6 +295,9 @@ export class AgentRuntime extends Service {
 
   async spawn(parent: Agent, request: SpawnRequest): Promise<AgentHandle> {
     if (this.closing) throw new Error('agent-runtime: closing')
+    if (request.prompt === undefined && request.taskWorker !== true) {
+      throw new Error('agent-runtime: a spawn request needs a prompt (a taskWorker spawn gets the default kickoff)')
+    }
     this.live(parent)
     const scope = this.scope(parent.id)
     return this.inGraph(scope, async () => {
@@ -308,15 +325,21 @@ export class AgentRuntime extends Service {
             // Unknown preset names throw out of permissionPresets.set itself
             // (its resolve names the preset), failing the spawn loudly.
             this.ctx.permissionPresets.set(agent.session, request.permissionPreset ?? 'danger-full-access')
-            // The contract rides the worker's own prompt scope, so the loop
-            // reprojects it into surface node 0 on every step and compaction
-            // cannot fold it away (contract-reinjection.ts).
-            installWorkerContract(agentCtx, request.contract)
+            // A task worker carries the role's stable policy as a prompt section
+            // (order 75, between the root's 70 and the contract's 80): the rules
+            // every worker runs under, reprojected into surface node 0 on every
+            // step. The contract itself is NOT registered here — it is the
+            // context assembly's section, projected from the store at each model
+            // request, so this scope holds no second copy of it.
+            if (request.taskWorker === true) {
+              agentCtx.systemPrompt.section({ name: 'singularity:worker', order: 75, text: WORKER_POLICY_TEXT, interpolate: false })
+            }
             // A capability grant restricts the surface the preset just joined
             // (its tools are inherited, so restrictable) and registers the
             // granted skills into this worker's own layer. A spawn nobody
             // authorized with capabilities keeps its composition's surface.
             if (request.grant !== undefined) await applyWorkerGrant(agentCtx, agent, request.grant)
+            sealRawSessionReads(agentCtx)
           },
         })
       } catch (error) {
@@ -345,10 +368,18 @@ export class AgentRuntime extends Service {
         this.scopes.set(handle.agent.id, scope)
         this.handles.set(handle.agent.id, handle)
         await this.ctx.parallel('agentRuntime/spawned', { parentId: parent.id, sessionId: handle.agent.id })
+        // The caller's awaited door, after publication and the spawn
+        // announcement and before any model input: what must be durable for the
+        // child's first request to be admissible (the reviewer ledger, A2 §D) is
+        // written and read back here. A rejection fails the spawn below — the
+        // handle is disposed, the node is marked failed, and no followup was
+        // ever queued.
+        await request.beforePrompt?.()
         // The delegated task, under this runtime's own attribution: `kind: 'user'`
         // is DSH's host-attested human input marker, and the worker's first turn is
         // nobody's request but this deployment's (A0 §1.10, {@link RuntimePromptSource}).
-        handle.agent.followup(createUserMessage({ content: [...request.prompt], source: runtimePrompt('spawn') }))
+        const kickoff = request.prompt ?? [{ type: 'text' as const, text: WORKER_KICKOFF_TEXT }]
+        handle.agent.followup(createUserMessage({ content: [...kickoff], source: runtimePrompt('spawn') }))
         return handle
       } catch (error) {
         this.handles.delete(handle.agent.id)

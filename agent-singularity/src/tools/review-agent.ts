@@ -34,7 +34,7 @@ import type { WorkerGrant } from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-task'
 import type { Diagnosis, DiagnosisConfidence, JudgementVerdict, ReviewJudgement, TaskId, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, rootTaskStoreId } from '@dangosys/dsh-singularity-task'
-import { appendReviewAgentRun, countReviewAgentRuns, reviewAgentBudget } from '../review-agent-ledger.ts'
+import { appendReviewAgentRun, countReviewAgentRuns, readReviewerDelegation, reviewAgentBudget } from '../review-agent-ledger.ts'
 import { computeEscalation } from './review-escalation.ts'
 import { buildReviewPack, latestReview, reviewRef } from './task-review-pack.ts'
 
@@ -47,18 +47,17 @@ export const REVIEWER_PRESET = 'singularity-reviewer'
  * The review agent's whole tool surface. Read-only by construction: the grant
  * allow-list is this list intersected with what the composition offers, so
  * `bash`, `write`, `edit`, `jobs`, `subagent`, `graph_spawn`, `hitl_*` and
- * `evolution_*` are absent however the deployment is composed. `session_trace`
- * and its siblings are here so the reviewer can drill into the sessions the
- * pack names, which is the point of printing session ids on every review line.
+ * `evolution_*` are absent however the deployment is composed. Session history
+ * is read with `context_read` — the one reference reader, authorized by the
+ * reviewer's delegated graph domain; the raw cross-session tools it replaced
+ * are sealed on every runtime-owned agent (`agent-runtime`'s execution guard).
  */
 export const REVIEWER_BASELINE: readonly string[] = [
   'task_review_pack',
   'task_read',
   'task_status',
+  'context_read',
   'capability_list',
-  'session_event_read',
-  'session_event_trace',
-  'session_trace',
   'read',
   'glob',
   'grep',
@@ -243,13 +242,28 @@ export function defineTaskReviewAgentTool(ctx: Context) {
         prompt: [{ type: 'text', text: prompt }],
         agentPreset: REVIEWER_PRESET,
         grant: reviewerGrant(),
+        // The delegation ledger is written between "the reviewer is a published
+        // graph member" and "its first model input" (A2 §D): the context
+        // assembly verifies the delegation from this ledger, so it must be
+        // durable — written AND read back — before any model request exists. A
+        // failure here fails the spawn: the handle is disposed, the node is
+        // marked failed, and the reviewer got zero model input.
+        beforePrompt: async () => {
+          await appendReviewAgentRun({ rootStoreId: storeId, taskId: args.taskId, sessionId: reviewerSessionId, actor: caller })
+          const back = await readReviewerDelegation(reviewerSessionId)
+          if (back === undefined || back.rootStoreId !== storeId || back.taskId !== args.taskId) {
+            throw new Error(
+              `task_review_agent: the delegation of reviewer session "${reviewerSessionId}" could not be read back from the ledger ` +
+              `(expected task ${args.taskId} in ${storeId}); no model input was sent`,
+            )
+          }
+        },
         signal: exec.signal,
       }).catch((error: unknown) => {
         spawnFailure = error instanceof Error ? error.message : String(error)
         return undefined
       })
       if (handle === undefined) return `task_review_agent: spawn failed: ${spawnFailure ?? 'unknown error'}`
-      await appendReviewAgentRun({ rootStoreId: storeId, taskId: args.taskId, sessionId: reviewerSessionId, actor: caller })
 
       const cancel = () => handle.agent.cancel({ kind: 'parent' })
       exec.signal.addEventListener('abort', cancel, { once: true })

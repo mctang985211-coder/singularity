@@ -43,10 +43,18 @@ const PLATFORM_TOOLS = [
 
 /** The baseline plus the row's own labels: what this worker's grant resolves to. */
 const GRANTED_TOOLS = [
-  'bash', 'capability_list', 'edit', 'glob', 'grep', 'job_kill', 'job_list', 'job_output',
-  'read', 'session_event_read', 'session_trace', 'skill', 'task_cancel', 'task_decompose', 'task_read', 'task_status',
+  'bash', 'capability_list', 'context_read', 'edit', 'glob', 'grep', 'job_kill', 'job_list', 'job_output',
+  'read', 'skill', 'task_cancel', 'task_decompose', 'task_read', 'task_status',
   'task_submit_result', 'task_verify', 'write', 'ask_user_question',
 ]
+
+/**
+ * The four raw cross-session readers (A2): the grant names none of them, the
+ * baseline that used to carry the exact-read ones no longer does, and the
+ * execution seal makes the surface a second line rather than the only one —
+ * `worker-grant.spec.ts` drives the denial itself.
+ */
+const RAW_SESSION_READS = ['session_search', 'session_event_read', 'session_event_trace', 'session_trace']
 
 
 /**
@@ -101,6 +109,7 @@ describe('an unselected skill and a worker\'s tool plane (S1-C)', () => {
     // nothing of the platform.
     for (const name of GRANTED_TOOLS) expect(before, name).toContain(name)
     for (const name of PLATFORM_TOOLS) expect(before, name).not.toContain(name)
+    for (const name of RAW_SESSION_READS) expect(before, name).not.toContain(name)
     expect(before).not.toContain('web_fetch')
     expect(before).not.toContain('subagent_fetchless')
 

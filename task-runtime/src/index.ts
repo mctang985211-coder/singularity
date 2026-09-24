@@ -64,7 +64,6 @@ import { assertRootBudgetConfig, checkBatchAdmission, checkRunStart, hasRootLimi
 import type { RootBudgetConfig } from './root-budget.ts'
 import { bindRunProviders, defaultRunBindingRoot, readRunBinding } from './run-binding.ts'
 import type { RunBindingRead } from './run-binding.ts'
-import { buildHandoff, renderWorkerPrompt } from './handoff.ts'
 import { normalizeDecomposition, normalizeRootContract, decompositionIdentity } from './normalize.ts'
 import type { DecompositionIdentityContext, NormalizedBatch } from './normalize.ts'
 import { isOpenProposal, proposalRequestKey, reviewContextDelta, reviewContextOf, rootProposalRequestKey } from './proposal.ts'
@@ -89,7 +88,6 @@ import {
   type SessionObservation,
   type VerifyRunOptions,
 } from './orchestrate.ts'
-import { renderWorkerContract } from './contract.ts'
 import { WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, describeOwner, normalizeWorkspacePath, releaseLayer } from './workspace.ts'
 import { drainSession } from './gate.ts'
 import type { WorkspaceOwner } from './workspace.ts'
@@ -163,9 +161,8 @@ export {
 } from './proposal.ts'
 export type { ObligationCoverage, ObligationTemplate, ObligationTemplateFile } from './obligation.ts'
 export { checkObligationCoverage, findRepoRoot, loadObligationTemplates, parseObligationTemplates } from './obligation.ts'
-export type { HandoffInit, WorkerPromptOptions } from './handoff.ts'
-export { buildHandoff, renderWorkerPrompt } from './handoff.ts'
-export { renderWorkerContract, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN } from './contract.ts'
+export type { HandoffInit } from './handoff.ts'
+export { buildHandoff } from './handoff.ts'
 export type {
   AcceptedSkillProviderVerdict,
   CapabilityGrants,
@@ -198,7 +195,7 @@ export type {
   RunBindingRequest,
   RunBindingSkillRead,
 } from './run-binding.ts'
-export { RUN_BINDING_SKILLS_DIR, bindRunProviders, defaultRunBindingRoot, readRunBinding, renderRunBinding } from './run-binding.ts'
+export { RUN_BINDING_SKILLS_DIR, bindRunProviders, defaultRunBindingRoot, readRunBinding } from './run-binding.ts'
 export type {
   CapabilityProviderPrecheck,
   ProviderPrecheck,
@@ -4436,32 +4433,10 @@ export class TaskRuntime extends Service {
       ...(champion.requiresIndependentAcceptance === true ? { requiresIndependentAcceptance: true } : {}),
     }
     const spawn = options.spawn !== false
-    let prompt: string | undefined
-    let contractBlock: string | undefined
-    if (spawn) {
-      const championRun = await this.ctx.task.runIn(storeId, championRunId)
-      // The handoff is in-memory only: the replay task is parentless by design,
-      // and the store reducer records a handoff only when the child's
-      // parentTaskId names the handoff's parent. The prompt carries the lineage
-      // instead. The contract's own assumptions and constraints ride along, so
-      // the prompt and the contract block rendered from the same handoff say
-      // what the store says: `(none)` there while `task_read` rendered the
-      // stored lists would be two views of one contract disagreeing.
-      const handoff = buildHandoff({
-        parentTask: champion,
-        parentRun: championRun,
-        childTask: task,
-        reason: `${options.lineage}: replay of ${championTaskId} under the candidate's overlay`,
-        callerSessionId,
-        assumptions: [...contract.assumptions],
-        constraints: [...contract.constraints],
-        relevantEvidence: [],
-      })
-      // The prompt never invites a split: a replay re-runs the one task as
-      // contracted, whatever the deployment's runtime-decomposition switch says.
-      prompt = renderWorkerPrompt(handoff, task, { allowRuntimeDecomposition: false })
-      contractBlock = renderWorkerContract(task, handoff)
-    }
+    // A replayed worker reads its context the way every task worker does (A2):
+    // the replay task is parentless by design, so the store records no handoff
+    // for it, and its contract projection carries the lineage label instead —
+    // the spawn request itself carries no prompt and no contract text.
     // The replay's admission shares the batch's rules (§3.5, §3.4): it starts a
     // run, so the root budget must allow one — counted against the *same* root
     // total the tree spends, because a replay's parentless task shares its
@@ -4499,7 +4474,6 @@ export class TaskRuntime extends Service {
           providers: precheck,
           lineage: options.lineage,
           agentPreset: options.overlay?.presetOverride ?? resolvePreset(manifest, this.config.defaultPreset),
-          ...(prompt === undefined ? {} : { prompt, contract: contractBlock }),
           ...(options.overlay?.extraSkillRoots === undefined ? {} : { skillRoots: [...options.overlay.extraSkillRoots] }),
           spawn,
           championRunId,
@@ -5263,6 +5237,16 @@ export class TaskRuntime extends Service {
   }
 
   /**
+   * Whether this deployment admits a run's own `task_decompose`
+   * (`Config.allowRuntimeDecomposition`), read-only. The context package's
+   * worker projection carries the rule that follows from it; nothing here
+   * grants or denies a call — admission still decides every one.
+   */
+  allowsRuntimeDecomposition(): boolean {
+    return this.config.allowRuntimeDecomposition
+  }
+
+  /**
    * The gate phase one bound session's run implies, applied on every rebinding.
    * The gate is a handle on the run's phase and the phase is the store's fact,
    * so a session this process rebound — from its index, from a reopened store,
@@ -5760,8 +5744,7 @@ export class TaskRuntime extends Service {
         return this.ctx.agentRuntime.spawn(parent, {
           sessionId: SessionId(request.sessionId),
           name: request.name,
-          prompt: [{ type: 'text', text: request.prompt }],
-          ...(request.contract !== undefined ? { contract: request.contract } : {}),
+          ...(request.taskWorker === undefined ? {} : { taskWorker: request.taskWorker }),
           ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
           ...(request.permissionPreset !== undefined ? { permissionPreset: request.permissionPreset } : {}),
           ...(request.grant !== undefined ? { grant: request.grant } : {}),

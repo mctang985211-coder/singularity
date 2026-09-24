@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
@@ -6,7 +6,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { resolveGrant } from '../../../agent-runtime/src/grants.ts'
-import { appendReviewAgentRun } from '../../src/review-agent-ledger.ts'
+import { appendReviewAgentRun, readReviewerDelegation } from '../../src/review-agent-ledger.ts'
 import {
   REVIEWER_BASELINE,
   REVIEWER_PRESET,
@@ -162,6 +162,20 @@ function fixture(handleValue: unknown, spawnImpl?: () => Promise<unknown>) {
   return { ctx: ctx as unknown as Context, spawn, recordDiagnosisIn }
 }
 
+/**
+ * The spawn stub honoring the agent-runtime's contract (A2): `beforePrompt`
+ * runs before the handle is returned — exactly the point where the runtime
+ * runs it (after publication and the spawn announcement, before the first
+ * model input). A rejection fails the spawn with zero model input.
+ */
+function fixtureWithBeforePrompt(handleValue: unknown) {
+  return fixture(handleValue, async (...args: unknown[]) => {
+    const request = args[1] as { beforePrompt?: () => Promise<void> }
+    await request.beforePrompt?.()
+    return handleValue
+  })
+}
+
 const exec = { agent: { id: 'root-1' }, signal: new AbortController().signal }
 
 let ledgerDir: string
@@ -181,6 +195,7 @@ afterEach(() => {
   else process.env.SINGULARITY_REVIEW_LEDGER_DIR = previousLedger
   if (previousBudget === undefined) delete process.env.SINGULARITY_REVIEW_AGENT_BUDGET
   else process.env.SINGULARITY_REVIEW_AGENT_BUDGET = previousBudget
+  chmodSync(ledgerDir, 0o700)
   rmSync(ledgerDir, { recursive: true, force: true })
 })
 
@@ -188,9 +203,47 @@ const REPLY = '```json\n'
   + '{"judgements":[{"dimension":"skill_fit","verdict":"inadequate","evidenceRefs":["ev-1"],"rationale":"the skill was never loaded"}]}'
   + '\n```'
 
+describe('the ledger as the reviewer binding source (A2)', () => {
+  const row = (overrides: Record<string, string> = {}) => ({
+    formatVersion: 1,
+    rootStoreId: 'sg-t-root',
+    taskId: 't1',
+    sessionId: 's-review',
+    actor: 'root-1',
+    at: '2026-09-24T00:00:00.000Z',
+    ...overrides,
+  })
+
+  test('answers one delegation for one session, and treats identical rows as the same one written twice', async () => {
+    writeFileSync(join(ledgerDir, 'agents.jsonl'), `${JSON.stringify(row())}\n${JSON.stringify(row())}\n`)
+    expect(await readReviewerDelegation('s-review')).toMatchObject({ rootStoreId: 'sg-t-root', taskId: 't1', actor: 'root-1' })
+    expect(await readReviewerDelegation('s-other')).toBeUndefined()
+    // A ledger that was never written is a state, not a failure.
+    rmSync(join(ledgerDir, 'agents.jsonl'))
+    expect(await readReviewerDelegation('s-review')).toBeUndefined()
+  })
+
+  test('refuses to pick between conflicting rows, naming the conflict rather than the file order', async () => {
+    writeFileSync(join(ledgerDir, 'agents.jsonl'), [
+      JSON.stringify(row()),
+      JSON.stringify(row({ taskId: 't2', rootStoreId: 'sg-t-other' })),
+      '',
+    ].join('\n'))
+    await expect(readReviewerDelegation('s-review')).rejects.toMatchObject({
+      name: 'ReviewerBindingError',
+      kind: 'binding-conflict',
+    })
+  })
+
+  test('reports a ledger this process cannot read as unreadable, never as "no delegation"', async () => {
+    writeFileSync(join(ledgerDir, 'agents.jsonl'), '{not json}\n')
+    await expect(readReviewerDelegation('s-review')).rejects.toMatchObject({ kind: 'unreadable' })
+  })
+})
+
 describe('task_review_agent', () => {
   test('spawns one preset-constrained reviewer and records its judgement as a diagnosis', async () => {
-    const { ctx, spawn, recordDiagnosisIn } = fixture(handle(REPLY))
+    const { ctx, spawn, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(REPLY))
     const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1' }, exec as never)) as string
 
     expect(spawn).toHaveBeenCalledOnce()
@@ -202,6 +255,11 @@ describe('task_review_agent', () => {
     // The grant actually restricts: resolve the exact grant the tool passed.
     const allow = resolveGrant(grantHarness().ctx, worker(), request.grant as never).allow
     for (const name of FORBIDDEN) expect(allow).not.toContain(name)
+
+    // The delegation was written to the ledger through the spawn's beforePrompt
+    // — durable before any model input, so the context assembly can verify it.
+    const delegation = await readReviewerDelegation(request.sessionId as string)
+    expect(delegation).toMatchObject({ rootStoreId: 'sg-t-root-1', taskId: 't1', actor: 'root-1' })
 
     expect(recordDiagnosisIn).toHaveBeenCalledOnce()
     const [storeId, diagnosis] = recordDiagnosisIn.mock.calls[0] as [string, Record<string, unknown>]
@@ -217,8 +275,30 @@ describe('task_review_agent', () => {
     expect(result).toContain('recorded')
   })
 
+  test('the reviewer baseline carries context_read instead of the sealed raw session tools', () => {
+    expect(REVIEWER_BASELINE).toContain('context_read')
+    expect(REVIEWER_BASELINE).toContain('task_read')
+    expect(REVIEWER_BASELINE).toContain('task_status')
+    for (const sealed of ['session_event_read', 'session_event_trace', 'session_trace', 'session_search']) {
+      expect(REVIEWER_BASELINE, sealed).not.toContain(sealed)
+    }
+  })
+
+  test('a beforePrompt failure (the ledger cannot be confirmed) fails the spawn with zero model input and records nothing', async () => {
+    // An unwritable ledger directory: the budget read still answers (missing
+    // file counts zero), but the append inside beforePrompt fails, and the
+    // runtime's contract turns that into a failed spawn before any model input.
+    chmodSync(ledgerDir, 0o500)
+    const { ctx, spawn, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(REPLY))
+    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1' }, exec as never)) as string
+
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(result).toContain('spawn failed')
+    expect(recordDiagnosisIn).not.toHaveBeenCalled()
+  })
+
   test('a timed-out reviewer is cancelled and its judgement recorded unknown', async () => {
-    const { ctx, spawn, recordDiagnosisIn } = fixture(handle(undefined, { hang: true }))
+    const { ctx, spawn, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(undefined, { hang: true }))
     const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', timeoutMs: 5 }, exec as never)) as string
 
     expect(spawn).toHaveBeenCalledOnce()
@@ -232,7 +312,7 @@ describe('task_review_agent', () => {
   })
 
   test('a reviewer that returns no parseable JSON records six unknowns rather than failing', async () => {
-    const { ctx, recordDiagnosisIn } = fixture(handle('I could not decide anything.'))
+    const { ctx, recordDiagnosisIn } = fixtureWithBeforePrompt(handle('I could not decide anything.'))
     const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1' }, exec as never)) as string
     expect(recordDiagnosisIn).toHaveBeenCalledOnce()
     const diagnosis = recordDiagnosisIn.mock.calls[0]![1] as { judgements: { verdict: string }[]; confidence: string }

@@ -226,26 +226,20 @@ describe('a cancellation’s write barrier against the store’s older record', 
     }
   })
 
-  it('drops the record a query read before the completion landed, and keeps the gate closed', async () => {
+  it('drops a store read that straddled the completion, and keeps the gate closed', async () => {
     const turn = Promise.withResolvers<void>()
     const readEntered = Promise.withResolvers<void>()
     const readRelease = Promise.withResolvers<void>()
-    let proposalId = ''
     const h = await startScriptedLoop({
       probes: ['graph_spawn'],
       script: (): readonly ScriptEntry[] => [
-        // The root's own turn is parked for the whole case: the run stays `active`
-        // and the session mid-turn, and the query below is a direct call rather
-        // than this turn, so nothing else dispatches into the session while the
-        // read is held.
+        // The root's own turn is parked for the whole case, so nothing else
+        // dispatches into the session while the read below is held.
         { waitFor: () => turn.promise },
         { text: 'root: nothing further' },
       ],
     })
     const root = await h.begin(CONTRACT)
-    const proposals = (await h.snapshot(root.storeId)).proposals?.all ?? []
-    expect(proposals).toHaveLength(1)
-    proposalId = proposals[0]!.proposalId
 
     // The write the late call below is measured against is admitted while the run
     // decides its own work, and its body runs: what the completed cancellation
@@ -256,41 +250,39 @@ describe('a cancellation’s write barrier against the store’s older record', 
     expect(ran(h, 'graph_spawn')).toHaveLength(1)
     expect(ran(h, 'graph_spawn')[0]).toContain(ACTIVE_WRITE)
 
-    // The straddling read: a call-through spy on the store's own read. The real
-    // implementation runs and returns the run object it holds — what is held is
-    // only the *return*, so the value this query carries out of the read is the
-    // one the store held before the decision. Only the first read of the root's
-    // run parks, and the assertions below check that this park is the query's own
-    // read and not a background one: nothing read that run after the spy was
-    // installed, and the query is still unanswered while the read is held.
-    const storeRunIn = h.task.runIn.bind(h.task)
-    let rootReads = 0
-    let querySettled = false
-    const readSpy = vi.spyOn(h.task, 'runIn').mockImplementation(async (...args: Parameters<TaskService['runIn']>) => {
-      const run = await storeRunIn(...args)
-      const isRootRun = args[0] === root.storeId && args[1] === root.runId
-      if (isRootRun) rootReads += 1
-      if (isRootRun && rootReads === 1) {
+    // The straddling read: a call-through spy on the store's own read. The read
+    // door no longer writes the gate at all (A2 §E), so the one store→gate write
+    // left is the recovery barrier's — `adoptRoot` derives each known session's
+    // phase from the store, and initializes the gates from one read of it taken
+    // under the gate's own token rule (`ExecutionGate.applyStorePhase`, whose
+    // token branch is `task-runtime/tests/unit/gate.spec.ts`). That is the
+    // trajectory this case is about: the real read runs and returns the record the
+    // store holds, and only its *return* is held, so the value it carries out is
+    // the one the store held before the decision below. The hold is armed for
+    // exactly one read — the barrier's own — so the assertions inside the window
+    // read the store normally.
+    const storeSnapshot = h.task.snapshotIn.bind(h.task)
+    let armed = true
+    let barrierSettled = false
+    const readSpy = vi.spyOn(h.task, 'snapshotIn').mockImplementation(async (...args: Parameters<TaskService['snapshotIn']>) => {
+      const snapshot = await storeSnapshot(...args)
+      if (args[0] === root.storeId && armed) {
+        armed = false
         readEntered.resolve()
         await readRelease.promise
       }
-      return run
+      return snapshot
     })
-
-    // The real query path: `task_proposal_read` -> `proposalStoreFor` ->
-    // `runForSession` -> the read this case holds open.
-    const straddling = throughPipeline(h, 'call-straddling-read', 'task_proposal_read', { proposalId })
-    void straddling.then(() => { querySettled = true }, () => { querySettled = true })
+    const adopting = h.runtime.adoptRoot(root.storeId, String(ROOT))
+    void adopting.then(() => { barrierSettled = true }, () => { barrierSettled = true })
     try {
       await readEntered.promise
-      // The held read is this query's own: it is the first read of the root's run
-      // since the spy was installed, and the query is still unanswered while it is
-      // held — so the value the release carries out of it is the value this query
-      // read, not somebody else's.
-      expect(rootReads).toBe(1)
-      expect(querySettled).toBe(false)
+      // The held read is the barrier's own: the barrier is still unanswered while
+      // it is held — so the value the release carries out of it is the value this
+      // barrier read, not somebody else's.
+      expect(barrierSettled).toBe(false)
       // Inside the read: the store still holds the older record, and that is the
-      // value this query is about to carry out of it (a read taken *around* the
+      // value the barrier is about to carry out of it (a read taken *around* the
       // completion rather than inside the closing window).
       const atRead = await h.task.runIn(root.storeId, root.runId)
       expect(atRead.status).toBe('running')
@@ -303,18 +295,12 @@ describe('a cancellation’s write barrier against the store’s older record', 
       expect(settled.status).toBe('cancelled')
       expect(h.runtime.gate.phaseOf(ROOT)).toBe('terminal')
 
-      // The read is released: the query answers from the record it read, and the
-      // gate is exactly where the completion put it — a value read before a
+      // The read is released: the barrier finishes with the record it read, and
+      // the gate is exactly where the completion put it — a value read before a
       // decision may not be applied after it.
       readRelease.resolve()
-      const answer = await straddling
+      await adopting.catch(() => undefined)
       expect(h.runtime.gate.phaseOf(ROOT)).toBe('terminal')
-      expect(answer.isError).toBe(false)
-      expect(answer.text).toContain(`proposal ${proposalId}`)
-      expect(answer.text).toContain('ship the release')
-      // The query went through the registry and the waterfall, not around them:
-      // the fixture's own dispatch record holds its call and its result.
-      expect((await answered(h, 'task_proposal_read')).result?.isError).toBeFalsy()
 
       // The late write is refused by name, and the fixture's stand-in body is
       // never reached — which proves the denial happened before any effect, and
@@ -325,7 +311,8 @@ describe('a cancellation’s write barrier against the store’s older record', 
       expect(ran(h, 'graph_spawn')).toHaveLength(1)
       expect(ran(h, 'graph_spawn')[0]).toContain(ACTIVE_WRITE)
 
-      // The coordination read still answers in the closed phase.
+      // The coordination read still answers in the closed phase, through the real
+      // pipeline (registry and waterfall included).
       const lateRead = await throughPipeline(h, 'call-late-read', 'task_read', {})
       expect(lateRead.isError).toBe(false)
       expect(lateRead.text).toContain('objective: ship the release')
@@ -333,10 +320,10 @@ describe('a cancellation’s write barrier against the store’s older record', 
       expect(h.runtime.gate.inFlightWrites(ROOT)).toEqual([])
     } finally {
       // A failed assertion above must not leave a latch holding a promise: the
-      // read and the turn are always released, and the query is always awaited.
+      // read and the turn are always released, and the barrier is always awaited.
       readRelease.resolve()
       turn.resolve()
-      await straddling.catch(() => undefined)
+      await adopting.catch(() => undefined)
       readSpy.mockRestore()
     }
   })

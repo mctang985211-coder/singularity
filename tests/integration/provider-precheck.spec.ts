@@ -12,6 +12,7 @@ import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
 import type { CapabilityConfig, CapabilityProviderPrecheck, Config, DecomposeSpec, SkillProviderVerdict, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
+import { graphRegistry, mountContextReadCore, sessionQueryReads } from '../support/context-plane.ts'
 import { personRequest } from '../../task-runtime/tests/support/person-request.ts'
 
 /**
@@ -173,9 +174,11 @@ async function harness(options: { capabilities?: Record<string, CapabilityConfig
     },
   } as never)
   ctx.provide('agents', { get: (sessionId: string) => ({ id: sessionId }) } as never)
-  ctx.provide('graphs', {
-    graphForSession: async () => ({ id: 'g1', envId: 'env1', rootSessionId: ROOT_SESSION }),
-  } as never)
+  ctx.provide('graphs', graphRegistry({
+    graphForSession: async () => ({ id: 'g1', name: 'graph', envId: 'env1', rootSessionId: ROOT_SESSION }),
+    members: () => [ROOT_SESSION, ...headers.keys()],
+  }) as never)
+  ctx.provide('sessionQuery', sessionQueryReads(sessionId => log.get(String(sessionId))) as never)
   // The env binding the session's checkout comes from: the same source the
   // verifier's cwd and the protected-input fixing read, and the directory the
   // pre-check discovers skills from.
@@ -204,7 +207,12 @@ async function harness(options: { capabilities?: Record<string, CapabilityConfig
   await verifier.ready()
   const config: Partial<Config> = { capabilities: { ...DEFAULT_ROWS, ...(options.capabilities ?? {}) } }
   const runtime = new TaskRuntime(ctx, config as Config)
-  if (options.mountAgent === true) await ctx.plugin(SingularityAgent)
+  if (options.mountAgent === true) {
+    // The read core and its assembly, mounted where the deployment's bundle mounts
+    // them: the plugin's tool adapters read through this service (A2).
+    await mountContextReadCore(ctx)
+    await ctx.plugin(SingularityAgent)
+  }
   return { task, runtime, verifier, log, spawned, tools }
 }
 

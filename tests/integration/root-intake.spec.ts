@@ -7,6 +7,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 // it with (`graphs/src/index.ts`): "the setup prompt" is that text, not a
 // paraphrase of it.
 import { setupPromptText } from '../../graphs/src/prompts/setup.prompts.ts'
+import { WORKER_KICKOFF_TEXT } from '../../agent-runtime/src/prompts/worker.prompts.ts'
 import { rootTaskStoreId } from '../../task/src/index.ts'
 import type {
   EvidenceBundle,
@@ -255,7 +256,11 @@ async function batchIdOf(h: ScriptedLoop, sessionId: string | SessionId): Promis
 function wakeNotices(h: ScriptedLoop, sessionId: string | SessionId): string[] {
   return h.eventsOf(sessionId)
     .filter(event => event.type === 'user/message')
-    .filter(event => (event.data as { source?: { kind?: string } }).source?.kind === 'plugin')
+    // The deployment's own notices — never the runtime-context snapshots DSH
+    // writes when an assembled dynamic context changes (`form: 'snapshot'`, A2):
+    // those are the model's context plane, not a message somebody sent.
+    .filter(event => (event.data as { source?: { kind?: string; form?: string } }).source?.kind === 'plugin')
+    .filter(event => (event.data as { source?: { form?: string } }).source?.form !== 'snapshot')
     .flatMap(event => (event.data as { content?: readonly { type: string; text?: string }[] }).content ?? [])
     .flatMap(block => (block.text === undefined ? [] : [block.text]))
 }
@@ -960,13 +965,25 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
     // asked and nothing was woken.
     await expect(h.task.openStore(workerStore)).rejects.toThrow(/does not exist/)
     expect(taskEvents(h, workerStore)).toEqual([])
-    // The delegated task on the worker's own log is byte-for-byte the prompt the
-    // spawn sent — this rule changed its attribution, not its content.
-    const delegated = h.eventsOf(worker).filter(event => event.type === 'user/message')
+    // The delegated task on the worker's own log is the runtime's own kickoff
+    // (A2): the contract and state moved into the assembled context, so what the
+    // spawn sends is a pointer at it — the attribution ('runtime-prompt'/'spawn')
+    // is unchanged. Everything else on the log is the deployment's
+    // runtime-context plane: the dynamic half of the assembled context, written
+    // as a snapshot when it changes (`@deepseek-ai/dsh-system-prompt`).
+    const userMessages = h.eventsOf(worker).filter(event => event.type === 'user/message')
+    const delegated = userMessages.filter(event => (event.data as { source?: { channel?: string } }).source?.kind === 'runtime-prompt')
     expect(delegated).toHaveLength(1)
     expect((delegated[0]!.data as { source: unknown }).source).toEqual({ kind: 'runtime-prompt', channel: 'spawn' })
     expect((delegated[0]!.data as { content: readonly { text?: string }[] }).content.map(block => block.text ?? '').join('\n'))
-      .toBe(h.spawns[0]!.prompt)
+      .toBe(WORKER_KICKOFF_TEXT)
+    for (const message of userMessages) {
+      const source = (message.data as { source?: { kind?: string; plugin?: string } }).source
+      expect(
+        source?.kind === 'runtime-prompt' || source?.plugin === '@deepseek-ai/dsh-system-prompt',
+        JSON.stringify(source),
+      ).toBe(true)
+    }
     const snapshot = await h.snapshot(root.storeId)
     expect(snapshot.tasks.filter(task => task.parentTaskId === undefined)).toHaveLength(1)
     expect(snapshot.tasks[0]!.objective).toBe(USER_GOAL)

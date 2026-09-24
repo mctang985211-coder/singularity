@@ -8,15 +8,18 @@ import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-agent-runtime'
+import type {} from '@dangosys/dsh-singularity-context'
 import type {} from '@dangosys/dsh-singularity-task'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
 import { HitlService } from './hitl.ts'
 import { EscalationService } from './escalation.ts'
 import { EvolutionService } from './evolution.ts'
 import { ProposalReviewService } from './proposal-review.ts'
+import { reviewerBindingSource } from './review-agent-ledger.ts'
 import { defineApproveTool } from './tools/approve.ts'
 import { defineAskTool } from './tools/ask.ts'
 import { defineCapabilityListTool } from './tools/capability-list.ts'
+import { defineContextReadTool } from './tools/context-read.ts'
 import { defineEscalateTool } from './tools/escalate.ts'
 import { defineEvolutionApplyTool } from './tools/evolution-apply.ts'
 import { defineEvolutionCandidateTool } from './tools/evolution-candidate.ts'
@@ -159,7 +162,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export class SingularityAgent extends Service {
-  static inject = ['tools', 'graphs', 'agentRuntime', 'task', 'taskRuntime', 'userQuestions', 'approval']
+  static inject = ['tools', 'graphs', 'agentRuntime', 'task', 'taskRuntime', 'singularityContext', 'userQuestions', 'approval']
   static Config: z<Config> = ConfigSchema
 
   constructor(ctx: Context, config?: Config) {
@@ -182,12 +185,21 @@ export class SingularityAgent extends Service {
     // What this assembly did, said where a sibling can read it (the root agent's
     // tool allow-list is the consumer) — see {@link EvolutionExposure}.
     new EvolutionExposure(ctx, evolution === 'on')
+    // The reviewer ledger is the one delegation source this deployment has (A2
+    // §D): the context read core resolves a reviewer's read domain from it, and
+    // this plugin owns the file — so the narrow read door is registered here,
+    // and it leaves with the plugin.
+    ctx.effect(
+      () => ctx.singularityContext.registerReviewerBindingSource(reviewerBindingSource()),
+      'singularityAgent: reviewer binding source',
+    )
     ctx.tools.register(defineMarkReadyTool(ctx))
     ctx.tools.register(defineSpawnTool(ctx))
     ctx.tools.register(defineAskTool(ctx))
     ctx.tools.register(defineApproveTool(ctx))
     ctx.tools.register(defineTaskReadTool(ctx))
     ctx.tools.register(defineCapabilityListTool(ctx))
+    ctx.tools.register(defineContextReadTool(ctx))
     // The root's own goal is accepted here (A0): it is in ROOT_TOOLS only, and
     // the deployment's evolution switch has nothing to do with it — a graph
     // whose contract cannot be accepted has no goal to work on at all.

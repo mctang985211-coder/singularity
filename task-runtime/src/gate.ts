@@ -49,7 +49,10 @@ import type { ExecutionPhase } from '@dangosys/dsh-singularity-task'
  * What a session bound to a run may still call once its run is no longer
  * `active`. Read-only inspection, diagnosis, the human-question tools, and the
  * controlled cancellation of this batch: the work of *looking at* a run or
- * ending it, never of making it produce more.
+ * ending it, never of making it produce more. `context_read` is the one
+ * history/reference reader here: the raw cross-session tools it replaced
+ * (`session_event_read` and its siblings) are sealed off every runtime-owned
+ * agent by the execution guard, so they have no phase to be allowed in.
  *
  * `task_cancel` is in the list because cancelling is the one write a waiting or
  * submitted run is allowed: the run has stopped deciding, and the owner may
@@ -67,11 +70,9 @@ import type { ExecutionPhase } from '@dangosys/dsh-singularity-task'
 export const COORDINATION_ALLOWED: ReadonlySet<string> = new Set([
   'task_read',
   'task_status',
+  'context_read',
   'capability_list',
   'skill',
-  'session_search',
-  'session_event_read',
-  'session_trace',
   'task_review_pack',
   'task_diagnose',
   'read',

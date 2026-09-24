@@ -6,7 +6,7 @@ import type {} from '@dangosys/dsh-singularity-task-runtime'
 import type { TaskProposal, TaskProposalDecomposition, TaskProposalRoot } from '@dangosys/dsh-singularity-task'
 import { renderProposalChildren, renderRootContract } from '../proposal-review.ts'
 import { undeclaredParameters } from './proposal-parameters.ts'
-import { proposalStoreFor } from './root-store.ts'
+import { proposalStoreFor } from './proposal-store.ts'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 

@@ -334,51 +334,6 @@ async function applyWorkerGrant(agentCtx, agent, grant) {
 }
 
 //#endregion
-//#region src/contract-reinjection.ts
-/** Section name. Registered into the worker's own scope, so no other agent inherits it. */
-const WORKER_CONTRACT_SECTION = "singularity:worker-contract";
-/**
-* Placement: after the root's own `singularity:root` section (order 70) and
-* well before the tool guidance the composition contributes at order 500+.
-*/
-const WORKER_CONTRACT_ORDER = 80;
-/**
-* Whether a spawn carries text to project. An absent or blank rendering
-* registers nothing: a worker spawned outside the task runtime, and every root
-* agent, keeps exactly the prompt its composition gives it.
-*/
-function carriesContract(contract) {
-	return contract !== void 0 && contract.trim().length > 0;
-}
-/**
-* The section a worker's contract rides on. `interpolate: false` because the
-* text is literal contract data: an objective or a criterion that happens to
-* contain `{{…}}` must reach the model as written, not be looked up as a prompt
-* variable (and `renderPrompt` throws on an unknown reference).
-*/
-function contractSection(text) {
-	return {
-		name: WORKER_CONTRACT_SECTION,
-		order: WORKER_CONTRACT_ORDER,
-		text,
-		interpolate: false
-	};
-}
-/**
-* Register the contract into one agent's prompt scope, during that agent's
-* setup. Returns whether a section was registered.
-*
-* The registration lives on `agentCtx`, the agent's own scope: it is disposed
-* with the agent and cannot leak into sibling workers or into the root, which
-* is why this is not a global section.
-*/
-function installWorkerContract(agentCtx, contract) {
-	if (!carriesContract(contract)) return false;
-	agentCtx.systemPrompt.section(contractSection(contract));
-	return true;
-}
-
-//#endregion
 //#region src/prompts/root.prompts.ts
 /**
 * The evolution protocol paragraph: written into the root prompt only when the
@@ -416,6 +371,74 @@ Task delegation runs through the task runtime. Once the contract is accepted, ca
 }
 
 //#endregion
+//#region src/prompts/worker.prompts.ts
+/**
+* The worker role's stable policy (A2): the rules every task worker runs under,
+* whatever its task, its handoff, or this deployment's decomposition switch.
+*
+* What belongs here and nowhere else: unconditional behaviour. The contract,
+* the root briefing and the handoff are the context package's assembly
+* projection (`singularity:worker-contract`, order 80 — this section sits just
+* ahead of it), and the rules that depend on the task or the deployment (the
+* decomposable hint, the runtime-split rule, the review wait) are the same
+* projection's conditional part — one rule lives in exactly one of the two.
+*
+* Migrated from the old spawn prompt (`task-runtime`'s retired
+* `renderWorkerPrompt`), minus the session-tool guidance: history is read with
+* `context_read` now, and the raw cross-session readers that prompt pointed at
+* are sealed (`./raw-session-guard.ts`). As a system-prompt section this text is
+* what the loop reprojects into surface node 0, so the rules survive the folds
+* the old spawn prompt did not.
+*/
+/**
+* The worker policy, registered as the `singularity:worker` section (order 75)
+* of every spawn that declares `taskWorker`. Unconditional on purpose: anything
+* that could change with the task or the deployment is not written here.
+*/
+const WORKER_POLICY_TEXT = [
+	"You are a Singularity task worker. The task you were delegated, its acceptance criteria and the current state of the project ride in your system context; the task store is the authority for all of it.",
+	"",
+	"## Rules",
+	"",
+	"- Do the work; never declare completion yourself — an external verifier checks every mandatory criterion.",
+	"- Where a criterion lists a command, make that command exit 0 in the checkout.",
+	"- A criterion's declared protected inputs must not be modified: the verifier re-checks their identity before judging, and a changed or missing input fails the criterion, naming the path.",
+	"- Keep changes scoped to this task. Need a human decision? Ask with `ask_user_question`.",
+	"- Cannot continue? Fail with a clear reason — the orchestrator blocks dependent tasks and reports to the parent task.",
+	"- This context is where you start, not the whole truth: re-read your own contract and run with `task_read`, the project state with `task_status`, and any record they name with `context_read` whenever you need them.",
+	"- When the work is done, hand it in with `task_submit_result`: a summary of what you delivered plus the evidence references you produced. The call closes this run to further writes, drains the calls still in flight, and lets the runtime put the run in front of the verifier; the verdict comes back as its answer.",
+	"- Going idle is not a submission: the runtime sees an idle session where a submission was due, reminds you once, and stops the run under the no-progress budget if nothing changes. Submit when the work is done, or say what is missing with a clear failure.",
+	"- `task_verify` is only a self-check: it re-runs the verifier and records the evidence it produces, never changes task status, and does not stand in for a submission."
+].join("\n");
+/**
+* The first user message a task worker receives when its spawn carried no
+* prompt of its own. The kickoff points at the context, it does not replace it:
+* the contract and state are the store's, and this only says where to look.
+*/
+const WORKER_KICKOFF_TEXT = "Begin your delegated task. Your contract, the root objective and the current task state are in your system context; re-read them with `task_read` whenever you need them, and hand the work in with `task_submit_result` when it is done.";
+
+//#endregion
+//#region src/raw-session-guard.ts
+/** The four raw cross-session readers no Singularity role may execute. */
+const RAW_SESSION_READ_TOOLS = [
+	"session_event_read",
+	"session_event_trace",
+	"session_trace",
+	"session_search"
+];
+/** The one denial reason every sealed call reports, by name. */
+const RAW_SESSION_READ_DENIAL = "singularity: raw cross-session reads are sealed; use context_read";
+/**
+* Deny the four readers on one agent's own scope, for the agent's whole life.
+* Registered through the agent's scoped context, so it travels with the agent
+* and touches no sibling; a scope chain re-evaluation cannot lift it, because
+* a guard has no allow answer.
+*/
+function sealRawSessionReads(agentCtx) {
+	agentCtx.tools.guard((execution) => RAW_SESSION_READ_TOOLS.includes(execution.name) ? RAW_SESSION_READ_DENIAL : void 0);
+}
+
+//#endregion
 //#region src/index.ts
 /** The nine tools the evolution chain is reached through; a deployment's switch is what registers them. */
 const EVOLUTION_TOOLS = [
@@ -437,6 +460,7 @@ const ROOT_CORE_TOOLS = [
 	"hitl_approve",
 	"task_read",
 	"capability_list",
+	"context_read",
 	"skill",
 	"task_intake",
 	"task_decompose",
@@ -576,6 +600,7 @@ var AgentRuntime = class extends Service {
 						text: rootPromptText(evolution)
 					});
 					agentCtx.tools.restrict({ allow: rootToolsFor(evolution) });
+					sealRawSessionReads(agentCtx);
 				}
 			});
 			this.handles.set(sessionId, handle);
@@ -615,6 +640,7 @@ var AgentRuntime = class extends Service {
 							text: rootPromptText(evolution)
 						});
 						agentCtx.tools.restrict({ allow: rootToolsFor(evolution) });
+						sealRawSessionReads(agentCtx);
 					}
 				});
 			} catch (error) {
@@ -645,6 +671,7 @@ var AgentRuntime = class extends Service {
 	}
 	async spawn(parent, request) {
 		if (this.closing) throw new Error("agent-runtime: closing");
+		if (request.prompt === void 0 && request.taskWorker !== true) throw new Error("agent-runtime: a spawn request needs a prompt (a taskWorker spawn gets the default kickoff)");
 		this.live(parent);
 		const scope = this.scope(parent.id);
 		return this.inGraph(scope, async () => {
@@ -673,8 +700,14 @@ var AgentRuntime = class extends Service {
 					setup: async (agentCtx, agent) => {
 						await this.ctx.agentPresets.mount(agentCtx, agentPreset);
 						this.ctx.permissionPresets.set(agent.session, request.permissionPreset ?? "danger-full-access");
-						installWorkerContract(agentCtx, request.contract);
+						if (request.taskWorker === true) agentCtx.systemPrompt.section({
+							name: "singularity:worker",
+							order: 75,
+							text: WORKER_POLICY_TEXT,
+							interpolate: false
+						});
 						if (request.grant !== void 0) await applyWorkerGrant(agentCtx, agent, request.grant);
+						sealRawSessionReads(agentCtx);
 					}
 				});
 			} catch (error) {
@@ -715,8 +748,13 @@ var AgentRuntime = class extends Service {
 					parentId: parent.id,
 					sessionId: handle.agent.id
 				});
+				await request.beforePrompt?.();
+				const kickoff = request.prompt ?? [{
+					type: "text",
+					text: WORKER_KICKOFF_TEXT
+				}];
 				handle.agent.followup(createUserMessage({
-					content: [...request.prompt],
+					content: [...kickoff],
 					source: runtimePrompt("spawn")
 				}));
 				return handle;
@@ -795,4 +833,4 @@ var AgentRuntime = class extends Service {
 var src_default = AgentRuntime;
 
 //#endregion
-export { AgentRuntime, applyWorkerGrant, src_default as default, findSkillFileIn, parseSkillFile, resolveGrant, skillRootsFor };
+export { AgentRuntime, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, applyWorkerGrant, src_default as default, findSkillFileIn, parseSkillFile, resolveGrant, sealRawSessionReads, skillRootsFor };

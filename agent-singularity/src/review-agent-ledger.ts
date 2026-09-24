@@ -19,6 +19,8 @@
 import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ReviewerBindingError } from '@dangosys/dsh-singularity-context'
+import type { ReviewerBindingRecord } from '@dangosys/dsh-singularity-context'
 import { REVIEW_AGENT_BUDGET_DEFAULT } from './tools/review-escalation.ts'
 
 /** One started review agent. Immutable; the file is append-only. */
@@ -90,4 +92,73 @@ export async function appendReviewAgentRun(record: Omit<ReviewAgentLedgerRecord,
   await mkdir(dirname(file), { recursive: true })
   const line = { formatVersion: 1 as const, ...record, at: new Date().toISOString() }
   await appendFile(file, `${JSON.stringify(line)}\n`, 'utf8')
+}
+
+/** Every ledger row, or `undefined` when the ledger has never been written (zero rows is a state, not a failure). */
+async function readLedgerRows(): Promise<ReviewAgentLedgerRecord[] | undefined> {
+  let text: string
+  try {
+    text = await readFile(reviewAgentLedgerFile(), 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+  const rows: ReviewAgentLedgerRecord[] = []
+  text.split('\n').forEach((line, index) => {
+    if (line.trim().length === 0) return
+    try {
+      rows.push(JSON.parse(line) as ReviewAgentLedgerRecord)
+    } catch {
+      throw new Error(`review-agent-ledger: corrupt line ${index + 1} in ${reviewAgentLedgerFile()}`)
+    }
+  })
+  return rows
+}
+
+/**
+ * The one delegation a session is recorded under, as the context package's
+ * reviewer binding source reads it (A2 §D): the ledger's `sessionId` is the
+ * review agent's own session, so the rows naming it are its delegation. One
+ * row is the record; several rows that disagree are a conflict the reader may
+ * not pick between (a read domain chosen by file order is not an
+ * authorization), and a ledger this process cannot read is `unreadable` —
+ * both raised as the context package's {@link ReviewerBindingError}, never
+ * softened into "no delegation". Identical duplicate rows are one delegation
+ * written twice, not a conflict.
+ */
+export async function readReviewerDelegation(sessionId: string): Promise<ReviewerBindingRecord | undefined> {
+  let rows: ReviewAgentLedgerRecord[] | undefined
+  try {
+    rows = await readLedgerRows()
+  } catch (error) {
+    throw new ReviewerBindingError(
+      'unreadable',
+      `the reviewer ledger cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  const matches = (rows ?? []).filter(row => row.sessionId === sessionId)
+  if (matches.length === 0) return undefined
+  const first = matches[0]!
+  const record: ReviewerBindingRecord = {
+    rootStoreId: first.rootStoreId,
+    taskId: first.taskId,
+    actor: first.actor,
+    at: first.at,
+  }
+  const conflicting = matches.some(
+    row => row.rootStoreId !== record.rootStoreId || row.taskId !== record.taskId || row.actor !== record.actor,
+  )
+  if (conflicting) {
+    throw new ReviewerBindingError(
+      'binding-conflict',
+      `session "${sessionId}" is recorded under more than one reviewer delegation: ` +
+        matches.map(row => `${row.taskId} in ${row.rootStoreId} (by ${row.actor})`).join('; '),
+    )
+  }
+  return record
+}
+
+/** The binding source the plugin registers into the context service: this deployment's ledger, as the narrow read door above. */
+export function reviewerBindingSource(): { read(sessionId: string): Promise<ReviewerBindingRecord | undefined> } {
+  return { read: readReviewerDelegation }
 }

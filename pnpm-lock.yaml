@@ -68,6 +68,9 @@ importers:
       '@dangosys/dsh-singularity-agent-runtime':
         specifier: workspace:*
         version: link:../agent-runtime
+      '@dangosys/dsh-singularity-context':
+        specifier: workspace:*
+        version: link:../context
       '@dangosys/dsh-singularity-graphs':
         specifier: workspace:*
         version: link:../graphs
@@ -191,12 +194,18 @@ importers:
       '@deepseek-ai/cordis':
         specifier: link:../../../thirdparty/deepseek-harness/vendor/cordis
         version: link:../../../thirdparty/deepseek-harness/vendor/cordis
+      '@deepseek-ai/dsh-agent':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/core/agent
+        version: link:../../../thirdparty/deepseek-harness/packages/core/agent
       '@deepseek-ai/dsh-session':
         specifier: link:../../../thirdparty/deepseek-harness/packages/core/session
         version: link:../../../thirdparty/deepseek-harness/packages/core/session
       '@deepseek-ai/dsh-session-query':
         specifier: link:../../../thirdparty/deepseek-harness/packages/session-query/session-query
         version: link:../../../thirdparty/deepseek-harness/packages/session-query/session-query
+      '@deepseek-ai/dsh-system-prompt':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/core/system-prompt
+        version: link:../../../thirdparty/deepseek-harness/packages/core/system-prompt
       '@types/node':
         specifier: ^22.20.0
         version: 22.20.1

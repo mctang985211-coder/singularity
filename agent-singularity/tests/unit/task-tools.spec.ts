@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { DEFAULT_CAPABILITIES, WorkspaceBusyError } from '../../../task-runtime/src/index.ts'
+import { graphRegistry, mountContextReadCore, sessionQueryReads } from '../../../tests/support/context-plane.ts'
 import { defineCapabilityListTool } from '../../src/tools/capability-list.ts'
 import { defineTaskDecomposeTool } from '../../src/tools/task-decompose.ts'
 import { defineTaskCancelTool } from '../../src/tools/task-cancel.ts'
@@ -15,6 +18,7 @@ const graph = { id: 'graph1', name: 'graph1', envId: 'project1', rootSessionId: 
 
 const rootTask = {
   taskId: 't-root',
+  definitionRef: { taskType: 'root', version: 1 },
   parentTaskId: undefined,
   objective: 'Build the feature',
   depth: 0,
@@ -36,6 +40,7 @@ const rootTask = {
 
 const childTask = {
   taskId: 't-child-1',
+  definitionRef: { taskType: 'subtask', version: 1 },
   parentTaskId: 't-root',
   objective: 'Implement the parser',
   depth: 1,
@@ -93,8 +98,8 @@ const workerRun = { ...rootRun, runId: 'r-worker', taskId: 't-worker', sessionId
 const snapshot = {
   version: 1 as const,
   id: 'sg-t-root-1',
-  tasks: [rootTask, childTask],
-  runs: [rootRun, childRun],
+  tasks: [rootTask, childTask, workerTask],
+  runs: [rootRun, childRun, workerRun],
   edges: [],
   evidence: [
     {
@@ -183,21 +188,71 @@ const RENDER_TABLE = {
   research: { preset: 'standard' },
 }
 
-function fixture() {
+/** The store one read runs against, with the patches a spec applies to it. */
+interface StoreFixture {
+  /** The snapshot every read of this fixture resolves through. */
+  snapshot: typeof snapshot
+  /** Replace one task record, the way the store's own protocol would have written it. */
+  patchTask(taskId: string, patch: Record<string, unknown>): void
+  /** Replace one run record. */
+  patchRun(runId: string, patch: Record<string, unknown>): void
+}
+
+/**
+ * The read plane every tool case runs against (A2): the real `singularityContext`
+ * mounted over a store whose records a spec patches, the graph registry facts the
+ * caller resolution reads, and the runtime's read-only observation surface. The
+ * tools are adapters over that service, so what a case asserts is the deployment's
+ * own read path — one store, one rendering — and never a fixture's copy of it.
+ */
+async function fixture(options: { storeError?: Error; sessions?: Map<string, SessionEvent[]> } = {}) {
   const services: Record<string, unknown> = {}
-  const ctx = {
-    graphs: { graphForSession: vi.fn(async (_sessionId: string) => graph) },
+  // A real cordis context, so the read core is mounted through the deployment's
+  // own plugin entry (`[Service.init]` registers the assembly listener) and the
+  // tools resolve their services the way a loaded deployment does.
+  const context = new Context()
+  const store: StoreFixture = {
+    snapshot: structuredClone(snapshot),
+    patchTask(taskId, patch) {
+      store.snapshot.tasks = store.snapshot.tasks.map(task => (task.taskId === taskId ? { ...task, ...patch } : task))
+    },
+    patchRun(runId, patch) {
+      store.snapshot.runs = store.snapshot.runs.map(run => (run.runId === runId ? { ...run, ...patch } : run))
+    },
+  }
+  const sessions = options.sessions ?? new Map<string, SessionEvent[]>()
+  const ctx: Record<string, unknown> = {
+    graphs: graphRegistry({
+      graphForSession: async () => ({
+        id: graph.id,
+        name: graph.name,
+        envId: graph.envId,
+        rootSessionId: graph.rootSessionId,
+        graphStoreId: 'sg-g-root',
+        layoutStoreId: 'sg-l-root',
+      }),
+      members: () => ['root-1', 's-child', 's-worker'],
+    }),
     task: {
-      openStore: vi.fn(async (_storeId: string) => snapshot),
-      snapshotIn: vi.fn(async (_storeId: string) => snapshot),
+      openStore: vi.fn(async (_storeId: string) => {
+        if (options.storeError !== undefined) throw options.storeError
+        return store.snapshot
+      }),
+      snapshotIn: vi.fn(async (_storeId: string) => store.snapshot),
       markRunStatusIn: vi.fn(async () => {}),
       recordDiagnosisIn: vi.fn(async () => {}),
     },
     taskRuntime: {
+      // The read-only surface the read core is allowed to use...
+      recoveryStatus: vi.fn(async (_storeId: string) => ({ status: 'ready' })),
+      readRunBinding: vi.fn(async (_binding: unknown) => undefined),
+      allowsRuntimeDecomposition: () => true,
+      gate: { phaseOf: (_sessionId: string) => undefined },
+      // ...and the execution entries the other tools of this spec drive.
       runForSession: vi.fn(async (sessionId: string) => ({
         storeId: 'sg-t-root-1',
-        task: sessionId === 'root-1' ? rootTask : workerTask,
-        run: sessionId === 'root-1' ? rootRun : workerRun,
+        task: sessionId === 'root-1' ? rootTask : sessionId === 's-child' ? childTask : workerTask,
+        run: sessionId === 'root-1' ? rootRun : sessionId === 's-child' ? childRun : workerRun,
       })),
       intakeRootContract: vi.fn(),
       submitDecompositionProposal: vi.fn(),
@@ -208,9 +263,28 @@ function fixture() {
       capabilityProviderReport: vi.fn(async (_sessionId: string) => providerReport()),
       verifyTimeoutMs: 1234,
     },
+    sessionQuery: sessionQueryReads(sessionId => sessions.get(String(sessionId))),
     get: (name: string) => services[name],
   }
-  return { ctx, services }
+  for (const [name, value] of Object.entries(ctx)) {
+    if (name === 'get') continue
+    context.provide(name, value as never)
+  }
+  // A service a spec injects later (a verifier, an env builder) lands on the
+  // context the same way the loader would provide it.
+  for (const name of ['verifier', 'envBuilder', 'sessions', 'jobs', 'approval', 'userQuestions']) {
+    Object.defineProperty(ctx, name, {
+      get: () => services[name],
+      set: (value: unknown) => { services[name] = value; context.provide(name, value as never) },
+      enumerable: true,
+    })
+  }
+  // The read core and its assembly, mounted where the deployment's bundle mounts
+  // them; the tools below are its adapters, and they read it off the context they
+  // are defined with.
+  const service = await mountContextReadCore(context)
+  Object.assign(ctx, { singularityContext: service })
+  return { ctx, context, services, store, sessions }
 }
 
 function exec(sessionId: string) {
@@ -219,44 +293,46 @@ function exec(sessionId: string) {
 
 describe('task_read', () => {
   it('returns the root task contract and child statuses for the root session', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const tool = defineTaskReadTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
     expect(ctx.task.openStore).toHaveBeenCalledExactlyOnceWith('sg-t-root-1')
-    expect(result).toContain('root task t-root [running/decomposed]')
+    expect(result).toContain('store sg-t-root-1 of graph "graph1"')
+    expect(result).toContain('task t-root [running/decomposed] depth 0')
     expect(result).toContain('objective: Build the feature')
-    expect(result).toContain('root-children-verified [composite] all mandatory children verified')
-    expect(result).toContain('- t-child-1 [verified/leaf] run r-child-1 [verified] — phase submitted Implement the parser')
+    expect(result).toContain('- root-children-verified [composite, mandatory] all mandatory children verified')
+    // Each child of the root view is one line: its own status, its latest run
+    // with the phase the store recorded, and the evidence and review it holds.
+    expect(result).toContain('- t-child-1 [verified] Implement the parser (run: verified — phase submitted evidence: [ev-1] review: verified)')
   })
 
   it('returns the own task and run for a worker session', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const tool = defineTaskReadTool(ctx as never)
     const result = (await tool.execute({}, exec('s-worker'))) as string
-    expect(ctx.taskRuntime.runForSession).toHaveBeenCalledExactlyOnceWith('s-worker')
-    expect(result).toContain('task t-worker [running] depth 1')
+    // The caller is resolved from the store's own run record, never from the
+    // runtime's lookup (A2): the read door does not reconcile, and the resolution
+    // is the one store read the answer rests on.
+    expect(ctx.taskRuntime.runForSession).not.toHaveBeenCalled()
+    expect(ctx.task.openStore).toHaveBeenCalledExactlyOnceWith('sg-t-root-1')
+    expect(result).toContain('task t-worker [running/leaf] depth 1')
     expect(result).toContain('objective: Implement the parser')
     expect(result).toContain('- ac1-1 [deterministic, mandatory] parses the fixtures — $ pnpm test')
     expect(result).toContain('run r-worker [running]')
   })
 
   it('renders the stored contract assumptions and constraints when the task has a contract', async () => {
-    const { ctx } = fixture()
-    ctx.taskRuntime.runForSession.mockImplementation(async () => ({
-      storeId: 'sg-t-root-1',
-      task: {
-        ...workerTask,
-        contract: {
-          contractVersion: 1,
-          objective: workerTask.objective,
-          acceptanceCriteria: workerTask.acceptanceCriteria,
-          assumptions: ['the fixtures are checked in'],
-          constraints: ['no network access'],
-          requiredCapabilities: [],
-        },
+    const { ctx, store } = await fixture()
+    store.patchTask('t-worker', {
+      contract: {
+        contractVersion: 1,
+        objective: workerTask.objective,
+        acceptanceCriteria: workerTask.acceptanceCriteria,
+        assumptions: ['the fixtures are checked in'],
+        constraints: ['no network access'],
+        requiredCapabilities: [],
       },
-      run: workerRun,
-    }) as never)
+    })
     const tool = defineTaskReadTool(ctx as never)
     const result = (await tool.execute({}, exec('s-worker'))) as string
     expect(result).toContain('assumptions:\n- the fixtures are checked in')
@@ -264,7 +340,7 @@ describe('task_read', () => {
   })
 
   it('renders a worker task without a contract exactly as before, inventing nothing', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const tool = defineTaskReadTool(ctx as never)
     const result = (await tool.execute({}, exec('s-worker'))) as string
     expect(result).not.toContain('assumptions:')
@@ -272,23 +348,18 @@ describe('task_read', () => {
   })
 
   it('renders the declared protected inputs on a worker criterion line', async () => {
-    const { ctx } = fixture()
-    ctx.taskRuntime.runForSession.mockImplementation(async () => ({
-      storeId: 'sg-t-root-1',
-      task: {
-        ...workerTask,
-        acceptanceCriteria: [
-          {
-            ...workerTask.acceptanceCriteria[0]!,
-            protectedInputs: [
-              { path: 'tests/check.sh', sha256: 'a'.repeat(64) },
-              { path: 'thresholds.json', sha256: 'b'.repeat(64) },
-            ],
-          },
-        ],
-      },
-      run: workerRun,
-    }) as never)
+    const { ctx, store } = await fixture()
+    store.patchTask('t-worker', {
+      acceptanceCriteria: [
+        {
+          ...workerTask.acceptanceCriteria[0]!,
+          protectedInputs: [
+            { path: 'tests/check.sh', sha256: 'a'.repeat(64) },
+            { path: 'thresholds.json', sha256: 'b'.repeat(64) },
+          ],
+        },
+      ],
+    })
     const tool = defineTaskReadTool(ctx as never)
     const result = (await tool.execute({}, exec('s-worker'))) as string
     expect(result).toContain(
@@ -297,7 +368,7 @@ describe('task_read', () => {
   })
 
   it('renders no protected-input suffix for a criterion that declares none', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const tool = defineTaskReadTool(ctx as never)
     const result = (await tool.execute({}, exec('s-worker'))) as string
     expect(result).not.toContain('protected inputs')
@@ -328,19 +399,15 @@ describe('task_read', () => {
     snapshotRoot: '/dsh/singularity/run-bindings/sg-t-root-1/r-worker/skills',
   }
 
-  function boundWorkerFixture(read: unknown) {
-    const { ctx } = fixture()
-    ctx.taskRuntime.runForSession.mockImplementation(async () => ({
-      storeId: 'sg-t-root-1',
-      task: workerTask,
-      run: { ...workerRun, providerBinding: workerBinding },
-    }) as never)
-    ctx.taskRuntime.readRunBinding = vi.fn(async () => read) as never
-    return { ctx }
+  async function boundWorkerFixture(read: unknown) {
+    const h = await fixture()
+    h.store.patchRun('r-worker', { providerBinding: workerBinding })
+    h.ctx.taskRuntime.readRunBinding = vi.fn(async () => read) as never
+    return h
   }
 
   it('renders the providers this run was bound to, and re-checks them against the record', async () => {
-    const { ctx } = boundWorkerFixture({
+    const { ctx } = await boundWorkerFixture({
       skills: [{ name: 'ball-align', role: 'guidance', readable: true, defects: [] }],
       defects: [],
     })
@@ -358,7 +425,7 @@ describe('task_read', () => {
   })
 
   it('reports bound content that is not readable by name, never a silent fallback', async () => {
-    const { ctx } = boundWorkerFixture({
+    const { ctx } = await boundWorkerFixture({
       skills: [{ name: 'ball-align', role: 'guidance', readable: false, defects: ['SKILL.md is not the recorded content: recorded bb…, read cc…'] }],
       defects: ['skill "ball-align": SKILL.md is not the recorded content: recorded bb…, read cc…'],
     })
@@ -374,7 +441,7 @@ describe('task_read', () => {
   })
 
   it('renders nothing extra for a run that carries no binding claim', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.readRunBinding = vi.fn() as never
     const tool = defineTaskReadTool(ctx as never)
     const result = (await tool.execute({}, exec('s-worker'))) as string
@@ -385,22 +452,17 @@ describe('task_read', () => {
   })
 
   it('renders the declared protected inputs on the root line too', async () => {
-    const { ctx } = fixture()
-    ctx.task.openStore.mockResolvedValue({
-      ...snapshot,
-      tasks: [
-        {
-          ...rootTask,
-          acceptanceCriteria: [
-            { ...rootTask.acceptanceCriteria[0]!, protectedInputs: [{ path: 'tests/check.sh', sha256: 'a'.repeat(64) }] },
-          ],
-        },
-        childTask,
+    const { ctx, store } = await fixture()
+    store.patchTask('t-root', {
+      acceptanceCriteria: [
+        { ...rootTask.acceptanceCriteria[0]!, protectedInputs: [{ path: 'tests/check.sh', sha256: 'a'.repeat(64) }] },
       ],
     })
     const tool = defineTaskReadTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
-    expect(result).toContain('- root-children-verified [composite] all mandatory children verified [protected inputs: tests/check.sh]')
+    expect(result).toContain(
+      '- root-children-verified [composite, mandatory] all mandatory children verified [protected inputs: tests/check.sh]',
+    )
   })
 
   /**
@@ -408,18 +470,14 @@ describe('task_read', () => {
    * protocol, and what an old record looks like — a reader is never told
    * `active` about a run nobody can admit work for.
    */
-  function workerRunFixture(run: Record<string, unknown>) {
-    const { ctx } = fixture()
-    ctx.taskRuntime.runForSession.mockImplementation(async () => ({
-      storeId: 'sg-t-root-1',
-      task: workerTask,
-      run: { ...workerRun, ...run },
-    }) as never)
-    return { ctx }
+  async function workerRunFixture(run: Record<string, unknown>) {
+    const h = await fixture()
+    h.store.patchRun('r-worker', run)
+    return h
   }
 
   it('renders the phase of an active run, with its no-progress marking', async () => {
-    const { ctx } = workerRunFixture({
+    const { ctx } = await workerRunFixture({
       noProgress: { kind: 'unsubmitted-idle', rounds: 2, factCount: 7, markedAt: '2026-09-16T00:02:00.000Z' },
     })
     const result = (await defineTaskReadTool(ctx as never).execute({}, exec('s-worker'))) as string
@@ -429,13 +487,13 @@ describe('task_read', () => {
   })
 
   it('renders the batch a waiting run is waiting on', async () => {
-    const { ctx } = workerRunFixture({ executionPhase: 'waiting_children', batchId: 'b-t-worker' })
+    const { ctx } = await workerRunFixture({ executionPhase: 'waiting_children', batchId: 'b-t-worker' })
     const result = (await defineTaskReadTool(ctx as never).execute({}, exec('s-worker'))) as string
     expect(result).toContain('run r-worker [running] — phase waiting_children; batch b-t-worker started')
   })
 
   it('renders what a submitted run handed in, with the evidence it named', async () => {
-    const { ctx } = workerRunFixture({
+    const { ctx } = await workerRunFixture({
       executionPhase: 'submitted',
       submission: {
         summary: 'children verified and the suite passes',
@@ -453,7 +511,7 @@ describe('task_read', () => {
   })
 
   it('renders a running run with no phase as the old record it is, not as active', async () => {
-    const { ctx } = workerRunFixture({ executionPhase: undefined })
+    const { ctx } = await workerRunFixture({ executionPhase: undefined })
     const result = (await defineTaskReadTool(ctx as never).execute({}, exec('s-worker'))) as string
     expect(result).toContain('needs-recovery (an old record: it was created before coordination phases')
     expect(result).toContain('cancel this task tree to recover')
@@ -461,7 +519,7 @@ describe('task_read', () => {
   })
 
   it('adds no phase to a terminal run that predates the field', async () => {
-    const { ctx } = workerRunFixture({ executionPhase: undefined, status: 'verified' })
+    const { ctx } = await workerRunFixture({ executionPhase: undefined, status: 'verified' })
     const result = (await defineTaskReadTool(ctx as never).execute({}, exec('s-worker'))) as string
     expect(result).toContain('run r-worker [verified] started 2026-09-16T00:00:00.000Z')
     expect(result).not.toContain('needs-recovery')
@@ -469,16 +527,18 @@ describe('task_read', () => {
   })
 
   it('renders each child run line of the root view with its own phase', async () => {
-    const { ctx } = fixture()
-    ctx.task.openStore.mockResolvedValue({
-      ...snapshot,
-      tasks: [rootTask, { ...childTask, status: 'running' }],
-      runs: [rootRun, { ...childRun, status: 'running', executionPhase: 'waiting_children', batchId: 'b-t-child-1' }],
-    })
+    const { ctx, store } = await fixture()
+    store.patchTask('t-child-1', { status: 'running' })
+    store.patchRun('r-child-1', { status: 'running', executionPhase: 'waiting_children', batchId: 'b-t-child-1' })
     const result = (await defineTaskReadTool(ctx as never).execute({}, exec('root-1'))) as string
-    expect(result).toContain(
-      '- t-child-1 [running/leaf] run r-child-1 [running] — phase waiting_children; batch b-t-child-1 Implement the parser',
-    )
+    // The child's own line carries the phase its run is in, and the batch id it
+    // waits on is the run record's own fact (read by reference, `context_read`):
+    // a summary line carries the phase and the status, not the whole record.
+    expect(result).toContain('- t-child-1 [running] Implement the parser (run: running — phase waiting_children')
+    // The root's own line is still its own run's: the child's phase is the
+    // child's, and one line never borrows another run's phase.
+    expect(result).toMatch(/run r-root \[running\] — phase active/)
+    expect((store.snapshot.runs.find(run => run.runId === 'r-child-1'))?.batchId).toBe('b-t-child-1')
   })
 })
 
@@ -501,7 +561,7 @@ describe('task_decompose', () => {
   }
 
   it('proposes the batch and continues it, rendering the admitted children', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const signal = new AbortController().signal
     ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission())
     ctx.taskRuntime.continueProposal.mockResolvedValue({
@@ -534,7 +594,7 @@ describe('task_decompose', () => {
   })
 
   it('states the contract the caller is under while the batch runs', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission())
     ctx.taskRuntime.continueProposal.mockResolvedValue({
       proposalId: 'p-1',
@@ -557,7 +617,7 @@ describe('task_decompose', () => {
   })
 
   it('registers the call id so the batch drain does not wait for the asking call', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const signal = new AbortController().signal
     ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission())
     ctx.taskRuntime.continueProposal.mockResolvedValue({
@@ -585,7 +645,7 @@ describe('task_decompose', () => {
   })
 
   it('returns the admission rejection as error text instead of throwing', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.submitDecompositionProposal.mockRejectedValue(
       new Error('task-runtime: admission rejected decomposition of "t-root":\n- child 0 has no acceptance criteria'),
     )
@@ -599,7 +659,7 @@ describe('task_decompose', () => {
   })
 
   it('returns the runtime rejection of an unknown declared contract version as error text', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const signal = new AbortController().signal
     ctx.taskRuntime.submitDecompositionProposal.mockRejectedValue(
       new Error('task-runtime: contract rejected decomposition of "t-root":\n- unknown contract version 2: this runtime writes version 1'),
@@ -622,7 +682,7 @@ describe('task_decompose', () => {
   })
 
   it('sends no requestKey, supersedes or contractVersion key when the caller declares none', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission())
     ctx.taskRuntime.continueProposal.mockResolvedValue({
       proposalId: 'p-1',
@@ -643,7 +703,7 @@ describe('task_decompose', () => {
   })
 
   it('lifts a declared requestKey and supersedes out of the batch into the submission options', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission({ existing: true, status: 'pending_review', policy: 'all' }))
     ctx.taskRuntime.continueProposal.mockResolvedValue({
       proposalId: 'p-1',
@@ -669,8 +729,8 @@ describe('task_decompose', () => {
     )
   })
 
-  it('declares requestKey and supersedes on the schema, and keeps the batch open for the runtime', () => {
-    const { ctx } = fixture()
+  it('declares requestKey and supersedes on the schema, and keeps the batch open for the runtime', async () => {
+    const { ctx } = await fixture()
     const tool = defineTaskDecomposeTool(ctx as never)
     const parameters = (tool.parameters as { properties: Record<string, { type: unknown; description?: string }> }).properties
 
@@ -683,7 +743,7 @@ describe('task_decompose', () => {
   })
 
   it('passes declared criterion ids and child constraints through untouched', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const signal = new AbortController().signal
     ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission())
     ctx.taskRuntime.continueProposal.mockResolvedValue({
@@ -713,7 +773,7 @@ describe('task_decompose', () => {
   })
 
   it('declares protectedInputs on the criterion schema and passes the declared paths through untouched', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const signal = new AbortController().signal
     ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission())
     ctx.taskRuntime.continueProposal.mockResolvedValue({
@@ -759,7 +819,7 @@ describe('task_decompose', () => {
   })
 
   it('reports a batch waiting for its review, naming the proposal and the policy on its record', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission({ existing: false, status: 'pending_review', policy: 'all' }))
     ctx.taskRuntime.continueProposal.mockResolvedValue({
       proposalId: 'p-9',
@@ -787,7 +847,7 @@ describe('task_decompose', () => {
   })
 
   it('names the policy the proposal was born under, read from the record', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission({ status: 'pending_review', policy: 'off' }))
     ctx.taskRuntime.continueProposal.mockResolvedValue({ proposalId: 'p-9', status: 'pending_review', detail: 'waiting' })
     // A proposal born under `off` and tightened into review keeps its birth
@@ -799,7 +859,7 @@ describe('task_decompose', () => {
   })
 
   it('says the policy could not be read back rather than inventing one', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission({ status: 'pending_review', policy: 'all' }))
     ctx.taskRuntime.continueProposal.mockResolvedValue({ proposalId: 'p-9', status: 'pending_review', detail: 'waiting' })
     ctx.taskRuntime.proposalIn.mockRejectedValue(new Error('task: unknown proposal "p-9"'))
@@ -810,7 +870,7 @@ describe('task_decompose', () => {
   })
 
   it('names a proposal that was decided against, and points at the revision route', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.submitDecompositionProposal.mockResolvedValue(submission({ existing: true, status: 'rejected', policy: 'all' }))
     ctx.taskRuntime.continueProposal.mockResolvedValue({
       proposalId: 'p-3',
@@ -828,7 +888,7 @@ describe('task_decompose', () => {
   })
 
   it('asks no human itself: a refused batch reaches no approval channel', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const approval = { request: vi.fn() }
     const withApproval = { ...ctx, approval }
     ctx.taskRuntime.submitDecompositionProposal.mockRejectedValue(
@@ -847,7 +907,7 @@ describe('task_decompose', () => {
 
 describe('capability_list', () => {
   it('renders the registry with each label resolved to the tools it grants', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const tool = defineCapabilityListTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
     expect(ctx.taskRuntime.listCapabilities).toHaveBeenCalledOnce()
@@ -859,7 +919,7 @@ describe('capability_list', () => {
   })
 
   it('states the baseline, the fail-closed tool rule, the skill boundary, and the permission posture', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const tool = defineCapabilityListTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
 
@@ -867,10 +927,15 @@ describe('capability_list', () => {
     expect(result).toContain('bash')
     expect(result).toContain('baseline labels: ')
     // The machinery line is rendered from WORKER_BASELINE_TOOLS, so it cannot drift from the grant.
+    // The machinery line is rendered from WORKER_BASELINE_TOOLS, so it cannot
+    // drift from the grant — and the raw cross-session readers are not part of it
+    // (A2): `context_read` is the reference reader a worker gets instead.
     expect(result).toContain(
-      'task machinery: task_read, task_status, task_decompose, task_submit_result, task_cancel, task_verify, capability_list, ' +
+      'task machinery: task_read, task_status, context_read, task_decompose, task_submit_result, task_cancel, task_verify, capability_list, ' +
       'task_proposal_read, task_proposal_continue, task_proposal_cancel',
     )
+    expect(result).toContain('baseline labels: filesystem, bash, jobs, search, skill, ask-user;')
+    expect(result).not.toContain('session-history')
     expect(result).toContain('tool grants are fail-closed: ')
     expect(result).toContain('skill grants are not exclusive: DSH has no per-agent skill hiding')
     expect(result).toContain('mcpServers grant whole MCP servers')
@@ -879,7 +944,7 @@ describe('capability_list', () => {
   })
 
   it('flags a label outside the vocabulary instead of resolving it silently', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.listCapabilities.mockReturnValue({ broken: { tools: ['filesystem', 'filesytem'] } })
     const tool = defineCapabilityListTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
@@ -887,7 +952,7 @@ describe('capability_list', () => {
   })
 
   it('renders the provider verdict of every declared skill under its capability row', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.listCapabilities.mockReturnValue(structuredClone(RENDER_TABLE))
     const tool = defineCapabilityListTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
@@ -911,7 +976,7 @@ describe('capability_list', () => {
   })
 
   it('says the providers were not checked when the tool has no calling session to check for', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const tool = defineCapabilityListTool(ctx as never)
     const result = (await tool.execute({}, { signal: new AbortController().signal } as never)) as string
 
@@ -923,17 +988,20 @@ describe('capability_list', () => {
 
 describe('task_status', () => {
   it('renders a compact task tree for the caller graph', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const tool = defineTaskStatusTool(ctx as never)
     const result = (await tool.execute({}, exec('root-1'))) as string
     expect(ctx.task.openStore).toHaveBeenCalledExactlyOnceWith('sg-t-root-1')
-    expect(result).toContain('graph graph1 task tree (2 tasks):')
-    expect(result).toContain('t-root [running] Build the feature (run: running — phase active)')
-    expect(result).toContain('  t-child-1 [verified] Implement the parser (run: verified — phase submitted evidence: [ev-1] review: verified)')
+    expect(result).toContain('graph: graph1 "graph1" — store sg-t-root-1')
+    expect(result).toContain('entries in scope: 2')
+    expect(result).toContain('- t-root [running] Build the feature (run: running — phase active) [you]')
+    expect(result).toContain(
+      '- t-child-1 [verified] Implement the parser (run: verified — phase submitted evidence: [ev-1] review: verified) [direct child]',
+    )
   })
 
   it('renders the localized cause of a failed review', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.task.openStore.mockResolvedValue({
       ...snapshot,
       tasks: [{ ...rootTask, status: 'failed' }, { ...childTask, status: 'failed' }],
@@ -956,7 +1024,7 @@ describe('task_status', () => {
   })
 
   it('appends failing criterion ids and exit codes when the failed review carries criteria', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.task.openStore.mockResolvedValue({
       ...snapshot,
       tasks: [{ ...rootTask, status: 'failed' }, { ...childTask, status: 'failed' }],
@@ -983,7 +1051,7 @@ describe('task_status', () => {
   })
 
   it('renders the blocking anomaly of a runless blocked review', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.task.openStore.mockResolvedValue({
       ...snapshot,
       tasks: [rootTask, { ...childTask, status: 'blocked', runIds: [] }],
@@ -1004,7 +1072,7 @@ describe('task_status', () => {
   })
 
   it('renders each run\'s coordination phase, and needs-recovery for a run with no phase', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.task.openStore.mockResolvedValue({
       ...snapshot,
       tasks: [rootTask, { ...childTask, status: 'running' }],
@@ -1015,8 +1083,10 @@ describe('task_status', () => {
       ],
     })
     const result = (await defineTaskStatusTool(ctx as never).execute({}, exec('root-1'))) as string
-    expect(result).toContain('t-root [running] Build the feature (run: running — needs-recovery (old record without a coordination phase))')
-    expect(result).toContain('  t-child-1 [running] Implement the parser (run: running — phase submitted')
+    expect(result).toContain(
+      '- t-root [running] Build the feature (run: running — needs-recovery (old record without a coordination phase))',
+    )
+    expect(result).toContain('- t-child-1 [running] Implement the parser (run: running — phase submitted')
   })
 })
 
@@ -1034,7 +1104,7 @@ describe('task_verify', () => {
   }
 
   it('re-runs the verifier with the graph env cwd and records no status', async () => {
-    const { ctx, services } = fixture()
+    const { ctx, services } = await fixture()
     const verifyRun = vi.fn(async () => bundle)
     services['verifier'] = { verifyRun }
     services['envBuilder'] = { store: { get: (envId: string) => ({ path: `/envs/${envId}` }) } }
@@ -1048,7 +1118,7 @@ describe('task_verify', () => {
   })
 
   it('omits cwd when the env checkout cannot be resolved', async () => {
-    const { ctx, services } = fixture()
+    const { ctx, services } = await fixture()
     const verifyRun = vi.fn(async () => bundle)
     services['verifier'] = { verifyRun }
     const tool = defineTaskVerifyTool(ctx as never)
@@ -1059,7 +1129,7 @@ describe('task_verify', () => {
   })
 
   it('refuses to run the verifier without a deadline when the runtime exposes no positive timeout', async () => {
-    const { ctx, services } = fixture()
+    const { ctx, services } = await fixture()
     const verifyRun = vi.fn(async () => bundle)
     services['verifier'] = { verifyRun }
     ;(ctx.taskRuntime as { verifyTimeoutMs?: number }).verifyTimeoutMs = 0
@@ -1071,7 +1141,7 @@ describe('task_verify', () => {
   })
 
   it('returns a friendly error for a finished run without calling the verifier', async () => {
-    const { ctx, services } = fixture()
+    const { ctx, services } = await fixture()
     const verifyRun = vi.fn(async () => bundle)
     services['verifier'] = { verifyRun }
     ctx.taskRuntime.runForSession.mockResolvedValue({ storeId: 'sg-t-root-1', task: childTask, run: childRun })
@@ -1083,7 +1153,7 @@ describe('task_verify', () => {
   })
 
   it('fails loudly when the verifier service is not loaded', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const tool = defineTaskVerifyTool(ctx as never)
     await expect(tool.execute({}, exec('s-worker'))).rejects.toThrow('verifier service is not loaded')
   })
@@ -1127,7 +1197,7 @@ describe('task_review_pack', () => {
   }
 
   it('assembles the nested pack: own reviews in full, parent and children summaries, dependency edges', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.task.openStore.mockResolvedValue(nestedSnapshot())
     const tool = defineTaskReviewPackTool(ctx as never)
 
@@ -1164,7 +1234,7 @@ describe('task_review_pack', () => {
    * entries that act on it. A run that carries no binding contributes no line.
    */
   it('names what each run of the task was bound to, and nothing for a run without a binding', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const bound = {
       ...nestedSnapshot(),
       runs: [
@@ -1205,7 +1275,7 @@ describe('task_review_pack', () => {
   })
 
   it('renders the metrics line and each dimension fact, and nothing for the dimensions the record omits', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const full = nestedSnapshot()
     const target = full.reviews.find(item => item.taskId === 't-child-1')!
     Object.assign(target, {
@@ -1250,13 +1320,13 @@ describe('task_review_pack', () => {
   })
 
   it('rejects an unknown task id', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const tool = defineTaskReviewPackTool(ctx as never)
     await expect(tool.execute({ taskId: 'ghost' }, exec('root-1'))).rejects.toThrow('unknown task "ghost"')
   })
 
   it('shows the deciding judge and its version on the criterion line', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const full = nestedSnapshot()
     const target = full.reviews.find(item => item.taskId === 't-child-1')!
     Object.assign(target, {
@@ -1292,7 +1362,7 @@ describe('task_diagnose', () => {
   }
 
   it('persists the diagnosis and reports proposals as suggestions only', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const tool = defineTaskDiagnoseTool(ctx as never)
     const result = (await tool.execute(args, exec('root-1'))) as string
     expect(ctx.task.recordDiagnosisIn).toHaveBeenCalledExactlyOnceWith('sg-t-root-1', args, 'root-1')
@@ -1303,7 +1373,7 @@ describe('task_diagnose', () => {
   })
 
   it('round-trips: a recorded diagnosis shows up in the next review pack and in task_status', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const state = structuredClone(snapshot)
     ctx.task.openStore.mockImplementation(async () => state)
     ctx.task.recordDiagnosisIn.mockImplementation(async (_storeId: string, diagnosis: never) => {
@@ -1320,7 +1390,7 @@ describe('task_diagnose', () => {
   })
 
   it('returns store rejections as error text instead of throwing', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.task.recordDiagnosisIn.mockRejectedValue(new Error('task: diagnosis "d1" already exists'))
     const tool = defineTaskDiagnoseTool(ctx as never)
     const result = (await tool.execute(args, exec('root-1'))) as string
@@ -1328,7 +1398,7 @@ describe('task_diagnose', () => {
   })
 
   it('rejects a proposal targetType outside the frozen vocabulary and persists nothing', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const tool = defineTaskDiagnoseTool(ctx as never)
     const rejected = (await tool.execute(
       { ...args, proposals: [{ targetType: 'prompt', targetId: 'x', rationale: 'y' }] },
@@ -1339,7 +1409,7 @@ describe('task_diagnose', () => {
   })
 
   it('rejects a proposals payload that is not an array of proposal objects and persists nothing', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const tool = defineTaskDiagnoseTool(ctx as never)
     for (const proposals of ['text', [{ targetType: 'skill' }]]) {
       const rejected = (await tool.execute(
@@ -1356,7 +1426,7 @@ describe('task_submit_result', () => {
   const submission = { summary: 'the parser passes the fixtures', evidenceRefs: ['ev-1'], notes: 'nothing left open' }
 
   it('passes the submission and the call registration id to the runtime, and renders the verdict', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const submitResult = vi.fn(async () => ({ status: 'verified', detail: 'run "r-worker" submitted and verified.' }))
     ctx.taskRuntime.submitResult = submitResult as never
     const tool = defineTaskSubmitResultTool(ctx as never)
@@ -1373,7 +1443,7 @@ describe('task_submit_result', () => {
   })
 
   it('sends no callId key when the caller is not a registered tool call', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const submitResult = vi.fn(async () => ({ status: 'verified', detail: 'ok' }))
     ctx.taskRuntime.submitResult = submitResult as never
     const tool = defineTaskSubmitResultTool(ctx as never)
@@ -1382,8 +1452,8 @@ describe('task_submit_result', () => {
     expect(Object.keys(submitResult.mock.calls[0]![2] as Record<string, unknown>)).toEqual([])
   })
 
-  it('requires a non-empty summary on the model-facing schema', () => {
-    const tool = defineTaskSubmitResultTool(fixture().ctx as never)
+  it('requires a non-empty summary on the model-facing schema', async () => {
+    const tool = defineTaskSubmitResultTool((await fixture()).ctx as never)
     const parameters = tool.parameters as {
       properties: Record<string, { type: unknown; required?: boolean; items?: { type: unknown } }>
     }
@@ -1399,7 +1469,7 @@ describe('task_submit_result', () => {
   })
 
   it('answers a late or repeated submission with the runtime\'s own conclusion, not an error', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.submitResult = vi.fn(async () => ({
       status: 'submitted',
       detail: 'run "r-worker" already submitted: the parser passes at 2026-09-16T00:03:00.000Z. A second submission changes nothing.',
@@ -1414,7 +1484,7 @@ describe('task_submit_result', () => {
   })
 
   it('returns the protocol refusal as text instead of throwing', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.submitResult = vi.fn(async () => {
       throw new Error('task-runtime: run "r-worker" is waiting on its child batch (b-t-worker); a parent cannot submit while its children are still running')
     }) as never
@@ -1427,8 +1497,8 @@ describe('task_submit_result', () => {
 })
 
 describe('task_cancel', () => {
-  function waitingRun() {
-    const { ctx } = fixture()
+  async function waitingRun() {
+    const { ctx } = await fixture()
     ctx.taskRuntime.runForSession.mockImplementation(async () => ({
       storeId: 'sg-t-root-1',
       task: workerTask,
@@ -1438,7 +1508,7 @@ describe('task_cancel', () => {
   }
 
   it('cancels the batch this run waits on and reports the settlement', async () => {
-    const { ctx } = waitingRun()
+    const { ctx } = await waitingRun()
     const cancelBatch = vi.fn(async () => [
       { taskId: 't-child-1', runId: 'r-child-1', status: 'cancelled' },
       { taskId: 't-child-2', status: 'blocked' },
@@ -1454,7 +1524,7 @@ describe('task_cancel', () => {
   })
 
   it('says there is no batch in flight and changes nothing when the run holds none', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const cancelBatch = vi.fn()
     ctx.taskRuntime.cancelBatch = cancelBatch as never
     const tool = defineTaskCancelTool(ctx as never)
@@ -1467,7 +1537,7 @@ describe('task_cancel', () => {
   })
 
   it('returns the runtime refusal as text instead of throwing', async () => {
-    const { ctx } = waitingRun()
+    const { ctx } = await waitingRun()
     ctx.taskRuntime.cancelBatch = vi.fn(async () => {
       throw new Error('task-runtime: batch "b-t-worker" is not being driven by this process')
     }) as never
@@ -1478,8 +1548,8 @@ describe('task_cancel', () => {
     expect(result).toContain('not being driven by this process')
   })
 
-  it('declares the reason as an optional parameter', () => {
-    const tool = defineTaskCancelTool(fixture().ctx as never)
+  it('declares the reason as an optional parameter', async () => {
+    const tool = defineTaskCancelTool((await fixture()).ctx as never)
     const parameters = tool.parameters as { properties: Record<string, { type: unknown }>; required?: string[] }
     expect(parameters.properties.reason?.type).toBe('string')
     expect(parameters.required ?? []).not.toContain('reason')
@@ -1488,14 +1558,14 @@ describe('task_cancel', () => {
 
 describe('missing agent identity', () => {
   it.each([
-    ['task_read', () => defineTaskReadTool(fixture().ctx as never), {}],
-    ['task_status', () => defineTaskStatusTool(fixture().ctx as never), {}],
-    ['task_intake', () => defineTaskIntakeTool(fixture().ctx as never), { objective: 'ship it', acceptanceCriteria: [] }],
-    ['task_submit_result', () => defineTaskSubmitResultTool(fixture().ctx as never), { summary: 'done' }],
-    ['task_cancel', () => defineTaskCancelTool(fixture().ctx as never), {}],
-    ['task_verify', () => defineTaskVerifyTool(fixture().ctx as never), {}],
-    ['task_review_pack', () => defineTaskReviewPackTool(fixture().ctx as never), { taskId: 't-child-1' }],
-    ['task_diagnose', () => defineTaskDiagnoseTool(fixture().ctx as never), {
+    ['task_read', async () => defineTaskReadTool((await fixture()).ctx as never), {}],
+    ['task_status', async () => defineTaskStatusTool((await fixture()).ctx as never), {}],
+    ['task_intake', async () => defineTaskIntakeTool((await fixture()).ctx as never), { objective: 'ship it', acceptanceCriteria: [] }],
+    ['task_submit_result', async () => defineTaskSubmitResultTool((await fixture()).ctx as never), { summary: 'done' }],
+    ['task_cancel', async () => defineTaskCancelTool((await fixture()).ctx as never), {}],
+    ['task_verify', async () => defineTaskVerifyTool((await fixture()).ctx as never), {}],
+    ['task_review_pack', async () => defineTaskReviewPackTool((await fixture()).ctx as never), { taskId: 't-child-1' }],
+    ['task_diagnose', async () => defineTaskDiagnoseTool((await fixture()).ctx as never), {
       taskId: 't-child-1',
       diagnosisId: 'd1',
       observedFailure: 'f',
@@ -1504,7 +1574,7 @@ describe('missing agent identity', () => {
       confidence: 'medium',
     }],
   ])('%s rejects a call with no agent identity', async (_name, make, args) => {
-    const tool = make()
+    const tool = await make()
     for (const exec of [{}, { agent: { id: '' }, signal: new AbortController().signal }]) {
       await expect(tool.execute(args, exec as never)).rejects.toThrow('missing agent id')
     }
@@ -1584,7 +1654,7 @@ describe('task_intake', () => {
   })
 
   it('accepts the contract through the runtime and renders the activated root', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const intake = vi.fn(async () => ({
       status: 'activated',
       proposalId: 'p-root-1',
@@ -1607,7 +1677,7 @@ describe('task_intake', () => {
   })
 
   it('renders a contract waiting for review as a proposal id, with no root task and nothing spawned', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.intakeRootContract = vi.fn(async () => ({
       status: 'pending_review',
       proposalId: 'p-root-wait',
@@ -1627,7 +1697,7 @@ describe('task_intake', () => {
   })
 
   it('names the runtime refusal and the root-specific rules, having written nothing', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.intakeRootContract = vi.fn(async () => {
       throw new Error(
         'task-runtime: root contract rejected:\n- root contract requires at least one mandatory acceptance criterion judged by ' +
@@ -1643,7 +1713,7 @@ describe('task_intake', () => {
   })
 
   it('refuses to re-intake a store that already holds a root task, naming the terminal rule', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.intakeRootContract = vi.fn(async () => {
       throw new Error(
         'task-runtime: store "sg-t-root-1" already holds root task "t-root", so a root contract cannot be intaken here',
@@ -1693,7 +1763,7 @@ describe('task_intake', () => {
   }
 
   it('says the contract is already on the record when the activation is what failed', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.intakeRootContract = vi.fn(async () => {
       throw new WorkspaceBusyError(
         '/env/checkout',
@@ -1717,7 +1787,7 @@ describe('task_intake', () => {
   })
 
   it('matches a record by the objective the caller sent when the call carried no key of its own', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.intakeRootContract = vi.fn(async () => {
       throw new Error('workspace /env/checkout is busy: held by kind run store sg-t-other')
     }) as never
@@ -1736,7 +1806,7 @@ describe('task_intake', () => {
   })
 
   it('does not read another contract\'s record as this one, even under the same objective', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.intakeRootContract = vi.fn(async () => {
       throw new Error('task-runtime: root contract rejected:\n- root contract objective must not be blank')
     }) as never
@@ -1755,7 +1825,7 @@ describe('task_intake', () => {
   })
 
   it('still says nothing was written when the store holds no proposal for this contract', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.intakeRootContract = vi.fn(async () => {
       throw new Error('task-runtime: root contract rejected:\n- root contract objective must not be blank')
     }) as never
@@ -1773,7 +1843,7 @@ describe('task_intake', () => {
   })
 
   it('says nothing was written when the store does not exist yet', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.intakeRootContract = vi.fn(async () => {
       throw new Error('task-runtime: root contract rejected:\n- root contract acceptanceCriteria must be an array')
     }) as never
@@ -1786,7 +1856,7 @@ describe('task_intake', () => {
   })
 
   it('reports a store it cannot read back instead of claiming nothing was written', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     ctx.taskRuntime.intakeRootContract = vi.fn(async () => {
       throw new Error('task-runtime: the intake of a root contract for session "root-1" was cancelled before anything was persisted')
     }) as never
@@ -1795,14 +1865,17 @@ describe('task_intake', () => {
     }) as never
     const result = (await defineTaskIntakeTool(ctx as never).execute(rootContract, exec('root-1'))) as string
 
+    // The caller is resolved through the read core first (A2), so the answer is
+    // that core's named refusal: the domain store cannot be read, with the store's
+    // own reason — and nothing was written.
     expect(result).toContain('task_intake rejected:')
     expect(result).toContain('invalid persisted event at seq 3')
-    expect(result).toContain('could not be read back')
-    expect(result).not.toContain('Nothing was written')
+    expect(result).toContain('cannot be read')
+    expect(result).toContain('nothing was written')
   })
 
   it('refuses a caller that is not the root session, by name, and calls nothing', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     const intake = vi.fn()
     ctx.taskRuntime.intakeRootContract = intake as never
     const result = (await defineTaskIntakeTool(ctx as never).execute(rootContract, exec('s-worker'))) as string
@@ -1813,7 +1886,7 @@ describe('task_intake', () => {
   })
 
   it('hands a key it does not declare to the runtime instead of dropping it', async () => {
-    const { ctx } = fixture()
+    const { ctx } = await fixture()
     // There is no approval parameter here, and there must be no path that
     // swallows one either: a key this tool does not declare rides along to the
     // runtime, which refuses it by name before a proposal exists (§7: nothing
@@ -1856,21 +1929,21 @@ describe('the root activation view', () => {
     createdAt: '2026-09-23T00:00:00.000Z',
   }
 
-  function emptyStore(proposals: readonly unknown[] = []) {
-    const { ctx } = fixture()
-    ctx.task.openStore = vi.fn(async () => ({
-      ...snapshot,
+  async function emptyStore(proposals: readonly unknown[] = []) {
+    const h = await fixture()
+    h.store.snapshot = {
+      ...h.store.snapshot,
       tasks: [],
       runs: [],
       evidence: [],
       reviews: [],
       proposals: { all: proposals, byId: {}, byRequestKey: {}, byParentTask: {} },
-    })) as never
-    return { ctx }
+    } as never
+    return h
   }
 
   it('task_read answers the named state and the open proposal, with no objective anywhere', async () => {
-    const { ctx } = emptyStore([waitingProposal])
+    const { ctx } = await emptyStore([waitingProposal])
     const result = (await defineTaskReadTool(ctx as never).execute({}, exec('root-1'))) as string
 
     expect(result).toContain('not activated')
@@ -1880,11 +1953,11 @@ describe('the root activation view', () => {
     expect(result).toContain('task_intake')
     expect(result).toContain('task_decompose')
     expect(result).not.toContain('objective:')
-    expect(result).not.toContain('root task t-root')
+    expect(result).not.toContain('task t-root')
   })
 
   it('task_status answers the same state rather than an empty tree', async () => {
-    const { ctx } = emptyStore([{ ...waitingProposal, status: 'ready', policy: 'off' }])
+    const { ctx } = await emptyStore([{ ...waitingProposal, status: 'ready', policy: 'off' }])
     const result = (await defineTaskStatusTool(ctx as never).execute({}, exec('root-1'))) as string
 
     expect(result).toContain('not activated')
@@ -1895,10 +1968,7 @@ describe('the root activation view', () => {
   })
 
   it('reads a store that does not exist yet as the same state, not as an error', async () => {
-    const { ctx } = fixture()
-    ctx.task.openStore = vi.fn(async () => {
-      throw new Error('task: store "sg-t-root-1" does not exist')
-    }) as never
+    const { ctx } = await fixture({ storeError: new Error('task: store "sg-t-root-1" does not exist') })
 
     const read = (await defineTaskReadTool(ctx as never).execute({}, exec('root-1'))) as string
     expect(read).toContain('not activated')
@@ -1907,11 +1977,15 @@ describe('the root activation view', () => {
     expect(status).toContain('not activated')
   })
 
-  it('keeps the worker path on its own task and never on the root store view', async () => {
-    const { ctx } = emptyStore([])
+  it('keeps a session with no run of its own off the root store view', async () => {
+    const { ctx } = await emptyStore([])
     const result = (await defineTaskReadTool(ctx as never).execute({}, exec('s-worker'))) as string
 
-    expect(result).toContain('task t-worker [running] depth 1')
+    // A store with no run naming this session is no contract for it: the caller
+    // is a published member with nothing of its own, refused by name — never the
+    // root's view, which belongs to the graph's root session alone.
+    expect(result).toContain('task_read unbound:')
+    expect(result).toContain('no Run of its own')
     expect(result).not.toContain('not activated')
   })
 })

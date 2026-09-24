@@ -23,10 +23,8 @@ import {
   TaskRuntime,
   VerifierUnavailableError,
   escalationHint,
-  renderRunBinding,
   workerBaseline,
 } from '../../src/index.ts'
-import { WORKER_CONTRACT_OPEN } from '../../src/contract.ts'
 
 const ROOT_SESSION = 'root-session'
 const STORE = rootTaskStoreId(ROOT_SESSION)
@@ -41,8 +39,14 @@ interface StoredSession {
 interface SpawnCall {
   sessionId: string
   name: string
-  prompt: string
-  contract?: string
+  /**
+   * The message the spawn carried, when it carried one. A task worker's spawn
+   * carries none (A2): its contract and state are the context assembly's, and the
+   * agent runtime fills the default kickoff.
+   */
+  prompt?: string
+  /** Whether the spawn declared the child a task worker (`SpawnRequest.taskWorker`). */
+  taskWorker?: boolean
   agentPreset?: string
   permissionPreset?: string
   grant?: {
@@ -118,8 +122,9 @@ function harness(
     spawn: vi.fn(async (_parent: unknown, request: {
       sessionId: string
       name: string
-      prompt: Array<{ type: 'text'; text: string }>
+      prompt?: Array<{ type: 'text'; text: string }>
       contract?: string
+      taskWorker?: boolean
       agentPreset?: string
       permissionPreset?: string
       grant?: SpawnCall['grant']
@@ -128,11 +133,14 @@ function harness(
       spawned.push({
         sessionId: request.sessionId,
         name: request.name,
-        prompt: request.prompt.map(block => block.text).join('\n'),
-        ...(request.contract !== undefined ? { contract: request.contract } : {}),
-        ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
-        ...(request.permissionPreset !== undefined ? { permissionPreset: request.permissionPreset } : {}),
-        ...(request.grant !== undefined ? { grant: request.grant } : {}),
+        ...(request.prompt === undefined ? {} : { prompt: request.prompt.map(block => block.text).join('\n') }),
+        // A delegated child is spawned as a task worker (A2): the request carries
+        // no prompt and no contract text of its own — the contract is the context
+        // assembly's, read from the store at each model request.
+        ...(request.taskWorker === undefined ? {} : { taskWorker: request.taskWorker }),
+        ...(request.agentPreset === undefined ? {} : { agentPreset: request.agentPreset }),
+        ...(request.permissionPreset === undefined ? {} : { permissionPreset: request.permissionPreset }),
+        ...(request.grant === undefined ? {} : { grant: request.grant }),
       })
       // `cancel` converges the agent to idle, as the real loop's does: a worker
       // that is mid-turn when the batch is cancelled resolves its idle wait, and
@@ -685,8 +693,17 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect([h.spawned[1]!.sessionId, h.spawned[2]!.sessionId].sort()).toEqual(
       [sessionOf(outcomes[1]!.taskId), sessionOf(outcomes[2]!.taskId)].sort(),
     )
-    expect(h.spawned[0]!.prompt).toContain('task a')
-    expect(h.spawned[0]!.prompt).toContain('Parent objective: ship the release')
+    // A delegated child is a task worker, and the store is where its context
+    // comes from (A2): the spawn carries no prompt and no contract text, and the
+    // handoff the runtime built for this child is the record the context
+    // projection reads back.
+    expect(h.spawned[0]!.taskWorker).toBe(true)
+    expect(h.spawned[0]!.prompt).toBeUndefined()
+    const handoff = (await h.task.snapshotIn(STORE)).handoffs.find(
+      item => item.childTaskId === outcomes[0]!.taskId,
+    )
+    expect(handoff?.parentObjective).toBe('ship the release')
+    expect(handoff?.reasonForDelegation).toBe('split the work')
 
     for (const outcome of outcomes) {
       expect(runEventKinds(h, outcome.runId!)).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskVerified', 'ReviewRecorded'])
@@ -963,29 +980,30 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(h.spawned[0]!.grant!.baseline).toContain('task_decompose')
   })
 
-  test('spawn carries the contract as a marked block, separate from the prompt the worker starts from', async () => {
+  test('spawn declares the child a task worker and carries no contract text of its own', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('ball child')],
     })
 
+    // A2: the spawn seam hands the worker a role marker, not text. The contract
+    // the worker reads is the context assembly's `singularity:worker-contract`
+    // section, projected from this store at every model request — asserted
+    // end-to-end in `tests/integration/context-assembly.spec.ts` — so the
+    // runtime keeps exactly one rendering of a contract (its own store records)
+    // and the spawn prompt is no longer a second surface a fold can shadow.
     const call = h.spawned[0]!
-    const contract = call.contract
-    expect(contract, 'the cascade must hand a contract to the spawn').toBeDefined()
-    // The block is marked and carries the store's own facts: the objective, the
-    // admission-assigned criterion id with the command a verifier will run, and
-    // the task id the terminal states are recorded against.
-    expect(contract).toContain(WORKER_CONTRACT_OPEN)
-    expect(contract).toContain('<worker-contract task="')
-    expect(contract).toContain('ball child')
-    expect(contract).toContain('| ac1-1 | deterministic | yes | ball child works | true | — |')
-    expect(contract).toContain('`task_read` reads the same store')
-    // It rides its own channel: the prompt is not the contract and the contract
-    // is not the prompt, so a fold that shadows one leaves the other.
-    expect(contract).not.toBe(call.prompt)
-    expect(contract!.length).toBeLessThan(call.prompt.length)
+    expect(call.taskWorker).toBe(true)
+    expect(call.prompt).toBeUndefined()
+    expect(call.contract).toBeUndefined()
+
+    // The facts that section is projected from are the store's own: the child
+    // task's admission-assigned criterion and the command a verifier will run.
+    const child = await h.task.taskIn(STORE, outcomes[0]!.taskId)
+    expect(child.objective).toBe('ball child')
+    expect(child.acceptanceCriteria.map(criterion => [criterion.criterionId, criterion.command])).toEqual([['ac1-1', 'true']])
   })
 
   test('a child with no capabilities still carries the baseline grant', async () => {
@@ -1162,12 +1180,14 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(snapshot.capabilities[outcomes[0]!.taskId]!.closure).toBe('closed')
     expect(taskEvents(h).map(item => item.kind)).not.toContain('CapabilityGapDetected')
 
-    expect(h.spawned[0]!.prompt).toContain('## This task is decomposable')
-    expect(h.spawned[0]!.prompt).toContain('task_decompose')
-    expect(h.spawned[1]!.prompt).not.toContain('## This task is decomposable')
-    // The leaf worker is not told it was admitted to split — but with the
-    // runtime-decomposition switch on (the default) it is told the door is open.
-    expect(h.spawned[1]!.prompt).toContain('call `task_decompose` yourself')
+    // The spawn itself says nothing about decomposition any more (A2): which
+    // worker is told what is the context projection's conditional part, driven by
+    // the task's `decompositionStatus` and the deployment switch
+    // (`context/tests/unit/reads.spec.ts` asserts both), while these spawn
+    // requests only declare the child a task worker.
+    expect(h.spawned[0]!.taskWorker).toBe(true)
+    expect(h.spawned[1]!.taskWorker).toBe(true)
+    expect(h.spawned[0]!.prompt).toBeUndefined()
 
     // A declaration is not a gap: with no nested decomposition the child still
     // runs, and the outer cascade verifies it exactly as before.
@@ -1323,9 +1343,12 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect((await h.task.taskIn(STORE, childTaskId)).decompositionStatus).toBe('decomposed')
     expect(nested.refusal).toBeUndefined()
     expect(nested.outcomes!.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
-    // The worker that was told it could split is the one that split.
-    expect(h.spawned[0]!.prompt).toContain('call `task_decompose` yourself')
-    expect(h.spawned[0]!.prompt).not.toContain('## This task is decomposable')
+    // The worker that split was told it could: the deployment switch is what puts
+    // that rule in its assembled contract (`context/tests/unit/reads.spec.ts`:
+    // "a leaf worker reads the runtime-split rule … when the deployment admits it").
+    // The spawn request carries the role marker and no rendering of the rule.
+    expect(h.spawned[0]!.taskWorker).toBe(true)
+    expect(h.spawned[0]!.prompt).toBeUndefined()
 
     const snapshot = await h.task.snapshotIn(STORE)
     const grandchildren = snapshot.tasks.filter(task => task.parentTaskId === childTaskId)
@@ -1379,9 +1402,14 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     )
     expect((await h.task.snapshotIn(STORE)).tasks).toHaveLength(2)
     expect(h.spawned).toHaveLength(1)
-    // The worker was never told about the tool, so the refusal is one it could
-    // not have avoided — which is what the switch-off prompt owes it.
-    expect(h.spawned[0]!.prompt).not.toContain('task_decompose')
+    // Nothing in the spawn invites a split, whatever the switch says (the spawn
+    // carries the role marker and no prompt at all) — and the projection the
+    // worker reads says nothing about `task_decompose` with the switch off, so the
+    // refusal is one it could not have avoided.
+    // (`context/tests/unit/reads.spec.ts`: "a leaf worker reads the runtime-split
+    // rule … and neither when it does not".)
+    expect(h.spawned[0]!.prompt).toBeUndefined()
+    expect(h.spawned[0]!.taskWorker).toBe(true)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
   })
 
@@ -1829,11 +1857,15 @@ describe('the content a run is bound to (S1-C)', () => {
     // The grant: the worker's skill layer is built from the snapshot root.
     expect(h.spawned[0]!.grant!.skillRoots).toEqual([binding.snapshotRoot])
 
-    // The worker's summary is rendered from the same record, so the capability
-    // names a worker may need are in the prompt it starts from.
-    expect(h.spawned[0]!.prompt).toContain('design-ball')
-    expect(h.spawned[0]!.prompt).toContain('ball-align')
-    expect(h.spawned[0]!.contract).toContain('ball-align')
+    // The worker's capability names ride its assembled contract, rendered from
+    // this same record by the context projection (`context/src/run-binding.ts`,
+    // asserted in `context/tests/unit/run-binding.spec.ts` and end-to-end in
+    // `tests/integration/context-assembly.spec.ts`); the spawn request itself
+    // carries only the role marker.
+    expect(binding.capabilities).toContain('design-ball')
+    expect(binding.skills.map(skill => skill.name)).toContain('ball-align')
+    expect(h.spawned[0]!.taskWorker).toBe(true)
+    expect(h.spawned[0]!.prompt).toBeUndefined()
   })
 
   test('a production rewrite after the run was bound leaves the run\'s bytes alone, and the next run binds the new bytes', async () => {
@@ -1913,7 +1945,7 @@ describe('the content a run is bound to (S1-C)', () => {
     expect(record.outcome).toBe('failed')
   })
 
-  test('the worker summary groups every selected provider under the capability rows that grant it', async () => {
+  test('the run record groups every matched capability with the providers the admission selected', async () => {
     pinSkillHome('ball-align', 'check')
     const h = harness({
       config: {
@@ -1925,28 +1957,31 @@ describe('the content a run is bound to (S1-C)', () => {
       },
     })
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
-    await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+    const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
       reason: 'split the work',
       children: [childSpec('ball child', { requiredCapabilities: ['design-ball', 'check-ball-registration', 'research'] })],
     })
 
-    const binding = h.spawned[0] === undefined
-      ? undefined
-      : (await h.task.runIn(STORE, (await h.task.snapshotIn(STORE)).runs.find(item => item.taskId !== rootTaskId)!.runId)).providerBinding
-    const summary = renderRunBinding(binding)
-    // Every capability the run matched is named, including the row that carries
-    // no provider skill (its tools are granted without one); a worker never has
-    // to guess a capability name to decompose or delegate.
-    expect(summary).toContain('design-ball')
-    expect(summary).toContain('check-ball-registration')
-    expect(summary).toContain('research')
-    expect(summary).toContain('no provider skill')
-    expect(summary).toContain('ball-align')
-    expect(summary).toContain('check')
-    expect(summary).toContain('guidance')
-    // The summary is identity and purpose, never the body: the worker reads the
-    // text with the `skill` tool on demand.
-    expect(summary).toContain('skill` tool')
+    // The record, not a rendering of it: what the worker's assembled contract is
+    // projected from is this run's own binding, and the text that projects it is
+    // the context package's (`context/src/run-binding.ts`, asserted in
+    // `context/tests/unit/run-binding.spec.ts`).
+    const binding = (await h.task.runIn(STORE, outcomes[0]!.runId!)).providerBinding
+    if (binding === undefined) throw new Error('the run recorded no provider binding')
+    // Every capability the run matched is in the record, including the row that
+    // carries no provider skill (its tools are granted without one) and the rows
+    // whose skills this deployment pinned — a worker never has to guess a
+    // capability name to decompose or delegate.
+    expect(binding.capabilities).toEqual(expect.arrayContaining(['design-ball', 'check-ball-registration', 'research']))
+    expect(binding.skills.map(skill => [skill.name, skill.role])).toEqual([
+      ['ball-align', 'guidance'],
+      ['check', 'guidance'],
+    ])
+    expect(binding.skills.find(skill => skill.name === 'ball-align')?.capabilities).toEqual(['design-ball'])
+    // Identity and purpose only: the body is never stored in the record — the
+    // worker reads it with the `skill` tool from the snapshot the record names.
+    for (const skill of binding.skills) expect(JSON.stringify(skill)).not.toContain('Align a Buckyball Ball across layers')
+    expect(binding.snapshotRoot).toBeDefined()
   })
 })
 
@@ -2441,8 +2476,17 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     expect(spawn.grant!.skillRoots).toEqual(['/sandbox/p2/skills'])
     // the overlay did not change the capability resolution
     expect(spawn.agentPreset).toBe('standard')
-    expect(spawn.prompt).not.toContain('call `task_decompose` yourself')
-    expect(spawn.prompt).toContain('[evolution-replay:p2]')
+    // A replay never invites a split (its projection carries no decomposition
+    // guidance at all — `context/tests/unit/reads.spec.ts`, "a replay reads …"),
+    // and the spawn request carries no prompt to invite one either: the replay
+    // task's own objective, tagged `[evolution-replay:p2]`, is what the context
+    // projection briefs it with, read from the store.
+    expect(spawn.prompt).toBeUndefined()
+    expect(spawn.taskWorker).toBe(true)
+    const replay = (await h.task.snapshotIn(STORE)).tasks.find(
+      task => task.objective.includes('[evolution-replay:p2]'),
+    )
+    expect(replay?.objective).toContain('[evolution-replay:p2]')
   })
 
   test('a spawning replay binds its own content: the overlay root stays first and the run\'s snapshot follows it', async () => {
@@ -2492,10 +2536,14 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     // every item the persisted contract carries is in the spawn prompt and in
     // the contract block the loop reprojects — and the persisted lists are the
     // champion's own, element for element, not merely two non-empty lists.
-    for (const item of [...stored.assumptions, ...stored.constraints]) {
-      expect(spawn.prompt).toContain(`- ${item}`)
-      expect(spawn.contract).toContain(`  - ${item}`)
-    }
+    // The declarations a worker is shown are its assembled contract's, projected
+    // from this very record (A2 — `context/tests/unit/reads.spec.ts` and
+    // `tests/integration/context-assembly.spec.ts` assert that rendering), and the
+    // spawn request carries no text of its own.
+    expect(spawn.taskWorker).toBe(true)
+    expect(spawn.prompt).toBeUndefined()
+    expect(spawn.contract).toBeUndefined()
+    for (const item of [...stored.assumptions, ...stored.constraints]) expect(item.length).toBeGreaterThan(0)
     expect(stored.assumptions).toEqual(championContract.assumptions)
     expect(stored.constraints).toEqual(championContract.constraints)
     expect(championContract.assumptions).toHaveLength(1)
@@ -2797,8 +2845,12 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
       expect(replayTask.contract!.constraints).toEqual([])
       // Nothing was invented for it either: the two rendered sections say so.
       const spawn = h.spawned[h.spawned.length - 1]!
-      expect(spawn.prompt).toContain('## Assumptions\n\n(none)')
-      expect(spawn.contract).toContain('- Constraints: (none)')
+      // Nothing is invented for the record either: its stored contract is what the
+      // worker's context is projected from, and it carries the empty lists.
+      expect(spawn.taskWorker).toBe(true)
+      expect(spawn.prompt).toBeUndefined()
+      expect(replayTask.contract!.assumptions).toEqual([])
+      expect(replayTask.contract!.constraints).toEqual([])
     })
   })
 })
@@ -2971,10 +3023,11 @@ describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {
       'a cycle-accurate reference model exists',
       `dependency evidence "${outcomes[0]!.evidenceId!}" is verified and available as a reference`,
     ])
-    // Both declarations reach the worker: the spawn prompt renders them and so
-    // does the contract block the loop reprojects.
-    expect(h.spawned[1]!.prompt).toContain('- no network access')
-    expect(h.spawned[1]!.contract).toContain('- Constraints:\n  - no network access')
+    // Both declarations reach the worker through its assembled contract — the
+    // projection's handoff block, read from this record — and the spawn request
+    // carries no rendering of its own (A2).
+    expect(h.spawned[1]!.taskWorker).toBe(true)
+    expect(h.spawned[1]!.prompt).toBeUndefined()
     // The stored child contract keeps the same declarations the handoff rendered.
     const child = await h.task.taskIn(STORE, outcomes[1]!.taskId)
     expect(child.contract!.constraints).toEqual(['no network access', 'finish inside ten minutes'])

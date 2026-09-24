@@ -23,7 +23,7 @@ import type {
 } from '@dangosys/dsh-singularity-task'
 import { checkObligationCoverage, findRepoRoot, loadObligationTemplates } from '@dangosys/dsh-singularity-task-runtime'
 import type { StoreRecoveryStatus } from '@dangosys/dsh-singularity-task-runtime'
-import { isGraphMember, type BindingDeps, type CallerGraph, type LoadedCaller } from './bindings.ts'
+import { isGraphMember, type BindingDeps, type CallerGraph, type LoadedCaller, type ReadOnlyTaskRuntime } from './bindings.ts'
 import { CONTEXT_OUTPUT_LIMIT_BYTES, OutputBudget, omittedLine, sliceUtf8, utf8Bytes } from './limits.ts'
 import { notActivatedLines } from './not-activated.ts'
 import { refused, type NamedRefusal, type ProjectedRead, read } from './refusals.ts'
@@ -222,6 +222,52 @@ function referenceList(
 /* --- contract projection (the assembly's immutable half) ----------------- */
 
 /**
+ * The decomposition guidance a worker's projection carries — the
+ * task/deployment-conditional part of the old spawn prompt's rules (A2: the
+ * unconditional rules are the agent runtime's worker policy section, and the
+ * two never repeat each other). Every condition is fixed for the whole run — a
+ * task's `decompositionStatus` is immutable after admission and the deployment
+ * switch is configuration — so the block is as byte-stable as the contract it
+ * rides with. A replay never sees it: a replay re-runs the one task as
+ * contracted, whatever the switch says.
+ */
+function workerDecompositionLines(taskRuntime: ReadOnlyTaskRuntime, task: TaskInstance): string[] {
+  const decomposable = task.decompositionStatus === 'decomposable'
+  const runtimeSplit = taskRuntime.allowsRuntimeDecomposition()
+  if (!decomposable && !runtimeSplit) return []
+  const lines: string[] = []
+  if (decomposable) {
+    lines.push(
+      '## This task is decomposable',
+      '',
+      '- Do not carry the work to completion yourself: this task was admitted as decomposable.',
+      '- Call `task_decompose` instead, with a `reason` and the child task list; every child needs an acceptance criterion a verifier can judge on its own.',
+      '- Decompose only when RFC §36 atomicity holds — independently verifiable acceptance dimensions, clear artifact boundaries, capabilities that match or gaps you can handle; otherwise do the work here.',
+      '- Once you decompose, the nested verification settles this task; you still never declare completion yourself.',
+    )
+  }
+  if (runtimeSplit) {
+    lines.push(
+      ...(lines.length === 0 ? [] : ['']),
+      '## If the work turns out not to be atomic',
+      '',
+      '- Call `task_decompose` yourself: this deployment admits a task\'s own decomposition, so your parent did not have to predict it. ' +
+        'The call still has to clear admission — structure, acyclic dependencies, a command on every executable criterion, capability ' +
+        'coverage, depth and batch-size limits — and a task may split only once; a refusal names the rule that blocked it, and that reason ' +
+        'is what you act on. Split only into pieces a verifier can judge on its own; otherwise do the work here.',
+    )
+  }
+  lines.push(
+    '',
+    '- A decomposition can come back waiting for a human review: it answers with a proposal id and admits nothing, so no child exists ' +
+      'and nothing is spawned until the review decides. Read the batch as it was recorded with `task_proposal_read`; do not re-submit the ' +
+      'same batch while it waits, because the same request is answered with the same proposal. If the review refuses it, revise the batch ' +
+      'from the reason on the record and decompose again — a revision is a new proposal, never a re-run of the refused one.',
+  )
+  return lines
+}
+
+/**
  * The immutable half of the context one role is assembled with (A2 §D/§9): the
  * root objective and its hard constraints, the caller's own complete contract,
  * the persisted handoff envelope, and — for replay or a reviewer — the honest
@@ -342,6 +388,10 @@ export async function contractProjection(deps: ReadDeps, loaded: LoadedCaller): 
       if (referenceList(budget, 'relevant evidence', references.evidence, 'handoff evidence references', 'read them by id') !== undefined) {
         return tooLarge('the handoff references', taskPageHint(task.taskId))
       }
+    }
+    const decomposition = workerDecompositionLines(deps.taskRuntime, task)
+    if (decomposition.length > 0 && budget.addAll(['', ...decomposition]) > 0) {
+      return tooLarge('the decomposition guidance', taskPageHint(task.taskId))
     }
   }
 

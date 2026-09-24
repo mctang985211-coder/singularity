@@ -17,10 +17,12 @@ import type { TaskEvent, TaskProposalRoot, TaskSnapshot } from '../../task/src/i
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
 import { ProposalReviewService } from '../../agent-singularity/src/proposal-review.ts'
+import { defineContextReadTool } from '../../agent-singularity/src/tools/context-read.ts'
 import { defineTaskReadTool } from '../../agent-singularity/src/tools/task-read.ts'
 import type { Config, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
+import { graphRegistry, mountContextReadCore } from '../support/context-plane.ts'
 import { seedLegacyRoot } from '../support/legacy-root.ts'
 import { personRequest } from '../../task-runtime/tests/support/person-request.ts'
 import { OTHER_TOOLS, ROOT_TOOLS } from '../support/scripted-loop.ts'
@@ -199,10 +201,11 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
   // allow-list — which the real `AgentRuntime` applies — resolves against, and
   // the real `task_read` for the read side.
   for (const name of [...ROOT_TOOLS, ...OTHER_TOOLS]) {
-    if (name === 'task_read') continue
+    if (name === 'task_read' || name === 'context_read') continue
     ctx.tools.register(standIn(name))
   }
   ctx.tools.register(defineTaskReadTool(ctx))
+  ctx.tools.register(defineContextReadTool(ctx))
   ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'p', model: 'm' }) })
   ctx.provide('agentPresets', { defaultId: 'standard', mount: async () => {}, resolve: async () => ({}) })
   ctx.provide('permissionPresets', { set: vi.fn(), resolve: () => ({}) })
@@ -221,7 +224,7 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
     setStatusIn: async () => {},
     addAgentIn: async (_storeId: string, agent: { id: string; name: string; status: string }) => { graphState.agents.push(agent) },
   } as never)
-  ctx.provide('graphs', {
+  ctx.provide('graphs', graphRegistry({
     graphForSession: async () => ({
       id: 'g1',
       name: 'graph',
@@ -230,6 +233,40 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
       graphStoreId: 'sg-g-root',
       layoutStoreId: 'sg-l-root',
     }),
+    list: async () => [{
+      id: 'g1',
+      name: 'graph',
+      envId: 'env1',
+      rootSessionId: ROOT,
+      graphStoreId: 'sg-g-root',
+      layoutStoreId: 'sg-l-root',
+    }],
+    members: () => [ROOT, ...graphState.agents.map(agent => String(agent.id))],
+  }) as never)
+  // The session plane's read-only half (A2), over the real JSONL log this boot
+  // writes through the backend's own read handle.
+  const readLog = async (sessionId: string): Promise<readonly SessionEvent[]> => {
+    const handle = await (persistence as unknown as {
+      open: (id: SessionId, access: 'read') => Promise<{ read: () => Promise<{ events: readonly SessionEvent[] }>; close: () => Promise<void> }>
+    }).open(SessionId(sessionId), 'read')
+    try {
+      return (await handle.read()).events
+    } finally {
+      await handle.close()
+    }
+  }
+  ctx.provide('sessionQuery', {
+    readSurface: async (sessionId: string) => ({ capturedThroughSeq: (await readLog(sessionId)).at(-1)?.seq ?? null }),
+    readEvent: async (request: { sessionId: string; seq: number; before?: number; after?: number }) => {
+      const events = await readLog(String(request.sessionId))
+      const target = events.find(event => event.seq === request.seq)
+      if (target === undefined) {
+        throw new Error(`session "${String(request.sessionId)}" has no event at seq ${request.seq}`)
+      }
+      const start = Math.max(0, request.seq - (request.before ?? 0))
+      const end = Math.min(events.length - 1, request.seq + (request.after ?? 0))
+      return { target, events: events.slice(start, end + 1), startSeq: start, endSeq: end }
+    },
   } as never)
 
   const task = new TaskService(ctx)
@@ -243,6 +280,9 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
     runBindingRoot: join(home, 'run-bindings'),
   } as Config)
   const runtime = ctx.get('taskRuntime') as TaskRuntime
+  // The read core and its assembly (A2), mounted where the deployment's bundle
+  // mounts them: the read side of every case below goes through it.
+  await mountContextReadCore(ctx)
 
   /** Hand one stub agent to the runtime: the scope, the setup hook, and the idle body. */
   async function mint(sessionId: SessionId, setup?: (agentCtx: Context, agent: Agent) => Promise<unknown>): Promise<Agent> {
@@ -626,8 +666,9 @@ describe('root intake recovery from the real session log (A0 §1.4, §3 stage B)
     // exactly one task and one run — the second process minted nothing.
     const read = await b.call('task_read')
     expect(read.isError).toBe(false)
-    expect(read.text).toContain(`root task ${ids.taskId}`)
+    expect(read.text).toContain(`task ${ids.taskId} [running/decomposable]`)
     expect(read.text).toContain(`objective: ${GOAL}`)
+    expect(read.text).toContain(`run ${ids.runId} [running] — phase active`)
     const snapshot = await b.snapshot()
     expect(snapshot.tasks).toHaveLength(1)
     expect(snapshot.runs).toHaveLength(1)
@@ -696,7 +737,7 @@ describe('root intake recovery from the real session log (A0 §1.4, §3 stage B)
     // the adoption now runs wrote no proposal onto the store.
     const read = await b.call('task_read')
     expect(read.isError).toBe(false)
-    expect(read.text).toContain(`root task ${seeded.taskId}`)
+    expect(read.text).toContain(`task ${seeded.taskId} [running/decomposable]`)
     expect(read.text).toContain(`objective: ${legacyObjective}`)
     const after = await b.snapshot()
     expect(after.tasks[0]!.taskId).toBe(seeded.taskId)

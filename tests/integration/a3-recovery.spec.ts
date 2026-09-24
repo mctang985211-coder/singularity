@@ -17,12 +17,14 @@ import type { RunProviderBinding, TaskEvent, TaskSnapshot } from '../../task/src
 import { seedLegacyRoot as seedLegacyRootFixture } from '../support/legacy-root.ts'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
+import { defineContextReadTool } from '../../agent-singularity/src/tools/context-read.ts'
 import { defineTaskReadTool } from '../../agent-singularity/src/tools/task-read.ts'
 import type { VerifyRunOptions } from '../../verifier/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 import type { CapabilityConfig, Config, DecomposeSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { OTHER_TOOLS, ROOT_TOOLS } from '../support/scripted-loop.ts'
+import { graphRegistry, mountContextReadCore } from '../support/context-plane.ts'
 
 /**
  * A3 acceptance on a real restart: a deployment whose stores live in the real
@@ -256,12 +258,13 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
   // the deployment's skill registry is part of this plane.
   await ctx.plugin(SkillRegistry, {})
   // The deployment's tool plane: stand-ins for every name the root's own
-  // allow-list and a worker's grant resolve against, and the real `task_read`
-  // for the read side this spec asserts on. The stand-ins record their own runs,
-  // which is the "was the body reached" evidence a gate case reads.
+  // allow-list and a worker's grant resolve against, and the real read tools
+  // (`task_read`, `context_read`) for the read side this spec asserts on. The
+  // stand-ins record their own runs, which is the "was the body reached"
+  // evidence a gate case reads.
   const ranTools: string[] = []
   for (const name of [...ROOT_TOOLS, ...OTHER_TOOLS]) {
-    if (name === 'task_read') continue
+    if (name === 'task_read' || name === 'context_read') continue
     ctx.tools.register({
       name,
       description: `tool ${name}`,
@@ -274,6 +277,7 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
     })
   }
   ctx.tools.register(defineTaskReadTool(ctx))
+  ctx.tools.register(defineContextReadTool(ctx))
   ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'p', model: 'm' }) })
   ctx.provide('agentPresets', { defaultId: 'standard', mount: async () => {}, resolve: async () => ({}) })
   ctx.provide('permissionPresets', { set: vi.fn(), resolve: () => ({}) })
@@ -297,7 +301,7 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
     setStatusIn: async () => {},
     addAgentIn: async (_storeId: string, agent: { id: string; name: string; status: string }) => { graphState.agents.push(agent) },
   } as never)
-  ctx.provide('graphs', {
+  ctx.provide('graphs', graphRegistry({
     graphForSession: async () => ({
       id: 'g1',
       name: 'graph',
@@ -306,6 +310,42 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
       graphStoreId: 'sg-g-root',
       layoutStoreId: 'sg-l-root',
     }),
+    list: async () => [{
+      id: 'g1',
+      name: 'graph',
+      envId: 'env1',
+      rootSessionId: ROOT,
+      graphStoreId: 'sg-g-root',
+      layoutStoreId: 'sg-l-root',
+    }],
+    // Every session this deployment announced is a published member: the node the
+    // graph store itself holds.
+    members: () => [ROOT, ...graphState.agents.map(agent => String(agent.id))],
+  }) as never)
+  // The session plane's read-only half (A2): exact reads over the real JSONL log,
+  // through the backend's own read handle.
+  const readLog = async (sessionId: string): Promise<readonly SessionEvent[]> => {
+    const handle = await (persistence as unknown as {
+      open: (id: SessionId, access: 'read') => Promise<{ read: () => Promise<{ events: readonly SessionEvent[] }>; close: () => Promise<void> }>
+    }).open(SessionId(sessionId), 'read')
+    try {
+      return (await handle.read()).events
+    } finally {
+      await handle.close()
+    }
+  }
+  ctx.provide('sessionQuery', {
+    readSurface: async (sessionId: string) => ({ capturedThroughSeq: (await readLog(sessionId)).at(-1)?.seq ?? null }),
+    readEvent: async (request: { sessionId: string; seq: number; before?: number; after?: number }) => {
+      const events = await readLog(String(request.sessionId))
+      const target = events.find(event => event.seq === request.seq)
+      if (target === undefined) {
+        throw new Error(`session "${String(request.sessionId)}" has no event at seq ${request.seq}`)
+      }
+      const start = Math.max(0, request.seq - (request.before ?? 0))
+      const end = Math.min(events.length - 1, request.seq + (request.after ?? 0))
+      return { target, events: events.slice(start, end + 1), startSeq: start, endSeq: end }
+    },
   } as never)
   if (options.parkDrain !== undefined) {
     // The drain's one awaited jobs call never returns, so the drain — and the
@@ -346,6 +386,9 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
   const spawns: SpawnRecord[] = []
   const agentRuntime = new AgentRuntime(ctx)
   const runtime = await mountRuntime(ctx, options)
+  // The read core and its prompt assembly (A2), mounted where the deployment's
+  // bundle mounts them: the read side of every case below goes through it.
+  await mountContextReadCore(ctx)
   ctx.agents.setFactory({
     createAgent: async (_ownerCtx: Context, opts: { sessionId: SessionId; setup?: (agentCtx: Context, agent: Agent) => Promise<unknown> }) =>
       ({ agent: await mint(opts.sessionId, opts.setup), dispose: async () => {} }),
@@ -698,7 +741,12 @@ describe('A3 recovery from the real session log', () => {
     expect(parentRead.isError).toBe(false)
     expect(parentRead.text).toContain('objective: ship the release')
     expect(parentRead.text).toContain('children: 1')
-    expect(parentRead.text).toContain(`run ${crashedChild.runId} [cancelled]`)
+    // The child's line in the root's view carries its run's terminal status and
+    // phase; the child's own read below carries the run id the tree view prints
+    // only for the caller's own run (A2 §D: a summary line names the task, and a
+    // run record is read by its own reference).
+    expect(parentRead.text).toContain(`- ${crashedChild.taskId} [cancelled]`)
+    expect(parentRead.text).toContain('run: cancelled')
     expect(b.runtime.gate.phaseOf(ROOT)).toBe('waiting_children')
     const childRead = await throughPipeline(b, crashedChild.sessionId, 'task_read', 'call-read-child')
     expect(childRead.isError).toBe(false)
@@ -871,7 +919,9 @@ describe('A3 recovery from the real session log', () => {
     expect(taskEvents(await b.events())).toHaveLength(written)
 
     // The read side derives needs-recovery from the missing phase, through the
-    // real tool: the root session's view renders the child run.
+    // real tool: the root session's own run line says it, and the child's record —
+    // which the root's view does not list at all, since nothing links it as this
+    // root's child — is readable by reference with the same verdict (A2 §D).
     const answer = await b.ctx.tools.execute({
       callId: 'call-old-record',
       name: 'task_read',
@@ -881,8 +931,19 @@ describe('A3 recovery from the real session log', () => {
     })
     const text = answer.content.map(block => (block.type === 'text' ? block.text : `[${block.type}]`)).join('\n')
     expect(answer.isError).toBeFalsy()
-    expect(text).toContain('r-old-child [running] — needs-recovery')
+    expect(text).toContain('r-old-root [running] — needs-recovery')
     expect(text).toContain('cannot decompose, submit or verify')
+    const childRecord = await b.ctx.tools.execute({
+      callId: 'call-old-child-record',
+      name: 'context_read',
+      arguments: { kind: 'run', ref: 'r-old-child' },
+      agent: { id: ROOT } as never,
+      signal: new AbortController().signal,
+    })
+    const childText = childRecord.content.map(block => (block.type === 'text' ? block.text : `[${block.type}]`)).join('\n')
+    expect(childRecord.isError).toBeFalsy()
+    expect(childText).toContain('run r-old-child of task t-old-child [running] — needs-recovery')
+    expect(childText).toContain('cannot decompose, submit or verify')
 
     // And its only legal continuation is cancellation: both continuations are
     // refused by name, with nothing written.

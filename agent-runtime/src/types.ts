@@ -152,7 +152,14 @@ export interface WorkerGrant {
 export interface SpawnRequest {
   readonly sessionId: SessionId
   readonly name: string
-  readonly prompt: readonly ContentBlock[]
+  /**
+   * The first user message the child is prompted with. Optional because a
+   * `taskWorker` spawn needs none: the agent runtime fills the default kickoff
+   * ({@link WORKER_KICKOFF_TEXT}), and the worker's contract and state are the
+   * context assembly's, not this message's. A spawn that is neither given a
+   * prompt nor marked `taskWorker` is refused.
+   */
+  readonly prompt?: readonly ContentBlock[]
   readonly agentOptions?: AgentOptions
   /** Capability-derived authorization applied to the child before publication. Absent = no capability decided it. */
   readonly grant?: WorkerGrant
@@ -169,13 +176,25 @@ export interface SpawnRequest {
    */
   readonly permissionPreset?: string
   /**
-   * The child's contract, registered as a system-prompt section on the child's
-   * own scope. The loop reprojects that section into surface node 0 on every
-   * step, so the contract survives compaction instead of living only in the
-   * spawn prompt. Task-runtime renders the text from the store; absent or blank
-   * registers nothing. See `./contract-reinjection.ts`.
+   * Declare the child a task worker (A2): the spawn setup installs the stable
+   * worker policy section (`singularity:worker`, order 75 — the worker's
+   * contract itself is the context assembly's `singularity:worker-contract`
+   * section, injected from the store at every model request), and an absent
+   * prompt becomes the default kickoff. Declared at spawn, not persisted: it
+   * describes who this child is, and the store's records stay the authority on
+   * what it works on.
    */
-  readonly contract?: string
+  readonly taskWorker?: boolean
+  /**
+   * The one awaited door a caller gets between "the child is a published graph
+   * member and its spawn was announced" and "the first model input is sent"
+   * (A2 §D: the reviewer ledger is written and read back here, so a delegation
+   * the context assembly can verify exists before any model request). The
+   * callback receives nothing a model could have influenced. When it rejects,
+   * the spawn fails the same way a publish failure does: the handle is
+   * disposed, the graph node is marked failed, and no model input was sent.
+   */
+  readonly beforePrompt?: () => Promise<void>
   readonly signal?: AbortSignal
 }
 

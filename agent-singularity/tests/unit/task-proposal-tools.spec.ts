@@ -64,10 +64,31 @@ function proposal(overrides: Partial<TaskProposal> = {}): TaskProposal {
 
 const manifest: CapabilityManifest = { capabilities: {}, missing: [], closure: 'closed' }
 
+/**
+ * The trusted session→graph→store resolution the tools now locate through
+ * (A2). The default fixture caller is the root session of graph `g1` — the
+ * state a root contract's own proposal is read and continued from; the refusal
+ * cases below swap in a member and an unbound session, whose answer is the
+ * runtime's own "no task run is bound" either way.
+ */
+function rootResolution(sessionId = 'root-1') {
+  return {
+    kind: 'root' as const,
+    sessionId,
+    graph: { id: 'g1', name: 'g1', envId: 'env1', rootSessionId: 'root-1' },
+    storeId: 'sg-t-root-1',
+    recovery: { status: 'ready' as const },
+  }
+}
+
 function fixture() {
   const ctx = {
-    graphs: { graphForSession: vi.fn(async () => ({ id: 'g1', rootSessionId: 'root-1' })) },
+    singularityContext: {
+      resolveCaller: vi.fn(async (sessionId: string) => rootResolution(sessionId)),
+    },
     taskRuntime: {
+      // `task_proposal_cancel` is the one write door here: it still resolves the
+      // store from the caller's own run (the runtime re-checks who may withdraw).
       runForSession: vi.fn(async () => ({
         storeId: 'sg-t-root-1',
         task: { taskId: 't-root' },
@@ -173,7 +194,7 @@ describe('task_proposal_read', () => {
     expect(result).toContain('task_proposal_read rejected: undeclared parameter "approved"')
     expect(result).toContain('no argument that approves')
     expect(ctx.taskRuntime.proposalIn).not.toHaveBeenCalled()
-    expect(ctx.taskRuntime.runForSession).not.toHaveBeenCalled()
+    expect(ctx.singularityContext.resolveCaller).not.toHaveBeenCalled()
   })
 
   it('declares exactly one parameter, so no approval field can be read as one', () => {
@@ -266,7 +287,7 @@ describe('task_proposal_continue', () => {
 
     expect(result).toContain('task_proposal_continue rejected: undeclared parameters "approved", "decidedBy"')
     expect(ctx.taskRuntime.continueProposal).not.toHaveBeenCalled()
-    expect(ctx.taskRuntime.runForSession).not.toHaveBeenCalled()
+    expect(ctx.singularityContext.resolveCaller).not.toHaveBeenCalled()
   })
 })
 
@@ -390,16 +411,19 @@ describe('a root contract proposal', () => {
 
 /**
  * A root session before its contract is activated (A0 §1.5, stage-D defect 1):
- * it has no task run — the root task is what an approved contract becomes — so
- * the run lookup that resolves a worker's store answers "no task run is bound to
- * session". That is precisely the state in which the session has to read the
- * proposal holding its contract, and the state both `task_intake`'s answer and
- * the root prompt send it to `task_proposal_read` in. The fallback is the store
- * the session owns; every other caller keeps the runtime's own refusal.
+ * it has no task run — the root task is what an approved contract becomes. That
+ * is precisely the state in which the session has to read the proposal holding
+ * its contract, and the state both `task_intake`'s answer and the root prompt
+ * send it to `task_proposal_read` in. The trusted binding answers the store the
+ * session owns either way (`resolveCaller` kind `root` carries the root store,
+ * activated or not); a caller with no binding of its own keeps the runtime's
+ * own refusal.
  */
 describe('a proposal call from a root session with no run', () => {
   function unbound(ctx: ReturnType<typeof fixture>) {
-    ctx.taskRuntime.runForSession.mockRejectedValue(new Error('task-runtime: no task run is bound to session "root-1"'))
+    // A root without a task resolves to the same store as one with one: the
+    // resolution the default fixture already carries. Named so the cases below
+    // read as the state they model.
     return ctx
   }
 
@@ -449,7 +473,13 @@ describe('a proposal call from a root session with no run', () => {
 
   it('keeps the runtime refusal for a session that is not the graph\'s root', async () => {
     const ctx = fixture()
-    ctx.taskRuntime.runForSession.mockRejectedValue(new Error('task-runtime: no task run is bound to session "s-worker"'))
+    ctx.singularityContext.resolveCaller.mockResolvedValue({
+      kind: 'member',
+      sessionId: 's-worker',
+      graph: { id: 'g1', name: 'g1', envId: 'env1', rootSessionId: 'root-1' },
+      storeId: 'sg-t-root-1',
+      recovery: { status: 'ready' as const },
+    })
     const result = (await defineTaskProposalReadTool(ctx as never).execute({ proposalId: 'p-7' }, exec('s-worker'))) as string
 
     expect(result).toContain('task_proposal_read rejected: task-runtime: no task run is bound to session "s-worker"')
@@ -457,8 +487,13 @@ describe('a proposal call from a root session with no run', () => {
   })
 
   it('keeps the runtime refusal for a session that is in no graph at all', async () => {
-    const ctx = unbound(fixture())
-    ctx.graphs.graphForSession.mockRejectedValue(new Error('graphs: session "root-1" is not in a graph'))
+    const ctx = fixture()
+    ctx.singularityContext.resolveCaller.mockResolvedValue({
+      kind: 'unbound',
+      sessionId: 'root-1',
+      refusal: 'unbound',
+      detail: 'session "root-1" is not a published member of any graph',
+    })
     const result = (await defineTaskProposalReadTool(ctx as never).execute({ proposalId: 'p-7' }, exec())) as string
 
     // The caller cannot be shown to own a root store, so the answer is the

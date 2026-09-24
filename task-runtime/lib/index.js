@@ -107,14 +107,17 @@ function assertKnownMcpServers(capability, names) {
 * | bash              | `shell/tool-bash` (`index.ts:242`)                                  |
 * | jobs              | `jobs/tool-jobs` (`index.ts:302,342,362`)                           |
 * | skill             | `skill/tool-skill` (`index.ts:82`)                                  |
-* | session-history   | `session-query/tool-session-query` (`index.ts:109,96,86`)           |
 * | ask-user          | `interaction/tool-ask-user` (`index.ts:21`)                         |
 * | web               | `web/tool-web` (`fetch.ts:459`, `search.ts:326`)                    |
 * | todo              | `todo/tool-todo` (`index.ts:147`)                                   |
 * | goal              | `goal/tool-goal` (`index.ts:195,207,234`)                           |
 * | subagent          | `subagent/tool-subagent` (`index.ts:380`), `.../tool-subagent-control` (`index.ts:29,77`, `list-agents.ts:93`) |
 *
-* Paths are relative to `thirdparty/deepseek-harness/packages/`.
+* Paths are relative to `thirdparty/deepseek-harness/packages/`. The raw
+* cross-session readers (`session_event_read` and its siblings) are deliberately
+* NOT a label: A2 sealed them off every Singularity role's surface — history is
+* read through `context_read`, whose caller-side authorization is the graph
+* domain, not a cwd.
 *
 * A label only carries names a composition can be expected to mount; a
 * capability-declared name the worker's own composition does not offer fails
@@ -140,11 +143,6 @@ const TOOL_LABELS = {
 		"job_kill"
 	],
 	skill: ["skill"],
-	"session-history": [
-		"session_event_read",
-		"session_event_trace",
-		"session_trace"
-	],
 	"ask-user": ["ask_user_question"],
 	web: ["web_fetch", "web_search"],
 	todo: ["todo_write"],
@@ -178,18 +176,18 @@ function resolveToolLabels(capability, labels) {
 /**
 * The capability-worker baseline: what every worker needs whatever its
 * capabilities are, because its own prompt tells it to use these. Every entry
-* cites the prompt line that needs it (`handoff.ts:renderWorkerPrompt`, plus
-* the shell tool's own guidance for `jobs`):
+* cites the prompt line that needs it (the worker policy section,
+* `agent-runtime/src/prompts/worker.prompts.ts`, plus the shell tool's own
+* guidance for `jobs`):
 *
-* - `filesystem` — "Do the work" / "Keep changes scoped to this task" (`:135-137`).
-* - `bash` — "Where a criterion lists a command, make that command exit 0 in the checkout" (`:136`).
+* - `filesystem` — "Do the work" / "Keep changes scoped to this task".
+* - `bash` — "Where a criterion lists a command, make that command exit 0 in the checkout".
 * - `jobs` — that same command is often long-running, and `bash`'s own description
 *   tells the model to collect background output with `job_output`/`job_kill`.
 * - `search` — locate the code the work touches.
 * - `skill` — without the loader the granted skills are unreachable, and
 *   `tool-skill` only injects the catalog when its tool is visible.
-* - `session-history` — "Read it exactly with `session_event_read` … or `session_trace`" (`:119`).
-* - `ask-user` — "Need a human decision? Ask with `ask_user_question`" (`:137`).
+* - `ask-user` — "Need a human decision? Ask with `ask_user_question`".
 *
 * A composition that offers none of them (the `bb-verify` node mounts no shell)
 * simply keeps what it has: see `agent-runtime/src/grants.ts`.
@@ -200,7 +198,6 @@ const WORKER_BASELINE_LABELS = [
 	"jobs",
 	"search",
 	"skill",
-	"session-history",
 	"ask-user"
 ];
 /**
@@ -222,15 +219,21 @@ const WORKER_BASELINE_LABELS = [
 * Every entry cites the prompt or tool contract that needs it:
 * - `capability_list`: `task_decompose` asks callers to discover valid capability
 *   names before proposing children, including recursively spawned workers.
-* - `task_decompose` — "Call `task_decompose` instead, with a `reason` and the child task list" (`handoff.ts:100`),
-*   and for a `leaf` worker whose deployment runs with `Config.allowRuntimeDecomposition` on,
-*   the runtime-split rule (`handoff.ts:145`) that opens the same tool to it.
-* - `task_submit_result` — "When the work is done, hand it in with `task_submit_result`" (`handoff.ts:161`):
-*   the submission is the only completion a worker can claim, so a worker without
-*   the tool could never finish a run.
-* - `task_read` — "re-read your own contract and run with `task_read`" (`handoff.ts:160`).
-* - `task_status` — the same line: the whole tree with `task_status` (`handoff.ts:160`).
-* - `task_verify` — "`task_verify` is only a self-check" (`handoff.ts:166`).
+* - `task_decompose` — a worker admitted as decomposable is told to call it with
+*   a `reason` and the child task list, and for a `leaf` worker whose deployment
+*   runs with `Config.allowRuntimeDecomposition` on, the runtime-split rule the
+*   context projection carries opens the same tool to it.
+* - `task_submit_result` — "When the work is done, hand it in with `task_submit_result`"
+*   (the worker policy section): the submission is the only completion a worker
+*   can claim, so a worker without the tool could never finish a run.
+* - `task_read` — the caller's own contract and run (A2 §D).
+* - `task_status` — the same policy line: the project state with `task_status`.
+* - `context_read` — the one reference reader (A2 §D): the worker's handoff and
+*   its task records point at artifacts, evidence, reviews, diagnoses and
+*   sessions by id, and this is the only door that reads them inside the
+*   caller's own graph domain — the raw cross-session readers it replaced are
+*   sealed off every runtime-owned agent (`agent-runtime`'s execution guard).
+* - `task_verify` — "`task_verify` is only a self-check" (the worker policy section).
 * - `task_cancel` — no prompt line asks for it: a run that decomposed holds a
 *   batch of its own, and the protocol's only way to end that batch early is
 *   this call (A3 §3.6). It is also the one write the execution gate keeps for
@@ -265,6 +268,7 @@ const WORKER_BASELINE_LABELS = [
 const WORKER_BASELINE_TOOLS = [
 	"task_read",
 	"task_status",
+	"context_read",
 	"task_decompose",
 	"task_submit_result",
 	"task_cancel",
@@ -803,7 +807,10 @@ function checkDecomposition(parent, children, existingEdges) {
 * What a session bound to a run may still call once its run is no longer
 * `active`. Read-only inspection, diagnosis, the human-question tools, and the
 * controlled cancellation of this batch: the work of *looking at* a run or
-* ending it, never of making it produce more.
+* ending it, never of making it produce more. `context_read` is the one
+* history/reference reader here: the raw cross-session tools it replaced
+* (`session_event_read` and its siblings) are sealed off every runtime-owned
+* agent by the execution guard, so they have no phase to be allowed in.
 *
 * `task_cancel` is in the list because cancelling is the one write a waiting or
 * submitted run is allowed: the run has stopped deciding, and the owner may
@@ -821,11 +828,9 @@ function checkDecomposition(parent, children, existingEdges) {
 const COORDINATION_ALLOWED = new Set([
 	"task_read",
 	"task_status",
+	"context_read",
 	"capability_list",
 	"skill",
-	"session_search",
-	"session_event_read",
-	"session_trace",
 	"task_review_pack",
 	"task_diagnose",
 	"read",
@@ -2579,245 +2584,6 @@ async function readRunBinding(binding) {
 		defects: [...rootDefects, ...skills.flatMap((skill) => skill.defects.map((defect$2) => `skill "${skill.name}": ${defect$2}`))]
 	};
 }
-/** The first 12 hex of a digest: enough to match two listings by eye, not a wall of hex. */
-function shortDigest(digest) {
-	return digest.slice(0, 12);
-}
-/**
-* The "chosen implementation" summary of one run — the section a worker's
-* contract block, its spawn prompt and `task_read` all render, from this one
-* function and one record, so the three views cannot describe different runs.
-*
-* What it carries: every capability the run matched, the skill selected for it
-* (name, role, purpose, short content digest and — where the skill declares one
-* — the contract digest), the granted MCP servers, the snapshot the run is bound
-* to, and what the binding does *not* cover. What it deliberately leaves out: the
-* skill text. A worker reads the body on demand with the `skill` tool; a summary
-* is identity and purpose.
-*
-* `read` is the re-check result when the caller re-read the snapshot. A caller
-* that has not read it (the spawn's own render, before the worker exists) omits
-* it, and then no readability claim is made in either direction. When it is
-* given and reports defects, they are rendered under a named refusal so a reader
-* is never told to trust content that is not there.
-*/
-function renderRunBinding(binding, read) {
-	if (binding === void 0) return "";
-	const lines = [];
-	for (const capability of binding.capabilities) {
-		const selected = binding.skills.filter((skill) => skill.capabilities.includes(capability));
-		if (selected.length === 0) {
-			lines.push(`- capability \`${capability}\`: no provider skill — the capability's tools are granted without one`);
-			continue;
-		}
-		for (const skill of selected) {
-			const contract = skill.contractDigest === null ? "" : `, contract ${shortDigest(skill.contractDigest)}`;
-			const gaps = skill.uncovered.length === 0 ? "" : ` · not covered by this binding: ${skill.uncovered.join(", ")}`;
-			lines.push(`- capability \`${capability}\` → skill \`${skill.name}\` [${skill.role}] — ${skill.description} (content ${shortDigest(skill.contentDigest)}${contract})${gaps}`);
-		}
-	}
-	if (binding.mcpServers.length > 0) lines.push(`- MCP servers mounted for this run: ${binding.mcpServers.map((server) => `\`${server.serverName}\`${server.templateDigest === null ? "" : ` (template ${shortDigest(server.templateDigest)})`}`).join(", ")}`);
-	if (lines.length === 0) return "";
-	const header = [
-		"## Implementation chosen for this run",
-		"",
-		`- registry revision: ${shortDigest(binding.registryRevision)}`,
-		...lines,
-		...binding.snapshotRoot === void 0 ? ["- a skill named here is read with the `skill` tool when you need its body; this run bound no content snapshot, so the revision and digests above are what it resolved against"] : [`- bound content snapshot: ${binding.snapshotRoot}`, "- a skill named here is read with the `skill` tool when you need its body; the revision, digests and snapshot path above are what this run is bound to"]
-	];
-	if (read !== void 0 && read.defects.length > 0) header.push("", "Bound content is not readable: the snapshot no longer matches this run's record, and the production skill path is not a substitute for it.", ...read.defects.map((defect$2) => `- ${defect$2}`));
-	return header.join("\n");
-}
-
-//#endregion
-//#region src/contract.ts
-/**
-* Opening marker of the block. Stable on purpose: it is what tells a reader —
-* human or test — that this text is the contract, and it lets a future
-* re-render find the copy already on the surface.
-*/
-const WORKER_CONTRACT_OPEN = "<worker-contract";
-/** Closing marker, and the URL-safe suffix a search for the block's end uses. */
-const WORKER_CONTRACT_CLOSE = "</worker-contract>";
-/**
-* The protected acceptance inputs cell of one criterion row — the paths the
-* worker must not modify, or `—` when the criterion declares none.
-*
-* One helper for both tables (`criteriaTable` here and the spawn prompt's own
-* copy in `./handoff.ts`) because the two render the same contract and must
-* agree byte-for-byte: a criterion that declares nothing is marked as such
-* rather than left blank, and the paths are joined in declaration order, never
-* sorted or deduplicated — what the caller declared is what the worker reads.
-* Only paths are rendered: the fixed digest is the verifier's business, and a
-* hex string in a prompt would be noise the worker cannot act on.
-*/
-function protectedInputsCell(criterion) {
-	const refs = criterion.protectedInputs ?? [];
-	return refs.length === 0 ? "—" : refs.map((ref) => ref.path).join(", ");
-}
-/** The criteria table, in the same shape the spawn prompt renders: what, how judged, the command, and what must not change. */
-function criteriaTable(criteria) {
-	return [
-		"| criterion | mode | mandatory | description | command | protected inputs |",
-		"| --- | --- | --- | --- | --- | --- |",
-		...criteria.map((criterion) => `| ${criterion.criterionId} | ${criterion.verificationMode} | ${criterion.mandatory ? "yes" : "no"} | ${criterion.description} | ${criterion.command ?? "—"} | ${protectedInputsCell(criterion)} |`)
-	];
-}
-/** One handoff list: `(none)` for an empty one, the items as a nested list otherwise. */
-function field(title, items) {
-	if (items.length === 0) return [`- ${title}: (none)`];
-	return [`- ${title}:`, ...items.map((item) => `  - ${item}`)];
-}
-/**
-* Render one task's contract block.
-* @param task - the child task as the store holds it at delegation.
-* @param handoff - the envelope the parent passed to this child.
-* @param binding - what this run was bound to and loaded (S1-C item 4): the
-*   providers chosen for it, rendered as the "chosen implementation" section
-*   from the same function and record `task_read` renders, so the two views
-*   cannot describe different runs. Absent on a run that recorded no binding,
-*   and then nothing is added to the block.
-* @returns the marked block, ending in the one line that says where the
-*   authority lives, so a model reading it never has to guess whether a
-*   compacted spawn prompt or this block is the current contract.
-*/
-function renderWorkerContract(task, handoff, binding) {
-	const summary = renderRunBinding(binding);
-	return [
-		`${WORKER_CONTRACT_OPEN} task="${task.taskId}" decomposition="${task.decompositionStatus}">`,
-		"",
-		`# Delegated task ${task.taskId}`,
-		"",
-		task.objective,
-		"",
-		"## Acceptance criteria",
-		"",
-		...criteriaTable(task.acceptanceCriteria),
-		...summary.length === 0 ? [] : ["", summary],
-		"",
-		"## Handoff",
-		"",
-		`- Parent objective: ${handoff.parentObjective}`,
-		`- Reason for delegation: ${handoff.reasonForDelegation}`,
-		...field("Constraints", handoff.constraints),
-		...field("Decisions already made", handoff.decisions),
-		...field("Assumptions", handoff.assumptions),
-		...field("Open questions", handoff.openQuestions),
-		"",
-		WORKER_CONTRACT_CLOSE,
-		"",
-		"This block is the authoritative copy of your contract and is re-sent with every request; `task_read` reads the same store."
-	].join("\n");
-}
-
-//#endregion
-//#region src/handoff.ts
-/** Envelope passed from a parent run to the child it delegates to (RFC §18). */
-function buildHandoff(init) {
-	return {
-		handoffId: `h-${randomUUID()}`,
-		parentTaskId: init.parentTask.taskId,
-		parentRunId: init.parentRun.runId,
-		childTaskId: init.childTask.taskId,
-		parentObjective: init.parentTask.objective,
-		reasonForDelegation: init.reason,
-		constraints: [...init.constraints ?? []],
-		decisions: [...init.decisions ?? []],
-		relevantArtifacts: (init.relevantArtifacts ?? init.parentRun.artifacts).map((artifact) => ({ ...artifact })),
-		relevantEvidence: [...init.relevantEvidence ?? []],
-		assumptions: [...init.assumptions ?? []],
-		openQuestions: [...init.openQuestions ?? []],
-		parentSessionRef: init.callerSessionId,
-		createdAt: (/* @__PURE__ */ new Date()).toISOString()
-	};
-}
-function listSection(title, items, empty) {
-	if (items.length === 0) return `## ${title}\n\n${empty}`;
-	return `## ${title}\n\n${items.map((item) => `- ${item}`).join("\n")}`;
-}
-/**
-* Render the worker prompt for a delegated child task. Compact on purpose:
-* objective, the acceptance criteria table (with verifier commands and the
-* protected input paths the worker must not modify), the implementation chosen
-* for this run ({@link WorkerPromptOptions.binding}), the handoff envelope, the
-* pointer to the delegating session, the decomposable reminder when the parent
-* asked for a further split, the runtime-split rule when the deployment admits
-* one ({@link WorkerPromptOptions}), and the rules — a few thousand tokens at
-* most.
-*/
-function renderWorkerPrompt(handoff, childTask, options) {
-	const header = [
-		`# Delegated task ${childTask.taskId}`,
-		"",
-		childTask.objective,
-		"",
-		"## Acceptance criteria",
-		"",
-		"| criterion | mode | mandatory | description | command | protected inputs |",
-		"| --- | --- | --- | --- | --- | --- |",
-		...childTask.acceptanceCriteria.map((criterion) => `| ${criterion.criterionId} | ${criterion.verificationMode} | ${criterion.mandatory ? "yes" : "no"} | ${criterion.description} | ${criterion.command ?? "—"} | ${protectedInputsCell(criterion)} |`)
-	].join("\n");
-	const decomposition = [
-		"## This task is decomposable",
-		"",
-		"- Do not carry the work to completion yourself: this task was admitted as decomposable.",
-		"- Call `task_decompose` instead, with a `reason` and the child task list; every child needs an acceptance criterion a verifier can judge on its own.",
-		"- Decompose only when RFC §36 atomicity holds — independently verifiable acceptance dimensions, clear artifact boundaries, capabilities that match or gaps you can handle; otherwise do the work here.",
-		"- Once you decompose, the nested verification settles this task; you still never declare completion yourself."
-	].join("\n");
-	const envelope = [
-		"## Handoff",
-		"",
-		`- Parent objective: ${handoff.parentObjective}`,
-		`- Reason for delegation: ${handoff.reasonForDelegation}`,
-		"",
-		listSection("Constraints", handoff.constraints, "(none)"),
-		"",
-		listSection("Decisions already made", handoff.decisions, "(none)"),
-		"",
-		listSection("Relevant artifacts", handoff.relevantArtifacts.map((artifact) => `${artifact.kind} ${artifact.uri}`), "(none)"),
-		"",
-		listSection("Relevant evidence", handoff.relevantEvidence, "(none)"),
-		"",
-		listSection("Assumptions", handoff.assumptions, "(none)"),
-		"",
-		listSection("Open questions", handoff.openQuestions, "(none)")
-	].join("\n");
-	const parentSession = [
-		"## Parent session",
-		"",
-		`- The session that delegated this task is \`${handoff.parentSessionRef}\`.`,
-		"- Need more of that context? Read it exactly with `session_event_read` (one `seq`) or `session_trace` (lineage and neighborhood).",
-		"- Full-text search is disabled in this deployment, so read parent events by sequence."
-	].join("\n");
-	const summary = renderRunBinding(options.binding);
-	const runtimeSplitRule = "- If the work turns out not to be atomic after all, call `task_decompose` yourself: this deployment admits a task's own decomposition, so your parent did not have to predict it. The call still has to clear admission — structure, acyclic dependencies, a command on every executable criterion, capability coverage, depth and batch-size limits — and a task may split only once; a refusal names the rule that blocked it, and that reason is what you act on. Split only into pieces a verifier can judge on its own; otherwise do the work here.";
-	const reviewRule = "- A decomposition can come back waiting for a human review: it answers with a proposal id and admits nothing, so no child exists and nothing is spawned until the review decides. Read the batch as it was recorded with `task_proposal_read`; do not re-submit the same batch while it waits, because the same request is answered with the same proposal. If the review refuses it, revise the batch from the reason on the record and decompose again — a revision is a new proposal, never a re-run of the refused one.";
-	const rules = [
-		"## Rules",
-		"",
-		"- Do the work; never declare completion yourself — an external verifier checks every mandatory criterion.",
-		"- Where a criterion lists a command, make that command exit 0 in the checkout.",
-		"- A criterion's declared protected inputs must not be modified: the verifier re-checks their identity before judging, and a changed or missing input fails the criterion, naming the path.",
-		"- Keep changes scoped to this task. Need a human decision? Ask with `ask_user_question`.",
-		"- Cannot continue? Fail with a clear reason — the orchestrator blocks dependent tasks and reports to the parent task.",
-		...options.allowRuntimeDecomposition ? [runtimeSplitRule] : [],
-		...options.allowRuntimeDecomposition || childTask.decompositionStatus === "decomposable" ? [reviewRule] : [],
-		"- This prompt is where you start, not the whole truth: re-read your own contract and run with `task_read`, and the whole tree with `task_status`, whenever you need them.",
-		"- When the work is done, hand it in with `task_submit_result`: a summary of what you delivered plus the evidence references you produced. The call closes this run to further writes, drains the calls still in flight, and lets the runtime put the run in front of the verifier; the verdict comes back as its answer.",
-		"- Going idle is not a submission: the runtime sees an idle session where a submission was due, reminds you once, and stops the run under the no-progress budget if nothing changes. Submit when the work is done, or say what is missing with a clear failure.",
-		"- `task_verify` is only a self-check: it re-runs the verifier and records the evidence it produces, never changes task status, and does not stand in for a submission."
-	].join("\n");
-	const blocks = [
-		header,
-		...summary.length === 0 ? [] : [summary],
-		envelope,
-		parentSession,
-		rules
-	];
-	if (childTask.decompositionStatus === "decomposable") blocks.push(decomposition);
-	return `${blocks.join("\n\n")}\n`;
-}
 
 //#endregion
 //#region src/normalize.ts
@@ -3693,6 +3459,37 @@ var WorkspaceRegistry = class {
 		await rm(this.markerPath(workspace), { force: true });
 	}
 };
+
+//#endregion
+//#region src/handoff.ts
+/**
+* The envelope passed from a parent run to the child it delegates to (RFC §18).
+*
+* This module builds and persists the DATA of a handoff and nothing else: what
+* a worker is shown from it is the context package's projection
+* (`context/src/projections.ts`, `render.ts:handoffLines`), and the stable
+* behaviour rules that used to ride the same spawn prompt are the agent
+* runtime's worker policy section — neither is rendered here, because the
+* runtime must not grow a second rendering of what it owns as facts.
+*/
+function buildHandoff(init) {
+	return {
+		handoffId: `h-${randomUUID()}`,
+		parentTaskId: init.parentTask.taskId,
+		parentRunId: init.parentRun.runId,
+		childTaskId: init.childTask.taskId,
+		parentObjective: init.parentTask.objective,
+		reasonForDelegation: init.reason,
+		constraints: [...init.constraints ?? []],
+		decisions: [...init.decisions ?? []],
+		relevantArtifacts: (init.relevantArtifacts ?? init.parentRun.artifacts).map((artifact) => ({ ...artifact })),
+		relevantEvidence: [...init.relevantEvidence ?? []],
+		assumptions: [...init.assumptions ?? []],
+		openQuestions: [...init.openQuestions ?? []],
+		parentSessionRef: init.callerSessionId,
+		createdAt: (/* @__PURE__ */ new Date()).toISOString()
+	};
+}
 
 //#endregion
 //#region src/orchestrate.ts
@@ -4811,11 +4608,7 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 		handle = await env.spawn({
 			sessionId,
 			name,
-			prompt: renderWorkerPrompt(handoff, task, {
-				allowRuntimeDecomposition: env.allowRuntimeDecomposition,
-				...binding === void 0 ? {} : { binding }
-			}),
-			contract: renderWorkerContract(task, handoff, binding),
+			taskWorker: true,
 			grant: await authorizedGrant(env, manifest, skillRootsForRun([], binding)),
 			...agentPreset === void 0 ? {} : { agentPreset },
 			...permissionPreset === void 0 ? {} : { permissionPreset },
@@ -5282,8 +5075,7 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 		handle = await env.spawn({
 			sessionId,
 			name: task.objective.trim().replace(/\s+/g, " ").slice(0, 40) || `replay-${task.taskId}`,
-			prompt: init.prompt ?? "",
-			...init.contract === void 0 ? {} : { contract: init.contract },
+			taskWorker: true,
 			grant: await authorizedGrant(env, init.manifest, roots),
 			...init.agentPreset === void 0 ? {} : { agentPreset: init.agentPreset },
 			...permissionPreset === void 0 ? {} : { permissionPreset },
@@ -8248,22 +8040,6 @@ var TaskRuntime = class extends Service {
 			...champion.requiresIndependentAcceptance === true ? { requiresIndependentAcceptance: true } : {}
 		};
 		const spawn = options.spawn !== false;
-		let prompt;
-		let contractBlock;
-		if (spawn) {
-			const handoff = buildHandoff({
-				parentTask: champion,
-				parentRun: await this.ctx.task.runIn(storeId, championRunId),
-				childTask: task,
-				reason: `${options.lineage}: replay of ${championTaskId} under the candidate's overlay`,
-				callerSessionId,
-				assumptions: [...contract.assumptions],
-				constraints: [...contract.constraints],
-				relevantEvidence: []
-			});
-			prompt = renderWorkerPrompt(handoff, task, { allowRuntimeDecomposition: false });
-			contractBlock = renderWorkerContract(task, handoff);
-		}
 		const replaySnapshot = await this.ctx.task.snapshotIn(storeId);
 		const replayBudget = resolveRootBudget(replaySnapshot, this.config.rootBudget ?? {});
 		if (!replayBudget.ok) {
@@ -8284,10 +8060,6 @@ var TaskRuntime = class extends Service {
 					providers: precheck,
 					lineage: options.lineage,
 					agentPreset: options.overlay?.presetOverride ?? resolvePreset(manifest, this.config.defaultPreset),
-					...prompt === void 0 ? {} : {
-						prompt,
-						contract: contractBlock
-					},
 					...options.overlay?.extraSkillRoots === void 0 ? {} : { skillRoots: [...options.overlay.extraSkillRoots] },
 					spawn,
 					championRunId
@@ -8862,6 +8634,15 @@ var TaskRuntime = class extends Service {
 		return found;
 	}
 	/**
+	* Whether this deployment admits a run's own `task_decompose`
+	* (`Config.allowRuntimeDecomposition`), read-only. The context package's
+	* worker projection carries the rule that follows from it; nothing here
+	* grants or denies a call — admission still decides every one.
+	*/
+	allowsRuntimeDecomposition() {
+		return this.config.allowRuntimeDecomposition;
+	}
+	/**
 	* The gate phase one bound session's run implies, applied on every rebinding.
 	* The gate is a handle on the run's phase and the phase is the store's fact,
 	* so a session this process rebound — from its index, from a reopened store,
@@ -9281,11 +9062,7 @@ var TaskRuntime = class extends Service {
 				return this.ctx.agentRuntime.spawn(parent, {
 					sessionId: SessionId(request.sessionId),
 					name: request.name,
-					prompt: [{
-						type: "text",
-						text: request.prompt
-					}],
-					...request.contract !== void 0 ? { contract: request.contract } : {},
+					...request.taskWorker === void 0 ? {} : { taskWorker: request.taskWorker },
 					...request.agentPreset !== void 0 ? { agentPreset: request.agentPreset } : {},
 					...request.permissionPreset !== void 0 ? { permissionPreset: request.permissionPreset } : {},
 					...request.grant !== void 0 ? { grant: request.grant } : {},
@@ -9555,4 +9332,4 @@ var TaskRuntime = class extends Service {
 var src_default = TaskRuntime;
 
 //#endregion
-export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, PROPOSAL_REQUEST_KEY_PREFIX, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, assertRootBudgetConfig, bindRunProviders, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, readProcessStartTime, readRunBinding, readVerifiedFile, registeredVerifierIds, registryRevision, renderRunBinding, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, PROPOSAL_REQUEST_KEY_PREFIX, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, assertRootBudgetConfig, bindRunProviders, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, readProcessStartTime, readRunBinding, readVerifiedFile, registeredVerifierIds, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

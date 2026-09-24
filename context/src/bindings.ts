@@ -106,6 +106,12 @@ export interface ReadOnlyTaskRuntime {
   recoveryStatus(storeId: string): Promise<StoreRecoveryStatus>
   readRunBinding(binding: RunProviderBinding): Promise<RunBindingRead | undefined>
   readonly gate: { phaseOf(sessionId: string): ExecutionPhase | 'terminal' | undefined }
+  /**
+   * Whether this deployment admits a run's own `task_decompose` — the fact the
+   * worker projection's runtime-split rule hangs on. Read-only: the projection
+   * *reports* the rule; admission still decides every call.
+   */
+  allowsRuntimeDecomposition(): boolean
 }
 
 /** Everything the binding resolver reads. */

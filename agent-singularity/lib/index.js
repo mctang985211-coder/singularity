@@ -5,8 +5,9 @@ import { appendFile, cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
-import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, capabilityToolQuery, checkObligationCoverage, findRepoRoot, loadObligationTemplates, loadSkillSidecar, optionalService, precheckReplacedCapabilityRow, readVerifiedFile, registeredVerifierIds, renderRunBinding, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
+import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, capabilityToolQuery, loadSkillSidecar, optionalService, precheckReplacedCapabilityRow, readVerifiedFile, registeredVerifierIds, unlistableVerifierRefusal, validateSkillProvider, walkVerified, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
+import { CONTEXT_OUTPUT_LIMIT_BYTES, ReviewerBindingError, openRootProposals } from "@dangosys/dsh-singularity-context";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { SessionId } from "@deepseek-ai/dsh-session";
 
@@ -38,12 +39,12 @@ var HitlService = class extends Service {
 		ctx.on("user-questions/request", async (request, next) => {
 			if (request.questions.length !== 1) return next();
 			const question = request.questions[0];
-			const text$27 = await this.enqueue(request.agent?.id ?? "unknown", "ask", question.question, request.signal);
-			if (text$27.kind !== "ask") throw new Error("hitl: expected ask answer");
+			const text$28 = await this.enqueue(request.agent?.id ?? "unknown", "ask", question.question, request.signal);
+			if (text$28.kind !== "ask") throw new Error("hitl: expected ask answer");
 			return { answers: [{
 				id: question.id,
 				selected: [],
-				custom: text$27.text
+				custom: text$28.text
 			}] };
 		}, { prepend: true });
 		ctx.on("approval/request", async (request) => {
@@ -67,16 +68,16 @@ var HitlService = class extends Service {
 		waiter.resolve(answer);
 		this.ctx.emit("hitl/change", this.list());
 	}
-	enqueue(sessionId$22, kind, prompt, callerSignal) {
+	enqueue(sessionId$20, kind, prompt, callerSignal) {
 		const signal = callerSignal === void 0 ? this.lifetime.signal : AbortSignal.any([callerSignal, this.lifetime.signal]);
 		signal.throwIfAborted();
-		if (typeof sessionId$22 !== "string" || sessionId$22.length === 0) throw new Error("hitl: missing session id");
+		if (typeof sessionId$20 !== "string" || sessionId$20.length === 0) throw new Error("hitl: missing session id");
 		const id = randomUUID();
 		const pending = {
 			id,
 			kind,
 			prompt,
-			sessionId: sessionId$22,
+			sessionId: sessionId$20,
 			createdAt: Date.now()
 		};
 		const abort = () => {
@@ -229,14 +230,14 @@ var EscalationService = class extends Service {
 		return escalations;
 	}
 	async load() {
-		let text$27;
+		let text$28;
 		try {
-			text$27 = await readFile(this.file, "utf8");
+			text$28 = await readFile(this.file, "utf8");
 		} catch (error) {
 			if (error.code === "ENOENT") return;
 			throw error;
 		}
-		const records = text$27.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
+		const records = text$28.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
 			try {
 				return JSON.parse(line);
 			} catch {
@@ -481,9 +482,9 @@ function entryEnd(lines, head, regionEnd, headerIndent) {
 * task-runtime entry, more than one (the error names every matching line —
 * refusing to guess which one governs), or no capabilities mapping.
 */
-function locateCapabilityRow(text$27, name) {
-	const eol = text$27.includes("\r\n") ? "\r\n" : "\n";
-	const lines = text$27.split(eol);
+function locateCapabilityRow(text$28, name) {
+	const eol = text$28.includes("\r\n") ? "\r\n" : "\n";
+	const lines = text$28.split(eol);
 	const docEnd = lines.findIndex((line) => line.trim() === "---");
 	const doc1End = docEnd === -1 ? lines.length : docEnd;
 	const itemIndices = [];
@@ -555,8 +556,8 @@ function locateCapabilityRow(text$27, name) {
 * beats re-rendering the registry entry, whose schema fills default arrays the
 * source text never spelled out.
 */
-function readCapabilityRowSource(text$27, name) {
-	const located = locateCapabilityRow(text$27, name);
+function readCapabilityRowSource(text$28, name) {
+	const located = locateCapabilityRow(text$28, name);
 	if (located.rowStart === -1) return null;
 	return located.lines.slice(located.rowStart, located.rowStart + located.rowSpan).join("\n");
 }
@@ -566,8 +567,8 @@ function readCapabilityRowSource(text$27, name) {
 * row is gone, insert the lines where a new row would go. Every other byte of
 * the file is preserved, exactly as with `editCapabilityRow`.
 */
-function restoreCapabilityRowSource(text$27, name, source) {
-	const { lines, eol, capIndex, capIndent, capCollapsed, rowStart, rowSpan, insertAt } = locateCapabilityRow(text$27, name);
+function restoreCapabilityRowSource(text$28, name, source) {
+	const { lines, eol, capIndex, capIndent, capCollapsed, rowStart, rowSpan, insertAt } = locateCapabilityRow(text$28, name);
 	const sourceLines = source.replace(/\r?\n$/, "").split("\n");
 	if (rowStart !== -1) {
 		lines.splice(rowStart, rowSpan, ...sourceLines);
@@ -596,8 +597,8 @@ function restoreCapabilityRowSource(text$27, name, source) {
 * than one (the error names every matching line — refusing to guess which one
 * governs), no capabilities mapping, or a removal names no existing row.
 */
-function editCapabilityRow(text$27, name, entry) {
-	const { lines, eol, capIndex, capIndent, capCollapsed, regionEnd, rowStart, rowSpan, insertAt, entryIndent } = locateCapabilityRow(text$27, name);
+function editCapabilityRow(text$28, name, entry) {
+	const { lines, eol, capIndex, capIndent, capCollapsed, regionEnd, rowStart, rowSpan, insertAt, entryIndent } = locateCapabilityRow(text$28, name);
 	const rowLine = `${" ".repeat(rowStart === -1 ? entryIndent : indentOf(lines[rowStart]))}${keySpelling(name)}: ${flowEntry(entry ?? {})}`;
 	if (entry !== null && rowStart !== -1) {
 		lines.splice(rowStart, rowSpan, rowLine);
@@ -713,16 +714,16 @@ function assertOnlyKeys(value, allowed, field) {
 }
 /** A single safe path segment (one directory name): no separators, never `.`/`..`, never absolute. */
 function assertSegment(value, field) {
-	const text$27 = nonEmpty(value, field);
-	if (text$27 === "." || text$27 === ".." || text$27.includes("/") || text$27.includes("\\") || isAbsolute(text$27)) throw new Error(`evolution: ${field} must be a single safe path segment, got "${text$27}"`);
-	return text$27;
+	const text$28 = nonEmpty(value, field);
+	if (text$28 === "." || text$28 === ".." || text$28.includes("/") || text$28.includes("\\") || isAbsolute(text$28)) throw new Error(`evolution: ${field} must be a single safe path segment, got "${text$28}"`);
+	return text$28;
 }
 /** A clean relative path: never absolute (posix or drive-letter), no `\`, no empty / `.` / `..` segments. */
 function assertSandboxPath(value, field) {
-	const text$27 = nonEmpty(value, field);
-	if (isAbsolute(text$27) || /^[A-Za-z]:[\\/]/.test(text$27) || text$27.includes("\\") || text$27.includes("\0")) throw new Error(`evolution: ${field} must be a relative path inside the sandbox, got "${text$27}"`);
-	if (text$27.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) throw new Error(`evolution: ${field} must be a clean relative path (no empty / "." / ".." segments), got "${text$27}"`);
-	return text$27;
+	const text$28 = nonEmpty(value, field);
+	if (isAbsolute(text$28) || /^[A-Za-z]:[\\/]/.test(text$28) || text$28.includes("\\") || text$28.includes("\0")) throw new Error(`evolution: ${field} must be a relative path inside the sandbox, got "${text$28}"`);
+	if (text$28.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) throw new Error(`evolution: ${field} must be a clean relative path (no empty / "." / ".." segments), got "${text$28}"`);
+	return text$28;
 }
 /** Resolve `rel` under `base`, refusing anything that would land outside — the sandbox confinement belt. */
 function resolveWithin(base, rel) {
@@ -903,8 +904,8 @@ function championEntryYaml(name, entry) {
 	].join("\n");
 }
 /** Read back the champion capability snapshot: the single JSON line under the `#` header, keyed by the capability name. */
-function parseChampionEntry(text$27, name) {
-	const line = text$27.split("\n").map((item) => item.trim()).filter((item) => item.length > 0 && !item.startsWith("#")).at(-1);
+function parseChampionEntry(text$28, name) {
+	const line = text$28.split("\n").map((item) => item.trim()).filter((item) => item.length > 0 && !item.startsWith("#")).at(-1);
 	if (line === void 0) throw new Error("evolution: the champion capability snapshot carries no entry line");
 	const parsed = JSON.parse(line);
 	if (!isRecord$2(parsed) || !(name in parsed) || !isRecord$2(parsed[name])) throw new Error(`evolution: the champion capability snapshot does not hold an entry for "${name}"`);
@@ -1587,24 +1588,24 @@ var EvolutionService = class extends Service {
 			}
 			case "capability": {
 				const { name, entry } = proposal.mutation;
-				const text$27 = await readFile(this.configFile, "utf8");
+				const text$28 = await readFile(this.configFile, "utf8");
 				let row;
 				let edited;
 				if (direction === "apply") {
 					row = entry;
-					edited = editCapabilityRow(text$27, name, row);
+					edited = editCapabilityRow(text$28, name, row);
 				} else if (champion === "missing") {
 					row = null;
-					edited = editCapabilityRow(text$27, name, null);
+					edited = editCapabilityRow(text$28, name, null);
 				} else if (proposal.prepared?.championSource === "config-text") {
 					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = restoreCapabilityRowSource(text$27, name, await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.source.txt`), "utf8"));
+					edited = restoreCapabilityRowSource(text$28, name, await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.source.txt`), "utf8"));
 				} else if (proposal.prepared?.championSource === "code-default") {
 					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = editCapabilityRow(text$27, name, null);
+					edited = editCapabilityRow(text$28, name, null);
 				} else {
 					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = editCapabilityRow(text$27, name, row);
+					edited = editCapabilityRow(text$28, name, row);
 				}
 				await writeFile(this.configFile, edited.text, "utf8");
 				return {
@@ -1641,14 +1642,14 @@ var EvolutionService = class extends Service {
 	* apply would.
 	*/
 	async capabilityRowSource(name) {
-		let text$27;
+		let text$28;
 		try {
-			text$27 = await readFile(this.configFile, "utf8");
+			text$28 = await readFile(this.configFile, "utf8");
 		} catch (error) {
 			if (error.code === "ENOENT") return null;
 			throw error;
 		}
-		return readCapabilityRowSource(text$27, name);
+		return readCapabilityRowSource(text$28, name);
 	}
 	/**
 	* Early state-machine check so a wrong-state call reports the transition
@@ -1878,14 +1879,14 @@ var EvolutionService = class extends Service {
 		return proposals;
 	}
 	async load() {
-		let text$27;
+		let text$28;
 		try {
-			text$27 = await readFile(this.file, "utf8");
+			text$28 = await readFile(this.file, "utf8");
 		} catch (error) {
 			if (error.code === "ENOENT") return;
 			throw error;
 		}
-		const records = text$27.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
+		const records = text$28.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
 			try {
 				return JSON.parse(line);
 			} catch {
@@ -1934,8 +1935,8 @@ const ROOT_REVIEW_TOOL_NAME = "task_intake";
 */
 function ownerSessionOfStore(storeId) {
 	if (!storeId.startsWith(STORE_PREFIX)) return void 0;
-	const sessionId$22 = storeId.slice(5);
-	return sessionId$22.length > 0 && rootTaskStoreId(sessionId$22) === storeId ? sessionId$22 : void 0;
+	const sessionId$20 = storeId.slice(5);
+	return sessionId$20.length > 0 && rootTaskStoreId(sessionId$20) === storeId ? sessionId$20 : void 0;
 }
 /**
 * The decider identity the channel records: the approval surface of the owner
@@ -1957,7 +1958,7 @@ function listField(title, items, empty) {
 * at submission: a reviewer has to see that they are protected *and* which bytes
 * were fixed, because the verifier re-reads exactly these before judging.
 */
-function protectedInputsPart$1(criterion) {
+function protectedInputsPart(criterion) {
 	const declared = criterion.protectedInputs ?? [];
 	if (declared.length === 0) return "";
 	return ` [protected inputs: ${declared.map((ref) => `${ref.path} sha256:${ref.sha256}`).join(", ")}]`;
@@ -1991,7 +1992,7 @@ function criterionLine(criterion, indent = "    ") {
 	const verifier = criterion.verifierRef === void 0 ? "" : ` [verifier: ${criterion.verifierRef}]`;
 	const requirements = requirementParts(criterion);
 	const requirementText = requirements.length === 0 ? "" : ` [${requirements.join("; ")}]`;
-	return `${indent}- ${criterion.criterionId} [${qualifiers.join(", ")}] ${criterion.description}${command}${verifier}${protectedInputsPart$1(criterion)}${requirementText}`;
+	return `${indent}- ${criterion.criterionId} [${qualifiers.join(", ")}] ${criterion.description}${command}${verifier}${protectedInputsPart(criterion)}${requirementText}`;
 }
 /**
 * How one declared capability resolved when this batch was proposed: the
@@ -2329,11 +2330,11 @@ var ProposalReviewService = class extends Service {
 		}
 	}
 	/** The live agent behind one session, or `undefined` — an absent registry or a departed session is a state, not a throw. */
-	liveAgent(sessionId$22) {
+	liveAgent(sessionId$20) {
 		const holder = this.ctx;
 		const registry = (typeof holder.get === "function" ? holder.get("agents") : void 0) ?? holder.agents;
 		try {
-			return registry?.get?.(sessionId$22);
+			return registry?.get?.(sessionId$20);
 		} catch {
 			return;
 		}
@@ -2369,8 +2370,188 @@ function message$1(error) {
 }
 
 //#endregion
+//#region src/tools/review-escalation.ts
+/** How many review agents one root store may start before the guardrail holds. */
+const REVIEW_AGENT_BUDGET_DEFAULT = 1;
+function latestReview$1(snapshot, taskId) {
+	return [...snapshot.reviews].reverse().find((item) => item.taskId === taskId);
+}
+/**
+* The capability coverage of one task, read from the review's dimension facts
+* when present and from the stored admission manifest otherwise. Both describe
+* the same resolution; the review's copy is the one a reader sees, the stored
+* manifest is what exists for a runless or dimension-less record.
+*/
+function capabilityGap(snapshot, taskId, review) {
+	const coverage = review?.dimensions?.capabilityCoverage;
+	if (coverage !== void 0) return coverage.closure === "gap" || coverage.missing.length > 0;
+	const manifest = snapshot.capabilities[taskId];
+	if (manifest === void 0) return false;
+	return manifest.closure === "gap" || manifest.missing.length > 0;
+}
+/**
+* Compute the escalation decision for one task against a store snapshot.
+* @param snapshot - the root task store snapshot.
+* @param taskId - the task whose review is under consideration.
+* @param budget - review agents already started, and the cap (defaults to
+*   `used: 0, max: REVIEW_AGENT_BUDGET_DEFAULT`).
+* @returns the signals that hold, whether to escalate, and the budget state.
+*/
+function computeEscalation(snapshot, taskId, budget = {}) {
+	const resolved = {
+		used: Math.max(0, budget.used ?? 0),
+		max: Math.max(1, budget.max ?? REVIEW_AGENT_BUDGET_DEFAULT)
+	};
+	const review = latestReview$1(snapshot, taskId);
+	const reasons = [];
+	if (review?.outcome === "failed") {
+		reasons.push("E1");
+		if (review.logTail === void 0 && review.evidenceRefs.length === 0) reasons.push("E2");
+	}
+	if ((review?.criteria ?? []).some((criterion) => criterion.verdict === "inconclusive")) reasons.push("E3");
+	if (capabilityGap(snapshot, taskId, review)) reasons.push("E4");
+	const exhausted = reasons.length > 0 && resolved.used >= resolved.max;
+	return {
+		reasons,
+		required: reasons.length > 0 && !exhausted,
+		budget: resolved,
+		suppressed: exhausted ? reasons : []
+	};
+}
+/**
+* The machine-readable escalation line `task_review_pack` prints. Three shapes:
+* required with signals, not required, and not required because the guardrail
+* spent the budget (which still names what it withheld — a suppressed signal is
+* a fact, not a silence).
+*/
+function renderEscalation(escalation) {
+	const budget = `${escalation.budget.used}/${escalation.budget.max}`;
+	if (escalation.required) return `escalation: required ${escalation.reasons.join(", ")} (budget ${budget})`;
+	if (escalation.suppressed.length > 0) return `escalation: not required (budget ${budget}) — suppressed ${escalation.suppressed.join(", ")}: budget exhausted`;
+	return `escalation: not required (budget ${budget})`;
+}
+/**
+* The judgement line: the six dimensions whose conclusion the fact table does
+* not carry, named so a reader cannot mistake the facts for a verdict.
+*/
+function renderJudgementDimensions() {
+	return `needs judgement (agent): ${JUDGED_DIMENSIONS.join(", ")} (not mechanically observable from the fact table; task_review_agent concludes these)`;
+}
+
+//#endregion
+//#region src/review-agent-ledger.ts
+/** Repo root, derived the way `EvolutionService` derives it (both files sit at the same depth). */
+const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
+/** Directory holding the ledger; `$DSH_HOME/review-agents` unless overridden. */
+function reviewAgentLedgerDir() {
+	const override = process.env.SINGULARITY_REVIEW_LEDGER_DIR;
+	if (override !== void 0 && override.length > 0) return resolve(override);
+	return join(process.env.DSH_HOME ?? join(repoRoot, ".dsh"), "review-agents");
+}
+/** The ledger file (`<dir>/agents.jsonl`). */
+function reviewAgentLedgerFile() {
+	return join(reviewAgentLedgerDir(), "agents.jsonl");
+}
+/** The per-root-store cap; `SINGULARITY_REVIEW_AGENT_BUDGET` when it parses to a positive integer. */
+function reviewAgentBudget() {
+	const raw = process.env.SINGULARITY_REVIEW_AGENT_BUDGET;
+	const parsed = raw === void 0 || raw.length === 0 ? NaN : Number(raw);
+	return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : REVIEW_AGENT_BUDGET_DEFAULT;
+}
+/**
+* How many review agents this root store has already started. A missing file
+* reads as zero; a corrupt line throws rather than silently undercounting.
+*/
+async function countReviewAgentRuns(rootStoreId) {
+	let text$28;
+	try {
+		text$28 = await readFile(reviewAgentLedgerFile(), "utf8");
+	} catch (error) {
+		if (error.code === "ENOENT") return 0;
+		throw error;
+	}
+	let count = 0;
+	text$28.split("\n").forEach((line, index) => {
+		if (line.trim().length === 0) return;
+		let record;
+		try {
+			record = JSON.parse(line);
+		} catch {
+			throw new Error(`review-agent-ledger: corrupt line ${index + 1} in ${reviewAgentLedgerFile()}`);
+		}
+		if (record.rootStoreId === rootStoreId) count += 1;
+	});
+	return count;
+}
+/** Append one started review agent. */
+async function appendReviewAgentRun(record) {
+	const file = reviewAgentLedgerFile();
+	await mkdir(dirname(file), { recursive: true });
+	const line = {
+		formatVersion: 1,
+		...record,
+		at: (/* @__PURE__ */ new Date()).toISOString()
+	};
+	await appendFile(file, `${JSON.stringify(line)}\n`, "utf8");
+}
+/** Every ledger row, or `undefined` when the ledger has never been written (zero rows is a state, not a failure). */
+async function readLedgerRows() {
+	let text$28;
+	try {
+		text$28 = await readFile(reviewAgentLedgerFile(), "utf8");
+	} catch (error) {
+		if (error.code === "ENOENT") return void 0;
+		throw error;
+	}
+	const rows = [];
+	text$28.split("\n").forEach((line, index) => {
+		if (line.trim().length === 0) return;
+		try {
+			rows.push(JSON.parse(line));
+		} catch {
+			throw new Error(`review-agent-ledger: corrupt line ${index + 1} in ${reviewAgentLedgerFile()}`);
+		}
+	});
+	return rows;
+}
+/**
+* The one delegation a session is recorded under, as the context package's
+* reviewer binding source reads it (A2 §D): the ledger's `sessionId` is the
+* review agent's own session, so the rows naming it are its delegation. One
+* row is the record; several rows that disagree are a conflict the reader may
+* not pick between (a read domain chosen by file order is not an
+* authorization), and a ledger this process cannot read is `unreadable` —
+* both raised as the context package's {@link ReviewerBindingError}, never
+* softened into "no delegation". Identical duplicate rows are one delegation
+* written twice, not a conflict.
+*/
+async function readReviewerDelegation(sessionId$20) {
+	let rows;
+	try {
+		rows = await readLedgerRows();
+	} catch (error) {
+		throw new ReviewerBindingError("unreadable", `the reviewer ledger cannot be read: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	const matches = (rows ?? []).filter((row) => row.sessionId === sessionId$20);
+	if (matches.length === 0) return void 0;
+	const first = matches[0];
+	const record = {
+		rootStoreId: first.rootStoreId,
+		taskId: first.taskId,
+		actor: first.actor,
+		at: first.at
+	};
+	if (matches.some((row) => row.rootStoreId !== record.rootStoreId || row.taskId !== record.taskId || row.actor !== record.actor)) throw new ReviewerBindingError("binding-conflict", `session "${sessionId$20}" is recorded under more than one reviewer delegation: ` + matches.map((row) => `${row.taskId} in ${row.rootStoreId} (by ${row.actor})`).join("; "));
+	return record;
+}
+/** The binding source the plugin registers into the context service: this deployment's ledger, as the narrow read door above. */
+function reviewerBindingSource() {
+	return { read: readReviewerDelegation };
+}
+
+//#endregion
 //#region src/tools/approve.ts
-const text$26 = (value) => [{
+const text$27 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2385,7 +2566,7 @@ function defineApproveTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$26(v)
+			render: (_a, v) => text$27(v)
 		},
 		execute: async (args, exec) => {
 			if (args.prompt.trim().length === 0) throw new Error("hitl_approve: prompt is empty");
@@ -2409,7 +2590,7 @@ function defineApproveTool(ctx) {
 
 //#endregion
 //#region src/tools/ask.ts
-const text$25 = (value) => [{
+const text$26 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2425,7 +2606,7 @@ function defineAskTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$25(v)
+			render: (_a, v) => text$26(v)
 		},
 		execute: async (args, exec) => {
 			if (args.prompt.trim().length === 0) throw new Error("hitl_ask: prompt is empty");
@@ -2444,7 +2625,7 @@ function defineAskTool(ctx) {
 
 //#endregion
 //#region src/tools/capability-list.ts
-const text$24 = (value) => [{
+const text$25 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2503,7 +2684,7 @@ function defineCapabilityListTool(ctx) {
 		parameters: {},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$24(v)
+			render: (_a, v) => text$25(v)
 		},
 		execute: async (_args, exec) => {
 			const capabilities = ctx.taskRuntime.listCapabilities();
@@ -2543,12 +2724,118 @@ function defineCapabilityListTool(ctx) {
 }
 
 //#endregion
+//#region src/tools/projected-read.ts
+/**
+* The caller's own session id — the only identity a context read ever gets,
+* because the read domain comes from the live caller, never from an argument.
+*/
+function callerSessionId(exec, tool) {
+	const id = exec.agent?.id;
+	if (typeof id !== "string" || id.length === 0) throw new Error(`${tool}: missing agent id`);
+	return id;
+}
+/**
+* One read as one tool answer: the text when the read answered, and the named
+* refusal with its detail when it refused. A refusal is a result, not a throw —
+* `not-activated`, `unbound`, `cross-graph` and the rest are answers the model
+* has to be told, in the same text style the tool's other rejections use.
+*/
+function adaptRead(tool, result) {
+	if (result.ok) return result.text;
+	return `${tool} ${result.refusal}:\n${result.detail}`;
+}
+
+//#endregion
+//#region src/tools/context-read.ts
+const text$24 = (value) => [{
+	type: "text",
+	text: value
+}];
+/** Every parameter this tool declares; anything else is refused by name before any read happens. */
+const DECLARED = [
+	"kind",
+	"ref",
+	"offset",
+	"limit"
+];
+/**
+* Refuse a call carrying a key this tool does not declare — a `graphId`,
+* `storeId` or `callerId` above all: the reference never authorizes, and an
+* undeclared key is named rather than silently ignored.
+*/
+function undeclared(args) {
+	const extra = Object.keys(args).filter((key) => !DECLARED.includes(key));
+	if (extra.length === 0) return void 0;
+	return [
+		`context_read rejected: undeclared parameter${extra.length === 1 ? "" : "s"} ${extra.map((key) => `"${key}"`).join(", ")} —`,
+		`this tool accepts ${DECLARED.join(", ")} and has no argument that names a graph, a store or a caller:`,
+		"the read domain is the calling session's own graph, and nothing here can widen it. Nothing was read."
+	].join(" ");
+}
+function defineContextReadTool(ctx) {
+	return defineTool({
+		name: "context_read",
+		description: `Read one record of the caller's own graph domain by its reference. Kinds and their references: \`task\` (a task id), \`run\` (a run id), \`evidence\` (an evidence id), \`diagnosis\` (a diagnosis id), \`review\` (\`{taskId, runId}\` — a review has no id of its own; use runId null for a task that blocked before any run), and \`session\` (a DSH session id of a published member of the caller's graph, paged by event seq). Task-class records are read whole and paged in UTF-8 BYTES: \`offset\` is a byte offset into the record text and \`limit\` is the page size in bytes (the whole answer never exceeds ${CONTEXT_OUTPUT_LIMIT_BYTES} bytes); an oversized record answers the first page with the next byte offset to continue from. A session read pages by DSH event offset: \`offset\` is an event seq and \`limit\` an event count (default 20, at most 100). The reference never widens the domain: an id this graph's store does not hold, a stale reference, an unreadable record and a session of another graph each come back as a named refusal (not-found, stale-reference, unreadable, cross-graph, context-too-large).`,
+		parameters: {
+			kind: {
+				type: "string",
+				required: true,
+				enum: [
+					"task",
+					"run",
+					"evidence",
+					"review",
+					"diagnosis",
+					"session"
+				],
+				description: "Which record plane the reference names"
+			},
+			ref: {
+				oneOf: [{ type: "string" }, {
+					type: "object",
+					additionalProperties: false,
+					properties: {
+						taskId: { type: "string" },
+						runId: { oneOf: [{ type: "string" }, { type: "null" }] }
+					}
+				}],
+				required: true,
+				description: "The record's own identity: an id string for task/run/evidence/diagnosis/session, `{taskId, runId}` for review (both keys required there; runId null when the task blocked before any run). Ids from another graph are refused; there is no graphId/storeId/callerId here."
+			},
+			offset: {
+				type: "number",
+				description: "Where the page starts. Task-class kinds: UTF-8 byte offset into the record text. Session: a DSH event seq. Default 0"
+			},
+			limit: {
+				type: "number",
+				description: "How much one page carries. Task-class kinds: UTF-8 bytes. Session: events per page (default 20, at most 100)"
+			}
+		},
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text$24(v)
+		},
+		execute: async (args, exec) => {
+			const refused = undeclared(args);
+			if (refused !== void 0) return refused;
+			const caller = callerSessionId(exec, "context_read");
+			return adaptRead("context_read", await ctx.singularityContext.contextRead(caller, {
+				kind: args.kind,
+				ref: args.ref,
+				...args.offset === void 0 ? {} : { offset: args.offset },
+				...args.limit === void 0 ? {} : { limit: args.limit }
+			}, exec.signal));
+		}
+	});
+}
+
+//#endregion
 //#region src/tools/escalate.ts
 const text$23 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$21(exec) {
+function sessionId$19(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("escalate: missing agent id");
 	return id;
@@ -2629,7 +2916,7 @@ function defineEscalateTool(ctx) {
 				if (escalations.length === 0) return "escalations: none recorded";
 				return [`escalations (${escalations.length}):`, ...escalations.map(renderEscalation$1)].join("\n");
 			}
-			const caller = sessionId$21(exec);
+			const caller = sessionId$19(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("escalate: missing agent");
 			const missing = ELEMENTS.filter((element) => {
@@ -2685,7 +2972,7 @@ const text$22 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$20(exec) {
+function sessionId$18(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_apply: missing agent id");
 	return id;
@@ -2722,7 +3009,7 @@ function defineEvolutionApplyTool(ctx) {
 			render: (_a, v) => text$22(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$20(exec);
+			const caller = sessionId$18(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("evolution_apply: missing agent");
 			let proposal;
@@ -2791,7 +3078,7 @@ const text$21 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$19(exec) {
+function sessionId$17(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_candidate: missing agent id");
 	return id;
@@ -2823,7 +3110,7 @@ function defineEvolutionCandidateTool(ctx) {
 			render: (_a, v) => text$21(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$19(exec);
+			const caller = sessionId$17(exec);
 			const versions = args.versionSet;
 			try {
 				const proposal = await ctx.evolution.candidate(args.proposalId, versions, caller, args.mutation);
@@ -2843,7 +3130,7 @@ const text$20 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$18(exec) {
+function sessionId$16(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_decide: missing agent id");
 	return id;
@@ -2874,7 +3161,7 @@ function defineEvolutionDecideTool(ctx) {
 			render: (_a, v) => text$20(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$18(exec);
+			const caller = sessionId$16(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("evolution_decide: missing agent");
 			let proposal;
@@ -2928,7 +3215,7 @@ const text$19 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$17(exec) {
+function sessionId$15(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_gate: missing agent id");
 	return id;
@@ -2985,7 +3272,7 @@ function defineEvolutionGateTool(ctx) {
 			render: (_a, v) => text$19(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$17(exec);
+			const caller = sessionId$15(exec);
 			let evidenceIds = /* @__PURE__ */ new Set();
 			try {
 				const graph = await ctx.graphs.graphForSession(caller);
@@ -3111,7 +3398,7 @@ const text$17 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$16(exec) {
+function sessionId$14(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_prepare: missing agent id");
 	return id;
@@ -3157,7 +3444,7 @@ function defineEvolutionPrepareTool(ctx) {
 			render: (_a, v) => text$17(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$16(exec);
+			const caller = sessionId$14(exec);
 			let proposal;
 			try {
 				proposal = await ctx.evolution.get(args.proposalId);
@@ -3211,7 +3498,7 @@ const TARGET_TYPE_SET$1 = new Set(TARGET_TYPES$1);
 function isProposalTargetType$1(value) {
 	return typeof value === "string" && TARGET_TYPE_SET$1.has(value);
 }
-function sessionId$15(exec) {
+function sessionId$13(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_propose: missing agent id");
 	return id;
@@ -3283,7 +3570,7 @@ function defineEvolutionProposeTool(ctx) {
 			render: (_a, v) => text$16(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$15(exec);
+			const caller = sessionId$13(exec);
 			let targetType = args.targetType;
 			let targetId = args.targetId;
 			let rationale = args.rationale;
@@ -3344,7 +3631,7 @@ const VERIFICATION_MODES = [
 	"review",
 	"composite"
 ];
-function sessionId$14(exec) {
+function sessionId$12(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_replay: missing agent id");
 	return id;
@@ -3449,7 +3736,7 @@ function defineEvolutionReplayTool(ctx) {
 			render: (_a, v) => text$15(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$14(exec);
+			const caller = sessionId$12(exec);
 			let proposal;
 			try {
 				proposal = await ctx.evolution.get(args.proposalId);
@@ -3595,7 +3882,7 @@ const text$14 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$13(exec) {
+function sessionId$11(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_rollback: missing agent id");
 	return id;
@@ -3614,7 +3901,7 @@ function defineEvolutionRollbackTool(ctx) {
 			render: (_a, v) => text$14(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$13(exec);
+			const caller = sessionId$11(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("evolution_rollback: missing agent");
 			let proposal;
@@ -3679,9 +3966,9 @@ function defineMarkReadyTool(ctx) {
 			render: (_a, v) => text$13(v)
 		},
 		execute: async (_args, exec) => {
-			const sessionId$22 = exec.agent?.id;
-			if (sessionId$22 === void 0) throw new Error("graph_mark_ready: missing agent id");
-			const graph = await ctx.graphs.graphForSession(sessionId$22);
+			const sessionId$20 = exec.agent?.id;
+			if (sessionId$20 === void 0) throw new Error("graph_mark_ready: missing agent id");
+			const graph = await ctx.graphs.graphForSession(sessionId$20);
 			await ctx.graphs.markReady(graph.id);
 			return `graph ${graph.id} ready`;
 		}
@@ -3746,7 +4033,7 @@ const text$12 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$12(exec) {
+function sessionId$10(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_cancel: missing agent id");
 	return id;
@@ -3769,7 +4056,7 @@ function defineTaskCancelTool(ctx) {
 			render: (_a, v) => text$12(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$12(exec);
+			const caller = sessionId$10(exec);
 			const { storeId, run } = await ctx.taskRuntime.runForSession(caller);
 			if (run.executionPhase !== "waiting_children" || run.batchId === void 0) return `task_cancel: no batch is in flight for run "${run.runId}" (${run.status}${run.executionPhase === void 0 ? ", no coordination phase recorded" : `, phase ${run.executionPhase}`}); nothing was changed`;
 			const batchId = run.batchId;
@@ -3790,7 +4077,7 @@ const text$11 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$11(exec) {
+function sessionId$9(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_decompose: missing agent id");
 	return id;
@@ -3958,7 +4245,7 @@ function defineTaskDecomposeTool(ctx) {
 			render: (_a, v) => text$11(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$11(exec);
+			const caller = sessionId$9(exec);
 			const { storeId, task, run } = await ctx.taskRuntime.runForSession(caller);
 			const { requestKey, supersedes,...spec } = args;
 			const callId = typeof exec.callId === "string" && exec.callId.length > 0 ? String(exec.callId) : void 0;
@@ -4084,7 +4371,7 @@ function toProposals(value) {
 		};
 	});
 }
-function sessionId$10(exec) {
+function sessionId$8(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_diagnose: missing agent id");
 	return id;
@@ -4176,7 +4463,7 @@ function defineTaskDiagnoseTool(ctx) {
 			render: (_a, v) => text$10(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$10(exec);
+			const caller = sessionId$8(exec);
 			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(caller)).rootSessionId);
 			const diagnosis = {
 				diagnosisId: args.diagnosisId,
@@ -4206,25 +4493,26 @@ function defineTaskDiagnoseTool(ctx) {
 }
 
 //#endregion
-//#region src/tools/root-store.ts
-/**
-* What an open root proposal means to the session waiting on one, in the words
-* of the lifecycle the store itself holds (A0 §2): nothing here can be read as
-* "the contract is accepted", and none of the three is a terminal state.
-* `ready` and `approved` are the two a reader is most likely to misread — both
-* mean the runtime still has to re-check and activate.
-*/
-const OPEN_ROOT_PROPOSAL_MEANING = new Map([
-	["pending_review", "waiting for a review decision; the contract is not a task yet"],
-	["ready", "recorded and past its re-check, waiting for the runtime to activate it"],
-	["approved", "approved on the record, waiting for the runtime's post-approval re-check and activation"]
-]);
+//#region src/tools/task-intake.ts
+const text$9 = (value) => [{
+	type: "text",
+	text: value
+}];
+function sessionId$7(exec) {
+	const id = exec.agent?.id;
+	if (typeof id !== "string" || id.length === 0) throw new Error("task_intake: missing agent id");
+	return id;
+}
+function message(error) {
+	return error instanceof Error ? error.message : String(error);
+}
 /**
 * The root store's snapshot, or `undefined` when no such store exists yet — the
 * pre-intake state §1.1 allows, answered as a state rather than thrown at a
 * reader. The store's own word for it is "does not exist"; every other failure
 * (a log this process cannot read, a store it cannot open) is the reader's to
-* surface and is re-raised unchanged.
+* surface and is re-raised unchanged. Read-only: `ctx.task.openStore` is the
+* store's own read open.
 */
 async function rootSnapshotOrUndefined(ctx, storeId) {
 	try {
@@ -4233,93 +4521,6 @@ async function rootSnapshotOrUndefined(ctx, storeId) {
 		if (error instanceof Error && /does not exist/.test(error.message)) return void 0;
 		throw error;
 	}
-}
-/**
-* The store's root task, or `undefined` — parentless is what a root is
-* (`adoptRoot` reads the same field), and a store with no root task is the
-* pre-intake state.
-*/
-function rootTaskIn(snapshot) {
-	return snapshot?.tasks.find((task) => task.parentTaskId === void 0);
-}
-/** Every root proposal still going to move: one waiting for a decision, or one waiting to be activated. */
-function openRootProposals(snapshot) {
-	return (snapshot?.proposals?.all ?? []).filter((proposal) => proposal.kind === "root" && OPEN_ROOT_PROPOSAL_MEANING.has(proposal.status));
-}
-/**
-* The store one proposal call belongs to (A0 §1.5, stage-D defect 1).
-*
-* A worker's store comes from the run it is executing — the lookup both proposal
-* tools have always made. A **root session before its contract is accepted has
-* no run at all** (the root task is what an approved contract becomes), and that
-* is exactly the state in which it has to read the proposal holding its
-* contract: `task_intake`'s answers and the root prompt both send it to
-* `task_proposal_read`. So when the run lookup answers "no task run is bound to
-* this session", the fallback is the store this session owns as a graph's root
-* session — `sg-t-<rootSessionId>` — and it is offered to that session alone: a
-* session that is not a graph's root, or that is in no graph at all, keeps the
-* runtime's own refusal unchanged, and what a caller hears when no store was
-* ever opened for its session is the store's own "does not exist".
-*/
-async function proposalStoreFor(ctx, sessionId$22) {
-	try {
-		return (await ctx.taskRuntime.runForSession(sessionId$22)).storeId;
-	} catch (error) {
-		if (!(error instanceof Error) || !/no task run is bound to session/.test(error.message)) throw error;
-		const storeId = await rootStoreOfSession(ctx, sessionId$22);
-		if (storeId === void 0) throw error;
-		return storeId;
-	}
-}
-/**
-* The root store one session owns, or `undefined` for a session that is not a
-* graph's root session (or that is in no graph this process can place). A probe,
-* not a refusal: a caller that has to *say* why a session is not a root renders
-* that on its own (`task_intake`'s named refusal), and a caller using this as a
-* fallback keeps the error it already had.
-*/
-async function rootStoreOfSession(ctx, sessionId$22) {
-	try {
-		const graph = await ctx.graphs.graphForSession(sessionId$22);
-		return graph.rootSessionId === sessionId$22 ? rootTaskStoreId(graph.rootSessionId) : void 0;
-	} catch {
-		return;
-	}
-}
-/**
-* The view both readers answer with while the store holds no root task (A0
-* §1.5): the state named, whatever proposal is open, and the one action that
-* changes it — accepting the user's own goal with `task_intake`. The last line
-* is the point of the whole view: no objective is reported, because none has
-* been accepted.
-*/
-function notActivatedLines(graphId, storeId, rootSessionId, snapshot) {
-	const open = openRootProposals(snapshot);
-	return [
-		`graph ${graphId} root session "${rootSessionId}": not activated — no root contract has been accepted for this session, so there is no root task.`,
-		`- store ${storeId}: ${snapshot === void 0 ? "does not exist yet — a graph opens it when it is created and fills it when a contract is accepted, and neither state is a failure" : "opened, with no root task in it"}`,
-		...open.length === 0 ? ["- open proposals: none — no root contract is waiting for a decision or for its activation."] : ["- open proposals:", ...open.map((proposal) => `  - ${proposal.proposalId} [${proposal.status}] policy ${proposal.policy} — ${OPEN_ROOT_PROPOSAL_MEANING.get(proposal.status)}`)],
-		"- accept the user's objective here with `task_intake`: it writes the normalized root contract (objective, acceptance criteria,",
-		"  assumptions, constraints and declared capabilities) and activates it as this graph's root task — or, where the deployment",
-		"  reviews root contracts, it answers with a proposal id and activates nothing until a recorded decision.",
-		"- `task_decompose` cannot run before that: it works on the root task, which does not exist until a contract is accepted.",
-		"- no objective is reported here: this graph's name and its setup work are not a goal, and no contract has named one yet."
-	];
-}
-
-//#endregion
-//#region src/tools/task-intake.ts
-const text$9 = (value) => [{
-	type: "text",
-	text: value
-}];
-function sessionId$9(exec) {
-	const id = exec.agent?.id;
-	if (typeof id !== "string" || id.length === 0) throw new Error("task_intake: missing agent id");
-	return id;
-}
-function message(error) {
-	return error instanceof Error ? error.message : String(error);
 }
 /**
 * Why a root contract is refused, when the store holds no record of it
@@ -4528,14 +4729,15 @@ function defineTaskIntakeTool(ctx) {
 			render: (_a, v) => text$9(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$9(exec);
-			const graph = await ctx.graphs.graphForSession(caller);
-			if (graph.rootSessionId !== caller) return [
-				`task_intake rejected: session "${caller}" is not the root session of graph "${graph.id}" (its root session is "${graph.rootSessionId}") —`,
+			const caller = sessionId$7(exec);
+			const resolution = await ctx.singularityContext.resolveCaller(caller);
+			if (resolution.kind === "unbound") return [`task_intake rejected: ${resolution.detail}`, "Nothing was read and nothing was written."].join("\n");
+			if (resolution.kind !== "root") return [
+				`task_intake rejected: session "${caller}" is not the root session of graph "${resolution.graph.id}" (its root session is "${resolution.graph.rootSessionId}") —`,
 				"a root contract is the goal of one root session, and a worker's task was admitted by its parent's decomposition.",
 				"Nothing was read and nothing was written."
 			].join("\n");
-			const storeId = rootTaskStoreId(graph.rootSessionId);
+			const storeId = resolution.storeId;
 			const { requestKey, supersedes,...spec } = args;
 			let result;
 			try {
@@ -4629,10 +4831,10 @@ async function pendingText(ctx, storeId, proposalId, detail) {
 * @returns the refusal text, or `undefined` when the call carries nothing undeclared.
 */
 function undeclaredParameters(args, declared, toolName) {
-	const undeclared = Object.keys(args).filter((key) => !declared.includes(key));
-	if (undeclared.length === 0) return void 0;
+	const undeclared$1 = Object.keys(args).filter((key) => !declared.includes(key));
+	if (undeclared$1.length === 0) return void 0;
 	return [
-		`${toolName} rejected: undeclared parameter${undeclared.length === 1 ? "" : "s"} ${undeclared.map((key) => `"${key}"`).join(", ")} —`,
+		`${toolName} rejected: undeclared parameter${undeclared$1.length === 1 ? "" : "s"} ${undeclared$1.map((key) => `"${key}"`).join(", ")} —`,
 		`this tool accepts ${declared.join(", ")} and has no argument that approves, decides, or stands in for a review;`,
 		"nothing was read and nothing was changed."
 	].join(" ");
@@ -4644,7 +4846,7 @@ const text$8 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$8(exec) {
+function sessionId$6(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_proposal_cancel: missing agent id");
 	return id;
@@ -4663,9 +4865,9 @@ function defineTaskProposalCancelTool(ctx) {
 			render: (_a, v) => text$8(v)
 		},
 		execute: async (args, exec) => {
-			const undeclared = undeclaredParameters(args, ["proposalId"], "task_proposal_cancel");
-			if (undeclared !== void 0) return undeclared;
-			const caller = sessionId$8(exec);
+			const undeclared$1 = undeclaredParameters(args, ["proposalId"], "task_proposal_cancel");
+			if (undeclared$1 !== void 0) return undeclared$1;
+			const caller = sessionId$6(exec);
 			const { storeId } = await ctx.taskRuntime.runForSession(caller);
 			try {
 				return [`${(await ctx.taskRuntime.cancelProposal(storeId, args.proposalId, caller)).detail}`, "The record is kept: a cancelled proposal is a fact, and a revision is a new proposal with its own request key."].join("\n");
@@ -4677,12 +4879,21 @@ function defineTaskProposalCancelTool(ctx) {
 }
 
 //#endregion
+//#region src/tools/proposal-store.ts
+/** The store one proposal call belongs to; see the module doc. */
+async function proposalStoreFor(ctx, sessionId$20) {
+	const resolution = await ctx.singularityContext.resolveCaller(sessionId$20);
+	if (resolution.kind === "worker" || resolution.kind === "root") return resolution.storeId;
+	throw new Error(`task-runtime: no task run is bound to session "${sessionId$20}"`);
+}
+
+//#endregion
 //#region src/tools/task-proposal-continue.ts
 const text$7 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$7(exec) {
+function sessionId$5(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_proposal_continue: missing agent id");
 	return id;
@@ -4741,9 +4952,9 @@ function defineTaskProposalContinueTool(ctx) {
 			render: (_a, v) => text$7(v)
 		},
 		execute: async (args, exec) => {
-			const undeclared = undeclaredParameters(args, ["proposalId"], "task_proposal_continue");
-			if (undeclared !== void 0) return undeclared;
-			const caller = sessionId$7(exec);
+			const undeclared$1 = undeclaredParameters(args, ["proposalId"], "task_proposal_continue");
+			if (undeclared$1 !== void 0) return undeclared$1;
+			const caller = sessionId$5(exec);
 			let continuation;
 			try {
 				const storeId = await proposalStoreFor(ctx, caller);
@@ -4762,7 +4973,7 @@ const text$6 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$6(exec) {
+function sessionId$4(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_proposal_read: missing agent id");
 	return id;
@@ -4862,9 +5073,9 @@ function defineTaskProposalReadTool(ctx) {
 			render: (_a, v) => text$6(v)
 		},
 		execute: async (args, exec) => {
-			const undeclared = undeclaredParameters(args, ["proposalId"], "task_proposal_read");
-			if (undeclared !== void 0) return undeclared;
-			const caller = sessionId$6(exec);
+			const undeclared$1 = undeclaredParameters(args, ["proposalId"], "task_proposal_read");
+			if (undeclared$1 !== void 0) return undeclared$1;
+			const caller = sessionId$4(exec);
 			try {
 				const storeId = await proposalStoreFor(ctx, caller);
 				return renderProposal(await ctx.taskRuntime.proposalIn(storeId, args.proposalId));
@@ -4876,285 +5087,25 @@ function defineTaskProposalReadTool(ctx) {
 }
 
 //#endregion
-//#region src/tools/run-phase.ts
-/**
-* The A3 coordination phase of one run, as the two readers of the store render
-* it. Both views come from these functions so `task_read` and `task_status` can
-* never describe the same run differently — the same discipline
-* `renderRunBinding` applies to the "chosen implementation" section.
-*
-* The rendering rule, and why it is a rule: a run created before the phase
-* field existed has *no* phase, and its phase is never guessed. A non-terminal
-* such run is displayed as `needs-recovery` — an old record whose only legal
-* continuation is cancellation (`TaskRuntime.reconcileStore` leaves it exactly
-* as it stands, and admission and submission both refuse it) — while a terminal
-* one renders nothing extra, because a finished run needs no phase. Reporting
-* `active` for it would invite work nobody can admit.
-*/
-/** The full form: what the record is and what a reader can do about it. */
-const NEEDS_RECOVERY = "needs-recovery (an old record: it was created before coordination phases, so it has no phase to continue from and cannot decompose, submit or verify — cancel this task tree to recover)";
-/** The compact form for `task_status`, whose run part is a cell inside a denser line. */
-const NEEDS_RECOVERY_SHORT = "needs-recovery (old record without a coordination phase)";
-/** The submission a run carries, as one clause: who handed it in, when, and what it named. */
-function submissionClause(submission) {
-	const evidence = submission.evidenceRefs.length === 0 ? "" : `; evidence [${submission.evidenceRefs.join(", ")}]`;
-	const notes = submission.notes === void 0 ? "" : `; notes: ${submission.notes}`;
-	return `submitted by ${submission.origin} at ${submission.submittedAt}: "${submission.summary}"${evidence}${notes}`;
-}
-/**
-* The phase, batch, submission and no-progress facts of one run, appended to a
-* `task_read` run line: where this run sits in the protocol, in that order, with
-* the batch id only where a batch exists to name. A phase change and a progress
-* marking rewrite these fields, so this is the run's current position, never a
-* history.
-*/
-function runPhaseSuffix(run) {
-	const parts = [];
-	if (run.executionPhase !== void 0) {
-		parts.push(`phase ${run.executionPhase}`);
-		if (run.batchId !== void 0) parts.push(`batch ${run.batchId}`);
-		if (run.submission !== void 0) parts.push(submissionClause(run.submission));
-	} else if (run.status === "running") parts.push(NEEDS_RECOVERY);
-	if (run.noProgress !== void 0) parts.push(`no-progress round ${run.noProgress.rounds} (${run.noProgress.kind})`);
-	return parts.length === 0 ? "" : ` — ${parts.join("; ")}`;
-}
-/** The same fact for `task_status`, whose run part is a cell inside a denser line. */
-function runPhaseCell(run) {
-	if (run.executionPhase !== void 0) return ` — phase ${run.executionPhase}`;
-	return run.status === "running" ? ` — ${NEEDS_RECOVERY_SHORT}` : "";
-}
-
-//#endregion
 //#region src/tools/task-read.ts
 const text$5 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$5(exec) {
-	const id = exec.agent?.id;
-	if (typeof id !== "string" || id.length === 0) throw new Error("task_read: missing agent id");
-	return id;
-}
-function latestRun(snapshot, task) {
-	const runId = task.runIds[task.runIds.length - 1];
-	return snapshot.runs.find((run) => run.runId === runId);
-}
-/**
-* The two contract facts a worker cannot read off the objective and the
-* criteria table: what its contract assumes and what it constrains (T1 §4) —
-* persisted with the task, so this store-backed view and the handoff-rendered
-* block say the same thing. A task created before the contract existed has
-* neither, and renders exactly what it rendered before: nothing is invented
-* for the part the store never held.
-*/
-function contractLines(task) {
-	const contract = task.contract;
-	if (contract === void 0) return [];
-	return [...contract.assumptions.length === 0 ? [] : ["assumptions:", ...contract.assumptions.map((item) => `- ${item}`)], ...contract.constraints.length === 0 ? [] : ["constraints:", ...contract.constraints.map((item) => `- ${item}`)]];
-}
-/**
-* The protected acceptance inputs a criterion declares, as one suffix a worker
-* can read: the paths it must not modify. Empty for a criterion that declares
-* none — such a criterion carries no protection, and printing an empty list
-* would read like a claim that it does.
-*/
-function protectedInputsPart(criterion) {
-	const declared = criterion.protectedInputs ?? [];
-	return declared.length === 0 ? "" : ` [protected inputs: ${declared.map((ref) => ref.path).join(", ")}]`;
-}
-/**
-* The run the caller is executing, as the store recorded it (S1-C item 4): the
-* providers this run was bound to, re-checked against the snapshot the record
-* names before they are shown.
-*
-* Why the re-check is not optional: the record says which bytes the run loaded,
-* and the snapshot path is the only place those bytes still exist. A snapshot
-* that is missing or edited is reported as such, naming the skill — the one
-* thing this view must never do is quietly show what stands at the production
-* skill path now, which would read as "this is what you are running".
-*
-* A run created before the field existed, or by a caller that assembled its plan
-* without a pre-check, carries no binding: then there is nothing to claim and
-* nothing is rendered, exactly as before.
-*/
-async function bindingLines(ctx, run) {
-	const binding = run.providerBinding;
-	if (binding === void 0) return [];
-	const summary = renderRunBinding(binding, await ctx.taskRuntime.readRunBinding(binding));
-	return summary.length === 0 ? [] : ["", ...summary.split("\n")];
-}
 function defineTaskReadTool(ctx) {
 	return defineTool({
 		name: "task_read",
-		description: "Read the caller's task contract. The root session sees the root task, its acceptance criteria, and child task statuses — or, before any root contract has been accepted, the named state saying so together with whatever proposal is still open (the graph's name is never shown as an objective). A worker sees its own task and run. A run line carries the coordination phase this run is in — and its batch id, its submission and any no-progress marking when it has them; a run with no phase is an old record and is shown as needs-recovery.",
+		description: "Read the caller's task contract. The root session sees the root task, its acceptance criteria, and child task statuses — or, before any root contract has been accepted, the named not-activated state together with whatever proposal is still open (the graph's name is never shown as an objective). A worker sees its own task and run. A reviewer sees the task it was delegated to review, marked review-only. A run line carries the coordination phase this run is in — and its batch id, its submission and any no-progress marking when it has them; a run with no phase is an old record and is shown as needs-recovery. This is the same read the worker's assembled context is projected from, so the two cannot disagree.",
 		parameters: {},
 		output: {
 			schema: { type: "string" },
 			render: (_a, v) => text$5(v)
 		},
 		execute: async (_args, exec) => {
-			const caller = sessionId$5(exec);
-			const graph = await ctx.graphs.graphForSession(caller);
-			if (graph.rootSessionId !== caller) {
-				const { task, run } = await ctx.taskRuntime.runForSession(caller);
-				return [
-					`task ${task.taskId} [${task.status}] depth ${task.depth}`,
-					`objective: ${task.objective}`,
-					"acceptance criteria:",
-					...task.acceptanceCriteria.map((criterion) => {
-						const command = criterion.command === void 0 ? "" : ` — $ ${criterion.command}`;
-						return `- ${criterion.criterionId} [${criterion.verificationMode}${criterion.mandatory ? ", mandatory" : ""}] ${criterion.description}${command}${protectedInputsPart(criterion)}`;
-					}),
-					...contractLines(task),
-					`run ${run.runId} [${run.status}]${runPhaseSuffix(run)} started ${run.startedAt}`,
-					...await bindingLines(ctx, run)
-				].join("\n");
-			}
-			const storeId = rootTaskStoreId(graph.rootSessionId);
-			const snapshot = await rootSnapshotOrUndefined(ctx, storeId);
-			const root = rootTaskIn(snapshot);
-			if (snapshot === void 0 || root === void 0) return notActivatedLines(graph.id, storeId, graph.rootSessionId, snapshot).join("\n");
-			const children = root.childTaskIds.map((taskId) => snapshot.tasks.find((task) => task.taskId === taskId)).filter((task) => task !== void 0);
-			return [
-				`root task ${root.taskId} [${root.status}/${root.decompositionStatus}]`,
-				`objective: ${root.objective}`,
-				"acceptance criteria:",
-				...root.acceptanceCriteria.map((criterion) => `- ${criterion.criterionId} [${criterion.verificationMode}] ${criterion.description}${protectedInputsPart(criterion)}`),
-				`children: ${children.length}`,
-				...children.map((child) => {
-					const run = latestRun(snapshot, child);
-					const runPart = run === void 0 ? "no run" : `run ${run.runId} [${run.status}]${runPhaseSuffix(run)}`;
-					return `- ${child.taskId} [${child.status}/${child.decompositionStatus}] ${runPart} ${child.objective}`;
-				})
-			].join("\n");
+			const caller = callerSessionId(exec, "task_read");
+			return adaptRead("task_read", await ctx.singularityContext.taskRead(caller, exec.signal));
 		}
 	});
-}
-
-//#endregion
-//#region src/tools/review-escalation.ts
-/** How many review agents one root store may start before the guardrail holds. */
-const REVIEW_AGENT_BUDGET_DEFAULT = 1;
-function latestReview$1(snapshot, taskId) {
-	return [...snapshot.reviews].reverse().find((item) => item.taskId === taskId);
-}
-/**
-* The capability coverage of one task, read from the review's dimension facts
-* when present and from the stored admission manifest otherwise. Both describe
-* the same resolution; the review's copy is the one a reader sees, the stored
-* manifest is what exists for a runless or dimension-less record.
-*/
-function capabilityGap(snapshot, taskId, review) {
-	const coverage = review?.dimensions?.capabilityCoverage;
-	if (coverage !== void 0) return coverage.closure === "gap" || coverage.missing.length > 0;
-	const manifest = snapshot.capabilities[taskId];
-	if (manifest === void 0) return false;
-	return manifest.closure === "gap" || manifest.missing.length > 0;
-}
-/**
-* Compute the escalation decision for one task against a store snapshot.
-* @param snapshot - the root task store snapshot.
-* @param taskId - the task whose review is under consideration.
-* @param budget - review agents already started, and the cap (defaults to
-*   `used: 0, max: REVIEW_AGENT_BUDGET_DEFAULT`).
-* @returns the signals that hold, whether to escalate, and the budget state.
-*/
-function computeEscalation(snapshot, taskId, budget = {}) {
-	const resolved = {
-		used: Math.max(0, budget.used ?? 0),
-		max: Math.max(1, budget.max ?? REVIEW_AGENT_BUDGET_DEFAULT)
-	};
-	const review = latestReview$1(snapshot, taskId);
-	const reasons = [];
-	if (review?.outcome === "failed") {
-		reasons.push("E1");
-		if (review.logTail === void 0 && review.evidenceRefs.length === 0) reasons.push("E2");
-	}
-	if ((review?.criteria ?? []).some((criterion) => criterion.verdict === "inconclusive")) reasons.push("E3");
-	if (capabilityGap(snapshot, taskId, review)) reasons.push("E4");
-	const exhausted = reasons.length > 0 && resolved.used >= resolved.max;
-	return {
-		reasons,
-		required: reasons.length > 0 && !exhausted,
-		budget: resolved,
-		suppressed: exhausted ? reasons : []
-	};
-}
-/**
-* The machine-readable escalation line `task_review_pack` prints. Three shapes:
-* required with signals, not required, and not required because the guardrail
-* spent the budget (which still names what it withheld — a suppressed signal is
-* a fact, not a silence).
-*/
-function renderEscalation(escalation) {
-	const budget = `${escalation.budget.used}/${escalation.budget.max}`;
-	if (escalation.required) return `escalation: required ${escalation.reasons.join(", ")} (budget ${budget})`;
-	if (escalation.suppressed.length > 0) return `escalation: not required (budget ${budget}) — suppressed ${escalation.suppressed.join(", ")}: budget exhausted`;
-	return `escalation: not required (budget ${budget})`;
-}
-/**
-* The judgement line: the six dimensions whose conclusion the fact table does
-* not carry, named so a reader cannot mistake the facts for a verdict.
-*/
-function renderJudgementDimensions() {
-	return `needs judgement (agent): ${JUDGED_DIMENSIONS.join(", ")} (not mechanically observable from the fact table; task_review_agent concludes these)`;
-}
-
-//#endregion
-//#region src/review-agent-ledger.ts
-/** Repo root, derived the way `EvolutionService` derives it (both files sit at the same depth). */
-const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
-/** Directory holding the ledger; `$DSH_HOME/review-agents` unless overridden. */
-function reviewAgentLedgerDir() {
-	const override = process.env.SINGULARITY_REVIEW_LEDGER_DIR;
-	if (override !== void 0 && override.length > 0) return resolve(override);
-	return join(process.env.DSH_HOME ?? join(repoRoot, ".dsh"), "review-agents");
-}
-/** The ledger file (`<dir>/agents.jsonl`). */
-function reviewAgentLedgerFile() {
-	return join(reviewAgentLedgerDir(), "agents.jsonl");
-}
-/** The per-root-store cap; `SINGULARITY_REVIEW_AGENT_BUDGET` when it parses to a positive integer. */
-function reviewAgentBudget() {
-	const raw = process.env.SINGULARITY_REVIEW_AGENT_BUDGET;
-	const parsed = raw === void 0 || raw.length === 0 ? NaN : Number(raw);
-	return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : REVIEW_AGENT_BUDGET_DEFAULT;
-}
-/**
-* How many review agents this root store has already started. A missing file
-* reads as zero; a corrupt line throws rather than silently undercounting.
-*/
-async function countReviewAgentRuns(rootStoreId) {
-	let text$27;
-	try {
-		text$27 = await readFile(reviewAgentLedgerFile(), "utf8");
-	} catch (error) {
-		if (error.code === "ENOENT") return 0;
-		throw error;
-	}
-	let count = 0;
-	text$27.split("\n").forEach((line, index) => {
-		if (line.trim().length === 0) return;
-		let record;
-		try {
-			record = JSON.parse(line);
-		} catch {
-			throw new Error(`review-agent-ledger: corrupt line ${index + 1} in ${reviewAgentLedgerFile()}`);
-		}
-		if (record.rootStoreId === rootStoreId) count += 1;
-	});
-	return count;
-}
-/** Append one started review agent. */
-async function appendReviewAgentRun(record) {
-	const file = reviewAgentLedgerFile();
-	await mkdir(dirname(file), { recursive: true });
-	const line = {
-		formatVersion: 1,
-		...record,
-		at: (/* @__PURE__ */ new Date()).toISOString()
-	};
-	await appendFile(file, `${JSON.stringify(line)}\n`, "utf8");
 }
 
 //#endregion
@@ -5163,7 +5114,7 @@ const text$4 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$4(exec) {
+function sessionId$3(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_review_pack: missing agent id");
 	return id;
@@ -5357,7 +5308,7 @@ function defineTaskReviewPackTool(ctx) {
 			render: (_a, v) => text$4(v)
 		},
 		execute: async (args, exec) => {
-			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(sessionId$4(exec))).rootSessionId);
+			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(sessionId$3(exec))).rootSessionId);
 			const snapshot = await ctx.task.openStore(storeId);
 			const used = await countReviewAgentRuns(storeId);
 			const escalation = computeEscalation(snapshot, args.taskId, {
@@ -5381,18 +5332,17 @@ const REVIEWER_PRESET = "singularity-reviewer";
 * The review agent's whole tool surface. Read-only by construction: the grant
 * allow-list is this list intersected with what the composition offers, so
 * `bash`, `write`, `edit`, `jobs`, `subagent`, `graph_spawn`, `hitl_*` and
-* `evolution_*` are absent however the deployment is composed. `session_trace`
-* and its siblings are here so the reviewer can drill into the sessions the
-* pack names, which is the point of printing session ids on every review line.
+* `evolution_*` are absent however the deployment is composed. Session history
+* is read with `context_read` — the one reference reader, authorized by the
+* reviewer's delegated graph domain; the raw cross-session tools it replaced
+* are sealed on every runtime-owned agent (`agent-runtime`'s execution guard).
 */
 const REVIEWER_BASELINE = [
 	"task_review_pack",
 	"task_read",
 	"task_status",
+	"context_read",
 	"capability_list",
-	"session_event_read",
-	"session_event_trace",
-	"session_trace",
 	"read",
 	"glob",
 	"grep",
@@ -5408,7 +5358,7 @@ function reviewerGrant() {
 }
 /** Default watchdog deadline for one review agent (10 minutes). */
 const REVIEW_AGENT_TIMEOUT_MS = 6e5;
-function sessionId$3(exec) {
+function sessionId$2(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_review_agent: missing agent id");
 	return id;
@@ -5522,7 +5472,7 @@ function defineTaskReviewAgentTool(ctx) {
 			render: (_a, v) => text$3(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$3(exec);
+			const caller = sessionId$2(exec);
 			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(caller)).rootSessionId);
 			const snapshot = await ctx.task.openStore(storeId);
 			if (snapshot.tasks.find((item) => item.taskId === args.taskId) === void 0) return `task_review_agent: unknown task "${args.taskId}"`;
@@ -5563,17 +5513,21 @@ function defineTaskReviewAgentTool(ctx) {
 				}],
 				agentPreset: REVIEWER_PRESET,
 				grant: reviewerGrant(),
+				beforePrompt: async () => {
+					await appendReviewAgentRun({
+						rootStoreId: storeId,
+						taskId: args.taskId,
+						sessionId: reviewerSessionId,
+						actor: caller
+					});
+					const back = await readReviewerDelegation(reviewerSessionId);
+					if (back === void 0 || back.rootStoreId !== storeId || back.taskId !== args.taskId) throw new Error(`task_review_agent: the delegation of reviewer session "${reviewerSessionId}" could not be read back from the ledger (expected task ${args.taskId} in ${storeId}); no model input was sent`);
+				},
 				signal: exec.signal
 			}).catch((error) => {
 				spawnFailure = error instanceof Error ? error.message : String(error);
 			});
 			if (handle === void 0) return `task_review_agent: spawn failed: ${spawnFailure ?? "unknown error"}`;
-			await appendReviewAgentRun({
-				rootStoreId: storeId,
-				taskId: args.taskId,
-				sessionId: reviewerSessionId,
-				actor: caller
-			});
 			const cancel = () => handle.agent.cancel({ kind: "parent" });
 			exec.signal.addEventListener("abort", cancel, { once: true });
 			let timer;
@@ -5630,69 +5584,36 @@ const text$2 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$2(exec) {
-	const id = exec.agent?.id;
-	if (typeof id !== "string" || id.length === 0) throw new Error("task_status: missing agent id");
-	return id;
-}
-/**
-* Best-effort obligation coverage for the footer (KISS §5.1, guide §4.2 #21):
-* templates from `<repoRoot>/.agents/skills/<name>/obligations.yml` against the
-* graph's obligations and requested capabilities. Every step may be absent —
-* no env builder, no repo root within 8 levels, no template files — and an
-* absent source omits the line rather than reporting zero coverage. Uncovered
-* entries are a hint ("satisfied, or forgotten?"), never a block.
-*/
-async function obligationLines(ctx, envId, snapshot) {
-	const header = snapshot.obligations.length === 0 ? [] : [`obligations: ${snapshot.obligations.length} recorded`];
-	try {
-		const envPath = (ctx.get?.("envBuilder") ?? ctx.envBuilder)?.store.get(envId).path;
-		if (envPath === void 0) return header;
-		const repoRoot$1 = await findRepoRoot(envPath);
-		if (repoRoot$1 === void 0) return header;
-		const templates = (await loadObligationTemplates(repoRoot$1)).flatMap((file) => file.templates);
-		if (templates.length === 0) return header;
-		const coverage = checkObligationCoverage(templates, snapshot);
-		const uncovered = coverage.uncovered.map((template) => `${template.id} ("${template.question}") — satisfied, or forgotten?`);
-		return [...header, `obligation coverage: ${coverage.covered.length}/${templates.length} covered${uncovered.length === 0 ? "" : `; uncovered: ${uncovered.join("; ")}`}`];
-	} catch {
-		return header;
-	}
-}
 function defineTaskStatusTool(ctx) {
 	return defineTool({
 		name: "task_status",
-		description: "Compact snapshot of the caller's graph task tree: task id, objective, status, latest run status with its coordination phase (a phase-less non-terminal run reads needs-recovery), evidence ids, and terminal review outcome. Before any root contract has been accepted it answers the named not-activated state (with whatever proposal is still open) instead of an empty tree. Also lists recorded obligations and the domain-template coverage hint.",
-		parameters: {},
+		description: "The caller's project status, paged. Scope `related` (the default) covers the caller's own task, its direct children and the tasks directly adjacent to it through a dependency edge; scope `graph` is the whole domain overview, sorted by task id. Each line carries the task status, its latest run with its coordination phase (a phase-less non-terminal run reads needs-recovery), evidence ids, the terminal review outcome and the diagnosis count. Entries are sorted by task id and paged with `offset` (from 0) and `limit` (default 20, at most 100); the answer states whether more entries follow and the offset to continue with. Pages are observations, not a consistent snapshot across calls. Before any root contract has been accepted the answer is the named not-activated state (with whatever proposal is still open).",
+		parameters: {
+			scope: {
+				type: "string",
+				enum: ["related", "graph"],
+				description: "related (default): the caller's own task, its direct children and its direct dependency neighbours; graph: every task in the domain"
+			},
+			offset: {
+				type: "number",
+				description: "Entry offset to start the page at, from 0; default 0"
+			},
+			limit: {
+				type: "number",
+				description: "Entries per page; default 20, clamped into 1–100 (a clamp is stated in the answer)"
+			}
+		},
 		output: {
 			schema: { type: "string" },
 			render: (_a, v) => text$2(v)
 		},
-		execute: async (_args, exec) => {
-			const graph = await ctx.graphs.graphForSession(sessionId$2(exec));
-			const storeId = rootTaskStoreId(graph.rootSessionId);
-			const snapshot = await rootSnapshotOrUndefined(ctx, storeId);
-			const root = rootTaskIn(snapshot);
-			if (snapshot === void 0 || root === void 0) return notActivatedLines(graph.id, storeId, graph.rootSessionId, snapshot).join("\n");
-			const lines = snapshot.tasks.map((task) => {
-				const runId = task.runIds[task.runIds.length - 1];
-				const run = snapshot.runs.find((item) => item.runId === runId);
-				const evidence = snapshot.evidence.filter((item) => item.taskId === task.taskId).map((item) => item.evidenceId);
-				const review = [...snapshot.reviews].reverse().find((item) => item.taskId === task.taskId);
-				const diagnoses = snapshot.diagnoses.filter((item) => item.taskId === task.taskId).length;
-				const runPart = run === void 0 ? "run: none" : `run: ${run.status}${runPhaseCell(run)}`;
-				const evidencePart = evidence.length === 0 ? "" : ` evidence: [${evidence.join(", ")}]`;
-				const failing = review?.criteria?.filter((item) => item.verdict !== "pass") ?? [];
-				const detail = review?.outcome === "failed" && failing.length > 0 ? `${review.localizedCause ?? "failed"} [${failing.map((item) => `${item.criterionId}${item.exitCode === void 0 ? "" : ` exit ${item.exitCode}`}`).join(", ")}]` : review?.localizedCause ?? review?.anomalies[0];
-				const reviewPart = review === void 0 ? "" : ` review: ${review.outcome}${detail === void 0 ? "" : ` — ${detail}`}`;
-				const diagPart = diagnoses === 0 ? "" : ` diag: ${diagnoses}`;
-				return `${"  ".repeat(task.depth)}${task.taskId} [${task.status}] ${task.objective} (${runPart}${evidencePart}${reviewPart}${diagPart})`;
-			});
-			return [
-				`graph ${graph.id} task tree (${snapshot.tasks.length} tasks):`,
-				...lines,
-				...await obligationLines(ctx, graph.envId, snapshot)
-			].join("\n");
+		execute: async (args, exec) => {
+			const caller = callerSessionId(exec, "task_status");
+			return adaptRead("task_status", await ctx.singularityContext.taskStatus(caller, {
+				...args.scope === void 0 ? {} : { scope: args.scope },
+				...args.offset === void 0 ? {} : { offset: args.offset },
+				...args.limit === void 0 ? {} : { limit: args.limit }
+			}, exec.signal));
 		}
 	});
 }
@@ -5842,6 +5763,7 @@ var SingularityAgent = class extends Service {
 		"agentRuntime",
 		"task",
 		"taskRuntime",
+		"singularityContext",
 		"userQuestions",
 		"approval"
 	];
@@ -5855,12 +5777,14 @@ var SingularityAgent = class extends Service {
 		new EscalationService(ctx);
 		new ProposalReviewService(ctx);
 		new EvolutionExposure(ctx, evolution === "on");
+		ctx.effect(() => ctx.singularityContext.registerReviewerBindingSource(reviewerBindingSource()), "singularityAgent: reviewer binding source");
 		ctx.tools.register(defineMarkReadyTool(ctx));
 		ctx.tools.register(defineSpawnTool(ctx));
 		ctx.tools.register(defineAskTool(ctx));
 		ctx.tools.register(defineApproveTool(ctx));
 		ctx.tools.register(defineTaskReadTool(ctx));
 		ctx.tools.register(defineCapabilityListTool(ctx));
+		ctx.tools.register(defineContextReadTool(ctx));
 		ctx.tools.register(defineTaskIntakeTool(ctx));
 		ctx.tools.register(defineTaskDecomposeTool(ctx));
 		ctx.tools.register(defineTaskProposalReadTool(ctx));

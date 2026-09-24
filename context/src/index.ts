@@ -21,6 +21,9 @@ import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
 import type {} from '@deepseek-ai/dsh-session-query'
+import type {} from '@deepseek-ai/dsh-system-prompt'
+import type {} from '@deepseek-ai/dsh-agent'
+import { assembleSingularityContext } from './assembly.ts'
 import {
   loadCaller,
   type BindingDeps,
@@ -41,12 +44,14 @@ import {
 } from './projections.ts'
 import type { ProjectedRead } from './refusals.ts'
 
+export * from './assembly.ts'
 export * from './bindings.ts'
 export * from './limits.ts'
 export * from './not-activated.ts'
 export * from './projections.ts'
 export * from './refusals.ts'
 export * from './render.ts'
+export * from './run-binding.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -62,6 +67,22 @@ export class SingularityContextService extends Service {
 
   constructor(ctx: Context) {
     super(ctx, 'singularityContext')
+  }
+
+  /**
+   * Mount the one `system-prompt/assemble` waterfall listener this service owns
+   * (`./assembly.ts`): the door the projections reach a real model request
+   * through. The registration rides this service's fiber, so it leaves when the
+   * service does.
+   */
+  [Service.init](): void {
+    this.ctx.effect(
+      () =>
+        this.ctx.on('system-prompt/assemble', (assembly, context, next) =>
+          assembleSingularityContext(this, assembly, context, next),
+        ),
+      'singularityContext: system-prompt assembly',
+    )
   }
 
   /**

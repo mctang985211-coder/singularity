@@ -5,7 +5,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
 import type { ProposalContinuation } from '@dangosys/dsh-singularity-task-runtime'
 import { undeclaredParameters } from './proposal-parameters.ts'
-import { proposalStoreFor } from './root-store.ts'
+import { proposalStoreFor } from './proposal-store.ts'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 

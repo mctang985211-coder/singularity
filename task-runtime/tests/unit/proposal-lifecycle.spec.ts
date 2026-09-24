@@ -100,7 +100,8 @@ function harness(
     }),
   }
 
-  const spawned: { sessionId: string; name: string; prompt: string }[] = []
+  /** One spawn request, as the runtime handed it to the agent runtime; a task-worker spawn carries no prompt (A2). */
+  const spawned: { sessionId: string; name: string; prompt?: string; taskWorker?: boolean }[] = []
   const cancelled: string[] = []
   const notifications: { sessionId: string; text: string }[] = []
   const liveAgents = new Map<string, unknown>()
@@ -117,12 +118,14 @@ function harness(
     spawn: vi.fn(async (_parent: unknown, request: {
       sessionId: string
       name: string
-      prompt: Array<{ type: 'text'; text: string }>
+      prompt?: Array<{ type: 'text'; text: string }>
+      taskWorker?: boolean
     }) => {
       spawned.push({
         sessionId: request.sessionId,
         name: request.name,
-        prompt: request.prompt.map(block => block.text).join('\n'),
+        ...(request.prompt === undefined ? {} : { prompt: request.prompt.map(block => block.text).join('\n') }),
+        ...(request.taskWorker === undefined ? {} : { taskWorker: request.taskWorker }),
       })
       let releaseIdle: (() => void) | undefined
       const agent = {

@@ -56,7 +56,7 @@ describe('reads change nothing', () => {
     const calls = stack.observedCalls()
     expect(calls.recoveryStatus).toBeGreaterThan(0)
     expect(calls.readRunBinding).toBeGreaterThan(0)
-    expect(Object.keys(stack.ctx.taskRuntime as object).sort()).toEqual(['gate', 'readRunBinding', 'recoveryStatus'])
+    expect(Object.keys(stack.ctx.taskRuntime as object).sort()).toEqual(['allowsRuntimeDecomposition', 'gate', 'readRunBinding', 'recoveryStatus'])
   })
 
   test('a read of a recovering store answers with the marker instead of waiting for the barrier', async () => {

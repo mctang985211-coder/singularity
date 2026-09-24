@@ -86,6 +86,14 @@ async function mountAgent() {
       }),
     }],
     ['taskRuntime', { listCapabilities: () => ({ research: { preset: 'standard' } }), replayTask, applyCapabilityRow: vi.fn() }],
+    // The read core the root-agent plugin injects (A2). This spec's subjects are
+    // the evolution ledger and the approval seam, and every tool it drives is an
+    // `evolution_*` or `hitl_*` one — nothing here reads context. The read core's
+    // own consumers are the `context` package's specs and
+    // `tests/integration/context-assembly.spec.ts`, so this sibling provides the
+    // one call the plugin makes at load time (registering its reviewer binding
+    // source) and nothing else.
+    ['singularityContext', { registerReviewerBindingSource: () => () => {} }],
     ['userQuestions', userQuestions],
     ['approval', approval],
   ]

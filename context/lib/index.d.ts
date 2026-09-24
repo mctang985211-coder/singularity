@@ -2,6 +2,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import { AcceptanceCriterion, Diagnosis, EvidenceBundle, ExecutionPhase, ReviewRecord, RunProviderBinding, TaskHandoff, TaskInstance, TaskProposalRoot, TaskRun, TaskSnapshot } from "@dangosys/dsh-singularity-task";
 import { RunBindingRead, StoreRecoveryStatus } from "@dangosys/dsh-singularity-task-runtime";
 import { SessionEvent } from "@deepseek-ai/dsh-session";
+import { AssembleContext, PromptAssembly } from "@deepseek-ai/dsh-system-prompt";
 
 //#region src/refusals.d.ts
 
@@ -126,6 +127,12 @@ interface ReadOnlyTaskRuntime {
   readonly gate: {
     phaseOf(sessionId: string): ExecutionPhase | 'terminal' | undefined;
   };
+  /**
+   * Whether this deployment admits a run's own `task_decompose` — the fact the
+   * worker projection's runtime-split rule hangs on. Read-only: the projection
+   * *reports* the rule; admission still decides every call.
+   */
+  allowsRuntimeDecomposition(): boolean;
 }
 /** Everything the binding resolver reads. */
 interface BindingDeps {
@@ -338,6 +345,31 @@ declare function taskStatus(deps: ReadDeps, loaded: LoadedCaller, query: StatusQ
  */
 declare function contextRead(deps: ReadDeps, loaded: LoadedCaller, query: ContextReadQuery, signal?: AbortSignal): Promise<ProjectedRead>;
 //#endregion
+//#region src/assembly.d.ts
+/**
+ * Section name of the assembled contract. The name the old contract-reinjection
+ * registered, kept: it is the one slot the immutable half has ever had, now
+ * filled from the store at every assembly instead of rendered once at spawn.
+ */
+declare const WORKER_CONTRACT_SECTION = "singularity:worker-contract";
+/** Placement: after the root's `singularity:root` (70) and the worker policy's `singularity:worker` (75). */
+declare const WORKER_CONTRACT_ORDER = 80;
+/** The dynamic half's context name on the runtime-context plane. */
+declare const STATE_CONTEXT_NAME = "singularity:state";
+/** Placement among the runtime contexts, after the centrally allocated ones (`CONTEXT_ORDERS` ends at 120). */
+declare const STATE_CONTEXT_ORDER = 130;
+/** The error a refused assembly throws: the refusal is its name, the detail its message. */
+declare class AssemblyRefusalError extends Error {
+  readonly refusal: ProjectedReadRefused['refusal'];
+  constructor(refusal: ProjectedReadRefused['refusal'], detail: string);
+}
+/**
+ * The one assembly step this package runs (see the module doc for who gets
+ * what). Mutates the assembly and delegates; a bound caller whose projection
+ * refuses rejects the whole waterfall, which is what refuses the model request.
+ */
+declare function assembleSingularityContext(service: SingularityContextService, assembly: PromptAssembly, context: AssembleContext, next: () => Promise<PromptAssembly>): Promise<PromptAssembly>;
+//#endregion
 //#region src/limits.d.ts
 /**
  * The one output bound this package has (A2 §D): 16 KiB for a single read —
@@ -494,6 +526,17 @@ declare function diagnosisRecordText(diagnosis: Diagnosis): string;
  */
 declare function taskSummaryLine(snapshot: TaskSnapshot, task: TaskInstance, roles?: readonly string[]): string;
 //#endregion
+//#region src/run-binding.d.ts
+/**
+ * Render one run's binding summary.
+ *
+ * `read` is the re-check result when the caller re-read the snapshot. A caller
+ * that has not read it omits it, and then no readability claim is made in either
+ * direction. When it is given and reports defects, they are rendered under a
+ * named refusal so a reader is never told to trust content that is not there.
+ */
+declare function renderRunBinding(binding: RunProviderBinding | undefined, read?: RunBindingRead): string;
+//#endregion
 //#region src/index.d.ts
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -505,6 +548,13 @@ declare class SingularityContextService extends Service {
   /** The registered delegation sources, in registration order; a later registration answers after an earlier one. */
   private readonly reviewerSources;
   constructor(ctx: Context);
+  /**
+   * Mount the one `system-prompt/assemble` waterfall listener this service owns
+   * (`./assembly.ts`): the door the projections reach a real model request
+   * through. The registration rides this service's fiber, so it leaves when the
+   * service does.
+   */
+  [Service.init](): void;
   /**
    * Register the narrow source this deployment reads reviewer delegations from
    * (the reviewer ledger). Returns the disposer that removes it again, so a
@@ -538,4 +588,4 @@ declare class SingularityContextService extends Service {
   private envBuilder;
 }
 //#endregion
-export { BindingDeps, CONTEXT_OUTPUT_LIMIT_BYTES, CallerBase, CallerGraph, CallerResolution, CallerUnbound, ContextReadQuery, EnvPathSource, GraphRecordFacts, LoadedCaller, MembershipNode, NAMED_REFUSALS, NamedRefusal, OutputBudget, ProjectedRead, ProjectedReadOk, ProjectedReadRefused, ReadContinuation, ReadDeps, ReadOnlyGraphs, ReadOnlyTaskRuntime, ReadOnlyTaskStore, RelatedEntry, ReviewReference, ReviewerBindingError, ReviewerBindingFailure, ReviewerBindingRecord, ReviewerBindingSource, SessionQueryReads, SingularityContextService, SingularityContextService as default, StatusQuery, StatusScope, Utf8Slice, bindingLines, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omittedLine, openRootProposals, read, refused, relatedEntries, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, storeStateText, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };
+export { AssemblyRefusalError, BindingDeps, CONTEXT_OUTPUT_LIMIT_BYTES, CallerBase, CallerGraph, CallerResolution, CallerUnbound, ContextReadQuery, EnvPathSource, GraphRecordFacts, LoadedCaller, MembershipNode, NAMED_REFUSALS, NamedRefusal, OutputBudget, ProjectedRead, ProjectedReadOk, ProjectedReadRefused, ReadContinuation, ReadDeps, ReadOnlyGraphs, ReadOnlyTaskRuntime, ReadOnlyTaskStore, RelatedEntry, ReviewReference, ReviewerBindingError, ReviewerBindingFailure, ReviewerBindingRecord, ReviewerBindingSource, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, SessionQueryReads, SingularityContextService, SingularityContextService as default, StatusQuery, StatusScope, Utf8Slice, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omittedLine, openRootProposals, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, storeStateText, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };

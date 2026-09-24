@@ -147,7 +147,14 @@ interface WorkerGrant {
 interface SpawnRequest {
   readonly sessionId: SessionId$1;
   readonly name: string;
-  readonly prompt: readonly ContentBlock[];
+  /**
+   * The first user message the child is prompted with. Optional because a
+   * `taskWorker` spawn needs none: the agent runtime fills the default kickoff
+   * ({@link WORKER_KICKOFF_TEXT}), and the worker's contract and state are the
+   * context assembly's, not this message's. A spawn that is neither given a
+   * prompt nor marked `taskWorker` is refused.
+   */
+  readonly prompt?: readonly ContentBlock[];
   readonly agentOptions?: AgentOptions;
   /** Capability-derived authorization applied to the child before publication. Absent = no capability decided it. */
   readonly grant?: WorkerGrant;
@@ -164,13 +171,25 @@ interface SpawnRequest {
    */
   readonly permissionPreset?: string;
   /**
-   * The child's contract, registered as a system-prompt section on the child's
-   * own scope. The loop reprojects that section into surface node 0 on every
-   * step, so the contract survives compaction instead of living only in the
-   * spawn prompt. Task-runtime renders the text from the store; absent or blank
-   * registers nothing. See `./contract-reinjection.ts`.
+   * Declare the child a task worker (A2): the spawn setup installs the stable
+   * worker policy section (`singularity:worker`, order 75 — the worker's
+   * contract itself is the context assembly's `singularity:worker-contract`
+   * section, injected from the store at every model request), and an absent
+   * prompt becomes the default kickoff. Declared at spawn, not persisted: it
+   * describes who this child is, and the store's records stay the authority on
+   * what it works on.
    */
-  readonly contract?: string;
+  readonly taskWorker?: boolean;
+  /**
+   * The one awaited door a caller gets between "the child is a published graph
+   * member and its spawn was announced" and "the first model input is sent"
+   * (A2 §D: the reviewer ledger is written and read back here, so a delegation
+   * the context assembly can verify exists before any model request). The
+   * callback receives nothing a model could have influenced. When it rejects,
+   * the spawn fails the same way a publish failure does: the handle is
+   * disposed, the graph node is marked failed, and no model input was sent.
+   */
+  readonly beforePrompt?: () => Promise<void>;
   readonly signal?: AbortSignal;
 }
 //#endregion
@@ -244,6 +263,51 @@ declare function findSkillFileIn(roots: readonly string[], name: string): Promis
  */
 declare function skillRootsFor(cwd: string | undefined): Promise<string[]>;
 //#endregion
+//#region src/prompts/worker.prompts.d.ts
+/**
+ * The worker role's stable policy (A2): the rules every task worker runs under,
+ * whatever its task, its handoff, or this deployment's decomposition switch.
+ *
+ * What belongs here and nowhere else: unconditional behaviour. The contract,
+ * the root briefing and the handoff are the context package's assembly
+ * projection (`singularity:worker-contract`, order 80 — this section sits just
+ * ahead of it), and the rules that depend on the task or the deployment (the
+ * decomposable hint, the runtime-split rule, the review wait) are the same
+ * projection's conditional part — one rule lives in exactly one of the two.
+ *
+ * Migrated from the old spawn prompt (`task-runtime`'s retired
+ * `renderWorkerPrompt`), minus the session-tool guidance: history is read with
+ * `context_read` now, and the raw cross-session readers that prompt pointed at
+ * are sealed (`./raw-session-guard.ts`). As a system-prompt section this text is
+ * what the loop reprojects into surface node 0, so the rules survive the folds
+ * the old spawn prompt did not.
+ */
+/**
+ * The worker policy, registered as the `singularity:worker` section (order 75)
+ * of every spawn that declares `taskWorker`. Unconditional on purpose: anything
+ * that could change with the task or the deployment is not written here.
+ */
+declare const WORKER_POLICY_TEXT: string;
+/**
+ * The first user message a task worker receives when its spawn carried no
+ * prompt of its own. The kickoff points at the context, it does not replace it:
+ * the contract and state are the store's, and this only says where to look.
+ */
+declare const WORKER_KICKOFF_TEXT: string;
+//#endregion
+//#region src/raw-session-guard.d.ts
+/** The four raw cross-session readers no Singularity role may execute. */
+declare const RAW_SESSION_READ_TOOLS: readonly string[];
+/** The one denial reason every sealed call reports, by name. */
+declare const RAW_SESSION_READ_DENIAL = "singularity: raw cross-session reads are sealed; use context_read";
+/**
+ * Deny the four readers on one agent's own scope, for the agent's whole life.
+ * Registered through the agent's scoped context, so it travels with the agent
+ * and touches no sibling; a scope chain re-evaluation cannot lift it, because
+ * a guard has no allow answer.
+ */
+declare function sealRawSessionReads(agentCtx: Context): void;
+//#endregion
 //#region src/index.d.ts
 declare class AgentRuntime extends Service {
   static inject: string[];
@@ -268,4 +332,4 @@ declare class AgentRuntime extends Service {
   private scope;
 }
 //#endregion
-export { type AgentOptions, AgentRuntime, AgentRuntime as default, type CanvasNode, type ContentBlock, type GraphScope, type McpServerSpec, type ParsedSkillFile, type ResolvedGrant, type RootRequest, type RuntimePromptSource, type SessionVisibility, type SpawnRequest, type WorkerCapabilityGrant, type WorkerGrant, applyWorkerGrant, findSkillFileIn, parseSkillFile, resolveGrant, skillRootsFor };
+export { type AgentOptions, AgentRuntime, AgentRuntime as default, type CanvasNode, type ContentBlock, type GraphScope, type McpServerSpec, type ParsedSkillFile, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, type ResolvedGrant, type RootRequest, type RuntimePromptSource, type SessionVisibility, type SpawnRequest, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, type WorkerCapabilityGrant, type WorkerGrant, applyWorkerGrant, findSkillFileIn, parseSkillFile, resolveGrant, sealRawSessionReads, skillRootsFor };

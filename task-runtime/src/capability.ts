@@ -50,14 +50,17 @@ export interface CapabilityConfig {
  * | bash              | `shell/tool-bash` (`index.ts:242`)                                  |
  * | jobs              | `jobs/tool-jobs` (`index.ts:302,342,362`)                           |
  * | skill             | `skill/tool-skill` (`index.ts:82`)                                  |
- * | session-history   | `session-query/tool-session-query` (`index.ts:109,96,86`)           |
  * | ask-user          | `interaction/tool-ask-user` (`index.ts:21`)                         |
  * | web               | `web/tool-web` (`fetch.ts:459`, `search.ts:326`)                    |
  * | todo              | `todo/tool-todo` (`index.ts:147`)                                   |
  * | goal              | `goal/tool-goal` (`index.ts:195,207,234`)                           |
  * | subagent          | `subagent/tool-subagent` (`index.ts:380`), `.../tool-subagent-control` (`index.ts:29,77`, `list-agents.ts:93`) |
  *
- * Paths are relative to `thirdparty/deepseek-harness/packages/`.
+ * Paths are relative to `thirdparty/deepseek-harness/packages/`. The raw
+ * cross-session readers (`session_event_read` and its siblings) are deliberately
+ * NOT a label: A2 sealed them off every Singularity role's surface — history is
+ * read through `context_read`, whose caller-side authorization is the graph
+ * domain, not a cwd.
  *
  * A label only carries names a composition can be expected to mount; a
  * capability-declared name the worker's own composition does not offer fails
@@ -75,7 +78,6 @@ export const TOOL_LABELS: Readonly<Record<string, readonly string[]>> = {
   bash: ['bash'],
   jobs: ['job_output', 'job_list', 'job_kill'],
   skill: ['skill'],
-  'session-history': ['session_event_read', 'session_event_trace', 'session_trace'],
   'ask-user': ['ask_user_question'],
   web: ['web_fetch', 'web_search'],
   todo: ['todo_write'],
@@ -105,18 +107,18 @@ export function resolveToolLabels(capability: string, labels: readonly string[])
 /**
  * The capability-worker baseline: what every worker needs whatever its
  * capabilities are, because its own prompt tells it to use these. Every entry
- * cites the prompt line that needs it (`handoff.ts:renderWorkerPrompt`, plus
- * the shell tool's own guidance for `jobs`):
+ * cites the prompt line that needs it (the worker policy section,
+ * `agent-runtime/src/prompts/worker.prompts.ts`, plus the shell tool's own
+ * guidance for `jobs`):
  *
- * - `filesystem` — "Do the work" / "Keep changes scoped to this task" (`:135-137`).
- * - `bash` — "Where a criterion lists a command, make that command exit 0 in the checkout" (`:136`).
+ * - `filesystem` — "Do the work" / "Keep changes scoped to this task".
+ * - `bash` — "Where a criterion lists a command, make that command exit 0 in the checkout".
  * - `jobs` — that same command is often long-running, and `bash`'s own description
  *   tells the model to collect background output with `job_output`/`job_kill`.
  * - `search` — locate the code the work touches.
  * - `skill` — without the loader the granted skills are unreachable, and
  *   `tool-skill` only injects the catalog when its tool is visible.
- * - `session-history` — "Read it exactly with `session_event_read` … or `session_trace`" (`:119`).
- * - `ask-user` — "Need a human decision? Ask with `ask_user_question`" (`:137`).
+ * - `ask-user` — "Need a human decision? Ask with `ask_user_question`".
  *
  * A composition that offers none of them (the `bb-verify` node mounts no shell)
  * simply keeps what it has: see `agent-runtime/src/grants.ts`.
@@ -127,7 +129,6 @@ export const WORKER_BASELINE_LABELS: readonly string[] = [
   'jobs',
   'search',
   'skill',
-  'session-history',
   'ask-user',
 ]
 
@@ -150,15 +151,21 @@ export const WORKER_BASELINE_LABELS: readonly string[] = [
  * Every entry cites the prompt or tool contract that needs it:
  * - `capability_list`: `task_decompose` asks callers to discover valid capability
  *   names before proposing children, including recursively spawned workers.
- * - `task_decompose` — "Call `task_decompose` instead, with a `reason` and the child task list" (`handoff.ts:100`),
- *   and for a `leaf` worker whose deployment runs with `Config.allowRuntimeDecomposition` on,
- *   the runtime-split rule (`handoff.ts:145`) that opens the same tool to it.
- * - `task_submit_result` — "When the work is done, hand it in with `task_submit_result`" (`handoff.ts:161`):
- *   the submission is the only completion a worker can claim, so a worker without
- *   the tool could never finish a run.
- * - `task_read` — "re-read your own contract and run with `task_read`" (`handoff.ts:160`).
- * - `task_status` — the same line: the whole tree with `task_status` (`handoff.ts:160`).
- * - `task_verify` — "`task_verify` is only a self-check" (`handoff.ts:166`).
+ * - `task_decompose` — a worker admitted as decomposable is told to call it with
+ *   a `reason` and the child task list, and for a `leaf` worker whose deployment
+ *   runs with `Config.allowRuntimeDecomposition` on, the runtime-split rule the
+ *   context projection carries opens the same tool to it.
+ * - `task_submit_result` — "When the work is done, hand it in with `task_submit_result`"
+ *   (the worker policy section): the submission is the only completion a worker
+ *   can claim, so a worker without the tool could never finish a run.
+ * - `task_read` — the caller's own contract and run (A2 §D).
+ * - `task_status` — the same policy line: the project state with `task_status`.
+ * - `context_read` — the one reference reader (A2 §D): the worker's handoff and
+ *   its task records point at artifacts, evidence, reviews, diagnoses and
+ *   sessions by id, and this is the only door that reads them inside the
+ *   caller's own graph domain — the raw cross-session readers it replaced are
+ *   sealed off every runtime-owned agent (`agent-runtime`'s execution guard).
+ * - `task_verify` — "`task_verify` is only a self-check" (the worker policy section).
  * - `task_cancel` — no prompt line asks for it: a run that decomposed holds a
  *   batch of its own, and the protocol's only way to end that batch early is
  *   this call (A3 §3.6). It is also the one write the execution gate keeps for
@@ -193,6 +200,7 @@ export const WORKER_BASELINE_LABELS: readonly string[] = [
 export const WORKER_BASELINE_TOOLS: readonly string[] = [
   'task_read',
   'task_status',
+  'context_read',
   'task_decompose',
   'task_submit_result',
   'task_cancel',

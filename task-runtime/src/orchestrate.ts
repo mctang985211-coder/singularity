@@ -36,8 +36,7 @@ import { describeOwner, releaseLayer } from './workspace.ts'
 import type { WorkspaceOwner, WorkspaceRegistry } from './workspace.ts'
 import { bindRunProviders } from './run-binding.ts'
 import { manifestMcpServers, resolveMcpServerSpecs, type McpEnvBinding } from './mcp-servers.ts'
-import { buildHandoff, renderWorkerPrompt } from './handoff.ts'
-import { renderWorkerContract } from './contract.ts'
+import { buildHandoff } from './handoff.ts'
 import { openProposalOf } from './proposal.ts'
 
 /** Raised when the verifier service (ticket C2) is not loaded in the context. */
@@ -61,18 +60,19 @@ export interface ChildOutcome {
 export interface SpawnChildRequest {
   sessionId: string
   name: string
-  prompt: string
   agentPreset?: string
   /** Permission preset the child session is switched to (capability-granted; absent keeps the default posture). */
   permissionPreset?: string
   /** Capability-derived authorization the agent runtime applies before the worker is published. */
   grant?: WorkerGrant
   /**
-   * The child's contract as a marked block, registered as a system-prompt
-   * section so the loop reprojects it into surface node 0 on every step instead
-   * of leaving it only in the spawn prompt, which a fold can shadow.
+   * Marks the child as a task worker of this runtime (A2): the agent runtime
+   * installs the stable worker policy section and the default kickoff, and the
+   * context assembly injects the child's contract and state from the store —
+   * this request carries no prompt and no contract text of its own, because a
+   * spawn prompt is a surface a fold can shadow and the store is the authority.
    */
-  contract?: string
+  taskWorker?: boolean
   signal?: AbortSignal
 }
 
@@ -1726,11 +1726,7 @@ async function startChildRound(
     handle = await env.spawn({
       sessionId,
       name,
-      prompt: renderWorkerPrompt(handoff, task, {
-        allowRuntimeDecomposition: env.allowRuntimeDecomposition,
-        ...(binding === undefined ? {} : { binding }),
-      }),
-      contract: renderWorkerContract(task, handoff, binding),
+      taskWorker: true,
       grant: await authorizedGrant(env, manifest, skillRootsForRun([], binding)),
       ...(agentPreset === undefined ? {} : { agentPreset }),
       ...(permissionPreset === undefined ? {} : { permissionPreset }),
@@ -2196,9 +2192,6 @@ export interface ReplayRunInit {
   lineage: string
   /** The preset to mount; already overlay-resolved by the caller. */
   agentPreset?: string
-  /** Worker prompt and its contract block, pre-rendered. Unused when `spawn` is false. */
-  prompt?: string
-  contract?: string
   /** Extra skill roots for the worker grant (overlay). */
   skillRoots?: readonly string[]
   /** false: deterministic criteria replay — no worker is spawned, the verifier alone settles the run. */
@@ -2337,8 +2330,7 @@ export async function runReplayTask(
     handle = await env.spawn({
       sessionId,
       name: task.objective.trim().replace(/\s+/g, ' ').slice(0, 40) || `replay-${task.taskId}`,
-      prompt: init.prompt ?? '',
-      ...(init.contract === undefined ? {} : { contract: init.contract }),
+      taskWorker: true,
       grant: await authorizedGrant(env, init.manifest, roots),
       ...(init.agentPreset === undefined ? {} : { agentPreset: init.agentPreset }),
       ...(permissionPreset === undefined ? {} : { permissionPreset }),

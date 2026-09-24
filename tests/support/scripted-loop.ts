@@ -58,8 +58,10 @@ import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
 import type { TaskEvent, TaskSnapshot } from '../../task/src/index.ts'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
+import { SingularityContextService } from '../../context/src/index.ts'
 import { ProposalReviewService } from '../../agent-singularity/src/proposal-review.ts'
 import { defineCapabilityListTool } from '../../agent-singularity/src/tools/capability-list.ts'
+import { defineContextReadTool } from '../../agent-singularity/src/tools/context-read.ts'
 import { defineTaskCancelTool } from '../../agent-singularity/src/tools/task-cancel.ts'
 import { defineTaskDecomposeTool } from '../../agent-singularity/src/tools/task-decompose.ts'
 import { defineTaskIntakeTool } from '../../agent-singularity/src/tools/task-intake.ts'
@@ -72,23 +74,31 @@ import { defineTaskSubmitResultTool } from '../../agent-singularity/src/tools/ta
 import type { CapabilityConfig, Config, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
+import { graphRegistry, sessionQueryReads } from './context-plane.ts'
 
 /** The root agent's allow-list, exactly as `agent-runtime` composes it. Exported so a fixture that mounts no loop still composes the deployment's root surface. */
 export const ROOT_TOOLS = [
-  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'skill', 'task_intake', 'task_decompose',
+  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'context_read', 'skill', 'task_intake', 'task_decompose',
   'task_submit_result', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
   'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
 
-/** The deployment's other global tools: the worker baseline's plane plus the session readers. */
+/**
+ * The deployment's other global tools: the worker baseline's plane plus the four
+ * raw cross-session readers a deployment's `tool-session-query` mounts. Those
+ * four are registered here as stand-ins on purpose — the seal this deployment
+ * puts on them is an execution guard (`agent-runtime/src/raw-session-guard.ts`),
+ * and a guard can only be shown to hold against a surface that would otherwise
+ * answer the call.
+ */
 export const OTHER_TOOLS = [
   'bash', 'read', 'write', 'edit', 'read_image', 'glob', 'grep', 'job_output', 'job_list', 'job_kill', 'ask_user_question',
-  'web_fetch', 'subagent_fetchless', 'session_search', 'session_event_read', 'session_trace',
+  'web_fetch', 'subagent_fetchless', 'session_search', 'session_event_read', 'session_event_trace', 'session_trace',
 ]
 
 /** The tools this fixture registers for real; every other name is a stand-in. */
 const REAL_TOOLS = [
-  'task_read', 'task_status', 'capability_list', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel',
+  'task_read', 'task_status', 'context_read', 'capability_list', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel',
   'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel',
 ]
 
@@ -138,7 +148,14 @@ export interface ToolCallRecord {
 export interface ScriptedSpawn {
   readonly sessionId: string
   readonly name: string
-  readonly prompt: string
+  /**
+   * The message the spawn carried, when it carried one. A task worker's spawn
+   * carries none (A2): its contract and state are the context assembly's, and
+   * its first user message is the runtime's default kickoff.
+   */
+  readonly prompt?: string
+  /** Whether the spawn declared the child a task worker (`SpawnRequest.taskWorker`). */
+  readonly taskWorker?: boolean
 }
 
 export interface ScriptedLoopOptions {
@@ -631,7 +648,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
       setStatusIn: async () => {},
       addAgentIn: async (_storeId: string, agent: { id: string; name: string; status: string }) => { graphState.agents.push(agent as never) },
     } as never)
-    ctx.provide('graphs', {
+    ctx.provide('graphs', graphRegistry({
       graphForSession: async (sessionId: SessionId) => ({
         id: 'g1',
         name: 'graph',
@@ -640,7 +657,26 @@ class ScriptedLoopImpl implements ScriptedLoop {
         graphStoreId: 'sg-g-root',
         layoutStoreId: 'sg-l-root',
       }),
-    } as never)
+      list: async () => [{
+        id: 'g1',
+        name: 'graph',
+        envId: 'env1',
+        rootSessionId: this.primary,
+        graphStoreId: 'sg-g-root',
+        layoutStoreId: 'sg-l-root',
+      }],
+      // Membership is the graph store's own record — the node a root or a spawn
+      // published — so a session reference is checked against it before any log
+      // is read.
+      members: () => [
+        ...this.roots.map(String),
+        ...graphState.agents.map(agent => String(agent.id)),
+        ...this.sessionRoot.keys(),
+      ],
+    }) as never)
+    // The session plane's read-only half (A2): exact reads over this fixture's own
+    // log, the same records `eventsOf` returns.
+    ctx.provide('sessionQuery', sessionQueryReads(sessionId => this.log.get(String(sessionId))?.events) as never)
     ctx.provide('envBuilder', { store: { get: (envId: string) => (envId === 'env1' ? { path: this.checkout, components: [] } : undefined) } } as never)
 
     // The tool plane: the real singularity tools, stand-ins for the rest, and a
@@ -658,6 +694,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
     }
     ctx.tools.register(defineTaskReadTool(ctx))
     ctx.tools.register(defineTaskStatusTool(ctx))
+    ctx.tools.register(defineContextReadTool(ctx))
     ctx.tools.register(defineCapabilityListTool(ctx))
     // The real root intake (A0 stage C): a spec that drives the root's own turn
     // reaches activation through the deployment's tool, not through a service call
@@ -689,7 +726,10 @@ class ScriptedLoopImpl implements ScriptedLoop {
     this.agentRuntime = new RecordingAgentRuntime(ctx, request => this.spawnRecords.push({
       sessionId: String(request.sessionId),
       name: request.name,
-      prompt: request.prompt.map(block => (block.type === 'text' ? block.text : `[${block.type}]`)).join('\n'),
+      ...(request.prompt === undefined
+        ? {}
+        : { prompt: request.prompt.map(block => (block.type === 'text' ? block.text : `[${block.type}]`)).join('\n') }),
+      ...(request.taskWorker === undefined ? {} : { taskWorker: request.taskWorker }),
     }))
     await ctx.plugin(AgentLoop, { agents: [] })
     // The verifier and the runtime are mounted the way the deployment's loader
@@ -707,6 +747,11 @@ class ScriptedLoopImpl implements ScriptedLoop {
       runBindingRoot: join(this.home, 'singularity', 'run-bindings'),
     } as Config)
     this.runtime = ctx.get('taskRuntime') as TaskRuntime
+    // The read core and the prompt assembly (A2): mounted where the deployment's
+    // bundle mounts it — after the runtime it observes, before the agent plane it
+    // serves — so every model request this fixture runs is assembled with the
+    // real sections and read by the real tools.
+    await ctx.plugin(SingularityContextService)
     // The review channel, mounted where the deployment mounts it — at the service
     // assembly, not on any agent's tool plane — so a review of this store's
     // batches is routed through the approval seam above, and a worker can never

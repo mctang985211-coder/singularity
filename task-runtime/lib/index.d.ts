@@ -38,14 +38,17 @@ interface CapabilityConfig {
  * | bash              | `shell/tool-bash` (`index.ts:242`)                                  |
  * | jobs              | `jobs/tool-jobs` (`index.ts:302,342,362`)                           |
  * | skill             | `skill/tool-skill` (`index.ts:82`)                                  |
- * | session-history   | `session-query/tool-session-query` (`index.ts:109,96,86`)           |
  * | ask-user          | `interaction/tool-ask-user` (`index.ts:21`)                         |
  * | web               | `web/tool-web` (`fetch.ts:459`, `search.ts:326`)                    |
  * | todo              | `todo/tool-todo` (`index.ts:147`)                                   |
  * | goal              | `goal/tool-goal` (`index.ts:195,207,234`)                           |
  * | subagent          | `subagent/tool-subagent` (`index.ts:380`), `.../tool-subagent-control` (`index.ts:29,77`, `list-agents.ts:93`) |
  *
- * Paths are relative to `thirdparty/deepseek-harness/packages/`.
+ * Paths are relative to `thirdparty/deepseek-harness/packages/`. The raw
+ * cross-session readers (`session_event_read` and its siblings) are deliberately
+ * NOT a label: A2 sealed them off every Singularity role's surface — history is
+ * read through `context_read`, whose caller-side authorization is the graph
+ * domain, not a cwd.
  *
  * A label only carries names a composition can be expected to mount; a
  * capability-declared name the worker's own composition does not offer fails
@@ -69,18 +72,18 @@ declare function resolveToolLabels(capability: string, labels: readonly string[]
 /**
  * The capability-worker baseline: what every worker needs whatever its
  * capabilities are, because its own prompt tells it to use these. Every entry
- * cites the prompt line that needs it (`handoff.ts:renderWorkerPrompt`, plus
- * the shell tool's own guidance for `jobs`):
+ * cites the prompt line that needs it (the worker policy section,
+ * `agent-runtime/src/prompts/worker.prompts.ts`, plus the shell tool's own
+ * guidance for `jobs`):
  *
- * - `filesystem` — "Do the work" / "Keep changes scoped to this task" (`:135-137`).
- * - `bash` — "Where a criterion lists a command, make that command exit 0 in the checkout" (`:136`).
+ * - `filesystem` — "Do the work" / "Keep changes scoped to this task".
+ * - `bash` — "Where a criterion lists a command, make that command exit 0 in the checkout".
  * - `jobs` — that same command is often long-running, and `bash`'s own description
  *   tells the model to collect background output with `job_output`/`job_kill`.
  * - `search` — locate the code the work touches.
  * - `skill` — without the loader the granted skills are unreachable, and
  *   `tool-skill` only injects the catalog when its tool is visible.
- * - `session-history` — "Read it exactly with `session_event_read` … or `session_trace`" (`:119`).
- * - `ask-user` — "Need a human decision? Ask with `ask_user_question`" (`:137`).
+ * - `ask-user` — "Need a human decision? Ask with `ask_user_question`".
  *
  * A composition that offers none of them (the `bb-verify` node mounts no shell)
  * simply keeps what it has: see `agent-runtime/src/grants.ts`.
@@ -105,15 +108,21 @@ declare const WORKER_BASELINE_LABELS: readonly string[];
  * Every entry cites the prompt or tool contract that needs it:
  * - `capability_list`: `task_decompose` asks callers to discover valid capability
  *   names before proposing children, including recursively spawned workers.
- * - `task_decompose` — "Call `task_decompose` instead, with a `reason` and the child task list" (`handoff.ts:100`),
- *   and for a `leaf` worker whose deployment runs with `Config.allowRuntimeDecomposition` on,
- *   the runtime-split rule (`handoff.ts:145`) that opens the same tool to it.
- * - `task_submit_result` — "When the work is done, hand it in with `task_submit_result`" (`handoff.ts:161`):
- *   the submission is the only completion a worker can claim, so a worker without
- *   the tool could never finish a run.
- * - `task_read` — "re-read your own contract and run with `task_read`" (`handoff.ts:160`).
- * - `task_status` — the same line: the whole tree with `task_status` (`handoff.ts:160`).
- * - `task_verify` — "`task_verify` is only a self-check" (`handoff.ts:166`).
+ * - `task_decompose` — a worker admitted as decomposable is told to call it with
+ *   a `reason` and the child task list, and for a `leaf` worker whose deployment
+ *   runs with `Config.allowRuntimeDecomposition` on, the runtime-split rule the
+ *   context projection carries opens the same tool to it.
+ * - `task_submit_result` — "When the work is done, hand it in with `task_submit_result`"
+ *   (the worker policy section): the submission is the only completion a worker
+ *   can claim, so a worker without the tool could never finish a run.
+ * - `task_read` — the caller's own contract and run (A2 §D).
+ * - `task_status` — the same policy line: the project state with `task_status`.
+ * - `context_read` — the one reference reader (A2 §D): the worker's handoff and
+ *   its task records point at artifacts, evidence, reviews, diagnoses and
+ *   sessions by id, and this is the only door that reads them inside the
+ *   caller's own graph domain — the raw cross-session readers it replaced are
+ *   sealed off every runtime-owned agent (`agent-runtime`'s execution guard).
+ * - `task_verify` — "`task_verify` is only a self-check" (the worker policy section).
  * - `task_cancel` — no prompt line asks for it: a run that decomposed holds a
  *   batch of its own, and the protocol's only way to end that batch early is
  *   this call (A3 §3.6). It is also the one write the execution gate keeps for
@@ -190,7 +199,10 @@ declare function resolvePermission(manifest: CapabilityManifest, resolveSpec: (n
  * What a session bound to a run may still call once its run is no longer
  * `active`. Read-only inspection, diagnosis, the human-question tools, and the
  * controlled cancellation of this batch: the work of *looking at* a run or
- * ending it, never of making it produce more.
+ * ending it, never of making it produce more. `context_read` is the one
+ * history/reference reader here: the raw cross-session tools it replaced
+ * (`session_event_read` and its siblings) are sealed off every runtime-owned
+ * agent by the execution guard, so they have no phase to be allowed in.
  *
  * `task_cancel` is in the list because cancelling is the one write a waiting or
  * submitted run is allowed: the run has stopped deciding, and the owner may
@@ -1208,25 +1220,6 @@ interface RunBindingRead {
  * to re-read, which is not the same as content that failed to re-read.
  */
 declare function readRunBinding(binding: RunProviderBinding): Promise<RunBindingRead | undefined>;
-/**
- * The "chosen implementation" summary of one run — the section a worker's
- * contract block, its spawn prompt and `task_read` all render, from this one
- * function and one record, so the three views cannot describe different runs.
- *
- * What it carries: every capability the run matched, the skill selected for it
- * (name, role, purpose, short content digest and — where the skill declares one
- * — the contract digest), the granted MCP servers, the snapshot the run is bound
- * to, and what the binding does *not* cover. What it deliberately leaves out: the
- * skill text. A worker reads the body on demand with the `skill` tool; a summary
- * is identity and purpose.
- *
- * `read` is the re-check result when the caller re-read the snapshot. A caller
- * that has not read it (the spawn's own render, before the worker exists) omits
- * it, and then no readability claim is made in either direction. When it is
- * given and reports defects, they are rendered under a named refusal so a reader
- * is never told to trust content that is not there.
- */
-declare function renderRunBinding(binding: RunProviderBinding | undefined, read?: RunBindingRead): string;
 //#endregion
 //#region src/normalize.d.ts
 /** Where one batch came from: the store, the parent, its run, and the caller that submitted it. */
@@ -1469,18 +1462,19 @@ interface ChildOutcome {
 interface SpawnChildRequest {
   sessionId: string;
   name: string;
-  prompt: string;
   agentPreset?: string;
   /** Permission preset the child session is switched to (capability-granted; absent keeps the default posture). */
   permissionPreset?: string;
   /** Capability-derived authorization the agent runtime applies before the worker is published. */
   grant?: WorkerGrant;
   /**
-   * The child's contract as a marked block, registered as a system-prompt
-   * section so the loop reprojects it into surface node 0 on every step instead
-   * of leaving it only in the spawn prompt, which a fold can shadow.
+   * Marks the child as a task worker of this runtime (A2): the agent runtime
+   * installs the stable worker policy section and the default kickoff, and the
+   * context assembly injects the child's contract and state from the store —
+   * this request carries no prompt and no contract text of its own, because a
+   * spawn prompt is a surface a fold can shadow and the store is the authority.
    */
-  contract?: string;
+  taskWorker?: boolean;
   signal?: AbortSignal;
 }
 /**
@@ -1808,9 +1802,6 @@ interface ReplayRunInit {
   lineage: string;
   /** The preset to mount; already overlay-resolved by the caller. */
   agentPreset?: string;
-  /** Worker prompt and its contract block, pre-rendered. Unused when `spawn` is false. */
-  prompt?: string;
-  contract?: string;
   /** Extra skill roots for the worker grant (overlay). */
   skillRoots?: readonly string[];
   /** false: deterministic criteria replay — no worker is spawned, the verifier alone settles the run. */
@@ -2281,68 +2272,16 @@ interface HandoffInit {
   relevantEvidence?: readonly string[];
 }
 /**
- * Deployment knobs the rendered prompt has to reflect. Required, not optional:
- * the prompt is the only place a worker learns whether the runtime will admit
- * its own decomposition, and a default here could silently disagree with
- * `Config.allowRuntimeDecomposition` (#16 in the guide is exactly this failure
- * mode — prompt wording decides the route, and no test asserts the real model's
- * choice).
+ * The envelope passed from a parent run to the child it delegates to (RFC §18).
+ *
+ * This module builds and persists the DATA of a handoff and nothing else: what
+ * a worker is shown from it is the context package's projection
+ * (`context/src/projections.ts`, `render.ts:handoffLines`), and the stable
+ * behaviour rules that used to ride the same spawn prompt are the agent
+ * runtime's worker policy section — neither is rendered here, because the
+ * runtime must not grow a second rendering of what it owns as facts.
  */
-interface WorkerPromptOptions {
-  /**
-   * `Config.allowRuntimeDecomposition`. On, the rules tell every worker it may
-   * call `task_decompose` when the work turns out not to be atomic, and what a
-   * refusal means; off, the rules stay silent about the tool — a `decomposable`
-   * child's own block already names it, and for a `leaf` worker naming it would
-   * only invite a call admission refuses.
-   */
-  allowRuntimeDecomposition: boolean;
-  /**
-   * What this run was bound to and loaded (S1-C item 4). Rendered as the
-   * "chosen implementation" section — the run's capability names, the provider
-   * selected for each, and how to read a body on demand — from the same function
-   * the contract block and `task_read` use. Absent on a run that recorded no
-   * binding, and then the prompt says nothing about one.
-   */
-  binding?: RunProviderBinding;
-}
-/** Envelope passed from a parent run to the child it delegates to (RFC §18). */
 declare function buildHandoff(init: HandoffInit): TaskHandoff;
-/**
- * Render the worker prompt for a delegated child task. Compact on purpose:
- * objective, the acceptance criteria table (with verifier commands and the
- * protected input paths the worker must not modify), the implementation chosen
- * for this run ({@link WorkerPromptOptions.binding}), the handoff envelope, the
- * pointer to the delegating session, the decomposable reminder when the parent
- * asked for a further split, the runtime-split rule when the deployment admits
- * one ({@link WorkerPromptOptions}), and the rules — a few thousand tokens at
- * most.
- */
-declare function renderWorkerPrompt(handoff: TaskHandoff, childTask: TaskInstance, options: WorkerPromptOptions): string;
-//#endregion
-//#region src/contract.d.ts
-/**
- * Opening marker of the block. Stable on purpose: it is what tells a reader —
- * human or test — that this text is the contract, and it lets a future
- * re-render find the copy already on the surface.
- */
-declare const WORKER_CONTRACT_OPEN = "<worker-contract";
-/** Closing marker, and the URL-safe suffix a search for the block's end uses. */
-declare const WORKER_CONTRACT_CLOSE = "</worker-contract>";
-/**
- * Render one task's contract block.
- * @param task - the child task as the store holds it at delegation.
- * @param handoff - the envelope the parent passed to this child.
- * @param binding - what this run was bound to and loaded (S1-C item 4): the
- *   providers chosen for it, rendered as the "chosen implementation" section
- *   from the same function and record `task_read` renders, so the two views
- *   cannot describe different runs. Absent on a run that recorded no binding,
- *   and then nothing is added to the block.
- * @returns the marked block, ending in the one line that says where the
- *   authority lives, so a model reading it never has to guess whether a
- *   compacted spawn prompt or this block is the current contract.
- */
-declare function renderWorkerContract(task: TaskInstance, handoff: TaskHandoff, binding?: RunProviderBinding): string;
 //#endregion
 //#region src/verified-read.d.ts
 /**
@@ -4353,6 +4292,13 @@ declare class TaskRuntime extends Service {
     run: TaskRun;
   }>;
   /**
+   * Whether this deployment admits a run's own `task_decompose`
+   * (`Config.allowRuntimeDecomposition`), read-only. The context package's
+   * worker projection carries the rule that follows from it; nothing here
+   * grants or denies a call — admission still decides every one.
+   */
+  allowsRuntimeDecomposition(): boolean;
+  /**
    * The gate phase one bound session's run implies, applied on every rebinding.
    * The gate is a handle on the run's phase and the phase is the store's fact,
    * so a session this process rebound — from its index, from a reopened store,
@@ -4640,4 +4586,4 @@ declare class TaskRuntime extends Service {
   private agentOrUndefined;
 }
 //#endregion
-export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BatchContext, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, PROPOSAL_REQUEST_KEY_PREFIX, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKER_CONTRACT_CLOSE, WORKER_CONTRACT_OPEN, WORKSPACE_OWNERS_DIR, type WorkerPromptOptions, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, assertRootBudgetConfig, bindRunProviders, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, readProcessStartTime, readRunBinding, readVerifiedFile, registeredVerifierIds, registryRevision, renderRunBinding, renderWorkerContract, renderWorkerPrompt, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BatchContext, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, PROPOSAL_REQUEST_KEY_PREFIX, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, assertRootBudgetConfig, bindRunProviders, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, readProcessStartTime, readRunBinding, readVerifiedFile, registeredVerifierIds, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

@@ -2,12 +2,11 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
-import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
+import type {} from '@dangosys/dsh-singularity-context'
+import { openRootProposals } from '@dangosys/dsh-singularity-context'
 import type { TaskProposalRoot, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import type { RootContractSpec, RootIntakeResult } from '@dangosys/dsh-singularity-task-runtime'
-import { openRootProposals, rootSnapshotOrUndefined } from './root-store.ts'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
@@ -19,6 +18,23 @@ function sessionId(exec: ToolRunContext): SessionId {
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * The root store's snapshot, or `undefined` when no such store exists yet — the
+ * pre-intake state §1.1 allows, answered as a state rather than thrown at a
+ * reader. The store's own word for it is "does not exist"; every other failure
+ * (a log this process cannot read, a store it cannot open) is the reader's to
+ * surface and is re-raised unchanged. Read-only: `ctx.task.openStore` is the
+ * store's own read open.
+ */
+async function rootSnapshotOrUndefined(ctx: Context, storeId: string): Promise<TaskSnapshot | undefined> {
+  try {
+    return await ctx.task.openStore(storeId)
+  } catch (error) {
+    if (error instanceof Error && /does not exist/.test(error.message)) return undefined
+    throw error
+  }
 }
 
 /**
@@ -274,19 +290,24 @@ export function defineTaskIntakeTool(ctx: Context) {
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
       const caller = sessionId(exec)
-      const graph = await ctx.graphs.graphForSession(caller)
       // The caller's identity is the first rule, and the tool's own: a contract
       // is the goal of one root session, and a worker that could intake one
-      // would be creating a second root under somebody else's graph. Checked
-      // before any service call, so a refusal here has no side effect at all.
-      if (graph.rootSessionId !== caller) {
+      // would be creating a second root under somebody else's graph. The
+      // resolution is the context read core's trusted session→graph binding —
+      // checked before any service call, so a refusal here has no side effect
+      // at all.
+      const resolution = await ctx.singularityContext.resolveCaller(caller)
+      if (resolution.kind === 'unbound') {
+        return [`task_intake rejected: ${resolution.detail}`, 'Nothing was read and nothing was written.'].join('\n')
+      }
+      if (resolution.kind !== 'root') {
         return [
-          `task_intake rejected: session "${caller}" is not the root session of graph "${graph.id}" (its root session is "${graph.rootSessionId}") —`,
+          `task_intake rejected: session "${caller}" is not the root session of graph "${resolution.graph.id}" (its root session is "${resolution.graph.rootSessionId}") —`,
           'a root contract is the goal of one root session, and a worker\'s task was admitted by its parent\'s decomposition.',
           'Nothing was read and nothing was written.',
         ].join('\n')
       }
-      const storeId = rootTaskStoreId(graph.rootSessionId)
+      const storeId = resolution.storeId
       // The two keys this tool declares are options of the intake, not contract
       // fields: passing them inside the spec would make the runtime refuse them
       // by name. Everything else the caller sent goes to the runtime as it

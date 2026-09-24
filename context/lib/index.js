@@ -1,8 +1,121 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import { rootTaskStoreId } from "@dangosys/dsh-singularity-task";
 import { SESSION_QUERY_READ_WINDOW_MAX, extractSessionEventText } from "@deepseek-ai/dsh-session-query";
-import { checkObligationCoverage, findRepoRoot, loadObligationTemplates, renderRunBinding } from "@dangosys/dsh-singularity-task-runtime";
+import { checkObligationCoverage, findRepoRoot, loadObligationTemplates } from "@dangosys/dsh-singularity-task-runtime";
 
+//#region src/assembly.ts
+/**
+* Section name of the assembled contract. The name the old contract-reinjection
+* registered, kept: it is the one slot the immutable half has ever had, now
+* filled from the store at every assembly instead of rendered once at spawn.
+*/
+const WORKER_CONTRACT_SECTION = "singularity:worker-contract";
+/** Placement: after the root's `singularity:root` (70) and the worker policy's `singularity:worker` (75). */
+const WORKER_CONTRACT_ORDER = 80;
+/** The dynamic half's context name on the runtime-context plane. */
+const STATE_CONTEXT_NAME = "singularity:state";
+/** Placement among the runtime contexts, after the centrally allocated ones (`CONTEXT_ORDERS` ends at 120). */
+const STATE_CONTEXT_ORDER = 130;
+/**
+* The sections that sort at or ahead of {@link WORKER_CONTRACT_ORDER}, by name
+* (`AssembledSection` carries no order, so the insertion point is computed from
+* who these are): the harness identity, the deployment persona prefix, and this
+* deployment's two role sections. The contract goes right behind them, ahead of
+* the tool guidance that starts at order 500.
+*/
+const PRE_CONTRACT_SECTIONS = new Set([
+	"harness:identity",
+	"deployment:persona-prefix",
+	"singularity:root",
+	"singularity:worker"
+]);
+/** The error a refused assembly throws: the refusal is its name, the detail its message. */
+var AssemblyRefusalError = class extends Error {
+	constructor(refusal, detail) {
+		super(detail);
+		this.refusal = refusal;
+		this.name = "AssemblyRefusalError";
+	}
+};
+/** Throw the projection's refusal as the named rejection of this model request. */
+function throwRefusal(read$1) {
+	throw new AssemblyRefusalError(read$1.refusal, `system-prompt assembly refused (${read$1.refusal}): ${read$1.detail}`);
+}
+/** The section the immutable half becomes: literal text, never variable-interpolated. */
+function contractSection(text) {
+	return {
+		name: WORKER_CONTRACT_SECTION,
+		text,
+		interpolate: false
+	};
+}
+/**
+* Replace the contract section by name, or insert it at its order. The assembly
+* arrives sorted; the insertion point is the first section that is not one of
+* the known pre-contract ones.
+*/
+function withContractSection(assembly, text) {
+	const existing = assembly.sections.find((section) => section.name === WORKER_CONTRACT_SECTION);
+	if (existing !== void 0) {
+		existing.text = text;
+		existing.interpolate = false;
+		return;
+	}
+	let index = 0;
+	while (index < assembly.sections.length && PRE_CONTRACT_SECTIONS.has(assembly.sections[index].name)) index += 1;
+	assembly.sections.splice(index, 0, contractSection(text));
+}
+/** Append the dynamic half to the runtime-context plane; an unchanged name is replaced, never duplicated. */
+function withStateContext(assembly, text) {
+	const existing = assembly.contexts.find((context) => context.name === STATE_CONTEXT_NAME);
+	if (existing !== void 0) {
+		existing.text = text;
+		return;
+	}
+	assembly.contexts.push({
+		name: STATE_CONTEXT_NAME,
+		text
+	});
+}
+/**
+* The one assembly step this package runs (see the module doc for who gets
+* what). Mutates the assembly and delegates; a bound caller whose projection
+* refuses rejects the whole waterfall, which is what refuses the model request.
+*/
+async function assembleSingularityContext(service, assembly, context, next) {
+	const agent = context.agent;
+	if (agent === void 0) return next();
+	const sessionId = String(agent.id);
+	const resolution = await service.resolveCaller(sessionId, context.signal);
+	switch (resolution.kind) {
+		case "worker": {
+			const contract = await service.contractProjection(sessionId, context.signal);
+			if (!contract.ok) throwRefusal(contract);
+			const dynamic = await service.dynamicProjection(sessionId, context.signal);
+			if (!dynamic.ok) throwRefusal(dynamic);
+			withContractSection(assembly, contract.text);
+			withStateContext(assembly, dynamic.text);
+			return next();
+		}
+		case "root": {
+			if (resolution.task === void 0) return next();
+			const contract = await service.contractProjection(sessionId, context.signal);
+			if (!contract.ok) throwRefusal(contract);
+			withContractSection(assembly, contract.text);
+			return next();
+		}
+		case "reviewer": {
+			const contract = await service.contractProjection(sessionId, context.signal);
+			if (!contract.ok) throwRefusal(contract);
+			withContractSection(assembly, contract.text);
+			return next();
+		}
+		case "member":
+		case "unbound": return next();
+	}
+}
+
+//#endregion
 //#region src/bindings.ts
 /**
 * The one thing the single-record seam cannot express: a ledger that holds
@@ -403,6 +516,48 @@ function refused(refusal, detail) {
 }
 
 //#endregion
+//#region src/run-binding.ts
+/** The first 12 hex of a digest: enough to match two listings by eye, not a wall of hex. */
+function shortDigest(digest) {
+	return digest.slice(0, 12);
+}
+/**
+* Render one run's binding summary.
+*
+* `read` is the re-check result when the caller re-read the snapshot. A caller
+* that has not read it omits it, and then no readability claim is made in either
+* direction. When it is given and reports defects, they are rendered under a
+* named refusal so a reader is never told to trust content that is not there.
+*/
+function renderRunBinding(binding, read$1) {
+	if (binding === void 0) return "";
+	const lines = [];
+	for (const capability of binding.capabilities) {
+		const selected = binding.skills.filter((skill) => skill.capabilities.includes(capability));
+		if (selected.length === 0) {
+			lines.push(`- capability \`${capability}\`: no provider skill — the capability's tools are granted without one`);
+			continue;
+		}
+		for (const skill of selected) {
+			const contract = skill.contractDigest === null ? "" : `, contract ${shortDigest(skill.contractDigest)}`;
+			const gaps = skill.uncovered.length === 0 ? "" : ` · not covered by this binding: ${skill.uncovered.join(", ")}`;
+			lines.push(`- capability \`${capability}\` → skill \`${skill.name}\` [${skill.role}] — ${skill.description} (content ${shortDigest(skill.contentDigest)}${contract})${gaps}`);
+		}
+	}
+	if (binding.mcpServers.length > 0) lines.push(`- MCP servers mounted for this run: ${binding.mcpServers.map((server) => `\`${server.serverName}\`${server.templateDigest === null ? "" : ` (template ${shortDigest(server.templateDigest)})`}`).join(", ")}`);
+	if (lines.length === 0) return "";
+	const header = [
+		"## Implementation chosen for this run",
+		"",
+		`- registry revision: ${shortDigest(binding.registryRevision)}`,
+		...lines,
+		...binding.snapshotRoot === void 0 ? ["- a skill named here is read with the `skill` tool when you need its body; this run bound no content snapshot, so the revision and digests above are what it resolved against"] : [`- bound content snapshot: ${binding.snapshotRoot}`, "- a skill named here is read with the `skill` tool when you need its body; the revision, digests and snapshot path above are what this run is bound to"]
+	];
+	if (read$1 !== void 0 && read$1.defects.length > 0) header.push("", "Bound content is not readable: the snapshot no longer matches this run's record, and the production skill path is not a substitute for it.", ...read$1.defects.map((defect) => `- ${defect}`));
+	return header.join("\n");
+}
+
+//#endregion
 //#region src/render.ts
 /**
 * The full phase note: what a phase-less record is and what a reader can do
@@ -779,6 +934,26 @@ function referenceList(budget, title, entries, noun, how) {
 	return budget.add(omittedLine(noun, entries.length - shown, how)) ? void 0 : "too-large";
 }
 /**
+* The decomposition guidance a worker's projection carries — the
+* task/deployment-conditional part of the old spawn prompt's rules (A2: the
+* unconditional rules are the agent runtime's worker policy section, and the
+* two never repeat each other). Every condition is fixed for the whole run — a
+* task's `decompositionStatus` is immutable after admission and the deployment
+* switch is configuration — so the block is as byte-stable as the contract it
+* rides with. A replay never sees it: a replay re-runs the one task as
+* contracted, whatever the switch says.
+*/
+function workerDecompositionLines(taskRuntime, task) {
+	const decomposable = task.decompositionStatus === "decomposable";
+	const runtimeSplit = taskRuntime.allowsRuntimeDecomposition();
+	if (!decomposable && !runtimeSplit) return [];
+	const lines = [];
+	if (decomposable) lines.push("## This task is decomposable", "", "- Do not carry the work to completion yourself: this task was admitted as decomposable.", "- Call `task_decompose` instead, with a `reason` and the child task list; every child needs an acceptance criterion a verifier can judge on its own.", "- Decompose only when RFC §36 atomicity holds — independently verifiable acceptance dimensions, clear artifact boundaries, capabilities that match or gaps you can handle; otherwise do the work here.", "- Once you decompose, the nested verification settles this task; you still never declare completion yourself.");
+	if (runtimeSplit) lines.push(...lines.length === 0 ? [] : [""], "## If the work turns out not to be atomic", "", "- Call `task_decompose` yourself: this deployment admits a task's own decomposition, so your parent did not have to predict it. The call still has to clear admission — structure, acyclic dependencies, a command on every executable criterion, capability coverage, depth and batch-size limits — and a task may split only once; a refusal names the rule that blocked it, and that reason is what you act on. Split only into pieces a verifier can judge on its own; otherwise do the work here.");
+	lines.push("", "- A decomposition can come back waiting for a human review: it answers with a proposal id and admits nothing, so no child exists and nothing is spawned until the review decides. Read the batch as it was recorded with `task_proposal_read`; do not re-submit the same batch while it waits, because the same request is answered with the same proposal. If the review refuses it, revise the batch from the reason on the record and decompose again — a revision is a new proposal, never a re-run of the refused one.");
+	return lines;
+}
+/**
 * The immutable half of the context one role is assembled with (A2 §D/§9): the
 * root objective and its hard constraints, the caller's own complete contract,
 * the persisted handoff envelope, and — for replay or a reviewer — the honest
@@ -863,6 +1038,8 @@ async function contractProjection(deps, loaded) {
 			if (referenceList(budget, "relevant artifacts", references.artifacts, "handoff artifact references", "read them by id") !== void 0) return tooLarge("the handoff references", taskPageHint(task.taskId));
 			if (referenceList(budget, "relevant evidence", references.evidence, "handoff evidence references", "read them by id") !== void 0) return tooLarge("the handoff references", taskPageHint(task.taskId));
 		}
+		const decomposition = workerDecompositionLines(deps.taskRuntime, task);
+		if (decomposition.length > 0 && budget.addAll(["", ...decomposition]) > 0) return tooLarge("the decomposition guidance", taskPageHint(task.taskId));
 	}
 	return read(budget.text(), storeSource(resolution.graph, resolution.storeId, "projected the caller's immutable contract"));
 }
@@ -1343,6 +1520,15 @@ var SingularityContextService = class extends Service {
 		super(ctx, "singularityContext");
 	}
 	/**
+	* Mount the one `system-prompt/assemble` waterfall listener this service owns
+	* (`./assembly.ts`): the door the projections reach a real model request
+	* through. The registration rides this service's fiber, so it leaves when the
+	* service does.
+	*/
+	[Service.init]() {
+		this.ctx.effect(() => this.ctx.on("system-prompt/assemble", (assembly, context, next) => assembleSingularityContext(this, assembly, context, next)), "singularityContext: system-prompt assembly");
+	}
+	/**
 	* Register the narrow source this deployment reads reviewer delegations from
 	* (the reviewer ledger). Returns the disposer that removes it again, so a
 	* plugin that unloads takes its binding source with it.
@@ -1415,4 +1601,4 @@ var SingularityContextService = class extends Service {
 var src_default = SingularityContextService;
 
 //#endregion
-export { CONTEXT_OUTPUT_LIMIT_BYTES, NAMED_REFUSALS, OutputBudget, ReviewerBindingError, SingularityContextService, bindingLines, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, src_default as default, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omittedLine, openRootProposals, read, refused, relatedEntries, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, storeStateText, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };
+export { AssemblyRefusalError, CONTEXT_OUTPUT_LIMIT_BYTES, NAMED_REFUSALS, OutputBudget, ReviewerBindingError, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, SingularityContextService, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, src_default as default, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omittedLine, openRootProposals, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, storeStateText, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };

@@ -7,6 +7,7 @@ import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-se
 import { SingularityAgent } from '../../agent-singularity/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
+import { graphRegistry, mountContextReadCore, sessionQueryReads } from '../support/context-plane.ts'
 import { requestedSession } from '../../task-runtime/tests/support/person-request.ts'
 
 const ROOT_SESSION = 's-root'
@@ -81,15 +82,20 @@ async function mount(approvalOutcome: string = 'allowed-once') {
     spawn: async () => ({ agent: { id: 'worker', cancel: () => {}, whenIdle: async () => {} }, dispose: async () => {} }),
   } as never)
   ctx.provide('agents', { get: (sessionId: string) => ({ id: sessionId }) } as never)
-  ctx.provide('graphs', {
-    graphForSession: async () => ({ id: 'g1', envId: 'env1', rootSessionId: ROOT_SESSION }),
-  } as never)
+  ctx.provide('graphs', graphRegistry({
+    graphForSession: async () => ({ id: 'g1', name: 'graph', envId: 'env1', rootSessionId: ROOT_SESSION }),
+    members: () => [ROOT_SESSION, ...sessions.keys()],
+  }) as never)
+  ctx.provide('sessionQuery', sessionQueryReads(sessionId => sessions.get(String(sessionId))?.events) as never)
   ctx.provide('tools', registry.service as never)
   ctx.provide('userQuestions', userQuestions as never)
   ctx.provide('approval', approval as never)
 
   const task = new TaskService(ctx)
   const runtime = new TaskRuntime(ctx)
+  // The read core the plugin's tools read through (A2), mounted where the
+  // deployment's bundle mounts it.
+  await mountContextReadCore(ctx)
   await ctx.plugin(SingularityAgent)
   return { tools: registry.tools, approval, task, runtime, home }
 }

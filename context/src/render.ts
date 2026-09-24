@@ -25,8 +25,8 @@ import type {
   TaskRun,
   TaskSnapshot,
 } from '@dangosys/dsh-singularity-task'
-import { renderRunBinding } from '@dangosys/dsh-singularity-task-runtime'
 import type { ReadOnlyTaskRuntime } from './bindings.ts'
+import { renderRunBinding } from './run-binding.ts'
 
 /**
  * The full phase note: what a phase-less record is and what a reader can do

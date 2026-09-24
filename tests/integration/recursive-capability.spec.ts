@@ -129,16 +129,22 @@ describe('a child that decomposes further (S1-C)', () => {
     expect(grandchildBinding.skills.map(skill => skill.name)).toEqual([SKILL])
     expect(grandchildBinding.skills[0]!.role).toBe('knowledge')
 
-    // 1. The spawn request itself: the contract block and the prompt carry the
-    // run's chosen implementation, from the record this run was bound to.
+    // 1. The grandchild's own assembled request: what the run chose for it is in
+    // the request the model really received — the context projection's
+    // "Implementation chosen for this run", read from the record this run was
+    // bound to (A2: the contract block that used to ride the spawn is now the
+    // assembled `singularity:worker-contract` section, and the spawn request
+    // itself carries no rendering at all).
     const request = h.spawns.find(item => item.sessionId === grandchildRun.sessionId)!
+    expect(request.taskWorker).toBe(true)
+    expect(request.prompt).toBeUndefined()
+    expect(request.contract).toBeUndefined()
     const line = summaryStart(ROW, SKILL, 'knowledge')
-    for (const view of [request.contract ?? '', request.prompt.map(block => (block.type === 'text' ? block.text : '')).join('\n')]) {
-      expect(view).toContain('## Implementation chosen for this run')
-      expect(view).toContain(line)
-      expect(view).toContain(`content ${grandchildBinding.skills[0]!.contentDigest.slice(0, 12)}`)
-      expect(view).toContain(`registry revision: ${grandchildBinding.registryRevision.slice(0, 12)}`)
-    }
+    const grandchildTexts = await h.assemblePrompt(h.agent(grandchildRun.sessionId as SessionId)!)
+    expect(grandchildTexts).toContain('## Implementation chosen for this run')
+    expect(grandchildTexts).toContain(line)
+    expect(grandchildTexts).toContain(`content ${grandchildBinding.skills[0]!.contentDigest.slice(0, 12)}`)
+    expect(grandchildTexts).toContain(`registry revision: ${grandchildBinding.registryRevision.slice(0, 12)}`)
 
     // 2. `task_read`, read through the tool as the grandchild, renders the same
     // line — one record, one renderer, two readers.

@@ -20,7 +20,9 @@ interface StoredSession {
 interface SpawnCall {
   sessionId: string
   name: string
-  prompt: string
+  /** The message the request carried, when it carried one; a task-worker spawn carries none (A2). */
+  prompt?: string
+  taskWorker?: boolean
   agentPreset?: string
 }
 
@@ -77,15 +79,19 @@ function harness(options: {
   const agentRuntime = {
     spawn: vi.fn(async (_parent: unknown, request: {
       sessionId: string
-      name: string
-      prompt: Array<{ type: 'text'; text: string }>
+      prompt?: Array<{ type: 'text'; text: string }>
+      taskWorker?: boolean
       agentPreset?: string
     }) => {
       if (options.spawnError !== undefined) throw new Error(options.spawnError)
       spawned.push({
         sessionId: request.sessionId,
         name: request.name,
-        prompt: request.prompt.map(block => block.text).join('\n'),
+        ...(request.prompt === undefined ? {} : { prompt: request.prompt.map(block => block.text).join('\n') }),
+        // A delegated child is spawned as a task worker (A2): its contract and
+        // state are the context assembly's, so the request carries no prompt of
+        // its own and no contract text.
+        ...(request.taskWorker !== undefined ? { taskWorker: request.taskWorker } : {}),
         ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
       })
       // `cancel` converges the agent to idle, as the real loop's does (A3 §3.7):

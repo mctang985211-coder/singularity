@@ -246,14 +246,19 @@ describe('tool labels', () => {
       'job_output', 'job_list', 'job_kill',
       'glob', 'grep',
       'skill',
-      'session_event_read', 'session_event_trace', 'session_trace',
       'ask_user_question',
-      'task_read', 'task_status', 'task_decompose', 'task_submit_result', 'task_cancel', 'task_verify', 'capability_list',
+      'task_read', 'task_status', 'context_read', 'task_decompose', 'task_submit_result', 'task_cancel', 'task_verify', 'capability_list',
       'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel',
     ])
     expect(baseline).toEqual([...new Set(baseline)])
     // The task machinery is the tail, in the order WORKER_BASELINE_TOOLS declares.
     expect(baseline.slice(-WORKER_BASELINE_TOOLS.length)).toEqual([...WORKER_BASELINE_TOOLS])
+    // History reads go through context_read, the one reader authorized by the
+    // caller's graph domain: the raw cross-session tools it replaced are sealed
+    // at execution and appear in no baseline.
+    for (const sealed of ['session_event_read', 'session_event_trace', 'session_trace', 'session_search']) {
+      expect(baseline, sealed).not.toContain(sealed)
+    }
     // Growth happens through task_decompose admission; the graph surface is never a worker's.
     expect(baseline).not.toContain('graph_spawn')
     expect(baseline).not.toContain('graph_mark_ready')

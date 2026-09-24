@@ -40,8 +40,20 @@ import { workerBaseline } from '../../task-runtime/src/capability.ts'
  * deployment's own extras, which a worker inherits beside the plugin's tools.
  * The plugin's surface is registered by the plugin itself — never copied here,
  * or a fixture would keep passing after the assembly moved.
+ *
+ * The four raw cross-session readers are among these extras on purpose: a
+ * deployment's `tool-session-query` mounts them, and the seal this composition
+ * puts on them (A2, `agent-runtime/src/raw-session-guard.ts`) is an execution
+ * guard — which can only be shown to hold against a surface that would otherwise
+ * answer the call.
  */
-const EXTRA_GLOBAL_TOOLS = ['session_search', 'session_event_read', 'session_trace']
+const EXTRA_GLOBAL_TOOLS = ['session_search', 'session_event_read', 'session_event_trace', 'session_trace']
+
+/** The four raw readers, as `agent-runtime` names them: no Singularity role may execute one. */
+const RAW_SESSION_READS = ['session_event_read', 'session_event_trace', 'session_trace', 'session_search'] as const
+
+/** The one denial reason every sealed call reports. */
+const RAW_SESSION_SEAL = 'singularity: raw cross-session reads are sealed; use context_read'
 
 /** What the `standard`-style preset contributes on its own plane. */
 const PRESET_TOOLS = ['bash', 'read', 'write', 'edit', 'read_image', 'glob', 'grep', 'skill', 'job_output', 'job_list', 'job_kill', 'ask_user_question', 'web_fetch', 'subagent_fetchless']
@@ -59,6 +71,11 @@ function tool(name: string): ToolDefinition {
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value as string }] },
     execute: async () => name,
   }
+}
+
+/** A global-plane stand-in that records that its body ran, so a denial can be told from an answer. */
+function ran(name: string, log: string[]): ToolDefinition {
+  return { ...tool(name), execute: async () => { log.push(name); return `${name}: fixture answer` } }
 }
 
 let cwd: string
@@ -81,8 +98,14 @@ afterEach(async () => {
 interface Harness {
   ctx: Context
   root: Agent
+  /** Every global-plane stand-in body that really ran, by name. */
+  readonly executed: readonly string[]
   visible(agent: Agent): string[]
   reachable(sessionId: SessionId): Agent | undefined
+  /** Dispatch one call as one agent through the real registry and gate waterfall. */
+  call(agent: Agent, name: string): Promise<{ isError: boolean; text: string }>
+  /** Register one more tool on an agent's own scope, standing in for a later preset/MCP mount. */
+  regrant(agent: Agent, name: string): void
   spawn(grant: WorkerGrant | undefined, presetTools?: readonly string[]): Promise<Agent>
   spawnError(grant: WorkerGrant, presetTools?: readonly string[]): Promise<Error>
 }
@@ -110,6 +133,7 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   const discovery = options.discovery ?? false
   const ctx = new Context()
   contexts.push(ctx)
+  const executed: string[] = []
   await ctx.plugin(SystemPrompt, {})
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AgentRegistry)
@@ -122,7 +146,7 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
     })
   }
 
-  for (const name of EXTRA_GLOBAL_TOOLS) ctx.tools.register(tool(name))
+  for (const name of EXTRA_GLOBAL_TOOLS) ctx.tools.register(ran(name))
   ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'p', model: 'm' }) })
   ctx.provide('agentPresets', { defaultId: 'standard', mount: async () => {}, resolve: async () => ({}) })
   ctx.provide('permissionPresets', { set: vi.fn() })
@@ -146,6 +170,13 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   ctx.provide('graphs', { graphForSession: async () => ({ id: 'g1', envId: 'env1', rootSessionId: ROOT_SESSION }) } as never)
   ctx.provide('task', {} as never)
   ctx.provide('taskRuntime', {} as never)
+  // The read core the root-agent plugin injects (A2). No tool this spec drives
+  // reads context — its subjects are the tool surface and the grant filter, both
+  // of which are the deployment's own registration — so this sibling provides the
+  // one call the plugin makes at load time (registering its reviewer binding
+  // source). The read core's consumers are the `context` specs and
+  // `tests/integration/context-assembly.spec.ts`.
+  ctx.provide('singularityContext', { registerReviewerBindingSource: () => () => {} } as never)
   ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) } as never)
   ctx.provide('approval', { request: async () => 'allowed-once' } as never)
 
@@ -215,11 +246,31 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
     return { agent: handle.agent, sessionId }
   }
 
+  let callSeq = 0
   return {
     ctx,
     root,
+    executed,
     visible: agent => ctx.tools.schemas(agent).map(schema => schema.name).sort(),
     reachable: sessionId => agents.get(sessionId),
+    async call(agent, name) {
+      callSeq += 1
+      const answer = await ctx.tools.execute({
+        callId: `wg-${callSeq}`,
+        name,
+        arguments: {},
+        agent,
+        signal: new AbortController().signal,
+      })
+      return {
+        isError: answer.isError === true,
+        text: (answer.content ?? []).map(block => (block.type === 'text' ? block.text : `[${block.type}]`)).join('\n'),
+      }
+    },
+    regrant(agent, name) {
+      const scope = (agent as unknown as { ctx: Context }).ctx
+      scope.tools.register(ran(name, executed))
+    },
     async spawn(grant) {
       const { agent } = await spawn(grant)
       return agent
@@ -257,8 +308,11 @@ describe('worker capability grants', () => {
     for (const stripped of ['evolution_decide', 'evolution_propose', 'graph_spawn', 'hitl_ask', 'task_review_pack', 'session_search', 'web_fetch']) {
       expect(names, stripped).not.toContain(stripped)
     }
-    // The exact-read tools are baselined; this deployment's full-text search is not.
-    expect(names).toContain('session_event_read')
+    // The four raw cross-session readers are off the surface (A2): the baseline
+    // that used to carry the exact-read ones no longer names them, and the one
+    // reference reader the worker has instead is `context_read`.
+    for (const sealed of RAW_SESSION_READS) expect(names, sealed).not.toContain(sealed)
+    expect(names).toContain('context_read')
   })
 
   it('keeps a preset plane only when the capability named its own preset', async () => {
@@ -279,9 +333,11 @@ describe('worker capability grants', () => {
     // Baseline names this composition never mounted are simply absent.
     expect(keptNames).not.toContain('bash')
     expect(keptNames).not.toContain('skill')
-    // The global plane is still fail-closed: only the baselined part survives.
-    expect(keptNames).toContain('session_event_read')
+    // The global plane is still fail-closed: only the baselined part survives,
+    // and the raw cross-session readers are not part of it (A2).
     expect(keptNames).toContain('task_read')
+    expect(keptNames).toContain('context_read')
+    for (const sealed of RAW_SESSION_READS) expect(keptNames, sealed).not.toContain(sealed)
     expect(keptNames).not.toContain('evolution_decide')
     expect(keptNames).not.toContain('task_review_pack')
   })
@@ -301,9 +357,46 @@ describe('worker capability grants', () => {
       'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve',
       'evolution_propose', 'evolution_candidate', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
       'task_review_pack', 'task_diagnose',
+      ...RAW_SESSION_READS,
     ]) {
       expect(names, stripped).not.toContain(stripped)
     }
+  })
+
+  it('denies the raw cross-session readers at execution, and a later mount cannot put them back', async () => {
+    // Two workers of the same composition: one granted (its surface is the
+    // baseline) and one un-granted (it inherits the deployment's whole plane,
+    // which mounts the four). The seal is an execution guard on each agent's own
+    // scope, so the surface is not what decides — the call is, in both cases.
+    const h = await harness()
+    const granted = await h.spawn(grantOf({ capabilities: [{ capability: 'design-ball', tools: ['read'], skills: [] }] }))
+    const ungranted = await h.spawn(undefined)
+    expect(h.visible(ungranted)).toContain('session_event_read')
+
+    for (const agent of [granted, ungranted]) {
+      for (const name of RAW_SESSION_READS) {
+        const denied = await h.call(agent, name)
+        expect(denied.isError, name).toBe(true)
+        expect(denied.text).toContain(RAW_SESSION_SEAL)
+      }
+    }
+    // None of them reached a body: the stand-in answers its own name, so its
+    // absence is the proof that the denial happened before any effect.
+    expect(h.executed).toEqual([])
+
+    // A mount that arrives *after* the spawn — a preset plane joining, an MCP
+    // server registered on the agent's own scope — cannot lift it: the guard
+    // sits on the agent's scope and a guard has no allow answer.
+    h.regrant(granted, 'session_event_read')
+    const regranted = await h.call(granted, 'session_event_read')
+    expect(regranted.isError).toBe(true)
+    expect(regranted.text).toContain(RAW_SESSION_SEAL)
+    expect(h.executed).toEqual([])
+
+    // What is not sealed still answers: the tool the four were replaced by, whose
+    // authorization is the caller's graph domain.
+    const other = await h.call(ungranted, 'task_decompose')
+    expect(other.text).not.toContain(RAW_SESSION_SEAL)
   })
 
   it('rejects the spawn when a capability declares a tool the composition does not offer, publishing nothing', async () => {

@@ -27,8 +27,10 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-session": "*",
-    "@deepseek-ai/dsh-session-query": "*"
+    "@deepseek-ai/dsh-session-query": "*",
+    "@deepseek-ai/dsh-system-prompt": "*"
   },
   "dependencies": {
     "@dangosys/dsh-singularity-graphs": "workspace:*",
@@ -41,8 +43,10 @@
     "tsdown": "^0.15.0",
     "typescript": "^5.9.0",
     "@deepseek-ai/cordis": "link:../../../thirdparty/deepseek-harness/vendor/cordis",
+    "@deepseek-ai/dsh-agent": "link:../../../thirdparty/deepseek-harness/packages/core/agent",
     "@deepseek-ai/dsh-session": "link:../../../thirdparty/deepseek-harness/packages/core/session",
-    "@deepseek-ai/dsh-session-query": "link:../../../thirdparty/deepseek-harness/packages/session-query/session-query"
+    "@deepseek-ai/dsh-session-query": "link:../../../thirdparty/deepseek-harness/packages/session-query/session-query",
+    "@deepseek-ai/dsh-system-prompt": "link:../../../thirdparty/deepseek-harness/packages/core/system-prompt"
   },
   "publishConfig": {
     "access": "public"

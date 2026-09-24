@@ -47,37 +47,51 @@ import SkillRegistry from '../../../../thirdparty/deepseek-harness/packages/skil
 import * as SkillFilesystem from '../../../../thirdparty/deepseek-harness/packages/skill/skill-filesystem/lib/index.js'
 import * as SkillTool from '../../../../thirdparty/deepseek-harness/packages/skill/tool-skill/lib/index.js'
 import { createScope, type Scope } from '../../../../thirdparty/deepseek-harness/packages/core/scope/lib/index.js'
+import { renderPrompt } from '../../../../thirdparty/deepseek-harness/packages/core/system-prompt/lib/index.js'
 import type { Agent, AgentHandle, ToolDefinition } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
+import { SingularityContextService } from '../../context/src/index.ts'
 import { defineCapabilityListTool } from '../../agent-singularity/src/tools/capability-list.ts'
+import { defineContextReadTool } from '../../agent-singularity/src/tools/context-read.ts'
 import { defineTaskCancelTool } from '../../agent-singularity/src/tools/task-cancel.ts'
 import { defineTaskDecomposeTool } from '../../agent-singularity/src/tools/task-decompose.ts'
 import { defineTaskIntakeTool } from '../../agent-singularity/src/tools/task-intake.ts'
 import { defineTaskReadTool } from '../../agent-singularity/src/tools/task-read.ts'
+import { defineTaskStatusTool } from '../../agent-singularity/src/tools/task-status.ts'
 import { defineTaskSubmitResultTool } from '../../agent-singularity/src/tools/task-submit-result.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
 import type { TaskEvent, TaskSnapshot } from '../../task/src/index.ts'
 import type { CapabilityConfig, Config, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
+import { graphRegistry, sessionQueryReads } from './context-plane.ts'
 
 /** The fixture skills the deployment's own pre-check fixtures install. */
 const FIXTURE_SKILLS = fileURLToPath(new URL('../../task-runtime/tests/fixtures/skills/', import.meta.url))
 
 /** Exactly the root agent's allow-list, so the root composition is the deployment's own. */
 export const ROOT_TOOLS = [
-  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'skill', 'task_intake', 'task_decompose',
+  'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'context_read', 'skill', 'task_intake', 'task_decompose',
   'task_submit_result', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
   'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
 
-/** The global-plane machinery every agent inherits. `skill` rides the preset plane, as `tool-skill` mounts it in the deployment. */
-export const GLOBAL_TOOLS = [...ROOT_TOOLS.filter(name => name !== 'skill'), 'session_search', 'session_event_read', 'session_trace']
+/**
+ * The global-plane machinery every agent inherits. `skill` rides the preset plane,
+ * as `tool-skill` mounts it in the deployment. The four raw cross-session readers
+ * are registered here on purpose: the seal this deployment puts on them is an
+ * execution guard, and a guard can only be shown to hold where the surface would
+ * otherwise answer the call.
+ */
+export const GLOBAL_TOOLS = [
+  ...ROOT_TOOLS.filter(name => name !== 'skill'),
+  'session_search', 'session_event_read', 'session_event_trace', 'session_trace',
+]
 
 /** The tools a stack can mount for real ({@link RunStackOptions.tools}); the stand-ins skip these names. */
-const REAL_TOOLS = ['task_read', 'capability_list', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel']
+const REAL_TOOLS = ['task_read', 'task_status', 'context_read', 'capability_list', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel']
 
 /** What the `standard`-style preset contributes on its own plane. */
 export const PRESET_TOOLS = ['bash', 'read', 'write', 'edit', 'read_image', 'glob', 'grep', 'skill', 'job_output', 'job_list', 'job_kill', 'ask_user_question', 'web_fetch', 'subagent_fetchless']
@@ -160,6 +174,14 @@ export interface RunStack {
   root(sessionId: SessionId, contract: RootContractSpec): Promise<{ storeId: string; taskId: string; runId: string }>
   /** Dispatch one tool call on behalf of one agent, the way the loop does. */
   call(agent: Agent, name: string, args: Record<string, unknown>): Promise<ToolCallResult>
+  /**
+   * What the deployment assembles for one agent's next request (A2): the real
+   * `system-prompt/assemble` waterfall, called with the same context the loop
+   * passes (`assembleContextFor`: the agent as its own scope). This fixture
+   * replaces the model loop, so this is the door a spec reads the assembled
+   * request through — the production listener, not a re-render.
+   */
+  assemblePrompt(agent: Agent): Promise<string>
 }
 
 /** What one dispatched tool call answered: the model-facing text, and whether the registry settled it as an error. */
@@ -317,7 +339,7 @@ class RunStackImpl implements RunStack {
     } as never)
     // One graph per root session, so a second admission in the same deployment
     // (a new version after an apply) has its own store and its own root run.
-    ctx.provide('graphs', {
+    ctx.provide('graphs', graphRegistry({
       graphForSession: async (sessionId: SessionId) => ({
         id: 'g1',
         name: 'graph',
@@ -326,7 +348,21 @@ class RunStackImpl implements RunStack {
         graphStoreId: 'sg-g-root',
         layoutStoreId: 'sg-l-root',
       }),
-    } as never)
+      list: async () => [{
+        id: 'g1',
+        name: 'graph',
+        envId: 'env1',
+        rootSessionId: this.primary,
+        graphStoreId: 'sg-g-root',
+        layoutStoreId: 'sg-l-root',
+      }],
+      // This fixture mints one live agent per session — root or spawn — and that
+      // registry is the published membership a session reference is checked against.
+      members: () => [...this.roots.map(String), ...this.live.keys(), ...this.sessionRoot.keys()],
+    }) as never)
+    // The session plane's read-only half (A2): exact reads over this fixture's own
+    // log, the records `events()` and the store read back.
+    ctx.provide('sessionQuery', sessionQueryReads(sessionId => this.log.get(String(sessionId))) as never)
     ctx.provide('envBuilder', { store: { get: (envId: string) => (envId === 'env1' ? { path: this.checkout, components: [] } : undefined) } } as never)
 
     // A preset's standing mount lives in its own scope; an agent joins it by scope parentage.
@@ -350,8 +386,14 @@ class RunStackImpl implements RunStack {
     } as never)
 
     await this.verifier.ready()
+    // The read core and the prompt assembly (A2), mounted where the deployment's
+    // bundle mounts them: after the runtime whose observations they read, before
+    // the agent plane whose requests they assemble.
+    await ctx.plugin(SingularityContextService)
     if (this.options.tools === true) {
       ctx.tools.register(defineTaskReadTool(ctx))
+      ctx.tools.register(defineTaskStatusTool(ctx))
+      ctx.tools.register(defineContextReadTool(ctx))
       ctx.tools.register(defineCapabilityListTool(ctx))
       ctx.tools.register(defineTaskIntakeTool(ctx))
       ctx.tools.register(defineTaskDecomposeTool(ctx))
@@ -511,6 +553,11 @@ class RunStackImpl implements RunStack {
       isError: result.isError,
       text: result.content.map(block => (block.type === 'text' ? block.text : `[${block.type}]`)).join('\n'),
     }
+  }
+
+  async assemblePrompt(agent: Agent): Promise<string> {
+    const assembly = await this.ctx.systemPrompt.assemble({ agent, scope: agent })
+    return renderPrompt(assembly)
   }
 
   async dispose(): Promise<void> {

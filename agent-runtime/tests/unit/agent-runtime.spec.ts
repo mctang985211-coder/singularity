@@ -1,7 +1,7 @@
 import { describe, expect, test, vi } from 'vitest'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { AgentRuntime } from '../../src/index.ts'
+import { AgentRuntime, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT } from '../../src/index.ts'
 
 const id = (value: string) => value as SessionId
 
@@ -11,7 +11,13 @@ function agent(value: string): Agent {
 
 type Spy = ReturnType<typeof vi.fn>
 
-/** The nineteen tools every root composition may call; the deployment's evolution switch does not touch them. */
+/**
+ * The twenty tools every root composition may call; the deployment's evolution
+ * switch does not touch them. `context_read` is one of them (A2): the root's reads
+ * name records by id, and the raw cross-session readers it replaced were never on
+ * this surface — the execution seal covers them (`./agent-runtime.spec.ts`,
+ * the guard cases).
+ */
 const ROOT_CORE_TOOLS = [
   'graph_spawn',
   'graph_mark_ready',
@@ -19,6 +25,7 @@ const ROOT_CORE_TOOLS = [
   'hitl_approve',
   'task_read',
   'capability_list',
+  'context_read',
   'skill',
   'task_intake',
   'task_decompose',
@@ -139,22 +146,25 @@ function context(
 
 interface Assembly {
   /** The scoped context the agent factory hands `setup`, with the restrictions and the prompt section it wrote. */
-  readonly agentCtx: { tools: { restrict: Spy }; systemPrompt: { section: Spy } }
+  readonly agentCtx: { tools: { restrict: Spy; guard: Spy }; systemPrompt: { section: Spy } }
   readonly session: { append: Spy }
   /** What `tools.restrict` was called with: the root's actual allow-list. */
   readonly restrict: Spy
   /** What `systemPrompt.section` was called with: the root's actual prompt. */
   readonly section: Spy
+  /** What `tools.guard` was called with: the sealed raw-session readers' execution guard. */
+  readonly guard: Spy
 }
 
 /** Runs one root assembly's `setup` the way the agent factory does — after the preset mount, before the first prompt. */
 async function assemble(options: unknown): Promise<Assembly> {
   const restrict = vi.fn()
   const section = vi.fn()
+  const guard = vi.fn()
   const session = { append: vi.fn() }
-  const agentCtx = { tools: { restrict }, systemPrompt: { section } }
+  const agentCtx = { tools: { restrict, guard }, systemPrompt: { section } }
   await (options as { setup: (ctx: unknown, agent: unknown) => Promise<void> }).setup(agentCtx, { session })
-  return { agentCtx, session, restrict, section }
+  return { agentCtx, session, restrict, section, guard }
 }
 
 /** The prompt text one assembly registered, read back off the section call. */
@@ -184,12 +194,14 @@ async function spawnContext() {
   const dispose = vi.fn(async (sessionId: string) => {
     live.delete(sessionId)
   })
+  const createCalls: { sessionId: string; options: { setup?: (ctx: unknown, agent: unknown) => Promise<void> } }[] = []
   Object.assign(state.ctx.agents, {
     get: (sessionId: string) => live.get(sessionId),
-    create: async ({ sessionId }: { sessionId: SessionId }) => {
-      const child = { id: sessionId, followup: vi.fn() } as unknown as Agent
-      live.set(sessionId, child)
-      return { agent: child, dispose: () => dispose(sessionId) }
+    create: async (options: { sessionId: SessionId; setup?: (ctx: unknown, agent: unknown) => Promise<void> }) => {
+      createCalls.push({ sessionId: options.sessionId, options })
+      const child = { id: options.sessionId, followup: vi.fn() } as unknown as Agent
+      live.set(options.sessionId, child)
+      return { agent: child, dispose: () => dispose(options.sessionId) }
     },
   })
   Object.assign(state.ctx.graph, {
@@ -203,7 +215,27 @@ async function spawnContext() {
   Object.assign(state.ctx, { parallel: async () => {} })
   const spawn = (name: string) =>
     runtime.spawn(state.root, { sessionId: id(name), name, prompt: [{ type: 'text' as const, text: 'work' }] })
-  return { ...state, runtime, scope, live, dispose, spawn, setLayout }
+  return { ...state, runtime, scope, live, dispose, spawn, setLayout, nodes, createCalls }
+}
+
+/**
+ * Invoke one recorded spawn's `setup` the way the agent factory does, with a
+ * scoped-context stub recording the prompt sections and the tool guard.
+ */
+async function runSetup(options: { setup?: (ctx: unknown, agent: unknown) => Promise<void> }) {
+  const restrict = vi.fn()
+  const section = vi.fn()
+  const guard = vi.fn()
+  const session = { append: vi.fn() }
+  await options.setup?.({ tools: { restrict, guard }, systemPrompt: { section } }, { session })
+  return { restrict, section, guard, session }
+}
+
+/** The denial a registered guard returns for one tool name, or `undefined` when the call is left alone. */
+function denialOf(guard: Spy, name: string): string | undefined {
+  const fn = guard.mock.calls[0]?.[0] as ((execution: { name: string }) => string | undefined) | undefined
+  if (fn === undefined) throw new Error('no guard was registered')
+  return fn({ name })
 }
 
 describe('AgentRuntime root lifecycle', () => {
@@ -381,7 +413,7 @@ describe('AgentRuntime root lifecycle', () => {
       setup: expect.any(Function),
     }))
     const childSession = {}
-    const childCtx = {}
+    const childCtx = { tools: { guard: vi.fn() }, systemPrompt: { section: vi.fn() } }
     await create.mock.calls[0][0].setup(childCtx, { session: childSession })
     expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(childSession, 'danger-full-access')
     expect(order).toEqual(['topology', 'bind', 'prompt'])
@@ -438,7 +470,7 @@ describe('AgentRuntime root lifecycle', () => {
 
     const childSession = {}
     await (create.mock.calls[0][0] as { setup: (ctx: unknown, agent: unknown) => Promise<void> })
-      .setup({}, { session: childSession })
+      .setup({ tools: { guard: vi.fn() }, systemPrompt: { section: vi.fn() } }, { session: childSession })
     expect(state.ctx.permissionPresets.set).toHaveBeenCalledExactlyOnceWith(childSession, 'workspace-write')
   })
 
@@ -664,5 +696,146 @@ describe('AgentRuntime root lifecycle', () => {
     expect(prompt).toContain('evolution_propose')
     expect(prompt).toContain('evolution_list reads the ledger')
     expect(prompt).not.toContain('Buckyball')
+  })
+})
+
+describe('the spawn request contract (A2)', () => {
+  test('a taskWorker spawn needs no prompt: the default kickoff starts its turn, attributed to the runtime', async () => {
+    const state = await spawnContext()
+    await state.runtime.spawn(state.root, { sessionId: id('child'), name: 'worker', taskWorker: true })
+
+    const child = state.live.get('child') as unknown as { followup: Spy }
+    expect(child.followup).toHaveBeenCalledOnce()
+    const message = child.followup.mock.calls[0]![0] as { content: readonly { text?: string }[]; source: unknown }
+    expect(message.content.map(block => block.text ?? '').join('\n')).toBe(WORKER_KICKOFF_TEXT)
+    expect(message.source).toEqual({ kind: 'runtime-prompt', channel: 'spawn' })
+    expect(WORKER_KICKOFF_TEXT).toContain('task_read')
+    expect(WORKER_KICKOFF_TEXT).toContain('task_submit_result')
+  })
+
+  test('a taskWorker spawn setup installs the stable worker policy section at order 75', async () => {
+    const state = await spawnContext()
+    await state.runtime.spawn(state.root, { sessionId: id('child'), name: 'worker', taskWorker: true })
+    const { section } = await runSetup(state.createCalls[0]!.options)
+
+    expect(section).toHaveBeenCalledWith({
+      name: 'singularity:worker',
+      order: 75,
+      text: WORKER_POLICY_TEXT,
+      interpolate: false,
+    })
+    // The stable, unconditional rules migrated from the old spawn prompt...
+    for (const rule of [
+      'never declare completion yourself',
+      'make that command exit 0 in the checkout',
+      'protected inputs must not be modified',
+      'hand it in with `task_submit_result`',
+      'Going idle is not a submission',
+      '`task_verify` is only a self-check',
+    ]) {
+      expect(WORKER_POLICY_TEXT).toContain(rule)
+    }
+    // ...without the sealed raw-session guidance and without the conditional
+    // rules (those are the context projection's, and the two never repeat).
+    expect(WORKER_POLICY_TEXT).not.toContain('session_event_read')
+    expect(WORKER_POLICY_TEXT).not.toContain('session_trace')
+    expect(WORKER_POLICY_TEXT).not.toContain('## This task is decomposable')
+    expect(WORKER_POLICY_TEXT).not.toContain('waiting for a human review')
+  })
+
+  test('a spawn with a prompt but no taskWorker installs no worker policy and no kickoff rewrite', async () => {
+    const state = await spawnContext()
+    await state.spawn('child')
+    const { section } = await runSetup(state.createCalls[0]!.options)
+    expect(section).not.toHaveBeenCalled()
+    const child = state.live.get('child') as unknown as { followup: Spy }
+    const message = child.followup.mock.calls[0]![0] as { content: readonly { text?: string }[] }
+    expect(message.content.map(block => block.text ?? '').join('\n')).toBe('work')
+  })
+
+  test('a spawn with neither a prompt nor taskWorker is refused before anything is created', async () => {
+    const state = await spawnContext()
+    await expect(state.runtime.spawn(state.root, { sessionId: id('child'), name: 'worker' }))
+      .rejects.toThrow('a spawn request needs a prompt')
+    expect(state.live.has('child')).toBe(false)
+  })
+
+  test('beforePrompt runs after publication and the spawn announcement, before the first model input', async () => {
+    const state = await spawnContext()
+    const order: string[] = []
+    Object.assign(state.ctx, {
+      parallel: async (event: string) => {
+        expect(event).toBe('agentRuntime/spawned')
+        order.push('spawned')
+      },
+    })
+    const child = { followup: vi.fn(() => order.push('prompt')) }
+    state.ctx.agents.create = async (options: { sessionId: SessionId }) => {
+      state.live.set(options.sessionId, { id: options.sessionId, ...child } as unknown as Agent)
+      return { agent: state.live.get(options.sessionId)!, dispose: () => state.dispose(options.sessionId) }
+    }
+    await state.runtime.spawn(state.root, {
+      sessionId: id('child'),
+      name: 'worker',
+      taskWorker: true,
+      beforePrompt: async () => {
+        order.push('beforePrompt')
+      },
+    })
+    expect(order).toEqual(['spawned', 'beforePrompt', 'prompt'])
+    expect(child.followup).toHaveBeenCalledOnce()
+  })
+
+  test('a beforePrompt failure disposes the handle, marks the node failed, and sends zero model input', async () => {
+    const state = await spawnContext()
+    const child = { followup: vi.fn() }
+    state.ctx.agents.create = async (options: { sessionId: SessionId }) => {
+      state.live.set(options.sessionId, { id: options.sessionId, ...child } as unknown as Agent)
+      return { agent: state.live.get(options.sessionId)!, dispose: () => state.dispose(options.sessionId) }
+    }
+    await expect(state.runtime.spawn(state.root, {
+      sessionId: id('child'),
+      name: 'worker',
+      taskWorker: true,
+      beforePrompt: async () => {
+        throw new Error('the ledger cannot be written')
+      },
+    })).rejects.toThrow('the ledger cannot be written')
+
+    expect(child.followup).not.toHaveBeenCalled()
+    expect(state.dispose).toHaveBeenCalledExactlyOnceWith('child')
+    expect(state.statuses).toContainEqual(['graph', id('child'), 'failed'])
+    expect(state.live.has('child')).toBe(false)
+    // A retry is not swallowed: the runtime holds no half-spawned child.
+    await state.runtime.stopAgents([id('child')])
+    expect(state.dispose).toHaveBeenCalledExactlyOnceWith('child')
+  })
+
+  test('the raw cross-session readers are denied at execution for a spawned agent, and nothing else is', async () => {
+    const state = await spawnContext()
+    await state.spawn('child')
+    const { guard } = await runSetup(state.createCalls[0]!.options)
+
+    expect(RAW_SESSION_READ_TOOLS).toEqual(['session_event_read', 'session_event_trace', 'session_trace', 'session_search'])
+    for (const name of RAW_SESSION_READ_TOOLS) expect(denialOf(guard, name)).toBe(RAW_SESSION_READ_DENIAL)
+    expect(RAW_SESSION_READ_DENIAL).toContain('context_read')
+    for (const other of ['context_read', 'session_history_export', 'task_read', 'bash']) {
+      expect(denialOf(guard, other)).toBeUndefined()
+    }
+  })
+
+  test('the same execution seal is installed for a root, created or resumed', async () => {
+    const created = context([])
+    const createdRuntime = new AgentRuntime(created.ctx as never)
+    await createdRuntime.createRoot({ sessionId: id('root'), cwd: '/workspace', scope: { graphStoreId: 'graph', layoutStoreId: 'layout' } })
+    const createdAssembly = await assemble(created.createOptions[0])
+    for (const name of RAW_SESSION_READ_TOOLS) expect(denialOf(createdAssembly.guard, name)).toBe(RAW_SESSION_READ_DENIAL)
+    expect(denialOf(createdAssembly.guard, 'context_read')).toBeUndefined()
+
+    const resumed = context([id('root')])
+    const resumedRuntime = new AgentRuntime(resumed.ctx as never)
+    await resumedRuntime.ensureRoot(id('root'), { graphStoreId: 'graph', layoutStoreId: 'layout' })
+    const resumedAssembly = await assemble(resumed.resumeOptions[0])
+    for (const name of RAW_SESSION_READ_TOOLS) expect(denialOf(resumedAssembly.guard, name)).toBe(RAW_SESSION_READ_DENIAL)
   })
 })

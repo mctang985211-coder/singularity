@@ -10,6 +10,7 @@ import { TaskService, canonicalize, contractDigest, decompositionDigest, rootTas
 import type { Config, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
+import { graphRegistry, mountContextReadCore, sessionQueryReads } from '../support/context-plane.ts'
 import { personRequest } from '../../task-runtime/tests/support/person-request.ts'
 
 /**
@@ -145,11 +146,12 @@ async function generation(
 
   const spawned: SpawnRequest[] = []
   ctx.provide('agentRuntime', {
-    spawn: async (_parent: unknown, request: { sessionId: string; name: string; prompt: { text: string }[]; contract?: string }) => {
+    spawn: async (_parent: unknown, request: { sessionId: string; name: string; prompt?: { text: string }[]; taskWorker?: boolean; contract?: string }) => {
       spawned.push({
         sessionId: request.sessionId,
         name: request.name,
-        prompt: request.prompt.map(block => block.text).join('\n'),
+        ...(request.prompt === undefined ? {} : { prompt: request.prompt.map(block => block.text).join('\n') }),
+        ...(request.taskWorker === undefined ? {} : { taskWorker: request.taskWorker }),
         ...(request.contract === undefined ? {} : { contract: request.contract }),
       })
       return {
@@ -166,9 +168,14 @@ async function generation(
     },
   } as never)
   ctx.provide('agents', { get: (sessionId: string) => ({ id: sessionId }) } as never)
-  ctx.provide('graphs', {
-    graphForSession: async (sessionId: SessionId) => ({ id: 'g1', envId: 'env1', rootSessionId: sessionId }),
-  } as never)
+  ctx.provide('graphs', graphRegistry({
+    graphForSession: async (sessionId: SessionId) => ({ id: 'g1', name: 'graph', envId: 'env1', rootSessionId: sessionId }),
+    members: () => [...memory.headers.keys()],
+  }) as never)
+  // The read plane the tools and the assembly need (A2): the session log this
+  // generation has open, so a session reference reads the same events this
+  // fixture's assertions read.
+  ctx.provide('sessionQuery', sessionQueryReads(sessionId => memory.events.get(sessionId as SessionId)) as never)
 
   const tools = new Map<string, RegisteredTool>()
   if (options.mountAgent === true) {
@@ -188,7 +195,12 @@ async function generation(
   // has to be readied explicitly, or `verifierIds()` reports no vocabulary at all.
   await verifier.ready()
   const runtime = new TaskRuntime(ctx, options.config as Config | undefined)
-  if (options.mountAgent === true) await ctx.plugin(SingularityAgent)
+  if (options.mountAgent === true) {
+    // The read core and the prompt assembly, mounted where the deployment's bundle
+    // mounts them: the plugin's tool adapters read through this service (A2).
+    await mountContextReadCore(ctx)
+    await ctx.plugin(SingularityAgent)
+  }
   return { ctx, task, runtime, verifier, tools, spawned, memory }
 }
 

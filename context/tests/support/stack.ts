@@ -34,6 +34,7 @@ import type {
   EvidenceBundle,
   ReviewRecord,
   RunProviderBinding,
+  SubmissionRecord,
   TaskEvent,
   TaskInstance,
   TaskRun,
@@ -77,6 +78,8 @@ export interface TaskSpec {
   readonly providerBinding?: RunProviderBinding
   /** A replay run: lineage is this run id, not a task parent. */
   readonly parentRunId?: string
+  /** Admit the task as `decomposable` (default `leaf`). */
+  readonly decomposable?: boolean
   /** Phase of the seeded run; defaults to `active`. */
   readonly phase?: TaskRun['executionPhase']
   /** Seed the run with no phase at all — the record shape every reader must not guess a phase for. */
@@ -136,6 +139,8 @@ export class FixtureStack {
   readonly task: TaskService
   readonly service: SingularityContextService
   readonly gate = new ExecutionGate()
+  /** Whether the runtime stub admits a run's own `task_decompose`; a spec flips it to read the projection's rule off. */
+  runtimeDecomposition = true
   /** Every call the read path made into the runtime's observation surface, in order. */
   readonly observed = { recoveryStatus: vi.fn(), readRunBinding: vi.fn(), gatePhaseOf: vi.fn() }
   private readonly headers = new Map<string, SessionHeader>()
@@ -207,6 +212,7 @@ export class FixtureStack {
         }))
         return { snapshotRoot: binding.snapshotRoot, skills, defects: skills.flatMap(skill => skill.defects) }
       },
+      allowsRuntimeDecomposition: () => this.runtimeDecomposition,
       gate: gateView,
     }
     const sessionQuery = {
@@ -284,7 +290,7 @@ export class FixtureStack {
       depth: spec.depth ?? 0,
       acceptanceCriteria: criteria,
       requestedCapabilities: [],
-      decompositionStatus: 'leaf',
+      decompositionStatus: spec.decomposable === true ? 'decomposable' : 'leaf',
       status: 'created',
       runIds: [],
       childTaskIds: [],
@@ -298,7 +304,9 @@ export class FixtureStack {
       },
     }
     await this.task.createTaskIn(storeId, task, spec.sessionId)
-    await this.task.admitTaskIn(storeId, spec.taskId, spec.sessionId, { decompositionStatus: 'leaf' })
+    await this.task.admitTaskIn(storeId, spec.taskId, spec.sessionId, {
+      decompositionStatus: spec.decomposable === true ? 'decomposable' : 'leaf',
+    })
     const run: TaskRun = {
       runId: spec.runId,
       taskId: spec.taskId,
@@ -413,6 +421,39 @@ export class FixtureStack {
       },
       spec.sessionId,
     )
+  }
+
+  /**
+   * Move one run through the phase protocol's own entries: a phase change
+   * (`active → waiting_children` with the batch id, or `→ submitted` with the
+   * submission record) and/or a no-progress marking on an `active` run — the
+   * store's own transitions, so the records a spec reads are the records the
+   * protocol writes.
+   */
+  async runFacts(spec: {
+    readonly taskId: string
+    readonly runId: string
+    readonly sessionId: string
+    readonly phase?: TaskRun['executionPhase']
+    readonly batchId?: string
+    readonly submission?: SubmissionRecord
+    readonly noProgress?: { readonly rounds: number; readonly factCount: number }
+  }): Promise<void> {
+    const storeId = rootTaskStoreId(this.rootOf(spec.sessionId))
+    if (spec.phase !== undefined) {
+      await this.task.changeRunPhaseIn(storeId, spec.taskId, spec.runId, spec.sessionId, {
+        phase: spec.phase,
+        ...(spec.batchId === undefined ? {} : { batchId: spec.batchId }),
+        ...(spec.submission === undefined ? {} : { submission: spec.submission }),
+      })
+    }
+    if (spec.noProgress !== undefined) {
+      await this.task.markRunProgressIn(storeId, spec.taskId, spec.runId, spec.sessionId, {
+        kind: 'unsubmitted-idle',
+        rounds: spec.noProgress.rounds,
+        factCount: spec.noProgress.factCount,
+      })
+    }
   }
 
   /** Record one obligation raised by a task. */

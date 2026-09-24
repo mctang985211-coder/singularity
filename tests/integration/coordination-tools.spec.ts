@@ -94,9 +94,15 @@ describe('the coordination tools (A3)', () => {
     expect(childRun.status).toBe('running')
     expect(childRun.executionPhase).toBe('active')
 
-    // The read side shows the phase from the store, not from memory.
+    // The read side shows the phase from the store, not from memory: the root's
+    // tree view names the child and the phase its run is in...
     const read = await h.call(h.rootAgent(ROOT), 'task_read', {})
-    expect(read.text).toContain(`run ${childRun.runId} [running] — phase active`)
+    expect(read.text).toContain(`- ${childRun.taskId} [running] align the ball (run: running — phase active)`)
+    // ...and the child's run record, with the same phase, is one reference read
+    // away — the run id the tree view does not print is read by id (A2 §D).
+    const byRef = await h.call(h.rootAgent(ROOT), 'context_read', { kind: 'run', ref: childRun.runId })
+    expect(byRef.isError).toBe(false)
+    expect(byRef.text).toContain(`run ${childRun.runId} of task ${childRun.taskId} [running] — phase active`)
 
     release.resolve()
     const outcomes = await h.runtime.awaitBatch(root.storeId, batchId)

@@ -361,3 +361,80 @@ describe('the not-activated view', () => {
     expect(text).toContain('no objective is reported here')
   })
 })
+
+/**
+ * The decomposition guidance in the worker's contract projection (A2, migrated
+ * from the old spawn prompt's conditional rules): the decomposable block when
+ * the task was admitted to split, the runtime-split rule when the deployment
+ * admits a run's own decomposition, the review-wait rule behind either, and
+ * never any of it for a replay or a reviewer. The unconditional rules are the
+ * agent runtime's worker policy section — the projection does not repeat them.
+ */
+describe('the decomposition guidance in the contract projection', () => {
+  test('a decomposable task reads its own block and the review rule, without the runtime-split door when the switch is off', async () => {
+    const stack = new FixtureStack()
+    stack.graph({ id: 'g-x', rootSessionId: 's-xroot', members: ['s-xw'] })
+    stack.sessionLog('s-xroot', ['request'])
+    stack.sessionLog('s-xw', ['request'])
+    stack.runtimeDecomposition = false
+    await stack.seed({ taskId: 't-xroot', sessionId: 's-xroot', runId: 'r-xroot', objective: 'the root goal' })
+    await stack.seed({
+      taskId: 't-xw',
+      sessionId: 's-xw',
+      runId: 'r-xw',
+      objective: 'the decomposable child',
+      parentTaskId: 't-xroot',
+      depth: 1,
+      decomposable: true,
+    })
+    const text = expectOk(await stack.service.contractProjection('s-xw')).text
+    expect(text).toContain('## This task is decomposable')
+    expect(text).toContain('was admitted as decomposable')
+    expect(text).toContain('`task_decompose`')
+    expect(text).toContain('RFC §36')
+    expect(text).toContain('the nested verification settles this task')
+    expect(text).toContain('waiting for a human review')
+    expect(text).toContain('`task_proposal_read`')
+    expect(text).toContain('a revision is a new proposal')
+    expect(text).not.toContain('## If the work turns out not to be atomic')
+    expect(text).not.toContain('admits a task\'s own decomposition')
+  })
+
+  test('a leaf worker reads the runtime-split rule and the review rule when the deployment admits it, and neither when it does not', async () => {
+    const stack = new FixtureStack()
+    const chain = await seedChain(stack)
+
+    const on = expectOk(await stack.service.contractProjection('s-c1')).text
+    expect(on).toContain('## If the work turns out not to be atomic')
+    expect(on).toContain('admits a task\'s own decomposition')
+    expect(on).toContain('a refusal names the rule that blocked it')
+    expect(on).toContain('a task may split only once')
+    expect(on).toContain('waiting for a human review')
+    expect(on).not.toContain('## This task is decomposable')
+
+    stack.runtimeDecomposition = false
+    const off = expectOk(await stack.service.contractProjection('s-c1')).text
+    expect(off).not.toContain('task_decompose')
+    expect(off).not.toContain('decompos')
+    expect(off).not.toContain('waiting for a human review')
+
+    // A replay re-runs the one task as contracted: no decomposition guidance
+    // whatever the switch says.
+    stack.runtimeDecomposition = true
+    const replay = expectOk(await stack.service.contractProjection(chain.replaySession)).text
+    expect(replay).not.toContain('## This task is decomposable')
+    expect(replay).not.toContain('## If the work turns out not to be atomic')
+    expect(replay).not.toContain('waiting for a human review')
+  })
+
+  test('the unconditional worker rules are the agent runtime\'s policy section, not this projection', async () => {
+    const stack = new FixtureStack()
+    await seedChain(stack)
+    const text = expectOk(await stack.service.contractProjection('s-c1')).text
+    // One rule, one home: the stable policy (submission, idle, self-check) is
+    // not repeated in the projection the contract owns.
+    expect(text).not.toContain('Going idle is not a submission')
+    expect(text).not.toContain('`task_verify` is only a self-check')
+    expect(text).not.toContain('never declare completion yourself — an external verifier')
+  })
+})
