@@ -902,6 +902,8 @@ S4-E 按 D 节整体迁移现有 Evolution 生命周期与工具消费者；不�
 
 固定工具为 `task_ask_parent({requestKey, question, blocking?})`（blocking 默认 true）与 `task_answer({questionId, requestKey, answer, resolves})`。身份均来自 live caller、当前 Run 和 Task 父关系，模型不传收件人或授权字段；根、reviewer 和无业务 Run 的节点不能使用 ask。答案只有是否解决当前问题的布尔声明，不新建 clarification/decision 等机器分类；`resolves:false` 保持 open，改契约的建议也必须如此。`resolves:true` 只解除该项执行阻塞，不修改契约/权限，框架不声称验证了自然语言答案正确。
 
+replay 的 parentRunId 仅是实验血缘：parentless replay Task 调 ask 必须拒绝且零问答/投递副作用，不能询问 champion 的执行者。若 replay 内真实分解出子任务，才按该 Task 父关系问答。因此下文 ordinary/replay 覆盖要求包含合法父子正例与无语义父节点的拒绝反例，不要求制造一个虚假父节点使所有入口都成功。
+
 正文使用发送 Session 的真实 `tool/call` 事件引用，agent-runtime 在提交领域意图前确认它已 flush；直接服务调用也必须提交可核对的同一来源，不允许伪造文本引用。Task 只记录 question/answer 身份、双方 Run、正文引用、messageId 与阻塞效果。专用问答事件维护已有 pendingQuestionIds/blockingQuestionIds，不能用 RunPhaseChanged 伪造一次主相位变化。id 按 Run/question 与 requestKey 派生，同 key 同内容返回原记录，异内容拒绝。
 
 顺序固定为：持久正文来源 → Task 原子提交问题/阻塞或答案/解除 → agent-runtime 按同 messageId 投递 DSH inbox → flush 收件 Session 后报告 delivered。ask/answer 不等对方 loop 或回复。Task 意图后崩溃由显式恢复补投递；目标 inbox/history 已有同 id 就不重复入箱。无 inbox 条目不表示已消费：claim 在 pre-step 前可能已移除；context 从未处理问答事实重投影来源，只有实际模型 step 输入才能证明看过，工具领域效果仍以 Task 记录判定。回答已解除阻塞而尚未被模型读取时，下一请求必须包含该回答引用/正文后才能执行；不得仅因 answered 就从上下文删除。没有消费证明就保留引用，不另建 consumed 账本或第二套通信库。
@@ -950,15 +952,21 @@ reviewer 经 context 自主取证、写 Diagnosis（targetType 为非空开放�
 
 **恢复入口固定为 `task_recover({sourceDiagnosisId, requestKey})`**：仅向可信 supervisor 协调会话开放，工具与直调服务均检查源归属、批准应用/解决证据、原契约/预算、当前没有在途恢复尝试。该入口恢复的是原目标的**新 Run**，不是旧 Run 复活或旧 admitted proposal 再次消费。runtime 在同一 store 为失败原根 Task 创建新 Run 与新 Session（旧 session 保持终态），复用原根预算起点；以原 Task 的不可变目标/AC 做顶层验收。根 graph 绑定仍指原目标，查询显式区分旧失败 Run 和当前恢复 Run。`TaskRetried` 可复用；返回新 Run/Session 身份后，由该协调节点通过现有 task_decompose 提出新批次，runtime 依据持久恢复关联路由到恢复准入分支，不由模型传 bypass 标志。普通 decompose 一次性闸不放宽；无分解的原目标直接按原契约执行新 Run。
 
+调用归属固定为工具适配 → evolution 的恢复协调入口 → task-runtime 的执行恢复入口。evolution 解析 Diagnosis/候选关联，核对可信协调者及自己持有的批准、applied/rollback 记录；runtime 核对本 store 的源 Task/Run、契约、当前 provider 内容、依赖证据、预算和恢复幂等，再提交新尝试。两层的直接调用入口各自重检所属规则，不把校验只放在工具函数中；runtime 不导入 evolution、不读取晋升账本、不接受模型传入的 approved 标志。宿主组合层负责两者接线，内部调用不能成为额外暴露的模型工具。
+
 恢复按 Run 固定新 batch 身份（parentTaskId + parentRunId），保存本次成员及旧来源；不覆盖 Task 原批次成员或改写旧失败/blocked 子 Task。新 proposal 引用本次 Run，创建失败/blocked 分支的替代 Task，必要的补产物任务由 Agent 按 T1 提出并经过原审核/准入。已通过兄弟以具体 Run/Evidence/输入与产物身份引用复用；依赖映射及父 AC 的 childEvidence 在本次批次绑定中解析，不能靠改原 AC 里的 id 跳过检查。无效复用拒绝并列明受影响项，由本次新提案安排新执行。恢复尝试和新批次准入分别按 requestKey/既有 proposal 消费幂等，重启续同一身份；不再使用固定 `b-<taskId>` 让不同尝试碰撞，也不依赖父再次分解旧批次。新 Run 终态决定本次目标结果，旧 Review/Evidence 均保留。
 
 能力候选应用与产物修复不是同一件事：缺产物沿已有 producer/dependsOn/Obligation 来源新建或执行合法的生产任务，只有产物与 evidence 真满足条件才解除；无需共享能力变更时不强迫先造 EvolutionProposal。task_recover 对能力变更要求已批准应用，对待生产的产物只要求缺口与来源可核对、生产所需能力可用，不能要求产物已经存在才允许启动其生产恢复。该协调节点先读事实/提新批次，受缺产物影响的业务消费者仍须通过原依赖闸；root 最终提交必须检查产物已满足。坏裁判不能由候选改写以通过，保留诊断；连续失败使用既有根预算/无进展停止，不为每种缺口增加修复分类或重试控制器。候选构建和实验的业务 Run 都计原根总额，新 recovery/supervisor 不获得新预算。
 
 验收 EVO-1：L1 用现成能力组合解决一个真实缺口；另一例由 Agent 生成 L2 执行型 Skill/sidecar、独立验证后仅由人批准；人工编写候选不合格。确定性 scripted 验收只证明接线，真实 Agent 生成效果须另有明确授权与预算的实跑记录，不能混称；没有该记录只交付机制、不宣称自主生长有效。EVO-2：缺 provider 基线真实拒绝、候选真实通过；错误候选、弱化 verifier、越权工具、内容漂移、人工拒绝均不应用、不恢复为成功。EVO-3：能力及产物缺口分别经真实 source→Diagnosis→处置→task_recover→新根独立验收；有效兄弟不重跑，无效引用拒复用并显式重建，旧失败可读。EVO-4：在联合应用每个持久边界、恢复 Run 创建后/批次准入前、准入后/spawn 前及新根结算前重开，provider 无半成品可用、同 requestKey 无重复 Run/批次、预算不归零；重复批准、取消、rollback 后的新准入全部重检，旧在途 Run 不热换版本。
 
+EVO-1 的真实运行证据是第 14 项整组已验收的必要条件，不是可省略的效果附件。派发时须填写本次实验授权和预算，未授权则先完成机制与确定性验证，并将整组保留待验收、列明所缺实跑条件；不能擅自收费运行，也不能填已验收后另排“以后验证自进化”。一组成功仅证明这些冻结案例，不宣称泛化成功率。
+
 内部交接严格串行：①有限 capability+Skill 候选/overlay 与联合应用回滚；②缺能力基线评估及证据闸；③按 Run 的恢复批次、原 AC 绑定与证据复用；④交接消费/supervisor 工具接线；⑤独立端到端验收。主代理保留公共合同/持久化兼容/集成；每个子代理只领一个已固定子目标，不能一次要求其实现完整自进化。整组完成前不开放自主执行开关；任何已承诺路径不以“下票补齐”通过。
 
 本次设计验证：三名 GPT-6 Sol 分别只读核对 context/恢复、问答、Evolution 的实际接口；context 调查者复核 D/E 后指出 graph/add 提前选中及 driver 先启动后登记两处冲突，已在 E 明确选择与失败处置。8 份修改文档的 96 个本地链接目标、15 个代码围栏及 git diff --check 通过。未改运行时代码、未运行构建/运行测试或模型实验，以上不能作为任一建设票的实现验收。
+
+2026-09-24 派发前重读：保留现有归属、顺序和整组完成闸；A6 工作量最大，其内部五项只作为主代理的串行交接，不得整组转派一个子代理。补明 replay 问父依据、恢复协调与执行的调用方向、EVO-1 实跑证据的完成条件，避免执行者自行改变语义。修改前基线 `e762946` / 外层 `319ab96`。此次为文档一致性复核，未重新验收运行时代码；可直接派发入口见[任务模板](execution-prompts/task-dispatch-template.md#直接派发入口)，当前仍只派 R1 无模型返工。
 
 ## R2 Q1 返工（查询重开取消中的执行闸）执行与验收记录（2026-09-23）
 
