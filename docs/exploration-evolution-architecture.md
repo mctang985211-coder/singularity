@@ -2,7 +2,7 @@
 
 日期：2026-09-21。状态：架构决定与待建合同，不是已上线功能。基线 Singularity `9900959`，外层 harness `51b6e2f`；本地 DSH `0d1f50007f9bca3f52b06e1c3074fa14d5fb0720`。
 
-2026-09-23 复核代码 `d5b0bb6`：A3 与 T2/T3 交付保留，A0 的来源/恢复、R2 的取消写闸、R1 的 S3 补验证已完成，R0 默认运行面证据保留；自主改进恢复仍未建。**2026-09-23 A0 返工（Q2/Q3）已关闭**：来源归属判定（store↔session、顶层会话、本人消息三规则，三入口共用，拒绝均在首次写入前）与 `adoptRoot` 公共恢复入口已落地，独立复核通过、未由人类验收；当时基线 Singularity `de85ae0`／外层 `3c4b4dbb7c`（当时工作区未提交，后已按建设计划归档）；记录见建设计划「A0 返工（Q2/Q3）执行与验收记录」与主 guide §5.13。R2 的取消写闸（Q1）与 R1 完成轮 3 已于 2026-09-24 验收，下一项与前置以建设计划唯一表为准。以下未来字段是设计候选，不能逐字段照搬；已实现机制不等于全部入口已满足合同。
+2026-09-23 复核代码 `d5b0bb6`：A3 与 T2/T3 交付保留，A0 的来源/恢复、R2 的取消写闸、R1 的 S3 补验证已完成，R0 默认运行面证据保留；自主改进恢复仍未建。**2026-09-23 A0 返工（Q2/Q3）已关闭**：来源归属判定（store↔session、顶层会话、本人消息三规则，三入口共用，拒绝均在首次写入前）与 `adoptRoot` 公共恢复入口已落地，独立复核通过、未由人类验收；当时基线 Singularity `de85ae0`／外层 `3c4b4dbb7c`（当时工作区未提交，后已按建设计划归档）；记录见[历史执行记录](history/2026-09-24-vrtc-execution-records.md)「A0 返工（Q2/Q3）执行与验收记录」与主 guide §5.13。R2 的取消写闸（Q1）与 R1 完成轮 3 已于 2026-09-24 验收，下一项与前置以建设计划唯一表为准。以下未来字段是设计候选，不能逐字段照搬；已实现机制不等于全部入口已满足合同。
 
 本文细化 [主指南](singularity-harness-guide.md)的上下文、协作与 supervisor 主线；Task 结构及可选契约审核见 [Task 自主构造指导](task-contract-construction-guide.md)，建设顺序见 [计划](2026-09-20-vrtc-code-change-plan.md)。外部事实及固定来源见 [开源调研](2026-09-21-open-source-agent-patterns.md)，角色提示词合同见 [Prompt 指导](agent-prompt-contracts.md)。
 
@@ -93,7 +93,7 @@ flowchart TD
 
 在进入业务执行前增加根目标 intake：root agent 从用户请求构造规范化根契约，包含 objective、范围/约束、mandatory AC 和独立顶层检查。机器校验后按 T2 相同开关语义进行可选契约审核；没有模板也能生成。根契约草案不是任务已接受，不允许 worker 消费未接受草案。
 
-T2/T3 子批次协议已交付，A0 根入口复用摘要绑定、批准后重检和恢复规则。off/all 两条路径均须完整，不能静默降级 off。已实现同一开关、四个事件、决定绑定、requestKey 幂等与恢复遍；本轮发现 adoptRoot 在无根任务时跳过该恢复遍——**该缺陷已于 2026-09-23 返工关闭**：`adoptRoot` 无根时先跑既有 `reconcileStore` 再读回（批准已存未激活由续跑阶梯绑定、`pending_review` 重发、否则 `{ adopted: false }` 并点名仍未关闭的提案，空 store 零写入），恢复夹具的 `reopen` 只经 `adoptRoot`，公共入口验收取代显式 reconcile 的测试（记录见建设计划「A0 返工（Q2/Q3）执行与验收记录」与主 guide §5.13）。
+T2/T3 子批次协议已交付，A0 根入口复用摘要绑定、批准后重检和恢复规则。off/all 两条路径均须完整，不能静默降级 off。已实现同一开关、四个事件、决定绑定、requestKey 幂等与恢复遍；本轮发现 adoptRoot 在无根任务时跳过该恢复遍——**该缺陷已于 2026-09-23 返工关闭**：`adoptRoot` 无根时先跑既有 `reconcileStore` 再读回（批准已存未激活由续跑阶梯绑定、`pending_review` 重发、否则 `{ adopted: false }` 并点名仍未关闭的提案，空 store 零写入），恢复夹具的 `reopen` 只经 `adoptRoot`，公共入口验收取代显式 reconcile 的测试（记录见历史执行记录「A0 返工（Q2/Q3）执行与验收记录」与主 guide §5.13）。
 
 为避免修改不可变历史，graph setup 与 root Task 激活必须分开：graph/root session 可以先存在，根任务只在契约接受后创建；不要先创建 graph-name 根任务再原地改 AC。旧图已有根任务继续按历史读取/完成，若目标改变创建新目标绑定/新 graph，不偷偷迁移已有任务。（**2026-09-23 落地，已验收**：`graphs.create` 只建 graph + root session 并调 `adoptRoot`；`task_read` 的「尚无业务根契约」状态与 `adoptRoot` 同批更新；旧图根任务的读取/验收/完成不变、其上 intake 具名拒绝，由 `tests/integration/root-intake-recovery.spec.ts` 与 `tests/support/legacy-root.ts` 覆盖。）
 
@@ -278,9 +278,9 @@ R0 按角色与实际启用能力收敛工具面，部署未启用 Evolution 时
 
 | 票 | 前置与落点 | 必交付与确定性验收 |
 |---|---|---|
-| A0 真实根契约入口 | T1、S1-V 切片 2、T2/T3 组；graphs/adoptRoot、root 角色 | setup 不消费根分解；无契约时 task_read 返回未激活；graph name 不冒充目标；新根有独立 AC；子全通过但根错误仍拒绝；off/all 与激活崩溃恢复完整；拒绝草案零派发；旧图不改历史；来源归属（store↔session、顶层会话、本人消息）与 `adoptRoot` 公共恢复入口的零副作用拒绝。**2026-09-23 实现事实（来源/恢复返工已关闭）**：`graphs.create` → `adoptRoot` 不再建根任务；`task_intake` + `assertRootContractOrigin` + `rootIndependenceDefects` + 同套审核/激活/幂等恢复 + 具名未激活视图；每条验收的测试位置见建设计划「A0 + R0 执行与验收记录」与「A0 返工（Q2/Q3）执行与验收记录」。仍未建：契约修订入口、模板库、A1 上下文投影；边界如实记录：归因纪律非来源真实性证明、服务层不校验顶层会话属某 graph 的 root、日志不可读时不能激活/恢复（fail-closed）、每次 `adoptRoot` 会重发等待中提案的审核请求；R1 完成轮 3 已补充固定场景的澄清与有限目标验证，不提供通用语义保证 |
+| A0 真实根契约入口 | T1、S1-V 切片 2、T2/T3 组；graphs/adoptRoot、root 角色 | setup 不消费根分解；无契约时 task_read 返回未激活；graph name 不冒充目标；新根有独立 AC；子全通过但根错误仍拒绝；off/all 与激活崩溃恢复完整；拒绝草案零派发；旧图不改历史；来源归属（store↔session、顶层会话、本人消息）与 `adoptRoot` 公共恢复入口的零副作用拒绝。**2026-09-23 实现事实（来源/恢复返工已关闭）**：`graphs.create` → `adoptRoot` 不再建根任务；`task_intake` + `assertRootContractOrigin` + `rootIndependenceDefects` + 同套审核/激活/幂等恢复 + 具名未激活视图；每条验收的测试位置见历史执行记录「A0 + R0 执行与验收记录」与「A0 返工（Q2/Q3）执行与验收记录」。仍未建：契约修订入口、模板库、A1 上下文投影；边界如实记录：归因纪律非来源真实性证明、服务层不校验顶层会话属某 graph 的 root、日志不可读时不能激活/恢复（fail-closed）、每次 `adoptRoot` 会重发等待中提案的审核请求；R1 完成轮 3 已补充固定场景的澄清与有限目标验证，不提供通用语义保证 |
 | A2 + A1 状态上下文（同组） | A0/A3、S1-C，R1/R3 验收后；新 context、现有工具与 DSH 装配 | 显式恢复与读取分离；三层根约束/本人贡献进入实际请求；依赖兄弟证据和同 graph 详情按引用可读，无关历史默认不推；跨 graph 包括原始 Session 入口均拒绝；压缩/重启可重建、replay 不串根；普通/replay 消费者及旧渲染迁移闭合 |
-| A3 非阻塞批次与协调相位（已交付，2026-09-22；验收见建设计划「A3 执行与验收记录」，落地事实已回写 §7.1/§7.2/§7.4） | T1、S1-V 切片 2、S1-C；Task runtime/reducer、agent-runtime | 分解立即返回且父可继续；waiting idle 不验收；显式提交/父独立验收；依赖串行、取消/恢复/卸载完整；提交/派发去重；迟到写入、跨批次/跨根工作区冲突被阻挡；普通/replay 同守状态规则；根预算不因新 Run/重启重置，无进展停止 |
+| A3 非阻塞批次与协调相位（已交付，2026-09-22；验收见历史执行记录「A3 执行与验收记录」，落地事实已回写 §7.1/§7.2/§7.4） | T1、S1-V 切片 2、S1-C；Task runtime/reducer、agent-runtime | 分解立即返回且父可继续；waiting idle 不验收；显式提交/父独立验收；依赖串行、取消/恢复/卸载完整；提交/派发去重；迟到写入、跨批次/跨根工作区冲突被阻挡；普通/replay 同守状态规则；根预算不因新 Run/重启重置，无进展停止 |
 | A4 父子问题/回答 | A2/A1、A3；agent-runtime + DSH 通信，context 呈现，runtime 执行阻塞 | 父子/三层问答无同步死锁；batch/写闸保留，一个答案不清空其他阻塞；未答不算同意，迟到不复活 Run；入箱及 claim 后 crash 可恢复，不重复领域副作用；正文不在 task 再存一份 |
 | S4-E 评估基础 | A4 后；新 evolution 包承接已有生命周期 | 先验一种候选的真实可比实验/独立判据；工具适配与实现迁移同批，旧 ledger 可读与既有回滚有效，不建全候选评估平台 |
 | A5 + S2-E 诊断与交接 | A2/A1、A4、S4-E；agent-singularity/review 消费 context | 对实际失败幂等触发 reviewer，Agent 选择取证与实验、交接候选；缺证据不冒称因果；运行终态不依赖事后诊断成功，重启不重复副作用 |

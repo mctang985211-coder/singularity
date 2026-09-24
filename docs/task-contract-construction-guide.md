@@ -1,6 +1,6 @@
 # Task 自主构造与契约审核建设指导
 
-日期：2026-09-21。状态：设计合同；T1「统一规范化契约」已实现并验收（2026-09-21，源码/测试锚见主 guide §5.6 与建设计划 T1 节），T2/T3「契约审核与恢复」已实现并验收（2026-09-23，源码/测试锚见主 guide §5.10 与建设计划「T2+T3：契约审核与恢复 执行与验收记录」）；正文其余部分仍是目标语义，落地边界以标注为准。
+日期：2026-09-21。状态：设计合同；T1「统一规范化契约」已实现并验收（2026-09-21，源码/测试锚见主 guide §5.6 与[历史执行记录](history/2026-09-24-vrtc-execution-records.md) T1 节），T2/T3「契约审核与恢复」已实现并验收（2026-09-23，源码/测试锚见主 guide §5.10 与历史执行记录「T2+T3：契约审核与恢复 执行与验收记录」）；正文其余部分仍是目标语义，落地边界以标注为准。
 本次编辑前工作区干净，已有提交作为备份：Singularity `7be57a1`，外层 harness `9f818152bb`。保留 P1–P4 的实现与验证记录。T2/T3 交付时的修改前基线为 Singularity `6d85c5e` / 外层 `4d5d4b7`。
 
 方向入口为 [主指南](singularity-harness-guide.md)，派发顺序以 [建设计划](2026-09-20-vrtc-code-change-plan.md)为准；本文件细化 Task 契约与生成审核，不替代两者。
@@ -51,9 +51,9 @@ S1-V 切片 2（2026-09-21）另在 AC 上加入 `protectedInputs`（受保护�
 
 S1-C（2026-09-22）把"Task 只提需求、Run 固定实现"落成机制：`requiredCapabilities` 仍是契约里的需求名（不写死 Skill），provider 预检、类型化侧车契约与 run 级内容绑定（`TaskRun.providerBinding`：registry 修订、provider 角色与内容摘要、preset/MCP 身份）见主 guide §5.8；它不改变本文件的契约字段与审核范围。
 
-**T1 已实现部分（2026-09-21）**：数据定义 `task/src/contract.ts:TaskContract`（含 `contractVersion`、`assumptions`、`constraints`），唯一规范化与校验入口 `task-runtime/src/normalize.ts:normalizeDecomposition`（三层闭合字段集、默认值、criterion id 固定、未知版本拒绝），身份算法 `canonicalize`/`contractDigest`/`decompositionDigest`，批次准入记录 `TaskDecomposed.admission`（`proposalDigest` + `AdmissionContext`），以及普通分解/replay/root 三个入口的持久化与共用结构校验（`task-runtime/src/admission.ts:contractDefects`）。下表的 `contractVersion`、`assumptions`、`constraints`、`requiredCapabilities`、`dependsOn`、输入/证据、复合声明、分解意图各行的**当前实现状态**以主 guide §5.6 与建设计划 T1 节为准。
+**T1 已实现部分（2026-09-21）**：数据定义 `task/src/contract.ts:TaskContract`（含 `contractVersion`、`assumptions`、`constraints`），唯一规范化与校验入口 `task-runtime/src/normalize.ts:normalizeDecomposition`（三层闭合字段集、默认值、criterion id 固定、未知版本拒绝），身份算法 `canonicalize`/`contractDigest`/`decompositionDigest`，批次准入记录 `TaskDecomposed.admission`（`proposalDigest` + `AdmissionContext`），以及普通分解/replay/root 三个入口的持久化与共用结构校验（`task-runtime/src/admission.ts:contractDefects`）。下表的 `contractVersion`、`assumptions`、`constraints`、`requiredCapabilities`、`dependsOn`、输入/证据、复合声明、分解意图各行的**当前实现状态**以主 guide §5.6 与历史执行记录 T1 节为准。
 
-**T2/T3 已实现部分（2026-09-23，已验收）**：本节 §5–§7 描述的策略、提案生命周期与恢复已落地，源码锚见主 guide §5.10、测试锚见建设计划 T2+T3 记录。三个上下文指纹——规范化单任务契约摘要（`contractDigest`）、整批提案摘要（`decompositionDigest`）、准入上下文指纹（`admissionContextDigest`，`task/src/proposal.ts`）——都已实现，并新增审核上下文指纹 `reviewContextDigest`（本批解析到的 manifest 折叠摘要 + 判据 pin 的 verifier 身份）与 `capabilityManifestDigest`。批准同时绑定 `proposalDigest` + `admissionContextDigest` + `reviewContextDigest`，reducer 逐项比对。仍未实现：Task 模板库、契约修订入口、多进程并发写同一 store 的恰好一次保证；**根契约入口（A0）已于 2026-09-23 交付并验收，其来源归属与 `adoptRoot` 恢复入口的返工（Q2/Q3）同日关闭**（见 §1 与建设计划「A0 返工（Q2/Q3）执行与验收记录」）。
+**T2/T3 已实现部分（2026-09-23，已验收）**：本节 §5–§7 描述的策略、提案生命周期与恢复已落地，源码锚见主 guide §5.10、测试锚见历史执行记录 T2+T3 记录。三个上下文指纹——规范化单任务契约摘要（`contractDigest`）、整批提案摘要（`decompositionDigest`）、准入上下文指纹（`admissionContextDigest`，`task/src/proposal.ts`）——都已实现，并新增审核上下文指纹 `reviewContextDigest`（本批解析到的 manifest 折叠摘要 + 判据 pin 的 verifier 身份）与 `capabilityManifestDigest`。批准同时绑定 `proposalDigest` + `admissionContextDigest` + `reviewContextDigest`，reducer 逐项比对。仍未实现：Task 模板库、契约修订入口、多进程并发写同一 store 的恰好一次保证；**根契约入口（A0）已于 2026-09-23 交付并验收，其来源归属与 `adoptRoot` 恢复入口的返工（Q2/Q3）同日关闭**（见 §1 与历史执行记录「A0 返工（Q2/Q3）执行与验收记录」）。
 
 保留当前字段词汇，新增字段明确版本。以下是目标语义，不是当前工具参数示例：
 
@@ -104,7 +104,7 @@ S1-C（2026-09-22）把"Task 只提需求、Run 固定实现"落成机制：`req
 
 ## 6. 提案生命周期与执行交接
 
-以下是 T2/T3 的提案合同，属于 TaskProposal，不扩展 TaskStatus 来塞审批状态。**已实现（2026-09-23，已验收）**：状态机、决定绑定、批准后重检与四个崩溃点的恢复都落地了，源码/测试锚见主 guide §5.10 与建设计划 T2+T3 记录；本节描述与实现一致，未落地的部分逐条标注。单提案对应一批分解，整批批准或拒绝；首版不支持部分批准，避免破坏 dependsOn。
+以下是 T2/T3 的提案合同，属于 TaskProposal，不扩展 TaskStatus 来塞审批状态。**已实现（2026-09-23，已验收）**：状态机、决定绑定、批准后重检与四个崩溃点的恢复都落地了，源码/测试锚见主 guide §5.10 与历史执行记录 T2+T3 记录；本节描述与实现一致，未落地的部分逐条标注。单提案对应一批分解，整批批准或拒绝；首版不支持部分批准，避免破坏 dependsOn。
 
 ```text
 生成草稿 -> 规范化与预检
@@ -135,7 +135,7 @@ ready -> 重检父状态、权限、预算、能力、verifier 与契约
 
 首版建议保留 `task_decompose` 作为兼容入口，内部先提出提案，再按策略推进。新增查询/继续入口以 proposalId 操作已保存内容，不接受“approved: true”或任意外部审批凭据。具体工具命名沿用仓库习惯，规范固定的是行为。
 
-**落地事实（2026-09-23 T2/T3，已验收）**：规则 1–8 已实现，入口与测试锚见主 guide §5.10 与建设计划 T2+T3 记录。store 侧：四个提案事件 `TaskProposalSubmitted`（携带整批规范化契约内容 `batch`，不只是摘要）、`TaskProposalDecided`（绑定 `proposalDigest` + `admissionContextDigest` + 批准必须的 `reviewContextDigest`）、`TaskProposalPhaseChanged`（`ready → pending_review` 收紧、`approved → ready` 重检通过、`ready|approved → stale`）、`TaskProposalAdmitted`（消费与子任务、依赖边、父相位同一提交），加上 `TaskSnapshot.proposals` 的 byId/byRequestKey/byParentTask 索引，持久化记录见 `docs/persistence-changes/2026-09-22-task-proposal-review.md`。工具面：`task_decompose` 组合「提交 + 续跑」，另有 `task_proposal_read`/`task_proposal_continue`/`task_proposal_cancel`；渠道 `ProposalReviewService` 挂在 service 装配处，不在任何 agent 工具面。规则 3（T2 不顺手实现 blocked 恢复）与规则 8（不下发平台管理/HITL 工具给递归 worker）在集成测试中被直接断言。
+**落地事实（2026-09-23 T2/T3，已验收）**：规则 1–8 已实现，入口与测试锚见主 guide §5.10 与历史执行记录 T2+T3 记录。store 侧：四个提案事件 `TaskProposalSubmitted`（携带整批规范化契约内容 `batch`，不只是摘要）、`TaskProposalDecided`（绑定 `proposalDigest` + `admissionContextDigest` + 批准必须的 `reviewContextDigest`）、`TaskProposalPhaseChanged`（`ready → pending_review` 收紧、`approved → ready` 重检通过、`ready|approved → stale`）、`TaskProposalAdmitted`（消费与子任务、依赖边、父相位同一提交），加上 `TaskSnapshot.proposals` 的 byId/byRequestKey/byParentTask 索引，持久化记录见 `docs/persistence-changes/2026-09-22-task-proposal-review.md`。工具面：`task_decompose` 组合「提交 + 续跑」，另有 `task_proposal_read`/`task_proposal_continue`/`task_proposal_cancel`；渠道 `ProposalReviewService` 挂在 service 装配处，不在任何 agent 工具面。规则 3（T2 不顺手实现 blocked 恢复）与规则 8（不下发平台管理/HITL 工具给递归 worker）在集成测试中被直接断言。
 
 ### 重启和幂等
 
@@ -168,7 +168,7 @@ Task 契约数据由 task 拥有，规范化规则可先在现有 task-runtime �
 
 ## 8. 分批建设与验收
 
-### T1：统一规范化契约（2026-09-21 已实现，执行与验收记录见建设计划 T1 节）
+### T1：统一规范化契约（2026-09-21 已实现，执行与验收记录见历史执行记录 T1 节）
 
 范围：§4 规范化字段、身份算法与新实例持久化，普通分解/replay 的适用结构校验、handoff 一致性。无模板库、审批开关、状态机和恢复调度。已有 P4 语义保留，不重做父验收。
 
@@ -187,7 +187,7 @@ Task 契约数据由 task 拥有，规范化规则可先在现有 task-runtime �
 
 验收：off 不调用人审但记录 policy-off；all 在批准前零子任务/零 spawn；非法输入不弹审批；批准只作用于同一摘要；拒绝/取消/无提供者均不执行；修订不能复用批准；直接 runtime 调用也受闸；父/Run/资源配置改变标 stale；all→off 不释放待审，off→all 在准入前补审；递归 worker 无新增管理工具。分别断言状态、事件、工具调用次数和父图不变。
 
-**验收证据锚（实现事实见主 guide §5.10，测试位置与结果见建设计划 T2+T3 记录「验收项对应（T2）」行）**：`tests/integration/proposal-review.spec.ts`（真实 DSH loop + scripted provider，15 项，覆盖上列每条与闸分类、known wait、replay 不入审）、`task-runtime/tests/unit/proposal-lifecycle.spec.ts`、`task/tests/unit/proposal.spec.ts`、`agent-singularity/tests/unit/{proposal-review,task-proposal-tools}.spec.ts`。
+**验收证据锚（实现事实见主 guide §5.10，测试位置与结果见历史执行记录 T2+T3 记录「验收项对应（T2）」行）**：`tests/integration/proposal-review.spec.ts`（真实 DSH loop + scripted provider，15 项，覆盖上列每条与闸分类、known wait、replay 不入审）、`task-runtime/tests/unit/proposal-lifecycle.spec.ts`、`task/tests/unit/proposal.spec.ts`、`agent-singularity/tests/unit/{proposal-review,task-proposal-tools}.spec.ts`。
 
 ### T3：审批恢复、准入幂等与节点修订案例（2026-09-23 已实现，已验收）
 
