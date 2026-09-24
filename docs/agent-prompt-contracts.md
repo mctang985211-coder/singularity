@@ -178,8 +178,8 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 | Prompt 中的说法 | 代码侧必须提供 |
 |---|---|
 | “你负责当前任务” | session→run→task 精确绑定，禁止同 session 冒领其他 Run |
-| “读取根目标和相关决定” | **A0 已实现，来源/恢复返工已关闭（2026-09-23）**：真实的根契约（`task_intake` 接受后持久化的 objective/criteria/assumptions/constraints/requiredCapabilities）与来源归属（`identity.rootSessionId` 经 `assertRootContractOrigin` 校验 store↔session、顶层会话与本人消息，三入口共用，拒绝在首次写入前且具名）；`task_read`/`task_status` 在未激活时给具名状态而非代用目标。边界：归因纪律不等于来源真实性证明，也不证明模型对用户请求的解读正确（语义效果由 R1 的固定场景补充验证，见主 guide §5.14：单场景证据，不是通用保证）。**A1 未建**：ContextView、祖先决定投影与原始 refs 的授权读取仍待建，不能只加一句“考虑全局” |
-| “可查看邻域任务” | A2 的可见域检查、revision、分页与合法动作；不能只有全树字符串 |
+| “读取根目标和相关决定” | **A0 已实现，来源/恢复返工已关闭（2026-09-23）**：真实的根契约（`task_intake` 接受后持久化的 objective/criteria/assumptions/constraints/requiredCapabilities）与来源归属（`identity.rootSessionId` 经 `assertRootContractOrigin` 校验 store↔session、顶层会话与本人消息，三入口共用，拒绝在首次写入前且具名）；`task_read`/`task_status` 在未激活时给具名状态而非代用目标。边界：归因纪律不等于来源真实性证明，也不证明模型对用户请求的解读正确；R1 固定场景只证明澄清答复到达模型，目标形成的验收仍返工（主 guide §5.14）。**A1 未建**：ContextView、祖先决定投影与原始 refs 的授权读取仍待建，不能只加一句“考虑全局” |
+| “可查看任务状态” | A2 先修现有 `task_status` 的 worker 全树读取：本人/直属子状态与根目标短句、相位和少量可核实的下一动作提示；实际执行入口重检。任意邻域、revision/分页没有当前消费者，不部署“可查看任意邻域”的提示词 |
 | “向父节点询问并等待” | A3 已落地非阻塞父循环与协调相位（waiting_children/submitted、写闸、显式提交；task-runtime/src/gate.ts、orchestrate.ts）；持久问题、问答唤醒与超时仍属 A4 |
 | “提交后由 verifier 判定” | A3 已落地：task_submit_result → RunPhaseChanged(submitted) 落库后 drainSession 排空在途写，再转 verifier 排他执行；idle 不作完成证据 |
 | “只做协调” | A3 已落地：waiting_children 期间运行时闸（tools/pre-execute waterfall，在途调用同样登记检查）只放行读/状态/诊断/task_cancel 等协调动作，不只靠提示词防并发写 |
