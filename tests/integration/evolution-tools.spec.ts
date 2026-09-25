@@ -393,11 +393,13 @@ it('stops the mechanical chain at the gate for agent_preset: the manual report i
     }, exec('root-1'))
     expect(gated).toContain('[gated]')
 
-    // The manual boundary is a boundary, not an approval: a manual report never
-    // becomes promotion evidence, and no human is asked to promote it.
+    // A manual report is never promotion evidence, and neither is any report at
+    // all for this target type: S4-E §F.2/EVAL-4 gives a capability, agent_preset
+    // or task_definition proposal no evaluator in this build, so its PROMOTE is
+    // refused by name and no human is asked to promote it.
     const decided = await decide.execute({ proposalId: 'p-preset-1', decision: 'PROMOTE' }, exec('root-1'))
     expect(decided).toContain('evolution_decide rejected:')
-    expect(decided).toContain('promotion requires executed replay evidence, not a manual report')
+    expect(decided).toContain('has no evaluator in this build')
     expect(approval.request).not.toHaveBeenCalled()
     expect(await readFile(join(championDir, 'preset.yml'), 'utf8')).toBe('preset: old\n')
 
@@ -502,6 +504,80 @@ it('refuses a skill call the two-sided experiment cannot honour, without running
     expect(replayTask).not.toHaveBeenCalled()
     const ledger = (await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n')
     expect(ledger.map(line => (JSON.parse(line) as { kind: string }).kind)).toEqual(['proposed', 'candidate', 'prepared'])
+  } finally {
+    vi.unstubAllEnvs()
+  }
+})
+
+it('refuses a capability PROMOTE and a skill gate without an experiment through the tools, leaving the ledger at gated', async () => {
+  const { tools, home, approval } = await mountAgent()
+  try {
+    const propose = tools.get('evolution_propose')!
+    const candidate = tools.get('evolution_candidate')!
+    const prepare = tools.get('evolution_prepare')!
+    const replay = tools.get('evolution_replay')!
+    const gate = tools.get('evolution_gate')!
+    const decide = tools.get('evolution_decide')!
+    const answers = {
+      targetFailureFixed: 'a', originalAcceptanceMaintained: 'b', existingRegressionMaintained: 'c',
+      noUnacceptableSideEffects: 'd', holdoutPerformanceAcceptable: 'e', resourceCostAcceptable: 'f',
+      regressionEvidenceRefs: ['ev-champ'],
+    }
+
+    // A capability candidate can be recorded and gated; its PROMOTE is refused by
+    // name (EVAL-4: no evaluator for this target type in this build).
+    await propose.execute({
+      proposalId: 'p-cap-eval4',
+      level: 'L2',
+      baseVersion: 'v1',
+      targetType: 'capability',
+      targetId: 'research',
+      rationale: 'the row should grant the verify skill',
+      sourceRefs: ['diagnosis:d1'],
+    }, exec('root-1'))
+    await candidate.execute({
+      proposalId: 'p-cap-eval4',
+      versionSet: { capabilityTable: 'config.yml#doc1' },
+      mutation: { name: 'research', entry: { preset: 'standard', skills: ['verify'] } },
+    }, exec('root-1'))
+    await prepare.execute({ proposalId: 'p-cap-eval4' }, exec('root-1'))
+    await replay.execute({ proposalId: 'p-cap-eval4', taskIds: ['t-champ'] }, exec('root-1'))
+    await gate.execute({
+      proposalId: 'p-cap-eval4',
+      ...answers,
+      regressionEvidenceRefs: ['sandbox/p-cap-eval4/replay-report.json', 'ev-champ'],
+    }, exec('root-1'))
+    const refusedDecide = await decide.execute({ proposalId: 'p-cap-eval4', decision: 'PROMOTE' }, exec('root-1'))
+    expect(refusedDecide).toContain('evolution_decide rejected:')
+    expect(refusedDecide).toContain('has no evaluator in this build')
+    expect(approval.request).not.toHaveBeenCalled()
+
+    // A skill candidate gates on its experiment: with none recorded, the gate is
+    // refused and only the ledger's three lifecycle lines exist.
+    await propose.execute({
+      proposalId: 'p-skill-eval4',
+      level: 'L2',
+      baseVersion: 'v1',
+      targetType: 'skill',
+      targetId: 'verify',
+      rationale: 'the skill never mentions empty-input fixtures',
+      sourceRefs: ['diagnosis:d1'],
+    }, exec('root-1'))
+    await candidate.execute({
+      proposalId: 'p-skill-eval4',
+      versionSet: { skill: 'v2' },
+      mutation: { name: 'verify', content: skillText('# new verify skill') },
+    }, exec('root-1'))
+    await prepare.execute({ proposalId: 'p-skill-eval4' }, exec('root-1'))
+    const refusedGate = await gate.execute({ proposalId: 'p-skill-eval4', ...answers }, exec('root-1'))
+    expect(refusedGate).toContain('evolution_gate rejected:')
+    expect(refusedGate).toContain('has no two-sided experiment')
+
+    const ledger = (await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n')
+      .map(line => (JSON.parse(line) as { kind: string }).kind)
+    expect(ledger).not.toContain('decided')
+    expect(ledger).not.toContain('applied')
+    expect(ledger.filter(kind => kind === 'gated')).toHaveLength(1)
   } finally {
     vi.unstubAllEnvs()
   }

@@ -1,7 +1,7 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import "@dangosys/dsh-singularity-task";
 import { ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest } from "@dangosys/dsh-singularity-task-runtime";
+import "@dangosys/dsh-singularity-task";
 
 //#region src/hitl.d.ts
 type HitlKind = 'ask' | 'approve';
@@ -309,6 +309,19 @@ declare module '@deepseek-ai/cordis' {
     singularityEvolution: EvolutionExposure;
   }
 }
+/**
+ * The model identity the evolution plane freezes with an experiment and re-reads
+ * before a promotion (see `Config.modelIdentity` of the evolution service).
+ *
+ * One source for both ends: the deployment's own default selection
+ * (`agentDefaultModel.currentSelection()`), which is the configuration a session
+ * without an explicit selection — and every replay the runtime spawns for an
+ * experiment — runs under. The experiment tool freezes exactly this value, so
+ * the identity a report is frozen under is the one the gate later compares
+ * against; a deployment that mounts no such service answers `undefined`, and the
+ * ledger then refuses to evaluate or promote rather than skipping the check.
+ */
+declare function deploymentModelIdentity(ctx: Context): string | undefined;
 declare class SingularityAgent extends Service {
   static inject: string[];
   static Config: z<Config>;
@@ -330,4 +343,4 @@ declare class SingularityAgent extends Service {
   private resolveEvolution;
 }
 //#endregion
-export { Config, DEFAULT_EVOLUTION, ESCALATION_TRIGGERS, type Escalation, type EscalationInput, type EscalationRecord, EscalationService, type EscalationTrigger, EvolutionExposure, type HitlAnswer, type HitlKind, type HitlPending, HitlService, ProposalReviewService, SingularityAgent, SingularityAgent as default, ownerSessionOfStore, renderProposalReview, reviewDecider };
+export { Config, DEFAULT_EVOLUTION, ESCALATION_TRIGGERS, type Escalation, type EscalationInput, type EscalationRecord, EscalationService, type EscalationTrigger, EvolutionExposure, type HitlAnswer, type HitlKind, type HitlPending, HitlService, ProposalReviewService, SingularityAgent, SingularityAgent as default, deploymentModelIdentity, ownerSessionOfStore, renderProposalReview, reviewDecider };

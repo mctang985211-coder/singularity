@@ -323,6 +323,15 @@ declare class VerifierRegistry extends Service {
   private executeSamples;
   /** The registered verifier ids, sorted — the vocabulary a criterion's `verifierRef` may name. */
   verifierIds(): string[];
+  /**
+   * The version each registered verifier declares, by id — the registry metadata
+   * {@link stampVersion} puts on the verdicts that instance produces. A verifier
+   * that declares no version is absent from the map, so a reader distinguishes
+   * "declares none" from "is not registered" by the two reads together
+   * (`verifierIds()` for registration, this for the version). Read as a pair
+   * wherever a verdict has to be recalled against the instance that judged it.
+   */
+  verifierVersions(): Record<string, string>;
   /** Best-effort warn through the cordis logger when one is mounted; tests and minimal contexts may not have it. */
   private warn;
   /** Cordis runs this after construction: the built-ins are gated before the service is usable. */

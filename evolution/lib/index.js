@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { Context, Service } from "@deepseek-ai/cordis";
-import { capabilityToolQuery, loadSkillSidecar, optionalService, precheckReplacedCapabilityRow, readVerifiedFile, registeredVerifierIds, unlistableVerifierRefusal, validateSkillProvider, walkVerified } from "@dangosys/dsh-singularity-task-runtime";
+import { capabilityToolQuery, loadSkillSidecar, optionalService, readVerifiedFile, registeredVerifierIds, registeredVerifierVocabulary, unlistableVerifierRefusal, validateSkillProvider, walkVerified } from "@dangosys/dsh-singularity-task-runtime";
 import { rootTaskStoreId } from "@dangosys/dsh-singularity-task";
 
 //#region src/config-edit.ts
@@ -661,7 +661,7 @@ function isHex64(value) {
 	return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
 /** Lowercase SHA-256 hex over exact bytes. */
-function sha256Hex$1(bytes) {
+function sha256Hex$2(bytes) {
 	return createHash("sha256").update(bytes).digest("hex");
 }
 /** The lineage tag one sample side's replayed task carries — how a run is found again after a crash. */
@@ -722,11 +722,11 @@ async function directoryDigest(directory) {
 				continue;
 			}
 			if (!entry.isFile()) throw new Error(`experiment: the input snapshot holds "${abs}", which is neither a file nor a directory — only regular files and symbolic links can be frozen as input`);
-			lines.push(`${rel}\0${sha256Hex$1(await readFile(abs))}`);
+			lines.push(`${rel}\0${sha256Hex$2(await readFile(abs))}`);
 		}
 	};
 	await walk(base, "");
-	return sha256Hex$1(lines.join("\n"));
+	return sha256Hex$2(lines.join("\n"));
 }
 /** The task's latest review record — its terminal outcome is what makes a sample a sample. */
 function latestReview(snapshot, task) {
@@ -761,7 +761,12 @@ function costOf(review) {
 		metrics: structuredClone(metrics)
 	};
 }
-/** The evidence ids of one run: the review record's own list, or the store's bundles for that run when there is no review. */
+/**
+* The evidence ids of one run: the review record's own list, or the store's
+* bundles for that run when there is no review. Exported because the promotion
+* gate re-reads exactly this fact from the store — one rule for what a side's
+* evidence is, not two.
+*/
 function evidenceRefsOf(snapshot, runId, review) {
 	if (review !== void 0) return [...review.evidenceRefs];
 	if (runId === void 0) return [];
@@ -838,7 +843,7 @@ function frozenCriterionOf(criterion) {
 	};
 }
 /** Freeze one sample from its store record: what the case is, and the acceptance the replay mirrors into both sides. */
-function frozenSampleOf(sample, task, review) {
+function frozenSampleOf$1(sample, task, review) {
 	if (task.acceptanceCriteria.length === 0) throw new Error(`sample "${sample.taskId}" carries no acceptance criteria; there is nothing for the two sides to be judged by`);
 	return {
 		taskId: sample.taskId,
@@ -1073,7 +1078,7 @@ async function runExperiment(sources, request) {
 		const review = latestReview(snapshot, task);
 		if (review === void 0) throw new Error(`sample "${sample.taskId}" has no review record on its latest run; there is no case to reproduce`);
 		assertSampleRole(sample, task, review);
-		return frozenSampleOf(sample, task, review);
+		return frozenSampleOf$1(sample, task, review);
 	});
 	const frozen = freezeExperiment({
 		proposalId: spec.proposalId,
@@ -1106,6 +1111,7 @@ async function runExperiment(sources, request) {
 		frozenDigest,
 		budget: { ...frozen.budget },
 		report: experimentReportPath(spec.proposalId, experimentId),
+		storeId,
 		actor,
 		at: (/* @__PURE__ */ new Date()).toISOString()
 	});
@@ -1250,6 +1256,7 @@ function assertExperimentStartRecord(record, proposals) {
 	if (canonicalJson(record.budget) !== canonicalJson(record.frozen.budget)) throw new Error(`evolution: experiment_started record for "${record.proposalId}" carries a budget that is not the frozen one`);
 	if (record.experimentId !== experimentIdOf(record.proposalId, record.frozenDigest)) throw new Error(`evolution: experiment_started record for "${record.proposalId}" has an id that does not match its frozen identity`);
 	if (record.report !== experimentReportPath(record.proposalId, record.experimentId)) throw new Error(`evolution: experiment_started record for "${record.proposalId}" names a report path outside its own sandbox`);
+	if (record.storeId !== void 0 && (typeof record.storeId !== "string" || record.storeId.length === 0)) throw new Error(`evolution: experiment_started record for "${record.proposalId}" has a malformed task store id`);
 	nonEmpty$1(record.actor, "experiment_started actor");
 	nonEmpty$1(record.at, "experiment_started at");
 }
@@ -1333,6 +1340,7 @@ function foldExperiments(records, proposals) {
 				frozenDigest: record.frozenDigest,
 				budget: record.budget,
 				report: record.report,
+				...record.storeId === void 0 ? {} : { storeId: record.storeId },
 				at: record.at,
 				samples: []
 			});
@@ -1353,6 +1361,238 @@ function foldExperiments(records, proposals) {
 		view.samples.push(record);
 	}
 	return views;
+}
+
+//#endregion
+//#region src/promotion.ts
+function sha256Hex$1(bytes) {
+	return createHash("sha256").update(bytes).digest("hex");
+}
+/**
+* The refusal every other target type gets: no evaluator, no promotion. This
+* build evaluates a replacement of an existing single-file `SKILL.md`;
+* capability, agent_preset, task_definition, the bookkeeping-only types and L4
+* have no evidence this gate could read, so a historical report cannot be
+* reused to promote them (§F.2: "没有支持的评估器就拒绝新晋升"). Their records
+* stay readable and an already-applied one still rolls back.
+*/
+function noEvaluatorRefusal(proposal) {
+	const history = proposal.replayed === void 0 ? "" : ` Its recorded v1 replay report (${proposal.replayed.report}) is not this build's evidence either: a historical report is never upgraded into a new promotion.`;
+	return /* @__PURE__ */ new Error(`evolution: proposal "${proposal.proposalId}" targets "${proposal.targetType}", which has no evaluator in this build — the two-sided experiment (§F.2) evaluates a replacement of an existing single-file SKILL.md only, and a promotion without supported evaluation evidence is refused rather than granted from a historical report.` + history);
+}
+/** The refusal of a skill candidate whose evaluation is still the v1 candidate-vs-champion replay. */
+function historicalReportRefusal(proposal) {
+	const replay = proposal.replayed;
+	const where = replay === void 0 ? "" : ` (${replay.report}, verdict ${replay.verdict})`;
+	return /* @__PURE__ */ new Error(`evolution: skill proposal "${proposal.proposalId}" holds a v1 candidate-vs-champion replay report${where} and no two-sided experiment — a historical report is not upgraded into this build's evidence (§F.2); run the two-sided experiment (evolution_replay) so the candidate is compared against a new baseline run of the same frozen samples`);
+}
+/** The refusal of a skill proposal nothing has evaluated yet. */
+function noExperimentRefusal(proposal) {
+	return /* @__PURE__ */ new Error(`evolution: skill proposal "${proposal.proposalId}" carries no two-sided experiment — a PROMOTE needs both sides of every frozen sample run as this experiment's own new runs; evaluate the candidate with evolution_replay before promoting it`);
+}
+/** One verdict's refusal text: the six outcomes §F.2 makes distinguishable, each named for what it means. */
+const VERDICT_REFUSALS = {
+	"fixed": "",
+	"fixed-with-regression": "the target failure is fixed, but a regression or holdout sample degraded under the candidate",
+	"regressed": "a regression or holdout sample degraded and the target failure is not fixed",
+	"not-fixed": "the candidate did not fix the target failure",
+	"both-failed": "the target failure was reproduced on the baseline and still fails on the candidate (both sides failed)",
+	"inconclusive": "the experiment could not settle, so it says nothing about the candidate"
+};
+/** `sample <taskId> [<role>]: <verdict>` per sample — the detail a verdict refusal carries. */
+function sampleVerdictLines(samples) {
+	return samples.map((sample) => `sample ${sample.taskId} [${sample.role}]: ${sample.verdict}`);
+}
+/** The report's byte serialization, exactly as the orchestrator writes it. */
+function reportBytes(report) {
+	return `${JSON.stringify(report, null, 2)}\n`;
+}
+/**
+* Whether one report side's evidence exists in the store as the side says it
+* does: a replayed task of this experiment's own lineage whose run this side
+* cites, the review record that settles that run with the outcome and criteria
+* the side reports, and the evidence bundles that run produced.
+*/
+function assertSideEvidence(input) {
+	const { sample, detail, experimentId, snapshot, where } = input;
+	if (detail.outcome === "interrupted") return;
+	const lineage = experimentLineage(experimentId, sample.taskId, detail.side);
+	const task = snapshot.tasks.find((item) => item.objective?.startsWith(`[${lineage}] `));
+	if (task === void 0) throw new Error(`evolution: the experiment report's ${where} does not cite a replayed task this experiment created — the store holds no task of lineage "${lineage}" (${detail.taskId ?? "no task"}/${detail.runId ?? "no run"}); a side that is not one of this experiment's own runs is not a baseline, whatever the record says`);
+	if (detail.taskId !== task.taskId) throw new Error(`evolution: the experiment report's ${where} names task "${String(detail.taskId)}" but the run it cites belongs to replayed task "${task.taskId}" of this experiment's own lineage — the identity a promotion reads must be the task the run ran as`);
+	if (detail.runId === void 0 || !task.runIds.includes(detail.runId)) throw new Error(`evolution: the experiment report's ${where} cites run "${String(detail.runId)}", which no run of this experiment's own replay (lineage ${lineage}) created — the historical record locates the case and is never a baseline`);
+	const runId = detail.runId;
+	const review = snapshot.reviews.find((item) => item.runId === runId);
+	if (review === void 0) throw new Error(`evolution: the experiment report's ${where} cites run "${runId}", which the store settles with no review record — a side without a terminal review record is not a settled run`);
+	if (review.taskId !== task.taskId) throw new Error(`evolution: the review record for run "${runId}" belongs to task "${review.taskId}", not the replayed task "${task.taskId}" the experiment report's ${where} cites`);
+	if (review.outcome !== detail.outcome) throw new Error(`evolution: the experiment report's ${where} reports outcome "${detail.outcome}" but the store's review record for run "${runId}" settled "${review.outcome}" — the report and the store disagree about what ran`);
+	if (detail.reviewRef !== `${task.taskId}#${runId}`) throw new Error(`evolution: the experiment report's ${where} cites review ref "${String(detail.reviewRef)}" but its run "${runId}" settles as "${task.taskId}#${runId}" — the reference a promotion reads must name the record that exists`);
+	const recorded = review.criteria ?? [];
+	const reported = detail.criteria;
+	if (recorded.length > 0) {
+		const byId = new Map(recorded.map((criterion) => [criterion.criterionId, criterion]));
+		for (const criterion of reported) {
+			const stored = byId.get(criterion.criterionId);
+			if (stored === void 0) throw new Error(`evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}", which the store's review record for run "${runId}" does not carry`);
+			if (stored.verdict !== criterion.verdict || stored.verifierId !== criterion.verifierId || stored.verifierVersion !== criterion.verifierVersion) throw new Error(`evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" as ${criterion.verdict}${criterion.verifierId === void 0 ? "" : ` (${criterion.verifierId}${criterion.verifierVersion === void 0 ? "" : `@${criterion.verifierVersion}`})`}, but run "${runId}" settled it as ${stored.verdict}${stored.verifierId === void 0 ? "" : ` (${stored.verifierId}${stored.verifierVersion === void 0 ? "" : `@${stored.verifierVersion}`})`} — the verdicts a promotion reads are the ones the store recorded`);
+		}
+		if (reported.length !== recorded.length) throw new Error(`evolution: the experiment report's ${where} carries ${reported.length} criterion verdicts while run "${runId}" settled ${recorded.length} — a side must report exactly the criteria its review record carries`);
+	}
+	const expected = evidenceRefsOf(snapshot, runId, review);
+	const reportedRefs = [...detail.evidenceRefs].sort();
+	const storedRefs = [...expected].sort();
+	if (reportedRefs.length !== storedRefs.length || reportedRefs.some((ref, index) => ref !== storedRefs[index])) throw new Error(`evolution: the experiment report's ${where} cites evidence [${detail.evidenceRefs.join(", ")}] but run "${runId}" holds [${expected.join(", ")}] — the evidence a promotion reads must be the bundles that run produced`);
+	for (const ref of detail.evidenceRefs) {
+		const bundle = snapshot.evidence.find((item) => item.evidenceId === ref);
+		if (bundle === void 0) throw new Error(`evolution: the experiment report's ${where} cites evidence "${ref}", which the store does not hold`);
+		if (bundle.taskRunId !== runId) throw new Error(`evolution: the experiment report's ${where} cites evidence "${ref}" of run "${String(bundle.taskRunId)}", not of its own run "${runId}" — evidence from another run cannot stand for this side`);
+	}
+	if (detail.initialDigest === void 0) throw new Error(`evolution: the experiment report's ${where} settled a run and records no workspace digest — the frozen input the side ran from cannot be re-proved`);
+}
+/** The store's contract of one sample, as the freeze derived its digest: objective, criteria, required capabilities. */
+function contractDigestOf(task) {
+	return digestOf({
+		objective: task.objective,
+		acceptanceCriteria: task.acceptanceCriteria,
+		requiredCapabilities: task.requestedCapabilities
+	});
+}
+/**
+* Whether one frozen sample still stands as it was frozen: the store's contract
+* hashes to the frozen digest, every frozen criterion is still there with the
+* same mode, command and protected-input identity, and every declared protected
+* input still holds the bytes it was fixed against — re-read in the production
+* workspace the experiment froze, with the same rule the verifier's own
+* pre-judgement check uses (`resolve(cwd, path)`, byte digest, a missing or
+* changed input is a defect).
+*/
+async function assertSampleInputsIntact(input) {
+	const { sample, snapshot, productionWorkspace } = input;
+	const task = snapshot.tasks.find((item) => item.taskId === sample.taskId);
+	if (task === void 0) throw new Error(`evolution: the experiment froze sample "${sample.taskId}", which this graph's task store no longer holds — the case the candidate was evaluated against cannot be re-read, so the evidence cannot be re-checked`);
+	const digest = contractDigestOf(task);
+	if (digest !== sample.contractDigest) throw new Error(`evolution: sample "${sample.taskId}" changed since the experiment froze it (contract digest ${digest} != ${sample.contractDigest}) — the case, its acceptance or its required capabilities moved, so the runs on record were judged against a contract this proposal is no longer evaluated against`);
+	const criteria = Array.isArray(task.acceptanceCriteria) ? task.acceptanceCriteria : [];
+	for (const frozen of sample.criteria) {
+		const criterion = criteria.find((item) => item.criterionId === frozen.criterionId);
+		if (criterion === void 0) throw new Error(`evolution: sample "${sample.taskId}" no longer carries the frozen criterion "${frozen.criterionId}"`);
+		assertFrozenCriterionIntact(sample.taskId, frozen, criterion);
+		for (const protectedInput of criterion.protectedInputs ?? []) await assertProtectedInputIntact(sample.taskId, protectedInput, productionWorkspace);
+	}
+}
+/** One criterion's frozen identity against the store's current one. */
+function assertFrozenCriterionIntact(taskId, frozen, criterion) {
+	const currentDigest = protectedInputsDigest(criterion.protectedInputs ?? []);
+	if (criterion.verificationMode !== frozen.verificationMode || criterion.command !== frozen.command || currentDigest !== frozen.protectedInputsDigest) throw new Error(`evolution: criterion "${frozen.criterionId}" of sample "${taskId}" changed since the experiment froze it (mode ${String(criterion.verificationMode)}/${frozen.verificationMode}, protected inputs ${currentDigest} != ${frozen.protectedInputsDigest}) — the acceptance the two sides ran under is no longer the frozen one`);
+}
+/** One declared protected input, re-read where the criterion's judge would read it. */
+async function assertProtectedInputIntact(taskId, input, productionWorkspace) {
+	let bytes;
+	try {
+		bytes = await readFile(resolve(productionWorkspace, input.path));
+	} catch (error) {
+		throw new Error(`evolution: the protected input "${input.path}" of sample "${taskId}" cannot be read in the production workspace "${productionWorkspace}" (${error instanceof Error ? error.message : String(error)}) — the input the acceptance rests on is gone, so the experiment's judging cannot be re-proved`);
+	}
+	const digest = sha256Hex$1(bytes);
+	if (digest !== input.sha256) throw new Error(`evolution: the protected input "${input.path}" of sample "${taskId}" changed since the experiment froze it (sha256 ${digest} != ${input.sha256}) — a criterion whose input moved is not the criterion the candidate was judged by`);
+}
+/**
+* Whether every criterion verdict a report side carries still names a registered
+* judge, at the version it judged with. Fail-closed: a deployment that cannot
+* list its verifier vocabulary refuses rather than assuming the judge is there.
+*/
+function assertJudgeUnchanged(detail, where, vocabulary) {
+	for (const criterion of detail.criteria) {
+		if (criterion.verifierId === void 0) throw new Error(`evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" without the verifier that decided it — a verdict nobody can be recalled against is not evidence a promotion may read`);
+		if (!vocabulary.ids.includes(criterion.verifierId)) throw new Error(`evolution: the experiment report's ${where} was decided by verifier "${criterion.verifierId}", which is no longer registered (registered: ${vocabulary.ids.length === 0 ? "none" : vocabulary.ids.join(", ")}) — the judge moved, so the verdicts on record cannot be reproduced`);
+		const current = vocabulary.versions[criterion.verifierId];
+		if (criterion.verifierVersion !== current) throw new Error(`evolution: the experiment report's ${where} was decided by verifier "${criterion.verifierId}" at version ${criterion.verifierVersion === void 0 ? "(none declared)" : criterion.verifierVersion}, but the registered instance declares ${current === void 0 ? "(none)" : current} now — a verdict belongs to the instance that judged, so a re-registered version invalidates the evidence`);
+	}
+}
+/** Whether a side's cost is known enough for a frozen budget that declares a ceiling. */
+function assertCostWithinDeclaredBudget(report, where, detail) {
+	const budget = report.frozen.budget;
+	if ((budget.maxTokens ?? budget.wallTimeMs) === void 0) return;
+	if (detail.cost.status === "unknown") throw new Error(`evolution: the frozen budget declares a cost ceiling (${budget.maxTokens === void 0 ? `wallTimeMs ${budget.wallTimeMs}` : `maxTokens ${budget.maxTokens}`}) and the ${where} reports no cost (${detail.cost.reason}) — an unknown cost cannot be shown to fit a ceiling the frozen budget set, so the promotion is refused rather than inferred`);
+}
+/**
+* The whole skill promotion gate, as reads. Returns the experiment it validated
+* so the caller can report the id, the report and the path; throws a named
+* refusal for the first condition that does not hold, having written nothing.
+*/
+async function assertSkillPromotionEvidence(sources, proposal) {
+	const prepared = proposal.prepared;
+	const candidate = prepared?.skillContent;
+	if (candidate === void 0) throw new Error(`evolution: skill proposal "${proposal.proposalId}" records no candidate content identity — it was prepared before content binding; propose a new candidate and evaluate it (prepare records the SHA-256 of the materialized SKILL.md)`);
+	const [experiment] = await sources.experiments(proposal.proposalId);
+	if (experiment === void 0) throw proposal.replayed === void 0 ? noExperimentRefusal(proposal) : historicalReportRefusal(proposal);
+	let report;
+	try {
+		report = buildExperimentReport(experiment);
+	} catch (error) {
+		throw new Error(`${error instanceof Error ? error.message : String(error)} — a promotion reads a completed experiment only; resume experiment ${experiment.experimentId} (evolution_replay) or freeze a new one`);
+	}
+	const reportPath = experiment.report;
+	let content;
+	try {
+		content = await readFile(resolve(sources.root, reportPath), "utf8");
+	} catch (error) {
+		throw new Error(`evolution: the experiment report "${reportPath}" of proposal "${proposal.proposalId}" cannot be read (${error instanceof Error ? error.message : String(error)}) — the ledger cites evidence the sandbox no longer holds`);
+	}
+	let parsed;
+	try {
+		parsed = JSON.parse(content);
+	} catch (error) {
+		throw new Error(`evolution: the experiment report "${reportPath}" is not readable JSON (${error instanceof Error ? error.message : String(error)})`);
+	}
+	assertExperimentReport(parsed);
+	if (content !== reportBytes(report)) throw new Error(`evolution: the experiment report "${reportPath}" is not the report its ledger records recompute to — it was changed after the experiment (a verdict, a cost or a criterion in it is not what ran); a promotion takes evidence from the experiment's own records, never from an edited file`);
+	const frozen = report.frozen;
+	if (frozen.candidate.name !== candidate.name || frozen.candidate.sha256 !== candidate.sha256) throw new Error(`evolution: the experiment froze candidate ${frozen.candidate.name}@${frozen.candidate.sha256} but proposal "${proposal.proposalId}" now prepares ${candidate.name}@${candidate.sha256} — the evidence belongs to different candidate bytes; propose a new candidate and evaluate it`);
+	const baseline = prepared?.skillBaseline;
+	if (baseline === void 0 || frozen.productionBaseline?.name !== baseline.name || frozen.productionBaseline?.sha256 !== baseline.sha256) throw new Error(`evolution: the experiment's frozen production baseline (${frozen.productionBaseline?.name ?? "none"}@${frozen.productionBaseline?.sha256 ?? "none"}) is not the baseline prepare recorded for proposal "${proposal.proposalId}" (${baseline?.name ?? "none"}@${baseline?.sha256 ?? "none"}) — the candidate was evaluated against another production state`);
+	const storeId = experiment.storeId;
+	if (storeId === void 0) throw new Error(`evolution: experiment "${experiment.experimentId}" records no task store, so the runs its sides cite cannot be re-read — run the two-sided experiment again so its evidence names the store it ran in`);
+	const snapshot = await sources.task.openStore(storeId);
+	const vocabulary = await sources.verifierVocabulary();
+	if (vocabulary === void 0) throw new Error("evolution: the verifier registry cannot be listed in this context, so the judges behind the experiment's verdicts cannot be re-checked — the promotion is refused rather than granted on unverifiable evidence");
+	for (const sample of report.samples) {
+		const frozenSample = frozenSampleOf(report, sample.taskId);
+		for (const side of ["baseline", "candidate"]) {
+			const detail = side === "baseline" ? sample.baseline : sample.candidate;
+			const label = `sample "${sample.taskId}" ${side} side`;
+			assertSideEvidence({
+				sample: frozenSample,
+				detail,
+				experimentId: experiment.experimentId,
+				snapshot,
+				where: label
+			});
+			assertJudgeUnchanged(detail, label, vocabulary);
+			assertCostWithinDeclaredBudget(report, label, detail);
+			if (detail.outcome === "interrupted") continue;
+			if (detail.initialDigest !== frozen.snapshot.digest) throw new Error(`evolution: the experiment report's ${label} ran from workspace digest ${detail.initialDigest}, not the frozen snapshot ${frozen.snapshot.digest} — both sides of a sample start from the same frozen input`);
+		}
+		await assertSampleInputsIntact({
+			sample: frozenSample,
+			snapshot,
+			productionWorkspace: frozen.snapshot.sourceDir
+		});
+	}
+	const currentModel = sources.modelIdentity();
+	if (currentModel !== frozen.model) throw new Error(`evolution: the experiment froze model "${frozen.model}" but this deployment resolves "${currentModel}" now — the runs on record were not run under the model this promotion would be judged against`);
+	if (report.verdict !== "fixed") throw new Error(`evolution: the two-sided experiment "${experiment.experimentId}" did not show a clean fix — ${VERDICT_REFUSALS[report.verdict]}:\n${sampleVerdictLines(report.samples).map((line) => `- ${line}`).join("\n")}`);
+	return {
+		experimentId: experiment.experimentId,
+		report,
+		reportPath
+	};
+}
+/** The frozen sample one report sample was compared under. */
+function frozenSampleOf(report, taskId) {
+	const sample = report.frozen.samples.find((item) => item.taskId === taskId);
+	if (sample === void 0) throw new Error(`evolution: the experiment report holds no frozen sample "${taskId}"`);
+	return sample;
 }
 
 //#endregion
@@ -1432,6 +1672,18 @@ function renderProviderRoles(providers) {
 		if (provider.role === "knowledge") return `provider: skill \`${provider.name}\` → knowledge (loadable content; it does not close an execution gap)`;
 		return `provider: skill \`${provider.name}\` → guidance (no sidecar; loadable guidance, not an execution provider)`;
 	});
+}
+/**
+* The model identity one selection names: `provider/model` when the route is
+* known, the model id alone otherwise. `undefined` for a selection that names no
+* model — a deployment configured without one is a case to refuse, not to paper
+* over with a placeholder.
+*/
+function modelIdentityOf(selection) {
+	const model = typeof selection?.model === "string" && selection.model.length > 0 ? selection.model : void 0;
+	if (model === void 0) return void 0;
+	const provider = typeof selection?.provider === "string" && selection.provider.length > 0 ? selection.provider : void 0;
+	return provider === void 0 ? model : `${provider}/${model}`;
 }
 function nonEmpty(value, field) {
 	if (typeof value !== "string" || value.trim().length === 0) throw new Error(`evolution: ${field} must be a non-empty string`);
@@ -1579,17 +1831,28 @@ function validateGateAnswers(answers) {
 * mutation must be prepared (sandbox materialization) before anything else; a
 * mutation-less (manual) candidate gates directly — the pre-mutation shape old
 * ledgers replay against. A prepared MECHANICAL mutation must then be replayed
-* (candidate vs champion over this graph's historical terminal tasks) before it
-* can gate; a bookkeeping-only (non-mechanical) one has nothing to replay and
-* gates from prepared. After the human decision, only a PROMOTE on an
-* applyable, materialized, sub-L4 mutation can be applied (W16), and only an
-* applied proposal can be rolled back.
+* (the v1 candidate-vs-champion comparison) before it can gate; a
+* bookkeeping-only (non-mechanical) one has nothing to replay and gates from
+* prepared.
+*
+* A prepared **skill** candidate gates straight from prepared: its evaluation is
+* the two-sided experiment (§F.2), which is recorded in the ledger's experiment
+* family and is deliberately *not* a lifecycle transition — the proposal stays
+* `prepared` while its samples run — so {@link EvolutionService.gate} requires
+* the completed experiment instead of a `replayed` record. `replayed` stays
+* reachable for a skill proposal only so a ledger written by the pre-S4-E build
+* folds and replays; nothing current writes it, and the promotion gate refuses
+* to promote from one. After the human decision, only a PROMOTE on an applyable,
+* materialized, sub-L4 mutation can be applied (W16), and only an applied
+* proposal can be rolled back.
 */
 function nextStates(proposal) {
 	switch (proposal.status) {
 		case "proposed": return ["candidate"];
 		case "candidate": return proposal.mutation === void 0 ? ["gated"] : ["prepared"];
-		case "prepared": return mutationMechanical(proposal.targetType) ? ["replayed"] : ["gated"];
+		case "prepared":
+			if (proposal.targetType === "skill") return ["gated", "replayed"];
+			return mutationMechanical(proposal.targetType) ? ["replayed"] : ["gated"];
 		case "replayed": return ["gated"];
 		case "gated": return ["decided"];
 		case "decided": return applyable(proposal) ? ["applied"] : [];
@@ -1600,7 +1863,7 @@ function nextStates(proposal) {
 /** The one transition check shared by live appends and replay, so an illegal migration reads identically in both. */
 function assertTransition(current, kind) {
 	if (nextStates(current).includes(kind)) return;
-	const hint = current.status === "candidate" && current.mutation !== void 0 && kind === "gated" ? " — this candidate carries a mutation; record \"prepared\" first (evolution_prepare)" : current.status === "prepared" && mutationMechanical(current.targetType) && kind === "gated" ? " — this mutation was materialized; record \"replayed\" first (evolution_replay)" : current.status === "decided" && kind === "applied" ? current.decision !== "PROMOTE" ? ` — the recorded decision is ${current.decision}; only a PROMOTE decision can be applied` : " — only a materialized skill / agent_preset / capability mutation at L1–L3 applies; anything else stays a manual human edit" : "";
+	const hint = current.status === "candidate" && current.mutation !== void 0 && kind === "gated" ? " — this candidate carries a mutation; record \"prepared\" first (evolution_prepare)" : current.status === "prepared" && mutationMechanical(current.targetType) && current.targetType !== "skill" && kind === "gated" ? " — this mutation was materialized; record \"replayed\" first (evolution_replay)" : current.status === "decided" && kind === "applied" ? current.decision !== "PROMOTE" ? ` — the recorded decision is ${current.decision}; only a PROMOTE decision can be applied` : " — only a materialized skill / agent_preset / capability mutation at L1–L3 applies; anything else stays a manual human edit" : "";
 	throw new Error(`evolution: proposal "${current.proposalId}" is ${current.status}; cannot record "${kind}"${hint}`);
 }
 /**
@@ -1699,12 +1962,15 @@ var EvolutionService = class extends Service {
 	configFile;
 	/** Repo root that relative evidence paths resolve against (see {@link Config.repoRoot}). */
 	repoRoot;
+	/** The injected model-identity resolver, if the assembly wired one (see {@link Config.modelIdentity}). */
+	resolveModelIdentity;
 	records = [];
 	loaded;
 	writes = Promise.resolve();
 	constructor(ctx, config = {}) {
 		super(ctx, "evolution");
 		this.repoRoot = config.repoRoot ?? process.cwd();
+		this.resolveModelIdentity = config.modelIdentity;
 		const dshHome = process.env.DSH_HOME ?? join(this.repoRoot, ".dsh");
 		this.root = resolve(config.root ?? join(dshHome, "evolution"));
 		this.skillRoot = resolve(config.skillRoot ?? join(dshHome, "skills"));
@@ -1718,6 +1984,25 @@ var EvolutionService = class extends Service {
 	/** Ledger file path (`<root>/proposals.jsonl`). */
 	get file() {
 		return join(this.root, "proposals.jsonl");
+	}
+	/**
+	* The model identity this deployment's runs share — the one the experiment
+	* freezes before anything runs and the promotion gate re-reads ({@link Config.modelIdentity}).
+	*
+	* Fail-closed: no resolver, a resolver that throws, or one that names nothing
+	* is a named refusal. The experiment tool freezes this value, so a deployment
+	* that cannot name its model can neither evaluate nor promote a candidate —
+	* and neither case silently skips the check.
+	*/
+	modelIdentity() {
+		let resolved;
+		try {
+			resolved = this.resolveModelIdentity?.();
+		} catch (error) {
+			throw new Error(`evolution: the model identity cannot be resolved (${error instanceof Error ? error.message : String(error)}) — the experiment freezes the model its runs share and a promotion re-reads it, so a deployment that cannot name one neither evaluates nor promotes a candidate`);
+		}
+		if (typeof resolved !== "string" || resolved.trim().length === 0) throw new Error("evolution: this deployment cannot name the model its runs share — no model-identity resolver was injected (or it named none); the two-sided experiment freezes the model identity before anything runs and the promotion gate re-reads it, so a deployment that cannot name it can neither evaluate nor promote a candidate");
+		return resolved;
 	}
 	async propose(input, actor) {
 		const record = {
@@ -1834,19 +2119,18 @@ var EvolutionService = class extends Service {
 	* record cites it by root-relative path, and the gate later requires that
 	* path in its regression evidence.
 	*
-	* For a skill candidate the service additionally binds the content identity
-	* (P2): the report must carry the same `candidateContent` prepare recorded,
-	* and the candidate file on disk must still hash to it. The tool re-checks
-	* before it runs anything; this check runs after the runs and before the
-	* record is written, so a modification that happened and persisted during
-	* the replay is refused instead of recorded.
+	* A **skill** candidate has no path here: its evaluation is the two-sided
+	* experiment (§F.2), so a live call that hands this entry a skill report is
+	* refused by name. The transition itself stays admissible so a ledger written
+	* by the pre-S4-E build still folds and replays; nothing current produces one,
+	* and the promotion gate refuses to promote from one.
 	*/
 	async replay(proposalId, actor, report) {
 		const current = await this.assertNext(proposalId, "replayed");
+		if (current.targetType === "skill") throw new Error(`evolution: proposal "${proposalId}" targets skill — a skill candidate is evaluated by the two-sided experiment (a new baseline run and a new candidate run per frozen sample, evolution_replay), not by the candidate-vs-champion replay this entry records`);
 		assertReplayReport(current, report);
 		const sandbox = current.prepared?.sandbox;
 		if (sandbox === void 0 || sandbox === null) throw new Error(`evolution: proposal "${proposalId}" names no sandbox; cannot place the replay report`);
-		if (current.targetType === "skill") await this.assertSkillContentBound(current, report);
 		const rel = `${sandbox}/replay-report.json`;
 		const abs = resolveWithin(this.root, rel);
 		await mkdir(dirname(abs), { recursive: true });
@@ -1874,41 +2158,44 @@ var EvolutionService = class extends Service {
 		return this.get(proposalId);
 	}
 	/**
-	* The skill replay's content binding (P2), enforced on the service entry that
-	* writes the `replayed` record: the report's identity must equal the one
-	* prepare recorded, and the candidate file must still be those exact bytes.
-	* A candidate prepared before content binding, or one that changed and stayed
-	* changed, is refused with the same guidance — fix the candidate through a
-	* new proposal and evaluation; the append-only ledger never re-digests an old
-	* record.
-	*/
-	async assertSkillContentBound(proposal, report) {
-		const identity = proposal.prepared?.skillContent;
-		if (identity === void 0) throw new Error(`evolution: skill proposal "${proposal.proposalId}" was prepared before candidate content binding — propose a new candidate and re-evaluate it; recorded identities are never re-digested`);
-		if (report.candidateContent === void 0) throw new Error("evolution: a skill replay report must carry candidateContent { name, sha256 }");
-		if (report.candidateContent.name !== identity.name || report.candidateContent.sha256 !== identity.sha256) throw new Error(`evolution: replay report candidate content identity { name: "${report.candidateContent.name}", sha256: ${report.candidateContent.sha256} } does not match the identity prepared for proposal "${proposal.proposalId}" { name: "${identity.name}", sha256: ${identity.sha256} }`);
-		await this.readVerifiedSkillCandidate(proposal);
-	}
-	/**
 	* Move candidate → gated (manual candidates), prepared → gated
-	* (bookkeeping-only mutations), or replayed → gated (mechanical mutations):
-	* all six Gate answers plus regression evidence refs. Every ref must exist —
-	* a path on disk (relative to the repo root or absolute) or an id the
-	* caller-side resolver knows (task-store evidence). Existence only; nothing
-	* here executes anything. A replayed proposal must additionally cite its
-	* replay report path; its contents must match the recorded digest and schema.
+	* (bookkeeping-only mutations and skill candidates), or replayed → gated
+	* (mechanical mutations): all six Gate answers plus regression evidence refs.
+	* Every ref must exist — a path on disk (relative to the repo root or
+	* absolute) or an id the caller-side resolver knows (task-store evidence).
+	* Existence only; nothing here executes anything. A replayed proposal must
+	* cite its replay report path, and its contents must match the recorded digest
+	* and schema. A **skill** proposal has no `replayed` record — its evaluation is
+	* the two-sided experiment — so it must have a completed experiment and cite
+	* that experiment's report instead (§F.2).
 	*/
 	async gate(proposalId, answers, actor, refKnown) {
 		const current = await this.assertNext(proposalId, "gated");
 		validateGateAnswers(answers);
+		let experimentReport;
+		if (current.targetType === "skill") {
+			const [experiment] = await this.experiments(proposalId);
+			if (experiment === void 0) throw new Error(`evolution: skill proposal "${proposalId}" has no two-sided experiment — the gate answers must rest on both sides of every frozen sample, so evaluate the candidate with evolution_replay before gating it`);
+			try {
+				buildExperimentReport(experiment);
+			} catch (error) {
+				throw new Error(`${error instanceof Error ? error.message : String(error)} — a skill candidate gates on a completed experiment only; resume experiment ${experiment.experimentId} (evolution_replay) before answering the gate`);
+			}
+			experimentReport = experiment.report;
+		}
 		if (current.replayed !== void 0) {
 			const report = current.replayed.report;
 			if (!answers.regressionEvidenceRefs.includes(report)) throw new Error(`evolution: a replayed candidate's regression evidence must cite the replay report "${report}"`);
 			if (!existsSync(resolveWithin(this.root, report))) throw new Error(`evolution: the replay report "${report}" no longer exists under the ledger root`);
 			await this.readRecordedReplay(current);
 		}
+		if (experimentReport !== void 0) {
+			if (!answers.regressionEvidenceRefs.includes(experimentReport)) throw new Error(`evolution: a skill candidate's regression evidence must cite its experiment report "${experimentReport}" — the six answers are answered over that experiment, and the gate records the evidence they rest on`);
+			if (!existsSync(resolveWithin(this.root, experimentReport))) throw new Error(`evolution: the experiment report "${experimentReport}" no longer exists under the ledger root`);
+		}
 		for (const ref of answers.regressionEvidenceRefs) {
 			if (current.replayed !== void 0 && ref === current.replayed.report) continue;
+			if (experimentReport !== void 0 && ref === experimentReport) continue;
 			if (!(this.refExistsOnDisk(ref) || refKnown !== void 0 && await refKnown(ref))) throw new Error(`evolution: regression evidence ref "${ref}" matches no known evidence id and no existing path`);
 		}
 		await this.append({
@@ -2001,59 +2288,65 @@ var EvolutionService = class extends Service {
 	/**
 	* Preflight for tools before asking for approval; mutation methods repeat the
 	* check. Returns the providers the promotion would put in place, each with the
-	* role it may be counted as (an empty list for a target type that carries
-	* none), so the callers that already gate on this check can report them.
+	* role it may be counted as, so the callers that already gate on this check
+	* can report them.
 	*
-	* Three checks run here, in this order, all of them shared with the service
-	* entry the tools ultimately call:
+	* Only a `skill` proposal is promotable in this build (EVAL-4/§F.2): every
+	* other target type is refused by name — a type with no evaluator gets no
+	* promotion, and a historical replay report is never upgraded into new
+	* evidence ({@link noEvaluatorRefusal}).
+	*
+	* For a skill candidate three checks run here, in this order, all of them
+	* shared with the service entry the tools ultimately call:
 	*
 	* 1. P2: the candidate bytes must still be the ones prepare recorded.
-	* 2. The replay gate (`assertReplayPromotable`).
-	* 3. S1-C item 3: the provider check. A skill candidate's sandbox directory and
-	*    a capability candidate's new row are judged by the same
-	*    {@link validateSkillProvider} admission, config load and capability
-	*    replacement use, so `evolution_apply` is not the only entry that knows
-	*    what a usable provider is — and a candidate carrying an execution
-	*    sidecar with an unregistered verifier or ungranted tools is refused here,
-	*    before a human is asked, before `decided` is recorded, and before
-	*    anything is written.
+	* 2. S1-C item 3: the provider check. The candidate's sandbox directory is
+	*    judged by the same {@link validateSkillProvider} admission, config load
+	*    and capability replacement use, so `evolution_apply` is not the only
+	*    entry that knows what a usable provider is — and a candidate carrying an
+	*    execution sidecar with an unregistered verifier or ungranted tools is
+	*    refused here, before a human is asked, before `decided` is recorded, and
+	*    before anything is written.
+	* 3. The evidence gate (`assertSkillPromotionEvidence`): a completed two-sided
+	*    experiment whose report, runs, reviews, evidence, frozen inputs, judge,
+	*    model, verdict and cost still hold. Every one of them is re-read from the
+	*    ledger, the store and the production workspace — the tools run all of it
+	*    before asking a human, and decide(PROMOTE) / apply run it again on the
+	*    service entry, so evidence that moved while the human was deciding is
+	*    still refused.
 	*/
 	async checkPromotion(proposalId) {
 		const proposal = await this.get(proposalId);
-		if (proposal.prepared?.mechanical !== true) return { providers: [] };
-		if (proposal.targetType === "skill") await this.readVerifiedSkillCandidate(proposal);
-		assertReplayPromotable(await this.readRecordedReplay(proposal));
-		return { providers: await this.assertProvidersPromotable(proposal) };
+		if (proposal.targetType !== "skill") throw noEvaluatorRefusal(proposal);
+		if (proposal.prepared?.mechanical !== true || proposal.prepared.sandbox == null) throw new Error(`evolution: skill proposal "${proposal.proposalId}" has no materialized candidate — nothing this proposal names was ever evaluated; record a structured candidate and prepare it (evolution_candidate / evolution_prepare) before promoting it`);
+		await this.readVerifiedSkillCandidate(proposal);
+		const providers = [await this.assertSkillCandidateProvider(proposal)];
+		await assertSkillPromotionEvidence(this.promotionSources(), proposal);
+		return { providers };
 	}
 	/**
-	* The promotion-time provider check (S1-C item 3): what the promotion would
-	* put in place, judged as a provider before it becomes production state.
-	*
-	* - `skill`: the materialized candidate directory
-	*   (`sandbox/<id>/skills/<name>/`) is read as a skill directory and judged
-	*   against the deployment's own sources — the effective capability table and
-	*   the registered verifier vocabulary. Nothing is discovered from a root: the
-	*   candidate is exactly the directory this promotion would write.
-	* - `capability`: the row as it will read after the replacement is checked by
-	*   the admission pre-check itself, over the table the replacement produces
-	*   and the harness process's own discovery roots (the row's own tool labels
-	*   expand through the same `resolveCapabilities` admission uses, which is what
-	*   makes them the covering set for a skill that declares this row). Whichever
-	*   skill the row grants must be reachable and usable from that viewpoint, or
-	*   the row is refused rather than written and refused later at admission.
-	* - every other target type carries no provider: nothing to judge.
-	*
-	* What the verdict means, in the vocabulary the whole system uses
-	* (`sidecar.ts`): only an execution sidecar whose verifier is registered and
-	* whose required tools its declared capabilities grant may be counted as an
-	* execution provider; knowledge and guidance are loadable and are recorded as
-	* such; anything else is a refusal naming every defect. None of it writes,
-	* and nothing is recorded before the caller's own transition.
+	* The services the promotion gate re-reads from this context: the experiment
+	* family of this same ledger, the task store the experiment names, the live
+	* verifier vocabulary and this deployment's model identity. Resolved softly
+	* one by one, so a context that cannot offer one gets a refusal naming it
+	* rather than a gate that silently checks less.
 	*/
-	async assertProvidersPromotable(proposal) {
-		if (proposal.targetType === "skill") return [await this.assertSkillCandidateProvider(proposal)];
-		if (proposal.targetType === "capability") return this.assertCapabilityRowProviders(proposal);
-		return [];
+	promotionSources() {
+		const task = optionalService(this.ctx, "task");
+		if (task === void 0) throw new Error("evolution: the promotion gate re-reads the experiment's runs, reviews and evidence from the task store, and this context has no task service — the evidence cannot be checked, so nothing is promoted");
+		return {
+			root: this.root,
+			experiments: (proposalId) => this.experiments(proposalId),
+			task,
+			verifierVocabulary: async () => {
+				const vocabulary = await registeredVerifierVocabulary(this.ctx);
+				return vocabulary === void 0 ? void 0 : {
+					ids: vocabulary.ids,
+					versions: vocabulary.versions
+				};
+			},
+			modelIdentity: () => this.modelIdentity()
+		};
 	}
 	/**
 	* The candidate skill's provider verdict, taken from the directory the
@@ -2132,30 +2425,6 @@ var EvolutionService = class extends Service {
 			known: false,
 			reason: "the effective capability registry cannot be read in this context (no task-runtime service), so the tools this capability grants cannot be resolved"
 		});
-	}
-	/**
-	* The row a capability promotion would write, checked as the pre-check checks
-	* a row: the replacement is folded into the effective table, and every skill
-	* the new row grants is discovered from the harness process's own roots and
-	* judged by {@link validateSkillProvider} — `verifierRefs` from the live
-	* registry, the row's own tool labels expanding through `resolveCapabilities`
-	* as the covering set. A refusal names the capability, the skill and every
-	* defect, and nothing is written.
-	*/
-	async assertCapabilityRowProviders(proposal) {
-		const { name, entry } = proposal.mutation;
-		const table = this.effectiveCapabilities();
-		if (table === void 0) throw new Error(`evolution: capability "${name}" cannot be promoted: the effective capability registry cannot be read in this context (no task-runtime service), so the providers the new row would grant cannot be judged`);
-		const verifierRefs = await registeredVerifierIds(this.ctx);
-		const { precheck, refusals } = await precheckReplacedCapabilityRow({
-			name,
-			entry,
-			table,
-			view: { cwd: process.cwd() },
-			...verifierRefs === void 0 ? {} : { verifierRefs }
-		});
-		if (refusals.length > 0) throw new Error(`evolution: capability "${name}" cannot be promoted — the row it would write grants providers that are not usable:\n` + refusals.map((line) => `- ${line}`).join("\n"));
-		return precheck.capabilities.flatMap((row) => row.skills).filter((verdict) => verdict.valid).map((verdict) => promotionProviderOf(verdict));
 	}
 	/** The effective capability table, or `undefined` when this context cannot read one (no task-runtime service). */
 	effectiveCapabilities() {
@@ -2691,7 +2960,7 @@ var EvolutionService = class extends Service {
 			assertExperimentStartRecord(record, this.fold(this.records));
 			const prior = this.experimentViews().get(record.experimentId);
 			if (prior !== void 0) {
-				if (prior.frozenDigest !== record.frozenDigest || prior.proposalId !== record.proposalId || prior.report !== record.report || canonicalJson(prior.frozen) !== canonicalJson(record.frozen)) throw new Error(`evolution: experiment "${record.experimentId}" is already recorded with a different frozen identity — an experiment id names one frozen block; changing any member of the specification freezes a different experiment`);
+				if (prior.frozenDigest !== record.frozenDigest || prior.proposalId !== record.proposalId || prior.report !== record.report || prior.storeId !== record.storeId || canonicalJson(prior.frozen) !== canonicalJson(record.frozen)) throw new Error(`evolution: experiment "${record.experimentId}" is already recorded with a different frozen identity — an experiment id names one frozen block, its own report path and the task store its runs live in; changing any of them freezes a different experiment`);
 				return;
 			}
 			const staged = [...this.records, record];
@@ -2914,7 +3183,7 @@ async function runReplayExperiment(sources, request) {
 	if (proposal.status !== "prepared") throw new Error(`proposal ${proposal.proposalId} is ${proposal.status}; only a prepared proposal can be replayed`);
 	const prepared = proposal.prepared;
 	if (!prepared.mechanical) throw new Error(`proposal ${proposal.proposalId} is bookkeeping-only (mechanical: false); nothing to replay — gate it directly with evolution_gate`);
-	if (proposal.targetType === "skill") await sources.evolution.readSkillCandidate(proposal.proposalId);
+	if (proposal.targetType === "skill") throw new Error(`proposal ${proposal.proposalId} targets "skill": a skill candidate is evaluated by the two-sided experiment (a new baseline run and a new candidate run per frozen sample), not by this candidate-vs-champion replay`);
 	const lineage = replayLineage(proposal.proposalId);
 	if (proposal.targetType === "agent_preset") {
 		const report$1 = {
@@ -2977,8 +3246,7 @@ async function runReplayExperiment(sources, request) {
 			if (proposal.targetType === "capability") {
 				const capability = mutation;
 				options = { overlay: { capabilityOverrides: { [capability.name]: capability.entry } } };
-			} else if (proposal.targetType === "skill") options = { overlay: { extraSkillRoots: [join(sandboxAbs, "skills")] } };
-			else if (proposal.targetType === "task_definition") options = {
+			} else if (proposal.targetType === "task_definition") options = {
 				contract: candidateContract(JSON.parse(await readFile(join(sandboxAbs, "task-definition.json"), "utf8")), champion),
 				spawn: false
 			};
@@ -3013,7 +3281,6 @@ async function runReplayExperiment(sources, request) {
 		targetType: proposal.targetType,
 		at: (/* @__PURE__ */ new Date()).toISOString(),
 		mode: "executed",
-		...proposal.targetType === "skill" ? { candidateContent: prepared.skillContent } : {},
 		observed,
 		holdout: {
 			executed: holdout.length > 0,
@@ -3035,4 +3302,4 @@ async function runReplayExperiment(sources, request) {
 }
 
 //#endregion
-export { APPLYABLE_TARGET_TYPES, CHAMPION_SOURCES, CHAMPION_STATES, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionService, MECHANICAL_TARGET_TYPES, PRESET_REPLAY_MANUAL_REASON, REPLAY_RELATIONS, REPLAY_VERDICTS, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, assertReplayPromotable, assertReplayReport, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, evolution_default as default, digestOf, directoryDigest, editCapabilityRow, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, mutationMechanical, overallExperimentVerdict, overallReplayVerdict, protectedInputsDigest, readCapabilityRowSource, renderProviderRoles, replayLineage, resolvePrepareChampion, restoreCapabilityRowSource, resumeExperiment, runExperiment, runReplayExperiment };
+export { APPLYABLE_TARGET_TYPES, CHAMPION_SOURCES, CHAMPION_STATES, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionService, MECHANICAL_TARGET_TYPES, PRESET_REPLAY_MANUAL_REASON, REPLAY_RELATIONS, REPLAY_VERDICTS, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, assertReplayPromotable, assertReplayReport, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, evolution_default as default, digestOf, directoryDigest, editCapabilityRow, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelIdentityOf, mutationMechanical, overallExperimentVerdict, overallReplayVerdict, protectedInputsDigest, readCapabilityRowSource, renderProviderRoles, replayLineage, resolvePrepareChampion, restoreCapabilityRowSource, resumeExperiment, runExperiment, runReplayExperiment };

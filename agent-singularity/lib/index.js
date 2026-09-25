@@ -1,14 +1,14 @@
 import { fileURLToPath } from "node:url";
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { APPLYABLE_TARGET_TYPES, EVOLUTION_DECISIONS, EvolutionService, PRESET_REPLAY_MANUAL_REASON, applyTargets, mutationMechanical, renderProviderRoles, resolvePrepareChampion, runReplayExperiment } from "@dangosys/dsh-singularity-evolution";
+import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, optionalService, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
+import { APPLYABLE_TARGET_TYPES, EVOLUTION_DECISIONS, EvolutionService, PRESET_REPLAY_MANUAL_REASON, applyTargets, modelIdentityOf, mutationMechanical, renderProviderRoles, resolvePrepareChampion, runReplayExperiment } from "@dangosys/dsh-singularity-evolution";
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
 import { CONTEXT_OUTPUT_LIMIT_BYTES, ReviewerBindingError, openRootProposals } from "@dangosys/dsh-singularity-context";
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, optionalService, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
 import { SessionId } from "@deepseek-ai/dsh-session";
 
 //#region src/hitl.ts
@@ -1585,7 +1585,7 @@ function sessionId$15(exec) {
 function defineEvolutionGateTool(ctx) {
 	return defineTool({
 		name: "evolution_gate",
-		description: "Answer the minimal Validation Gate for a candidate (status: gated). The six questions (细化想法4 §32): 1. Target failure fixed? 2. Original acceptance maintained? 3. Existing regression maintained? 4. No unacceptable side effects? 5. Holdout performance acceptable? 6. Resource cost acceptable? All six answers are required; the regression/replay side must cite evidence ids (from this graph's task store) or file paths whose existence is checked — cited evidence is never executed. A candidate carrying a mutation must pass evolution_prepare (sandbox materialization) and, for a mechanical mutation, evolution_replay — the replay report path must then be one of the regressionEvidenceRefs. Records the ledger entry only; nothing is promoted or changed. Next step is evolution_decide, which always asks a human.",
+		description: "Answer the minimal Validation Gate for a candidate (status: gated). The six questions (细化想法4 §32): 1. Target failure fixed? 2. Original acceptance maintained? 3. Existing regression maintained? 4. No unacceptable side effects? 5. Holdout performance acceptable? 6. Resource cost acceptable? All six answers are required, and the regression side must cite evidence ids (from this graph's task store) or file paths whose existence is checked — cited evidence is never executed. A candidate carrying a mutation must pass evolution_prepare (sandbox materialization) and then be evaluated by evolution_replay: for a skill candidate that is the two-sided experiment (a new baseline run and a new candidate run per frozen sample), and its report path must be one of the regressionEvidenceRefs — the gate refuses a skill candidate whose experiment is not complete. A capability / agent_preset / task_definition candidate keeps the v1 replay path and cites its replay report the same way; note that this build promotes single-file skill replacements only, so those types cannot be promoted even though they can be recorded. Records the ledger entry only; nothing is promoted or changed. Next step is evolution_decide, which always asks a human.",
 		parameters: {
 			proposalId: {
 				type: "string",
@@ -1957,36 +1957,16 @@ function sessionId$12(exec) {
 	return id;
 }
 /**
-* The model identity one selection names: `provider/model` when the route is
-* known, the model id alone otherwise. `undefined` for a selection that names
-* no model — a caller's agent configured without one is a case to refuse, not
-* to paper over with a placeholder.
+* The model identity this experiment freezes — read from the evolution plane's
+* injected resolver, never from the caller (§F.2: the model is frozen before the
+* runs, and a model-filled string could not be one). The injection is the whole
+* point: the promotion gate re-reads the same resolver off the same service, so
+* the identity this call freezes is the one that gate later compares against.
+* A deployment that cannot name its model gets the service's own refusal here —
+* before any run, before any ledger line.
 */
-function modelIdentityOf(selection) {
-	const model = typeof selection?.model === "string" && selection.model.length > 0 ? selection.model : void 0;
-	if (model === void 0) return void 0;
-	const provider = typeof selection?.provider === "string" && selection.provider.length > 0 ? selection.provider : void 0;
-	return provider === void 0 ? model : `${provider}/${model}`;
-}
-/**
-* The model identity this experiment freezes, read from configuration rather
-* than from the caller (§F.2: the model is frozen before the runs, and a
-* model-filled string could not be one):
-*
-* 1. the caller agent's own selection (`Agent.options` — the provider/model
-*    route this agent's requests use), when the session carries one;
-* 2. else the deployment's default selection (`agentDefaultModel`) — the
-*    configuration a session without an explicit selection runs under, and the
-*    one the runtime merges into the spawns a replay creates.
-*
-* Neither the model's own turn nor the tool's arguments can influence this.
-*/
-function modelIdentity(ctx, exec) {
-	const fromAgent = modelIdentityOf(exec.agent?.options);
-	if (fromAgent !== void 0) return fromAgent;
-	const fromDefaults = modelIdentityOf(optionalService(ctx, "agentDefaultModel")?.currentSelection());
-	if (fromDefaults !== void 0) return fromDefaults;
-	throw new Error("this deployment cannot name the model the caller's session runs — the experiment freezes the model identity before anything runs (the caller agent carries no selection and no agentDefaultModel service is mounted)");
+function modelIdentity(ctx) {
+	return ctx.evolution.modelIdentity();
 }
 /** The workspace the caller's own session runs in — the frozen input snapshot both experiment sides are built from. */
 async function callerWorkspace(ctx, caller) {
@@ -2100,7 +2080,7 @@ function renderReplayResult(result) {
 	].join("\n");
 }
 /** The experiment one skill call runs: the derived samples, the caller's frozen input, and the model identity it runs under. */
-async function runSkillExperiment(ctx, exec, args, caller) {
+async function runSkillExperiment(ctx, args, caller, signal) {
 	let snapshot;
 	try {
 		const graph = await ctx.graphs.graphForSession(caller);
@@ -2112,10 +2092,10 @@ async function runSkillExperiment(ctx, exec, args, caller) {
 		proposalId: args.proposalId,
 		samples: deriveExperimentSamples(snapshot, args.taskIds, args.holdoutTaskIds),
 		snapshot: { sourceDir: await callerWorkspace(ctx, caller) },
-		model: modelIdentity(ctx, exec),
+		model: modelIdentity(ctx),
 		budget: { ...args.budget ?? {} },
 		repetition: args.repetition ?? 0
-	}, caller, caller, { signal: exec.signal });
+	}, caller, caller, { signal });
 }
 function defineEvolutionReplayTool(ctx) {
 	return defineTool({
@@ -2172,13 +2152,13 @@ function defineEvolutionReplayTool(ctx) {
 			const holdoutTaskIds = (args.holdoutTaskIds ?? []).map((id) => String(id));
 			try {
 				const proposal = await ctx.evolution.get(args.proposalId);
-				if (proposal.targetType === "skill") return renderExperiment(await runSkillExperiment(ctx, exec, {
+				if (proposal.targetType === "skill") return renderExperiment(await runSkillExperiment(ctx, {
 					proposalId: args.proposalId,
 					taskIds,
 					holdoutTaskIds,
 					...args.repetition === void 0 ? {} : { repetition: args.repetition },
 					...args.budget === void 0 ? {} : { budget: args.budget }
-				}, caller), proposal.targetId);
+				}, caller, exec.signal), proposal.targetId);
 				return renderReplayResult(await runReplayExperiment({
 					evolution: ctx.evolution,
 					graphs: ctx.graphs,
@@ -4302,6 +4282,26 @@ var EvolutionExposure = class extends Service {
 * value in keeps every default root byte-for-byte where it was.
 */
 const REPO_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
+/**
+* The model identity the evolution plane freezes with an experiment and re-reads
+* before a promotion (see `Config.modelIdentity` of the evolution service).
+*
+* One source for both ends: the deployment's own default selection
+* (`agentDefaultModel.currentSelection()`), which is the configuration a session
+* without an explicit selection — and every replay the runtime spawns for an
+* experiment — runs under. The experiment tool freezes exactly this value, so
+* the identity a report is frozen under is the one the gate later compares
+* against; a deployment that mounts no such service answers `undefined`, and the
+* ledger then refuses to evaluate or promote rather than skipping the check.
+*/
+function deploymentModelIdentity(ctx) {
+	const defaults = optionalService(ctx, "agentDefaultModel");
+	try {
+		return modelIdentityOf(defaults?.currentSelection());
+	} catch {
+		return;
+	}
+}
 var SingularityAgent = class extends Service {
 	static inject = [
 		"tools",
@@ -4319,7 +4319,10 @@ var SingularityAgent = class extends Service {
 		this.assertClosedConfig(config);
 		const evolution = this.resolveEvolution(config);
 		ctx.plugin(HitlService);
-		new EvolutionService(ctx, { repoRoot: REPO_ROOT });
+		new EvolutionService(ctx, {
+			repoRoot: REPO_ROOT,
+			modelIdentity: () => deploymentModelIdentity(ctx)
+		});
 		new EscalationService(ctx);
 		new ProposalReviewService(ctx);
 		new EvolutionExposure(ctx, evolution === "on");
@@ -4388,4 +4391,4 @@ var SingularityAgent = class extends Service {
 var src_default = SingularityAgent;
 
 //#endregion
-export { DEFAULT_EVOLUTION, ESCALATION_TRIGGERS, EscalationService, EvolutionExposure, HitlService, ProposalReviewService, SingularityAgent, src_default as default, ownerSessionOfStore, renderProposalReview, reviewDecider };
+export { DEFAULT_EVOLUTION, ESCALATION_TRIGGERS, EscalationService, EvolutionExposure, HitlService, ProposalReviewService, SingularityAgent, src_default as default, deploymentModelIdentity, ownerSessionOfStore, renderProposalReview, reviewDecider };

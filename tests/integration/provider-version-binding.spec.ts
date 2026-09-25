@@ -3,6 +3,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { EvolutionService } from '../../evolution/src/index.ts'
 import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
+import { deploymentModelIdentity } from '../../agent-singularity/src/index.ts'
+import { promotionExperimentContext, recordPromotionExperiment } from '../support/promotion-experiment.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { canonicalize } from '../../task/src/contract.ts'
@@ -70,6 +72,9 @@ function evolutionOf(h: RunStack): EvolutionService {
     skillRoot: join(h.home, 'skills'),
     presetRoot: join(h.workspace, 'production-presets'),
     configFile: join(h.workspace, 'config.yml'),
+    // The same resolver the deployment wires: the model identity the experiment
+    // freezes and the promotion gate re-reads.
+    modelIdentity: () => deploymentModelIdentity(h.ctx),
   })
 }
 
@@ -169,9 +174,14 @@ async function applySkillVersion(h: RunStack, name: string, content: string, pro
   }, ROOT_A)
   await svc.candidate(proposalId, { skill: 'v2' }, ROOT_A, { name, content })
   await svc.prepare(proposalId, ROOT_A)
-  const identity = (await svc.get(proposalId)).prepared!.skillContent!
-  await svc.replay(proposalId, ROOT_A, replayReport(proposalId, 'skill', identity))
-  await svc.gate(proposalId, gateAnswers([`sandbox/${proposalId}/replay-report.json`]), ROOT_A)
+  // A completed two-sided experiment is what this build promotes from (S4-E §F.2).
+  // The experiment's own store: the samples it cites must not be written into a
+  // store a live batch is still settling in.
+  const { reportPath } = await recordPromotionExperiment(promotionExperimentContext(h), svc, {
+    proposalId,
+    model: deploymentModelIdentity(h.ctx)!,
+  })
+  await svc.gate(proposalId, gateAnswers([reportPath]), ROOT_A)
   await svc.decide(proposalId, 'PROMOTE', ROOT_A, 'approval:decide')
   const applied = (await defineEvolutionApplyTool(h.ctx).execute({ proposalId }, exec(h.rootAgent(ROOT_A), 'call-apply'))) as string
   expect(applied).toContain('[applied]')
@@ -385,13 +395,17 @@ describe('a new version in production and the runs that are already bound (S1-C)
     await svc.prepare('p-row-1', ROOT_A, { capabilityEntry: h.runtime.listCapabilities()[ROW] ?? null })
     await svc.replay('p-row-1', ROOT_A, replayReport('p-row-1', 'capability'))
     await svc.gate('p-row-1', gateAnswers(['sandbox/p-row-1/replay-report.json']), ROOT_A)
-    await svc.decide('p-row-1', 'PROMOTE', ROOT_A, 'approval:decide')
-    const applied = (await defineEvolutionApplyTool(h.ctx).execute({ proposalId: 'p-row-1' }, exec(h.rootAgent(ROOT_A), 'call-row-apply'))) as string
-    expect(applied).toContain('[applied]')
-    expect(applied).toContain('runtime registry row replaced')
+    // S4-E EVAL-4: a capability PROMOTE has no evaluator in this build, so the
+    // evolution entry refuses it and writes nothing. The row's own replacement is
+    // the runtime registry mirror's job now (`TaskRuntime.applyCapabilityRow`,
+    // the entry the rollback tool calls and the admission pre-check shared).
+    await expect(svc.decide('p-row-1', 'PROMOTE', ROOT_A, 'approval:decide')).rejects.toThrow('has no evaluator in this build')
+    const refusal = (await defineEvolutionApplyTool(h.ctx).execute({ proposalId: 'p-row-1' }, exec(h.rootAgent(ROOT_A), 'call-row-apply'))) as string
+    expect(refusal).toContain('evolution_apply rejected:')
+    expect(await readFile(join(h.workspace, 'config.yml'), 'utf8')).toBe(CONFIG_FIXTURE)
 
-    // The row moved in config.yml and in the running table…
-    expect(await readFile(join(h.workspace, 'config.yml'), 'utf8')).toContain(`      ${ROW}: { skills: [${SKILL}], tools: [filesystem, bash] }\n`)
+    // The row moves in the running table…
+    await h.runtime.applyCapabilityRow(ROW, row)
     expect(h.runtime.listCapabilities()[ROW]).toEqual(row)
 
     // …and the accepted task's contract and acceptance criteria are the very same

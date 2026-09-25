@@ -50,7 +50,12 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { EvolutionService } from '../../evolution/src/index.ts'
 import { overallExperimentVerdict, PRESET_REPLAY_MANUAL_REASON } from '../../evolution/src/index.ts'
 import type { ExperimentReport } from '../../evolution/src/index.ts'
+import { deploymentModelIdentity } from '../../agent-singularity/src/index.ts'
+import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
+import { defineEvolutionDecideTool } from '../../agent-singularity/src/tools/evolution-decide.ts'
+import { defineEvolutionGateTool } from '../../agent-singularity/src/tools/evolution-gate.ts'
 import { defineEvolutionReplayTool } from '../../agent-singularity/src/tools/evolution-replay.ts'
+import { defineEvolutionRollbackTool } from '../../agent-singularity/src/tools/evolution-rollback.ts'
 import type { AcceptanceCriterion } from '../../task/src/index.ts'
 import { disposeRunStacks, sha256Of, startRunStack, type RunStack } from '../support/run-stack.ts'
 
@@ -224,6 +229,8 @@ interface Fixture {
   storeId: string
   /** The replay tool as the deployment's registry holds it. */
   replay(args: Record<string, unknown>): Promise<string>
+  /** Any of the evolution tools, dispatched the way the loop dispatches one. */
+  call(name: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }>
 }
 
 /**
@@ -247,6 +254,9 @@ async function fixture(options: { candidateBody?: string; skipSamples?: boolean 
     skillRoot,
     presetRoot: join(h.workspace, 'presets'),
     configFile: join(h.workspace, 'config.yml'),
+    // The deployment's model identity: the experiment freezes it and the
+    // promotion gate re-reads the same resolver (S4-E §F.2).
+    modelIdentity: () => deploymentModelIdentity(h.ctx),
   })
   await evolution.propose({
     proposalId: PROPOSAL,
@@ -278,7 +288,15 @@ async function fixture(options: { candidateBody?: string; skipSamples?: boolean 
   // would be masked by the root's allow-list), and the registry's documented
   // per-agent variant is how one agent gets the real tool. The dispatch below is
   // the loop's own (`ctx.tools.execute`), with the production schema checks.
-  h.rootAgent(ROOT).ctx.tools.register(defineEvolutionReplayTool(h.ctx))
+  for (const tool of [
+    defineEvolutionReplayTool(h.ctx),
+    defineEvolutionGateTool(h.ctx),
+    defineEvolutionDecideTool(h.ctx),
+    defineEvolutionApplyTool(h.ctx),
+    defineEvolutionRollbackTool(h.ctx),
+  ]) {
+    h.rootAgent(ROOT).ctx.tools.register(tool)
+  }
   return {
     h,
     evolution,
@@ -287,6 +305,11 @@ async function fixture(options: { candidateBody?: string; skipSamples?: boolean 
       const result = await h.call(h.rootAgent(ROOT), 'evolution_replay', args)
       expect(result.isError, result.text).toBe(false)
       return result.text
+    },
+    /** One evolution tool call as the loop dispatches it: the answer's own text, and its error flag. */
+    async call(name: string, args: Record<string, unknown>) {
+      const result = await h.call(h.rootAgent(ROOT), name, args)
+      return { text: result.text, isError: result.isError }
     },
   }
 }
@@ -595,5 +618,105 @@ describe('S4-E: evolution_replay evaluates a skill candidate as the two-sided ex
     // Manual means manual: nothing ran and the store gained nothing.
     expect((await f.h.snapshot(f.storeId)).tasks).toHaveLength(before.tasks.length)
     expect(f.h.spawns).toHaveLength(spawnsBefore)
+  })
+})
+
+/**
+ * S4-E §F.2 end to end through the production tools: the experiment is the
+ * evidence, the gate cites its report, and only after the two human gates does
+ * the candidate replace the production `SKILL.md` — from which `evolution_rollback`
+ * restores the champion bytes. This is the chain EVAL-2's positive case asks for,
+ * with the real ledger, store, runtime, spawn, verifier and both approvals
+ * (the stack's approval seam answers `allowed-once`).
+ */
+describe('S4-E: the promotion gate promotes a fixed skill candidate end to end', () => {
+  const gateAnswers = (refs: string[]) => ({
+    targetFailureFixed: 'the target failure is fixed on the candidate side',
+    originalAcceptanceMaintained: 'the acceptance identity is unchanged',
+    existingRegressionMaintained: 'the held-out samples are maintained',
+    noUnacceptableSideEffects: 'one SKILL.md changes',
+    holdoutPerformanceAcceptable: 'no holdout degraded',
+    resourceCostAcceptable: 'recorded from the runs',
+    regressionEvidenceRefs: refs,
+  })
+
+  it('runs the experiment → gate → decide → apply → rollback, with each step asked of the real tools', async () => {
+    const f = await fixture()
+    const production = join(f.h.home, 'skills', SKILL, 'SKILL.md')
+    expect(readFileSync(production, 'utf8')).toBe(PRODUCTION_BODY)
+
+    // 1. The evaluation: both sides of both samples, as this experiment's own runs.
+    //    The budget declares no cost ceiling, so a side whose cost the run never
+    //    reported is recorded as unknown — never as a zero, and never a refusal
+    //    (§F.2; a declared ceiling would be the other case).
+    await f.replay({
+      proposalId: PROPOSAL,
+      taskIds: ['t-fix'],
+      holdoutTaskIds: ['t-holdout'],
+      budget: { note: 'no cost ceiling declared for this fixture run' },
+    })
+    const experimentId = await experimentIdOf(f)
+    const reportPath = `sandbox/${PROPOSAL}/exp-${experimentId}/experiment-report.json`
+    const experimentReport = await reportOnDisk(f, reportPath)
+    for (const sample of experimentReport.samples) {
+      expect(sample.baseline.cost.status === 'reported' || sample.baseline.cost.status === 'unknown').toBe(true)
+      expect(sample.candidate.cost.status === 'reported' || sample.candidate.cost.status === 'unknown').toBe(true)
+    }
+
+    // 2. The gate: six answers over the experiment, whose report must be cited.
+    const gateMissing = await f.call('evolution_gate', { proposalId: PROPOSAL, ...gateAnswers(['evidence:missing']) })
+    expect(gateMissing.text).toContain('must cite its experiment report')
+    const gated = await f.call('evolution_gate', { proposalId: PROPOSAL, ...gateAnswers([reportPath]) })
+    expect(gated.isError, gated.text).toBe(false)
+    expect(gated.text).toContain('[gated] gate answered 6/6')
+
+    // 3. The first human gate: PROMOTE is recorded, and nothing is written yet.
+    const decided = await f.call('evolution_decide', { proposalId: PROPOSAL, decision: 'PROMOTE', note: 'the fix holds' })
+    expect(decided.isError, decided.text).toBe(false)
+    expect(decided.text).toContain('proposal p1 [decided] PROMOTE — the fix holds')
+    expect(decided.text).toContain('nothing applied yet; evolution_apply (second human gate) takes it to production')
+    expect(readFileSync(production, 'utf8')).toBe(PRODUCTION_BODY)
+
+    // 4. The second human gate: the apply writes exactly the candidate bytes.
+    const applied = await f.call('evolution_apply', { proposalId: PROPOSAL })
+    expect(applied.isError, applied.text).toBe(false)
+    expect(applied.text).toContain('proposal p1 [applied] L2 skill')
+    expect(applied.text).toContain(`  - ${production}`)
+    expect(readFileSync(production, 'utf8')).toBe(CANDIDATE_BODY)
+    expect((await f.evolution.get(PROPOSAL)).status).toBe('applied')
+
+    // 5. Rollback restores the champion snapshot, with its own approval.
+    const rolledback = await f.call('evolution_rollback', { proposalId: PROPOSAL })
+    expect(rolledback.isError, rolledback.text).toBe(false)
+    expect(rolledback.text).toContain('champion restored')
+    expect(readFileSync(production, 'utf8')).toBe(PRODUCTION_BODY)
+    expect((await f.evolution.get(PROPOSAL)).status).toBe('rolledback')
+
+    // Every step is on the ledger, in order, with the approval evidents the
+    // tools passed to the service.
+    const kinds = (await ledgerLines(f)).map(line => line.kind as string)
+    expect(kinds).toEqual([
+      'proposed', 'candidate', 'prepared',
+      'experiment_started', 'experiment_sample', 'experiment_sample', 'experiment_sample', 'experiment_sample',
+      'gated', 'decided', 'applied', 'rolledback',
+    ])
+    const lines = await ledgerLines(f)
+    expect(lines.filter(line => line.kind === 'decided')[0]).toMatchObject({ decision: 'PROMOTE', approvalRef: expect.stringMatching(/^approval:/) })
+    expect(lines.filter(line => line.kind === 'applied')[0]).toMatchObject({ targets: [production], approvalRef: expect.stringMatching(/^approval:/) })
+    expect(lines.filter(line => line.kind === 'rolledback')[0]).toMatchObject({ targets: [production], approvalRef: expect.stringMatching(/^approval:/) })
+    // Nothing rewrote an earlier line: a skill candidate never takes `replayed`.
+    expect(kinds).not.toContain('replayed')
+  })
+
+  it('refuses a skill candidate whose evidence is not a completed experiment, before any human is asked', async () => {
+    const f = await fixture()
+    const bare = await f.call('evolution_gate', { proposalId: PROPOSAL, ...gateAnswers(['evidence:missing']) })
+    expect(bare.text).toContain('has no two-sided experiment')
+    expect((await f.evolution.get(PROPOSAL)).status).toBe('prepared')
+
+    const promote = await f.call('evolution_decide', { proposalId: PROPOSAL, decision: 'PROMOTE' })
+    expect(promote.text).toContain('evolution_decide rejected:')
+    expect(promote.text).toContain('is prepared; only a gated proposal can be decided')
+    expect(await ledgerLines(f)).toHaveLength(3)
   })
 })

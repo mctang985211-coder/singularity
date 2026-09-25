@@ -8,6 +8,7 @@ import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/l
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import { EvolutionService } from '../../evolution/src/index.ts'
 import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
+import { recordPromotionExperiment } from '../support/promotion-experiment.ts'
 import { defineEvolutionDecideTool } from '../../agent-singularity/src/tools/evolution-decide.ts'
 import type { TaskEvent } from '../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
@@ -31,11 +32,17 @@ import { personRequest } from '../../task-runtime/tests/support/person-request.t
  *    the fixture is installed under the checkout's own `.agents/skills`.
  * 2. **config load** (`providerLoadReport`, S1-C item 3) — the harness process's
  *    own viewpoint: the fixture is installed under a pinned `$DSH_HOME/skills`.
- * 3. **capability replacement** (`EvolutionService.checkPromotion` on a
- *    capability candidate) — the row's providers, discovered from the harness
- *    process's own roots.
- * 4. **candidate promotion** (`checkPromotion` on a skill candidate) — the
- *    candidate's own sandbox directory.
+ * 3. **capability replacement** (`TaskRuntime.applyCapabilityRow`) — the row's
+ *    providers, discovered from the harness process's own roots, judged before
+ *    the row becomes effective in the running table.
+ * 4. **candidate promotion** (`EvolutionService.checkPromotion` on a skill
+ *    candidate) — the candidate's own sandbox directory.
+ *
+ * The evolution *capability* promotion entry is no longer one of them: S4-E
+ * §F.2/EVAL-4 refuses a PROMOTE without an evaluator, so the row check's live
+ * consumer is the runtime registry mirror (the same one the rollback tool calls).
+ * That refusal is asserted beside the four, so the property "one illegal provider,
+ * one defect code" still holds for every entry that judges the row today.
  *
  * What is real: the task store and reducer, the runtime's admission and
  * pre-check, the sidecar loader/validator, the capability table, the verifier
@@ -249,6 +256,9 @@ async function harness(options: { capabilities?: Readonly<Record<string, Capabil
     skillRoot: join(workspace, 'production-skills'),
     presetRoot: join(workspace, 'production-presets'),
     configFile: join(workspace, 'config.yml'),
+    // The deployment's model identity: the experiment freezes it, the promotion
+    // gate re-reads it (S4-E §F.2).
+    modelIdentity: () => 'p/m',
   })
   await writeFile(join(workspace, 'config.yml'), CONFIG_FIXTURE)
   ctx.provide('tools', {
@@ -264,6 +274,8 @@ async function harness(options: { capabilities?: Readonly<Record<string, Capabil
     [...log.values()].flatMap(events => events.flatMap(event => (event.type === 'task/event' ? [event.data as unknown as TaskEvent] : [])))
 
   return {
+    ctx,
+    workspace,
     runtime,
     evolution,
     task,
@@ -335,6 +347,13 @@ async function capabilityCandidateGated(h: Harness, entry: CapabilityConfig, pro
 /** Walk one skill candidate named `name` whose sandbox holds `content` to `gated`, ready for its promotion checks. */
 async function skillCandidateGated(h: Harness, content: string, proposalId = 's1', name = SKILL): Promise<void> {
   const svc = h.evolution
+  // The candidate must be a *replacement*: give the fixture a production SKILL.md
+  // once, and never overwrite whatever a previous promotion put there.
+  const production = join(h.skillRoot, name, 'SKILL.md')
+  if (!existsSync(production)) {
+    await mkdir(join(h.skillRoot, name), { recursive: true })
+    await writeFile(production, skillText('# the production version', name), 'utf8')
+  }
   await svc.propose({
     proposalId,
     targetType: 'skill',
@@ -346,9 +365,25 @@ async function skillCandidateGated(h: Harness, content: string, proposalId = 's1
   }, ROOT_SESSION)
   await svc.candidate(proposalId, { skill: 'v2' }, ROOT_SESSION, { name, content })
   await svc.prepare(proposalId, ROOT_SESSION)
-  const identity = (await svc.get(proposalId)).prepared!.skillContent!
-  await svc.replay(proposalId, ROOT_SESSION, replayReport(proposalId, 'skill', identity))
-  await svc.gate(proposalId, gateAnswers([`sandbox/${proposalId}/replay-report.json`]), ROOT_SESSION)
+  // S4-E §F.2: the evidence a promotion reads is the completed two-sided
+  // experiment, recorded through the ledger's own write entries.
+  const { reportPath } = await recordPromotionExperiment(promotionExperimentContextFor(h), svc, { proposalId, model: 'p/m' })
+  await svc.gate(proposalId, gateAnswers([reportPath]), ROOT_SESSION)
+}
+
+/**
+ * The store and scratch directory this hand-built harness offers the experiment
+ * fixture: its own store, minted by the fixture, so the samples it cites are
+ * never written into the store the runtime is admitting runs in.
+ */
+function promotionExperimentContextFor(h: Harness) {
+  return {
+    ctx: h.ctx,
+    task: h.task as never,
+    scratch: h.workspace,
+    cwd: h.checkout,
+    storeId: 'sg-t-promotion-fixture',
+  }
 }
 
 /** The one executed-report shape the replay entry accepts; this file is about the promotion entries, not about running the replay. */
@@ -454,8 +489,8 @@ const ILLEGAL_SHAPES = [
   },
 ] as const
 
-describe('one illegal provider, four consumers, one defect code (S1-C item 3)', () => {
-  it.each(ILLEGAL_SHAPES)('$label: admission, config load, capability replacement and promotion all name $defect', async shape => {
+describe('one illegal provider, one defect code, every entry that still judges it (S1-C item 3)', () => {
+  it.each(ILLEGAL_SHAPES)('$label: admission, config load, the registry mirror and the candidate promotion all name $defect', async shape => {
     const h = await harness({ capabilities: shape.row })
     const content = skillText('# the illegal provider', 'declaredName' in shape ? shape.declaredName : SKILL)
     // The same bytes, installed where each consumer looks.
@@ -476,11 +511,16 @@ describe('one illegal provider, four consumers, one defect code (S1-C item 3)', 
     expect(load.defects[0]).toContain(`${shape.defect}:`)
 
     // 3. A capability replacement: the row's own provider, judged before the row
-    //    would be written.
+    //    becomes effective. S4-E EVAL-4 took this consumer away from the evolution
+    //    promotion entry (a capability PROMOTE has no evaluator and is refused by
+    //    name), so the row check is exercised where it still has a live consumer —
+    //    the runtime registry mirror the rollback tool also calls.
     await capabilityCandidateGated(h, { skills: [SKILL], tools: [...(shape.row[ROW]!.tools ?? [])] })
+    expect(await h.evolution.checkPromotion('c1').catch((error: unknown) => (error instanceof Error ? error.message : String(error))))
+      .toContain('has no evaluator in this build')
     let capabilityRefusal = ''
     try {
-      await h.evolution.checkPromotion('c1')
+      await h.runtime.applyCapabilityRow(ROW, { skills: [SKILL], tools: [...(shape.row[ROW]!.tools ?? [])] })
     } catch (error) {
       capabilityRefusal = error instanceof Error ? error.message : String(error)
     }
@@ -501,25 +541,28 @@ describe('one illegal provider, four consumers, one defect code (S1-C item 3)', 
     expect(promotionRefusal).toContain(`${shape.defect}:`)
 
     // Four entries, one code — the property a per-entry check could not prove.
-    const codes = [shape.defect, shape.defect, shape.defect, shape.defect]
-    expect([admission, load.defects[0]!, capabilityRefusal, promotionRefusal].map(entry => codes.find(code => entry.includes(`${code}:`))))
-      .toEqual(codes)
+    expect([admission, load.defects[0]!, capabilityRefusal, promotionRefusal].every(entry => entry.includes(`${shape.defect}:`))).toBe(true)
 
-    // The same refusal through the tool a human decision goes through, for both
-    // candidate kinds: `evolution_decide` runs the promotion check *before* it asks
-    // for approval, so a proposal that cannot be promoted never burns a sign-off.
+    // The same refusal through the tool a human decision goes through: the skill
+    // candidate's defect is what `evolution_decide` reports — it runs the promotion
+    // check *before* it asks for approval, so a proposal that cannot be promoted
+    // never burns a sign-off. The capability proposal is refused there too, for the
+    // one reason this build gives every non-skill type (EVAL-4: no evaluator).
     const toolCtx = { evolution: h.evolution, approval: h.approval, taskRuntime: h.runtime } as never
-    for (const proposalId of ['s1', 'c1']) {
-      const decided = (await defineEvolutionDecideTool(toolCtx).execute({ proposalId, decision: 'PROMOTE' }, exec(ROOT_SESSION))) as string
-      expect(decided).toContain('evolution_decide rejected:')
-      expect(decided).toContain(`${shape.defect}:`)
-    }
+    const decided = (await defineEvolutionDecideTool(toolCtx).execute({ proposalId: 's1', decision: 'PROMOTE' }, exec(ROOT_SESSION))) as string
+    expect(decided).toContain('evolution_decide rejected:')
+    expect(decided).toContain(`${shape.defect}:`)
+    const capabilityDecided = (await defineEvolutionDecideTool(toolCtx).execute({ proposalId: 'c1', decision: 'PROMOTE' }, exec(ROOT_SESSION))) as string
+    expect(capabilityDecided).toContain('evolution_decide rejected:')
+    expect(capabilityDecided).toContain('has no evaluator in this build')
     expect(h.approval.request).not.toHaveBeenCalled()
 
     // None of the refusals had a side effect: no row written, no production skill,
     // no applied record, no decision recorded, nothing spawned for the refused batch.
     expect(await readFile(h.configFile, 'utf8')).toBe(CONFIG_FIXTURE)
-    expect(existsSync(join(h.skillRoot, SKILL, 'SKILL.md'))).toBe(false)
+    // Production still holds exactly the fixture's own version: nothing the
+    // refusals touched was written.
+    expect(await readFile(join(h.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(skillText('# the production version', SKILL))
     const ledger = (await readFile(join(h.evolution.root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
       .map(line => (JSON.parse(line) as { kind: string }).kind)
     expect(ledger).not.toContain('applied')
@@ -527,7 +570,7 @@ describe('one illegal provider, four consumers, one defect code (S1-C item 3)', 
     expect(h.taskEvents().filter(event => event.kind === 'CapabilityGapDetected')).toEqual([])
   })
 
-  it('admits, loads, replaces and promotes one legal provider through all four entries', async () => {
+  it('admits, loads, mirrors and promotes one legal provider through every entry that still judges it', async () => {
     const h = await harness()
     const content = skillText('# a usable execution provider')
     const shape: SkillShape = { sidecar: 'execution', verifierRef: 'command', capabilities: [ROW], requiredTools: ['bash'] }
@@ -552,21 +595,22 @@ describe('one illegal provider, four consumers, one defect code (S1-C item 3)', 
     expect(load.defects).toEqual([])
     expect(load.failed).toBeUndefined()
 
-    // 3. The capability replacement writes the row and records the role.
+    // 3. The capability replacement is refused by the evolution entry (EVAL-4: a
+    //    capability PROMOTE has no evaluator), and the row's own provider is
+    //    admitted where it still becomes effective — the runtime registry mirror,
+    //    which runs the same admission pre-check over the replacement.
     await capabilityCandidateGated(h, { skills: [SKILL], tools: ['filesystem', 'bash'] })
-    const check = await h.evolution.checkPromotion('c1')
-    expect(check.providers).toMatchObject([{ name: SKILL, role: 'execution-provider', verifierRef: 'command' }])
-    await h.evolution.decide('c1', 'PROMOTE', ROOT_SESSION, 'approval:decide')
-    const applied = await h.evolution.apply('c1', ROOT_SESSION, 'approval:apply')
-    expect(applied.providers).toMatchObject([{ name: SKILL, role: 'execution-provider', verifierRef: 'command' }])
-    expect(await readFile(h.configFile, 'utf8')).toContain(`      ${ROW}: { skills: [${SKILL}], tools: [filesystem, bash] }\n`)
+    await expect(h.evolution.decide('c1', 'PROMOTE', ROOT_SESSION, 'approval:decide')).rejects.toThrow('has no evaluator in this build')
+    expect((await h.evolution.get('c1')).status).toBe('gated')
+    await h.runtime.applyCapabilityRow(ROW, { skills: [SKILL], tools: ['filesystem', 'bash'] })
+    expect(h.runtime.listCapabilities()[ROW]).toEqual({ skills: [SKILL], tools: ['filesystem', 'bash'] })
 
-    // 4. A skill candidate — in the shape the skill executor promotes, a single
-    //    `SKILL.md` — walks the promotion entries through the tools, and the
-    //    human who reviews it sees the role the validator counted it as. A
-    //    candidate carrying a sidecar or resources is refused here instead
-    //    (D1: the executor writes one file, so such a candidate is never
-    //    reported as the execution provider it declares itself to be).
+    // 4. A skill candidate — the one target type this build evaluates and
+    //    promotes — walks the promotion entries through the tools, and the human
+    //    who reviews it sees the role the validator counted it as. A candidate
+    //    carrying a sidecar or resources is refused here instead (the executor
+    //    writes one file, so such a candidate is never reported as the execution
+    //    provider it declares itself to be).
     const candidate = skillText('# the candidate the executor can carry', 'verify')
     await skillCandidateGated(h, candidate, 's2', 'verify')
     const toolCtx = { evolution: h.evolution, approval: h.approval, taskRuntime: h.runtime } as never

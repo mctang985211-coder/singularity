@@ -591,7 +591,10 @@ describe('AgentRuntime root lifecycle', () => {
     expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_OPEN })
     const prompt = promptTextOf(section)
     expect(prompt).toContain('To carry a diagnosed fix into the evolution track')
-    expect(prompt).toContain('L4 and bookkeeping-only types stay manual')
+    // S4-E §F.2: a skill candidate is evaluated by the two-sided experiment, and
+    // only a single-file skill replacement is promotable in this build.
+    expect(prompt).toContain('a new baseline run under the production configuration and a new candidate run on the prepared bytes')
+    expect(prompt).toContain('promotes single-file skill replacements only')
     expect(prompt).toContain('evolution_list reads the ledger')
     // The domain reference map is a deployed skill, not part of the general root prompt.
     expect(prompt).not.toContain('Buckyball')

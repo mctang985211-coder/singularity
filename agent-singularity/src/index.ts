@@ -11,8 +11,8 @@ import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-context'
 import type {} from '@dangosys/dsh-singularity-task'
-import type {} from '@dangosys/dsh-singularity-task-runtime'
-import { EvolutionService } from '@dangosys/dsh-singularity-evolution'
+import { optionalService } from '@dangosys/dsh-singularity-task-runtime'
+import { EvolutionService, modelIdentityOf } from '@dangosys/dsh-singularity-evolution'
 import { HitlService } from './hitl.ts'
 import { EscalationService } from './escalation.ts'
 import { ProposalReviewService } from './proposal-review.ts'
@@ -141,6 +141,33 @@ declare module '@deepseek-ai/cordis' {
  */
 const REPO_ROOT = fileURLToPath(new URL('../../../../', import.meta.url))
 
+/** The one selection shape this resolver reads: whatever the deployment's default-model service answers with. */
+interface ModelSelectionLike {
+  provider?: unknown
+  model?: unknown
+}
+
+/**
+ * The model identity the evolution plane freezes with an experiment and re-reads
+ * before a promotion (see `Config.modelIdentity` of the evolution service).
+ *
+ * One source for both ends: the deployment's own default selection
+ * (`agentDefaultModel.currentSelection()`), which is the configuration a session
+ * without an explicit selection — and every replay the runtime spawns for an
+ * experiment — runs under. The experiment tool freezes exactly this value, so
+ * the identity a report is frozen under is the one the gate later compares
+ * against; a deployment that mounts no such service answers `undefined`, and the
+ * ledger then refuses to evaluate or promote rather than skipping the check.
+ */
+export function deploymentModelIdentity(ctx: Context): string | undefined {
+  const defaults = optionalService<{ currentSelection(): ModelSelectionLike }>(ctx, 'agentDefaultModel')
+  try {
+    return modelIdentityOf(defaults?.currentSelection())
+  } catch {
+    return undefined
+  }
+}
+
 export class SingularityAgent extends Service {
   static inject = ['tools', 'graphs', 'agentRuntime', 'task', 'taskRuntime', 'singularityContext', 'userQuestions', 'approval']
   static Config: z<Config> = ConfigSchema
@@ -153,9 +180,10 @@ export class SingularityAgent extends Service {
     // The evolution tools read `ctx.evolution`, and a service a child fiber
     // provides is invisible to the parent that mounted it — so the ledger's
     // service is provided on this fiber rather than through `ctx.plugin`. The
-    // lifecycle itself is the evolution package's; this assembly only says
-    // where the harness root is.
-    new EvolutionService(ctx, { repoRoot: REPO_ROOT })
+    // lifecycle itself is the evolution package's; this assembly says where the
+    // harness root is and which model the deployment's runs share — the one
+    // fact the package cannot derive from a process with no agent of its own.
+    new EvolutionService(ctx, { repoRoot: REPO_ROOT, modelIdentity: () => deploymentModelIdentity(ctx) })
     // Same discipline for the escalation ledger: the `escalate` tool reads
     // `ctx.escalation` from this fiber, and the parent never injects it.
     new EscalationService(ctx)

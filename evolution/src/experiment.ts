@@ -165,6 +165,13 @@ export interface ExperimentStartedRecord {
   budget: ExperimentBudget
   /** Report path relative to the ledger root (`sandbox/<proposalId>/exp-<experimentId>/experiment-report.json`). */
   report: string
+  /**
+   * The task store every run of this experiment was created in, so a later
+   * reader (the promotion gate) can re-read the sides' runs, reviews and
+   * evidence without a caller session. Written by the orchestrator; absent only
+   * on a record written before the field existed, which the gate refuses by name.
+   */
+  storeId?: string
   actor: string
   at: string
 }
@@ -229,6 +236,8 @@ export interface ExperimentView {
   frozenDigest: string
   budget: ExperimentBudget
   report: string
+  /** The task store this experiment's runs were created in (see {@link ExperimentStartedRecord.storeId}). */
+  storeId?: string
   /** The `experiment_started` record's own timestamp. */
   at: string
   /** Sample records in ledger order. */
@@ -408,8 +417,13 @@ function costOf(review: ReviewRecord | undefined): ExperimentCost {
   return { status: 'reported', metrics: structuredClone(metrics) }
 }
 
-/** The evidence ids of one run: the review record's own list, or the store's bundles for that run when there is no review. */
-function evidenceRefsOf(snapshot: TaskSnapshot, runId: string | undefined, review: ReviewRecord | undefined): string[] {
+/**
+ * The evidence ids of one run: the review record's own list, or the store's
+ * bundles for that run when there is no review. Exported because the promotion
+ * gate re-reads exactly this fact from the store — one rule for what a side's
+ * evidence is, not two.
+ */
+export function evidenceRefsOf(snapshot: TaskSnapshot, runId: string | undefined, review: ReviewRecord | undefined): string[] {
   if (review !== undefined) return [...review.evidenceRefs]
   if (runId === undefined) return []
   return snapshot.evidence.filter(bundle => bundle.taskRunId === runId).map(bundle => bundle.evidenceId)
@@ -882,6 +896,7 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
     frozenDigest,
     budget: { ...frozen.budget },
     report: experimentReportPath(spec.proposalId, experimentId),
+    storeId,
     actor,
     at: new Date().toISOString(),
   })
@@ -1061,6 +1076,9 @@ export function assertExperimentStartRecord(record: ExperimentStartedRecord, pro
   if (record.report !== experimentReportPath(record.proposalId, record.experimentId)) {
     throw new Error(`evolution: experiment_started record for "${record.proposalId}" names a report path outside its own sandbox`)
   }
+  if (record.storeId !== undefined && (typeof record.storeId !== 'string' || record.storeId.length === 0)) {
+    throw new Error(`evolution: experiment_started record for "${record.proposalId}" has a malformed task store id`)
+  }
   nonEmpty(record.actor, 'experiment_started actor')
   nonEmpty(record.at, 'experiment_started at')
 }
@@ -1174,6 +1192,7 @@ export function foldExperiments(
         frozenDigest: record.frozenDigest,
         budget: record.budget,
         report: record.report,
+        ...(record.storeId === undefined ? {} : { storeId: record.storeId }),
         at: record.at,
         samples: [],
       })

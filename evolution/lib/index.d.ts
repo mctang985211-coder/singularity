@@ -1,6 +1,6 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import { CapabilityConfig, ReplayRunOutcome, ReplayTaskOptions } from "@dangosys/dsh-singularity-task-runtime";
-import { ProposalTargetType, ReviewCriterion, ReviewMetrics, TaskSnapshot } from "@dangosys/dsh-singularity-task";
+import { ProposalTargetType, ReviewCriterion, ReviewMetrics, ReviewRecord, TaskSnapshot } from "@dangosys/dsh-singularity-task";
 import { SessionId } from "@deepseek-ai/dsh-session";
 
 //#region src/config-edit.d.ts
@@ -509,6 +509,13 @@ interface ExperimentStartedRecord {
   budget: ExperimentBudget;
   /** Report path relative to the ledger root (`sandbox/<proposalId>/exp-<experimentId>/experiment-report.json`). */
   report: string;
+  /**
+   * The task store every run of this experiment was created in, so a later
+   * reader (the promotion gate) can re-read the sides' runs, reviews and
+   * evidence without a caller session. Written by the orchestrator; absent only
+   * on a record written before the field existed, which the gate refuses by name.
+   */
+  storeId?: string;
   actor: string;
   at: string;
 }
@@ -569,6 +576,8 @@ interface ExperimentView {
   frozenDigest: string;
   budget: ExperimentBudget;
   report: string;
+  /** The task store this experiment's runs were created in (see {@link ExperimentStartedRecord.storeId}). */
+  storeId?: string;
   /** The `experiment_started` record's own timestamp. */
   at: string;
   /** Sample records in ledger order. */
@@ -642,6 +651,13 @@ declare function experimentSampleLabel(key: ExperimentKey): string;
  * describe bytes the workspace never holds.
  */
 declare function directoryDigest(directory: string): Promise<string>;
+/**
+ * The evidence ids of one run: the review record's own list, or the store's
+ * bundles for that run when there is no review. Exported because the promotion
+ * gate re-reads exactly this fact from the store — one rule for what a side's
+ * evidence is, not two.
+ */
+declare function evidenceRefsOf(snapshot: TaskSnapshot, runId: string | undefined, review: ReviewRecord | undefined): string[];
 /** The key one frozen sample's side has under one experiment. */
 declare function experimentSampleKeyOf(view: Pick<ExperimentView, 'proposalId' | 'frozen'>, sampleTaskId: string, side: ExperimentSide): ExperimentKey;
 /**
@@ -1131,7 +1147,33 @@ interface Config {
    * working directory instead.
    */
   repoRoot?: string;
+  /**
+   * Resolves the model identity this plane freezes with an experiment and
+   * re-reads before a promotion (`<provider>/<model>`, or the model id alone).
+   *
+   * It is injected, not derived here: the deployment knows which selection its
+   * sessions and the replay spawns run under, and the process this package runs
+   * in has no agent of its own to ask. The assembly
+   * (`@dangosys/dsh-singularity-agent`) wires it to the same source the
+   * experiment tool freezes from — one resolver, so the identity a report is
+   * frozen under is exactly the one the gate compares against.
+   *
+   * Absent, or answering nothing, is a refusal at both entries (fail-closed):
+   * an experiment cannot freeze a model nobody can name, and a promotion cannot
+   * prove the model did not drift. Neither silently skips the check.
+   */
+  modelIdentity?: () => string | undefined;
 }
+/**
+ * The model identity one selection names: `provider/model` when the route is
+ * known, the model id alone otherwise. `undefined` for a selection that names no
+ * model — a deployment configured without one is a case to refuse, not to paper
+ * over with a placeholder.
+ */
+declare function modelIdentityOf(selection: {
+  provider?: unknown;
+  model?: unknown;
+} | undefined): string | undefined;
 /**
  * The production write targets of an apply (and its matching rollback), for
  * the approval reason and the audit record — the human sees exactly what a
@@ -1161,12 +1203,24 @@ declare class EvolutionService extends Service {
   readonly configFile: string;
   /** Repo root that relative evidence paths resolve against (see {@link Config.repoRoot}). */
   readonly repoRoot: string;
+  /** The injected model-identity resolver, if the assembly wired one (see {@link Config.modelIdentity}). */
+  private readonly resolveModelIdentity?;
   private records;
   private readonly loaded;
   private writes;
   constructor(ctx: Context, config?: Config);
   /** Ledger file path (`<root>/proposals.jsonl`). */
   get file(): string;
+  /**
+   * The model identity this deployment's runs share — the one the experiment
+   * freezes before anything runs and the promotion gate re-reads ({@link Config.modelIdentity}).
+   *
+   * Fail-closed: no resolver, a resolver that throws, or one that names nothing
+   * is a named refusal. The experiment tool freezes this value, so a deployment
+   * that cannot name its model can neither evaluate nor promote a candidate —
+   * and neither case silently skips the check.
+   */
+  modelIdentity(): string;
   propose(input: ProposeInput, actor: string): Promise<EvolutionProposal>;
   /**
    * Move proposed → candidate, recording the complete version set the candidate
@@ -1203,32 +1257,24 @@ declare class EvolutionService extends Service {
    * record cites it by root-relative path, and the gate later requires that
    * path in its regression evidence.
    *
-   * For a skill candidate the service additionally binds the content identity
-   * (P2): the report must carry the same `candidateContent` prepare recorded,
-   * and the candidate file on disk must still hash to it. The tool re-checks
-   * before it runs anything; this check runs after the runs and before the
-   * record is written, so a modification that happened and persisted during
-   * the replay is refused instead of recorded.
+   * A **skill** candidate has no path here: its evaluation is the two-sided
+   * experiment (§F.2), so a live call that hands this entry a skill report is
+   * refused by name. The transition itself stays admissible so a ledger written
+   * by the pre-S4-E build still folds and replays; nothing current produces one,
+   * and the promotion gate refuses to promote from one.
    */
   replay(proposalId: string, actor: string, report: unknown): Promise<EvolutionProposal>;
   /**
-   * The skill replay's content binding (P2), enforced on the service entry that
-   * writes the `replayed` record: the report's identity must equal the one
-   * prepare recorded, and the candidate file must still be those exact bytes.
-   * A candidate prepared before content binding, or one that changed and stayed
-   * changed, is refused with the same guidance — fix the candidate through a
-   * new proposal and evaluation; the append-only ledger never re-digests an old
-   * record.
-   */
-  private assertSkillContentBound;
-  /**
    * Move candidate → gated (manual candidates), prepared → gated
-   * (bookkeeping-only mutations), or replayed → gated (mechanical mutations):
-   * all six Gate answers plus regression evidence refs. Every ref must exist —
-   * a path on disk (relative to the repo root or absolute) or an id the
-   * caller-side resolver knows (task-store evidence). Existence only; nothing
-   * here executes anything. A replayed proposal must additionally cite its
-   * replay report path; its contents must match the recorded digest and schema.
+   * (bookkeeping-only mutations and skill candidates), or replayed → gated
+   * (mechanical mutations): all six Gate answers plus regression evidence refs.
+   * Every ref must exist — a path on disk (relative to the repo root or
+   * absolute) or an id the caller-side resolver knows (task-store evidence).
+   * Existence only; nothing here executes anything. A replayed proposal must
+   * cite its replay report path, and its contents must match the recorded digest
+   * and schema. A **skill** proposal has no `replayed` record — its evaluation is
+   * the two-sided experiment — so it must have a completed experiment and cite
+   * that experiment's report instead (§F.2).
    */
   gate(proposalId: string, answers: GateAnswers, actor: string, refKnown?: (ref: string) => Promise<boolean>): Promise<EvolutionProposal>;
   /**
@@ -1271,50 +1317,42 @@ declare class EvolutionService extends Service {
   /**
    * Preflight for tools before asking for approval; mutation methods repeat the
    * check. Returns the providers the promotion would put in place, each with the
-   * role it may be counted as (an empty list for a target type that carries
-   * none), so the callers that already gate on this check can report them.
+   * role it may be counted as, so the callers that already gate on this check
+   * can report them.
    *
-   * Three checks run here, in this order, all of them shared with the service
-   * entry the tools ultimately call:
+   * Only a `skill` proposal is promotable in this build (EVAL-4/§F.2): every
+   * other target type is refused by name — a type with no evaluator gets no
+   * promotion, and a historical replay report is never upgraded into new
+   * evidence ({@link noEvaluatorRefusal}).
+   *
+   * For a skill candidate three checks run here, in this order, all of them
+   * shared with the service entry the tools ultimately call:
    *
    * 1. P2: the candidate bytes must still be the ones prepare recorded.
-   * 2. The replay gate (`assertReplayPromotable`).
-   * 3. S1-C item 3: the provider check. A skill candidate's sandbox directory and
-   *    a capability candidate's new row are judged by the same
-   *    {@link validateSkillProvider} admission, config load and capability
-   *    replacement use, so `evolution_apply` is not the only entry that knows
-   *    what a usable provider is — and a candidate carrying an execution
-   *    sidecar with an unregistered verifier or ungranted tools is refused here,
-   *    before a human is asked, before `decided` is recorded, and before
-   *    anything is written.
+   * 2. S1-C item 3: the provider check. The candidate's sandbox directory is
+   *    judged by the same {@link validateSkillProvider} admission, config load
+   *    and capability replacement use, so `evolution_apply` is not the only
+   *    entry that knows what a usable provider is — and a candidate carrying an
+   *    execution sidecar with an unregistered verifier or ungranted tools is
+   *    refused here, before a human is asked, before `decided` is recorded, and
+   *    before anything is written.
+   * 3. The evidence gate (`assertSkillPromotionEvidence`): a completed two-sided
+   *    experiment whose report, runs, reviews, evidence, frozen inputs, judge,
+   *    model, verdict and cost still hold. Every one of them is re-read from the
+   *    ledger, the store and the production workspace — the tools run all of it
+   *    before asking a human, and decide(PROMOTE) / apply run it again on the
+   *    service entry, so evidence that moved while the human was deciding is
+   *    still refused.
    */
   checkPromotion(proposalId: string): Promise<PromotionCheck>;
   /**
-   * The promotion-time provider check (S1-C item 3): what the promotion would
-   * put in place, judged as a provider before it becomes production state.
-   *
-   * - `skill`: the materialized candidate directory
-   *   (`sandbox/<id>/skills/<name>/`) is read as a skill directory and judged
-   *   against the deployment's own sources — the effective capability table and
-   *   the registered verifier vocabulary. Nothing is discovered from a root: the
-   *   candidate is exactly the directory this promotion would write.
-   * - `capability`: the row as it will read after the replacement is checked by
-   *   the admission pre-check itself, over the table the replacement produces
-   *   and the harness process's own discovery roots (the row's own tool labels
-   *   expand through the same `resolveCapabilities` admission uses, which is what
-   *   makes them the covering set for a skill that declares this row). Whichever
-   *   skill the row grants must be reachable and usable from that viewpoint, or
-   *   the row is refused rather than written and refused later at admission.
-   * - every other target type carries no provider: nothing to judge.
-   *
-   * What the verdict means, in the vocabulary the whole system uses
-   * (`sidecar.ts`): only an execution sidecar whose verifier is registered and
-   * whose required tools its declared capabilities grant may be counted as an
-   * execution provider; knowledge and guidance are loadable and are recorded as
-   * such; anything else is a refusal naming every defect. None of it writes,
-   * and nothing is recorded before the caller's own transition.
+   * The services the promotion gate re-reads from this context: the experiment
+   * family of this same ledger, the task store the experiment names, the live
+   * verifier vocabulary and this deployment's model identity. Resolved softly
+   * one by one, so a context that cannot offer one gets a refusal naming it
+   * rather than a gate that silently checks less.
    */
-  private assertProvidersPromotable;
+  private promotionSources;
   /**
    * The candidate skill's provider verdict, taken from the directory the
    * promotion would write — plus the executor boundary this promotion cannot
@@ -1362,16 +1400,6 @@ declare class EvolutionService extends Service {
    * grant rather than mistaken for an empty table.
    */
   private capabilityToolAnswer;
-  /**
-   * The row a capability promotion would write, checked as the pre-check checks
-   * a row: the replacement is folded into the effective table, and every skill
-   * the new row grants is discovered from the harness process's own roots and
-   * judged by {@link validateSkillProvider} — `verifierRefs` from the live
-   * registry, the row's own tool labels expanding through `resolveCapabilities`
-   * as the covering set. A refusal names the capability, the skill and every
-   * defect, and nothing is written.
-   */
-  private assertCapabilityRowProviders;
   /** The effective capability table, or `undefined` when this context cannot read one (no task-runtime service). */
   private effectiveCapabilities;
   /**
@@ -1570,14 +1598,12 @@ declare function replayLineage(proposalId: string): string;
 declare const PRESET_REPLAY_MANUAL_REASON: string;
 /**
  * The ledger service the experiment records through, as this module uses it: the
- * sandbox root it materialized under, the content check that binds a skill
- * candidate (P2), and the `replayed` transition itself.
+ * sandbox root it materialized under and the `replayed` transition itself.
  */
 interface ReplayLedger {
   /** Absolute ledger directory; the sandbox and the report live under it. */
   readonly root: string;
   get(proposalId: string): Promise<EvolutionProposal>;
-  readSkillCandidate(proposalId: string): Promise<Buffer>;
   replay(proposalId: string, actor: string, report: ReplayReport): Promise<EvolutionProposal>;
 }
 /**
@@ -1630,4 +1656,4 @@ interface ReplayExperimentResult {
  */
 declare function runReplayExperiment(sources: ReplayExperimentSources, request: ReplayExperimentRequest): Promise<ReplayExperimentResult>;
 //#endregion
-export { APPLYABLE_TARGET_TYPES, AgentPresetMutation, ApplyOutcome, ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, CapabilityMutation, CapabilityRowAction, CapabilityRowResult, ChampionSource, ChampionState, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCriterion, FrozenExperiment, FrozenSample, GateAnswers, ListFilter, MECHANICAL_TARGET_TYPES, MechanicalMutation, PRESET_REPLAY_MANUAL_REASON, PrepareChampion, PrepareChampionSources, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, REPLAY_RELATIONS, REPLAY_VERDICTS, ReplayCriterionDiff, ReplayCriterionSummary, ReplayExperimentRequest, ReplayExperimentResult, ReplayExperimentSources, ReplayLedger, ReplayRelation, ReplayReport, ReplaySideSummary, ReplayTaskComparison, ReplayVerdict, ReplayedView, SkillContentIdentity, SkillMutation, TaskDefinitionMutation, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, assertReplayPromotable, assertReplayReport, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, editCapabilityRow, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, mutationMechanical, overallExperimentVerdict, overallReplayVerdict, protectedInputsDigest, readCapabilityRowSource, renderProviderRoles, replayLineage, resolvePrepareChampion, restoreCapabilityRowSource, resumeExperiment, runExperiment, runReplayExperiment };
+export { APPLYABLE_TARGET_TYPES, AgentPresetMutation, ApplyOutcome, ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, CapabilityMutation, CapabilityRowAction, CapabilityRowResult, ChampionSource, ChampionState, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCriterion, FrozenExperiment, FrozenSample, GateAnswers, ListFilter, MECHANICAL_TARGET_TYPES, MechanicalMutation, PRESET_REPLAY_MANUAL_REASON, PrepareChampion, PrepareChampionSources, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, REPLAY_RELATIONS, REPLAY_VERDICTS, ReplayCriterionDiff, ReplayCriterionSummary, ReplayExperimentRequest, ReplayExperimentResult, ReplayExperimentSources, ReplayLedger, ReplayRelation, ReplayReport, ReplaySideSummary, ReplayTaskComparison, ReplayVerdict, ReplayedView, SkillContentIdentity, SkillMutation, TaskDefinitionMutation, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, assertReplayPromotable, assertReplayReport, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, editCapabilityRow, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelIdentityOf, mutationMechanical, overallExperimentVerdict, overallReplayVerdict, protectedInputsDigest, readCapabilityRowSource, renderProviderRoles, replayLineage, resolvePrepareChampion, restoreCapabilityRowSource, resumeExperiment, runExperiment, runReplayExperiment };

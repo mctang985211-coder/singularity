@@ -21,11 +21,15 @@ export function defineEvolutionGateTool(ctx: Context) {
       'Answer the minimal Validation Gate for a candidate (status: gated). The six questions (细化想法4 §32): ' +
       '1. Target failure fixed? 2. Original acceptance maintained? 3. Existing regression maintained? ' +
       '4. No unacceptable side effects? 5. Holdout performance acceptable? 6. Resource cost acceptable? ' +
-      'All six answers are required; the regression/replay side must cite evidence ids (from this graph\'s task store) ' +
-      'or file paths whose existence is checked — cited evidence is never executed. A candidate carrying a mutation must ' +
-      'pass evolution_prepare (sandbox materialization) and, for a mechanical mutation, evolution_replay — the replay ' +
-      'report path must then be one of the regressionEvidenceRefs. Records the ledger entry only; ' +
-      'nothing is promoted or changed. Next step is evolution_decide, which always asks a human.',
+      'All six answers are required, and the regression side must cite evidence ids (from this graph\'s task store) or ' +
+      'file paths whose existence is checked — cited evidence is never executed. A candidate carrying a mutation must ' +
+      'pass evolution_prepare (sandbox materialization) and then be evaluated by evolution_replay: for a skill candidate ' +
+      'that is the two-sided experiment (a new baseline run and a new candidate run per frozen sample), and its report ' +
+      'path must be one of the regressionEvidenceRefs — the gate refuses a skill candidate whose experiment is not ' +
+      'complete. A capability / agent_preset / task_definition candidate keeps the v1 replay path and cites its replay ' +
+      'report the same way; note that this build promotes single-file skill replacements only, so those types cannot be ' +
+      'promoted even though they can be recorded. Records the ledger entry only; nothing is promoted or changed. ' +
+      'Next step is evolution_decide, which always asks a human.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Candidate to gate' },
       targetFailureFixed: { type: 'string', required: true, description: 'Answer to "1. Target failure fixed?"' },

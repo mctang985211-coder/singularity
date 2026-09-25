@@ -10,14 +10,16 @@
  * - `capability`: the champion task re-runs through the real spawn + verify
  *   chain with the mutation's entry as a whole-row `capabilityOverrides`
  *   overlay for that run only.
- * - `skill`: same chain, with the sandbox's `skills/` dir as an
- *   `extraSkillRoots` overlay — the sandbox skill shadows the same-name
- *   production skill for the replay worker alone.
  * - `task_definition`: deterministic criteria replay — no worker spawn; the
  *   candidate definition's criteria run through the verifier in the graph env.
  * - `agent_preset`: manual in v1 — the agent-presets roster scans
  *   constructor-fixed roots and cannot mount a sandbox-materialized preset, so
  *   nothing executes and the report records the boundary honestly.
+ *
+ * A `skill` candidate has no path here: its evaluation is the two-sided
+ * experiment (§F.2, `experiment.ts`), which runs a new baseline and a new
+ * candidate run per frozen sample instead of comparing against a historical
+ * champion. Reaching this module with one is a refusal, not a fallback.
  *
  * The champion side of every comparison is the historical task's own terminal
  * review record (self-contained: outcome / criteria / durationMs), never a
@@ -25,11 +27,6 @@
  * and the ledger's `replayed` record cites it; `evolution_gate` requires that
  * path in its regression evidence.
  *
- * Skill candidates are content-bound (P2): the candidate file is verified
- * against the SHA-256 prepare recorded before any run starts, the report names
- * that identity, and the service re-verifies the file after the runs before the
- * `replayed` record is written — a candidate that changed and stayed changed is
- * refused, not recorded.
  *
  * The model-facing tool adapter (`evolution_replay`, in
  * `@dangosys/dsh-singularity-agent`) declares the tool's schema, extracts the
@@ -70,14 +67,12 @@ const VERIFICATION_MODES: readonly VerificationMode[] = ['deterministic', 'simul
 
 /**
  * The ledger service the experiment records through, as this module uses it: the
- * sandbox root it materialized under, the content check that binds a skill
- * candidate (P2), and the `replayed` transition itself.
+ * sandbox root it materialized under and the `replayed` transition itself.
  */
 export interface ReplayLedger {
   /** Absolute ledger directory; the sandbox and the report live under it. */
   readonly root: string
   get(proposalId: string): Promise<EvolutionProposal>
-  readSkillCandidate(proposalId: string): Promise<Buffer>
   replay(proposalId: string, actor: string, report: ReplayReport): Promise<EvolutionProposal>
 }
 
@@ -229,13 +224,16 @@ export async function runReplayExperiment(
       'gate it directly with evolution_gate',
     )
   }
-  // P2 content binding: before anything executes, the candidate file must
-  // still be the exact content prepare recorded (regular file, no symlinked
-  // path, digest match). The overlay below shadows this same file for the
-  // replay worker — never the production skill — so what runs is what was
-  // checked. The service re-verifies after the runs, before the replayed
-  // record is written.
-  if (proposal.targetType === 'skill') await sources.evolution.readSkillCandidate(proposal.proposalId)
+  // A skill candidate is evaluated by the two-sided experiment, never here:
+  // this path compares against the historical champion, which §F.2 forbids for
+  // a skill replacement. A caller reaching it with one is refused by name
+  // rather than silently compared against a baseline nobody re-ran.
+  if (proposal.targetType === 'skill') {
+    throw new Error(
+      `proposal ${proposal.proposalId} targets "skill": a skill candidate is evaluated by the two-sided experiment ` +
+      '(a new baseline run and a new candidate run per frozen sample), not by this candidate-vs-champion replay',
+    )
+  }
   const lineage = replayLineage(proposal.proposalId)
 
   // agent_preset: the v1 manual boundary — record it, execute nothing.
@@ -307,11 +305,6 @@ export async function runReplayExperiment(
       if (proposal.targetType === 'capability') {
         const capability = mutation as CapabilityMutation
         options = { overlay: { capabilityOverrides: { [capability.name]: capability.entry } } }
-      } else if (proposal.targetType === 'skill') {
-        // The overlay root is exactly the dir holding the candidate file
-        // verified above (`skills/<name>/SKILL.md`) — the replay worker
-        // shadows the same-name production skill with it for that run only.
-        options = { overlay: { extraSkillRoots: [join(sandboxAbs, 'skills')] } }
       } else if (proposal.targetType === 'task_definition') {
         const definition = JSON.parse(await readFile(join(sandboxAbs, 'task-definition.json'), 'utf8'))
         options = { contract: candidateContract(definition, champion), spawn: false }
@@ -348,9 +341,6 @@ export async function runReplayExperiment(
     targetType: proposal.targetType,
     at: new Date().toISOString(),
     mode: 'executed',
-    // P2: a skill report names the candidate content identity the runs went
-    // through — the one verified above and re-verified by the service.
-    ...(proposal.targetType === 'skill' ? { candidateContent: prepared.skillContent } : {}),
     observed,
     holdout: { executed: holdout.length > 0, tasks: holdout },
     verdict: overallReplayVerdict([...observed, ...holdout]),

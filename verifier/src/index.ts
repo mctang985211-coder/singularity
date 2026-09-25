@@ -350,6 +350,22 @@ export class VerifierRegistry extends Service {
     return [...this.verifiers.keys()].sort()
   }
 
+  /**
+   * The version each registered verifier declares, by id — the registry metadata
+   * {@link stampVersion} puts on the verdicts that instance produces. A verifier
+   * that declares no version is absent from the map, so a reader distinguishes
+   * "declares none" from "is not registered" by the two reads together
+   * (`verifierIds()` for registration, this for the version). Read as a pair
+   * wherever a verdict has to be recalled against the instance that judged it.
+   */
+  verifierVersions(): Record<string, string> {
+    const versions: Record<string, string> = {}
+    for (const [id, verifier] of this.verifiers) {
+      if (verifier.version !== undefined) versions[id] = verifier.version
+    }
+    return versions
+  }
+
   /** Best-effort warn through the cordis logger when one is mounted; tests and minimal contexts may not have it. */
   private warn(message: string): void {
     const logger = (this.ctx as { logger?: (name: string) => { warn(format: string): void } }).logger

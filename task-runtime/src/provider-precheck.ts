@@ -59,6 +59,13 @@ export interface VerifierVocabulary {
   ready?(): Promise<void>
   /** The registered verifier ids, the vocabulary a sidecar's `verifier.ref` may name. */
   verifierIds?(): string[]
+  /**
+   * The declared version of each registered verifier, by id — the registry
+   * metadata a verdict is stamped with. Optional: a registry that reports ids
+   * only (an older implementation, a minimal test double) leaves every version
+   * undeclared, which a reader reports as "none" rather than inventing one.
+   */
+  verifierVersions?(): Record<string, string>
 }
 
 /**
@@ -109,6 +116,34 @@ export async function registeredVerifierIds(host: unknown): Promise<readonly str
   try {
     await verifier.ready?.()
     return verifier.verifierIds?.()
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The registered verifier vocabulary *and the version each instance declares*,
+ * or `undefined` under exactly the conditions {@link registeredVerifierIds}
+ * answers `undefined`. The two are read together by a caller that has to recall
+ * a verdict against the instance that produced it (the evolution promotion
+ * gate): an id list cannot tell a re-registered judge from the one that judged,
+ * and a version list read without the ids could name a judge that is gone.
+ *
+ * Registration is awaited once, then both halves are read from the same
+ * instance. A registry that implements `verifierIds()` but no
+ * `verifierVersions()` answers an empty map — "no version was declared", which
+ * is the truth for it, not a refusal.
+ */
+export async function registeredVerifierVocabulary(
+  host: unknown,
+): Promise<{ ids: readonly string[]; versions: Readonly<Record<string, string>> } | undefined> {
+  const verifier = optionalService<VerifierVocabulary>(host, 'verifier')
+  if (verifier === undefined) return undefined
+  try {
+    await verifier.ready?.()
+    const ids = verifier.verifierIds?.()
+    if (ids === undefined) return undefined
+    return { ids, versions: verifier.verifierVersions?.() ?? {} }
   } catch {
     return undefined
   }

@@ -237,6 +237,7 @@ export {
   providerDefectLines,
   providerRefusals,
   registeredVerifierIds,
+  registeredVerifierVocabulary,
   skillSearchRoots,
   unlistableVerifierRefusal,
 } from './provider-precheck.ts'
