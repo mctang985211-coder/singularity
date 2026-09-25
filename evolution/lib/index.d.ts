@@ -1330,8 +1330,8 @@ declare class EvolutionService extends Service {
    *
    * 1. P2: the candidate bytes must still be the ones prepare recorded.
    * 2. S1-C item 3: the provider check. The candidate's sandbox directory is
-   *    judged by the same {@link validateSkillProvider} admission, config load
-   *    and capability replacement use, so `evolution_apply` is not the only
+   *    judged by the same {@link validateSkillProvider} admission and config
+   *    load the rest of the system uses, so `evolution_apply` is not the only
    *    entry that knows what a usable provider is — and a candidate carrying an
    *    execution sidecar with an unregistered verifier or ungranted tools is
    *    refused here, before a human is asked, before `decided` is recorded, and
