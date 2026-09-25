@@ -4,7 +4,7 @@
 
 本票读取上限以[唯一计划 D 节](../2026-09-20-vrtc-code-change-plan.md)的 2026-09-25 追加裁决为准：单次完整输出最多 50000 字节，字节窗口与省略措辞复用 `@deepseek-ai/dsh-output-retention`；旧复审记录中的 16 KiB 是当时实现事实。
 
-先读[公共执行合同](README.md)、[唯一计划 D/E 节](../2026-09-20-vrtc-code-change-plan.md)、[复审记录](../history/2026-09-25-a2-a1-progress-review.md)和[返工记录](../history/2026-09-25-a2-a1-rework-record.md)的 Q3 部分。核对两仓状态与 AGENTS.md，按公共合同在修改前建立 Git 基线。当前被审代码为 `4115a85`；其 Q1/Q2/Q4 和 Q3 中途读失败的已通过反例应保留。
+先读[公共执行合同](README.md)、[唯一计划 D/E 节](../2026-09-20-vrtc-code-change-plan.md)、[复审记录](../history/2026-09-25-a2-a1-progress-review.md)和[返工记录](../history/2026-09-25-a2-a1-rework-record.md)的 Q3 部分。核对两仓状态与 AGENTS.md，按公共合同在修改前建立 Git 基线。`4115a85` 是上次复审的被审代码，不代替施工时的实际 HEAD；其 Q1/Q2/Q4 和 Q3 中途读失败的已通过反例应保留。
 
 ## 固定交付
 
