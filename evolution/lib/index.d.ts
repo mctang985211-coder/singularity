@@ -1,6 +1,6 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import { CapabilityConfig, ReplayRunOutcome, ReplayTaskOptions } from "@dangosys/dsh-singularity-task-runtime";
-import { ProposalTargetType, TaskSnapshot } from "@dangosys/dsh-singularity-task";
+import { ProposalTargetType, ReviewCriterion, ReviewMetrics, TaskSnapshot } from "@dangosys/dsh-singularity-task";
 import { SessionId } from "@deepseek-ai/dsh-session";
 
 //#region src/config-edit.d.ts
@@ -144,9 +144,561 @@ declare function assertReplayReport(proposal: {
 }, report: unknown): asserts report is ReplayReport;
 /** A human approval cannot substitute for two independent, non-regressing replay groups. */
 declare function assertReplayPromotable(report: ReplayReport): void;
+/**
+ * The comparer a v2 report names, and the only one this build can re-check:
+ * the verdict rules of {@link compareExperimentSides} and
+ * {@link overallExperimentVerdict}. A report naming anything else is refused
+ * by {@link assertExperimentReport} instead of being re-derived with rules this
+ * build does not have.
+ */
+declare const EXPERIMENT_COMPARER_VERSION = "experiment-comparer@1";
+/**
+ * Why a sample is in the experiment:
+ * - `observed-failure` — the case the candidate is supposed to fix; its
+ *   historical record must be `failed`, and its baseline run must reproduce
+ *   that failure for a fix to be claimable.
+ * - `observed-regression` — a case the proposal's evidence already covers and
+ *   that must keep passing.
+ * - `holdout` — a case the candidate was not selected on; it must not degrade.
+ * At least one `observed-failure` and one `holdout` are required (§F.2).
+ */
+type ExperimentSampleRole = 'observed-failure' | 'observed-regression' | 'holdout';
+declare const EXPERIMENT_SAMPLE_ROLES: readonly ExperimentSampleRole[];
+/** Which side of one sample's comparison a run is: the frozen baseline, or the candidate. */
+type ExperimentSide = 'baseline' | 'candidate';
+declare const EXPERIMENT_SIDES: readonly ExperimentSide[];
+/**
+ * A side's settled outcome. `cancelled` is the runtime's own settlement of a
+ * run that was stopped; `interrupted` is this plane's record of a side whose
+ * run never reached a terminal state (a process that died mid-run, a run the
+ * store no longer holds) — it says nothing about the candidate, so every
+ * verdict over it is `inconclusive`.
+ */
+type ExperimentOutcome = 'verified' | 'failed' | 'cancelled' | 'interrupted';
+declare const EXPERIMENT_OUTCOMES: readonly ExperimentOutcome[];
+/**
+ * One sample's mechanical verdict (§F.2):
+ * - `fixed` — the baseline reproduced the historical failure and the candidate
+ *   passed, with no criterion moving under it.
+ * - `both-failed` — both sides failed: the failure is reproducible *and* not
+ *   fixed. The distinguishable sub-case of `not-fixed`.
+ * - `not-fixed` — the candidate did not pass where the baseline failed, or the
+ *   baseline did not fail at all (nothing was reproduced to fix).
+ * - `maintained` — a regression/holdout sample whose candidate side is not
+ *   worse than its baseline.
+ * - `regressed` — a regression/holdout sample whose candidate side is worse.
+ * - `inconclusive` — a side that could not settle, or a comparison whose two
+ *   contracts differ; it says nothing about the candidate.
+ */
+type ExperimentSampleVerdict = 'fixed' | 'both-failed' | 'not-fixed' | 'maintained' | 'regressed' | 'inconclusive';
+declare const EXPERIMENT_SAMPLE_VERDICTS: readonly ExperimentSampleVerdict[];
+/**
+ * The experiment's overall verdict — the six mechanically distinguishable
+ * situations §F.2 names, in the order {@link overallExperimentVerdict} decides
+ * them: `inconclusive` (evidence that could not settle), `both-failed`
+ * (reproduced and unfixed), `regressed` (unfixed and something else got worse),
+ * `not-fixed` (unfixed, nothing worse), `fixed-with-regression` (the failure is
+ * fixed but a regression or holdout sample degraded), `fixed` (clean:
+ * every failure sample fixed, every regression/holdout sample maintained).
+ */
+type ExperimentVerdict = 'fixed' | 'fixed-with-regression' | 'not-fixed' | 'both-failed' | 'regressed' | 'inconclusive';
+declare const EXPERIMENT_VERDICTS: readonly ExperimentVerdict[];
+/**
+ * The run-level budget the caller freezes with the experiment (§F.2: samples,
+ * inputs, judge, model/tools, budget and comparison rules are frozen before the
+ * run). Recorded verbatim in the frozen block, the ledger and the report.
+ *
+ * This plane enforces none of it, and says so rather than implying otherwise:
+ * `ReplayTaskOptions` carries no run-level budget, so there is no limit here to
+ * pass through, and the budget a tree actually spends belongs to the runtime's
+ * own root budget, measured where the runs are. A gate may read these numbers
+ * as the frozen intent they are — never as a spent amount.
+ */
+interface ExperimentBudget {
+  /** Wall-clock ceiling for the whole experiment, in milliseconds. */
+  wallTimeMs?: number;
+  /** Token ceiling for the whole experiment. */
+  maxTokens?: number;
+  /** Free text: what the budget was derived from and why it is judged enough. */
+  note?: string;
+}
+/**
+ * What one side cost, as the run's own ReviewRecord reported it.
+ *
+ * `unknown` is a first-class answer, never a zero: a record without metrics (a
+ * deployment that exposes no projection, a run that never wrote a review) is
+ * reported as unknown with its reason, because "no cost reported" and "zero
+ * cost" are different facts and only one of them is true. `reported` carries
+ * the metrics verbatim — this schema never re-derives or rounds them.
+ */
+type ExperimentCost = {
+  status: 'reported';
+  metrics: ReviewMetrics;
+} | {
+  status: 'unknown';
+  reason: string;
+};
+/** One criterion's verdict on one side, with the verifier that decided it (v1's report dropped the verifier identity; v2 keeps it). */
+interface ExperimentCriterionDetail {
+  criterionId: string;
+  verdict: 'pass' | 'fail' | 'inconclusive';
+  /** The registered verifier that decided the verdict, copied from the run's ReviewRecord. */
+  verifierId?: string;
+  /** The deciding instance's version, when it declared one. */
+  verifierVersion?: string;
+  command?: string;
+  exitCode?: number;
+}
+/**
+ * One side of one sample's comparison: this experiment's own run of that
+ * sample. Every identity here is the durable one — the replayed task, the run,
+ * the terminal review record, the evidence it carries, and the workspace built
+ * from the frozen snapshot with the digest taken before the run wrote in it.
+ */
+interface ExperimentSideDetail {
+  /** The replayed task this side created — never the sample's historical task. Absent for a side whose run never reached the store. */
+  taskId?: string;
+  role: ExperimentSampleRole;
+  side: ExperimentSide;
+  outcome: ExperimentOutcome;
+  /** The run this side created. Absent when no run reached the store. */
+  runId?: string;
+  /** `<taskId>#<runId>` of the terminal ReviewRecord this side cites (the deployment's own review-ref shape). */
+  reviewRef?: string;
+  /** Evidence ids the run's review record carries. */
+  evidenceRefs: string[];
+  /** The workspace this side's run went through, as the runtime resolved it. */
+  workspace: string;
+  /**
+   * SHA-256 of the workspace's content right after it was built from the frozen
+   * snapshot — equal to the snapshot digest, which is what makes the side's
+   * input the frozen one. Absent only for an `interrupted` side whose workspace
+   * cannot be re-proved (`reason` says why).
+   */
+  initialDigest?: string;
+  criteria: ExperimentCriterionDetail[];
+  cost: ExperimentCost;
+  /** Why this side has no terminal run; required for `interrupted`, absent otherwise. */
+  reason?: string;
+}
+/** One sample's comparison: both sides, and the mechanical verdict over them. */
+interface ExperimentSampleComparison {
+  /** The sample's historical task id — the case, not a baseline. */
+  taskId: string;
+  role: ExperimentSampleRole;
+  baseline: ExperimentSideDetail;
+  candidate: ExperimentSideDetail;
+  verdict: ExperimentSampleVerdict;
+}
+/** One criterion's frozen identity: the acceptance condition as the sample's own contract holds it. */
+interface FrozenCriterion {
+  criterionId: string;
+  verificationMode: string;
+  command?: string;
+  /** SHA-256 over the criterion's protected input identities (`<path>\0<sha256>` lines, sorted); the empty list hashes too. */
+  protectedInputsDigest: string;
+}
+/**
+ * One sample's frozen identity: the case it locates, and the acceptance
+ * identity the replay will mirror into both sides. `observed` is the historical
+ * record the sample was chosen for — it locates the case and is *not* a
+ * baseline: every report side must cite a different run.
+ */
+interface FrozenSample {
+  taskId: string;
+  role: ExperimentSampleRole;
+  /** SHA-256 over the sample's contract as the replay mirrors it (objective, criteria, required capabilities). */
+  contractDigest: string;
+  criteria: FrozenCriterion[];
+  observed: {
+    outcome: 'verified' | 'failed';
+    runId?: string;
+  };
+}
+/**
+ * The identity block fixed before the first run (§F.2). Everything a reader
+ * needs to say *what* was compared: the candidate's exact bytes, the input
+ * snapshot both workspaces were built from, the samples and their acceptance
+ * identity, the model identity the caller froze, the budget, the overlay each
+ * side ran under, and the comparer that judged. {@link frozenDigestOf} is the
+ * digest of this whole block, so a report and a ledger record name the same
+ * frozen experiment only if every one of these fields agrees.
+ */
+interface FrozenExperiment {
+  proposalId: string;
+  /**
+   * The repetition index this experiment froze. A higher index is a *different*
+   * frozen experiment (§F.2: only an explicit new experiment may run and charge
+   * budget again), so it has its own id, its own budget and its own evidence —
+   * which is what lets a sample be run again without ever overwriting a record.
+   */
+  repetition: number;
+  /** The candidate content identity the candidate side runs against (the prepared `SKILL.md`). */
+  candidate: SkillContentIdentity;
+  /** The production baseline the candidate replaces, when prepare captured one (a replacement, not a new skill). */
+  productionBaseline?: SkillContentIdentity;
+  /** The model identity the caller froze — an opaque string (a config digest, a model name), never interpreted here. */
+  model: string;
+  budget: ExperimentBudget;
+  samples: FrozenSample[];
+  /** The input snapshot both sides' workspaces are built from, and its recursive content digest. */
+  snapshot: {
+    sourceDir: string;
+    digest: string;
+  };
+  /** The comparer that produced the report's verdicts. */
+  comparerVersion: string;
+  /** What each side runs under, in words: the candidate's overlay, and the baseline's absence of one. */
+  overlay: {
+    baseline: string;
+    candidate: string;
+  };
+}
+/** One experiment's report: the frozen identity, every sample's two sides, and the verdict recomputable from them. */
+interface ExperimentReport {
+  formatVersion: 2;
+  proposalId: string;
+  experimentId: string;
+  /**
+   * When this report's newest ledger record was written — a function of the
+   * records, not of the reading: re-reading an experiment reproduces the same
+   * report bytes, so a digest taken over the report stays meaningful.
+   */
+  at: string;
+  frozen: FrozenExperiment;
+  frozenDigest: string;
+  samples: ExperimentSampleComparison[];
+  verdict: ExperimentVerdict;
+}
+/**
+ * JSON with object keys sorted recursively — the one serialization every digest
+ * in this schema is taken over. `undefined` members are dropped, so a digest is
+ * the same whether an absent optional member was omitted or written as
+ * `undefined`, and the digest of a value never depends on key insertion order.
+ */
+declare function canonicalJson(value: unknown): string;
+/** Lowercase SHA-256 hex over {@link canonicalJson} of a value — the frozen-block digest primitive. */
+declare function digestOf(value: unknown): string;
+/** The digest of a whole frozen identity block; a report and its ledger record agree only when these agree. */
+declare function frozenDigestOf(frozen: FrozenExperiment): string;
+/** SHA-256 over a criterion's protected input identities, in path order — the acceptance input identity of one criterion. */
+declare function protectedInputsDigest(inputs: readonly {
+  path: string;
+  sha256: string;
+}[]): string;
+/**
+ * The comparison-relevant half of one side: exactly what the v1 comparer reads
+ * (the outcome and the criterion verdicts), so the v2 verdict is the v1 rules
+ * applied to this experiment's evidence and nothing else. An
+ * {@link ExperimentSideDetail} is assignable to it.
+ */
+interface ExperimentSideComparison {
+  outcome: ExperimentOutcome;
+  criteria: ExperimentCriterionDetail[];
+}
+/**
+ * One sample's mechanical verdict. An unrankable side (cancelled / interrupted)
+ * and a comparison whose two contracts differ (a criterion added, removed or
+ * re-commanded) are both `inconclusive` — the v1 semantics, unchanged. A role of
+ * `observed-failure` asks whether the target failure was reproduced and then
+ * fixed; a regression or holdout sample asks only whether the candidate is
+ * worse, and its answer is `regressed` or `maintained`.
+ */
+declare function compareExperimentSides(role: ExperimentSampleRole, baseline: ExperimentSideComparison, candidate: ExperimentSideComparison): ExperimentSampleVerdict;
+/**
+ * The overall verdict over every sample, from the sample verdicts alone: any
+ * evidence that could not settle makes the whole experiment inconclusive; a
+ * reproduced-and-unfixed failure is `both-failed`; an unfixed target failure
+ * with a degraded regression/holdout sample is `regressed`; an unfixed target
+ * with nothing worse is `not-fixed`; a fixed target with a degraded sample is
+ * `fixed-with-regression`; and a fixed target with nothing worse is `fixed`.
+ * The six are distinguishable by construction, and a report whose `verdict` is
+ * not this value is refused.
+ */
+declare function overallExperimentVerdict(samples: readonly Pick<ExperimentSampleComparison, 'role' | 'verdict'>[]): ExperimentVerdict;
+/**
+ * Validate a frozen identity block: every member present and shaped, the
+ * comparison rules named, and §F.2's two non-empty groups (at least one
+ * observed failure, at least one holdout) enforced — a block missing either is
+ * not a two-sided experiment whatever it is called. Used by the report
+ * assertion and by the ledger fold, so a hand-written record fails the same
+ * checks a live run's record passes.
+ */
+declare function assertFrozenExperiment(value: unknown): asserts value is FrozenExperiment;
+/**
+ * Validate a v2 report against itself, the way `assertReplayReport` validates a
+ * v1 one — and further: every verdict the report carries must equal the one its
+ * own details recompute (`compareExperimentSides` per sample,
+ * `overallExperimentVerdict` overall), and the frozen block must hash to the
+ * `frozenDigest` the report names. A report whose judgement and evidence
+ * disagree is refused rather than read.
+ *
+ * The one thing this schema cannot check is where a side's run came from: a
+ * forged report could name any task and run. It closes the forgery that matters
+ * — a side citing the sample's *historical* run (or its historical task) as its
+ * own — from the frozen block alone, and the service that owns the ledger
+ * closes the rest by checking each recorded run against the store record the
+ * experiment's own lineage names.
+ */
+declare function assertExperimentReport(report: unknown): asserts report is ExperimentReport;
+//#endregion
+//#region src/experiment.d.ts
+/** One sample as the caller's specification names it. */
+interface ExperimentSampleSpec {
+  taskId: string;
+  role: ExperimentSampleRole;
+}
+/**
+ * The experiment a caller freezes before anything runs (§F.2). Everything here
+ * is fixed *before* the first run: samples and their roles, the input snapshot
+ * both sides are built from, the model identity, the budget, and the repetition
+ * index. Changing any member freezes a different experiment.
+ */
+interface ExperimentSpec {
+  proposalId: string;
+  samples: ExperimentSampleSpec[];
+  /** The directory whose recursive content is the frozen input both workspaces are built from. */
+  snapshot: {
+    sourceDir: string;
+  };
+  /**
+   * The model identity the caller froze — an opaque string (a model name, a
+   * scripted configuration's digest, the tool set the runs share). Nothing here
+   * interprets it, and nothing here can verify that a run used it: it is the
+   * caller's declaration, recorded in the frozen block so a later reader sees
+   * exactly what was claimed.
+   */
+  model: string;
+  budget: ExperimentBudget;
+  /**
+   * This experiment's repetition index. `0` is the first run of the frozen
+   * experiment; a higher index is a new, separately budgeted experiment (§F.2:
+   * only an explicit new experiment may run and charge budget again).
+   */
+  repetition: number;
+}
+/** One experiment call: the frozen specification, the session it runs as, and the caller's cancellation. */
+interface ExperimentRequest {
+  readonly spec: ExperimentSpec;
+  /** The session every replayed run of this experiment is run as. */
+  readonly caller: SessionId;
+  readonly actor: string;
+  readonly signal?: AbortSignal;
+}
+/**
+ * The idempotency key of one sample side (§F.2). All five members together
+ * name one run; the module doc says what a repeat of a key means.
+ */
+interface ExperimentKey {
+  proposalId: string;
+  /** The prepared candidate's content identity (P2's digest of the materialized `SKILL.md`). */
+  preparedContentDigest: string;
+  sampleTaskId: string;
+  side: ExperimentSide;
+  repetition: number;
+}
+/** One `experiment_started` ledger line: the frozen experiment, recorded before the first run. */
+interface ExperimentStartedRecord {
+  formatVersion: 1;
+  kind: 'experiment_started';
+  proposalId: string;
+  experimentId: string;
+  frozen: FrozenExperiment;
+  frozenDigest: string;
+  /** The frozen budget, carried on the record as well as inside the block (the fold requires the two to agree). */
+  budget: ExperimentBudget;
+  /** Report path relative to the ledger root (`sandbox/<proposalId>/exp-<experimentId>/experiment-report.json`). */
+  report: string;
+  actor: string;
+  at: string;
+}
+/**
+ * One `experiment_sample` ledger line: one sample side's run and what it settled
+ * to. Written once per key and never overwritten; a side with no terminal run (a
+ * process that died mid-experiment) records `interrupted` and is never re-run
+ * under the same key.
+ */
+interface ExperimentSampleRecord {
+  formatVersion: 1;
+  kind: 'experiment_sample';
+  proposalId: string;
+  experimentId: string;
+  /** Key part: the candidate content identity this run went through. */
+  preparedContentDigest: string;
+  sampleTaskId: string;
+  side: ExperimentSide;
+  repetition: number;
+  /** The replayed task this side created. Absent for a side whose run never reached the store. */
+  taskId?: string;
+  /** The run this side created. Absent for a side whose run never reached the store. */
+  runId?: string;
+  outcome: 'verified' | 'failed' | 'cancelled' | 'interrupted';
+  /** `<taskId>#<runId>` of the terminal ReviewRecord this side cites (the deployment's own review-ref shape). */
+  reviewRef?: string;
+  /** Evidence ids the run's review record (or, when it has none, the store's evidence bundles) carries. */
+  evidenceRefs: string[];
+  /** The run's per-criterion verdicts, with the verifier that decided each — the report's criterion detail. */
+  criteria: ReviewCriterion[];
+  /** The workspace this side's run went through. */
+  workspace: string;
+  /**
+   * The frozen snapshot digest the workspace was built from. A run started by
+   * this call measures it right after the build; a side settled from the store
+   * after a crash records the digest the workspace *was built from* — by then
+   * the run has written into the directory, so re-digesting it would measure the
+   * run's output, not its input. Absent only for an `interrupted` side whose
+   * workspace cannot be re-proved.
+   */
+  initialDigest?: string;
+  cost: ExperimentCost;
+  /** Why this side has no terminal run; required for `interrupted`. */
+  reason?: string;
+  actor: string;
+  at: string;
+}
+type ExperimentRecord = ExperimentStartedRecord | ExperimentSampleRecord;
+/** True for a record of the experiment family — the lines the proposal fold must leave alone. */
+declare function isExperimentRecord(record: {
+  kind: string;
+}): record is ExperimentRecord;
+/** One experiment's folded view: its started record plus every sample record written under it. */
+interface ExperimentView {
+  experimentId: string;
+  proposalId: string;
+  frozen: FrozenExperiment;
+  frozenDigest: string;
+  budget: ExperimentBudget;
+  report: string;
+  /** The `experiment_started` record's own timestamp. */
+  at: string;
+  /** Sample records in ledger order. */
+  samples: ExperimentSampleRecord[];
+}
+/**
+ * The ledger as this module uses it: the proposal it evaluates, the prepared
+ * candidate's verified bytes, the folded experiment family, and the two
+ * append-only writes. `EvolutionService` is the only implementation.
+ */
+interface ExperimentLedger {
+  /** Absolute ledger directory; the sandbox, the workspaces and the report live under it. */
+  readonly root: string;
+  get(proposalId: string): Promise<EvolutionProposal>;
+  /** Read the prepared candidate's bytes and verify them against the identity recorded at prepare (P2); throws otherwise. */
+  readSkillCandidate(proposalId: string): Promise<Buffer>;
+  /** One experiment's folded view; throws on an unknown id. */
+  experiment(experimentId: string): Promise<ExperimentView>;
+  /**
+   * Every experiment folded under one proposal, newest first. One call answers
+   * both questions a run has about the ledger: which sample keys are already
+   * spent, and by which frozen experiment.
+   */
+  experiments(proposalId: string): Promise<ExperimentView[]>;
+  /** Record the frozen experiment (idempotent by identity: an identical record is a no-op, a different one refuses). */
+  recordExperimentStart(record: ExperimentStartedRecord): Promise<void>;
+  /** Record one sample side. A key that is already recorded refuses a different content by name. */
+  recordExperimentSample(record: ExperimentSampleRecord): Promise<void>;
+}
+/** The services one experiment reads, as the caller's context holds them. */
+interface ExperimentSources {
+  readonly evolution: ExperimentLedger;
+  readonly graphs: {
+    graphForSession(sessionId: SessionId): Promise<{
+      readonly rootSessionId: SessionId;
+    }>;
+  };
+  readonly task: {
+    openStore(storeId: string): Promise<TaskSnapshot>;
+  };
+  readonly taskRuntime: {
+    replayTask(storeId: string, championTaskId: string, options: ReplayTaskOptions, callerSessionId: string): Promise<ReplayRunOutcome>;
+  };
+}
+/** What one experiment call produced. */
+interface ExperimentResult {
+  proposalId: string;
+  experimentId: string;
+  /** The report as recorded; its bytes are exactly the file at {@link ExperimentResult.reportPath}. */
+  report: ExperimentReport;
+  /** Report path relative to the ledger root. */
+  reportPath: string;
+  /** The folded ledger view the report was recomputed from. */
+  experiment: ExperimentView;
+}
+/** The lineage tag one sample side's replayed task carries — how a run is found again after a crash. */
+declare function experimentLineage(experimentId: string, sampleTaskId: string, side: ExperimentSide): string;
+/** The experiment id: a digest of the proposal and the frozen block, so a differently frozen experiment never shares one. */
+declare function experimentIdOf(proposalId: string, frozenDigest: string): string;
+/** The report path one experiment's evidence lands at, relative to the ledger root. */
+declare function experimentReportPath(proposalId: string, experimentId: string): string;
+/** The one string form of a sample key (map key, refusals, the ledger's own uniqueness check). */
+declare function experimentSampleKey(key: ExperimentKey): string;
+/** A sample key as a reader sees it: the sample and the side it names. */
+declare function experimentSampleLabel(key: ExperimentKey): string;
+/**
+ * The recursive content digest of a directory — the input snapshot identity
+ * (§F.2): every regular file's relative path and byte digest, sorted by path,
+ * hashed together. A symbolic link is digested by its target text rather than
+ * followed, because a copy keeps it a link (`cp`'s default): following it would
+ * describe bytes the workspace never holds.
+ */
+declare function directoryDigest(directory: string): Promise<string>;
+/** The key one frozen sample's side has under one experiment. */
+declare function experimentSampleKeyOf(view: Pick<ExperimentView, 'proposalId' | 'frozen'>, sampleTaskId: string, side: ExperimentSide): ExperimentKey;
+/**
+ * Build the v2 report from the ledger records alone — the same records always
+ * give the same report, its `at` included. An experiment missing a side has no
+ * report: an incomplete comparison is not evidence, and saying so is the honest
+ * answer.
+ */
+declare function buildExperimentReport(view: ExperimentView): ExperimentReport;
+/**
+ * Run — or continue — the frozen two-sided experiment, and return the report the
+ * ledger records. Idempotent per sample key: a recorded side is reused, an
+ * in-flight side is settled from the store and never re-run, and only a side
+ * that never ran is started. Every refusal throws with its reason, and the runs
+ * that did settle stay in the task store and in the ledger.
+ */
+declare function runExperiment(sources: ExperimentSources, request: ExperimentRequest): Promise<ExperimentResult>;
+/**
+ * Resume a frozen experiment by id: its specification *is* the frozen block, so
+ * a caller needs to remember nothing but the id. The block is re-derived from
+ * the current world before anything runs, and the re-derivation must reproduce
+ * the recorded one — a candidate, a sample contract, a model or a snapshot that
+ * moved since the experiment froze is refused by name rather than run under a
+ * different identity.
+ */
+declare function resumeExperiment(sources: ExperimentSources, request: {
+  experimentId: string;
+  caller: SessionId;
+  actor: string;
+  signal?: AbortSignal;
+}): Promise<ExperimentResult>;
+/**
+ * Validate one `experiment_started` line in its own right: the proposal it names
+ * exists, the experiment id, frozen digest, budget and report path are exactly
+ * what the frozen block derives. Used by the fold and by the service's own write
+ * path, so a line that reaches the append is checked the same way one read back
+ * from the file is.
+ */
+declare function assertExperimentStartRecord(record: ExperimentStartedRecord, proposals: ReadonlyMap<string, EvolutionProposal>): void;
+/**
+ * Fold the ledger's experiment family: every `experiment_started` opens an
+ * experiment, every `experiment_sample` must belong to one, and the sample key
+ * is unique across the whole ledger. A hand-forged line fails exactly the checks
+ * a live write passes — the frozen block is re-hashed, the id re-derived, the
+ * budget re-compared, and the record's key parts re-checked against the
+ * experiment it claims — so the read path and the write path agree on what a
+ * record is.
+ *
+ * The proposal fold is the other half of the same ledger and is not this
+ * function's business; the caller passes its result in for the one cross-check
+ * that spans the two (`experiment_started` must name a real proposal).
+ */
+declare function foldExperiments(records: readonly {
+  kind: string;
+}[], proposals: ReadonlyMap<string, EvolutionProposal>): Map<string, ExperimentView>;
 //#endregion
 //#region src/evolution.d.ts
-
 type EvolutionLevel = 'L1' | 'L2' | 'L3' | 'L4';
 type EvolutionStatus = 'proposed' | 'candidate' | 'prepared' | 'replayed' | 'gated' | 'decided' | 'applied' | 'rolledback';
 /** The three frozen decision values of the Validation Gate (细化想法4.md §32). */
@@ -411,7 +963,16 @@ type EvolutionRecord = {
   approvalRef: string;
   actor: string;
   at: string;
-};
+}
+/**
+ * The experiment family (S4-E §F.2): the two-sided skill evaluation's frozen
+ * identity and its per-sample runs. These lines are not lifecycle transitions
+ * — an experiment does not move a proposal's status — so the proposal fold
+ * leaves them alone and {@link foldExperiments} folds them; a build that
+ * predates them cannot fold a ledger that holds one, which is the one
+ * compatibility limit of adding them (said in the delivery record, not
+ * papered over). `formatVersion` stays 1: the envelope did not change.
+ */ | ExperimentStartedRecord | ExperimentSampleRecord;
 /** Folded view of one `applied` or `rolledback` record. */
 interface ApplyView {
   targets: string[];
@@ -899,11 +1460,79 @@ declare class EvolutionService extends Service {
    * prepared/replayed/applied/rolledback shapes), so a hand-forged line fails
    * load exactly as it would fail append. The same rules guard replay and live
    * appends, so an illegal migration is rejected identically in both paths.
+   *
+   * The experiment family is not a lifecycle transition and is skipped here;
+   * {@link foldLedger} folds it beside this fold.
    */
   private fold;
   private load;
+  /**
+   * Validate a whole ledger: the proposal lifecycle fold, then the experiment
+   * fold beside it. Neither family's rules change because the other exists —
+   * a lifecycle line is judged exactly as it always was, and an experiment line
+   * gets its own checks ({@link foldExperiments}).
+   */
+  private foldLedger;
   /** Validate the staged fold first; memory commits only after the line is on disk. */
   private append;
+  /** The folded views of every experiment, one per id — the ledger's experiment family, validated. */
+  private experimentViews;
+  /**
+   * One experiment's folded view (its frozen block and every sample record
+   * written under it), or a named refusal for an unknown id. This is the read
+   * the promotion gate will take: the report is a function of these records, so
+   * re-deriving it here is what lets a later stage refuse a report that no
+   * longer matches the ledger.
+   */
+  experiment(experimentId: string): Promise<ExperimentView>;
+  /** Every experiment's folded view, newest first, optionally narrowed to one proposal. */
+  experiments(proposalId?: string): Promise<ExperimentView[]>;
+  /**
+   * Record the frozen experiment, before its first run. Idempotent by identity:
+   * the same frozen block under the same id is a no-op (a repeat call resumes
+   * the same experiment rather than starting a second one), and a record that
+   * already holds a different frozen block, budget or report path is refused —
+   * the experiment id *is* the frozen identity, so a disagreement means the
+   * ledger and the caller are not talking about the same experiment.
+   */
+  recordExperimentStart(record: ExperimentStartedRecord): Promise<void>;
+  /**
+   * Record one sample side, once. The key carries the run: a second record for
+   * the same key is refused by the fold whatever it says, and a record that
+   * disagrees with the experiment it names (a different candidate identity, a
+   * different repetition, a sample the experiment never froze) is refused
+   * before the line lands. Nothing here re-runs anything — the caller only
+   * writes what a run already settled to.
+   */
+  recordExperimentSample(record: ExperimentSampleRecord): Promise<void>;
+  /**
+   * The two-sided experiment entry (§F.2). The orchestrator itself lives in
+   * `experiment.ts`; this method is the service's own door to it, resolving the
+   * graph, task and runtime services from this context so the tool layer above
+   * has exactly one call to make. It does not touch the promotion gate or the
+   * lifecycle: an experiment is evidence, and what may be promoted from it is a
+   * later stage's question.
+   */
+  runExperiment(spec: ExperimentSpec, caller: SessionId, actor: string, options?: {
+    signal?: AbortSignal;
+  }): Promise<ExperimentResult>;
+  /**
+   * Continue a frozen experiment by id. Its specification *is* the recorded
+   * frozen block, so a caller that lost the spec — a restart — can resume what
+   * was frozen rather than guess at it; the block is re-derived and must
+   * reproduce the recorded identity, so a candidate, contract, model or
+   * snapshot that moved is refused rather than run under a new identity.
+   */
+  resumeExperiment(experimentId: string, caller: SessionId, actor: string, options?: {
+    signal?: AbortSignal;
+  }): Promise<ExperimentResult>;
+  /**
+   * The services one experiment runs on, resolved softly: an experiment needs
+   * the graph (for this graph's task store), the task store's reads, and the
+   * runtime's replay entry. A context that cannot offer one refuses by name
+   * instead of running an experiment that could not be judged against a store.
+   */
+  private experimentSources;
 }
 //#endregion
 //#region src/prepare-champion.d.ts
@@ -1001,4 +1630,4 @@ interface ReplayExperimentResult {
  */
 declare function runReplayExperiment(sources: ReplayExperimentSources, request: ReplayExperimentRequest): Promise<ReplayExperimentResult>;
 //#endregion
-export { APPLYABLE_TARGET_TYPES, AgentPresetMutation, ApplyOutcome, ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, CapabilityMutation, CapabilityRowAction, CapabilityRowResult, ChampionSource, ChampionState, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, GateAnswers, ListFilter, MECHANICAL_TARGET_TYPES, MechanicalMutation, PRESET_REPLAY_MANUAL_REASON, PrepareChampion, PrepareChampionSources, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, REPLAY_RELATIONS, REPLAY_VERDICTS, ReplayCriterionDiff, ReplayCriterionSummary, ReplayExperimentRequest, ReplayExperimentResult, ReplayExperimentSources, ReplayLedger, ReplayRelation, ReplayReport, ReplaySideSummary, ReplayTaskComparison, ReplayVerdict, ReplayedView, SkillContentIdentity, SkillMutation, TaskDefinitionMutation, applyTargets, assertReplayPromotable, assertReplayReport, compareReplaySides, editCapabilityRow, mutationMechanical, overallReplayVerdict, readCapabilityRowSource, renderProviderRoles, replayLineage, resolvePrepareChampion, restoreCapabilityRowSource, runReplayExperiment };
+export { APPLYABLE_TARGET_TYPES, AgentPresetMutation, ApplyOutcome, ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, CapabilityMutation, CapabilityRowAction, CapabilityRowResult, ChampionSource, ChampionState, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCriterion, FrozenExperiment, FrozenSample, GateAnswers, ListFilter, MECHANICAL_TARGET_TYPES, MechanicalMutation, PRESET_REPLAY_MANUAL_REASON, PrepareChampion, PrepareChampionSources, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, REPLAY_RELATIONS, REPLAY_VERDICTS, ReplayCriterionDiff, ReplayCriterionSummary, ReplayExperimentRequest, ReplayExperimentResult, ReplayExperimentSources, ReplayLedger, ReplayRelation, ReplayReport, ReplaySideSummary, ReplayTaskComparison, ReplayVerdict, ReplayedView, SkillContentIdentity, SkillMutation, TaskDefinitionMutation, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, assertReplayPromotable, assertReplayReport, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, editCapabilityRow, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, mutationMechanical, overallExperimentVerdict, overallReplayVerdict, protectedInputsDigest, readCapabilityRowSource, renderProviderRoles, replayLineage, resolvePrepareChampion, restoreCapabilityRowSource, resumeExperiment, runExperiment, runReplayExperiment };

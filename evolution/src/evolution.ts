@@ -69,6 +69,7 @@ import { existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
 import {
   capabilityToolQuery,
@@ -88,9 +89,25 @@ import type {
 } from '@dangosys/dsh-singularity-task-runtime'
 import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
 import type { ReplayRelation, ReplayReport, ReplayVerdict, SkillContentIdentity } from './replay.ts'
-import { assertReplayPromotable, assertReplayReport, REPLAY_RELATIONS, REPLAY_VERDICTS } from './replay.ts'
+import { assertReplayPromotable, assertReplayReport, canonicalJson, REPLAY_RELATIONS, REPLAY_VERDICTS } from './replay.ts'
 import { editCapabilityRow, readCapabilityRowSource, restoreCapabilityRowSource } from './config-edit.ts'
 import type { CapabilityRowResult } from './config-edit.ts'
+import type {
+  ExperimentKey,
+  ExperimentResult,
+  ExperimentSampleRecord,
+  ExperimentSources,
+  ExperimentSpec,
+  ExperimentStartedRecord,
+  ExperimentView,
+} from './experiment.ts'
+import {
+  assertExperimentStartRecord,
+  foldExperiments,
+  isExperimentRecord,
+  resumeExperiment,
+  runExperiment,
+} from './experiment.ts'
 
 export type EvolutionLevel = 'L1' | 'L2' | 'L3' | 'L4'
 export type EvolutionStatus = 'proposed' | 'candidate' | 'prepared' | 'replayed' | 'gated' | 'decided' | 'applied' | 'rolledback'
@@ -389,6 +406,17 @@ export type EvolutionRecord =
       actor: string
       at: string
     }
+  /**
+   * The experiment family (S4-E §F.2): the two-sided skill evaluation's frozen
+   * identity and its per-sample runs. These lines are not lifecycle transitions
+   * — an experiment does not move a proposal's status — so the proposal fold
+   * leaves them alone and {@link foldExperiments} folds them; a build that
+   * predates them cannot fold a ledger that holds one, which is the one
+   * compatibility limit of adding them (said in the delivery record, not
+   * papered over). `formatVersion` stays 1: the envelope did not change.
+   */
+  | ExperimentStartedRecord
+  | ExperimentSampleRecord
 
 /** Folded view of one `applied` or `rolledback` record. */
 export interface ApplyView {
@@ -1843,10 +1871,14 @@ export class EvolutionService extends Service {
    * prepared/replayed/applied/rolledback shapes), so a hand-forged line fails
    * load exactly as it would fail append. The same rules guard replay and live
    * appends, so an illegal migration is rejected identically in both paths.
+   *
+   * The experiment family is not a lifecycle transition and is skipped here;
+   * {@link foldLedger} folds it beside this fold.
    */
   private fold(records: readonly EvolutionRecord[]): Map<string, EvolutionProposal> {
     const proposals = new Map<string, EvolutionProposal>()
     for (const record of records) {
+      if (isExperimentRecord(record)) continue
       const current = proposals.get(record.proposalId)
       if (record.kind === 'proposed') {
         if (current !== undefined) throw new Error(`evolution: proposal "${record.proposalId}" already exists`)
@@ -2016,14 +2048,26 @@ export class EvolutionService extends Service {
       if (record.formatVersion !== 1) throw new Error(`evolution: unsupported ledger formatVersion "${String(record.formatVersion)}"`)
     }
     this.records = records
-    this.fold(this.records)
+    this.foldLedger(this.records)
+  }
+
+  /**
+   * Validate a whole ledger: the proposal lifecycle fold, then the experiment
+   * fold beside it. Neither family's rules change because the other exists —
+   * a lifecycle line is judged exactly as it always was, and an experiment line
+   * gets its own checks ({@link foldExperiments}).
+   */
+  private foldLedger(records: readonly EvolutionRecord[]): Map<string, EvolutionProposal> {
+    const proposals = this.fold(records)
+    foldExperiments(records, proposals)
+    return proposals
   }
 
   /** Validate the staged fold first; memory commits only after the line is on disk. */
   private async append(record: EvolutionRecord): Promise<void> {
     await this.loaded
     const run = this.writes.then(async () => {
-      this.fold([...this.records, record])
+      this.foldLedger([...this.records, record])
       await mkdir(this.root, { recursive: true })
       await appendFile(this.file, `${JSON.stringify(record)}\n`, 'utf8')
       this.records = [...this.records, record]
@@ -2033,6 +2077,144 @@ export class EvolutionService extends Service {
       () => undefined,
     )
     await run
+  }
+
+  /* ------------------------------------------------------------------------ *
+   * The two-sided experiment (S4-E §F.2): the ledger writes the orchestrator
+   * calls, and the two entries the tool layer will wire up next.
+   * ------------------------------------------------------------------------ */
+
+  /** The folded views of every experiment, one per id — the ledger's experiment family, validated. */
+  private experimentViews(): Map<string, ExperimentView> {
+    return foldExperiments(this.records, this.fold(this.records))
+  }
+
+  /**
+   * One experiment's folded view (its frozen block and every sample record
+   * written under it), or a named refusal for an unknown id. This is the read
+   * the promotion gate will take: the report is a function of these records, so
+   * re-deriving it here is what lets a later stage refuse a report that no
+   * longer matches the ledger.
+   */
+  async experiment(experimentId: string): Promise<ExperimentView> {
+    await this.loaded
+    const view = this.experimentViews().get(experimentId)
+    if (view === undefined) throw new Error(`evolution: unknown experiment "${experimentId}"`)
+    return view
+  }
+
+  /** Every experiment's folded view, newest first, optionally narrowed to one proposal. */
+  async experiments(proposalId?: string): Promise<ExperimentView[]> {
+    await this.loaded
+    return [...this.experimentViews().values()]
+      .filter(view => proposalId === undefined || view.proposalId === proposalId)
+      .reverse()
+  }
+
+  /**
+   * Record the frozen experiment, before its first run. Idempotent by identity:
+   * the same frozen block under the same id is a no-op (a repeat call resumes
+   * the same experiment rather than starting a second one), and a record that
+   * already holds a different frozen block, budget or report path is refused —
+   * the experiment id *is* the frozen identity, so a disagreement means the
+   * ledger and the caller are not talking about the same experiment.
+   */
+  async recordExperimentStart(record: ExperimentStartedRecord): Promise<void> {
+    await this.loaded
+    const run = this.writes.then(async () => {
+      // The line must stand on its own before anything is decided about it:
+      // frozen block, digest, id, budget and report path all re-derived.
+      assertExperimentStartRecord(record, this.fold(this.records))
+      // Then the repeat rule. While the derivation above holds, one id can only
+      // ever carry one frozen block — the id *is* the block's digest — so this
+      // comparison is a second line of defence: a future derivation change may
+      // not silently make a repeat call adopt a different frozen experiment.
+      const prior = this.experimentViews().get(record.experimentId)
+      if (prior !== undefined) {
+        if (prior.frozenDigest !== record.frozenDigest || prior.proposalId !== record.proposalId
+          || prior.report !== record.report || canonicalJson(prior.frozen) !== canonicalJson(record.frozen)) {
+          throw new Error(
+            `evolution: experiment "${record.experimentId}" is already recorded with a different frozen identity — ` +
+            'an experiment id names one frozen block; changing any member of the specification freezes a different experiment',
+          )
+        }
+        return
+      }
+      const staged = [...this.records, record]
+      foldExperiments(staged, this.fold(staged))
+      await mkdir(this.root, { recursive: true })
+      await appendFile(this.file, `${JSON.stringify(record)}\n`, 'utf8')
+      this.records = staged
+    })
+    this.writes = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    await run
+  }
+
+  /**
+   * Record one sample side, once. The key carries the run: a second record for
+   * the same key is refused by the fold whatever it says, and a record that
+   * disagrees with the experiment it names (a different candidate identity, a
+   * different repetition, a sample the experiment never froze) is refused
+   * before the line lands. Nothing here re-runs anything — the caller only
+   * writes what a run already settled to.
+   */
+  async recordExperimentSample(record: ExperimentSampleRecord): Promise<void> {
+    await this.append(record)
+  }
+
+  /**
+   * The two-sided experiment entry (§F.2). The orchestrator itself lives in
+   * `experiment.ts`; this method is the service's own door to it, resolving the
+   * graph, task and runtime services from this context so the tool layer above
+   * has exactly one call to make. It does not touch the promotion gate or the
+   * lifecycle: an experiment is evidence, and what may be promoted from it is a
+   * later stage's question.
+   */
+  async runExperiment(spec: ExperimentSpec, caller: SessionId, actor: string, options: { signal?: AbortSignal } = {}): Promise<ExperimentResult> {
+    return runExperiment(this.experimentSources(), {
+      spec,
+      caller,
+      actor,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    })
+  }
+
+  /**
+   * Continue a frozen experiment by id. Its specification *is* the recorded
+   * frozen block, so a caller that lost the spec — a restart — can resume what
+   * was frozen rather than guess at it; the block is re-derived and must
+   * reproduce the recorded identity, so a candidate, contract, model or
+   * snapshot that moved is refused rather than run under a new identity.
+   */
+  async resumeExperiment(experimentId: string, caller: SessionId, actor: string, options: { signal?: AbortSignal } = {}): Promise<ExperimentResult> {
+    return resumeExperiment(this.experimentSources(), {
+      experimentId,
+      caller,
+      actor,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    })
+  }
+
+  /**
+   * The services one experiment runs on, resolved softly: an experiment needs
+   * the graph (for this graph's task store), the task store's reads, and the
+   * runtime's replay entry. A context that cannot offer one refuses by name
+   * instead of running an experiment that could not be judged against a store.
+   */
+  private experimentSources(): ExperimentSources {
+    const graphs = optionalService<ExperimentSources['graphs']>(this.ctx, 'graphs')
+    const task = optionalService<ExperimentSources['task']>(this.ctx, 'task')
+    const taskRuntime = optionalService<ExperimentSources['taskRuntime']>(this.ctx, 'taskRuntime')
+    if (graphs === undefined || task === undefined || taskRuntime === undefined) {
+      throw new Error(
+        'evolution: the two-sided experiment needs the graphs, task and taskRuntime services in this context ' +
+        `(missing: ${[graphs === undefined ? 'graphs' : undefined, task === undefined ? 'task' : undefined, taskRuntime === undefined ? 'taskRuntime' : undefined].filter(Boolean).join(', ')})`,
+      )
+    }
+    return { evolution: this, graphs, task, taskRuntime }
   }
 }
 

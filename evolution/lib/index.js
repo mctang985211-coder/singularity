@@ -1,4 +1,4 @@
-import { appendFile, cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, cp, mkdir, readFile, readdir, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -365,6 +365,994 @@ function assertReplayReport(proposal, report) {
 function assertReplayPromotable(report) {
 	if (report.mode !== "executed") throw new Error("evolution: promotion requires executed replay evidence, not a manual report");
 	for (const [name, tasks] of [["observed", report.observed], ["holdout", report.holdout.tasks]]) if (overallReplayVerdict(tasks) !== "not-worse") throw new Error(`evolution: promotion requires non-empty ${name} replay with no regressions or inconclusive results`);
+}
+/**
+* The comparer a v2 report names, and the only one this build can re-check:
+* the verdict rules of {@link compareExperimentSides} and
+* {@link overallExperimentVerdict}. A report naming anything else is refused
+* by {@link assertExperimentReport} instead of being re-derived with rules this
+* build does not have.
+*/
+const EXPERIMENT_COMPARER_VERSION = "experiment-comparer@1";
+const EXPERIMENT_SAMPLE_ROLES = [
+	"observed-failure",
+	"observed-regression",
+	"holdout"
+];
+const EXPERIMENT_SIDES = ["baseline", "candidate"];
+const EXPERIMENT_OUTCOMES = [
+	"verified",
+	"failed",
+	"cancelled",
+	"interrupted"
+];
+const EXPERIMENT_SAMPLE_VERDICTS = [
+	"fixed",
+	"both-failed",
+	"not-fixed",
+	"maintained",
+	"regressed",
+	"inconclusive"
+];
+const EXPERIMENT_VERDICTS = [
+	"fixed",
+	"fixed-with-regression",
+	"not-fixed",
+	"both-failed",
+	"regressed",
+	"inconclusive"
+];
+/**
+* JSON with object keys sorted recursively — the one serialization every digest
+* in this schema is taken over. `undefined` members are dropped, so a digest is
+* the same whether an absent optional member was omitted or written as
+* `undefined`, and the digest of a value never depends on key insertion order.
+*/
+function canonicalJson(value) {
+	if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+	if (value !== null && typeof value === "object") return `{${Object.entries(value).filter(([, item]) => item !== void 0).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
+	return JSON.stringify(value) ?? "null";
+}
+/** Lowercase SHA-256 hex over {@link canonicalJson} of a value — the frozen-block digest primitive. */
+function digestOf(value) {
+	return createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
+}
+/** The digest of a whole frozen identity block; a report and its ledger record agree only when these agree. */
+function frozenDigestOf(frozen) {
+	return digestOf(frozen);
+}
+/** SHA-256 over a criterion's protected input identities, in path order — the acceptance input identity of one criterion. */
+function protectedInputsDigest(inputs) {
+	const lines = inputs.map((input) => `${input.path}\0${input.sha256}`).sort();
+	return createHash("sha256").update(lines.join("\n"), "utf8").digest("hex");
+}
+/** One side as the v1 comparer reads it: the same outcome rank and criterion semantics, so v1's rules stay the rules. */
+function asReplaySide(side) {
+	return {
+		taskId: "",
+		outcome: side.outcome === "interrupted" ? "cancelled" : side.outcome,
+		criteria: side.criteria.map((criterion) => ({
+			criterionId: criterion.criterionId,
+			verdict: criterion.verdict,
+			...criterion.command === void 0 ? {} : { command: criterion.command },
+			...criterion.exitCode === void 0 ? {} : { exitCode: criterion.exitCode }
+		}))
+	};
+}
+/**
+* One sample's mechanical verdict. An unrankable side (cancelled / interrupted)
+* and a comparison whose two contracts differ (a criterion added, removed or
+* re-commanded) are both `inconclusive` — the v1 semantics, unchanged. A role of
+* `observed-failure` asks whether the target failure was reproduced and then
+* fixed; a regression or holdout sample asks only whether the candidate is
+* worse, and its answer is `regressed` or `maintained`.
+*/
+function compareExperimentSides(role, baseline, candidate) {
+	const relation = compareReplaySides(asReplaySide(baseline), asReplaySide(candidate)).relation;
+	if (relation === "inconclusive") return "inconclusive";
+	const baselineRank = OUTCOME_RANK[baseline.outcome];
+	const candidateRank = OUTCOME_RANK[candidate.outcome];
+	if (role === "observed-failure") {
+		if (baselineRank === 0 && candidateRank === 0) return "both-failed";
+		return baselineRank === 0 && candidateRank === 1 ? "fixed" : "not-fixed";
+	}
+	return relation === "worse" ? "regressed" : "maintained";
+}
+/**
+* The overall verdict over every sample, from the sample verdicts alone: any
+* evidence that could not settle makes the whole experiment inconclusive; a
+* reproduced-and-unfixed failure is `both-failed`; an unfixed target failure
+* with a degraded regression/holdout sample is `regressed`; an unfixed target
+* with nothing worse is `not-fixed`; a fixed target with a degraded sample is
+* `fixed-with-regression`; and a fixed target with nothing worse is `fixed`.
+* The six are distinguishable by construction, and a report whose `verdict` is
+* not this value is refused.
+*/
+function overallExperimentVerdict(samples) {
+	if (samples.some((sample) => sample.verdict === "inconclusive")) return "inconclusive";
+	if (samples.some((sample) => sample.verdict === "both-failed")) return "both-failed";
+	const failures = samples.filter((sample) => sample.role === "observed-failure");
+	const fixedAll = failures.length > 0 && failures.every((sample) => sample.verdict === "fixed");
+	const regressedAny = samples.some((sample) => sample.verdict === "regressed");
+	if (!fixedAll) return regressedAny ? "regressed" : "not-fixed";
+	return regressedAny ? "fixed-with-regression" : "fixed";
+}
+const EXPERIMENT_OUTCOME_SET = new Set(EXPERIMENT_OUTCOMES);
+const EXPERIMENT_CONDITION_VERDICTS = [
+	"pass",
+	"fail",
+	"inconclusive"
+];
+function isHex64$1(value) {
+	return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+function assertIdentity(value, field) {
+	if (!isRecord$2(value) || typeof value.name !== "string" || value.name.length === 0 || !isHex64$1(value.sha256)) throw new Error(`evolution: experiment report ${field} must be a content identity { name, sha256 }`);
+}
+/**
+* Validate a frozen identity block: every member present and shaped, the
+* comparison rules named, and §F.2's two non-empty groups (at least one
+* observed failure, at least one holdout) enforced — a block missing either is
+* not a two-sided experiment whatever it is called. Used by the report
+* assertion and by the ledger fold, so a hand-written record fails the same
+* checks a live run's record passes.
+*/
+function assertFrozenExperiment(value) {
+	if (!isRecord$2(value)) throw new Error("evolution: experiment report frozen must be an object");
+	if (typeof value.proposalId !== "string" || value.proposalId.length === 0) throw new Error("evolution: experiment report frozen.proposalId must be a non-empty string");
+	if (!Number.isInteger(value.repetition) || value.repetition < 0) throw new Error("evolution: experiment report frozen.repetition must be a non-negative integer");
+	assertIdentity(value.candidate, "frozen.candidate");
+	if (value.productionBaseline !== void 0) assertIdentity(value.productionBaseline, "frozen.productionBaseline");
+	if (typeof value.model !== "string" || value.model.length === 0) throw new Error("evolution: experiment report frozen.model must be a non-empty string (the model identity the caller froze)");
+	assertExperimentBudget(value.budget, "frozen.budget");
+	if (!isRecord$2(value.snapshot) || typeof value.snapshot.sourceDir !== "string" || value.snapshot.sourceDir.length === 0 || !isHex64$1(value.snapshot.digest)) throw new Error("evolution: experiment report frozen.snapshot must be { sourceDir, digest } with a SHA-256 content digest");
+	if (value.comparerVersion !== EXPERIMENT_COMPARER_VERSION) throw new Error(`evolution: experiment report frozen.comparerVersion must be "${EXPERIMENT_COMPARER_VERSION}" — got ${JSON.stringify(value.comparerVersion)}; a report this build cannot re-derive is refused, not trusted`);
+	if (!isRecord$2(value.overlay) || typeof value.overlay.baseline !== "string" || value.overlay.baseline.length === 0 || typeof value.overlay.candidate !== "string" || value.overlay.candidate.length === 0) throw new Error("evolution: experiment report frozen.overlay must name what each side ran under");
+	if (!Array.isArray(value.samples) || value.samples.length === 0) throw new Error("evolution: experiment report frozen.samples must be a non-empty array");
+	const taskIds = /* @__PURE__ */ new Set();
+	value.samples.forEach((sample, index) => assertFrozenSample(sample, `frozen.samples[${index}]`, taskIds));
+	const roles = value.samples.map((sample) => sample.role);
+	if (!roles.includes("observed-failure")) throw new Error("evolution: an experiment frozen block needs at least one observed-failure sample (§F.2: the target failure must be reproduced)");
+	if (!roles.includes("holdout")) throw new Error("evolution: an experiment frozen block needs at least one holdout sample (§F.2: the candidate must not be selected on every case)");
+}
+function assertExperimentBudget(value, field) {
+	if (!isRecord$2(value)) throw new Error(`evolution: ${field} must be an object (a run-level budget, recorded only)`);
+	for (const key of Object.keys(value)) if (key !== "wallTimeMs" && key !== "maxTokens" && key !== "note") throw new Error(`evolution: ${field} has unknown key "${key}"`);
+	for (const key of ["wallTimeMs", "maxTokens"]) {
+		const member = value[key];
+		if (member !== void 0 && (typeof member !== "number" || !Number.isFinite(member) || member < 0)) throw new Error(`evolution: ${field}.${key} must be a non-negative number`);
+	}
+	if (value.note !== void 0 && (typeof value.note !== "string" || value.note.length === 0)) throw new Error(`evolution: ${field}.note must be a non-empty string`);
+}
+function assertFrozenSample(value, field, seen) {
+	if (!isRecord$2(value) || typeof value.taskId !== "string" || value.taskId.length === 0) throw new Error(`evolution: experiment report ${field} must carry a taskId`);
+	if (seen.has(value.taskId)) throw new Error(`evolution: experiment report ${field} repeats task "${value.taskId}"`);
+	seen.add(value.taskId);
+	if (!EXPERIMENT_SAMPLE_ROLES.includes(value.role)) throw new Error(`evolution: experiment report ${field}.role must be one of ${EXPERIMENT_SAMPLE_ROLES.join(" / ")}`);
+	if (!isHex64$1(value.contractDigest)) throw new Error(`evolution: experiment report ${field}.contractDigest must be a SHA-256 hex`);
+	if (!Array.isArray(value.criteria) || value.criteria.length === 0) throw new Error(`evolution: experiment report ${field}.criteria must be a non-empty array (the acceptance the replay mirrors)`);
+	const criterionIds = /* @__PURE__ */ new Set();
+	for (const criterion of value.criteria) {
+		if (!isRecord$2(criterion) || typeof criterion.criterionId !== "string" || criterion.criterionId.length === 0 || criterionIds.has(criterion.criterionId) || typeof criterion.verificationMode !== "string" || criterion.verificationMode.length === 0 || criterion.command !== void 0 && typeof criterion.command !== "string" || !isHex64$1(criterion.protectedInputsDigest)) throw new Error(`evolution: experiment report ${field} has an invalid or duplicate frozen criterion`);
+		criterionIds.add(criterion.criterionId);
+	}
+	if (!isRecord$2(value.observed) || value.observed.outcome !== "verified" && value.observed.outcome !== "failed" || value.observed.runId !== void 0 && (typeof value.observed.runId !== "string" || value.observed.runId.length === 0)) throw new Error(`evolution: experiment report ${field}.observed must record the historical outcome (and run, when known) the sample was chosen for`);
+}
+function assertCriterionDetail(value, field) {
+	if (!isRecord$2(value) || typeof value.criterionId !== "string" || value.criterionId.length === 0 || !EXPERIMENT_CONDITION_VERDICTS.includes(value.verdict) || value.verifierId !== void 0 && (typeof value.verifierId !== "string" || value.verifierId.length === 0) || value.verifierVersion !== void 0 && (typeof value.verifierVersion !== "string" || value.verifierVersion.length === 0) || value.command !== void 0 && typeof value.command !== "string" || value.exitCode !== void 0 && typeof value.exitCode !== "number") throw new Error(`evolution: experiment report ${field} has an invalid criterion verdict`);
+}
+function assertCost(value, field) {
+	if (!isRecord$2(value)) throw new Error(`evolution: experiment report ${field} must be a cost object`);
+	if (value.status === "unknown") {
+		if (typeof value.reason !== "string" || value.reason.length === 0) throw new Error(`evolution: experiment report ${field} must say why the cost is unknown`);
+		return;
+	}
+	if (value.status !== "reported" || !isRecord$2(value.metrics)) throw new Error(`evolution: experiment report ${field} must be { status: "reported", metrics } or { status: "unknown", reason }`);
+}
+function assertSideDetail(value, field, sampleTaskId, observedRunId) {
+	if (!isRecord$2(value)) throw new Error(`evolution: experiment report ${field} must be an object`);
+	if (value.taskId !== void 0 && (typeof value.taskId !== "string" || value.taskId.length === 0)) throw new Error(`evolution: experiment report ${field}.taskId must be a non-empty string when present`);
+	if (value.taskId === sampleTaskId) throw new Error(`evolution: experiment report ${field} names the sample's own historical task "${sampleTaskId}" as a run of this experiment — the historical task is the case, not a baseline; both sides must be new replayed tasks`);
+	if (!EXPERIMENT_SAMPLE_ROLES.includes(value.role)) throw new Error(`evolution: experiment report ${field}.role must be one of ${EXPERIMENT_SAMPLE_ROLES.join(" / ")}`);
+	if (!EXPERIMENT_SIDES.includes(value.side)) throw new Error(`evolution: experiment report ${field}.side must be one of ${EXPERIMENT_SIDES.join(" / ")}`);
+	if (!EXPERIMENT_OUTCOME_SET.has(value.outcome)) throw new Error(`evolution: experiment report ${field}.outcome must be one of ${EXPERIMENT_OUTCOMES.join(" / ")}`);
+	for (const key of ["runId", "reviewRef"]) {
+		const member = value[key];
+		if (member !== void 0 && (typeof member !== "string" || member.length === 0)) throw new Error(`evolution: experiment report ${field}.${key} must be a non-empty string when present`);
+	}
+	if (observedRunId !== void 0 && value.runId === observedRunId) throw new Error(`evolution: experiment report ${field} cites run "${observedRunId}", the sample's own historical run — the historical champion locates the case and is never this experiment's baseline; both sides must be new runs`);
+	if (!Array.isArray(value.evidenceRefs) || value.evidenceRefs.some((ref) => typeof ref !== "string" || ref.length === 0)) throw new Error(`evolution: experiment report ${field}.evidenceRefs must be an array of non-empty evidence ids`);
+	if (typeof value.workspace !== "string" || value.workspace.length === 0) throw new Error(`evolution: experiment report ${field}.workspace must be the directory the run went through`);
+	if (value.initialDigest !== void 0 && !isHex64$1(value.initialDigest)) throw new Error(`evolution: experiment report ${field}.initialDigest must be the SHA-256 of the frozen workspace content`);
+	if (!Array.isArray(value.criteria)) throw new Error(`evolution: experiment report ${field}.criteria must be an array`);
+	const ids = /* @__PURE__ */ new Set();
+	for (const criterion of value.criteria) {
+		assertCriterionDetail(criterion, `${field}.criteria[${criterion.criterionId}]`);
+		if (ids.has(criterion.criterionId)) throw new Error(`evolution: experiment report ${field} has a duplicate criterion`);
+		ids.add(criterion.criterionId);
+	}
+	assertCost(value.cost, `${field}.cost`);
+	if (value.outcome === "interrupted") {
+		if (typeof value.reason !== "string" || value.reason.length === 0) throw new Error(`evolution: experiment report ${field} is interrupted and must carry the reason it has no terminal run`);
+		return;
+	}
+	if (typeof value.taskId !== "string" || value.taskId.length === 0) throw new Error(`evolution: experiment report ${field} settled a run and must name the replayed task it created`);
+	if (value.initialDigest === void 0) throw new Error(`evolution: experiment report ${field} settled a run and must carry the workspace's initial digest`);
+	if (value.outcome === "verified" && ids.size === 0) throw new Error(`evolution: experiment report ${field} verified outcome needs criterion evidence`);
+}
+/**
+* Validate a v2 report against itself, the way `assertReplayReport` validates a
+* v1 one — and further: every verdict the report carries must equal the one its
+* own details recompute (`compareExperimentSides` per sample,
+* `overallExperimentVerdict` overall), and the frozen block must hash to the
+* `frozenDigest` the report names. A report whose judgement and evidence
+* disagree is refused rather than read.
+*
+* The one thing this schema cannot check is where a side's run came from: a
+* forged report could name any task and run. It closes the forgery that matters
+* — a side citing the sample's *historical* run (or its historical task) as its
+* own — from the frozen block alone, and the service that owns the ledger
+* closes the rest by checking each recorded run against the store record the
+* experiment's own lineage names.
+*/
+function assertExperimentReport(report) {
+	if (!isRecord$2(report)) throw new Error("evolution: experiment report must be an object");
+	if (report.formatVersion !== 2) throw new Error("evolution: experiment report formatVersion must be 2");
+	if (typeof report.proposalId !== "string" || report.proposalId.length === 0) throw new Error("evolution: experiment report.proposalId must be a non-empty string");
+	if (typeof report.experimentId !== "string" || report.experimentId.length === 0) throw new Error("evolution: experiment report.experimentId must be a non-empty string");
+	if (typeof report.at !== "string" || report.at.length === 0) throw new Error("evolution: experiment report.at must be a non-empty string");
+	assertFrozenExperiment(report.frozen);
+	const frozen = report.frozen;
+	if (frozen.proposalId !== report.proposalId) throw new Error(`evolution: experiment report frozen.proposalId "${frozen.proposalId}" does not match "${report.proposalId}"`);
+	if (report.frozenDigest !== frozenDigestOf(frozen)) throw new Error("evolution: experiment report frozenDigest does not match its frozen identity block");
+	if (!Array.isArray(report.samples)) throw new Error("evolution: experiment report.samples must be an array");
+	const reportSamples = report.samples;
+	const byTask = new Map(frozen.samples.map((sample) => [sample.taskId, sample]));
+	if (reportSamples.length !== frozen.samples.length) throw new Error("evolution: experiment report must carry exactly one comparison per frozen sample");
+	const seen = /* @__PURE__ */ new Set();
+	reportSamples.forEach((entry, index) => {
+		const field = `samples[${index}]`;
+		if (!isRecord$2(entry)) throw new Error(`evolution: experiment report ${field} must be an object`);
+		const taskId = entry.taskId;
+		const frozenSample = typeof taskId === "string" ? byTask.get(taskId) : void 0;
+		if (frozenSample === void 0) throw new Error(`evolution: experiment report ${field}.taskId is not one of the frozen samples`);
+		if (seen.has(frozenSample.taskId)) throw new Error(`evolution: experiment report ${field} repeats sample "${frozenSample.taskId}"`);
+		seen.add(frozenSample.taskId);
+		if (entry.role !== frozenSample.role) throw new Error(`evolution: experiment report ${field}.role does not match the frozen sample's role`);
+		if (!EXPERIMENT_SAMPLE_VERDICTS.includes(entry.verdict)) throw new Error(`evolution: experiment report ${field}.verdict must be one of ${EXPERIMENT_SAMPLE_VERDICTS.join(" / ")}`);
+		assertSideDetail(entry.baseline, `${field}.baseline`, frozenSample.taskId, frozenSample.observed.runId);
+		assertSideDetail(entry.candidate, `${field}.candidate`, frozenSample.taskId, frozenSample.observed.runId);
+		const baseline = entry.baseline;
+		const candidate = entry.candidate;
+		if (baseline.side !== "baseline" || candidate.side !== "candidate") throw new Error(`evolution: experiment report ${field} must carry one baseline and one candidate side`);
+		if (baseline.role !== frozenSample.role || candidate.role !== frozenSample.role) throw new Error(`evolution: experiment report ${field} sides must carry the sample's role`);
+		if (baseline.workspace === candidate.workspace) throw new Error(`evolution: experiment report ${field} sides share one workspace "${baseline.workspace}" — two sides need two workspaces`);
+		const computed = compareExperimentSides(frozenSample.role, baseline, candidate);
+		if (entry.verdict !== computed) throw new Error(`evolution: experiment report ${field}.verdict "${String(entry.verdict)}" does not match its own evidence ("${computed}")`);
+	});
+	const computedVerdict = overallExperimentVerdict(reportSamples);
+	if (report.verdict !== computedVerdict) throw new Error(`evolution: experiment report.verdict "${String(report.verdict)}" does not match its samples ("${computedVerdict}")`);
+	if (!EXPERIMENT_VERDICTS.includes(report.verdict)) throw new Error(`evolution: experiment report.verdict must be one of ${EXPERIMENT_VERDICTS.join(" / ")}`);
+}
+
+//#endregion
+//#region src/experiment.ts
+/** True for a record of the experiment family — the lines the proposal fold must leave alone. */
+function isExperimentRecord(record) {
+	return record.kind === "experiment_started" || record.kind === "experiment_sample";
+}
+/** A run state that means the run is over, whatever it settled to. */
+const TERMINAL_RUN_STATUSES = [
+	"verified",
+	"failed",
+	"cancelled"
+];
+function nonEmpty$1(value, field) {
+	if (typeof value !== "string" || value.trim().length === 0) throw new Error(`experiment: ${field} must be a non-empty string`);
+	return value;
+}
+/** A single safe path segment (one directory name): no separators, never `.`/`..`, never absolute. */
+function safeSegment(value, field) {
+	const text = nonEmpty$1(value, field);
+	if (text === "." || text === ".." || text.includes("/") || text.includes("\\") || isAbsolute(text)) throw new Error(`experiment: ${field} must be a single safe path segment, got "${text}"`);
+	return text;
+}
+function isHex64(value) {
+	return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+/** Lowercase SHA-256 hex over exact bytes. */
+function sha256Hex$1(bytes) {
+	return createHash("sha256").update(bytes).digest("hex");
+}
+/** The lineage tag one sample side's replayed task carries — how a run is found again after a crash. */
+function experimentLineage(experimentId, sampleTaskId, side) {
+	return `evolution-experiment:${experimentId}:${sampleTaskId}:${side}`;
+}
+/** The experiment id: a digest of the proposal and the frozen block, so a differently frozen experiment never shares one. */
+function experimentIdOf(proposalId, frozenDigest) {
+	return digestOf({
+		proposalId,
+		frozenDigest
+	}).slice(0, 16);
+}
+/** The report path one experiment's evidence lands at, relative to the ledger root. */
+function experimentReportPath(proposalId, experimentId) {
+	return `sandbox/${proposalId}/exp-${experimentId}/experiment-report.json`;
+}
+/** The one string form of a sample key (map key, refusals, the ledger's own uniqueness check). */
+function experimentSampleKey(key) {
+	return [
+		key.proposalId,
+		key.preparedContentDigest,
+		key.sampleTaskId,
+		key.side,
+		key.repetition
+	].join("\0");
+}
+/** A sample key as a reader sees it: the sample and the side it names. */
+function experimentSampleLabel(key) {
+	return `${key.sampleTaskId}/${key.side}#${key.repetition}`;
+}
+/**
+* The recursive content digest of a directory — the input snapshot identity
+* (§F.2): every regular file's relative path and byte digest, sorted by path,
+* hashed together. A symbolic link is digested by its target text rather than
+* followed, because a copy keeps it a link (`cp`'s default): following it would
+* describe bytes the workspace never holds.
+*/
+async function directoryDigest(directory) {
+	const base = resolve(directory);
+	const lines = [];
+	const walk = async (current, prefix) => {
+		let found;
+		try {
+			found = await readdir(current, { withFileTypes: true });
+		} catch (error) {
+			throw new Error(`experiment: the input snapshot "${current}" cannot be read: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		for (const entry of [...found].sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
+			const rel = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+			const abs = join(current, entry.name);
+			if (entry.isDirectory()) {
+				await walk(abs, rel);
+				continue;
+			}
+			if (entry.isSymbolicLink()) {
+				lines.push(`${rel}\0link:${await readlink(abs)}`);
+				continue;
+			}
+			if (!entry.isFile()) throw new Error(`experiment: the input snapshot holds "${abs}", which is neither a file nor a directory — only regular files and symbolic links can be frozen as input`);
+			lines.push(`${rel}\0${sha256Hex$1(await readFile(abs))}`);
+		}
+	};
+	await walk(base, "");
+	return sha256Hex$1(lines.join("\n"));
+}
+/** The task's latest review record — its terminal outcome is what makes a sample a sample. */
+function latestReview(snapshot, task) {
+	const runId = task.runIds[task.runIds.length - 1];
+	return snapshot.reviews.find((item) => item.runId === runId);
+}
+function reviewRefOf(review) {
+	return `${review.taskId}#${review.runId ?? "no-run"}`;
+}
+/**
+* What one side cost, as the run's own review record reported it. `unknown` is
+* a first-class answer and never a zero: a record that carries no metrics, or
+* metrics with no token and no tool-call counters, is reported with the reason
+* it could not be read.
+*/
+function costOf(review) {
+	if (review === void 0) return {
+		status: "unknown",
+		reason: "the run settled no review record, so no cost was reported for it"
+	};
+	const metrics = review.metrics;
+	if (metrics === void 0) return {
+		status: "unknown",
+		reason: "the run's review record carries no metrics, so no cost was reported for it"
+	};
+	if (metrics.tokens === void 0 && metrics.toolCalls === void 0) return {
+		status: "unknown",
+		reason: "the run's review record carries metrics but no token and no tool-call counters"
+	};
+	return {
+		status: "reported",
+		metrics: structuredClone(metrics)
+	};
+}
+/** The evidence ids of one run: the review record's own list, or the store's bundles for that run when there is no review. */
+function evidenceRefsOf(snapshot, runId, review) {
+	if (review !== void 0) return [...review.evidenceRefs];
+	if (runId === void 0) return [];
+	return snapshot.evidence.filter((bundle) => bundle.taskRunId === runId).map((bundle) => bundle.evidenceId);
+}
+/** The review record's criteria, or the run's own verdicts when the review carries none. */
+function criteriaOf(review, outcome) {
+	return structuredClone([...review?.criteria ?? outcome?.criteria ?? []]);
+}
+/** One criterion as the report carries it: the verdict plus the verifier that decided it (v1's report dropped the identity). */
+function criterionDetail(criterion) {
+	return {
+		criterionId: criterion.criterionId,
+		verdict: criterion.verdict,
+		...criterion.verifierId === void 0 ? {} : { verifierId: criterion.verifierId },
+		...criterion.verifierVersion === void 0 ? {} : { verifierVersion: criterion.verifierVersion },
+		...criterion.command === void 0 ? {} : { command: criterion.command },
+		...criterion.exitCode === void 0 ? {} : { exitCode: criterion.exitCode }
+	};
+}
+/**
+* The proposal this experiment may evaluate, and the candidate bytes it runs
+* against. A skill candidate only: this plane's two-sided experiment replaces an
+* existing single-file `SKILL.md`, and every other target type either has no such
+* evaluation (A6's capability candidates) or none at all. The candidate's bytes
+* are re-verified here (P2) before anything runs.
+*/
+async function experimentCandidate(sources, proposalId) {
+	const proposal = await sources.evolution.get(proposalId);
+	if (proposal.targetType !== "skill") throw new Error(`proposal ${proposalId} targets "${proposal.targetType}"; the two-sided experiment evaluates a skill candidate only`);
+	if (proposal.status !== "prepared") throw new Error(`proposal ${proposalId} is ${proposal.status}; only a prepared proposal can be evaluated`);
+	const prepared = proposal.prepared;
+	if (prepared === void 0 || prepared.sandbox === null || !prepared.mechanical) throw new Error(`proposal ${proposalId} has no materialized candidate; prepare it before evaluating it`);
+	if (prepared.champion !== "captured") throw new Error(`proposal ${proposalId} was prepared with no production skill to replace — this experiment evaluates a replacement of an existing single-file SKILL.md only; promoting a brand-new skill is not what its evidence can show`);
+	const candidate = prepared.skillContent;
+	if (candidate === void 0) throw new Error(`proposal ${proposalId} carries no candidate content identity (it was prepared before content binding) — propose a new candidate and prepare it`);
+	await sources.evolution.readSkillCandidate(proposalId);
+	return {
+		proposal,
+		sandbox: prepared.sandbox,
+		candidate
+	};
+}
+/** The specification's own shape, before anything is read or frozen. */
+function validateSpec(spec) {
+	nonEmpty$1(spec.proposalId, "proposalId");
+	nonEmpty$1(spec.model, "model");
+	if (typeof spec.snapshot?.sourceDir !== "string" || spec.snapshot.sourceDir.trim().length === 0) throw new Error("experiment: snapshot.sourceDir must be the directory both sides are built from");
+	if (!Number.isInteger(spec.repetition) || spec.repetition < 0) throw new Error("experiment: repetition must be the experiment's non-negative integer repeat index");
+	if (!Array.isArray(spec.samples) || spec.samples.length === 0) throw new Error("experiment: samples must name at least one sample");
+	const seen = /* @__PURE__ */ new Set();
+	for (const [index, sample] of spec.samples.entries()) {
+		safeSegment(sample.taskId, `samples[${index}].taskId`);
+		if (seen.has(sample.taskId)) throw new Error(`experiment: samples[${index}] repeats task "${sample.taskId}"`);
+		seen.add(sample.taskId);
+		if (!EXPERIMENT_SAMPLE_ROLES.includes(sample.role)) throw new Error(`experiment: samples[${index}].role must be one of ${EXPERIMENT_SAMPLE_ROLES.join(" / ")}`);
+	}
+}
+/** The role a sample must have been chosen for, against the historical record it carries. */
+function assertSampleRole(sample, task, review) {
+	const required = sample.role === "observed-failure" ? "failed" : "verified";
+	if (review.outcome !== required) throw new Error(`sample "${sample.taskId}" is an ${sample.role} but its latest review record is "${review.outcome}", not "${required}" — a sample must be the case its role names`);
+	if (task.status !== review.outcome) throw new Error(`sample "${sample.taskId}" is ${task.status} but its latest review record is "${review.outcome}"; the two must agree`);
+}
+/** The frozen acceptance identity of one criterion, taken from the sample's own stored contract. */
+function frozenCriterionOf(criterion) {
+	const inputs = criterion.protectedInputs ?? [];
+	for (const input of inputs) if (typeof input?.path !== "string" || input.path.length === 0 || !isHex64(input?.sha256)) throw new Error(`the sample's criterion "${criterion.criterionId}" carries a protected input that was never fixed to { path, sha256 } — an acceptance input nobody fixed is not a frozen input`);
+	return {
+		criterionId: criterion.criterionId,
+		verificationMode: criterion.verificationMode,
+		...criterion.command === void 0 ? {} : { command: criterion.command },
+		protectedInputsDigest: protectedInputsDigest(inputs)
+	};
+}
+/** Freeze one sample from its store record: what the case is, and the acceptance the replay mirrors into both sides. */
+function frozenSampleOf(sample, task, review) {
+	if (task.acceptanceCriteria.length === 0) throw new Error(`sample "${sample.taskId}" carries no acceptance criteria; there is nothing for the two sides to be judged by`);
+	return {
+		taskId: sample.taskId,
+		role: sample.role,
+		contractDigest: digestOf({
+			objective: task.objective,
+			acceptanceCriteria: task.acceptanceCriteria,
+			requiredCapabilities: task.requestedCapabilities
+		}),
+		criteria: task.acceptanceCriteria.map(frozenCriterionOf),
+		observed: {
+			outcome: review.outcome === "failed" ? "failed" : "verified",
+			...review.runId === void 0 ? {} : { runId: review.runId }
+		}
+	};
+}
+/** Build the frozen identity block (§F.2), then check it against the schema the report and the ledger share. */
+function freezeExperiment(input) {
+	const frozen = {
+		proposalId: input.proposalId,
+		repetition: input.spec.repetition,
+		candidate: {
+			name: input.candidate.name,
+			sha256: input.candidate.sha256
+		},
+		...input.productionBaseline === void 0 ? {} : { productionBaseline: { ...input.productionBaseline } },
+		model: input.spec.model,
+		budget: { ...input.spec.budget },
+		samples: input.samples,
+		snapshot: {
+			sourceDir: resolve(input.spec.snapshot.sourceDir),
+			digest: input.snapshotDigest
+		},
+		comparerVersion: EXPERIMENT_COMPARER_VERSION,
+		overlay: {
+			baseline: "none — the baseline runs under the production configuration",
+			candidate: `extraSkillRoots: [${input.sandbox}/skills]`
+		}
+	};
+	assertFrozenExperiment(frozen);
+	return frozen;
+}
+/** Build one side's workspace from the frozen snapshot, then prove it holds exactly the frozen bytes. */
+async function buildWorkspace(sourceDir, target, snapshotDigest) {
+	await rm(target, {
+		recursive: true,
+		force: true
+	});
+	await mkdir(target, { recursive: true });
+	await cp(resolve(sourceDir), target, { recursive: true });
+	const real = await realpath(target);
+	const digest = await directoryDigest(real);
+	if (digest !== snapshotDigest) throw new Error(`the workspace "${real}" was built from the frozen snapshot but hashes to ${digest}, not the frozen ${snapshotDigest}; the build did not reproduce the frozen input, so nothing runs in it`);
+	return real;
+}
+function runFactsOf(snapshot, task, settled) {
+	const runId = settled?.runId ?? task.runIds[task.runIds.length - 1];
+	const run = runId === void 0 ? void 0 : snapshot.runs.find((item) => item.runId === runId);
+	const review = runId === void 0 ? void 0 : snapshot.reviews.find((item) => item.runId === runId);
+	const outcome = review !== void 0 && TERMINAL_RUN_STATUSES.includes(review.outcome) ? review.outcome : run !== void 0 && TERMINAL_RUN_STATUSES.includes(run.status) ? run.status : void 0;
+	const detail = runId === void 0 ? "the store holds no run of this side's task" : run === void 0 ? `the store holds no run "${runId}" of this side's task` : `the store holds run ${run.runId} as ${run.status}${run.executionPhase === void 0 ? "" : ` (${run.executionPhase})`} with no terminal review record`;
+	return {
+		outcome: outcome === void 0 ? "interrupted" : outcome,
+		taskId: task.taskId,
+		...runId === void 0 ? {} : { runId },
+		...review === void 0 ? {} : { review },
+		criteria: criteriaOf(review, settled),
+		evidenceRefs: evidenceRefsOf(snapshot, runId, review),
+		terminal: outcome !== void 0,
+		detail
+	};
+}
+/** The one ledger line a sample side writes, from the facts its run settled to. */
+function sampleRecord(input) {
+	return {
+		formatVersion: 1,
+		kind: "experiment_sample",
+		proposalId: input.view.proposalId,
+		experimentId: input.view.experimentId,
+		preparedContentDigest: input.view.frozen.candidate.sha256,
+		sampleTaskId: input.sample.taskId,
+		side: input.side,
+		repetition: input.view.frozen.repetition,
+		...input.taskId === void 0 ? {} : { taskId: input.taskId },
+		...input.runId === void 0 ? {} : { runId: input.runId },
+		outcome: input.outcome,
+		...input.review === void 0 ? {} : { reviewRef: reviewRefOf(input.review) },
+		evidenceRefs: [...input.evidenceRefs],
+		criteria: input.criteria,
+		workspace: input.workspace,
+		...input.initialDigest === void 0 ? {} : { initialDigest: input.initialDigest },
+		cost: input.cost,
+		...input.reason === void 0 ? {} : { reason: input.reason },
+		actor: input.actor,
+		at: (/* @__PURE__ */ new Date()).toISOString()
+	};
+}
+/**
+* One sample side that has a run in the store but no record: a process died
+* between starting the run and recording it. The store's terminal state is what
+* gets recorded — as it stands, never re-run. A run that never settled is
+* recorded `interrupted` with the store's own description of where it stands,
+* and the workspace's frozen digest is the one it was built from (the run has
+* written into the directory since; see the module doc).
+*/
+function recoveredSampleRecord(input) {
+	const facts = runFactsOf(input.snapshot, input.task, void 0);
+	if (!facts.terminal) return sampleRecord({
+		view: input.view,
+		sample: input.sample,
+		side: input.side,
+		outcome: "interrupted",
+		...facts.taskId === void 0 ? {} : { taskId: facts.taskId },
+		...facts.runId === void 0 ? {} : { runId: facts.runId },
+		criteria: [],
+		evidenceRefs: [],
+		workspace: input.workspace,
+		cost: {
+			status: "unknown",
+			reason: "the run never settled, so it reported no cost"
+		},
+		reason: `${facts.detail} — the experiment settles what the store holds and never re-runs an in-flight sample; resume it, or freeze a new experiment at a higher repetition, to run this side again`,
+		actor: input.actor
+	});
+	return sampleRecord({
+		view: input.view,
+		sample: input.sample,
+		side: input.side,
+		outcome: facts.outcome,
+		...facts.taskId === void 0 ? {} : { taskId: facts.taskId },
+		...facts.runId === void 0 ? {} : { runId: facts.runId },
+		...facts.review === void 0 ? {} : { review: facts.review },
+		criteria: facts.criteria,
+		evidenceRefs: facts.evidenceRefs,
+		workspace: input.workspace,
+		initialDigest: input.view.frozen.snapshot.digest,
+		cost: costOf(facts.review),
+		actor: input.actor
+	});
+}
+/** One side's detail as the report carries it, read off the ledger record and nothing else. */
+function sideDetailOf(view, sample, side) {
+	const record = view.samples.find((item) => item.sampleTaskId === sample.taskId && item.side === side);
+	if (record === void 0) throw new Error(`experiment: sample ${sample.taskId}/${side} has no record`);
+	return {
+		...record.taskId === void 0 ? {} : { taskId: record.taskId },
+		role: sample.role,
+		side,
+		outcome: record.outcome,
+		...record.runId === void 0 ? {} : { runId: record.runId },
+		...record.reviewRef === void 0 ? {} : { reviewRef: record.reviewRef },
+		evidenceRefs: [...record.evidenceRefs],
+		workspace: record.workspace,
+		...record.initialDigest === void 0 ? {} : { initialDigest: record.initialDigest },
+		criteria: record.criteria.map(criterionDetail),
+		cost: record.cost,
+		...record.reason === void 0 ? {} : { reason: record.reason }
+	};
+}
+/** The key one frozen sample's side has under one experiment. */
+function experimentSampleKeyOf(view, sampleTaskId, side) {
+	return {
+		proposalId: view.proposalId,
+		preparedContentDigest: view.frozen.candidate.sha256,
+		sampleTaskId,
+		side,
+		repetition: view.frozen.repetition
+	};
+}
+/**
+* Build the v2 report from the ledger records alone — the same records always
+* give the same report, its `at` included. An experiment missing a side has no
+* report: an incomplete comparison is not evidence, and saying so is the honest
+* answer.
+*/
+function buildExperimentReport(view) {
+	const missing = view.frozen.samples.flatMap((sample) => EXPERIMENT_SIDES.filter((side) => !view.samples.some((item) => item.sampleTaskId === sample.taskId && item.side === side)).map((side) => `${sample.taskId}/${side}`));
+	if (missing.length > 0) throw new Error(`experiment ${view.experimentId} is incomplete — no record for ${missing.join(", ")}; the settled runs stay recorded`);
+	const samples = view.frozen.samples.map((sample) => {
+		const baseline = sideDetailOf(view, sample, "baseline");
+		const candidate = sideDetailOf(view, sample, "candidate");
+		return {
+			taskId: sample.taskId,
+			role: sample.role,
+			baseline,
+			candidate,
+			verdict: compareExperimentSides(sample.role, baseline, candidate)
+		};
+	});
+	const at = [view.at, ...view.samples.map((record) => record.at)].reduce((left, right) => left > right ? left : right);
+	const report = {
+		formatVersion: 2,
+		proposalId: view.proposalId,
+		experimentId: view.experimentId,
+		at,
+		frozen: view.frozen,
+		frozenDigest: view.frozenDigest,
+		samples,
+		verdict: overallExperimentVerdict(samples)
+	};
+	assertExperimentReport(report);
+	return report;
+}
+/** The store one experiment reads: the caller's graph root, exactly as the v1 replay resolves it. */
+async function experimentStore(sources, caller) {
+	try {
+		const storeId = rootTaskStoreId((await sources.graphs.graphForSession(caller)).rootSessionId);
+		return {
+			storeId,
+			snapshot: await sources.task.openStore(storeId)
+		};
+	} catch (error) {
+		throw new Error(`cannot open this graph's task store: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+/**
+* Run — or continue — the frozen two-sided experiment, and return the report the
+* ledger records. Idempotent per sample key: a recorded side is reused, an
+* in-flight side is settled from the store and never re-run, and only a side
+* that never ran is started. Every refusal throws with its reason, and the runs
+* that did settle stay in the task store and in the ledger.
+*/
+async function runExperiment(sources, request) {
+	const { spec, caller, actor } = request;
+	validateSpec(spec);
+	const { sandbox, candidate, proposal } = await experimentCandidate(sources, spec.proposalId);
+	const { storeId, snapshot } = await experimentStore(sources, caller);
+	const samples = spec.samples.map((sample) => {
+		const task = snapshot.tasks.find((item) => item.taskId === sample.taskId);
+		if (task === void 0) throw new Error(`unknown sample task "${sample.taskId}" in this graph's task store`);
+		if (task.status !== "verified" && task.status !== "failed") throw new Error(`sample "${sample.taskId}" is ${task.status}; only a terminal (verified or failed) sample can be evaluated`);
+		const review = latestReview(snapshot, task);
+		if (review === void 0) throw new Error(`sample "${sample.taskId}" has no review record on its latest run; there is no case to reproduce`);
+		assertSampleRole(sample, task, review);
+		return frozenSampleOf(sample, task, review);
+	});
+	const frozen = freezeExperiment({
+		proposalId: spec.proposalId,
+		spec,
+		candidate,
+		...proposal.prepared?.skillBaseline === void 0 ? {} : { productionBaseline: proposal.prepared.skillBaseline },
+		sandbox,
+		snapshotDigest: await directoryDigest(spec.snapshot.sourceDir),
+		samples
+	});
+	const frozenDigest = frozenDigestOf(frozen);
+	const experimentId = experimentIdOf(spec.proposalId, frozenDigest);
+	const sandboxRel = `${sandbox}/exp-${experimentId}`;
+	const recorded = /* @__PURE__ */ new Map();
+	for (const previous of await sources.evolution.experiments(spec.proposalId)) for (const record of previous.samples) recorded.set(experimentSampleKey(record), record);
+	for (const sample of frozen.samples) for (const side of EXPERIMENT_SIDES) {
+		const key = experimentSampleKeyOf({
+			proposalId: spec.proposalId,
+			frozen
+		}, sample.taskId, side);
+		const prior = recorded.get(experimentSampleKey(key));
+		if (prior !== void 0 && prior.experimentId !== experimentId) throw sameKeyRefusal(key, prior, experimentId);
+	}
+	await sources.evolution.recordExperimentStart({
+		formatVersion: 1,
+		kind: "experiment_started",
+		proposalId: spec.proposalId,
+		experimentId,
+		frozen,
+		frozenDigest,
+		budget: { ...frozen.budget },
+		report: experimentReportPath(spec.proposalId, experimentId),
+		actor,
+		at: (/* @__PURE__ */ new Date()).toISOString()
+	});
+	const view = await sources.evolution.experiment(experimentId);
+	let started = 0;
+	try {
+		sampleLoop: for (const sample of view.frozen.samples) for (const side of EXPERIMENT_SIDES) {
+			const key = experimentSampleKeyOf(view, sample.taskId, side);
+			const lineage = experimentLineage(view.experimentId, sample.taskId, side);
+			const workspace = resolve(sources.evolution.root, sandboxRel, sample.taskId, side);
+			const prior = recorded.get(experimentSampleKey(key));
+			if (prior !== void 0) {
+				assertRecordedRunOrigin(snapshot, lineage, key, prior);
+				continue;
+			}
+			if (request.signal?.aborted) break sampleLoop;
+			const inFlight = snapshot.tasks.find((item) => item.objective.startsWith(`[${lineage}] `));
+			if (inFlight !== void 0) {
+				const recovered = recoveredSampleRecord({
+					view,
+					sample,
+					side,
+					task: inFlight,
+					snapshot,
+					workspace,
+					actor
+				});
+				await sources.evolution.recordExperimentSample(recovered);
+				recorded.set(experimentSampleKey(key), recovered);
+				continue;
+			}
+			const real = await buildWorkspace(spec.snapshot.sourceDir, workspace, view.frozen.snapshot.digest);
+			const outcome = await sources.taskRuntime.replayTask(storeId, sample.taskId, {
+				lineage,
+				workspace: { path: real },
+				...side === "candidate" ? { overlay: { extraSkillRoots: [resolve(sources.evolution.root, sandbox, "skills")] } } : {},
+				...request.signal === void 0 ? {} : { signal: request.signal }
+			}, caller);
+			if (outcome.workspace !== void 0 && outcome.workspace !== real) throw new Error(`the replay of "${sample.taskId}" reported workspace "${outcome.workspace}" but was given "${real}"; a side's frozen input and the directory its run went through must be the same directory`);
+			const after = await sources.task.openStore(storeId);
+			const replayed = after.tasks.find((item) => item.taskId === outcome.taskId);
+			if (replayed === void 0) throw new Error(`the replay of "${sample.taskId}" created task "${outcome.taskId}", which the store does not hold`);
+			const facts = runFactsOf(after, replayed, outcome);
+			const fresh = sampleRecord({
+				view,
+				sample,
+				side,
+				outcome: facts.outcome,
+				...facts.taskId === void 0 ? {} : { taskId: facts.taskId },
+				...facts.runId === void 0 ? {} : { runId: facts.runId },
+				...facts.review === void 0 ? {} : { review: facts.review },
+				criteria: facts.criteria,
+				evidenceRefs: facts.evidenceRefs,
+				workspace: real,
+				initialDigest: view.frozen.snapshot.digest,
+				cost: costOf(facts.review),
+				actor
+			});
+			await sources.evolution.recordExperimentSample(fresh);
+			recorded.set(experimentSampleKey(key), fresh);
+			started += 1;
+			if (facts.outcome === "cancelled") break sampleLoop;
+		}
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		if (started === 0) throw error instanceof Error ? error : new Error(message);
+		throw new Error(`${message} (the experiment stopped; ${started} sample run(s) it started settled and stay in the ledger and the task store as evidence — resume experiment ${experimentId} to continue it)`);
+	}
+	const finalView = await sources.evolution.experiment(experimentId);
+	let report;
+	try {
+		report = buildExperimentReport(finalView);
+	} catch (error) {
+		throw new Error(`${error instanceof Error ? error.message : String(error)} — resume experiment ${experimentId} to continue it`);
+	}
+	const abs = resolve(sources.evolution.root, finalView.report);
+	await mkdir(dirname(abs), { recursive: true });
+	await writeFile(abs, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+	return {
+		proposalId: finalView.proposalId,
+		experimentId,
+		report,
+		reportPath: finalView.report,
+		experiment: finalView
+	};
+}
+/**
+* Resume a frozen experiment by id: its specification *is* the frozen block, so
+* a caller needs to remember nothing but the id. The block is re-derived from
+* the current world before anything runs, and the re-derivation must reproduce
+* the recorded one — a candidate, a sample contract, a model or a snapshot that
+* moved since the experiment froze is refused by name rather than run under a
+* different identity.
+*/
+async function resumeExperiment(sources, request) {
+	const view = await sources.evolution.experiment(request.experimentId);
+	return runExperiment(sources, {
+		spec: {
+			proposalId: view.proposalId,
+			samples: view.frozen.samples.map((sample) => ({
+				taskId: sample.taskId,
+				role: sample.role
+			})),
+			snapshot: { sourceDir: view.frozen.snapshot.sourceDir },
+			model: view.frozen.model,
+			budget: view.frozen.budget,
+			repetition: view.frozen.repetition
+		},
+		caller: request.caller,
+		actor: request.actor,
+		...request.signal === void 0 ? {} : { signal: request.signal }
+	});
+}
+/**
+* A recorded sample that cites a run this experiment did not create is refused:
+* the historical champion locates the case and is never a baseline, so a record
+* whose run no run of this experiment's own lineage created is not reused, and
+* nothing downstream is allowed to read it as evidence.
+*/
+function assertRecordedRunOrigin(snapshot, lineage, key, record) {
+	if (record.runId === void 0) return;
+	const task = snapshot.tasks.find((item) => item.objective.startsWith(`[${lineage}] `));
+	if (task === void 0 || !task.runIds.includes(record.runId)) throw new Error(`experiment: the recorded sample ${experimentSampleLabel(key)} cites run "${record.runId}", which no run of this experiment's own replay (lineage ${lineage}) created — the historical record locates the case and is never a baseline; the record and the store disagree, so nothing here is reused`);
+}
+/** One sample key a different frozen experiment already spent (§F.2: a re-run needs an explicit new experiment). */
+function sameKeyRefusal(key, prior, experimentId) {
+	return /* @__PURE__ */ new Error(`experiment: sample ${experimentSampleLabel(key)} is already recorded by experiment ${prior.experimentId} (frozen at ${prior.at}), which is not this one (${experimentId}) — the key is spent and its record is never overwritten; freeze a new experiment at a higher repetition to run this side again`);
+}
+/**
+* Validate one `experiment_started` line in its own right: the proposal it names
+* exists, the experiment id, frozen digest, budget and report path are exactly
+* what the frozen block derives. Used by the fold and by the service's own write
+* path, so a line that reaches the append is checked the same way one read back
+* from the file is.
+*/
+function assertExperimentStartRecord(record, proposals) {
+	if (proposals.get(record.proposalId) === void 0) throw new Error(`evolution: experiment_started record for unknown proposal "${record.proposalId}"`);
+	if (typeof record.experimentId !== "string" || !/^[a-f0-9]{16}$/.test(record.experimentId)) throw new Error(`evolution: experiment_started record for "${record.proposalId}" has an invalid experiment id`);
+	assertFrozenExperiment(record.frozen);
+	if (record.frozen.proposalId !== record.proposalId) throw new Error(`evolution: experiment_started record for "${record.proposalId}" freezes proposal "${record.frozen.proposalId}"`);
+	if (record.frozenDigest !== frozenDigestOf(record.frozen)) throw new Error(`evolution: experiment_started record for "${record.proposalId}" has a digest that does not match its frozen block`);
+	if (canonicalJson(record.budget) !== canonicalJson(record.frozen.budget)) throw new Error(`evolution: experiment_started record for "${record.proposalId}" carries a budget that is not the frozen one`);
+	if (record.experimentId !== experimentIdOf(record.proposalId, record.frozenDigest)) throw new Error(`evolution: experiment_started record for "${record.proposalId}" has an id that does not match its frozen identity`);
+	if (record.report !== experimentReportPath(record.proposalId, record.experimentId)) throw new Error(`evolution: experiment_started record for "${record.proposalId}" names a report path outside its own sandbox`);
+	nonEmpty$1(record.actor, "experiment_started actor");
+	nonEmpty$1(record.at, "experiment_started at");
+}
+function assertSampleCriteria(criteria, field) {
+	if (!Array.isArray(criteria)) throw new Error(`evolution: ${field} must be an array`);
+	const ids = /* @__PURE__ */ new Set();
+	for (const criterion of criteria) {
+		if (criterion === null || typeof criterion !== "object" || typeof criterion.criterionId !== "string" || criterion.criterionId.length === 0 || ![
+			"pass",
+			"fail",
+			"inconclusive"
+		].includes(criterion.verdict) || ids.has(criterion.criterionId)) throw new Error(`evolution: ${field} has an invalid or duplicate criterion verdict`);
+		const detail = criterion;
+		for (const member of [
+			"verifierId",
+			"verifierVersion",
+			"command"
+		]) if (detail[member] !== void 0 && (typeof detail[member] !== "string" || detail[member].length === 0)) throw new Error(`evolution: ${field} has a malformed ${member}`);
+		if (detail.exitCode !== void 0 && typeof detail.exitCode !== "number") throw new Error(`evolution: ${field} has a malformed exit code`);
+		ids.add(detail.criterionId);
+	}
+}
+function assertExperimentSample(record, view, key) {
+	const field = `experiment_sample record for ${experimentSampleLabel(key)}`;
+	if (view === void 0) throw new Error(`evolution: ${field} names unknown experiment "${record.experimentId}"`);
+	if (view.proposalId !== record.proposalId) throw new Error(`evolution: ${field} names a different proposal than its experiment`);
+	if (record.preparedContentDigest !== view.frozen.candidate.sha256) throw new Error(`evolution: ${field} names a candidate content identity that is not the experiment's own`);
+	if (record.repetition !== view.frozen.repetition) throw new Error(`evolution: ${field} names a repetition that is not the experiment's own`);
+	if (!view.frozen.samples.some((sample) => sample.taskId === record.sampleTaskId)) throw new Error(`evolution: ${field} names sample "${record.sampleTaskId}", which the experiment never froze`);
+	if (!EXPERIMENT_SIDES.includes(record.side)) throw new Error(`evolution: ${field} has an unknown side "${String(record.side)}"`);
+	if (![
+		"verified",
+		"failed",
+		"cancelled",
+		"interrupted"
+	].includes(record.outcome)) throw new Error(`evolution: ${field} has an unknown outcome "${String(record.outcome)}"`);
+	for (const member of [
+		"taskId",
+		"runId",
+		"reviewRef"
+	]) if (record[member] !== void 0 && (typeof record[member] !== "string" || record[member].length === 0)) throw new Error(`evolution: ${field} has a malformed ${member}`);
+	if (typeof record.workspace !== "string" || record.workspace.length === 0) throw new Error(`evolution: ${field} names no workspace`);
+	if (!Array.isArray(record.evidenceRefs) || record.evidenceRefs.some((ref) => typeof ref !== "string" || ref.length === 0)) throw new Error(`evolution: ${field} has a malformed evidence ref list`);
+	assertSampleCriteria(record.criteria, `${field} criteria`);
+	if (record.cost === null || typeof record.cost !== "object") throw new Error(`evolution: ${field} has no cost`);
+	if (record.cost.status === "unknown") {
+		if (typeof record.cost.reason !== "string" || record.cost.reason.length === 0) throw new Error(`evolution: ${field} reports an unknown cost without saying why`);
+	} else if (record.cost.status !== "reported" || record.cost.metrics === null || typeof record.cost.metrics !== "object") throw new Error(`evolution: ${field} has a malformed cost report`);
+	if (record.outcome === "interrupted") {
+		if (typeof record.reason !== "string" || record.reason.length === 0) throw new Error(`evolution: ${field} is interrupted and must carry the reason it has no terminal run`);
+		return;
+	}
+	if (record.initialDigest === void 0 || !isHex64(record.initialDigest)) throw new Error(`evolution: ${field} settled a run and must carry the frozen digest its workspace was built from`);
+}
+/**
+* Fold the ledger's experiment family: every `experiment_started` opens an
+* experiment, every `experiment_sample` must belong to one, and the sample key
+* is unique across the whole ledger. A hand-forged line fails exactly the checks
+* a live write passes — the frozen block is re-hashed, the id re-derived, the
+* budget re-compared, and the record's key parts re-checked against the
+* experiment it claims — so the read path and the write path agree on what a
+* record is.
+*
+* The proposal fold is the other half of the same ledger and is not this
+* function's business; the caller passes its result in for the one cross-check
+* that spans the two (`experiment_started` must name a real proposal).
+*/
+function foldExperiments(records, proposals) {
+	const views = /* @__PURE__ */ new Map();
+	const keys = /* @__PURE__ */ new Set();
+	for (const raw of records) {
+		if (!isExperimentRecord(raw)) continue;
+		const record = raw;
+		if (record.kind === "experiment_started") {
+			if (views.has(record.experimentId)) throw new Error(`evolution: experiment "${record.experimentId}" is recorded twice`);
+			assertExperimentStartRecord(record, proposals);
+			views.set(record.experimentId, {
+				experimentId: record.experimentId,
+				proposalId: record.proposalId,
+				frozen: record.frozen,
+				frozenDigest: record.frozenDigest,
+				budget: record.budget,
+				report: record.report,
+				at: record.at,
+				samples: []
+			});
+			continue;
+		}
+		const view = views.get(record.experimentId);
+		const key = {
+			proposalId: record.proposalId,
+			preparedContentDigest: record.preparedContentDigest,
+			sampleTaskId: record.sampleTaskId,
+			side: record.side,
+			repetition: record.repetition
+		};
+		assertExperimentSample(record, view, key);
+		const id = experimentSampleKey(key);
+		if (keys.has(id)) throw new Error(`evolution: sample ${experimentSampleLabel(key)} is recorded twice; a recorded run is never overwritten or re-run`);
+		keys.add(id);
+		view.samples.push(record);
+	}
+	return views;
 }
 
 //#endregion
@@ -1505,10 +2493,14 @@ var EvolutionService = class extends Service {
 	* prepared/replayed/applied/rolledback shapes), so a hand-forged line fails
 	* load exactly as it would fail append. The same rules guard replay and live
 	* appends, so an illegal migration is rejected identically in both paths.
+	*
+	* The experiment family is not a lifecycle transition and is skipped here;
+	* {@link foldLedger} folds it beside this fold.
 	*/
 	fold(records) {
 		const proposals = /* @__PURE__ */ new Map();
 		for (const record of records) {
+			if (isExperimentRecord(record)) continue;
 			const current = proposals.get(record.proposalId);
 			if (record.kind === "proposed") {
 				if (current !== void 0) throw new Error(`evolution: proposal "${record.proposalId}" already exists`);
@@ -1638,19 +2630,142 @@ var EvolutionService = class extends Service {
 		});
 		for (const record of records) if (record.formatVersion !== 1) throw new Error(`evolution: unsupported ledger formatVersion "${String(record.formatVersion)}"`);
 		this.records = records;
-		this.fold(this.records);
+		this.foldLedger(this.records);
+	}
+	/**
+	* Validate a whole ledger: the proposal lifecycle fold, then the experiment
+	* fold beside it. Neither family's rules change because the other exists —
+	* a lifecycle line is judged exactly as it always was, and an experiment line
+	* gets its own checks ({@link foldExperiments}).
+	*/
+	foldLedger(records) {
+		const proposals = this.fold(records);
+		foldExperiments(records, proposals);
+		return proposals;
 	}
 	/** Validate the staged fold first; memory commits only after the line is on disk. */
 	async append(record) {
 		await this.loaded;
 		const run = this.writes.then(async () => {
-			this.fold([...this.records, record]);
+			this.foldLedger([...this.records, record]);
 			await mkdir(this.root, { recursive: true });
 			await appendFile(this.file, `${JSON.stringify(record)}\n`, "utf8");
 			this.records = [...this.records, record];
 		});
 		this.writes = run.then(() => void 0, () => void 0);
 		await run;
+	}
+	/** The folded views of every experiment, one per id — the ledger's experiment family, validated. */
+	experimentViews() {
+		return foldExperiments(this.records, this.fold(this.records));
+	}
+	/**
+	* One experiment's folded view (its frozen block and every sample record
+	* written under it), or a named refusal for an unknown id. This is the read
+	* the promotion gate will take: the report is a function of these records, so
+	* re-deriving it here is what lets a later stage refuse a report that no
+	* longer matches the ledger.
+	*/
+	async experiment(experimentId) {
+		await this.loaded;
+		const view = this.experimentViews().get(experimentId);
+		if (view === void 0) throw new Error(`evolution: unknown experiment "${experimentId}"`);
+		return view;
+	}
+	/** Every experiment's folded view, newest first, optionally narrowed to one proposal. */
+	async experiments(proposalId) {
+		await this.loaded;
+		return [...this.experimentViews().values()].filter((view) => proposalId === void 0 || view.proposalId === proposalId).reverse();
+	}
+	/**
+	* Record the frozen experiment, before its first run. Idempotent by identity:
+	* the same frozen block under the same id is a no-op (a repeat call resumes
+	* the same experiment rather than starting a second one), and a record that
+	* already holds a different frozen block, budget or report path is refused —
+	* the experiment id *is* the frozen identity, so a disagreement means the
+	* ledger and the caller are not talking about the same experiment.
+	*/
+	async recordExperimentStart(record) {
+		await this.loaded;
+		const run = this.writes.then(async () => {
+			assertExperimentStartRecord(record, this.fold(this.records));
+			const prior = this.experimentViews().get(record.experimentId);
+			if (prior !== void 0) {
+				if (prior.frozenDigest !== record.frozenDigest || prior.proposalId !== record.proposalId || prior.report !== record.report || canonicalJson(prior.frozen) !== canonicalJson(record.frozen)) throw new Error(`evolution: experiment "${record.experimentId}" is already recorded with a different frozen identity — an experiment id names one frozen block; changing any member of the specification freezes a different experiment`);
+				return;
+			}
+			const staged = [...this.records, record];
+			foldExperiments(staged, this.fold(staged));
+			await mkdir(this.root, { recursive: true });
+			await appendFile(this.file, `${JSON.stringify(record)}\n`, "utf8");
+			this.records = staged;
+		});
+		this.writes = run.then(() => void 0, () => void 0);
+		await run;
+	}
+	/**
+	* Record one sample side, once. The key carries the run: a second record for
+	* the same key is refused by the fold whatever it says, and a record that
+	* disagrees with the experiment it names (a different candidate identity, a
+	* different repetition, a sample the experiment never froze) is refused
+	* before the line lands. Nothing here re-runs anything — the caller only
+	* writes what a run already settled to.
+	*/
+	async recordExperimentSample(record) {
+		await this.append(record);
+	}
+	/**
+	* The two-sided experiment entry (§F.2). The orchestrator itself lives in
+	* `experiment.ts`; this method is the service's own door to it, resolving the
+	* graph, task and runtime services from this context so the tool layer above
+	* has exactly one call to make. It does not touch the promotion gate or the
+	* lifecycle: an experiment is evidence, and what may be promoted from it is a
+	* later stage's question.
+	*/
+	async runExperiment(spec, caller, actor, options = {}) {
+		return runExperiment(this.experimentSources(), {
+			spec,
+			caller,
+			actor,
+			...options.signal === void 0 ? {} : { signal: options.signal }
+		});
+	}
+	/**
+	* Continue a frozen experiment by id. Its specification *is* the recorded
+	* frozen block, so a caller that lost the spec — a restart — can resume what
+	* was frozen rather than guess at it; the block is re-derived and must
+	* reproduce the recorded identity, so a candidate, contract, model or
+	* snapshot that moved is refused rather than run under a new identity.
+	*/
+	async resumeExperiment(experimentId, caller, actor, options = {}) {
+		return resumeExperiment(this.experimentSources(), {
+			experimentId,
+			caller,
+			actor,
+			...options.signal === void 0 ? {} : { signal: options.signal }
+		});
+	}
+	/**
+	* The services one experiment runs on, resolved softly: an experiment needs
+	* the graph (for this graph's task store), the task store's reads, and the
+	* runtime's replay entry. A context that cannot offer one refuses by name
+	* instead of running an experiment that could not be judged against a store.
+	*/
+	experimentSources() {
+		const graphs = optionalService(this.ctx, "graphs");
+		const task = optionalService(this.ctx, "task");
+		const taskRuntime = optionalService(this.ctx, "taskRuntime");
+		if (graphs === void 0 || task === void 0 || taskRuntime === void 0) throw new Error(`evolution: the two-sided experiment needs the graphs, task and taskRuntime services in this context (missing: ${[
+			graphs === void 0 ? "graphs" : void 0,
+			task === void 0 ? "task" : void 0,
+			taskRuntime === void 0 ? "taskRuntime" : void 0
+		].filter(Boolean).join(", ")})`);
+		return {
+			evolution: this,
+			graphs,
+			task,
+			taskRuntime
+		};
 	}
 };
 var evolution_default = EvolutionService;
@@ -1920,4 +3035,4 @@ async function runReplayExperiment(sources, request) {
 }
 
 //#endregion
-export { APPLYABLE_TARGET_TYPES, CHAMPION_SOURCES, CHAMPION_STATES, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EvolutionService, MECHANICAL_TARGET_TYPES, PRESET_REPLAY_MANUAL_REASON, REPLAY_RELATIONS, REPLAY_VERDICTS, applyTargets, assertReplayPromotable, assertReplayReport, compareReplaySides, evolution_default as default, editCapabilityRow, mutationMechanical, overallReplayVerdict, readCapabilityRowSource, renderProviderRoles, replayLineage, resolvePrepareChampion, restoreCapabilityRowSource, runReplayExperiment };
+export { APPLYABLE_TARGET_TYPES, CHAMPION_SOURCES, CHAMPION_STATES, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionService, MECHANICAL_TARGET_TYPES, PRESET_REPLAY_MANUAL_REASON, REPLAY_RELATIONS, REPLAY_VERDICTS, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, assertReplayPromotable, assertReplayReport, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, evolution_default as default, digestOf, directoryDigest, editCapabilityRow, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, mutationMechanical, overallExperimentVerdict, overallReplayVerdict, protectedInputsDigest, readCapabilityRowSource, renderProviderRoles, replayLineage, resolvePrepareChampion, restoreCapabilityRowSource, resumeExperiment, runExperiment, runReplayExperiment };

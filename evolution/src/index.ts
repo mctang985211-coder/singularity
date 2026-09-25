@@ -20,6 +20,7 @@
 
 export * from './config-edit.ts'
 export * from './evolution.ts'
+export * from './experiment.ts'
 export * from './prepare-champion.ts'
 export * from './replay-experiment.ts'
 export * from './replay.ts'
