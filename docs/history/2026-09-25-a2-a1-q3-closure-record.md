@@ -1,6 +1,6 @@
 # 第 9 项 A2+A1：Q3 单事件续读收尾记录（2026-09-25）
 
-> 状态：**待验收**（Q3-1、Q3-2 与整组回归的证据见下；最终“已验收”由进度审核填写）。本记录覆盖[Q3 收尾 prompt](../execution-prompts/09-a2-a1-q3-closure.md)的全部固定交付，并记录计划所有者 2026-09-25 的追加裁决（上限与省略机制直接与 DSH 对齐）。
+> 状态：**待验收**（Q3-1、Q3-2 与整组回归的证据见下；独立复核发现的一处可达缺陷已修复并回归）。最终“已验收”由进度审核填写。本记录覆盖[Q3 收尾 prompt](../execution-prompts/09-a2-a1-q3-closure.md)的全部固定交付，并记录计划所有者 2026-09-25 的追加裁决（上限与省略机制直接与 DSH 对齐）。
 
 | 字段 | 内容 |
 |---|---|
@@ -9,7 +9,7 @@
 | 任务链接 | [Q3 收尾 prompt](../execution-prompts/09-a2-a1-q3-closure.md)；合同：计划 D 节（含 2026-09-25 追加裁决）、[复审记录 Q3](2026-09-25-a2-a1-progress-review.md) |
 | 开始日期 | 2026-09-25 |
 | 修改前基线 | 施工时实际 HEAD Singularity `d99344f`（复核裁决 `153ca8e`/`9d8b769`；被审代码为 `4115a85`），外层 harness `06b477fe`；两仓无 AGENTS.md |
-| 交付版本 | 实现 `30c66f8`；文档随同批提交（见文末“提交”一节） |
+| 交付版本 | 实现 `30c66f8` + 复核响应 `4b9fb4c`；文档 `740849c` 及随后的记录提交 |
 | 前置验收记录 | 第 8/8a 项 R1、R3 已验收；第 9 项 Q1/Q2/Q4 与 Q3 中途读取失败经复审关闭 |
 
 ## 固定交付逐条对应
@@ -54,8 +54,8 @@
 | 命令（cwd） | 结果 |
 |---|---|
 | `pnpm build`（packages/singularity） | 13 包全部通过（`graphs`/`context` 的 `lib` 产物已重建） |
-| `pnpm vitest run --project unit packages/singularity`（外层） | 47 文件 / 1533 项全过（本票前基线 47 / 1521） |
-| `pnpm vitest run --project integration packages/singularity`（外层） | 42 文件 / 301 项全过（本票前基线 41 / 296；新增 `context-read-single-event.spec.ts` 5 例） |
+| `pnpm vitest run --project unit packages/singularity`（外层） | 47 文件 / 1536 项全过（本票前基线 47 / 1521；含复核响应新增的星号字符用例） |
+| `pnpm vitest run --project integration packages/singularity`（外层） | 42 文件 / 302 项全过（本票前基线 41 / 296；新增 `context-read-single-event.spec.ts` 6 例，含复核响应的星号字符用例） |
 | `pnpm run verify-persistence`（packages/singularity） | OK — 4 event roots 与 schema 一致（持久化零变化） |
 | `git diff --check`（packages/singularity） | 干净 |
 | `pnpm exec tsc --noEmit`（agent-singularity） | 退出码 0、零输出 |
@@ -83,18 +83,25 @@
 - **性能特性**：按字节分页在每页都重新编码/截取正文尾部（库的 `TextRetainer` 语义如此，且合同禁止建索引/缓存），因此 `limit: 4` 这种极小页在 60 KB 正文上约 1.3 s、在 240 KB 正文上约 17 s（单测给它显式 60 s 超时）。正常页量（4 KiB～上限）是毫秒级。若将来需要更快的小页遍历，那是“加缓存/索引”的合同变更，不在本票。
 - `omissionLine` 把 `scope` 交给平台的 notice（`formatRetentionNotice` 的默认子句只渲染数量，不渲染 scope；列表自身的标题行已经点名），因此两条被切列表的子句文本只差数量——测试按位置钉住。
 - 未覆盖：`ref` 的 `sessionId` 为空字符串、`seq` 为 0 且事件正文为空的组合在工具门只有单测覆盖；`limit` 为 `Number.MAX_SAFE_INTEGER` 的钳制路径由契约的“钳到上限”覆盖（单测有 1e99 一例）。
+- 星号平面字符（emoji）现已覆盖（单测窗口、事件分页、task 记录分页、工具门逐页还原各一例）；落单代理项（无效日志才会有的文本）会被解码为 U+FFFD，属字节等价而非字符等价。
 - 未覆盖：DSH `readEvent` 返回 `target.seq` 与请求不符的路径在单测里有专门用例，但真实引擎不会产生该状态。
 
 ## 未解决缺陷 / 阻塞
 
 无已知合同违反。两处需审核知情的边界：分页性能特性（上）；`@deepseek-ai/dsh-output-retention` 作为 peer 需由部署提供（基础 bundle 已通过 `dsh-spill-policy` 间接引入，本仓由 `context` 的 link devDependency 解析）。
 
-## 独立复核
+## 独立复核与其响应
 
-执行者：未参与实现的只读子代理，只审“字节窗口 + 上限 + 省略/拒绝矩阵”一个风险组。结论见下节（复核返回后补记）。
+执行者：未参与实现的只读子代理，只审“字节窗口 + 上限 + 省略/拒绝矩阵”一个风险组；复跑 unit 5/89、integration 2/8，并自写 4 组探针（上限与库等价、事件门、24 种拒绝形状、四个有界列表）。结论：**上限与复用 PASS、拒绝矩阵 PASS、有界列表 PASS（含一处边界）**，**字节逐页还原 FAIL** ——发现一处我引入的真实缺陷，已修复。
+
+**复核发现 1（已修复，严重）**：`sliceUtf8` 重写为 `TextRetainer` 包装时，游标按**码点**计数却用**UTF-16 code unit** 下标调用 `String#slice`。含星号平面字符（emoji、U+1D11E 等一对代理项＝一个字符两个 code unit）的正文因此每页向后错一个 unit：页内出现落单代理项、`nextOffset` 指向字符中间、正文重复且部分永不显示（复核在真实工具门上用 `😀` 正文复现；同一函数也用于 task 类记录分页，9 页中 6 页字节区间错误）。处置：`limits.ts` 改为按码点走、按 code unit 切（`utf8WidthAt`/`codeUnitsAt`），游标仍由库保留的字节数推出。红/绿：新增单测与工具门用例在修复前红（`a body of astral characters walks out…` 期望整段还原、实得错页；`pages an event whose text carries astral characters byte for byte` 同理），修复后绿；原有 92 个 context 单测与 8 个 Q3 集成用例不受影响。此后我另加了一处状态页记账（把省略子句的字节算进页脚预留），消除复核指出的“最后一处子句可能悄悄放不下”的潜在点。
+
+**复核确认（PASS 部分）**：50000 与基础 bundle 的 `maxInlineBytes` 一致且“恰在上限”不会被 spill 替换（`spill-policy` 只在 `> cap` 时替换）；`sliceUtf8` 在边界预算上与 `TextRetainer` 逐字节一致；`omissionLine` 与库的 `describeOmitted` 逐字一致；`src` 与已提交 `lib` 里不再有第二套字节窗口、`16 * 1024` 或旧措辞；四类列表在 1 000–6 000 条窄引用下的省略计数与真实 store 一致，其后固定块都渲染；24 种拒绝形状全部具名、除需要正文的三种 offset 外**零日志读取**。
+
+**复核留下、需审核知情的判断（本票保留现状并记录理由）**：（a）`OmissionReport.scope/limit/kept` 与 `strategy` 传给库的 notice 但不进渲染行（库的默认子句只渲染 omitted+unit；列表自身标题已点名）；（b）session **列表**的“events shown / more follows / next event not shown”仍是本包措辞——它们是游标陈述而非省略陈述，库明确把“如何继续读”留给工具；（c）引用列表被切时，紧随其后的*固定*块（分解指引/绑定摘要）若本就放不下，整段投影仍具名 `context-too-large`（而不是丢掉该块）——顺序上“先命名省略、再拒绝命名块”是有意为之；（d）证据列表可能被压到 0 条（各列表各自命名省略）；（e）`@deepseek-ai/dsh-output-retention` 不是基础 bundle 的直接依赖（是 `dsh-spill-policy` 等的依赖），本仓由 peer + link devDependency 解析，部署侧 hoisting 由消费方保证。
 
 ## 提交
 
-- Singularity 实现 + 构建产物：`30c66f8`
-- 文档同步（本记录、主 guide、计划、审核记录、派发入口）：见紧随其后的文档提交
+- Singularity 实现 + 构建产物：`30c66f8`；独立复核响应（星号字符分页修复、状态页子句预留）：`4b9fb4c`
+- 文档同步（本记录、主 guide、计划、审核记录、派发入口）：`740849c` 及写入复核结论的后续记录提交
 - 外层子模块指针：见外层同批提交
