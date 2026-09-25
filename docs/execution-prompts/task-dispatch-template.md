@@ -8,7 +8,7 @@
 
 ## 直接派发入口
 
-以下入口只在当前票没有待审核交付时交给实现主代理。第 9 项 A2+A1 已验收，当前下一票是第 11 项 A4；票据交付后改用[进度审核 prompt](progress-review-and-dispatch.md)，审核前不连续施工。
+以下入口只在当前票没有待审核交付时交给实现主代理。第 9 项 A2+A1 已验收，当前第 11 项 A4 直接使用[已填写 prompt](11-a4-parent-child-clarification.md)；票据交付后改用[进度审核 prompt](progress-review-and-dispatch.md)，审核前不连续施工。
 
 ```text
 你是 Singularity 本次实现主代理，工作区：
@@ -44,7 +44,7 @@ docs/execution-prompts/README.md 的公共合同，以及本模板的实施约�
 | 当前票 | 建设计划中的合同 | 必须引用的验收 |
 |---|---|---|
 | A2 + A1（已验收，历史对照） | D：读取/绑定与迁移；E：显式恢复 | Q1–Q4、A2-1–A2-6；当前见 `09-a2-a1-q3-closure.md` |
-| A4 | F.1 | A4-1–A4-5，含结算归属 |
+| A4 | F.1；[已填写派发 prompt](11-a4-parent-child-clarification.md) | A4-1–A4-5，含结算归属 |
 | S4-E | F.2 与 S4-E 专项 | EVAL-1–EVAL-5，含旧生命周期删除 |
 | A5 + S2-E | F.3；E 的 DSH 观测复用及 Diagnosis 职责 | REV-1–REV-5，含观测与终态分工 |
 | A6 + S2-R + S3 | F.4 | EVO-1–EVO-5；EVO-1 真实 Agent 运行是整组验收条件 |

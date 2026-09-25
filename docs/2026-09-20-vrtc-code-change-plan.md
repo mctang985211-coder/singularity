@@ -25,7 +25,7 @@
 | 8a | R3：已有 Task 合同归位 | 已验收（2026-09-24） | — | [历史记录](history/2026-09-24-vrtc-execution-records.md) | R3-1–R3-3 全通过；内容身份、Task 依赖与旧数据行为保持 |
 | 9 | A2 + A1：Agent 状态上下文（一个交付组） | **已验收（2026-09-25）**：Q1–Q4、A2-1～A2-6 与公共检查通过 | 实现主代理 + 子代理 | 本文 D/E 节；[交付记录](history/2026-09-25-a2-a1-delivery-record.md)、[进度审核及复审](history/2026-09-25-a2-a1-progress-review.md)、[返工记录](history/2026-09-25-a2-a1-rework-record.md)、[Q3 收尾记录](history/2026-09-25-a2-a1-q3-closure-record.md) | 已按 D 节的单事件引用实现有界续读（上限 50000 字节、字节窗口与省略措辞复用 `@deepseek-ai/dsh-output-retention`）；进度审核通过；下一项为第 11 项 A4 |
 | 10 | A1 原独立排位 | 并入第 9 项，不单独派发 | — | 保留编号供历史引用 | 第 9 项整组验收后直接进入第 11 项 |
-| 11 | A4：父子澄清 | 待派发；前置已验收、合同已定 | 待填 | 本文 F.1、深入架构 §7 | agent-runtime + DSH 负责持久消息与投递；context 呈现，task-runtime 负责阻塞执行效果；父子/三层、故障恢复与写闸完整 |
+| 11 | A4：父子澄清 | 待派发；前置已验收、合同已定 | 待填 | 本文 F.1、深入架构 §7、[A4 派发 prompt](execution-prompts/11-a4-parent-child-clarification.md) | agent-runtime + DSH 负责持久消息与投递；context 呈现，task-runtime 负责阻塞执行效果；父子/三层、故障恢复与写闸完整 |
 | 12 | S4-E：评估基础（S4 内的子票） | 待前置；合同已定、未实施 | 待填 | 本文 F.2 | 现有 Evolution 生命周期随本票迁入 evolution 包；单文件 Skill 的可比实验、真实证据与晋升闸，旧 ledger/回滚保留 |
 | 13 | A5 + S2-E：诊断与缺口交接（一个交付组） | 待前置；合同已定、未实施 | 待填 | 本文 F.3、深入架构 §8 | agent-singularity/review 按源身份触发只读复盘并保存交接；runtime 结算不等 reviewer；缺口可见与诊断失败恢复完整 |
 | 14 | A6 + S2-R + S3：自主改进与恢复（一个交付组） | 待前置；合同已定、未实施 | 待填 | 本文 F.4 | evolution 组织有限候选路径，task-runtime 重检并恢复原图；L1/L2、能力/产物缺口、拒绝/重启/回滚均验收 |

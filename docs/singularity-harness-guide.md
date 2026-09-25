@@ -1,6 +1,6 @@
 # Singularity Harness 工作指南
 
-当前进度（2026-09-25，Q3 收尾交付后）：R1、R2、R3 已验收；第 9 项 A2+A1 的 Q1–Q4 全部关闭，[Q3 收尾](history/2026-09-25-a2-a1-q3-closure-record.md)已实现单事件按字节续读（上限与 DSH 对齐）并复验整组，**已于 2026-09-25 验收**。下一项可派 A4。施工合同以[建设计划 D/E/F](2026-09-20-vrtc-code-change-plan.md)为准，原[交付记录](history/2026-09-25-a2-a1-delivery-record.md)与[复审记录](history/2026-09-25-a2-a1-progress-review.md)保留当时证据。
+当前进度（2026-09-25，Q3 收尾交付后）：R1、R2、R3 已验收；第 9 项 A2+A1 的 Q1–Q4 全部关闭，[Q3 收尾](history/2026-09-25-a2-a1-q3-closure-record.md)已实现单事件按字节续读（上限与 DSH 对齐）并复验整组，**已于 2026-09-25 验收**。下一项可派[A4](execution-prompts/11-a4-parent-child-clarification.md)。施工合同以[建设计划 D/E/F](2026-09-20-vrtc-code-change-plan.md)为准，原[交付记录](history/2026-09-25-a2-a1-delivery-record.md)与[复审记录](history/2026-09-25-a2-a1-progress-review.md)保留当时证据。
 
 本文负责方向、职责与当前事实；[术语表](../CONTEXT.md)定义概念。[历史指南](history/2026-09-21-harness-guide-snapshot.md)保留旧编号和操作经验。深入实施参考：[Task 契约与可选人审](task-contract-construction-guide.md)、[有目标的探索/自进化架构](exploration-evolution-architecture.md)、[角色与 System Prompt 合同](agent-prompt-contracts.md)。[开源机制调研](2026-09-21-open-source-agent-patterns.md)记录一手来源。
 
