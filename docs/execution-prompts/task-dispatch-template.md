@@ -4,6 +4,8 @@
 
 限制的是无依据的扩展、反复选型和重复劳动，不要求 agent 少理解代码或隐瞒缺陷。Prompt 不能保证工程质量，最终仍检查实际 diff、调用方、验收与停止条件。
 
+派发第 11–14 项时先按[计划文首五问复核](../2026-09-20-vrtc-code-change-plan.md#五问复核保留领域差异直接用现成底座)删去无消费者、非必要或 DSH 已提供的通用机制；实现只负责剩余 Singularity 领域差异。A4 不加提问次数预算或第二 mailbox，A5 不为搬移 Session 观测新建模块。第三方相似机制若不能直接满足本项目 Task/Run/权限与持久身份，不以复制源码代替适配证明。
+
 ## 直接派发入口
 
 以下入口只在当前票没有待审核交付时交给实现主代理。第 9 项 A2+A1 复审仍返工，当前使用[Q3 收尾 prompt](09-a2-a1-q3-closure.md)；本模板的通用入口留给整组验收后的下一票。票据交付后改用[进度审核 prompt](progress-review-and-dispatch.md)，审核前不连续施工。
@@ -44,7 +46,7 @@ docs/execution-prompts/README.md 的公共合同，以及本模板的实施约�
 | A2 + A1（返工） | D：读取/绑定与迁移；E：显式恢复 | Q1–Q4、A2-1–A2-6；当前见 `09-a2-a1-q3-closure.md` |
 | A4 | F.1 | A4-1–A4-5，含结算归属 |
 | S4-E | F.2 与 S4-E 专项 | EVAL-1–EVAL-5，含旧生命周期删除 |
-| A5 + S2-E | F.3；E 的 Session 观测及 Diagnosis 迁移 | REV-1–REV-5，含观测与终态分工 |
+| A5 + S2-E | F.3；E 的 DSH 观测复用及 Diagnosis 职责 | REV-1–REV-5，含观测与终态分工 |
 | A6 + S2-R + S3 | F.4 | EVO-1–EVO-5；EVO-1 真实 Agent 运行是整组验收条件 |
 
 ## 可填写 Prompt

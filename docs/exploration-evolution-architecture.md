@@ -168,7 +168,7 @@ A3 统一模块职责：Task runtime 对分解、提交、取消和恢复负责�
 
 ### 7.2 分开 Agent idle 与任务完成
 
-保留 Task 的结果状态；新 Run 主相位（建议 executionPhase）为 active、waiting_children、submitted，另以 pendingQuestionIds/blockingQuestionIds 记录正交的问答等待。active 且有阻塞问题时，对外显示 waiting_answer；waiting_children 同时可有阻塞问题，不能覆盖原 batchId 或把主相位改成 active。waiting 不是 PASS/FAIL，也不重用 capability blocked 原因。事件与 reducer 变更需按持久化规则记录。（A3 已落地 2026-09-22：`executionPhase` 三相位与 `batchId`/`submission`/`noProgress` 已持久化，reducer 迁移闸只放行 active→waiting_children、active→submitted、waiting_children→submitted；`pendingQuestionIds`/`blockingQuestionIds` 作为 A4 挂载点字段已持久化但无消费者，问答工具与 waiting_answer 显示未建。）
+保留 Task 的结果状态；Run 主相位为 active、waiting_children、submitted，问答等待从单一问答事件事实派生。active 且有阻塞问题时，对外显示 waiting_answer；waiting_children 同时可有阻塞问题，不能覆盖原 batchId 或把主相位改成 active。waiting 不是 PASS/FAIL，也不重用 capability blocked 原因。事件与 reducer 变更需按持久化规则记录。（A3 已落地 2026-09-22：`executionPhase` 三相位与 `batchId`/`submission`/`noProgress` 已持久化；`pendingQuestionIds`/`blockingQuestionIds` 作为 A4 挂载点字段已预留但无非空生产写入。现行计划 F.1 决定不启用这两份索引，新事件不写入，旧空字段保持可读。）
 
 新增提交验收动作（工作名 task_submit_result）：worker 提交 artifact refs 与证据引用，runtime 进入 submitted→verifying，verifier 决定结果。task_verify 仍只是自检。session idle 无提交时只能是等待或异常停顿，不能直接做“完成”证据；祖先 waiting_children 的 idle 不触发父验收。子全部终态之后仍必须执行独立父 AC。（A3 已落地 2026-09-22：`task_submit_result` 工具 + `submitResult`（身份/相位重检 → RunPhaseChanged(submitted) 落库 → drainSession 排空 → verifier 排他执行）；idle 无提交经 RunProgressMarked 相位机提醒一次后到限停止；子全终态后父由 runtime 自动提交，composite 仍走既有独立父验收规则。）
 
@@ -179,7 +179,7 @@ A3 统一模块职责：Task runtime 对分解、提交、取消和恢复负责�
 | 当前相位 | 触发及前提 | 下一状态与效果 |
 |---|---|---|
 | active 且无阻塞问题 | 有效分解批次原子提交 | waiting_children；拥有 batchId；父写入收敛后只启动一个符合依赖的子节点 |
-| active 或 waiting_children | 阻塞性问题已持久化 | 主相位不变，加入 blockingQuestionIds；保留 batch，停止受阻动作，不触发 verifier |
+| active 或 waiting_children | 阻塞性问题已持久化 | 主相位不变，从问答事实派生该阻塞；保留 batch，停止受阻动作，不触发 verifier |
 | 有阻塞问题的非终态 | 有效且适用的解决性回答 | 只移除对应阻塞；同一 run/session 可处理回答，其余阻塞仍有效；waiting_children 的写闸保持 |
 | active 且无阻塞问题 | 有效 task_submit_result | submitted；关闭写入准入，排空后捕获身份并验证，走既有终态 |
 | waiting_children | 全部子节点终态且无未处理协调事件/阻塞问题 | 由 runtime 进入 submitted，写入收敛后执行父验收；父 agent 无需第二次自述完成 |
@@ -202,7 +202,7 @@ A3 统一模块职责：Task runtime 对分解、提交、取消和恢复负责�
 
 必须区分 transport delivered、待处理领域事实和模型已消费：入箱/claim 都不证明模型见过。未答问题及待消费回答继续进入 ContextView；以可追溯的模型 step 输入确认消费，领域处理结果另由幂等工具动作确认。若公开事件无法证明消费，就保留待处理引用并允许重放，不伪造 consumed。恢复只补缺失效果，重放不重开问题或重复执行已经落账的回答；不能把所有 delivered 消息从恢复索引删除。
 
-阻塞性问题加入该 Run 的 blockingQuestionIds，worker 停止受阻执行并等待唤醒；不阻塞父 loop、不轮询。已有子批次时仍保留 waiting_children，可处理协调消息并逐级提问。非阻塞问题仅在确有无依赖工作时允许继续。父从全局 brief/决定/证据回答，无足够依据明确说明未知，可逐级询问，不默认找人。涉及用户目标/新增权限/残余风险，root 使用已有 human 工具。
+阻塞性问题写入与 Run 关联的问答事实，worker 停止受阻执行并等待唤醒；不阻塞父 loop、不轮询。已有子批次时仍保留 waiting_children，可处理协调消息并逐级提问。非阻塞问题仅在确有无依赖工作时允许继续。父从全局 brief/决定/证据回答，无足够依据明确说明未知，可逐级询问，不默认找人。涉及用户目标/新增权限/残余风险，root 使用已有 human 工具。
 
 answer 校验真实父身份、question 状态、对应 run 和契约；回答进入两端可追溯历史。resolves:true 是父声明可解决当前问题，仅在绑定仍适用时解除该项；false 保持 open，未知或需要改契约均如此，不再建立回答类别枚举。runtime 不声称证明自然语言答案正确。所有阻塞解除后仍遵守原主相位，不能改为 active；已解除但尚未被模型读取的回答必须进入下一请求。父/子 Run 终态、问题取消或契约失效时拒绝迟到执行效果，保留审计。同 requestKey 同内容幂等、冲突拒绝；parent 不可用记录 unavailable 并等待恢复/期限，不隐式新建替代父节点。
 
@@ -210,7 +210,7 @@ answer 校验真实父身份、question 状态、对应 run 和契约；回答�
 
 ### 7.4 时间、循环与故障
 
-问答仅新增 maxQuestionsPerRun 一个外置正整数限额（默认 8），按首次接受的 questionId 计数并从记录恢复；重复按 requestKey 幂等，不以字符串相似度合并。无进展与截止沿原运行预算，不新增三套问答限额；已知阻塞不计空转提醒。未回答不是失败答案，wallTime 按原 startedAt 继续计入等待，截止取消协调并保留问题。已知问答等待的 Run 在重启后须能恢复同一 Session/阻塞，不能沿“在途未提交全部取消”分支处理；无法确认写入已停止时具名失败。
+问答复用原 Run wallTime、根截止和无进展停止规则，不新增提问次数预算；重复按 requestKey 幂等，不以字符串相似度合并。已知阻塞不计空转提醒。未回答不是失败答案，wallTime 按原 startedAt 继续计入等待，截止取消协调并保留问题。已知问答等待的 Run 在重启后须能恢复同一 Session/阻塞，不能沿“在途未提交全部取消”分支处理；无法确认写入已停止时具名失败。
 
 A3 同时建立根目标预算归属：子任务、重试、诊断、候选和评估各有明细但共用根总额，replay 的 parentless Task 通过明确的资助根引用记账，不因 Task 无父亲获得新预算。独立评估请求必须有自己的显式预算 owner。时间从根接受时计，Run 期限不得晚于根期限；次数在准入时按稳定操作 id 预留/记账，崩溃恢复不重复计数，也不重置额度。A5/S2-R/S3/S4-E 接入该入口，不能新增各自独立的总预算。（A3 已落地 2026-09-22：`root-budget.ts`；owner = store 根任务（其 run 经 `rootTaskStoreId` 绑定回本 store），replay 的 parentless task 共享该根总额；maxRuns 按 runId 记账、崩溃重数不退款不重置。）
 

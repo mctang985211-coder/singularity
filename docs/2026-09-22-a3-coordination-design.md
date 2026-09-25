@@ -31,7 +31,7 @@ export interface NoProgressRecord {
 }
 ```
 
-`TaskRun` 新增可选字段：`executionPhase?: ExecutionPhase`、`batchId?: string`、`submission?: SubmissionRecord`、`pendingQuestionIds?: string[]`、`blockingQuestionIds?: string[]`（A4 挂载点，A3 恒不写入非空值）、`noProgress?: NoProgressRecord`。旧 run 无这些字段：终态原样读取；非终态缺 `executionPhase` 走 needs-recovery 派生诊断（§3.7），不默认 active 重跑。
+`TaskRun` 新增可选字段：`executionPhase?: ExecutionPhase`、`batchId?: string`、`submission?: SubmissionRecord`、`pendingQuestionIds?: string[]`、`blockingQuestionIds?: string[]`（当时的 A4 挂载点，A3 恒不写入非空值；现行计划 F.1 决定 A4 不启用两份索引）、`noProgress?: NoProgressRecord`。旧 run 无这些字段：终态原样读取；非终态缺 `executionPhase` 走 needs-recovery 派生诊断（§3.7），不默认 active 重跑。
 
 新 run 出生时 `executionPhase: 'active'`；无 worker 的 replay（`spawn: false`）出生即 `submitted`（origin runtime）。
 
@@ -42,7 +42,7 @@ RunPhaseChanged: {
   phase: ExecutionPhase
   batchId?: string                 // waiting_children 必填：b-<parentTaskId>（确定性，一个任务只分解一次）
   submission?: SubmissionRecord    // submitted 必填
-  pendingQuestionIds?: string[]    // A4 写入；A3 reducer 只做形状校验并携带
+  pendingQuestionIds?: string[]    // A3 预留，现行 A4 不启用；旧空字段需可读
   blockingQuestionIds?: string[]   // 同上
   reason?: string
 }
@@ -82,7 +82,7 @@ Reducer 校验（`task/src/service/state.ts`）：
 | active（worker）idle 且无提交 | `whenIdle` 观察 | `RunProgressMarked(rounds+1)`；rounds=1 时经 `agent.followup` 发一次提醒；达到 `noProgressRounds` 上限 → failed（无进展预算停止，保留诊断）；已知等待（waiting_children/submitted）不标记 |
 | 重启后非终态 run | 恢复对账（§3.7） | submitted → 补验证；waiting_children → 重启批次 driver；active（worker）→ cancelled + 恢复诊断；缺相位（旧记录）→ 不改状态，task_read/task_status 派生显示 needs-recovery |
 
-`waiting_answer` 对外显示态与 `pendingQuestionIds`/`blockingQuestionIds` 的写入属 A4；本票仅在类型与 reducer 形状校验上预留。
+`waiting_answer` 对外显示态属 A4；本票预留的 `pendingQuestionIds`/`blockingQuestionIds` 无非空生产写入，现行计划 F.1 决定 A4 从问答事实派生等待，不再启用它们。
 
 ## 3. 机制设计
 
