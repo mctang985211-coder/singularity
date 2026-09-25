@@ -639,6 +639,196 @@ declare function capabilityManifestDigest(manifests: readonly CapabilityManifest
  */
 declare function reviewContextDigest(context: TaskProposalReviewContext): string;
 //#endregion
+//#region src/question.d.ts
+/**
+ * A citation into the Session that sent a question or an answer: which Session,
+ * and which seq in its log. The event at that seq is the sender's own
+ * `tool/call` — the body the model wrote — so the citation is checkable by
+ * whoever holds the Session, and a record can never point at a body that was
+ * never sent.
+ *
+ * The `sessionId` is the sending run's own Session (the child run's for a
+ * question, the parent run's for an answer), which the reducer enforces: a
+ * reference into some other Session would make the citation unusable for
+ * recovery and could smuggle text from a conversation this store never saw.
+ */
+interface QuestionMessageRef {
+  /** The sending run's Session — the Session the cited `tool/call` event lives in. */
+  sessionId: string;
+  /** The seq of that `tool/call` event in the sending Session's log. */
+  seq: number;
+}
+/**
+ * What a caller states when asking (the payload of `QuestionAsked`, minus what
+ * the store derives and stamps): which run asks, the key that makes the request
+ * stable, the content digest of the question, the citation of the body, the
+ * message identity the delivery layer will use, and whether the answer blocks
+ * the asking run.
+ *
+ * The parent is deliberately absent: it is the asking task's direct parent, and
+ * a caller that could name a recipient could ask the wrong node. The store
+ * resolves the parent task, and its current run, from the child run alone.
+ */
+interface QuestionAsk {
+  /** The run asking; its task's direct parent is the addressee. */
+  childRunId: RunId;
+  /** The caller's stable request key (§F.1); one key per question, and re-sends repeat it. */
+  requestKey: string;
+  /** SHA-256 of the question body as the sender wrote it — the content identity used for idempotency, never the body itself. */
+  questionDigest: string;
+  /** Where the question's body is: the child session's own `tool/call` event. */
+  questionRef: QuestionMessageRef;
+  /** The delivery identity the message carries into the parent's Session (agent-runtime's handle; the store records it so a retry re-delivers the same message). */
+  messageId: string;
+  /** Whether an answer is required before the asking run may continue. */
+  blocking: boolean;
+}
+/**
+ * What a caller states when answering (the payload of `QuestionAnswered`, minus
+ * what the store derives and stamps). The answering run is named explicitly and
+ * must be the run the question was asked of — a question is addressed to one
+ * run, and an answer from a restarted or unrelated run is not an answer to it.
+ */
+interface QuestionAnswer {
+  /** The question being answered. */
+  questionId: string;
+  /** The answering run; must equal the question record's parent run. */
+  parentRunId: RunId;
+  /** The caller's stable request key for this answer; several keys may answer one open question. */
+  requestKey: string;
+  /** SHA-256 of the answer body as the sender wrote it — content identity for idempotency, never the body itself. */
+  answerDigest: string;
+  /** The parent's declaration that the question is answered (true) or still open (false). Never a classification and never an authorization. */
+  resolves: boolean;
+  /** Where the answer's body is: the parent session's own `tool/call` event. */
+  answerRef: QuestionMessageRef;
+  /** The delivery identity the answer carries into the child's Session. */
+  messageId: string;
+}
+/**
+ * One stored question: the ask as it was written, plus the id it derives from,
+ * the parent run it was addressed to, the time the store recorded it, and the
+ * answers that have arrived.
+ *
+ * `answers` is absent until one is recorded (an answer is its own event, never
+ * a rewrite of the question), and its order is the order the store applied
+ * them — a reader asking "was this resolved" reads the list, because the
+ * resolution *is* an answer's `resolves` declaration and is never duplicated
+ * into a flag of its own.
+ */
+interface QuestionRecord extends QuestionAsk {
+  /** `q-` plus {@link questionIdOf}'s derivation from the run and the key. */
+  questionId: string;
+  /** The run the question is addressed to: the parent task's current run when the question was recorded. */
+  parentRunId: RunId;
+  /** When the ask was recorded, as the writer stated it. */
+  askedAt: string;
+  /** The answers recorded so far, in application order; absent until the first one. */
+  answers?: readonly QuestionAnswerRecord[];
+}
+/** One stored answer: the claim as it was written, plus the id it derives from and the time it was recorded. */
+interface QuestionAnswerRecord extends QuestionAnswer {
+  /** `a-` plus {@link answerIdOf}'s derivation from the question and the key. */
+  answerId: string;
+  /** When the answer was recorded, as the writer stated it. */
+  answeredAt: string;
+}
+/**
+ * The questions a snapshot holds, indexed by the one question a reader asks
+ * ("what does this run wait on?" is a filter, but "what was this id?" is not):
+ * every question in ask order, and by id.
+ *
+ * The request-key view a proposal index carries is deliberately missing here:
+ * a question's key is already inside its id derivation (the asking run and the
+ * key are what the id covers), so an id lookup *is* the by-key lookup and a
+ * second index could only disagree with it. Answers are not indexed at all —
+ * they live under the question they answer.
+ */
+interface TaskQuestionIndex {
+  /** Every question the store holds, in ask order. */
+  readonly all: readonly QuestionRecord[];
+  /** `questionId` → the question, answers included. */
+  readonly byId: Readonly<Record<string, QuestionRecord>>;
+}
+/** What an ask returns: the stored record, and whether this call is the one that recorded it. */
+interface QuestionAskResult {
+  readonly question: QuestionRecord;
+  readonly created: boolean;
+}
+/** What an answer returns: the stored record, and whether this call is the one that recorded it. */
+interface QuestionAnswerResult {
+  readonly answer: QuestionAnswerRecord;
+  readonly created: boolean;
+}
+/**
+ * The identity a question id is derived from. Exactly these two fields: the
+ * asking run keeps two tasks' identical keys apart, and the key keeps two
+ * questions of one run apart, so a retry addresses the question it means.
+ */
+interface QuestionIdentity {
+  childRunId: RunId;
+  requestKey: string;
+}
+/**
+ * The identity an answer id is derived from: the question and the answering
+ * caller's key. The question already covers its asking run and its own key.
+ */
+interface QuestionAnswerIdentity {
+  questionId: string;
+  requestKey: string;
+}
+/**
+ * The question id one (run, key) pair gets: `q-` plus SHA-256 over
+ * {@link canonicalize} of {@link QuestionIdentity}. One implementation, used by
+ * every writer and by the idempotency lookup, so "the question this caller
+ * asked before the restart" and "the question in the store" cannot be two
+ * addresses for one fact. Nothing else is in the digest — the parent run, the
+ * body, the blocking flag and the time are recorded *beside* it, and a retry
+ * that changes one of them is a conflict the caller hears about, not a second
+ * question.
+ */
+declare function questionIdOf(identity: QuestionIdentity): string;
+/**
+ * The answer id one (question, key) pair gets: `a-` plus SHA-256 over
+ * {@link canonicalize} of {@link QuestionAnswerIdentity}. Same rule and same
+ * reason as {@link questionIdOf}: a repeated answer is answered from the store,
+ * and a different answer to the same question is a different key — never a
+ * second write under one id.
+ */
+declare function answerIdOf(identity: QuestionAnswerIdentity): string;
+/**
+ * The question one id names, or `undefined` when the store holds none. A
+ * snapshot without a question index is refused rather than read as empty: a
+ * snapshot built by this build's reducer always carries the index (empty
+ * members included), so an absent one means "this reader cannot see questions",
+ * and answering "the store holds none" from it would be a lie a caller could
+ * act on.
+ */
+declare function questionOf(snapshot: TaskSnapshot, questionId: string): QuestionRecord | undefined;
+/**
+ * The questions one run asked that are still open, in ask order. Open means
+ * both halves: no answer has resolved it, and both runs are still running —
+ * the parent has to be able to answer, and a settled run is never blocked by
+ * anything again. A question whose parent run settled stays on record as an
+ * unanswered question; it simply stops being open, which is how terminal
+ * cancellation takes effect without a cancellation event.
+ */
+declare function openQuestionsOf(snapshot: TaskSnapshot, childRunId: RunId): QuestionRecord[];
+/**
+ * The open questions whose answers block the asking run — the derivation the
+ * write gate and the display read. `blocking: false` is a real question that is
+ * expected to be delivered and answered; it just never stops the run.
+ */
+declare function blockingQuestionsOf(snapshot: TaskSnapshot, childRunId: RunId): QuestionRecord[];
+/**
+ * The questions one parent run has been asked and has not resolved, in ask
+ * order — the parent-side pending list (§7.3: an unanswered question and an
+ * unread answer both keep their reference until the model has actually seen
+ * them). A question whose parent run settled is not here: nobody can answer it
+ * any more, and the asking run derives its own release from the same rule.
+ */
+declare function questionsAwaitingAnswerOf(snapshot: TaskSnapshot, parentRunId: RunId): QuestionRecord[];
+//#endregion
 //#region src/types.d.ts
 type TaskId = string;
 type RunId = string;
@@ -1024,12 +1214,15 @@ interface TaskRun {
    */
   submission?: SubmissionRecord;
   /**
-   * Question ids the run is waiting on (A4 mount point). A3 never writes a
-   * non-empty value; the field exists so the shape has one owner, and the
-   * reducer carries whatever A4 writes through phase changes unchanged.
+   * The A3 question-id mount point, kept readable and never written again
+   * (A4): the store's question records are the one durable source of what a run
+   * waits on, and a second index that could disagree with them is what A4 took
+   * out of the write shape. The reducer still carries the field when an old
+   * record carries it, so a store written by A3 opens with the snapshot it had,
+   * and a new phase change carrying it is refused by name.
    */
   pendingQuestionIds?: string[];
-  /** Question ids whose answers block this run's next step (A4 mount point); see {@link pendingQuestionIds}. */
+  /** The A3 blocking-question mount point, kept readable and never written again; see {@link pendingQuestionIds}. */
   blockingQuestionIds?: string[];
   /**
    * The last no-progress marking on this run (A3). Overwritten by each
@@ -1579,6 +1772,19 @@ interface TaskSnapshot {
    * {@link TaskProposalIndex}.
    */
   readonly proposals?: TaskProposalIndex;
+  /**
+   * The store's parent/child questions (A4 §F.1), in ask order and by id, each
+   * carrying the answers recorded so far. This is the *only* durable source of
+   * question blocking: a run's open questions, and which of them block it, are
+   * derived from these records (see `question.ts`'s helpers), never from a
+   * phase, a run field or a second index.
+   *
+   * Optional at the type level for the same reason as {@link proposals} — a
+   * hand-built snapshot predates questions — and a snapshot produced by this
+   * build's reducer always carries it. A reader that cannot see the index must
+   * not read it as "no questions": see {@link TaskQuestionIndex}.
+   */
+  readonly questions?: TaskQuestionIndex;
 }
 interface TaskEventPayloads {
   /** A task instance enters the store (created status, no runs or children attached). */
@@ -1653,9 +1859,15 @@ interface TaskEventPayloads {
     batchId?: string;
     /** The record a `submitted` run hands in; required for that phase and refused elsewhere. */
     submission?: SubmissionRecord;
-    /** A4: question ids the run waits on; the reducer checks shape only and carries them unchanged. */
+    /**
+     * The A3 question-id mount point, readable for old records only: the
+     * reducer still shape-checks and carries it, so a store written before A4
+     * replays to the same snapshot, while this build's write entries refuse a
+     * phase change that carries it — what a run waits on comes from the
+     * question facts ({@link QuestionRecord}), not from the phase.
+     */
     pendingQuestionIds?: string[];
-    /** A4: blocking question ids; same handling as `pendingQuestionIds`. */
+    /** The A3 blocking-question mount point, readable for old records only; same handling as `pendingQuestionIds`. */
     blockingQuestionIds?: string[];
     /** The caller's account of the transition, when a reader needs one. */
     reason?: string;
@@ -1678,6 +1890,47 @@ interface TaskEventPayloads {
     factCount: number;
     /** The observable diagnostic: why the run looks stuck. */
     note: string;
+  };
+  /**
+   * A child run asks its direct parent task a question (A4, plan §F.1). The
+   * record is the durable half of the exchange — the question's identity, the
+   * asking and answering runs, the citation of the body, the delivery's
+   * messageId, the request key and the content digest — and it is deliberately
+   * not the body: the text lives in the asking Session's own `tool/call` event,
+   * which {@link QuestionRecord.questionRef} names. Several questions may be
+   * open on one run, and a run with a blocking one stops its blocked work
+   * without any phase change: the blockage is derived from these records.
+   *
+   * The reducer is the gate. It re-derives the id from the child run and the
+   * key, requires the envelope to name that run, the child's task and its
+   * parent task, requires both runs to be running, requires the asking task to
+   * have a direct parent (a root or parentless replay task has none to ask, and
+   * the reducer refuses by name rather than inventing one), requires the cited
+   * Session to be the asking run's own, and refuses a second question under one
+   * id — a repeated request is answered from the stored record by the entry,
+   * never by a second event.
+   */
+  QuestionAsked: {
+    question: QuestionRecord;
+  };
+  /**
+   * A parent run answers one of its children's questions (A4, plan §F.1). The
+   * answer is its own event, appended to the question's record: an open
+   * question accepts several answers (a partial one, then a resolving one), and
+   * `resolves` is the parent's declaration that this question is answered —
+   * `false` leaves it open, and the framework neither classifies the answer nor
+   * treats it as a contract or permission change.
+   *
+   * The reducer re-derives the answer id from the question and the key, refuses
+   * an answer whose run is not the run the question was asked of (a wrong
+   * parent, including one of a restarted run), refuses a question that is
+   * already resolved or whose child or parent run has settled (a late answer
+   * neither revives a run nor leaves a new fact), requires the envelope and the
+   * cited Session to be the answering run's own, and refuses a second answer
+   * under one id.
+   */
+  QuestionAnswered: {
+    answer: QuestionAnswerRecord;
   };
   /** The capability manifest a task was admitted with is stored. */
   CapabilityResolved: {
@@ -1867,9 +2120,12 @@ declare class TaskState {
    */
   private assertBirthPhase;
   /**
-   * A4's question ids ride on the phase change; nothing reads them yet, so the
-   * reducer checks that the list is a list of strings and carries it unchanged
-   * — an empty list is a legitimate shape and is stored as given.
+   * The A3 question-id mount points ride on a phase change and are read-only
+   * since A4: the question records are the one durable source of what a run
+   * waits on, and this build's write entries refuse a phase change that carries
+   * either field. Records already in a log still have to replay to the snapshot
+   * they produced, so the reducer keeps shape-checking and carrying them — an
+   * empty list is a legitimate shape and is stored as given.
    */
   private assertQuestionIds;
   private addDependency;
@@ -1917,6 +2173,45 @@ declare class TaskState {
    * and never accumulates, so replay and live observation agree.
    */
   private markRunProgress;
+  /**
+   * A child run asks its direct parent (A4 §F.1). The reducer is the gate for
+   * the whole shape, in this order: the record must be well-formed, its id must
+   * be the identity its own (child run, request key) pair derives, the asking
+   * run must exist and still be running, its task must have a direct parent
+   * (a root or parentless replay task has nobody to ask, and the refusal names
+   * that rather than inventing a parent), the parent task's *current* run must
+   * be the one the record names and must be running, and the cited Session must
+   * be the asking run's own — a citation into some other Session could point at
+   * text this store never saw. The envelope is checked against the same facts:
+   * it names the asking run, the child task, and the parent task.
+   *
+   * The parent run is resolved here, not taken from the caller: an ask cannot
+   * choose its addressee, and a parent run that settled after the caller's
+   * read closes the ask by name (the entry's own check is advisory; this one
+   * binds, because it runs inside the commit).
+   */
+  private askQuestion;
+  /**
+   * A parent run answers one of its children's questions (A4 §F.1). An answer
+   * is appended to the question's record, so the reducer's job is to decide
+   * whether this answer may join *this* question: the id must be the one its
+   * (question, request key) pair derives, the question must exist, the
+   * answering run must be the run the question was asked of (a wrong parent,
+   * including the new run of a restarted task, is refused by name), both runs
+   * must still be running, the question must not already be resolved, the cited
+   * Session must be the answering run's own, and neither the envelope nor the
+   * answer id may disagree with what is stored.
+   *
+   * A settled run is the late-answer case the plan fixes: the refusal happens
+   * here, before anything is applied, so a terminal run is never revived and a
+   * question nobody can answer leaves no new fact — the record stays as the
+   * audit of what was asked. `resolves: false` is a complete answer that keeps
+   * the question open, which is why the openness test reads the answers and not
+   * a status.
+   */
+  private answerQuestion;
+  /** A cited body reference: the sending Session, and a seq inside its log. */
+  private assertMessageRef;
   private resolveCapabilities;
   private produceEvidence;
   private addHandoff;
@@ -2016,6 +2311,15 @@ declare class TaskState {
    * proposals would happily write a second one for the same request key.
    */
   private index;
+  /**
+   * The question index of the snapshot this state replays on. Absent only when
+   * a foreign, hand-built snapshot (one from a reader that predates questions)
+   * was replayed onto — never on this build's own value — and that is a refusal
+   * rather than an empty index, for the same reason as {@link index}: a reducer
+   * that cannot see the questions would happily write a second one for the same
+   * (run, request key) identity.
+   */
+  private questions;
   /**
    * Every proposal event is about one subject, and the envelope has to name it:
    * a decomposition proposal's events name the parent task whose batch it is; a
@@ -2258,8 +2562,53 @@ declare class TaskService extends Service {
    * gate: only `active → waiting_children` (carrying the batch id) and
    * `active|waiting_children → submitted` (carrying the submission) apply, and
    * a refused transition commits nothing.
+   *
+   * The A3 question-id mount points are no longer part of this write shape
+   * (A4): what a run waits on comes from the question records, and a payload
+   * that carries either field is refused before anything is queued rather than
+   * written as a second index that could disagree with them. The reducer still
+   * carries them when an old record carries them, so old stores replay
+   * unchanged.
    */
   changeRunPhaseIn(storeId: string, taskId: TaskId, runId: RunId, actor: string, payload: TaskEventPayloads['RunPhaseChanged']): Promise<void>;
+  /**
+   * Records one question a child run asks its direct parent (A4 §F.1), and
+   * returns the record — the one this call wrote, or the one already holding
+   * this identity.
+   *
+   * The identity is derived from the asking run and the caller's request key
+   * ({@link questionIdOf}), so a repeated request is answered from the store:
+   * same content digest and same blocking declaration return the stored record
+   * with `created: false` and write nothing at all, while a disagreement in
+   * either is refused by name — the store never silently keeps one declaration
+   * and reports the other as delivered. The digest covers the question's text;
+   * the body itself stays in the asking Session, cited by `questionRef`.
+   *
+   * The parent is resolved from the child run's task, never accepted from the
+   * caller: its direct parent task, and that task's *current* run. The reads
+   * here are advisory (the write lock is not held across them) and the reducer
+   * is what binds the record, so a parent run that settled in between refuses
+   * the ask inside the commit and writes nothing.
+   */
+  askParentQuestionIn(storeId: string, ask: QuestionAsk, actor: string): Promise<QuestionAskResult>;
+  /**
+   * Records one answer to a still-open question (A4 §F.1), and returns the
+   * record — the one this call wrote, or the one already holding this identity.
+   *
+   * The identity is derived from the question and the caller's request key
+   * ({@link answerIdOf}), and the idempotency check runs *before* the openness
+   * check on purpose: an answer that resolved its question may be re-delivered
+   * after a crash, and such a retry must get its own record back rather than
+   * "the question is already resolved". A repeated key with a different digest
+   * or a different `resolves` declaration is refused by name.
+   *
+   * The answering run is named by the caller and the reducer requires it to be
+   * the run the question was asked of; the body citation must sit in that run's
+   * own Session. Both runs must still be running: a late answer after either
+   * settled is refused before anything is applied, so no terminal run is
+   * revived and the store leaves no new fact.
+   */
+  answerParentQuestionIn(storeId: string, answer: QuestionAnswer, actor: string): Promise<QuestionAnswerResult>;
   /**
    * Records one no-progress marking on an active run (A3). `rounds` is the
    * caller's consecutive count; the reducer records the value it is given.
@@ -2329,4 +2678,4 @@ declare class TaskService extends Service {
   private header;
 }
 //#endregion
-export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, ExecutionPhase, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, NoProgressRecord, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ProtectedInputRef, ROOT_PROPOSAL_TASK_ID, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootProposalIdentity, RunId, RunMcpServerBinding, RunProviderBinding, RunSkillBinding, RunStatus, SkillFitFacts, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskContract, TaskContractVersion, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, admissionContextDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, sha256Hex, taskProposalId };
+export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, ExecutionPhase, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, NoProgressRecord, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ProtectedInputRef, QuestionAnswer, QuestionAnswerIdentity, QuestionAnswerRecord, QuestionAnswerResult, QuestionAsk, QuestionAskResult, QuestionIdentity, QuestionMessageRef, QuestionRecord, ROOT_PROPOSAL_TASK_ID, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootProposalIdentity, RunId, RunMcpServerBinding, RunProviderBinding, RunSkillBinding, RunStatus, SkillFitFacts, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskContract, TaskContractVersion, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskQuestionIndex, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, admissionContextDigest, answerIdOf, blockingQuestionsOf, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, sha256Hex, taskProposalId };

@@ -211,6 +211,96 @@ function verifierKey(verifier) {
 }
 
 //#endregion
+//#region src/question.ts
+/** The `q-` prefix every question id carries, so an id is recognizable wherever it is printed. */
+const QUESTION_ID_PREFIX = "q-";
+/** The `a-` prefix every answer id carries. */
+const ANSWER_ID_PREFIX = "a-";
+/**
+* The question id one (run, key) pair gets: `q-` plus SHA-256 over
+* {@link canonicalize} of {@link QuestionIdentity}. One implementation, used by
+* every writer and by the idempotency lookup, so "the question this caller
+* asked before the restart" and "the question in the store" cannot be two
+* addresses for one fact. Nothing else is in the digest — the parent run, the
+* body, the blocking flag and the time are recorded *beside* it, and a retry
+* that changes one of them is a conflict the caller hears about, not a second
+* question.
+*/
+function questionIdOf(identity) {
+	return `${QUESTION_ID_PREFIX}${sha256Hex(canonicalize(identity))}`;
+}
+/**
+* The answer id one (question, key) pair gets: `a-` plus SHA-256 over
+* {@link canonicalize} of {@link QuestionAnswerIdentity}. Same rule and same
+* reason as {@link questionIdOf}: a repeated answer is answered from the store,
+* and a different answer to the same question is a different key — never a
+* second write under one id.
+*/
+function answerIdOf(identity) {
+	return `${ANSWER_ID_PREFIX}${sha256Hex(canonicalize(identity))}`;
+}
+/**
+* The question one id names, or `undefined` when the store holds none. A
+* snapshot without a question index is refused rather than read as empty: a
+* snapshot built by this build's reducer always carries the index (empty
+* members included), so an absent one means "this reader cannot see questions",
+* and answering "the store holds none" from it would be a lie a caller could
+* act on.
+*/
+function questionOf(snapshot, questionId) {
+	return questionIndex(snapshot).byId[questionId];
+}
+/**
+* The questions one run asked that are still open, in ask order. Open means
+* both halves: no answer has resolved it, and both runs are still running —
+* the parent has to be able to answer, and a settled run is never blocked by
+* anything again. A question whose parent run settled stays on record as an
+* unanswered question; it simply stops being open, which is how terminal
+* cancellation takes effect without a cancellation event.
+*/
+function openQuestionsOf(snapshot, childRunId) {
+	return questionIndex(snapshot).all.filter((question) => question.childRunId === childRunId && isOpen(snapshot, question));
+}
+/**
+* The open questions whose answers block the asking run — the derivation the
+* write gate and the display read. `blocking: false` is a real question that is
+* expected to be delivered and answered; it just never stops the run.
+*/
+function blockingQuestionsOf(snapshot, childRunId) {
+	return openQuestionsOf(snapshot, childRunId).filter((question) => question.blocking);
+}
+/**
+* The questions one parent run has been asked and has not resolved, in ask
+* order — the parent-side pending list (§7.3: an unanswered question and an
+* unread answer both keep their reference until the model has actually seen
+* them). A question whose parent run settled is not here: nobody can answer it
+* any more, and the asking run derives its own release from the same rule.
+*/
+function questionsAwaitingAnswerOf(snapshot, parentRunId) {
+	return questionIndex(snapshot).all.filter((question) => question.parentRunId === parentRunId && isOpen(snapshot, question));
+}
+/** The snapshot's question index, or a refusal: an absent index is "cannot see", never "holds none" (see {@link questionOf}). */
+function questionIndex(snapshot) {
+	const index = snapshot.questions;
+	if (index === void 0) throw new Error("task: snapshot carries no question index");
+	return index;
+}
+/**
+* Whether one stored question still blocks anything: unresolved, and both runs
+* still running. `running` is the only non-terminal run status this build
+* writes — `blocked`, `verified`, `failed` and `cancelled` are all settled
+* outcomes a run never leaves — so this one test covers "the child still needs
+* to know" and "the parent can still answer".
+*/
+function isOpen(snapshot, question) {
+	if (question.answers?.some((answer) => answer.resolves) === true) return false;
+	return isRunning(snapshot, question.childRunId) && isRunning(snapshot, question.parentRunId);
+}
+function isRunning(snapshot, runId) {
+	return snapshot.runs.some((run) => run.runId === runId && run.status === "running");
+}
+
+//#endregion
 //#region src/types.ts
 /** DFS over an edge list: true when `target` is reachable from `start`. */
 function reaches(edges, start, target) {
@@ -361,6 +451,13 @@ function emptyProposalIndex() {
 		byParentTask: {}
 	};
 }
+/** One store's question index with nothing in it; what a store without questions answers. */
+function emptyQuestionIndex() {
+	return {
+		all: [],
+		byId: {}
+	};
+}
 function nonEmpty(value) {
 	return typeof value === "string" && value.length > 0;
 }
@@ -387,7 +484,8 @@ var TaskState = class TaskState {
 			diagnoses: [],
 			obligations: [],
 			capabilities: {},
-			proposals: emptyProposalIndex()
+			proposals: emptyProposalIndex(),
+			questions: emptyQuestionIndex()
 		} : copy(snapshot);
 	}
 	clone() {
@@ -439,6 +537,12 @@ var TaskState = class TaskState {
 				return;
 			case "RunProgressMarked":
 				this.markRunProgress(event$1.taskId, event$1.runId, event$1.payload, event$1.timestamp);
+				return;
+			case "QuestionAsked":
+				this.askQuestion(event$1.taskId, event$1.runId, event$1.parentTaskId, event$1.payload.question);
+				return;
+			case "QuestionAnswered":
+				this.answerQuestion(event$1.taskId, event$1.runId, event$1.parentTaskId, event$1.payload.answer);
 				return;
 			case "CapabilityResolved":
 				this.resolveCapabilities(event$1.taskId, event$1.payload.manifest);
@@ -661,9 +765,12 @@ var TaskState = class TaskState {
 		this.assertSubmissionShape(run.runId, run.submission);
 	}
 	/**
-	* A4's question ids ride on the phase change; nothing reads them yet, so the
-	* reducer checks that the list is a list of strings and carries it unchanged
-	* — an empty list is a legitimate shape and is stored as given.
+	* The A3 question-id mount points ride on a phase change and are read-only
+	* since A4: the question records are the one durable source of what a run
+	* waits on, and this build's write entries refuse a phase change that carries
+	* either field. Records already in a log still have to replay to the snapshot
+	* they produced, so the reducer keeps shape-checking and carrying them — an
+	* empty list is a legitimate shape and is stored as given.
 	*/
 	assertQuestionIds(runId, payload) {
 		const lists = [["pendingQuestionIds", payload.pendingQuestionIds], ["blockingQuestionIds", payload.blockingQuestionIds]];
@@ -820,6 +927,138 @@ var TaskState = class TaskState {
 				}
 			} : item)
 		};
+	}
+	/**
+	* A child run asks its direct parent (A4 §F.1). The reducer is the gate for
+	* the whole shape, in this order: the record must be well-formed, its id must
+	* be the identity its own (child run, request key) pair derives, the asking
+	* run must exist and still be running, its task must have a direct parent
+	* (a root or parentless replay task has nobody to ask, and the refusal names
+	* that rather than inventing a parent), the parent task's *current* run must
+	* be the one the record names and must be running, and the cited Session must
+	* be the asking run's own — a citation into some other Session could point at
+	* text this store never saw. The envelope is checked against the same facts:
+	* it names the asking run, the child task, and the parent task.
+	*
+	* The parent run is resolved here, not taken from the caller: an ask cannot
+	* choose its addressee, and a parent run that settled after the caller's
+	* read closes the ask by name (the entry's own check is advisory; this one
+	* binds, because it runs inside the commit).
+	*/
+	askQuestion(taskId, envelopeRunId, envelopeParentTaskId, question) {
+		if (!isRecord(question)) throw new Error("task: question must be an object");
+		if (!nonEmpty(question.questionId)) throw new Error("task: question id must be a non-empty string");
+		const id = question.questionId;
+		if (!nonEmpty(question.requestKey)) throw new Error(`task: question "${id}" request key must be a non-empty string`);
+		if (!nonEmpty(question.messageId)) throw new Error(`task: question "${id}" message id must be a non-empty string`);
+		if (!isDigest(question.questionDigest)) throw new Error(`task: question "${id}" content digest must be a lowercase SHA-256 hex digest`);
+		if (typeof question.blocking !== "boolean") throw new Error(`task: question "${id}" blocking must be a boolean`);
+		if (!nonEmpty(question.askedAt)) throw new Error(`task: question "${id}" requires an ask time`);
+		if (question.answers !== void 0) throw new Error(`task: question "${id}" is asked without answers; an answer is its own event`);
+		this.assertMessageRef(`question "${id}"`, question.questionRef);
+		const derived = questionIdOf({
+			childRunId: question.childRunId,
+			requestKey: question.requestKey
+		});
+		if (id !== derived) throw new Error(`task: question id "${id}" is not the identity of child run "${question.childRunId}" and request key "${question.requestKey}" ("${derived}")`);
+		const child = this.run(question.childRunId);
+		if (envelopeRunId !== child.runId) throw new Error(`task: question "${id}" envelope run id mismatch: the asking run is "${child.runId}", the envelope names "${String(envelopeRunId)}"`);
+		const childTask = this.task(child.taskId);
+		if (taskId !== childTask.taskId) throw new Error(`task: question "${id}" is asked by run "${child.runId}" of task "${childTask.taskId}", not "${taskId}"`);
+		if (child.status !== "running") throw new Error(`task: child run "${child.runId}" is ${child.status}; a question requires a running run`);
+		if (childTask.parentTaskId === void 0) throw new Error(`task: task "${childTask.taskId}" has no parent task; a root or parentless replay task cannot ask a parent`);
+		const parentTask = this.task(childTask.parentTaskId);
+		if (envelopeParentTaskId !== parentTask.taskId) throw new Error(`task: question "${id}" must carry parent task id "${parentTask.taskId}"; the envelope names "${String(envelopeParentTaskId)}"`);
+		const parentRunId = parentTask.runIds[parentTask.runIds.length - 1];
+		if (parentRunId === void 0) throw new Error(`task: parent task "${parentTask.taskId}" has no run for question "${id}"`);
+		const parentRun = this.run(parentRunId);
+		if (question.parentRunId !== parentRun.runId) throw new Error(`task: question "${id}" names parent run "${question.parentRunId}"; task "${parentTask.taskId}"'s current run is "${parentRun.runId}"`);
+		if (parentRun.status !== "running") throw new Error(`task: parent run "${parentRun.runId}" is ${parentRun.status}; a question requires a running parent run`);
+		if (question.questionRef.sessionId !== child.sessionId) throw new Error(`task: question "${id}" cites session "${question.questionRef.sessionId}"; the asking run's session is "${child.sessionId}"`);
+		const index = this.questions();
+		if (index.byId[id] !== void 0) throw new Error(`task: question "${id}" already exists`);
+		const stored = copy(question);
+		this.value = {
+			...this.value,
+			questions: {
+				all: [...index.all, stored],
+				byId: {
+					...index.byId,
+					[id]: stored
+				}
+			}
+		};
+	}
+	/**
+	* A parent run answers one of its children's questions (A4 §F.1). An answer
+	* is appended to the question's record, so the reducer's job is to decide
+	* whether this answer may join *this* question: the id must be the one its
+	* (question, request key) pair derives, the question must exist, the
+	* answering run must be the run the question was asked of (a wrong parent,
+	* including the new run of a restarted task, is refused by name), both runs
+	* must still be running, the question must not already be resolved, the cited
+	* Session must be the answering run's own, and neither the envelope nor the
+	* answer id may disagree with what is stored.
+	*
+	* A settled run is the late-answer case the plan fixes: the refusal happens
+	* here, before anything is applied, so a terminal run is never revived and a
+	* question nobody can answer leaves no new fact — the record stays as the
+	* audit of what was asked. `resolves: false` is a complete answer that keeps
+	* the question open, which is why the openness test reads the answers and not
+	* a status.
+	*/
+	answerQuestion(taskId, envelopeRunId, envelopeParentTaskId, answer) {
+		if (!isRecord(answer)) throw new Error("task: answer must be an object");
+		if (!nonEmpty(answer.answerId)) throw new Error("task: answer id must be a non-empty string");
+		const id = answer.answerId;
+		if (!nonEmpty(answer.questionId)) throw new Error(`task: answer "${id}" question id must be a non-empty string`);
+		if (!nonEmpty(answer.requestKey)) throw new Error(`task: answer "${id}" request key must be a non-empty string`);
+		if (!nonEmpty(answer.messageId)) throw new Error(`task: answer "${id}" message id must be a non-empty string`);
+		if (!isDigest(answer.answerDigest)) throw new Error(`task: answer "${id}" content digest must be a lowercase SHA-256 hex digest`);
+		if (typeof answer.resolves !== "boolean") throw new Error(`task: answer "${id}" resolves must be a boolean`);
+		if (!nonEmpty(answer.answeredAt)) throw new Error(`task: answer "${id}" requires an answer time`);
+		this.assertMessageRef(`answer "${id}"`, answer.answerRef);
+		const derived = answerIdOf({
+			questionId: answer.questionId,
+			requestKey: answer.requestKey
+		});
+		if (id !== derived) throw new Error(`task: answer id "${id}" is not the identity of question "${answer.questionId}" and request key "${answer.requestKey}" ("${derived}")`);
+		const question = this.questions().byId[answer.questionId];
+		if (question === void 0) throw new Error(`task: unknown question "${answer.questionId}"`);
+		if (answer.parentRunId !== question.parentRunId) throw new Error(`task: answer "${id}" names parent run "${answer.parentRunId}"; question "${question.questionId}" was asked of run "${question.parentRunId}"`);
+		const child = this.run(question.childRunId);
+		const parent = this.run(question.parentRunId);
+		if (child.status !== "running") throw new Error(`task: question "${question.questionId}" is not open: child run "${child.runId}" is ${child.status}; a question requires a running run`);
+		if (parent.status !== "running") throw new Error(`task: question "${question.questionId}" is not open: parent run "${parent.runId}" is ${parent.status}; a question requires a running parent run`);
+		if (answer.answerRef.sessionId !== parent.sessionId) throw new Error(`task: answer "${id}" cites session "${answer.answerRef.sessionId}"; the answering run's session is "${parent.sessionId}"`);
+		if (envelopeRunId !== parent.runId) throw new Error(`task: answer "${id}" envelope run id mismatch: the answering run is "${parent.runId}", the envelope names "${String(envelopeRunId)}"`);
+		const childTask = this.task(child.taskId);
+		if (taskId !== childTask.taskId) throw new Error(`task: answer "${id}" belongs to run "${child.runId}" of task "${childTask.taskId}", not "${taskId}"`);
+		if (envelopeParentTaskId !== parent.taskId) throw new Error(`task: answer "${id}" must carry parent task id "${parent.taskId}"; the envelope names "${String(envelopeParentTaskId)}"`);
+		const answers = question.answers ?? [];
+		if (answers.some((item) => item.resolves)) throw new Error(`task: question "${question.questionId}" is already resolved; answer "${id}" is refused`);
+		if (answers.some((item) => item.answerId === id)) throw new Error(`task: answer "${id}" already exists`);
+		const stored = {
+			...question,
+			answers: [...answers, copy(answer)]
+		};
+		const replace = (questions) => questions.map((item) => item.questionId === question.questionId ? stored : item);
+		this.value = {
+			...this.value,
+			questions: {
+				all: replace(this.questions().all),
+				byId: {
+					...this.questions().byId,
+					[question.questionId]: stored
+				}
+			}
+		};
+	}
+	/** A cited body reference: the sending Session, and a seq inside its log. */
+	assertMessageRef(where, ref) {
+		if (!isRecord(ref)) throw new Error(`task: ${where} body reference must be an object`);
+		if (!nonEmpty(ref.sessionId)) throw new Error(`task: ${where} body reference session id must be a non-empty string`);
+		if (!Number.isInteger(ref.seq) || ref.seq < 0) throw new Error(`task: ${where} body reference seq must be a non-negative integer`);
 	}
 	resolveCapabilities(taskId, manifest) {
 		this.task(taskId);
@@ -1145,6 +1384,19 @@ var TaskState = class TaskState {
 	index() {
 		const index = this.value.proposals;
 		if (index === void 0) throw new Error("task: snapshot carries no proposal index");
+		return index;
+	}
+	/**
+	* The question index of the snapshot this state replays on. Absent only when
+	* a foreign, hand-built snapshot (one from a reader that predates questions)
+	* was replayed onto — never on this build's own value — and that is a refusal
+	* rather than an empty index, for the same reason as {@link index}: a reducer
+	* that cannot see the questions would happily write a second one for the same
+	* (run, request key) identity.
+	*/
+	questions() {
+		const index = this.value.questions;
+		if (index === void 0) throw new Error("task: snapshot carries no question index");
 		return index;
 	}
 	/**
@@ -1963,14 +2215,148 @@ var TaskService = class extends Service {
 	* gate: only `active → waiting_children` (carrying the batch id) and
 	* `active|waiting_children → submitted` (carrying the submission) apply, and
 	* a refused transition commits nothing.
+	*
+	* The A3 question-id mount points are no longer part of this write shape
+	* (A4): what a run waits on comes from the question records, and a payload
+	* that carries either field is refused before anything is queued rather than
+	* written as a second index that could disagree with them. The reducer still
+	* carries them when an old record carries them, so old stores replay
+	* unchanged.
 	*/
 	async changeRunPhaseIn(storeId, taskId, runId, actor, payload) {
+		if (payload.pendingQuestionIds !== void 0 || payload.blockingQuestionIds !== void 0) throw new Error("task: RunPhaseChanged no longer carries pendingQuestionIds/blockingQuestionIds; question blocking is derived from the question facts, and the A3 fields stay readable on records already written");
 		await this.commitIn(storeId, [event("RunPhaseChanged", {
 			taskId,
 			runId,
 			actor,
 			payload
 		})]);
+	}
+	/**
+	* Records one question a child run asks its direct parent (A4 §F.1), and
+	* returns the record — the one this call wrote, or the one already holding
+	* this identity.
+	*
+	* The identity is derived from the asking run and the caller's request key
+	* ({@link questionIdOf}), so a repeated request is answered from the store:
+	* same content digest and same blocking declaration return the stored record
+	* with `created: false` and write nothing at all, while a disagreement in
+	* either is refused by name — the store never silently keeps one declaration
+	* and reports the other as delivered. The digest covers the question's text;
+	* the body itself stays in the asking Session, cited by `questionRef`.
+	*
+	* The parent is resolved from the child run's task, never accepted from the
+	* caller: its direct parent task, and that task's *current* run. The reads
+	* here are advisory (the write lock is not held across them) and the reducer
+	* is what binds the record, so a parent run that settled in between refuses
+	* the ask inside the commit and writes nothing.
+	*/
+	async askParentQuestionIn(storeId, ask, actor) {
+		const store = this.requireStore(storeId);
+		await store.ready;
+		await store.writes;
+		const snapshot = store.state.snapshot();
+		const questionId = questionIdOf({
+			childRunId: ask.childRunId,
+			requestKey: ask.requestKey
+		});
+		const stored = questionOf(snapshot, questionId);
+		if (stored !== void 0) {
+			if (stored.questionDigest !== ask.questionDigest) throw new Error(`task: question request key "${ask.requestKey}" is already bound to question "${questionId}": the stored content digest does not match the one offered`);
+			if (stored.blocking !== ask.blocking) throw new Error(`task: question request key "${ask.requestKey}" is already bound to question "${questionId}" with a different blocking declaration`);
+			return {
+				question: stored,
+				created: false
+			};
+		}
+		const child = snapshot.runs.find((item) => item.runId === ask.childRunId);
+		if (child === void 0) throw new Error(`task: unknown run "${ask.childRunId}"`);
+		const childTask = snapshot.tasks.find((item) => item.taskId === child.taskId);
+		if (childTask === void 0) throw new Error(`task: unknown task "${child.taskId}"`);
+		if (childTask.parentTaskId === void 0) throw new Error(`task: task "${childTask.taskId}" has no parent task; a root or parentless replay task cannot ask a parent`);
+		const parentTask = snapshot.tasks.find((item) => item.taskId === childTask.parentTaskId);
+		if (parentTask === void 0) throw new Error(`task: unknown parent task "${childTask.parentTaskId}"`);
+		const parentRunId = parentTask.runIds[parentTask.runIds.length - 1];
+		if (parentRunId === void 0) throw new Error(`task: parent task "${parentTask.taskId}" has no run for a question from task "${childTask.taskId}"`);
+		const question = {
+			...ask,
+			questionId,
+			parentRunId,
+			askedAt: now()
+		};
+		await this.commitIn(storeId, [event("QuestionAsked", {
+			taskId: childTask.taskId,
+			runId: child.runId,
+			sessionId: child.sessionId,
+			parentTaskId: parentTask.taskId,
+			actor,
+			payload: { question }
+		})]);
+		return {
+			question,
+			created: true
+		};
+	}
+	/**
+	* Records one answer to a still-open question (A4 §F.1), and returns the
+	* record — the one this call wrote, or the one already holding this identity.
+	*
+	* The identity is derived from the question and the caller's request key
+	* ({@link answerIdOf}), and the idempotency check runs *before* the openness
+	* check on purpose: an answer that resolved its question may be re-delivered
+	* after a crash, and such a retry must get its own record back rather than
+	* "the question is already resolved". A repeated key with a different digest
+	* or a different `resolves` declaration is refused by name.
+	*
+	* The answering run is named by the caller and the reducer requires it to be
+	* the run the question was asked of; the body citation must sit in that run's
+	* own Session. Both runs must still be running: a late answer after either
+	* settled is refused before anything is applied, so no terminal run is
+	* revived and the store leaves no new fact.
+	*/
+	async answerParentQuestionIn(storeId, answer, actor) {
+		const store = this.requireStore(storeId);
+		await store.ready;
+		await store.writes;
+		const snapshot = store.state.snapshot();
+		const question = questionOf(snapshot, answer.questionId);
+		if (question === void 0) throw new Error(`task: unknown question "${answer.questionId}"`);
+		const answerId = answerIdOf({
+			questionId: answer.questionId,
+			requestKey: answer.requestKey
+		});
+		const stored = (question.answers ?? []).find((item) => item.answerId === answerId);
+		if (stored !== void 0) {
+			if (stored.answerDigest !== answer.answerDigest) throw new Error(`task: answer request key "${answer.requestKey}" is already bound to answer "${answerId}": the stored content digest does not match the one offered`);
+			if (stored.resolves !== answer.resolves) throw new Error(`task: answer request key "${answer.requestKey}" is already bound to answer "${answerId}" with a different resolves declaration`);
+			return {
+				answer: stored,
+				created: false
+			};
+		}
+		const child = snapshot.runs.find((item) => item.runId === question.childRunId);
+		if (child === void 0) throw new Error(`task: unknown run "${question.childRunId}"`);
+		const childTask = snapshot.tasks.find((item) => item.taskId === child.taskId);
+		if (childTask === void 0) throw new Error(`task: unknown task "${child.taskId}"`);
+		const parent = snapshot.runs.find((item) => item.runId === answer.parentRunId);
+		if (parent === void 0) throw new Error(`task: unknown run "${answer.parentRunId}"`);
+		const record = {
+			...answer,
+			answerId,
+			answeredAt: now()
+		};
+		await this.commitIn(storeId, [event("QuestionAnswered", {
+			taskId: childTask.taskId,
+			runId: parent.runId,
+			sessionId: parent.sessionId,
+			parentTaskId: parent.taskId,
+			actor,
+			payload: { answer: record }
+		})]);
+		return {
+			answer: record,
+			created: true
+		};
 	}
 	/**
 	* Records one no-progress marking on an active run (A3). `rounds` is the
@@ -2196,4 +2582,4 @@ var TaskService = class extends Service {
 var src_default = TaskService;
 
 //#endregion
-export { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskService, TaskState, admissionContextDigest, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, src_default as default, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, sha256Hex, taskProposalId };
+export { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskService, TaskState, admissionContextDigest, answerIdOf, blockingQuestionsOf, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, src_default as default, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, sha256Hex, taskProposalId };

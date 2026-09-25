@@ -6,6 +6,11 @@ import type {
   TaskProposalIndex,
   TaskProposalPhaseChange,
 } from './proposal.ts'
+import type {
+  QuestionAnswerRecord,
+  QuestionRecord,
+  TaskQuestionIndex,
+} from './question.ts'
 
 export type TaskId = string
 export type RunId = string
@@ -411,12 +416,15 @@ export interface TaskRun {                          // (§5.3)
    */
   submission?: SubmissionRecord
   /**
-   * Question ids the run is waiting on (A4 mount point). A3 never writes a
-   * non-empty value; the field exists so the shape has one owner, and the
-   * reducer carries whatever A4 writes through phase changes unchanged.
+   * The A3 question-id mount point, kept readable and never written again
+   * (A4): the store's question records are the one durable source of what a run
+   * waits on, and a second index that could disagree with them is what A4 took
+   * out of the write shape. The reducer still carries the field when an old
+   * record carries it, so a store written by A3 opens with the snapshot it had,
+   * and a new phase change carrying it is refused by name.
    */
   pendingQuestionIds?: string[]
-  /** Question ids whose answers block this run's next step (A4 mount point); see {@link pendingQuestionIds}. */
+  /** The A3 blocking-question mount point, kept readable and never written again; see {@link pendingQuestionIds}. */
   blockingQuestionIds?: string[]
   /**
    * The last no-progress marking on this run (A3). Overwritten by each
@@ -1010,6 +1018,19 @@ export interface TaskSnapshot {
    * {@link TaskProposalIndex}.
    */
   readonly proposals?: TaskProposalIndex
+  /**
+   * The store's parent/child questions (A4 §F.1), in ask order and by id, each
+   * carrying the answers recorded so far. This is the *only* durable source of
+   * question blocking: a run's open questions, and which of them block it, are
+   * derived from these records (see `question.ts`'s helpers), never from a
+   * phase, a run field or a second index.
+   *
+   * Optional at the type level for the same reason as {@link proposals} — a
+   * hand-built snapshot predates questions — and a snapshot produced by this
+   * build's reducer always carries it. A reader that cannot see the index must
+   * not read it as "no questions": see {@link TaskQuestionIndex}.
+   */
+  readonly questions?: TaskQuestionIndex
 }
 
 export interface TaskEventPayloads {
@@ -1065,9 +1086,15 @@ export interface TaskEventPayloads {
     batchId?: string
     /** The record a `submitted` run hands in; required for that phase and refused elsewhere. */
     submission?: SubmissionRecord
-    /** A4: question ids the run waits on; the reducer checks shape only and carries them unchanged. */
+    /**
+     * The A3 question-id mount point, readable for old records only: the
+     * reducer still shape-checks and carries it, so a store written before A4
+     * replays to the same snapshot, while this build's write entries refuse a
+     * phase change that carries it — what a run waits on comes from the
+     * question facts ({@link QuestionRecord}), not from the phase.
+     */
     pendingQuestionIds?: string[]
-    /** A4: blocking question ids; same handling as `pendingQuestionIds`. */
+    /** The A3 blocking-question mount point, readable for old records only; same handling as `pendingQuestionIds`. */
     blockingQuestionIds?: string[]
     /** The caller's account of the transition, when a reader needs one. */
     reason?: string
@@ -1091,6 +1118,43 @@ export interface TaskEventPayloads {
     /** The observable diagnostic: why the run looks stuck. */
     note: string
   }
+  /**
+   * A child run asks its direct parent task a question (A4, plan §F.1). The
+   * record is the durable half of the exchange — the question's identity, the
+   * asking and answering runs, the citation of the body, the delivery's
+   * messageId, the request key and the content digest — and it is deliberately
+   * not the body: the text lives in the asking Session's own `tool/call` event,
+   * which {@link QuestionRecord.questionRef} names. Several questions may be
+   * open on one run, and a run with a blocking one stops its blocked work
+   * without any phase change: the blockage is derived from these records.
+   *
+   * The reducer is the gate. It re-derives the id from the child run and the
+   * key, requires the envelope to name that run, the child's task and its
+   * parent task, requires both runs to be running, requires the asking task to
+   * have a direct parent (a root or parentless replay task has none to ask, and
+   * the reducer refuses by name rather than inventing one), requires the cited
+   * Session to be the asking run's own, and refuses a second question under one
+   * id — a repeated request is answered from the stored record by the entry,
+   * never by a second event.
+   */
+  QuestionAsked: { question: QuestionRecord }
+  /**
+   * A parent run answers one of its children's questions (A4, plan §F.1). The
+   * answer is its own event, appended to the question's record: an open
+   * question accepts several answers (a partial one, then a resolving one), and
+   * `resolves` is the parent's declaration that this question is answered —
+   * `false` leaves it open, and the framework neither classifies the answer nor
+   * treats it as a contract or permission change.
+   *
+   * The reducer re-derives the answer id from the question and the key, refuses
+   * an answer whose run is not the run the question was asked of (a wrong
+   * parent, including one of a restarted run), refuses a question that is
+   * already resolved or whose child or parent run has settled (a late answer
+   * neither revives a run nor leaves a new fact), requires the envelope and the
+   * cited Session to be the answering run's own, and refuses a second answer
+   * under one id.
+   */
+  QuestionAnswered: { answer: QuestionAnswerRecord }
   /** The capability manifest a task was admitted with is stored. */
   CapabilityResolved: { manifest: CapabilityManifest }
   /** Admission found required capabilities the registry cannot grant. */

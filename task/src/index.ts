@@ -34,11 +34,21 @@ import type {
   TaskProposalPhaseChange,
   TaskProposalRootConsumption,
 } from './proposal.ts'
+import { answerIdOf, questionIdOf, questionOf } from './question.ts'
+import type {
+  QuestionAnswer,
+  QuestionAnswerRecord,
+  QuestionAnswerResult,
+  QuestionAsk,
+  QuestionAskResult,
+  QuestionRecord,
+} from './question.ts'
 import { TaskState } from './service/state.ts'
 
 export * from './types.ts'
 export * from './contract.ts'
 export * from './proposal.ts'
+export * from './question.ts'
 export { TaskState } from './service/state.ts'
 
 declare module '@deepseek-ai/dsh-session/types' {
@@ -451,6 +461,13 @@ export class TaskService extends Service {
    * gate: only `active → waiting_children` (carrying the batch id) and
    * `active|waiting_children → submitted` (carrying the submission) apply, and
    * a refused transition commits nothing.
+   *
+   * The A3 question-id mount points are no longer part of this write shape
+   * (A4): what a run waits on comes from the question records, and a payload
+   * that carries either field is refused before anything is queued rather than
+   * written as a second index that could disagree with them. The reducer still
+   * carries them when an old record carries them, so old stores replay
+   * unchanged.
    */
   async changeRunPhaseIn(
     storeId: string,
@@ -459,7 +476,138 @@ export class TaskService extends Service {
     actor: string,
     payload: TaskEventPayloads['RunPhaseChanged'],
   ): Promise<void> {
+    if (payload.pendingQuestionIds !== undefined || payload.blockingQuestionIds !== undefined) {
+      throw new Error(
+        'task: RunPhaseChanged no longer carries pendingQuestionIds/blockingQuestionIds; question blocking is derived from the question facts, ' +
+        'and the A3 fields stay readable on records already written',
+      )
+    }
     await this.commitIn(storeId, [event('RunPhaseChanged', { taskId, runId, actor, payload })])
+  }
+
+  /**
+   * Records one question a child run asks its direct parent (A4 §F.1), and
+   * returns the record — the one this call wrote, or the one already holding
+   * this identity.
+   *
+   * The identity is derived from the asking run and the caller's request key
+   * ({@link questionIdOf}), so a repeated request is answered from the store:
+   * same content digest and same blocking declaration return the stored record
+   * with `created: false` and write nothing at all, while a disagreement in
+   * either is refused by name — the store never silently keeps one declaration
+   * and reports the other as delivered. The digest covers the question's text;
+   * the body itself stays in the asking Session, cited by `questionRef`.
+   *
+   * The parent is resolved from the child run's task, never accepted from the
+   * caller: its direct parent task, and that task's *current* run. The reads
+   * here are advisory (the write lock is not held across them) and the reducer
+   * is what binds the record, so a parent run that settled in between refuses
+   * the ask inside the commit and writes nothing.
+   */
+  async askParentQuestionIn(storeId: string, ask: QuestionAsk, actor: string): Promise<QuestionAskResult> {
+    const store = this.requireStore(storeId)
+    await store.ready
+    await store.writes
+    const snapshot = store.state.snapshot()
+    const questionId = questionIdOf({ childRunId: ask.childRunId, requestKey: ask.requestKey })
+    const stored = questionOf(snapshot, questionId)
+    if (stored !== undefined) {
+      if (stored.questionDigest !== ask.questionDigest) {
+        throw new Error(
+          `task: question request key "${ask.requestKey}" is already bound to question "${questionId}": the stored content digest does not match the one offered`,
+        )
+      }
+      if (stored.blocking !== ask.blocking) {
+        throw new Error(
+          `task: question request key "${ask.requestKey}" is already bound to question "${questionId}" with a different blocking declaration`,
+        )
+      }
+      return { question: stored, created: false }
+    }
+    const child = snapshot.runs.find(item => item.runId === ask.childRunId)
+    if (child === undefined) throw new Error(`task: unknown run "${ask.childRunId}"`)
+    const childTask = snapshot.tasks.find(item => item.taskId === child.taskId)
+    if (childTask === undefined) throw new Error(`task: unknown task "${child.taskId}"`)
+    if (childTask.parentTaskId === undefined) {
+      throw new Error(`task: task "${childTask.taskId}" has no parent task; a root or parentless replay task cannot ask a parent`)
+    }
+    const parentTask = snapshot.tasks.find(item => item.taskId === childTask.parentTaskId)
+    if (parentTask === undefined) throw new Error(`task: unknown parent task "${childTask.parentTaskId}"`)
+    const parentRunId = parentTask.runIds[parentTask.runIds.length - 1]
+    if (parentRunId === undefined) {
+      throw new Error(`task: parent task "${parentTask.taskId}" has no run for a question from task "${childTask.taskId}"`)
+    }
+    const question: QuestionRecord = { ...ask, questionId, parentRunId, askedAt: now() }
+    await this.commitIn(storeId, [
+      event('QuestionAsked', {
+        taskId: childTask.taskId,
+        runId: child.runId,
+        sessionId: child.sessionId,
+        parentTaskId: parentTask.taskId,
+        actor,
+        payload: { question },
+      }),
+    ])
+    return { question, created: true }
+  }
+
+  /**
+   * Records one answer to a still-open question (A4 §F.1), and returns the
+   * record — the one this call wrote, or the one already holding this identity.
+   *
+   * The identity is derived from the question and the caller's request key
+   * ({@link answerIdOf}), and the idempotency check runs *before* the openness
+   * check on purpose: an answer that resolved its question may be re-delivered
+   * after a crash, and such a retry must get its own record back rather than
+   * "the question is already resolved". A repeated key with a different digest
+   * or a different `resolves` declaration is refused by name.
+   *
+   * The answering run is named by the caller and the reducer requires it to be
+   * the run the question was asked of; the body citation must sit in that run's
+   * own Session. Both runs must still be running: a late answer after either
+   * settled is refused before anything is applied, so no terminal run is
+   * revived and the store leaves no new fact.
+   */
+  async answerParentQuestionIn(storeId: string, answer: QuestionAnswer, actor: string): Promise<QuestionAnswerResult> {
+    const store = this.requireStore(storeId)
+    await store.ready
+    await store.writes
+    const snapshot = store.state.snapshot()
+    const question = questionOf(snapshot, answer.questionId)
+    if (question === undefined) throw new Error(`task: unknown question "${answer.questionId}"`)
+    const answerId = answerIdOf({ questionId: answer.questionId, requestKey: answer.requestKey })
+    const stored = (question.answers ?? []).find(item => item.answerId === answerId)
+    if (stored !== undefined) {
+      if (stored.answerDigest !== answer.answerDigest) {
+        throw new Error(
+          `task: answer request key "${answer.requestKey}" is already bound to answer "${answerId}": the stored content digest does not match the one offered`,
+        )
+      }
+      if (stored.resolves !== answer.resolves) {
+        throw new Error(
+          `task: answer request key "${answer.requestKey}" is already bound to answer "${answerId}" with a different resolves declaration`,
+        )
+      }
+      return { answer: stored, created: false }
+    }
+    const child = snapshot.runs.find(item => item.runId === question.childRunId)
+    if (child === undefined) throw new Error(`task: unknown run "${question.childRunId}"`)
+    const childTask = snapshot.tasks.find(item => item.taskId === child.taskId)
+    if (childTask === undefined) throw new Error(`task: unknown task "${child.taskId}"`)
+    const parent = snapshot.runs.find(item => item.runId === answer.parentRunId)
+    if (parent === undefined) throw new Error(`task: unknown run "${answer.parentRunId}"`)
+    const record: QuestionAnswerRecord = { ...answer, answerId, answeredAt: now() }
+    await this.commitIn(storeId, [
+      event('QuestionAnswered', {
+        taskId: childTask.taskId,
+        runId: parent.runId,
+        sessionId: parent.sessionId,
+        parentTaskId: parent.taskId,
+        actor,
+        payload: { answer: record },
+      }),
+    ])
+    return { answer: record, created: true }
   }
 
   /**

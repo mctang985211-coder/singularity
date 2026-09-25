@@ -144,6 +144,7 @@ describe('TaskService store lifecycle', () => {
       obligations: [],
       capabilities: {},
       proposals: { all: [], byId: {}, byRequestKey: {}, byParentTask: {} },
+      questions: { all: [], byId: {} },
     })
     await expect(service.createStore(STORE)).rejects.toThrow('already open')
     await expect(service.createStore('bad id!')).rejects.toThrow('invalid store id')
