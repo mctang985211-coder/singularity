@@ -13,6 +13,7 @@ const cordisPlugins = [
   'verifier',
   'task-runtime',
   'context',
+  'evolution',
   'agent-runtime',
   'agent-singularity',
   'graph-web',

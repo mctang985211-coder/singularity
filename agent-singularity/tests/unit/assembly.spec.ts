@@ -16,9 +16,11 @@
  */
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type {} from '@dangosys/dsh-singularity-evolution'
 import { DEFAULT_EVOLUTION, SingularityAgent } from '../../src/index.ts'
 import type { Config } from '../../src/index.ts'
 
@@ -102,7 +104,7 @@ async function mount(config?: Config) {
   } else {
     await ctx.plugin(SingularityAgent, config)
   }
-  return { ctx, tools }
+  return { ctx, tools, home }
 }
 
 afterEach(() => {
@@ -152,5 +154,21 @@ describe('SingularityAgent assembly', () => {
     const on = await mount({ evolution: 'on' })
     expect(read(on.ctx)).toBe(true)
     await on.ctx.fiber.dispose()
+  })
+
+  it('hands the evolution ledger the harness repo root, so its default roots stay where they were', async () => {
+    // The ledger's defaults hang off the harness root (`<repoRoot>/.dsh`,
+    // `<repoRoot>/config.yml`). That root used to be derived inside the ledger
+    // module; since S4-E the lifecycle lives in
+    // `@dangosys/dsh-singularity-evolution`, whose own depth is different — so
+    // the assembly computes it at the depth the ledger used to sit at, and
+    // passes it in. This spec's own five-level path names the same directory.
+    const { ctx, home } = await mount({ evolution: 'on' })
+    const evolution = ctx.get('evolution')
+    expect(evolution?.repoRoot).toBe(fileURLToPath(new URL('../../../../../', import.meta.url)))
+    // and the data roots still resolve off DSH_HOME, exactly as before
+    expect(evolution?.root).toBe(resolve(join(home, 'evolution')))
+    expect(evolution?.file).toBe(resolve(join(home, 'evolution', 'proposals.jsonl')))
+    await ctx.fiber.dispose()
   })
 })

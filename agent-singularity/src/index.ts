@@ -3,6 +3,7 @@
  * @module dsh-singularity-agent
  */
 
+import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
@@ -11,9 +12,9 @@ import type {} from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-context'
 import type {} from '@dangosys/dsh-singularity-task'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
+import { EvolutionService } from '@dangosys/dsh-singularity-evolution'
 import { HitlService } from './hitl.ts'
 import { EscalationService } from './escalation.ts'
-import { EvolutionService } from './evolution.ts'
 import { ProposalReviewService } from './proposal-review.ts'
 import { reviewerBindingSource } from './review-agent-ledger.ts'
 import { defineApproveTool } from './tools/approve.ts'
@@ -54,41 +55,6 @@ export { EscalationService } from './escalation.ts'
 export type { Escalation, EscalationInput, EscalationRecord, EscalationTrigger } from './escalation.ts'
 export { ESCALATION_TRIGGERS } from './escalation.ts'
 export { ProposalReviewService, ownerSessionOfStore, renderProposalReview, reviewDecider } from './proposal-review.ts'
-export { EvolutionService } from './evolution.ts'
-export type {
-  AgentPresetMutation,
-  ApplyOutcome,
-  ApplyView,
-  CapabilityMutation,
-  ChampionSource,
-  ChampionState,
-  EvolutionDecision,
-  EvolutionLevel,
-  EvolutionProposal,
-  EvolutionRecord,
-  EvolutionStatus,
-  GateAnswers,
-  ListFilter,
-  MechanicalMutation,
-  PrepareChampion,
-  PreparedView,
-  ProposeInput,
-  SkillMutation,
-  TaskDefinitionMutation,
-} from './evolution.ts'
-export { APPLYABLE_TARGET_TYPES, applyTargets, CHAMPION_SOURCES, CHAMPION_STATES, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, MECHANICAL_TARGET_TYPES, mutationMechanical } from './evolution.ts'
-export type {
-  ReplayCriterionDiff,
-  ReplayCriterionSummary,
-  ReplayRelation,
-  ReplayReport,
-  ReplaySideSummary,
-  ReplayTaskComparison,
-  ReplayVerdict,
-  SkillContentIdentity,
-} from './replay.ts'
-export { compareReplaySides, overallReplayVerdict, REPLAY_RELATIONS, REPLAY_VERDICTS } from './replay.ts'
-export type { ReplayedView } from './evolution.ts'
 
 /**
  * Plugin configuration — the deployment's composition, not a model's choice.
@@ -163,6 +129,18 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
+/**
+ * The harness repo root this composition passes to the evolution ledger: the
+ * base of its `$DSH_HOME` fallback (`<repoRoot>/.dsh`), of the production
+ * `config.yml` default, and of relative evidence refs.
+ *
+ * It is computed here because the ledger used to sit at this same source depth
+ * and derive it (`new URL('../../../../', import.meta.url)` from
+ * `agent-singularity/src`); the evolution package does not, so passing the
+ * value in keeps every default root byte-for-byte where it was.
+ */
+const REPO_ROOT = fileURLToPath(new URL('../../../../', import.meta.url))
+
 export class SingularityAgent extends Service {
   static inject = ['tools', 'graphs', 'agentRuntime', 'task', 'taskRuntime', 'singularityContext', 'userQuestions', 'approval']
   static Config: z<Config> = ConfigSchema
@@ -174,8 +152,10 @@ export class SingularityAgent extends Service {
     ctx.plugin(HitlService)
     // The evolution tools read `ctx.evolution`, and a service a child fiber
     // provides is invisible to the parent that mounted it — so the ledger's
-    // service is provided on this fiber rather than through `ctx.plugin`.
-    new EvolutionService(ctx)
+    // service is provided on this fiber rather than through `ctx.plugin`. The
+    // lifecycle itself is the evolution package's; this assembly only says
+    // where the harness root is.
+    new EvolutionService(ctx, { repoRoot: REPO_ROOT })
     // Same discipline for the escalation ledger: the `escalate` tool reads
     // `ctx.escalation` from this fiber, and the parent never injects it.
     new EscalationService(ctx)

@@ -7,7 +7,7 @@
  * writing it into the task log would make a tool's bookkeeping part of the
  * domain's event history. So the count lives in an append-only JSONL file
  * under `$DSH_HOME`, the same shape (and the same home) the Evolution ledger
- * uses (`agent-singularity/src/evolution.ts`).
+ * uses (`@dangosys/dsh-singularity-evolution`).
  *
  * Counts are per root store — one root graph, one budget. The file opens per
  * append, so there is no handle to close. The path is overridable through
@@ -37,7 +37,7 @@ export interface ReviewAgentLedgerRecord {
   at: string
 }
 
-/** Repo root, derived the way `EvolutionService` derives it (both files sit at the same depth). */
+/** Repo root, derived at this file's depth — the same root the agent assembly hands the evolution ledger. */
 const repoRoot = fileURLToPath(new URL('../../../../', import.meta.url))
 
 /** Directory holding the ledger; `$DSH_HOME/review-agents` unless overridden. */

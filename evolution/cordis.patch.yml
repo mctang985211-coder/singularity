@@ -1,0 +1,3 @@
+- insert:
+    - id: singularity-evolution
+      name: '@dangosys/dsh-singularity-evolution'

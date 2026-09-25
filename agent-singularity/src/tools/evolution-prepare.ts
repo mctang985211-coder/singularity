@@ -4,9 +4,8 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task'
-import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
-import type { CapabilityMutation, PrepareChampion } from '../evolution.ts'
+import { resolvePrepareChampion } from '@dangosys/dsh-singularity-evolution'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
@@ -14,40 +13,6 @@ function sessionId(exec: ToolRunContext): SessionId {
   const id = exec.agent?.id
   if (typeof id !== 'string' || id.length === 0) throw new Error('evolution_prepare: missing agent id')
   return id
-}
-
-/**
- * Champion anchor for a task_definition target. The task store keeps no
- * definitions registry — definition fields live denormalized on each task
- * instance — so the snapshot is the first instance matching
- * { taskType: targetId, version: baseVersion } ('v3' and '3' both read as 3),
- * reduced to the fields instances actually hold (decompositionPolicy and
- * budgetPolicy are not retained per instance). No match, or no store, means the
- * champion is unresolvable: null.
- */
-async function definitionChampion(
-  ctx: Context,
-  caller: SessionId,
-  targetId: string,
-  baseVersion: string,
-): Promise<Record<string, unknown> | null> {
-  const version = Number(baseVersion.replace(/^v/, ''))
-  if (!Number.isInteger(version)) return null
-  try {
-    const graph = await ctx.graphs.graphForSession(caller)
-    const snapshot = await ctx.task.openStore(rootTaskStoreId(graph.rootSessionId))
-    const task = snapshot.tasks.find(item => item.definitionRef.taskType === targetId && item.definitionRef.version === version)
-    if (task === undefined) return null
-    return {
-      taskType: task.definitionRef.taskType,
-      version: task.definitionRef.version,
-      objective: task.objective,
-      acceptanceCriteria: task.acceptanceCriteria,
-      requiredCapabilities: task.requestedCapabilities,
-    }
-  } catch {
-    return null
-  }
 }
 
 export function defineEvolutionPrepareTool(ctx: Context) {
@@ -72,17 +37,14 @@ export function defineEvolutionPrepareTool(ctx: Context) {
       } catch (error) {
         return `evolution_prepare rejected: ${error instanceof Error ? error.message : String(error)}`
       }
-      // Champion resolution: capability reads the effective registry, task_definition
-      // the task store; skill / preset champions the service reads from the
-      // production roots itself.
-      const champion: PrepareChampion = {}
-      if (proposal.targetType === 'capability' && proposal.mutation !== undefined) {
-        const name = (proposal.mutation as CapabilityMutation).name
-        champion.capabilityEntry = ctx.taskRuntime.listCapabilities()[name] ?? null
-      }
-      if (proposal.targetType === 'task_definition') {
-        champion.taskDefinition = await definitionChampion(ctx, caller, proposal.targetId, proposal.baseVersion)
-      }
+      // Champion resolution (capability: the effective registry; task_definition:
+      // the task store; skill / preset: the production roots, read by the
+      // ledger itself) belongs to the evolution package.
+      const champion = await resolvePrepareChampion(
+        { graphs: ctx.graphs, task: ctx.task, taskRuntime: ctx.taskRuntime },
+        proposal,
+        caller,
+      )
       try {
         const prepared = await ctx.evolution.prepare(args.proposalId, caller, champion)
         const view = prepared.prepared!

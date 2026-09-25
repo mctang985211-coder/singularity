@@ -3,8 +3,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
-import { APPLYABLE_TARGET_TYPES, applyTargets, renderProviderRoles } from '../evolution.ts'
-import type { EvolutionProposal } from '../evolution.ts'
+import { APPLYABLE_TARGET_TYPES, applyTargets, renderProviderRoles } from '@dangosys/dsh-singularity-evolution'
+import type { EvolutionProposal } from '@dangosys/dsh-singularity-evolution'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
@@ -34,7 +34,7 @@ function manualGuidance(proposal: EvolutionProposal): string | null {
 }
 
 /** How fast each applied type takes effect, stated honestly in the output. */
-export function effectNote(proposal: EvolutionProposal): string {
+function effectNote(proposal: EvolutionProposal): string {
   switch (proposal.targetType) {
     case 'skill':
       return 'effective immediately — the skill filesystem watches the skill root, so the write is live'

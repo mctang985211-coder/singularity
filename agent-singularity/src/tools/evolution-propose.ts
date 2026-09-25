@@ -5,7 +5,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
-import type { ProposalTargetType } from '../evolution.ts'
+import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 

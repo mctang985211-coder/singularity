@@ -61,14 +61,13 @@
  * identity covering files, for content production never receives. Multi-file
  * skill candidates need an executor that writes them; until then they are
  * refused before a human is asked.
- * @module dsh-singularity-agent
+ * @module dsh-singularity-evolution
  */
 
 import { appendFile, cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
 import {
@@ -92,19 +91,6 @@ import type { ReplayRelation, ReplayReport, ReplayVerdict, SkillContentIdentity 
 import { assertReplayPromotable, assertReplayReport, REPLAY_RELATIONS, REPLAY_VERDICTS } from './replay.ts'
 import { editCapabilityRow, readCapabilityRowSource, restoreCapabilityRowSource } from './config-edit.ts'
 import type { CapabilityRowResult } from './config-edit.ts'
-
-export type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
-export type {
-  ReplayCriterionDiff,
-  ReplayCriterionSummary,
-  ReplayRelation,
-  ReplayReport,
-  ReplaySideSummary,
-  ReplayTaskComparison,
-  ReplayVerdict,
-  SkillContentIdentity,
-} from './replay.ts'
-export { compareReplaySides, overallReplayVerdict, REPLAY_RELATIONS, REPLAY_VERDICTS } from './replay.ts'
 
 export type EvolutionLevel = 'L1' | 'L2' | 'L3' | 'L4'
 export type EvolutionStatus = 'proposed' | 'candidate' | 'prepared' | 'replayed' | 'gated' | 'decided' | 'applied' | 'rolledback'
@@ -558,7 +544,7 @@ export interface Config {
   /**
    * Directory of the ledger file `proposals.jsonl`; sandboxes materialize under
    * `<root>/sandbox/<proposalId>/`. Omitted resolves to `$DSH_HOME/evolution`,
-   * falling back to `<repo root>/.dsh/evolution` when `DSH_HOME` is unset (same
+   * falling back to `<repoRoot>/.dsh/evolution` when `DSH_HOME` is unset (same
    * derivation as the verifier's evidenceRoot).
    */
   root?: string
@@ -569,9 +555,23 @@ export interface Config {
   /**
    * The production `config.yml` whose document-1 task-runtime row a capability
    * apply/rollback edits (text-level surgery on that one row; every other byte
-   * is preserved). Defaults to `<repo root>/config.yml`.
+   * is preserved). Defaults to `<repoRoot>/config.yml`.
    */
   configFile?: string
+  /**
+   * The harness repo root: the parent of the `$DSH_HOME` fallback
+   * (`<repoRoot>/.dsh`), the base of the default `config.yml`, and the base
+   * relative evidence refs resolve against.
+   *
+   * It is a configuration member rather than something this package derives:
+   * the ledger used to sit at the depth of the harness source tree, and this
+   * package does not — a derivation here would silently move every default. The
+   * assembly computes it at its own location (`new URL('../../../../',
+   * import.meta.url)`) and passes it in. A direct construction that omits it
+   * (a test, an embedding process) reads relative refs against the process's
+   * working directory instead.
+   */
+  repoRoot?: string
 }
 
 function nonEmpty(value: unknown, field: string): string {
@@ -915,7 +915,7 @@ export class EvolutionService extends Service {
   readonly presetRoot: string
   /** Production config.yml a capability apply/rollback edits. */
   readonly configFile: string
-  /** Repo root that relative evidence paths resolve against. */
+  /** Repo root that relative evidence paths resolve against (see {@link Config.repoRoot}). */
   readonly repoRoot: string
   private records: EvolutionRecord[] = []
   private readonly loaded: Promise<void>
@@ -923,7 +923,8 @@ export class EvolutionService extends Service {
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'evolution')
-    this.repoRoot = fileURLToPath(new URL('../../../../', import.meta.url))
+    // Explicitly configured, never derived here: see Config.repoRoot.
+    this.repoRoot = config.repoRoot ?? process.cwd()
     const dshHome = process.env.DSH_HOME ?? join(this.repoRoot, '.dsh')
     this.root = resolve(config.root ?? join(dshHome, 'evolution'))
     this.skillRoot = resolve(config.skillRoot ?? join(dshHome, 'skills'))

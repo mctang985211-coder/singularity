@@ -11,7 +11,7 @@
  * regression, and a candidate run that could not settle (cancelled) is
  * inconclusive, not worse. "Not worse" is the strongest claim this schema
  * makes; whether that suffices for promotion is the human gate's call.
- * @module dsh-singularity-agent
+ * @module dsh-singularity-evolution
  */
 
 import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'

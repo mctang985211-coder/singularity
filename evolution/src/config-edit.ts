@@ -16,7 +16,7 @@
  * captures a row's verbatim source lines at prepare time, and
  * `restoreCapabilityRowSource` splices them back at rollback, so a round trip
  * is byte-identical instead of schema-normalized.
- * @module dsh-singularity-agent
+ * @module dsh-singularity-evolution
  */
 
 import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'

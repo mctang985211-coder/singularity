@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
-import { applyTargets } from '../evolution.ts'
+import { applyTargets } from '@dangosys/dsh-singularity-evolution'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 

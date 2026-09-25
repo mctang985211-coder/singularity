@@ -37,6 +37,7 @@
   "dependencies": {
     "@dangosys/dsh-singularity-agent-runtime": "workspace:*",
     "@dangosys/dsh-singularity-context": "workspace:*",
+    "@dangosys/dsh-singularity-evolution": "workspace:*",
     "@dangosys/dsh-singularity-graphs": "workspace:*",
     "@dangosys/dsh-singularity-task": "workspace:*",
     "@dangosys/dsh-singularity-task-runtime": "workspace:*"

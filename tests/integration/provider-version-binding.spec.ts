@@ -1,7 +1,7 @@
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { EvolutionService } from '../../agent-singularity/src/evolution.ts'
+import { EvolutionService } from '../../evolution/src/index.ts'
 import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'

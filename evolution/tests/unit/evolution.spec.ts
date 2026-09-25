@@ -4,20 +4,20 @@ import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
+import type { CapabilityConfig, ReplayTaskOptions } from '@dangosys/dsh-singularity-task-runtime'
 import { EvolutionService } from '../../src/evolution.ts'
 import type { GateAnswers, ProposeInput } from '../../src/evolution.ts'
 import type { SkillContentIdentity } from '../../src/replay.ts'
 import { editCapabilityRow, readCapabilityRowSource, restoreCapabilityRowSource } from '../../src/config-edit.ts'
-import { defineEvolutionApplyTool } from '../../src/tools/evolution-apply.ts'
-import { defineEvolutionCandidateTool } from '../../src/tools/evolution-candidate.ts'
-import { defineEvolutionDecideTool } from '../../src/tools/evolution-decide.ts'
-import { defineEvolutionGateTool } from '../../src/tools/evolution-gate.ts'
-import { defineEvolutionListTool } from '../../src/tools/evolution-list.ts'
-import { defineEvolutionPrepareTool } from '../../src/tools/evolution-prepare.ts'
-import { defineEvolutionProposeTool } from '../../src/tools/evolution-propose.ts'
-import { defineEvolutionReplayTool } from '../../src/tools/evolution-replay.ts'
-import { defineEvolutionRollbackTool } from '../../src/tools/evolution-rollback.ts'
+import { defineEvolutionApplyTool } from '../../../agent-singularity/src/tools/evolution-apply.ts'
+import { defineEvolutionCandidateTool } from '../../../agent-singularity/src/tools/evolution-candidate.ts'
+import { defineEvolutionDecideTool } from '../../../agent-singularity/src/tools/evolution-decide.ts'
+import { defineEvolutionGateTool } from '../../../agent-singularity/src/tools/evolution-gate.ts'
+import { defineEvolutionListTool } from '../../../agent-singularity/src/tools/evolution-list.ts'
+import { defineEvolutionPrepareTool } from '../../../agent-singularity/src/tools/evolution-prepare.ts'
+import { defineEvolutionProposeTool } from '../../../agent-singularity/src/tools/evolution-propose.ts'
+import { defineEvolutionReplayTool } from '../../../agent-singularity/src/tools/evolution-replay.ts'
+import { defineEvolutionRollbackTool } from '../../../agent-singularity/src/tools/evolution-rollback.ts'
 import { assertReplayReport, compareReplaySides, overallReplayVerdict } from '../../src/replay.ts'
 
 function fixtureCtx() {
@@ -304,7 +304,9 @@ describe('EvolutionService ledger', () => {
 const graph = { id: 'graph1', name: 'graph1', envId: 'project1', rootSessionId: 'root-1' }
 
 function toolCtx(svc: EvolutionService, approvalOutcome: string = 'allowed-once') {
-  const approval = { request: vi.fn(async () => approvalOutcome) }
+  // The mock carries the request shape so a case can read back what the human
+  // was actually asked (`mock.calls[0][0]`) without a cast to `never`.
+  const approval = { request: vi.fn(async (_request: { reason: string; toolName: string }) => approvalOutcome) }
   const ctx = {
     reflect: { provide: () => {} },
     effect: () => {},
@@ -491,16 +493,16 @@ describe('evolution tools', () => {
     )
     await defineEvolutionCandidateTool(ctx).execute({ proposalId: 'p1', versionSet: VERSION_SET }, exec('root-1'))
     const list = defineEvolutionListTool(ctx)
-    const all = (await list.execute({})) as string
+    const all = (await list.execute({}, exec('root-1'))) as string
     expect(all).toContain('evolution ledger (2):')
     expect(all).toContain('- p2 [proposed] L4 verifier verifier:1 (base v3)')
     expect(all).toContain('- p1 [candidate] L2 task_definition build:1 (base v3)')
     expect(all).toContain('history: proposed by root-1')
-    const filtered = (await list.execute({ status: 'candidate' })) as string
+    const filtered = (await list.execute({ status: 'candidate' }, exec('root-1'))) as string
     expect(filtered).toContain('evolution ledger (1):')
     expect(filtered).toContain('p1')
     expect(filtered).not.toContain('p2')
-    const byTarget = (await list.execute({ targetType: 'verifier' })) as string
+    const byTarget = (await list.execute({ targetType: 'verifier' }, exec('root-1'))) as string
     expect(byTarget).toContain('evolution ledger (1):')
     expect(byTarget).toContain('p2')
   })
@@ -1097,14 +1099,14 @@ describe('evolution_prepare tool', () => {
     await defineEvolutionCandidateTool(ctx).execute({ proposalId: 'c1', versionSet: VERSION_SET, mutation: capabilityMutation }, exec('root-1'))
     await defineEvolutionPrepareTool(ctx).execute({ proposalId: 'c1' }, exec('root-1'))
     const list = defineEvolutionListTool(ctx)
-    const all = (await list.execute({})) as string
+    const all = (await list.execute({}, exec('root-1'))) as string
     expect(all).toContain('- c1 [prepared] L2 capability research (base v1)')
     expect(all).toContain('mutation: mechanical capability mutation')
     expect(all).toContain(`sandbox: ${svc.root}/sandbox/c1 (2 files, champion snapshot captured)`)
     expect(all).toContain('history: proposed by root-1')
-    const filtered = (await list.execute({ status: 'prepared' })) as string
+    const filtered = (await list.execute({ status: 'prepared' }, exec('root-1'))) as string
     expect(filtered).toContain('evolution ledger (1):')
-    const gated = (await list.execute({ status: 'gated' })) as string
+    const gated = (await list.execute({ status: 'gated' }, exec('root-1'))) as string
     expect(gated).toBe('evolution ledger: no proposals match')
   })
 })
@@ -1363,7 +1365,12 @@ describe('evolution_replay tool', () => {
   async function preparedProposal(targetType: 'capability' | 'skill' | 'task_definition' | 'agent_preset') {
     const { svc, root } = await serviceWithRoots()
     let replayCount = 0
-    const replayTask = vi.fn(async () => ({ ...replayOutcome, taskId: replayCount++ === 0 ? 't-cand' : `t-cand-${replayCount}` }))
+    const replayTask = vi.fn(async (
+      _storeId: string,
+      _championTaskId: string,
+      _options: ReplayTaskOptions,
+      _caller: string,
+    ) => ({ ...replayOutcome, taskId: replayCount++ === 0 ? 't-cand' : `t-cand-${replayCount}` }))
     const { ctx } = replayToolCtx(svc, replayTask)
     const proposeTool = defineEvolutionProposeTool(ctx)
     const candidateTool = defineEvolutionCandidateTool(ctx)
@@ -1529,7 +1536,7 @@ describe('evolution_replay tool', () => {
   })
 
   it('rejects overlapping task lists, unknown tasks, non-terminal tasks, and tasks without a review record', async () => {
-    const { ctx, replayTask, replayTool, id } = await preparedProposal('capability')
+    const { svc, ctx, replayTask, replayTool, id } = await preparedProposal('capability')
     const overlap = (await replayTool.execute({ proposalId: id, taskIds: ['t-champ'], holdoutTaskIds: ['t-champ'] }, exec('root-1'))) as string
     expect(overlap).toContain('must not overlap or repeat')
     const unknown = (await replayTool.execute({ proposalId: id, taskIds: ['t-ghost'] }, exec('root-1'))) as string
@@ -1553,7 +1560,7 @@ describe('evolution_replay tool', () => {
     const noRecord = (await replayTool.execute({ proposalId: id, taskIds: ['t-champ'] }, exec('root-1'))) as string
     expect(noRecord).toContain('has no review record')
     expect(replayTask).not.toHaveBeenCalled()
-    expect((await ctx.evolution.get(id)).status).toBe('prepared')
+    expect((await svc.get(id)).status).toBe('prepared')
   })
 
   it('records nothing when a replay run throws mid-flight, and says so', async () => {
@@ -1570,7 +1577,7 @@ describe('evolution_replay tool', () => {
   })
 
   it('evolution_gate after a replay requires the report path among the evidence refs', async () => {
-    const { ctx, replayTool, id } = await preparedProposal('capability')
+    const { svc, ctx, replayTool, id } = await preparedProposal('capability')
     await replayTool.execute({ proposalId: id, taskIds: ['t-champ'] }, exec('root-1'))
     const gate = defineEvolutionGateTool(ctx)
     const missing = (await gate.execute({ proposalId: id, ...gateAnswers(['ev-champ']) }, exec('root-1'))) as string
@@ -1580,7 +1587,7 @@ describe('evolution_replay tool', () => {
       exec('root-1'),
     )) as string
     expect(gated).toContain('[gated] gate answered 6/6')
-    expect((await ctx.evolution.get(id)).status).toBe('gated')
+    expect((await svc.get(id)).status).toBe('gated')
   })
 })
 
@@ -2166,7 +2173,12 @@ describe('skill candidate content binding (P2)', () => {
     // rewriting production must not move the candidate identity: the replay
     // validates and digests the sandbox candidate, never the production skill
     await writeFile(join(skillRoot, 'verify', 'SKILL.md'), '# production rewritten\n')
-    const replayTask = vi.fn(async () => ({ ...replayOutcome }))
+    const replayTask = vi.fn(async (
+      _storeId: string,
+      _championTaskId: string,
+      _options: ReplayTaskOptions,
+      _caller: string,
+    ) => ({ ...replayOutcome }))
     const { ctx } = replayToolCtx(svc, replayTask)
     const result = (await defineEvolutionReplayTool(ctx).execute(
       { proposalId: 's1', taskIds: ['t-champ'] },
@@ -3285,7 +3297,7 @@ describe('evolution_apply / evolution_rollback tools', () => {
     await walkToDecided(svc, skillProposal, { name: 'verify', content: skillText('# new') })
     await defineEvolutionApplyTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))
     await defineEvolutionRollbackTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))
-    const listed = (await defineEvolutionListTool(ctx).execute({ status: 'rolledback' })) as string
+    const listed = (await defineEvolutionListTool(ctx).execute({ status: 'rolledback' }, exec('root-1'))) as string
     expect(listed).toContain('- s1 [rolledback PROMOTE] L2 skill verify (base v1)')
     expect(listed).toContain(`applied: [${join(skillRoot, 'verify', 'SKILL.md')}] (approval approval:call-1)`)
     expect(listed).toContain('rolled back:')

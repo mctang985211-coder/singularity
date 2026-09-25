@@ -1,7 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import { mutationMechanical } from '../evolution.ts'
-import type { ProposalTargetType } from '../evolution.ts'
+import { mutationMechanical } from '@dangosys/dsh-singularity-evolution'
+import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 

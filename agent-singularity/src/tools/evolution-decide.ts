@@ -2,7 +2,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
-import { EVOLUTION_DECISIONS, renderProviderRoles } from '../evolution.ts'
+import { EVOLUTION_DECISIONS, renderProviderRoles } from '@dangosys/dsh-singularity-evolution'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
