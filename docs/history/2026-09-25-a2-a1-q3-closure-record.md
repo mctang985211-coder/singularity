@@ -105,3 +105,18 @@
 - Singularity 实现 + 构建产物：`30c66f8`；独立复核响应（星号字符分页修复、状态页子句预留）：`4b9fb4c`
 - 文档同步（本记录、主 guide、计划、审核记录、派发入口）：`740849c` 及写入复核结论的后续记录提交
 - 外层子模块指针：见外层同批提交
+
+## 第二轮审核意见应答（2026-09-25）
+
+被审 SHA：`aaf0601`。审核两项，逐项核对如下；本段**不改变任何生产行为**，只收紧证据与同步文档。
+
+**1.「非法 `seq`/`ref` 形状在公开工具入口没有具名拒绝」——事实成立，判断为平台第一道门的正常行为，不返工。**
+- 事实核对（子代理实测复现）：`seq: 1.5`、`sessionId: 42`、`ref` 为数字这类**违反工具自身声明形状**的调用，由 DSH typed-tool 在 `execute` 之前拒绝（`thirdparty/deepseek-harness/packages/core/tools/src/schema.ts:587` 抛 `ToolArgsError`），模型看到的是 `Error: invalid arguments: "ref" must match exactly one oneOf branch (matched 0)`——点名 `ref`，且注入计数的 `readEvent` 一次未被调用。
+- 判断依据：(a) 计划 D 节的「非法引用/数值具名拒绝，不调用 DSH」针对的是**通过声明类型但数值/引用非法**的调用（负数 `seq`、非整数/字符中间/越界的 `offset`、缺失事件、跨图），这些全部由读核按八词表具名返回且零日志读取，Q3-2 反例保留；(b) 要让形状错误落到读核，只能把 `ref`/`seq` 的声明放宽成 `json`/`number`——等同复制平台已有的参数校验，并拿掉模型可见的形状声明，与既定「不再自己做一套」的复用裁决方向相反；(c) 本仓既有约定即「工具声明 schema 是运行时前面的一道门」，见 `tests/integration/task-contract.spec.ts` 的 `toolSchemaRefusal` 用例；(d) 服务门对同一形状答 `not-found`（同批断言），所以两道具名门都不读日志。
+- 处置（只收紧证据，不改行为）：`tests/integration/context-read-single-event.spec.ts` 把原先「`invalid arguments` 或 `not-found` 二者皆可」的弱断言拆成两条确定断言——`seq: -1` 走读核 `not-found`（非错误结果）、`seq: 1.5` 走平台门并被逐字钉住（含 registry 的 `Error: ` 渲染），另补 `ref: 7` 一例；计划 D 节写明两道门的名字分工（形状→声明 schema；数值/引用→八词表）。
+
+**2.「主 guide 仍留旧状态」——成立，已修。** `docs/singularity-harness-guide.md` 多处**当前态**行仍写「仍返工 / Q3 单事件续读待实现 / 整组待复验」（能力表、缺口表 G11/G13、Handoff 行、§5.15 标题与尾段等），与交付实况不符——上一轮只改了文首与 §5.15 正文，没扫全 guide。现已逐行改为「待验收」并指向本记录，另补 `context-read-single-event.spec.ts` 到测试锚。
+
+**本轮检查（改动后重跑整组）**：`pnpm build` 13 包通过（`BUILD_EXIT=0`）；外层 `pnpm vitest run --project unit packages/singularity` = 47 文件 / 1536 项全过；`--project integration packages/singularity` = 42 文件 / 302 项全过；`pnpm run verify-persistence` OK（4 event roots）；`agent-singularity` 的 `pnpm exec tsc --noEmit` 退出 0；`git diff --check` 干净。
+**未覆盖**：形状门由 DSH 校验与渲染，钉住的是当前平台文本（升级平台需同步该断言）；未跑付费真实模型实验、未推送、未部署；A4 未开始。
+**票状态**：Q1–Q4、A2-1～A2-6 与公共检查均有证据，**仍为待验收，停在进度审核**。

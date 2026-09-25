@@ -38,3 +38,7 @@
 ## Q3 收尾（实现侧应答，2026-09-25）
 
 按[Q3 收尾 prompt](../execution-prompts/09-a2-a1-q3-closure.md)与计划 D 节的追加裁决完成：同一四参数内 `ref:"<sessionId>"` 保留事件列表，`ref:{sessionId, seq}` 读取单个事件的可见正文（`extractSessionEventText`）并按 UTF-8 字节分页；列表遇超限事件给出该精确引用，不再以跳过充当正文。上限由 16 KiB 改为与部署一致的 50000 字节（`@deepseek-ai/dsh-spill-policy` 的 `maxInlineBytes`），字节窗口与省略措辞复用 `@deepseek-ai/dsh-output-retention`（`TextRetainer`/`formatRetentionNotice`），本包只保留游标与按行预算。对齐过程另修掉四处“条目可以吃掉省略行/页脚预留”的分页记账缺陷。真实工具门证据、红/绿轨迹、检查数量与独立复核见[Q3 收尾记录](2026-09-25-a2-a1-q3-closure-record.md)；本审核记录的原反例描述保持原样，第 9 项现为待验收。
+
+## 第二轮审核意见应答（实现侧，2026-09-25）
+
+审核两项的逐项核对见[Q3 收尾记录「第二轮审核意见应答」](2026-09-25-a2-a1-q3-closure-record.md)。摘要：**（1）「非法 `seq`/`ref` 形状没有具名拒绝」不是缺口**——那是 DSH typed-tool 对工具自身声明形状的校验（`thirdparty/.../core/tools/src/schema.ts:587`，读核不运行、日志零读取），通过声明类型的非法数值与引用仍由读核按八词表具名拒绝；放宽 `ref`/`seq` 声明去把形状错误改写成本包词表，等同复制平台校验并拿掉模型可见的形状声明，与本票的复用裁决相反，故不改行为——只把测试里「`invalid arguments` 或 `not-found` 二者皆可」的弱断言拆成两条逐字断言（`seq: -1` → 读核 `not-found`；`seq: 1.5` → 平台门文本，另补 `ref: 7`），并在计划 D 节写明两道门的名字分工。**（2）主 guide 留下旧状态，成立**——已把能力表、缺口表的 G11/G13、Handoff 行与 §5.15 标题/尾段等当前态行从「仍返工/待实现/待复验」改为「待验收」并指向收尾记录。改动后整组重跑：`pnpm build` 13 包、unit 47 文件/1536 项、integration 42 文件/302 项、`verify-persistence` OK、`agent-singularity` 的 `tsc --noEmit` 与 `git diff --check` 干净；第 9 项仍为**待验收**，停在进度审核。

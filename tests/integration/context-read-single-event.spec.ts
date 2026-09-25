@@ -327,13 +327,19 @@ describe('what a single-event read refuses, and what it never asks (Q3-2)', () =
     expect(foreign.text).not.toContain(FOREIGN_BODY)
     expect(foreign.text).not.toContain('foreign-body-marker')
 
-    // 2. A reference that names no event: the session alone, and a sessionId that
-    //    is not an id. The contract's refusal for both is `not-found`, and
-    //    neither may read. The sessionId-only reference reaches the read core
-    //    through the tool door; the type-wrong sessionId is refused one door
-    //    earlier — the tool's own schema declares `sessionId: string`, so the
-    //    registry answers invalid arguments — and the service door behind it is
-    //    where the read core's own `not-found` is visible.
+    // 2. A reference that names no event: the session alone, and `ref` shapes the
+    //    declared schema does not admit. The session-only reference reaches the
+    //    read core through the tool door and is answered `not-found`; a shape the
+    //    declaration itself refuses is refused one door earlier, by the
+    //    platform's typed-argument gate naming `ref`, and the read core never
+    //    runs. That gate is the tool's *declared schema* at work — the shapes the
+    //    model is handed — not a second refusal built here: accepting the wrong
+    //    shape so the handler could restate it in this package's words would
+    //    drop the model-facing shape declaration to buy nothing, since neither
+    //    door reads the log. The gate's whole answer is pinned — its own words
+    //    plus the registry's `Error: ` rendering of a failed call — so a change
+    //    in the schema or in the platform shows up as a failing assertion.
+    const REF_SHAPE_REFUSAL = 'Error: invalid arguments: "ref" must match exactly one oneOf branch (matched 0)'
     reads.restore()
     const noSeq = patchReadEvent(stack)
     const missing = await stack.call(ROOT, 'context_read', { kind: 'session', ref: { sessionId: MEMBER } })
@@ -342,18 +348,22 @@ describe('what a single-event read refuses, and what it never asks (Q3-2)', () =
     expect(missing.text).not.toContain(MEMBER_BODY)
     noSeq.restore()
 
-    const notAnId = patchReadEvent(stack)
-    const wrongId = await stack.call(ROOT, 'context_read', { kind: 'session', ref: { sessionId: 42, seq: 0 } })
-    expect(notAnId.count).toBe(0)
-    expect(wrongId.isError, wrongId.text).toBe(true)
-    expect(wrongId.text).toMatch(/invalid arguments/)
-    expect(wrongId.text).toContain('"ref"')
-    expect(wrongId.text).not.toContain(MEMBER_BODY)
-    notAnId.restore()
+    for (const [label, ref] of [
+      ['a sessionId that is not an id', { sessionId: 42, seq: 0 }],
+      ['a ref that is neither declared shape', 7],
+    ] as const) {
+      const counted = patchReadEvent(stack)
+      const answer = await stack.call(ROOT, 'context_read', { kind: 'session', ref })
+      expect(counted.count, label).toBe(0)
+      expect(answer.isError, `${label}: ${answer.text}`).toBe(true)
+      expect(answer.text, label).toBe(REF_SHAPE_REFUSAL)
+      expect(answer.text, label).not.toContain(MEMBER_BODY)
+      counted.restore()
+    }
 
     // The service door behind the tool, where no schema stands in front of the
-    // read core: every one of those shapes is `not-found` there — the same rule
-    // the tool door spells as invalid arguments — and none of them reads.
+    // read core: the same shapes are `not-found` there — the rule the tool door
+    // spells as invalid arguments — and none of them reads.
     const service = stack.ctx.get('singularityContext') as unknown as {
       contextRead(
         sessionId: string,
@@ -368,26 +378,36 @@ describe('what a single-event read refuses, and what it never asks (Q3-2)', () =
     expect(String(atService.detail)).not.toContain(MEMBER_BODY)
     serviceReads.restore()
 
-    // 3. Numbers a page cannot be taken at: a negative seq and a fractional seq
-    //    are refusals, and a negative or fractional byte offset is a stale
-    //    reference — none of them reads the log.
+    // 3. Numbers a page cannot be taken at: `-1` fits the declared `integer` type
+    //    and is the read core's own named refusal; `1.5` does not fit it, so the
+    //    typed-argument gate refuses the call before the core runs. Neither
+    //    reads, and the service door answers the two the same way.
+    const negativeSeq = patchReadEvent(stack)
+    const negative = await stack.call(ROOT, 'context_read', {
+      kind: 'session',
+      ref: { sessionId: MEMBER, seq: -1 },
+    })
+    expect(negativeSeq.count).toBe(0)
+    expect(negative.isError, negative.text).toBe(false)
+    refusal(negative, 'not-found', 'a negative seq')
+    expect(negative.text).not.toContain(MEMBER_BODY)
+    negativeSeq.restore()
+
+    const fractionalSeq = patchReadEvent(stack)
+    const fractional = await stack.call(ROOT, 'context_read', {
+      kind: 'session',
+      ref: { sessionId: MEMBER, seq: 1.5 },
+    })
+    expect(fractionalSeq.count).toBe(0)
+    expect(fractional.isError, fractional.text).toBe(true)
+    expect(fractional.text).toBe(REF_SHAPE_REFUSAL)
+    expect(fractional.text).not.toContain(MEMBER_BODY)
+    fractionalSeq.restore()
+
     for (const [label, ref] of [
       ['a negative seq', { sessionId: MEMBER, seq: -1 }],
       ['a fractional seq', { sessionId: MEMBER, seq: 1.5 }],
     ] as const) {
-      const counted = patchReadEvent(stack)
-      const answer = await stack.call(ROOT, 'context_read', { kind: 'session', ref })
-      expect(counted.count, label).toBe(0)
-      if (answer.isError) {
-        // The tool schema declares `seq` an integer, so an out-of-type seq is
-        // refused at the door, before the read core sees it.
-        expect(answer.text, label).toMatch(/invalid arguments/)
-      } else {
-        refusal(answer, 'not-found', label)
-      }
-      expect(answer.text, label).not.toContain(MEMBER_BODY)
-      counted.restore()
-
       const atCore = patchReadEvent(stack)
       const projected = await service.contextRead(ROOT, { kind: 'session', ref })
       expect(atCore.count, label).toBe(0)
