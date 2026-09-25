@@ -173,6 +173,15 @@ interface SpawnRequest {
    */
   readonly permissionPreset?: string;
   /**
+   * The working directory the child's session starts in, replacing the
+   * inherit-the-parent default. It is the session's own cwd for everything that
+   * resolves against it — a worker's project skill roots are searched upward from
+   * it (`skill-file.ts`) — and a caller names one when the child must work
+   * somewhere other than where its parent works (a replay the task runtime runs in
+   * a workspace the caller supplied). Absent keeps the parent's cwd.
+   */
+  readonly cwd?: string;
+  /**
    * Declare the child a task worker (A2): the spawn setup installs the stable
    * worker policy section (`singularity:worker`, order 75 — the worker's
    * contract itself is the context assembly's `singularity:worker-contract`

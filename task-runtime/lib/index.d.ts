@@ -1535,6 +1535,13 @@ interface SpawnChildRequest {
    * spawn prompt is a surface a fold can shadow and the store is the authority.
    */
   taskWorker?: boolean;
+  /**
+   * The working directory the child's session starts in. Absent inherits the
+   * caller's own cwd, which is what every ordinary run does; the orchestration
+   * names one when its sessions work somewhere else ({@link
+   * OrchestrateEnv.workerCwd}).
+   */
+  cwd?: string;
   signal?: AbortSignal;
 }
 /**
@@ -1675,6 +1682,14 @@ interface OrchestrateEnv {
    */
   workspaces?: WorkspaceRegistry;
   workspacePath?: string;
+  /**
+   * The directory every worker this orchestration spawns starts in, when the
+   * checkout it works in is not the one its caller's session inherits. A replay
+   * the caller placed in a workspace of its own names it, and its children inherit
+   * it the same way an ordinary child inherits its parent's cwd. Absent — the
+   * ordinary case — keeps every spawn on the parent session's own cwd.
+   */
+  workerCwd?: string;
   /**
    * The provider pre-check, for the one case that has no verdict to carry: a
    * batch whose admission happened in an earlier process. A freshly admitted
@@ -2032,6 +2047,13 @@ interface ReplayRunOutcome {
   evidenceId?: string;
   durationMs?: number;
   criteria?: ReviewCriterion[];
+  /**
+   * The workspace this replay ran in, when its caller named one
+   * (`ReplayTaskOptions.workspace`, normalized): the directory its worker wrote
+   * in and its verifier judged in. Absent for a replay that ran in the caller's
+   * own checkout, which is where an unnamed replay always runs.
+   */
+  workspace?: string;
 }
 /**
  * Replay runner (guide §2.7.6, W15): create the caller-shaped replay task in
@@ -3020,6 +3042,20 @@ interface ReplayTaskOptions {
   };
   /** false: no worker spawn — the verifier alone settles the run (deterministic criteria replay). Default true. */
   spawn?: boolean;
+  /**
+   * The workspace this replay runs in, when the caller has prepared one of its
+   * own (S4-E) instead of replaying into its own checkout. The directory is
+   * claimed under the same one-writer-per-workspace rule as any other, and it is
+   * what the whole run resolves against: the provider pre-check, the protected
+   * acceptance inputs' bytes, the worker's own cwd, its children's, the
+   * verifier's cwd and the verifier's exclusive hold. The caller owns the
+   * directory's lifecycle — creating it, snapshotting it, and cleaning it up
+   * afterwards are not this entry's business — and a path that cannot be
+   * resolved refuses the replay before anything persists.
+   */
+  workspace?: {
+    path: string;
+  };
   signal?: AbortSignal;
 }
 interface Config {
@@ -3563,6 +3599,20 @@ declare class TaskRuntime extends Service {
    * process records no lineage on the run it continues.
    */
   private readonly replayLineage;
+  /**
+   * The directory each session this process spawned into a *named* workspace
+   * works in, keyed by session: a replay may be placed in a directory of its own
+   * (S4-E), and that directory — not the session's graph env — is then the
+   * checkout every one of its runs resolves against, its own decomposition and its
+   * children's spawns included.
+   *
+   * In-process only, like the ownership registry it feeds and the session index
+   * beside it: a session the process never spawned has no entry, and a restart
+   * resolves the store's own sessions from the graph again. An entry lives while
+   * the run bound to its session is non-terminal ({@link runSettledFromRuntime}
+   * forgets it), which is exactly as long as anything can resolve through it.
+   */
+  private readonly sessionWorkspaces;
   /** The tool-execution gate and the write drain (A3 §3.3); this runtime owns every phase it writes. */
   private readonly executionGate;
   /**
@@ -4543,14 +4593,21 @@ declare class TaskRuntime extends Service {
    * (T1), and its criteria are judged by the same structural rules an ordinary
    * decomposition child faces (`contractDefects` plus the P4 declarations).
    * Protected acceptance inputs are fixed here too (S1-V slice 2), against the
-   * replay caller's checkout: a candidate contract declaring paths has their
-   * identity fixed before anything else reads it, while a champion's stored
+   * checkout the replay runs in — the caller's own, or the workspace the caller
+   * named (`options.workspace`, S4-E): a candidate contract declaring paths has
+   * their identity fixed before anything else reads it, while a champion's stored
    * `{ path, sha256 }` refs are carried verbatim — the historical identity is
    * what the pre-judgement re-check compares against, so it is never re-read
    * from disk and never invented. A replay has no batch, so it records no
    * admission context: nothing was proposed to a parent, there is no sibling
    * set to bound, and the limits that do apply to its run are the run's own
    * budget, not a batch's.
+   *
+   * A caller that names a workspace gets one isolated replay in a directory of
+   * its own: the path is resolved and claimed before anything persists, so an
+   * unusable or already-held directory refuses the replay with nothing written,
+   * and every directory the run resolves against — the pre-check, the protected
+   * inputs, the worker and its children, the verifier — is that one.
    */
   replayTask(storeId: string, championTaskId: TaskId, options: ReplayTaskOptions, callerSessionId: string): Promise<ReplayRunOutcome>;
   /**
@@ -5065,9 +5122,11 @@ declare class TaskRuntime extends Service {
   private ancestorTaskIdFor;
   /**
    * Take the checkout for one replay run: an unheld workspace is claimed, and a
-   * workspace the *caller's own* tree already holds is handed over (the replay
-   * run writes where its caller writes). Any other holder is a conflict, and the
-   * replay refuses before its task is created.
+   * workspace the *caller's own* tree already holds is handed over (a replay
+   * without a named workspace writes where its caller writes). Any other holder
+   * is a conflict, and the replay refuses before its task is created — which is
+   * also how a workspace another side of a comparison still holds refuses the
+   * second side (`options.workspace`), by the same rule and the same error.
    *
    * The layer names the replayed task ({@link WorkspaceOwner.taskId}), because
    * the hold is the replay run's own: the §3.4 admission compares a holder by
@@ -5136,6 +5195,13 @@ declare class TaskRuntime extends Service {
    * against. `undefined` means the deployment cannot name it — the caller
    * refuses rather than fixing an identity against a base it does not know
    * ({@link fixProtectedInputs}).
+   *
+   * A session this process spawned into a named workspace (S4-E) answers with
+   * that workspace: the graph env names where the caller's own tree works, which
+   * is not where a replay the caller placed elsewhere works. This is the one
+   * resolution point, so every path that asks for a session's checkout — the
+   * protected inputs of a nested batch, the pre-check a review re-runs, the
+   * capability report a worker reads — follows the same directory.
    */
   private envPathForSession;
   /**
@@ -5157,6 +5223,13 @@ declare class TaskRuntime extends Service {
    * the caller's session is the viewpoint every path in this env shares — the
    * verifier's `cwd`, the protected inputs' base, the skills' discovery root and
    * the workspace ownership key are one directory.
+   *
+   * @param workspace - the already-normalized workspace this orchestration runs
+   * in, when it is not the caller session's own checkout: a replay placed in a
+   * directory the caller supplied (§S4-E). It replaces the checkout for the
+   * verifier's `cwd`, the MCP env the grant binds against, and the cwd every
+   * worker this env spawns starts in; absent, the session's own checkout is used
+   * exactly as before.
    */
   private orchestrateEnv;
   /**

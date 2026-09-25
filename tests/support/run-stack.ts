@@ -379,8 +379,11 @@ class RunStackImpl implements RunStack {
 
     const rootKeys = new Map(this.roots.map(root => [root as string, rootPresetKey]))
     ctx.agents.setFactory({
-      createAgent: async (_ownerCtx: Context, opts: { sessionId: SessionId; setup?: (agentCtx: Context, agent: Agent) => Promise<unknown> }) =>
-        ({ agent: await this.mint(opts.sessionId, opts.setup, rootKeys.get(opts.sessionId) ?? presetKey), dispose: async () => { this.live.delete(opts.sessionId) } }),
+      // `meta.cwd` is what a session's own header carries in the real loop, and a
+      // worker's cwd is where its tools resolve relative paths: a factory that
+      // dropped it would answer a worker whose session disagrees with the spawn.
+      createAgent: async (_ownerCtx: Context, opts: { sessionId: SessionId; meta?: { cwd?: string }; setup?: (agentCtx: Context, agent: Agent) => Promise<unknown> }) =>
+        ({ agent: await this.mint(opts.sessionId, opts.setup, rootKeys.get(opts.sessionId) ?? presetKey, opts.meta?.cwd), dispose: async () => { this.live.delete(opts.sessionId) } }),
       resume: async (_ownerCtx: Context, opts: { resumeSessionId: SessionId; setup?: (agentCtx: Context, agent: Agent) => Promise<unknown> }) =>
         ({ agent: await this.mint(opts.resumeSessionId, opts.setup, rootKeys.get(opts.resumeSessionId) ?? presetKey), dispose: async () => { this.live.delete(opts.resumeSessionId) } }),
     } as never)
@@ -413,13 +416,21 @@ class RunStackImpl implements RunStack {
     }
   }
 
-  /** Mint one agent's scoped world and run `setup` on it, exactly as the loop's factory does. */
+  /**
+   * Mint one agent's scoped world and run `setup` on it, exactly as the loop's
+   * factory does. `cwd` is the session's own working directory when the creation
+   * named one (a spawn's `meta.cwd`); a session the fixture already holds a header
+   * for — a root — keeps the header it was seeded with.
+   */
   private async mint(
     sessionId: SessionId,
     setup: ((agentCtx: Context, agent: Agent) => Promise<unknown>) | undefined,
     parentKey: { id: string },
+    cwd?: string,
   ): Promise<Agent> {
     let self!: Agent
+    /** The pending idle wait's resolver, so `cancel` converges a turn the way the real loop's does. */
+    let releaseIdle: (() => void) | undefined
     const agent = {
       id: sessionId,
       // A live agent is idle when its loop is not running a turn, and that is
@@ -429,14 +440,21 @@ class RunStackImpl implements RunStack {
       // way a turn would, so the field is honest in both states.
       status: 'idle',
       followup: vi.fn(),
-      cancel: vi.fn(),
+      // Cancelling a live worker ends its turn, and a turn that never ends cannot
+      // be stopped: a batch cancellation reaches a parked worker through this
+      // resolver, exactly as the loop's own `cancel` converges a real turn. The
+      // scripted body itself is the spec's, and only it decides when to return.
+      cancel: vi.fn(() => { releaseIdle?.() }),
       append: vi.fn(),
       // A live worker goes idle when its work is done; here that is whatever the
       // spec scripted for this session, run at the same point in the cascade.
-      whenIdle: async () => { await this.runWorkerTurn(sessionId, self) },
+      whenIdle: () => new Promise<void>((resolve, reject) => {
+        releaseIdle = resolve
+        void this.runWorkerTurn(sessionId, self).then(resolve, reject)
+      }),
       session: {
         id: sessionId,
-        header: this.headers.get(sessionId) ?? { id: sessionId, cwd: this.checkout, agentPreset: 'standard' },
+        header: this.headers.get(sessionId) ?? { id: sessionId, cwd: cwd ?? this.checkout, agentPreset: 'standard' },
         append: vi.fn(),
       },
     } as unknown as Agent

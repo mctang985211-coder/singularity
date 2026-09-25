@@ -655,6 +655,18 @@ export interface ReplayTaskOptions {
   contract?: { objective: string; acceptanceCriteria: AcceptanceCriterion[]; requiredCapabilities: string[] }
   /** false: no worker spawn — the verifier alone settles the run (deterministic criteria replay). Default true. */
   spawn?: boolean
+  /**
+   * The workspace this replay runs in, when the caller has prepared one of its
+   * own (S4-E) instead of replaying into its own checkout. The directory is
+   * claimed under the same one-writer-per-workspace rule as any other, and it is
+   * what the whole run resolves against: the provider pre-check, the protected
+   * acceptance inputs' bytes, the worker's own cwd, its children's, the
+   * verifier's cwd and the verifier's exclusive hold. The caller owns the
+   * directory's lifecycle — creating it, snapshotting it, and cleaning it up
+   * afterwards are not this entry's business — and a path that cannot be
+   * resolved refuses the replay before anything persists.
+   */
+  workspace?: { path: string }
   signal?: AbortSignal
 }
 
@@ -1410,6 +1422,20 @@ export class TaskRuntime extends Service {
    * process records no lineage on the run it continues.
    */
   private readonly replayLineage = new Map<TaskId, string>()
+  /**
+   * The directory each session this process spawned into a *named* workspace
+   * works in, keyed by session: a replay may be placed in a directory of its own
+   * (S4-E), and that directory — not the session's graph env — is then the
+   * checkout every one of its runs resolves against, its own decomposition and its
+   * children's spawns included.
+   *
+   * In-process only, like the ownership registry it feeds and the session index
+   * beside it: a session the process never spawned has no entry, and a restart
+   * resolves the store's own sessions from the graph again. An entry lives while
+   * the run bound to its session is non-terminal ({@link runSettledFromRuntime}
+   * forgets it), which is exactly as long as anything can resolve through it.
+   */
+  private readonly sessionWorkspaces = new Map<string, string>()
   /** The tool-execution gate and the write drain (A3 §3.3); this runtime owns every phase it writes. */
   private readonly executionGate: ExecutionGate
   /**
@@ -4456,14 +4482,21 @@ export class TaskRuntime extends Service {
    * (T1), and its criteria are judged by the same structural rules an ordinary
    * decomposition child faces (`contractDefects` plus the P4 declarations).
    * Protected acceptance inputs are fixed here too (S1-V slice 2), against the
-   * replay caller's checkout: a candidate contract declaring paths has their
-   * identity fixed before anything else reads it, while a champion's stored
+   * checkout the replay runs in — the caller's own, or the workspace the caller
+   * named (`options.workspace`, S4-E): a candidate contract declaring paths has
+   * their identity fixed before anything else reads it, while a champion's stored
    * `{ path, sha256 }` refs are carried verbatim — the historical identity is
    * what the pre-judgement re-check compares against, so it is never re-read
    * from disk and never invented. A replay has no batch, so it records no
    * admission context: nothing was proposed to a parent, there is no sibling
    * set to bound, and the limits that do apply to its run are the run's own
    * budget, not a batch's.
+   *
+   * A caller that names a workspace gets one isolated replay in a directory of
+   * its own: the path is resolved and claimed before anything persists, so an
+   * unusable or already-held directory refuses the replay with nothing written,
+   * and every directory the run resolves against — the pre-check, the protected
+   * inputs, the worker and its children, the verifier — is that one.
    */
   async replayTask(
     storeId: string,
@@ -4489,9 +4522,13 @@ export class TaskRuntime extends Service {
     if (manifest.missing.length > 0) {
       throw new Error(`task-runtime: replay of "${championTaskId}" cannot run: capability gap [${manifest.missing.join(', ')}] under the overlay`)
     }
-    const envPath = await this.envPathForSession(callerSessionId)
+    // The checkout this replay's everything resolves against: the workspace the
+    // caller named, resolved to its real path first so the claim, the cwd and the
+    // digest all name one directory — or the caller's own session checkout.
+    const named = options.workspace === undefined ? undefined : await normalizeWorkspacePath(options.workspace.path)
+    const envPath = named ?? await this.envPathForSession(callerSessionId)
     // The same provider pre-check the ordinary decomposition runs (S1-C item 1),
-    // from the replay caller's checkout and under the overlay's own capability
+    // from the replay's checkout and under the overlay's own capability
     // table — the table this replay resolved against, not the configured one.
     // The overlay's extra skill roots are searched first because that is the
     // order the grant registers them in: a candidate skill in the sandbox is
@@ -4571,11 +4608,13 @@ export class TaskRuntime extends Service {
     // run, so the root budget must allow one — counted against the *same* root
     // total the tree spends, because a replay's parentless task shares its
     // funding root rather than getting a fresh allowance — and it writes into
-    // the caller's checkout, so that checkout must be the caller's own. Both are
-    // checked here, before the task is created, and both refuse with nothing
-    // persisted. A budget that cannot be resolved refuses the replay for the
-    // same reason the batch entries refuse: a configured hard limit nobody can
-    // measure is not a limit this deployment may run without.
+    // one checkout, so that checkout must be claimable by this replay: the
+    // caller's own (which the caller's tree must hold) or the workspace the
+    // caller named (which nobody may hold). Both are checked here, before the
+    // task is created, and both refuse with nothing persisted. A budget that
+    // cannot be resolved refuses the replay for the same reason the batch
+    // entries refuse: a configured hard limit nobody can measure is not a limit
+    // this deployment may run without.
     const replaySnapshot = await this.ctx.task.snapshotIn(storeId)
     const replayBudget = resolveRootBudget(replaySnapshot, this.config.rootBudget ?? {})
     if (!replayBudget.ok) {
@@ -4588,7 +4627,7 @@ export class TaskRuntime extends Service {
         throw new Error(`task-runtime: replay of "${championTaskId}" refused: ${startVerdict.reason}`)
       }
     }
-    const workspacePath = await this.workspacePathForSession(callerSessionId)
+    const workspacePath = named ?? await this.workspacePathForSession(callerSessionId)
     const workspaceOwner = workspacePath === undefined
       ? undefined
       : await this.claimReplayWorkspace(workspacePath, storeId, callerSessionId, championTaskId, task.taskId)
@@ -4596,7 +4635,7 @@ export class TaskRuntime extends Service {
     const controller = new AbortController()
     const run = async (): Promise<ReplayRunOutcome> => {
       try {
-        return await runReplayTask(await this.orchestrateEnv(callerSessionId, callerSessionId), storeId, {
+        const outcome = await runReplayTask(await this.orchestrateEnv(callerSessionId, callerSessionId, named), storeId, {
           task,
           manifest,
           // The pre-check this replay passed: the Run binding (S1-C item 4) records
@@ -4611,6 +4650,10 @@ export class TaskRuntime extends Service {
           ...(options.signal === undefined ? {} : { admission: options.signal }),
           advance: controller.signal,
         })
+        // A named workspace is what the outcome of this replay reports: the
+        // comparison report names the directory each side's run went through. An
+        // unnamed replay reports none, as it always did.
+        return named === undefined ? outcome : { ...outcome, workspace: named }
       } finally {
         if (workspacePath !== undefined && workspaceOwner !== undefined) await this.releaseReplayWorkspace(workspacePath, workspaceOwner)
       }
@@ -4769,9 +4812,18 @@ export class TaskRuntime extends Service {
     const sessionId = this.sessionBoundInProcess(storeId, runId)
     if (sessionId === undefined) return
     this.executionGate.setTerminal(sessionId)
-    void this.releaseRunWorkspaceLayer(storeId, runId, sessionId).catch(error => {
-      this.warn(`run ${runId}: the workspace layer it held could not be released (${error instanceof Error ? error.message : String(error)})`)
-    })
+    void this.releaseRunWorkspaceLayer(storeId, runId, sessionId)
+      .catch(error => {
+        this.warn(`run ${runId}: the workspace layer it held could not be released (${error instanceof Error ? error.message : String(error)})`)
+      })
+      // The workspace this session was spawned into is forgotten once the run
+      // behind it is terminal — and only after the release above has resolved,
+      // because that release resolves the same entry ({@link sessionWorkspaces}).
+      // Nothing terminal resolves through it again: a decomposed child of this
+      // session is refused by the store long before it could.
+      .finally(() => {
+        if (this.sessionWorkspaces.size > 0) this.sessionWorkspaces.delete(sessionId)
+      })
   }
 
   /**
@@ -6169,9 +6221,11 @@ export class TaskRuntime extends Service {
 
   /**
    * Take the checkout for one replay run: an unheld workspace is claimed, and a
-   * workspace the *caller's own* tree already holds is handed over (the replay
-   * run writes where its caller writes). Any other holder is a conflict, and the
-   * replay refuses before its task is created.
+   * workspace the *caller's own* tree already holds is handed over (a replay
+   * without a named workspace writes where its caller writes). Any other holder
+   * is a conflict, and the replay refuses before its task is created — which is
+   * also how a workspace another side of a comparison still holds refuses the
+   * second side (`options.workspace`), by the same rule and the same error.
    *
    * The layer names the replayed task ({@link WorkspaceOwner.taskId}), because
    * the hold is the replay run's own: the §3.4 admission compares a holder by
@@ -6352,8 +6406,17 @@ export class TaskRuntime extends Service {
    * against. `undefined` means the deployment cannot name it — the caller
    * refuses rather than fixing an identity against a base it does not know
    * ({@link fixProtectedInputs}).
+   *
+   * A session this process spawned into a named workspace (S4-E) answers with
+   * that workspace: the graph env names where the caller's own tree works, which
+   * is not where a replay the caller placed elsewhere works. This is the one
+   * resolution point, so every path that asks for a session's checkout — the
+   * protected inputs of a nested batch, the pre-check a review re-runs, the
+   * capability report a worker reads — follows the same directory.
    */
   private async envPathForSession(sessionId: string): Promise<string | undefined> {
+    const named = this.sessionWorkspaces.get(sessionId)
+    if (named !== undefined) return named
     return (await this.sessionEnv(sessionId))?.path
   }
 
@@ -6379,9 +6442,20 @@ export class TaskRuntime extends Service {
    * the caller's session is the viewpoint every path in this env shares — the
    * verifier's `cwd`, the protected inputs' base, the skills' discovery root and
    * the workspace ownership key are one directory.
+   *
+   * @param workspace - the already-normalized workspace this orchestration runs
+   * in, when it is not the caller session's own checkout: a replay placed in a
+   * directory the caller supplied (§S4-E). It replaces the checkout for the
+   * verifier's `cwd`, the MCP env the grant binds against, and the cwd every
+   * worker this env spawns starts in; absent, the session's own checkout is used
+   * exactly as before.
    */
-  private async orchestrateEnv(callerSessionId: string, actor: string): Promise<OrchestrateEnv> {
-    const workspacePath = await this.workspacePathForSession(callerSessionId)
+  private async orchestrateEnv(callerSessionId: string, actor: string, workspace?: string): Promise<OrchestrateEnv> {
+    // A session this process already spawned into a named workspace keeps
+    // working in it: the replay's own decomposition builds its env here, and the
+    // workspace it was placed in is the one its children inherit.
+    const named = workspace ?? this.sessionWorkspaces.get(callerSessionId)
+    const workspacePath = named ?? await this.workspacePathForSession(callerSessionId)
     return {
       task: this.ctx.task,
       actor,
@@ -6393,6 +6467,7 @@ export class TaskRuntime extends Service {
       gate: this.executionGate,
       workspaces: this.workspaces,
       ...(workspacePath === undefined ? {} : { workspacePath }),
+      ...(named === undefined ? {} : { workerCwd: named }),
       noProgressRounds: this.config.noProgressRounds,
       writeDrainTimeoutMs: this.config.writeDrainTimeoutMs,
       ...(this.config.rootBudget === undefined ? {} : { rootBudget: { ...this.config.rootBudget } }),
@@ -6434,22 +6509,34 @@ export class TaskRuntime extends Service {
         // declares MCP servers then fails the spawn loudly (mcp-servers.ts).
         const env = await this.sessionEnv(callerSessionId)
         if (env === undefined) return undefined
+        // A named workspace stands in for the env root: a server this run's
+        // capability grants works in the checkout the worker works in, not in
+        // the one the caller's tree owns. The env's component layout is what
+        // names a repository's checkout under either root.
+        const root = named ?? env.path
         return {
-          envRoot: env.path,
+          envRoot: root,
           checkout: repo => {
             const component = (env.components ?? []).find(item => item.repo === repo)
-            return component === undefined ? undefined : join(env.path, component.dir)
+            return component === undefined ? undefined : join(root, component.dir)
           },
         }
       },
       spawn: request => {
         const parent = this.liveAgent(callerSessionId)
+        // The session this spawn creates works where the spawn says it does, and
+        // this process remembers it for as long as the run behind it: an
+        // orchestration built later for that session — its own decomposition, the
+        // recovery of one of its runs — resolves its checkout from here.
+        const sessionWorkspace = request.cwd ?? named
+        if (sessionWorkspace !== undefined) this.sessionWorkspaces.set(request.sessionId, sessionWorkspace)
         return this.ctx.agentRuntime.spawn(parent, {
           sessionId: SessionId(request.sessionId),
           name: request.name,
           ...(request.taskWorker === undefined ? {} : { taskWorker: request.taskWorker }),
           ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
           ...(request.permissionPreset !== undefined ? { permissionPreset: request.permissionPreset } : {}),
+          ...(request.cwd !== undefined ? { cwd: request.cwd } : {}),
           ...(request.grant !== undefined ? { grant: request.grant } : {}),
           ...(request.signal !== undefined ? { signal: request.signal } : {}),
         })
@@ -6466,7 +6553,7 @@ export class TaskRuntime extends Service {
             `task-runtime: verifier service is not loaded; cannot verify run "${runId}" (expected plugin id "verifier", ticket C2)`,
           )
         }
-        const cwd = await this.envPathForSession(callerSessionId)
+        const cwd = named ?? await this.envPathForSession(callerSessionId)
         return verifier.verifyRun(storeId, runId, { ...(cwd === undefined ? {} : { cwd }), ...options })
       },
       readLogTail: async logRef => this.runVerifier()?.logTail?.(logRef),

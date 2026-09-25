@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdir, mkdtemp, readFile, readdir, realpath, writeFile } from 'node:fs/promises'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
@@ -49,6 +49,8 @@ interface SpawnCall {
   taskWorker?: boolean
   agentPreset?: string
   permissionPreset?: string
+  /** The working directory the spawn named for the worker, when it named one (a replay in a caller-named workspace). */
+  cwd?: string
   grant?: {
     capabilities: readonly { capability: string; tools: readonly string[]; skills: readonly string[] }[]
     baseline: readonly string[]
@@ -127,6 +129,7 @@ function harness(
       taskWorker?: boolean
       agentPreset?: string
       permissionPreset?: string
+      cwd?: string
       grant?: SpawnCall['grant']
     }) => {
       if (options.spawnError !== undefined) throw new Error(options.spawnError)
@@ -140,6 +143,7 @@ function harness(
         ...(request.taskWorker === undefined ? {} : { taskWorker: request.taskWorker }),
         ...(request.agentPreset === undefined ? {} : { agentPreset: request.agentPreset }),
         ...(request.permissionPreset === undefined ? {} : { permissionPreset: request.permissionPreset }),
+        ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
         ...(request.grant === undefined ? {} : { grant: request.grant }),
       })
       // `cancel` converges the agent to idle, as the real loop's does: a worker
@@ -2576,6 +2580,58 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     }])
     const replayRun = await h.task.runIn(STORE, outcome.runId)
     expect(replayRun.capabilitySnapshot).toContain('mcp:bbdev')
+  })
+
+  test('a replay in a caller-named workspace resolves its spawn, its verifier and its MCP servers there', async () => {
+    // S4-E: the two-sided evaluation runs each side in a workspace built from the
+    // same initial snapshot, so everything one side resolves against — the
+    // worker's cwd, the verifier's cwd, and what a capability's MCP server is
+    // bound to — has to follow the directory the caller named.
+    pinSkillHome('check')
+    const parent = mkdtempSync(join(tmpdir(), 's4e-named-replay-'))
+    const checkoutRoot = join(parent, 'checkout')
+    const named = join(parent, 'candidate-side')
+    mkdirSync(checkoutRoot, { recursive: true })
+    mkdirSync(named, { recursive: true })
+    try {
+      const realNamed = await realpath(named)
+      const h = harness({ config: { capabilities: { 'check-ball-registration': { skills: ['check'], mcpServers: ['bbdev'] } } } })
+      h.ctx.envBuilder = {
+        store: {
+          get: (envId: string) => ({
+            path: checkoutRoot,
+            components: [{ owner: 'fork', repo: 'buckyball', url: 'u', dir: 'fork/buckyball', status: 'ready' }],
+          }),
+        },
+      }
+      const { championTaskId } = await champion(h, 'champion work', { requiredCapabilities: ['check-ball-registration'] })
+
+      const outcome = await h.runtime.replayTask(STORE, championTaskId, {
+        lineage: 'evolution-replay:named-workspace',
+        workspace: { path: named },
+      }, ROOT_SESSION)
+
+      expect(outcome.status).toBe('verified')
+      // The outcome names the workspace, normalized — the identity a report and a
+      // marker both key by.
+      expect(outcome.workspace).toBe(realNamed)
+      // The worker starts in it.
+      const spawn = h.spawned[h.spawned.length - 1]!
+      expect(spawn.cwd).toBe(realNamed)
+      // So does the MCP server the capability grants: the env root a server's cwd
+      // and `{repoRoot:…}` placeholders resolve against is the named workspace.
+      expect(spawn.grant!.mcpServers).toEqual([{
+        serverName: 'bbdev',
+        command: join(realNamed, 'fork/buckyball/scripts/claude/run_mcp_server.sh'),
+        args: [],
+        env: {},
+        cwd: join(realNamed, 'fork/buckyball'),
+      }])
+      // And the verifier judges there.
+      expect(h.verifier.verifyRun).toHaveBeenCalledWith(STORE, outcome.runId, { cwd: realNamed, timeoutMs: DEFAULT_VERIFY_TIMEOUT_MS })
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
   })
 
   test('a presetOverride wins over the capability resolution; absent it, the capability preset stands', async () => {

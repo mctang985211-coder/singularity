@@ -360,7 +360,7 @@ export class AgentRuntime extends Service {
         handle = await this.ctx.agents.create({
           sessionId: request.sessionId,
           meta: {
-            cwd: parentHeader.cwd,
+            cwd: request.cwd ?? parentHeader.cwd,
             agentPreset,
             parentSession: parentHeader.id,
             isSeeded: false,

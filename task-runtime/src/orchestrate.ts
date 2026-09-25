@@ -75,6 +75,13 @@ export interface SpawnChildRequest {
    * spawn prompt is a surface a fold can shadow and the store is the authority.
    */
   taskWorker?: boolean
+  /**
+   * The working directory the child's session starts in. Absent inherits the
+   * caller's own cwd, which is what every ordinary run does; the orchestration
+   * names one when its sessions work somewhere else ({@link
+   * OrchestrateEnv.workerCwd}).
+   */
+  cwd?: string
   signal?: AbortSignal
 }
 
@@ -227,6 +234,14 @@ export interface OrchestrateEnv {
    */
   workspaces?: WorkspaceRegistry
   workspacePath?: string
+  /**
+   * The directory every worker this orchestration spawns starts in, when the
+   * checkout it works in is not the one its caller's session inherits. A replay
+   * the caller placed in a workspace of its own names it, and its children inherit
+   * it the same way an ordinary child inherits its parent's cwd. Absent — the
+   * ordinary case — keeps every spawn on the parent session's own cwd.
+   */
+  workerCwd?: string
   /**
    * The provider pre-check, for the one case that has no verdict to carry: a
    * batch whose admission happened in an earlier process. A freshly admitted
@@ -1970,6 +1985,7 @@ async function startChildRound(
       grant: await authorizedGrant(env, manifest, skillRootsForRun([], binding)),
       ...(agentPreset === undefined ? {} : { agentPreset }),
       ...(permissionPreset === undefined ? {} : { permissionPreset }),
+      ...(env.workerCwd === undefined ? {} : { cwd: env.workerCwd }),
       signal: batch.signal,
     })
   } catch (error) {
@@ -2599,6 +2615,13 @@ export interface ReplayRunOutcome {
   evidenceId?: string
   durationMs?: number
   criteria?: ReviewCriterion[]
+  /**
+   * The workspace this replay ran in, when its caller named one
+   * (`ReplayTaskOptions.workspace`, normalized): the directory its worker wrote
+   * in and its verifier judged in. Absent for a replay that ran in the caller's
+   * own checkout, which is where an unnamed replay always runs.
+   */
+  workspace?: string
 }
 
 /**
@@ -2714,6 +2737,7 @@ export async function runReplayTask(
       grant: await authorizedGrant(env, init.manifest, roots),
       ...(init.agentPreset === undefined ? {} : { agentPreset: init.agentPreset }),
       ...(permissionPreset === undefined ? {} : { permissionPreset }),
+      ...(env.workerCwd === undefined ? {} : { cwd: env.workerCwd }),
       ...(advance === undefined ? {} : { signal: advance }),
     })
   } catch (error) {
