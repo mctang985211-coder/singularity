@@ -8,6 +8,7 @@ import * as McpClient from "@deepseek-ai/dsh-mcp-client";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { SessionAlreadyOwnedError } from "@deepseek-ai/dsh-session-persistence";
 
 //#region src/skill-file.ts
 /** How far up from a worker's cwd project skill roots are looked for. */
@@ -538,7 +539,7 @@ async function reconcileAgentMessageDeliveries(deps, intents) {
 		reports.push({
 			messageId: intent.messageId,
 			status: "refused",
-			reason: messageOf(error)
+			reason: messageOf$1(error)
 		});
 	}
 	return reports;
@@ -554,7 +555,7 @@ async function witnessBarrier(deps, session, sessionId, code = "source-not-durab
 	try {
 		durable = await deps.sessions.flush(session);
 	} catch (error) {
-		throw new MessageDeliveryRefusal(code, `agent-runtime: session "${String(sessionId)}" could not be flushed: ${messageOf(error)}`, { cause: error });
+		throw new MessageDeliveryRefusal(code, `agent-runtime: session "${String(sessionId)}" could not be flushed: ${messageOf$1(error)}`, { cause: error });
 	}
 	if (!durable) throw new MessageDeliveryRefusal(code, `agent-runtime: session "${String(sessionId)}" has no durability barrier (no session/flush participant)`);
 }
@@ -572,7 +573,7 @@ async function ownSuffix(deps, sessionId) {
 	try {
 		snapshot = await deps.sessionQuery.readSession(sessionId);
 	} catch (error) {
-		throw new MessageDeliveryRefusal("target-unreadable", `agent-runtime: target session "${String(sessionId)}" could not be read, so whether a message was accepted cannot be decided: ${messageOf(error)}`, { cause: error });
+		throw new MessageDeliveryRefusal("target-unreadable", `agent-runtime: target session "${String(sessionId)}" could not be read, so whether a message was accepted cannot be decided: ${messageOf$1(error)}`, { cause: error });
 	}
 	return snapshot.events.slice(snapshot.inheritedEventCount);
 }
@@ -597,10 +598,10 @@ function sourceReadRefusal(sessionId, seq, error) {
 	const code = error?.code;
 	if (code === "SESSION_QUERY_EVENT_NOT_FOUND") return new MessageDeliveryRefusal("source-event-missing", `agent-runtime: session "${sessionId}" has no event at seq ${seq}`, { cause: error });
 	if (code === "SESSION_QUERY_SESSION_NOT_FOUND") return new MessageDeliveryRefusal("source-session-missing", `agent-runtime: session "${sessionId}" does not exist`, { cause: error });
-	return new MessageDeliveryRefusal("source-unreadable", `agent-runtime: session "${sessionId}" could not be read: ${messageOf(error)}`, { cause: error });
+	return new MessageDeliveryRefusal("source-unreadable", `agent-runtime: session "${sessionId}" could not be read: ${messageOf$1(error)}`, { cause: error });
 }
 /** One line of an unknown failure, for refusals that carry a cause. */
-function messageOf(error) {
+function messageOf$1(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 
@@ -709,6 +710,161 @@ const RAW_SESSION_READ_DENIAL = "singularity: raw cross-session reads are sealed
 */
 function sealRawSessionReads(agentCtx) {
 	agentCtx.tools.guard((execution) => RAW_SESSION_READ_TOOLS.includes(execution.name) ? RAW_SESSION_READ_DENIAL : void 0);
+}
+
+//#endregion
+//#region src/worker-resume.ts
+/**
+* The permission posture a worker runs under when nobody decided one for it —
+* the spawn's own default (`index.ts`, the shared worker setup), named here
+* because the resume must state the same posture it is checking against.
+*/
+const WORKER_DEFAULT_PERMISSION_PRESET = "danger-full-access";
+/** One refused resume, with the stable name of what could not be established. */
+var WorkerResumeRefusal = class extends Error {
+	code;
+	constructor(code, message$1, options) {
+		super(message$1, options);
+		this.name = "WorkerResumeRefusal";
+		this.code = code;
+	}
+};
+/** The one marker `TaskRun.capabilitySnapshot` uses for a granted MCP server's plane (`task-runtime/src/capability.ts`). */
+const MCP_PLANE_MARKER = "mcp:";
+/**
+* Bring one spawned worker's persisted Session back live, or refuse by name.
+*
+* Order: ownership, then the Session's own durable record, then the declared
+* Run facts against it, then the graph's membership and delegation facts, then
+* the resume. Every check before `deps.agents.resume` is a read: a refusal
+* leaves the store, the Session log, the graph and the handle map exactly as
+* they were, and no Session is ever created to stand in for the one that could
+* not be taken over.
+* @param deps - the live registry, the session read path, the graph store and the composition.
+* @param request - the identity, its graph scope, the Run facts and the authorization claimed.
+* @returns the live handle of the same Session, idle and reachable, owning no new identity.
+* @throws WorkerResumeRefusal with the stable code of what could not be established.
+* @throws Error (unnamed) when the graph store cannot take the node's status
+*   repair: nothing was resumed, and that write is not a source decision a
+*   refusal code could name.
+*/
+async function resumeWorkerAgent(deps, request) {
+	const sessionId = SessionId(request.sessionId);
+	if (deps.agents.get(sessionId) !== void 0) throw new WorkerResumeRefusal("ownership-conflict", `agent-runtime: session "${String(sessionId)}" is already live; a resume must wait until its owner settles`);
+	const persisted = await readPersistedSession(deps, sessionId);
+	const header = persisted.session;
+	const agentPreset = assertRunBinding(request, header, persisted.events.slice(persisted.inheritedEventCount));
+	const member = await assertGraphMember(deps, request, header, sessionId);
+	const role = workerRole(request, agentPreset);
+	if (member.status === "running") await deps.graph.setStatusIn(request.scope.graphStoreId, sessionId, "idle");
+	return await resume(deps, request, sessionId, role);
+}
+/** One Session's persisted header and events, read through the deployment's own query path. */
+async function readPersistedSession(deps, sessionId) {
+	try {
+		return await deps.sessionQuery.readSession(sessionId);
+	} catch (error) {
+		if (error?.code === "SESSION_QUERY_SESSION_NOT_FOUND") throw new WorkerResumeRefusal("session-missing", `agent-runtime: session "${String(sessionId)}" does not exist; a worker recovery resumes a Session, it never creates one`, { cause: error });
+		throw new WorkerResumeRefusal("session-unreadable", `agent-runtime: session "${String(sessionId)}" could not be read, so it cannot be taken over safely: ${messageOf(error)}`, { cause: error });
+	}
+}
+/**
+* Refuse a declared Run, grant or permission the Session's own durable record
+* contradicts (A4 §F.1: "声明的 Run/绑定与 Session 持久事实不一致").
+*
+* What is checkable and why each one matters:
+* - the Run's `sessionId` — the store's binding is to one Session, and a resume
+*   under a Run that names another one would put a run's work on the wrong log;
+* - the Run's `agentPreset` against the header's — the header is what the
+*   resumed composition is built from, so a store that recorded a different
+*   preset means the two records disagree about what this Session is;
+* - the declared grant against the Run's recorded capability snapshot — the
+*   tool face is authorization, and the snapshot is the store's record of what
+*   the Run was admitted with;
+* - a `permission/preset` the log recorded against the declared permission —
+*   the log is the permission the Session actually ran under, and re-applying a
+*   different one would silently widen or narrow a session mid-task.
+* @returns the agent preset the Session's own header names — verified present,
+*   and the one the resumed composition is built from.
+*/
+function assertRunBinding(request, header, own) {
+	const run = request.run;
+	if (run.storeId === "" || run.taskId === "" || run.runId === "") throw new WorkerResumeRefusal("binding-mismatch", `agent-runtime: the declared run identity is empty (store "${run.storeId}", task "${run.taskId}", run "${run.runId}")`);
+	if (String(run.sessionId) !== String(header.id)) throw new WorkerResumeRefusal("binding-mismatch", `agent-runtime: run "${run.runId}" binds session "${String(run.sessionId)}", not the session "${String(header.id)}" being resumed`);
+	if (header.agentPreset === void 0) throw new WorkerResumeRefusal("binding-mismatch", `agent-runtime: session "${String(header.id)}" names no agent preset, so the composition run "${run.runId}" was spawned in cannot be rebuilt`);
+	if (run.agentPreset !== void 0 && run.agentPreset !== header.agentPreset) throw new WorkerResumeRefusal("binding-mismatch", `agent-runtime: run "${run.runId}" recorded agent preset "${run.agentPreset}" but session "${String(header.id)}" ran under "${header.agentPreset}"`);
+	const recorded = [...new Set(run.capabilitySnapshot)].sort();
+	const declared = declaredPlane(request.grant);
+	if (recorded.join("\n") !== declared.join("\n")) throw new WorkerResumeRefusal("binding-mismatch", `agent-runtime: run "${run.runId}" was admitted with capability plane [${recorded.join(", ")}] but the resume declares [${declared.join(", ")}]`);
+	const applied = request.permissionPreset ?? WORKER_DEFAULT_PERMISSION_PRESET;
+	const recordedPermission = lastPermissionPreset(own);
+	if (recordedPermission !== void 0 && recordedPermission !== applied) throw new WorkerResumeRefusal("binding-mismatch", `agent-runtime: session "${String(header.id)}" recorded permission preset "${recordedPermission}" but the resume would apply "${applied}"`);
+	return header.agentPreset;
+}
+/**
+* Refuse a Session the graph does not publish, or one whose delegation facts a
+* worker resume needs and cannot find (A4 §F.1: a resume must not invent the
+* member or its edge). Membership alone is not enough: the worker's lineage is
+* the parent the spawn published, and the Session's own header must agree with
+* the graph's edge — the two durable records are checked against each other.
+*/
+async function assertGraphMember(deps, request, header, sessionId) {
+	let snapshot;
+	try {
+		snapshot = await deps.graph.snapshotIn(request.scope.graphStoreId);
+	} catch (error) {
+		throw new WorkerResumeRefusal("member-facts-missing", `agent-runtime: graph store "${request.scope.graphStoreId}" could not be read, so session "${String(sessionId)}" cannot be shown to be a member: ${messageOf(error)}`, { cause: error });
+	}
+	const node = snapshot.agents.find((agent) => String(agent.id) === String(sessionId));
+	if (node === void 0) throw new WorkerResumeRefusal("not-in-graph", `agent-runtime: session "${String(sessionId)}" is not published by graph store "${request.scope.graphStoreId}"; a worker recovery resumes a member, it never adds one`);
+	const delegation = snapshot.edges.find((edge) => edge.kind === "spawn" && String(edge.to) === String(sessionId));
+	if (delegation === void 0) throw new WorkerResumeRefusal("member-facts-missing", snapshot.roots.some((candidate) => String(candidate) === String(sessionId)) ? `agent-runtime: session "${String(sessionId)}" is a root of graph store "${request.scope.graphStoreId}"; a root's recovery entry is ensureRoot, not a worker resume` : `agent-runtime: graph store "${request.scope.graphStoreId}" records no spawn edge into session "${String(sessionId)}", so its delegation cannot be verified`);
+	if (header.parentSession === void 0) throw new WorkerResumeRefusal("member-facts-missing", `agent-runtime: session "${String(sessionId)}" records no parent session, but graph store "${request.scope.graphStoreId}" holds a spawn edge from "${String(delegation.from)}"`);
+	if (String(header.parentSession) !== String(delegation.from)) throw new WorkerResumeRefusal("binding-mismatch", `agent-runtime: session "${String(sessionId)}" records parent "${String(header.parentSession)}" but graph store "${request.scope.graphStoreId}" holds its spawn edge from "${String(delegation.from)}"`);
+	return { status: node.status };
+}
+/** The composition a resume rebuilds: the request states it, the binding check verified the preset. */
+function workerRole(request, agentPreset) {
+	return {
+		agentPreset,
+		permissionPreset: request.permissionPreset ?? WORKER_DEFAULT_PERMISSION_PRESET,
+		taskWorker: request.taskWorker,
+		...request.grant === void 0 ? {} : { grant: request.grant }
+	};
+}
+/** Take the Session over through DSH's own resume, naming every refusal it raises. */
+async function resume(deps, request, sessionId, role) {
+	try {
+		return await deps.agents.resume({
+			resumeSessionId: sessionId,
+			...deps.agentOptions === void 0 ? {} : { agentOptions: deps.agentOptions },
+			setup: deps.setup(role)
+		});
+	} catch (error) {
+		if (error instanceof SessionAlreadyOwnedError) throw new WorkerResumeRefusal("ownership-conflict", `agent-runtime: session "${String(sessionId)}" is already owned by a write handle; retry the resume once that owner settles`, { cause: error });
+		throw new WorkerResumeRefusal("takeover-refused", `agent-runtime: session "${String(sessionId)}" could not be taken over safely: ${messageOf(error)}`, { cause: error });
+	}
+}
+/** The granted plane one grant declares: every capability's tools and skills, plus each MCP server's plane marker. */
+function declaredPlane(grant) {
+	const plane = /* @__PURE__ */ new Set();
+	for (const capability of grant?.capabilities ?? []) {
+		for (const tool of capability.tools) plane.add(tool);
+		for (const skill of capability.skills) plane.add(skill);
+	}
+	for (const server of grant?.mcpServers ?? []) plane.add(`${MCP_PLANE_MARKER}${server.serverName}`);
+	return [...plane].sort();
+}
+/** The permission preset the Session's own log last recorded, or `undefined` when it recorded none. */
+function lastPermissionPreset(own) {
+	for (let index = own.length - 1; index >= 0; index -= 1) {
+		const event = own[index];
+		if (event.type === "permission/preset") return event.data.preset;
+	}
+}
+/** One line of an unknown failure, for refusals that carry a cause. */
+function messageOf(error) {
+	return error instanceof Error ? error.message : String(error);
 }
 
 //#endregion
@@ -972,18 +1128,12 @@ var AgentRuntime = class extends Service {
 						...request.agentOptions
 					},
 					signal: request.signal,
-					setup: async (agentCtx, agent) => {
-						await this.ctx.agentPresets.mount(agentCtx, agentPreset);
-						this.ctx.permissionPresets.set(agent.session, request.permissionPreset ?? "danger-full-access");
-						if (request.taskWorker === true) agentCtx.systemPrompt.section({
-							name: "singularity:worker",
-							order: 75,
-							text: WORKER_POLICY_TEXT,
-							interpolate: false
-						});
-						if (request.grant !== void 0) await applyWorkerGrant(agentCtx, agent, request.grant);
-						sealRawSessionReads(agentCtx);
-					}
+					setup: this.workerSetup({
+						agentPreset,
+						permissionPreset: request.permissionPreset ?? WORKER_DEFAULT_PERMISSION_PRESET,
+						taskWorker: request.taskWorker === true,
+						...request.grant === void 0 ? {} : { grant: request.grant }
+					})
 				});
 			} catch (error) {
 				this.owned.delete(request.sessionId);
@@ -1041,6 +1191,41 @@ var AgentRuntime = class extends Service {
 				this.scopes.delete(handle.agent.id);
 				await handle.dispose();
 				if (published) await this.ctx.graph.setStatusIn(scope.graphStoreId, handle.agent.id, "failed");
+				throw error;
+			}
+		});
+	}
+	/**
+	* Bring one spawned worker's persisted Session back live (A4 §F.1), through
+	* the recovery entry `./worker-resume.ts` documents: the same Session, the
+	* same composition (the shared `workerSetup` below, which `spawn` also hands
+	* the agent factory), the same grant, seal and permission — and **idle**.
+	* Nothing is sent to the model here; the caller wakes the Session when it has
+	* something to deliver (§F.1: "恢复后由调用方决定何时 steer").
+	*
+	* The handle lands in the same `handles` map a spawn's product does, so
+	* `stopAgents`/`stopGraph` and the session-visibility rule treat a resumed
+	* worker exactly as they treat a spawned one. There is no second roster, no
+	* second mailbox and no second handle table: this entry owns nothing the
+	* spawn path does not already own.
+	* @param request - the Session, its graph scope, the Run facts the caller read
+	*   from its store, and the authorization the Run was admitted with.
+	* @returns the live handle of the same Session, idle.
+	* @throws WorkerResumeRefusal with the stable code of what could not be established.
+	*/
+	async resumeWorkerAgent(request) {
+		if (this.closing) throw new Error("agent-runtime: closing");
+		const sessionId = SessionId(request.sessionId);
+		return await this.inGraph(request.scope, async () => {
+			this.owned.add(sessionId);
+			this.scopes.set(sessionId, request.scope);
+			try {
+				const handle = await resumeWorkerAgent(this.workerResumeDeps(request), request);
+				this.handles.set(sessionId, handle);
+				return handle;
+			} catch (error) {
+				this.owned.delete(sessionId);
+				this.scopes.delete(sessionId);
 				throw error;
 			}
 		});
@@ -1138,6 +1323,45 @@ var AgentRuntime = class extends Service {
 			sessionQuery: this.ctx.sessionQuery
 		};
 	}
+	/**
+	* The one composition a worker's scoped world is built from. `spawn` and
+	* {@link resumeWorkerAgent} both hand this to the agent factory, so a resumed
+	* worker is composed exactly as its spawn composed it (A4 §F.1: same preset,
+	* same permission posture, same policy prompt, same grant, same seal) — and
+	* this package holds one worker composition, not a spawn flavor and a
+	* recovery flavor that could drift apart.
+	*/
+	workerSetup(role) {
+		return async (agentCtx, agent) => {
+			await this.ctx.agentPresets.mount(agentCtx, role.agentPreset);
+			this.ctx.permissionPresets.set(agent.session, role.permissionPreset);
+			if (role.taskWorker) agentCtx.systemPrompt.section({
+				name: "singularity:worker",
+				order: 75,
+				text: WORKER_POLICY_TEXT,
+				interpolate: false
+			});
+			if (role.grant !== void 0) await applyWorkerGrant(agentCtx, agent, role.grant);
+			sealRawSessionReads(agentCtx);
+		};
+	}
+	/**
+	* What one worker resume reaches: the live registry, the deployment's own
+	* session read path, the graph store, this runtime's worker composition, and
+	* the model selection a spawn would run under.
+	*/
+	workerResumeDeps(request) {
+		return {
+			agents: this.ctx.agents,
+			sessionQuery: this.ctx.sessionQuery,
+			graph: this.ctx.graph,
+			setup: (role) => this.workerSetup(role),
+			agentOptions: {
+				...this.ctx.agentDefaultModel.currentSelection(),
+				...request.agentOptions
+			}
+		};
+	}
 	inGraph(scope, work) {
 		if (this.closing) throw new Error("agent-runtime: closing");
 		if (this.stopping.has(scope.graphStoreId)) throw new Error("agent-runtime: graph stopping");
@@ -1157,4 +1381,4 @@ var AgentRuntime = class extends Service {
 var src_default = AgentRuntime;
 
 //#endregion
-export { AgentRuntime, MessageDeliveryRefusal, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, answerMessageText, applyWorkerGrant, src_default as default, ensureAgentMessageDelivered, findSkillFileIn, messageAccepted, parseSkillFile, questionMessageText, readToolCallBody, reconcileAgentMessageDeliveries, relayMessage, resolveGrant, sealRawSessionReads, skillRootsFor, toolCallRefIn };
+export { AgentRuntime, MessageDeliveryRefusal, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, WORKER_DEFAULT_PERMISSION_PRESET, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, WorkerResumeRefusal, answerMessageText, applyWorkerGrant, src_default as default, ensureAgentMessageDelivered, findSkillFileIn, messageAccepted, parseSkillFile, questionMessageText, readToolCallBody, reconcileAgentMessageDeliveries, relayMessage, resolveGrant, resumeWorkerAgent, sealRawSessionReads, skillRootsFor, toolCallRefIn };

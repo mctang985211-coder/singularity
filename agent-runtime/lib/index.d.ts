@@ -2,7 +2,8 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import { ContentBlock, UserMessage } from "@deepseek-ai/dsh-llm";
 import { Session, SessionEvent, SessionId, SessionId as SessionId$1 } from "@deepseek-ai/dsh-session";
 import { CanvasNode } from "@dangosys/dsh-singularity-layout";
-import { Agent, Agent as Agent$1, AgentHandle, AgentOptions } from "@deepseek-ai/dsh-agent";
+import { Agent, Agent as Agent$1, AgentHandle, AgentHandle as AgentHandle$1, AgentOptions, AgentOptions as AgentOptions$1, AgentSetup } from "@deepseek-ai/dsh-agent";
+import { AgentStatus } from "@dangosys/dsh-singularity-graph";
 import { SessionEventReadRequest, SessionEventWindow, SessionLogSnapshot } from "@deepseek-ai/dsh-session-query";
 
 //#region src/types.d.ts
@@ -193,9 +194,66 @@ interface SpawnRequest {
   readonly beforePrompt?: () => Promise<void>;
   readonly signal?: AbortSignal;
 }
+/**
+ * The Run facts a caller read from its own store for the Session it is bringing
+ * back (A4 §F.1's recovery entry). Structural on purpose: this package holds no
+ * task dependency — the store is the runtime's — so these are the fields
+ * `TaskRun` records, named the way it names them, and nothing here is guessed
+ * by the resume. Every one of them is checked against the Session's own durable
+ * record before anything is written.
+ */
+interface WorkerRunFacts {
+  /** The store the Run belongs to. */
+  readonly storeId: string;
+  readonly taskId: string;
+  readonly runId: string;
+  /** The Session the store's own Run record binds — must be the Session being resumed. */
+  readonly sessionId: SessionId$1;
+  /** The preset the Run was admitted with, when the store recorded one. */
+  readonly agentPreset?: string;
+  /**
+   * What the Run was admitted with (`TaskRun.capabilitySnapshot`: the granted
+   * tools, skills and `mcp:<serverName>` markers, flattened). Required because
+   * the store records it for every Run: a resume that cannot show the plane the
+   * Run was admitted under would be reinstalling a tool face nobody authorized.
+   */
+  readonly capabilitySnapshot: readonly string[];
+}
+/**
+ * One controlled resume of a spawned worker's persisted Session (A4 §F.1), the
+ * entry `task-runtime`'s recovery pass calls once it has reconciled the store:
+ * the same Session comes back live as the same worker — same identity, same
+ * composition, same tool face, same grant, same raw-session seal — and **idle**.
+ *
+ * Nothing here is a new session, a substitute node, a roster or a mailbox: the
+ * handle this returns is registered in the runtime's one handle map and is
+ * disposed by the same `stopAgents`/`stopGraph` rules a spawn's handle is.
+ */
+interface WorkerResumeRequest {
+  /** The persisted Session to bring back live; the identity the spawn created. */
+  readonly sessionId: SessionId$1;
+  /** The graph the Session was published in — the scope its spawn ran under. */
+  readonly scope: GraphScope;
+  /** The Run the caller holds for this Session, as the store records it. */
+  readonly run: WorkerRunFacts;
+  /** The grant the Run was spawned with, resolved by the caller as the spawn resolved it. */
+  readonly grant?: WorkerGrant;
+  /**
+   * The permission preset the Run was admitted under. Absent = the spawn's own
+   * default ({@link WORKER_DEFAULT_PERMISSION_PRESET}).
+   */
+  readonly permissionPreset?: string;
+  /**
+   * Whether the Session was spawned as a task worker. Required, not defaulted:
+   * the durable record does not carry the flag, and a resume that guessed would
+   * either drop the worker policy the prompt ran under or add one it never had.
+   */
+  readonly taskWorker: boolean;
+  /** Per-agent options for the resumed agent, overriding the runtime's default selection. */
+  readonly agentOptions?: AgentOptions;
+}
 //#endregion
 //#region src/messages.d.ts
-
 /**
  * Why one delivery or source read was refused. Every refusal is named: a caller
  * that cannot act on the difference between "not there yet" and "cannot be
@@ -516,6 +574,118 @@ declare const RAW_SESSION_READ_DENIAL = "singularity: raw cross-session reads ar
  */
 declare function sealRawSessionReads(agentCtx: Context): void;
 //#endregion
+//#region src/worker-resume.d.ts
+/**
+ * The permission posture a worker runs under when nobody decided one for it —
+ * the spawn's own default (`index.ts`, the shared worker setup), named here
+ * because the resume must state the same posture it is checking against.
+ */
+declare const WORKER_DEFAULT_PERMISSION_PRESET = "danger-full-access";
+/**
+ * The composition one worker's scoped world is built from. Internal seam: the
+ * runtime computes it (from a spawn request, or from a resume's checked facts)
+ * and hands the same function to the agent factory either way, which is what
+ * makes a resumed worker's preset, prompt, tool face, permission and seal the
+ * ones its spawn had.
+ */
+interface WorkerRole {
+  /** The agent preset mounted for this worker. */
+  readonly agentPreset: string;
+  /** The permission preset applied to this worker's session. */
+  readonly permissionPreset: string;
+  /** Declare this worker a task worker: its stable policy section is installed. */
+  readonly taskWorker: boolean;
+  /** The resolved capability grant, when the run was admitted with one. */
+  readonly grant?: WorkerGrant;
+}
+/**
+ * Why one resume refused, named for the caller's next move. Everything except
+ * `takeover-refused` is a source check decided by reading: a refusal leaves the
+ * store, the Session log, the graph and the handle map exactly as they were.
+ * `takeover-refused` is DSH's own refusal to take the Session over (crash
+ * repair or replay validation, and the write lease under `ownership-conflict`),
+ * which this module reports and never works around by creating another Session.
+ */
+type WorkerResumeRefusalCode = /** No such persisted Session. */
+'session-missing'
+/** The Session exists but its log could not be read, so it cannot be taken over safely. */ | 'session-unreadable'
+/**
+ * A live agent — this runtime's handle or another owner's registration —
+ * already owns the Session. Retryable once that owner settles; never resolved
+ * by resuming under a second owner.
+ */ | 'ownership-conflict'
+/** The declared Run, grant or permission contradicts the Session's own durable record. */ | 'binding-mismatch'
+/** The graph store does not publish this Session as a member. */ | 'not-in-graph'
+/** The Session is a member, but the delegation facts a worker resume needs are absent. */ | 'member-facts-missing'
+/** The resume itself refused the Session (interrupted-turn repair, replay validation, write lease). */ | 'takeover-refused';
+/** One refused resume, with the stable name of what could not be established. */
+declare class WorkerResumeRefusal extends Error {
+  readonly code: WorkerResumeRefusalCode;
+  constructor(code: WorkerResumeRefusalCode, message: string, options?: ErrorOptions);
+}
+/**
+ * What one resume reads and what it resumes through, narrowed to the four
+ * capabilities it actually uses. No service resolves another one through this
+ * module, and a caller can replace any of them for a test.
+ */
+interface WorkerResumeDeps {
+  /** Live agents by Session id — the ownership check, and the resume door. */
+  readonly agents: {
+    get(id: SessionId): Agent | undefined;
+    resume(options: {
+      resumeSessionId: SessionId;
+      agentOptions?: AgentOptions$1;
+      setup?: AgentSetup;
+    }): Promise<AgentHandle>;
+  };
+  /**
+   * The persisted Session's own record: the header (preset, lineage) and the
+   * log's own events (the permission the Session actually ran under). The
+   * deployment's read path is used, not a second reader over the artifact.
+   */
+  readonly sessionQuery: {
+    readSession(sessionId: SessionId): Promise<SessionLogSnapshot>;
+  };
+  /** The graph store: membership, the delegation edge, and the node status a resume repairs. */
+  readonly graph: {
+    snapshotIn(storeId: string): Promise<{
+      readonly roots: readonly SessionId[];
+      readonly agents: readonly {
+        readonly id: SessionId;
+        readonly status: AgentStatus;
+      }[];
+      readonly edges: readonly {
+        readonly kind: string;
+        readonly from: SessionId;
+        readonly to: SessionId;
+      }[];
+    }>;
+    setStatusIn(storeId: string, sessionId: SessionId, status: AgentStatus): Promise<void>;
+  };
+  /** Compose one worker's scoped world — the caller's own spawn composition, reused verbatim. */
+  readonly setup: (role: WorkerRole) => AgentSetup;
+  /** The per-agent options the resumed agent runs under (the runtime's default selection plus the request's own). */
+  readonly agentOptions?: AgentOptions$1;
+}
+/**
+ * Bring one spawned worker's persisted Session back live, or refuse by name.
+ *
+ * Order: ownership, then the Session's own durable record, then the declared
+ * Run facts against it, then the graph's membership and delegation facts, then
+ * the resume. Every check before `deps.agents.resume` is a read: a refusal
+ * leaves the store, the Session log, the graph and the handle map exactly as
+ * they were, and no Session is ever created to stand in for the one that could
+ * not be taken over.
+ * @param deps - the live registry, the session read path, the graph store and the composition.
+ * @param request - the identity, its graph scope, the Run facts and the authorization claimed.
+ * @returns the live handle of the same Session, idle and reachable, owning no new identity.
+ * @throws WorkerResumeRefusal with the stable code of what could not be established.
+ * @throws Error (unnamed) when the graph store cannot take the node's status
+ *   repair: nothing was resumed, and that write is not a source decision a
+ *   refusal code could name.
+ */
+declare function resumeWorkerAgent(deps: WorkerResumeDeps, request: WorkerResumeRequest): Promise<AgentHandle>;
+//#endregion
 //#region src/index.d.ts
 declare class AgentRuntime extends Service {
   static inject: string[];
@@ -528,10 +698,29 @@ declare class AgentRuntime extends Service {
   private closing;
   private readonly resuming;
   constructor(ctx: Context);
-  ensureRoot(sessionId: SessionId, scope: GraphScope): Promise<AgentHandle>;
+  ensureRoot(sessionId: SessionId, scope: GraphScope): Promise<AgentHandle$1>;
   private resumeRoot;
-  createRoot(request: RootRequest): Promise<AgentHandle>;
-  spawn(parent: Agent$1, request: SpawnRequest): Promise<AgentHandle>;
+  createRoot(request: RootRequest): Promise<AgentHandle$1>;
+  spawn(parent: Agent$1, request: SpawnRequest): Promise<AgentHandle$1>;
+  /**
+   * Bring one spawned worker's persisted Session back live (A4 §F.1), through
+   * the recovery entry `./worker-resume.ts` documents: the same Session, the
+   * same composition (the shared `workerSetup` below, which `spawn` also hands
+   * the agent factory), the same grant, seal and permission — and **idle**.
+   * Nothing is sent to the model here; the caller wakes the Session when it has
+   * something to deliver (§F.1: "恢复后由调用方决定何时 steer").
+   *
+   * The handle lands in the same `handles` map a spawn's product does, so
+   * `stopAgents`/`stopGraph` and the session-visibility rule treat a resumed
+   * worker exactly as they treat a spawned one. There is no second roster, no
+   * second mailbox and no second handle table: this entry owns nothing the
+   * spawn path does not already own.
+   * @param request - the Session, its graph scope, the Run facts the caller read
+   *   from its store, and the authorization the Run was admitted with.
+   * @returns the live handle of the same Session, idle.
+   * @throws WorkerResumeRefusal with the stable code of what could not be established.
+   */
+  resumeWorkerAgent(request: WorkerResumeRequest): Promise<AgentHandle$1>;
   stopGraph(scope: GraphScope): Promise<void>;
   stopAgents(sessionIds: readonly SessionId[]): Promise<void>;
   prompt(agent: Agent$1, prompt: readonly ContentBlock[]): Promise<void>;
@@ -569,9 +758,24 @@ declare class AgentRuntime extends Service {
    * and a service the module never calls is never handed to it.
    */
   private deliveryDeps;
+  /**
+   * The one composition a worker's scoped world is built from. `spawn` and
+   * {@link resumeWorkerAgent} both hand this to the agent factory, so a resumed
+   * worker is composed exactly as its spawn composed it (A4 §F.1: same preset,
+   * same permission posture, same policy prompt, same grant, same seal) — and
+   * this package holds one worker composition, not a spawn flavor and a
+   * recovery flavor that could drift apart.
+   */
+  private workerSetup;
+  /**
+   * What one worker resume reaches: the live registry, the deployment's own
+   * session read path, the graph store, this runtime's worker composition, and
+   * the model selection a spawn would run under.
+   */
+  private workerResumeDeps;
   private inGraph;
   private live;
   private scope;
 }
 //#endregion
-export { type AgentMessageIntent, type AgentOptions, AgentRuntime, AgentRuntime as default, type CanvasNode, type ContentBlock, type GraphScope, type McpServerSpec, type MessageDelivery, type MessageDeliveryDeps, MessageDeliveryRefusal, type MessageDeliveryReport, type MessageDeliveryStatus, type MessageRefusalCode, type ParsedSkillFile, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, type ResolvedGrant, type RootRequest, type RuntimePromptSource, type SessionOwnLog, type SessionVisibility, type SpawnRequest, type ToolCallBody, type ToolCallRef, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, type WorkerCapabilityGrant, type WorkerGrant, answerMessageText, applyWorkerGrant, ensureAgentMessageDelivered, findSkillFileIn, messageAccepted, parseSkillFile, questionMessageText, readToolCallBody, reconcileAgentMessageDeliveries, relayMessage, resolveGrant, sealRawSessionReads, skillRootsFor, toolCallRefIn };
+export { type AgentMessageIntent, type AgentOptions, AgentRuntime, AgentRuntime as default, type CanvasNode, type ContentBlock, type GraphScope, type McpServerSpec, type MessageDelivery, type MessageDeliveryDeps, MessageDeliveryRefusal, type MessageDeliveryReport, type MessageDeliveryStatus, type MessageRefusalCode, type ParsedSkillFile, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, type ResolvedGrant, type RootRequest, type RuntimePromptSource, type SessionOwnLog, type SessionVisibility, type SpawnRequest, type ToolCallBody, type ToolCallRef, WORKER_DEFAULT_PERMISSION_PRESET, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, type WorkerCapabilityGrant, type WorkerGrant, type WorkerResumeDeps, WorkerResumeRefusal, type WorkerResumeRefusalCode, type WorkerResumeRequest, type WorkerRole, type WorkerRunFacts, answerMessageText, applyWorkerGrant, ensureAgentMessageDelivered, findSkillFileIn, messageAccepted, parseSkillFile, questionMessageText, readToolCallBody, reconcileAgentMessageDeliveries, relayMessage, resolveGrant, resumeWorkerAgent, sealRawSessionReads, skillRootsFor, toolCallRefIn };

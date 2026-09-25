@@ -6,6 +6,7 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
+import type { AgentSetup } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -17,7 +18,7 @@ import type {} from '@deepseek-ai/dsh-permission-presets'
 import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import type {} from '@dangosys/dsh-singularity-layout'
 import { DEFAULT_ROOT } from '@dangosys/dsh-singularity-layout'
-import type { Agent, AgentHandle, ContentBlock, GraphEvent, GraphScope, RootRequest, RuntimePromptSource, SpawnRequest } from './types.ts'
+import type { Agent, AgentHandle, ContentBlock, GraphEvent, GraphScope, RootRequest, RuntimePromptSource, SpawnRequest, WorkerResumeRequest } from './types.ts'
 import { applyWorkerGrant } from './grants.ts'
 import {
   ensureAgentMessageDelivered,
@@ -35,6 +36,8 @@ import type {
 import { rootPromptText } from './prompts/root.prompts.ts'
 import { WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT } from './prompts/worker.prompts.ts'
 import { sealRawSessionReads } from './raw-session-guard.ts'
+import { WORKER_DEFAULT_PERMISSION_PRESET, resumeWorkerAgent as resumeWorker } from './worker-resume.ts'
+import type { WorkerResumeDeps, WorkerRole } from './worker-resume.ts'
 
 /** The nine tools the evolution chain is reached through; a deployment's switch is what registers them. */
 const EVOLUTION_TOOLS = [
@@ -144,6 +147,8 @@ export type {
   SpawnRequest,
   WorkerCapabilityGrant,
   WorkerGrant,
+  WorkerResumeRequest,
+  WorkerRunFacts,
 } from './types.ts'
 export { applyWorkerGrant, resolveGrant } from './grants.ts'
 export type { ResolvedGrant } from './grants.ts'
@@ -151,6 +156,8 @@ export { findSkillFileIn, parseSkillFile, skillRootsFor } from './skill-file.ts'
 export type { ParsedSkillFile } from './skill-file.ts'
 export { WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT } from './prompts/worker.prompts.ts'
 export { RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, sealRawSessionReads } from './raw-session-guard.ts'
+export { WORKER_DEFAULT_PERMISSION_PRESET, WorkerResumeRefusal, resumeWorkerAgent } from './worker-resume.ts'
+export type { WorkerResumeDeps, WorkerResumeRefusalCode, WorkerRole } from './worker-resume.ts'
 export {
   MessageDeliveryRefusal,
   answerMessageText,
@@ -362,27 +369,12 @@ export class AgentRuntime extends Service {
           },
           agentOptions: { ...this.ctx.agentDefaultModel.currentSelection(), ...request.agentOptions },
           signal: request.signal,
-          setup: async (agentCtx, agent) => {
-            await this.ctx.agentPresets.mount(agentCtx, agentPreset)
-            // Unknown preset names throw out of permissionPresets.set itself
-            // (its resolve names the preset), failing the spawn loudly.
-            this.ctx.permissionPresets.set(agent.session, request.permissionPreset ?? 'danger-full-access')
-            // A task worker carries the role's stable policy as a prompt section
-            // (order 75, between the root's 70 and the contract's 80): the rules
-            // every worker runs under, reprojected into surface node 0 on every
-            // step. The contract itself is NOT registered here — it is the
-            // context assembly's section, projected from the store at each model
-            // request, so this scope holds no second copy of it.
-            if (request.taskWorker === true) {
-              agentCtx.systemPrompt.section({ name: 'singularity:worker', order: 75, text: WORKER_POLICY_TEXT, interpolate: false })
-            }
-            // A capability grant restricts the surface the preset just joined
-            // (its tools are inherited, so restrictable) and registers the
-            // granted skills into this worker's own layer. A spawn nobody
-            // authorized with capabilities keeps its composition's surface.
-            if (request.grant !== undefined) await applyWorkerGrant(agentCtx, agent, request.grant)
-            sealRawSessionReads(agentCtx)
-          },
+          setup: this.workerSetup({
+            agentPreset,
+            permissionPreset: request.permissionPreset ?? WORKER_DEFAULT_PERMISSION_PRESET,
+            taskWorker: request.taskWorker === true,
+            ...(request.grant === undefined ? {} : { grant: request.grant }),
+          }),
         })
       } catch (error) {
         this.owned.delete(request.sessionId)
@@ -431,6 +423,46 @@ export class AgentRuntime extends Service {
         this.scopes.delete(handle.agent.id)
         await handle.dispose()
         if (published) await this.ctx.graph.setStatusIn(scope.graphStoreId, handle.agent.id, 'failed')
+        throw error
+      }
+    })
+  }
+
+  /**
+   * Bring one spawned worker's persisted Session back live (A4 §F.1), through
+   * the recovery entry `./worker-resume.ts` documents: the same Session, the
+   * same composition (the shared `workerSetup` below, which `spawn` also hands
+   * the agent factory), the same grant, seal and permission — and **idle**.
+   * Nothing is sent to the model here; the caller wakes the Session when it has
+   * something to deliver (§F.1: "恢复后由调用方决定何时 steer").
+   *
+   * The handle lands in the same `handles` map a spawn's product does, so
+   * `stopAgents`/`stopGraph` and the session-visibility rule treat a resumed
+   * worker exactly as they treat a spawned one. There is no second roster, no
+   * second mailbox and no second handle table: this entry owns nothing the
+   * spawn path does not already own.
+   * @param request - the Session, its graph scope, the Run facts the caller read
+   *   from its store, and the authorization the Run was admitted with.
+   * @returns the live handle of the same Session, idle.
+   * @throws WorkerResumeRefusal with the stable code of what could not be established.
+   */
+  async resumeWorkerAgent(request: WorkerResumeRequest): Promise<AgentHandle> {
+    if (this.closing) throw new Error('agent-runtime: closing')
+    const sessionId = SessionId(request.sessionId)
+    return await this.inGraph(request.scope, async () => {
+      // The same window a spawn opens: while the factory composes this
+      // Session's world it is not yet a live session of this runtime, and the
+      // visibility rule and the stop path read this map. Removed again below
+      // when the resume refuses, so a refusal leaves no trace of the attempt.
+      this.owned.add(sessionId)
+      this.scopes.set(sessionId, request.scope)
+      try {
+        const handle = await resumeWorker(this.workerResumeDeps(request), request)
+        this.handles.set(sessionId, handle)
+        return handle
+      } catch (error) {
+        this.owned.delete(sessionId)
+        this.scopes.delete(sessionId)
         throw error
       }
     })
@@ -546,6 +578,54 @@ export class AgentRuntime extends Service {
       agents: this.ctx.agents,
       sessions: this.ctx.sessions,
       sessionQuery: this.ctx.sessionQuery,
+    }
+  }
+
+  /**
+   * The one composition a worker's scoped world is built from. `spawn` and
+   * {@link resumeWorkerAgent} both hand this to the agent factory, so a resumed
+   * worker is composed exactly as its spawn composed it (A4 §F.1: same preset,
+   * same permission posture, same policy prompt, same grant, same seal) — and
+   * this package holds one worker composition, not a spawn flavor and a
+   * recovery flavor that could drift apart.
+   */
+  private workerSetup(role: WorkerRole): AgentSetup {
+    return async (agentCtx, agent) => {
+      await this.ctx.agentPresets.mount(agentCtx, role.agentPreset)
+      // Unknown preset names throw out of permissionPresets.set itself
+      // (its resolve names the preset), failing the spawn — or the resume —
+      // loudly.
+      this.ctx.permissionPresets.set(agent.session, role.permissionPreset)
+      // A task worker carries the role's stable policy as a prompt section
+      // (order 75, between the root's 70 and the contract's 80): the rules
+      // every worker runs under, reprojected into surface node 0 on every
+      // step. The contract itself is NOT registered here — it is the
+      // context assembly's section, projected from the store at each model
+      // request, so this scope holds no second copy of it.
+      if (role.taskWorker) {
+        agentCtx.systemPrompt.section({ name: 'singularity:worker', order: 75, text: WORKER_POLICY_TEXT, interpolate: false })
+      }
+      // A capability grant restricts the surface the preset just joined
+      // (its tools are inherited, so restrictable) and registers the
+      // granted skills into this worker's own layer. A spawn nobody
+      // authorized with capabilities keeps its composition's surface.
+      if (role.grant !== undefined) await applyWorkerGrant(agentCtx, agent, role.grant)
+      sealRawSessionReads(agentCtx)
+    }
+  }
+
+  /**
+   * What one worker resume reaches: the live registry, the deployment's own
+   * session read path, the graph store, this runtime's worker composition, and
+   * the model selection a spawn would run under.
+   */
+  private workerResumeDeps(request: WorkerResumeRequest): WorkerResumeDeps {
+    return {
+      agents: this.ctx.agents,
+      sessionQuery: this.ctx.sessionQuery,
+      graph: this.ctx.graph,
+      setup: role => this.workerSetup(role),
+      agentOptions: { ...this.ctx.agentDefaultModel.currentSelection(), ...request.agentOptions },
     }
   }
 

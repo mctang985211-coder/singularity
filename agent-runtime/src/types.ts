@@ -198,4 +198,64 @@ export interface SpawnRequest {
   readonly signal?: AbortSignal
 }
 
+/**
+ * The Run facts a caller read from its own store for the Session it is bringing
+ * back (A4 §F.1's recovery entry). Structural on purpose: this package holds no
+ * task dependency — the store is the runtime's — so these are the fields
+ * `TaskRun` records, named the way it names them, and nothing here is guessed
+ * by the resume. Every one of them is checked against the Session's own durable
+ * record before anything is written.
+ */
+export interface WorkerRunFacts {
+  /** The store the Run belongs to. */
+  readonly storeId: string
+  readonly taskId: string
+  readonly runId: string
+  /** The Session the store's own Run record binds — must be the Session being resumed. */
+  readonly sessionId: SessionId
+  /** The preset the Run was admitted with, when the store recorded one. */
+  readonly agentPreset?: string
+  /**
+   * What the Run was admitted with (`TaskRun.capabilitySnapshot`: the granted
+   * tools, skills and `mcp:<serverName>` markers, flattened). Required because
+   * the store records it for every Run: a resume that cannot show the plane the
+   * Run was admitted under would be reinstalling a tool face nobody authorized.
+   */
+  readonly capabilitySnapshot: readonly string[]
+}
+
+/**
+ * One controlled resume of a spawned worker's persisted Session (A4 §F.1), the
+ * entry `task-runtime`'s recovery pass calls once it has reconciled the store:
+ * the same Session comes back live as the same worker — same identity, same
+ * composition, same tool face, same grant, same raw-session seal — and **idle**.
+ *
+ * Nothing here is a new session, a substitute node, a roster or a mailbox: the
+ * handle this returns is registered in the runtime's one handle map and is
+ * disposed by the same `stopAgents`/`stopGraph` rules a spawn's handle is.
+ */
+export interface WorkerResumeRequest {
+  /** The persisted Session to bring back live; the identity the spawn created. */
+  readonly sessionId: SessionId
+  /** The graph the Session was published in — the scope its spawn ran under. */
+  readonly scope: GraphScope
+  /** The Run the caller holds for this Session, as the store records it. */
+  readonly run: WorkerRunFacts
+  /** The grant the Run was spawned with, resolved by the caller as the spawn resolved it. */
+  readonly grant?: WorkerGrant
+  /**
+   * The permission preset the Run was admitted under. Absent = the spawn's own
+   * default ({@link WORKER_DEFAULT_PERMISSION_PRESET}).
+   */
+  readonly permissionPreset?: string
+  /**
+   * Whether the Session was spawned as a task worker. Required, not defaulted:
+   * the durable record does not carry the flag, and a resume that guessed would
+   * either drop the worker policy the prompt ran under or add one it never had.
+   */
+  readonly taskWorker: boolean
+  /** Per-agent options for the resumed agent, overriding the runtime's default selection. */
+  readonly agentOptions?: AgentOptions
+}
+
 export type { Agent, AgentHandle, AgentOptions, CanvasNode, ContentBlock, GraphEvent, SessionId }
