@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import { ExecutionGate } from '../../src/gate.ts'
-import { answerMessageIdOf, applyStoreQuestionBlocking, parseCallArguments, pendingQuestionMessages, questionMessageIdOf } from '../../src/question.ts'
+import { answerMessageIdOf, applyStoreQuestionBlocking, parseCallArguments, pendingQuestionMessages, questionMessageIdOf, releaseAskingSessions } from '../../src/question.ts'
 import type { QuestionAnswerRecord, QuestionRecord, RunId, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 
 /**
@@ -134,6 +134,61 @@ describe('pendingQuestionMessages', () => {
 
   test('refuses a snapshot that cannot show questions at all rather than reading it as "none"', () => {
     expect(() => pendingQuestionMessages({ runs: [], tasks: [] } as unknown as TaskSnapshot)).toThrow(/carries no question index/)
+  })
+})
+
+describe('releaseAskingSessions', () => {
+  test("recomputes the block of every session whose question the settled run was asked", () => {
+    const gate = new ExecutionGate()
+    const first = question()
+    const second = question({ questionId: 'q-2', childRunId: 'r-other', requestKey: 'k2', messageId: 'm-q-2' })
+    const settled = snapshot([first, second], { 'r-parent': 'cancelled' })
+    gate.setQuestionsBlocked('s-r-child', true)
+    gate.setQuestionsBlocked('s-r-other', true)
+    gate.setQuestionsBlocked('s-r-parent', true)
+
+    releaseAskingSessions(gate, settled, 'r-parent')
+    // Both asking runs are released — the addressee settled, so nothing of theirs
+    // is open any more — and the settled run's own session is not this function's
+    // subject (its gate is closed by the settlement, not by a release).
+    expect(gate.questionsBlocked('s-r-child')).toBe(false)
+    expect(gate.questionsBlocked('s-r-other')).toBe(false)
+    expect(gate.questionsBlocked('s-r-parent')).toBe(true)
+  })
+
+  test('leaves a session blocked while another of its questions is still open', () => {
+    const gate = new ExecutionGate()
+    const toSettled = question()
+    const toOpen = question({ questionId: 'q-2', parentRunId: 'r-other', requestKey: 'k2', messageId: 'm-q-2' })
+    gate.setQuestionsBlocked('s-r-child', true)
+
+    releaseAskingSessions(gate, snapshot([toSettled, toOpen]), 'r-parent')
+
+    expect(gate.questionsBlocked('s-r-child')).toBe(true)
+  })
+
+  test('touches nothing for a question whose asking run is no longer running, and nothing it cannot see', () => {
+    const gate = new ExecutionGate()
+    gate.setQuestionsBlocked('s-r-child', false)
+    const settledChild = snapshot([question()], { 'r-child': 'cancelled' })
+
+    releaseAskingSessions(gate, settledChild, 'r-parent')
+
+    expect(gate.questionsBlocked('s-r-child')).toBe(false)
+    // A snapshot with no question index is "cannot see", and a settlement must not
+    // fail on it: there is nothing to release and nothing to invent.
+    expect(() => releaseAskingSessions(gate, { runs: [], tasks: [] } as unknown as TaskSnapshot, 'r-parent')).not.toThrow()
+  })
+
+  test('does not decide a value the gate already holds', () => {
+    const gate = new ExecutionGate()
+    gate.setQuestionsBlocked('s-r-child', false)
+    const token = gate.decisionToken('s-r-child')
+
+    releaseAskingSessions(gate, snapshot([question()], { 'r-parent': 'cancelled' }), 'r-parent')
+
+    expect(gate.questionsBlocked('s-r-child')).toBe(false)
+    expect(gate.decisionToken('s-r-child')).toBe(token)
   })
 })
 

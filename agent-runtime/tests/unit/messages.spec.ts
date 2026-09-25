@@ -20,7 +20,9 @@ import {
   messageAccepted,
   questionMessageText,
   relayMessage,
+  toolCallRefIn,
 } from '../../src/messages.ts'
+import type { SessionOwnLog } from '../../src/messages.ts'
 
 const TARGET = SessionId('s-parent')
 const SENDER = SessionId('s-child')
@@ -41,6 +43,16 @@ function history(seq: number, message: UserMessage): SessionEvent {
 /** One relayed message with a stable identity, as the module builds it. */
 function relay(messageId: string, text = 'body'): UserMessage {
   return relayMessage({ targetSessionId: TARGET, senderSessionId: SENDER, messageId, text })
+}
+
+/** One `tool/call` event, the shape a citation names. */
+function call(seq: number, callId: string): SessionEvent {
+  return { type: 'tool/call', seq: SessionSeq(seq), time: seq, data: { callId, name: 'task_ask_parent', arguments: '{}' } } as SessionEvent
+}
+
+/** One Session's own log: `inheritedEventCount` leading events came from the fork's ancestor. */
+function ownLog(inheritedEventCount: number, events: readonly SessionEvent[]): SessionOwnLog {
+  return { session: { id: SENDER }, inheritedEventCount, events }
 }
 
 describe('relayed message representation', () => {
@@ -64,6 +76,36 @@ describe('relayed message representation', () => {
   it('stamps the question and the answer body with both stable identities', () => {
     expect(questionMessageText('q-abc', 'Which contract holds?')).toBe('[task-question q-abc] Which contract holds?')
     expect(answerMessageText('a-def', 'q-abc', 'The frozen one.')).toBe('[task-answer a-def for q-abc] The frozen one.')
+  })
+})
+
+/**
+ * The citation lookup one question call goes through (A4 §F.1): the body must be
+ * read back from the *caller's own* `tool/call`, so the id it holds can only ever
+ * name an event of its own Session suffix — a fork-inherited prefix belongs to
+ * the Session this one descends from, and a call made there is not a call this
+ * Session made.
+ */
+describe('the citation of one own tool call', () => {
+  it('finds an id in the own suffix of the log', () => {
+    const log = ownLog(2, [call(0, 'call-inherited'), call(1, 'call-other'), call(2, 'call-mine')])
+
+    expect(toolCallRefIn(log, 'call-mine')).toEqual({ sessionId: SENDER, seq: 2 })
+  })
+
+  it('does not find an id that only the fork-inherited prefix holds', () => {
+    const log = ownLog(2, [call(0, 'call-inherited'), call(1, 'call-also-inherited'), call(2, 'call-mine')])
+
+    expect(toolCallRefIn(log, 'call-inherited')).toBeUndefined()
+    expect(toolCallRefIn(log, 'call-also-inherited')).toBeUndefined()
+    expect(toolCallRefIn(log, 'call-mine')).toEqual({ sessionId: SENDER, seq: 2 })
+  })
+
+  it('answers a duplicated id with its latest durable record, and an unknown one with nothing', () => {
+    const log = ownLog(1, [call(0, 'call-inherited'), call(1, 'call-twice'), call(2, 'call-twice')])
+
+    expect(toolCallRefIn(log, 'call-twice')).toEqual({ sessionId: SENDER, seq: 2 })
+    expect(toolCallRefIn(log, 'call-never-made')).toBeUndefined()
   })
 })
 

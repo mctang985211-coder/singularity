@@ -689,6 +689,49 @@ export async function reconcileQuestionDeliveries(
 }
 
 /**
+ * Recompute the question block of every run that asked the run just settled —
+ * the *fourth* moment the facts behind a block can move, and the one that has no
+ * event of its own.
+ *
+ * An open question requires both runs to still be running ({@link
+ * blockingQuestionsOf}), so the moment the *addressee* settles, every question
+ * addressed to it stops being open: the asking run is no longer waiting on
+ * anything, and nothing about it may be refused for a wait that no longer
+ * exists. No `QuestionAnswered` was written and no phase moved, so the three
+ * push sites that recompute a block (the ask, the resolving answer, recovery)
+ * never run — without this step a run whose parent settled first would keep a
+ * refusal that only its own wall time could end.
+ *
+ * Everything pushed here is derived from the snapshot the caller read *after*
+ * the settlement, and the asking sessions are found from the store's own
+ * questions (an answer carries no session; the citation does) rather than from
+ * anything this process remembers. The asking run's own session is not the
+ * subject — a run that settled closes its own gate — and a question whose asking
+ * run is no longer running has nothing left to release.
+ */
+export function releaseAskingSessions(gate: ExecutionGate, snapshot: TaskSnapshot, settledRunId: RunId): void {
+  const index = snapshot.questions
+  // A snapshot without a question index cannot answer "what asked this run", and
+  // a settlement must not fail on that: the store's own facts are unchanged, and
+  // the next read that carries the index recomputes the same blocks.
+  if (index === undefined) return
+  const asking = new Map<string, RunId>()
+  for (const question of index.all) {
+    if (question.parentRunId !== settledRunId) continue
+    const childRun = snapshot.runs.find(run => run.runId === question.childRunId)
+    if (childRun === undefined || childRun.status !== 'running') continue
+    asking.set(childRun.sessionId, childRun.runId)
+  }
+  for (const [sessionId, childRunId] of asking) {
+    const blocked = blockingQuestionsOf(snapshot, childRunId).length > 0
+    // Only a changed value is worth a decision: the gate's token is what drops a
+    // store-derived value read concurrently, and re-pushing the state a session
+    // already holds would move that token for no fact at all.
+    if (gate.questionsBlocked(sessionId) !== blocked) gate.setQuestionsBlocked(sessionId, blocked)
+  }
+}
+
+/**
  * Push the question block every run in one snapshot implies onto the gate, under
  * the gate's own token rule — the recovery pass's half of §F.1's "restart from
  * the durable facts". The token is the one taken before the snapshot read, so a

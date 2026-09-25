@@ -45,8 +45,9 @@
  * whether the session's run is waiting on an unresolved blocking question. It is
  * *not* a phase — the store keeps no such state and the run's own main phase is
  * unchanged by asking — so it is derived from the question facts
- * (`blockingQuestionsOf`) at the three moments those facts can change (after a
- * blocking ask, after a resolving answer, and on recovery) and pushed in through
+ * (`blockingQuestionsOf`) at the four moments those facts can change (after a
+ * blocking ask, after a resolving answer, when the run the question was addressed
+ * to settles, and on recovery) and pushed in through
  * {@link ExecutionGate.setQuestionsBlocked}. What it does is one-way on purpose:
  * a blocked session is refused everything the coordination list does not name —
  * *including* the writes `active` would have admitted — while nothing about it
@@ -280,9 +281,10 @@ export class ExecutionGate {
   /**
    * Record that a session's run is — or is no longer — waiting on an unresolved
    * blocking question (A4 §F.1). A decision of this process about a fact this
-   * process just wrote (the ask it committed, the answer that released one), so
-   * it counts as one exactly as {@link setPhase} does; a value the *store*
-   * implies goes through {@link applyStoreQuestionsBlocked}.
+   * process just wrote (the ask it committed, the answer that released one, the
+   * addressee's own settlement that ended every question addressed to it), so it
+   * counts as one exactly as {@link setPhase} does; a value the *store* implies
+   * goes through {@link applyStoreQuestionsBlocked}.
    *
    * `false` is not "probably unblocked": the caller is stating the derivation it
    * just took from the store's question facts (`blockingQuestionsOf`), which is

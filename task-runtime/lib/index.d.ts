@@ -373,9 +373,10 @@ declare class ExecutionGate {
   /**
    * Record that a session's run is — or is no longer — waiting on an unresolved
    * blocking question (A4 §F.1). A decision of this process about a fact this
-   * process just wrote (the ask it committed, the answer that released one), so
-   * it counts as one exactly as {@link setPhase} does; a value the *store*
-   * implies goes through {@link applyStoreQuestionsBlocked}.
+   * process just wrote (the ask it committed, the answer that released one, the
+   * addressee's own settlement that ended every question addressed to it), so it
+   * counts as one exactly as {@link setPhase} does; a value the *store* implies
+   * goes through {@link applyStoreQuestionsBlocked}.
    *
    * `false` is not "probably unblocked": the caller is stating the derivation it
    * just took from the store's question facts (`blockingQuestionsOf`), which is
@@ -1755,6 +1756,16 @@ interface RuntimeSettlementEnv {
   workspacePath?: string;
   /** Called once per terminal transition: the runtime closes the gate here and releases the run's layer. */
   onRunSettled?(storeId: string, taskId: TaskId, runId: RunId, status: RunStatus): void;
+  /**
+   * The live process's execution gate, when this settlement has one (A4 §F.1).
+   * A settled run ends the *questions addressed to it* — an open question needs
+   * both runs running — so the settlement recomputes the asking sessions' blocks
+   * from the store ({@link releaseAskingSessions}) and needs the one thing that
+   * holds them. Absent means there is no live gate to push onto: a settlement
+   * whose caller holds no sessions (a store-level one) has none to release, and
+   * the store's own derivation is what the next recovery reads back.
+   */
+  gate?: ExecutionGate;
 }
 /** Raised when the deployment cannot observe a run's terminal state, so no honest settlement is possible. */
 declare class RunWatcherUnavailableError extends Error {
@@ -4490,12 +4501,45 @@ declare class TaskRuntime extends Service {
   private settlementParts;
   /**
    * What the runtime does when *any* run reaches a terminal state (A3 §3.3): the
-   * gate closes for the session that held it, and the workspace layer the run
-   * claimed comes off the stack. One implementation for the orchestration's
-   * settlements and the runtime's own, so a run settled from either side leaves
-   * the process in the same state.
+   * gate closes for the session that held it, the questions addressed to it stop
+   * blocking the runs that asked ({@link recomputeAskingSessions}), and the
+   * workspace layer the run claimed comes off the stack. One implementation for
+   * the orchestration's settlements and the runtime's own, so a run settled from
+   * either side leaves the process in the same state.
+   *
+   * A run whose session this process never bound is settled like any other: its
+   * own gate has nothing to close here, but the runs that asked it are recomputed
+   * all the same, because the wait that ended is theirs.
    */
   private runSettledFromRuntime;
+  /**
+   * Recompute the question block of every run that asked the run just settled
+   * (A4 §F.1), from the store, here.
+   *
+   * This is the orchestration side of the same step `settleRunFromRuntime` takes
+   * where its caller awaits it: the two settlements — the driver's own
+   * (`settleChildRun`, `settleParentBatch`, `settleSubmittedRun`) and the
+   * runtime-level entry — must not differ in what the gate shows afterwards, and
+   * both derive the value the same way. The read is reported rather than
+   * propagated: the run is settled and its record written by now, and a store
+   * this process cannot read back is a failure of the *release*, not of the
+   * settlement — the next recovery recomputes the same blocks.
+   */
+  private recomputeAskingSessions;
+  /**
+   * Report the question deliveries one recovery pass could not settle (A4 §F.1)
+   * — `refused` (the body could not be read back from its own citation, or the
+   * relay refused) and `unavailable` (the target Session is not live in this
+   * process) — as one warning, because the pass's own report is not enough: the
+   * explicit adoption drops it, and an undelivered question nobody is told about
+   * is a wait whose only remaining ends are a restart and a wall time.
+   *
+   * Nothing here changes the control flow: the intents stay on the Task record,
+   * the next activation retries them, and a delivery that settled is not reported
+   * at all. The line names the store, how many of how many intents are still
+   * owed, the count per status, and each affected fact with its own refusal.
+   */
+  private reportUnsettledQuestionDeliveries;
   /**
    * Start the driver for one admitted batch. The controller is registered
    * before the driver runs, so a cancellation arriving immediately after

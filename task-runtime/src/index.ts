@@ -98,6 +98,7 @@ import {
   askParentQuestion,
   pendingCoordinationOf,
   reconcileQuestionDeliveries,
+  releaseAskingSessions,
   type AnsweredQuestionOutcome,
   type AskedQuestionOutcome,
   type ParentAnswerCall,
@@ -4671,25 +4672,85 @@ export class TaskRuntime extends Service {
       onRunSettled: (storeId, taskId, runId, status) => {
         this.runSettledFromRuntime(storeId, taskId, runId, status)
       },
+      gate: this.executionGate,
     }
   }
 
   /**
    * What the runtime does when *any* run reaches a terminal state (A3 §3.3): the
-   * gate closes for the session that held it, and the workspace layer the run
-   * claimed comes off the stack. One implementation for the orchestration's
-   * settlements and the runtime's own, so a run settled from either side leaves
-   * the process in the same state.
+   * gate closes for the session that held it, the questions addressed to it stop
+   * blocking the runs that asked ({@link recomputeAskingSessions}), and the
+   * workspace layer the run claimed comes off the stack. One implementation for
+   * the orchestration's settlements and the runtime's own, so a run settled from
+   * either side leaves the process in the same state.
+   *
+   * A run whose session this process never bound is settled like any other: its
+   * own gate has nothing to close here, but the runs that asked it are recomputed
+   * all the same, because the wait that ended is theirs.
    */
   private runSettledFromRuntime(storeId: string, taskId: TaskId, runId: RunId, status: RunStatus): void {
     void taskId
     void status
+    void this.recomputeAskingSessions(storeId, runId)
     const sessionId = this.sessionBoundInProcess(storeId, runId)
     if (sessionId === undefined) return
     this.executionGate.setTerminal(sessionId)
     void this.releaseRunWorkspaceLayer(storeId, runId, sessionId).catch(error => {
       this.warn(`run ${runId}: the workspace layer it held could not be released (${error instanceof Error ? error.message : String(error)})`)
     })
+  }
+
+  /**
+   * Recompute the question block of every run that asked the run just settled
+   * (A4 §F.1), from the store, here.
+   *
+   * This is the orchestration side of the same step `settleRunFromRuntime` takes
+   * where its caller awaits it: the two settlements — the driver's own
+   * (`settleChildRun`, `settleParentBatch`, `settleSubmittedRun`) and the
+   * runtime-level entry — must not differ in what the gate shows afterwards, and
+   * both derive the value the same way. The read is reported rather than
+   * propagated: the run is settled and its record written by now, and a store
+   * this process cannot read back is a failure of the *release*, not of the
+   * settlement — the next recovery recomputes the same blocks.
+   */
+  private async recomputeAskingSessions(storeId: string, runId: RunId): Promise<void> {
+    try {
+      releaseAskingSessions(this.executionGate, await this.ctx.task.snapshotIn(storeId), runId)
+    } catch (error) {
+      this.warn(
+        `store ${storeId}: the question blocks of the runs that asked run "${runId}" could not be recomputed after it settled ` +
+        `(${error instanceof Error ? error.message : String(error)})`,
+      )
+    }
+  }
+
+  /**
+   * Report the question deliveries one recovery pass could not settle (A4 §F.1)
+   * — `refused` (the body could not be read back from its own citation, or the
+   * relay refused) and `unavailable` (the target Session is not live in this
+   * process) — as one warning, because the pass's own report is not enough: the
+   * explicit adoption drops it, and an undelivered question nobody is told about
+   * is a wait whose only remaining ends are a restart and a wall time.
+   *
+   * Nothing here changes the control flow: the intents stay on the Task record,
+   * the next activation retries them, and a delivery that settled is not reported
+   * at all. The line names the store, how many of how many intents are still
+   * owed, the count per status, and each affected fact with its own refusal.
+   */
+  private reportUnsettledQuestionDeliveries(storeId: string, deliveries: readonly QuestionReconcileReport[]): void {
+    const unsettled = deliveries.filter(delivery => delivery.status === 'refused' || delivery.status === 'unavailable')
+    if (unsettled.length === 0) return
+    const counts = new Map<string, number>()
+    for (const delivery of unsettled) counts.set(delivery.status, (counts.get(delivery.status) ?? 0) + 1)
+    const byStatus = [...counts]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([status, count]) => `${count} ${status}`)
+      .join(', ')
+    this.warn(
+      `store ${storeId}: ${unsettled.length} of ${deliveries.length} owed question message${deliveries.length === 1 ? '' : 's'} could not be ` +
+      `settled (${byStatus}): ${unsettled.map(delivery => `${delivery.subject} [${delivery.status}${delivery.reason === undefined ? '' : `: ${delivery.reason}`}]`).join('; ')}. ` +
+      'The Task records still hold these intents, no substitute parent is invented, and the next activation retries them',
+    )
   }
 
   /**
@@ -5303,9 +5364,12 @@ export class TaskRuntime extends Service {
     // `unavailable`: zero side effects, no substitute parent, and the same retry
     // on the next activation. Nothing here can fail the pass: a store whose
     // deliveries cannot be decided is still a store whose facts were reconciled.
+    // What could not be settled is *also* warned about here, so the one caller
+    // that drops the returned report (adoption) cannot swallow it.
     let questionDeliveries: QuestionReconcileReport[] = []
     try {
       questionDeliveries = await reconcileQuestionDeliveries(this.questionCoordination(), storeId)
+      this.reportUnsettledQuestionDeliveries(storeId, questionDeliveries)
     } catch (error) {
       this.warn(
         `store ${storeId}: its pending question deliveries could not be reconciled ` +

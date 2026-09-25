@@ -29,6 +29,7 @@ import { blockingQuestionsOf, openQuestionsOf, questionsAwaitingAnswerOf } from 
 import { capabilitySnapshot, resolvePermission, resolvePreset, workerBaseline, type CapabilityConfig, type PermissionSpec } from './capability.ts'
 import { drainSession } from './gate.ts'
 import type { ExecutionGate, JobsView } from './gate.ts'
+import { releaseAskingSessions } from './question.ts'
 import type { ProviderPrecheck } from './provider-precheck.ts'
 import { providerRefusals } from './provider-precheck.ts'
 import { checkRunStart, countSubtreeFacts, hasRootLimits, resolveRootBudget, runDeadlineMs } from './root-budget.ts'
@@ -308,6 +309,16 @@ export interface RuntimeSettlementEnv {
   workspacePath?: string
   /** Called once per terminal transition: the runtime closes the gate here and releases the run's layer. */
   onRunSettled?(storeId: string, taskId: TaskId, runId: RunId, status: RunStatus): void
+  /**
+   * The live process's execution gate, when this settlement has one (A4 §F.1).
+   * A settled run ends the *questions addressed to it* — an open question needs
+   * both runs running — so the settlement recomputes the asking sessions' blocks
+   * from the store ({@link releaseAskingSessions}) and needs the one thing that
+   * holds them. Absent means there is no live gate to push onto: a settlement
+   * whose caller holds no sessions (a store-level one) has none to release, and
+   * the store's own derivation is what the next recovery reads back.
+   */
+  gate?: ExecutionGate
 }
 
 /** Raised when the deployment cannot observe a run's terminal state, so no honest settlement is possible. */
@@ -2570,6 +2581,25 @@ export async function settleRunFromRuntime(
     })
   }
   env.onRunSettled?.(storeId, current.taskId, current.runId, status)
+  // The questions addressed to this run stop being open the moment it settles
+  // (A4 §F.1: an open question needs *both* runs running), so the runs that asked
+  // it are recomputed here, from the store, before this settlement reports itself
+  // done — a caller that awaited it must not have to wait for another event to
+  // see the wait it ended. The gate is the one capability of the live process
+  // this needs, and a settlement that has none (a store-level one) simply has no
+  // session to release.
+  if (env.gate !== undefined) {
+    try {
+      releaseAskingSessions(env.gate, await env.task.snapshotIn(storeId), current.runId)
+    } catch (error) {
+      notifyOwner(
+        env,
+        current.sessionId,
+        `task-runtime: the question blocks of the runs that asked run "${current.runId}" could not be recomputed after it settled ` +
+        `(${message(error)}); the store's own derivation is unchanged and the next recovery recomputes them`,
+      )
+    }
+  }
   await releaseWorkspaceLayer(env, runOwner(storeId, current.taskId, current.runId), current.sessionId)
   notifyOwner(env, current.sessionId, `task-runtime: run "${current.runId}" was settled ${status}: ${reason}`)
 }

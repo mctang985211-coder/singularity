@@ -982,9 +982,10 @@ var ExecutionGate = class {
 	/**
 	* Record that a session's run is — or is no longer — waiting on an unresolved
 	* blocking question (A4 §F.1). A decision of this process about a fact this
-	* process just wrote (the ask it committed, the answer that released one), so
-	* it counts as one exactly as {@link setPhase} does; a value the *store*
-	* implies goes through {@link applyStoreQuestionsBlocked}.
+	* process just wrote (the ask it committed, the answer that released one, the
+	* addressee's own settlement that ended every question addressed to it), so it
+	* counts as one exactly as {@link setPhase} does; a value the *store* implies
+	* goes through {@link applyStoreQuestionsBlocked}.
 	*
 	* `false` is not "probably unblocked": the caller is stating the derivation it
 	* just took from the store's question facts (`blockingQuestionsOf`), which is
@@ -3202,6 +3203,452 @@ function reviewContextDelta(before, after) {
 }
 
 //#endregion
+//#region src/question.ts
+function message$2(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+/**
+* The `m-` identity one question's message carries: derived from the question id,
+* never minted. A retry — in this process or after a restart — states the same
+* identity, which is what lets a target's own fold answer "this one is already
+* here" instead of the framework keeping a ledger of what it sent.
+*/
+function questionMessageIdOf(questionId) {
+	return `m-${questionId}`;
+}
+/** The `m-` identity one answer's message carries, derived from the answer id for the same reason ({@link questionMessageIdOf}). */
+function answerMessageIdOf(answerId) {
+	return `m-${answerId}`;
+}
+/**
+* The arguments object one cited `tool/call` must hold: a JSON object, refused by
+* name when it is not. Exported for the same reason this module's other pure
+* steps are: the refusal rules are part of the contract, and a unit test should
+* be able to drive them without a store.
+*/
+function parseCallArguments(body) {
+	let parsed;
+	try {
+		parsed = JSON.parse(body.arguments);
+	} catch (error) {
+		throw new Error(`task-runtime: the arguments of the cited "${body.name}" call are not JSON (${message$2(error)}); a body that cannot be parsed is not a citation`);
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error(`task-runtime: the arguments of the cited "${body.name}" call are not a JSON object`);
+	return parsed;
+}
+/** One non-empty string field of a cited call's arguments, refused by name when it is absent or blank. */
+function requiredString(args, field, where) {
+	const value = args[field];
+	if (typeof value !== "string" || value.trim().length === 0) throw new Error(`task-runtime: ${where} requires a non-empty "${field}" in its own arguments; the call carries ${JSON.stringify(value)}`);
+	return value;
+}
+/** One non-empty string the *caller* claims; a caller that cannot state its own identity is refused before anything is read. */
+function claimedString(value, field, toolName) {
+	if (typeof value !== "string" || value.trim().length === 0) throw new Error(`task-runtime: ${toolName} needs a non-empty "${field}" from its caller; it received ${JSON.stringify(value)}`);
+	return value;
+}
+/** How one boolean argument reads: absent takes `absent`, a non-boolean is refused (never coerced). */
+function booleanArgument(args, field, absent, where) {
+	const value = args[field];
+	if (value === void 0) return absent;
+	if (typeof value !== "boolean") throw new Error(`task-runtime: ${where} carries "${field}": ${JSON.stringify(value)}, which is not a boolean`);
+	return value;
+}
+/**
+* Locate and read back the caller's *own* `tool/call`, by registration id.
+*
+* The Session comes from the caller's identity (its run binding), never from the
+* request: an id can only ever name an event of the calling session. The read
+* goes through agent-runtime's `readToolCallBody`, which flushes the live
+* Session first — the citation must be durable before a store may record it —
+* and refuses by name when the event is missing, unreadable, or not a tool call.
+*/
+async function readOwnCall(deps, callerSessionId, callId, toolName) {
+	if (callId.length === 0) throw new Error(`task-runtime: ${toolName} needs the registration id of its own call to cite its body`);
+	let log;
+	try {
+		log = await deps.sessionQuery.readSession(SessionId(callerSessionId));
+	} catch (error) {
+		throw new Error(`task-runtime: ${toolName} cannot read session "${callerSessionId}" to locate its own call "${callId}": ${message$2(error)}`, { cause: error });
+	}
+	const ref = toolCallRefIn(log, callId);
+	if (ref === void 0) throw new Error(`task-runtime: session "${callerSessionId}" holds no tool/call "${callId}"; ${toolName} cites the call it is answering for, and a caller cannot cite somebody else's call or a call that was never made`);
+	let body;
+	try {
+		body = await deps.messages.readToolCallBody(ref);
+	} catch (error) {
+		throw new Error(`task-runtime: ${toolName} could not read back the body of its own call "${callId}" (${message$2(error)})`, { cause: error });
+	}
+	if (body.name !== toolName) throw new Error(`task-runtime: call "${callId}" in session "${callerSessionId}" is "${body.name}", not "${toolName}"; the cited body is the one that was sent`);
+	return {
+		...body,
+		ref
+	};
+}
+/** The body one ask cites, read back from the caller's own Session and checked against the claim the call makes. */
+async function checkAskBody(deps, caller, request) {
+	const body = await readOwnCall(deps, caller.sessionId, request.callId, "task_ask_parent");
+	const args = parseCallArguments(body);
+	const claimedKey = claimedString(request.requestKey, "requestKey", "task_ask_parent");
+	const actualKey = requiredString(args, "requestKey", "task_ask_parent");
+	if (actualKey !== claimedKey) throw new Error(`task-runtime: task_ask_parent claims request key "${claimedKey}", but the cited call "${request.callId}" asked under "${actualKey}"; the arguments the sender wrote are the only request key the store may record`);
+	const blocking = booleanArgument(args, "blocking", true, "task_ask_parent");
+	if (request.blocking !== void 0 && request.blocking !== blocking) throw new Error(`task-runtime: task_ask_parent claims blocking=${String(request.blocking)}, but the cited call "${request.callId}" declared ${String(blocking)}; a caller cannot record a blocking declaration its own message does not carry`);
+	return {
+		ref: body.ref,
+		digest: sha256Hex(body.arguments),
+		requestKey: actualKey,
+		question: requiredString(args, "question", "task_ask_parent"),
+		blocking
+	};
+}
+/** The body one answer cites, read back from the answering Session and checked against the claim the call makes. */
+async function checkAnswerBody(deps, caller, request) {
+	const body = await readOwnCall(deps, caller.sessionId, request.callId, "task_answer");
+	const args = parseCallArguments(body);
+	const claimedQuestion = claimedString(request.questionId, "questionId", "task_answer");
+	const actualQuestion = requiredString(args, "questionId", "task_answer");
+	if (actualQuestion !== claimedQuestion) throw new Error(`task-runtime: task_answer claims question "${claimedQuestion}", but the cited call "${request.callId}" answers "${actualQuestion}"; a call answers the question its own message names`);
+	const claimedKey = claimedString(request.requestKey, "requestKey", "task_answer");
+	const actualKey = requiredString(args, "requestKey", "task_answer");
+	if (actualKey !== claimedKey) throw new Error(`task-runtime: task_answer claims request key "${claimedKey}", but the cited call "${request.callId}" answered under "${actualKey}"`);
+	if (args.resolves === void 0) throw new Error(`task-runtime: task_answer requires a boolean "resolves" in its own arguments; the cited call "${request.callId}" carries none`);
+	const resolves = booleanArgument(args, "resolves", false, "task_answer");
+	if (request.resolves !== resolves) throw new Error(`task-runtime: task_answer claims resolves=${String(request.resolves)}, but the cited call "${request.callId}" declared ${String(resolves)}; an answer releases exactly what its own message declares`);
+	return {
+		ref: body.ref,
+		digest: sha256Hex(body.arguments),
+		questionId: actualQuestion,
+		requestKey: actualKey,
+		answer: requiredString(args, "answer", "task_answer"),
+		resolves
+	};
+}
+/**
+* Read one *recorded* citation back for the text a message carries. This is the
+* record's own `(session, seq)` — not the call in hand — so a retry delivers
+* exactly the bytes the store's record points at, and a record whose Session can
+* no longer be read is a refusal rather than a made-up body.
+*/
+async function recordedText(deps, ref, field, where) {
+	let body;
+	try {
+		body = await deps.messages.readToolCallBody({
+			sessionId: SessionId(ref.sessionId),
+			seq: ref.seq
+		});
+	} catch (error) {
+		throw new Error(`task-runtime: the recorded body of ${where} could not be read from session "${ref.sessionId}" seq ${ref.seq}: ${message$2(error)}`, { cause: error });
+	}
+	return requiredString(parseCallArguments(body), field, `the recorded ${where}`);
+}
+/**
+* Compose and deliver one recorded message, reporting rather than throwing: by
+* this point the store's record is durable, so a delivery that cannot be decided
+* is information for the caller and a retry for the recovery pass — never a
+* reason to fail the call that already recorded the fact.
+*/
+async function deliverRecorded(deps, record) {
+	try {
+		const intent = {
+			targetSessionId: SessionId(record.targetSessionId),
+			senderSessionId: SessionId(record.senderSessionId),
+			messageId: record.messageId,
+			text: record.render(await recordedText(deps, record.ref, record.field, record.where))
+		};
+		const delivery = await deps.messages.ensureAgentMessageDelivered(intent);
+		return {
+			messageId: delivery.messageId,
+			status: delivery.status
+		};
+	} catch (error) {
+		return {
+			messageId: record.messageId,
+			status: "refused",
+			reason: message$2(error)
+		};
+	}
+}
+/**
+* The run one id names, or a refusal: every caller here reads a fact whose run
+* the store has already checked, so a missing one is a defect of the snapshot,
+* not a state to carry on from.
+*/
+function runOf(snapshot, runId, where) {
+	const run = snapshot.runs.find((candidate) => candidate.runId === runId);
+	if (run === void 0) throw new Error(`task-runtime: ${where} names run "${runId}", which the store's snapshot does not hold`);
+	return run;
+}
+/**
+* Ask one's direct parent (A4 §F.1): the `task_ask_parent` entry's whole effect.
+*
+* Read the body → commit the intent → recompute the block → deliver under the
+* recorded identity. The parent is never named by the caller: the store resolves
+* the asking task's direct parent and *its* current run, and the delivery goes to
+* that run's Session. A repeated request (same run, same key, same arguments
+* text) returns the record the store already holds, changes no gate state and
+* delivers the same `messageId` — which is `already-present` when the target
+* still holds it.
+*/
+async function askParentQuestion(deps, caller, request) {
+	const checked = await checkAskBody(deps, caller, request);
+	const ask = {
+		childRunId: caller.runId,
+		requestKey: checked.requestKey,
+		questionDigest: checked.digest,
+		questionRef: {
+			sessionId: caller.sessionId,
+			seq: checked.ref.seq
+		},
+		messageId: questionMessageIdOf(questionIdOf({
+			childRunId: caller.runId,
+			requestKey: checked.requestKey
+		})),
+		blocking: checked.blocking
+	};
+	const stored = await deps.task.askParentQuestionIn(caller.storeId, ask, caller.actor);
+	const snapshot = await deps.task.snapshotIn(caller.storeId);
+	deps.gate.setQuestionsBlocked(caller.sessionId, blockingQuestionsOf(snapshot, stored.question.childRunId).length > 0);
+	const parentRun = runOf(snapshot, stored.question.parentRunId, `question "${stored.question.questionId}"`);
+	const delivery = await deliverRecorded(deps, {
+		messageId: stored.question.messageId,
+		targetSessionId: parentRun.sessionId,
+		senderSessionId: caller.sessionId,
+		ref: stored.question.questionRef,
+		field: "question",
+		where: "the question",
+		render: (written) => questionMessageText(stored.question.questionId, written)
+	});
+	return {
+		question: stored.question,
+		created: stored.created,
+		delivery
+	};
+}
+/**
+* Answer one child's question (A4 §F.1): the `task_answer` entry's whole effect.
+*
+* The answering run is the caller's own — the store refuses an answer from any
+* other run, including the new run of a restarted task — and the body citation
+* must sit in the answering Session. The message goes to the *asking* run's
+* Session, so `resolves: true` both releases that run's write gate (recomputed
+* from the facts, so a second open question keeps it blocked) and puts the
+* parent's words in front of the model that asked.
+*/
+async function answerParentQuestion(deps, caller, request) {
+	const checked = await checkAnswerBody(deps, caller, request);
+	const answer = {
+		questionId: checked.questionId,
+		parentRunId: caller.runId,
+		requestKey: checked.requestKey,
+		answerDigest: checked.digest,
+		resolves: checked.resolves,
+		answerRef: {
+			sessionId: caller.sessionId,
+			seq: checked.ref.seq
+		},
+		messageId: answerMessageIdOf(answerIdOf({
+			questionId: checked.questionId,
+			requestKey: checked.requestKey
+		}))
+	};
+	const stored = await deps.task.answerParentQuestionIn(caller.storeId, answer, caller.actor);
+	const snapshot = await deps.task.snapshotIn(caller.storeId);
+	const question = questionOf(snapshot, stored.answer.questionId);
+	if (question === void 0) throw new Error(`task-runtime: answer "${stored.answer.answerId}" was recorded, but its question is not in the store's snapshot; the block and the delivery cannot be decided from a fact the snapshot does not hold`);
+	const childRun = runOf(snapshot, question.childRunId, `question "${question.questionId}"`);
+	if (stored.answer.resolves) deps.gate.setQuestionsBlocked(childRun.sessionId, blockingQuestionsOf(snapshot, question.childRunId).length > 0);
+	const delivery = await deliverRecorded(deps, {
+		messageId: stored.answer.messageId,
+		targetSessionId: childRun.sessionId,
+		senderSessionId: caller.sessionId,
+		ref: stored.answer.answerRef,
+		field: "answer",
+		where: "the answer",
+		render: (written) => answerMessageText(stored.answer.answerId, stored.answer.questionId, written)
+	});
+	return {
+		answer: stored.answer,
+		created: stored.created,
+		delivery
+	};
+}
+/**
+* What one store's question facts still owe a message, derived from its own
+* snapshot and nothing else.
+*
+* Two rules, and both are about what the *facts* can prove rather than about
+* what a process remembers:
+*
+* - every **open** question owes its ask: both runs are running and no answer
+*   has resolved it, so the parent still has to be able to answer it;
+* - every **answer** whose asking run is still running owes its delivery: the
+*   framework has no consumption proof (§F.1 keeps the reference until a real
+*   model step shows it), so even a resolved question's answer is owed to a run
+*   that may never have read it.
+*
+* Nothing else is owed. A question whose asking run settled is audit — its ask
+* and its answers are moot, and re-delivering them would be a message to a run
+* that cannot act on it.
+*/
+function pendingQuestionMessages(snapshot) {
+	const index = snapshot.questions;
+	if (index === void 0) throw new Error("task-runtime: this store's snapshot carries no question index, so its pending question messages cannot be read");
+	const open = /* @__PURE__ */ new Set();
+	for (const run of snapshot.runs) for (const question of openQuestionsOf(snapshot, run.runId)) open.add(question.questionId);
+	const messages = [];
+	const refused = [];
+	for (const question of index.all) {
+		const subject = `question "${question.questionId}"`;
+		const childRun = snapshot.runs.find((run) => run.runId === question.childRunId);
+		const parentRun = snapshot.runs.find((run) => run.runId === question.parentRunId);
+		if (childRun === void 0 || parentRun === void 0) {
+			refused.push({
+				subject,
+				messageId: question.messageId,
+				status: "refused",
+				reason: "the store holds the question without both of its runs, so neither the ask nor its answers can be addressed"
+			});
+			continue;
+		}
+		if (open.has(question.questionId)) messages.push({
+			subject,
+			kind: "question",
+			questionId: question.questionId,
+			messageId: question.messageId,
+			ref: question.questionRef,
+			senderSessionId: childRun.sessionId,
+			targetSessionId: parentRun.sessionId
+		});
+		if (childRun.status !== "running") continue;
+		for (const answer of question.answers ?? []) messages.push({
+			subject: `answer "${answer.answerId}" for question "${question.questionId}"`,
+			kind: "answer",
+			questionId: question.questionId,
+			answerId: answer.answerId,
+			messageId: answer.messageId,
+			ref: answer.answerRef,
+			senderSessionId: parentRun.sessionId,
+			targetSessionId: childRun.sessionId
+		});
+	}
+	return {
+		messages,
+		refused
+	};
+}
+/**
+* Reconcile the deliveries one store's question facts still owe (§F.1's crash
+* recovery): read each pending body from its *recorded* citation, then hand the
+* composed intents to agent-runtime's reconcile — which delivers only what the
+* target Session's own fold says is missing, so a second pass over the same
+* record adds nothing.
+*
+* A recorded body that can no longer be read is reported per record rather than
+* failing the pass: the facts are still the facts, the next activation is the
+* retry, and one unreadable Session must not hide the deliveries that could be
+* made. A target that is not live comes back `unavailable` — zero side effects,
+* no substitute parent, and the same retry rule.
+*/
+async function reconcileQuestionDeliveries(deps, storeId) {
+	const pending = pendingQuestionMessages(await deps.task.snapshotIn(storeId));
+	const composed = [];
+	const subjects = [];
+	const unreadable = /* @__PURE__ */ new Map();
+	for (const pendingMessage of pending.messages) {
+		const subject = pendingMessage.subject;
+		try {
+			subjects.push(subject);
+			composed.push({
+				targetSessionId: SessionId(pendingMessage.targetSessionId),
+				senderSessionId: SessionId(pendingMessage.senderSessionId),
+				messageId: pendingMessage.messageId,
+				text: pendingMessage.kind === "question" ? questionMessageText(pendingMessage.questionId, await recordedText(deps, pendingMessage.ref, "question", "the question")) : answerMessageText(pendingMessage.answerId, pendingMessage.questionId, await recordedText(deps, pendingMessage.ref, "answer", "the answer"))
+			});
+		} catch (error) {
+			subjects.pop();
+			unreadable.set(pendingMessage.messageId, {
+				subject,
+				messageId: pendingMessage.messageId,
+				status: "refused",
+				reason: message$2(error)
+			});
+		}
+	}
+	const settled = composed.length === 0 ? [] : await deps.messages.reconcileAgentMessageDeliveries(composed);
+	const reported = /* @__PURE__ */ new Map();
+	settled.forEach((report, index) => {
+		reported.set(report.messageId, {
+			subject: subjects[index],
+			messageId: report.messageId,
+			status: report.status,
+			...report.reason === void 0 ? {} : { reason: report.reason }
+		});
+	});
+	return [...pending.refused, ...pending.messages.flatMap((pendingMessage) => {
+		const record = reported.get(pendingMessage.messageId) ?? unreadable.get(pendingMessage.messageId);
+		return record === void 0 ? [] : [record];
+	})];
+}
+/**
+* Recompute the question block of every run that asked the run just settled —
+* the *fourth* moment the facts behind a block can move, and the one that has no
+* event of its own.
+*
+* An open question requires both runs to still be running ({@link
+* blockingQuestionsOf}), so the moment the *addressee* settles, every question
+* addressed to it stops being open: the asking run is no longer waiting on
+* anything, and nothing about it may be refused for a wait that no longer
+* exists. No `QuestionAnswered` was written and no phase moved, so the three
+* push sites that recompute a block (the ask, the resolving answer, recovery)
+* never run — without this step a run whose parent settled first would keep a
+* refusal that only its own wall time could end.
+*
+* Everything pushed here is derived from the snapshot the caller read *after*
+* the settlement, and the asking sessions are found from the store's own
+* questions (an answer carries no session; the citation does) rather than from
+* anything this process remembers. The asking run's own session is not the
+* subject — a run that settled closes its own gate — and a question whose asking
+* run is no longer running has nothing left to release.
+*/
+function releaseAskingSessions(gate, snapshot, settledRunId) {
+	const index = snapshot.questions;
+	if (index === void 0) return;
+	const asking = /* @__PURE__ */ new Map();
+	for (const question of index.all) {
+		if (question.parentRunId !== settledRunId) continue;
+		const childRun = snapshot.runs.find((run) => run.runId === question.childRunId);
+		if (childRun === void 0 || childRun.status !== "running") continue;
+		asking.set(childRun.sessionId, childRun.runId);
+	}
+	for (const [sessionId, childRunId] of asking) {
+		const blocked = blockingQuestionsOf(snapshot, childRunId).length > 0;
+		if (gate.questionsBlocked(sessionId) !== blocked) gate.setQuestionsBlocked(sessionId, blocked);
+	}
+}
+/**
+* Push the question block every run in one snapshot implies onto the gate, under
+* the gate's own token rule — the recovery pass's half of §F.1's "restart from
+* the durable facts". The token is the one taken before the snapshot read, so a
+* value that straddled a decision of this process is dropped exactly as a
+* store-derived phase is.
+*/
+function applyStoreQuestionBlocking(gate, snapshot, tokenOf) {
+	for (const run of snapshot.runs) gate.applyStoreQuestionsBlocked(run.sessionId, blockingQuestionsOf(snapshot, run.runId).length > 0, tokenOf(run.sessionId));
+}
+/**
+* Whether one run still owes or waits for coordination: no unresolved blocking
+* question of its own, and no question of a child's it has not answered. The
+* runtime reads this where a run's own next step would otherwise be automatic —
+* the parent's submission once its children are terminal — and the answer is
+* deliberately *derived* from the facts rather than stored: an answered question
+* and an unanswered one are the same list, one answer apart.
+*/
+function pendingCoordinationOf(snapshot, runId) {
+	return [...openQuestionsOf(snapshot, runId), ...questionsAwaitingAnswerOf(snapshot, runId)];
+}
+
+//#endregion
 //#region src/workspace.ts
 /** The directory under a deployment's run-binding root that holds ownership markers (§3.4). */
 const WORKSPACE_OWNERS_DIR = "workspace-owners";
@@ -3249,7 +3696,7 @@ function ownerKey(owner) {
 		owner.since
 	]);
 }
-function message$2(error) {
+function message$1(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 /**
@@ -3263,7 +3710,7 @@ async function normalizeWorkspacePath(path) {
 	try {
 		return await realpath(resolve(path));
 	} catch (error) {
-		throw new Error(`workspace ${path} cannot be resolved to a real path: ${message$2(error)}`);
+		throw new Error(`workspace ${path} cannot be resolved to a real path: ${message$1(error)}`);
 	}
 }
 /**
@@ -3313,7 +3760,7 @@ function parseMarker(raw, file) {
 	} catch (error) {
 		return {
 			kind: "unreadable",
-			reason: `${file} is not readable JSON (${message$2(error)}); an unreadable marker is not evidence that a workspace is free`
+			reason: `${file} is not readable JSON (${message$1(error)}); an unreadable marker is not evidence that a workspace is free`
 		};
 	}
 	if (declared === null || typeof declared !== "object") return {
@@ -3507,7 +3954,7 @@ var WorkspaceRegistry = class {
 			if (error.code === "ENOENT") return { kind: "absent" };
 			return {
 				kind: "unreadable",
-				reason: `${file} cannot be read (${message$2(error)}); an unreadable marker is not evidence that a workspace is free`
+				reason: `${file} cannot be read (${message$1(error)}); an unreadable marker is not evidence that a workspace is free`
 			};
 		}
 		const read = parseMarker(raw, file);
@@ -3583,7 +4030,7 @@ const CANCELLED_BEFORE_START = "cancelled by the caller before this child starte
 var RunWatcherUnavailableError = class extends Error {
 	name = "RunWatcherUnavailableError";
 };
-function message$1(error) {
+function message(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 /** Read `signal.aborted` behind a function boundary so control-flow narrowing never freezes the value. */
@@ -3911,7 +4358,7 @@ async function awaitWorker(handle, signal, wallTimeMs) {
 	try {
 		const branches = [handle.agent.whenIdle().then(() => ({ kind: "idle" })).catch((error) => isAborted(signal) ? { kind: "aborted" } : {
 			kind: "failed",
-			reason: message$1(error)
+			reason: message(error)
 		})];
 		if (wallTimeMs !== void 0) branches.push(new Promise((resolve$1) => {
 			timer = setTimeout(() => resolve$1({ kind: "budget-exhausted" }), wallTimeMs);
@@ -3988,7 +4435,7 @@ async function assertPresetUsable(env, manifest, preset) {
 		await env.assertPreset(preset);
 	} catch (error) {
 		const grantedBy = Object.entries(manifest.capabilities).flatMap(([name, entry]) => entry.preset === preset ? [name] : []);
-		throw new Error(`task-runtime: preset "${preset}"${grantedBy.length === 0 ? "" : ` granted by capabilities [${grantedBy.join(", ")}]`} is not mountable: ${message$1(error)}`);
+		throw new Error(`task-runtime: preset "${preset}"${grantedBy.length === 0 ? "" : ` granted by capabilities [${grantedBy.join(", ")}]`} is not mountable: ${message(error)}`);
 	}
 }
 /**
@@ -4005,7 +4452,7 @@ function permissionFor(env, manifest) {
 		return resolvePermission(manifest, env.resolvePermissionSpec);
 	} catch (error) {
 		const declaredBy = Object.entries(manifest.capabilities).flatMap(([name, entry]) => entry.permission === void 0 ? [] : [name]);
-		throw new Error(`task-runtime: permission declared by capabilities [${declaredBy.join(", ")}] is not usable: ${message$1(error)}`);
+		throw new Error(`task-runtime: permission declared by capabilities [${declaredBy.join(", ")}] is not usable: ${message(error)}`);
 	}
 }
 /** Run statuses that end a run: the states a batch adopts instead of driving further. */
@@ -4655,7 +5102,7 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 			...env.runBindingRoot === void 0 ? {} : { root: env.runBindingRoot }
 		});
 	} catch (error) {
-		const reason = `content binding failed: ${message$1(error)}`;
+		const reason = `content binding failed: ${message(error)}`;
 		await env.task.startRunIn(batch.storeId, run, env.actor);
 		return {
 			kind: "adopted",
@@ -4685,7 +5132,7 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 				dependencyTaskIds
 			}, {
 				status: "failed",
-				localizedCause: `spawn failed: ${message$1(error)}`
+				localizedCause: `spawn failed: ${message(error)}`
 			})
 		};
 	}
@@ -4723,7 +5170,7 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 				dependencyTaskIds
 			}, {
 				status: "failed",
-				localizedCause: `spawn failed: ${message$1(error)}`
+				localizedCause: `spawn failed: ${message(error)}`
 			})
 		};
 	}
@@ -4947,7 +5394,7 @@ async function driveBatch(env, batch) {
 		if (!await convergeAdmission(env, batch)) return await deriveChildOutcomes(env.task, batch.storeId, batch.parentTaskId);
 		return await driveRounds(env, batch);
 	} catch (error) {
-		await failParentRun(env, batch, `the batch driver failed: ${message$1(error)}`);
+		await failParentRun(env, batch, `the batch driver failed: ${message(error)}`);
 		return await deriveChildOutcomes(env.task, batch.storeId, batch.parentTaskId).catch(() => []);
 	}
 }
@@ -4987,7 +5434,7 @@ async function failParentRun(env, batch, reason) {
 		env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, "failed");
 		notifyOwner(env, batch.callerSessionId, `task-runtime: batch ${batch.batchId} failed: ${reason}`);
 	} catch (error) {
-		notifyOwner(env, batch.callerSessionId, `task-runtime: batch ${batch.batchId} failed and its parent run could not be settled: ${reason} (${message$1(error)})`);
+		notifyOwner(env, batch.callerSessionId, `task-runtime: batch ${batch.batchId} failed and its parent run could not be settled: ${reason} (${message(error)})`);
 	}
 }
 /**
@@ -5024,7 +5471,7 @@ async function settleSubmittedRun(env, storeId, taskId, runId, opts = {}) {
 	try {
 		bundle = await withVerifierWorkspace(env, storeId, taskId, runId, run.sessionId, () => verifyWithDeadline(env, storeId, runId));
 	} catch (error) {
-		const reason$1 = message$1(error);
+		const reason$1 = message(error);
 		const status = await failSubmittedRun(env, storeId, task, run, relatedTaskIds, reason$1, anomalies);
 		if (error instanceof VerifierUnavailableError) {
 			const batchId = await parentBatchOf(env, storeId, task, run);
@@ -5165,7 +5612,7 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 			...env.runBindingRoot === void 0 ? {} : { root: env.runBindingRoot }
 		});
 	} catch (error) {
-		const reason = `content binding failed: ${message$1(error)}`;
+		const reason = `content binding failed: ${message(error)}`;
 		await env.task.startRunIn(storeId, run, env.actor);
 		await env.task.markRunStatusIn(storeId, task.taskId, run.runId, "failed", env.actor, { reason });
 		await recordTerminalReview(env, storeId, task.taskId, "failed", {
@@ -5195,7 +5642,7 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 			...advance === void 0 ? {} : { signal: advance }
 		});
 	} catch (error) {
-		const reason = `spawn failed: ${message$1(error)}`;
+		const reason = `spawn failed: ${message(error)}`;
 		await env.task.markRunStatusIn(storeId, task.taskId, run.runId, "failed", env.actor, { reason });
 		await recordTerminalReview(env, storeId, task.taskId, "failed", {
 			run,
@@ -5304,418 +5751,13 @@ async function settleRunFromRuntime(env, storeId, run, status, reason) {
 		relatedTaskIds
 	});
 	env.onRunSettled?.(storeId, current.taskId, current.runId, status);
+	if (env.gate !== void 0) try {
+		releaseAskingSessions(env.gate, await env.task.snapshotIn(storeId), current.runId);
+	} catch (error) {
+		notifyOwner(env, current.sessionId, `task-runtime: the question blocks of the runs that asked run "${current.runId}" could not be recomputed after it settled (${message(error)}); the store's own derivation is unchanged and the next recovery recomputes them`);
+	}
 	await releaseWorkspaceLayer(env, runOwner(storeId, current.taskId, current.runId), current.sessionId);
 	notifyOwner(env, current.sessionId, `task-runtime: run "${current.runId}" was settled ${status}: ${reason}`);
-}
-
-//#endregion
-//#region src/question.ts
-function message(error) {
-	return error instanceof Error ? error.message : String(error);
-}
-/**
-* The `m-` identity one question's message carries: derived from the question id,
-* never minted. A retry — in this process or after a restart — states the same
-* identity, which is what lets a target's own fold answer "this one is already
-* here" instead of the framework keeping a ledger of what it sent.
-*/
-function questionMessageIdOf(questionId) {
-	return `m-${questionId}`;
-}
-/** The `m-` identity one answer's message carries, derived from the answer id for the same reason ({@link questionMessageIdOf}). */
-function answerMessageIdOf(answerId) {
-	return `m-${answerId}`;
-}
-/**
-* The arguments object one cited `tool/call` must hold: a JSON object, refused by
-* name when it is not. Exported for the same reason this module's other pure
-* steps are: the refusal rules are part of the contract, and a unit test should
-* be able to drive them without a store.
-*/
-function parseCallArguments(body) {
-	let parsed;
-	try {
-		parsed = JSON.parse(body.arguments);
-	} catch (error) {
-		throw new Error(`task-runtime: the arguments of the cited "${body.name}" call are not JSON (${message(error)}); a body that cannot be parsed is not a citation`);
-	}
-	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error(`task-runtime: the arguments of the cited "${body.name}" call are not a JSON object`);
-	return parsed;
-}
-/** One non-empty string field of a cited call's arguments, refused by name when it is absent or blank. */
-function requiredString(args, field, where) {
-	const value = args[field];
-	if (typeof value !== "string" || value.trim().length === 0) throw new Error(`task-runtime: ${where} requires a non-empty "${field}" in its own arguments; the call carries ${JSON.stringify(value)}`);
-	return value;
-}
-/** One non-empty string the *caller* claims; a caller that cannot state its own identity is refused before anything is read. */
-function claimedString(value, field, toolName) {
-	if (typeof value !== "string" || value.trim().length === 0) throw new Error(`task-runtime: ${toolName} needs a non-empty "${field}" from its caller; it received ${JSON.stringify(value)}`);
-	return value;
-}
-/** How one boolean argument reads: absent takes `absent`, a non-boolean is refused (never coerced). */
-function booleanArgument(args, field, absent, where) {
-	const value = args[field];
-	if (value === void 0) return absent;
-	if (typeof value !== "boolean") throw new Error(`task-runtime: ${where} carries "${field}": ${JSON.stringify(value)}, which is not a boolean`);
-	return value;
-}
-/**
-* Locate and read back the caller's *own* `tool/call`, by registration id.
-*
-* The Session comes from the caller's identity (its run binding), never from the
-* request: an id can only ever name an event of the calling session. The read
-* goes through agent-runtime's `readToolCallBody`, which flushes the live
-* Session first — the citation must be durable before a store may record it —
-* and refuses by name when the event is missing, unreadable, or not a tool call.
-*/
-async function readOwnCall(deps, callerSessionId, callId, toolName) {
-	if (callId.length === 0) throw new Error(`task-runtime: ${toolName} needs the registration id of its own call to cite its body`);
-	let log;
-	try {
-		log = await deps.sessionQuery.readSession(SessionId(callerSessionId));
-	} catch (error) {
-		throw new Error(`task-runtime: ${toolName} cannot read session "${callerSessionId}" to locate its own call "${callId}": ${message(error)}`, { cause: error });
-	}
-	const ref = toolCallRefIn(log, callId);
-	if (ref === void 0) throw new Error(`task-runtime: session "${callerSessionId}" holds no tool/call "${callId}"; ${toolName} cites the call it is answering for, and a caller cannot cite somebody else's call or a call that was never made`);
-	let body;
-	try {
-		body = await deps.messages.readToolCallBody(ref);
-	} catch (error) {
-		throw new Error(`task-runtime: ${toolName} could not read back the body of its own call "${callId}" (${message(error)})`, { cause: error });
-	}
-	if (body.name !== toolName) throw new Error(`task-runtime: call "${callId}" in session "${callerSessionId}" is "${body.name}", not "${toolName}"; the cited body is the one that was sent`);
-	return {
-		...body,
-		ref
-	};
-}
-/** The body one ask cites, read back from the caller's own Session and checked against the claim the call makes. */
-async function checkAskBody(deps, caller, request) {
-	const body = await readOwnCall(deps, caller.sessionId, request.callId, "task_ask_parent");
-	const args = parseCallArguments(body);
-	const claimedKey = claimedString(request.requestKey, "requestKey", "task_ask_parent");
-	const actualKey = requiredString(args, "requestKey", "task_ask_parent");
-	if (actualKey !== claimedKey) throw new Error(`task-runtime: task_ask_parent claims request key "${claimedKey}", but the cited call "${request.callId}" asked under "${actualKey}"; the arguments the sender wrote are the only request key the store may record`);
-	const blocking = booleanArgument(args, "blocking", true, "task_ask_parent");
-	if (request.blocking !== void 0 && request.blocking !== blocking) throw new Error(`task-runtime: task_ask_parent claims blocking=${String(request.blocking)}, but the cited call "${request.callId}" declared ${String(blocking)}; a caller cannot record a blocking declaration its own message does not carry`);
-	return {
-		ref: body.ref,
-		digest: sha256Hex(body.arguments),
-		requestKey: actualKey,
-		question: requiredString(args, "question", "task_ask_parent"),
-		blocking
-	};
-}
-/** The body one answer cites, read back from the answering Session and checked against the claim the call makes. */
-async function checkAnswerBody(deps, caller, request) {
-	const body = await readOwnCall(deps, caller.sessionId, request.callId, "task_answer");
-	const args = parseCallArguments(body);
-	const claimedQuestion = claimedString(request.questionId, "questionId", "task_answer");
-	const actualQuestion = requiredString(args, "questionId", "task_answer");
-	if (actualQuestion !== claimedQuestion) throw new Error(`task-runtime: task_answer claims question "${claimedQuestion}", but the cited call "${request.callId}" answers "${actualQuestion}"; a call answers the question its own message names`);
-	const claimedKey = claimedString(request.requestKey, "requestKey", "task_answer");
-	const actualKey = requiredString(args, "requestKey", "task_answer");
-	if (actualKey !== claimedKey) throw new Error(`task-runtime: task_answer claims request key "${claimedKey}", but the cited call "${request.callId}" answered under "${actualKey}"`);
-	if (args.resolves === void 0) throw new Error(`task-runtime: task_answer requires a boolean "resolves" in its own arguments; the cited call "${request.callId}" carries none`);
-	const resolves = booleanArgument(args, "resolves", false, "task_answer");
-	if (request.resolves !== resolves) throw new Error(`task-runtime: task_answer claims resolves=${String(request.resolves)}, but the cited call "${request.callId}" declared ${String(resolves)}; an answer releases exactly what its own message declares`);
-	return {
-		ref: body.ref,
-		digest: sha256Hex(body.arguments),
-		questionId: actualQuestion,
-		requestKey: actualKey,
-		answer: requiredString(args, "answer", "task_answer"),
-		resolves
-	};
-}
-/**
-* Read one *recorded* citation back for the text a message carries. This is the
-* record's own `(session, seq)` — not the call in hand — so a retry delivers
-* exactly the bytes the store's record points at, and a record whose Session can
-* no longer be read is a refusal rather than a made-up body.
-*/
-async function recordedText(deps, ref, field, where) {
-	let body;
-	try {
-		body = await deps.messages.readToolCallBody({
-			sessionId: SessionId(ref.sessionId),
-			seq: ref.seq
-		});
-	} catch (error) {
-		throw new Error(`task-runtime: the recorded body of ${where} could not be read from session "${ref.sessionId}" seq ${ref.seq}: ${message(error)}`, { cause: error });
-	}
-	return requiredString(parseCallArguments(body), field, `the recorded ${where}`);
-}
-/**
-* Compose and deliver one recorded message, reporting rather than throwing: by
-* this point the store's record is durable, so a delivery that cannot be decided
-* is information for the caller and a retry for the recovery pass — never a
-* reason to fail the call that already recorded the fact.
-*/
-async function deliverRecorded(deps, record) {
-	try {
-		const intent = {
-			targetSessionId: SessionId(record.targetSessionId),
-			senderSessionId: SessionId(record.senderSessionId),
-			messageId: record.messageId,
-			text: record.render(await recordedText(deps, record.ref, record.field, record.where))
-		};
-		const delivery = await deps.messages.ensureAgentMessageDelivered(intent);
-		return {
-			messageId: delivery.messageId,
-			status: delivery.status
-		};
-	} catch (error) {
-		return {
-			messageId: record.messageId,
-			status: "refused",
-			reason: message(error)
-		};
-	}
-}
-/**
-* The run one id names, or a refusal: every caller here reads a fact whose run
-* the store has already checked, so a missing one is a defect of the snapshot,
-* not a state to carry on from.
-*/
-function runOf(snapshot, runId, where) {
-	const run = snapshot.runs.find((candidate) => candidate.runId === runId);
-	if (run === void 0) throw new Error(`task-runtime: ${where} names run "${runId}", which the store's snapshot does not hold`);
-	return run;
-}
-/**
-* Ask one's direct parent (A4 §F.1): the `task_ask_parent` entry's whole effect.
-*
-* Read the body → commit the intent → recompute the block → deliver under the
-* recorded identity. The parent is never named by the caller: the store resolves
-* the asking task's direct parent and *its* current run, and the delivery goes to
-* that run's Session. A repeated request (same run, same key, same arguments
-* text) returns the record the store already holds, changes no gate state and
-* delivers the same `messageId` — which is `already-present` when the target
-* still holds it.
-*/
-async function askParentQuestion(deps, caller, request) {
-	const checked = await checkAskBody(deps, caller, request);
-	const ask = {
-		childRunId: caller.runId,
-		requestKey: checked.requestKey,
-		questionDigest: checked.digest,
-		questionRef: {
-			sessionId: caller.sessionId,
-			seq: checked.ref.seq
-		},
-		messageId: questionMessageIdOf(questionIdOf({
-			childRunId: caller.runId,
-			requestKey: checked.requestKey
-		})),
-		blocking: checked.blocking
-	};
-	const stored = await deps.task.askParentQuestionIn(caller.storeId, ask, caller.actor);
-	const snapshot = await deps.task.snapshotIn(caller.storeId);
-	deps.gate.setQuestionsBlocked(caller.sessionId, blockingQuestionsOf(snapshot, stored.question.childRunId).length > 0);
-	const parentRun = runOf(snapshot, stored.question.parentRunId, `question "${stored.question.questionId}"`);
-	const delivery = await deliverRecorded(deps, {
-		messageId: stored.question.messageId,
-		targetSessionId: parentRun.sessionId,
-		senderSessionId: caller.sessionId,
-		ref: stored.question.questionRef,
-		field: "question",
-		where: "the question",
-		render: (written) => questionMessageText(stored.question.questionId, written)
-	});
-	return {
-		question: stored.question,
-		created: stored.created,
-		delivery
-	};
-}
-/**
-* Answer one child's question (A4 §F.1): the `task_answer` entry's whole effect.
-*
-* The answering run is the caller's own — the store refuses an answer from any
-* other run, including the new run of a restarted task — and the body citation
-* must sit in the answering Session. The message goes to the *asking* run's
-* Session, so `resolves: true` both releases that run's write gate (recomputed
-* from the facts, so a second open question keeps it blocked) and puts the
-* parent's words in front of the model that asked.
-*/
-async function answerParentQuestion(deps, caller, request) {
-	const checked = await checkAnswerBody(deps, caller, request);
-	const answer = {
-		questionId: checked.questionId,
-		parentRunId: caller.runId,
-		requestKey: checked.requestKey,
-		answerDigest: checked.digest,
-		resolves: checked.resolves,
-		answerRef: {
-			sessionId: caller.sessionId,
-			seq: checked.ref.seq
-		},
-		messageId: answerMessageIdOf(answerIdOf({
-			questionId: checked.questionId,
-			requestKey: checked.requestKey
-		}))
-	};
-	const stored = await deps.task.answerParentQuestionIn(caller.storeId, answer, caller.actor);
-	const snapshot = await deps.task.snapshotIn(caller.storeId);
-	const question = questionOf(snapshot, stored.answer.questionId);
-	if (question === void 0) throw new Error(`task-runtime: answer "${stored.answer.answerId}" was recorded, but its question is not in the store's snapshot; the block and the delivery cannot be decided from a fact the snapshot does not hold`);
-	const childRun = runOf(snapshot, question.childRunId, `question "${question.questionId}"`);
-	if (stored.answer.resolves) deps.gate.setQuestionsBlocked(childRun.sessionId, blockingQuestionsOf(snapshot, question.childRunId).length > 0);
-	const delivery = await deliverRecorded(deps, {
-		messageId: stored.answer.messageId,
-		targetSessionId: childRun.sessionId,
-		senderSessionId: caller.sessionId,
-		ref: stored.answer.answerRef,
-		field: "answer",
-		where: "the answer",
-		render: (written) => answerMessageText(stored.answer.answerId, stored.answer.questionId, written)
-	});
-	return {
-		answer: stored.answer,
-		created: stored.created,
-		delivery
-	};
-}
-/**
-* What one store's question facts still owe a message, derived from its own
-* snapshot and nothing else.
-*
-* Two rules, and both are about what the *facts* can prove rather than about
-* what a process remembers:
-*
-* - every **open** question owes its ask: both runs are running and no answer
-*   has resolved it, so the parent still has to be able to answer it;
-* - every **answer** whose asking run is still running owes its delivery: the
-*   framework has no consumption proof (§F.1 keeps the reference until a real
-*   model step shows it), so even a resolved question's answer is owed to a run
-*   that may never have read it.
-*
-* Nothing else is owed. A question whose asking run settled is audit — its ask
-* and its answers are moot, and re-delivering them would be a message to a run
-* that cannot act on it.
-*/
-function pendingQuestionMessages(snapshot) {
-	const index = snapshot.questions;
-	if (index === void 0) throw new Error("task-runtime: this store's snapshot carries no question index, so its pending question messages cannot be read");
-	const open = /* @__PURE__ */ new Set();
-	for (const run of snapshot.runs) for (const question of openQuestionsOf(snapshot, run.runId)) open.add(question.questionId);
-	const messages = [];
-	const refused = [];
-	for (const question of index.all) {
-		const subject = `question "${question.questionId}"`;
-		const childRun = snapshot.runs.find((run) => run.runId === question.childRunId);
-		const parentRun = snapshot.runs.find((run) => run.runId === question.parentRunId);
-		if (childRun === void 0 || parentRun === void 0) {
-			refused.push({
-				subject,
-				messageId: question.messageId,
-				status: "refused",
-				reason: "the store holds the question without both of its runs, so neither the ask nor its answers can be addressed"
-			});
-			continue;
-		}
-		if (open.has(question.questionId)) messages.push({
-			subject,
-			kind: "question",
-			questionId: question.questionId,
-			messageId: question.messageId,
-			ref: question.questionRef,
-			senderSessionId: childRun.sessionId,
-			targetSessionId: parentRun.sessionId
-		});
-		if (childRun.status !== "running") continue;
-		for (const answer of question.answers ?? []) messages.push({
-			subject: `answer "${answer.answerId}" for question "${question.questionId}"`,
-			kind: "answer",
-			questionId: question.questionId,
-			answerId: answer.answerId,
-			messageId: answer.messageId,
-			ref: answer.answerRef,
-			senderSessionId: parentRun.sessionId,
-			targetSessionId: childRun.sessionId
-		});
-	}
-	return {
-		messages,
-		refused
-	};
-}
-/**
-* Reconcile the deliveries one store's question facts still owe (§F.1's crash
-* recovery): read each pending body from its *recorded* citation, then hand the
-* composed intents to agent-runtime's reconcile — which delivers only what the
-* target Session's own fold says is missing, so a second pass over the same
-* record adds nothing.
-*
-* A recorded body that can no longer be read is reported per record rather than
-* failing the pass: the facts are still the facts, the next activation is the
-* retry, and one unreadable Session must not hide the deliveries that could be
-* made. A target that is not live comes back `unavailable` — zero side effects,
-* no substitute parent, and the same retry rule.
-*/
-async function reconcileQuestionDeliveries(deps, storeId) {
-	const pending = pendingQuestionMessages(await deps.task.snapshotIn(storeId));
-	const composed = [];
-	const subjects = [];
-	const unreadable = /* @__PURE__ */ new Map();
-	for (const pendingMessage of pending.messages) {
-		const subject = pendingMessage.subject;
-		try {
-			subjects.push(subject);
-			composed.push({
-				targetSessionId: SessionId(pendingMessage.targetSessionId),
-				senderSessionId: SessionId(pendingMessage.senderSessionId),
-				messageId: pendingMessage.messageId,
-				text: pendingMessage.kind === "question" ? questionMessageText(pendingMessage.questionId, await recordedText(deps, pendingMessage.ref, "question", "the question")) : answerMessageText(pendingMessage.answerId, pendingMessage.questionId, await recordedText(deps, pendingMessage.ref, "answer", "the answer"))
-			});
-		} catch (error) {
-			subjects.pop();
-			unreadable.set(pendingMessage.messageId, {
-				subject,
-				messageId: pendingMessage.messageId,
-				status: "refused",
-				reason: message(error)
-			});
-		}
-	}
-	const settled = composed.length === 0 ? [] : await deps.messages.reconcileAgentMessageDeliveries(composed);
-	const reported = /* @__PURE__ */ new Map();
-	settled.forEach((report, index) => {
-		reported.set(report.messageId, {
-			subject: subjects[index],
-			messageId: report.messageId,
-			status: report.status,
-			...report.reason === void 0 ? {} : { reason: report.reason }
-		});
-	});
-	return [...pending.refused, ...pending.messages.flatMap((pendingMessage) => {
-		const record = reported.get(pendingMessage.messageId) ?? unreadable.get(pendingMessage.messageId);
-		return record === void 0 ? [] : [record];
-	})];
-}
-/**
-* Push the question block every run in one snapshot implies onto the gate, under
-* the gate's own token rule — the recovery pass's half of §F.1's "restart from
-* the durable facts". The token is the one taken before the snapshot read, so a
-* value that straddled a decision of this process is dropped exactly as a
-* store-derived phase is.
-*/
-function applyStoreQuestionBlocking(gate, snapshot, tokenOf) {
-	for (const run of snapshot.runs) gate.applyStoreQuestionsBlocked(run.sessionId, blockingQuestionsOf(snapshot, run.runId).length > 0, tokenOf(run.sessionId));
-}
-/**
-* Whether one run still owes or waits for coordination: no unresolved blocking
-* question of its own, and no question of a child's it has not answered. The
-* runtime reads this where a run's own next step would otherwise be automatic —
-* the parent's submission once its children are terminal — and the answer is
-* deliberately *derived* from the facts rather than stored: an answered question
-* and an unanswered one are the same list, one answer apart.
-*/
-function pendingCoordinationOf(snapshot, runId) {
-	return [...openQuestionsOf(snapshot, runId), ...questionsAwaitingAnswerOf(snapshot, runId)];
 }
 
 //#endregion
@@ -8716,23 +8758,71 @@ var TaskRuntime = class extends Service {
 			budget: { ...this.config.budget },
 			onRunSettled: (storeId, taskId, runId, status) => {
 				this.runSettledFromRuntime(storeId, taskId, runId, status);
-			}
+			},
+			gate: this.executionGate
 		};
 	}
 	/**
 	* What the runtime does when *any* run reaches a terminal state (A3 §3.3): the
-	* gate closes for the session that held it, and the workspace layer the run
-	* claimed comes off the stack. One implementation for the orchestration's
-	* settlements and the runtime's own, so a run settled from either side leaves
-	* the process in the same state.
+	* gate closes for the session that held it, the questions addressed to it stop
+	* blocking the runs that asked ({@link recomputeAskingSessions}), and the
+	* workspace layer the run claimed comes off the stack. One implementation for
+	* the orchestration's settlements and the runtime's own, so a run settled from
+	* either side leaves the process in the same state.
+	*
+	* A run whose session this process never bound is settled like any other: its
+	* own gate has nothing to close here, but the runs that asked it are recomputed
+	* all the same, because the wait that ended is theirs.
 	*/
 	runSettledFromRuntime(storeId, taskId, runId, status) {
+		this.recomputeAskingSessions(storeId, runId);
 		const sessionId = this.sessionBoundInProcess(storeId, runId);
 		if (sessionId === void 0) return;
 		this.executionGate.setTerminal(sessionId);
 		this.releaseRunWorkspaceLayer(storeId, runId, sessionId).catch((error) => {
 			this.warn(`run ${runId}: the workspace layer it held could not be released (${error instanceof Error ? error.message : String(error)})`);
 		});
+	}
+	/**
+	* Recompute the question block of every run that asked the run just settled
+	* (A4 §F.1), from the store, here.
+	*
+	* This is the orchestration side of the same step `settleRunFromRuntime` takes
+	* where its caller awaits it: the two settlements — the driver's own
+	* (`settleChildRun`, `settleParentBatch`, `settleSubmittedRun`) and the
+	* runtime-level entry — must not differ in what the gate shows afterwards, and
+	* both derive the value the same way. The read is reported rather than
+	* propagated: the run is settled and its record written by now, and a store
+	* this process cannot read back is a failure of the *release*, not of the
+	* settlement — the next recovery recomputes the same blocks.
+	*/
+	async recomputeAskingSessions(storeId, runId) {
+		try {
+			releaseAskingSessions(this.executionGate, await this.ctx.task.snapshotIn(storeId), runId);
+		} catch (error) {
+			this.warn(`store ${storeId}: the question blocks of the runs that asked run "${runId}" could not be recomputed after it settled (${error instanceof Error ? error.message : String(error)})`);
+		}
+	}
+	/**
+	* Report the question deliveries one recovery pass could not settle (A4 §F.1)
+	* — `refused` (the body could not be read back from its own citation, or the
+	* relay refused) and `unavailable` (the target Session is not live in this
+	* process) — as one warning, because the pass's own report is not enough: the
+	* explicit adoption drops it, and an undelivered question nobody is told about
+	* is a wait whose only remaining ends are a restart and a wall time.
+	*
+	* Nothing here changes the control flow: the intents stay on the Task record,
+	* the next activation retries them, and a delivery that settled is not reported
+	* at all. The line names the store, how many of how many intents are still
+	* owed, the count per status, and each affected fact with its own refusal.
+	*/
+	reportUnsettledQuestionDeliveries(storeId, deliveries) {
+		const unsettled = deliveries.filter((delivery) => delivery.status === "refused" || delivery.status === "unavailable");
+		if (unsettled.length === 0) return;
+		const counts = /* @__PURE__ */ new Map();
+		for (const delivery of unsettled) counts.set(delivery.status, (counts.get(delivery.status) ?? 0) + 1);
+		const byStatus = [...counts].sort(([left], [right]) => left.localeCompare(right)).map(([status, count]) => `${count} ${status}`).join(", ");
+		this.warn(`store ${storeId}: ${unsettled.length} of ${deliveries.length} owed question message${deliveries.length === 1 ? "" : "s"} could not be settled (${byStatus}): ${unsettled.map((delivery) => `${delivery.subject} [${delivery.status}${delivery.reason === void 0 ? "" : `: ${delivery.reason}`}]`).join("; ")}. The Task records still hold these intents, no substitute parent is invented, and the next activation retries them`);
 	}
 	/**
 	* Start the driver for one admitted batch. The controller is registered
@@ -9160,6 +9250,7 @@ var TaskRuntime = class extends Service {
 		let questionDeliveries = [];
 		try {
 			questionDeliveries = await reconcileQuestionDeliveries(this.questionCoordination(), storeId);
+			this.reportUnsettledQuestionDeliveries(storeId, questionDeliveries);
 		} catch (error) {
 			this.warn(`store ${storeId}: its pending question deliveries could not be reconciled (${error instanceof Error ? error.message : String(error)}); the Task records still hold the intents, and the next activation retries`);
 		}

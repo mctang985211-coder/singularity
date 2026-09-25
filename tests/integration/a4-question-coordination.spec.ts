@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SessionId } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
-import { blockingQuestionsOf, questionIdOf } from '../../task/src/index.ts'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { blockingQuestionsOf, questionIdOf, sha256Hex } from '../../task/src/index.ts'
 import type { TaskEvent } from '../../task/src/index.ts'
+import { settleRunFromRuntime } from '../../task-runtime/src/index.ts'
 import type { DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import {
   disposeScriptedLoops,
@@ -112,6 +114,14 @@ async function questionOf(h: ScriptedLoop, storeId: string, questionId: string) 
 function insertsOf(h: ScriptedLoop, sessionId: string, messageId: string): number {
   return h.eventsOf(sessionId).filter(event => event.type === 'agent/inbox/spliced'
     && event.data.inserted.some(message => String(message.id) === messageId)).length
+}
+
+/** The `tool/call` one dispatched call left in one session's own log — the bytes a citation must name. */
+function citedCall(h: ScriptedLoop, sessionId: string, callId: string): SessionEvent {
+  const event = h.eventsOf(sessionId).find(candidate => candidate.type === 'tool/call'
+    && String((candidate.data as { callId?: unknown }).callId) === callId)
+  expect(event, `session ${sessionId} holding tool/call ${callId}`).toBeDefined()
+  return event as SessionEvent
 }
 
 /**
@@ -431,6 +441,14 @@ describe('the orchestration entries (A4 §F.1)', () => {
         requestKey: 'a1',
         resolves: true,
       }), /claims question "q-other", but the cited call/],
+      // The declaration is part of the body: `resolves` releases exactly what the
+      // sender's own message says, never what a caller claims about it.
+      ['a tampered resolves declaration', () => h.runtime.answerParentQuestion(child, {
+        callId: (h.calls.find(call => call.name === 'task_answer' && call.sessionId === child) as ToolCallRecord).callId,
+        questionId: 'q-none',
+        requestKey: 'a1',
+        resolves: false,
+      }), /claims resolves=false, but the cited call/],
     ]
     for (const [what, attempt, pattern] of refusals) {
       await expect(attempt(), what).rejects.toThrow(pattern)
@@ -486,6 +504,63 @@ describe('the orchestration entries (A4 §F.1)', () => {
     expect(h.runtime.gate.decide(child, 'task_submit_result')).toEqual({ allow: true })
     finished.resolve()
   })
+
+  it('records the cited bytes themselves as the content identity, for a question and for its answer', async () => {
+    const answerNow = Promise.withResolvers<void>()
+    const finished = Promise.withResolvers<void>()
+    let questionId = ''
+    const h = await startScriptedLoop({
+      // These cases drive the runtime entries themselves: the question tools stay
+      // the fixture's stand-ins so the scripted call leaves nothing but the
+      // `tool/call` citation the entry is handed (the shipped definitions are
+      // ③c's, and its own spec runs them).
+      questionTools: 'stand-in',
+      script: (_sessionId, index): readonly ScriptEntry[] => index === 0
+        ? [
+          { tool: 'task_decompose', args: { reason: 'split the release work', children: children('child work') } },
+          { waitFor: () => answerNow.promise },
+          { tool: 'task_answer', args: (): Record<string, unknown> => ({ questionId, requestKey: 'a1', answer: 'the frozen contract holds', resolves: true }) },
+          { waitFor: () => finished.promise },
+        ]
+        : [
+          { tool: 'task_ask_parent', args: { requestKey: 'k1', question: 'which contract holds?' } },
+          { waitFor: () => answerNow.promise },
+        ],
+    })
+    const root = await h.begin(ROOT_CONTRACT)
+    await batchIdOf(h, ROOT)
+    await vi.waitFor(() => expect(h.spawns.length).toBeGreaterThanOrEqual(1))
+    const child = spawnOf(h, 0)
+    await vi.waitFor(async () => expect((await h.runForSession(child)).run.status).toBe('running'))
+
+    // The question's digest is SHA-256 over the argument bytes the sender's own
+    // Session holds — the citation and the content identity describe that one
+    // event, so a reader can recompute the identity from the body it reads back.
+    const askCall = await callOf(h, 'task_ask_parent', child)
+    const asked = await h.runtime.askParentQuestion(child, { callId: askCall.callId, requestKey: 'k1', blocking: true })
+    questionId = asked.question.questionId
+    const askEvent = citedCall(h, child, askCall.callId)
+    expect(asked.question.questionRef).toEqual({ sessionId: child, seq: askEvent.seq })
+    expect(asked.question.questionDigest).toBe(sha256Hex(String((askEvent.data as { arguments?: unknown }).arguments)))
+
+    // The same holds one level down: the answer's digest is the answering
+    // Session's own call, and the stored record carries it unchanged.
+    answerNow.resolve()
+    const answerCall = await callOf(h, 'task_answer', ROOT)
+    const answered = await h.runtime.answerParentQuestion(ROOT, {
+      callId: answerCall.callId,
+      questionId,
+      requestKey: 'a1',
+      resolves: true,
+    })
+    const answerEvent = citedCall(h, ROOT, answerCall.callId)
+    expect(answered.answer.answerRef).toEqual({ sessionId: ROOT, seq: answerEvent.seq })
+    expect(answered.answer.answerDigest).toBe(sha256Hex(String((answerEvent.data as { arguments?: unknown }).arguments)))
+    const stored = (await h.snapshot(root.storeId)).questions?.byId[questionId]
+    expect(stored?.questionDigest).toBe(sha256Hex(String((askEvent.data as { arguments?: unknown }).arguments)))
+    expect(stored?.answers?.map(answer => answer.answerDigest)).toEqual([answered.answer.answerDigest])
+    finished.resolve()
+  }, 30_000)
 })
 
 describe('the budget still ends a blocked wait (A4 §F.1)', () => {
@@ -548,6 +623,216 @@ describe('the budget still ends a blocked wait (A4 §F.1)', () => {
     // for a question whose runs have settled.
     const reconciled = await h.runtime.reconcileStore(root.storeId)
     expect(reconciled.questionDeliveries).toEqual([])
+  }, 30_000)
+
+  it('counts a blocked idle worker as the protocol\'s wait, not as no progress, under a one-round limit', async () => {
+    const asked = Promise.withResolvers<void>()
+    const h = await startScriptedLoop({
+      // These cases drive the runtime entries themselves: the question tools stay
+      // the fixture's stand-ins so the scripted call leaves nothing but the
+      // `tool/call` citation the entry is handed (the shipped definitions are
+      // ③c's, and its own spec runs them).
+      questionTools: 'stand-in',
+      // One unsubmitted idle round stops a worker — unless the idle *is* the wait
+      // the protocol put it in, which is what this case turns on.
+      noProgressRounds: 1,
+      // The run's own wall time is what ends the parked wait: the deadline is not a
+      // stay of execution, and it is the only thing this wait ended by.
+      budget: { wallTimeMs: 250 },
+      script: (_sessionId, index): readonly ScriptEntry[] => {
+        if (index === 0) {
+          return [
+            { tool: 'task_decompose', args: { reason: 'split the release work', children: children('child work') } },
+            { waitFor: () => asked.promise },
+            { text: 'root: waiting for the child' },
+          ]
+        }
+        // The child hands the question over to the spec and then ends its turn: the
+        // idle the runtime observes next is the question wait itself.
+        return [
+          { tool: 'task_ask_parent', args: { requestKey: 'k1', question: 'which contract holds?' } },
+          { waitFor: () => asked.promise },
+          { text: 'child: waiting for an answer' },
+        ]
+      },
+    })
+    const root = await h.begin(ROOT_CONTRACT)
+    await batchIdOf(h, ROOT)
+    await vi.waitFor(() => expect(h.spawns.length).toBeGreaterThanOrEqual(1))
+    const child = spawnOf(h, 0)
+    await vi.waitFor(async () => expect((await h.runForSession(child)).run.status).toBe('running'))
+    const childRun = (await h.runForSession(child)).run
+
+    const call = await callOf(h, 'task_ask_parent', child)
+    const askedQuestion = await h.runtime.askParentQuestion(child, { callId: call.callId, requestKey: 'k1', blocking: true })
+    expect(blockingQuestionsOf(await h.snapshot(root.storeId), childRun.runId)).toHaveLength(1)
+    // The child's turn really ends here: that idle is exactly what the runtime
+    // observes next, and it must not be read as stagnation.
+    asked.resolve()
+    await h.agent(child).whenIdle()
+    const parked = await vi.waitFor(async () => {
+      const current = (await h.runForSession(child)).run
+      expect(current.status).toBe('running')
+      return current
+    })
+    // No no-progress round was marked for the wait — neither on the run nor in the
+    // store's own event log (which this read is shown to see by the fact above).
+    expect(taskEventsOf(h, root.storeId).some(event => event.kind === 'QuestionAsked' && event.runId === childRun.runId)).toBe(true)
+    expect(parked.noProgress).toBeUndefined()
+    expect(taskEventsOf(h, root.storeId).filter(event => event.kind === 'RunProgressMarked' && event.runId === childRun.runId)).toEqual([])
+    // The wait ends the way a wait does: the run's own wall time, not the
+    // no-progress rule, and the question stays on the record as its audit.
+    const ended = await vi.waitFor(async () => {
+      const current = (await h.runForSession(child)).run
+      expect(current.status).toBe('failed')
+      return current
+    }, { timeout: 20_000 })
+    expect(ended.noProgress).toBeUndefined()
+    const review = (await h.snapshot(root.storeId)).reviews.find(item => item.runId === childRun.runId)
+    expect(review?.localizedCause).toContain('wallTimeMs')
+    expect(review?.localizedCause ?? '').not.toContain('no progress')
+    expect((await h.snapshot(root.storeId)).questions?.all.map(question => question.questionId)).toEqual([askedQuestion.question.questionId])
+  }, 30_000)
+})
+
+describe('a question entry needs a caller with a run (A4 §F.1)', () => {
+  it('refuses a live session bound to no run at the shipped tools and at the service entries, with no question and no message', async () => {
+    const LONER = 's-loner'
+    const h = await startScriptedLoop({
+      // The shipped definitions are the subject here: a live session with no run
+      // reaches the deployment's own `task_ask_parent`/`task_answer`, so the
+      // refusal a model reads is the tool's own rendering of it.
+      questionTools: 'shipped',
+      script: (sessionId): readonly ScriptEntry[] => sessionId === LONER
+        ? [
+          { tool: 'task_ask_parent', args: { requestKey: 'k1', question: 'who owns me?' } },
+          { tool: 'task_answer', args: { questionId: 'q-none', requestKey: 'a1', answer: 'nobody asked me', resolves: true } },
+        ]
+        : [],
+    })
+    const root = await h.begin(ROOT_CONTRACT)
+    // A session the loop really runs, with no run bound to it: what a root before
+    // activation, a reviewer and a helper all look like to the question plane. The
+    // fixture mints it the way a spawn does, because the subject is the entry's
+    // refusal and not the spawn that would never make such a session.
+    const made = await h.ctx.agents.create({
+      sessionId: SessionId(LONER),
+      meta: { cwd: h.checkout, agentPreset: 'standard' },
+      agentOptions: { provider: 'mock', model: 'mock' },
+      setup: async () => {},
+    })
+    expect(String(made.agent.id)).toBe(LONER)
+    const eventsBefore = taskEventsOf(h, root.storeId).length
+    /** Every message identity of the question plane one Session's own log holds, inbox and history. */
+    const planeMessagesOf = (sessionId: string): string[] => h.eventsOf(sessionId).flatMap(event => event.type === 'agent/inbox/spliced'
+      ? event.data.inserted.map(message => String(message.id)).filter(id => id.startsWith('m-q-') || id.startsWith('m-a-'))
+      : [])
+    h.userSays('begin the work nobody gave me', LONER)
+
+    // Both shipped tools answer the model with the refusal, in their own words,
+    // and neither reaches the store: the identity comes from a live caller's run.
+    const askCall = await callOf(h, 'task_ask_parent', LONER)
+    expect(askCall.result?.isError).toBe(false)
+    expect(askCall.result?.text).toContain('task_ask_parent rejected:')
+    expect(askCall.result?.text).toContain(`no task run is bound to session "${LONER}"`)
+    const answerCall = await callOf(h, 'task_answer', LONER)
+    expect(answerCall.result?.isError).toBe(false)
+    expect(answerCall.result?.text).toContain('task_answer rejected:')
+    expect(answerCall.result?.text).toContain(`no task run is bound to session "${LONER}"`)
+
+    // The direct service entries refuse the same caller, before any citation is
+    // read: a session with no run has nobody to ask and nothing to answer.
+    await expect(h.runtime.askParentQuestion(LONER, { callId: askCall.callId, requestKey: 'k2', blocking: true }))
+      .rejects.toThrow(`no task run is bound to session "${LONER}"`)
+    await expect(h.runtime.answerParentQuestion(LONER, { callId: answerCall.callId, questionId: 'q-none', requestKey: 'a2', resolves: true }))
+      .rejects.toThrow(`no task run is bound to session "${LONER}"`)
+
+    // Zero side effects: no question fact, no message of the question plane in
+    // either Session's own log, and no block. (Both Sessions keep their own
+    // traffic — the root's kickoff and the person's text — which is not this
+    // case's subject; what a refused call could have added is a plane delivery,
+    // and there is none.)
+    expect(taskEventsOf(h, root.storeId).length).toBe(eventsBefore)
+    expect(taskEventsOf(h, root.storeId).filter(event => event.kind === 'QuestionAsked')).toEqual([])
+    expect((await h.snapshot(root.storeId)).questions?.all ?? []).toEqual([])
+    await h.agent(LONER).whenIdle()
+    expect(planeMessagesOf(ROOT)).toEqual([])
+    expect(planeMessagesOf(LONER)).toEqual([])
+    expect(h.runtime.gate.questionsBlocked(LONER)).toBe(false)
+    expect(h.runtime.gate.decide(LONER, 'write')).toEqual({ allow: true })
+  }, 30_000)
+})
+
+describe('the addressee settling releases the asking run (A4 §F.1)', () => {
+  it("recomputes the asking run's block when the run it asked settles, so the wait ends with the question and not with its wall time", async () => {
+    const asked = Promise.withResolvers<void>()
+    const keepGoing = Promise.withResolvers<void>()
+    const h = await startScriptedLoop({
+      // This case drives the runtime entries itself, as the blocking cases above
+      // do: the scripted call leaves the `tool/call` citation the entry is handed.
+      questionTools: 'stand-in',
+      probes: ['write'],
+      script: (_sessionId, index): readonly ScriptEntry[] => index === 0
+        ? [
+          { tool: 'task_decompose', args: { reason: 'split the release work', children: children('child work') } },
+          { waitFor: () => keepGoing.promise },
+        ]
+        : [
+          { tool: 'task_ask_parent', args: { requestKey: 'k1', question: 'which contract holds?' } },
+          { waitFor: () => asked.promise },
+          { tool: 'write', args: { path: 'child-blocked.txt', content: 'no' } },
+          { waitFor: () => keepGoing.promise },
+          { tool: 'write', args: { path: 'child-released.txt', content: 'yes' } },
+          { text: 'child: released' },
+        ],
+    })
+    const root = await h.begin(ROOT_CONTRACT)
+    await batchIdOf(h, ROOT)
+    await vi.waitFor(() => expect(h.spawns.length).toBeGreaterThanOrEqual(1))
+    const child = spawnOf(h, 0)
+    await vi.waitFor(async () => expect((await h.runForSession(child)).run.status).toBe('running'))
+    const childRun = (await h.runForSession(child)).run
+
+    // The child asks the run it must wait on, and the block is live: the store's
+    // derivation says the question is open and the gate refuses the write the same
+    // turn attempts next.
+    const askCall = await callOf(h, 'task_ask_parent', child)
+    const askedQuestion = await h.runtime.askParentQuestion(child, { callId: askCall.callId, requestKey: 'k1', blocking: true })
+    expect(askedQuestion.question.parentRunId).toBe(root.runId)
+    expect(h.runtime.gate.questionsBlocked(child)).toBe(true)
+    expect(h.runtime.gate.decide(child, 'write').allow).toBe(false)
+    asked.resolve()
+    const blocked = await callOf(h, 'write', child, call => (call.args as { path?: string }).path === 'child-blocked.txt')
+    expect(blocked.result?.isError).toBe(true)
+    expect(blocked.result?.text).toContain('waiting on an unresolved blocking question')
+    expect(h.executed.some(name => name.includes('child-blocked.txt'))).toBe(false)
+
+    // The addressee is settled — the same entry a graph removal, a batch-failure
+    // seam and a recovery refusal take, with the runtime's own post-settlement
+    // work for the run's session. The asking run is deliberately still in flight:
+    // nothing else touches its gate, so the release can only come from the
+    // settlement having recomputed it (an open question needs *both* runs running).
+    const rootRun = (await h.runForSession(ROOT)).run
+    await settleRunFromRuntime({
+      task: h.task,
+      actor: 'tester',
+      gate: h.runtime.gate,
+      onRunSettled: () => { h.runtime.gate.setTerminal(ROOT) },
+    }, root.storeId, rootRun, 'cancelled', 'test: the asked run is settled in place')
+
+    expect((await h.task.runIn(root.storeId, rootRun.runId)).status).toBe('cancelled')
+    const after = await h.snapshot(root.storeId)
+    expect(after.questions?.all.map(question => question.questionId)).toEqual([askedQuestion.question.questionId])
+    // The derivation and the gate agree again, and the run may do what the block
+    // refused: write, and hand its result in.
+    expect(blockingQuestionsOf(after, childRun.runId)).toEqual([])
+    expect(h.runtime.gate.questionsBlocked(child)).toBe(false)
+    expect(h.runtime.gate.decide(child, 'write')).toEqual({ allow: true })
+    expect(h.runtime.gate.decide(child, 'task_submit_result')).toEqual({ allow: true })
+    keepGoing.resolve()
+    const released = await callOf(h, 'write', child, call => (call.args as { path?: string }).path === 'child-released.txt')
+    expect(released.result?.isError).toBe(false)
+    expect(h.executed.some(name => name.includes('child-released.txt'))).toBe(true)
   }, 30_000)
 })
 

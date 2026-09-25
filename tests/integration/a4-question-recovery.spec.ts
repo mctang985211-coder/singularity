@@ -606,6 +606,13 @@ describe('A4 recovery from the real session log', () => {
     expect(denied.allow).toBe(false)
     if (denied.allow) throw new Error('unreachable')
     expect(denied.reason).toContain('waiting on an unresolved blocking question')
+    // …and the *addressee's* side is not blocked by it: the root is live again
+    // with its own gate from the store — active, unblocked, free to write — so the
+    // run that owes the answer can still produce one. A block smeared onto the
+    // parent would leave nobody able to answer the child.
+    expect(b.runtime.gate.questionsBlocked(ROOT)).toBe(false)
+    expect(b.runtime.gate.phaseOf(ROOT)).toBe('active')
+    expect(b.runtime.gate.decide(ROOT, 'write')).toEqual({ allow: true })
     // The delivery the first process could not make is made exactly once here,
     // and the record's identity is the one that landed.
     expect(b.copiesOf(ROOT, askedOutcome.question.messageId)).toBe(1)
@@ -694,6 +701,18 @@ describe('A4 recovery from the real session log', () => {
     expect(running.runs.find(run => run.runId === 'r-child')?.status).toBe('running')
     expect(running.reviews.some(review => review.runId === 'r-child')).toBe(false)
     expect(b.copiesOf(ROOT, askedOutcome.question.messageId)).toBe(1)
+    // The waiting parent's own gate came back from the store with it, and recovery
+    // *rebuilt* the phase rather than opening it: the root holds
+    // `waiting_children`, so its writes stay closed until its batch settles — the
+    // answer it owes its child is coordination, and coordination is what stays
+    // allowed here.
+    expect(b.runtime.gate.phaseOf(ROOT)).toBe('waiting_children')
+    const parentDenied = b.runtime.gate.decide(ROOT, 'write')
+    expect(parentDenied.allow).toBe(false)
+    if (parentDenied.allow) throw new Error('unreachable')
+    expect(parentDenied.reason).toContain('phase "waiting_children"')
+    expect(b.runtime.gate.decide(ROOT, 'task_answer')).toEqual({ allow: true })
+    expect(b.runtime.gate.questionsBlocked(ROOT)).toBe(false)
 
     // Now the child is stopped the way any other terminal write stops it (the
     // store's own service, by the actor that owns the run): the wait ends, the
@@ -759,5 +778,52 @@ describe('A4 recovery from the real session log', () => {
     // closes a gate, which the recovery cases above assert.)
     expect(blockingQuestionsOf(after, 'r-child')).toEqual([])
     await b.dispose()
+  })
+})
+
+describe('what a recovery pass reports about owed question messages (A4 §F.1)', () => {
+  it('warns about a delivery it could not settle, naming the store, the count per status and the fact', async () => {
+    const dir = workspace()
+    const asked = Promise.withResolvers<void>()
+    const a = await Boot.open(dir, sessionId => sessionId === CHILD
+      ? [{ tool: 'task_ask_parent', args: { requestKey: 'k1', question: 'which contract holds?' } }, { waitFor: () => asked.promise }]
+      : [{ waitFor: () => asked.promise }])
+    await seedParentChild(a)
+    const child = await a.create(CHILD)
+    a.begin(child, 'begin the child work')
+    await vi.waitFor(() => expect(calls.some(call => call.name === 'task_ask_parent' && call.sessionId === CHILD)).toBe(true))
+    const askCall = calls.find(call => call.name === 'task_ask_parent' && call.sessionId === CHILD) as DispatchedCall
+    const askedOutcome = await a.runtime.askParentQuestion(CHILD, { callId: askCall.callId, requestKey: 'k1', blocking: true })
+    // The addressee is not live in this process, so the intent is durable and the
+    // delivery is owed: exactly the state recovery has to report on.
+    expect(askedOutcome.delivery.status).toBe('unavailable')
+    expect(a.copiesOf(ROOT, askedOutcome.question.messageId)).toBe(0)
+
+    // The deployment's own log, read the way a deployment reads it: a sink on the
+    // real logger service, not a fake of the runtime's reporting.
+    const warnings: string[] = []
+    const logger = a.ctx.logger as unknown as { exporter(sink: unknown): unknown }
+    logger.exporter({
+      levels: { default: 3 },
+      export: (message: { type: string; args: unknown[] }) => {
+        if (message.type === 'warn') warnings.push(String(message.args[0]))
+      },
+    })
+
+    const report = await a.runtime.reconcileStore(STORE)
+    expect(report.questionDeliveries.map(delivery => delivery.status)).toEqual(['unavailable'])
+    const deliveryWarnings = warnings.filter(line => line.includes('owed question message'))
+    expect(deliveryWarnings).toHaveLength(1)
+    expect(deliveryWarnings[0]).toContain(STORE)
+    expect(deliveryWarnings[0]).toContain('1 of 1 owed question message')
+    expect(deliveryWarnings[0]).toContain('1 unavailable')
+    expect(deliveryWarnings[0]).toContain(`question "${askedOutcome.question.questionId}"`)
+    // The warning is a report, not a change of control flow: nothing was delivered,
+    // nothing was written, and the intent is still the record the next pass reads.
+    expect(a.copiesOf(ROOT, askedOutcome.question.messageId)).toBe(0)
+    const after = await a.snapshot()
+    expect(after.questions?.byId[askedOutcome.question.questionId]?.messageId).toBe(askedOutcome.question.messageId)
+    expect(after.runs.find(run => run.runId === 'r-child')?.status).toBe('running')
+    await a.dispose()
   })
 })
