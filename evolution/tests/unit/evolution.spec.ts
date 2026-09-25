@@ -1329,6 +1329,95 @@ const championReview = {
   criteria: [{ criterionId: 'ac1-1', verdict: 'pass', command: 'true', exitCode: 0 }],
 }
 
+/**
+ * A skill candidate prepared against a production `SKILL.md`, plus the caller
+ * workspace and the store the two-sided experiment reads. The replay mock
+ * records each side the way the store would: the baseline fails the criterion
+ * the production bytes cannot satisfy, the candidate (the side carrying the
+ * sandbox overlay) passes every criterion.
+ *
+ * The ledger service is built on *this* fixture's context, not the v1 stubs':
+ * the experiment resolves its graph, store and runtime from the service's own
+ * context, so the same object carries them for the tool above it.
+ */
+async function preparedSkillExperiment(options: { candidate?: string; production?: string } = {}) {
+  const dir = await mkdtemp(join(tmpdir(), 'evolution-'))
+  const root = join(dir, 'evolution')
+  const skillRoot = join(dir, 'skills')
+  const workspace = join(root, 'env')
+  const store = experimentStore()
+  let replayed = 0
+  const replayTask = vi.fn(async (
+    _storeId: string,
+    championTaskId: string,
+    replayOptions: ReplayTaskOptions,
+    _caller: string,
+  ) => {
+    replayed += 1
+    const taskId = `t-replay-${replayed}`
+    const runId = `r-replay-${replayed}`
+    const criterionId = championTaskId === 't-fail' ? 'ac-fix' : 'ac-holdout'
+    const candidateSide = replayOptions.overlay !== undefined
+    const outcome = candidateSide || criterionId !== 'ac-fix' ? 'verified' as const : 'failed' as const
+    store.settle(taskId, runId, criterionId, outcome, String(replayOptions.lineage))
+    return {
+      taskId,
+      runId,
+      status: outcome,
+      durationMs: 3,
+      criteria: [{ criterionId, verdict: outcome === 'verified' ? 'pass' as const : 'fail' as const, verifierId: 'command' }],
+    }
+  })
+  const ctx = {
+    reflect: { provide: () => {} },
+    effect: () => {},
+    approval: { request: vi.fn(async () => 'allowed-once') },
+    graphs: { graphForSession: vi.fn(async () => graph) },
+    agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }) },
+    taskRuntime: {
+      listCapabilities: vi.fn(() => ({ research: { preset: 'standard' } })),
+      replayTask,
+      workspacePathFor: vi.fn(async () => workspace),
+    },
+    task: { openStore: vi.fn(async () => store.snapshot()) },
+    verifier: { ready: async () => {}, verifierIds: () => [...VERIFIER_VOCABULARY] },
+  }
+  const svc = new EvolutionService(ctx as never, { root, skillRoot, presetRoot: join(dir, '.agent-presets'), configFile: join(dir, 'config.yml') })
+  Object.assign(ctx, { evolution: svc })
+  const production = options.production ?? '# old verify skill\n'
+  await mkdir(join(skillRoot, 'verify'), { recursive: true })
+  await writeFile(join(skillRoot, 'verify', 'SKILL.md'), production)
+  await mkdir(workspace, { recursive: true })
+  await writeFile(join(workspace, 'input.txt'), 'the frozen input\n')
+  await svc.propose(skillProposal, 'root-1')
+  await svc.candidate('s1', { skill: 'v2' }, 'root-1', { name: 'verify', content: options.candidate ?? SKILL_CANDIDATE })
+  const identity = (await svc.prepare('s1', 'root-1')).prepared!.skillContent!
+  return {
+    svc,
+    root,
+    skillRoot,
+    workspace,
+    identity,
+    store,
+    replayTask,
+    replayTool: defineEvolutionReplayTool(ctx as never),
+    experiment: { workspace, identity },
+  }
+}
+
+/**
+ * The recursive content digest of a directory holding exactly `entries`, as the
+ * experiment defines its input snapshot: `<relative path>\0<sha256>` lines,
+ * sorted by path, hashed together. Computed here, so the frozen identity is
+ * never confirmed against the implementation that produced it.
+ */
+function snapshotDigest(entries: Record<string, string>): string {
+  const lines = Object.entries(entries)
+    .sort(([left], [right]) => (left < right ? -1 : 1))
+    .map(([rel, bytes]) => `${rel}\0${createHash('sha256').update(bytes).digest('hex')}`)
+  return createHash('sha256').update(lines.join('\n'), 'utf8').digest('hex')
+}
+
 /** Tool context whose taskRuntime.replayTask is a mock and whose store holds the champion fixture. */
 function replayToolCtx(svc: EvolutionService, replayTask: ReturnType<typeof vi.fn>) {
   const ctx = {
@@ -1351,6 +1440,63 @@ function replayToolCtx(svc: EvolutionService, replayTask: ReturnType<typeof vi.f
     },
   }
   return { ctx: ctx as never }
+}
+
+/** One terminal sample task and its review record, as the two-sided experiment's store holds them. */
+function sampleCase(taskId: string, runId: string, criterionId: string, outcome: 'verified' | 'failed') {
+  return {
+    task: {
+      taskId,
+      definitionRef: { taskType: 'subtask', version: 1 },
+      parentTaskId: 't-parent',
+      objective: `${taskId} objective`,
+      depth: 1,
+      acceptanceCriteria: [{ criterionId, description: 'works', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
+      requestedCapabilities: [],
+      decompositionStatus: 'leaf',
+      status: outcome,
+      runIds: [runId],
+      childTaskIds: [],
+    },
+    run: { runId, taskId, sessionId: `s-${taskId}`, status: outcome, startedAt: '2026-09-26T00:00:00.000Z' },
+    review: {
+      taskId,
+      runId,
+      sessionId: `s-${taskId}`,
+      outcome,
+      evidenceRefs: [`ev-${taskId}`],
+      anomalies: [],
+      ...(outcome === 'failed' ? { localizedCause: 'the fixture case failed' } : {}),
+      criteria: [{ criterionId, verdict: outcome === 'verified' ? 'pass' : 'fail', verifierId: 'command' }],
+    },
+  }
+}
+
+const FAILED_SAMPLE = sampleCase('t-fail', 'r-fail', 'ac-fix', 'failed')
+const HOLDOUT_SAMPLE = sampleCase('t-holdout', 'r-holdout', 'ac-holdout', 'verified')
+const REGRESSION_SAMPLE = sampleCase('t-regression', 'r-regression', 'ac-keep', 'verified')
+
+/**
+ * A store the experiment can walk: the samples the caller names, and the side
+ * each replay settles, appended the way the store itself would have recorded it
+ * (the orchestrator re-reads the store after every run and records what it
+ * finds there, so a fixture that did not append would record nothing).
+ */
+function experimentStore() {
+  interface Row { [key: string]: unknown }
+  const tasks: Row[] = [championTask, FAILED_SAMPLE.task as Row, HOLDOUT_SAMPLE.task as Row, REGRESSION_SAMPLE.task as Row]
+  const runs: Row[] = [FAILED_SAMPLE.run as Row, HOLDOUT_SAMPLE.run as Row, REGRESSION_SAMPLE.run as Row]
+  const reviews: Row[] = [championReview, FAILED_SAMPLE.review as Row, HOLDOUT_SAMPLE.review as Row, REGRESSION_SAMPLE.review as Row]
+  return {
+    snapshot: () => ({ tasks: [...tasks], runs: [...runs], reviews: [...reviews], diagnoses: [], obligations: [], evidence: [] }),
+    /** Record one side a replay settled: task, run and the terminal review the report reads. */
+    settle(taskId: string, runId: string, criterionId: string, outcome: 'verified' | 'failed', lineage: string) {
+      const settled = sampleCase(taskId, runId, criterionId, outcome)
+      tasks.push({ ...settled.task, parentTaskId: undefined, objective: `[${lineage}] ${taskId}` })
+      runs.push(settled.run as Row)
+      reviews.push(settled.review as Row)
+    },
+  }
 }
 
 const replayOutcome = {
@@ -1455,14 +1601,100 @@ describe('evolution_replay tool', () => {
     })
   })
 
-  it('replays a skill proposal with the sandbox skills dir as the only overlay', async () => {
-    const { root, replayTask, replayTool, id } = await preparedProposal('skill')
-    const result = (await replayTool.execute({ proposalId: id, taskIds: ['t-champ'] }, exec('root-1'))) as string
-    expect(result).toContain('[replayed] skill verify')
-    expect(replayTask.mock.calls[0]![2]).toMatchObject({
-      overlay: { extraSkillRoots: [join(root, 'sandbox', id, 'skills')] },
+  it('walks a skill candidate through the two-sided experiment: four sides, the sandbox overlay only on the candidate side', async () => {
+    const { svc, root, replayTask, replayTool, experiment } = await preparedSkillExperiment()
+    const result = (await replayTool.execute(
+      { proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'], budget: { wallTimeMs: 60_000, note: 'the fixture budget' } },
+      exec('root-1'),
+    )) as string
+
+    // The answer renders the experiment: both sides of every sample, and the
+    // baseline named as this experiment's own new run.
+    expect(result).toContain('proposal s1 [experiment] skill verify — verdict: fixed')
+    expect(result).toContain('t-fail [observed-failure] baseline failed → candidate verified (ac-fix fail→pass) — fixed')
+    expect(result).toContain('t-holdout [holdout] baseline verified → candidate verified (no criterion diff) — maintained')
+    expect(result).toContain('report: sandbox/s1/exp-')
+    expect(result).not.toContain('champion')
+
+    // Four runs: every sample twice, the baseline under the production
+    // configuration and the candidate under the sandbox's skills dir.
+    expect(replayTask).toHaveBeenCalledTimes(4)
+    const sides = replayTask.mock.calls.map(call => [call[1], call[2].overlay === undefined ? 'baseline' : 'candidate'])
+    expect(sides).toEqual([
+      ['t-fail', 'baseline'], ['t-fail', 'candidate'],
+      ['t-holdout', 'baseline'], ['t-holdout', 'candidate'],
+    ])
+    for (const [storeId, _sample, options, caller] of replayTask.mock.calls.map(call => call as unknown as [string, string, ReplayTaskOptions, string])) {
+      expect(storeId).toBe('sg-t-root-1')
+      expect(caller).toBe('root-1')
+      expect(options.workspace?.path).toContain(join('sandbox', 's1'))
+      expect(options.lineage).toContain('evolution-experiment:')
+    }
+    for (const call of replayTask.mock.calls.filter(call => call[2].overlay !== undefined)) {
+      expect(call[2].overlay).toEqual({ extraSkillRoots: [join(root, 'sandbox', 's1', 'skills')] })
+    }
+
+    // The frozen block binds what ran: the candidate bytes, the production
+    // baseline, the roles, the snapshot both workspaces were built from, the
+    // model identity and the budget the call named.
+    const lines = (await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+    const started = lines.find(line => line.kind === 'experiment_started') as { frozen: Record<string, any> }
+    expect(started.frozen.candidate).toEqual(experiment.identity)
+    expect(started.frozen.productionBaseline).toEqual({
+      name: 'verify',
+      sha256: createHash('sha256').update('# old verify skill\n', 'utf8').digest('hex'),
     })
-    expect(replayTask.mock.calls[0]![2].spawn).toBeUndefined()
+    expect(started.frozen.samples.map((sample: { taskId: string; role: string }) => [sample.taskId, sample.role]))
+      .toEqual([['t-fail', 'observed-failure'], ['t-holdout', 'holdout']])
+    expect(started.frozen.snapshot.sourceDir).toBe(experiment.workspace)
+    expect(started.frozen.snapshot.digest).toBe(snapshotDigest({ 'input.txt': 'the frozen input\n' }))
+    expect(started.frozen.model).toBe('p/m')
+    expect(started.frozen.budget).toEqual({ wallTimeMs: 60_000, note: 'the fixture budget' })
+    expect(started.frozen.overlay.baseline).toContain('none')
+    expect(started.frozen.overlay.candidate).toBe('extraSkillRoots: [sandbox/s1/skills]')
+    expect(lines.filter(line => line.kind === 'experiment_sample')).toHaveLength(4)
+
+    // The proposal lifecycle does not move: a skill experiment is evidence, and
+    // what may be promoted from it is the promotion gate's question.
+    expect((await svc.get('s1')).status).toBe('prepared')
+  })
+
+  it('reuses every settled side when the same skill call is repeated: no run, no new ledger line', async () => {
+    const { root, replayTask, replayTool, experiment } = await preparedSkillExperiment()
+    const first = (await replayTool.execute({ proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))) as string
+    expect(replayTask).toHaveBeenCalledTimes(4)
+
+    const second = (await replayTool.execute({ proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))) as string
+    expect(second).toBe(first)
+    expect(replayTask).toHaveBeenCalledTimes(4)
+    const lines = (await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { kind: string })
+    expect(lines.filter(line => line.kind === 'experiment_started')).toHaveLength(1)
+    expect(lines.filter(line => line.kind === 'experiment_sample')).toHaveLength(4)
+
+    // A higher repetition is the explicit new experiment §F.2 allows: four new
+    // sides under its own frozen block.
+    const third = (await replayTool.execute(
+      { proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'], repetition: 1 },
+      exec('root-1'),
+    )) as string
+    expect(third).not.toBe(first)
+    expect(third).toContain('repetition 1')
+    expect(replayTask).toHaveBeenCalledTimes(8)
+    expect(experiment.identity.sha256).toMatch(/^[a-f0-9]{64}$/)
+  })
+
+  it('refuses a skill call with no failed sample or with an empty holdout, running nothing', async () => {
+    const { root, replayTask, replayTool } = await preparedSkillExperiment()
+    const noFailure = (await replayTool.execute({ proposalId: 's1', taskIds: ['t-regression'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))) as string
+    expect(noFailure).toContain('evolution_replay rejected:')
+    expect(noFailure).toContain('no observed failure for this candidate to fix')
+
+    const noHoldout = (await replayTool.execute({ proposalId: 's1', taskIds: ['t-fail'] }, exec('root-1'))) as string
+    expect(noHoldout).toContain('holdoutTaskIds must name at least one task that did not select this candidate')
+
+    expect(replayTask).not.toHaveBeenCalled()
+    const lines = (await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { kind: string })
+    expect(lines.map(line => line.kind)).toEqual(['proposed', 'candidate', 'prepared'])
   })
 
   it('replays a task_definition proposal as a deterministic criteria replay of the candidate definition', async () => {
@@ -2165,33 +2397,28 @@ describe('skill candidate content binding (P2)', () => {
     expect(applied.replayed!.reportDigest).toBe(createHash('sha256').update(reportBytes).digest('hex'))
   })
 
-  it('P2-A: the replay tool binds the report to the verified candidate, overlays the sandbox skills dir, and ignores production', async () => {
-    const { svc, root, skillRoot } = await serviceWithProduction()
-    await mkdir(join(skillRoot, 'verify'), { recursive: true })
-    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), '# old verify skill\n')
-    const identity = await prepareSkill(svc)
-    // rewriting production must not move the candidate identity: the replay
-    // validates and digests the sandbox candidate, never the production skill
+  it('P2-A: the experiment binds the report to the verified candidate and the prepare-time production baseline, never to production rewritten since', async () => {
+    const { root, skillRoot, replayTask, replayTool, experiment } = await preparedSkillExperiment()
+    // rewriting production must not move either identity: the candidate is
+    // re-verified in the sandbox, and the baseline was captured at prepare
     await writeFile(join(skillRoot, 'verify', 'SKILL.md'), '# production rewritten\n')
-    const replayTask = vi.fn(async (
-      _storeId: string,
-      _championTaskId: string,
-      _options: ReplayTaskOptions,
-      _caller: string,
-    ) => ({ ...replayOutcome }))
-    const { ctx } = replayToolCtx(svc, replayTask)
-    const result = (await defineEvolutionReplayTool(ctx).execute(
-      { proposalId: 's1', taskIds: ['t-champ'] },
+    const result = (await replayTool.execute(
+      { proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'] },
       exec('root-1'),
     )) as string
-    expect(result).toContain('proposal s1 [replayed] skill verify — verdict: not-worse')
-    expect(replayTask.mock.calls[0]![2]).toMatchObject({
-      lineage: 'evolution-replay:s1',
-      overlay: { extraSkillRoots: [join(root, 'sandbox', 's1', 'skills')] },
+    expect(result).toContain('proposal s1 [experiment] skill verify — verdict: fixed')
+
+    const lines = (await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+    const started = lines.find(line => line.kind === 'experiment_started') as { frozen: Record<string, any> }
+    expect(started.frozen.candidate).toEqual(experiment.identity)
+    expect(started.frozen.productionBaseline).toEqual({
+      name: 'verify',
+      sha256: createHash('sha256').update('# old verify skill\n', 'utf8').digest('hex'),
     })
-    const report = JSON.parse(await readFile(join(root, 'sandbox', 's1', 'replay-report.json'), 'utf8'))
-    expect(report.candidateContent).toEqual(identity)
-    expect(identity.sha256).not.toBe(createHash('sha256').update('# production rewritten\n', 'utf8').digest('hex'))
+    expect(experiment.identity.sha256).not.toBe(createHash('sha256').update('# production rewritten\n', 'utf8').digest('hex'))
+    // the overlay is the sandbox candidate, never the production skill
+    expect(replayTask.mock.calls.filter(call => call[2].overlay !== undefined)).toHaveLength(2)
+    expect(replayTask.mock.calls.every(call => call[2].lineage?.startsWith('evolution-experiment:'))).toBe(true)
   })
 
   it('P2-A: other targetTypes carry no skill fields and replay without a candidate identity', async () => {
@@ -2214,44 +2441,30 @@ describe('skill candidate content binding (P2)', () => {
     }
   })
 
-  it('P2-B: a candidate modified after prepare is refused before any replay run, tool and service alike', async () => {
-    const { svc, root } = await serviceWithProduction()
-    const identity = await prepareSkill(svc)
+  it('P2-B: a candidate modified after prepare is refused before any run, tool and service alike', async () => {
+    const { svc, root, replayTask, replayTool, experiment } = await preparedSkillExperiment()
     await writeFile(skillCandidateFile(root), 'tampered after prepare\n')
 
-    const replayTask = vi.fn()
-    const { ctx } = replayToolCtx(svc, replayTask)
-    const viaTool = (await defineEvolutionReplayTool(ctx).execute({ proposalId: 's1', taskIds: ['t-champ'] }, exec('root-1'))) as string
+    const viaTool = (await replayTool.execute({ proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))) as string
     expect(viaTool).toContain('evolution_replay rejected:')
     expect(viaTool).toContain('no longer matches the content identity recorded at prepare')
     expect(replayTask).not.toHaveBeenCalled()
 
     // the same refusal through a direct service call, with an honest report
-    await expect(svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, identity)))
+    await expect(svc.replay('s1', 'root-1', replayReport('s1', 'skill', {}, experiment.identity)))
       .rejects.toThrow('no longer matches the content identity recorded at prepare')
     expect((await svc.get('s1')).status).toBe('prepared')
     expect(existsSync(join(root, 'sandbox', 's1', 'replay-report.json'))).toBe(false)
   })
 
-  it('P2-B: a candidate modified during the replay runs leaves no replayed state and production untouched', async () => {
-    const { svc, root, skillRoot } = await serviceWithProduction()
-    await mkdir(join(skillRoot, 'verify'), { recursive: true })
-    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), '# old verify skill\n')
-    await prepareSkill(svc)
-    // Deterministic hook: the replay run itself rewrites the candidate and
-    // leaves it changed. No sleeps, no timing races.
-    const replayTask = vi.fn(async () => {
-      await writeFile(skillCandidateFile(root), 'rewritten mid-replay\n')
-      return { ...replayOutcome }
-    })
-    const { ctx } = replayToolCtx(svc, replayTask)
-    const result = (await defineEvolutionReplayTool(ctx).execute({ proposalId: 's1', taskIds: ['t-champ'] }, exec('root-1'))) as string
-    expect(result).toContain('evolution_replay rejected:')
-    expect(result).toContain('no longer matches the content identity')
-    expect(replayTask).toHaveBeenCalledOnce()
-    expect((await svc.get('s1')).status).toBe('prepared')
-    expect(existsSync(join(root, 'sandbox', 's1', 'replay-report.json'))).toBe(false)
+  it('keeps the candidate bytes out of production through the whole experiment, whatever the runs do', async () => {
+    const { root, skillRoot, replayTask, replayTool } = await preparedSkillExperiment()
+    // The experiment writes into its own sandboxes and sandbox workspaces only;
+    // a run that rearranges its own workspace cannot reach the production skill.
+    await replayTool.execute({ proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))
+    expect(replayTask).toHaveBeenCalledTimes(4)
     expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe('# old verify skill\n')
+    expect(existsSync(join(root, 'sandbox', 's1', 'replay-report.json'))).toBe(false)
   })
 
   it('P2-B: a candidate modified after the replay is refused at decide and apply, with no successful-promotion state', async () => {

@@ -53,13 +53,26 @@ async function mountAgent() {
     criteria: [{ criterionId: 'ac1-1', verdict: 'pass', command: 'true', exitCode: 0 }],
   }))
   const ctx = new Context()
+  // The caller session's own workspace: what the skill experiment freezes as its
+  // input snapshot (`TaskRuntime.workspacePathFor`), and — with the store below —
+  // the world a two-sided experiment reads before it refuses or runs.
+  const workspace = join(home, 'env')
+  await mkdir(join(workspace, 'nested'), { recursive: true })
+  await writeFile(join(workspace, 'input.txt'), 'the frozen input\n')
   const dependencies: ReadonlyArray<readonly [string, object]> = [
     ['tools', registry.service],
     ['graphs', { graphForSession: async () => ({ id: 'g1', envId: 'env1', rootSessionId: 'root-1' }) }],
     ['agentRuntime', {}],
+    // The deployment's default model identity: what the two-sided experiment
+    // freezes as the model its runs share (the caller agent's own selection where
+    // the session has one, this otherwise).
+    ['agentDefaultModel', { currentSelection: () => ({ provider: 'p', model: 'm' }) }],
     ['task', {
       openStore: async () => ({
-        tasks: ['t-champ', 't-holdout'].map(taskId => ({
+        // `t-champ`/`t-holdout` are the verified terminal tasks the v1 replay
+        // cases name; `t-fail` carries the failed latest review the skill
+        // experiment reads an observed-failure sample's role from.
+        tasks: ['t-champ', 't-holdout', 't-fail'].map(taskId => ({
           taskId,
           definitionRef: { taskType: 'subtask', version: 1 },
           parentTaskId: 't-root',
@@ -68,24 +81,29 @@ async function mountAgent() {
           acceptanceCriteria: [{ criterionId: 'ac1-1', description: 'works', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
           requestedCapabilities: ['research'],
           decompositionStatus: 'leaf',
-          status: 'verified',
+          status: taskId === 't-fail' ? 'failed' : 'verified',
           runIds: [`r-${taskId}`],
           childTaskIds: [],
         })),
-        reviews: ['t-champ', 't-holdout'].map(taskId => ({
+        reviews: ['t-champ', 't-holdout', 't-fail'].map(taskId => ({
           taskId,
           runId: `r-${taskId}`,
-          outcome: 'verified',
+          outcome: taskId === 't-fail' ? 'failed' : 'verified',
           evidenceRefs: ['ev-champ'],
           anomalies: [],
           durationMs: 42,
-          criteria: [{ criterionId: 'ac1-1', verdict: 'pass', command: 'true', exitCode: 0 }],
+          criteria: [{ criterionId: 'ac1-1', verdict: taskId === 't-fail' ? 'fail' : 'pass', command: 'true', exitCode: 0 }],
         })),
         evidence: [{ evidenceId: 'ev-champ' }],
         diagnoses: [], obligations: [],
       }),
     }],
-    ['taskRuntime', { listCapabilities: () => ({ research: { preset: 'standard' } }), replayTask, applyCapabilityRow: vi.fn() }],
+    ['taskRuntime', {
+      listCapabilities: () => ({ research: { preset: 'standard' } }),
+      replayTask,
+      applyCapabilityRow: vi.fn(),
+      workspacePathFor: async () => workspace,
+    }],
     // The read core the root-agent plugin injects (A2). This spec's subjects are
     // the evolution ledger and the approval seam, and every tool it drives is an
     // `evolution_*` or `hitl_*` one — nothing here reads context. The read core's
@@ -101,7 +119,7 @@ async function mountAgent() {
   // The one deployment choice this spec has to state out loud: the chain it
   // drives is the one the deployment opted into.
   await ctx.plugin(SingularityAgent, { evolution: 'on' })
-  return { tools: registry.tools, approval, userQuestions, home, replayTask }
+  return { tools: registry.tools, approval, userQuestions, home, replayTask, workspace }
 }
 
 /** A sibling plugin providing one service, standing in for a harness plugin the profile also mounts. */
@@ -326,12 +344,12 @@ it('drives the mechanical chain prepared → replayed → gated, with the gate r
 })
 
 
-it('drives a skill proposal to applied and rolledback through the plugin, production writes confined to $DSH_HOME/skills', async () => {
+it('stops the mechanical chain at the gate for agent_preset: the manual report is recorded but never promoted', async () => {
   const { tools, home, approval, replayTask } = await mountAgent()
   try {
-    const championDir = join(home, 'skills', 'verify')
+    const championDir = join(home, '.agent-presets', 'bb-verify')
     await mkdir(championDir, { recursive: true })
-    await writeFile(join(championDir, 'SKILL.md'), '# old verify skill\n')
+    await writeFile(join(championDir, 'preset.yml'), 'preset: old\n')
 
     const propose = tools.get('evolution_propose')!
     const candidate = tools.get('evolution_candidate')!
@@ -339,79 +357,63 @@ it('drives a skill proposal to applied and rolledback through the plugin, produc
     const replay = tools.get('evolution_replay')!
     const gate = tools.get('evolution_gate')!
     const decide = tools.get('evolution_decide')!
-    const apply = tools.get('evolution_apply')!
-    const rollback = tools.get('evolution_rollback')!
     const list = tools.get('evolution_list')!
-    expect(apply).toBeDefined()
-    expect(rollback).toBeDefined()
 
     await propose.execute({
-      proposalId: 'p-skill-1',
+      proposalId: 'p-preset-1',
       level: 'L2',
       baseVersion: 'v1',
-      targetType: 'skill',
-      targetId: 'verify',
-      rationale: 'the skill never mentions empty-input fixtures',
+      targetType: 'agent_preset',
+      targetId: 'bb-verify',
+      rationale: 'the preset never mentions empty-input fixtures',
       sourceRefs: ['diagnosis:d1'],
     }, exec('root-1'))
     await candidate.execute({
-      proposalId: 'p-skill-1',
-      versionSet: { skill: 'v2' },
-      mutation: { name: 'verify', content: skillText('# new verify skill') },
+      proposalId: 'p-preset-1',
+      versionSet: { agentPreset: 'v2' },
+      mutation: { presetId: 'bb-verify', files: [{ path: 'preset.yml', content: 'preset: new\n' }] },
     }, exec('root-1'))
-    await prepare.execute({ proposalId: 'p-skill-1' }, exec('root-1'))
-    // P2: prepare records the SHA-256 of the materialized candidate bytes on the ledger line
-    const preparedRecord = JSON.parse((await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n').at(-1)!)
-    const candidateBytes = await readFile(join(home, 'evolution', 'sandbox', 'p-skill-1', 'skills', 'verify', 'SKILL.md'))
-    expect(candidateBytes.toString('utf8')).toBe(skillText('# new verify skill'))
-    expect(preparedRecord.skillContent).toEqual({ name: 'verify', sha256: createHash('sha256').update(candidateBytes).digest('hex') })
+    const prepared = await prepare.execute({ proposalId: 'p-preset-1' }, exec('root-1'))
+    expect(prepared).toContain('champion snapshot: captured')
 
-    await replay.execute({ proposalId: 'p-skill-1', taskIds: ['t-champ'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))
-    // P2: the replay overlay points at the checked candidate and the report carries the same identity
-    expect(replayTask.mock.calls[0]![2]).toMatchObject({
-      lineage: 'evolution-replay:p-skill-1',
-      overlay: { extraSkillRoots: [join(home, 'evolution', 'sandbox', 'p-skill-1', 'skills')] },
-    })
-    const replayedReport = JSON.parse(await readFile(join(home, 'evolution', 'sandbox', 'p-skill-1', 'replay-report.json'), 'utf8'))
-    expect(replayedReport.candidateContent).toEqual(preparedRecord.skillContent)
+    // The v1 path, unchanged for every non-skill targetType: agent_preset is
+    // manual — the report is recorded and nothing executes.
+    const replayed = await replay.execute({ proposalId: 'p-preset-1', taskIds: ['t-champ'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))
+    expect(replayed).toContain('proposal p-preset-1 [replayed] manual — nothing was executed')
+    expect(replayed).toContain('report: sandbox/p-preset-1/replay-report.json')
+    expect(replayTask).not.toHaveBeenCalled()
+    const manualReport = JSON.parse(await readFile(join(home, 'evolution', 'sandbox', 'p-preset-1', 'replay-report.json'), 'utf8'))
+    expect(manualReport).toMatchObject({ formatVersion: 1, mode: 'manual', verdict: 'manual' })
+
     const gated = await gate.execute({
-      proposalId: 'p-skill-1',
+      proposalId: 'p-preset-1',
       targetFailureFixed: 'a', originalAcceptanceMaintained: 'b', existingRegressionMaintained: 'c',
       noUnacceptableSideEffects: 'd', holdoutPerformanceAcceptable: 'e', resourceCostAcceptable: 'f',
-      regressionEvidenceRefs: ['sandbox/p-skill-1/replay-report.json', 'ev-champ'],
+      regressionEvidenceRefs: ['sandbox/p-preset-1/replay-report.json', 'ev-champ'],
     }, exec('root-1'))
     expect(gated).toContain('[gated]')
 
-    // decide and apply each burn their own human approval
-    const decided = await decide.execute({ proposalId: 'p-skill-1', decision: 'PROMOTE' }, exec('root-1'))
-    expect(decided).toContain('[decided] PROMOTE')
-    const applied = await apply.execute({ proposalId: 'p-skill-1' }, exec('root-1'))
-    expect(applied).toContain('proposal p-skill-1 [applied] L2 skill verify')
-    expect(applied).toContain('effective immediately')
-    expect(approval.request).toHaveBeenCalledTimes(2)
-    expect((approval.request.mock.calls[1]![0] as { toolName: string }).toolName).toBe('evolution_apply')
-    // P2: production receives the verified candidate bytes, byte for byte
-    expect(await readFile(join(championDir, 'SKILL.md'))).toEqual(Buffer.from(skillText('# new verify skill'), 'utf8'))
-
-    const rolledback = await rollback.execute({ proposalId: 'p-skill-1' }, exec('root-1'))
-    expect(rolledback).toContain('proposal p-skill-1 [rolledback] L2 skill verify')
-    expect(approval.request).toHaveBeenCalledTimes(3)
-    expect(await readFile(join(championDir, 'SKILL.md'), 'utf8')).toBe('# old verify skill\n')
+    // The manual boundary is a boundary, not an approval: a manual report never
+    // becomes promotion evidence, and no human is asked to promote it.
+    const decided = await decide.execute({ proposalId: 'p-preset-1', decision: 'PROMOTE' }, exec('root-1'))
+    expect(decided).toContain('evolution_decide rejected:')
+    expect(decided).toContain('promotion requires executed replay evidence, not a manual report')
+    expect(approval.request).not.toHaveBeenCalled()
+    expect(await readFile(join(championDir, 'preset.yml'), 'utf8')).toBe('preset: old\n')
 
     const ledger = (await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n')
     expect(ledger.map(line => (JSON.parse(line) as { kind: string }).kind))
-      .toEqual(['proposed', 'candidate', 'prepared', 'replayed', 'gated', 'decided', 'applied', 'rolledback'])
-
-    const listed = await list.execute({ status: 'rolledback' })
-    expect(listed).toContain('p-skill-1 [rolledback PROMOTE]')
-    expect(listed).toContain('applied: [')
+      .toEqual(['proposed', 'candidate', 'prepared', 'replayed', 'gated'])
+    const listed = await list.execute({ status: 'gated' })
+    expect(listed).toContain('p-preset-1 [gated]')
+    expect(listed).toContain('replayed: verdict manual')
   } finally {
     vi.unstubAllEnvs()
   }
 })
 
 it('refuses a tampered skill candidate through the plugin, leaving production and the ledger untouched', async () => {
-  const { tools, home } = await mountAgent()
+  const { tools, home, replayTask } = await mountAgent()
   try {
     const championDir = join(home, 'skills', 'verify')
     await mkdir(championDir, { recursive: true })
@@ -439,10 +441,13 @@ it('refuses a tampered skill candidate through the plugin, leaving production an
     // the candidate changes after prepare — the service identity check must refuse it
     await writeFile(join(home, 'evolution', 'sandbox', 'p-skill-2', 'skills', 'verify', 'SKILL.md'), 'tampered\n')
 
-    const rejected = await replay.execute({ proposalId: 'p-skill-2', taskIds: ['t-champ'] }, exec('root-1'))
+    const rejected = await replay.execute({ proposalId: 'p-skill-2', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))
     expect(rejected).toContain('evolution_replay rejected:')
     expect(rejected).toContain('no longer matches the content identity')
     expect(await readFile(join(championDir, 'SKILL.md'), 'utf8')).toBe('# old verify skill\n')
+    // nothing ran and nothing was recorded: the two-sided experiment re-verifies
+    // the candidate before its first run, and no experiment line reached the ledger
+    expect(replayTask).not.toHaveBeenCalled()
     const ledger = (await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n')
     expect(ledger.map(line => (JSON.parse(line) as { kind: string }).kind)).toEqual(['proposed', 'candidate', 'prepared'])
     expect(existsSync(join(home, 'evolution', 'sandbox', 'p-skill-2', 'replay-report.json'))).toBe(false)
@@ -451,8 +456,8 @@ it('refuses a tampered skill candidate through the plugin, leaving production an
   }
 })
 
-it('refuses a skill apply whose production baseline moved after prepare, through the plugin', async () => {
-  const { tools, home, approval } = await mountAgent()
+it('refuses a skill call the two-sided experiment cannot honour, without running or recording anything', async () => {
+  const { tools, home, replayTask } = await mountAgent()
   try {
     const championDir = join(home, 'skills', 'verify')
     await mkdir(championDir, { recursive: true })
@@ -462,10 +467,6 @@ it('refuses a skill apply whose production baseline moved after prepare, through
     const candidate = tools.get('evolution_candidate')!
     const prepare = tools.get('evolution_prepare')!
     const replay = tools.get('evolution_replay')!
-    const gate = tools.get('evolution_gate')!
-    const decide = tools.get('evolution_decide')!
-    const apply = tools.get('evolution_apply')!
-    const list = tools.get('evolution_list')!
 
     await propose.execute({
       proposalId: 'p-skill-3',
@@ -481,8 +482,8 @@ it('refuses a skill apply whose production baseline moved after prepare, through
       versionSet: { skill: 'v2' },
       mutation: { name: 'verify', content: skillText('# new verify skill') },
     }, exec('root-1'))
-    const prepared = await prepare.execute({ proposalId: 'p-skill-3' }, exec('root-1'))
     // P3: prepare records the production baseline digest on the ledger line
+    const prepared = await prepare.execute({ proposalId: 'p-skill-3' }, exec('root-1'))
     expect(prepared).toContain('production baseline: verify sha256:')
     const preparedRecord = JSON.parse((await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n').at(-1)!)
     expect(preparedRecord.skillBaseline).toEqual({
@@ -490,31 +491,17 @@ it('refuses a skill apply whose production baseline moved after prepare, through
       sha256: createHash('sha256').update('# old verify skill\n').digest('hex'),
     })
 
-    await replay.execute({ proposalId: 'p-skill-3', taskIds: ['t-champ'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))
-    await gate.execute({
-      proposalId: 'p-skill-3',
-      targetFailureFixed: 'a', originalAcceptanceMaintained: 'b', existingRegressionMaintained: 'c',
-      noUnacceptableSideEffects: 'd', holdoutPerformanceAcceptable: 'e', resourceCostAcceptable: 'f',
-      regressionEvidenceRefs: ['sandbox/p-skill-3/replay-report.json', 'ev-champ'],
-    }, exec('root-1'))
-    await decide.execute({ proposalId: 'p-skill-3', decision: 'PROMOTE' }, exec('root-1'))
-
-    // the production skill changes after the candidate was prepared and approved
-    await writeFile(join(championDir, 'SKILL.md'), '# edited in production\n')
-    const rejected = await apply.execute({ proposalId: 'p-skill-3' }, exec('root-1'))
-    expect(rejected).toContain('evolution_apply rejected:')
-    expect(rejected).toContain('changed since prepare')
-    expect(rejected).toContain('create a new candidate from the current production state')
-    // the apply never reaches the human: only the decide approval was burned
-    expect(approval.request).toHaveBeenCalledTimes(1)
-    // production keeps the externally edited bytes
-    expect(await readFile(join(championDir, 'SKILL.md'), 'utf8')).toBe('# edited in production\n')
+    // A skill candidate is evaluated by a two-sided experiment, so the call must
+    // name a failure and a holdout: history supplies the roles, and a call that
+    // names no failure is refused by name before anything runs.
+    const noFailure = await replay.execute({ proposalId: 'p-skill-3', taskIds: ['t-champ'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))
+    expect(noFailure).toContain('evolution_replay rejected:')
+    expect(noFailure).toContain('no observed failure for this candidate to fix')
+    const noHoldout = await replay.execute({ proposalId: 'p-skill-3', taskIds: ['t-fail'] }, exec('root-1'))
+    expect(noHoldout).toContain('holdoutTaskIds must name at least one task that did not select this candidate')
+    expect(replayTask).not.toHaveBeenCalled()
     const ledger = (await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n')
-    expect(ledger.map(line => (JSON.parse(line) as { kind: string }).kind))
-      .toEqual(['proposed', 'candidate', 'prepared', 'replayed', 'gated', 'decided'])
-    const listed = await list.execute({ status: 'decided' })
-    expect(listed).toContain('p-skill-3 [decided PROMOTE]')
-    expect(listed).toContain('production baseline verify sha256:')
+    expect(ledger.map(line => (JSON.parse(line) as { kind: string }).kind)).toEqual(['proposed', 'candidate', 'prepared'])
   } finally {
     vi.unstubAllEnvs()
   }

@@ -5110,6 +5110,20 @@ declare class TaskRuntime extends Service {
    */
   private workspacePathForSession;
   /**
+   * The directory one session's runs work in, for a caller that has to *name* it
+   * — the one evaluation that freezes a workspace as its input snapshot has to
+   * know which directory to freeze (S4-E §F.2). The answer is
+   * {@link envPathForSession}'s: the workspace this process placed the session
+   * in, else the session's graph env checkout, and `undefined` when the
+   * deployment cannot name either.
+   *
+   * Read-only on purpose. This door resolves a path; it does not claim the
+   * workspace, does not take its ownership, and grants no write — a caller that
+   * runs something in the directory still goes through the ordinary entries,
+   * which check ownership themselves.
+   */
+  workspacePathFor(sessionId: string): Promise<string | undefined>;
+  /**
    * Refuse a decomposition whose caller does not hold its own checkout. The
    * holder may be the parent run itself (the ordinary case: a run works in its
    * checkout and hands it down), a batch the runtime holds between children, or
