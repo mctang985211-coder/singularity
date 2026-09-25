@@ -1,19 +1,45 @@
 /**
- * The one output bound this package has (A2 §D): 16 KiB for a single read —
- * whether that read is a tool-facing record, the reference lists a projection
- * carries, or the outer text of a status page. There is no second budget and no
- * configuration surface: one constant, one accounting, so "how much can a read
- * put in front of a model" has exactly one answer.
+ * The one output bound this package has (A2 §D) and the vocabulary a bounded
+ * read uses to say what it left out.
  *
- * What the bound never does is truncate silently. A record read pages with an
+ * The bound is **50 000 UTF-8 bytes for a single read** — the same model-facing
+ * cap this deployment's own tool-result policy uses
+ * (`@deepseek-ai/dsh-spill-policy`'s `maxInlineBytes: 50000`, mounted by the
+ * base bundle at `packages/bundle/base/cordis.patch.yml`). Aligning with it is
+ * the point: one Singularity read stays inside what the platform already treats
+ * as inline content, so a read is never replaced by a spill preview, and a read
+ * that asks for a whole record asks for exactly as much as the platform's own
+ * tools may put in front of a model. The policy reserves its notice's byte cost
+ * out of that budget before filling a preview; the session pages here do the
+ * same for their closing lines.
+ *
+ * The *mechanics* of bounding a body are not this package's invention either.
+ * Byte windows, the guarantee that a cut never splits a UTF-8 character, and the
+ * wording of what was omitted come from `@deepseek-ai/dsh-output-retention`
+ * (`TextRetainer`, `describeOmitted` through `formatRetentionNotice`) — the
+ * library whose documented split is "the library owns the omission clause, the
+ * tool supplies its own recovery guidance". What has no counterpart there, and
+ * therefore lives here, is exactly two things: the **cursor** (`nextOffset`,
+ * which lets a caller read on, and which the library deliberately does not
+ * model) and the **per-line budget** (`OutputBudget`, which counts lines rather
+ * than bytes because a page must never carry half a line).
+ *
+ * What the bound never does is truncate silently: a record read pages with an
  * explicit continuation offset; a core contract that cannot fit is refused by
- * name (`context-too-large`) rather than cut; a reference list that does not fit
- * says how many entries it did not show.
+ * name (`context-too-large`) rather than cut; a bounded list says in the
+ * platform's own words how many entries it did not show, plus where to read
+ * them.
  * @module @dangosys/dsh-singularity-context/limits
  */
 
-/** The outer output bound of one context read, in UTF-8 bytes. */
-export const CONTEXT_OUTPUT_LIMIT_BYTES = 16 * 1024
+import { TextRetainer, formatRetentionNotice, type Omitted, type RetentionNotice } from '@deepseek-ai/dsh-output-retention'
+
+/**
+ * The outer output bound of one context read, in UTF-8 bytes. Deliberately the
+ * deployment's own inline cap rather than a tighter local choice: see the module
+ * doc for the reference and for what stays outside the library.
+ */
+export const CONTEXT_OUTPUT_LIMIT_BYTES = 50_000
 
 /** UTF-8 byte length of `text`. */
 export function utf8Bytes(text: string): number {
@@ -31,33 +57,46 @@ export interface Utf8Slice {
 
 /**
  * Take at most `maxBytes` bytes starting at `offsetBytes` from `text`, never
- * splitting a UTF-8 character.
+ * splitting a UTF-8 character, and report where the next page starts.
  *
- * An offset that lands inside a character starts at the next character (the
- * partial bytes belong to a character the caller's page boundary cut, and
- * re-emitting a fraction of one would corrupt it). A page always carries at
- * least one character: a bound smaller than the first character still advances,
- * so a caller that feeds `nextOffset` back never loops on the same offset.
+ * The window itself is `TextRetainer({kind: 'head'})` from
+ * `@deepseek-ai/dsh-output-retention`: it keeps the first `maxBytes` bytes, trims
+ * a partial character at that cut, and reports the exact omitted byte count, so
+ * "where did this page end" is read off the library rather than recomputed here.
+ * The two things wrapped around it are the ones the library does not own: the
+ * cursor (`nextOffset`, derived from the bytes actually retained) and the floor
+ * that keeps a caller moving — an offset inside a character starts at the next
+ * character, and a page always carries at least that one character, so feeding
+ * `nextOffset` back never loops on the same offset.
  */
 export function sliceUtf8(text: string, offsetBytes: number, maxBytes: number): Utf8Slice {
   const start = Math.max(0, Math.trunc(offsetBytes))
   const budget = Math.max(0, Math.trunc(maxBytes))
+  // Walk to the first character at or after `start`: its byte offset is where the
+  // page really begins, and its width is the page's floor.
   let position = 0
-  let taken = 0
-  const parts: string[] = []
+  let index = 0
+  let startIndex = -1
+  let firstWidth = 0
   for (const character of text) {
-    const width = utf8Bytes(character)
-    const characterStart = position
-    position += width
-    if (characterStart < start) continue
-    if (taken + width > budget) {
-      if (parts.length === 0) return { text: character, nextOffset: position, done: false }
-      return { text: parts.join(''), nextOffset: characterStart, done: false }
+    if (position >= start) {
+      startIndex = index
+      firstWidth = utf8Bytes(character)
+      break
     }
-    parts.push(character)
-    taken += width
+    position += utf8Bytes(character)
+    index += 1
   }
-  return { text: parts.join(''), nextOffset: position, done: true }
+  // Past the end: nothing left to take, and the cursor stays where the text does.
+  if (startIndex < 0) return { text: '', nextOffset: position, done: true }
+
+  const rest = text.slice(startIndex)
+  const retainer = new TextRetainer({ kind: 'head', maxBytes: Math.max(budget, firstWidth) })
+  retainer.push(rest)
+  const retained = retainer.finish()
+  const omitted = retained.omittedBytes.kind === 'exact' ? retained.omittedBytes.count : 0
+  const kept = utf8Bytes(rest) - omitted
+  return { text: retained.text, nextOffset: position + kept, done: !retained.truncated }
 }
 
 /**
@@ -65,6 +104,10 @@ export function sliceUtf8(text: string, offsetBytes: number, maxBytes: number): 
  * — or is refused, so no line a caller sees is a cut one. `remaining` is what a
  * caller that wants to bound a *part* of its output (a reference list, say) has
  * left to spend.
+ *
+ * This is the part of the bounding story `@deepseek-ai/dsh-output-retention`
+ * does not model: the library bounds a *byte* window or an *item* count, while a
+ * rendered page has to keep whole lines together, so its accounting is by line.
  */
 export class OutputBudget {
   private readonly lines: string[] = []
@@ -102,7 +145,41 @@ export class OutputBudget {
   }
 }
 
-/** The one-word name of an omission a bounded list reports, so a reader can tell a short list from a cut one. */
-export function omittedLine(noun: string, omitted: number, how: string): string {
-  return `… ${omitted} more ${noun} not shown (${how})`
+/** One bounded list's omission, in the shape the platform's notice vocabulary takes. */
+export interface OmissionReport {
+  /** What was bounded, e.g. `related tasks` — the notice's scope label. */
+  readonly scope: string
+  /** What the omitted units are, in the library's own vocabulary. */
+  readonly unit: RetentionNotice['unit']
+  /** How many units the page carried. */
+  readonly kept: number
+  /** The bound the page filled, in units. */
+  readonly limit: number
+  /** The exact number of units left out. */
+  readonly omitted: number
+  /** This read's own recovery sentence — the half the library leaves to the tool. */
+  readonly recovery: string
+}
+
+/**
+ * One bounded list's omission line: the platform's standardized clause followed
+ * by this read's recovery sentence. `@deepseek-ai/dsh-output-retention`
+ * documents that split — the library owns the wording of *what* was omitted,
+ * the tool owns *how to read on* ("page through them with the status view",
+ * "read them by id") — so this line is composed through
+ * {@link formatRetentionNotice} rather than spelled out here.
+ */
+export function omissionLine(report: OmissionReport): string {
+  const omitted: Omitted = { kind: 'exact', count: report.omitted }
+  return formatRetentionNotice(
+    {
+      scope: report.scope,
+      strategy: 'head',
+      unit: report.unit,
+      limit: report.limit,
+      kept: report.kept,
+      omitted,
+    },
+    () => report.recovery,
+  )
 }

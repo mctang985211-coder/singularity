@@ -1,7 +1,8 @@
 /**
- * The bounds and the vocabulary themselves (A2 §D/§6/§7): one 16 KiB constant,
- * one closed set of refusal names, and the rule that no read — reference list
- * included — can put more than the bound in front of a model.
+ * The bounds and the vocabulary themselves (A2 §D/§6/§7): one output bound —
+ * this deployment's own model-facing inline cap — one closed set of refusal
+ * names, and the rule that no read, reference list included, can put more than
+ * the bound in front of a model.
  */
 
 import { describe, expect, test } from 'vitest'
@@ -18,7 +19,9 @@ async function chainStack(): Promise<{ stack: FixtureStack; chain: Chain }> {
 describe('the output bound', () => {
   test('is one constant, and every read stays inside it', async () => {
     const { stack } = await chainStack()
-    expect(CONTEXT_OUTPUT_LIMIT_BYTES).toBe(16 * 1024)
+    // The one literal pin of the bound's value: every other size in these tests
+    // derives from the constant, so a silent change is caught here, in the open.
+    expect(CONTEXT_OUTPUT_LIMIT_BYTES).toBe(50_000)
     const reads = [
       expectOk(await stack.service.taskRead('s-c1')),
       expectOk(await stack.service.taskRead('s-root')),
@@ -34,6 +37,13 @@ describe('the output bound', () => {
 
   test('a handoff with more references than fit names what it did not show', async () => {
     const { stack, chain } = await chainStack()
+    // A reference list is metered in whole rendered lines, so the fixture uses
+    // wide ones: ~1 KB a line, with the artifacts alone the bound's worth of
+    // references — more than the projection can show. The deployment's
+    // runtime-split guidance rides after these lists and is not what this case
+    // measures, so the switch is off and the projection ends with the lists.
+    const lineWidth = 1_000
+    stack.runtimeDecomposition = false
     stack.member(chain.graph, 's-refs')
     stack.sessionLog('s-refs', ['request'])
     await stack.seed({
@@ -44,6 +54,7 @@ describe('the output bound', () => {
       parentTaskId: 't-root',
       depth: 1,
     })
+    const filler = 'x'.repeat(lineWidth)
     await stack.handoff({
       parentTaskId: 't-root',
       parentRunId: 'r-root',
@@ -51,24 +62,68 @@ describe('the output bound', () => {
       sessionId: chain.rootSession,
       parentObjective: 'build the release',
       reason: 'the reference list is longer than the bound',
-      artifacts: Array.from({ length: 400 }, (_, index) => ({
+      artifacts: Array.from({ length: CONTEXT_OUTPUT_LIMIT_BYTES / lineWidth + 10 }, (_, index) => ({
         artifactId: `a-${String(index).padStart(3, '0')}`,
         kind: 'fixture',
-        uri: `out/fixture-${String(index).padStart(3, '0')}.bin`,
+        uri: `out/${filler}-${String(index).padStart(3, '0')}.bin`,
       })),
-      evidence: Array.from({ length: 400 }, (_, index) => `e-${String(index).padStart(3, '0')}`),
+      evidence: Array.from({ length: 3 }, (_, index) => `e-${filler}-${String(index).padStart(3, '0')}`),
     })
-    const projection = await stack.service.contractProjection('s-refs')
-    if (projection.ok) {
-      expect(utf8Bytes(projection.text)).toBeLessThanOrEqual(CONTEXT_OUTPUT_LIMIT_BYTES)
-      // Nothing is dropped silently: the list says how many entries it did not show.
-      expect(projection.text).toContain('more handoff artifact references not shown')
-      expect(projection.text).toContain('more handoff evidence references not shown')
-    } else {
-      // The other honest answer: the core does not fit, so the whole projection
-      // is refused rather than cut.
-      expect(projection.refusal).toBe('context-too-large')
-    }
+    const projection = expectOk(await stack.service.contractProjection('s-refs'))
+    expect(utf8Bytes(projection.text)).toBeLessThanOrEqual(CONTEXT_OUTPUT_LIMIT_BYTES)
+    // Nothing is dropped silently: each list that was cut says how many entries
+    // it did not show — the platform's own omission clause, followed by this
+    // read's recovery sentence — and the cut lists are the handoff's own two
+    // reference lists, in the order the projection renders them.
+    expect(projection.text).toMatch(
+      /Omitted \d+ items\. read them by id\n- relevant evidence:\nOmitted \d+ items\. read them by id/,
+    )
+  })
+
+  test('a list of ordinary narrow references that does not fit still names its omission', async () => {
+    const { stack, chain } = await chainStack()
+    // The same shape with *narrow* entries — the ordinary case: thousands of
+    // ordinary references overflow the bound, and the list must still say how
+    // many it did not show. (The clause's room is reserved before each entry is
+    // measured, so an entry can never eat it and turn the projection into a
+    // refusal.)
+    stack.runtimeDecomposition = false
+    stack.member(chain.graph, 's-narrow')
+    stack.sessionLog('s-narrow', ['request'])
+    await stack.seed({
+      taskId: 't-narrow',
+      sessionId: 's-narrow',
+      runId: 'r-narrow',
+      objective: 'a task with many narrow references',
+      parentTaskId: 't-root',
+      depth: 1,
+    })
+    await stack.handoff({
+      parentTaskId: 't-root',
+      parentRunId: 'r-root',
+      childTaskId: 't-narrow',
+      sessionId: chain.rootSession,
+      parentObjective: 'build the release',
+      reason: 'the reference list is longer than the bound',
+      artifacts: Array.from({ length: 6_000 }, (_, index) => ({
+        artifactId: `a-${String(index).padStart(4, '0')}`,
+        kind: 'fixture',
+        uri: `out/${String(index).padStart(4, '0')}.bin`,
+      })),
+      evidence: ['e-plan', 'e-spec'],
+    })
+    const projection = expectOk(await stack.service.contractProjection('s-narrow'))
+    expect(utf8Bytes(projection.text)).toBeLessThanOrEqual(CONTEXT_OUTPUT_LIMIT_BYTES)
+    // The artifacts were cut and said so — the room the clause needs was never
+    // spent on an entry — and the evidence list after it still rendered, either
+    // whole or with its own clause in the same words.
+    expect(projection.text).toMatch(/Omitted \d+ items\. read them by id\n- relevant evidence:/)
+    const evidenceSection = projection.text.slice(projection.text.indexOf('- relevant evidence:'))
+    const whole = evidenceSection.includes('- evidence `e-plan`') && evidenceSection.includes('- evidence `e-spec`')
+    expect(
+      whole || /Omitted \d+ items\. read them by id/.test(evidenceSection),
+      evidenceSection.slice(-400),
+    ).toBe(true)
   })
 })
 

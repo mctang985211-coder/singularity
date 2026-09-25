@@ -30,7 +30,8 @@
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-session-query": "*",
-    "@deepseek-ai/dsh-system-prompt": "*"
+    "@deepseek-ai/dsh-system-prompt": "*",
+    "@deepseek-ai/dsh-output-retention": "*"
   },
   "dependencies": {
     "@dangosys/dsh-singularity-graphs": "workspace:*",
@@ -46,7 +47,8 @@
     "@deepseek-ai/dsh-agent": "link:../../../thirdparty/deepseek-harness/packages/core/agent",
     "@deepseek-ai/dsh-session": "link:../../../thirdparty/deepseek-harness/packages/core/session",
     "@deepseek-ai/dsh-session-query": "link:../../../thirdparty/deepseek-harness/packages/session-query/session-query",
-    "@deepseek-ai/dsh-system-prompt": "link:../../../thirdparty/deepseek-harness/packages/core/system-prompt"
+    "@deepseek-ai/dsh-system-prompt": "link:../../../thirdparty/deepseek-harness/packages/core/system-prompt",
+    "@deepseek-ai/dsh-output-retention": "link:../../../thirdparty/deepseek-harness/packages/util/output-retention"
   },
   "publishConfig": {
     "access": "public"

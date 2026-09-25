@@ -3,6 +3,7 @@ import { rootTaskStoreId } from "@dangosys/dsh-singularity-task";
 import { SESSION_NOT_IN_GRAPH } from "@dangosys/dsh-singularity-graphs";
 import { SESSION_QUERY_READ_WINDOW_MAX, extractSessionEventText } from "@deepseek-ai/dsh-session-query";
 import { checkObligationCoverage, findRepoRoot, loadObligationTemplates } from "@dangosys/dsh-singularity-task-runtime";
+import { TextRetainer, formatRetentionNotice } from "@deepseek-ai/dsh-output-retention";
 
 //#region src/refusals.ts
 /**
@@ -408,7 +409,7 @@ async function graphOfSession(graphs, sessionId) {
 */
 async function spawnedInto(deps, graph, sessionId) {
 	try {
-		return ((await deps.graphs.view(graph.id)).graph.edges ?? []).some((edge) => edge.kind === "spawn" && String(edge.to) === sessionId) ? { kind: "spawned" } : { kind: "member" };
+		return (await deps.graphs.view(graph.id)).graph.edges.some((edge) => edge.kind === "spawn" && String(edge.to) === sessionId) ? { kind: "spawned" } : { kind: "member" };
 	} catch (error) {
 		return {
 			kind: "failed",
@@ -508,64 +509,63 @@ async function isGraphMember(graphs, graphId, sessionId) {
 //#endregion
 //#region src/limits.ts
 /**
-* The one output bound this package has (A2 §D): 16 KiB for a single read —
-* whether that read is a tool-facing record, the reference lists a projection
-* carries, or the outer text of a status page. There is no second budget and no
-* configuration surface: one constant, one accounting, so "how much can a read
-* put in front of a model" has exactly one answer.
-*
-* What the bound never does is truncate silently. A record read pages with an
-* explicit continuation offset; a core contract that cannot fit is refused by
-* name (`context-too-large`) rather than cut; a reference list that does not fit
-* says how many entries it did not show.
-* @module @dangosys/dsh-singularity-context/limits
+* The outer output bound of one context read, in UTF-8 bytes. Deliberately the
+* deployment's own inline cap rather than a tighter local choice: see the module
+* doc for the reference and for what stays outside the library.
 */
-/** The outer output bound of one context read, in UTF-8 bytes. */
-const CONTEXT_OUTPUT_LIMIT_BYTES = 16 * 1024;
+const CONTEXT_OUTPUT_LIMIT_BYTES = 5e4;
 /** UTF-8 byte length of `text`. */
 function utf8Bytes(text) {
 	return Buffer.byteLength(text, "utf8");
 }
 /**
 * Take at most `maxBytes` bytes starting at `offsetBytes` from `text`, never
-* splitting a UTF-8 character.
+* splitting a UTF-8 character, and report where the next page starts.
 *
-* An offset that lands inside a character starts at the next character (the
-* partial bytes belong to a character the caller's page boundary cut, and
-* re-emitting a fraction of one would corrupt it). A page always carries at
-* least one character: a bound smaller than the first character still advances,
-* so a caller that feeds `nextOffset` back never loops on the same offset.
+* The window itself is `TextRetainer({kind: 'head'})` from
+* `@deepseek-ai/dsh-output-retention`: it keeps the first `maxBytes` bytes, trims
+* a partial character at that cut, and reports the exact omitted byte count, so
+* "where did this page end" is read off the library rather than recomputed here.
+* The two things wrapped around it are the ones the library does not own: the
+* cursor (`nextOffset`, derived from the bytes actually retained) and the floor
+* that keeps a caller moving — an offset inside a character starts at the next
+* character, and a page always carries at least that one character, so feeding
+* `nextOffset` back never loops on the same offset.
 */
 function sliceUtf8(text, offsetBytes, maxBytes) {
 	const start = Math.max(0, Math.trunc(offsetBytes));
 	const budget = Math.max(0, Math.trunc(maxBytes));
 	let position = 0;
-	let taken = 0;
-	const parts = [];
+	let index = 0;
+	let startIndex = -1;
+	let firstWidth = 0;
 	for (const character of text) {
-		const width = utf8Bytes(character);
-		const characterStart = position;
-		position += width;
-		if (characterStart < start) continue;
-		if (taken + width > budget) {
-			if (parts.length === 0) return {
-				text: character,
-				nextOffset: position,
-				done: false
-			};
-			return {
-				text: parts.join(""),
-				nextOffset: characterStart,
-				done: false
-			};
+		if (position >= start) {
+			startIndex = index;
+			firstWidth = utf8Bytes(character);
+			break;
 		}
-		parts.push(character);
-		taken += width;
+		position += utf8Bytes(character);
+		index += 1;
 	}
-	return {
-		text: parts.join(""),
+	if (startIndex < 0) return {
+		text: "",
 		nextOffset: position,
 		done: true
+	};
+	const rest = text.slice(startIndex);
+	const retainer = new TextRetainer({
+		kind: "head",
+		maxBytes: Math.max(budget, firstWidth)
+	});
+	retainer.push(rest);
+	const retained = retainer.finish();
+	const omitted = retained.omittedBytes.kind === "exact" ? retained.omittedBytes.count : 0;
+	const kept = utf8Bytes(rest) - omitted;
+	return {
+		text: retained.text,
+		nextOffset: position + kept,
+		done: !retained.truncated
 	};
 }
 /**
@@ -573,6 +573,10 @@ function sliceUtf8(text, offsetBytes, maxBytes) {
 * — or is refused, so no line a caller sees is a cut one. `remaining` is what a
 * caller that wants to bound a *part* of its output (a reference list, say) has
 * left to spend.
+*
+* This is the part of the bounding story `@deepseek-ai/dsh-output-retention`
+* does not model: the library bounds a *byte* window or an *item* count, while a
+* rendered page has to keep whole lines together, so its accounting is by line.
 */
 var OutputBudget = class {
 	lines = [];
@@ -603,9 +607,27 @@ var OutputBudget = class {
 		return this.lines.join("\n");
 	}
 };
-/** The one-word name of an omission a bounded list reports, so a reader can tell a short list from a cut one. */
-function omittedLine(noun, omitted, how) {
-	return `… ${omitted} more ${noun} not shown (${how})`;
+/**
+* One bounded list's omission line: the platform's standardized clause followed
+* by this read's recovery sentence. `@deepseek-ai/dsh-output-retention`
+* documents that split — the library owns the wording of *what* was omitted,
+* the tool owns *how to read on* ("page through them with the status view",
+* "read them by id") — so this line is composed through
+* {@link formatRetentionNotice} rather than spelled out here.
+*/
+function omissionLine(report) {
+	const omitted = {
+		kind: "exact",
+		count: report.omitted
+	};
+	return formatRetentionNotice({
+		scope: report.scope,
+		strategy: "head",
+		unit: report.unit,
+		limit: report.limit,
+		kept: report.kept,
+		omitted
+	}, () => report.recovery);
 }
 
 //#endregion
@@ -990,6 +1012,12 @@ const STATUS_LIMIT_MAX = 100;
 /** The session page's default event count, and its ceiling (the same range as a status page). */
 const SESSION_LIMIT_DEFAULT = 20;
 const SESSION_LIMIT_MAX = 100;
+/**
+* The floor of one session-event page, in UTF-8 bytes: a page takes the largest
+* fragment that fits, but at least this much room is always given to it, so a
+* caller's `limit` can never make a page that cannot carry one character.
+*/
+const SESSION_EVENT_PAGE_MIN_BYTES = 4;
 /** A task-class page never goes below this many bytes; below it a page could not advance usefully. */
 const TASK_PAGE_MIN_BYTES = 64;
 /** How a caller asks for a record's identity, spelled out in every malformed-ref refusal. */
@@ -999,7 +1027,7 @@ const REF_SHAPES = {
 	evidence: "the evidence id",
 	diagnosis: "the diagnosis id",
 	review: "`{taskId, runId}` (with `runId: null` for a task that blocked before any run)",
-	session: "the session id"
+	session: "the session id, or `{sessionId, seq}` for one event"
 };
 function storeSource(graph, storeId, what) {
 	return `${what} — store ${storeId} of graph ${graph.id}, one Task snapshot read`;
@@ -1051,22 +1079,54 @@ function ownRunLine(run) {
 }
 /**
 * One reference list inside the byte bound: entries are shown in store order
-* until the budget (which also has to hold the omission marker) runs out, and
+* until the budget (which also has to hold the omission clause) runs out, and
 * what did not fit is named with its count. Returns `'too-large'` when not even
-* the marker fits — a list that cannot say how much it hid is not shown at all.
+* the clause fits — a list that cannot say how much it hid is not shown at all.
+*
+* `follow` is the room the caller still owes to everything it renders *after*
+* this list (the next list whole, a fixed guidance block, the run binding
+* summary): the list stops early enough to leave it, so one long list names what
+* it hid instead of starving what follows into a refusal. The clause's room is
+* reserved *before* each entry is measured, never spent on an entry
+* (`@deepseek-ai/dsh-spill-policy` reserves its own notice the same way).
 */
-function referenceList(budget, title, entries, noun, how) {
+function referenceList(budget, title, entries, noun, how, follow = 0) {
 	if (entries.length === 0) return budget.add(`- ${title}: (none)`) ? void 0 : "too-large";
-	const reserve = utf8Bytes(omittedLine(noun, entries.length, how)) + 1;
+	const omitted = (count) => omissionLine({
+		scope: noun,
+		unit: "items",
+		kept: entries.length - count,
+		limit: entries.length,
+		omitted: count,
+		recovery: how
+	});
+	const reserve = utf8Bytes(omitted(entries.length)) + 1 + follow;
 	if (!budget.add(`- ${title}:`)) return "too-large";
 	let shown = 0;
 	for (const entry of entries) {
-		if (budget.remaining <= reserve) break;
-		if (!budget.add(`  ${entry}`)) break;
+		const line = `  ${entry}`;
+		if (budget.remaining < reserve + utf8Bytes(line) + 1) break;
+		budget.add(line);
 		shown += 1;
 	}
 	if (shown === entries.length) return void 0;
-	return budget.add(omittedLine(noun, entries.length - shown, how)) ? void 0 : "too-large";
+	return budget.add(omitted(entries.length - shown)) ? void 0 : "too-large";
+}
+/**
+* The least a bounded list occupies whole: its heading, and the omission clause
+* it would emit for `count` entries. A caller that renders two lists in a row
+* hands the first this floor for the second, so the second is never starved.
+*/
+function referenceFloor(title, noun, count, how) {
+	const clause = omissionLine({
+		scope: noun,
+		unit: "items",
+		kept: 0,
+		limit: count,
+		omitted: count,
+		recovery: how
+	});
+	return utf8Bytes(`- ${title}:`) + 1 + utf8Bytes(clause) + 1;
 }
 /**
 * The decomposition guidance a worker's projection carries — the
@@ -1147,14 +1207,14 @@ async function contractProjection(deps, loaded) {
 		const label = ["", `- this session has no business Run: the contract above belongs to the task it was delegated to review (delegated by session ${resolution.delegation.actor}, recorded ${resolution.delegation.at}), and reading it is not executing it.`];
 		if (budget.addAll(label) > 0) return tooLarge("the review-only label", taskPageHint(task.taskId));
 	}
-	if (run?.providerBinding !== void 0) {
-		const summary = (await bindingLines(deps.taskRuntime, run.providerBinding)).filter((line) => line.length > 0);
-		if (budget.addAll([
-			"",
-			"## Implementation chosen for this run",
-			...summary
-		]) > 0) return tooLarge("the run binding summary", taskPageHint(task.taskId));
-	}
+	const summaryLines = run?.providerBinding === void 0 ? [] : [
+		"",
+		"## Implementation chosen for this run",
+		...(await bindingLines(deps.taskRuntime, run.providerBinding)).filter((line) => line.length > 0)
+	];
+	const summaryFloor = summaryLines.length === 0 ? 0 : utf8Bytes(summaryLines.join("\n")) + 2;
+	const decomposition = role === "worker" ? workerDecompositionLines(deps.taskRuntime, task) : [];
+	const decompositionFloor = decomposition.length === 0 ? 0 : utf8Bytes(["", ...decomposition].join("\n")) + 2;
 	if (role === "worker") {
 		const handoff = handoffFor(snapshot, task.taskId);
 		if (handoff === void 0) {
@@ -1170,12 +1230,14 @@ async function contractProjection(deps, loaded) {
 				...handoffLines(handoff)
 			]) > 0) return tooLarge("the handoff", taskPageHint(task.taskId));
 			const references = handoffReferences(handoff);
-			if (referenceList(budget, "relevant artifacts", references.artifacts, "handoff artifact references", "read them by id") !== void 0) return tooLarge("the handoff references", taskPageHint(task.taskId));
-			if (referenceList(budget, "relevant evidence", references.evidence, "handoff evidence references", "read them by id") !== void 0) return tooLarge("the handoff references", taskPageHint(task.taskId));
+			const evidenceFloor = referenceFloor("relevant evidence", "handoff evidence references", references.evidence.length, "read them by id");
+			const tail = decompositionFloor + summaryFloor;
+			if (referenceList(budget, "relevant artifacts", references.artifacts, "handoff artifact references", "read them by id", evidenceFloor + tail) !== void 0) return tooLarge("the handoff references", taskPageHint(task.taskId));
+			if (referenceList(budget, "relevant evidence", references.evidence, "handoff evidence references", "read them by id", tail) !== void 0) return tooLarge("the handoff references", taskPageHint(task.taskId));
 		}
-		const decomposition = workerDecompositionLines(deps.taskRuntime, task);
 		if (decomposition.length > 0 && budget.addAll(["", ...decomposition]) > 0) return tooLarge("the decomposition guidance", taskPageHint(task.taskId));
 	}
+	if (summaryLines.length > 0 && budget.addAll(summaryLines) > 0) return tooLarge("the run binding summary", taskPageHint(task.taskId));
 	return read(budget.text(), storeSource(resolution.graph, resolution.storeId, "projected the caller's immutable contract"));
 }
 /**
@@ -1241,16 +1303,24 @@ async function dynamicProjection(deps, loaded) {
 	} else if (!budget.add(`your run: ${resolution.run === void 0 ? "none" : ownRunLine(resolution.run)}`)) return tooLarge("the run line", taskPageHint(task.taskId));
 	if (snapshot !== void 0) {
 		const lines = relatedEntries(snapshot, task).map((entry) => taskSummaryLine(snapshot, entry.task, entry.roles));
-		const reserve = utf8Bytes(omittedLine("related tasks", lines.length, "page through them with the status view")) + 1;
+		const marker$1 = (count) => omissionLine({
+			scope: "related tasks",
+			unit: "items",
+			kept: lines.length - count,
+			limit: lines.length,
+			omitted: count,
+			recovery: "page through them with the status view"
+		});
+		const reserve = utf8Bytes(marker$1(lines.length)) + 1;
 		if (budget.addAll(["", "related tasks (you, your direct children, and the tasks directly adjacent through a dependency edge):"]) > 0) return tooLarge("the related tasks heading", taskPageHint(task.taskId));
 		let shown = 0;
 		for (const line of lines) {
-			if (budget.remaining <= reserve) break;
-			if (!budget.add(line)) break;
+			if (budget.remaining < reserve + utf8Bytes(line) + 1) break;
+			budget.add(line);
 			shown += 1;
 		}
 		if (shown < lines.length) {
-			if (!budget.add(omittedLine("related tasks", lines.length - shown, "page through them with the status view"))) return tooLarge("the related tasks list", taskPageHint(task.taskId));
+			if (!budget.add(marker$1(lines.length - shown))) return tooLarge("the related tasks list", taskPageHint(task.taskId));
 		}
 	}
 	return read(budget.text(), storeSource(resolution.graph, resolution.storeId, "projected the caller's dynamic state"));
@@ -1294,6 +1364,7 @@ async function taskRead(deps, loaded) {
 		...run === void 0 ? [] : ["", ownRunLine(run)]
 	];
 	if (budget.addAll(lines) > 0) return tooLarge("your contract", taskPageHint(task.taskId));
+	const summary = run?.providerBinding === void 0 ? [] : (await bindingLines(deps.taskRuntime, run.providerBinding)).filter((line) => line.length > 0);
 	if (snapshot !== void 0 && resolution.kind === "root") {
 		const children = task.childTaskIds.flatMap((taskId) => snapshot.tasks.filter((item) => item.taskId === taskId));
 		const childLines = [
@@ -1301,13 +1372,26 @@ async function taskRead(deps, loaded) {
 			`children: ${children.length}`,
 			...children.map((child) => taskSummaryLine(snapshot, child))
 		];
-		const omitted = budget.addAll(childLines);
-		if (omitted > 0 && !budget.add(omittedLine("child tasks", omitted, "read them with the status view or by reference"))) return tooLarge("the root's children", taskPageHint(task.taskId));
+		const clause = (omitted$1) => omissionLine({
+			scope: "child tasks",
+			unit: "items",
+			kept: children.length - omitted$1,
+			limit: children.length,
+			omitted: omitted$1,
+			recovery: "read them with the status view or by reference"
+		});
+		const reserve = utf8Bytes(clause(children.length)) + 1 + (summary.length === 0 ? 0 : utf8Bytes(summary.join("\n")) + 2);
+		let shown = 0;
+		for (const line of childLines) {
+			if (budget.remaining < reserve + utf8Bytes(line) + 1) break;
+			budget.add(line);
+			shown += 1;
+		}
+		if (shown < 2) return tooLarge("the root's children", taskPageHint(task.taskId));
+		const omitted = children.length - (shown - 2);
+		if (omitted > 0 && !budget.add(clause(omitted))) return tooLarge("the root's children", taskPageHint(task.taskId));
 	}
-	if (run?.providerBinding !== void 0) {
-		const summary = (await bindingLines(deps.taskRuntime, run.providerBinding)).filter((line) => line.length > 0);
-		if (budget.addAll(summary) > 0) return tooLarge("the run binding summary", taskPageHint(task.taskId));
-	}
+	if (summary.length > 0 && budget.addAll(summary) > 0) return tooLarge("the run binding summary", taskPageHint(task.taskId));
 	return read(budget.text(), storeSource(resolution.graph, resolution.storeId, "read the caller's own contract and run"));
 }
 /**
@@ -1359,8 +1443,9 @@ async function taskStatus(deps, loaded, query) {
 	const footerReserve = utf8Bytes("- more: yes — continue with offset 999999") + 1 + utf8Bytes("- source: ") + 200 + 1 + obligations.reduce((total, line) => total + utf8Bytes(line) + 1, 0);
 	let shown = 0;
 	for (const entry of page) {
-		if (budget.remaining <= footerReserve) break;
-		if (!budget.add(taskSummaryLine(snapshot, entry.task, entry.roles))) break;
+		const line = taskSummaryLine(snapshot, entry.task, entry.roles);
+		if (budget.remaining < footerReserve + utf8Bytes(line) + 1) break;
+		budget.add(line);
 		shown += 1;
 	}
 	if (shown === 0 && page.length > 0) {
@@ -1373,7 +1458,14 @@ async function taskStatus(deps, loaded, query) {
 	const footer = [`- more: ${hasMore ? `yes — continue with offset ${nextOffset}` : "no — this is the end of the scope"}`, `- source: one read of store ${resolution.storeId}; pages are observations, not a consistent snapshot across calls` + (shown < page.length ? "; this page stopped at the output bound" : "")];
 	if (budget.addAll(footer) > 0) return tooLarge("the status page footer", "Ask for a smaller page (a lower `limit`).");
 	const omittedObligations = budget.addAll(obligations);
-	if (omittedObligations > 0) budget.add(omittedLine("obligation lines", omittedObligations, "the status page reached its output bound"));
+	if (omittedObligations > 0) budget.add(omissionLine({
+		scope: "obligation lines",
+		unit: "lines",
+		kept: obligations.length - omittedObligations,
+		limit: obligations.length,
+		omitted: omittedObligations,
+		recovery: "the status page reached its output bound"
+	}));
 	return read(budget.text(), storeSource(resolution.graph, resolution.storeId, `listed ${scope} tasks`), {
 		hasMore,
 		nextOffset
@@ -1415,7 +1507,10 @@ async function obligationLines(envBuilder, envId, snapshot) {
 * being touched.
 *
 * Task-class records are read whole and paged in UTF-8 bytes when they exceed
-* the output bound; a session read pages by DSH event seq, its own read unit.
+* the output bound. A session reference has two forms: a session id pages that
+* session's log by DSH event seq (its own read unit), while `{sessionId, seq}`
+* reads one event's visible text, paged in UTF-8 bytes — the door a listing
+* hands an event too large to render inline to.
 */
 async function contextRead(deps, loaded, query, signal) {
 	const resolution = loaded.resolution;
@@ -1424,8 +1519,9 @@ async function contextRead(deps, loaded, query, signal) {
 	const snapshot = loaded.snapshot;
 	const kind = query.kind;
 	if (kind === "session") {
-		if (typeof query.ref !== "string") return malformedRef(kind, query.ref);
-		return await sessionRead(deps, loaded, query.ref, query.offset, query.limit, signal);
+		if (typeof query.ref === "string") return await sessionRead(deps, loaded, query.ref, query.offset, query.limit, signal);
+		if (isSessionEventReference(query.ref)) return await sessionEventRead(deps, loaded, query.ref, query.offset, query.limit, signal);
+		return malformedRef(kind, query.ref);
 	}
 	if (snapshot === void 0) return refused("not-activated", `store "${resolution.storeId}" of graph "${resolution.graph.id}" does not exist yet, so it holds no ${kind} record to read.`);
 	const found = locateRecord(snapshot, kind, query.ref);
@@ -1456,6 +1552,17 @@ function malformedRef(kind, ref) {
 	const shape = REF_SHAPES[kind];
 	return refused("not-found", `\`context_read\` kind:"${kind}" reads one record by ${shape}; the reference given (${ref === null ? "null" : JSON.stringify(ref)}) is not that shape, so it names no record.`);
 }
+/**
+* Whether `ref` is the `{sessionId, seq}` event reference. The shape only: a
+* `seq` that is a number but not a usable event seq (negative, fractional,
+* non-finite) is the event read's own refusal, so the value is judged there with
+* the requirement it failed, never here as a wrong shape.
+*/
+function isSessionEventReference(ref) {
+	if (ref === null || typeof ref !== "object") return false;
+	const candidate = ref;
+	return typeof candidate.sessionId === "string" && typeof candidate.seq === "number";
+}
 function unknownDetail(noun, ref, snapshot) {
 	return `no ${noun} "${ref}" in your graph's task store (it holds ${snapshot.tasks.length} tasks); ids from another graph are not readable here, and a reference never widens the read domain.`;
 }
@@ -1466,24 +1573,29 @@ function locateRecord(snapshot, kind, ref) {
 			refusal: "not-found",
 			detail: reviewRefDetail(ref)
 		};
-		if (snapshot.tasks.find((item) => item.taskId === ref.taskId) === void 0) return {
+		const taskId = ref.taskId;
+		if (typeof taskId !== "string") return {
 			refusal: "not-found",
-			detail: `task "${ref.taskId}" is not in your graph's task store, so the review reference does not resolve inside the caller's domain.`
+			detail: reviewRefDetail(ref)
+		};
+		if (snapshot.tasks.find((item) => item.taskId === taskId) === void 0) return {
+			refusal: "not-found",
+			detail: `task "${taskId}" is not in your graph's task store, so the review reference does not resolve inside the caller's domain.`
 		};
 		const runId = ref.runId ?? null;
-		const review = [...snapshot.reviews].reverse().find((item) => item.taskId === ref.taskId && (item.runId ?? null) === runId);
+		const review = [...snapshot.reviews].reverse().find((item) => item.taskId === taskId && (item.runId ?? null) === runId);
 		if (review !== void 0) return {
-			identity: `${ref.taskId}#${runId ?? "no-run"}`,
+			identity: `${taskId}#${runId ?? "no-run"}`,
 			record: review
 		};
-		const others = snapshot.reviews.filter((item) => item.taskId === ref.taskId);
+		const others = snapshot.reviews.filter((item) => item.taskId === taskId);
 		if (others.length === 0) return {
 			refusal: "not-found",
-			detail: `task "${ref.taskId}" has no review record in this store, so the reference names nothing.`
+			detail: `task "${taskId}" has no review record in this store, so the reference names nothing.`
 		};
 		return {
 			refusal: "stale-reference",
-			detail: `task "${ref.taskId}" has review records, but none for run "${runId ?? "(none)"}": this store holds ${others.map((item) => `${item.taskId}#${item.runId ?? "no-run"} (${item.outcome})`).join(", ")}. The reference names a review that does not exist for that run.`
+			detail: `task "${taskId}" has review records, but none for run "${runId ?? "(none)"}": this store holds ${others.map((item) => `${item.taskId}#${item.runId ?? "no-run"} (${item.outcome})`).join(", ")}. The reference names a review that does not exist for that run.`
 		};
 	}
 	if (typeof ref !== "string") return {
@@ -1554,6 +1666,23 @@ async function recordTextOf(deps, snapshot, record) {
 	return reviewRecordText(record);
 }
 /**
+* The membership gate both session forms pass before DSH is asked anything: a
+* session that is not a published member of the caller's graph reads nothing,
+* and a membership that cannot be read is a named failure, never a pass — a
+* session reference whose ownership is unknown is not this graph's session.
+* `undefined` means the session is a member and the read may proceed.
+*/
+async function sessionMembershipRefusal(deps, resolution, sessionId) {
+	let member;
+	try {
+		member = await isGraphMember(deps.graphs, resolution.graph.id, sessionId);
+	} catch (error) {
+		return refused("unreadable", `the membership of session "${sessionId}" in graph "${resolution.graph.id}" could not be read: ${message(error)}. A session reference is checked against the graph's published members before its log is read.`);
+	}
+	if (member) return void 0;
+	return refused("cross-graph", `session "${sessionId}" is not a published member of graph "${resolution.graph.id}"; a session reference reads the caller's own domain, and a session id is not a key to another graph.`);
+}
+/**
 * One session page: events from `offset` (a DSH event seq) onward, bounded by the
 * event count and by the output bound. A session that is not a published member
 * of the caller's graph is refused as `cross-graph` before its log is touched;
@@ -1572,13 +1701,8 @@ async function recordTextOf(deps, snapshot, record) {
 async function sessionRead(deps, loaded, sessionId, requestedOffset, requestedLimit, signal) {
 	const resolution = loaded.resolution;
 	signal?.throwIfAborted();
-	let member;
-	try {
-		member = await isGraphMember(deps.graphs, resolution.graph.id, sessionId);
-	} catch (error) {
-		return refused("unreadable", `the membership of session "${sessionId}" in graph "${resolution.graph.id}" could not be read: ${message(error)}. A session reference is checked against the graph's published members before its log is read.`);
-	}
-	if (!member) return refused("cross-graph", `session "${sessionId}" is not a published member of graph "${resolution.graph.id}"; a session reference reads the caller's own domain, and a session id is not a key to another graph.`);
+	const gate = await sessionMembershipRefusal(deps, resolution, sessionId);
+	if (gate !== void 0) return gate;
 	const offset = Number.isFinite(requestedOffset ?? 0) ? Math.max(0, Math.trunc(requestedOffset ?? 0)) : 0;
 	const requestedEvents = Number.isFinite(requestedLimit ?? SESSION_LIMIT_DEFAULT) ? Math.trunc(requestedLimit ?? SESSION_LIMIT_DEFAULT) : SESSION_LIMIT_DEFAULT;
 	const limit = Math.min(SESSION_LIMIT_MAX, Math.max(1, requestedEvents));
@@ -1635,7 +1759,7 @@ async function sessionRead(deps, loaded, sessionId, requestedOffset, requestedLi
 	const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES);
 	budget.addAll(banner);
 	budget.addAll(["", `events: seq ${offset}..${cursor - 1} of a log through seq ${capturedThroughSeq}`]);
-	const reserve = sessionClosingReserve(limit, capturedThroughSeq);
+	const reserve = sessionClosingReserve(limit, capturedThroughSeq, sessionId);
 	let shown = 0;
 	let stopped;
 	for (const event of events) {
@@ -1648,7 +1772,7 @@ async function sessionRead(deps, loaded, sessionId, requestedOffset, requestedLi
 		budget.addAll(lines);
 		shown += 1;
 	}
-	if (stopped !== void 0) budget.add(notShownEventLine(stopped));
+	if (stopped !== void 0) budget.add(notShownEventLine(sessionId, stopped));
 	const lastShownSeq = Number(events[shown - 1].seq);
 	const nextOffset = stopped === void 0 ? lastShownSeq + 1 : Number(stopped.seq);
 	const hasMore = nextOffset <= capturedThroughSeq;
@@ -1656,6 +1780,124 @@ async function sessionRead(deps, loaded, sessionId, requestedOffset, requestedLi
 	return read(budget.text(), `session ${sessionId} via the session query, seq ${offset}..${lastShownSeq} of a log through seq ${capturedThroughSeq}`, {
 		hasMore,
 		nextOffset
+	});
+}
+/** The exact object reference one event is read with, as the listing hands it back and the tool spells it. */
+function eventReference(sessionId, seq) {
+	return `{"sessionId":${JSON.stringify(sessionId)},"seq":${seq}}`;
+}
+/**
+* Whether `offsetBytes` falls between two characters of `text` — the offset
+* itself or one past a character. A UTF-8 continuation byte (`10xxxxxx`) says
+* the byte belongs to a character that started earlier, so a page starting there
+* would carry a fragment of one; an offset outside the text is not a boundary
+* either.
+*/
+function onCharacterBoundary(text, offsetBytes) {
+	if (offsetBytes === 0) return true;
+	const byte = Buffer.from(text, "utf8").at(offsetBytes);
+	return byte !== void 0 && (byte & 192) !== 128;
+}
+/**
+* The line the final page of an event carries. The two reads page by different
+* units — the listing by event seq, this one by byte — so the note names the
+* listing's own cursor as such: the event after this one, never this page's
+* `nextOffset`.
+*/
+function eventEndNote(sessionId, seq) {
+	return `the visible text of event seq ${seq} of session "${sessionId}" ends here; the listing of that session continues with \`context_read\` kind:"session" ref:"${sessionId}" offset = ${seq + 1} (the event seq after this one).`;
+}
+/**
+* One event page as JSON — exactly the model-visible value. `offset` and
+* `nextOffset` are byte positions in the event's visible text, `body` this
+* page's raw fragment of it, and the note rides the final page only.
+*/
+function sessionEventPage(ref, offset, slice) {
+	return JSON.stringify({
+		sessionId: ref.sessionId,
+		seq: ref.seq,
+		offset,
+		nextOffset: slice.nextOffset,
+		hasMore: !slice.done,
+		body: slice.text,
+		...slice.done ? { note: eventEndNote(ref.sessionId, ref.seq) } : {}
+	});
+}
+/**
+* One session *event*: the visible text of a single event, paged in UTF-8 bytes
+* (A2 §D, Q3 closure) — the door a session listing opens for an event too large
+* to render inline. The listing's own unit is the whole event, so an event that
+* does not fit a listing page has no listing cursor inside it; this read carries
+* that event's `extractSessionEventText` output as bytes, and the raw session
+* JSON it was extracted from is never part of a page.
+*
+* The order is the contract: the seq, the offset and the limit are judged before
+* anything is read, membership is the graph store's own record (so a guessed
+* session id never reaches DSH), and only then is the one event read. Every page
+* advances — an offset inside a character or at or past the end of the text is
+* `stale-reference`, never a silently re-aligned page — and the page is sized
+* against the JSON the model receives, so escapes cannot push it over the bound.
+*/
+async function sessionEventRead(deps, loaded, ref, requestedOffset, requestedLimit, signal) {
+	const resolution = loaded.resolution;
+	signal?.throwIfAborted();
+	const sessionId = ref.sessionId;
+	const seq = ref.seq;
+	if (!Number.isSafeInteger(seq) || seq < 0) return refused("not-found", `\`context_read\` kind:"session" reads one event by a \`{sessionId, seq}\` whose seq is a non-negative safe integer (a DSH event seq); the seq given (${String(seq)}) is not one, so it names no event.`);
+	const offset = requestedOffset ?? 0;
+	if (!Number.isSafeInteger(offset) || offset < 0) return refused("stale-reference", `the offset given (${String(offset)}) is not a non-negative safe integer; a session event's offset is a UTF-8 byte position in that event's visible text.`);
+	const requestedBytes = requestedLimit ?? CONTEXT_OUTPUT_LIMIT_BYTES;
+	if (!Number.isSafeInteger(requestedBytes) || requestedBytes < 1) return refused("not-found", `the limit given (${String(requestedBytes)}) is not a positive safe integer; a session event's limit is a page size in UTF-8 bytes, clamped into ${SESSION_EVENT_PAGE_MIN_BYTES}..${CONTEXT_OUTPUT_LIMIT_BYTES}.`);
+	const limit = Math.min(CONTEXT_OUTPUT_LIMIT_BYTES, Math.max(SESSION_EVENT_PAGE_MIN_BYTES, requestedBytes));
+	const gate = await sessionMembershipRefusal(deps, resolution, sessionId);
+	if (gate !== void 0) return gate;
+	let window;
+	try {
+		window = await deps.sessionQuery.readEvent({
+			sessionId,
+			seq,
+			before: 0,
+			after: 0
+		}, signal);
+	} catch (error) {
+		signal?.throwIfAborted();
+		const code = errorCode(error);
+		if (code === "SESSION_QUERY_ABORTED") throw error;
+		if (code === "SESSION_QUERY_EVENT_NOT_FOUND") return refused("stale-reference", `session "${sessionId}" has no event at seq ${seq}: ${message(error)}. The reference names an event this log does not hold.`);
+		if (code === "SESSION_QUERY_SESSION_NOT_FOUND") return refused("not-found", `session "${sessionId}" has no log in this deployment: ${message(error)}`);
+		return refused("unreadable", `session "${sessionId}" could not be read at seq ${seq}: ${message(error)}`);
+	}
+	const answered = window?.target;
+	if (answered === void 0 || Number(answered.seq) !== seq) return refused("stale-reference", `session "${sessionId}" answered ${answered === void 0 ? "no event" : `seq ${String(answered.seq)}`} for the reference to seq ${seq}: a page of another event is not this event's text.`);
+	const text = extractSessionEventText(answered);
+	const total = utf8Bytes(text);
+	const source = `session ${sessionId} via the session query, event seq ${seq} observed with ${total} UTF-8 bytes of visible text`;
+	if (total === 0) {
+		if (offset !== 0) return refused("stale-reference", `event seq ${seq} of session "${sessionId}" has no visible text, so offset ${offset} is past the end of it; offset 0 is the only page of that event.`);
+		return read(sessionEventPage(ref, 0, {
+			text: "",
+			nextOffset: 0,
+			done: true
+		}), source, {
+			hasMore: false,
+			nextOffset: 0
+		});
+	}
+	if (offset >= total) return refused("stale-reference", `offset ${offset} is at or past the end of the visible text of event seq ${seq} of session "${sessionId}", which is ${total} UTF-8 bytes: this page would carry nothing.`);
+	if (!onCharacterBoundary(text, offset)) return refused("stale-reference", `offset ${offset} falls inside a UTF-8 character of the visible text of event seq ${seq} of session "${sessionId}"; an offset is a character boundary, and a page never starts with a fragment of a character.`);
+	let pageBytes = limit;
+	let slice = sliceUtf8(text, offset, pageBytes);
+	let page = sessionEventPage(ref, offset, slice);
+	while (utf8Bytes(page) > CONTEXT_OUTPUT_LIMIT_BYTES && pageBytes > 1) {
+		const fitted = Math.floor(utf8Bytes(slice.text) * CONTEXT_OUTPUT_LIMIT_BYTES / utf8Bytes(page));
+		pageBytes = Math.max(1, Math.min(pageBytes - 1, fitted));
+		slice = sliceUtf8(text, offset, pageBytes);
+		page = sessionEventPage(ref, offset, slice);
+	}
+	if (utf8Bytes(page) > CONTEXT_OUTPUT_LIMIT_BYTES) return refused("context-too-large", `a single character of event seq ${seq} of session "${sessionId}" plus the page stating where it sits does not fit the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte output bound, so no page of that event's text can be returned.`);
+	return read(page, source, {
+		hasMore: !slice.done,
+		nextOffset: slice.nextOffset
 	});
 }
 /** The widest rendering of one number of `value`'s magnitude, so a reserve can bound a line that carries it. */
@@ -1667,14 +1909,15 @@ function widestNumber(value) {
 * footer, and the line naming the event the page stopped before when there is
 * one. Every number those lines can carry is bounded here by the range the page
 * itself knows (the caller's limit, the log's last seq, and the widest text
-* size), so the reserve is an upper bound whatever events follow: a page the
-* model receives always ends with its continuation cue.
+* size), and the session id is the same string the page carries, so the reserve
+* is an upper bound whatever event follows: a page the model receives always
+* ends with its continuation cue.
 */
-function sessionClosingReserve(limit, capturedThroughSeq) {
+function sessionClosingReserve(limit, capturedThroughSeq, sessionId) {
 	const seq = widestNumber(Number(capturedThroughSeq) + 1);
 	const count = widestNumber(limit);
 	const footer = `- events shown: ${count} of at most ${count} · more follows from seq ${seq}`;
-	const stopped = `- the next event (seq ${seq}, ${widestNumber(Number.MAX_SAFE_INTEGER)} UTF-8 bytes of text) was not shown on this page: it does not fit the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte bound, so the page ends before it.`;
+	const stopped = `- the next event (seq ${seq}, ${widestNumber(Number.MAX_SAFE_INTEGER)} UTF-8 bytes of text) was not shown on this page: it does not fit the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte bound, so the page ends before it. Read that event with ref:${eventReference(sessionId, Number(seq))} — its text pages in UTF-8 bytes.`;
 	return utf8Bytes(footer) + utf8Bytes(stopped) + 2;
 }
 /** Whether every one of `lines` fits the page's remaining space as one block (each separator counted), keeping `reserve` for what follows. */
@@ -1687,17 +1930,27 @@ function eventTextBytes(event) {
 	return utf8Bytes(extractSessionEventText(event));
 }
 /**
-* The refusal of an event no page can carry: a session offset addresses whole
-* events (DSH's read unit), so an event larger than the bound has no second
-* page. The detail names the event and its size, says none of it is shown, and
-* hands the caller the one deliberate way past it.
+* The refusal of an event no listing page can carry: a session offset addresses
+* whole events (DSH's read unit), so an event larger than the bound has no
+* second listing page. The detail names the event and the size of its visible
+* text, says the listing cannot render it whole, and hands back the one
+* reference that reads the event's text itself — pages of its visible text in
+* UTF-8 bytes. Moving past the event with `offset` is mentioned as the caller's
+* explicit choice, never as a way to reach the body.
 */
 function oversizedEventDetail(sessionId, event) {
-	return `event seq ${event.seq} of session "${sessionId}" does not fit one ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte page (its text alone is ${eventTextBytes(event)} UTF-8 bytes); a session offset addresses whole events — DSH's read unit — so this read cannot page inside one event, and none of that event's text is shown here. To continue past it, ask again with offset ${Number(event.seq) + 1}: the read never skips an event on its own, so that choice is the caller's.`;
+	const seq = Number(event.seq);
+	return `event seq ${seq} of session "${sessionId}" does not fit one ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte page (its visible text alone is ${eventTextBytes(event)} UTF-8 bytes); a session listing carries whole events — DSH's read unit — so this listing cannot render it whole, and none of its text is shown here. Read that event with \`context_read\` kind:"session" ref:${eventReference(sessionId, seq)}, whose pages are the UTF-8 bytes of its visible text. Asking this listing again with offset ${seq + 1} moves past the event and shows none of its text: that is the caller's explicit choice, not a way to read the body.`;
 }
-/** The line a page carries when it stops before an event that does not fit; the caller must choose to move past it. */
-function notShownEventLine(event) {
-	return `- the next event (seq ${event.seq}, ${eventTextBytes(event)} UTF-8 bytes of text) was not shown on this page: it does not fit the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte bound, so the page ends before it.`;
+/**
+* The line a page carries when it stops before an event that does not fit: the
+* event is named with the size of its visible text and the exact reference that
+* reads it, so the body the listing cannot carry is one call away, and moving
+* past the event stays the caller's explicit choice.
+*/
+function notShownEventLine(sessionId, event) {
+	const seq = Number(event.seq);
+	return `- the next event (seq ${seq}, ${eventTextBytes(event)} UTF-8 bytes of text) was not shown on this page: it does not fit the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte bound, so the page ends before it. Read that event with ref:${eventReference(sessionId, seq)} — its text pages in UTF-8 bytes.`;
 }
 function eventLines(event) {
 	const text = extractSessionEventText(event);
@@ -1801,4 +2054,4 @@ var SingularityContextService = class extends Service {
 var src_default = SingularityContextService;
 
 //#endregion
-export { AssemblyRefusalError, CONTEXT_OUTPUT_LIMIT_BYTES, NAMED_REFUSALS, OutputBudget, ReviewerBindingError, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, SingularityContextService, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, src_default as default, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omittedLine, openRootProposals, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, storeStateText, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };
+export { AssemblyRefusalError, CONTEXT_OUTPUT_LIMIT_BYTES, NAMED_REFUSALS, OutputBudget, ReviewerBindingError, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, SingularityContextService, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, src_default as default, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omissionLine, openRootProposals, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, storeStateText, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };

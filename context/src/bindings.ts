@@ -554,7 +554,7 @@ async function spawnedInto(
 ): Promise<{ kind: 'spawned' } | { kind: 'member' } | { kind: 'failed'; detail: string }> {
   try {
     const view = await deps.graphs.view(graph.id)
-    const spawned = (view.graph.edges ?? []).some(edge => edge.kind === 'spawn' && String(edge.to) === sessionId)
+    const spawned = view.graph.edges.some(edge => edge.kind === 'spawn' && String(edge.to) === sessionId)
     return spawned ? { kind: 'spawned' } : { kind: 'member' }
   } catch (error) {
     return {

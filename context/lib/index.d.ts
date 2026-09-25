@@ -1,6 +1,7 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import { AcceptanceCriterion, Diagnosis, EvidenceBundle, ExecutionPhase, ReviewRecord, RunProviderBinding, TaskHandoff, TaskInstance, TaskProposalRoot, TaskRun, TaskSnapshot } from "@dangosys/dsh-singularity-task";
 import { RunBindingRead, StoreRecoveryStatus } from "@dangosys/dsh-singularity-task-runtime";
+import { RetentionNotice } from "@deepseek-ai/dsh-output-retention";
 import { SessionEvent } from "@deepseek-ai/dsh-session";
 import { AssembleContext, PromptAssembly } from "@deepseek-ai/dsh-system-prompt";
 
@@ -258,17 +259,34 @@ interface ReviewReference {
   /** `null` for a task that blocked before any run started. */
   readonly runId: string | null;
 }
+/**
+ * One session event's identity (A2 §D, Q3 closure): the session it belongs to and
+ * the event's own DSH seq. This is the reference a session *listing* hands back
+ * for an event too large to render inline, and it is the only door that pages the
+ * event's visible text by bytes — the session-id form keeps paging by event
+ * seq/count.
+ */
+interface SessionEventReference {
+  readonly sessionId: string;
+  readonly seq: number;
+}
 /** What one reference read asks for, by kind. */
 interface ContextReadQuery {
   readonly kind: 'task' | 'run' | 'evidence' | 'review' | 'diagnosis' | 'session';
   /** The record's own identity, in the shape its kind uses. */
-  readonly ref: string | ReviewReference;
-  /** Task-class kinds: UTF-8 byte offset into the record text. Session: event seq. */
+  readonly ref: string | ReviewReference | SessionEventReference;
+  /**
+   * Task-class kinds: UTF-8 byte offset into the record text. Session listing
+   * (`ref` a session id): event seq. Session event (`ref` `{sessionId, seq}`):
+   * UTF-8 byte offset into that event's visible text — `extractSessionEventText`,
+   * never the raw session JSON.
+   */
   readonly offset?: number;
   /**
    * Task-class kinds: how many UTF-8 bytes of the record this page may carry
-   * (the whole answer still never exceeds the output bound). Session: events per
-   * page.
+   * (the whole answer still never exceeds the output bound). Session listing:
+   * events per page. Session event: the page size in UTF-8 bytes of that event's
+   * visible text (default the output bound, clamped into 4..the bound).
    */
   readonly limit?: number;
 }
@@ -374,7 +392,10 @@ declare function taskStatus(deps: ReadDeps, loaded: LoadedCaller, query: StatusQ
  * being touched.
  *
  * Task-class records are read whole and paged in UTF-8 bytes when they exceed
- * the output bound; a session read pages by DSH event seq, its own read unit.
+ * the output bound. A session reference has two forms: a session id pages that
+ * session's log by DSH event seq (its own read unit), while `{sessionId, seq}`
+ * reads one event's visible text, paged in UTF-8 bytes — the door a listing
+ * hands an event too large to render inline to.
  */
 declare function contextRead(deps: ReadDeps, loaded: LoadedCaller, query: ContextReadQuery, signal?: AbortSignal): Promise<ProjectedRead>;
 //#endregion
@@ -405,20 +426,11 @@ declare function assembleSingularityContext(service: SingularityContextService, 
 //#endregion
 //#region src/limits.d.ts
 /**
- * The one output bound this package has (A2 §D): 16 KiB for a single read —
- * whether that read is a tool-facing record, the reference lists a projection
- * carries, or the outer text of a status page. There is no second budget and no
- * configuration surface: one constant, one accounting, so "how much can a read
- * put in front of a model" has exactly one answer.
- *
- * What the bound never does is truncate silently. A record read pages with an
- * explicit continuation offset; a core contract that cannot fit is refused by
- * name (`context-too-large`) rather than cut; a reference list that does not fit
- * says how many entries it did not show.
- * @module @dangosys/dsh-singularity-context/limits
+ * The outer output bound of one context read, in UTF-8 bytes. Deliberately the
+ * deployment's own inline cap rather than a tighter local choice: see the module
+ * doc for the reference and for what stays outside the library.
  */
-/** The outer output bound of one context read, in UTF-8 bytes. */
-declare const CONTEXT_OUTPUT_LIMIT_BYTES: number;
+declare const CONTEXT_OUTPUT_LIMIT_BYTES = 50000;
 /** UTF-8 byte length of `text`. */
 declare function utf8Bytes(text: string): number;
 /** One page out of a longer text: the bytes taken, the offset after them, and whether the source ended. */
@@ -431,13 +443,17 @@ interface Utf8Slice {
 }
 /**
  * Take at most `maxBytes` bytes starting at `offsetBytes` from `text`, never
- * splitting a UTF-8 character.
+ * splitting a UTF-8 character, and report where the next page starts.
  *
- * An offset that lands inside a character starts at the next character (the
- * partial bytes belong to a character the caller's page boundary cut, and
- * re-emitting a fraction of one would corrupt it). A page always carries at
- * least one character: a bound smaller than the first character still advances,
- * so a caller that feeds `nextOffset` back never loops on the same offset.
+ * The window itself is `TextRetainer({kind: 'head'})` from
+ * `@deepseek-ai/dsh-output-retention`: it keeps the first `maxBytes` bytes, trims
+ * a partial character at that cut, and reports the exact omitted byte count, so
+ * "where did this page end" is read off the library rather than recomputed here.
+ * The two things wrapped around it are the ones the library does not own: the
+ * cursor (`nextOffset`, derived from the bytes actually retained) and the floor
+ * that keeps a caller moving — an offset inside a character starts at the next
+ * character, and a page always carries at least that one character, so feeding
+ * `nextOffset` back never loops on the same offset.
  */
 declare function sliceUtf8(text: string, offsetBytes: number, maxBytes: number): Utf8Slice;
 /**
@@ -445,6 +461,10 @@ declare function sliceUtf8(text: string, offsetBytes: number, maxBytes: number):
  * — or is refused, so no line a caller sees is a cut one. `remaining` is what a
  * caller that wants to bound a *part* of its output (a reference list, say) has
  * left to spend.
+ *
+ * This is the part of the bounding story `@deepseek-ai/dsh-output-retention`
+ * does not model: the library bounds a *byte* window or an *item* count, while a
+ * rendered page has to keep whole lines together, so its accounting is by line.
  */
 declare class OutputBudget {
   readonly maxBytes: number;
@@ -459,8 +479,30 @@ declare class OutputBudget {
   addAll(lines: readonly string[]): number;
   text(): string;
 }
-/** The one-word name of an omission a bounded list reports, so a reader can tell a short list from a cut one. */
-declare function omittedLine(noun: string, omitted: number, how: string): string;
+/** One bounded list's omission, in the shape the platform's notice vocabulary takes. */
+interface OmissionReport {
+  /** What was bounded, e.g. `related tasks` — the notice's scope label. */
+  readonly scope: string;
+  /** What the omitted units are, in the library's own vocabulary. */
+  readonly unit: RetentionNotice['unit'];
+  /** How many units the page carried. */
+  readonly kept: number;
+  /** The bound the page filled, in units. */
+  readonly limit: number;
+  /** The exact number of units left out. */
+  readonly omitted: number;
+  /** This read's own recovery sentence — the half the library leaves to the tool. */
+  readonly recovery: string;
+}
+/**
+ * One bounded list's omission line: the platform's standardized clause followed
+ * by this read's recovery sentence. `@deepseek-ai/dsh-output-retention`
+ * documents that split — the library owns the wording of *what* was omitted,
+ * the tool owns *how to read on* ("page through them with the status view",
+ * "read them by id") — so this line is composed through
+ * {@link formatRetentionNotice} rather than spelled out here.
+ */
+declare function omissionLine(report: OmissionReport): string;
 //#endregion
 //#region src/not-activated.d.ts
 /** Every root proposal still going to move: one waiting for a decision, or one waiting to be activated. */
@@ -621,4 +663,4 @@ declare class SingularityContextService extends Service {
   private envBuilder;
 }
 //#endregion
-export { AssemblyRefusalError, BindingDeps, CONTEXT_OUTPUT_LIMIT_BYTES, CallerBase, CallerGraph, CallerResolution, CallerUnbound, ContextReadQuery, EnvPathSource, GraphRecordFacts, LoadedCaller, MembershipEdge, MembershipNode, NAMED_REFUSALS, NamedRefusal, OutputBudget, ProjectedRead, ProjectedReadOk, ProjectedReadRefused, ReadContinuation, ReadDeps, ReadOnlyGraphs, ReadOnlyTaskRuntime, ReadOnlyTaskStore, RelatedEntry, ReviewReference, ReviewerBindingError, ReviewerBindingFailure, ReviewerBindingRecord, ReviewerBindingSource, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, SessionQueryReads, SingularityContextService, SingularityContextService as default, StatusQuery, StatusScope, Utf8Slice, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omittedLine, openRootProposals, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, storeStateText, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };
+export { AssemblyRefusalError, BindingDeps, CONTEXT_OUTPUT_LIMIT_BYTES, CallerBase, CallerGraph, CallerResolution, CallerUnbound, ContextReadQuery, EnvPathSource, GraphRecordFacts, LoadedCaller, MembershipEdge, MembershipNode, NAMED_REFUSALS, NamedRefusal, OmissionReport, OutputBudget, ProjectedRead, ProjectedReadOk, ProjectedReadRefused, ReadContinuation, ReadDeps, ReadOnlyGraphs, ReadOnlyTaskRuntime, ReadOnlyTaskStore, RelatedEntry, ReviewReference, ReviewerBindingError, ReviewerBindingFailure, ReviewerBindingRecord, ReviewerBindingSource, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, SessionEventReference, SessionQueryReads, SingularityContextService, SingularityContextService as default, StatusQuery, StatusScope, Utf8Slice, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omissionLine, openRootProposals, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, storeStateText, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };

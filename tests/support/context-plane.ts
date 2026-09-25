@@ -13,6 +13,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionQueryError } from '../../../../thirdparty/deepseek-harness/packages/session-query/session-query/lib/index.js'
 import { SingularityContextService } from '../../context/src/index.ts'
 
 /** The fields of a registry graph the read core reads (`context/src/bindings.ts:GraphRecordFacts`). */
@@ -122,8 +123,14 @@ export function sessionQueryReads(
     readEvent: async (request: { sessionId: string; seq: number; before?: number; after?: number }) => {
       const events = log(String(request.sessionId))
       const target = events.find(event => event.seq === request.seq)
+      // DSH's own engine answers a seq its log does not hold with this coded
+      // error, and the read core tells it apart from a source that failed; the
+      // stand-in must not soften that into an uncoded failure.
       if (target === undefined) {
-        throw new Error(`session "${String(request.sessionId)}" has no event at seq ${request.seq}`)
+        throw new SessionQueryError(
+          `session "${String(request.sessionId)}" has no event at seq ${request.seq}`,
+          'SESSION_QUERY_EVENT_NOT_FOUND',
+        )
       }
       const start = Math.max(0, request.seq - (request.before ?? 0))
       const end = Math.min(events.length - 1, request.seq + (request.after ?? 0))

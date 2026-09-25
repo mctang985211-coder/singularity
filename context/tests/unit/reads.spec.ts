@@ -6,11 +6,15 @@
  */
 
 import { describe, expect, test } from 'vitest'
-import { SESSION_QUERY_READ_WINDOW_MAX } from '@deepseek-ai/dsh-session-query'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { SESSION_QUERY_READ_WINDOW_MAX, extractSessionEventText } from '@deepseek-ai/dsh-session-query'
 import type { TaskProposalRoot, TaskSnapshot } from '../../../task/src/index.ts'
-import { notActivatedLines, taskSummaryLine } from '../../src/index.ts'
+import { CONTEXT_OUTPUT_LIMIT_BYTES, notActivatedLines, taskSummaryLine } from '../../src/index.ts'
 import { FixtureStack, seedChain, type Chain } from '../support/stack.ts'
 import { expectOk, expectRefused } from '../support/stack.ts'
+
+/** The smallest fixture that is really over the bound: the bound plus a few KB. */
+const OVER_BOUND_BYTES = CONTEXT_OUTPUT_LIMIT_BYTES + 5_000
 
 async function chainStack(): Promise<{ stack: FixtureStack; chain: Chain }> {
   const stack = new FixtureStack()
@@ -43,7 +47,7 @@ async function seedOversizedStatusEntry(
     taskId,
     sessionId: 's-worker-bigstatus',
     runId: 'r-bigstatus',
-    objective: 'z'.repeat(20_000),
+    objective: 'z'.repeat(OVER_BOUND_BYTES),
     parentTaskId: 't-root',
     depth: 1,
   })
@@ -59,6 +63,95 @@ function pageBody(text: string): string {
   const start = lines.indexOf('', 2)
   const end = lines.lastIndexOf('')
   return lines.slice(start + 1, end).join('\n')
+}
+
+/** One session-event page, in the shape the read fixes: the JSON a model receives, decoded. */
+interface EventPage {
+  readonly sessionId: string
+  readonly seq: number
+  readonly offset: number
+  readonly nextOffset: number
+  readonly hasMore: boolean
+  readonly body: string
+  readonly note?: string
+}
+
+/** The session plane as a seam, for the one-event shape an event read renders. */
+interface SessionEventSeam {
+  readEvent(
+    request: { readonly sessionId: string; readonly seq: number; readonly before?: number; readonly after?: number },
+    signal?: AbortSignal,
+  ): Promise<{ readonly target: SessionEvent }>
+}
+
+/** A second graph in the same deployment: another root session, another store, the same cwd. */
+async function secondGraph(stack: FixtureStack): Promise<{ rootSession: string }> {
+  stack.graph({ id: 'g-2', rootSessionId: 's-root-2', members: [] })
+  stack.sessionLog('s-root-2', ['second graph request'])
+  await stack.seed({ taskId: 't-other', sessionId: 's-root-2', runId: 'r-other', objective: 'the other graph objective' })
+  return { rootSession: 's-root-2' }
+}
+
+/** The event the fixture's log holds at `seq`, as the session query answers it. */
+async function loggedEvent(stack: FixtureStack, sessionId: string, seq: number): Promise<SessionEvent> {
+  const query = (stack.ctx as unknown as { sessionQuery: SessionEventSeam }).sessionQuery
+  return (await query.readEvent({ sessionId, seq, before: 0, after: 0 })).target
+}
+
+/** Count the event reads one case performs, so "refused before DSH" is measured rather than assumed. */
+function trackEventReads(stack: FixtureStack): { reads: number } {
+  const counter = { reads: 0 }
+  const query = (stack.ctx as unknown as { sessionQuery: SessionQuerySeam }).sessionQuery
+  const real = query.readEvent.bind(query)
+  query.readEvent = async (request, signal) => {
+    counter.reads += 1
+    return await real(request, signal)
+  }
+  return counter
+}
+
+/** Decode one event page. */
+function eventPage(text: string): EventPage {
+  return JSON.parse(text) as EventPage
+}
+
+/**
+ * Walk one event's text page by page and hand back what the pages carried: every
+ * page is checked against the output bound and against the page that follows, so
+ * a walk that returns has really advanced to the end of the text.
+ */
+async function walkEvent(
+  stack: FixtureStack,
+  caller: string,
+  sessionId: string,
+  seq: number,
+  limit?: number,
+): Promise<{ text: string; pages: number }> {
+  let offset = 0
+  let pages = 0
+  const parts: string[] = []
+  for (;;) {
+    const result = expectOk(
+      await stack.service.contextRead(caller, {
+        kind: 'session',
+        ref: { sessionId, seq },
+        offset,
+        ...(limit === undefined ? {} : { limit }),
+      }),
+    )
+    const page = eventPage(result.text)
+    expect(Buffer.byteLength(result.text, 'utf8')).toBeLessThanOrEqual(CONTEXT_OUTPUT_LIMIT_BYTES)
+    expect(page.offset).toBe(offset)
+    expect(page.hasMore).toBe(result.hasMore)
+    expect(page.nextOffset).toBe(result.nextOffset)
+    parts.push(page.body)
+    pages += 1
+    if (result.hasMore !== true) break
+    expect(result.nextOffset as number).toBeGreaterThan(offset)
+    offset = result.nextOffset as number
+    expect(pages).toBeLessThan(20_000)
+  }
+  return { text: parts.join(''), pages }
 }
 
 describe('the caller\'s contract and its root briefing', () => {
@@ -268,12 +361,13 @@ describe('the output bound', () => {
       taskId: 't-huge',
       sessionId: 's-worker-huge',
       runId: 'r-huge',
-      objective: `a huge contract ${'y'.repeat(20_000)}`,
+      objective: `a huge contract ${'y'.repeat(OVER_BOUND_BYTES)}`,
       parentTaskId: 't-root',
       depth: 1,
     })
     expect(expectRefused(await stack.service.taskRead('s-worker-huge'), 'context-too-large')).toContain('context_read')
-    expect(expectRefused(await stack.service.contractProjection('s-worker-huge'), 'context-too-large')).toContain('16384-byte output bound')
+    expect(expectRefused(await stack.service.contractProjection('s-worker-huge'), 'context-too-large'))
+      .toContain(`${CONTEXT_OUTPUT_LIMIT_BYTES}-byte output bound`)
     // The same record is still readable in pages, with a continuation.
     const first = expectOk(await stack.service.contextRead('s-worker-huge', { kind: 'task', ref: 't-huge' }))
     expect(first.hasMore).toBe(true)
@@ -338,13 +432,13 @@ describe('the output bound', () => {
   test('an event larger than the bound is refused by name, never cut', async () => {
     const { stack, chain } = await chainStack()
     stack.member(chain.graph, 's-big-event')
-    stack.sessionLog('s-big-event', ['x'.repeat(20_000)])
+    stack.sessionLog('s-big-event', ['x'.repeat(OVER_BOUND_BYTES)])
     const result = await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-big-event', limit: 1 })
     // The refusal names the seq, the size of the event's own text, the fact that
     // an offset addresses whole events, and the one deliberate way past it.
     const detail = expectRefused(result, 'context-too-large')
     expect(detail).toContain('seq 0')
-    expect(detail).toContain('20000')
+    expect(detail).toContain(String(OVER_BOUND_BYTES))
     expect(detail).toMatch(/whole events/)
     expect(detail).toMatch(/offset 1\b/)
     // It is a refusal, not a page: no partial body of that event is returned.
@@ -355,7 +449,7 @@ describe('the output bound', () => {
   test('a page ends before an event that does not fit, and the next read refuses at that seq', async () => {
     const { stack, chain } = await chainStack()
     stack.member(chain.graph, 's-mixed-events')
-    stack.sessionLog('s-mixed-events', ['a short event', 'y'.repeat(20_000)])
+    stack.sessionLog('s-mixed-events', ['a short event', 'y'.repeat(OVER_BOUND_BYTES)])
     const page = expectOk(await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-mixed-events', limit: 2 }))
     expect(page.text).toContain('seq 0 | user/message')
     expect(page.text).not.toContain('yyy')
@@ -364,7 +458,7 @@ describe('the output bound', () => {
     expect(page.hasMore).toBe(true)
     expect(page.nextOffset).toBe(1)
     expect(page.text).toMatch(/seq 1\b.*not shown/)
-    expect(page.text).toContain('20000')
+    expect(page.text).toContain(String(OVER_BOUND_BYTES))
     // A follow-up read at that seq hits the whole-event refusal and names the one
     // offset that moves past it — the caller's choice, not the read's.
     const detail = expectRefused(
@@ -379,12 +473,13 @@ describe('the output bound', () => {
     const { stack, chain } = await chainStack()
     // The shape an independent audit measured: a page whose first event nearly
     // fills the bound and then stops before a huge second one. Sizes sweep the
-    // byte windows (≈15 988–16 049 and ≥ 16 134) in which the closing lines used
-    // to fall outside the bound, leaving the model a page with no cue at all.
-    for (const size of [15_600, 15_900, 15_988, 16_000, 16_049, 16_050, 16_100, 16_133, 16_134, 16_200, 16_390]) {
+    // byte windows (≈ 396–335 bytes below the bound, and at or past 250 bytes
+    // below it) in which the closing lines used to fall outside the bound,
+    // leaving the model a page with no cue at all.
+    for (const size of [-784, -484, -396, -384, -335, -334, -284, -251, -250, -184, 6].map(delta => CONTEXT_OUTPUT_LIMIT_BYTES + delta)) {
       const session = `s-size-${size}`
       stack.member(chain.graph, session)
-      stack.sessionLog(session, ['A'.repeat(size), 'B'.repeat(20_000)])
+      stack.sessionLog(session, ['A'.repeat(size), 'B'.repeat(OVER_BOUND_BYTES)])
       const result = await stack.service.contextRead('s-g1', { kind: 'session', ref: session, limit: 2 })
       if (!result.ok) {
         // A first event that cannot be carried is refused by name, never cut.
@@ -410,6 +505,279 @@ describe('the output bound', () => {
     const detail = expectRefused(await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-c1' }), 'unreadable')
     expect(detail).toContain('membership of session "s-c1"')
     expect(detail).toContain('the graph store is not readable')
+  })
+})
+
+/**
+ * One session event by its `{sessionId, seq}` reference (Q3 closure): the door a
+ * session listing opens for an event too large to render inline. The listing's
+ * own unit is the whole event, so this read carries the event's *visible text*
+ * (`extractSessionEventText`) paged in UTF-8 bytes as JSON — never the raw
+ * session JSON, and never a page that splits a character.
+ */
+describe('one session event by its {sessionId, seq} reference', () => {
+  test('the object reference is accepted now, and reads one short event whole', async () => {
+    const { stack } = await chainStack()
+    // Red first: before this door existed the same call answered the
+    // malformed-reference refusal — `not-found` with "the reference given
+    // ({"sessionId":"s-c1","seq":0}) is not that shape" — although the tool
+    // schema already declared the branch and forwarded it.
+    const page = expectOk(await stack.service.contextRead('s-c1', { kind: 'session', ref: { sessionId: 's-c1', seq: 0 } }))
+    const visible = extractSessionEventText(await loggedEvent(stack, 's-c1', 0))
+    const parsed = eventPage(page.text)
+    for (const key of ['sessionId', 'seq', 'offset', 'nextOffset', 'hasMore', 'body']) {
+      expect(Object.keys(parsed)).toContain(key)
+    }
+    expect(parsed.sessionId).toBe('s-c1')
+    expect(parsed.seq).toBe(0)
+    expect(parsed.offset).toBe(0)
+    // The body is the event's visible text, not a rendering of the session JSON it lives in.
+    expect(parsed.body).toBe(visible)
+    expect(parsed.hasMore).toBe(false)
+    // Offsets are byte positions in that text: the final page ends at its size.
+    expect(parsed.nextOffset).toBe(Buffer.byteLength(visible, 'utf8'))
+    // The final page says where the listing continues: the listing pages by
+    // event seq, this read by byte, so it names the seq *after* this event.
+    expect(parsed.note as string).toContain('offset = 1')
+    expect(parsed.note as string).toContain('s-c1')
+    // The struct's continuation is the page's own: either one continues from the same place.
+    expect(page.hasMore).toBe(parsed.hasMore)
+    expect(page.nextOffset).toBe(parsed.nextOffset)
+    expect(page.source).toContain('s-c1')
+    expect(page.source).toContain('seq 0')
+    expect(page.source).toContain(String(Buffer.byteLength(visible, 'utf8')))
+  })
+
+  // The floor walk is deliberately thousands of pages (one character at a time
+  // over a body past the bound), so it gets room beyond the default per-test
+  // budget.
+  test('a long body of Chinese text and escaped characters walks out page by page, character for character', { timeout: 60_000 }, async () => {
+    const { stack, chain } = await chainStack()
+    stack.member(chain.graph, 's-long')
+    // Chinese (3-byte) characters plus every class JSON widens: a quote, a
+    // backslash, a newline and a control character. The bound is on the JSON the
+    // model receives rather than on the raw fragment, so a body whose escapes
+    // multiply its size still has to walk out whole.
+    const seeded = `正文开始 ${'汉'.repeat(2_000)} 引号:" 反斜杠:\\ 换行:\n 控制:\u0007 ${'x'.repeat(CONTEXT_OUTPUT_LIMIT_BYTES)} 正文结束`
+    stack.sessionLog('s-long', [seeded])
+    const visible = extractSessionEventText(await loggedEvent(stack, 's-long', 0))
+    expect(Buffer.byteLength(visible, 'utf8')).toBeGreaterThan(CONTEXT_OUTPUT_LIMIT_BYTES)
+    for (const character of ['汉', '"', '\\', '\n', '\u0007']) expect(visible).toContain(character)
+
+    const wide = await walkEvent(stack, 's-g1', 's-long', 0, 4_096)
+    expect(wide.pages).toBeGreaterThan(1)
+    expect(wide.text).toBe(visible)
+    // The same walk at the clamp floor: four bytes a page, one character at a
+    // time, still whole, still strictly advancing.
+    const narrow = await walkEvent(stack, 's-g1', 's-long', 0, 4)
+    expect(narrow.pages).toBeGreaterThan(1_000)
+    expect(narrow.text).toBe(visible)
+  })
+
+  test('an escape-heavy body never exceeds the page bound, and every page still advances', async () => {
+    const { stack, chain } = await chainStack()
+    // One body whose every character escapes to two bytes, one whose every
+    // character escapes to six: a raw-byte page of either would blow the bound
+    // after escaping, so the page is sized against the JSON, not the fragment.
+    for (const [session, body] of [
+      ['s-quotes', '"'.repeat(OVER_BOUND_BYTES)],
+      ['s-controls', '\u0007'.repeat(OVER_BOUND_BYTES)],
+    ] as const) {
+      stack.member(chain.graph, session)
+      stack.sessionLog(session, [body])
+      const visible = extractSessionEventText(await loggedEvent(stack, session, 0))
+      const walk = await walkEvent(stack, 's-g1', session, 0)
+      expect(walk.pages).toBeGreaterThan(1)
+      expect(walk.text).toBe(visible)
+    }
+  })
+
+  test('the limit clamps into 4..the bound, and a limit that is not a positive safe integer is not-found', async () => {
+    const { stack, chain } = await chainStack()
+    stack.member(chain.graph, 's-clamped')
+    stack.sessionLog('s-clamped', ['l'.repeat(OVER_BOUND_BYTES)])
+    const counter = trackEventReads(stack)
+    // The clamp floor is 4 bytes: a page always carries at least one character,
+    // so an offset handed back never stalls on the same byte again.
+    const floor = eventPage(
+      expectOk(await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-clamped', seq: 0 }, limit: 1 })).text,
+    )
+    expect(Buffer.byteLength(floor.body, 'utf8')).toBe(4)
+    expect(floor.hasMore).toBe(true)
+    // The ceiling is the output bound, and what fits in it is the page *JSON*,
+    // so a huge limit still yields a body smaller than the bound — and the page
+    // says there is more, so the body below is a page, not the whole event.
+    const capped = expectOk(
+      await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-clamped', seq: 0 }, limit: 999_999 }),
+    )
+    expect(Buffer.byteLength(capped.text, 'utf8')).toBeLessThanOrEqual(CONTEXT_OUTPUT_LIMIT_BYTES)
+    expect(eventPage(capped.text).hasMore).toBe(true)
+    expect(Buffer.byteLength(eventPage(capped.text).body, 'utf8')).toBeLessThan(CONTEXT_OUTPUT_LIMIT_BYTES)
+    // A limit that cannot be a page size is refused before the log is touched.
+    for (const limit of [0, -1, 2.5, Number.NaN]) {
+      expectRefused(
+        await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-clamped', seq: 0 }, limit }),
+        'not-found',
+      )
+    }
+    expect(counter.reads).toBe(2)
+  })
+
+  test('the listing hands a too-large event back as the exact reference that reads it', async () => {
+    const { stack, chain } = await chainStack()
+    stack.member(chain.graph, 's-hand')
+    stack.sessionLog('s-hand', ['a short event', 'y'.repeat(OVER_BOUND_BYTES)])
+    // A page that stops before the event names it, its size, and the reference
+    // that reads its text — never "skip it to get its body".
+    const page = expectOk(await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-hand', limit: 2 }))
+    expect(page.text).toContain('ref:{"sessionId":"s-hand","seq":1}')
+    expect(page.text).toContain(String(OVER_BOUND_BYTES))
+    // The refusal when the event is the page's first names the same reference,
+    // and moving past the event stays the caller's explicit choice.
+    const refused = expectRefused(
+      await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-hand', offset: 1, limit: 2 }),
+      'context-too-large',
+    )
+    expect(refused).toContain('ref:{"sessionId":"s-hand","seq":1}')
+    expect(refused).toMatch(/cannot render/)
+    expect(refused).toContain('offset 2')
+    // The handed-back reference really is the door to that event's text: walked
+    // to its end, it restores the whole event.
+    const walk = await walkEvent(stack, 's-g1', 's-hand', 1)
+    expect(walk.text).toBe('y'.repeat(OVER_BOUND_BYTES))
+  })
+})
+
+/**
+ * The refusals of a session-event read, in the order the contract fixes: the seq,
+ * the offset and the limit are judged before anything is read, the session is
+ * checked against the caller's graph before DSH is asked, and only a reference
+ * that survives all of that reaches the log.
+ */
+describe('the refusals of a session event read', () => {
+  test('a malformed reference, an unpageable seq and an unpageable offset are refused before the log is touched', async () => {
+    const { stack } = await chainStack()
+    const counter = trackEventReads(stack)
+    // Object references the event branch does not accept name no event, and the
+    // refusal says which shape the kind reads.
+    for (const ref of [{ sessionId: 's-c1' }, { seq: 0 }, { sessionId: 42, seq: 0 }]) {
+      expect(expectRefused(await stack.service.contextRead('s-g1', { kind: 'session', ref: ref as never }), 'not-found'))
+        .toContain('{sessionId, seq}')
+    }
+    // A seq is a DSH event seq: a negative, fractional or non-finite one names no event.
+    for (const seq of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(expectRefused(await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-c1', seq } }), 'not-found'))
+        .toContain(String(seq))
+    }
+    // An offset is a byte position in the event's text, so a negative,
+    // fractional or non-finite one is not a page boundary at all.
+    for (const offset of [-1, 2.5, Number.NaN]) {
+      expectRefused(
+        await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-c1', seq: 0 }, offset }),
+        'stale-reference',
+      )
+    }
+    expect(counter.reads).toBe(0)
+  })
+
+  test('a session of another graph, and a membership view that fails, are refused before the log is touched', async () => {
+    const { stack, chain } = await chainStack()
+    const other = await secondGraph(stack)
+    const counter = trackEventReads(stack)
+    expect(expectRefused(
+      await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: other.rootSession, seq: 0 } }),
+      'cross-graph',
+    )).toContain('not a published member')
+    expect(counter.reads).toBe(0)
+    // An unverifiable membership is a named failure, never a pass: the event
+    // door checks the graph store exactly as the listing does.
+    stack.breakGraphView(new Error('the graph store is not readable'), chain.graph)
+    const detail = expectRefused(
+      await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-c1', seq: 0 } }),
+      'unreadable',
+    )
+    expect(detail).toContain('membership of session "s-c1"')
+    expect(detail).toContain('the graph store is not readable')
+    expect(counter.reads).toBe(0)
+  })
+
+  test('an event the log does not hold is stale, and a log that stops answering is unreadable with no text', async () => {
+    const { stack } = await chainStack()
+    // s-c1's log holds seq 0 and 1 and nothing else.
+    expect(expectRefused(
+      await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-c1', seq: 5 } }),
+      'stale-reference',
+    )).toContain('seq 5')
+    const query = (stack.ctx as unknown as { sessionQuery: SessionQuerySeam }).sessionQuery
+    query.readEvent = async () => {
+      throw new Error('the log stopped answering')
+    }
+    const result = await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-c1', seq: 0 } })
+    expect(expectRefused(result, 'unreadable')).toContain('the log stopped answering')
+    // A failed read is a refusal, not a page: no partial body, no JSON wrapper.
+    expect('text' in result).toBe(false)
+    expect(JSON.stringify(result)).not.toContain('child one')
+  })
+
+  test('an answer that names another event is stale, never rendered as this one', async () => {
+    const { stack } = await chainStack()
+    const query = (stack.ctx as unknown as { sessionQuery: SessionQuerySeam }).sessionQuery
+    const real = query.readEvent.bind(query)
+    query.readEvent = async (request, signal) => {
+      const window = await real(request, signal)
+      // The log's seq-1 event where seq 0 was asked for: a source that answers a
+      // different event must not have that event's text rendered as seq 0's.
+      return request.seq === 0 ? { ...window, target: (await real({ ...request, seq: 1 }, signal)).target } : window
+    }
+    const detail = expectRefused(
+      await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-c1', seq: 0 } }),
+      'stale-reference',
+    )
+    expect(detail).toContain('seq 1')
+    expect(detail).toContain('seq 0')
+  })
+
+  test('an offset inside a character, at the end of the text and far past it is stale, never silently realigned', async () => {
+    const { stack, chain } = await chainStack()
+    stack.member(chain.graph, 's-bytes')
+    // A body that starts with a three-byte character: bytes 1 and 2 are inside it.
+    stack.sessionLog('s-bytes', [`中${'x'.repeat(32)}`])
+    const visible = extractSessionEventText(await loggedEvent(stack, 's-bytes', 0))
+    const total = Buffer.byteLength(visible, 'utf8')
+    for (const offset of [1, 2, total, 999_999]) {
+      expect(expectRefused(
+        await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-bytes', seq: 0 }, offset }),
+        'stale-reference',
+      )).toContain(String(offset))
+    }
+    // Byte 3 is the boundary after that character: a page from there is the rest of the text.
+    const tail = eventPage(
+      expectOk(await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-bytes', seq: 0 }, offset: 3 })).text,
+    )
+    expect(tail.offset).toBe(3)
+    expect(tail.body).toBe(visible.slice(1))
+  })
+
+  test('an event with no visible text has exactly one page, and only at offset 0', async () => {
+    const { stack, chain } = await chainStack()
+    stack.member(chain.graph, 's-empty-event')
+    // An event whose extractable text is empty: there is nothing to page, so the
+    // one page that exists is offset 0's, and any later byte is past its end.
+    stack.sessionLog('s-empty-event', [''])
+    const result = expectOk(
+      await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-empty-event', seq: 0 } }),
+    )
+    const parsed = eventPage(result.text)
+    expect(parsed.body).toBe('')
+    expect(parsed.hasMore).toBe(false)
+    expect(parsed.nextOffset).toBe(0)
+    expect(result.hasMore).toBe(false)
+    expect(result.nextOffset).toBe(0)
+    expect(parsed.note as string).toContain('offset = 1')
+    expect(expectRefused(
+      await stack.service.contextRead('s-g1', { kind: 'session', ref: { sessionId: 's-empty-event', seq: 0 }, offset: 5 }),
+      'stale-reference',
+    )).toContain('5')
   })
 })
 

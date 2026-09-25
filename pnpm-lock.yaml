@@ -197,6 +197,9 @@ importers:
       '@deepseek-ai/dsh-agent':
         specifier: link:../../../thirdparty/deepseek-harness/packages/core/agent
         version: link:../../../thirdparty/deepseek-harness/packages/core/agent
+      '@deepseek-ai/dsh-output-retention':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/util/output-retention
+        version: link:../../../thirdparty/deepseek-harness/packages/util/output-retention
       '@deepseek-ai/dsh-session':
         specifier: link:../../../thirdparty/deepseek-harness/packages/core/session
         version: link:../../../thirdparty/deepseek-harness/packages/core/session

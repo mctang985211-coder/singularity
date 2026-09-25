@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { TaskEvent } from '../../task/src/index.ts'
+import { CONTEXT_OUTPUT_LIMIT_BYTES } from '../../context/src/index.ts'
 import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stack.ts'
+
+/** The smallest fixture that is really over the bound: the bound plus a few KB. */
+const OVER_BOUND_BYTES = CONTEXT_OUTPUT_LIMIT_BYTES + 5_000
 
 /**
  * Q3/Q4 (2026-09-25 rework), at the tool door the model actually calls: the real
@@ -11,7 +15,7 @@ import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stac
  * the deployment's own registry, for the two shapes the review named:
  *
  * - a session whose log answers one window and then fails, and a single session
- *   event larger than the 16 KiB bound;
+ *   event larger than the bound;
  * - a task whose summary line is larger than the bound, at `limit: 1` and inside
  *   a larger page.
  *
@@ -52,7 +56,7 @@ async function oversizedTask(stack: AssemblyStack, storeId: string, parentTaskId
     taskId,
     definitionRef: { taskType: 'subtask', version: 1 },
     parentTaskId,
-    objective: `an objective no page can carry ${'z'.repeat(20_000)}`,
+    objective: `an objective no page can carry ${'z'.repeat(OVER_BOUND_BYTES)}`,
     depth: 1,
     acceptanceCriteria: [{
       criterionId: 'ac-enormous',
@@ -166,7 +170,7 @@ describe('the status page a model is handed (Q4)', () => {
 describe('the session page a model is handed (Q3)', () => {
   it('refuses an event larger than the bound by name instead of cutting it, and stops a later one at its own seq', async () => {
     const stack = await boot({ worker: async () => {} })
-    const giant = 'y'.repeat(20_000)
+    const giant = 'y'.repeat(OVER_BOUND_BYTES)
     await stack.seedLog('s-root', ['the first event', giant])
 
     // The oversized event is the page's first: nothing of it is shown, and the
@@ -174,9 +178,14 @@ describe('the session page a model is handed (Q3)', () => {
     const first = await stack.call('s-root', 'context_read', { kind: 'session', ref: 's-root', offset: 1, limit: 1 })
     expect(first.text).toContain('context_read context-too-large')
     expect(first.text).toContain('event seq 1')
-    expect(first.text).toContain('does not fit one 16384-byte page')
-    expect(first.text).toContain('a session offset addresses whole events')
+    expect(first.text).toContain(`does not fit one ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte page`)
+    // The refusal names the event and hands back the reference that reads it
+    // (Q3 closure): the listing's own cursor passes the event and shows none of
+    // its text, which the refusal says outright rather than implying a read.
+    expect(first.text).toContain('ref:{"sessionId":"s-root","seq":1}')
+    expect(first.text).toContain('none of its text is shown')
     expect(first.text).toContain('offset 2')
+    expect(first.text).toMatch(/not a way to read/i)
     expect(first.text).not.toContain(giant)
 
     // A page that meets it *after* an event it can carry ends before it, at the
@@ -186,6 +195,8 @@ describe('the session page a model is handed (Q3)', () => {
     expect(stopped.text).toContain('seq 0 | user/message')
     expect(stopped.text).toContain('the first event')
     expect(stopped.text).toMatch(/more follows from seq 1\b/)
+    // The page that stops before the event names that event's own reference too.
+    expect(stopped.text).toContain('ref:{"sessionId":"s-root","seq":1}')
     expect(stopped.text).not.toContain(giant)
     expect(stopped.text).not.toContain('more follows from seq 2')
 

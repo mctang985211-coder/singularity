@@ -34,6 +34,7 @@ import SessionStore, { SessionId } from '../../../../thirdparty/deepseek-harness
 import type { SessionEvent } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import SkillRegistry from '../../../../thirdparty/deepseek-harness/packages/skill/skill/lib/index.js'
 import JsonlSessionPersistence from '../../../../thirdparty/deepseek-harness/packages/session/session-persistence-jsonl/lib/index.js'
+import { SessionQueryError } from '../../../../thirdparty/deepseek-harness/packages/session-query/session-query/lib/index.js'
 import { createUserMessage } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
 import { createScope } from '../../../../thirdparty/deepseek-harness/packages/core/scope/lib/index.js'
 import type { Agent, ToolDefinition } from '@deepseek-ai/dsh-agent'
@@ -256,7 +257,15 @@ export class AssemblyStack {
       readEvent: async (request: { sessionId: string; seq: number; before?: number; after?: number }) => {
         const events = await readLog(String(request.sessionId))
         const target = events.find(event => event.seq === request.seq)
-        if (target === undefined) throw new Error(`session "${String(request.sessionId)}" has no event at seq ${request.seq}`)
+        // The lack of an event at a seq is a *coded* condition in DSH's own
+        // engine, and the read core tells it apart from a source that failed;
+        // the stand-in answers it the same way.
+        if (target === undefined) {
+          throw new SessionQueryError(
+            `session "${String(request.sessionId)}" has no event at seq ${request.seq}`,
+            'SESSION_QUERY_EVENT_NOT_FOUND',
+          )
+        }
         const start = Math.max(0, request.seq - (request.before ?? 0))
         const end = Math.min(events.length - 1, request.seq + (request.after ?? 0))
         return { target, events: events.slice(start, end + 1), startSeq: start, endSeq: end }
