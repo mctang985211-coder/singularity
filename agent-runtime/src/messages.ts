@@ -267,6 +267,51 @@ export async function readToolCallBody(deps: MessageDeliveryDeps, ref: ToolCallR
 }
 
 /**
+ * The part of one Session's log a citation lookup needs: the Session it belongs
+ * to, how many of its leading events are fork-inherited, and the events. Written
+ * structurally so a caller that holds a Session log — this package's own
+ * `SessionLogSnapshot`, or a reader that only kept these three fields — can be
+ * searched without this module importing the query engine's types.
+ */
+export interface SessionOwnLog {
+  /** The Session the events belong to; its id is the citation's `sessionId`. */
+  readonly session: { readonly id: SessionId }
+  /** How many leading events came from the fork's ancestor and are not this Session's own. */
+  readonly inheritedEventCount: number
+  /** The log's events, in seq order. */
+  readonly events: readonly SessionEvent[]
+}
+
+/**
+ * The citation of one `tool/call` inside a Session's *own* event suffix, found
+ * by the call id the tool layer holds (A4 §F.1).
+ *
+ * Why the caller needs this at all: the body of a question or an answer is the
+ * sender's own tool call, and the durable citation into it is a `(session, seq)`
+ * pair, while what a tool call has in hand is its registration id
+ * ({@link ToolCallRef} is what {@link readToolCallBody} takes). This is that
+ * translation, as a pure read of a Session log the caller already has, so the
+ * lookup rule — own suffix only, the *last* event for an id — lives beside the
+ * citation type instead of in each caller.
+ *
+ * The suffix rule is the delivery fold's ({@link ownSuffix}): a fork-inherited
+ * prefix belongs to the Session this one descends from, and a call made there is
+ * not a call this Session made. The last event wins because a log is append-only
+ * and an id — were it ever re-dispatched — would be answered by its latest
+ * durable record.
+ */
+export function toolCallRefIn(log: SessionOwnLog, callId: string): ToolCallRef | undefined {
+  const own = log.events.slice(log.inheritedEventCount)
+  for (let index = own.length - 1; index >= 0; index -= 1) {
+    const event = own[index] as SessionEvent
+    if (event.type !== 'tool/call') continue
+    if (String(event.data.callId) !== callId) continue
+    return { sessionId: log.session.id, seq: event.seq }
+  }
+  return undefined
+}
+
+/**
  * Put one already-decided message into the target Session's inbox, at most once.
  *
  * Order: reconcile, then relay, then flush, then confirm. Reconcile-first is

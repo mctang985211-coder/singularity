@@ -3888,9 +3888,10 @@ describe('A3 coordination', () => {
     let attempts = 0
     h.task.snapshotIn = async () => { attempts += 1; throw new Error('the log is unreadable') }
     // `reconcileStore` now answers with the proposals it could not finish
-    // (T2/T3 §5), so "nothing was reconciled" is the empty report — and the read
-    // is still attempted exactly once, before anything at all is touched.
-    await expect(h.runtime.reconcileStore(STORE)).resolves.toEqual({ unresolvedProposals: [] })
+    // (T2/T3 §5) and the question deliveries it owes (A4 §F.1), so "nothing was
+    // reconciled" is the empty report — and the read is still attempted exactly
+    // once, before anything at all is touched.
+    await expect(h.runtime.reconcileStore(STORE)).resolves.toEqual({ unresolvedProposals: [], questionDeliveries: [] })
     h.task.snapshotIn = original
     expect(attempts).toBe(1)
     expect((await h.task.runIn(STORE, runId)).status).toBe('running')

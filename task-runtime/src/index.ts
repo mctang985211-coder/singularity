@@ -48,7 +48,9 @@ import {
   ROOT_PROPOSAL_TASK_ID,
   TASK_CONTRACT_VERSION,
   admissionContextDigest,
+  blockingQuestionsOf,
   contractDigest,
+  questionOf,
   reviewContextDigest,
   rootProposalDigest,
   rootProposalId,
@@ -72,6 +74,7 @@ import {
   fixSpecProtectedInputs,
 } from './protected-inputs.ts'
 import {
+  blockUnstartedChildren,
   deriveChildOutcomes,
   driveBatch,
   runReplayTask,
@@ -85,9 +88,24 @@ import {
   type OrchestrateEnv,
   type ReplayOverlay,
   type ReplayRunOutcome,
+  type RuntimeSettlementEnv,
   type SessionObservation,
   type VerifyRunOptions,
 } from './orchestrate.ts'
+import {
+  answerParentQuestion,
+  applyStoreQuestionBlocking,
+  askParentQuestion,
+  pendingCoordinationOf,
+  reconcileQuestionDeliveries,
+  type AnsweredQuestionOutcome,
+  type AskedQuestionOutcome,
+  type ParentAnswerCall,
+  type ParentAskCall,
+  type QuestionCaller,
+  type QuestionCoordinationDeps,
+  type QuestionReconcileReport,
+} from './question.ts'
 import { WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, describeOwner, normalizeWorkspacePath, releaseLayer } from './workspace.ts'
 import { drainSession } from './gate.ts'
 import type { WorkspaceOwner } from './workspace.ts'
@@ -229,6 +247,7 @@ export type {
   VerifyRunOptions,
 } from './orchestrate.ts'
 export {
+  blockUnstartedChildren,
   deriveChildOutcomes,
   driveBatch,
   runReplayTask,
@@ -238,6 +257,29 @@ export {
   VerifierUnavailableError,
   escalationHint,
 } from './orchestrate.ts'
+export type {
+  AnsweredQuestionOutcome,
+  AskedQuestionOutcome,
+  ParentAnswerCall,
+  ParentAskCall,
+  PendingQuestionMessage,
+  PendingQuestionMessages,
+  QuestionCaller,
+  QuestionCoordinationDeps,
+  QuestionDelivery,
+  QuestionReconcileReport,
+} from './question.ts'
+export {
+  answerMessageIdOf,
+  applyStoreQuestionBlocking,
+  answerParentQuestion,
+  askParentQuestion,
+  parseCallArguments,
+  pendingCoordinationOf,
+  pendingQuestionMessages,
+  questionMessageIdOf,
+  reconcileQuestionDeliveries,
+} from './question.ts'
 
 /** Local view of the verifier service (ticket C2 develops it in parallel): the
  * runtime resolves it softly from the context and never imports the package. */
@@ -1177,6 +1219,13 @@ export interface ReconcileReport {
     status: TaskProposalStatus
     reason: string
   }[]
+  /**
+   * What the pass's own question deliveries settled as (A4 §F.1), one record per
+   * fact the store still owed a message for — `delivered`, `already-present`, or
+   * `unavailable` for a target nobody has brought back yet. Empty means the store
+   * owed nothing; a `refused` record names why that one could not be decided.
+   */
+  readonly questionDeliveries: readonly QuestionReconcileReport[]
 }
 
 /**
@@ -1882,6 +1931,12 @@ export class TaskRuntime extends Service {
     for (const run of snapshot.runs) {
       this.gatePhaseFromStore(run.sessionId, run, storeId, tokens.get(run.sessionId) ?? 0)
     }
+    // The question blocks come from the same read and the same tokens (A4 §F.1):
+    // a restarted session whose run is waiting on an unresolved blocking question
+    // is blocked again from the durable facts, whether or not this process bound
+    // it — the gate keys on the session id, and the store's runs are what name
+    // the sessions.
+    applyStoreQuestionBlocking(this.executionGate, snapshot, sessionId => tokens.get(sessionId) ?? 0)
   }
 
   /**
@@ -4563,51 +4618,78 @@ export class TaskRuntime extends Service {
    * Fail one batch's parent run without an `OrchestrateEnv`: the children that
    * never started are blocked, the parent run is failed with the cause, and the
    * owner is told. Store-level on purpose — the caller is here because the env
-   * could not be built, so the store service and the notification seam are all
-   * this path needs — and it never throws, so a driver's failure cannot become an
-   * unhandled rejection of its own. `outcome` is `'cancelled'` only for a batch
-   * whose driver never started (a recovery barrier stood it down when the
-   * cancellation aborted it): the same writes a started driver's abort branch
-   * makes, from the one place that can still make them.
+   * could not be built, so this path holds the settlement's own narrow
+   * capabilities ({@link TaskRuntime.settlementParts}) instead of building one —
+   * and it never throws, so a driver's failure cannot become an unhandled
+   * rejection of its own. `outcome` is `'cancelled'` only for a batch whose
+   * driver never started (a recovery barrier stood it down when the cancellation
+   * aborted it): the same writes a started driver's abort branch makes, from the
+   * one place that can still make them.
+   *
+   * The two writes are the orchestration's own (A4-5): `blockUnstartedChildren`
+   * and `settleRunFromRuntime`, the same pair every other batch failure uses —
+   * there is no second terminal-record writer here.
    */
   private async failBatchFromRuntime(storeId: string, key: string, reason: string, outcome: 'failed' | 'cancelled' = 'failed'): Promise<void> {
     const prefix = `${storeId}/b-`
     if (!key.startsWith(prefix)) return
     const parentTaskId = key.slice(prefix.length) as TaskId
-    const actor = `fail-batch:${storeId}`
+    const parts = this.settlementParts(`fail-batch:${storeId}`)
     try {
+      await blockUnstartedChildren(parts, storeId, parentTaskId, reason)
       const snapshot = await this.ctx.task.snapshotIn(storeId)
-      const parentTask = snapshot.tasks.find(task => task.taskId === parentTaskId)
       const parentRun = [...snapshot.runs].reverse().find(run => run.taskId === parentTaskId && run.status === 'running')
-      for (const childTaskId of parentTask?.childTaskIds ?? []) {
-        const child = snapshot.tasks.find(task => task.taskId === childTaskId)
-        if (child === undefined || child.status === 'verified' || child.status === 'failed' || child.status === 'blocked' || child.status === 'cancelled') continue
-        if (snapshot.runs.some(run => run.taskId === childTaskId)) continue
-        await this.ctx.task.markRunStatusIn(storeId, childTaskId, undefined as unknown as RunId, 'blocked', actor, { reason })
-        await this.ctx.task.recordReviewIn(storeId, {
-          taskId: childTaskId,
-          outcome: 'blocked',
-          evidenceRefs: [],
-          anomalies: [reason],
-          relatedTaskIds: [parentTaskId],
-        }, actor)
-      }
       if (parentRun === undefined) return
-      await this.ctx.task.markRunStatusIn(storeId, parentTaskId, parentRun.runId, outcome, actor, { reason })
-      await this.ctx.task.recordReviewIn(storeId, {
-        taskId: parentTaskId,
-        runId: parentRun.runId,
-        sessionId: parentRun.sessionId,
-        outcome,
-        evidenceRefs: [],
-        anomalies: [reason],
-        localizedCause: reason,
-        relatedTaskIds: parentTask?.childTaskIds ?? [],
-      }, actor)
-      this.notify(parentRun.sessionId, `task-runtime: batch ${key.slice(prefix.length - 2)} ${outcome}: ${reason}`)
+      await settleRunFromRuntime(parts, storeId, parentRun, outcome, `batch ${key.slice(prefix.length - 2)} ${outcome}: ${reason}`)
     } catch (error) {
       this.warn(`store ${storeId}: the failed driver ${key} could not be settled (${error instanceof Error ? error.message : String(error)})`)
     }
+  }
+
+  /**
+   * The narrow capabilities one runtime-level settlement holds — the store, the
+   * actor, the notification seam and the gate/workspace bookkeeping — for the one
+   * path that writes a terminal state without an orchestration env
+   * ({@link failBatchFromRuntime}): the caller is there precisely because this
+   * deployment's own view could not be built, so this holds the services that
+   * cannot fail for that reason and nothing else. The checkout registry is
+   * deliberately not among them: resolving a workspace path here would guess at
+   * the very environment whose construction failed, and a marker left for the
+   * explicit activation to reconcile is honest where a guessed release is not.
+   * Every other batch failure goes through the driver's own env, which carries
+   * the registry and releases the layer.
+   */
+  private settlementParts(actor: string): RuntimeSettlementEnv {
+    return {
+      task: this.ctx.task,
+      actor,
+      notify: (sessionId, text) => {
+        this.notify(sessionId, text)
+      },
+      observeSession: async sessionId => this.observeSession(sessionId),
+      budget: { ...this.config.budget },
+      onRunSettled: (storeId, taskId, runId, status) => {
+        this.runSettledFromRuntime(storeId, taskId, runId, status)
+      },
+    }
+  }
+
+  /**
+   * What the runtime does when *any* run reaches a terminal state (A3 §3.3): the
+   * gate closes for the session that held it, and the workspace layer the run
+   * claimed comes off the stack. One implementation for the orchestration's
+   * settlements and the runtime's own, so a run settled from either side leaves
+   * the process in the same state.
+   */
+  private runSettledFromRuntime(storeId: string, taskId: TaskId, runId: RunId, status: RunStatus): void {
+    void taskId
+    void status
+    const sessionId = this.sessionBoundInProcess(storeId, runId)
+    if (sessionId === undefined) return
+    this.executionGate.setTerminal(sessionId)
+    void this.releaseRunWorkspaceLayer(storeId, runId, sessionId).catch(error => {
+      this.warn(`run ${runId}: the workspace layer it held could not be released (${error instanceof Error ? error.message : String(error)})`)
+    })
   }
 
   /**
@@ -4744,6 +4826,111 @@ export class TaskRuntime extends Service {
           ? `run "${run.runId}" submitted and verified.`
           : `run "${run.runId}" submitted and settled ${status}; the terminal review record names why.`,
     }
+  }
+
+  /**
+   * Ask one's direct parent (A4 §F.1, `task_ask_parent`): the runtime entry the
+   * tool layer adapts.
+   *
+   * The identity is the caller's own — a live session, its run binding, and the
+   * parent the store derives from that run's task — and the body is read back
+   * from the caller's own Session before the store records anything, so a forged
+   * call id, another session's citation or a claim the message does not support
+   * is refused by name with no task event and no delivery. Everything after the
+   * commit (the write-gate block, the message under the *recorded* id) is owned
+   * by `./question.ts`; `unavailable` there is not a failure — the intent is
+   * durable, the record is returned, and recovery re-delivers.
+   */
+  async askParentQuestion(callerSessionId: string, request: ParentAskCall): Promise<AskedQuestionOutcome> {
+    const caller = await this.questionCaller(callerSessionId, 'task_ask_parent')
+    return await askParentQuestion(this.questionCoordination(), caller, request)
+  }
+
+  /**
+   * Answer one child's still-open question (A4 §F.1, `task_answer`): the same
+   * shape as {@link askParentQuestion}, with the answering run taken from the
+   * caller's binding and the delivery addressed to the run that asked. A
+   * resolving answer recomputes the *asking* run's block from the store, so a
+   * second open question keeps it blocked.
+   */
+  async answerParentQuestion(callerSessionId: string, request: ParentAnswerCall): Promise<AnsweredQuestionOutcome> {
+    const caller = await this.questionCaller(callerSessionId, 'task_answer')
+    const answered = await answerParentQuestion(this.questionCoordination(), caller, request)
+    // A coordination item closing can be the event that releases a waiting
+    // parent's own automatic submission (see {@link redriveWaitingParent}): both
+    // runs whose pending lists changed are re-driven, and nothing is settled here.
+    const snapshot = await this.ctx.task.snapshotIn(caller.storeId)
+    const question = questionOf(snapshot, answered.answer.questionId)
+    if (question !== undefined) await this.redriveWaitingParent(caller.storeId, question.childRunId)
+    await this.redriveWaitingParent(caller.storeId, caller.runId)
+    return answered
+  }
+
+  /**
+   * The identity every question call starts from: the live caller session, its
+   * run binding, and the store that binding names. A session with no run (a root
+   * before activation, a reviewer, a helper) has nobody to ask and nothing to
+   * answer, and is refused here before any other step.
+   */
+  private async questionCaller(callerSessionId: string, entry: string): Promise<QuestionCaller> {
+    if (this.agentOrUndefined(callerSessionId) === undefined) {
+      throw new Error(
+        `task-runtime: ${entry} needs a live caller session; "${callerSessionId}" has no live agent in this process, ` +
+        'and the question identity comes from the live caller\'s own run',
+      )
+    }
+    let binding: { storeId: string; task: TaskInstance; run: TaskRun }
+    try {
+      binding = await this.runForSession(callerSessionId)
+    } catch (error) {
+      throw new Error(`task-runtime: ${entry} refused: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+    }
+    await this.assertRecoveryReady(binding.storeId, entry)
+    return { sessionId: callerSessionId, storeId: binding.storeId, runId: binding.run.runId, actor: callerSessionId }
+  }
+
+  /** The services question coordination reaches: the store's entries, the session read path, agent-runtime's handle, and the gate. */
+  private questionCoordination(): QuestionCoordinationDeps {
+    return {
+      task: this.ctx.task,
+      sessionQuery: this.ctx.sessionQuery,
+      messages: this.ctx.agentRuntime,
+      gate: this.executionGate,
+    }
+  }
+
+  /**
+   * Re-drive a waiting parent whose last coordination item just closed (A4 §F.1).
+   *
+   * The parent's own submission has exactly one owner — the batch driver's
+   * `settleParentBatch` — and that owner holds it back while a coordination item
+   * is open. When the last one closes, the driver that owns the submission is
+   * re-entered (the same entry the recovery pass uses), so the answer that
+   * released the parent is what lets it submit instead of leaving a settled batch
+   * with a parent nobody owns. This writes nothing itself: the driver re-reads
+   * the store and the gate it applies is the same one.
+   */
+  private async redriveWaitingParent(storeId: string, runId: RunId): Promise<void> {
+    const snapshot = await this.ctx.task.snapshotIn(storeId)
+    const run = snapshot.runs.find(candidate => candidate.runId === runId)
+    if (run === undefined || run.status !== 'running' || run.executionPhase !== 'waiting_children' || run.batchId === undefined) return
+    if (pendingCoordinationOf(snapshot, runId).length > 0) return
+    if (this.drivers.has(`${storeId}/${run.batchId}`)) return
+    const task = snapshot.tasks.find(candidate => candidate.taskId === run.taskId)
+    const children = task?.childTaskIds ?? []
+    const childrenSettled = children.length > 0 && children.every(taskId => {
+      const status = snapshot.tasks.find(candidate => candidate.taskId === taskId)?.status
+      return status === 'verified' || status === 'failed' || status === 'blocked' || status === 'cancelled'
+    })
+    if (!childrenSettled) return
+    this.startBatchDriver({
+      storeId,
+      parentTaskId: run.taskId,
+      parentRunId: run.runId,
+      batchId: run.batchId,
+      callerSessionId: run.sessionId,
+      reason: `coordination item settled for batch ${run.batchId}`,
+    })
   }
 
   /**
@@ -4987,7 +5174,7 @@ export class TaskRuntime extends Service {
       snapshot = await this.ctx.task.snapshotIn(storeId)
     } catch (error) {
       this.warn(`store ${storeId}: recovery could not read the store (${error instanceof Error ? error.message : String(error)}), so nothing was reconciled`)
-      return { unresolvedProposals: [] }
+      return { unresolvedProposals: [], questionDeliveries: [] }
     }
     this.reindex(storeId, snapshot)
     const depthOf = (taskId: TaskId): number => snapshot.tasks.find(task => task.taskId === taskId)?.depth ?? 0
@@ -5046,6 +5233,23 @@ export class TaskRuntime extends Service {
       // historical tree) — so the store's own naming is what decides
       // (`rootTaskStoreId`, the mapping the store was opened under).
       if (rootTaskStoreId(run.sessionId) === storeId) continue
+      // The known question wait (A4 §F.1): a run whose unresolved blocking
+      // question is on the record is not an abandoned in-flight run, it is one
+      // parked exactly where the protocol told it to park — and the question is
+      // the durable fact that says so. Cancelling it would cancel the answer its
+      // parent still owes it, so the run keeps its identity (same session, same
+      // run) and the gate keeps the block (initializeStoreGates rebuilds it from
+      // this same snapshot). Everything else about an unsubmitted run is
+      // unchanged: a run without such a question is settled cancelled by name.
+      const pendingQuestions = blockingQuestionsOf(snapshot, run.runId)
+      if (pendingQuestions.length > 0) {
+        this.warn(
+          `store ${storeId}: run "${run.runId}" (session "${run.sessionId}") was in flight when this store was reopened and is waiting on ` +
+          `${pendingQuestions.length === 1 ? 'an unresolved blocking question' : `${pendingQuestions.length} unresolved blocking questions`} ` +
+          `(${pendingQuestions.map(question => question.questionId).join(', ')}); the run is left running with its block and no question is cancelled`,
+        )
+        continue
+      }
       await settleRunFromRuntime(
         env,
         storeId,
@@ -5091,11 +5295,28 @@ export class TaskRuntime extends Service {
         }
       }
     }
+    // The question deliveries this store still owes (A4 §F.1). This is the pass
+    // a restart runs, and it runs it *after* the sessions the barrier brought
+    // back are live — the root's among them — so a question addressed to a
+    // session this process just resumed is delivered here rather than left for a
+    // retry nobody would make. Targets that are still not live come back
+    // `unavailable`: zero side effects, no substitute parent, and the same retry
+    // on the next activation. Nothing here can fail the pass: a store whose
+    // deliveries cannot be decided is still a store whose facts were reconciled.
+    let questionDeliveries: QuestionReconcileReport[] = []
+    try {
+      questionDeliveries = await reconcileQuestionDeliveries(this.questionCoordination(), storeId)
+    } catch (error) {
+      this.warn(
+        `store ${storeId}: its pending question deliveries could not be reconciled ` +
+        `(${error instanceof Error ? error.message : String(error)}); the Task records still hold the intents, and the next activation retries`,
+      )
+    }
     // The proposal pass comes last (T2/T3 §5–§6): a batch it admits is driven by
     // the driver it starts, and the workspace question is already settled above,
     // so a continuation is not attempted into a checkout this process does not
     // hold.
-    return { unresolvedProposals: await this.reconcileProposals(storeId) }
+    return { unresolvedProposals: await this.reconcileProposals(storeId), questionDeliveries }
   }
 
   /**
@@ -5183,28 +5404,25 @@ export class TaskRuntime extends Service {
    * failed with the reason, and the batch's driver is aborted so its own loop
    * stops seeing work that no longer exists.
    */
+  /**
+   * The fallback batch-failure seam the orchestration calls when a run's own
+   * settlement cannot finish the batch (verification unavailable in a nested
+   * submission): every child that never started is blocked, the parent run is
+   * failed with the reason, and the batch's driver is aborted so its own loop
+   * stops seeing work that no longer exists.
+   *
+   * Both writes are the orchestration's own (A4-5): {@link blockUnstartedChildren}
+   * and {@link settleRunFromRuntime} — the same pair `failBatchFromRuntime` uses —
+   * so this file holds no second copy of either record shape.
+   */
   private async failBatch(storeId: string, batchId: string, reason: string): Promise<void> {
     const parentTaskId = batchId.startsWith('b-') ? batchId.slice(2) : undefined
     if (parentTaskId === undefined) return
     const entry = this.drivers.get(`${storeId}/${batchId}`)
     entry?.controller.abort()
     const env = await this.orchestrateEnv(await this.sessionForStore(storeId), `fail-batch:${storeId}`)
+    await blockUnstartedChildren(env, storeId, parentTaskId, reason)
     const snapshot = await this.ctx.task.snapshotIn(storeId)
-    const parentTask = snapshot.tasks.find(task => task.taskId === parentTaskId)
-    if (parentTask === undefined) return
-    for (const childTaskId of parentTask.childTaskIds) {
-      const child = snapshot.tasks.find(task => task.taskId === childTaskId)
-      if (child === undefined || child.status === 'verified' || child.status === 'failed' || child.status === 'blocked' || child.status === 'cancelled') continue
-      if (snapshot.runs.some(run => run.taskId === childTaskId)) continue
-      await env.task.markRunStatusIn(storeId, childTaskId, undefined as unknown as RunId, 'blocked', env.actor, { reason })
-      await env.task.recordReviewIn(storeId, {
-        taskId: childTaskId,
-        outcome: 'blocked',
-        evidenceRefs: [],
-        anomalies: [reason],
-        relatedTaskIds: [parentTaskId],
-      }, env.actor)
-    }
     const parentRun = [...snapshot.runs].reverse().find(run => run.taskId === parentTaskId && run.batchId === batchId)
     if (parentRun === undefined || parentRun.status !== 'running') return
     await settleRunFromRuntime(env, storeId, parentRun, 'failed', reason)
@@ -5696,17 +5914,12 @@ export class TaskRuntime extends Service {
       watchRun: (storeId, runId, callback) => this.watchRun(storeId, runId, callback),
       agentFor: sessionId => this.agentOrUndefined(sessionId),
       jobs: this.softService<JobsView>('jobs'),
+      // What every settled run leaves behind (the gate closes, the workspace
+      // layer comes off) is the runtime's own bookkeeping, shared with the
+      // settlements the runtime performs without an env — see
+      // {@link runSettledFromRuntime}.
       onRunSettled: (storeId, taskId, runId, status) => {
-        void status
-        // The gate closes for the session whose run just settled — a late write
-        // from a settled run is exactly what §2's last matrix row refuses — and
-        // the workspace layer the run held comes off the stack.
-        const sessionId = this.sessionBoundInProcess(storeId, runId)
-        if (sessionId === undefined) return
-        this.executionGate.setTerminal(sessionId)
-        void this.releaseRunWorkspaceLayer(storeId, runId, sessionId).catch(error => {
-          this.warn(`run ${runId}: the workspace layer it held could not be released (${error instanceof Error ? error.message : String(error)})`)
-        })
+        this.runSettledFromRuntime(storeId, taskId, runId, status)
       },
       failBatch: (storeId, batchId, reason) => this.failBatch(storeId, batchId, reason),
       assertPreset: async preset => {

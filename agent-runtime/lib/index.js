@@ -435,6 +435,36 @@ async function readToolCallBody(deps, ref) {
 	};
 }
 /**
+* The citation of one `tool/call` inside a Session's *own* event suffix, found
+* by the call id the tool layer holds (A4 §F.1).
+*
+* Why the caller needs this at all: the body of a question or an answer is the
+* sender's own tool call, and the durable citation into it is a `(session, seq)`
+* pair, while what a tool call has in hand is its registration id
+* ({@link ToolCallRef} is what {@link readToolCallBody} takes). This is that
+* translation, as a pure read of a Session log the caller already has, so the
+* lookup rule — own suffix only, the *last* event for an id — lives beside the
+* citation type instead of in each caller.
+*
+* The suffix rule is the delivery fold's ({@link ownSuffix}): a fork-inherited
+* prefix belongs to the Session this one descends from, and a call made there is
+* not a call this Session made. The last event wins because a log is append-only
+* and an id — were it ever re-dispatched — would be answered by its latest
+* durable record.
+*/
+function toolCallRefIn(log, callId) {
+	const own = log.events.slice(log.inheritedEventCount);
+	for (let index = own.length - 1; index >= 0; index -= 1) {
+		const event = own[index];
+		if (event.type !== "tool/call") continue;
+		if (String(event.data.callId) !== callId) continue;
+		return {
+			sessionId: log.session.id,
+			seq: event.seq
+		};
+	}
+}
+/**
 * Put one already-decided message into the target Session's inbox, at most once.
 *
 * Order: reconcile, then relay, then flush, then confirm. Reconcile-first is
@@ -1124,4 +1154,4 @@ var AgentRuntime = class extends Service {
 var src_default = AgentRuntime;
 
 //#endregion
-export { AgentRuntime, MessageDeliveryRefusal, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, answerMessageText, applyWorkerGrant, src_default as default, ensureAgentMessageDelivered, findSkillFileIn, messageAccepted, parseSkillFile, questionMessageText, readToolCallBody, reconcileAgentMessageDeliveries, relayMessage, resolveGrant, sealRawSessionReads, skillRootsFor };
+export { AgentRuntime, MessageDeliveryRefusal, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, answerMessageText, applyWorkerGrant, src_default as default, ensureAgentMessageDelivered, findSkillFileIn, messageAccepted, parseSkillFile, questionMessageText, readToolCallBody, reconcileAgentMessageDeliveries, relayMessage, resolveGrant, sealRawSessionReads, skillRootsFor, toolCallRefIn };

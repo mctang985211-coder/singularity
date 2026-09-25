@@ -183,6 +183,14 @@ export const WORKER_BASELINE_LABELS: readonly string[] = [
  *   not platform management: the human decision itself never happens in a
  *   worker's tool plane — the review channel is wired at the service assembly
  *   and a worker has no tool that could decide a proposal.
+ * - `task_ask_parent`, `task_answer` (A4 §F.1) — the two halves of the direct
+ *   parent/child question protocol, and the only effects a run keeps while it is
+ *   blocked on an unanswered question (`gate.ts:COORDINATION_ALLOWED`). **A4
+ *   sub-goal ③a note**: the names are listed here so a worker's own surface can
+ *   reach the runtime entries the write gate and the blocking tests drive; the
+ *   shipped tool definitions, their schemas and the root's own policy line are
+ *   ③c's, and nothing here decides what a call is allowed to say — the gate and
+ *   the Task store do.
  *
  * `graph_spawn` is deliberately NOT here, even though the deployment registers
  * it for the root: it reaches the graph without Task Admission and returns the
@@ -209,6 +217,8 @@ export const WORKER_BASELINE_TOOLS: readonly string[] = [
   'task_proposal_read',
   'task_proposal_continue',
   'task_proposal_cancel',
+  'task_ask_parent',
+  'task_answer',
 ]
 
 /**

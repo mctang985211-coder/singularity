@@ -1,7 +1,8 @@
 import { Context, Service } from "@deepseek-ai/cordis";
+import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
-import { AcceptanceCriterion, AdmissionContext, ArtifactRef, CapabilityManifest, ChildEvidenceRef, DecompositionAdmission, DecompositionIdentity, DependencyEdge, EvidenceBundle, ExecutionPhase, Obligation, ProtectedInputRef, ReviewCriterion, ReviewTokenUsage, ReviewToolCall, RunId, RunProviderBinding, RunSkillBinding, RunStatus, TaskContract, TaskContractVersion, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalDecisionOutcome, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalStatus, TaskProposalVerifierIdentity, TaskRun, TaskService, TaskSnapshot, VerificationMode } from "@dangosys/dsh-singularity-task";
-import { McpServerSpec, WorkerGrant } from "@dangosys/dsh-singularity-agent-runtime";
+import { AcceptanceCriterion, AdmissionContext, ArtifactRef, CapabilityManifest, ChildEvidenceRef, DecompositionAdmission, DecompositionIdentity, DependencyEdge, EvidenceBundle, ExecutionPhase, Obligation, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAsk, QuestionMessageRef, QuestionRecord, ReviewCriterion, ReviewTokenUsage, ReviewToolCall, RunId, RunProviderBinding, RunSkillBinding, RunStatus, TaskContract, TaskContractVersion, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalDecisionOutcome, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalStatus, TaskProposalVerifierIdentity, TaskRun, TaskService, TaskSnapshot, VerificationMode } from "@dangosys/dsh-singularity-task";
+import { AgentMessageIntent, McpServerSpec, MessageDeliveryReport, MessageDeliveryStatus, SessionOwnLog, ToolCallBody, ToolCallRef, WorkerGrant } from "@dangosys/dsh-singularity-agent-runtime";
 import { AgentHandle } from "@deepseek-ai/dsh-agent";
 
 //#region src/capability.d.ts
@@ -140,6 +141,14 @@ declare const WORKER_BASELINE_LABELS: readonly string[];
  *   not platform management: the human decision itself never happens in a
  *   worker's tool plane — the review channel is wired at the service assembly
  *   and a worker has no tool that could decide a proposal.
+ * - `task_ask_parent`, `task_answer` (A4 §F.1) — the two halves of the direct
+ *   parent/child question protocol, and the only effects a run keeps while it is
+ *   blocked on an unanswered question (`gate.ts:COORDINATION_ALLOWED`). **A4
+ *   sub-goal ③a note**: the names are listed here so a worker's own surface can
+ *   reach the runtime entries the write gate and the blocking tests drive; the
+ *   shipped tool definitions, their schemas and the root's own policy line are
+ *   ③c's, and nothing here decides what a call is allowed to say — the gate and
+ *   the Task store do.
  *
  * `graph_spawn` is deliberately NOT here, even though the deployment registers
  * it for the root: it reaches the graph without Task Admission and returns the
@@ -216,6 +225,13 @@ declare function resolvePermission(manifest: CapabilityManifest, resolveSpec: (n
  * which is the same effect `task_decompose` has, so it is a write in every
  * non-active phase — a run that has stopped deciding its own work does not get
  * to turn a proposal into tasks.
+ *
+ * The two question tools (A4 §F.1) are coordination in the plainest sense: a
+ * child asking its direct parent is the one effect still admitted while its own
+ * run is blocked on a question, and a parent answering a child is the one effect
+ * a `waiting_children` parent may still produce. Neither makes anything else
+ * writable — answering is not a phase change, and a blocked run keeps its block
+ * until the answer that resolves it.
  */
 declare const COORDINATION_ALLOWED: ReadonlySet<string>;
 /** A tool call that was let through and has not reported its result yet. */
@@ -272,9 +288,9 @@ type DrainResult = {
   pending: string[];
 };
 /**
- * The phase each session is in, and what it has in flight. One instance per
- * runtime; nothing here touches the store or a service, so the rules can be
- * tested as the pure state machine they are.
+ * The phase each session is in, what it has in flight, and whether it is waiting
+ * on an answer. One instance per runtime; nothing here touches the store or a
+ * service, so the rules can be tested as the pure state machine they are.
  */
 declare class ExecutionGate {
   private readonly phases;
@@ -286,6 +302,14 @@ declare class ExecutionGate {
    * store-derived phase is checked against.
    */
   private readonly decisions;
+  /**
+   * The sessions whose runs are waiting on an unresolved blocking question
+   * (A4 §F.1). A set rather than a map of booleans: "no entry" and "not blocked"
+   * are the same fact, and a cleared session must not leave a stale value to be
+   * read back. Nothing here is persisted or projected — the store's question
+   * facts are the durable state, and this is the live process's handle on them.
+   */
+  private readonly questionBlocked;
   /**
    * Move a session's phase: the runtime calls this when **it** is the authority
    * for the transition — a committed admission or submission, a settled run, an
@@ -300,6 +324,11 @@ declare class ExecutionGate {
    * reason says the call is late. A decision, like {@link setPhase} — it moves
    * the phase because this process knows the run is over, not because a read of
    * the store implied it.
+   *
+   * The question block goes with it: an open question requires *both* runs to be
+   * running, so a run this process just made terminal is blocked by nothing —
+   * leaving the flag set would make the refusal name a wait that no longer
+   * exists.
    */
   setTerminal(sessionId: string): void;
   /**
@@ -341,6 +370,29 @@ declare class ExecutionGate {
    *   straddled a decision, never one that raced a write.
    */
   applyStorePhase(sessionId: string, phase: ExecutionPhase | 'terminal', token: number): boolean;
+  /**
+   * Record that a session's run is — or is no longer — waiting on an unresolved
+   * blocking question (A4 §F.1). A decision of this process about a fact this
+   * process just wrote (the ask it committed, the answer that released one), so
+   * it counts as one exactly as {@link setPhase} does; a value the *store*
+   * implies goes through {@link applyStoreQuestionsBlocked}.
+   *
+   * `false` is not "probably unblocked": the caller is stating the derivation it
+   * just took from the store's question facts (`blockingQuestionsOf`), which is
+   * what makes a second blocking question keep the session blocked after the
+   * first is answered.
+   */
+  setQuestionsBlocked(sessionId: string, blocked: boolean): void;
+  /**
+   * Apply a blocking state the store implies — never one this process decided —
+   * under the same token rule as {@link applyStorePhase}: `token` is the
+   * {@link decisionToken} taken before the read that produced it, and a value
+   * the gate has moved past is dropped rather than applied. The return says
+   * which of the two happened.
+   */
+  applyStoreQuestionsBlocked(sessionId: string, blocked: boolean, token: number): boolean;
+  /** Whether the run bound to this session is waiting on an unresolved blocking question (A4 §7.2's derived wait). */
+  questionsBlocked(sessionId: string): boolean;
   /** The phase a session is under, or `undefined` when no run is bound to it (nothing is gated). */
   phaseOf(sessionId: string): ExecutionPhase | 'terminal' | undefined;
   /**
@@ -360,9 +412,16 @@ declare class ExecutionGate {
   inFlightWrites(sessionId: string): InFlightCall[];
   /**
    * Decide one call. A session with no phase is not bound to a run and is not
-   * gated; an `active` run is still deciding its own work. Every other phase
-   * allows the coordination list and denies everything else, naming the phase,
-   * the refused tool, and what is still allowed.
+   * gated; an `active` run with no blocking question is still deciding its own
+   * work. Every other state allows the coordination list and denies everything
+   * else, naming what holds the session — the phase, or the question it waits on
+   * — the refused tool, and what is still allowed.
+   *
+   * The two refusals are one decision with two names because a caller has to be
+   * able to tell them apart: `active` plus a blocking question is *not* "the
+   * phase closed writes", it is "this run is waiting for an answer", and an
+   * answer (not a phase change) is what ends it. Both are computed after the
+   * allow-list, so the question tools and the reads answer in either state.
    */
   decide(sessionId: string, toolName: string): GateDecision;
   /**
@@ -1665,6 +1724,38 @@ interface OrchestrateEnv {
    */
   failBatch?(storeId: string, batchId: string, reason: string): Promise<void>;
 }
+/**
+ * What a *runtime-level* settlement holds — the slice of {@link OrchestrateEnv}
+ * that a terminal record, a notification and a workspace release actually read.
+ *
+ * Why it exists as its own type (A4-5): the paths that settle a batch without a
+ * driver (`failBatch`, and the runtime's own fallback for a driver that rejected
+ * before it could settle anything) are the very paths whose environment could
+ * not be built, and building one only to write a terminal state would leave the
+ * settlement as unreachable as the thing that failed. `OrchestrateEnv` satisfies
+ * this structurally, so the driver paths are unchanged: there is one
+ * {@link settleRunFromRuntime}, one {@link blockUnstartedChildren} and one
+ * terminal-record writer, and only the amount of environment handed to them
+ * differs.
+ */
+interface RuntimeSettlementEnv {
+  /** The store's own service — the one writer of the events a settlement records. */
+  task: TaskService;
+  /** The actor those events are attributed to. */
+  actor: string;
+  /** How the run's owner is told, when the deployment has a channel; absent means nothing is sent. */
+  notify?(sessionId: string, text: string): void;
+  /** The session observation the review's dimensions and metrics read; absent keeps the store-derived facts only. */
+  observeSession?(sessionId: string): Promise<SessionObservation | undefined>;
+  /** The resolved per-run budget a terminal review records post-hoc breaches against. */
+  budget?: BudgetConfig;
+  /** The one-writer-per-workspace registry, with the checkout to release from ({@link OrchestrateEnv.workspaces}). */
+  workspaces?: WorkspaceRegistry;
+  /** The checkout path the registry is keyed by; both absent means ownership is skipped rather than guessed. */
+  workspacePath?: string;
+  /** Called once per terminal transition: the runtime closes the gate here and releases the run's layer. */
+  onRunSettled?(storeId: string, taskId: TaskId, runId: RunId, status: RunStatus): void;
+}
 /** Raised when the deployment cannot observe a run's terminal state, so no honest settlement is possible. */
 declare class RunWatcherUnavailableError extends Error {
   name: string;
@@ -1719,6 +1810,19 @@ interface BatchContext {
  * settlement, never evidence of work in progress.
  */
 declare function deriveChildOutcomes(task: TaskService, storeId: string, parentTaskId: TaskId): Promise<ChildOutcome[]>;
+/**
+ * Block every child of one parent task that never started, naming one reason —
+ * the runtime-level entry for the paths that settle a batch without a driver
+ * (`failBatch`, and the fallback for a driver that rejected before it settled
+ * anything).
+ *
+ * It is {@link blockUnstarted} over the batch the store itself implies
+ * (`batchItems`) rather than over a `BatchContext` the caller no longer holds,
+ * so the *rule* — a child with no run and no terminal state is blocked, one that
+ * already ran is left to its own settlement — stays in one place and the
+ * runtime's failure seams share it with the driver.
+ */
+declare function blockUnstartedChildren(env: RuntimeSettlementEnv, storeId: string, parentTaskId: TaskId, reason: string): Promise<ChildOutcome[]>;
 /**
  * Drive one admitted batch to settlement (A3 §3.1): reentrant, store-driven,
  * and owned by the runtime rather than by the tool call that admitted it.
@@ -1859,7 +1963,226 @@ declare function runReplayTask(env: OrchestrateEnv, storeId: string, init: Repla
  * A run that is already terminal is left exactly as it is: this is a settlement
  * entry, not an overwrite.
  */
-declare function settleRunFromRuntime(env: OrchestrateEnv, storeId: string, run: TaskRun, status: 'cancelled' | 'failed', reason: string): Promise<void>;
+declare function settleRunFromRuntime(env: RuntimeSettlementEnv, storeId: string, run: TaskRun, status: 'cancelled' | 'failed', reason: string): Promise<void>;
+//#endregion
+//#region src/question.d.ts
+/** What one `task_ask_parent` call claims about itself (A4 §F.1): the call it is, and the key it asks under. */
+interface ParentAskCall {
+  /**
+   * The registration id of the calling tool call. It names the `tool/call` event
+   * the body must come from, in the caller's own Session — an id the caller
+   * cannot forge into somebody else's Session, because the Session is resolved
+   * from the caller's run binding and never from this field.
+   */
+  readonly callId: string;
+  /** The caller's stable request key for this question; a retry repeats it. */
+  readonly requestKey: string;
+  /** Whether the answer blocks the asking run. Absent means the contract's default (`true`), taken from the call's own arguments. */
+  readonly blocking?: boolean;
+}
+/** What one `task_answer` call claims about itself. */
+interface ParentAnswerCall {
+  /** The registration id of the calling tool call — the answering Session's own `tool/call`. */
+  readonly callId: string;
+  /** The question being answered; must be the one the cited call names. */
+  readonly questionId: string;
+  /** The caller's stable request key for this answer. */
+  readonly requestKey: string;
+  /** The parent's declaration: `true` answers the question, `false` keeps it open. Never a classification. */
+  readonly resolves: boolean;
+}
+/** Who is calling: the live session, the run binding that identifies it, and the actor its writes are attributed to. */
+interface QuestionCaller {
+  /** The caller's own Session — where the cited body must live, and (for an ask) the session the question is asked from. */
+  readonly sessionId: string;
+  /** The store the caller's run belongs to. */
+  readonly storeId: string;
+  /** The run the caller is bound to: the asking run for an ask, the answering run for an answer. */
+  readonly runId: RunId;
+  /** The attribution every event of this call carries (the caller's session id, as elsewhere in the runtime). */
+  readonly actor: string;
+}
+/**
+ * One delivery attempt as the entry point reports it: the identity the store
+ * recorded, and what the target Session could witness. `refused` is this
+ * module's own name for "the attempt could not be decided at all" — the body
+ * could not be read back from the *recorded* citation, or the delivery layer
+ * raised a refusal — and it is reported rather than thrown because the intent is
+ * durable by then: the caller keeps the record, and recovery retries.
+ */
+interface QuestionDelivery {
+  readonly messageId: string;
+  readonly status: MessageDeliveryStatus | 'refused';
+  /** Present only with `refused`: why no delivery could be settled. */
+  readonly reason?: string;
+}
+/** What one ask settled as: the stored record, whether this call wrote it, and what the delivery attempt settled as. */
+interface AskedQuestionOutcome {
+  readonly question: QuestionRecord;
+  readonly created: boolean;
+  readonly delivery: QuestionDelivery;
+}
+/** What one answer settled as: the stored record, whether this call wrote it, and what the delivery attempt settled as. */
+interface AnsweredQuestionOutcome {
+  readonly answer: QuestionAnswerRecord;
+  readonly created: boolean;
+  readonly delivery: QuestionDelivery;
+}
+/** One record a reconciliation pass addressed: which fact it belongs to, and what the attempt settled as. */
+interface QuestionReconcileReport {
+  /** Which question or answer the record is about, in the store's own ids (`question "q-…"`, `answer "a-…" for question "q-…"`). */
+  readonly subject: string;
+  readonly messageId: string;
+  readonly status: MessageDeliveryStatus | 'refused';
+  readonly reason?: string;
+}
+/** Where one owed message comes from and where it goes, before its body is read back from the citation. */
+interface PendingMessageBase {
+  /** Which fact the message belongs to, in the store's own ids. */
+  readonly subject: string;
+  readonly questionId: string;
+  readonly messageId: string;
+  /** The sender's own citation into its Session: where the body is. */
+  readonly ref: QuestionMessageRef;
+  readonly senderSessionId: string;
+  readonly targetSessionId: string;
+}
+/** One message a store's question facts still owe: an open question's ask, or an answer to a run that may not have read it. */
+type PendingQuestionMessage = (PendingMessageBase & {
+  readonly kind: 'question';
+}) | (PendingMessageBase & {
+  readonly kind: 'answer';
+  readonly answerId: string;
+});
+/** What one store's pending question messages are, and which facts cannot be addressed from the snapshot at all. */
+interface PendingQuestionMessages {
+  readonly messages: readonly PendingQuestionMessage[];
+  readonly refused: readonly QuestionReconcileReport[];
+}
+/**
+ * The services one question coordination reaches, narrowed to what it calls: the
+ * store's own entries (never the whole service), the caller's Session log, and
+ * agent-runtime's delivery handle. Nothing here resolves another service through
+ * this module, and a caller can hand a test double for any of them.
+ */
+interface QuestionCoordinationDeps {
+  /** The Task store: the facts, their one writer, and the snapshot every derivation reads. */
+  readonly task: {
+    snapshotIn(storeId: string): Promise<TaskSnapshot>;
+    askParentQuestionIn(storeId: string, ask: QuestionAsk, actor: string): Promise<{
+      question: QuestionRecord;
+      created: boolean;
+    }>;
+    answerParentQuestionIn(storeId: string, answer: QuestionAnswer, actor: string): Promise<{
+      answer: QuestionAnswerRecord;
+      created: boolean;
+    }>;
+  };
+  /** The caller's own Session, to locate the `tool/call` this call cites (and to read it back before deciding anything). */
+  readonly sessionQuery: {
+    readSession(sessionId: SessionId): Promise<SessionOwnLog>;
+  };
+  /** agent-runtime's handle: the flushed body read-back, the relay, and the recovery reconcile. */
+  readonly messages: {
+    readToolCallBody(ref: ToolCallRef): Promise<ToolCallBody>;
+    ensureAgentMessageDelivered(intent: AgentMessageIntent): Promise<{
+      messageId: string;
+      status: MessageDeliveryStatus;
+    }>;
+    reconcileAgentMessageDeliveries(intents: readonly AgentMessageIntent[]): Promise<MessageDeliveryReport[]>;
+  };
+  /** The execution gate whose *blocking* state these facts decide (A4 §7.2). */
+  readonly gate: ExecutionGate;
+}
+/**
+ * The `m-` identity one question's message carries: derived from the question id,
+ * never minted. A retry — in this process or after a restart — states the same
+ * identity, which is what lets a target's own fold answer "this one is already
+ * here" instead of the framework keeping a ledger of what it sent.
+ */
+declare function questionMessageIdOf(questionId: string): string;
+/** The `m-` identity one answer's message carries, derived from the answer id for the same reason ({@link questionMessageIdOf}). */
+declare function answerMessageIdOf(answerId: string): string;
+/**
+ * The arguments object one cited `tool/call` must hold: a JSON object, refused by
+ * name when it is not. Exported for the same reason this module's other pure
+ * steps are: the refusal rules are part of the contract, and a unit test should
+ * be able to drive them without a store.
+ */
+declare function parseCallArguments(body: ToolCallBody): Record<string, unknown>;
+/**
+ * Ask one's direct parent (A4 §F.1): the `task_ask_parent` entry's whole effect.
+ *
+ * Read the body → commit the intent → recompute the block → deliver under the
+ * recorded identity. The parent is never named by the caller: the store resolves
+ * the asking task's direct parent and *its* current run, and the delivery goes to
+ * that run's Session. A repeated request (same run, same key, same arguments
+ * text) returns the record the store already holds, changes no gate state and
+ * delivers the same `messageId` — which is `already-present` when the target
+ * still holds it.
+ */
+declare function askParentQuestion(deps: QuestionCoordinationDeps, caller: QuestionCaller, request: ParentAskCall): Promise<AskedQuestionOutcome>;
+/**
+ * Answer one child's question (A4 §F.1): the `task_answer` entry's whole effect.
+ *
+ * The answering run is the caller's own — the store refuses an answer from any
+ * other run, including the new run of a restarted task — and the body citation
+ * must sit in the answering Session. The message goes to the *asking* run's
+ * Session, so `resolves: true` both releases that run's write gate (recomputed
+ * from the facts, so a second open question keeps it blocked) and puts the
+ * parent's words in front of the model that asked.
+ */
+declare function answerParentQuestion(deps: QuestionCoordinationDeps, caller: QuestionCaller, request: ParentAnswerCall): Promise<AnsweredQuestionOutcome>;
+/**
+ * What one store's question facts still owe a message, derived from its own
+ * snapshot and nothing else.
+ *
+ * Two rules, and both are about what the *facts* can prove rather than about
+ * what a process remembers:
+ *
+ * - every **open** question owes its ask: both runs are running and no answer
+ *   has resolved it, so the parent still has to be able to answer it;
+ * - every **answer** whose asking run is still running owes its delivery: the
+ *   framework has no consumption proof (§F.1 keeps the reference until a real
+ *   model step shows it), so even a resolved question's answer is owed to a run
+ *   that may never have read it.
+ *
+ * Nothing else is owed. A question whose asking run settled is audit — its ask
+ * and its answers are moot, and re-delivering them would be a message to a run
+ * that cannot act on it.
+ */
+declare function pendingQuestionMessages(snapshot: TaskSnapshot): PendingQuestionMessages;
+/**
+ * Reconcile the deliveries one store's question facts still owe (§F.1's crash
+ * recovery): read each pending body from its *recorded* citation, then hand the
+ * composed intents to agent-runtime's reconcile — which delivers only what the
+ * target Session's own fold says is missing, so a second pass over the same
+ * record adds nothing.
+ *
+ * A recorded body that can no longer be read is reported per record rather than
+ * failing the pass: the facts are still the facts, the next activation is the
+ * retry, and one unreadable Session must not hide the deliveries that could be
+ * made. A target that is not live comes back `unavailable` — zero side effects,
+ * no substitute parent, and the same retry rule.
+ */
+declare function reconcileQuestionDeliveries(deps: QuestionCoordinationDeps, storeId: string): Promise<QuestionReconcileReport[]>;
+/**
+ * Push the question block every run in one snapshot implies onto the gate, under
+ * the gate's own token rule — the recovery pass's half of §F.1's "restart from
+ * the durable facts". The token is the one taken before the snapshot read, so a
+ * value that straddled a decision of this process is dropped exactly as a
+ * store-derived phase is.
+ */
+declare function applyStoreQuestionBlocking(gate: ExecutionGate, snapshot: TaskSnapshot, tokenOf: (sessionId: string) => number): void;
+/**
+ * Whether one run still owes or waits for coordination: no unresolved blocking
+ * question of its own, and no question of a child's it has not answered. The
+ * runtime reads this where a run's own next step would otherwise be automatic —
+ * the parent's submission once its children are terminal — and the answer is
+ * deliberately *derived* from the facts rather than stored: an answered question
+ * and an unanswered one are the same list, one answer apart.
+ */
+declare function pendingCoordinationOf(snapshot: TaskSnapshot, runId: RunId): readonly QuestionRecord[];
 //#endregion
 //#region src/admission.d.ts
 /** Parent task plus the decomposition policy its caller grants it. */
@@ -3038,6 +3361,13 @@ interface ReconcileReport {
     status: TaskProposalStatus;
     reason: string;
   }[];
+  /**
+   * What the pass's own question deliveries settled as (A4 §F.1), one record per
+   * fact the store still owed a message for — `delivered`, `already-present`, or
+   * `unavailable` for a target nobody has brought back yet. Empty means the store
+   * owed nothing; a `refused` record names why that one could not be decided.
+   */
+  readonly questionDeliveries: readonly QuestionReconcileReport[];
 }
 /**
  * What a read sees about one store's recovery (A2 §E) — facts and markers,
@@ -4129,14 +4459,41 @@ declare class TaskRuntime extends Service {
    * Fail one batch's parent run without an `OrchestrateEnv`: the children that
    * never started are blocked, the parent run is failed with the cause, and the
    * owner is told. Store-level on purpose — the caller is here because the env
-   * could not be built, so the store service and the notification seam are all
-   * this path needs — and it never throws, so a driver's failure cannot become an
-   * unhandled rejection of its own. `outcome` is `'cancelled'` only for a batch
-   * whose driver never started (a recovery barrier stood it down when the
-   * cancellation aborted it): the same writes a started driver's abort branch
-   * makes, from the one place that can still make them.
+   * could not be built, so this path holds the settlement's own narrow
+   * capabilities ({@link TaskRuntime.settlementParts}) instead of building one —
+   * and it never throws, so a driver's failure cannot become an unhandled
+   * rejection of its own. `outcome` is `'cancelled'` only for a batch whose
+   * driver never started (a recovery barrier stood it down when the cancellation
+   * aborted it): the same writes a started driver's abort branch makes, from the
+   * one place that can still make them.
+   *
+   * The two writes are the orchestration's own (A4-5): `blockUnstartedChildren`
+   * and `settleRunFromRuntime`, the same pair every other batch failure uses —
+   * there is no second terminal-record writer here.
    */
   private failBatchFromRuntime;
+  /**
+   * The narrow capabilities one runtime-level settlement holds — the store, the
+   * actor, the notification seam and the gate/workspace bookkeeping — for the one
+   * path that writes a terminal state without an orchestration env
+   * ({@link failBatchFromRuntime}): the caller is there precisely because this
+   * deployment's own view could not be built, so this holds the services that
+   * cannot fail for that reason and nothing else. The checkout registry is
+   * deliberately not among them: resolving a workspace path here would guess at
+   * the very environment whose construction failed, and a marker left for the
+   * explicit activation to reconcile is honest where a guessed release is not.
+   * Every other batch failure goes through the driver's own env, which carries
+   * the registry and releases the layer.
+   */
+  private settlementParts;
+  /**
+   * What the runtime does when *any* run reaches a terminal state (A3 §3.3): the
+   * gate closes for the session that held it, and the workspace layer the run
+   * claimed comes off the stack. One implementation for the orchestration's
+   * settlements and the runtime's own, so a run settled from either side leaves
+   * the process in the same state.
+   */
+  private runSettledFromRuntime;
   /**
    * Start the driver for one admitted batch. The controller is registered
    * before the driver runs, so a cancellation arriving immediately after
@@ -4173,6 +4530,49 @@ declare class TaskRuntime extends Service {
     status: string;
     detail: string;
   }>;
+  /**
+   * Ask one's direct parent (A4 §F.1, `task_ask_parent`): the runtime entry the
+   * tool layer adapts.
+   *
+   * The identity is the caller's own — a live session, its run binding, and the
+   * parent the store derives from that run's task — and the body is read back
+   * from the caller's own Session before the store records anything, so a forged
+   * call id, another session's citation or a claim the message does not support
+   * is refused by name with no task event and no delivery. Everything after the
+   * commit (the write-gate block, the message under the *recorded* id) is owned
+   * by `./question.ts`; `unavailable` there is not a failure — the intent is
+   * durable, the record is returned, and recovery re-delivers.
+   */
+  askParentQuestion(callerSessionId: string, request: ParentAskCall): Promise<AskedQuestionOutcome>;
+  /**
+   * Answer one child's still-open question (A4 §F.1, `task_answer`): the same
+   * shape as {@link askParentQuestion}, with the answering run taken from the
+   * caller's binding and the delivery addressed to the run that asked. A
+   * resolving answer recomputes the *asking* run's block from the store, so a
+   * second open question keeps it blocked.
+   */
+  answerParentQuestion(callerSessionId: string, request: ParentAnswerCall): Promise<AnsweredQuestionOutcome>;
+  /**
+   * The identity every question call starts from: the live caller session, its
+   * run binding, and the store that binding names. A session with no run (a root
+   * before activation, a reviewer, a helper) has nobody to ask and nothing to
+   * answer, and is refused here before any other step.
+   */
+  private questionCaller;
+  /** The services question coordination reaches: the store's entries, the session read path, agent-runtime's handle, and the gate. */
+  private questionCoordination;
+  /**
+   * Re-drive a waiting parent whose last coordination item just closed (A4 §F.1).
+   *
+   * The parent's own submission has exactly one owner — the batch driver's
+   * `settleParentBatch` — and that owner holds it back while a coordination item
+   * is open. When the last one closes, the driver that owns the submission is
+   * re-entered (the same entry the recovery pass uses), so the answer that
+   * released the parent is what lets it submit instead of leaving a settled batch
+   * with a parent nobody owns. This writes nothing itself: the driver re-reads
+   * the store and the gate it applies is the same one.
+   */
+  private redriveWaitingParent;
   /**
    * Cancel one batch (`task_cancel`, §3.6): abort its driver, which settles the
    * children — the one in flight is cancelled, the ones that never started are
@@ -4279,6 +4679,17 @@ declare class TaskRuntime extends Service {
    * submission): every child that is not terminal is blocked, the parent run is
    * failed with the reason, and the batch's driver is aborted so its own loop
    * stops seeing work that no longer exists.
+   */
+  /**
+   * The fallback batch-failure seam the orchestration calls when a run's own
+   * settlement cannot finish the batch (verification unavailable in a nested
+   * submission): every child that never started is blocked, the parent run is
+   * failed with the reason, and the batch's driver is aborted so its own loop
+   * stops seeing work that no longer exists.
+   *
+   * Both writes are the orchestration's own (A4-5): {@link blockUnstartedChildren}
+   * and {@link settleRunFromRuntime} — the same pair `failBatchFromRuntime` uses —
+   * so this file holds no second copy of either record shape.
    */
   private failBatch;
   /** The session whose viewpoint a store-wide operation (recovery, cancellation) resolves its checkout from. */
@@ -4586,4 +4997,4 @@ declare class TaskRuntime extends Service {
   private agentOrUndefined;
 }
 //#endregion
-export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type BatchContext, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, PROPOSAL_REQUEST_KEY_PREFIX, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, assertRootBudgetConfig, bindRunProviders, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, parseObligationTemplates, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, readProcessStartTime, readRunBinding, readVerifiedFile, registeredVerifierIds, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

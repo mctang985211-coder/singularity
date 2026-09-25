@@ -94,6 +94,11 @@ export const ROOT_TOOLS = [
 export const OTHER_TOOLS = [
   'bash', 'read', 'write', 'edit', 'read_image', 'glob', 'grep', 'job_output', 'job_list', 'job_kill', 'ask_user_question',
   'web_fetch', 'subagent_fetchless', 'session_search', 'session_event_read', 'session_event_trace', 'session_trace',
+  // The two question tools stand in here for A4 §F.1's shipped definitions
+  // (sub-goal ③c owns those): the fixture only needs them *registered* so a
+  // model call reaches the real waterfall and leaves a `tool/call` event, which
+  // is the citation a spec then hands to the runtime entry it is testing.
+  'task_ask_parent', 'task_answer',
 ]
 
 /** The tools this fixture registers for real; every other name is a stand-in. */
@@ -166,6 +171,8 @@ export interface ScriptedLoopOptions {
   readonly noProgressRounds?: number
   readonly verifyTimeoutMs?: number
   readonly writeDrainTimeoutMs?: number
+  /** The per-run budget this deployment enforces (`Config.budget`) — the deadline a spec drives a blocked wait into. */
+  readonly budget?: Readonly<{ maxToolCalls?: number; tokens?: number; wallTimeMs?: number; attempts?: number }>
   /** Tools whose recorded execution also keeps its arguments — the side-effect probe a denial is asserted against. */
   readonly probes?: readonly string[]
   /**
@@ -619,6 +626,13 @@ class ScriptedLoopImpl implements ScriptedLoop {
       },
       flush: async () => {},
     } as never)
+    // The fixture's backend appends into its own log synchronously, so its
+    // durability barrier has nothing left to do — but the barrier has to *exist*:
+    // the A4 delivery path flushes a Session before it trusts a cited body, and a
+    // Session with no `session/flush` participant is refused by name
+    // (`source-not-durable`). One no-op listener is this in-memory backend's way
+    // of saying "what you appended is already where the next reader finds it".
+    ctx.on('session/flush', () => {})
     // The deployment's other services. The loop's own turn drives everything
     // else, so these are the seams a graph deployment provides and nothing more.
     ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'mock', model: 'mock' }) })
@@ -750,6 +764,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
       ...(this.options.noProgressRounds === undefined ? {} : { noProgressRounds: this.options.noProgressRounds }),
       ...(this.options.verifyTimeoutMs === undefined ? {} : { verifyTimeoutMs: this.options.verifyTimeoutMs }),
       ...(this.options.writeDrainTimeoutMs === undefined ? {} : { writeDrainTimeoutMs: this.options.writeDrainTimeoutMs }),
+      ...(this.options.budget === undefined ? {} : { budget: { ...this.options.budget } }),
       ...(this.options.generatedTaskReview === undefined ? {} : { generatedTaskReview: this.options.generatedTaskReview }),
       runBindingRoot: join(this.home, 'singularity', 'run-bindings'),
     } as Config)

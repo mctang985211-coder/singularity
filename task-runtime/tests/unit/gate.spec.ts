@@ -22,6 +22,8 @@ const CONTRACT_ALLOWED = [
   'read',
   'read_image',
   'skill',
+  'task_answer',
+  'task_ask_parent',
   'task_cancel',
   'task_diagnose',
   'task_proposal_cancel',
@@ -34,6 +36,9 @@ const CONTRACT_ALLOWED = [
 
 /** Tools the protocol closes in every non-active phase; the samples name their category. */
 const WRITE_TOOLS = ['write', 'edit', 'bash', 'job_list', 'job_kill', 'graph_spawn', 'evolution_apply', 'subagent_spawn', 'task_decompose', 'task_submit_result', 'task_verify', 'task_proposal_continue']
+
+/** The two question tools, named on their own so the rows about them read as what they are (A4 §F.1). */
+const QUESTION_TOOLS = ['task_ask_parent', 'task_answer']
 
 interface FakeJob {
   id: string
@@ -170,6 +175,92 @@ describe('ExecutionGate.decide', () => {
     expect(decision.reason).toContain('phase "terminal"')
     expect(decision.reason).toContain('"bash" is denied')
     expect(decision.reason).toContain('This is a late call')
+  })
+})
+
+describe('the question block (A4 §F.1)', () => {
+  test('denies the writes an active run would otherwise be free to make, and says why', () => {
+    const gate = new ExecutionGate()
+    gate.setPhase('s-1', 'active')
+    gate.setQuestionsBlocked('s-1', true)
+    expect(gate.questionsBlocked('s-1')).toBe(true)
+    for (const tool of QUESTION_TOOLS) expect(gate.decide('s-1', tool)).toEqual({ allow: true })
+    expect(gate.decide('s-1', 'task_read')).toEqual({ allow: true })
+    expect(gate.decide('s-1', 'context_read')).toEqual({ allow: true })
+    for (const tool of ['write', 'bash', 'graph_spawn', 'task_decompose', 'task_submit_result', 'task_proposal_continue']) {
+      const decision = gate.decide('s-1', tool)
+      expect(decision.allow).toBe(false)
+      if (decision.allow) throw new Error('unreachable')
+      // The phase is still `active`, so the reason must not claim a phase closed
+      // anything — it names the question, and it says an answer is what ends it.
+      expect(decision.reason).toContain('waiting on an unresolved blocking question')
+      expect(decision.reason).toContain('phase is "active"')
+      expect(decision.reason).toContain(`"${tool}" is denied`)
+      expect(decision.reason).not.toContain('produce effects are closed')
+      expect(decision.reason).not.toContain('late call')
+    }
+    // Releasing the block restores exactly the phase's own rule and nothing more.
+    gate.setQuestionsBlocked('s-1', false)
+    expect(gate.questionsBlocked('s-1')).toBe(false)
+    for (const tool of [...WRITE_TOOLS, 'some_future_tool']) expect(gate.decide('s-1', tool)).toEqual({ allow: true })
+  })
+
+  test('never opens a gate: a blocked waiting_children parent answers and still cannot write', () => {
+    const gate = new ExecutionGate()
+    gate.setPhase('s-1', 'waiting_children')
+    gate.setQuestionsBlocked('s-1', true)
+    expect(gate.decide('s-1', 'task_answer')).toEqual({ allow: true })
+    for (const tool of ['write', 'bash', 'task_decompose', 'task_submit_result']) {
+      expect(gate.decide('s-1', tool).allow).toBe(false)
+    }
+    // Every blocking question answered: the phase rule is what remains, and it
+    // still denies the writes — an answer never turns a waiting parent back into
+    // an active one.
+    gate.setQuestionsBlocked('s-1', false)
+    for (const tool of ['write', 'bash', 'task_decompose']) expect(gate.decide('s-1', tool).allow).toBe(false)
+    expect(gate.decide('s-1', 'task_read')).toEqual({ allow: true })
+  })
+
+  test('a session with no phase is not gated by a block either (the gate handles runs, not sessions in the abstract)', () => {
+    const gate = new ExecutionGate()
+    gate.setQuestionsBlocked('s-1', true)
+    expect(gate.decide('s-1', 'write')).toEqual({ allow: true })
+  })
+
+  test('a terminal run is blocked by nothing, and the terminal writers clear the flag', () => {
+    const gate = new ExecutionGate()
+    gate.setPhase('s-1', 'active')
+    gate.setQuestionsBlocked('s-1', true)
+    gate.setTerminal('s-1')
+    expect(gate.questionsBlocked('s-1')).toBe(false)
+    const late = gate.decide('s-1', 'bash')
+    expect(late.allow).toBe(false)
+    if (late.allow) throw new Error('unreachable')
+    expect(late.reason).toContain('This is a late call')
+    expect(late.reason).not.toContain('blocking question')
+
+    const applied = new ExecutionGate()
+    applied.setQuestionsBlocked('s-2', true)
+    expect(applied.applyStorePhase('s-2', 'terminal', applied.decisionToken('s-2'))).toBe(true)
+    expect(applied.questionsBlocked('s-2')).toBe(false)
+  })
+
+  test('a store-derived block respects the decision token, exactly as a store-derived phase does', () => {
+    const gate = new ExecutionGate()
+    // The read starts here (the token the recovery pass takes before reading)...
+    const token = gate.decisionToken('s-1')
+    gate.setPhase('s-1', 'active')
+    // ...and the ask this process committed lands while it is in flight, so the
+    // stale snapshot's "not blocked" may not lift a block this process wrote.
+    gate.setQuestionsBlocked('s-1', true)
+    expect(gate.applyStoreQuestionsBlocked('s-1', false, token)).toBe(false)
+    expect(gate.questionsBlocked('s-1')).toBe(true)
+    // A read taken after the decision is current again, and applies.
+    expect(gate.applyStoreQuestionsBlocked('s-1', false, gate.decisionToken('s-1'))).toBe(true)
+    expect(gate.questionsBlocked('s-1')).toBe(false)
+    // A store-derived block is not a decision of its own: the two decisions
+    // above (the phase and the ask) are the whole count.
+    expect(gate.decisionToken('s-1')).toBe(2)
   })
 })
 

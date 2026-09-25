@@ -25,6 +25,7 @@ import type {
   TaskStatus,
   VerificationResult,
 } from '@dangosys/dsh-singularity-task'
+import { blockingQuestionsOf, openQuestionsOf, questionsAwaitingAnswerOf } from '@dangosys/dsh-singularity-task'
 import { capabilitySnapshot, resolvePermission, resolvePreset, workerBaseline, type CapabilityConfig, type PermissionSpec } from './capability.ts'
 import { drainSession } from './gate.ts'
 import type { ExecutionGate, JobsView } from './gate.ts'
@@ -276,6 +277,39 @@ export interface OrchestrateEnv {
   failBatch?(storeId: string, batchId: string, reason: string): Promise<void>
 }
 
+/**
+ * What a *runtime-level* settlement holds — the slice of {@link OrchestrateEnv}
+ * that a terminal record, a notification and a workspace release actually read.
+ *
+ * Why it exists as its own type (A4-5): the paths that settle a batch without a
+ * driver (`failBatch`, and the runtime's own fallback for a driver that rejected
+ * before it could settle anything) are the very paths whose environment could
+ * not be built, and building one only to write a terminal state would leave the
+ * settlement as unreachable as the thing that failed. `OrchestrateEnv` satisfies
+ * this structurally, so the driver paths are unchanged: there is one
+ * {@link settleRunFromRuntime}, one {@link blockUnstartedChildren} and one
+ * terminal-record writer, and only the amount of environment handed to them
+ * differs.
+ */
+export interface RuntimeSettlementEnv {
+  /** The store's own service — the one writer of the events a settlement records. */
+  task: TaskService
+  /** The actor those events are attributed to. */
+  actor: string
+  /** How the run's owner is told, when the deployment has a channel; absent means nothing is sent. */
+  notify?(sessionId: string, text: string): void
+  /** The session observation the review's dimensions and metrics read; absent keeps the store-derived facts only. */
+  observeSession?(sessionId: string): Promise<SessionObservation | undefined>
+  /** The resolved per-run budget a terminal review records post-hoc breaches against. */
+  budget?: BudgetConfig
+  /** The one-writer-per-workspace registry, with the checkout to release from ({@link OrchestrateEnv.workspaces}). */
+  workspaces?: WorkspaceRegistry
+  /** The checkout path the registry is keyed by; both absent means ownership is skipped rather than guessed. */
+  workspacePath?: string
+  /** Called once per terminal transition: the runtime closes the gate here and releases the run's layer. */
+  onRunSettled?(storeId: string, taskId: TaskId, runId: RunId, status: RunStatus): void
+}
+
 /** Raised when the deployment cannot observe a run's terminal state, so no honest settlement is possible. */
 export class RunWatcherUnavailableError extends Error {
   override name = 'RunWatcherUnavailableError'
@@ -483,7 +517,7 @@ function reviewCriteria(criteria: readonly AcceptanceCriterion[], results: reado
  * that fails degrades to an omitted field instead of costing the record.
  */
 async function reviewEnrichment(
-  env: OrchestrateEnv,
+  env: RuntimeSettlementEnv,
   storeId: string,
   taskId: TaskId,
   outcome: ReviewOutcome,
@@ -659,7 +693,7 @@ function budgetExhaustedReason(which: string, detail: string): string {
  * Best-effort like the enrichment read: no budget, no reader, or no
  * observation means no annotation.
  */
-async function budgetBreaches(env: OrchestrateEnv, run: TaskRun): Promise<string[]> {
+async function budgetBreaches(env: RuntimeSettlementEnv, run: TaskRun): Promise<string[]> {
   const budget = env.budget
   if (budget === undefined || env.observeSession === undefined) return []
   if (budget.maxToolCalls === undefined && budget.tokens === undefined) return []
@@ -734,12 +768,12 @@ async function awaitWorker(handle: AgentHandle, signal: AbortSignal | undefined,
   }
 }
 
-async function evidenceRefsFor(env: OrchestrateEnv, storeId: string, runId: RunId): Promise<string[]> {
+async function evidenceRefsFor(env: RuntimeSettlementEnv, storeId: string, runId: RunId): Promise<string[]> {
   return (await env.task.snapshotIn(storeId)).evidence.filter(item => item.taskRunId === runId).map(item => item.evidenceId)
 }
 
 /** Run start → terminal transition in ms; the terminal mark just landed, so finishedAt is in the store. */
-async function runDurationMs(env: OrchestrateEnv, storeId: string, run: TaskRun): Promise<number> {
+async function runDurationMs(env: RuntimeSettlementEnv, storeId: string, run: TaskRun): Promise<number> {
   const finishedAt = (await env.task.runIn(storeId, run.runId)).finishedAt
   const end = finishedAt === undefined ? Date.now() : Date.parse(finishedAt)
   return Math.max(0, end - Date.parse(run.startedAt))
@@ -778,7 +812,7 @@ interface TerminalReviewOptions {
  * {@link reviewEnrichment} — and never gate the record itself.
  */
 async function recordTerminalReview(
-  env: OrchestrateEnv,
+  env: RuntimeSettlementEnv,
   storeId: string,
   taskId: TaskId,
   outcome: ReviewOutcome,
@@ -970,7 +1004,7 @@ export async function deriveChildOutcomes(task: TaskService, storeId: string, pa
 }
 
 /** Best-effort owner notification; a deployment without the seam, or a throwing one, changes nothing. */
-function notifyOwner(env: OrchestrateEnv, sessionId: string | undefined, text: string): void {
+function notifyOwner(env: RuntimeSettlementEnv, sessionId: string | undefined, text: string): void {
   if (sessionId === undefined || env.notify === undefined) return
   try {
     env.notify(sessionId, text)
@@ -983,7 +1017,7 @@ function notifyOwner(env: OrchestrateEnv, sessionId: string | undefined, text: s
 /* --- workspace handovers (A3 §3.4) --------------------------------------- */
 
 /** The workspace this orchestration may own, when the deployment names one. */
-function workspaceOf(env: OrchestrateEnv): { registry: WorkspaceRegistry; workspace: string } | undefined {
+function workspaceOf(env: RuntimeSettlementEnv): { registry: WorkspaceRegistry; workspace: string } | undefined {
   if (env.workspaces === undefined || env.workspacePath === undefined) return undefined
   return { registry: env.workspaces, workspace: env.workspacePath }
 }
@@ -1031,7 +1065,7 @@ async function handOverWorkspace(
 
 /** Release one layer the caller knows is on top, reporting — never hiding — a mismatch. */
 async function releaseWorkspaceLayer(
-  env: OrchestrateEnv,
+  env: RuntimeSettlementEnv,
   owner: WorkspaceOwner,
   sessionId: string | undefined,
 ): Promise<void> {
@@ -1278,7 +1312,19 @@ async function observeWorkerRun(
     // is left of the root's) and the batch's abort. Neither is paused or reset
     // for the review; a review that outlives them ends the run as the budget
     // stop it is, and the proposal is left where it stands.
-    if (openProposalOf(snapshot, task.taskId, run.runId) !== undefined) {
+    //
+    // The question wait (A4 §F.1) is the same shape one level down: a worker
+    // that asked its parent something unanswered has gone idle *because the
+    // protocol is holding it*, so an idle observation is not stagnation and no
+    // round is marked. It is bounded by exactly the same two limits — the
+    // deadline still cancels the run (a block is not a stay of execution), and a
+    // batch abort still reaches it — and the question stays on the record as the
+    // audit of what was asked. Nothing here opens the write gate: while the
+    // question is open the session's own gate refuses everything but
+    // coordination, and only the answer's `resolves` recomputes that.
+    const knownWait = openProposalOf(snapshot, task.taskId, run.runId) !== undefined
+      || blockingQuestionsOf(snapshot, run.runId).length > 0
+    if (knownWait) {
       return await awaitWaitingTerminal(env, run, handle, signal, rootDeadline, terminal)
     }
     const factCount = countSubtreeFacts(snapshot, task.taskId)
@@ -1520,7 +1566,7 @@ type StartAttempt =
 
 /** Mark one child that never started, and record why — the runless blocked shape the store accepts. */
 async function blockChild(
-  env: OrchestrateEnv,
+  env: RuntimeSettlementEnv,
   storeId: string,
   item: BatchItem,
   block: BlockReason,
@@ -1537,7 +1583,7 @@ async function blockChild(
 
 /** Every child that never started, settled with the same reason — the batch never leaves an admitted ghost behind. */
 async function blockUnstarted(
-  env: OrchestrateEnv,
+  env: RuntimeSettlementEnv,
   storeId: string,
   snapshot: TaskSnapshot,
   items: readonly BatchItem[],
@@ -1552,6 +1598,30 @@ async function blockUnstarted(
     blocked.push(await blockChild(env, storeId, item, why(item), dependencyTaskIds))
   }
   return blocked
+}
+
+/**
+ * Block every child of one parent task that never started, naming one reason —
+ * the runtime-level entry for the paths that settle a batch without a driver
+ * (`failBatch`, and the fallback for a driver that rejected before it settled
+ * anything).
+ *
+ * It is {@link blockUnstarted} over the batch the store itself implies
+ * (`batchItems`) rather than over a `BatchContext` the caller no longer holds,
+ * so the *rule* — a child with no run and no terminal state is blocked, one that
+ * already ran is left to its own settlement — stays in one place and the
+ * runtime's failure seams share it with the driver.
+ */
+export async function blockUnstartedChildren(
+  env: RuntimeSettlementEnv,
+  storeId: string,
+  parentTaskId: TaskId,
+  reason: string,
+): Promise<ChildOutcome[]> {
+  const snapshot = await env.task.snapshotIn(storeId)
+  const parentTask = taskOf(snapshot, parentTaskId)
+  if (parentTask === undefined) return []
+  return await blockUnstarted(env, storeId, snapshot, batchItems(parentTask, snapshot.edges), () => ({ reason, blockers: [] }))
 }
 
 /**
@@ -1802,6 +1872,22 @@ async function driveRounds(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
       // with the recovery named (§3.6) instead of being resumed. A normally
       // driven child never reaches this branch: the driver waits for its
       // terminal state inside the round that started it.
+      //
+      // The known question wait (A4 §F.1) is the third case, and the one that
+      // must not be cancelled: a child whose unresolved blocking question is on
+      // the record was idle *because the protocol held it*, not because it
+      // abandoned its work. Its answer is still coming, so the run keeps its
+      // identity and the driver waits for the terminal state its own session
+      // will produce once it can read the answer — the same wait the phases
+      // below use. The block is rebuilt from the store in the same step, so a
+      // write from that session is refused for the reason that is true.
+      if (started.executionPhase === 'active' && blockingQuestionsOf(snapshot, started.runId).length > 0) {
+        env.gate.setQuestionsBlocked(started.sessionId, true)
+        const status = await waitRunSettled(env, batch.storeId, started.runId, started.sessionId)
+        env.onRunSettled?.(batch.storeId, item.taskId, started.runId, status)
+        await releaseWorkspaceLayer(env, runOwner(batch.storeId, item.taskId, started.runId), started.sessionId)
+        continue
+      }
       if (started.executionPhase === 'active') {
         const reason =
           `recovery: run "${started.runId}" was in flight when batch ${batch.batchId} resumed and never submitted; ` +
@@ -1890,6 +1976,26 @@ async function settleParentBatch(env: OrchestrateEnv, batch: BatchContext, items
     await recordTerminalReview(env, batch.storeId, batch.parentTaskId, 'cancelled', { run: parentRun, anomalies: [reason], relatedTaskIds: childTaskIds })
     env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, 'cancelled')
     notifyOwner(env, batch.callerSessionId, `task-runtime: ${reason}`)
+    return outcomes
+  }
+
+  // The unprocessed coordination items hold the parent where it is (A4 §F.1):
+  // every child is terminal, but the parent itself either asked something it has
+  // not been answered on or was asked something it has not answered. Submitting
+  // it here would hand the verifier a run whose own coordination is unfinished —
+  // the acceptance would be of a tree that still owes words — so nothing is
+  // submitted and the run stays `waiting_children`. What moves it later is the
+  // answer (or the child's question), through the driver this runtime re-enters
+  // once the last item closes; the batch's own outcome is already the store's.
+  const coordination = [...openQuestionsOf(snapshot, batch.parentRunId), ...questionsAwaitingAnswerOf(snapshot, batch.parentRunId)]
+  if (coordination.length > 0) {
+    notifyOwner(
+      env,
+      batch.callerSessionId,
+      `task-runtime: ${batchSummary(batch.batchId, outcomes)}; run "${batch.parentRunId}" stays waiting_children: ` +
+      `${coordination.length === 1 ? 'one coordination item is' : `${coordination.length} coordination items are`} still open ` +
+      `(${coordination.map(question => question.questionId).join(', ')}), and the parent's own acceptance waits for them`,
+    )
     return outcomes
   }
 
@@ -2430,7 +2536,7 @@ async function finishReplay(
  * entry, not an overwrite.
  */
 export async function settleRunFromRuntime(
-  env: OrchestrateEnv,
+  env: RuntimeSettlementEnv,
   storeId: string,
   run: TaskRun,
   status: 'cancelled' | 'failed',

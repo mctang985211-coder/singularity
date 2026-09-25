@@ -101,11 +101,17 @@ export function graphRegistry(options: GraphRegistryOptions): GraphRegistryLike 
  * over one fixture's own log: `offset` is a DSH event seq, so the read is the
  * window around the event a caller named. A session the fixture holds no log for
  * is refused by name, which is what the read core reports as `unreadable`.
+ *
+ * `readSession` is the whole-log read the A4 delivery path folds (`agent-runtime`'s
+ * `ownSuffix`) and the question entries cite through: a fixture's logs are never
+ * fork-inherited, so the inherited prefix is zero and the events are the session's
+ * own.
  */
 export function sessionQueryReads(
   eventsOf: (sessionId: string) => readonly SessionEvent[] | undefined,
 ): {
   readSurface(sessionId: string): Promise<{ capturedThroughSeq: number | null }>
+  readSession(sessionId: string): Promise<{ session: { id: string }; inheritedEventCount: number; events: readonly SessionEvent[] }>
   readEvent(request: { sessionId: string; seq: number; before?: number; after?: number }): Promise<{
     target: SessionEvent
     events: readonly SessionEvent[]
@@ -120,6 +126,11 @@ export function sessionQueryReads(
   }
   return {
     readSurface: async (sessionId: string) => ({ capturedThroughSeq: log(sessionId).at(-1)?.seq ?? null }),
+    readSession: async (sessionId: string) => ({
+      session: { id: sessionId },
+      inheritedEventCount: 0,
+      events: log(sessionId),
+    }),
     readEvent: async (request: { sessionId: string; seq: number; before?: number; after?: number }) => {
       const events = log(String(request.sessionId))
       const target = events.find(event => event.seq === request.seq)

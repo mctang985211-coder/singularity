@@ -40,6 +40,19 @@
  * phase back — and `undefined` therefore means something specific: this session
  * is not bound to a run (an env-clean helper, a reviewer session), and nothing
  * about it is gated.
+ *
+ * **The question block (A4 §F.1, §7.2).** One more per-session fact lives here:
+ * whether the session's run is waiting on an unresolved blocking question. It is
+ * *not* a phase — the store keeps no such state and the run's own main phase is
+ * unchanged by asking — so it is derived from the question facts
+ * (`blockingQuestionsOf`) at the three moments those facts can change (after a
+ * blocking ask, after a resolving answer, and on recovery) and pushed in through
+ * {@link ExecutionGate.setQuestionsBlocked}. What it does is one-way on purpose:
+ * a blocked session is refused everything the coordination list does not name —
+ * *including* the writes `active` would have admitted — while nothing about it
+ * ever opens a gate. A `waiting_children` parent that answers its child stays in
+ * `waiting_children`; the answer releases the child's block, never the parent's
+ * write gate, and `active` with blocking questions is a wait, not a licence.
  * @module @dangosys/dsh-singularity-task-runtime/gate
  */
 
@@ -66,6 +79,13 @@ import type { ExecutionPhase } from '@dangosys/dsh-singularity-task'
  * which is the same effect `task_decompose` has, so it is a write in every
  * non-active phase — a run that has stopped deciding its own work does not get
  * to turn a proposal into tasks.
+ *
+ * The two question tools (A4 §F.1) are coordination in the plainest sense: a
+ * child asking its direct parent is the one effect still admitted while its own
+ * run is blocked on a question, and a parent answering a child is the one effect
+ * a `waiting_children` parent may still produce. Neither makes anything else
+ * writable — answering is not a phase change, and a blocked run keeps its block
+ * until the answer that resolves it.
  */
 export const COORDINATION_ALLOWED: ReadonlySet<string> = new Set([
   'task_read',
@@ -86,6 +106,8 @@ export const COORDINATION_ALLOWED: ReadonlySet<string> = new Set([
   'task_cancel',
   'task_proposal_read',
   'task_proposal_cancel',
+  'task_ask_parent',
+  'task_answer',
 ])
 
 /** A tool call that was let through and has not reported its result yet. */
@@ -154,9 +176,9 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * The phase each session is in, and what it has in flight. One instance per
- * runtime; nothing here touches the store or a service, so the rules can be
- * tested as the pure state machine they are.
+ * The phase each session is in, what it has in flight, and whether it is waiting
+ * on an answer. One instance per runtime; nothing here touches the store or a
+ * service, so the rules can be tested as the pure state machine they are.
  */
 export class ExecutionGate {
   private readonly phases = new Map<string, ExecutionPhase | 'terminal'>()
@@ -168,6 +190,14 @@ export class ExecutionGate {
    * store-derived phase is checked against.
    */
   private readonly decisions = new Map<string, number>()
+  /**
+   * The sessions whose runs are waiting on an unresolved blocking question
+   * (A4 §F.1). A set rather than a map of booleans: "no entry" and "not blocked"
+   * are the same fact, and a cleared session must not leave a stale value to be
+   * read back. Nothing here is persisted or projected — the store's question
+   * facts are the durable state, and this is the live process's handle on them.
+   */
+  private readonly questionBlocked = new Set<string>()
 
   /**
    * Move a session's phase: the runtime calls this when **it** is the authority
@@ -187,10 +217,16 @@ export class ExecutionGate {
    * reason says the call is late. A decision, like {@link setPhase} — it moves
    * the phase because this process knows the run is over, not because a read of
    * the store implied it.
+   *
+   * The question block goes with it: an open question requires *both* runs to be
+   * running, so a run this process just made terminal is blocked by nothing —
+   * leaving the flag set would make the refusal name a wait that no longer
+   * exists.
    */
   setTerminal(sessionId: string): void {
     this.decisions.set(sessionId, this.decisionToken(sessionId) + 1)
     this.phases.set(sessionId, 'terminal')
+    this.questionBlocked.delete(sessionId)
   }
 
   /**
@@ -237,7 +273,45 @@ export class ExecutionGate {
   applyStorePhase(sessionId: string, phase: ExecutionPhase | 'terminal', token: number): boolean {
     if (this.decisionToken(sessionId) !== token) return false
     this.phases.set(sessionId, phase)
+    if (phase === 'terminal') this.questionBlocked.delete(sessionId)
     return true
+  }
+
+  /**
+   * Record that a session's run is — or is no longer — waiting on an unresolved
+   * blocking question (A4 §F.1). A decision of this process about a fact this
+   * process just wrote (the ask it committed, the answer that released one), so
+   * it counts as one exactly as {@link setPhase} does; a value the *store*
+   * implies goes through {@link applyStoreQuestionsBlocked}.
+   *
+   * `false` is not "probably unblocked": the caller is stating the derivation it
+   * just took from the store's question facts (`blockingQuestionsOf`), which is
+   * what makes a second blocking question keep the session blocked after the
+   * first is answered.
+   */
+  setQuestionsBlocked(sessionId: string, blocked: boolean): void {
+    this.decisions.set(sessionId, this.decisionToken(sessionId) + 1)
+    if (blocked) this.questionBlocked.add(sessionId)
+    else this.questionBlocked.delete(sessionId)
+  }
+
+  /**
+   * Apply a blocking state the store implies — never one this process decided —
+   * under the same token rule as {@link applyStorePhase}: `token` is the
+   * {@link decisionToken} taken before the read that produced it, and a value
+   * the gate has moved past is dropped rather than applied. The return says
+   * which of the two happened.
+   */
+  applyStoreQuestionsBlocked(sessionId: string, blocked: boolean, token: number): boolean {
+    if (this.decisionToken(sessionId) !== token) return false
+    if (blocked) this.questionBlocked.add(sessionId)
+    else this.questionBlocked.delete(sessionId)
+    return true
+  }
+
+  /** Whether the run bound to this session is waiting on an unresolved blocking question (A4 §7.2's derived wait). */
+  questionsBlocked(sessionId: string): boolean {
+    return this.questionBlocked.has(sessionId)
   }
 
   /** The phase a session is under, or `undefined` when no run is bound to it (nothing is gated). */
@@ -277,19 +351,31 @@ export class ExecutionGate {
 
   /**
    * Decide one call. A session with no phase is not bound to a run and is not
-   * gated; an `active` run is still deciding its own work. Every other phase
-   * allows the coordination list and denies everything else, naming the phase,
-   * the refused tool, and what is still allowed.
+   * gated; an `active` run with no blocking question is still deciding its own
+   * work. Every other state allows the coordination list and denies everything
+   * else, naming what holds the session — the phase, or the question it waits on
+   * — the refused tool, and what is still allowed.
+   *
+   * The two refusals are one decision with two names because a caller has to be
+   * able to tell them apart: `active` plus a blocking question is *not* "the
+   * phase closed writes", it is "this run is waiting for an answer", and an
+   * answer (not a phase change) is what ends it. Both are computed after the
+   * allow-list, so the question tools and the reads answer in either state.
    */
   decide(sessionId: string, toolName: string): GateDecision {
     const phase = this.phases.get(sessionId)
-    if (phase === undefined || phase === 'active') return { allow: true }
+    if (phase === undefined) return { allow: true }
     if (COORDINATION_ALLOWED.has(toolName)) return { allow: true }
+    const blocked = this.questionBlocked.has(sessionId)
+    if (phase === 'active' && !blocked) return { allow: true }
     const late = phase === 'terminal' ? ' This is a late call: the run is terminal, so only read-only coordination remains.' : ''
+    const because = blocked
+      ? `is waiting on an unresolved blocking question (its phase is "${phase}", unchanged: an answer releases the question, never the write gate)`
+      : `is in phase "${phase}", where tools that write, spawn, or produce effects are closed`
     return {
       allow: false,
       reason:
-        `the run bound to this session is in phase "${phase}", where tools that write, spawn, or produce effects are closed, so "${toolName}" is denied.` +
+        `the run bound to this session ${because}, so "${toolName}" is denied.` +
         `${late} Allowed in this phase: the coordination and read-only tools (${[...COORDINATION_ALLOWED].join(', ')}).`,
     }
   }

@@ -249,6 +249,10 @@ describe('tool labels', () => {
       'ask_user_question',
       'task_read', 'task_status', 'context_read', 'task_decompose', 'task_submit_result', 'task_cancel', 'task_verify', 'capability_list',
       'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel',
+      // A4 §F.1: the two halves of the parent/child question protocol — the one
+      // coordination a blocked run still needs, and the answer its own child may
+      // need from it.
+      'task_ask_parent', 'task_answer',
     ])
     expect(baseline).toEqual([...new Set(baseline)])
     // The task machinery is the tail, in the order WORKER_BASELINE_TOOLS declares.
@@ -266,6 +270,10 @@ describe('tool labels', () => {
     // management: a worker can read, continue and withdraw what it proposed, and
     // holds no tool that could decide a proposal or reach the platform surface.
     expect(WORKER_BASELINE_TOOLS).toEqual(expect.arrayContaining(['task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel']))
+    // The question tools are task-domain coordination of the same kind: a worker
+    // asks its direct parent and answers a child it was asked by, and nothing
+    // about them reaches the platform surface.
+    expect(WORKER_BASELINE_TOOLS).toEqual(expect.arrayContaining(['task_ask_parent', 'task_answer']))
     for (const platformTool of ['hitl_ask', 'hitl_approve', 'evolution_decide', 'task_review_pack', 'task_diagnose', 'escalate', 'graph_spawn']) {
       expect(baseline, platformTool).not.toContain(platformTool)
     }
