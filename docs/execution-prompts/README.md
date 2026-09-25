@@ -1,6 +1,6 @@
 # Singularity 构建任务派发入口
 
-当前（2026-09-25，Q3 收尾交付后）：第 9 项 A2+A1 的 Q1–Q4 全部关闭，[Q3 收尾](../history/2026-09-25-a2-a1-q3-closure-record.md)实现了四参数内的单事件引用（`ref:{sessionId,seq}`，按正文 UTF-8 字节分页）、50000 字节单次上限（与部署的 DSH inline 上限一致）与 `@deepseek-ai/dsh-output-retention` 复用。整组**停在进度审核**，确认前不派新的实现票（含第 11 项 A4）；状态以[建设计划文首唯一表](../2026-09-20-vrtc-code-change-plan.md)为准。
+当前（2026-09-25）：第 9 项 A2+A1 的 Q1–Q4 与整组检查已通过[进度审核](../history/2026-09-25-a2-a1-progress-review.md)，状态为**已验收**。下一项是第 11 项 A4 父子澄清；按[单票模板](task-dispatch-template.md)与[计划 F.1](../2026-09-20-vrtc-code-change-plan.md)派发，前置状态以计划文首唯一表为准。
 
 进度核实和下一票材料由[进度审核指挥 prompt](progress-review-and-dispatch.md)处理；已派发票尚未验收时不启动下一票。后续单票从[派发模板](task-dispatch-template.md)填写，直接引用计划 D/E/F，不复制旧方案或重新选型。P1–P4 的原始 prompt 保留在本目录供历史回归，不作为当前任务入口。子代理只读获派子目标的相关合同片段。
 
