@@ -10,7 +10,7 @@
 
 由运行时传入实际已有的角色、task/run 身份、当前契约与工具集合；rootBrief/ContextView/allowedActions 等视图随对应能力落地，不为装配本文模板预建字段。数据不是 {{模板变量}} 代码，使用 `interpolate:false` 或结构化渲染，来源文本不能改变 agent 角色。正文含反引号、竖线、XML 结束符等仍需原样可识别，不能依靠 Markdown 表格拼接保证边界。
 
-A2 的入口已固定为 task_read、task_status(scope=related|graph)、context_read(kind/ref)；无 Run reviewer 用既有 ledger 的可信委派绑定，首条模型输入前必须可读。原始跨 Session 工具从有效工具面移除并在执行入口拒绝旁路。恢复由 graph 显式激活/adoptRoot 完成，prompt 只读，不在装配中补恢复。A4 的 `task_ask_parent`/`task_answer` 已交付（2026-09-25 待验收）；A5–A6 的工具合同见[计划 D/E/F](2026-09-20-vrtc-code-change-plan.md)，仍是待建能力，不能提前注入。
+A2 的入口已固定为 task_read、task_status(scope=related|graph)、context_read(kind/ref)；无 Run reviewer 用既有 ledger 的可信委派绑定，首条模型输入前必须可读。原始跨 Session 工具从有效工具面移除并在执行入口拒绝旁路。恢复由 graph 显式激活/adoptRoot 完成，prompt 只读，不在装配中补恢复。A4 的 `task_ask_parent`/`task_answer` 已接线（2026-09-25 冷恢复返工）；A5–A6 的工具合同见[计划 D/E/F](2026-09-20-vrtc-code-change-plan.md)，仍是待建能力，不能提前注入。
 
 每个 role 的工具集必须在真实装配后检查；工具没实现/没挂载就不得在模型提示中要求调用。以下方括号能力项为部署时条件块，不能原样输出给模型。已有 tool 名称继续沿用，规划名到实现后才启用。
 
@@ -101,7 +101,7 @@ task_decompose 可能不立即执行：部署开启契约人审时，它回答�
 需要终止本批次时用 task_cancel（只取消自己派发的批次）；waiting_children
 期间的写、shell 与再次分解由运行时闸拒绝，不只靠本提示词约束。
 
-[父子问答协议已于 A4 交付（2026-09-25 待验收），此段为当前合同]
+[父子问答协议已接线，A4 冷恢复返工中（2026-09-25），此段为当前合同]
 收到子节点问题时先检查 questionId 对应契约与相关决定，给出有来源的回答。
 没有足够依据就继续查询或沿祖先请求澄清，不能编造根目标。
 task_answer 的 resolves 只表示你是否认为当前问题已解决；未知或需要
@@ -182,9 +182,9 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 | Prompt 中的说法 | 代码侧必须提供 |
 |---|---|
 | “你负责当前任务” | session→run→task 精确绑定，禁止同 session 冒领其他 Run |
-| “读取根目标和相关决定” | **A0 已实现，来源/恢复返工已关闭（2026-09-23）**：真实的根契约（`task_intake` 接受后持久化的 objective/criteria/assumptions/constraints/requiredCapabilities）与来源归属（`identity.rootSessionId` 经 `assertRootContractOrigin` 校验 store↔session、顶层会话与本人消息，三入口共用，拒绝在首次写入前且具名）；`task_read`/`task_status` 在未激活时给具名状态而非代用目标。边界：归因纪律不等于来源真实性证明，也不证明模型对用户请求的解读正确；R1 完成轮 3 只证明固定场景的澄清消费和有限目标形成，不能泛化为通用语义保证（主 guide §5.14）。**A1 未建**：ContextView、祖先决定投影与原始 refs 的授权读取仍待建，不能只加一句“考虑全局” |
+| “读取根目标和相关决定” | **A0 已实现，来源/恢复返工已关闭（2026-09-23）**：真实的根契约（`task_intake` 接受后持久化的 objective/criteria/assumptions/constraints/requiredCapabilities）与来源归属（`identity.rootSessionId` 经 `assertRootContractOrigin` 校验 store↔session、顶层会话与本人消息，三入口共用，拒绝在首次写入前且具名）；`task_read`/`task_status` 在未激活时给具名状态而非代用目标。边界：归因纪律不等于来源真实性证明，也不证明模型对用户请求的解读正确；R1 完成轮 3 只证明固定场景的澄清消费和有限目标形成，不能泛化为通用语义保证（主 guide §5.14）。**A1 已随第 9 项验收**：ContextView、祖先决定投影与原始 refs 的授权读取已接线；实际效果仍须以模型请求和来源授权检查为准 |
 | “可查看项目状态与上下文” | A2+A1 的 context 包同源服务模型请求和主动查询：根约束/本人贡献/相关依赖默认注入，同 graph 任务及证据/会话按引用可读；跨 graph 拒绝且原始 Session 工具不能绕过。相关性不等于权限，不因兄弟身份拒绝读取依赖证据；执行限制仍由实际动作入口重检 |
-| “向父节点询问并等待” | A3 已落地非阻塞父循环与协调相位；A4 已交付（2026-09-25 待验收）：消息/送达/恢复主体为 agent-runtime + DSH（`messages.ts`），context 展示问题和回答，task-runtime 仅仲裁执行阻塞。通信正文与队列未加进 task |
+| “向父节点询问并等待” | A3 已落地非阻塞父循环与协调相位；A4 已接线（2026-09-25 冷恢复返工）：消息/送达/恢复主体为 agent-runtime + DSH（`messages.ts`），context 展示问题和回答，task-runtime 仅仲裁执行阻塞。通信正文与队列未加进 task |
 | “提交后由 verifier 判定” | A3 已落地：task_submit_result → RunPhaseChanged(submitted) 落库后 drainSession 排空在途写，再转 verifier 排他执行；idle 不作完成证据 |
 | “只做协调” | A3 已落地：waiting_children 期间运行时闸（tools/pre-execute waterfall，在途调用同样登记检查）只放行读/状态/诊断/task_cancel 等协调动作，不只靠提示词防并发写 |
 | “分解可能待审，批准后系统自动续跑”（T2/T3 **已落地**） | 配置 `Config.generatedTaskReview: off/all`（默认 `off`）与真实档案：`all` 下 `task_decompose` 只提交提案（`submitDecompositionProposal` → `pending_review`）并返回 proposalId；渠道 `ProposalReviewService`（`ctx.proposalReviewChannel`，service 装配处）经 `ctx.approval.request` 提问并写 `decidedBy=approval:<ownerSessionId>`；批准由 runtime 重检后继续（`continueProposal`），工具层没有任何决定参数或 approvalRef；prompt 文本真实落点为 `agent-runtime/src/prompts/root.prompts.ts` 与 `task-runtime/src/handoff.ts` 的审核段；三个提案工具`task_proposal_read/continue/cancel` 在 root allow-list 与 worker baseline |
