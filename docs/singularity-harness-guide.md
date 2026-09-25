@@ -1,6 +1,6 @@
 # Singularity Harness 工作指南
 
-当前进度（2026-09-26，A4 收尾返工交付后）：R1、R2、R3 与第 9 项 A2+A1 已验收；**第 11 项 A4 收尾返工已交付、待验收**。非根 Session 冷恢复、四个故障窗口和二层/三层问答已有定向证据；恢复屏障现在只在 ready 之后唤醒问答 Agent（延迟投递/notice 挂在同一屏障 handle 上，失败或取消即丢弃），首笔合法问答工具不再依赖模型重试。证据见[返工交付记录](history/2026-09-26-a4-rework-record.md)、[二次进度审核](history/2026-09-26-a4-second-progress-review.md)与[唤醒时序收尾记录](history/2026-09-26-a4-barrier-wake-record.md)；验收后才派第 12 项 S4-E。施工合同以[建设计划 D/E/F](2026-09-20-vrtc-code-change-plan.md)为准。
+当前进度（2026-09-26）：R1、R2、R3、第 9 项 A2+A1 与**第 11 项 A4 已验收**。A4 的非根 Session 冷恢复、四个故障窗口和二层/三层问答已有定向证据；恢复屏障在 ready 后唤醒问答 Agent，首笔合法问答工具不再依赖模型重试。[最终审核](history/2026-09-26-a4-final-review.md)确认[唤醒时序收尾](history/2026-09-26-a4-barrier-wake-record.md)关闭原阻断。当前只派第 12 项 [S4-E](execution-prompts/12-s4-e-skill-evaluation.md)。施工合同以[建设计划 D/E/F](2026-09-20-vrtc-code-change-plan.md)为准。
 
 本文负责方向、职责与当前事实；[术语表](../CONTEXT.md)定义概念。[历史指南](history/2026-09-21-harness-guide-snapshot.md)保留旧编号和操作经验。深入实施参考：[Task 契约与可选人审](task-contract-construction-guide.md)、[有目标的探索/自进化架构](exploration-evolution-architecture.md)、[角色与 System Prompt 合同](agent-prompt-contracts.md)。[开源机制调研](2026-09-21-open-source-agent-patterns.md)记录一手来源。
 
@@ -100,7 +100,7 @@ A2 与 A1 合成一个可验收交付组：授权概览、按引用取细节、�
 
 - **读取（已提交实现并验收）**：task_read、task_status 与 context_read 由 context 读源适配；四个跨 Session 原始工具已从角色有效工具面移除并由执行闸拒绝。绑定事实读取失败具名拒绝且零模型输入，委派者必须是所属 graph 成员，状态分页必前进。超限单事件按 `ref:{sessionId,seq}` 逐页读取其可见正文（`extractSessionEventText`）的 UTF-8 字节页；上限 50000 字节与部署的 DSH inline 上限一致，字节窗口与省略措辞复用 `@deepseek-ai/dsh-output-retention`，游标与按行预算仍属本包。
 - **恢复（已提交实现并随整组验收）**：graphs.activate（含启动恢复）显式 await adoptRoot，创建也汇入该门；先完成对账/写闸/driver 登记，再开放业务输入，不等批次执行。直接执行入口未就绪具名拒绝；读取路径不恢复。此实现已随第 9 项提交；整组回归已在 [Q3 收尾](history/2026-09-25-a2-a1-q3-closure-record.md)跑过，不能因局部成立跳过整组验收。
-- **后续闭环（A4 收尾返工已交付待验收；A5/S4-E/A6 未建）**：A4 已落地「正文留 Session、Task 留引用/阻塞」、非根冷恢复与恢复期唤醒顺序（屏障 ready 后才投递/唤醒，§5.16）；A5 只按失败 Review 幂等启动诊断。S4-E 先完整支持单文件 Skill 替换的双侧评估；它不能关闭 missing capability。A6 明确承担 capability 行与可选执行型 Skill 的联合评估/应用/回滚，以及原目标的新 Run/批次恢复；人仍只审改进，框架不预置 Agent 的查因/修复策略。
+- **后续闭环（A4 已验收；S4-E/A5/A6 未建）**：A4 已落地「正文留 Session、Task 留引用/阻塞」、非根冷恢复与恢复期唤醒顺序（屏障 ready 后才投递/唤醒，§5.16）；A5 只按失败 Review 幂等启动诊断。S4-E 先完整支持单文件 Skill 替换的双侧评估；它不能关闭 missing capability。A6 明确承担 capability 行与可选执行型 Skill 的联合评估/应用/回滚，以及原目标的新 Run/批次恢复；人仍只审改进，框架不预置 Agent 的查因/修复策略。
 
 R3 是避免共享导出同时迁移的串行维护安排，不是上下文能力的技术前置；禁止借此要求先整理完所有大文件。后续每票内部交接顺序见计划 F，主代理集成整组，子代理一次只领取一个确定目标。
 
@@ -212,7 +212,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 任务列表显示可读取的状态与有依据的执行限制，可见不等于可领取，动作仍由 runtime 实时重检。节点可查询与提出新 Task，不做全局工作窃取。Supervisor 由真实失败/缺口记录幂等触发，Agent 自行选择依赖与证据下钻路径，再由候选节点实现、独立验证和人审应用；复用已有记录身份，不新建 incident 平台，不以诊断自述取代正确性证据。
 
-根契约入口已实现（§5.11），其来源归属与恢复入口已返工关闭（§5.13）：setup 与目标激活分离，graph name 不再代替 objective，缺独立判据具名拒绝，旧任务不原地改题；根契约的来源由统一服务入口机械校验（store↔session、顶层会话、会话自身日志里的本人消息），模型自报不能替代，`adoptRoot` 无根时经既有恢复遍完成恢复。这些是机械合同，不能推给模型实验；R1 只验证了一个具体澄清场景，schema/hash 不证明语义正确。A2+A1 已提交实现，进度审核返工与 Q1–Q4 定向返工（含 Q3 单事件续读收尾，§5.15）均已关闭，现已验收；A4 收尾返工（恢复期唤醒在屏障 ready 后）已交付待验收，见 §5.16 与[收尾记录](history/2026-09-26-a4-barrier-wake-record.md)。
+根契约入口已实现（§5.11），其来源归属与恢复入口已返工关闭（§5.13）：setup 与目标激活分离，graph name 不再代替 objective，缺独立判据具名拒绝，旧任务不原地改题；根契约的来源由统一服务入口机械校验（store↔session、顶层会话、会话自身日志里的本人消息），模型自报不能替代，`adoptRoot` 无根时经既有恢复遍完成恢复。这些是机械合同，不能推给模型实验；R1 只验证了一个具体澄清场景，schema/hash 不证明语义正确。A2+A1 已提交实现，进度审核返工与 Q1–Q4 定向返工（含 Q3 单事件续读收尾，§5.15）均已关闭，现已验收；A4 收尾返工（恢复期唤醒在屏障 ready 后）已验收，见 §5.16 与[最终审核](history/2026-09-26-a4-final-review.md)。
 
 ### Task 自主构造与可选人审
 
@@ -285,14 +285,14 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 | G9 | 类型闸只覆盖 `agent-singularity`；其余 Singularity 包的 `build` 仍只有 tsdown，未接 `tsc --noEmit`，其严格类型状态未经本闸保证 | P1 范围外，待独立评估 |
 | G10 | 动态生成已存在，无生成提案审核协议的风险已由 T1+T2/T3 关闭（§5.6、§5.10）：统一可持久化契约、闭合字段集、内容摘要与准入记录（T1）；`generatedTaskReview` 策略、不可变提案与整批内容、决定绑定三个摘要、批准后重检、requestKey 幂等与四个崩溃点恢复（T2/T3，2026-09-23 已验收）。仍未建：Task 模板库（模板不是合法性白名单）、契约修订入口、多进程并发写同一 store 的恰好一次保证 | T1、T2/T3 交付组 / Task 自主构造指导 |
 | G11 | 根 objective/AC 入口过弱；上下文传递缺根目标、祖先决定来源与新鲜度；根目标错了时全局传播不能补救。**A0 已实现、Q2/Q3 返工已关闭（§5.11、§5.13）**：根任务延迟到真实用户目标/AC 被接受后激活，graph name 不再进入 objective，缺独立顶层判据具名拒绝；根契约的来源与归属由统一服务入口机械校验（store↔session、顶层会话、会话自身日志的本人消息；不可读即具名拒绝），本运行时提示词不再冒充人类输入，`adoptRoot` 无根时经既有恢复遍完成恢复；A1 的上下文投影（根目标/硬约束与本人契约/贡献的来源化呈现）已随第 9 项提交实现，Q1–Q4 定向返工与 [Q3 收尾](history/2026-09-25-a2-a1-q3-closure-record.md)完成，整组已验收（§5.15），「模型对用户请求的解读是否正确」的通用语义证明仍未建——机器准入只管结构、判据种类与来源归因；R1 的真实场景证明答复送达，且完成轮 3 在冻结合同下把该场景判为 `pass / path2-limited-goal`（§5.14 完成轮记录）；三条契约边界（假设不得替代确认、缺失条件先问用户、契约只承载答复支持的内容且判据须可裁定）已落在根 prompt / `task_intake` 说明。通用语义证明仍不在机器准入范围内——一次场景通过不等于普遍澄清能力 | A0（返工关闭）→ A1 |
-| G12 | 父同步等子的循环等待已由 A3 解除（§5.9：分解立即返回 batchId、waiting_children 运行时写闸、显式提交、无进展停止，idle 不再等同执行结束）。持久 question/answer 与问答等待已接线；A4 的同一 Session/Run 冷恢复、组合故障与恢复期唤醒顺序（屏障 ready 后才投递/唤醒）已有证据，收尾返工待验收（§5.16）。未添加 ask_parent 之外的通用消息框架，send_message 仍未开放 | A3（已交付）→ A4（收尾返工待验收） |
+| G12 | 父同步等子的循环等待已由 A3 解除（§5.9：分解立即返回 batchId、waiting_children 运行时写闸、显式提交、无进展停止，idle 不再等同执行结束）。持久 question/answer 与问答等待已接线；A4 的同一 Session/Run 冷恢复、组合故障与恢复期唤醒顺序（屏障 ready 后才投递/唤醒）已验收（§5.16）。未添加 ask_parent 之外的通用消息框架，send_message 仍未开放 | A3（已交付）→ A4（已验收） |
 | G13 | A2 已提交 related/graph 分页视图与原始 Session 工具封闭；分页停滞（Q4）、Session 大事件不可续读（Q3）与绑定失败放行（Q1）的返工均已关闭并有正/反例证据，整组现已验收；动作是否可执行仍由 runtime 重检。reviewer 跨图因果 debug 属 A5 | A2（已验收）/A5 |
 | G14 | root/worker prompt 与当前方向有漂移：L4/manual、直接问人、make command exit 0、分解意图矛盾；未来工具必须随真实协议接线再写入提示。**R0 已关闭工具面的漂移部分（2026-09-23，已验收，§5.11）**：allow-list 与 prompt 由同一开关布尔派生（off 时提示词不含进化协议段、工具面不含九个 `evolution_*`），并新增根 intake 段（`task_intake`、未激活视图、审核策略、激活前不得 `task_decompose`）；其余角色模板（A1–A6）仍逐票同步 | R0（已验收）→ A0–A6 逐票同步 Prompt 合同 |
 | G15 | 根工具无条件暴露进化链、通用 prompt 混入 BB 指导；runtime 职责集中，未使用接口/仅诊断摘要易被误读为完整保证；缺真实模型运行反馈。**R0 部分关闭（2026-09-23，已验收，§5.11）**：进化链改由装配开关决定是否注册（off = 只注册 19 个常驻工具，on = 28 个，与之前逐名相同），BB 句子从通用 root prompt 移除、领域指导归部署的领域 skill；不新增主管、不合并审批。R1 已补真实运行反馈并于 2026-09-24 验收（完成轮 3 为 `pass / path2-limited-goal`，失败轮次保留）；**R2 已关闭「未使用接口/仅诊断摘要」部分与取消写闸返工（Q1，§5.12）**：`evidenceByVerifier` 无消费者已撤回；`templateDigest` 标明仅诊断、无身份保证；三个无消费者导出（`TaskProposalKind`/`TaskProposalDecision`/`TASK_PROPOSAL_ID_PREFIX`）收回；取消进行中的写闸不再被只读查询/协调读解除，跨取消完成点的陈旧读取也被闸的决定计数丢弃（`closingStores` + `applyStorePhase`，两轮交付 `250a04f`/`8f9086e`）。仍待：runtime 职责集中（drivers 推状态模型）按证据保留、不预定 pull 化；§5.12 记的四项既有取消边界（spawn 续跑、另两条 store 派生写相位入口、`closingStores` 非重入计数、`unload` 无 store 记录）未修。R1 的 V5 ledger 将缺失 cache-write/usage 记为未报告，但完成轮 fixture 的 `driver.json/run-meta.json` 历史 `0` 已披露为 caveat，未来轮次须修自己的 driver 副本；三次生产修复落在根 prompt / `task_intake` 说明。一次通过只证明该固定场景，不冒充效果验收或普遍澄清能力 | R0（证据保留）+ R2 Q1（已关闭）+ R1（已验收） |
 
 历史记录中的 M1–M9 为此前会话的实跑声明，保留于历史指南。本次回归结果见建设计划 S0；本次没有重跑 LLM、BB 构建仿真或生产 Evolution 链路。旧环境可用性、外部 bbdev 缺陷和部署阈值在使用前需重新读取对应部署，不能从旧日志推断当前状态。
 
-各票的实现范围与剩余边界见上表及 §5；提交、日期和实跑证据查[历史执行记录](history/2026-09-24-vrtc-execution-records.md)。P4 原交付与后续修复须分别读取。当前已接线的机械保障不代表问答语义正确性、自然语言完整性或自主修复已完成；A4 收尾返工（恢复期唤醒在屏障 ready 后）待进度审核验收。
+各票的实现范围与剩余边界见上表及 §5；提交、日期和实跑证据查[历史执行记录](history/2026-09-24-vrtc-execution-records.md)。P4 原交付与后续修复须分别读取。当前已接线的机械保障不代表问答语义正确性、自然语言完整性或自主修复已完成；A4 收尾返工（恢复期唤醒在屏障 ready 后）已通过[进度审核](history/2026-09-26-a4-final-review.md)。
 
 ## 5. 实现时的关键约束
 
@@ -402,17 +402,17 @@ A3 已交付非阻塞批次、执行相位、工作区写入归属、显式提�
 
 **进度审核阻断（全部关闭）**：Q1（绑定故障放行）、Q2（委派归属）、Q3（中途读取失败与超限单事件续读）、Q4（状态分页停滞）均已关闭并有正/反例证据。详见[最终进度审核](history/2026-09-25-a2-a1-progress-review.md)、[返工记录](history/2026-09-25-a2-a1-rework-record.md)与[Q3 收尾记录](history/2026-09-25-a2-a1-q3-closure-record.md)；整组已验收，下一项为 A4。
 
-### 5.16 父子持久问答（2026-09-26 A4 收尾返工后待验收）
+### 5.16 父子持久问答（2026-09-26 A4 已验收）
 
-已接线范围：直属父子问答 `task_ask_parent({requestKey,question,blocking?})` / `task_answer({questionId,requestKey,answer,resolves})`，经真实 DSH Session/inbox 投递与冷恢复续跑；阻塞只作用于对应 Run 和问题，不新增预算、mailbox、消息框架或回答分类器。恢复期的唤醒（问答投递与 owner notice）在屏障 ready 之后才发出。[交付记录](history/2026-09-25-a4-delivery-record.md)、[返工交付记录](history/2026-09-26-a4-rework-record.md)与[唤醒时序收尾记录](history/2026-09-26-a4-barrier-wake-record.md)保存已测证据；验收结论见[二次进度审核](history/2026-09-26-a4-second-progress-review.md)与本轮收尾记录状态。
+已接线范围：直属父子问答 `task_ask_parent({requestKey,question,blocking?})` / `task_answer({questionId,requestKey,answer,resolves})`，经真实 DSH Session/inbox 投递与冷恢复续跑；阻塞只作用于对应 Run 和问题，不新增预算、mailbox、消息框架或回答分类器。恢复期的唤醒（问答投递与 owner notice）在屏障 ready 之后才发出。[交付记录](history/2026-09-25-a4-delivery-record.md)、[返工交付](history/2026-09-26-a4-rework-record.md)与[唤醒收尾](history/2026-09-26-a4-barrier-wake-record.md)保存实测证据；[最终审核](history/2026-09-26-a4-final-review.md)给出验收结论。
 
 - **事实（task）**：`QuestionAsked`/`QuestionAnswered` 两类事件只持久 question/answer 稳定身份（`q-`/`a-` + 内容哈希）、双方 Run、正文引用 `{sessionId,seq}`、messageId、requestKey、内容 digest 与 blocking/resolves；**不存正文**。`questionId` 按 (childRunId, requestKey) 派生：同 key 同内容返回原记录、异内容具名拒绝零副作用。`TaskSnapshot.questions` 供纯派生（`openQuestionsOf`/`blockingQuestionsOf`/`questionsAwaitingAnswerOf`）；open = 无 resolving 回答且双方 run running。旧空 `pendingQuestionIds/blockingQuestionIds` 声明保留可读、新写入停止（`changeRunPhaseIn` 具名拒绝），决策 `same-version`（[persistence 记录](persistence-changes/2026-09-25-a4-questions.md)）。入口 `task/src/index.ts:askParentQuestionIn/answerParentQuestionIn`、领域模块 `task/src/question.ts`。
 - **投递（agent-runtime）**：`messages.ts` 是唯一主体。正文来源 = 发送 Session 真实且已 flush 的 `tool/call`（先 `ctx.sessions.flush` 再 `sessionQuery` 读回，伪造/他 Session/篡改在 task 意图落库前具名拒绝；digest = sha256(arguments 原文)）。消息自建 `freezeMessage` + `{kind:'agent-message',form:'relay',senderSessionId}`（不伪装 human，零 DSH 改动）；顺序固定：来源 flush → task 原子提交 → `steer` 投递 → 收件 Session flush → 报 delivered。同 messageId 幂等：pending 撞 DSH `already pending` 或 fold 命中 history 即 `already-present`（fold 照 agent-team 算法，不依赖实验包）；目标不 live 记 `unavailable` 零副作用、保留意图由恢复入口重试。delivered ≠ 已消费。
-- **阻塞与恢复（task-runtime）**：编排入口 `askParentQuestion`/`answerParentQuestion`（`index.ts`，身份只取 live caller + run 绑定 + store 父关系）。闸新增 per-session 阻塞态（`setQuestionsBlocked`，非相位）：阻塞会话只放行协调动作；waiting_children 相位规则不因问答改变。闸在 ask、resolving answer、恢复重建和被问方终态后重算（`releaseAskingSessions`）；active+阻塞免无进展标记，原截止继续生效。冷恢复已接回问答等待的 active worker 与有问答参与的 waiting_children 非根父的同一 Session/Run，并对账受管理工作、重建 gate、补投持久问答；被收养等待有原 deadline，失败具名结算，无问答在途 run 仍按 A3 旧规则取消。**唤醒顺序（本轮收口）**：`reconcileStore` 的「投递 + 未 claim notice」块与恢复期根激活 notice 不再在屏障内执行——屏障 `recovering` 时登记为 `StoreRecoveryState` 上的延迟动作（与 `pendingDrivers` 同形、仅进程内），`adoptRoot` 在 gate 初始化与 ready 之后（release 之前）按序发出，`state.cancelled` 或屏障失败即丢弃；意图始终在 Task 持久事实里，下一次显式激活重跑同一决定。无屏障的直接 `reconcileStore` 调用语义不变。A4-5 的结算所有者保持原实现。
+- **阻塞与恢复（task-runtime）**：编排入口 `askParentQuestion`/`answerParentQuestion`（`index.ts`，身份只取 live caller + run 绑定 + store 父关系）。闸新增 per-session 阻塞态（`setQuestionsBlocked`，非相位）：阻塞会话只放行协调动作；waiting_children 相位规则不因问答改变。闸在 ask、resolving answer、恢复重建和被问方终态后重算（`releaseAskingSessions`）；active+阻塞免无进展标记，原截止继续生效。冷恢复已接回问答等待的 active worker 与有问答参与的 waiting_children 非根父的同一 Session/Run，并对账受管理工作、重建 gate、补投持久问答；被收养等待有原 deadline，失败具名结算，无问答在途 run 仍按 A3 旧规则取消。**唤醒顺序**：`reconcileStore` 的「投递 + 未 claim notice」块与恢复期根激活 notice 不在屏障 `recovering` 时执行；它们登记为 `StoreRecoveryState` 上的延迟动作（仅进程内），`adoptRoot` 在 gate 初始化与 ready 之后（release 之前）按序发出；屏障 ready 前取消或失败即丢弃。意图始终在 Task 持久事实里，下一次显式激活重跑同一决定。无屏障的直接 `reconcileStore` 调用语义不变。A4-5 的结算所有者保持原实现。
 - **呈现（context）**：`singularity:questions` runtime-context（worker 与 root 均接线）：父视角列待答问题（id/子 run/ref/`task_answer` 指引），子视角列未证明看过的回答（消费证明 = 本人 Session history 存在该 messageId 的 `user/message`，无证明保留引用，不建 consumed 账本）；正文经 `context_read` 按 ref 读取。active+阻塞显示 `waiting_answer`（纯派生）。重复装配字节稳定、零写副作用。
 - **工具（agent-singularity）**：`task-ask-parent.ts`/`task-answer.ts` 薄适配（身份 `exec.agent.id` + `exec.callId`，未声明键具名拒绝，schema 无收件人/授权字段）；worker baseline 含两者，root 仅 `task_answer`，reviewer 白名单不含即关闭。
 - **顺带修复**：replay 工作区层补 taskId，使 replay 内真实 `task_decompose` 及「replay 中真实 Task 父子问答」正例走通（前置 A3 缺陷，红绿证据见交付记录）。
-- **已知边界与阻断**：replay driver 自身的跨重启续跑属 A6/S2-R（replay 树内真实父子的问答恢复已覆盖）；全体 worker 的热恢复不泛化（S2-R）；阻塞确立时已放行的同 step 在途写仍按 A3 相位语义处理；A4-3 点2「入箱未 flush」以移除 artifact 尾部字节模拟（真实 append-through 后端无法自造该状态）；审批渠道在恢复中重发问后由人/渠道记录的决策若在 store ready 前到达仍被具名拒绝、提案保留 `pending_review`（人/渠道自己的写入口，非 runtime 唤醒，见收尾记录）。屏障内提前唤醒已由[收尾返工](history/2026-09-26-a4-barrier-wake-record.md)关闭，待验收。
+- **已知边界**：replay driver 自身的跨重启续跑属 A6/S2-R（replay 树内真实父子的问答恢复已覆盖）；全体 worker 的热恢复不泛化（S2-R）；阻塞确立时已放行的同 step 在途写仍按 A3 相位语义处理；A4-3 点2「入箱未 flush」以移除 artifact 尾部字节模拟（真实 append-through 后端无法自造该状态）；审批渠道在恢复中重发问后由人/渠道记录的决策若在 store ready 前到达仍被具名拒绝、提案保留 `pending_review`（人/渠道自己的写入口，非 runtime 唤醒，见收尾记录）。屏障内提前唤醒已由[收尾返工](history/2026-09-26-a4-barrier-wake-record.md)关闭并[验收](history/2026-09-26-a4-final-review.md)。屏障取消前的延迟动作会丢弃；ready 后已开始的投递与普通取消并发时，业务闸仍负责拒绝取消后的写入。
 
 ## 6. 文档维护
 
