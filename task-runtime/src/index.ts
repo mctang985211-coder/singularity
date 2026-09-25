@@ -965,6 +965,25 @@ interface StoreRecoveryState {
   readonly released: Promise<boolean>
   /** The drivers this barrier registered but has not yet released to start. */
   readonly pendingDrivers: { key: string; controller: AbortController }[]
+  /**
+   * The delivery-and-wake pass this barrier's {@link TaskRuntime.reconcileStore}
+   * deferred (A4 §F.1's wake order): a `steer` or a notice reaches an idle
+   * Session as a model turn, and a turn that arrives while the store is still
+   * `recovering` is refused by the recovery door with nothing to wake it again.
+   * The ready handle runs it once — when the gates are in place and the status
+   * is `ready` — and a failed or invalidated barrier drops it; the persistent
+   * question intents are all the pass needs, so the next explicit activation
+   * decides the same deliveries again from the record.
+   */
+  pendingQuestionDelivery?: () => Promise<void>
+  /**
+   * The owner notices a pass deferred because the store was not ready yet
+   * ({@link TaskRuntime.notifyWhenReady}): a notice is a `followup`, so it wakes
+   * a model exactly like a delivery does and owes the same order. They are sent
+   * in the order they were raised, on the ready handle, and dropped with a
+   * failed or invalidated barrier — nothing that matters depends on a notice.
+   */
+  pendingNotices: { sessionId: string; text: string }[]
   /** Why a failed barrier failed, verbatim. */
   reason?: string
   /** The original error a failed barrier threw. */
@@ -1837,6 +1856,7 @@ export class TaskRuntime extends Service {
       release,
       released,
       pendingDrivers: [],
+      pendingNotices: [],
     }
     this.storeRecovery.set(storeId, state)
     try {
@@ -1854,6 +1874,18 @@ export class TaskRuntime extends Service {
         state.status = 'ready'
         state.pendingDrivers.length = 0
       }
+      // The wakes this barrier deferred run now and only now: the gates are in
+      // place and the store is `ready`, so the first request each one starts is
+      // admissible. They run before the drivers are released, so `adoptRoot`
+      // still hands the completion over in one step — and a wake is never
+      // retried by the Session it refused, so an invalidated barrier drops them
+      // and the intents the deliveries would have decided stay on the record.
+      const deferred = state.pendingQuestionDelivery
+      state.pendingQuestionDelivery = undefined
+      if (!state.cancelled) {
+        for (const notice of state.pendingNotices.splice(0)) this.notify(notice.sessionId, notice.text)
+        if (deferred !== undefined) await deferred()
+      }
       // The drivers start only now — after the facts, the gates and the
       // registrations are settled. The barrier never waits for what they do;
       // an invalidated barrier stands its registrations down instead.
@@ -1863,6 +1895,11 @@ export class TaskRuntime extends Service {
       state.status = 'failed'
       state.reason = error instanceof Error ? error.message : String(error)
       state.failure = error
+      // The failed barrier's deferred wake is dropped with it: a store that never
+      // reached `ready` wakes no model, and the record keeps the intents for the
+      // activation that retries.
+      state.pendingQuestionDelivery = undefined
+      state.pendingNotices.length = 0
       // Not-started is not executed (A2 §E): the drivers this barrier
       // registered are aborted and removed, nothing is written on their behalf,
       // and the next explicit activation re-registers them from the persistent
@@ -3475,7 +3512,7 @@ export class TaskRuntime extends Service {
     this.sessions.set(rootSessionId, { storeId, taskId, runId })
     this.startedSessions.add(rootSessionId)
     this.executionGate.setPhase(rootSessionId, 'active')
-    this.notify(
+    this.notifyWhenReady(
       rootSessionId,
       `the root contract of this session was activated: task ${taskId}, run ${runId} (proposal ${proposal.proposalId}, policy ${proposal.policy}). ` +
       'This session may now decompose, submit its own result, or cancel.',
@@ -4394,7 +4431,7 @@ export class TaskRuntime extends Service {
     }
     if (phase === 'terminal') this.executionGate.setTerminal(rootSessionId)
     else if (phase !== undefined) this.executionGate.setPhase(rootSessionId, phase)
-    this.notify(
+    this.notifyWhenReady(
       rootSessionId,
       `recovery bound this session to its activated root contract: task ${taskId}, run ${runId}` +
       `${phase === 'terminal' ? ' (that run is terminal, so this session is closed to new work)' : ''}. ` +
@@ -5460,16 +5497,40 @@ export class TaskRuntime extends Service {
     // deliveries cannot be decided is still a store whose facts were reconciled.
     // What could not be settled is *also* warned about here, so the one caller
     // that drops the returned report (adoption) cannot swallow it.
+    //
+    // This block is the pass's one wake — the `steer` of an owed message and the
+    // notice that wakes a Session holding an unread one — and a wake is a model
+    // turn, so it may not run *inside* the barrier: the turn's first request
+    // would meet a store that is still `recovering`, be refused by the recovery
+    // door, and nothing would wake the Session again. A barrier in flight
+    // therefore owns the decision, exactly as it owns the drivers it registers:
+    // the pass hands it the deferred pass, the ready handle runs it once after
+    // the gates and the `ready` status, and a failed or invalidated barrier
+    // drops it. The intents live in the Task record and are re-read either way.
+    const deliverQuestions = async (): Promise<QuestionReconcileReport[]> => {
+      try {
+        const deliveries = await reconcileQuestionDeliveries(this.questionCoordination(), storeId)
+        this.reportUnsettledQuestionDeliveries(storeId, deliveries)
+        await this.wakeUnclaimedQuestionMessages(storeId, deliveries)
+        return deliveries
+      } catch (error) {
+        this.warn(
+          `store ${storeId}: its pending question deliveries could not be reconciled ` +
+          `(${error instanceof Error ? error.message : String(error)}); the Task records still hold the intents, and the next activation retries`,
+        )
+        return []
+      }
+    }
+    const barrier = this.storeRecovery.get(storeId)
     let questionDeliveries: QuestionReconcileReport[] = []
-    try {
-      questionDeliveries = await reconcileQuestionDeliveries(this.questionCoordination(), storeId)
-      this.reportUnsettledQuestionDeliveries(storeId, questionDeliveries)
-      await this.wakeUnclaimedQuestionMessages(storeId, questionDeliveries)
-    } catch (error) {
-      this.warn(
-        `store ${storeId}: its pending question deliveries could not be reconciled ` +
-        `(${error instanceof Error ? error.message : String(error)}); the Task records still hold the intents, and the next activation retries`,
-      )
+    if (barrier === undefined || barrier.status !== 'recovering') {
+      questionDeliveries = await deliverQuestions()
+    } else if (barrier.cancelled !== true) {
+      // A second pass inside one barrier re-decides the same deliveries; the later
+      // decision is the one the ready handle runs, and the record is what both read.
+      barrier.pendingQuestionDelivery = async () => {
+        await deliverQuestions()
+      }
     }
     // The proposal pass comes last (T2/T3 §5–§6): a batch it admits is driven by
     // the driver it starts, and the workspace question is already settled above,
@@ -6185,6 +6246,29 @@ export class TaskRuntime extends Service {
     } catch (error) {
       this.warn(`could not notify session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
     }
+  }
+
+  /**
+   * Send one owner notice through the live Session when its store is ready, and
+   * park it on the recovery barrier when one is in flight (A4 §F.1's wake order).
+   *
+   * A notice is a wake: `followup` opens a turn in an idle Session, and a turn
+   * whose first request meets a store that is still `recovering` is refused by
+   * the recovery door with nothing to wake the Session again. The notices the
+   * barrier's own pass raises are therefore raised here rather than sent: the
+   * ready handle sends them in the order they were raised, and a failed or
+   * invalidated barrier drops them — a notice is best-effort by contract, and
+   * the next explicit activation raises the same one from the record again. With
+   * no barrier in flight this is {@link notify}, unchanged.
+   */
+  private notifyWhenReady(sessionId: string, text: string): void {
+    const storeId = this.sessions.get(sessionId)?.storeId
+    const barrier = storeId === undefined ? undefined : this.storeRecovery.get(storeId)
+    if (barrier !== undefined && barrier.status === 'recovering' && barrier.cancelled !== true) {
+      barrier.pendingNotices.push({ sessionId, text })
+      return
+    }
+    this.notify(sessionId, text)
   }
 
   /**

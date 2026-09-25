@@ -5088,6 +5088,20 @@ declare class TaskRuntime extends Service {
    */
   private notify;
   /**
+   * Send one owner notice through the live Session when its store is ready, and
+   * park it on the recovery barrier when one is in flight (A4 §F.1's wake order).
+   *
+   * A notice is a wake: `followup` opens a turn in an idle Session, and a turn
+   * whose first request meets a store that is still `recovering` is refused by
+   * the recovery door with nothing to wake the Session again. The notices the
+   * barrier's own pass raises are therefore raised here rather than sent: the
+   * ready handle sends them in the order they were raised, and a failed or
+   * invalidated barrier drops them — a notice is best-effort by contract, and
+   * the next explicit activation raises the same one from the record again. With
+   * no barrier in flight this is {@link notify}, unchanged.
+   */
+  private notifyWhenReady;
+  /**
    * Kill and confirm one session's managed jobs — the half of the write
    * convergence a cancellation owes its checkout. A deployment with no jobs
    * service, or a session whose agent is gone, has nothing to reconcile, and

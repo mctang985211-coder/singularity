@@ -6717,7 +6717,8 @@ var TaskRuntime = class TaskRuntime extends Service {
 			promise: barrier.then(() => void 0, () => void 0),
 			release,
 			released,
-			pendingDrivers: []
+			pendingDrivers: [],
+			pendingNotices: []
 		};
 		this.storeRecovery.set(storeId, state);
 		try {
@@ -6728,12 +6729,20 @@ var TaskRuntime = class TaskRuntime extends Service {
 				state.status = "ready";
 				state.pendingDrivers.length = 0;
 			}
+			const deferred = state.pendingQuestionDelivery;
+			state.pendingQuestionDelivery = void 0;
+			if (!state.cancelled) {
+				for (const notice of state.pendingNotices.splice(0)) this.notify(notice.sessionId, notice.text);
+				if (deferred !== void 0) await deferred();
+			}
 			release(!state.cancelled);
 			return adoption;
 		} catch (error) {
 			state.status = "failed";
 			state.reason = error instanceof Error ? error.message : String(error);
 			state.failure = error;
+			state.pendingQuestionDelivery = void 0;
+			state.pendingNotices.length = 0;
 			this.standDownPendingDrivers(state);
 			release(false);
 			try {
@@ -7997,7 +8006,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 		});
 		this.startedSessions.add(rootSessionId);
 		this.executionGate.setPhase(rootSessionId, "active");
-		this.notify(rootSessionId, `the root contract of this session was activated: task ${taskId}, run ${runId} (proposal ${proposal.proposalId}, policy ${proposal.policy}). This session may now decompose, submit its own result, or cancel.`);
+		this.notifyWhenReady(rootSessionId, `the root contract of this session was activated: task ${taskId}, run ${runId} (proposal ${proposal.proposalId}, policy ${proposal.policy}). This session may now decompose, submit its own result, or cancel.`);
 		return {
 			proposalId: proposal.proposalId,
 			status: "activated",
@@ -8705,7 +8714,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 		}
 		if (phase === "terminal") this.executionGate.setTerminal(rootSessionId);
 		else if (phase !== void 0) this.executionGate.setPhase(rootSessionId, phase);
-		this.notify(rootSessionId, `recovery bound this session to its activated root contract: task ${taskId}, run ${runId}${phase === "terminal" ? " (that run is terminal, so this session is closed to new work)" : ""}. A late intake for a different contract is refused because the store already holds this root.`);
+		this.notifyWhenReady(rootSessionId, `recovery bound this session to its activated root contract: task ${taskId}, run ${runId}${phase === "terminal" ? " (that run is terminal, so this session is closed to new work)" : ""}. A late intake for a different contract is refused because the store already holds this root.`);
 	}
 	/**
 	* Replay one historical terminal task under a candidate overlay (guide
@@ -9456,14 +9465,23 @@ var TaskRuntime = class TaskRuntime extends Service {
 				}
 			}
 		}
+		const deliverQuestions = async () => {
+			try {
+				const deliveries = await reconcileQuestionDeliveries(this.questionCoordination(), storeId);
+				this.reportUnsettledQuestionDeliveries(storeId, deliveries);
+				await this.wakeUnclaimedQuestionMessages(storeId, deliveries);
+				return deliveries;
+			} catch (error) {
+				this.warn(`store ${storeId}: its pending question deliveries could not be reconciled (${error instanceof Error ? error.message : String(error)}); the Task records still hold the intents, and the next activation retries`);
+				return [];
+			}
+		};
+		const barrier = this.storeRecovery.get(storeId);
 		let questionDeliveries = [];
-		try {
-			questionDeliveries = await reconcileQuestionDeliveries(this.questionCoordination(), storeId);
-			this.reportUnsettledQuestionDeliveries(storeId, questionDeliveries);
-			await this.wakeUnclaimedQuestionMessages(storeId, questionDeliveries);
-		} catch (error) {
-			this.warn(`store ${storeId}: its pending question deliveries could not be reconciled (${error instanceof Error ? error.message : String(error)}); the Task records still hold the intents, and the next activation retries`);
-		}
+		if (barrier === void 0 || barrier.status !== "recovering") questionDeliveries = await deliverQuestions();
+		else if (barrier.cancelled !== true) barrier.pendingQuestionDelivery = async () => {
+			await deliverQuestions();
+		};
 		return {
 			unresolvedProposals: await this.reconcileProposals(storeId),
 			questionDeliveries,
@@ -10097,6 +10115,31 @@ var TaskRuntime = class TaskRuntime extends Service {
 		} catch (error) {
 			this.warn(`could not notify session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
 		}
+	}
+	/**
+	* Send one owner notice through the live Session when its store is ready, and
+	* park it on the recovery barrier when one is in flight (A4 §F.1's wake order).
+	*
+	* A notice is a wake: `followup` opens a turn in an idle Session, and a turn
+	* whose first request meets a store that is still `recovering` is refused by
+	* the recovery door with nothing to wake the Session again. The notices the
+	* barrier's own pass raises are therefore raised here rather than sent: the
+	* ready handle sends them in the order they were raised, and a failed or
+	* invalidated barrier drops them — a notice is best-effort by contract, and
+	* the next explicit activation raises the same one from the record again. With
+	* no barrier in flight this is {@link notify}, unchanged.
+	*/
+	notifyWhenReady(sessionId, text$1) {
+		const storeId = this.sessions.get(sessionId)?.storeId;
+		const barrier = storeId === void 0 ? void 0 : this.storeRecovery.get(storeId);
+		if (barrier !== void 0 && barrier.status === "recovering" && barrier.cancelled !== true) {
+			barrier.pendingNotices.push({
+				sessionId,
+				text: text$1
+			});
+			return;
+		}
+		this.notify(sessionId, text$1);
 	}
 	/**
 	* Kill and confirm one session's managed jobs — the half of the write
