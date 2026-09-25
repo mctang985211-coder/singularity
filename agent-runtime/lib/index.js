@@ -1,6 +1,6 @@
 import { Context, Service } from "@deepseek-ai/cordis";
-import { createUserMessage } from "@deepseek-ai/dsh-llm";
-import { SessionId } from "@deepseek-ai/dsh-session";
+import { MessageId, createUserMessage, freezeMessage } from "@deepseek-ai/dsh-llm";
+import { SessionId, SessionSeq } from "@deepseek-ai/dsh-session";
 import { setApprovalPolicy } from "@deepseek-ai/dsh-user-approval";
 import { DEFAULT_ROOT } from "@dangosys/dsh-singularity-layout";
 import { RUN_CODE_NAME } from "@deepseek-ai/dsh-tools";
@@ -334,6 +334,247 @@ async function applyWorkerGrant(agentCtx, agent, grant) {
 }
 
 //#endregion
+//#region src/messages.ts
+/** One refused source read or delivery, with the stable name of what went wrong. */
+var MessageDeliveryRefusal = class extends Error {
+	code;
+	constructor(code, message$1, options) {
+		super(message$1, options);
+		this.name = "MessageDeliveryRefusal";
+		this.code = code;
+	}
+};
+/** The message body a question carries into its parent's Session: the stable question identity, then what was asked. */
+function questionMessageText(questionId, question) {
+	return `[task-question ${questionId}] ${question}`;
+}
+/**
+* The message body an answer carries into the asking Session: both identities,
+* so the receiving model can tell which answer resolves which question without
+* a second lookup, then what the parent answered.
+*/
+function answerMessageText(answerId, questionId, answer) {
+	return `[task-answer ${answerId} for ${questionId}] ${answer}`;
+}
+/**
+* Build the identified, frozen relay message one intent delivers. Pure and
+* exported so a caller can inspect the exact representation it is about to
+* write; nothing here reaches the Task store or the Session.
+*/
+function relayMessage(intent) {
+	return freezeMessage({
+		id: MessageId(intent.messageId),
+		role: "user",
+		content: [{
+			type: "text",
+			text: intent.text
+		}],
+		source: {
+			kind: "agent-message",
+			form: "relay",
+			senderSessionId: intent.senderSessionId
+		}
+	});
+}
+/**
+* Whether a Session's own event suffix already holds one message identity, in
+* history or still pending in the inbox. `events` must be the Session's own
+* suffix (its fork-inherited prefix belongs to the Session it descends from and
+* is not a delivery to this one).
+*
+* This is the *retry* rule: an identity a claim already removed and history
+* never took is not accepted, because the model never saw it and the recovery
+* path must deliver it again (§F.1: "claim 在 pre-step 前可能已移除").
+*/
+function messageAccepted(events, messageId) {
+	return events.some((event) => event.type === "user/message" && event.data.id === messageId) || pendingInboxMessages(events).some((message$1) => message$1.id === messageId);
+}
+/**
+* Whether the log durably records that this identity entered the Session's
+* inbox — the *receipt* rule, which is wider than {@link messageAccepted} by one
+* case: a claim (or a cancel's clear) removes a pending entry through a splice
+* that carries no identity, so between "claimed" and "in history" the identity
+* is in neither list while the insertion event stays in the log. That window is
+* not a delivery failure — the message was durably recorded and the target's own
+* driver was the one consuming it — and treating it as one would invite a
+* duplicate re-delivery of a message the Session already took.
+*/
+function messageRecorded(events, messageId) {
+	return events.some((event) => event.type === "agent/inbox/spliced" && event.data.inserted.some((message$1) => message$1.id === messageId));
+}
+/**
+* Read back the body of a cited `tool/call`: the evidence behind a question or an
+* answer, straight from the Session that sent it.
+*
+* A live Session is flushed first — the cited event must be durable before the
+* Task store commits an intent that cites it, because recovery reads the body
+* from the log and a body that only ever existed in a write buffer is not a
+* source. Refusals are named: an absent Session, an absent seq, an unreadable
+* Session, a Session with no durability barrier, and an event that is not the
+* `tool/call` it is cited as are five different things, and a caller that
+* cannot tell them apart would record the wrong fact.
+*/
+async function readToolCallBody(deps, ref) {
+	const sessionId = SessionId(ref.sessionId);
+	const live = deps.sessions.get(sessionId);
+	if (live !== void 0) await witnessBarrier(deps, live, sessionId);
+	let window;
+	try {
+		window = await deps.sessionQuery.readEvent({
+			sessionId,
+			seq: SessionSeq(ref.seq)
+		});
+	} catch (error) {
+		throw sourceReadRefusal(String(sessionId), ref.seq, error);
+	}
+	const event = window.target;
+	if (event.type !== "tool/call" || typeof event.data.name !== "string" || event.data.name === "") throw new MessageDeliveryRefusal("source-not-tool-call", `agent-runtime: session "${String(sessionId)}" seq ${ref.seq} is not a tool call (event type "${event.type}")`);
+	return {
+		name: event.data.name,
+		arguments: event.data.arguments
+	};
+}
+/**
+* Put one already-decided message into the target Session's inbox, at most once.
+*
+* Order: reconcile, then relay, then flush, then confirm. Reconcile-first is
+* what makes a retry harmless — a message already pending or already in history
+* is reported `already-present` without touching the inbox. The relay is
+* `agent.steer`, not `followup`: an answer must reach the target's next model
+* request, including one that is mid-turn (a followup would queue it behind the
+* current turn), and an idle target still opens a turn, which is what a question
+* addressed to a settled parent needs to be answered at all.
+*
+* The confirmation after the flush is deliberately wider than the retry fold
+* ({@link messageRecorded}): a target whose turn is already consuming the
+* message claims it out of the inbox before history takes it, and that window
+* must not be reported as a failed delivery. What `delivered` claims is exactly
+* what the log shows — the Session durably recorded this identity — never that
+* the model read it.
+*
+* A target with no live agent is `unavailable` before anything else happens: no
+* offline write, no resume, no substitute parent — the intent survives in the
+* Task store, and the recovery path is what brings the target back and calls
+* this again.
+*/
+async function ensureAgentMessageDelivered(deps, intent) {
+	const targetSessionId = SessionId(intent.targetSessionId);
+	const agent = deps.agents.get(targetSessionId);
+	if (agent === void 0) return {
+		messageId: intent.messageId,
+		status: "unavailable"
+	};
+	if (await acceptedAlready(deps, targetSessionId, intent.messageId)) return {
+		messageId: intent.messageId,
+		status: "already-present"
+	};
+	try {
+		agent.steer(relayMessage(intent));
+	} catch (error) {
+		if (isAlreadyPending(error, intent.messageId)) return {
+			messageId: intent.messageId,
+			status: "already-present"
+		};
+		throw error;
+	}
+	await witnessBarrier(deps, agent.session, targetSessionId, "target-not-durable");
+	const own = await ownSuffix(deps, targetSessionId);
+	if (!messageAccepted(own, intent.messageId) && !messageRecorded(own, intent.messageId)) throw new MessageDeliveryRefusal("delivery-unconfirmed", `agent-runtime: message "${intent.messageId}" was relayed to session "${String(targetSessionId)}" but is not in its log after the flush`);
+	return {
+		messageId: intent.messageId,
+		status: "delivered"
+	};
+}
+/**
+* Reconcile a set of committed intents against the Sessions that hold them,
+* delivering exactly the ones that are missing (§F.1: "恢复只补缺失投递").
+*
+* This is the entry point A4's recovery path calls with the records the Task
+* store holds: it owns no ledger of its own (the delivered fact *is* the
+* target's fold, and a second record could disagree with it), it never rewrites
+* an intent, and it reports each record separately so one unreachable parent
+* cannot hide the others. Intents are delivered in the order given, so the
+* target's inbox keeps the order the caller recorded.
+*/
+async function reconcileAgentMessageDeliveries(deps, intents) {
+	const reports = [];
+	for (const intent of intents) try {
+		const delivery = await ensureAgentMessageDelivered(deps, intent);
+		reports.push({
+			messageId: delivery.messageId,
+			status: delivery.status
+		});
+	} catch (error) {
+		reports.push({
+			messageId: intent.messageId,
+			status: "refused",
+			reason: messageOf(error)
+		});
+	}
+	return reports;
+}
+/**
+* The durability barrier, as the two callers state it: `session/flush` reaching
+* no listener means nothing stores this Session, so neither a cited body nor a
+* delivery can be witnessed. A refusal here is not a delivery failure — the
+* caller keeps the intent and can retry.
+*/
+async function witnessBarrier(deps, session, sessionId, code = "source-not-durable") {
+	let durable;
+	try {
+		durable = await deps.sessions.flush(session);
+	} catch (error) {
+		throw new MessageDeliveryRefusal(code, `agent-runtime: session "${String(sessionId)}" could not be flushed: ${messageOf(error)}`, { cause: error });
+	}
+	if (!durable) throw new MessageDeliveryRefusal(code, `agent-runtime: session "${String(sessionId)}" has no durability barrier (no session/flush participant)`);
+}
+/** Whether the target Session's own suffix already holds the identity. */
+async function acceptedAlready(deps, sessionId, messageId) {
+	return messageAccepted(await ownSuffix(deps, sessionId), messageId);
+}
+/**
+* Read one Session's own event suffix (without the fork-inherited prefix). A
+* failed read is a refusal, never an assumed "nothing there": a delivery decided
+* from an unreadable log could duplicate a message the Session already holds.
+*/
+async function ownSuffix(deps, sessionId) {
+	let snapshot;
+	try {
+		snapshot = await deps.sessionQuery.readSession(sessionId);
+	} catch (error) {
+		throw new MessageDeliveryRefusal("target-unreadable", `agent-runtime: target session "${String(sessionId)}" could not be read, so whether a message was accepted cannot be decided: ${messageOf(error)}`, { cause: error });
+	}
+	return snapshot.events.slice(snapshot.inheritedEventCount);
+}
+/** The pending inbox one durable suffix describes, folded the way DSH replays it. */
+function pendingInboxMessages(events) {
+	const inbox = {
+		"next-turn": [],
+		"next-step": []
+	};
+	for (const event of events) {
+		if (event.type !== "agent/inbox/spliced") continue;
+		inbox[event.data.target].splice(event.data.start, event.data.removedCount ?? 0, ...event.data.inserted);
+	}
+	return [...inbox["next-turn"], ...inbox["next-step"]];
+}
+/** Whether one thrown error is DSH's duplicate-pending-inbox refusal for this id. */
+function isAlreadyPending(error, messageId) {
+	return error instanceof Error && error.message === `message "${messageId}" is already pending`;
+}
+/** Name one refused source read from the error the session read path raised. */
+function sourceReadRefusal(sessionId, seq, error) {
+	const code = error?.code;
+	if (code === "SESSION_QUERY_EVENT_NOT_FOUND") return new MessageDeliveryRefusal("source-event-missing", `agent-runtime: session "${sessionId}" has no event at seq ${seq}`, { cause: error });
+	if (code === "SESSION_QUERY_SESSION_NOT_FOUND") return new MessageDeliveryRefusal("source-session-missing", `agent-runtime: session "${sessionId}" does not exist`, { cause: error });
+	return new MessageDeliveryRefusal("source-unreadable", `agent-runtime: session "${sessionId}" could not be read: ${messageOf(error)}`, { cause: error });
+}
+/** One line of an unknown failure, for refusals that carry a cause. */
+function messageOf(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+
+//#endregion
 //#region src/prompts/root.prompts.ts
 /**
 * The evolution protocol paragraph: written into the root prompt only when the
@@ -525,7 +766,8 @@ var AgentRuntime = class extends Service {
 		"layout",
 		"permissionPresets",
 		"sessions",
-		"sessionPersistence"
+		"sessionPersistence",
+		"sessionQuery"
 	];
 	owned = /* @__PURE__ */ new Set();
 	roots = /* @__PURE__ */ new Set();
@@ -814,6 +1056,55 @@ var AgentRuntime = class extends Service {
 			source: runtimePrompt("prompt")
 		}));
 	}
+	/**
+	* Read back the body of a `tool/call` one question or answer cites (A4 §F.1),
+	* flushing the sending Session first so the citation names a durable event.
+	* Thin adapter over {@link readToolCallBody}: this class owns the handle and the
+	* context, the delivery rules own themselves (`./messages.ts`).
+	* @param ref - the sending Session and the seq of its `tool/call`.
+	* @returns the tool name and the raw arguments text the model produced.
+	* @throws MessageDeliveryRefusal with the named reason the citation is unusable.
+	*/
+	async readToolCallBody(ref) {
+		if (this.closing) throw new Error("agent-runtime: closing");
+		return await readToolCallBody(this.deliveryDeps(), ref);
+	}
+	/**
+	* Deliver one already-committed message identity into its target Session's
+	* inbox, at most once, and report what that Session's log can witness. Called
+	* by the question protocol after the Task store committed the intent (A4's
+	* third sub-goal); re-calling it after a crash delivers only what is missing.
+	* @param intent - the recorded identity, the two Sessions, and the body.
+	* @returns the settled status: `delivered`, `already-present`, or `unavailable`.
+	* @throws MessageDeliveryRefusal when the attempt cannot be decided or confirmed.
+	*/
+	async ensureAgentMessageDelivered(intent) {
+		if (this.closing) throw new Error("agent-runtime: closing");
+		return await ensureAgentMessageDelivered(this.deliveryDeps(), intent);
+	}
+	/**
+	* Reconcile a set of committed intents against their target Sessions, one at a
+	* time, and report each record's outcome — the recovery path's entry point
+	* (§F.1). No ledger of its own: the delivered fact is each target's own fold.
+	* @param intents - the records the Task store holds, in delivery order.
+	* @returns one report per record; a refused record names why.
+	*/
+	async reconcileAgentMessageDeliveries(intents) {
+		if (this.closing) throw new Error("agent-runtime: closing");
+		return await reconcileAgentMessageDeliveries(this.deliveryDeps(), intents);
+	}
+	/**
+	* The services one delivery reaches, resolved to the three capabilities
+	* `./messages.ts` declares and no more: this class's own fields stay private,
+	* and a service the module never calls is never handed to it.
+	*/
+	deliveryDeps() {
+		return {
+			agents: this.ctx.agents,
+			sessions: this.ctx.sessions,
+			sessionQuery: this.ctx.sessionQuery
+		};
+	}
 	inGraph(scope, work) {
 		if (this.closing) throw new Error("agent-runtime: closing");
 		if (this.stopping.has(scope.graphStoreId)) throw new Error("agent-runtime: graph stopping");
@@ -833,4 +1124,4 @@ var AgentRuntime = class extends Service {
 var src_default = AgentRuntime;
 
 //#endregion
-export { AgentRuntime, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, applyWorkerGrant, src_default as default, findSkillFileIn, parseSkillFile, resolveGrant, sealRawSessionReads, skillRootsFor };
+export { AgentRuntime, MessageDeliveryRefusal, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, answerMessageText, applyWorkerGrant, src_default as default, ensureAgentMessageDelivered, findSkillFileIn, messageAccepted, parseSkillFile, questionMessageText, readToolCallBody, reconcileAgentMessageDeliveries, relayMessage, resolveGrant, sealRawSessionReads, skillRootsFor };

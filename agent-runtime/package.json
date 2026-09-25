@@ -35,6 +35,8 @@
     "@deepseek-ai/dsh-permission-presets": "*",
     "@deepseek-ai/dsh-session": "*",
     "@deepseek-ai/dsh-session-persistence": "*",
+    "@deepseek-ai/dsh-session-query": "*",
+    "@deepseek-ai/dsh-subagent": "*",
     "@deepseek-ai/dsh-system-prompt": "*",
     "@deepseek-ai/dsh-tools": "*",
     "@deepseek-ai/dsh-user-approval": "*"
@@ -57,6 +59,8 @@
     "@deepseek-ai/dsh-permission-presets": "link:../../../thirdparty/deepseek-harness/packages/interaction/permission-presets",
     "@deepseek-ai/dsh-session": "link:../../../thirdparty/deepseek-harness/packages/core/session",
     "@deepseek-ai/dsh-session-persistence": "link:../../../thirdparty/deepseek-harness/packages/session/session-persistence",
+    "@deepseek-ai/dsh-session-query": "link:../../../thirdparty/deepseek-harness/packages/session-query/session-query",
+    "@deepseek-ai/dsh-subagent": "link:../../../thirdparty/deepseek-harness/packages/subagent/subagent",
     "@deepseek-ai/dsh-system-prompt": "link:../../../thirdparty/deepseek-harness/packages/core/system-prompt",
     "@deepseek-ai/dsh-tools": "link:../../../thirdparty/deepseek-harness/packages/core/tools",
     "@deepseek-ai/dsh-user-approval": "link:../../../thirdparty/deepseek-harness/packages/interaction/user-approval"

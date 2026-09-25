@@ -1,8 +1,9 @@
 import { Context, Service } from "@deepseek-ai/cordis";
-import { ContentBlock } from "@deepseek-ai/dsh-llm";
-import { SessionId, SessionId as SessionId$1 } from "@deepseek-ai/dsh-session";
+import { ContentBlock, UserMessage } from "@deepseek-ai/dsh-llm";
+import { Session, SessionEvent, SessionId, SessionId as SessionId$1 } from "@deepseek-ai/dsh-session";
 import { CanvasNode } from "@dangosys/dsh-singularity-layout";
 import { Agent, Agent as Agent$1, AgentHandle, AgentOptions } from "@deepseek-ai/dsh-agent";
+import { SessionEventReadRequest, SessionEventWindow, SessionLogSnapshot } from "@deepseek-ai/dsh-session-query";
 
 //#region src/types.d.ts
 declare module '@deepseek-ai/cordis' {
@@ -193,6 +194,177 @@ interface SpawnRequest {
   readonly signal?: AbortSignal;
 }
 //#endregion
+//#region src/messages.d.ts
+
+/**
+ * Why one delivery or source read was refused. Every refusal is named: a caller
+ * that cannot act on the difference between "not there yet" and "cannot be
+ * decided" would retry the wrong thing.
+ */
+type MessageRefusalCode = /** The cited Session holds no event at the cited seq. */
+'source-event-missing'
+/** The cited Session does not exist. */ | 'source-session-missing'
+/** The cited Session exists but could not be read. */ | 'source-unreadable'
+/** The cited Session's log has no durability barrier, so its body cannot be witnessed. */ | 'source-not-durable'
+/** The cited event is not the `tool/call` it is cited as. */ | 'source-not-tool-call'
+/** The target Session's log could not be read, so whether the message was accepted cannot be decided. */ | 'target-unreadable'
+/** The target Session has no durability barrier (or is no longer live in this process). */ | 'target-not-durable'
+/** Delivery was attempted but the identity is not in the target's log afterwards. */ | 'delivery-unconfirmed';
+/** One refused source read or delivery, with the stable name of what went wrong. */
+declare class MessageDeliveryRefusal extends Error {
+  readonly code: MessageRefusalCode;
+  constructor(code: MessageRefusalCode, message: string, options?: ErrorOptions);
+}
+/** Where a message body was written: the sending Session and the seq of its `tool/call`. */
+interface ToolCallRef {
+  /** The sending Session — the Session the cited `tool/call` event lives in. */
+  readonly sessionId: SessionId;
+  /** The seq of that event in the sending Session's log. */
+  readonly seq: number;
+}
+/** The body at a cited `tool/call`: the tool name and the raw arguments text. */
+interface ToolCallBody {
+  /** The tool the model called. */
+  readonly name: string;
+  /** The `arguments` JSON text exactly as the model produced it, unparsed here. */
+  readonly arguments: string;
+}
+/**
+ * One message the Task store has already decided to deliver: the durable
+ * identity, the two Sessions, and the text. Everything about it is a record the
+ * store holds, so a retry after a restart states the same delivery.
+ */
+interface AgentMessageIntent {
+  /** The Session that must receive the message. */
+  readonly targetSessionId: SessionId;
+  /** The Session whose agent authored the body. */
+  readonly senderSessionId: SessionId;
+  /** The durable message identity the Task store recorded. */
+  readonly messageId: string;
+  /** The model-facing body, identity included (see {@link questionMessageText}). */
+  readonly text: string;
+}
+/**
+ * What one delivery attempt settled as.
+ *
+ * `delivered` — this call put the identity into the target's log and the target
+ * was flushed; `already-present` — the target's log already held the identity,
+ * so this call wrote nothing (a retry, or a concurrent attempt that won the
+ * race); `unavailable` — no live agent owns the target, nothing was attempted.
+ */
+type MessageDeliveryStatus = 'delivered' | 'already-present' | 'unavailable';
+/** The settled outcome of one delivery attempt. */
+interface MessageDelivery {
+  /** The identity this attempt addressed. */
+  readonly messageId: string;
+  readonly status: MessageDeliveryStatus;
+}
+/** One record of a reconciliation pass: what each intent of the set settled as. */
+interface MessageDeliveryReport {
+  /** The identity this record addressed. */
+  readonly messageId: string;
+  /** The settled status, or `refused` when the attempt could not be decided at all. */
+  readonly status: MessageDeliveryStatus | 'refused';
+  /** Why the attempt was refused; present only with `refused`. */
+  readonly reason?: string;
+}
+/**
+ * The services a delivery needs, narrowed to what it actually calls: the live
+ * agent registry it can wake, the session store whose `flush` is the durability
+ * barrier, and the session read path it folds. No service resolves another one
+ * through this module, and a caller can hand a test double for any of them.
+ */
+interface MessageDeliveryDeps {
+  /** Live agents by Session id — the only registry a delivery reaches a target through. */
+  readonly agents: {
+    get(id: SessionId): Agent | undefined;
+  };
+  /** Live sessions: `get` decides whether there is anything to flush, `flush` is the barrier. */
+  readonly sessions: {
+    get(id: SessionId): Session | undefined;
+    flush(session: Session): Promise<boolean>;
+  };
+  /** The session read path: exact event reads and live-preferred whole-log folds. */
+  readonly sessionQuery: {
+    readEvent(request: SessionEventReadRequest): Promise<SessionEventWindow>;
+    readSession(sessionId: SessionId): Promise<SessionLogSnapshot>;
+  };
+}
+/** The message body a question carries into its parent's Session: the stable question identity, then what was asked. */
+declare function questionMessageText(questionId: string, question: string): string;
+/**
+ * The message body an answer carries into the asking Session: both identities,
+ * so the receiving model can tell which answer resolves which question without
+ * a second lookup, then what the parent answered.
+ */
+declare function answerMessageText(answerId: string, questionId: string, answer: string): string;
+/**
+ * Build the identified, frozen relay message one intent delivers. Pure and
+ * exported so a caller can inspect the exact representation it is about to
+ * write; nothing here reaches the Task store or the Session.
+ */
+declare function relayMessage(intent: AgentMessageIntent): UserMessage;
+/**
+ * Whether a Session's own event suffix already holds one message identity, in
+ * history or still pending in the inbox. `events` must be the Session's own
+ * suffix (its fork-inherited prefix belongs to the Session it descends from and
+ * is not a delivery to this one).
+ *
+ * This is the *retry* rule: an identity a claim already removed and history
+ * never took is not accepted, because the model never saw it and the recovery
+ * path must deliver it again (§F.1: "claim 在 pre-step 前可能已移除").
+ */
+declare function messageAccepted(events: readonly SessionEvent[], messageId: string): boolean;
+/**
+ * Read back the body of a cited `tool/call`: the evidence behind a question or an
+ * answer, straight from the Session that sent it.
+ *
+ * A live Session is flushed first — the cited event must be durable before the
+ * Task store commits an intent that cites it, because recovery reads the body
+ * from the log and a body that only ever existed in a write buffer is not a
+ * source. Refusals are named: an absent Session, an absent seq, an unreadable
+ * Session, a Session with no durability barrier, and an event that is not the
+ * `tool/call` it is cited as are five different things, and a caller that
+ * cannot tell them apart would record the wrong fact.
+ */
+declare function readToolCallBody(deps: MessageDeliveryDeps, ref: ToolCallRef): Promise<ToolCallBody>;
+/**
+ * Put one already-decided message into the target Session's inbox, at most once.
+ *
+ * Order: reconcile, then relay, then flush, then confirm. Reconcile-first is
+ * what makes a retry harmless — a message already pending or already in history
+ * is reported `already-present` without touching the inbox. The relay is
+ * `agent.steer`, not `followup`: an answer must reach the target's next model
+ * request, including one that is mid-turn (a followup would queue it behind the
+ * current turn), and an idle target still opens a turn, which is what a question
+ * addressed to a settled parent needs to be answered at all.
+ *
+ * The confirmation after the flush is deliberately wider than the retry fold
+ * ({@link messageRecorded}): a target whose turn is already consuming the
+ * message claims it out of the inbox before history takes it, and that window
+ * must not be reported as a failed delivery. What `delivered` claims is exactly
+ * what the log shows — the Session durably recorded this identity — never that
+ * the model read it.
+ *
+ * A target with no live agent is `unavailable` before anything else happens: no
+ * offline write, no resume, no substitute parent — the intent survives in the
+ * Task store, and the recovery path is what brings the target back and calls
+ * this again.
+ */
+declare function ensureAgentMessageDelivered(deps: MessageDeliveryDeps, intent: AgentMessageIntent): Promise<MessageDelivery>;
+/**
+ * Reconcile a set of committed intents against the Sessions that hold them,
+ * delivering exactly the ones that are missing (§F.1: "恢复只补缺失投递").
+ *
+ * This is the entry point A4's recovery path calls with the records the Task
+ * store holds: it owns no ledger of its own (the delivered fact *is* the
+ * target's fold, and a second record could disagree with it), it never rewrites
+ * an intent, and it reports each record separately so one unreachable parent
+ * cannot hide the others. Intents are delivered in the order given, so the
+ * target's inbox keeps the order the caller recorded.
+ */
+declare function reconcileAgentMessageDeliveries(deps: MessageDeliveryDeps, intents: readonly AgentMessageIntent[]): Promise<MessageDeliveryReport[]>;
+//#endregion
 //#region src/grants.d.ts
 /** The tool surface one worker's grant resolves to, plus what its composition could not offer. */
 interface ResolvedGrant {
@@ -327,9 +499,43 @@ declare class AgentRuntime extends Service {
   stopGraph(scope: GraphScope): Promise<void>;
   stopAgents(sessionIds: readonly SessionId[]): Promise<void>;
   prompt(agent: Agent$1, prompt: readonly ContentBlock[]): Promise<void>;
+  /**
+   * Read back the body of a `tool/call` one question or answer cites (A4 §F.1),
+   * flushing the sending Session first so the citation names a durable event.
+   * Thin adapter over {@link readToolCallBody}: this class owns the handle and the
+   * context, the delivery rules own themselves (`./messages.ts`).
+   * @param ref - the sending Session and the seq of its `tool/call`.
+   * @returns the tool name and the raw arguments text the model produced.
+   * @throws MessageDeliveryRefusal with the named reason the citation is unusable.
+   */
+  readToolCallBody(ref: ToolCallRef): Promise<ToolCallBody>;
+  /**
+   * Deliver one already-committed message identity into its target Session's
+   * inbox, at most once, and report what that Session's log can witness. Called
+   * by the question protocol after the Task store committed the intent (A4's
+   * third sub-goal); re-calling it after a crash delivers only what is missing.
+   * @param intent - the recorded identity, the two Sessions, and the body.
+   * @returns the settled status: `delivered`, `already-present`, or `unavailable`.
+   * @throws MessageDeliveryRefusal when the attempt cannot be decided or confirmed.
+   */
+  ensureAgentMessageDelivered(intent: AgentMessageIntent): Promise<MessageDelivery>;
+  /**
+   * Reconcile a set of committed intents against their target Sessions, one at a
+   * time, and report each record's outcome — the recovery path's entry point
+   * (§F.1). No ledger of its own: the delivered fact is each target's own fold.
+   * @param intents - the records the Task store holds, in delivery order.
+   * @returns one report per record; a refused record names why.
+   */
+  reconcileAgentMessageDeliveries(intents: readonly AgentMessageIntent[]): Promise<MessageDeliveryReport[]>;
+  /**
+   * The services one delivery reaches, resolved to the three capabilities
+   * `./messages.ts` declares and no more: this class's own fields stay private,
+   * and a service the module never calls is never handed to it.
+   */
+  private deliveryDeps;
   private inGraph;
   private live;
   private scope;
 }
 //#endregion
-export { type AgentOptions, AgentRuntime, AgentRuntime as default, type CanvasNode, type ContentBlock, type GraphScope, type McpServerSpec, type ParsedSkillFile, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, type ResolvedGrant, type RootRequest, type RuntimePromptSource, type SessionVisibility, type SpawnRequest, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, type WorkerCapabilityGrant, type WorkerGrant, applyWorkerGrant, findSkillFileIn, parseSkillFile, resolveGrant, sealRawSessionReads, skillRootsFor };
+export { type AgentMessageIntent, type AgentOptions, AgentRuntime, AgentRuntime as default, type CanvasNode, type ContentBlock, type GraphScope, type McpServerSpec, type MessageDelivery, type MessageDeliveryDeps, MessageDeliveryRefusal, type MessageDeliveryReport, type MessageDeliveryStatus, type MessageRefusalCode, type ParsedSkillFile, RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, type ResolvedGrant, type RootRequest, type RuntimePromptSource, type SessionVisibility, type SpawnRequest, type ToolCallBody, type ToolCallRef, WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT, type WorkerCapabilityGrant, type WorkerGrant, answerMessageText, applyWorkerGrant, ensureAgentMessageDelivered, findSkillFileIn, messageAccepted, parseSkillFile, questionMessageText, readToolCallBody, reconcileAgentMessageDeliveries, relayMessage, resolveGrant, sealRawSessionReads, skillRootsFor };

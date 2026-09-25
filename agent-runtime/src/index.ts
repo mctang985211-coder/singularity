@@ -10,6 +10,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
+import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-permission-presets'
@@ -18,6 +19,19 @@ import type {} from '@dangosys/dsh-singularity-layout'
 import { DEFAULT_ROOT } from '@dangosys/dsh-singularity-layout'
 import type { Agent, AgentHandle, ContentBlock, GraphEvent, GraphScope, RootRequest, RuntimePromptSource, SpawnRequest } from './types.ts'
 import { applyWorkerGrant } from './grants.ts'
+import {
+  ensureAgentMessageDelivered,
+  readToolCallBody,
+  reconcileAgentMessageDeliveries,
+} from './messages.ts'
+import type {
+  AgentMessageIntent,
+  MessageDelivery,
+  MessageDeliveryDeps,
+  MessageDeliveryReport,
+  ToolCallBody,
+  ToolCallRef,
+} from './messages.ts'
 import { rootPromptText } from './prompts/root.prompts.ts'
 import { WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT } from './prompts/worker.prompts.ts'
 import { sealRawSessionReads } from './raw-session-guard.ts'
@@ -132,6 +146,26 @@ export { findSkillFileIn, parseSkillFile, skillRootsFor } from './skill-file.ts'
 export type { ParsedSkillFile } from './skill-file.ts'
 export { WORKER_KICKOFF_TEXT, WORKER_POLICY_TEXT } from './prompts/worker.prompts.ts'
 export { RAW_SESSION_READ_DENIAL, RAW_SESSION_READ_TOOLS, sealRawSessionReads } from './raw-session-guard.ts'
+export {
+  MessageDeliveryRefusal,
+  answerMessageText,
+  ensureAgentMessageDelivered,
+  messageAccepted,
+  questionMessageText,
+  readToolCallBody,
+  reconcileAgentMessageDeliveries,
+  relayMessage,
+} from './messages.ts'
+export type {
+  AgentMessageIntent,
+  MessageDelivery,
+  MessageDeliveryDeps,
+  MessageDeliveryReport,
+  MessageDeliveryStatus,
+  MessageRefusalCode,
+  ToolCallBody,
+  ToolCallRef,
+} from './messages.ts'
 
 export class AgentRuntime extends Service {
   static inject = [
@@ -143,6 +177,7 @@ export class AgentRuntime extends Service {
     'permissionPresets',
     'sessions',
     'sessionPersistence',
+    'sessionQuery',
   ]
   private readonly owned = new Set<SessionId>()
   private readonly roots = new Set<SessionId>()
@@ -450,6 +485,61 @@ export class AgentRuntime extends Service {
     // (`graphs.create`), never by a person: it carries this runtime's own message
     // source for the same reason a spawn does (A0 §1.10).
     agent.followup(createUserMessage({ content: [...prompt], source: runtimePrompt('prompt') }))
+  }
+
+  /**
+   * Read back the body of a `tool/call` one question or answer cites (A4 §F.1),
+   * flushing the sending Session first so the citation names a durable event.
+   * Thin adapter over {@link readToolCallBody}: this class owns the handle and the
+   * context, the delivery rules own themselves (`./messages.ts`).
+   * @param ref - the sending Session and the seq of its `tool/call`.
+   * @returns the tool name and the raw arguments text the model produced.
+   * @throws MessageDeliveryRefusal with the named reason the citation is unusable.
+   */
+  async readToolCallBody(ref: ToolCallRef): Promise<ToolCallBody> {
+    if (this.closing) throw new Error('agent-runtime: closing')
+    return await readToolCallBody(this.deliveryDeps(), ref)
+  }
+
+  /**
+   * Deliver one already-committed message identity into its target Session's
+   * inbox, at most once, and report what that Session's log can witness. Called
+   * by the question protocol after the Task store committed the intent (A4's
+   * third sub-goal); re-calling it after a crash delivers only what is missing.
+   * @param intent - the recorded identity, the two Sessions, and the body.
+   * @returns the settled status: `delivered`, `already-present`, or `unavailable`.
+   * @throws MessageDeliveryRefusal when the attempt cannot be decided or confirmed.
+   */
+  async ensureAgentMessageDelivered(intent: AgentMessageIntent): Promise<MessageDelivery> {
+    if (this.closing) throw new Error('agent-runtime: closing')
+    return await ensureAgentMessageDelivered(this.deliveryDeps(), intent)
+  }
+
+  /**
+   * Reconcile a set of committed intents against their target Sessions, one at a
+   * time, and report each record's outcome — the recovery path's entry point
+   * (§F.1). No ledger of its own: the delivered fact is each target's own fold.
+   * @param intents - the records the Task store holds, in delivery order.
+   * @returns one report per record; a refused record names why.
+   */
+  async reconcileAgentMessageDeliveries(
+    intents: readonly AgentMessageIntent[],
+  ): Promise<MessageDeliveryReport[]> {
+    if (this.closing) throw new Error('agent-runtime: closing')
+    return await reconcileAgentMessageDeliveries(this.deliveryDeps(), intents)
+  }
+
+  /**
+   * The services one delivery reaches, resolved to the three capabilities
+   * `./messages.ts` declares and no more: this class's own fields stay private,
+   * and a service the module never calls is never handed to it.
+   */
+  private deliveryDeps(): MessageDeliveryDeps {
+    return {
+      agents: this.ctx.agents,
+      sessions: this.ctx.sessions,
+      sessionQuery: this.ctx.sessionQuery,
+    }
   }
 
   private inGraph<T>(scope: GraphScope, work: () => Promise<T>): Promise<T> {

@@ -44,6 +44,12 @@ importers:
       '@deepseek-ai/dsh-session-persistence':
         specifier: link:../../../thirdparty/deepseek-harness/packages/session/session-persistence
         version: link:../../../thirdparty/deepseek-harness/packages/session/session-persistence
+      '@deepseek-ai/dsh-session-query':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/session-query/session-query
+        version: link:../../../thirdparty/deepseek-harness/packages/session-query/session-query
+      '@deepseek-ai/dsh-subagent':
+        specifier: link:../../../thirdparty/deepseek-harness/packages/subagent/subagent
+        version: link:../../../thirdparty/deepseek-harness/packages/subagent/subagent
       '@deepseek-ai/dsh-system-prompt':
         specifier: link:../../../thirdparty/deepseek-harness/packages/core/system-prompt
         version: link:../../../thirdparty/deepseek-harness/packages/core/system-prompt
