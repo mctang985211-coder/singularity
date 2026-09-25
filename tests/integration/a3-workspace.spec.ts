@@ -1,17 +1,18 @@
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { rootTaskStoreId } from '../../task/src/index.ts'
 import type { DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { WorkspaceBusyError } from '../../task-runtime/src/index.ts'
-import { disposeRunStacks, startRunStack, type RunStack } from '../support/run-stack.ts'
+import { disposeRunStacks, startRunStack, type RunStack, type ToolCallResult } from '../support/run-stack.ts'
 
 /**
  * A3 acceptance on the cross-entry rules: the same admission checks that guard
  * a tool call guard a direct service call, a second root, and a replay.
  *
- * The three cases here are the ones a per-entry test cannot show:
+ * The four cases here are the ones a per-entry test cannot show:
  *
  * 1. **Two roots, one checkout.** A root run holds its workspace for as long as
  *    it is non-terminal, so a second root's own intake is refused at activation —
@@ -23,7 +24,12 @@ import { disposeRunStacks, startRunStack, type RunStack } from '../support/run-s
  *    holds is refused with nothing persisted; and a spawning replay's worker is
  *    held to the same completion protocol as any worker — an idle session
  *    without a submission is stopped by the no-progress budget.
- * 3. **The service API is not a bypass.** `decomposeAndRun` called directly
+ * 3. **The layer a replay holds is its own run's.** §3.4 compares a holder by
+ *    task, so the layer a spawning replay takes names the replayed task beside
+ *    its lineage label — otherwise the replayed worker's own `task_decompose`
+ *    would be refused as another writer's — and the release that ends the replay
+ *    leaves the caller's layer as the holder again.
+ * 4. **The service API is not a bypass.** `decomposeAndRun` called directly
  *    (never through `task_decompose`) runs the same admission, including the
  *    ownership check, and refuses with zero side effects.
  *
@@ -48,6 +54,17 @@ const children = (objective: string): DecomposeSpec['children'] => [{
 function markers(h: RunStack): string[] {
   const directory = join(h.home, 'singularity', 'run-bindings', 'workspace-owners')
   return existsSync(directory) ? readdirSync(directory) : []
+}
+
+/**
+ * The owner one workspace's marker file names, as the file on disk holds it — the
+ * record a second process reads and the identity §3.4's admission compares.
+ */
+function markerOwner(h: RunStack): Record<string, unknown> {
+  const files = markers(h)
+  if (files.length !== 1) throw new Error(`expected exactly one workspace marker, found ${files.length}`)
+  const file = join(h.home, 'singularity', 'run-bindings', 'workspace-owners', files[0]!)
+  return (JSON.parse(readFileSync(file, 'utf8')) as { owner: Record<string, unknown> }).owner
 }
 
 /**
@@ -174,6 +191,69 @@ describe('workspace ownership across entries (A3)', () => {
     // recorded for a run that never submitted.
     expect(after.runs.filter(run => run.taskId === replayRun.taskId)).toHaveLength(1)
     expect(after.evidence.filter(item => item.taskRunId === replayRun.runId)).toHaveLength(0)
+  })
+
+  it('names the replayed task in the layer a spawning replay holds, so its worker may decompose', async () => {
+    // A spawning replay writes into its caller's checkout, so it holds that
+    // checkout for as long as it runs (§3.4) — and §3.4 compares a holder by
+    // *task*, which is what a replayed worker's own `task_decompose` is admitted
+    // against. The layer's identity is therefore observable from inside the
+    // worker's own call, and so is the release that gives the caller its hold
+    // back when the replay ends.
+    let h!: RunStack
+    let layerWhileRunning: Record<string, unknown> | undefined
+    let decomposeAnswer: ToolCallResult | undefined
+    let decomposedTaskId = ''
+    h = await startRunStack({
+      roots: [ROOT1],
+      tools: true,
+      worker: async (sessionId: SessionId, agent: Agent) => {
+        const { task, run } = await h.runtime.runForSession(sessionId)
+        // The replayed worker: the parentless task whose run carries lineage. The
+        // root is parentless too but descends from no run, and a batch child has a
+        // parent task — so this is the replay and nothing else.
+        if (task.parentTaskId !== undefined || run.parentRunId === undefined) return
+        decomposedTaskId = task.taskId
+        layerWhileRunning = markerOwner(h)
+        decomposeAnswer = await h.call(agent, 'task_decompose', {
+          reason: 'the replayed work is not atomic',
+          children: children('replay child work'),
+        })
+      },
+    })
+    const first = await h.root(ROOT1, rootContract('the first tree'))
+    const champion = await writeChampion(h, first.storeId)
+
+    const replay = await h.runtime.replayTask(first.storeId, champion.taskId, { lineage: 'evolution-replay:p1' }, ROOT1)
+
+    // The worker's own call was admitted by the same rule every worker faces: the
+    // checkout it writes into is held by its own task, and the lineage label is
+    // the run half of that layer — never a store run id.
+    expect(layerWhileRunning).toMatchObject({
+      kind: 'run',
+      storeId: first.storeId,
+      taskId: decomposedTaskId,
+      runId: `replay-of-${champion.taskId}`,
+    })
+    if (decomposeAnswer === undefined) throw new Error('the replayed worker never decomposed')
+    expect(decomposeAnswer.isError).toBe(false)
+    expect(decomposeAnswer.text).toContain(`decomposed ${decomposedTaskId} into 1 children`)
+    expect(replay.status).toBe('verified')
+
+    // The child is a real Task child of the replayed task, and the replay's own
+    // batch settled it: one child, verified by the real command verifier.
+    const after = await h.snapshot(first.storeId)
+    const replayTask = after.tasks.find(task => task.taskId === replay.taskId)!
+    const [childTaskId] = replayTask.childTaskIds
+    const childTask = after.tasks.find(task => task.taskId === childTaskId)!
+    expect(childTask.parentTaskId).toBe(replay.taskId)
+    expect(childTask.depth).toBe(1)
+    expect(childTask.status).toBe('verified')
+
+    // The replay's layer is off the stack again: what the marker names is the
+    // caller's own hold — the same layer the replay was handed.
+    expect(markerOwner(h)).toMatchObject({ kind: 'run', storeId: first.storeId, taskId: first.taskId, runId: first.runId })
+    expect(markers(h)).toHaveLength(1)
   })
 
   it('charges a replay to the store\u2019s root total, and refuses the replay past maxRuns with nothing persisted', async () => {

@@ -4516,7 +4516,7 @@ export class TaskRuntime extends Service {
     const workspacePath = await this.workspacePathForSession(callerSessionId)
     const workspaceOwner = workspacePath === undefined
       ? undefined
-      : await this.claimReplayWorkspace(workspacePath, storeId, callerSessionId, championTaskId)
+      : await this.claimReplayWorkspace(workspacePath, storeId, callerSessionId, championTaskId, task.taskId)
     this.replayLineage.set(task.taskId, options.lineage)
     const controller = new AbortController()
     const run = async (): Promise<ReplayRunOutcome> => {
@@ -5715,18 +5715,28 @@ export class TaskRuntime extends Service {
    * workspace the *caller's own* tree already holds is handed over (the replay
    * run writes where its caller writes). Any other holder is a conflict, and the
    * replay refuses before its task is created.
+   *
+   * The layer names the replayed task ({@link WorkspaceOwner.taskId}), because
+   * the hold is the replay run's own: the §3.4 admission compares a holder by
+   * task (`assertWorkspaceHeldBy`), so without it the replay's worker would be
+   * refused the decomposition it is entitled to — its own checkout would read as
+   * a stranger's. The `runId` stays the lineage label
+   * (`replay-of-<championTaskId>`): experiment lineage is not a store run id, and
+   * nothing addresses this layer by it.
    */
   private async claimReplayWorkspace(
     workspace: string,
     storeId: string,
     callerSessionId: string,
     championTaskId: TaskId,
+    replayTaskId: TaskId,
   ): Promise<WorkspaceOwner> {
     const registry = this.workspaces
     if (registry === undefined) throw new Error('task-runtime: the workspace registry is not initialized')
     const owner: WorkspaceOwner = {
       kind: 'run',
       storeId,
+      taskId: replayTaskId,
       runId: `replay-of-${championTaskId}`,
       since: now(),
     }

@@ -1941,9 +1941,11 @@ interface ReplayRunOutcome {
  * it with the same terminal-record discipline every other run gets
  * ({@link recordTerminalReview}), the lineage tag on the record's anomalies.
  * The replayed task is parentless and the historical task it mirrors is never
- * touched: a replay is a comparison experiment, not a tree edit. A replay never
- * decomposes (its prompt says the door is closed), so there is no parent
- * acceptance to settle.
+ * touched: a replay is a comparison experiment, not a tree edit. Nothing asks a
+ * replay to decompose — its projection carries no decomposition guidance and no
+ * spawn prompt invites one — but nothing refuses it either: `task_decompose` is
+ * on every worker's surface, and a replayed worker that splits is settled by its
+ * batch through the ordinary parent acceptance.
  *
  * A spawning replay is a worker like any other and follows the same rules: it
  * is born `active` and it *submits* — an idle worker is not a completion, the
@@ -4813,6 +4815,14 @@ declare class TaskRuntime extends Service {
    * workspace the *caller's own* tree already holds is handed over (the replay
    * run writes where its caller writes). Any other holder is a conflict, and the
    * replay refuses before its task is created.
+   *
+   * The layer names the replayed task ({@link WorkspaceOwner.taskId}), because
+   * the hold is the replay run's own: the §3.4 admission compares a holder by
+   * task (`assertWorkspaceHeldBy`), so without it the replay's worker would be
+   * refused the decomposition it is entitled to — its own checkout would read as
+   * a stranger's. The `runId` stays the lineage label
+   * (`replay-of-<championTaskId>`): experiment lineage is not a store run id, and
+   * nothing addresses this layer by it.
    */
   private claimReplayWorkspace;
   /** Release the replay's own layer, leaving whatever the caller held in place. */

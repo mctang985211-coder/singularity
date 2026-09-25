@@ -33,7 +33,11 @@ import {
  * that run them end to end, are A4 sub-goal ③c's own spec
  * (`a4-question-loop.spec.ts`). The store, the gate and the delivery are never
  * faked here, and the gate's decision on `task_ask_parent`/`task_answer` is
- * asserted through the real waterfall before any entry is called.
+ * asserted through the real waterfall before any entry is called. One case is
+ * the exception, and on purpose: the replay case that has a worker decompose for
+ * real runs the shipped `task_decompose`/`task_ask_parent`/`task_answer`, because
+ * what it covers — the checkout a replay run holds while its own batch is
+ * admitted — is only reachable through the production tool path.
  *
  * The tree the blocking cases use is three layers deep on purpose
  * (`root → middle → grandchild`): the grandchild and the middle are workers (the
@@ -93,6 +97,45 @@ async function callOf(h: ScriptedLoop, name: string, sessionId: string, where?: 
 /** Every task event one store appended, read back from its own session log. */
 function taskEventsOf(h: ScriptedLoop, storeId: string): TaskEvent[] {
   return h.eventsOf(storeId).flatMap(event => (event.type === 'task/event' ? [event.data as unknown as TaskEvent] : []))
+}
+
+/** Wait for one question record in the store's snapshot, then read it. */
+async function questionOf(h: ScriptedLoop, storeId: string, questionId: string) {
+  return await vi.waitFor(async () => {
+    const question = (await h.snapshot(storeId)).questions?.byId[questionId]
+    expect(question, `question ${questionId} in ${storeId}`).toBeDefined()
+    return question!
+  })
+}
+
+/** Every durable inbox insert one Session's log holds under one identity. */
+function insertsOf(h: ScriptedLoop, sessionId: string, messageId: string): number {
+  return h.eventsOf(sessionId).filter(event => event.type === 'agent/inbox/spliced'
+    && event.data.inserted.some(message => String(message.id) === messageId)).length
+}
+
+/**
+ * Wait until one target Session has claimed an identity into its own history,
+ * then read the entry — the proof the message reached the loop's own state rather
+ * than only the target's inbox.
+ */
+async function claimedIn(h: ScriptedLoop, sessionId: string, messageId: string) {
+  return await vi.waitFor(() => {
+    const claimed = h.eventsOf(sessionId)
+      .flatMap(event => (event.type === 'user/message' ? [event.data] : []))
+      .find(message => String(message.id) === messageId)
+    expect(claimed, `session ${sessionId} claiming message ${messageId}`).toBeDefined()
+    return claimed!
+  })
+}
+
+/** One request of a session that carried a text, in request order — the proof the model was shown it. */
+async function requestCarrying(h: ScriptedLoop, sessionId: string, needle: string) {
+  return await vi.waitFor(() => {
+    const request = h.requestsOf(sessionId).find(candidate => candidate.texts.join('\n').includes(needle))
+    expect(request, `a request of ${sessionId} carrying "${needle}"`).toBeDefined()
+    return request!
+  })
 }
 
 describe('the write gate under a question block (A4 §F.1)', () => {
@@ -645,11 +688,12 @@ describe('questions inside a replay (A4 §F.1)', () => {
       expect(bound.run.status).toBe('running')
       return bound.run
     })
-    // The replay's own child: written through the store's admission exactly as a
-    // decomposition writes it (the A3 workspace rule refuses a *spawning* replay's
-    // own decompose in this fixture — `workspace … is busy` — and that rule is not
-    // this spec's subject). What matters here is the Task relation: the child's
-    // parent task is the replay's task, so the question has a real addressee.
+    // The replay's own child: written through the store's admission, the shape a
+    // decomposition leaves. This case keeps the pure Task relation as a
+    // regression — the child's parent task is the replay's task, so the question
+    // has a real addressee — and it is no longer the only way to reach one: the
+    // case below has the replay's worker decompose for real through the shipped
+    // tool, which is the production path.
     await h.task.createTaskIn(root.storeId, {
       taskId: 't-replay-child',
       definitionRef: { taskType: 'root', version: 1 },
@@ -725,6 +769,133 @@ describe('questions inside a replay (A4 §F.1)', () => {
     expect(after.questions?.byId[questionId]?.answers?.map(answer => answer.resolves)).toEqual([true])
     expect(after.runs.filter(run => run.taskId === replayRun.taskId)).toHaveLength(1)
     expect(after.questions?.all.map(question => question.questionId)).toEqual([questionId])
+    keep.resolve()
+  }, 30_000)
+
+  it('carries a question from the child the replay really decomposed, through the shipped tools', async () => {
+    const questionKnown = Promise.withResolvers<void>()
+    const childReleased = Promise.withResolvers<void>()
+    const keep = Promise.withResolvers<void>()
+    let questionId = ''
+    const h = await startScriptedLoop({
+      // This one case runs the *shipped* question tools, and it is the only way to
+      // cover what it covers: a spawning replay's worker really decomposes, which
+      // is what makes the replay's own checkout a live question (A3 §3.4) — the
+      // child's ask and the replay's answer are then model calls through the
+      // deployment's own definitions, so the tool waterfall, the runtime entries,
+      // the store and the durable inbox are all the production ones.
+      questionTools: 'shipped',
+      probes: ['write'],
+      script: (_sessionId, index): readonly ScriptEntry[] => {
+        if (index === 0) return [{ waitFor: () => keep.promise }]
+        if (index === 1) {
+          // The replay's own worker (the root's first spawn): it decomposes for
+          // real, then answers the child that batch spawned.
+          return [
+            { tool: 'task_decompose', args: { reason: 'split the replayed work', children: children('replay child work') } },
+            { text: 'replay: the batch is the runtime\'s now' },
+            { waitFor: () => questionKnown.promise },
+            { tool: 'task_read', args: {} },
+            { tool: 'task_answer', args: (): Record<string, unknown> => ({ questionId, requestKey: 'a1', answer: 'the champion contract holds', resolves: true }) },
+            { text: 'replay: answered my child' },
+            { waitFor: () => keep.promise },
+          ]
+        }
+        // The child the replay decomposed: it asks its direct parent — the replay
+        // task — and the block its own ask opens is what refuses the write it
+        // attempts in the same turn.
+        return [
+          { tool: 'task_ask_parent', args: { requestKey: 'k1', question: 'which contract applies to me?' } },
+          { tool: 'write', args: { path: 'child-write-blocked.txt', content: 'no' } },
+          { text: 'child: waiting for an answer' },
+          { waitFor: () => childReleased.promise },
+          { tool: 'write', args: { path: 'child-write-after.txt', content: 'yes' } },
+          { waitFor: () => keep.promise },
+        ]
+      },
+    })
+    const root = await h.begin(ROOT_CONTRACT)
+    const champion = await writeChampion(h, root.storeId)
+    h.runtime.replayTask(root.storeId, champion, { lineage: 'evolution-replay:p1' }, ROOT).catch(() => undefined)
+    await vi.waitFor(() => expect(h.spawns.length).toBeGreaterThanOrEqual(1))
+    const replaySession = spawnOf(h, 0)
+    const replayRun = await vi.waitFor(async () => {
+      const bound = await h.runForSession(replaySession)
+      expect(bound.run.status).toBe('running')
+      return bound.run
+    })
+
+    // The replay's worker decomposes through the shipped tool and the real
+    // admission. The checkout the batch's own §3.4 check reads is the one the
+    // replay run holds, and that hold names this task — which is the whole reason
+    // the call gets past the check instead of being refused as another writer's.
+    const decomposeCall = await callOf(h, 'task_decompose', replaySession)
+    expect(decomposeCall.result?.isError).toBe(false)
+    expect(decomposeCall.result?.text).toContain(`decomposed ${replayRun.taskId} into 1 children`)
+    await vi.waitFor(() => expect(h.spawns.length).toBeGreaterThanOrEqual(2))
+    const child = spawnOf(h, 1)
+    const childBound = await h.runForSession(child)
+    expect(childBound.task.parentTaskId).toBe(replayRun.taskId)
+    const childRunId = childBound.run.runId
+    questionId = questionIdOf({ childRunId, requestKey: 'k1' })
+
+    // The child's own model call went through the shipped tool: the runtime read
+    // the body back from that call's citation, addressed it to its direct parent
+    // (the replay's run) and blocked the child at the delivery.
+    const askCall = await callOf(h, 'task_ask_parent', child)
+    expect(askCall.result?.isError).toBe(false)
+    expect(askCall.result?.text).toContain(`question ${questionId} recorded for your direct parent (run ${replayRun.runId})`)
+    expect(askCall.result?.text).toContain('This run is now blocked on that answer')
+    const question = await questionOf(h, root.storeId, questionId)
+    expect(question.childRunId).toBe(childRunId)
+    expect(question.parentRunId).toBe(replayRun.runId)
+    expect(question.blocking).toBe(true)
+    expect(h.runtime.gate.questionsBlocked(child)).toBe(true)
+    // The block is live in the real waterfall: the write the same turn attempts
+    // next is refused, and its body never ran.
+    const blockedWrite = await callOf(h, 'write', child, call => (call.args as { path?: string }).path === 'child-write-blocked.txt')
+    expect(blockedWrite.result?.isError).toBe(true)
+    expect(blockedWrite.result?.text).toContain('waiting on an unresolved blocking question')
+    expect(h.executed.some(name => name.includes('child-write-blocked.txt'))).toBe(false)
+    // …and the replay's own session really received it: its durable inbox holds the
+    // recorded identity, and the loop claimed that identity into its history.
+    expect(insertsOf(h, replaySession, question.messageId)).toBe(1)
+    const asked = await claimedIn(h, replaySession, question.messageId)
+    expect(asked.source).toEqual({ kind: 'agent-message', form: 'relay', senderSessionId: child })
+
+    // The waiting replay — its own batch is what it is doing — sees the question
+    // in its own request and answers with the shipped tool.
+    questionKnown.resolve()
+    const replayRequest = await requestCarrying(h, replaySession, questionId)
+    expect(replayRequest.texts.join('\n')).toContain(`[task-question ${questionId}] which contract applies to me?`)
+    expect(replayRequest.texts.join('\n')).toContain('## Questions waiting for your answer (1)')
+    const answerCall = await callOf(h, 'task_answer', replaySession)
+    expect(answerCall.result?.isError).toBe(false)
+    expect(answerCall.result?.text).toContain('`resolves: true` releases exactly that question')
+    const [answer] = (await h.snapshot(root.storeId)).questions?.byId[questionId]?.answers ?? []
+    expect(answer?.parentRunId).toBe(replayRun.runId)
+    expect(answer?.resolves).toBe(true)
+    expect(answerCall.result?.text).toContain(`answer ${answer!.answerId} recorded for question ${questionId}`)
+    // The answer reached exactly that child — its own inbox, its own history — and
+    // released the block the ask opened.
+    expect(insertsOf(h, child, answer!.messageId)).toBe(1)
+    const answered = await claimedIn(h, child, answer!.messageId)
+    expect(answered.source).toEqual({ kind: 'agent-message', form: 'relay', senderSessionId: replaySession })
+    expect(h.runtime.gate.questionsBlocked(child)).toBe(false)
+    expect(blockingQuestionsOf(await h.snapshot(root.storeId), childRunId)).toEqual([])
+    // The released child's next step is admitted: the block was the only thing
+    // that refused it.
+    childReleased.resolve()
+    const released = await callOf(h, 'write', child, call => (call.args as { path?: string }).path === 'child-write-after.txt')
+    expect(released.result?.isError).toBe(false)
+    expect(h.executed.some(name => name.includes('child-write-after.txt'))).toBe(true)
+    // One question, one answer, one child, one run for the replay task: a real
+    // decomposition inside a replay is an ordinary batch and nothing more — it did
+    // not turn the replay into a second root or a second run of its task.
+    const after = await h.snapshot(root.storeId)
+    expect(after.questions?.all.map(item => item.questionId)).toEqual([questionId])
+    expect(after.tasks.filter(task => task.parentTaskId === replayRun.taskId)).toHaveLength(1)
+    expect(after.runs.filter(run => run.taskId === replayRun.taskId)).toHaveLength(1)
     keep.resolve()
   }, 30_000)
 })
