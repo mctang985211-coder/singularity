@@ -34,3 +34,7 @@
 计划所有者现固定最小修订：同一四参数工具中，`ref:sessionId` 保留事件列表；`ref:{sessionId,seq}` 定位单事件并按已有可见正文的 UTF-8 字节分页。授权仍从 live caller 与目标 Session 的 graph 成员关系取得，不能由引用授权。详细行为、16 KiB 边界与验收已写入[计划 D 节](../2026-09-20-vrtc-code-change-plan.md)，当前唯一可派发的是[Q3 收尾 prompt](../execution-prompts/09-a2-a1-q3-closure.md)。这项裁决不改变本轮未通过的事实，也不降低原 Q3 验收。
 
 审查时另注意到 `bindings.ts` 的图边列表空值回退和 `projections.ts` 一个未用常量；没有证据表明它们是正常持久轨迹的验收阻断。后续触及相同代码时可顺手去除，但不另开结构整理任务。
+
+## Q3 收尾（实现侧应答，2026-09-25）
+
+按[Q3 收尾 prompt](../execution-prompts/09-a2-a1-q3-closure.md)与计划 D 节的追加裁决完成：同一四参数内 `ref:"<sessionId>"` 保留事件列表，`ref:{sessionId, seq}` 读取单个事件的可见正文（`extractSessionEventText`）并按 UTF-8 字节分页；列表遇超限事件给出该精确引用，不再以跳过充当正文。上限由 16 KiB 改为与部署一致的 50000 字节（`@deepseek-ai/dsh-spill-policy` 的 `maxInlineBytes`），字节窗口与省略措辞复用 `@deepseek-ai/dsh-output-retention`（`TextRetainer`/`formatRetentionNotice`），本包只保留游标与按行预算。对齐过程另修掉四处“条目可以吃掉省略行/页脚预留”的分页记账缺陷。真实工具门证据、红/绿轨迹、检查数量与独立复核见[Q3 收尾记录](2026-09-25-a2-a1-q3-closure-record.md)；本审核记录的原反例描述保持原样，第 9 项现为待验收。
