@@ -17,7 +17,7 @@ import { toolCallResponse, textResponse } from '../../../../thirdparty/deepseek-
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { blockingQuestionsOf, rootTaskStoreId } from '../../task/src/index.ts'
 import { TaskService } from '../../task/src/index.ts'
-import type { RunProviderBinding, TaskEvent, TaskRun, TaskSnapshot } from '../../task/src/index.ts'
+import type { CapabilityManifest, RunProviderBinding, TaskEvent, TaskRun, TaskSnapshot } from '../../task/src/index.ts'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
@@ -60,6 +60,14 @@ const MIDDLE = 's-middle'
 const GRANDCHILD = 's-grandchild'
 const STORE = rootTaskStoreId(ROOT)
 const ACTOR = 'tester'
+
+/**
+ * The capability manifest every seeded task is admitted under: no capabilities
+ * at all, which is a manifest like any other — a run's store record always
+ * carries one (`startChildRound` refuses a child without it), and the worker
+ * resume rebuilds its grant from exactly this record.
+ */
+const NO_CAPABILITIES: CapabilityManifest = { capabilities: {}, missing: [], closure: 'closed' }
 
 /** The criterion every task in this spec carries: a command the real verifier can settle. */
 const CRITERIA = [{ criterionId: 'ac1-1', description: 'it holds', verificationMode: 'deterministic' as const, requiredEvidence: [], mandatory: true, command: 'true' }]
@@ -172,10 +180,16 @@ class Boot {
     readonly runtime: TaskRuntime,
     readonly adapter: ScriptedAdapter,
     private readonly handles: { close: () => Promise<void> }[],
-    private readonly createAgent: (sessionId: string, options: { provider: string; model: string }) => Promise<Agent>,
+    /** What the deployment's own factory publishes for a spawned session: the graph's node and its edge. */
+    private readonly graph: { agents: { id: string; name: string; status: string }[]; edges: { kind: string; from: string; to: string }[] },
   ) {}
 
-  static async open(dir: string, script: (sessionId: string) => readonly ScriptEntry[]): Promise<Boot> {
+  /** What one boot's graph store holds: the records a second boot re-reads after the first died. */
+  static async open(
+    dir: string,
+    script: (sessionId: string) => readonly ScriptEntry[],
+    seed: { readonly graph?: { readonly agents: { id: string; name: string; status: string }[]; readonly edges: { kind: string; from: string; to: string }[] } } = {},
+  ): Promise<Boot> {
     const ctx = new Context()
     await mountAgentLoopTestDependencies(ctx)
     const persistence = new JsonlSessionPersistence(ctx, { root: dir, compression: 'none' })
@@ -199,16 +213,41 @@ class Boot {
     const adapter = new ScriptedAdapter(script)
     ctx.llm.registerAdapter([PROVIDER], adapter)
     await ctx.plugin(TestSessionQuery)
-    const harness = await mountAgentLoopTestHarness(ctx)
+    await mountAgentLoopTestHarness(ctx)
     ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: PROVIDER, model: MODEL }) })
     ctx.provide('agentPresets', { defaultId: 'standard', mount: async () => {}, resolve: async () => ({}) })
     ctx.provide('permissionPresets', { set: () => {}, resolve: () => ({}) })
     ctx.provide('layout', { setIn: async () => {} })
+    // The graph store's own records: what a spawn publishes (the node and its
+    // delegation edge) is what a worker resume re-reads after a restart, so this
+    // stand-in holds them the way the deployment's store does rather than
+    // answering "nobody is here" (A4 §F.1's resume refuses a stranger by name).
+    // A second boot over the same directory is handed the records the first one
+    // published, the way a durable store hands them over.
+    const graphState = {
+      roots: [ROOT],
+      agents: (seed.graph?.agents ?? []).map(agent => ({ ...agent })),
+      edges: (seed.graph?.edges ?? []).map(edge => ({ ...edge })),
+    }
     ctx.provide('graph', {
-      snapshotIn: async () => ({ version: 1, id: 'g', roots: [ROOT], agents: [], groups: [], edges: [] }),
-      commitIn: async () => {},
+      snapshotIn: async () => ({
+        version: 1,
+        id: 'g',
+        roots: [...graphState.roots],
+        agents: graphState.agents.map(agent => ({ ...agent })),
+        groups: [],
+        edges: graphState.edges.map(edge => ({ ...edge })),
+      }),
+      commitIn: async (_storeId: string, events: readonly { kind: string; agent?: { id: string; name: string }; edge?: { kind: string; from: string; to: string } }[]) => {
+        for (const event of events) {
+          if (event.kind === 'agent/add' && event.agent !== undefined) graphState.agents.push({ ...event.agent, status: 'idle' })
+          if (event.kind === 'edge/add' && event.edge !== undefined) graphState.edges.push({ ...event.edge })
+        }
+      },
       setStatusIn: async () => {},
-      addAgentIn: async () => {},
+      addAgentIn: async (_storeId: string, agent: { id: string; name: string }) => {
+        if (!graphState.agents.some(candidate => candidate.id === agent.id)) graphState.agents.push({ ...agent, status: 'idle' })
+      },
     })
     ctx.provide('graphs', graphRegistry({
       graphForSession: async () => ({
@@ -247,13 +286,35 @@ class Boot {
       runBindingRoot: join(dir, 'run-bindings'),
     } as Config)
     const runtime = ctx.get('taskRuntime') as TaskRuntime
-    return new Boot(dir, ctx, task, runtime, adapter, handles, (sessionId, options) => harness.create(SessionId(sessionId), options))
+    return new Boot(dir, ctx, task, runtime, adapter, handles, graphState)
   }
 
-  /** Create one live Session the way a spawn does, and materialize its artifact. */
-  async create(sessionId: string): Promise<Agent> {
-    const agent = await this.createAgent(sessionId, { provider: PROVIDER, model: MODEL })
+  /**
+   * Create one live Session the way a spawn does, and materialize its artifact.
+   *
+   * A worker's Session is not just an id: the durable records a restart reads are
+   * its header's lineage (`parentSession`, the preset it ran under) and the graph
+   * store's own node and `spawn` edge. `harness.create` carries only a cwd, so a
+   * child is created through DSH's own factory with the metadata
+   * `AgentRuntime.spawn` passes, and the same two graph records are published
+   * here — the shape a real spawn leaves, which is what the recovery's worker
+   * resume checks against (A4 §F.1: a resume refuses a stranger by name).
+   */
+  async create(sessionId: string, parent?: string): Promise<Agent> {
+    const handle = await this.ctx.agents.create({
+      sessionId: SessionId(sessionId),
+      meta: parent === undefined
+        ? { cwd: this.dir, agentPreset: 'standard' }
+        : { cwd: this.dir, agentPreset: 'standard', parentSession: SessionId(parent), isSeeded: false, origin: 'subagent', delegationDepth: 1 },
+      agentOptions: { provider: PROVIDER, model: MODEL },
+      setup: async () => {},
+    })
+    const agent = handle.agent
     await this.ctx.sessions.flush(agent.session)
+    if (parent !== undefined) {
+      this.graph.agents.push({ id: sessionId, name: 'worker', status: 'idle' })
+      this.graph.edges.push({ kind: 'spawn', from: parent, to: sessionId })
+    }
     return agent
   }
 
@@ -288,6 +349,11 @@ class Boot {
       .find(path => path.endsWith(suffix))
     if (found === undefined) throw new Error(`no artifact for session "${sessionId}" under ${this.dir}`)
     return found
+  }
+
+  /** The graph records this process published: what a second boot over the same directory re-reads. */
+  commits(): { agents: { id: string; name: string; status: string }[]; edges: { kind: string; from: string; to: string }[] } {
+    return { agents: this.graph.agents.map(agent => ({ ...agent })), edges: this.graph.edges.map(edge => ({ ...edge })) }
   }
 
   /** Simulate process death: the durability barrier for every live Session, then release every descriptor. */
@@ -367,7 +433,7 @@ async function seedParentChild(boot: Boot, options: { parentWaitingChildren?: bo
     runIds: [],
     childTaskIds: [],
   }, ACTOR)
-  await boot.task.admitTaskIn(STORE, 't-root', ACTOR, { decompositionStatus: options.parentWaitingChildren === true ? 'decomposed' : 'leaf' })
+  await boot.task.admitTaskIn(STORE, 't-root', ACTOR, { decompositionStatus: options.parentWaitingChildren === true ? 'decomposed' : 'leaf', manifest: NO_CAPABILITIES })
   await boot.task.startRunIn(STORE, {
     runId: 'r-root',
     taskId: 't-root',
@@ -395,7 +461,7 @@ async function seedParentChild(boot: Boot, options: { parentWaitingChildren?: bo
     runIds: [],
     childTaskIds: [],
   }, ACTOR)
-  await boot.task.admitTaskIn(STORE, 't-child', ACTOR, { decompositionStatus: 'leaf' })
+  await boot.task.admitTaskIn(STORE, 't-child', ACTOR, { decompositionStatus: 'leaf', manifest: NO_CAPABILITIES })
   await boot.task.startRunIn(STORE, {
     runId: 'r-child',
     taskId: 't-child',
@@ -434,7 +500,7 @@ async function seedMiddleTree(boot: Boot): Promise<void> {
     runIds: [],
     childTaskIds: [],
   }, ACTOR)
-  await boot.task.admitTaskIn(STORE, 't-root', ACTOR, { decompositionStatus: 'decomposed' })
+  await boot.task.admitTaskIn(STORE, 't-root', ACTOR, { decompositionStatus: 'decomposed', manifest: NO_CAPABILITIES })
   await boot.task.startRunIn(STORE, {
     runId: 'r-root',
     taskId: 't-root',
@@ -459,7 +525,7 @@ async function seedMiddleTree(boot: Boot): Promise<void> {
     runIds: [],
     childTaskIds: [],
   }, ACTOR)
-  await boot.task.admitTaskIn(STORE, 't-middle', ACTOR, { decompositionStatus: 'decomposed' })
+  await boot.task.admitTaskIn(STORE, 't-middle', ACTOR, { decompositionStatus: 'decomposed', manifest: NO_CAPABILITIES })
   await boot.task.startRunIn(STORE, {
     runId: 'r-middle',
     taskId: 't-middle',
@@ -485,7 +551,7 @@ async function seedMiddleTree(boot: Boot): Promise<void> {
     runIds: [],
     childTaskIds: [],
   }, ACTOR)
-  await boot.task.admitTaskIn(STORE, 't-grand', ACTOR, { decompositionStatus: 'leaf' })
+  await boot.task.admitTaskIn(STORE, 't-grand', ACTOR, { decompositionStatus: 'leaf', manifest: NO_CAPABILITIES })
   await boot.task.startRunIn(STORE, {
     runId: 'r-grand',
     taskId: 't-grand',
@@ -511,7 +577,7 @@ describe("the parent's own acceptance (A4 §F.1)", () => {
       ? [{ tool: 'task_ask_parent', args: { requestKey: 'k1', question: 'does the frozen contract still hold?' } }, { waitFor: () => answerNow.promise }]
       : [{ waitFor: () => answerNow.promise }, { tool: 'task_answer', args: { questionId, requestKey: 'a1', answer: 'it holds', resolves: true } }])
     await seedMiddleTree(a)
-    const middle = await a.create(MIDDLE)
+    const middle = await a.create(MIDDLE, ROOT)
     a.begin(middle, 'the middle begins')
     await vi.waitFor(() => expect(calls.some(call => call.name === 'task_ask_parent' && call.sessionId === MIDDLE)).toBe(true))
     const askCall = calls.find(call => call.name === 'task_ask_parent' && call.sessionId === MIDDLE) as DispatchedCall
@@ -575,7 +641,7 @@ describe('A4 recovery from the real session log', () => {
       ? [{ tool: 'task_ask_parent', args: { requestKey: 'k1', question: 'which contract holds?' } }, { waitFor: () => asked.promise }]
       : [{ waitFor: () => asked.promise }])
     await seedParentChild(a)
-    const child = await a.create(CHILD)
+    const child = await a.create(CHILD, ROOT)
     a.begin(child, 'begin the child work')
     await vi.waitFor(() => expect(calls.some(call => call.name === 'task_ask_parent' && call.sessionId === CHILD)).toBe(true))
     const firstCall = calls.find(call => call.name === 'task_ask_parent' && call.sessionId === CHILD) as DispatchedCall
@@ -589,7 +655,7 @@ describe('A4 recovery from the real session log', () => {
     // The second process: the root's session comes back, the store recovers, and
     // the child is *not* an abandoned in-flight run — its question is on the
     // record and the answer it waits for is still owed.
-    const b = await Boot.open(dir, () => [{ text: 'recovered' }])
+    const b = await Boot.open(dir, () => [{ text: 'recovered' }], { graph: a.commits() })
     await b.create(ROOT)
     const adopted = await b.runtime.adoptRoot(STORE, ROOT)
     expect(adopted).toMatchObject({ adopted: true, taskId: 't-root', runId: 'r-root' })
@@ -642,10 +708,10 @@ describe('A4 recovery from the real session log', () => {
     const dir = workspace()
     const a = await Boot.open(dir, () => [{ text: 'nothing to do' }])
     await seedParentChild(a)
-    await a.create(CHILD)
+    await a.create(CHILD, ROOT)
     await a.crash()
 
-    const b = await Boot.open(dir, () => [{ text: 'recovered' }])
+    const b = await Boot.open(dir, () => [{ text: 'recovered' }], { graph: a.commits() })
     await b.create(ROOT)
     await b.runtime.adoptRoot(STORE, ROOT)
     const after = await b.snapshot()
@@ -677,7 +743,7 @@ describe('A4 recovery from the real session log', () => {
       ? [{ tool: 'task_ask_parent', args: { requestKey: 'k1', question: 'which contract holds?' } }, { waitFor: () => asked.promise }]
       : [{ waitFor: () => asked.promise }])
     await seedParentChild(a, { parentWaitingChildren: true })
-    const child = await a.create(CHILD)
+    const child = await a.create(CHILD, ROOT)
     a.begin(child, 'begin the child work')
     await vi.waitFor(() => expect(calls.some(call => call.name === 'task_ask_parent' && call.sessionId === CHILD)).toBe(true))
     const firstCall = calls.find(call => call.name === 'task_ask_parent' && call.sessionId === CHILD) as DispatchedCall
@@ -691,7 +757,7 @@ describe('A4 recovery from the real session log', () => {
     // without cancelling it, because it is waiting exactly where the protocol put
     // it. The driver's own adoption is the only writer that touches this session's
     // gate decision, so the token moving is what proves it got there.
-    const b = await Boot.open(dir, () => [{ text: 'recovered' }])
+    const b = await Boot.open(dir, () => [{ text: 'recovered' }], { graph: a.commits() })
     await b.create(ROOT)
     await b.runtime.adoptRoot(STORE, ROOT)
     expect(b.runtime.gate.decisionToken(CHILD)).toBe(0)
@@ -743,7 +809,7 @@ describe('A4 recovery from the real session log', () => {
       ? [{ tool: 'task_ask_parent', args: { requestKey: 'k1', question: 'which contract holds?' } }, { waitFor: () => asked.promise }]
       : [{ waitFor: () => asked.promise }])
     await seedParentChild(a)
-    const child = await a.create(CHILD)
+    const child = await a.create(CHILD, ROOT)
     a.begin(child, 'begin the child work')
     await vi.waitFor(() => expect(calls.some(call => call.name === 'task_ask_parent' && call.sessionId === CHILD)).toBe(true))
     const firstCall = calls.find(call => call.name === 'task_ask_parent' && call.sessionId === CHILD) as DispatchedCall
@@ -753,7 +819,7 @@ describe('A4 recovery from the real session log', () => {
 
     const b = await Boot.open(dir, sessionId => sessionId === ROOT
       ? [{ tool: 'task_answer', args: { questionId, requestKey: 'a1', answer: 'the frozen contract holds', resolves: true } }]
-      : [{ text: 'nothing' }])
+      : [{ text: 'nothing' }], { graph: a.commits() })
     const root = await b.create(ROOT)
     await b.runtime.adoptRoot(STORE, ROOT)
     // The question-waiting run is in flight after recovery. Its owner then stops
@@ -789,7 +855,7 @@ describe('what a recovery pass reports about owed question messages (A4 §F.1)',
       ? [{ tool: 'task_ask_parent', args: { requestKey: 'k1', question: 'which contract holds?' } }, { waitFor: () => asked.promise }]
       : [{ waitFor: () => asked.promise }])
     await seedParentChild(a)
-    const child = await a.create(CHILD)
+    const child = await a.create(CHILD, ROOT)
     a.begin(child, 'begin the child work')
     await vi.waitFor(() => expect(calls.some(call => call.name === 'task_ask_parent' && call.sessionId === CHILD)).toBe(true))
     const askCall = calls.find(call => call.name === 'task_ask_parent' && call.sessionId === CHILD) as DispatchedCall

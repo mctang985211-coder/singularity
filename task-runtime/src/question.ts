@@ -632,6 +632,21 @@ export function pendingQuestionMessages(snapshot: TaskSnapshot): PendingQuestion
 }
 
 /**
+ * The question messages one store still owes **one Session** — the same
+ * derivation as {@link pendingQuestionMessages}, narrowed to a target.
+ *
+ * It exists for the recovery pass's own question (A4 §F.1): an unsubmitted run
+ * whose Session is owed a delivery is *not* an abandoned run. The clearest case
+ * is an answered question whose answer has not been read — the asking run's
+ * block is already gone (the answer resolved it), so the blocking derivation
+ * cannot see the wait, while the store still owes that run the answer it waited
+ * for. Cancelling it there would throw away exactly what the exchange produced.
+ */
+export function owedQuestionMessagesTo(snapshot: TaskSnapshot, sessionId: string): PendingQuestionMessage[] {
+  return pendingQuestionMessages(snapshot).messages.filter(message => message.targetSessionId === sessionId)
+}
+
+/**
  * Reconcile the deliveries one store's question facts still owe (§F.1's crash
  * recovery): read each pending body from its *recorded* citation, then hand the
  * composed intents to agent-runtime's reconcile — which delivers only what the

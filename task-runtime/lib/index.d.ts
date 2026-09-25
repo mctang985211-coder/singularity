@@ -1724,7 +1724,84 @@ interface OrchestrateEnv {
    * case it exists for (A3 §3.1, the `VerifierUnavailableError` rule).
    */
   failBatch?(storeId: string, batchId: string, reason: string): Promise<void>;
+  /**
+   * Bring one adopted worker's Session back live under its own identity (A4
+   * §F.1) — the runtime's own door into `AgentRuntime.resumeWorkerAgent`, with
+   * the run binding, the store-derived gate and the managed-work reconciliation
+   * the resume owes. The *authorization* is not passed by the driver: this
+   * module rebuilds it from the store with the same helpers the spawn used
+   * ({@link resumeAdoptedWorker}), because a driver has nothing to add to it.
+   *
+   * Absent means this deployment cannot bring a worker back, and a
+   * question-waiting run nobody can reach fails by name rather than waiting
+   * forever (see {@link resumeAdoptedWorker}).
+   */
+  resumeWorkerSession?(request: AdoptedWorkerResumeRequest): Promise<AdoptedWorkerResume>;
 }
+/**
+ * What one request to bring an adopted worker's Session back states: the run
+ * the store holds and the authorization rebuilt for it — never a second
+ * composition, grant or preset invented by the caller.
+ */
+interface AdoptedWorkerResumeRequest {
+  readonly storeId: string;
+  /** The run as the store records it: the identity the resume must reproduce, not a copy the caller may edit. */
+  readonly run: TaskRun;
+  /** The grant rebuilt from the run's manifest and its own binding, exactly as the spawn resolved it. */
+  readonly grant: WorkerGrant;
+  /** The permission preset the spawn admitted the run under; absent = the spawn's own default. */
+  readonly permissionPreset?: string;
+  /** Whether the run's Session was spawned as a task worker. */
+  readonly taskWorker: boolean;
+}
+/**
+ * What one attempt to bring an adopted worker back settled as (A4 §F.1):
+ *
+ * - `live` — the same Session is live in this process now (or already was), so
+ *   what is owed it can be delivered and its wait can be observed;
+ * - `retry` — another owner holds the Session (`ownership-conflict`). Nothing is
+ *   taken over, the run keeps its identity, and the wait stays bounded by the
+ *   deadline; the next activation retries;
+ * - `refused` — the resume could not be established under this identity
+ *   (`session-missing`, `session-unreadable`, `binding-mismatch`,
+ *   `not-in-graph`, `member-facts-missing`, `takeover-refused`, or a refusal of
+ *   the managed-work reconciliation). The caller must walk the run to a terminal
+ *   state: an in-flight run nobody can bring back is a dead wait, not a wait.
+ */
+type AdoptedWorkerResume = {
+  readonly status: 'live';
+} | {
+  readonly status: 'retry';
+  readonly reason: string;
+} | {
+  readonly status: 'refused';
+  readonly reason: string;
+};
+/**
+ * Rebuild the authorization a recovery pass has to state for one run, from the
+ * store's own records, and hand it to the deployment's resume door.
+ *
+ * **Why it is rebuilt here and not remembered:** the spawn's grant is a
+ * function of durable facts — the task's manifest in the store, and the run's
+ * own provider binding — so the same helpers that resolved it at spawn
+ * (`authorizedGrant`, `permissionFor`, `skillRootsForRun`) resolve it again.
+ * A grant recorded somewhere and handed back would be a second source of
+ * authorization that could drift from the manifest it came from; and a resume
+ * states the plane it *would* install so the Session's own durable record can
+ * refuse a grant it never ran under.
+ *
+ * The one thing this cannot rebuild is an overlay the spawn took from the
+ * caller rather than from the store — a replay's candidate skill roots
+ * (`ReplayOverlay.extraSkillRoots`, A6/S2-R's own subject). What is rebuilt is
+ * the run's own binding snapshot, which is what a resumed worker loads its
+ * content from; the candidate overlay of an interrupted experiment is not part
+ * of the run's record and is not invented here.
+ * @param env - the deployment's seam, for the store, the permission registry and the resume door.
+ * @param storeId - the store the run belongs to.
+ * @param run - the run as the store records it.
+ * @returns what the attempt settled as, never a throw for a named refusal.
+ */
+declare function resumeAdoptedWorker(env: OrchestrateEnv, storeId: string, run: TaskRun): Promise<AdoptedWorkerResume>;
 /**
  * What a *runtime-level* settlement holds — the slice of {@link OrchestrateEnv}
  * that a terminal record, a notification and a workspace release actually read.
@@ -1813,6 +1890,17 @@ interface BatchContext {
    * and rebuilds its verdicts through {@link OrchestrateEnv.precheck}.
    */
   providers?: ProviderPrecheck;
+  /**
+   * The experiment lineage this batch's parent task belongs to, when it is a
+   * replay's (W15). The parent's own terminal record carries it as an anomaly, so
+   * a replay run the batch settles is the same record the replay driver would have
+   * settled. The lineage is a fact of the *process* that started the experiment
+   * (`replayTask`'s own map), so this covers the in-process case — a batch
+   * settling a replay whose driver is still around; a replay run settled after a
+   * restart keeps the durable lineage it has (the replayed task's contract) and no
+   * invented anomaly, which is A6/S2-R's own bookkeeping.
+   */
+  lineage?: string;
 }
 /**
  * One child's outcome as the store records it. A child that never reached a
@@ -3364,6 +3452,25 @@ interface ProposalReviewChannel {
   requestReview(request: ProposalReviewRequest): Promise<ProposalReviewNotice>;
 }
 /**
+ * One worker recovery attempt a pass made, as the pass reports it (A4 §F.1):
+ * which run and Session it was about, and what the attempt settled as —
+ * `live` (the same Session is back, the pass's own success), `retry` (another
+ * owner holds it; nothing was taken over) or `refused` (the identity could not
+ * be established, and the caller must walk the run to a terminal state).
+ *
+ * The runs this covers are the ones the question protocol parked: a worker whose
+ * blocking question is unresolved, one whose Session is owed a delivery it has
+ * not been given, and a `waiting_children` parent that participates in questions
+ * at all. Every other unsubmitted run is still recovery's own cancellation.
+ */
+interface QuestionResumeReport {
+  /** The run the attempt was about, as the store names it (`run "r-…" (session "s-…")`). */
+  readonly subject: string;
+  readonly status: AdoptedWorkerResume['status'];
+  /** Present for `retry` and `refused`: why the Session was not brought back. */
+  readonly reason?: string;
+}
+/**
  * What one recovery pass could not finish, reported rather than guessed: the
  * proposals it could not continue and why. Empty means every open proposal was
  * either continued or already in a state recovery must not touch.
@@ -3381,6 +3488,14 @@ interface ReconcileReport {
    * owed nothing; a `refused` record names why that one could not be decided.
    */
   readonly questionDeliveries: readonly QuestionReconcileReport[];
+  /**
+   * What the pass's own recovery of question-waiting workers settled as (A4
+   * §F.1), one record per run it tried to bring back — `live` for a Session that
+   * is now reachable, `retry` for one another owner still holds, `refused` for an
+   * identity that could not be established (and whose run the pass then settled
+   * terminal). Empty means the pass found no question-waiting worker to recover.
+   */
+  readonly questionResumes: readonly QuestionResumeReport[];
 }
 /**
  * What a read sees about one store's recovery (A2 §E) — facts and markers,
@@ -4710,6 +4825,100 @@ declare class TaskRuntime extends Service {
    */
   reconcileStore(storeId: string): Promise<ReconcileReport>;
   /**
+   * The refusal code one resume failure names — read structurally (the stable
+   * class name and its `code`) rather than by `instanceof`, because the runtime
+   * that raises it and this package can be two modules of one contract in a
+   * source-built deployment, and a duplicate class object must not turn a named
+   * refusal into an unnamed failure.
+   */
+  private static resumeRefusalCodeOf;
+  /**
+   * Record one worker-recovery attempt in the pass's report *and* on the
+   * deployment's log (A4 §F.1): a `live` resume is the pass's own success and
+   * needs no warn, while a `retry` and a `refused` are exactly what an operator
+   * has to see — the first because the run keeps waiting on an owner that is not
+   * this process, the second because the run is about to be settled terminal for
+   * it. The report is the machine-readable half; this is the one adoption drops.
+   */
+  private recordQuestionResume;
+  /**
+   * Wake a Session that was brought back with coordination input its own inbox
+   * still holds unread (A4 §F.1's wake contract).
+   *
+   * Why this exists: a delivery is a `steer`, and a retry whose target's fold
+   * already holds the identity is answered `already-present` **without steering**
+   * — right, because a second copy would be a duplicate, but it also means a
+   * message that was durable *before* the crash (spliced and flushed, never
+   * claimed) wakes nothing after the restart. The resumed driver stays idle with
+   * the question or the answer sitting in its restored inbox, and the wait would
+   * only end at the deadline. So the pass looks at the deliveries that came back
+   * `already-present`, checks the *live* inbox of the session each one addressed
+   * (the public `inbox.nextTurn`/`nextStep` read), and — only when that identity
+   * is still pending there — wakes the session with the runtime's own voice: a
+   * `plugin`-sourced `notice` (the shape {@link notify} always sends), never a
+   * person's message and never the question's or the answer's words.
+   *
+   * Nothing else is sent: a delivery that was steered in this pass needs no
+   * second wake, a session with no pending identity is left alone, and a session
+   * that is not live here cannot be woken (that is the `unavailable` case the
+   * report already names). A failure inside this step is reported, never
+   * propagated: the deliveries themselves were decided.
+   */
+  private wakeUnclaimedQuestionMessages;
+  /**
+   * Whether one live session's own inbox still holds a message identity — the
+   * public pending read of a DSH Agent (`inbox.nextTurn` / `inbox.nextStep`),
+   * used only to decide whether a session needs waking (A4 §F.1's wake
+   * contract). A session this process does not hold is not "pending": it is a
+   * target the delivery report already names `unavailable`.
+   */
+  private sessionHoldsPendingMessage;
+  /**
+   * The deployment half of the recovery pass's worker resume (A4 §F.1): resolve
+   * the Session's graph scope, take the Session over through
+   * `AgentRuntime.resumeWorkerAgent` under the run's own identity, and put the
+   * live result where every other live session of this process lives.
+   *
+   * The order after the resume is the promise the contract makes:
+   *
+   * 1. **The binding.** The Session is bound to its run in this process's one
+   *    binding table (`sessions`) and marked as work this process drives
+   *    (`startedSessions`), exactly as a spawn's product is — so the run's own
+   *    tools (`task_submit_result`, `task_answer`) resolve, and the next recovery
+   *    pass reads it as live work rather than as a stranger's.
+   * 2. **The gate, before anything can be delivered.** The run's phase and its
+   *    question block are applied from the store under the gate's own token rule
+   *    ({@link applyResumedSessionGate}) — the same derivation
+   *    `initializeStoreGates` performs for every session, moved ahead of the
+   *    delivery pass so the first request an answer wakes is already decided
+   *    under the facts the store holds.
+   * 3. **The managed work the dead process left.** The drain (the same
+   *    `drainSession` the settlement paths use, with the now-live agent and the
+   *    deployment's jobs service) kills and waits for this session's managed work
+   *    within the configured window. An unconfirmed drain refuses the takeover by
+   *    name: a resumed worker whose predecessor's jobs nobody could confirm
+   *    stopped must not be allowed to run as if nothing of the sort happened.
+   *
+   * A refusal of the resume itself is named and never worked around: an
+   * `ownership-conflict` is the retryable one (another owner holds the Session;
+   * this process must not take it over) and everything else means the identity
+   * cannot be established, which the caller settles as a terminal state.
+   */
+  private resumeAdoptedWorkerSession;
+  /**
+   * Apply the phase and the question block one resumed session's run implies,
+   * from the store, under the gate's own token rule — the token taken *before*
+   * the read, so a decision this process made while the read was in flight drops
+   * the value instead of being overwritten by it. Same derivation as
+   * `initializeStoreGates`, applied per session because a delivered answer can
+   * wake this session before that pass runs.
+   */
+  private applyResumedSessionGate;
+  /** The drain a resumed Session owes: the session's managed work, with the agent that now owns it. */
+  private drainAdoptedSession;
+  /** Let one resumed Session go again — the runtime's own stop path, never a private dispose. */
+  private stopAdoptedSession;
+  /**
    * Rebuild this process's workspace ownership for one store from the store's
    * own state: the root run's own hold, and — when that run is waiting on
    * children — the batch layer its driver hands to each child in turn. A tree
@@ -5051,4 +5260,4 @@ declare class TaskRuntime extends Service {
   private agentOrUndefined;
 }
 //#endregion
-export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AdoptedWorkerResume, type AdoptedWorkerResumeRequest, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, QuestionResumeReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

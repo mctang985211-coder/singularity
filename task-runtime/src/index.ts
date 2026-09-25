@@ -13,6 +13,7 @@ import { SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/d
 import type {} from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@dangosys/dsh-singularity-agent-runtime'
+import type { GraphScope } from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {
   AcceptanceCriterion,
@@ -77,11 +78,14 @@ import {
   blockUnstartedChildren,
   deriveChildOutcomes,
   driveBatch,
+  resumeAdoptedWorker,
   runReplayTask,
   settleRunFromRuntime,
   settleSubmittedRun,
   VerifierUnavailableError,
   escalationHint,
+  type AdoptedWorkerResume,
+  type AdoptedWorkerResumeRequest,
   type BatchContext,
   type BudgetConfig,
   type ChildOutcome,
@@ -96,7 +100,9 @@ import {
   answerParentQuestion,
   applyStoreQuestionBlocking,
   askParentQuestion,
+  owedQuestionMessagesTo,
   pendingCoordinationOf,
+  pendingQuestionMessages,
   reconcileQuestionDeliveries,
   releaseAskingSessions,
   type AnsweredQuestionOutcome,
@@ -235,6 +241,8 @@ export {
   unlistableVerifierRefusal,
 } from './provider-precheck.ts'
 export type {
+  AdoptedWorkerResume,
+  AdoptedWorkerResumeRequest,
   BatchContext,
   BudgetConfig,
   ChildOutcome,
@@ -251,6 +259,7 @@ export {
   blockUnstartedChildren,
   deriveChildOutcomes,
   driveBatch,
+  resumeAdoptedWorker,
   runReplayTask,
   settleRunFromRuntime,
   settleSubmittedRun,
@@ -1210,6 +1219,26 @@ export interface ProposalReviewChannel {
 }
 
 /**
+ * One worker recovery attempt a pass made, as the pass reports it (A4 §F.1):
+ * which run and Session it was about, and what the attempt settled as —
+ * `live` (the same Session is back, the pass's own success), `retry` (another
+ * owner holds it; nothing was taken over) or `refused` (the identity could not
+ * be established, and the caller must walk the run to a terminal state).
+ *
+ * The runs this covers are the ones the question protocol parked: a worker whose
+ * blocking question is unresolved, one whose Session is owed a delivery it has
+ * not been given, and a `waiting_children` parent that participates in questions
+ * at all. Every other unsubmitted run is still recovery's own cancellation.
+ */
+export interface QuestionResumeReport {
+  /** The run the attempt was about, as the store names it (`run "r-…" (session "s-…")`). */
+  readonly subject: string
+  readonly status: AdoptedWorkerResume['status']
+  /** Present for `retry` and `refused`: why the Session was not brought back. */
+  readonly reason?: string
+}
+
+/**
  * What one recovery pass could not finish, reported rather than guessed: the
  * proposals it could not continue and why. Empty means every open proposal was
  * either continued or already in a state recovery must not touch.
@@ -1227,6 +1256,14 @@ export interface ReconcileReport {
    * owed nothing; a `refused` record names why that one could not be decided.
    */
   readonly questionDeliveries: readonly QuestionReconcileReport[]
+  /**
+   * What the pass's own recovery of question-waiting workers settled as (A4
+   * §F.1), one record per run it tried to bring back — `live` for a Session that
+   * is now reachable, `retry` for one another owner still holds, `refused` for an
+   * identity that could not be established (and whose run the pass then settled
+   * terminal). Empty means the pass found no question-waiting worker to recover.
+   */
+  readonly questionResumes: readonly QuestionResumeReport[]
 }
 
 /**
@@ -4789,6 +4826,11 @@ export class TaskRuntime extends Service {
       reason: options.reason,
       ...(options.excludeCallId === undefined ? {} : { excludeCallId: options.excludeCallId }),
       ...(options.providers === undefined ? {} : { providers: options.providers }),
+      // A replay's parent task carries its experiment lineage into the record this
+      // process's batch writes for it — the same record the replay driver would
+      // have written. The lineage map is this process's, so a restart's replay
+      // settles from the store's own records and invents no anomaly (A6/S2-R).
+      ...(this.replayLineage.has(options.parentTaskId) ? { lineage: this.replayLineage.get(options.parentTaskId)! } : {}),
     }
     const barrier = this.storeRecovery.get(options.storeId)
     const gate = barrier !== undefined && barrier.status === 'recovering' ? barrier : undefined
@@ -5235,7 +5277,7 @@ export class TaskRuntime extends Service {
       snapshot = await this.ctx.task.snapshotIn(storeId)
     } catch (error) {
       this.warn(`store ${storeId}: recovery could not read the store (${error instanceof Error ? error.message : String(error)}), so nothing was reconciled`)
-      return { unresolvedProposals: [], questionDeliveries: [] }
+      return { unresolvedProposals: [], questionDeliveries: [], questionResumes: [] }
     }
     this.reindex(storeId, snapshot)
     const depthOf = (taskId: TaskId): number => snapshot.tasks.find(task => task.taskId === taskId)?.depth ?? 0
@@ -5244,6 +5286,7 @@ export class TaskRuntime extends Service {
       .sort((left, right) => depthOf(right.taskId) - depthOf(left.taskId))
     const env = await this.orchestrateEnv(this.recoverySessionFor(snapshot, storeId), `recovery:${storeId}`)
     const waiting: TaskRun[] = []
+    const questionResumes: QuestionResumeReport[] = []
 
     for (const run of ordered) {
       // Recovery is for the runs nobody in this process holds, and that question
@@ -5299,16 +5342,39 @@ export class TaskRuntime extends Service {
       // parked exactly where the protocol told it to park — and the question is
       // the durable fact that says so. Cancelling it would cancel the answer its
       // parent still owes it, so the run keeps its identity (same session, same
-      // run) and the gate keeps the block (initializeStoreGates rebuilds it from
-      // this same snapshot). Everything else about an unsubmitted run is
+      // run) and its **Session is brought back** — the one thing a dead process
+      // cannot leave behind: without it the answer the parent produces would be
+      // recorded and never delivered, and a wait that cannot end is not a wait.
+      // The gate's phase and block for that Session come from the same store read
+      // as every other session's (`initializeStoreGates`), applied before
+      // anything is delivered to it. Everything else about an unsubmitted run is
       // unchanged: a run without such a question is settled cancelled by name.
+      // Two durable facts make an unsubmitted run a *wait* rather than an
+      // abandoned run (A4 §F.1): a blocking question of its own that is still
+      // unresolved, and a delivery the store still owes its Session — the
+      // answered-but-unread case, where the block is already gone but the run has
+      // not been given the answer it waited for.
       const pendingQuestions = blockingQuestionsOf(snapshot, run.runId)
-      if (pendingQuestions.length > 0) {
-        this.warn(
-          `store ${storeId}: run "${run.runId}" (session "${run.sessionId}") was in flight when this store was reopened and is waiting on ` +
-          `${pendingQuestions.length === 1 ? 'an unresolved blocking question' : `${pendingQuestions.length} unresolved blocking questions`} ` +
-          `(${pendingQuestions.map(question => question.questionId).join(', ')}); the run is left running with its block and no question is cancelled`,
-        )
+      const owed = owedQuestionMessagesTo(snapshot, run.sessionId)
+      if (pendingQuestions.length > 0 || owed.length > 0) {
+        const attempt = await resumeAdoptedWorker(env, storeId, run)
+        this.recordQuestionResume(storeId, run, attempt, questionResumes)
+        if (attempt.status === 'refused') {
+          // A run in flight that nobody can bring back is a dead wait: it is
+          // settled terminal with the refusal named, never left `running`.
+          await settleRunFromRuntime(
+            env,
+            storeId,
+            run,
+            'failed',
+            `recovery refused to continue run "${run.runId}": it was waiting on ` +
+            `${pendingQuestions.length === 1 ? 'an unresolved blocking question' : `${pendingQuestions.length} unresolved blocking questions`} ` +
+            `(${pendingQuestions.map(question => question.questionId).join(', ')})` +
+            `${owed.length === 0 ? '' : ` and is owed ${owed.length} question message${owed.length === 1 ? '' : 's'} it has not been given`}` +
+            `, but its Session "${run.sessionId}" could not be brought back under its own identity: ${attempt.reason}`,
+          )
+          await this.reconcileSessionJobs(run.sessionId)
+        }
         continue
       }
       await settleRunFromRuntime(
@@ -5343,8 +5409,36 @@ export class TaskRuntime extends Service {
         }
       }
       if (adoptable) {
+        // A waiting parent that participates in questions is a Session the
+        // answer it owes — or the answer it waits for — has to reach, so it comes
+        // back the same way a question-waiting worker does (A4 §F.1), before any
+        // driver of it is registered. A parent that cannot come back is settled
+        // terminal with the refusal named, and its batch is not started: there is
+        // no owner left for the acceptance the driver would produce.
+        const settled = new Set<RunId>()
+        for (const run of waiting) {
+          if (rootTaskStoreId(run.sessionId) === storeId) continue
+          const participating = pendingCoordinationOf(snapshot, run.runId).length > 0
+            || owedQuestionMessagesTo(snapshot, run.sessionId).length > 0
+          if (!participating) continue
+          const attempt = await resumeAdoptedWorker(env, storeId, run)
+          this.recordQuestionResume(storeId, run, attempt, questionResumes)
+          if (attempt.status === 'refused') {
+            await settleRunFromRuntime(
+              env,
+              storeId,
+              run,
+              'failed',
+              `recovery refused to continue run "${run.runId}": it is a waiting parent with open coordination, but its Session ` +
+              `"${run.sessionId}" could not be brought back under its own identity: ${attempt.reason}`,
+            )
+            await this.reconcileSessionJobs(run.sessionId)
+            settled.add(run.runId)
+          }
+        }
         for (const run of waiting) {
           if (run.batchId === undefined) continue
+          if (settled.has(run.runId)) continue
           this.startBatchDriver({
             storeId,
             parentTaskId: run.taskId,
@@ -5370,6 +5464,7 @@ export class TaskRuntime extends Service {
     try {
       questionDeliveries = await reconcileQuestionDeliveries(this.questionCoordination(), storeId)
       this.reportUnsettledQuestionDeliveries(storeId, questionDeliveries)
+      await this.wakeUnclaimedQuestionMessages(storeId, questionDeliveries)
     } catch (error) {
       this.warn(
         `store ${storeId}: its pending question deliveries could not be reconciled ` +
@@ -5380,7 +5475,244 @@ export class TaskRuntime extends Service {
     // the driver it starts, and the workspace question is already settled above,
     // so a continuation is not attempted into a checkout this process does not
     // hold.
-    return { unresolvedProposals: await this.reconcileProposals(storeId), questionDeliveries }
+    return { unresolvedProposals: await this.reconcileProposals(storeId), questionDeliveries, questionResumes }
+  }
+
+  /**
+   * The refusal code one resume failure names — read structurally (the stable
+   * class name and its `code`) rather than by `instanceof`, because the runtime
+   * that raises it and this package can be two modules of one contract in a
+   * source-built deployment, and a duplicate class object must not turn a named
+   * refusal into an unnamed failure.
+   */
+  private static resumeRefusalCodeOf(error: unknown): string | undefined {
+    if (!(error instanceof Error) || error.name !== 'WorkerResumeRefusal') return undefined
+    const code = (error as { code?: unknown }).code
+    return typeof code === 'string' ? code : undefined
+  }
+
+  /**
+   * Record one worker-recovery attempt in the pass's report *and* on the
+   * deployment's log (A4 §F.1): a `live` resume is the pass's own success and
+   * needs no warn, while a `retry` and a `refused` are exactly what an operator
+   * has to see — the first because the run keeps waiting on an owner that is not
+   * this process, the second because the run is about to be settled terminal for
+   * it. The report is the machine-readable half; this is the one adoption drops.
+   */
+  private recordQuestionResume(storeId: string, run: TaskRun, attempt: AdoptedWorkerResume, into: QuestionResumeReport[]): void {
+    const subject = `run "${run.runId}" (session "${run.sessionId}")`
+    into.push(attempt.status === 'live' ? { subject, status: 'live' } : { subject, status: attempt.status, reason: attempt.reason })
+    if (attempt.status === 'retry') {
+      this.warn(
+        `store ${storeId}: ${subject} is waiting on an unresolved blocking question, but its Session is held by another owner ` +
+        `(${attempt.reason}); nothing is taken over and the next activation retries`,
+      )
+    }
+    if (attempt.status === 'refused') {
+      this.warn(
+        `store ${storeId}: ${subject} is waiting on an unresolved blocking question and its Session could not be brought back ` +
+        `under its own identity (${attempt.reason}); the run is settled failed rather than left running with a wait nobody can end`,
+      )
+    }
+  }
+
+  /**
+   * Wake a Session that was brought back with coordination input its own inbox
+   * still holds unread (A4 §F.1's wake contract).
+   *
+   * Why this exists: a delivery is a `steer`, and a retry whose target's fold
+   * already holds the identity is answered `already-present` **without steering**
+   * — right, because a second copy would be a duplicate, but it also means a
+   * message that was durable *before* the crash (spliced and flushed, never
+   * claimed) wakes nothing after the restart. The resumed driver stays idle with
+   * the question or the answer sitting in its restored inbox, and the wait would
+   * only end at the deadline. So the pass looks at the deliveries that came back
+   * `already-present`, checks the *live* inbox of the session each one addressed
+   * (the public `inbox.nextTurn`/`nextStep` read), and — only when that identity
+   * is still pending there — wakes the session with the runtime's own voice: a
+   * `plugin`-sourced `notice` (the shape {@link notify} always sends), never a
+   * person's message and never the question's or the answer's words.
+   *
+   * Nothing else is sent: a delivery that was steered in this pass needs no
+   * second wake, a session with no pending identity is left alone, and a session
+   * that is not live here cannot be woken (that is the `unavailable` case the
+   * report already names). A failure inside this step is reported, never
+   * propagated: the deliveries themselves were decided.
+   */
+  private async wakeUnclaimedQuestionMessages(storeId: string, deliveries: readonly QuestionReconcileReport[]): Promise<void> {
+    const unread = new Set(deliveries.filter(delivery => delivery.status === 'already-present').map(delivery => delivery.messageId))
+    if (unread.size === 0) return
+    let snapshot: TaskSnapshot
+    try {
+      snapshot = await this.ctx.task.snapshotIn(storeId)
+    } catch (error) {
+      this.warn(
+        `store ${storeId}: the sessions holding already-present question messages could not be read back ` +
+        `(${error instanceof Error ? error.message : String(error)}); the next activation retries`,
+      )
+      return
+    }
+    const targets = new Map<string, string>()
+    for (const message of pendingQuestionMessages(snapshot).messages) {
+      if (unread.has(message.messageId)) targets.set(message.targetSessionId, message.messageId)
+    }
+    for (const [sessionId, messageId] of targets) {
+      if (!this.sessionHoldsPendingMessage(sessionId, messageId)) continue
+      this.notify(
+        sessionId,
+        `task-runtime: this session was brought back after a restart with coordination input it has not read (message "${messageId}" is still ` +
+        'pending in its inbox); read it and act on it — the framework will not send a second copy',
+      )
+    }
+  }
+
+  /**
+   * Whether one live session's own inbox still holds a message identity — the
+   * public pending read of a DSH Agent (`inbox.nextTurn` / `inbox.nextStep`),
+   * used only to decide whether a session needs waking (A4 §F.1's wake
+   * contract). A session this process does not hold is not "pending": it is a
+   * target the delivery report already names `unavailable`.
+   */
+  private sessionHoldsPendingMessage(sessionId: string, messageId: string): boolean {
+    const agent = this.agentOrUndefined(sessionId) as
+      | { inbox?: { nextTurn?: readonly { id?: unknown }[]; nextStep?: readonly { id?: unknown }[] } }
+      | undefined
+    const inbox = agent?.inbox
+    if (inbox === undefined) return false
+    return [...(inbox.nextTurn ?? []), ...(inbox.nextStep ?? [])].some(message => String(message.id) === messageId)
+  }
+
+  /**
+   * The deployment half of the recovery pass's worker resume (A4 §F.1): resolve
+   * the Session's graph scope, take the Session over through
+   * `AgentRuntime.resumeWorkerAgent` under the run's own identity, and put the
+   * live result where every other live session of this process lives.
+   *
+   * The order after the resume is the promise the contract makes:
+   *
+   * 1. **The binding.** The Session is bound to its run in this process's one
+   *    binding table (`sessions`) and marked as work this process drives
+   *    (`startedSessions`), exactly as a spawn's product is — so the run's own
+   *    tools (`task_submit_result`, `task_answer`) resolve, and the next recovery
+   *    pass reads it as live work rather than as a stranger's.
+   * 2. **The gate, before anything can be delivered.** The run's phase and its
+   *    question block are applied from the store under the gate's own token rule
+   *    ({@link applyResumedSessionGate}) — the same derivation
+   *    `initializeStoreGates` performs for every session, moved ahead of the
+   *    delivery pass so the first request an answer wakes is already decided
+   *    under the facts the store holds.
+   * 3. **The managed work the dead process left.** The drain (the same
+   *    `drainSession` the settlement paths use, with the now-live agent and the
+   *    deployment's jobs service) kills and waits for this session's managed work
+   *    within the configured window. An unconfirmed drain refuses the takeover by
+   *    name: a resumed worker whose predecessor's jobs nobody could confirm
+   *    stopped must not be allowed to run as if nothing of the sort happened.
+   *
+   * A refusal of the resume itself is named and never worked around: an
+   * `ownership-conflict` is the retryable one (another owner holds the Session;
+   * this process must not take it over) and everything else means the identity
+   * cannot be established, which the caller settles as a terminal state.
+   */
+  private async resumeAdoptedWorkerSession(request: AdoptedWorkerResumeRequest): Promise<AdoptedWorkerResume> {
+    const sessionId = request.run.sessionId
+    // A session already live here is one this process holds: the resume is not
+    // repeated (it would be an ownership conflict by construction), and only the
+    // binding and the gate are made sure of, idempotently.
+    const live = this.agentOrUndefined(sessionId) !== undefined
+    if (!live) {
+      let scope: GraphScope
+      try {
+        const graph = await this.ctx.graphs.graphForSession(SessionId(sessionId))
+        scope = { graphStoreId: graph.graphStoreId, layoutStoreId: graph.layoutStoreId }
+      } catch (error) {
+        return {
+          status: 'refused',
+          reason: `the graph of session "${sessionId}" could not be resolved (${error instanceof Error ? error.message : String(error)})`,
+        }
+      }
+      try {
+        await this.ctx.agentRuntime.resumeWorkerAgent({
+          sessionId: SessionId(sessionId),
+          scope,
+          run: {
+            storeId: request.storeId,
+            taskId: request.run.taskId,
+            runId: request.run.runId,
+            sessionId: SessionId(sessionId),
+            ...(request.run.agentPreset === undefined ? {} : { agentPreset: request.run.agentPreset }),
+            capabilitySnapshot: request.run.capabilitySnapshot,
+          },
+          grant: request.grant,
+          ...(request.permissionPreset === undefined ? {} : { permissionPreset: request.permissionPreset }),
+          taskWorker: request.taskWorker,
+        })
+      } catch (error) {
+        const code = TaskRuntime.resumeRefusalCodeOf(error)
+        if (code === 'ownership-conflict') return { status: 'retry', reason: error instanceof Error ? error.message : String(error) }
+        if (code !== undefined) {
+          return { status: 'refused', reason: `${code}: ${error instanceof Error ? error.message : String(error)}` }
+        }
+        return { status: 'refused', reason: error instanceof Error ? error.message : String(error) }
+      }
+    }
+    this.sessions.set(sessionId, { storeId: request.storeId, taskId: request.run.taskId, runId: request.run.runId })
+    this.startedSessions.add(sessionId)
+    await this.applyResumedSessionGate(request.storeId, sessionId, request.run.runId)
+    if (!live) {
+      const drained = await this.drainAdoptedSession(sessionId)
+      if (!drained.confirmed) {
+        await this.stopAdoptedSession(sessionId)
+        return {
+          status: 'refused',
+          reason: `the managed work of session "${sessionId}" could not be confirmed stopped: ${drained.pending.join('; ')}`,
+        }
+      }
+    }
+    return { status: 'live' }
+  }
+
+  /**
+   * Apply the phase and the question block one resumed session's run implies,
+   * from the store, under the gate's own token rule — the token taken *before*
+   * the read, so a decision this process made while the read was in flight drops
+   * the value instead of being overwritten by it. Same derivation as
+   * `initializeStoreGates`, applied per session because a delivered answer can
+   * wake this session before that pass runs.
+   */
+  private async applyResumedSessionGate(storeId: string, sessionId: string, runId: RunId): Promise<void> {
+    const token = this.executionGate.decisionToken(sessionId)
+    let snapshot: TaskSnapshot
+    try {
+      snapshot = await this.ctx.task.snapshotIn(storeId)
+    } catch (error) {
+      this.warn(
+        `store ${storeId}: the facts of session "${sessionId}" could not be read back after its resume ` +
+        `(${error instanceof Error ? error.message : String(error)}); its gate is left as the store-derived pass finds it`,
+      )
+      return
+    }
+    const run = snapshot.runs.find(candidate => candidate.runId === runId)
+    if (run === undefined) return
+    this.gatePhaseFromStore(sessionId, run, storeId, token)
+    this.executionGate.applyStoreQuestionsBlocked(sessionId, blockingQuestionsOf(snapshot, runId).length > 0, token)
+  }
+
+  /** The drain a resumed Session owes: the session's managed work, with the agent that now owns it. */
+  private async drainAdoptedSession(sessionId: string): Promise<DrainResult> {
+    return await drainSession(this.executionGate, sessionId, {
+      timeoutMs: this.config.writeDrainTimeoutMs,
+      jobs: this.softService<JobsView>('jobs'),
+      agent: this.agentOrUndefined(sessionId),
+    })
+  }
+
+  /** Let one resumed Session go again — the runtime's own stop path, never a private dispose. */
+  private async stopAdoptedSession(sessionId: string): Promise<void> {
+    try {
+      await this.ctx.agentRuntime.stopAgents([SessionId(sessionId)])
+    } catch (error) {
+      this.warn(`session ${sessionId}: the resumed worker could not be stopped again (${error instanceof Error ? error.message : String(error)})`)
+    }
   }
 
   /**
@@ -6038,6 +6370,11 @@ export class TaskRuntime extends Service {
           ...(request.signal !== undefined ? { signal: request.signal } : {}),
         })
       },
+      // The recovery pass's own door into a worker's Session (A4 §F.1): one
+      // implementation for the store pass and the batch driver's adoption,
+      // because both recover the *same* run and there is nothing a driver could
+      // state that the store does not already hold.
+      resumeWorkerSession: request => this.resumeAdoptedWorkerSession(request),
       verifyRun: async (storeId, runId, options = {}) => {
         const verifier = this.runVerifier()
         if (verifier === undefined || typeof verifier.verifyRun !== 'function') {

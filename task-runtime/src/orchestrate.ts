@@ -29,7 +29,7 @@ import { blockingQuestionsOf, openQuestionsOf, questionsAwaitingAnswerOf } from 
 import { capabilitySnapshot, resolvePermission, resolvePreset, workerBaseline, type CapabilityConfig, type PermissionSpec } from './capability.ts'
 import { drainSession } from './gate.ts'
 import type { ExecutionGate, JobsView } from './gate.ts'
-import { releaseAskingSessions } from './question.ts'
+import { owedQuestionMessagesTo, releaseAskingSessions } from './question.ts'
 import type { ProviderPrecheck } from './provider-precheck.ts'
 import { providerRefusals } from './provider-precheck.ts'
 import { checkRunStart, countSubtreeFacts, hasRootLimits, resolveRootBudget, runDeadlineMs } from './root-budget.ts'
@@ -276,6 +276,116 @@ export interface OrchestrateEnv {
    * case it exists for (A3 §3.1, the `VerifierUnavailableError` rule).
    */
   failBatch?(storeId: string, batchId: string, reason: string): Promise<void>
+  /**
+   * Bring one adopted worker's Session back live under its own identity (A4
+   * §F.1) — the runtime's own door into `AgentRuntime.resumeWorkerAgent`, with
+   * the run binding, the store-derived gate and the managed-work reconciliation
+   * the resume owes. The *authorization* is not passed by the driver: this
+   * module rebuilds it from the store with the same helpers the spawn used
+   * ({@link resumeAdoptedWorker}), because a driver has nothing to add to it.
+   *
+   * Absent means this deployment cannot bring a worker back, and a
+   * question-waiting run nobody can reach fails by name rather than waiting
+   * forever (see {@link resumeAdoptedWorker}).
+   */
+  resumeWorkerSession?(request: AdoptedWorkerResumeRequest): Promise<AdoptedWorkerResume>
+}
+
+/**
+ * What one request to bring an adopted worker's Session back states: the run
+ * the store holds and the authorization rebuilt for it — never a second
+ * composition, grant or preset invented by the caller.
+ */
+export interface AdoptedWorkerResumeRequest {
+  readonly storeId: string
+  /** The run as the store records it: the identity the resume must reproduce, not a copy the caller may edit. */
+  readonly run: TaskRun
+  /** The grant rebuilt from the run's manifest and its own binding, exactly as the spawn resolved it. */
+  readonly grant: WorkerGrant
+  /** The permission preset the spawn admitted the run under; absent = the spawn's own default. */
+  readonly permissionPreset?: string
+  /** Whether the run's Session was spawned as a task worker. */
+  readonly taskWorker: boolean
+}
+
+/**
+ * What one attempt to bring an adopted worker back settled as (A4 §F.1):
+ *
+ * - `live` — the same Session is live in this process now (or already was), so
+ *   what is owed it can be delivered and its wait can be observed;
+ * - `retry` — another owner holds the Session (`ownership-conflict`). Nothing is
+ *   taken over, the run keeps its identity, and the wait stays bounded by the
+ *   deadline; the next activation retries;
+ * - `refused` — the resume could not be established under this identity
+ *   (`session-missing`, `session-unreadable`, `binding-mismatch`,
+ *   `not-in-graph`, `member-facts-missing`, `takeover-refused`, or a refusal of
+ *   the managed-work reconciliation). The caller must walk the run to a terminal
+ *   state: an in-flight run nobody can bring back is a dead wait, not a wait.
+ */
+export type AdoptedWorkerResume =
+  | { readonly status: 'live' }
+  | { readonly status: 'retry'; readonly reason: string }
+  | { readonly status: 'refused'; readonly reason: string }
+
+/**
+ * Rebuild the authorization a recovery pass has to state for one run, from the
+ * store's own records, and hand it to the deployment's resume door.
+ *
+ * **Why it is rebuilt here and not remembered:** the spawn's grant is a
+ * function of durable facts — the task's manifest in the store, and the run's
+ * own provider binding — so the same helpers that resolved it at spawn
+ * (`authorizedGrant`, `permissionFor`, `skillRootsForRun`) resolve it again.
+ * A grant recorded somewhere and handed back would be a second source of
+ * authorization that could drift from the manifest it came from; and a resume
+ * states the plane it *would* install so the Session's own durable record can
+ * refuse a grant it never ran under.
+ *
+ * The one thing this cannot rebuild is an overlay the spawn took from the
+ * caller rather than from the store — a replay's candidate skill roots
+ * (`ReplayOverlay.extraSkillRoots`, A6/S2-R's own subject). What is rebuilt is
+ * the run's own binding snapshot, which is what a resumed worker loads its
+ * content from; the candidate overlay of an interrupted experiment is not part
+ * of the run's record and is not invented here.
+ * @param env - the deployment's seam, for the store, the permission registry and the resume door.
+ * @param storeId - the store the run belongs to.
+ * @param run - the run as the store records it.
+ * @returns what the attempt settled as, never a throw for a named refusal.
+ */
+export async function resumeAdoptedWorker(env: OrchestrateEnv, storeId: string, run: TaskRun): Promise<AdoptedWorkerResume> {
+  const resume = env.resumeWorkerSession
+  if (resume === undefined) {
+    return {
+      status: 'refused',
+      reason: 'this deployment wires no worker resume, so the Session of an adopted run cannot be brought back',
+    }
+  }
+  let manifest: CapabilityManifest | undefined
+  try {
+    manifest = (await env.task.snapshotIn(storeId)).capabilities[run.taskId]
+  } catch (error) {
+    return { status: 'refused', reason: `the store could not be read for its manifest: ${message(error)}` }
+  }
+  if (manifest === undefined) {
+    return {
+      status: 'refused',
+      reason: `the store holds no capability manifest for task "${run.taskId}", so the composition run "${run.runId}" was spawned in cannot be rebuilt`,
+    }
+  }
+  let grant: WorkerGrant
+  let permissionPreset: string | undefined
+  try {
+    grant = await authorizedGrant(env, manifest, skillRootsForRun([], run.providerBinding))
+    permissionPreset = permissionFor(env, manifest)
+  } catch (error) {
+    return { status: 'refused', reason: `the run's authorization could not be rebuilt: ${message(error)}` }
+  }
+  return await resume({
+    storeId,
+    run,
+    grant,
+    ...(permissionPreset === undefined ? {} : { permissionPreset }),
+    taskWorker: true,
+  })
 }
 
 /**
@@ -934,6 +1044,17 @@ export interface BatchContext {
    * and rebuilds its verdicts through {@link OrchestrateEnv.precheck}.
    */
   providers?: ProviderPrecheck
+  /**
+   * The experiment lineage this batch's parent task belongs to, when it is a
+   * replay's (W15). The parent's own terminal record carries it as an anomaly, so
+   * a replay run the batch settles is the same record the replay driver would have
+   * settled. The lineage is a fact of the *process* that started the experiment
+   * (`replayTask`'s own map), so this covers the in-process case — a batch
+   * settling a replay whose driver is still around; a replay run settled after a
+   * restart keeps the durable lineage it has (the replayed task's contract) and no
+   * invented anomaly, which is A6/S2-R's own bookkeeping.
+   */
+  lineage?: string
 }
 
 /** One child of an admitted batch, positioned by the parent's own child order. */
@@ -958,6 +1079,19 @@ type WorkerObservation =
   | { kind: 'budget-exhausted' }
   | { kind: 'no-progress'; rounds: number; reason: string }
   | { kind: 'failed'; reason: string }
+
+/**
+ * What a wait that only watches the store and the deadline can end as: the
+ * three endings {@link awaitWaitingTerminal} decides. Its own type because two
+ * callers hand it a different "already terminal" observation — a round's
+ * `waitRunSettled` and a batch driver adopting a recovered child's — and both
+ * need the same narrowed answer, not the report of a worker whose idle the round
+ * was watching.
+ */
+type WaitingObservation =
+  | { kind: 'terminal'; status: RunStatus }
+  | { kind: 'aborted' }
+  | { kind: 'budget-exhausted' }
 
 /**
  * The children of one parent, in the parent's own order, with each child's
@@ -1285,7 +1419,7 @@ async function observeWorkerRun(
   // wire rejects rather than resolving: that rejection is the *other* branch's
   // business (the store read), never an unhandled one.
   recorded.catch(() => {})
-  const terminal = recorded.then((status): WorkerObservation => ({ kind: 'terminal', status }))
+  const terminal = recorded.then((status): WaitingObservation => ({ kind: 'terminal', status }))
   // The root's deadline is a store fact, not a per-round one: it is read once, and
   // only this run's remaining window is recomputed as the wait goes on.
   const rootDeadline = await rootDeadlineOf(env, storeId)
@@ -1310,7 +1444,7 @@ async function observeWorkerRun(
       // the active case is: the run's own deadline and the batch's abort both end
       // it (A3 §3.1's race), because a run that is waiting is still work the tree
       // has to be able to stop.
-      return await awaitWaitingTerminal(env, run, handle, signal, rootDeadline, terminal)
+      return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: 'parent' }), signal, rootDeadline, terminal)
     }
     if (agentIsRunning(handle)) continue
     const snapshot = await env.task.snapshotIn(storeId)
@@ -1336,7 +1470,7 @@ async function observeWorkerRun(
     const knownWait = openProposalOf(snapshot, task.taskId, run.runId) !== undefined
       || blockingQuestionsOf(snapshot, run.runId).length > 0
     if (knownWait) {
-      return await awaitWaitingTerminal(env, run, handle, signal, rootDeadline, terminal)
+      return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: 'parent' }), signal, rootDeadline, terminal)
     }
     const factCount = countSubtreeFacts(snapshot, task.taskId)
     const previous = current.noProgress
@@ -1372,39 +1506,48 @@ async function observeWorkerRun(
  * would leave `cancelBatch` waiting for a settlement nobody produces — the
  * children it never started stay unblocked and the workspace layer stays held —
  * and the unload path would hang behind the same promise.
+ *
+ * The cancellation is handed in as a callback rather than an `AgentHandle`
+ * because the two callers hold different things: the round that started a
+ * worker has its handle, while the batch driver adopting a question-waiting
+ * child out of a store has only the session id and asks the deployment to
+ * resolve the agent (A4 §F.1 — the deadline ends a recovered wait exactly as it
+ * ends a live one, so this is one implementation, not two).
  */
 async function awaitWaitingTerminal(
   env: OrchestrateEnv,
   run: TaskRun,
-  handle: AgentHandle,
+  cancel: (() => void) | undefined,
   signal: AbortSignal | undefined,
   rootDeadline: string | undefined,
-  terminal: Promise<WorkerObservation>,
-): Promise<WorkerObservation> {
-  const cancel = (): void => handle.agent.cancel({ kind: 'parent' })
+  terminal: Promise<WaitingObservation>,
+): Promise<WaitingObservation> {
+  const stop = (): void => {
+    cancel?.()
+  }
   if (isAborted(signal)) {
-    cancel()
+    stop()
     return { kind: 'aborted' }
   }
   const remaining = runDeadlineMs(run.startedAt, env.budget?.wallTimeMs, rootDeadline, Date.now())
   if (remaining <= 0) {
     // The deadline had already passed when this wait began, so no waiter will
     // cancel the worker: this does, exactly as the active branch does.
-    cancel()
+    stop()
     return { kind: 'budget-exhausted' }
   }
-  signal?.addEventListener('abort', cancel, { once: true })
+  signal?.addEventListener('abort', stop, { once: true })
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    const branches: Promise<WorkerObservation>[] = [terminal]
+    const branches: Promise<WaitingObservation>[] = [terminal]
     if (signal !== undefined) {
-      branches.push(new Promise<WorkerObservation>(resolve => {
+      branches.push(new Promise<WaitingObservation>(resolve => {
         signal.addEventListener('abort', () => resolve({ kind: 'aborted' }), { once: true })
       }))
     }
-    branches.push(new Promise<WorkerObservation>(resolve => {
+    branches.push(new Promise<WaitingObservation>(resolve => {
       timer = setTimeout(() => {
-        cancel()
+        stop()
         resolve({ kind: 'budget-exhausted' })
       }, remaining)
       if (typeof timer.unref === 'function') timer.unref()
@@ -1412,7 +1555,23 @@ async function awaitWaitingTerminal(
     return await Promise.race(branches)
   } finally {
     if (timer !== undefined) clearTimeout(timer)
-    signal?.removeEventListener('abort', cancel)
+    signal?.removeEventListener('abort', stop)
+  }
+}
+
+/**
+ * The cancellation one session's own agent exposes, when this deployment can
+ * resolve it — what the driver needs to end a wait it did not start (A4 §F.1).
+ * A deployment that cannot name the agent has no cancellation to hand over, and
+ * the wait is still bounded by the deadline that settles the run.
+ */
+function cancelAgentOf(env: OrchestrateEnv, sessionId: string): (() => void) | undefined {
+  const agent = env.agentFor?.(sessionId) as { cancel?: (reason: { kind: 'parent' }) => void } | undefined
+  if (agent === undefined) return undefined
+  const cancel = agent.cancel
+  if (typeof cancel !== 'function') return undefined
+  return () => {
+    cancel.call(agent, { kind: 'parent' })
   }
 }
 
@@ -1888,15 +2047,21 @@ async function driveRounds(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
       // must not be cancelled: a child whose unresolved blocking question is on
       // the record was idle *because the protocol held it*, not because it
       // abandoned its work. Its answer is still coming, so the run keeps its
-      // identity and the driver waits for the terminal state its own session
-      // will produce once it can read the answer — the same wait the phases
-      // below use. The block is rebuilt from the store in the same step, so a
-      // write from that session is refused for the reason that is true.
-      if (started.executionPhase === 'active' && blockingQuestionsOf(snapshot, started.runId).length > 0) {
-        env.gate.setQuestionsBlocked(started.sessionId, true)
-        const status = await waitRunSettled(env, batch.storeId, started.runId, started.sessionId)
-        env.onRunSettled?.(batch.storeId, item.taskId, started.runId, status)
-        await releaseWorkspaceLayer(env, runOwner(batch.storeId, item.taskId, started.runId), started.sessionId)
+      // identity, its Session is brought back live (the one thing a dead process
+      // cannot leave behind), and the driver waits for the terminal state that
+      // Session will produce once it can read the answer — under the same two
+      // bounds every other worker wait runs under. The block is rebuilt from the
+      // store in the same step, so a write from that session is refused for the
+      // reason that is true.
+      // The wait is one of two durable facts: an unresolved blocking question, or
+      // a delivery the store still owes this session (the answered-but-unread
+      // case — the block is gone, the answer is owed, and cancelling the run
+      // would throw away what the exchange produced).
+      const questionWait = started.executionPhase === 'active'
+        && (blockingQuestionsOf(snapshot, started.runId).length > 0 || owedQuestionMessagesTo(snapshot, started.sessionId).length > 0)
+      if (questionWait) {
+        const dependencyTaskIds = item.dependsOn.map(dependency => (items[dependency] as BatchItem).taskId)
+        await awaitAdoptedQuestionWait(env, batch, item, started, dependencyTaskIds)
         continue
       }
       if (started.executionPhase === 'active') {
@@ -1923,6 +2088,99 @@ async function driveRounds(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
     const attempt = await startChildRound(env, batch, parentTask, parentRun, items, item, snapshot)
     if (attempt.kind === 'adopted') continue
     await driveChildRound(env, batch, attempt.child)
+  }
+}
+
+/**
+ * Bring one adopted, question-waiting child back and wait for its settlement
+ * (A4 §F.1) — the batch driver's half of the worker recovery.
+ *
+ * The child this runs for is a run the driver did **not** start: a process that
+ * died left it in flight with an unresolved blocking question on the record.
+ * Its Run identity is untouched; what the dead process could not leave behind is
+ * its Session, so the runtime's resume door ({@link OrchestrateEnv.resumeWorkerSession})
+ * is asked to bring it back under that same identity. Three answers are
+ * possible, and each has a different consequence:
+ *
+ * - `live` — the Session is reachable again, so what the child waits for (its
+ *   parent's answer) can be delivered to it and the wait can be observed;
+ * - `retry` — another owner holds the Session. Nothing is taken over and the run
+ *   keeps its identity; the wait continues (bounded by the deadline) and the
+ *   next activation retries;
+ * - `refused` — the identity cannot be established. The child is settled
+ *   `failed` with the refusal named, because a run in flight that nobody can
+ *   bring back is a wait with no end, and leaving it `running` would be a lie
+ *   the store keeps telling.
+ *
+ * The wait itself is {@link awaitWaitingTerminal}: the same deadline (the run's
+ * own `wallTime` and what is left of the root's, both measured from the run's
+ * persisted `startedAt`) and the same batch abort that every other worker wait
+ * runs under — the gap this closes is "a recovered wait with no deadline", not a
+ * new rule about deadlines. The deadline ending here is a budget stop, exactly
+ * as it is for a run whose worker this process started, and it takes the
+ * question's derived effects with it: a settled asking run owes no delivery, so
+ * a late answer is audit rather than a revival.
+ */
+async function awaitAdoptedQuestionWait(
+  env: OrchestrateEnv,
+  batch: BatchContext,
+  item: BatchItem,
+  run: TaskRun,
+  dependencyTaskIds: readonly TaskId[],
+): Promise<ChildOutcome> {
+  const resumed = await resumeAdoptedWorker(env, batch.storeId, run)
+  if (resumed.status === 'refused') {
+    const reason = `recovery refused to continue this run: the Session "${run.sessionId}" could not be brought back (${resumed.reason})`
+    return await settleChildRun(env, batch.storeId, { item, run, dependencyTaskIds }, {
+      status: 'failed',
+      localizedCause: reason,
+      anomalies: [reason],
+    })
+  }
+  if (resumed.status === 'retry') {
+    notifyOwner(
+      env,
+      run.sessionId,
+      `task-runtime: run "${run.runId}" is waiting on coordination this process cannot hand to it, and its Session "${run.sessionId}" is held by ` +
+      `another owner (${resumed.reason}); nothing is taken over, and the wait stays bounded by the run's own deadline`,
+    )
+  }
+  // The block is *derived* from the store here, never assumed — this process wrote
+  // no ask, and the wait it adopted may be an answered-but-unread one, where the
+  // block is already gone — and the phase is set only for a Session this call
+  // brought live (an already-live session keeps the phase its own binding
+  // derived). Both are pushed before the wait, so the first request the answer
+  // wakes is decided under the facts the store holds.
+  env.gate.setQuestionsBlocked(run.sessionId, blockingQuestionsOf(await env.task.snapshotIn(batch.storeId), run.runId).length > 0)
+  if (resumed.status === 'live' && env.gate.phaseOf(run.sessionId) === undefined) env.gate.setPhase(run.sessionId, 'active')
+  const terminal = waitRunSettled(env, batch.storeId, run.runId, run.sessionId)
+    .then((status): WaitingObservation => ({ kind: 'terminal', status }))
+  const rootDeadline = await rootDeadlineOf(env, batch.storeId)
+  const observation = await awaitWaitingTerminal(env, run, cancelAgentOf(env, run.sessionId), batch.signal, rootDeadline, terminal)
+  switch (observation.kind) {
+    case 'terminal': {
+      const snapshot = await env.task.snapshotIn(batch.storeId)
+      const status: RunStatus = snapshot.runs.find(candidate => candidate.runId === run.runId)?.status ?? observation.status
+      env.onRunSettled?.(batch.storeId, item.taskId, run.runId, status)
+      await releaseWorkspaceLayer(env, runOwner(batch.storeId, item.taskId, run.runId), run.sessionId)
+      const evidenceId = childEvidenceId(snapshot, run.runId)
+      return {
+        taskId: item.taskId,
+        runId: run.runId,
+        status: status as ChildOutcome['status'],
+        ...(evidenceId === undefined ? {} : { evidenceId }),
+      }
+    }
+    case 'budget-exhausted':
+      return await settleChildRun(env, batch.storeId, { item, run, dependencyTaskIds }, {
+        status: 'failed',
+        localizedCause: budgetExhaustedReason('wallTimeMs', `worker run exceeded its wall-clock budget (${env.budget?.wallTimeMs}ms from its own startedAt)`),
+      })
+    case 'aborted':
+      return await settleChildRun(env, batch.storeId, { item, run, dependencyTaskIds }, {
+        status: 'cancelled',
+        anomalies: [`the batch was cancelled while this recovered child waited: ${batch.reason}`],
+      })
   }
 }
 
@@ -2034,7 +2292,10 @@ async function settleParentBatch(env: OrchestrateEnv, batch: BatchContext, items
   }
   await env.task.changeRunPhaseIn(batch.storeId, batch.parentTaskId, batch.parentRunId, env.actor, { phase: 'submitted', submission })
   env.gate.setPhase(parentRun.sessionId, 'submitted')
-  const status = await settleSubmittedRun(env, batch.storeId, batch.parentTaskId, batch.parentRunId, { relatedTaskIds: childTaskIds })
+  const status = await settleSubmittedRun(env, batch.storeId, batch.parentTaskId, batch.parentRunId, {
+    relatedTaskIds: childTaskIds,
+    ...(batch.lineage === undefined ? {} : { anomalies: [batch.lineage] }),
+  })
   notifyOwner(env, batch.callerSessionId, `task-runtime: ${batchSummary(batch.batchId, outcomes)}; run "${batch.parentRunId}" is ${status}.`)
   return outcomes
 }
