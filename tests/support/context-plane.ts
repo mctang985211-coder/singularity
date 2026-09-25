@@ -26,11 +26,23 @@ export interface GraphRecordFactsLike {
   readonly layoutStoreId?: string
 }
 
+/**
+ * One published graph edge (`agent-runtime` records a `spawn` edge from the
+ * parent when it publishes a spawned session).
+ */
+export interface GraphEdgeLike {
+  readonly kind: string
+  readonly from: string
+  readonly to: string
+}
+
 /** The registry, as the read core uses it: which graph a session is in, which graphs exist, and who one publishes. */
 export interface GraphRegistryLike {
   graphForSession(sessionId: string): Promise<GraphRecordFactsLike>
   list(): Promise<readonly GraphRecordFactsLike[]>
-  view(id: string): Promise<{ readonly graph: { readonly agents: readonly { readonly id: string }[] } }>
+  view(id: string): Promise<{
+    readonly graph: { readonly agents: readonly { readonly id: string }[]; readonly edges: readonly GraphEdgeLike[] }
+  }>
 }
 
 export interface GraphRegistryOptions {
@@ -56,6 +68,13 @@ export interface GraphRegistryOptions {
    * them must not publish one's members into the other.
    */
   readonly members?: (id: string) => readonly string[]
+  /**
+   * The graph store's own edges, by graph id. Defaults to none: a fixture whose
+   * graph publishes nothing spawned has no `spawn` edge to report, which is what
+   * a mount-only graph store holds. A fixture that spawns real sessions through
+   * the deployment's `AgentRuntime` passes the edges it committed.
+   */
+  readonly edges?: (id: string) => readonly GraphEdgeLike[]
 }
 
 /**
@@ -67,7 +86,11 @@ export function graphRegistry(options: GraphRegistryOptions): GraphRegistryLike 
     graphForSession: async (sessionId: string) => await options.graphForSession(sessionId),
     list: async () => (options.list === undefined ? [] : await options.list()),
     view: async (id: string) => ({
-      graph: { id, agents: [...(options.members?.(id) ?? [])].map(member => ({ id: member })) },
+      graph: {
+        id,
+        agents: [...(options.members?.(id) ?? [])].map(member => ({ id: member })),
+        edges: [...(options.edges?.(id) ?? [])],
+      },
     }),
   }
 }

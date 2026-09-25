@@ -23,7 +23,7 @@
 | 7 | R2：按证据整理运行时 | 已验收（2026-09-24） | — | [历史记录](history/2026-09-24-vrtc-execution-records.md) | Q1 两条取消交错、恢复及合法 active 路径通过；其他取消边界未证明 |
 | 8 | R1：真实运行验证 | 已验收（2026-09-24） | — | [历史记录](history/2026-09-24-vrtc-execution-records.md) | 完成轮 3 `pass / path2-limited-goal` 且独立复核通过；失败轮与用量缺报保留；仅证明固定场景 |
 | 8a | R3：已有 Task 合同归位 | 已验收（2026-09-24） | — | [历史记录](history/2026-09-24-vrtc-execution-records.md) | R3-1–R3-3 全通过；内容身份、Task 依赖与旧数据行为保持 |
-| 9 | A2 + A1：Agent 状态上下文（一个交付组） | **返工（2026-09-25 进度审核）** | 实现主代理 + 子代理 | 本文 D/E 节；[交付记录](history/2026-09-25-a2-a1-delivery-record.md)、[进度审核](history/2026-09-25-a2-a1-progress-review.md)、[返工 prompt](execution-prompts/09-a2-a1-review-rework.md) | 先关闭已绑定请求缺契约放行、reviewer 委派者不一致、Session 大事件不可续读与状态分页停滞的反例；独立复核及整组回归通过后再审，不派 A4 |
+| 9 | A2 + A1：Agent 状态上下文（一个交付组） | **返工（2026-09-25 定向返工：Q1/Q2/Q4 关闭；Q3 大事件为冻结接口冲突待裁决）** | 实现主代理 + 子代理 | 本文 D/E 节；[交付记录](history/2026-09-25-a2-a1-delivery-record.md)、[进度审核](history/2026-09-25-a2-a1-progress-review.md)、[返工记录](history/2026-09-25-a2-a1-rework-record.md)、[返工 prompt](execution-prompts/09-a2-a1-review-rework.md) | Q1（绑定失败具名拒绝、零模型输入）、Q2（委派者归属核对）、Q4（分页必前进）已关闭并经红/绿反例复现；Q3 的“中途失败不得伪装成功”关闭，但“>16 KiB 单事件可续读”在冻结四参数下不可表达，须先裁决最小合同修订（见返工记录）或按已实现行为调整该条款；独立复核与整组回归通过后才审，不派 A4 |
 | 10 | A1 原独立排位 | 并入第 9 项，不单独派发 | — | 保留编号供历史引用 | 第 9 项整组验收后直接进入第 11 项 |
 | 11 | A4：父子澄清 | 待前置；合同已定、未实施 | 待填 | 本文 F.1、深入架构 §7 | agent-runtime + DSH 负责持久消息与投递；context 呈现，task-runtime 负责阻塞执行效果；父子/三层、故障恢复与写闸完整 |
 | 12 | S4-E：评估基础（S4 内的子票） | 待前置；合同已定、未实施 | 待填 | 本文 F.2 | 现有 Evolution 生命周期随本票迁入 evolution 包；单文件 Skill 的可比实验、真实证据与晋升闸，旧 ledger/回滚保留 |
@@ -67,13 +67,15 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 9 项 A2+A1 经[进度审核](history/2026-09-25-a2-a1-progress-review.md)判返工，当前只派[定向返工 prompt](execution-prompts/09-a2-a1-review-rework.md)；返工复验通过后才进入第 11 项 A4。历史补救、R1 和 R3 的逐轮证据见[执行与验收记录](history/2026-09-24-vrtc-execution-records.md)。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 9 项 A2+A1 已经[进度审核](history/2026-09-25-a2-a1-progress-review.md)判返工，定向返工已完成并留下[返工记录](history/2026-09-25-a2-a1-rework-record.md)（Q1/Q2/Q4 关闭；Q3 的 16 KiB 单事件续读为冻结接口冲突，待裁决）。当前不派新票：返工复验通过（或计划所有者先裁决 Q3 合同）后才进入第 11 项 A4。历史补救、R1 和 R3 的逐轮证据见[执行与验收记录](history/2026-09-24-vrtc-execution-records.md)。
 
 ## 当前施工合同（D/E/F）
 
 ### D. A2 + A1：Agent 状态上下文（2026-09-24 职责重定）
 
 状态：实现方于 2026-09-25 交付 `4a510ed`、`f90d05b`、`0f41d91`、`6e0f651`；[进度审核](history/2026-09-25-a2-a1-progress-review.md)发现 A2-2/A2-3/A2-5 的可达反例，**第 9 项返工、整组未验收**。原交付证据保留于[交付记录](history/2026-09-25-a2-a1-delivery-record.md)，职责及依赖方向见[主 guide §1.4](singularity-harness-guide.md)。
+
+**定向返工（2026-09-25，提交 `bee6a96`）**：Q1（绑定事实读取失败必须具名拒绝模型请求、零模型输入；图查询异常不得改写为“没有图”）、Q2（委派者必须是所委派 graph 实际发布的成员）、Q3 的“中途读失败不得返回局部成功页”、Q4（状态分页必前进）已实现并有红/绿反例，见[返工记录](history/2026-09-25-a2-a1-rework-record.md)。**未关闭**：单个 DSH 事件正文超过 16 KiB 时，冻结的 `context_read` 四参数（Session 的 `offset` 沿 DSH 事件 offset，读取单位是整个事件）无法表达事件内续读游标，本票按返工 prompt 要求实现“不截断、不跳过、具名 `context-too-large` + `offset: seq+1` 显式续读其余日志”并报告最小合同修订选项，整组保持返工、不填待验收。修改其一（允许事件内位置、允许 `ref` 指向单事件、或另给有界通道）才能让 Q3 完全成立。
 
 **直接消费者与需要回答的问题**
 

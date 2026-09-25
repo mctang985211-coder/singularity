@@ -374,6 +374,43 @@ describe('the output bound', () => {
     expect(detail).toContain('seq 1')
     expect(detail).toMatch(/offset 2\b/)
   })
+
+  test('every successful page ends with its closing lines, whatever the next event measures', async () => {
+    const { stack, chain } = await chainStack()
+    // The shape an independent audit measured: a page whose first event nearly
+    // fills the bound and then stops before a huge second one. Sizes sweep the
+    // byte windows (≈15 988–16 049 and ≥ 16 134) in which the closing lines used
+    // to fall outside the bound, leaving the model a page with no cue at all.
+    for (const size of [15_600, 15_900, 15_988, 16_000, 16_049, 16_050, 16_100, 16_133, 16_134, 16_200, 16_390]) {
+      const session = `s-size-${size}`
+      stack.member(chain.graph, session)
+      stack.sessionLog(session, ['A'.repeat(size), 'B'.repeat(20_000)])
+      const result = await stack.service.contextRead('s-g1', { kind: 'session', ref: session, limit: 2 })
+      if (!result.ok) {
+        // A first event that cannot be carried is refused by name, never cut.
+        expect(result.refusal, `size ${size}`).toBe('context-too-large')
+        continue
+      }
+      // Whatever fitted, the page the model receives ends with where it stopped
+      // and where to continue.
+      expect(result.text, `size ${size}`).toContain('- events shown:')
+      if (result.nextOffset === 1) {
+        expect(result.text, `size ${size}`).toMatch(/the next event \(seq 1\b/)
+        expect(result.text, `size ${size}`).toMatch(/more follows from seq 1\b/)
+      }
+    }
+  })
+
+  test('a session reference whose membership cannot be read is a named unreadable, not an escape', async () => {
+    const { stack, chain } = await chainStack()
+    // The registry's own view of who a graph publishes is a read like any other:
+    // a session reference whose ownership cannot be established is refused by
+    // name, never passed to DSH as if the session were the caller's.
+    stack.breakGraphView(new Error('the graph store is not readable'), chain.graph)
+    const detail = expectRefused(await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-c1' }), 'unreadable')
+    expect(detail).toContain('membership of session "s-c1"')
+    expect(detail).toContain('the graph store is not readable')
+  })
 })
 
 describe('task_status pagination', () => {
@@ -447,6 +484,21 @@ describe('task_status pagination', () => {
     const inRange = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph', limit: 3 }))
     expect(inRange.text).toContain('scope: graph · offset 0 · limit 3')
     expect(inRange.text).not.toContain('clamped')
+  })
+
+  test('a non-finite offset or limit is clamped like any other out-of-range value', async () => {
+    const { stack } = await chainStack()
+    // Not reachable through the tool door (its schema rejects a non-number), but
+    // the service door is a door: an unpageable number must not produce the one
+    // page shape a reader can never continue from.
+    const page = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph', offset: Number.NaN, limit: Number.NaN }))
+    expect(page.text).toContain('clamped into their ranges')
+    // A page is either finished or it advances: the shape `hasMore` with the same
+    // offset back is the one a reader can never leave.
+    expect(page.nextOffset as number).toBeGreaterThan(0)
+    expect(page.hasMore === true && page.nextOffset === 0).toBe(false)
+    const infinite = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph', offset: 0, limit: Number.POSITIVE_INFINITY }))
+    expect(infinite.text).toContain('limit 20')
   })
 
   test('the related scope from a reviewer covers the delegated task\'s relations', async () => {

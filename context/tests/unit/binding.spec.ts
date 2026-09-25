@@ -309,6 +309,31 @@ describe('a binding failure is not "outside the deployment" (Q1)', () => {
     expect(await placementOf(stack, 's-broken-root')).toBe('failed')
   })
 
+  test('a store the backend reports as absent binds the root\'s not-activated state, a member\'s silence, and a spawned session\'s refusal', async () => {
+    const { stack } = await chainStack()
+    stack.graph({ id: 'g-no-store', rootSessionId: 's-no-store-root', members: ['s-no-store-member'] })
+    // The root: a graph whose store does not exist yet is the named not-activated
+    // state (A2 §D) — it is the one session that state belongs to.
+    expect(expectRefused(await stack.service.taskRead('s-no-store-root'), 'not-activated')).toContain('task_intake')
+    // A session the graph publishes without having spawned it (the real case is a
+    // root of another graph a deployment resolves here): nothing to read, and the
+    // member reading the plan gives it stays.
+    expect((await stack.service.resolveCaller('s-no-store-member'))).toMatchObject({ kind: 'member' })
+    expect(expectRefused(await stack.service.taskStatus('s-no-store-member', { scope: 'graph' }), 'not-activated'))
+      .toContain('does not exist yet')
+    // A session the graph *did* spawn: the run it is bound by was written to that
+    // store when it was spawned, so an absent store is a store that cannot be
+    // read — the state that once let a bound worker's request assemble with no
+    // contract at all.
+    stack.spawned('g-no-store', 's-no-store-worker')
+    expect(await placementOf(stack, 's-no-store-worker')).toBe('failed')
+    expect(expectRefused(await stack.service.taskRead('s-no-store-worker'), 'unreadable')).toContain('was recorded in that store')
+    // And the graph store's own edge is what decides: if that read fails, the
+    // question cannot be answered and the session is refused rather than guessed.
+    stack.breakGraphView(new Error('the graph store is not readable'), 'g-no-store')
+    expect(await placementOf(stack, 's-no-store-member')).toBe('failed')
+  })
+
   test('a ledger that cannot answer one row is a failure for a published member', async () => {
     const { stack } = await chainStack()
     stack.bindingSource({

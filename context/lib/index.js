@@ -324,6 +324,12 @@ async function loadCaller(deps, sessionId, signal) {
 	const opened = await openDomain(deps.task, storeId);
 	if (opened.failure !== void 0) return failed(sessionId, "unreadable", `the domain store "${storeId}" of graph "${graph.id}" cannot be read: ${opened.failure}`, facts);
 	const snapshot = opened.snapshot;
+	const isRoot = sessionId === String(graph.rootSessionId);
+	if (snapshot === void 0 && !isRoot) {
+		const spawned = await spawnedInto(deps, graph, sessionId);
+		if (spawned.kind === "failed") return failed(sessionId, "unreadable", spawned.detail, facts);
+		if (spawned.kind === "spawned") return failed(sessionId, "unreadable", `graph "${graph.id}" spawned session "${sessionId}" into itself, but its store "${storeId}" does not exist; the run this session is bound by was recorded in that store, so its absence means the store cannot be read, not that the session has nothing to read. No contract can be assembled for it.`, facts);
+	}
 	const base = {
 		sessionId,
 		graph: facts,
@@ -332,7 +338,6 @@ async function loadCaller(deps, sessionId, signal) {
 	};
 	const own = snapshot === void 0 ? void 0 : runOfSessionIn(snapshot, sessionId);
 	const task = snapshot === void 0 ? void 0 : taskOfRun(snapshot, own);
-	const isRoot = sessionId === String(graph.rootSessionId);
 	const workerRun = !isRoot && own !== void 0 && task !== void 0;
 	const ledger = isRoot || workerRun ? await readDelegation(deps, sessionId) : void 0;
 	if (ledger?.kind === "refused" && ledger.refusal === "binding-conflict") return failed(sessionId, ledger.refusal, ledger.detail, facts);
@@ -390,6 +395,24 @@ async function graphOfSession(graphs, sessionId) {
 		return {
 			kind: "failed",
 			detail: `graph membership for session "${sessionId}" could not be read: ${message$1(error)}. A registry that cannot be read is not a session without a graph.`
+		};
+	}
+}
+/**
+* Whether the graph itself spawned one session into it. `agent-runtime` records
+* a `spawn` edge from the parent when it publishes a spawned session, so this is
+* the graph store's own durable record — the same source membership comes from —
+* and not an inference from names or status. A read that fails is reported as a
+* failure: which side of the rule a session falls on decides whether its absent
+* store is a named state or a read failure, and a guess would decide wrongly.
+*/
+async function spawnedInto(deps, graph, sessionId) {
+	try {
+		return ((await deps.graphs.view(graph.id)).graph.edges ?? []).some((edge) => edge.kind === "spawn" && String(edge.to) === sessionId) ? { kind: "spawned" } : { kind: "member" };
+	} catch (error) {
+		return {
+			kind: "failed",
+			detail: `session "${sessionId}" is published by graph "${graph.id}", whose store "${rootTaskStoreId(graph.rootSessionId)}" does not exist, and whether that graph spawned this session cannot be read: ${message$1(error)}. A binding that cannot be read is not a binding.`
 		};
 	}
 }
@@ -1310,9 +1333,9 @@ async function taskStatus(deps, loaded, query) {
 	const scope = query.scope ?? "related";
 	const requestedOffset = query.offset ?? 0;
 	const requestedLimit = query.limit ?? STATUS_LIMIT_DEFAULT;
-	const offset = Math.max(0, Math.trunc(requestedOffset));
-	const limit = Math.min(STATUS_LIMIT_MAX, Math.max(1, Math.trunc(requestedLimit)));
-	const clamped = Math.trunc(requestedLimit) !== limit || truncate(requestedOffset) !== offset;
+	const offset = Number.isFinite(requestedOffset) ? Math.max(0, Math.trunc(requestedOffset)) : 0;
+	const limit = Number.isFinite(requestedLimit) ? Math.min(STATUS_LIMIT_MAX, Math.max(1, Math.trunc(requestedLimit))) : STATUS_LIMIT_DEFAULT;
+	const clamped = !Number.isFinite(requestedLimit) || !Number.isFinite(requestedOffset) || Math.trunc(requestedLimit) !== limit || truncate(requestedOffset) !== offset;
 	if (resolution.kind === "root" && resolution.task === void 0) return refused("not-activated", notActivatedLines(resolution.graph, resolution.storeId, snapshot).join("\n"));
 	if (snapshot === void 0) return refused("not-activated", `store "${resolution.storeId}" of graph "${resolution.graph.id}" does not exist yet, so there is no task tree to read.`);
 	const self = resolution.kind === "member" ? void 0 : resolution.task;
@@ -1549,9 +1572,15 @@ async function recordTextOf(deps, snapshot, record) {
 async function sessionRead(deps, loaded, sessionId, requestedOffset, requestedLimit, signal) {
 	const resolution = loaded.resolution;
 	signal?.throwIfAborted();
-	if (!await isGraphMember(deps.graphs, resolution.graph.id, sessionId)) return refused("cross-graph", `session "${sessionId}" is not a published member of graph "${resolution.graph.id}"; a session reference reads the caller's own domain, and a session id is not a key to another graph.`);
-	const offset = Math.max(0, Math.trunc(requestedOffset ?? 0));
-	const requestedEvents = Math.trunc(requestedLimit ?? SESSION_LIMIT_DEFAULT);
+	let member;
+	try {
+		member = await isGraphMember(deps.graphs, resolution.graph.id, sessionId);
+	} catch (error) {
+		return refused("unreadable", `the membership of session "${sessionId}" in graph "${resolution.graph.id}" could not be read: ${message(error)}. A session reference is checked against the graph's published members before its log is read.`);
+	}
+	if (!member) return refused("cross-graph", `session "${sessionId}" is not a published member of graph "${resolution.graph.id}"; a session reference reads the caller's own domain, and a session id is not a key to another graph.`);
+	const offset = Number.isFinite(requestedOffset ?? 0) ? Math.max(0, Math.trunc(requestedOffset ?? 0)) : 0;
+	const requestedEvents = Number.isFinite(requestedLimit ?? SESSION_LIMIT_DEFAULT) ? Math.trunc(requestedLimit ?? SESSION_LIMIT_DEFAULT) : SESSION_LIMIT_DEFAULT;
 	const limit = Math.min(SESSION_LIMIT_MAX, Math.max(1, requestedEvents));
 	const clamped = requestedEvents !== limit;
 	let capturedThroughSeq;
@@ -1606,11 +1635,12 @@ async function sessionRead(deps, loaded, sessionId, requestedOffset, requestedLi
 	const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES);
 	budget.addAll(banner);
 	budget.addAll(["", `events: seq ${offset}..${cursor - 1} of a log through seq ${capturedThroughSeq}`]);
+	const reserve = sessionClosingReserve(limit, capturedThroughSeq);
 	let shown = 0;
 	let stopped;
 	for (const event of events) {
 		const lines = eventLines(event);
-		if (!blockFits(budget, lines)) {
+		if (!blockFits(budget, lines, reserve)) {
 			if (shown === 0) return refused("context-too-large", oversizedEventDetail(sessionId, event));
 			stopped = event;
 			break;
@@ -1628,10 +1658,29 @@ async function sessionRead(deps, loaded, sessionId, requestedOffset, requestedLi
 		nextOffset
 	});
 }
-/** Whether every one of `lines` fits the page's remaining space as one block (each separator counted). */
-function blockFits(budget, lines) {
+/** The widest rendering of one number of `value`'s magnitude, so a reserve can bound a line that carries it. */
+function widestNumber(value) {
+	return "9".repeat(String(Math.max(0, Math.trunc(value))).length);
+}
+/**
+* The bytes a session page must keep for its closing lines — the `events shown`
+* footer, and the line naming the event the page stopped before when there is
+* one. Every number those lines can carry is bounded here by the range the page
+* itself knows (the caller's limit, the log's last seq, and the widest text
+* size), so the reserve is an upper bound whatever events follow: a page the
+* model receives always ends with its continuation cue.
+*/
+function sessionClosingReserve(limit, capturedThroughSeq) {
+	const seq = widestNumber(Number(capturedThroughSeq) + 1);
+	const count = widestNumber(limit);
+	const footer = `- events shown: ${count} of at most ${count} · more follows from seq ${seq}`;
+	const stopped = `- the next event (seq ${seq}, ${widestNumber(Number.MAX_SAFE_INTEGER)} UTF-8 bytes of text) was not shown on this page: it does not fit the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte bound, so the page ends before it.`;
+	return utf8Bytes(footer) + utf8Bytes(stopped) + 2;
+}
+/** Whether every one of `lines` fits the page's remaining space as one block (each separator counted), keeping `reserve` for what follows. */
+function blockFits(budget, lines, reserve = 0) {
 	if (lines.length === 0) return true;
-	return utf8Bytes(lines.join("\n")) + (budget.bytes === 0 ? 0 : 1) <= budget.remaining;
+	return utf8Bytes(lines.join("\n")) + (budget.bytes === 0 ? 0 : 1) + reserve <= budget.remaining;
 }
 /** The UTF-8 size of the text one event carries. */
 function eventTextBytes(event) {

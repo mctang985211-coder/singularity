@@ -615,9 +615,17 @@ export async function taskStatus(deps: ReadDeps, loaded: LoadedCaller, query: St
   const scope: StatusScope = query.scope ?? 'related'
   const requestedOffset = query.offset ?? 0
   const requestedLimit = query.limit ?? STATUS_LIMIT_DEFAULT
-  const offset = Math.max(0, Math.trunc(requestedOffset))
-  const limit = Math.min(STATUS_LIMIT_MAX, Math.max(1, Math.trunc(requestedLimit)))
-  const clamped = Math.trunc(requestedLimit) !== limit || truncate(requestedOffset) !== offset
+  // A number that is not finite cannot be paged with: it would make the page
+  // empty while `hasMore` stayed true, which is the one shape a page may never
+  // have. The tool schema rejects it before this door; the service door answers
+  // it like the out-of-range values below, with the clamp stated in the result.
+  const offset = Number.isFinite(requestedOffset) ? Math.max(0, Math.trunc(requestedOffset)) : 0
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.min(STATUS_LIMIT_MAX, Math.max(1, Math.trunc(requestedLimit)))
+    : STATUS_LIMIT_DEFAULT
+  const clamped = !Number.isFinite(requestedLimit) || !Number.isFinite(requestedOffset)
+    || Math.trunc(requestedLimit) !== limit
+    || truncate(requestedOffset) !== offset
 
   if (resolution.kind === 'root' && resolution.task === undefined) {
     return refused('not-activated', notActivatedLines(resolution.graph, resolution.storeId, snapshot).join('\n'))
@@ -923,15 +931,29 @@ async function sessionRead(
 ): Promise<ProjectedRead> {
   const resolution = loaded.resolution as Exclude<LoadedCaller['resolution'], { kind: 'unbound' }>
   signal?.throwIfAborted()
-  if (!(await isGraphMember(deps.graphs, resolution.graph.id, sessionId))) {
+  let member: boolean
+  try {
+    member = await isGraphMember(deps.graphs, resolution.graph.id, sessionId)
+  } catch (error) {
+    // A membership that cannot be read is a named failure, never a pass: a
+    // session reference whose ownership is unknown is not this graph's session.
+    return refused(
+      'unreadable',
+      `the membership of session "${sessionId}" in graph "${resolution.graph.id}" could not be read: ${message(error)}. ` +
+        'A session reference is checked against the graph\'s published members before its log is read.',
+    )
+  }
+  if (!member) {
     return refused(
       'cross-graph',
       `session "${sessionId}" is not a published member of graph "${resolution.graph.id}"; a session reference reads the ` +
         'caller\'s own domain, and a session id is not a key to another graph.',
     )
   }
-  const offset = Math.max(0, Math.trunc(requestedOffset ?? 0))
-  const requestedEvents = Math.trunc(requestedLimit ?? SESSION_LIMIT_DEFAULT)
+  const offset = Number.isFinite(requestedOffset ?? 0) ? Math.max(0, Math.trunc(requestedOffset ?? 0)) : 0
+  const requestedEvents = Number.isFinite(requestedLimit ?? SESSION_LIMIT_DEFAULT)
+    ? Math.trunc(requestedLimit ?? SESSION_LIMIT_DEFAULT)
+    : SESSION_LIMIT_DEFAULT
   const limit = Math.min(SESSION_LIMIT_MAX, Math.max(1, requestedEvents))
   const clamped = requestedEvents !== limit
   let capturedThroughSeq: number | null
@@ -1010,13 +1032,17 @@ async function sessionRead(
   const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES)
   budget.addAll(banner)
   budget.addAll(['', `events: seq ${offset}..${cursor - 1} of a log through seq ${capturedThroughSeq}`])
+  // The room the page's closing lines need, decided before any event is added:
+  // a page the model receives always says where it ended and where to continue,
+  // and never spends that room on an event body.
+  const reserve = sessionClosingReserve(limit, capturedThroughSeq)
   let shown = 0
   let stopped: SessionEvent | undefined
   for (const event of events) {
     const lines = eventLines(event)
     // The whole event is measured before any of its lines is added: a page
     // carries whole events, never a partial body.
-    if (!blockFits(budget, lines)) {
+    if (!blockFits(budget, lines, reserve)) {
       // A session offset addresses whole events (DSH's read unit), so an event
       // that does not fit has no second page inside the page: the first one is
       // refused by name, a later one ends the page before it.
@@ -1044,11 +1070,37 @@ async function sessionRead(
   )
 }
 
-/** Whether every one of `lines` fits the page's remaining space as one block (each separator counted). */
-function blockFits(budget: OutputBudget, lines: readonly string[]): boolean {
+/** A byte count is written in at most sixteen digits (`Number.MAX_SAFE_INTEGER`), the widest any text size can be. */
+const EVENT_SIZE_DIGITS = 16
+
+/** The widest rendering of one number of `value`'s magnitude, so a reserve can bound a line that carries it. */
+function widestNumber(value: number): string {
+  return '9'.repeat(String(Math.max(0, Math.trunc(value))).length)
+}
+
+/**
+ * The bytes a session page must keep for its closing lines — the `events shown`
+ * footer, and the line naming the event the page stopped before when there is
+ * one. Every number those lines can carry is bounded here by the range the page
+ * itself knows (the caller's limit, the log's last seq, and the widest text
+ * size), so the reserve is an upper bound whatever events follow: a page the
+ * model receives always ends with its continuation cue.
+ */
+function sessionClosingReserve(limit: number, capturedThroughSeq: number): number {
+  const seq = widestNumber(Number(capturedThroughSeq) + 1)
+  const count = widestNumber(limit)
+  const footer = `- events shown: ${count} of at most ${count} · more follows from seq ${seq}`
+  const stopped =
+    `- the next event (seq ${seq}, ${widestNumber(Number.MAX_SAFE_INTEGER)} UTF-8 bytes of text) was not shown on this ` +
+    `page: it does not fit the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte bound, so the page ends before it.`
+  return utf8Bytes(footer) + utf8Bytes(stopped) + 2
+}
+
+/** Whether every one of `lines` fits the page's remaining space as one block (each separator counted), keeping `reserve` for what follows. */
+function blockFits(budget: OutputBudget, lines: readonly string[], reserve = 0): boolean {
   if (lines.length === 0) return true
   const width = utf8Bytes(lines.join('\n')) + (budget.bytes === 0 ? 0 : 1)
-  return width <= budget.remaining
+  return width + reserve <= budget.remaining
 }
 
 /** The UTF-8 size of the text one event carries. */

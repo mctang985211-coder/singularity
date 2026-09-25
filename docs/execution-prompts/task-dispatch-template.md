@@ -6,7 +6,7 @@
 
 ## 直接派发入口
 
-以下入口只在当前票没有待审核交付时交给实现主代理。当前第 9 项 A2+A1 的[进度审核](../history/2026-09-25-a2-a1-progress-review.md)判返工，直接使用[定向返工 prompt](09-a2-a1-review-rework.md)；本模板的通用入口留给通过后的下一票。票据交付后改用[进度审核 prompt](progress-review-and-dispatch.md)，审核前不连续施工。
+以下入口只在当前票没有待审核交付时交给实现主代理。当前第 9 项 A2+A1 的[定向返工](../history/2026-09-25-a2-a1-rework-record.md)已完成并停在进度审核（Q1/Q2/Q4 关闭、Q3 剩冻结接口冲突待裁决），本模板的通用入口留给通过后的下一票。票据交付后改用[进度审核 prompt](progress-review-and-dispatch.md)，审核前不连续施工。
 
 ```text
 你是 Singularity 本次实现主代理，工作区：
@@ -18,7 +18,7 @@ docs/2026-09-20-vrtc-code-change-plan.md 的唯一执行表，
 docs/execution-prompts/README.md 的公共合同，以及本模板的实施约束。
 只执行唯一表中首个未完成的有效票号；跳过已注明合并的历史编号。
 前置不满足就报告阻塞；已有交付待验收时只指出应走进度审核，不接下一票。
-当前第 9 项返工只按 docs/execution-prompts/09-a2-a1-review-rework.md 的 Q1–Q4 执行，保留已成立的子目标提交与证据；复验未通过不得跳到 A4。
+第 9 项返工已按 docs/execution-prompts/09-a2-a1-review-rework.md 执行完毕并停在进度审核（见[返工记录](../history/2026-09-25-a2-a1-rework-record.md)）；Q3 的合同冲突裁决或复验通过前不得跳到 A4。
 进度审核尚未完成时停下，交给 progress-review-and-dispatch.md。
 审核提出新的定向返工合同时，才按该合同实施，不沿用旧实验预算。
 其他票只读本模板合同索引所指的段落及必要源码，按既定合同实施。

@@ -92,12 +92,21 @@ export interface MembershipNode {
   readonly id: string
 }
 
+/** One published graph edge, as the graph store holds it (`agent-runtime` publishes `spawn` edges). */
+export interface MembershipEdge {
+  readonly kind: string
+  readonly from: string
+  readonly to: string
+}
+
 /** The graph registry, read-only: which graph a session belongs to, and who that graph publishes. */
 export interface ReadOnlyGraphs {
   graphForSession(sessionId: string): Promise<GraphRecordFacts>
   list(): Promise<readonly GraphRecordFacts[]>
-  /** One graph's published members, read by the registry's own graph id. */
-  view(id: string): Promise<{ readonly graph: { readonly agents: readonly MembershipNode[] } }>
+  /** One graph's published members and edges, read by the registry's own graph id. */
+  view(id: string): Promise<{
+    readonly graph: { readonly agents: readonly MembershipNode[]; readonly edges: readonly MembershipEdge[] }
+  }>
 }
 
 /** The fields of a registry graph this package reads. */
@@ -424,11 +433,38 @@ export async function loadCaller(deps: BindingDeps, sessionId: string, signal?: 
     )
   }
   const snapshot = opened.snapshot
+  const isRoot = sessionId === String(graph.rootSessionId)
+  if (snapshot === undefined && !isRoot) {
+    // A graph's store may legitimately not exist yet — that is the *root's*
+    // `not-activated` state (A2 §D), and it stays one; a session published into
+    // the graph that the graph did **not** spawn (a root of another graph is the
+    // real case) still has nothing to read and passes through, as a plain member
+    // always did. A session this graph *did* spawn is different: its run record
+    // was written to that store when it was spawned (the spawn happens because a
+    // run exists), so an absent store is not "nothing to read yet" — it is the
+    // store the session is bound by, no longer readable. Reading that as "a
+    // member with nothing to read" is what let a bound worker's request assemble
+    // with no contract at all when the store's log stopped being listed
+    // (2026-09-25 review, Q1).
+    const spawned = await spawnedInto(deps, graph, sessionId)
+    if (spawned.kind === 'failed') {
+      return failed(sessionId, 'unreadable', spawned.detail, facts)
+    }
+    if (spawned.kind === 'spawned') {
+      return failed(
+        sessionId,
+        'unreadable',
+        `graph "${graph.id}" spawned session "${sessionId}" into itself, but its store "${storeId}" does not exist; the ` +
+          'run this session is bound by was recorded in that store, so its absence means the store cannot be read, not ' +
+          'that the session has nothing to read. No contract can be assembled for it.',
+        facts,
+      )
+    }
+  }
   const recovery = await deps.taskRuntime.recoveryStatus(storeId)
   const base: CallerBase = { sessionId, graph: facts, storeId, recovery }
   const own = snapshot === undefined ? undefined : runOfSessionIn(snapshot, sessionId)
   const task = snapshot === undefined ? undefined : taskOfRun(snapshot, own)
-  const isRoot = sessionId === String(graph.rootSessionId)
   const workerRun = !isRoot && own !== undefined && task !== undefined
   // The ledger is the authority only for a session with no run of its own. A
   // *conflict* names this session and contradicts its identity, so it refuses
@@ -499,6 +535,34 @@ async function graphOfSession(graphs: ReadOnlyGraphs, sessionId: string): Promis
       detail:
         `graph membership for session "${sessionId}" could not be read: ${message(error)}. ` +
         'A registry that cannot be read is not a session without a graph.',
+    }
+  }
+}
+
+/**
+ * Whether the graph itself spawned one session into it. `agent-runtime` records
+ * a `spawn` edge from the parent when it publishes a spawned session, so this is
+ * the graph store's own durable record — the same source membership comes from —
+ * and not an inference from names or status. A read that fails is reported as a
+ * failure: which side of the rule a session falls on decides whether its absent
+ * store is a named state or a read failure, and a guess would decide wrongly.
+ */
+async function spawnedInto(
+  deps: BindingDeps,
+  graph: GraphRecordFacts,
+  sessionId: string,
+): Promise<{ kind: 'spawned' } | { kind: 'member' } | { kind: 'failed'; detail: string }> {
+  try {
+    const view = await deps.graphs.view(graph.id)
+    const spawned = (view.graph.edges ?? []).some(edge => edge.kind === 'spawn' && String(edge.to) === sessionId)
+    return spawned ? { kind: 'spawned' } : { kind: 'member' }
+  } catch (error) {
+    return {
+      kind: 'failed',
+      detail:
+        `session "${sessionId}" is published by graph "${graph.id}", whose store "${rootTaskStoreId(graph.rootSessionId)}" ` +
+        `does not exist, and whether that graph spawned this session cannot be read: ${message(error)}. ` +
+        'A binding that cannot be read is not a binding.',
     }
   }
 }

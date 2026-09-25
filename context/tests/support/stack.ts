@@ -147,7 +147,7 @@ export class FixtureStack {
   private readonly headers = new Map<string, SessionHeader>()
   private readonly logs = new Map<string, { header: SessionHeader; events: SessionEvent[] }>()
   private readonly stores = new Map<string, { header: SessionHeader; events: TaskEvent[] }>()
-  private readonly graphs = new Map<string, { spec: Required<GraphSpec>; members: Set<string> }>()
+  private readonly graphs = new Map<string, { spec: Required<GraphSpec>; members: Set<string>; spawned: Set<string> }>()
   private readonly recovery = new Map<string, StoreRecoveryStatus>()
   private envPath: string | undefined
   private time = 1_760_000_000_000
@@ -155,7 +155,9 @@ export class FixtureStack {
   private graphsService!: {
     graphForSession(sessionId: string): Promise<unknown>
     list(): Promise<readonly unknown[]>
-    view(id: string): Promise<{ graph: { readonly agents: readonly { readonly id: string }[] } }>
+    view(id: string): Promise<{
+      graph: { readonly agents: readonly { readonly id: string }[]; readonly edges: readonly { kind: string; from: string; to: string }[] }
+    }>
   }
 
   constructor() {
@@ -190,7 +192,16 @@ export class FixtureStack {
       view: async (id: string) => {
         const entry = this.graphs.get(id)
         if (entry === undefined) throw new Error(`graphs: unknown graph "${id}"`)
-        return { graph: { id, agents: [...entry.members].map(member => ({ id: member })) } }
+        return {
+          graph: {
+            id,
+            agents: [...entry.members].map(member => ({ id: member })),
+            // The graph store's own record that these sessions were spawned into
+            // the graph, which is what tells a spawned session's absent store
+            // apart from a member's named state.
+            edges: [...entry.spawned].map(spawned => ({ kind: 'spawn', from: entry.spec.rootSessionId, to: spawned })),
+          },
+        }
       },
     }
     this.graphsService = graphsService
@@ -261,7 +272,14 @@ export class FixtureStack {
         members: [spec.rootSessionId, ...(spec.members ?? [])],
       },
       members: new Set([spec.rootSessionId, ...(spec.members ?? [])]),
+      spawned: new Set(),
     })
+  }
+
+  /** Publish one session as **spawned** into a graph: the graph store's own `spawn` edge. */
+  spawned(graphId: string, sessionId: string): void {
+    this.member(graphId, sessionId)
+    this.graphs.get(graphId)!.spawned.add(sessionId)
   }
 
   /** Publish one more member in a graph (a session that exists without a run of its own). */

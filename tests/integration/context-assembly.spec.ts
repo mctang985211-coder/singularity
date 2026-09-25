@@ -1,5 +1,5 @@
-import { appendFileSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { appendFileSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { join, sep } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RAW_SESSION_READ_DENIAL } from '../../agent-runtime/src/index.ts'
 import { AssemblyRefusalError } from '../../context/src/index.ts'
@@ -107,6 +107,21 @@ function breakStoreRead(stack: AssemblyStack, storeId: string): void {
     if (String(id) === storeId) throw new Error('input/output error while reading the store log')
     return await original(id)
   }
+}
+
+/**
+ * The log file the deployment's own store backend keeps for one store session.
+ * Found by walking the workspace, so a case corrupts the file the store really
+ * reads (and, once its header is unreadable, the one the backend no longer
+ * lists — the state that used to read as "no run of its own").
+ */
+function storeLogFile(dir: string, storeId: string): string {
+  const found = readdirSync(dir, { withFileTypes: true, recursive: true })
+    .filter(entry => entry.isFile() && entry.name.startsWith('session.') && entry.name.endsWith('.jsonl'))
+    .map(entry => join(entry.parentPath, entry.name))
+    .find(path => path.includes(`${sep}${storeId}${sep}`))
+  if (found === undefined) throw new Error(`the fixture found no store log for "${storeId}" under ${dir}`)
+  return found
 }
 
 /** One more row for a session already recorded: how a delegation that contradicts itself is written. */
@@ -622,6 +637,54 @@ describe('a binding that cannot be read refuses the request (Q1)', () => {
     const read = await second.call('s-root', 'task_read')
     expect(read.text).toContain('task_read unreadable')
     expect(read.text).toContain(`store "${storeId}"`)
+  })
+
+  it('refuses a published worker whose store log stopped being listed, and keeps the root\'s not-activated state', async () => {
+    const first = await boot({
+      worker: async sessionId => {
+        const bound = await first.runtime.runForSession(sessionId).catch(() => undefined)
+        if (bound === undefined || bound.task.depth !== 1) return
+        await first.call(sessionId, 'task_decompose', {
+          reason: 'the deck is a separate deliverable',
+          children: [{ objective: 'grandchild: build the deck', acceptanceCriteria: [criterion('true')] }],
+        })
+      },
+    })
+    const chain = await threeLayers(first)
+    const members = (await first.snapshot(chain.storeId)).runs.map(run => String(run.sessionId))
+    // The graph store's own record of what it spawned, read off the process that
+    // really spawned them: the next process re-reads exactly this from its store.
+    const spawned = first.spawnEdges().map(edge => edge.to)
+    expect(spawned).toContain(chain.grandchildSession)
+    const log = storeLogFile(first.dir, chain.storeId)
+    await first.crash()
+    await first.dispose({ remove: false })
+
+    // The store's log is unreadable, and with its header gone the backend no
+    // longer lists the store at all — so the store's own answer is "does not
+    // exist". For a session the graph *spawned* that answer must not be read as
+    // "a member with no run of its own": the request is refused by name instead
+    // of assembled with no contract ("Q1", and the reverse of what an independent
+    // audit found).
+    writeFileSync(log, '{ this is not a session log\n', 'utf8')
+    const second = await boot({
+      dir: first.dir,
+      graphs: [{ id: 'g1', rootSessionId: 's-root', members, spawned }],
+      worker: async () => {},
+    })
+    const refusal = await assemblyRefusal(second, chain.grandchildSession)
+    expect(refusal.refusal).toBe('unreadable')
+    expect(refusal.message).toContain(`store "${chain.storeId}"`)
+    expect(refusal.message).toContain('does not exist')
+    const read = await second.call(chain.grandchildSession, 'task_read')
+    expect(read.text).toContain('task_read unreadable')
+    expect(read.text).not.toContain('## Your contract')
+
+    // The root keeps the state that absence is named for (A2 §D): its graph has
+    // no accepted contract yet, so its own request is still the not-activated
+    // one — with the intake that changes it.
+    const rootPrompt = await second.prompt('s-root')
+    expect(rootPrompt).not.toContain('objective: ship the release')
   })
 
   it('refuses an already-running reviewer whose ledger cannot be read, and lets no delegated contract through', async () => {

@@ -673,6 +673,13 @@ class ScriptedLoopImpl implements ScriptedLoop {
         ...graphState.agents.map(agent => String(agent.id)),
         ...this.sessionRoot.keys(),
       ],
+      // The graph store's own edges, the record a spawned session leaves behind.
+      edges: () => graphState.edges.flatMap(edge => {
+        const candidate = edge as { kind?: string; from?: string; to?: string }
+        return typeof candidate.kind === 'string' && typeof candidate.from === 'string' && typeof candidate.to === 'string'
+          ? [{ kind: candidate.kind, from: candidate.from, to: candidate.to }]
+          : []
+      }),
     }) as never)
     // The session plane's read-only half (A2): exact reads over this fixture's own
     // log, the same records `eventsOf` returns.

@@ -55,6 +55,13 @@ export interface GraphSpec {
   readonly rootSessionId: string
   /** Sessions that are members of this graph (the root is one by construction). */
   readonly members?: readonly string[]
+  /**
+   * Sessions this graph is already recorded as having spawned — the graph store's
+   * own `spawn` edges, which a restart re-reads from that store. A booted process
+   * records its own edges as it spawns (see {@link AssemblyStack.spawnEdges}); this
+   * field is how a case hands a *new* process the edges the durable store held.
+   */
+  readonly spawned?: readonly string[]
 }
 
 export interface AssemblyStackOptions {
@@ -101,6 +108,8 @@ export class AssemblyStack {
   readonly roots: readonly string[]
   /** Every spawn the runtime asked the agent runtime for, in order. */
   readonly spawns: SpawnRequest[] = []
+  /** The graph store's own `spawn` edges this process committed, in order: what a restart would re-read. */
+  private readonly committedEdges: { kind: string; from: string; to: string }[] = []
   /** The approval door, counted: a read or an assembly must never reach it (A2-4). */
   readonly approvalRequest = vi.fn(async () => 'allowed-once' as const)
   /** The stand-in bodies that really ran, by tool name. */
@@ -177,10 +186,36 @@ export class AssemblyStack {
     ctx.provide('approval', { request: this.approvalRequest })
     ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) })
     const graphAgents = this.roots.map(id => ({ id, name: 'Singularity', status: 'idle' as const }))
+    // The graph store's own edges, committed by the deployment's `AgentRuntime`
+    // when it publishes a spawn: the record that tells a spawned session's absent
+    // store apart from a member's named pre-activation state.
+    const graphEdges: { kind: string; from: string; to: string }[] = []
+    for (const graph of this.graphs) {
+      for (const to of graph.spawned ?? []) {
+        graphEdges.push({ kind: 'spawn', from: graph.rootSessionId, to })
+      }
+    }
+    this.committedEdges.length = 0
     ctx.provide('graph', {
-      snapshotIn: async () => ({ version: 1, id: 'g', roots: [...this.roots], agents: [...graphAgents], groups: [], edges: [] }),
-      commitIn: async (_store: string, events: readonly { kind: string; agent?: (typeof graphAgents)[number] }[]) => {
-        for (const event of events) if (event.kind === 'agent/add' && event.agent !== undefined) graphAgents.push(event.agent)
+      snapshotIn: async () => ({
+        version: 1,
+        id: 'g',
+        roots: [...this.roots],
+        agents: [...graphAgents],
+        groups: [],
+        edges: [...graphEdges],
+      }),
+      commitIn: async (
+        _store: string,
+        events: readonly { kind: string; agent?: (typeof graphAgents)[number]; edge?: { kind: string; from: string; to: string } }[],
+      ) => {
+        for (const event of events) {
+          if (event.kind === 'agent/add' && event.agent !== undefined) graphAgents.push(event.agent)
+          if (event.kind === 'edge/add' && event.edge !== undefined) {
+            graphEdges.push(event.edge)
+            this.committedEdges.push(event.edge)
+          }
+        }
       },
       setStatusIn: async () => {},
       addAgentIn: async (_store: string, agent: (typeof graphAgents)[number]) => { graphAgents.push(agent) },
@@ -203,6 +238,7 @@ export class AssemblyStack {
         rootSessionId: graph.rootSessionId,
       })),
       members: id => [...this.membership.entries()].filter(([, graphId]) => graphId === id).map(([sessionId]) => sessionId),
+      edges: id => (id === this.graphs[0]!.id ? graphEdges : []),
     }) as never)
     // The session plane's read-only half (A2) over the real JSONL log.
     const readLog = async (sessionId: string): Promise<readonly SessionEvent[]> => {
@@ -371,6 +407,11 @@ export class AssemblyStack {
   /** The stand-in tool bodies that really ran, by name. */
   executed(): readonly string[] {
     return this.ran
+  }
+
+  /** The graph store's own `spawn` edges this process committed: a restart's `GraphSpec.spawned`. */
+  spawnEdges(): readonly { kind: string; from: string; to: string }[] {
+    return [...this.committedEdges]
   }
 
   /** A session's whole stored log, as the JSONL backend holds it. */

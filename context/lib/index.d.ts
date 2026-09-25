@@ -97,14 +97,21 @@ declare class ReviewerBindingError extends Error {
 interface MembershipNode {
   readonly id: string;
 }
+/** One published graph edge, as the graph store holds it (`agent-runtime` publishes `spawn` edges). */
+interface MembershipEdge {
+  readonly kind: string;
+  readonly from: string;
+  readonly to: string;
+}
 /** The graph registry, read-only: which graph a session belongs to, and who that graph publishes. */
 interface ReadOnlyGraphs {
   graphForSession(sessionId: string): Promise<GraphRecordFacts>;
   list(): Promise<readonly GraphRecordFacts[]>;
-  /** One graph's published members, read by the registry's own graph id. */
+  /** One graph's published members and edges, read by the registry's own graph id. */
   view(id: string): Promise<{
     readonly graph: {
       readonly agents: readonly MembershipNode[];
+      readonly edges: readonly MembershipEdge[];
     };
   }>;
 }
@@ -614,4 +621,4 @@ declare class SingularityContextService extends Service {
   private envBuilder;
 }
 //#endregion
-export { AssemblyRefusalError, BindingDeps, CONTEXT_OUTPUT_LIMIT_BYTES, CallerBase, CallerGraph, CallerResolution, CallerUnbound, ContextReadQuery, EnvPathSource, GraphRecordFacts, LoadedCaller, MembershipNode, NAMED_REFUSALS, NamedRefusal, OutputBudget, ProjectedRead, ProjectedReadOk, ProjectedReadRefused, ReadContinuation, ReadDeps, ReadOnlyGraphs, ReadOnlyTaskRuntime, ReadOnlyTaskStore, RelatedEntry, ReviewReference, ReviewerBindingError, ReviewerBindingFailure, ReviewerBindingRecord, ReviewerBindingSource, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, SessionQueryReads, SingularityContextService, SingularityContextService as default, StatusQuery, StatusScope, Utf8Slice, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omittedLine, openRootProposals, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, storeStateText, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };
+export { AssemblyRefusalError, BindingDeps, CONTEXT_OUTPUT_LIMIT_BYTES, CallerBase, CallerGraph, CallerResolution, CallerUnbound, ContextReadQuery, EnvPathSource, GraphRecordFacts, LoadedCaller, MembershipEdge, MembershipNode, NAMED_REFUSALS, NamedRefusal, OutputBudget, ProjectedRead, ProjectedReadOk, ProjectedReadRefused, ReadContinuation, ReadDeps, ReadOnlyGraphs, ReadOnlyTaskRuntime, ReadOnlyTaskStore, RelatedEntry, ReviewReference, ReviewerBindingError, ReviewerBindingFailure, ReviewerBindingRecord, ReviewerBindingSource, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, SessionQueryReads, SingularityContextService, SingularityContextService as default, StatusQuery, StatusScope, Utf8Slice, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omittedLine, openRootProposals, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, storeStateText, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };
