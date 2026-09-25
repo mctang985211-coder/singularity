@@ -306,6 +306,16 @@ interface SessionQueryReads {
     readonly startSeq: number;
     readonly endSeq: number;
   }>;
+  /**
+   * One Session's whole log, live-preferred, with the number of fork-inherited
+   * events at its head: the fold a *consumption proof* is read off (A4 §7.3) —
+   * the prefix belongs to the Session this one descends from, so a message in it
+   * was never put in front of this Session's model.
+   */
+  readSession(sessionId: string): Promise<{
+    readonly inheritedEventCount: number;
+    readonly events: readonly SessionEvent[];
+  }>;
 }
 /** Soft view of the env-builder store: the graph env's path is where template discovery walks up from. */
 interface EnvPathSource {
@@ -354,6 +364,33 @@ declare function relatedEntries(snapshot: TaskSnapshot, self: TaskInstance): Rel
  * session log deduplicate them.
  */
 declare function dynamicProjection(deps: ReadDeps, loaded: LoadedCaller): Promise<ProjectedRead>;
+/**
+ * The question plane (A4 §F.1, architecture §7.3): what this run owes or waits
+ * for in the direct parent/child conversation, for the prompt assembly's own
+ * named runtime context. Two lists, both derived from the store's question
+ * facts and neither a phase:
+ *
+ * - **as a parent**: every question of a child's that is still open and
+ *   unanswered (`questionsAwaitingAnswerOf`) — the question's identity, the
+ *   asking run, the blocking flag, and the `{sessionId, seq}` reference that
+ *   reads the body out of the asking Session. A question is shown until an
+ *   answer resolves it, whatever happened to its delivery: the store's own fact
+ *   is what makes the parent owe an answer.
+ * - **as a child**: every answer to this run's own questions that its Session
+ *   does not yet prove was put in front of the model. An answer is never dropped
+ *   because the question was answered — it is dropped only when the caller's own
+ *   Session holds that answer's `messageId` as a `user/message` event
+ *   ({@link consumedMessageIds}); a fold that cannot be read proves nothing, so
+ *   every recorded answer stays listed. No consumed flag is stored anywhere.
+ *
+ * The body itself is never copied here: the reference into the sending Session
+ * is the one source of the text, and it is what the model reads with
+ * `context_read`. Both lists are bounded, questions print by `askedAt` ascending
+ * (their answers in the order the store applied them), and a caller with nothing
+ * pending gets an empty text — no header, and no runtime context at all for the
+ * assembly to add.
+ */
+declare function questionProjection(deps: ReadDeps, loaded: LoadedCaller): Promise<ProjectedRead>;
 /**
  * `task_read` (A2 §D/A2-5), the tool-facing read of the caller's own contract:
  *
@@ -412,6 +449,16 @@ declare const WORKER_CONTRACT_ORDER = 80;
 declare const STATE_CONTEXT_NAME = "singularity:state";
 /** Placement among the runtime contexts, after the centrally allocated ones (`CONTEXT_ORDERS` ends at 120). */
 declare const STATE_CONTEXT_ORDER = 130;
+/**
+ * The question plane's context name on the same plane (A4 §F.1). A separate
+ * name, not a second section of {@link STATE_CONTEXT_NAME}: the two are read at
+ * different moments (the run's state changes with the protocol, the questions
+ * change with what has been answered and read), and one changing must not make
+ * the other look new to the loop's deduplication.
+ */
+declare const QUESTIONS_CONTEXT_NAME = "singularity:questions";
+/** Placement among the runtime contexts: right behind the state plane. */
+declare const QUESTIONS_CONTEXT_ORDER = 140;
 /** The error a refused assembly throws: the refusal is its name, the detail its message. */
 declare class AssemblyRefusalError extends Error {
   readonly refusal: ProjectedReadRefused['refusal'];
@@ -528,10 +575,13 @@ declare function notActivatedLines(graph: CallerGraph, storeId: string, snapshot
  * run line: where this run sits in the protocol, in that order, with the batch
  * id only where a batch exists to name. A phase change and a progress marking
  * rewrite these fields, so this is the run's current position, never a history.
+ *
+ * `snapshot` is where the one derived word comes from: an `active` run with an
+ * open blocking question reads `waiting_answer` (see {@link displayPhase}).
  */
-declare function runPhaseSuffix(run: TaskRun): string;
+declare function runPhaseSuffix(run: TaskRun, snapshot?: TaskSnapshot): string;
 /** The same fact for a denser line, where only the phase and the old-record marker fit. */
-declare function runPhaseCell(run: TaskRun): string;
+declare function runPhaseCell(run: TaskRun, snapshot?: TaskSnapshot): string;
 /** The acceptance criteria, one line per criterion, in declaration order. */
 declare function criteriaLines(criteria: readonly AcceptanceCriterion[]): string[];
 /**
@@ -586,8 +636,12 @@ declare function handoffReferences(handoff: TaskHandoff): {
 };
 /** The complete rendering of one task record. */
 declare function taskRecordText(task: TaskInstance): string;
-/** The complete rendering of one run record, with the binding re-check appended. */
-declare function runRecordText(taskRuntime: ReadOnlyTaskRuntime, run: TaskRun): Promise<string>;
+/**
+ * The complete rendering of one run record, with the binding re-check appended.
+ * The snapshot is the store the run was read out of: it is where the one
+ * derived word on the run line comes from (see {@link runPhaseSuffix}).
+ */
+declare function runRecordText(taskRuntime: ReadOnlyTaskRuntime, run: TaskRun, snapshot?: TaskSnapshot): Promise<string>;
 /** The complete rendering of one evidence bundle. */
 declare function evidenceRecordText(snapshot: TaskSnapshot, evidence: EvidenceBundle): string;
 /**
@@ -603,6 +657,9 @@ declare function diagnosisRecordText(diagnosis: Diagnosis): string;
  * The one-line identity of one task, in the shape both status reads use: status,
  * objective, the latest run with its phase, evidence ids, the most recent review
  * outcome with the detail a reader can act on, and the diagnosis count.
+ *
+ * The phase cell is derived from this same snapshot, so a related task's own
+ * open blocking question shows as `waiting_answer` here too.
  */
 declare function taskSummaryLine(snapshot: TaskSnapshot, task: TaskInstance, roles?: readonly string[]): string;
 //#endregion
@@ -657,6 +714,12 @@ declare class SingularityContextService extends Service {
   contractProjection(sessionId: string, signal?: AbortSignal): Promise<ProjectedRead>;
   /** The dynamic half: run state, gate phase, recovery marker, related tasks (A2 §D/§9). */
   dynamicProjection(sessionId: string, signal?: AbortSignal): Promise<ProjectedRead>;
+  /**
+   * The question plane (A4 §F.1/§7.3): the questions this run has not been
+   * answered on, and the answers to its own questions that no model request has
+   * been shown to have carried into its Session yet.
+   */
+  questionProjection(sessionId: string, signal?: AbortSignal): Promise<ProjectedRead>;
   private load;
   private bindingDeps;
   private readDeps;
@@ -668,4 +731,4 @@ declare class SingularityContextService extends Service {
   private envBuilder;
 }
 //#endregion
-export { AssemblyRefusalError, BindingDeps, CONTEXT_OUTPUT_LIMIT_BYTES, CallerBase, CallerGraph, CallerResolution, CallerUnbound, ContextReadQuery, EnvPathSource, GraphRecordFacts, LoadedCaller, MembershipEdge, MembershipNode, NAMED_REFUSALS, NamedRefusal, OmissionReport, OutputBudget, ProjectedRead, ProjectedReadOk, ProjectedReadRefused, ReadContinuation, ReadDeps, ReadOnlyGraphs, ReadOnlyTaskRuntime, ReadOnlyTaskStore, RelatedEntry, ReviewReference, ReviewerBindingError, ReviewerBindingFailure, ReviewerBindingRecord, ReviewerBindingSource, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, SessionEventReference, SessionQueryReads, SingularityContextService, SingularityContextService as default, StatusQuery, StatusScope, Utf8Slice, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omissionLine, openRootProposals, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, storeStateText, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };
+export { AssemblyRefusalError, BindingDeps, CONTEXT_OUTPUT_LIMIT_BYTES, CallerBase, CallerGraph, CallerResolution, CallerUnbound, ContextReadQuery, EnvPathSource, GraphRecordFacts, LoadedCaller, MembershipEdge, MembershipNode, NAMED_REFUSALS, NamedRefusal, OmissionReport, OutputBudget, ProjectedRead, ProjectedReadOk, ProjectedReadRefused, QUESTIONS_CONTEXT_NAME, QUESTIONS_CONTEXT_ORDER, ReadContinuation, ReadDeps, ReadOnlyGraphs, ReadOnlyTaskRuntime, ReadOnlyTaskStore, RelatedEntry, ReviewReference, ReviewerBindingError, ReviewerBindingFailure, ReviewerBindingRecord, ReviewerBindingSource, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, SessionEventReference, SessionQueryReads, SingularityContextService, SingularityContextService as default, StatusQuery, StatusScope, Utf8Slice, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omissionLine, openRootProposals, questionProjection, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, storeStateText, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };

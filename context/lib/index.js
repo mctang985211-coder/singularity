@@ -1,5 +1,5 @@
 import { Context, Service } from "@deepseek-ai/cordis";
-import { rootTaskStoreId } from "@dangosys/dsh-singularity-task";
+import { blockingQuestionsOf, questionsAwaitingAnswerOf, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
 import { SESSION_NOT_IN_GRAPH } from "@dangosys/dsh-singularity-graphs";
 import { SESSION_QUERY_READ_WINDOW_MAX, extractSessionEventText } from "@deepseek-ai/dsh-session-query";
 import { checkObligationCoverage, findRepoRoot, loadObligationTemplates } from "@dangosys/dsh-singularity-task-runtime";
@@ -59,6 +59,16 @@ const STATE_CONTEXT_NAME = "singularity:state";
 /** Placement among the runtime contexts, after the centrally allocated ones (`CONTEXT_ORDERS` ends at 120). */
 const STATE_CONTEXT_ORDER = 130;
 /**
+* The question plane's context name on the same plane (A4 §F.1). A separate
+* name, not a second section of {@link STATE_CONTEXT_NAME}: the two are read at
+* different moments (the run's state changes with the protocol, the questions
+* change with what has been answered and read), and one changing must not make
+* the other look new to the loop's deduplication.
+*/
+const QUESTIONS_CONTEXT_NAME = "singularity:questions";
+/** Placement among the runtime contexts: right behind the state plane. */
+const QUESTIONS_CONTEXT_ORDER = 140;
+/**
 * The sections that sort at or ahead of {@link WORKER_CONTRACT_ORDER}, by name
 * (`AssembledSection` carries no order, so the insertion point is computed from
 * who these are): the harness identity, the deployment persona prefix, and this
@@ -107,17 +117,25 @@ function withContractSection(assembly, text) {
 	while (index < assembly.sections.length && PRE_CONTRACT_SECTIONS.has(assembly.sections[index].name)) index += 1;
 	assembly.sections.splice(index, 0, contractSection(text));
 }
-/** Append the dynamic half to the runtime-context plane; an unchanged name is replaced, never duplicated. */
-function withStateContext(assembly, text) {
-	const existing = assembly.contexts.find((context) => context.name === STATE_CONTEXT_NAME);
+/** Append one plane to the runtime-context plane; an unchanged name is replaced, never duplicated. */
+function withRuntimeContext(assembly, name, text) {
+	const existing = assembly.contexts.find((context) => context.name === name);
 	if (existing !== void 0) {
 		existing.text = text;
 		return;
 	}
 	assembly.contexts.push({
-		name: STATE_CONTEXT_NAME,
+		name,
 		text
 	});
+}
+/**
+* The question plane, when it has anything to say: an empty projection adds no
+* context at all, so a run with nothing pending carries no empty entry into the
+* loop's deduplication.
+*/
+function withQuestionContext(assembly, text) {
+	if (text.length > 0) withRuntimeContext(assembly, QUESTIONS_CONTEXT_NAME, text);
 }
 /**
 * The one assembly step this package runs (see the module doc for who gets
@@ -135,15 +153,21 @@ async function assembleSingularityContext(service, assembly, context, next) {
 			if (!contract.ok) throwRefusal(contract);
 			const dynamic = await service.dynamicProjection(sessionId, context.signal);
 			if (!dynamic.ok) throwRefusal(dynamic);
+			const questions = await service.questionProjection(sessionId, context.signal);
+			if (!questions.ok) throwRefusal(questions);
 			withContractSection(assembly, contract.text);
-			withStateContext(assembly, dynamic.text);
+			withRuntimeContext(assembly, STATE_CONTEXT_NAME, dynamic.text);
+			withQuestionContext(assembly, questions.text);
 			return next();
 		}
 		case "root": {
 			if (resolution.task === void 0) return next();
 			const contract = await service.contractProjection(sessionId, context.signal);
 			if (!contract.ok) throwRefusal(contract);
+			const questions = await service.questionProjection(sessionId, context.signal);
+			if (!questions.ok) throwRefusal(questions);
 			withContractSection(assembly, contract.text);
+			withQuestionContext(assembly, questions.text);
 			return next();
 		}
 		case "reviewer": {
@@ -752,15 +776,36 @@ function submissionClause(submission) {
 	return `submitted by ${submission.origin} at ${submission.submittedAt}: "${submission.summary}"${evidence}${notes}`;
 }
 /**
+* The phase one run's line shows (A4 §7.2): a run whose stored phase is `active`
+* while a blocking question it asked is still open reads `waiting_answer`. The
+* derivation is the store's own question facts
+* ({@link blockingQuestionsOf}) — never the gate, and never a phase written
+* back: `waiting_children` keeps its own phase and its batch id beside any open
+* question, and a run whose snapshot is not at hand (or carries no question
+* index) shows the phase it has on record.
+*/
+function displayPhase(run, snapshot) {
+	const phase = run.executionPhase;
+	if (phase !== "active") return phase;
+	return blockedByQuestion(run, snapshot) ? "waiting_answer" : phase;
+}
+/** Whether a blocking question this run asked is still open — the fact `waiting_answer` is derived from. */
+function blockedByQuestion(run, snapshot) {
+	return snapshot?.questions === void 0 ? false : blockingQuestionsOf(snapshot, run.runId).length > 0;
+}
+/**
 * The phase, batch, submission and no-progress facts of one run, appended to a
 * run line: where this run sits in the protocol, in that order, with the batch
 * id only where a batch exists to name. A phase change and a progress marking
 * rewrite these fields, so this is the run's current position, never a history.
+*
+* `snapshot` is where the one derived word comes from: an `active` run with an
+* open blocking question reads `waiting_answer` (see {@link displayPhase}).
 */
-function runPhaseSuffix(run) {
+function runPhaseSuffix(run, snapshot) {
 	const parts = [];
 	if (run.executionPhase !== void 0) {
-		parts.push(`phase ${run.executionPhase}`);
+		parts.push(`phase ${displayPhase(run, snapshot)}`);
 		if (run.batchId !== void 0) parts.push(`batch ${run.batchId}`);
 		if (run.submission !== void 0) parts.push(submissionClause(run.submission));
 	} else if (run.status === "running") parts.push(NEEDS_RECOVERY);
@@ -768,8 +813,8 @@ function runPhaseSuffix(run) {
 	return parts.length === 0 ? "" : ` — ${parts.join("; ")}`;
 }
 /** The same fact for a denser line, where only the phase and the old-record marker fit. */
-function runPhaseCell(run) {
-	if (run.executionPhase !== void 0) return ` — phase ${run.executionPhase}`;
+function runPhaseCell(run, snapshot) {
+	if (run.executionPhase !== void 0) return ` — phase ${displayPhase(run, snapshot)}`;
 	return run.status === "running" ? ` — ${NEEDS_RECOVERY_SHORT}` : "";
 }
 /**
@@ -948,11 +993,15 @@ function taskRecordText(task) {
 	lines.push(`children: ${task.childTaskIds.length === 0 ? "(none)" : task.childTaskIds.join(", ")}`);
 	return lines.join("\n");
 }
-/** The complete rendering of one run record, with the binding re-check appended. */
-async function runRecordText(taskRuntime, run) {
+/**
+* The complete rendering of one run record, with the binding re-check appended.
+* The snapshot is the store the run was read out of: it is where the one
+* derived word on the run line comes from (see {@link runPhaseSuffix}).
+*/
+async function runRecordText(taskRuntime, run, snapshot) {
 	const { providerBinding,...record } = run;
 	const lines = [
-		`run ${run.runId} of task ${run.taskId} [${run.status}]${runPhaseSuffix(run)}`,
+		`run ${run.runId} of task ${run.taskId} [${run.status}]${runPhaseSuffix(run, snapshot)}`,
 		`session: ${run.sessionId}${run.parentRunId === void 0 ? "" : ` · parent run: ${run.parentRunId}`}`,
 		`started: ${run.startedAt}${run.finishedAt === void 0 ? "" : ` · finished: ${run.finishedAt}`}`,
 		`capabilities: ${run.capabilitySnapshot.length === 0 ? "(none)" : run.capabilitySnapshot.join(", ")}`,
@@ -1007,13 +1056,16 @@ function diagnosisRecordText(diagnosis) {
 * The one-line identity of one task, in the shape both status reads use: status,
 * objective, the latest run with its phase, evidence ids, the most recent review
 * outcome with the detail a reader can act on, and the diagnosis count.
+*
+* The phase cell is derived from this same snapshot, so a related task's own
+* open blocking question shows as `waiting_answer` here too.
 */
 function taskSummaryLine(snapshot, task, roles = []) {
 	const run = latestRun(snapshot, task);
 	const evidence = snapshot.evidence.filter((item) => item.taskId === task.taskId).map((item) => item.evidenceId);
 	const review = [...snapshot.reviews].reverse().find((item) => item.taskId === task.taskId);
 	const diagnoses = snapshot.diagnoses.filter((item) => item.taskId === task.taskId).length;
-	const runPart = run === void 0 ? "run: none" : `run: ${run.status}${runPhaseCell(run)}`;
+	const runPart = run === void 0 ? "run: none" : `run: ${run.status}${runPhaseCell(run, snapshot)}`;
 	const evidencePart = evidence.length === 0 ? "" : ` evidence: [${evidence.join(", ")}]`;
 	const failing = review?.criteria?.filter((item) => item.verdict !== "pass") ?? [];
 	const detail = review?.outcome === "failed" && failing.length > 0 ? `${review.localizedCause ?? "failed"} [${failing.map((item) => `${item.criterionId}${item.exitCode === void 0 ? "" : ` exit ${item.exitCode}`}`).join(", ")}]` : review?.localizedCause ?? review?.anomalies[0];
@@ -1092,9 +1144,13 @@ function contractBody(task) {
 		...contractLines(task)
 	];
 }
-/** The caller's own run, as one line: status, phase, and the old-record marker such a run earns. */
-function ownRunLine(run) {
-	return `run ${run.runId} [${run.status}]${runPhaseSuffix(run)} started ${run.startedAt}`;
+/**
+* The caller's own run, as one line: status, phase, and the old-record marker
+* such a run earns. The snapshot is the store the run was read from, and is
+* where the run line's one derived word comes from (`waiting_answer`).
+*/
+function ownRunLine(run, snapshot) {
+	return `run ${run.runId} [${run.status}]${runPhaseSuffix(run, snapshot)} started ${run.startedAt}`;
 }
 /**
 * One reference list inside the byte bound: entries are shown in store order
@@ -1317,9 +1373,9 @@ async function dynamicProjection(deps, loaded) {
 	if (budget.addAll(header) > 0) return tooLarge("the dynamic projection header", taskPageHint(task.taskId));
 	if (resolution.kind === "reviewer") {
 		const run = snapshot === void 0 ? void 0 : latestRun(snapshot, task);
-		const label = `delegated task state (review-only, no business Run): ${run === void 0 ? "no run was ever started" : ownRunLine(run)}`;
+		const label = `delegated task state (review-only, no business Run): ${run === void 0 ? "no run was ever started" : ownRunLine(run, snapshot)}`;
 		if (!budget.add(label)) return tooLarge("the delegated task state", taskPageHint(task.taskId));
-	} else if (!budget.add(`your run: ${resolution.run === void 0 ? "none" : ownRunLine(resolution.run)}`)) return tooLarge("the run line", taskPageHint(task.taskId));
+	} else if (!budget.add(`your run: ${resolution.run === void 0 ? "none" : ownRunLine(resolution.run, snapshot)}`)) return tooLarge("the run line", taskPageHint(task.taskId));
 	if (snapshot !== void 0) {
 		const lines = relatedEntries(snapshot, task).map((entry) => taskSummaryLine(snapshot, entry.task, entry.roles));
 		const marker$1 = (count) => omissionLine({
@@ -1343,6 +1399,149 @@ async function dynamicProjection(deps, loaded) {
 		}
 	}
 	return read(budget.text(), storeSource(resolution.graph, resolution.storeId, "projected the caller's dynamic state"));
+}
+/**
+* The message identities one Session's own history proves its model has seen
+* (A4 §7.3): the `user/message` events of its own event suffix, by message id.
+* That is the only durable proof — a pending inbox entry is not one (the loop
+* claims and removes it before the step that would carry it), and a claim whose
+* write never reached history is not one either.
+*
+* The fold is the delivery path's (`agent-runtime`'s `ownSuffix`): the
+* fork-inherited prefix belongs to the Session this one descends from, so a
+* message there was never put in front of *this* Session's model. Nothing is
+* written back: this function is a read, and the proof is re-derived at every
+* assembly, so no consumed flag and no second ledger can disagree with the log.
+*/
+async function consumedMessageIds(deps, sessionId) {
+	const log = await deps.sessionQuery.readSession(sessionId);
+	const ids = /* @__PURE__ */ new Set();
+	for (const event of log.events.slice(log.inheritedEventCount)) if (event.type === "user/message") ids.add(String(event.data.id));
+	return ids;
+}
+/** What nothing was proven about. */
+const NOTHING_CONSUMED = /* @__PURE__ */ new Set();
+/**
+* The order both lists print in: `askedAt` ascending, which is the order the
+* store applied the asks in. Sorting explicitly keeps the claim true even if two
+* asks commit out of stamp order, and `Array#sort` being stable keeps questions
+* the store stamped in the same millisecond in the order it holds them.
+*/
+function byAskedAt(left, right) {
+	return left.askedAt < right.askedAt ? -1 : left.askedAt > right.askedAt ? 1 : 0;
+}
+/** One question line: the identity, the asking run, the blocking flag, and where the body is. */
+function questionEntry(snapshot, question) {
+	const task = snapshot.runs.find((run) => run.runId === question.childRunId)?.taskId;
+	const from = `from child run ${question.childRunId}${task === void 0 ? "" : ` (task ${task})`}`;
+	return `- ${question.questionId} — ${from}, blocking: ${question.blocking ? "yes" : "no"}, asked ${question.askedAt}\n  body: \`context_read\` kind:"session" ref:${eventReference(question.questionRef.sessionId, question.questionRef.seq)}`;
+}
+/** One answer line: the identity, the question it answers, the resolution, and where the body is. */
+function answerEntry(question, answer) {
+	return `- ${answer.answerId} — the answer to question ${question.questionId}, resolves: ${answer.resolves ? "yes" : "no"}, answered ${answer.answeredAt}\n  body: \`context_read\` kind:"session" ref:${eventReference(answer.answerRef.sessionId, answer.answerRef.seq)}`;
+}
+/**
+* One bounded list of question or answer lines: the entries in the store's ask
+* order, then the list's guidance. What the output bound could not carry is
+* named with its count (`@deepseek-ai/dsh-output-retention`'s clause) instead of
+* silently dropped, and the guidance's room is reserved before each entry is
+* measured, so an unusually long list never starves it. Returns `'too-large'`
+* when not even the heading fits: a list that cannot say what it holds is not
+* shown at all.
+*/
+function questionList(budget, heading, entries, guidance, scope, recovery) {
+	if (!budget.add("") || !budget.add(heading)) return "too-large";
+	const omitted = (count) => omissionLine({
+		scope,
+		unit: "items",
+		kept: entries.length - count,
+		limit: entries.length,
+		omitted: count,
+		recovery
+	});
+	const reserve = utf8Bytes(omitted(entries.length)) + 1 + utf8Bytes(guidance) + 1;
+	let shown = 0;
+	for (const entry of entries) {
+		if (budget.remaining < reserve + utf8Bytes(entry) + 1) break;
+		budget.add(entry);
+		shown += 1;
+	}
+	if (shown < entries.length && !budget.add(omitted(entries.length - shown))) return "too-large";
+	return budget.add(guidance) ? "ok" : "too-large";
+}
+/**
+* The question plane (A4 §F.1, architecture §7.3): what this run owes or waits
+* for in the direct parent/child conversation, for the prompt assembly's own
+* named runtime context. Two lists, both derived from the store's question
+* facts and neither a phase:
+*
+* - **as a parent**: every question of a child's that is still open and
+*   unanswered (`questionsAwaitingAnswerOf`) — the question's identity, the
+*   asking run, the blocking flag, and the `{sessionId, seq}` reference that
+*   reads the body out of the asking Session. A question is shown until an
+*   answer resolves it, whatever happened to its delivery: the store's own fact
+*   is what makes the parent owe an answer.
+* - **as a child**: every answer to this run's own questions that its Session
+*   does not yet prove was put in front of the model. An answer is never dropped
+*   because the question was answered — it is dropped only when the caller's own
+*   Session holds that answer's `messageId` as a `user/message` event
+*   ({@link consumedMessageIds}); a fold that cannot be read proves nothing, so
+*   every recorded answer stays listed. No consumed flag is stored anywhere.
+*
+* The body itself is never copied here: the reference into the sending Session
+* is the one source of the text, and it is what the model reads with
+* `context_read`. Both lists are bounded, questions print by `askedAt` ascending
+* (their answers in the order the store applied them), and a caller with nothing
+* pending gets an empty text — no header, and no runtime context at all for the
+* assembly to add.
+*/
+async function questionProjection(deps, loaded) {
+	const resolution = loaded.resolution;
+	if (resolution.kind === "unbound") return unboundRead(resolution);
+	if (resolution.kind === "member") return refused("unbound", `session "${resolution.sessionId}" is a published member of graph "${resolution.graph.id}" but has no Run of its own and no recorded delegation, so it asks no parent and answers no child; questions belong to the runs that hold them.`);
+	if (resolution.kind === "root" && resolution.task === void 0) return refused("not-activated", notActivatedLines(resolution.graph, resolution.storeId, loaded.snapshot).join("\n"));
+	if (resolution.kind === "reviewer" && resolution.task === void 0) return refused("not-found", `the delegation of session "${resolution.sessionId}" names task "${resolution.delegation.taskId}", which store "${resolution.storeId}" does not hold; there is no delegated run whose questions could be projected.`);
+	const snapshot = loaded.snapshot;
+	const source = storeSource(resolution.graph, resolution.storeId, "projected the caller's pending questions");
+	const run = resolution.kind === "worker" || resolution.kind === "root" ? resolution.run : void 0;
+	if (snapshot === void 0 || run === void 0) return read("", source);
+	if (snapshot.questions === void 0) return refused("unreadable", `store "${resolution.storeId}" of graph "${resolution.graph.id}" answered with a snapshot that carries no question index, so the questions it holds cannot be read; a view built without them would report "no questions" for a store that has some.`);
+	const asked = [...questionsAwaitingAnswerOf(snapshot, run.runId)].sort(byAskedAt);
+	const answers = [];
+	for (const question of [...snapshot.questions.all].sort(byAskedAt)) {
+		if (question.childRunId !== run.runId) continue;
+		for (const answer of question.answers ?? []) answers.push({
+			question,
+			answer
+		});
+	}
+	let consumed = NOTHING_CONSUMED;
+	if (answers.length > 0) try {
+		consumed = await consumedMessageIds(deps, resolution.sessionId);
+	} catch {
+		consumed = NOTHING_CONSUMED;
+	}
+	const unread = answers.filter((item) => !consumed.has(item.answer.messageId));
+	if (asked.length === 0 && unread.length === 0) return read("", source);
+	const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES);
+	const header = [
+		"# Pending questions (coordination)",
+		`role: ${resolution.kind}`,
+		`graph: ${resolution.graph.id} "${resolution.graph.name}" — store ${resolution.storeId}`,
+		"unanswered questions and answers not yet shown to have been read — derived from the store's question facts, never a phase change"
+	];
+	if (budget.addAll(header) > 0) return refused("context-too-large", `the pending-questions header of store "${resolution.storeId}" does not fit the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte output bound, and a coordination view is never returned as a fragment of itself; nothing is reported in place of it.`);
+	if (asked.length > 0) {
+		if (questionList(budget, `## Questions waiting for your answer (${asked.length})`, asked.map((question) => questionEntry(snapshot, question)), "Answer a question with `task_answer` {questionId, requestKey, answer, resolves}; `resolves:false` keeps it open, and the body is at the reference on the question's line.", "pending questions", "the questions this view could not carry stay open in the store") === "too-large") return questionViewTooLarge(resolution.storeId, "questions waiting for an answer");
+	}
+	if (unread.length > 0) {
+		if (questionList(budget, `## Answers waiting to be read (${unread.length})`, unread.map((item) => answerEntry(item.question, item.answer)), "Read an answer at the reference on its line: it stays here until your own Session shows it was put in front of you.", "unread answers", "the answers this view could not carry stay unread in the store") === "too-large") return questionViewTooLarge(resolution.storeId, "answers waiting to be read");
+	}
+	return read(budget.text(), source);
+}
+/** The refusal of a question list the output bound could not lay out at all. */
+function questionViewTooLarge(storeId, what) {
+	return refused("context-too-large", `the ${what} of store "${storeId}" do not fit the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte output bound, and a coordination view is never returned as a fragment of itself; nothing is reported in place of it.`);
 }
 /**
 * `task_read` (A2 §D/A2-5), the tool-facing read of the caller's own contract:
@@ -1380,7 +1579,7 @@ async function taskRead(deps, loaded) {
 	const lines = [
 		"",
 		...contractBody(task),
-		...run === void 0 ? [] : ["", ownRunLine(run)]
+		...run === void 0 ? [] : ["", ownRunLine(run, snapshot)]
 	];
 	if (budget.addAll(lines) > 0) return tooLarge("your contract", taskPageHint(task.taskId));
 	const summary = run?.providerBinding === void 0 ? [] : (await bindingLines(deps.taskRuntime, run.providerBinding)).filter((line) => line.length > 0);
@@ -1680,7 +1879,7 @@ function reviewRefDetail(ref) {
 }
 async function recordTextOf(deps, snapshot, record) {
 	if ("objective" in record) return taskRecordText(record);
-	if ("capabilitySnapshot" in record) return await runRecordText(deps.taskRuntime, record);
+	if ("capabilitySnapshot" in record) return await runRecordText(deps.taskRuntime, record, snapshot);
 	if ("evidenceId" in record) return evidenceRecordText(snapshot, record);
 	if ("diagnosisId" in record) return diagnosisRecordText(record);
 	return reviewRecordText(record);
@@ -2041,6 +2240,14 @@ var SingularityContextService = class extends Service {
 	async dynamicProjection(sessionId, signal) {
 		return await dynamicProjection(this.readDeps(), await this.load(sessionId, signal));
 	}
+	/**
+	* The question plane (A4 §F.1/§7.3): the questions this run has not been
+	* answered on, and the answers to its own questions that no model request has
+	* been shown to have carried into its Session yet.
+	*/
+	async questionProjection(sessionId, signal) {
+		return await questionProjection(this.readDeps(), await this.load(sessionId, signal));
+	}
 	async load(sessionId, signal) {
 		signal?.throwIfAborted();
 		return await loadCaller(this.bindingDeps(), sessionId, signal);
@@ -2074,4 +2281,4 @@ var SingularityContextService = class extends Service {
 var src_default = SingularityContextService;
 
 //#endregion
-export { AssemblyRefusalError, CONTEXT_OUTPUT_LIMIT_BYTES, NAMED_REFUSALS, OutputBudget, ReviewerBindingError, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, SingularityContextService, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, src_default as default, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omissionLine, openRootProposals, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, storeStateText, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };
+export { AssemblyRefusalError, CONTEXT_OUTPUT_LIMIT_BYTES, NAMED_REFUSALS, OutputBudget, QUESTIONS_CONTEXT_NAME, QUESTIONS_CONTEXT_ORDER, ReviewerBindingError, STATE_CONTEXT_NAME, STATE_CONTEXT_ORDER, SingularityContextService, WORKER_CONTRACT_ORDER, WORKER_CONTRACT_SECTION, assembleSingularityContext, bindingLines, constraintItems, contextRead, contractLines, contractProjection, criteriaLines, src_default as default, diagnosisRecordText, dynamicProjection, evidenceRecordText, handoffFor, handoffLines, handoffReferences, isGraphMember, latestRun, loadCaller, notActivatedLines, omissionLine, openRootProposals, questionProjection, read, refused, relatedEntries, renderRunBinding, reviewRecordText, rootAncestor, runPhaseCell, runPhaseSuffix, runRecordText, sliceUtf8, storeStateText, taskRead, taskRecordText, taskStatus, taskSummaryLine, utf8Bytes };

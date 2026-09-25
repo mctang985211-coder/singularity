@@ -35,6 +35,7 @@ import {
   contextRead,
   contractProjection,
   dynamicProjection,
+  questionProjection,
   taskRead,
   taskStatus,
   type ContextReadQuery,
@@ -130,6 +131,15 @@ export class SingularityContextService extends Service {
   /** The dynamic half: run state, gate phase, recovery marker, related tasks (A2 §D/§9). */
   async dynamicProjection(sessionId: string, signal?: AbortSignal): Promise<ProjectedRead> {
     return await dynamicProjection(this.readDeps(), await this.load(sessionId, signal))
+  }
+
+  /**
+   * The question plane (A4 §F.1/§7.3): the questions this run has not been
+   * answered on, and the answers to its own questions that no model request has
+   * been shown to have carried into its Session yet.
+   */
+  async questionProjection(sessionId: string, signal?: AbortSignal): Promise<ProjectedRead> {
+    return await questionProjection(this.readDeps(), await this.load(sessionId, signal))
   }
 
   private async load(sessionId: string, signal?: AbortSignal): Promise<LoadedCaller> {

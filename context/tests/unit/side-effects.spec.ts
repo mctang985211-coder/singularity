@@ -6,6 +6,7 @@
  */
 
 import { describe, expect, test } from 'vitest'
+import { questionIdOf } from '../../../task/src/index.ts'
 import { FixtureStack, seedChain, type Chain } from '../support/stack.ts'
 import { expectOk, expectRefused } from '../support/stack.ts'
 
@@ -31,6 +32,8 @@ async function readEverything(stack: FixtureStack): Promise<void> {
   await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-c1' })
   await stack.service.contractProjection('s-g1')
   await stack.service.dynamicProjection('s-g1')
+  await stack.service.questionProjection('s-root')
+  await stack.service.questionProjection('s-c1')
 }
 
 describe('reads change nothing', () => {
@@ -115,6 +118,34 @@ describe('projections are stable', () => {
     await readEverything(stack)
     expect(expectOk(await stack.service.contractProjection('s-g1')).text).toBe(firstContract)
     expect(expectOk(await stack.service.dynamicProjection('s-g1')).text).toBe(firstDynamic)
+  })
+
+  test('the question plane is stable, writes nothing, and asks the runtime for nothing', async () => {
+    const { stack, chain } = await chainStack()
+    await stack.ask({ childRunId: 'r-c1', requestKey: 'k1' })
+    const answer = await stack.answer({ questionId: questionIdOf({ childRunId: 'r-c1', requestKey: 'k1' }), requestKey: 'a1', resolves: true })
+    const events = stack.storeEvents(chain.storeId).length
+    const observed = stack.observedCalls()
+
+    const parent = expectOk(await stack.service.questionProjection('s-root')).text
+    const child = expectOk(await stack.service.questionProjection('s-c1')).text
+    expect(child).toContain(answer.answerId)
+    // The one plane the question read touches is the Session log it folds a
+    // consumption proof out of: no store write, and none of the runtime
+    // observations a run's gate or binding would need. The two reads answer the
+    // same bytes, and the only counter that moves is the caller resolution's
+    // own store-open observation, which every projection performs.
+    expect(expectOk(await stack.service.questionProjection('s-root')).text).toBe(parent)
+    expect(expectOk(await stack.service.questionProjection('s-c1')).text).toBe(child)
+    expect(stack.storeEvents(chain.storeId).length).toBe(events)
+    expect(stack.observedCalls().readRunBinding).toBe(observed.readRunBinding)
+    expect(stack.observedCalls().gatePhaseOf).toBe(observed.gatePhaseOf)
+
+    // Other reads in between change neither the text nor the store.
+    await readEverything(stack)
+    expect(expectOk(await stack.service.questionProjection('s-root')).text).toBe(parent)
+    expect(expectOk(await stack.service.questionProjection('s-c1')).text).toBe(child)
+    expect(stack.storeEvents(chain.storeId).length).toBe(events)
   })
 
   test('a projection follows the store when the store really changes', async () => {

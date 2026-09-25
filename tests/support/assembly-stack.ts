@@ -35,7 +35,7 @@ import type { SessionEvent } from '../../../../thirdparty/deepseek-harness/packa
 import SkillRegistry from '../../../../thirdparty/deepseek-harness/packages/skill/skill/lib/index.js'
 import JsonlSessionPersistence from '../../../../thirdparty/deepseek-harness/packages/session/session-persistence-jsonl/lib/index.js'
 import { SessionQueryError } from '../../../../thirdparty/deepseek-harness/packages/session-query/session-query/lib/index.js'
-import { createUserMessage } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
+import { createUserMessage, freezeMessage, MessageId } from '../../../../thirdparty/deepseek-harness/packages/llm/llm/lib/index.js'
 import { createScope } from '../../../../thirdparty/deepseek-harness/packages/core/scope/lib/index.js'
 import type { Agent, ToolDefinition } from '@deepseek-ai/dsh-agent'
 import type { TaskEvent, TaskSnapshot } from '../../task/src/index.ts'
@@ -254,6 +254,14 @@ export class AssemblyStack {
     }
     ctx.provide('sessionQuery', {
       readSurface: async (sessionId: string) => ({ capturedThroughSeq: (await readLog(sessionId)).at(-1)?.seq ?? null }),
+      // The whole-log fold a consumption proof is read off (A4 §7.3). A session
+      // this fixture holds no log for fails the read, exactly as the real
+      // engine's absent-log condition does.
+      readSession: async (sessionId: string) => ({
+        session: { id: String(sessionId) },
+        inheritedEventCount: 0,
+        events: await readLog(String(sessionId)),
+      }),
       readEvent: async (request: { sessionId: string; seq: number; before?: number; after?: number }) => {
         const events = await readLog(String(request.sessionId))
         const target = events.find(event => event.seq === request.seq)
@@ -455,6 +463,40 @@ export class AssemblyStack {
         data: createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }),
         surfaceOp: 'append',
       })) as never)
+    } finally {
+      await handle.close()
+    }
+  }
+
+  /**
+   * Append one relayed message to a session's durable log, in the shape the loop
+   * writes when a claimed inbox message reaches a model request: a `user/message`
+   * event carrying the message's own identity and an `agent-message` source.
+   * That event is the one durable proof A4 §7.3 accepts that the model was given
+   * the message — a pending inbox entry is not one — so a case that simulates
+   * consumption writes exactly this and nothing else.
+   */
+  async appendMessage(sessionId: string, messageId: string, text = `message ${messageId}`): Promise<void> {
+    const next = (await this.log(sessionId)).length
+    const handle = await (this.persistence as unknown as {
+      open: (id: SessionId, access: 'write') => Promise<{
+        append: (events: readonly unknown[]) => Promise<void>
+        close: () => Promise<void>
+      }>
+    }).open(SessionId(sessionId), 'write')
+    try {
+      await handle.append([{
+        type: 'user/message',
+        seq: next,
+        time: Date.now(),
+        data: freezeMessage({
+          id: MessageId(messageId),
+          role: 'user' as const,
+          content: [{ type: 'text' as const, text }],
+          source: { kind: 'agent-message' as const, form: 'relay' as const, senderSessionId: sessionId },
+        }),
+        surfaceOp: 'append',
+      }] as never)
     } finally {
       await handle.close()
     }

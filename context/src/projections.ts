@@ -13,9 +13,12 @@
 
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { SESSION_QUERY_READ_WINDOW_MAX, extractSessionEventText } from '@deepseek-ai/dsh-session-query'
+import { questionsAwaitingAnswerOf } from '@dangosys/dsh-singularity-task'
 import type {
   Diagnosis,
   EvidenceBundle,
+  QuestionAnswerRecord,
+  QuestionRecord,
   ReviewRecord,
   TaskInstance,
   TaskRun,
@@ -110,6 +113,15 @@ export interface SessionQueryReads {
     readonly startSeq: number
     readonly endSeq: number
   }>
+  /**
+   * One Session's whole log, live-preferred, with the number of fork-inherited
+   * events at its head: the fold a *consumption proof* is read off (A4 §7.3) —
+   * the prefix belongs to the Session this one descends from, so a message in it
+   * was never put in front of this Session's model.
+   */
+  readSession(
+    sessionId: string,
+  ): Promise<{ readonly inheritedEventCount: number; readonly events: readonly SessionEvent[] }>
 }
 
 /** Soft view of the env-builder store: the graph env's path is where template discovery walks up from. */
@@ -212,9 +224,13 @@ function contractBody(task: TaskInstance): string[] {
   ]
 }
 
-/** The caller's own run, as one line: status, phase, and the old-record marker such a run earns. */
-function ownRunLine(run: TaskRun): string {
-  return `run ${run.runId} [${run.status}]${runPhaseSuffix(run)} started ${run.startedAt}`
+/**
+ * The caller's own run, as one line: status, phase, and the old-record marker
+ * such a run earns. The snapshot is the store the run was read from, and is
+ * where the run line's one derived word comes from (`waiting_answer`).
+ */
+function ownRunLine(run: TaskRun, snapshot?: TaskSnapshot): string {
+  return `run ${run.runId} [${run.status}]${runPhaseSuffix(run, snapshot)} started ${run.startedAt}`
 }
 
 /**
@@ -542,10 +558,10 @@ export async function dynamicProjection(deps: ReadDeps, loaded: LoadedCaller): P
 
   if (resolution.kind === 'reviewer') {
     const run = snapshot === undefined ? undefined : latestRun(snapshot, task)
-    const label = `delegated task state (review-only, no business Run): ${run === undefined ? 'no run was ever started' : ownRunLine(run)}`
+    const label = `delegated task state (review-only, no business Run): ${run === undefined ? 'no run was ever started' : ownRunLine(run, snapshot)}`
     if (!budget.add(label)) return tooLarge('the delegated task state', taskPageHint(task.taskId))
   } else {
-    if (!budget.add(`your run: ${resolution.run === undefined ? 'none' : ownRunLine(resolution.run)}`)) {
+    if (!budget.add(`your run: ${resolution.run === undefined ? 'none' : ownRunLine(resolution.run, snapshot)}`)) {
       return tooLarge('the run line', taskPageHint(task.taskId))
     }
   }
@@ -585,6 +601,229 @@ export async function dynamicProjection(deps: ReadDeps, loaded: LoadedCaller): P
   return read(
     budget.text(),
     storeSource(resolution.graph, resolution.storeId, 'projected the caller\'s dynamic state'),
+  )
+}
+
+/* --- question projection (the assembly's coordination half) -------------- */
+
+/**
+ * The message identities one Session's own history proves its model has seen
+ * (A4 §7.3): the `user/message` events of its own event suffix, by message id.
+ * That is the only durable proof — a pending inbox entry is not one (the loop
+ * claims and removes it before the step that would carry it), and a claim whose
+ * write never reached history is not one either.
+ *
+ * The fold is the delivery path's (`agent-runtime`'s `ownSuffix`): the
+ * fork-inherited prefix belongs to the Session this one descends from, so a
+ * message there was never put in front of *this* Session's model. Nothing is
+ * written back: this function is a read, and the proof is re-derived at every
+ * assembly, so no consumed flag and no second ledger can disagree with the log.
+ */
+async function consumedMessageIds(deps: ReadDeps, sessionId: string): Promise<ReadonlySet<string>> {
+  const log = await deps.sessionQuery.readSession(sessionId)
+  const ids = new Set<string>()
+  for (const event of log.events.slice(log.inheritedEventCount)) {
+    if (event.type === 'user/message') ids.add(String(event.data.id))
+  }
+  return ids
+}
+
+/** What nothing was proven about. */
+const NOTHING_CONSUMED: ReadonlySet<string> = new Set()
+
+/**
+ * The order both lists print in: `askedAt` ascending, which is the order the
+ * store applied the asks in. Sorting explicitly keeps the claim true even if two
+ * asks commit out of stamp order, and `Array#sort` being stable keeps questions
+ * the store stamped in the same millisecond in the order it holds them.
+ */
+function byAskedAt(left: QuestionRecord, right: QuestionRecord): number {
+  return left.askedAt < right.askedAt ? -1 : left.askedAt > right.askedAt ? 1 : 0
+}
+
+/** One question line: the identity, the asking run, the blocking flag, and where the body is. */
+function questionEntry(snapshot: TaskSnapshot, question: QuestionRecord): string {
+  const task = snapshot.runs.find(run => run.runId === question.childRunId)?.taskId
+  const from = `from child run ${question.childRunId}${task === undefined ? '' : ` (task ${task})`}`
+  return (
+    `- ${question.questionId} — ${from}, blocking: ${question.blocking ? 'yes' : 'no'}, asked ${question.askedAt}` +
+    `\n  body: \`context_read\` kind:"session" ref:${eventReference(question.questionRef.sessionId, question.questionRef.seq)}`
+  )
+}
+
+/** One answer line: the identity, the question it answers, the resolution, and where the body is. */
+function answerEntry(question: QuestionRecord, answer: QuestionAnswerRecord): string {
+  return (
+    `- ${answer.answerId} — the answer to question ${question.questionId}, resolves: ${answer.resolves ? 'yes' : 'no'}, ` +
+    `answered ${answer.answeredAt}` +
+    `\n  body: \`context_read\` kind:"session" ref:${eventReference(answer.answerRef.sessionId, answer.answerRef.seq)}`
+  )
+}
+
+/**
+ * One bounded list of question or answer lines: the entries in the store's ask
+ * order, then the list's guidance. What the output bound could not carry is
+ * named with its count (`@deepseek-ai/dsh-output-retention`'s clause) instead of
+ * silently dropped, and the guidance's room is reserved before each entry is
+ * measured, so an unusually long list never starves it. Returns `'too-large'`
+ * when not even the heading fits: a list that cannot say what it holds is not
+ * shown at all.
+ */
+function questionList(
+  budget: OutputBudget,
+  heading: string,
+  entries: readonly string[],
+  guidance: string,
+  scope: string,
+  recovery: string,
+): 'ok' | 'too-large' {
+  if (!budget.add('') || !budget.add(heading)) return 'too-large'
+  const omitted = (count: number): string =>
+    omissionLine({ scope, unit: 'items', kept: entries.length - count, limit: entries.length, omitted: count, recovery })
+  const reserve = utf8Bytes(omitted(entries.length)) + 1 + utf8Bytes(guidance) + 1
+  let shown = 0
+  for (const entry of entries) {
+    if (budget.remaining < reserve + utf8Bytes(entry) + 1) break
+    budget.add(entry)
+    shown += 1
+  }
+  if (shown < entries.length && !budget.add(omitted(entries.length - shown))) return 'too-large'
+  return budget.add(guidance) ? 'ok' : 'too-large'
+}
+
+/**
+ * The question plane (A4 §F.1, architecture §7.3): what this run owes or waits
+ * for in the direct parent/child conversation, for the prompt assembly's own
+ * named runtime context. Two lists, both derived from the store's question
+ * facts and neither a phase:
+ *
+ * - **as a parent**: every question of a child's that is still open and
+ *   unanswered (`questionsAwaitingAnswerOf`) — the question's identity, the
+ *   asking run, the blocking flag, and the `{sessionId, seq}` reference that
+ *   reads the body out of the asking Session. A question is shown until an
+ *   answer resolves it, whatever happened to its delivery: the store's own fact
+ *   is what makes the parent owe an answer.
+ * - **as a child**: every answer to this run's own questions that its Session
+ *   does not yet prove was put in front of the model. An answer is never dropped
+ *   because the question was answered — it is dropped only when the caller's own
+ *   Session holds that answer's `messageId` as a `user/message` event
+ *   ({@link consumedMessageIds}); a fold that cannot be read proves nothing, so
+ *   every recorded answer stays listed. No consumed flag is stored anywhere.
+ *
+ * The body itself is never copied here: the reference into the sending Session
+ * is the one source of the text, and it is what the model reads with
+ * `context_read`. Both lists are bounded, questions print by `askedAt` ascending
+ * (their answers in the order the store applied them), and a caller with nothing
+ * pending gets an empty text — no header, and no runtime context at all for the
+ * assembly to add.
+ */
+export async function questionProjection(deps: ReadDeps, loaded: LoadedCaller): Promise<ProjectedRead> {
+  const resolution = loaded.resolution
+  if (resolution.kind === 'unbound') return unboundRead(resolution)
+  if (resolution.kind === 'member') {
+    return refused(
+      'unbound',
+      `session "${resolution.sessionId}" is a published member of graph "${resolution.graph.id}" but has no Run of its own and no ` +
+        'recorded delegation, so it asks no parent and answers no child; questions belong to the runs that hold them.',
+    )
+  }
+  if (resolution.kind === 'root' && resolution.task === undefined) {
+    return refused('not-activated', notActivatedLines(resolution.graph, resolution.storeId, loaded.snapshot).join('\n'))
+  }
+  if (resolution.kind === 'reviewer' && resolution.task === undefined) {
+    return refused(
+      'not-found',
+      `the delegation of session "${resolution.sessionId}" names task "${resolution.delegation.taskId}", which store ` +
+        `"${resolution.storeId}" does not hold; there is no delegated run whose questions could be projected.`,
+    )
+  }
+  const snapshot = loaded.snapshot
+  const source = storeSource(resolution.graph, resolution.storeId, 'projected the caller\'s pending questions')
+  // A reviewer has no business Run, and no other role reaches here without one:
+  // the question plane is a run's own list, so there is nothing to project.
+  const run = resolution.kind === 'worker' || resolution.kind === 'root' ? resolution.run : undefined
+  if (snapshot === undefined || run === undefined) return read('', source)
+  if (snapshot.questions === undefined) {
+    return refused(
+      'unreadable',
+      `store "${resolution.storeId}" of graph "${resolution.graph.id}" answered with a snapshot that carries no question index, so ` +
+        'the questions it holds cannot be read; a view built without them would report "no questions" for a store that has some.',
+    )
+  }
+
+  const asked = [...questionsAwaitingAnswerOf(snapshot, run.runId)].sort(byAskedAt)
+  const answers: { readonly question: QuestionRecord; readonly answer: QuestionAnswerRecord }[] = []
+  for (const question of [...snapshot.questions.all].sort(byAskedAt)) {
+    if (question.childRunId !== run.runId) continue
+    for (const answer of question.answers ?? []) answers.push({ question, answer })
+  }
+  let consumed: ReadonlySet<string> = NOTHING_CONSUMED
+  if (answers.length > 0) {
+    try {
+      consumed = await consumedMessageIds(deps, resolution.sessionId)
+    } catch {
+      // A log this read cannot open proves nothing was read, which is the
+      // direction §7.3 fixes: no proof, keep the reference. Every recorded
+      // answer stays in the view and a later assembly re-derives the fold.
+      consumed = NOTHING_CONSUMED
+    }
+  }
+  const unread = answers.filter(item => !consumed.has(item.answer.messageId))
+  if (asked.length === 0 && unread.length === 0) return read('', source)
+
+  const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES)
+  const header = [
+    '# Pending questions (coordination)',
+    `role: ${resolution.kind}`,
+    `graph: ${resolution.graph.id} "${resolution.graph.name}" — store ${resolution.storeId}`,
+    'unanswered questions and answers not yet shown to have been read — derived from the store\'s question facts, never a phase change',
+  ]
+  if (budget.addAll(header) > 0) {
+    return refused(
+      'context-too-large',
+      `the pending-questions header of store "${resolution.storeId}" does not fit the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte output bound, ` +
+        'and a coordination view is never returned as a fragment of itself; nothing is reported in place of it.',
+    )
+  }
+
+  if (asked.length > 0) {
+    const guidance =
+      'Answer a question with `task_answer` {questionId, requestKey, answer, resolves}; `resolves:false` keeps it open, and the ' +
+      'body is at the reference on the question\'s line.'
+    const outcome = questionList(
+      budget,
+      `## Questions waiting for your answer (${asked.length})`,
+      asked.map(question => questionEntry(snapshot, question)),
+      guidance,
+      'pending questions',
+      'the questions this view could not carry stay open in the store',
+    )
+    if (outcome === 'too-large') return questionViewTooLarge(resolution.storeId, 'questions waiting for an answer')
+  }
+
+  if (unread.length > 0) {
+    const guidance =
+      'Read an answer at the reference on its line: it stays here until your own Session shows it was put in front of you.'
+    const outcome = questionList(
+      budget,
+      `## Answers waiting to be read (${unread.length})`,
+      unread.map(item => answerEntry(item.question, item.answer)),
+      guidance,
+      'unread answers',
+      'the answers this view could not carry stay unread in the store',
+    )
+    if (outcome === 'too-large') return questionViewTooLarge(resolution.storeId, 'answers waiting to be read')
+  }
+
+  return read(budget.text(), source)
+}
+
+/** The refusal of a question list the output bound could not lay out at all. */
+function questionViewTooLarge(storeId: string, what: string): ProjectedRead {
+  return refused(
+    'context-too-large',
+    `the ${what} of store "${storeId}" do not fit the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte output bound, and a coordination view is ` +
+      'never returned as a fragment of itself; nothing is reported in place of it.',
   )
 }
 
@@ -642,7 +881,7 @@ export async function taskRead(deps: ReadDeps, loaded: LoadedCaller): Promise<Pr
   }
 
   const run = resolution.kind === 'worker' || resolution.kind === 'root' ? resolution.run : undefined
-  const lines = ['', ...contractBody(task), ...(run === undefined ? [] : ['', ownRunLine(run)])]
+  const lines = ['', ...contractBody(task), ...(run === undefined ? [] : ['', ownRunLine(run, snapshot)])]
   if (budget.addAll(lines) > 0) return tooLarge('your contract', taskPageHint(task.taskId))
 
   // The run binding summary is owed after the children list; measuring it first
@@ -1038,7 +1277,7 @@ async function recordTextOf(
   record: TaskInstance | TaskRun | EvidenceBundle | ReviewRecord | Diagnosis,
 ): Promise<string> {
   if ('objective' in record) return taskRecordText(record)
-  if ('capabilitySnapshot' in record) return await runRecordText(deps.taskRuntime, record)
+  if ('capabilitySnapshot' in record) return await runRecordText(deps.taskRuntime, record, snapshot)
   if ('evidenceId' in record) return evidenceRecordText(snapshot, record)
   if ('diagnosisId' in record) return diagnosisRecordText(record)
   return reviewRecordText(record as ReviewRecord)

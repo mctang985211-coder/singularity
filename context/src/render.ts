@@ -12,6 +12,7 @@
  * @module @dangosys/dsh-singularity-context/render
  */
 
+import { blockingQuestionsOf } from '@dangosys/dsh-singularity-task'
 import type {
   AcceptanceCriterion,
   ArtifactRef,
@@ -50,15 +51,38 @@ function submissionClause(submission: SubmissionRecord): string {
 }
 
 /**
+ * The phase one run's line shows (A4 §7.2): a run whose stored phase is `active`
+ * while a blocking question it asked is still open reads `waiting_answer`. The
+ * derivation is the store's own question facts
+ * ({@link blockingQuestionsOf}) — never the gate, and never a phase written
+ * back: `waiting_children` keeps its own phase and its batch id beside any open
+ * question, and a run whose snapshot is not at hand (or carries no question
+ * index) shows the phase it has on record.
+ */
+function displayPhase(run: TaskRun, snapshot: TaskSnapshot | undefined): string {
+  const phase = run.executionPhase as string
+  if (phase !== 'active') return phase
+  return blockedByQuestion(run, snapshot) ? 'waiting_answer' : phase
+}
+
+/** Whether a blocking question this run asked is still open — the fact `waiting_answer` is derived from. */
+function blockedByQuestion(run: TaskRun, snapshot: TaskSnapshot | undefined): boolean {
+  return snapshot?.questions === undefined ? false : blockingQuestionsOf(snapshot, run.runId).length > 0
+}
+
+/**
  * The phase, batch, submission and no-progress facts of one run, appended to a
  * run line: where this run sits in the protocol, in that order, with the batch
  * id only where a batch exists to name. A phase change and a progress marking
  * rewrite these fields, so this is the run's current position, never a history.
+ *
+ * `snapshot` is where the one derived word comes from: an `active` run with an
+ * open blocking question reads `waiting_answer` (see {@link displayPhase}).
  */
-export function runPhaseSuffix(run: TaskRun): string {
+export function runPhaseSuffix(run: TaskRun, snapshot?: TaskSnapshot): string {
   const parts: string[] = []
   if (run.executionPhase !== undefined) {
-    parts.push(`phase ${run.executionPhase}`)
+    parts.push(`phase ${displayPhase(run, snapshot)}`)
     if (run.batchId !== undefined) parts.push(`batch ${run.batchId}`)
     if (run.submission !== undefined) parts.push(submissionClause(run.submission))
   } else if (run.status === 'running') {
@@ -69,8 +93,8 @@ export function runPhaseSuffix(run: TaskRun): string {
 }
 
 /** The same fact for a denser line, where only the phase and the old-record marker fit. */
-export function runPhaseCell(run: TaskRun): string {
-  if (run.executionPhase !== undefined) return ` — phase ${run.executionPhase}`
+export function runPhaseCell(run: TaskRun, snapshot?: TaskSnapshot): string {
+  if (run.executionPhase !== undefined) return ` — phase ${displayPhase(run, snapshot)}`
   return run.status === 'running' ? ` — ${NEEDS_RECOVERY_SHORT}` : ''
 }
 
@@ -275,14 +299,19 @@ export function taskRecordText(task: TaskInstance): string {
   return lines.join('\n')
 }
 
-/** The complete rendering of one run record, with the binding re-check appended. */
+/**
+ * The complete rendering of one run record, with the binding re-check appended.
+ * The snapshot is the store the run was read out of: it is where the one
+ * derived word on the run line comes from (see {@link runPhaseSuffix}).
+ */
 export async function runRecordText(
   taskRuntime: ReadOnlyTaskRuntime,
   run: TaskRun,
+  snapshot?: TaskSnapshot,
 ): Promise<string> {
   const { providerBinding, ...record } = run
   const lines: string[] = [
-    `run ${run.runId} of task ${run.taskId} [${run.status}]${runPhaseSuffix(run)}`,
+    `run ${run.runId} of task ${run.taskId} [${run.status}]${runPhaseSuffix(run, snapshot)}`,
     `session: ${run.sessionId}${run.parentRunId === undefined ? '' : ` · parent run: ${run.parentRunId}`}`,
     `started: ${run.startedAt}${run.finishedAt === undefined ? '' : ` · finished: ${run.finishedAt}`}`,
     `capabilities: ${run.capabilitySnapshot.length === 0 ? '(none)' : run.capabilitySnapshot.join(', ')}`,
@@ -349,13 +378,16 @@ export function diagnosisRecordText(diagnosis: Diagnosis): string {
  * The one-line identity of one task, in the shape both status reads use: status,
  * objective, the latest run with its phase, evidence ids, the most recent review
  * outcome with the detail a reader can act on, and the diagnosis count.
+ *
+ * The phase cell is derived from this same snapshot, so a related task's own
+ * open blocking question shows as `waiting_answer` here too.
  */
 export function taskSummaryLine(snapshot: TaskSnapshot, task: TaskInstance, roles: readonly string[] = []): string {
   const run = latestRun(snapshot, task)
   const evidence = snapshot.evidence.filter(item => item.taskId === task.taskId).map(item => item.evidenceId)
   const review = [...snapshot.reviews].reverse().find(item => item.taskId === task.taskId)
   const diagnoses = snapshot.diagnoses.filter(item => item.taskId === task.taskId).length
-  const runPart = run === undefined ? 'run: none' : `run: ${run.status}${runPhaseCell(run)}`
+  const runPart = run === undefined ? 'run: none' : `run: ${run.status}${runPhaseCell(run, snapshot)}`
   const evidencePart = evidence.length === 0 ? '' : ` evidence: [${evidence.join(', ')}]`
   const failing = review?.criteria?.filter(item => item.verdict !== 'pass') ?? []
   const detail = review?.outcome === 'failed' && failing.length > 0

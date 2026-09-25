@@ -8,10 +8,12 @@
  * Why this shape. The unit under test is the read path, and the facts a read
  * may trust are exactly the store's own records — so the fixture writes its
  * stores through the store's trusted entries (`createTaskIn`, `admitTaskIn`,
- * `startRunIn`, `recordHandoffIn`, …), the same ones a store's writer uses, and
- * never by poking at state. What is replaced is what a read may only *observe*
- * from the outside: the graph registry's membership answer, the runtime's
- * recovery status and binding re-check, and DSH's session log. Nothing here
+ * `startRunIn`, `recordHandoffIn`, `askParentQuestionIn`, …), the same ones a
+ * store's writer uses, and never by poking at state. What is replaced is what a
+ * read may only *observe* from the outside: the graph registry's membership
+ * answer, the runtime's recovery status and binding re-check, and DSH's session
+ * log — whose *shape* is real enough for the one fold the question plane reads,
+ * a `user/message` event carrying a message id (`consumed`). Nothing here
  * recovers, spawns or approves anything — a read that did would be visible as a
  * fixture method that was called, and the specs assert that none is.
  *
@@ -26,12 +28,14 @@ import { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
 import { vi } from 'vitest'
-import { rootTaskStoreId } from '../../../task/src/index.ts'
+import { questionOf, rootTaskStoreId, sha256Hex } from '../../../task/src/index.ts'
 import { TaskService } from '../../../task/src/index.ts'
 import type {
   AcceptanceCriterion,
   ArtifactRef,
   EvidenceBundle,
+  QuestionAnswerRecord,
+  QuestionRecord,
   ReviewRecord,
   RunProviderBinding,
   SubmissionRecord,
@@ -159,6 +163,10 @@ export class FixtureStack {
       graph: { readonly agents: readonly { readonly id: string }[]; readonly edges: readonly { kind: string; from: string; to: string }[] }
     }>
   }
+  /** The session plane's stand-in, kept so one of its reads can be handed back broken. */
+  private sessionQueryService!: {
+    readSession(sessionId: string): Promise<unknown>
+  }
 
   constructor() {
     this.ctx = new Context()
@@ -243,6 +251,13 @@ export class FixtureStack {
         if (log === undefined) throw sessionError(`session "${String(sessionId)}" has no log`, 'SESSION_QUERY_SESSION_NOT_FOUND')
         return { capturedThroughSeq: log.events.at(-1)?.seq ?? null }
       },
+      readSession: async (sessionId: string) => {
+        const log = this.logs.get(String(sessionId))
+        if (log === undefined) throw sessionError(`session "${String(sessionId)}" has no log`, 'SESSION_QUERY_SESSION_NOT_FOUND')
+        // The fixture's logs are never fork-inherited: the whole log is the
+        // session's own suffix, which is what the consumption fold reads.
+        return { session: { id: String(sessionId) }, inheritedEventCount: 0, events: log.events }
+      },
       readEvent: async (request: { sessionId: string; seq: number; before?: number; after?: number }) => {
         const log = this.logs.get(String(request.sessionId))
         if (log === undefined) throw sessionError(`session "${String(request.sessionId)}" has no log`, 'SESSION_QUERY_SESSION_NOT_FOUND')
@@ -258,6 +273,7 @@ export class FixtureStack {
     this.ctx.provide('graphs', graphsService as never)
     this.ctx.provide('taskRuntime', runtimeService as never)
     this.ctx.provide('sessionQuery', sessionQuery as never)
+    this.sessionQueryService = sessionQuery
     this.service = new SingularityContextService(this.ctx)
   }
 
@@ -295,6 +311,91 @@ export class FixtureStack {
     this.headers.set(sessionId, header)
     // Seqs are per-session and dense from 0, the way a real log numbers them.
     this.logs.set(sessionId, { header, events: texts.map((text, index) => SESSION_TEXT(text, index, this.stamp())) })
+  }
+
+  /**
+   * Append one identified relay message to a session's log — the `user/message`
+   * event DSH writes when a claimed inbox message is put in front of the model.
+   * This is the durable fact a consumption proof is read off (A4 §7.3): the
+   * fixture writes exactly that event and nothing else, so "the model has been
+   * given this message id" is the log's own record.
+   */
+  consumed(sessionId: string, messageId: string, text = `message ${messageId}`): void {
+    const log = this.logs.get(sessionId)
+    if (log === undefined) throw new Error(`fixture: session "${sessionId}" has no log`)
+    log.events.push({
+      type: 'user/message',
+      seq: SessionSeq(log.events.length),
+      time: this.stamp(),
+      data: {
+        id: messageId,
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'agent-message', form: 'relay', senderSessionId: sessionId },
+      },
+    } as unknown as SessionEvent)
+  }
+
+  /**
+   * Ask one question through the store's own entry (`askParentQuestionIn`): the
+   * fixture supplies the citation, the identity comes from the (run, request
+   * key) pair the store derives it from, and the parent run is the one the store
+   * resolves from the asking task's parent — never a caller's choice.
+   */
+  async ask(spec: {
+    readonly childRunId: string
+    readonly requestKey: string
+    readonly blocking?: boolean
+    /** Where the body is; defaults to seq 0 of the asking run's own session, which this fixture always has. */
+    readonly questionRef?: { readonly sessionId: string; readonly seq: number }
+    readonly messageId?: string
+  }): Promise<QuestionRecord> {
+    const child = this.runFactsOf(spec.childRunId)
+    const result = await this.task.askParentQuestionIn(
+      child.storeId,
+      {
+        childRunId: spec.childRunId,
+        requestKey: spec.requestKey,
+        // The body is the Session's `tool/call`; this fixture does not model the
+        // call, so the digest is a fixture value rounded to the request key.
+        questionDigest: sha256Hex(`question:${spec.childRunId}:${spec.requestKey}`),
+        questionRef: spec.questionRef ?? { sessionId: child.sessionId, seq: 0 },
+        messageId: spec.messageId ?? `m-question-${spec.requestKey}`,
+        blocking: spec.blocking ?? true,
+      },
+      child.sessionId,
+    )
+    return result.question
+  }
+
+  /**
+   * Answer one question through the store's own entry
+   * (`answerParentQuestionIn`): the answering run is the question's own parent
+   * run, resolved from the record, and the citation is that run's session — the
+   * same two checks the reducer applies.
+   */
+  async answer(spec: {
+    readonly questionId: string
+    readonly requestKey: string
+    readonly resolves?: boolean
+    readonly answerRef?: { readonly sessionId: string; readonly seq: number }
+    readonly messageId?: string
+  }): Promise<QuestionAnswerRecord> {
+    const found = await this.findQuestion(spec.questionId)
+    const result = await this.task.answerParentQuestionIn(
+      found.storeId,
+      {
+        questionId: spec.questionId,
+        parentRunId: found.question.parentRunId,
+        requestKey: spec.requestKey,
+        answerDigest: sha256Hex(`answer:${spec.questionId}:${spec.requestKey}`),
+        resolves: spec.resolves ?? true,
+        answerRef: spec.answerRef ?? { sessionId: found.parentSessionId, seq: 0 },
+        messageId: spec.messageId ?? `m-answer-${spec.requestKey}`,
+      },
+      found.parentSessionId,
+    )
+    return result.answer
   }
 
   /** Seed one task, its admission, and its running run through the store's own entries. */
@@ -466,7 +567,8 @@ export class FixtureStack {
     readonly phase?: TaskRun['executionPhase']
     readonly batchId?: string
     readonly submission?: SubmissionRecord
-    readonly noProgress?: { readonly rounds: number; readonly factCount: number }
+    /** The note the store requires of a progress marking; a fixture sentence stands in for the observation a runtime writes. */
+    readonly noProgress?: { readonly rounds: number; readonly factCount: number; readonly note?: string }
   }): Promise<void> {
     const storeId = rootTaskStoreId(this.rootOf(spec.sessionId))
     if (spec.phase !== undefined) {
@@ -481,6 +583,7 @@ export class FixtureStack {
         kind: 'unsubmitted-idle',
         rounds: spec.noProgress.rounds,
         factCount: spec.noProgress.factCount,
+        note: spec.noProgress.note ?? 'fixture: the run made no progress',
       })
     }
   }
@@ -596,6 +699,19 @@ export class FixtureStack {
     return { read: async () => record }
   }
 
+  /**
+   * Make the session plane's whole-log read fail for one session. The read that
+   * folds a consumption proof has to answer "was this message put in front of the
+   * model?" from the log; a log that cannot be read must not be answered as "no".
+   */
+  breakSessionRead(sessionId: string, error: Error = new Error('the session log cannot be read')): void {
+    const read = this.sessionQueryService.readSession.bind(this.sessionQueryService)
+    this.sessionQueryService.readSession = async (id: string) => {
+      if (String(id) === sessionId) throw error
+      return await read(id)
+    }
+  }
+
   async snapshot(storeId: string): Promise<TaskSnapshot> {
     return await this.task.snapshotIn(storeId)
   }
@@ -627,6 +743,30 @@ export class FixtureStack {
       if (event !== undefined) return String(event.sessionId)
     }
     throw new Error(`fixture: no run was seeded for task "${taskId}"`)
+  }
+
+  /** Where one seeded run lives: its store, its session, and the task it executes. */
+  private runFactsOf(runId: string): { readonly storeId: string; readonly sessionId: string; readonly taskId: string } {
+    for (const [storeId, store] of this.stores) {
+      const event = store.events.find(item => item.kind === 'TaskStarted' && item.runId === runId)
+      if (event !== undefined) return { storeId, sessionId: String(event.sessionId), taskId: String(event.taskId) }
+    }
+    throw new Error(`fixture: no run "${runId}" was seeded`)
+  }
+
+  /** One stored question with the store and the answering session its record names. */
+  private async findQuestion(
+    questionId: string,
+  ): Promise<{ readonly storeId: string; readonly question: QuestionRecord; readonly parentSessionId: string }> {
+    for (const storeId of this.stores.keys()) {
+      const snapshot = await this.snapshot(storeId).catch(() => undefined)
+      const question = snapshot === undefined ? undefined : questionOf(snapshot, questionId)
+      if (question === undefined) continue
+      const parent = snapshot?.runs.find(run => run.runId === question.parentRunId)
+      if (parent === undefined) throw new Error(`fixture: question "${questionId}" names no run of this store`)
+      return { storeId, question, parentSessionId: String(parent.sessionId) }
+    }
+    throw new Error(`fixture: no store holds question "${questionId}"`)
   }
 
   private async store(storeId: string): Promise<void> {
