@@ -18,13 +18,13 @@
 |---|---|---|
 | 子节点全局观 | fresh session；TaskHandoff 的父目标、理由、决策/约束等字段；父 session 引用；worker contract 系统投影 | 实际 `buildHandoff` 调用主要填父目标、依赖证据、assumptions，决策/约束常为空；没有完整 root brief 和祖先决策投影 |
 | 压缩后契约 | `contract-reinjection.ts` 复用 DSH system prompt projection，agent scope 隔离 | 动态上下文版本、决策变更通知、事实与摘要来源分离不完整 |
-| 子询问父 | DSH 有 inbox/steer/followup、continuable send_message；worker 有 ask_user_question | Singularity spawn 直接走 agents.create，未注册 continuable activation；开放 send_message 不能自动得到子到父通道；缺 questionId/答复/等待协议 |
-| 父节点可回答 | A3 已使 `decomposeAndRun` 返回 batchId，父可继续协调 | A4 的持久问题/回答与唤醒尚未接线，不能据非阻塞推进宣称问答完成 |
-| 多轮任务执行 | A3 已分开 idle 与显式提交，waiting_children/submitted 有运行时闸 | 问答等待、部分回答与 claim 后恢复仍待 A4；已提交未判决的恢复不等于任意中断自动续做 |
-| Task 发现与上下文 | task_read 读当前任务；task_status 列整 store；handoff 带一层父目标；capability_list 列 registry | 缺根约束、贡献、相关依赖证据的统一投影与按引用读取；A2/A1 由 context 一起交付。没有模板 catalog；revision/cursor 并非默认建设目标 |
+| 子询问父 | DSH 有 inbox/steer/followup、continuable send_message；worker 有 ask_user_question | Singularity spawn 直接走 agents.create，未注册 continuable activation；开放 send_message 不能自动得到子到父通道（A4 已交付 2026-09-25、冷恢复返工闭合 2026-09-26：`task_ask_parent`/`task_answer`、持久 questionId/答复/等待协议与同 messageId 投递；send_message 仍未开放） |
+| 父节点可回答 | A3 已使 `decomposeAndRun` 返回 batchId，父可继续协调 | A4 的持久问题/回答与唤醒已接线（2026-09-25/26，含跨重启续跑；主 guide §5.16） |
+| 多轮任务执行 | A3 已分开 idle 与显式提交，waiting_children/submitted 有运行时闸 | 问答等待、部分回答与 claim 后恢复已由 A4 交付；已提交未判决的恢复不等于任意中断自动续做 |
+| Task 发现与上下文 | task_read 读当前任务；task_status 列整 store；handoff 带一层父目标；capability_list 列 registry | 根约束/贡献/相关依赖的统一投影与按引用读取已随 A2+A1 验收（2026-09-25，context 包）。没有模板 catalog；revision/cursor 并非默认建设目标 |
 | 沿图 debug | task_review_pack 带当前任务的 reviews/父子摘要/相邻依赖；只读 task_review_agent 及 Diagnosis | 无自动 review 触发与跨任务因果遍历；reviewer prompt 限制“pack and nothing else”与读取更深证据的工具能力不协调 |
 | 改进执行 | Evolution proposal/prepare/replay/gate/approval/apply/rollback；P1–P4 | 无 supervisor 自动候选工作流、真实来源全绑定、blocked 恢复；多目标执行器仍缺失 |
-| 根目标 | **A0 已实现，Q2/Q3 返工已关闭（2026-09-23）**：`graphs.create` 只建 graph + root session 并调 `adoptRoot`；`task_intake` 用用户目标构造根契约，机器校验（含「至少一条 mandatory 非 composite 判据」）后可经 T2/T3 同套审核，激活即一次原子提交落根任务 + 根 run；未激活时 `task_read`/`task_status` 报具名状态；三个入口共用 `assertRootContractOrigin`（store↔session、顶层会话、本人消息三规则，拒绝均在首次写入前，日志不可读 fail-closed）；无根任务时 `adoptRoot` 先跑既有恢复遍再读回，否则答 `{ adopted: false }` 并点名仍未关闭的提案 | 仍未建：根契约修订入口（修订=新提案）、模板库、A1 上下文投影；机器准入不证明模型对用户请求的解读正确，R1 完成轮 3 只证明固定场景的澄清消费与有限目标形成；来源归属是归因纪律而非来源真实性证明（宿主伪造 `user` 消息仍被采信），服务层不校验顶层会话属某 graph 的 root（该规则仍在 `task_intake` 工具），日志不可读时不能激活/恢复 |
+| 根目标 | **A0 已实现，Q2/Q3 返工已关闭（2026-09-23）**：`graphs.create` 只建 graph + root session 并调 `adoptRoot`；`task_intake` 用用户目标构造根契约，机器校验（含「至少一条 mandatory 非 composite 判据」）后可经 T2/T3 同套审核，激活即一次原子提交落根任务 + 根 run；未激活时 `task_read`/`task_status` 报具名状态；三个入口共用 `assertRootContractOrigin`（store↔session、顶层会话、本人消息三规则，拒绝均在首次写入前，日志不可读 fail-closed）；无根任务时 `adoptRoot` 先跑既有恢复遍再读回，否则答 `{ adopted: false }` 并点名仍未关闭的提案 | 仍未建：根契约修订入口（修订=新提案）、模板库；A1 上下文投影已随第 9 项验收（2026-09-25）；机器准入不证明模型对用户请求的解读正确，R1 完成轮 3 只证明固定场景的澄清消费与有限目标形成；来源归属是归因纪律而非来源真实性证明（宿主伪造 `user` 消息仍被采信），服务层不校验顶层会话属某 graph 的 root（该规则仍在 `task_intake` 工具），日志不可读时不能激活/恢复 |
 | Prompt 一致性 | root/worker 提示词在源码；工具按 grant 筛选；**R0 已交付（2026-09-23，已验收）**：装配开关 `evolution` 决定九个 `evolution_*` 是否注册，root allow-list 与 prompt 由同一布尔派生（off = 19 常驻工具 / 20 名 allow-list / 无进化协议段；on = 28 / 29，逐名与之前相同）；BB 句子移出通用 root prompt，领域指导归部署的领域 skill | 仍未做：A1–A6 各角色模板逐票同步（worker 的「make command exit 0」与「直接问人」措辞、decomposable 一段的自相矛盾表述在本组未改）；R1 需给出真实模型下的提示词效果证据 |
 
 主要源码：`task-runtime/src/{handoff,contract,orchestrate,index,capability}.ts`；`agent-runtime/src/{index,contract-reinjection,grants}.ts`；`agent-runtime/src/prompts/root.prompts.ts`；`agent-singularity/src/tools/{task-read,task-status,task-review-pack,review-agent}.ts`。
@@ -106,7 +106,7 @@ T2/T3 子批次协议已交付，A0 根入口复用摘要绑定、批准后重�
 | 层 | 默认内容 | 来源/更新 |
 |---|---|---|
 | 不可丢的任务核心 | 自身完整 AC/constraints/assumptions、根目标与根硬约束、父目标、我的贡献/义务引用、当前 run 身份 | T1 契约、TaskHandoff；契约不可变，系统 section 投影 |
-| 小型动态事实 | 当前已有决定及来源、已选能力摘要、直接依赖状态、现有执行限制与预算观测；问答随 A4 落地再加入 | 从既有记录读取；来源保留 Task/Run/Session 身份，变化时更新，不新建全局 revision 或每 step 时间戳 |
+| 小型动态事实 | 当前已有决定及来源、已选能力摘要、直接依赖状态、现有执行限制与预算观测；问答已随 A4 落地（`singularity:questions` 投影呈现待答问题与未读回答，2026-09-25） | 从既有记录读取；来源保留 Task/Run/Session 身份，变化时更新，不新建全局 revision 或每 step 时间戳 |
 | 按需细节 | 祖先契约、相关兄弟 evidence、决定原文、失败日志、父 session 具体 seq | 只读查询；读取动作与返回进入模型日志 |
 
 “全局”是知道最终目标、硬边界、自己的贡献和依赖，不是看到所有会话。普通 worker 不默认收到无关兄弟历史、全库 Skill 正文、所有诊断。Supervisor 可在授权域内读取更宽切片，但也先摘要再展开。
@@ -160,7 +160,7 @@ A3 前的链路是“父工具等待子 whenIdle → 子工具等待父回答”
 
 A3 统一模块职责：Task runtime 对分解、提交、取消和恢复负责身份/状态重检、幂等与副作用交接，工具层只做输入转换和结果展示；A4 问答沿用同一合同。先计算合法迁移并持久化效果意图，再通过已有 agent-runtime/verifier 执行；恢复按稳定身份补缺失效果，不把内存 promise 当状态。普通执行、replay、恢复共用提交/验证/预算/取消规则，只允许调用场景显式不同；不得各复制一套状态分支。新增内部 helper 必须减少重复职责，不把每个事件包装成独立框架或插件。
 
-共享工作区必须避免父子同时写：父进入 waiting_children 时，运行时工具执行闸只放行上下文读取、向直属父提问、回答子问题、root 的必要人类澄清、诊断请求、状态查询与受控取消；拒绝父的写/shell/再次分解等动作。不能只调整下一步工具 schemas，因为在途调用也需检查。并行独立工作必须另有产物范围与隔离合同，本票不开放。（A3 已落地 2026-09-22：`gate.ts` 经 `tools/pre-execute` waterfall 真实否决，在途调用同样登记检查，放行表含读/状态/诊断/`task_cancel` 等 18 项；问答两类动作只留 A4 挂载点。）
+共享工作区必须避免父子同时写：父进入 waiting_children 时，运行时工具执行闸只放行上下文读取、向直属父提问、回答子问题、root 的必要人类澄清、诊断请求、状态查询与受控取消；拒绝父的写/shell/再次分解等动作。不能只调整下一步工具 schemas，因为在途调用也需检查。并行独立工作必须另有产物范围与隔离合同，本票不开放。（A3 已落地 2026-09-22：`gate.ts` 经 `tools/pre-execute` waterfall 真实否决，在途调用同样登记检查，放行表含读/状态/诊断/`task_cancel` 等 18 项；问答两类动作只留 A4 挂载点。A4 已落地（2026-09-25）：放行表 20 项含 `task_ask_parent`/`task_answer`，闸增 per-session 问答阻塞态。）
 
 派发与验收共用写入收敛边界：先持久化准入关闭状态，再排空已准入的写调用及其受管理后台进程，最后启动子批次或捕获产物身份并验证。分解可以立即返回 batchId，但排空完成前不能启动子节点。提交可以立即返回已记录，但排空完成前不能进入 verifier。复用现有工具/进程生命周期服务，不自造进程调度器；无法确认停止的写进程形成明确的不可验收诊断，禁止超时后假定已停止。恢复后同样先对账，不能仅因内存调用计数为零就验证。该边界覆盖受管理执行，不声称隔离共享文件系统上的任意外部进程。（A3 已落地：`drainSession` 有界排空 + `ctx.jobs` kill/wait 终态确认；发起提交/分解的调用经 `excludeCallId` 排除；不可确认 → 明确的不可验收诊断。）
 
@@ -186,7 +186,7 @@ A3 统一模块职责：Task runtime 对分解、提交、取消和恢复负责�
 | 任意非终态 | graph 取消/硬超时/不可恢复基础设施失败 | 按原因走 cancelled/failed，取消未答问题和后续派发 |
 | 任意终态 | 迟到问题/回答/提交 | 拒绝执行效果，保留诊断；不能复活原 Run |
 
-（A3 已落地 2026-09-22：reducer 迁移闸只放行 active→waiting_children、active→submitted、waiting_children→submitted；取消行与终态拒绝行已接线；含问答阻塞的两行属 A4 待建。）
+（A3 已落地 2026-09-22：reducer 迁移闸只放行 active→waiting_children、active→submitted、waiting_children→submitted；取消行与终态拒绝行已接线；含问答阻塞的两行属 A4，已交付（2026-09-25）：阻塞派生自问答事实、resolves:true 只解除对应项、主相位不变。）
 
 历史非终态 Run 缺相位时不能默认认定 active 并自动重跑；恢复入口先从旧事件确认可安全继续的路径，否则显示 needs-recovery 诊断，不新增伪造终态。（A3 已落地：旧无相位 run 不改状态、不重跑，`task_read`/`task_status` 派生 needs-recovery，唯一合法动作是取消。）迁移模式不得绕过原预算、重复已产生的外部副作用。
 
@@ -274,7 +274,7 @@ R0 按角色与实际启用能力收敛工具面，部署未启用 Evolution 时
 
 ## 10. 分批建设合同
 
-派发严格遵守[建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一表，每次读取[公共执行合同](execution-prompts/README.md)，更新主 guide、计划及本文当前状态。A0、R2、R1 完成轮 3 与 R3 已验收，R0 证据保留，下一项可派第 9 项 A2+A1。下表仅作方向索引，不构成另一份派发授权；读取/恢复与后续各组的施工合同、验收编号使用计划 D/E/F。
+派发严格遵守[建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一表，每次读取[公共执行合同](execution-prompts/README.md)，更新主 guide、计划及本文当前状态。A0、R2、R1 完成轮 3、R3 与第 9 项 A2+A1 已验收，R0 证据保留；第 11 项 A4 已交付（2026-09-26 返工闭合，待验收），当前状态以计划文首唯一表为准。下表仅作方向索引，不构成另一份派发授权；读取/恢复与后续各组的施工合同、验收编号使用计划 D/E/F。
 
 | 票 | 前置与落点 | 必交付与确定性验收 |
 |---|---|---|

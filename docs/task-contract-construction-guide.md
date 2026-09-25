@@ -5,7 +5,7 @@
 
 方向入口为 [主指南](singularity-harness-guide.md)，派发顺序以 [建设计划](2026-09-20-vrtc-code-change-plan.md)为准；本文件细化 Task 契约与生成审核，不替代两者。
 
-后续 [探索与自进化架构](exploration-evolution-architecture.md)细化上下文、非阻塞批次、问父与 supervisor。T1–T3 只建设子任务契约/审核，均已交付；根 intake 属 A0（A0 + R0 已交付，来源/恢复返工 2026-09-23 关闭）。当前唯一顺序以建设计划为准：R2、R1、R3 已验收，下一项为第 9 项 A2+A1；context 职责及完整消费设计见主 guide §1.4 与计划 D/E 节，不将上下文主体继续放进 task。
+后续 [探索与自进化架构](exploration-evolution-architecture.md)细化上下文、非阻塞批次、问父与 supervisor。T1–T3 只建设子任务契约/审核，均已交付；根 intake 属 A0（A0 + R0 已交付，来源/恢复返工 2026-09-23 关闭）。当前唯一顺序以建设计划为准（截至 2026-09-26：第 9 项 A2+A1 已验收、第 11 项 A4 返工交付待验收，下一项 S4-E）；context 职责及完整消费设计见主 guide §1.4 与计划 D/E 节，不将上下文主体继续放进 task。
 
 后续恢复合同已固定在计划 F.4，尚未实现：task_recover 为失败原目标创建新 Run/Session，本次 task_decompose 依据持久恢复关联进入按 Run 的新批次准入；复用证据通过本次成员绑定解析，原 AC、旧已消费提案和旧终态不改。下文“一父一批”仍描述当前 T2/T3 行为，不能据此把 A6 写成重新消费旧 proposal，也不能在 A6 前放宽当前闸。
 

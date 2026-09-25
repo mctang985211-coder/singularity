@@ -1,6 +1,8 @@
 # A3 非阻塞运行与恢复：事件/状态迁移矩阵与受控模型 fixture 合同
 
 日期：2026-09-22。状态：A3 已交付，本文保留实现前合同与评审理由供回归参考；实际落点、偏差及验证以[历史执行记录](history/2026-09-24-vrtc-execution-records.md)中的 A3 记录和主 guide §5.9 为准，不重新派发 A3。
+
+后续更正（2026-09-26）：第 11 项 A4 已交付并闭合冷恢复返工——`task_ask_parent`/`task_answer` 已建并挂载，闸放行表现行 20 项；已知问答等待的 worker 与有问答参与的 waiting_children 非根父在重启后恢复同一 Session/Run 续跑，本文 §2 矩阵与 §5 边界中「worker session 续跑属 S2-R」的表述自此仅对**非问答**的在途 worker 成立。当前事实以主 guide §5.16 与[返工交付记录](history/2026-09-26-a4-rework-record.md)为准。
 前置：T1（`741dcb2`）、S1-V 切片 2（`c2912af`）、S1-C（`eaa024f`）均已验收；前置接口已逐项源码核对。
 依据：[深入架构](exploration-evolution-architecture.md) §7.1/§7.2/§7.4 与 §10 A3 行；[建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一顺序第 4 行完成闸。
 
@@ -80,9 +82,9 @@ Reducer 校验（`task/src/service/state.ts`）：
 | 任意非终态 | graph 取消 / batch 取消（`task_cancel`，仅本批次父 run 的 session）/ 根期限到达 / 不可恢复基础设施失败 | 按原因 cancelled 或 failed；取消未启动子节点（cancelled-before-start），中止在途子 agent，回收工作区归属，对账受管理进程 |
 | 任意终态 | 迟到的提交/分解/写入 | 拒绝执行效果并保留诊断（提交去重由相位唯一性保证：第二次提交返回已记录结果，不改状态） |
 | active（worker）idle 且无提交 | `whenIdle` 观察 | `RunProgressMarked(rounds+1)`；rounds=1 时经 `agent.followup` 发一次提醒；达到 `noProgressRounds` 上限 → failed（无进展预算停止，保留诊断）；已知等待（waiting_children/submitted）不标记 |
-| 重启后非终态 run | 恢复对账（§3.7） | submitted → 补验证；waiting_children → 重启批次 driver；active（worker）→ cancelled + 恢复诊断；缺相位（旧记录）→ 不改状态，task_read/task_status 派生显示 needs-recovery |
+| 重启后非终态 run | 恢复对账（§3.7） | submitted → 补验证；waiting_children → 重启批次 driver；active（worker）→ cancelled + 恢复诊断（A4 起例外：已知问答等待的 active worker 恢复同一 Session/Run 续跑，见文首更正）；缺相位（旧记录）→ 不改状态，task_read/task_status 派生显示 needs-recovery |
 
-`waiting_answer` 对外显示态属 A4；本票预留的 `pendingQuestionIds`/`blockingQuestionIds` 无非空生产写入，现行计划 F.1 决定 A4 从问答事实派生等待，不再启用它们。
+`waiting_answer` 对外显示态属 A4（已交付 2026-09-25：active+阻塞经 context 纯派生显示，非相位）；本票预留的 `pendingQuestionIds`/`blockingQuestionIds` 无非空生产写入，现行计划 F.1 决定 A4 从问答事实派生等待，不再启用它们。
 
 ## 3. 机制设计
 
@@ -115,7 +117,7 @@ Reducer 校验（`task/src/service/state.ts`）：
 
 闸内状态（单进程 runtime 拥有）：`sessionId → { phase, inFlight: Map<callId, {name, writes}> }`。相位由 runtime 在提交成功后同步更新。**在途登记一致性规则**：只有被放行（调用了 `next()`）的调用才登记；deny 的调用不登记（其 `tools/result` 到来时移除为 no-op）；`tools/result` 按 callId 出清。
 
-放行表（相位 ≠ active 时）：`task_read`、`task_status`、`capability_list`、`skill`、`session_search`、`session_event_read`、`session_trace`、`task_review_pack`、`task_diagnose`、`read`、`read_image`、`glob`、`grep`、`web_fetch`、`ask_user_question`、`hitl_ask`、`hitl_approve`、`task_cancel`。其余一律 deny（含 `task_decompose`、`task_submit_result`、`task_verify`、`write`、`edit`、`bash`、`job_*`、`graph_spawn`、`evolution_*`、`subagent_*`）。无 run 绑定的 session（env-clean、reviewer 等）不受闸约束。deny 返回 `{ kind: 'deny', reason }`（含相位与允许类别），不改动任何状态。
+放行表（相位 ≠ active 时）：`task_read`、`task_status`、`capability_list`、`skill`、`session_search`、`session_event_read`、`session_trace`、`task_review_pack`、`task_diagnose`、`read`、`read_image`、`glob`、`grep`、`web_fetch`、`ask_user_question`、`hitl_ask`、`hitl_approve`、`task_cancel`。其余一律 deny（含 `task_decompose`、`task_submit_result`、`task_verify`、`write`、`edit`、`bash`、`job_*`、`graph_spawn`、`evolution_*`、`subagent_*`）。无 run 绑定的 session（env-clean、reviewer 等）不受闸约束。（2026-09-26 更正：现行放行表 20 项——A2+A1 起 `context_read` 在表、`session_search`/`session_event_read`/`session_trace` 已移出并封闭，A4 起增 `task_ask_parent`/`task_answer`；以 `task-runtime/src/gate.ts` 为准。）deny 返回 `{ kind: 'deny', reason }`（含相位与允许类别），不改动任何状态。
 
 写入收敛（dispatch 与验收共用）：
 
@@ -196,9 +198,9 @@ Reducer 校验（`task/src/service/state.ts`）：
 
 ## 5. 边界（如实声明，不算完成项）
 
-- 问答工具（task_ask_parent/task_answer）属 A4；本票只有持久化字段挂载点。
+- 问答工具（task_ask_parent/task_answer）属 A4；本票只有持久化字段挂载点。（A4 已于 2026-09-25 交付、2026-09-26 冷恢复返工闭合，见文首更正。）
 - 子任务仍按依赖串行；不引入并行工作窃取。
-- 进程崩溃时在途的 active worker run 不恢复现场（cancelled + 诊断）；worker session 续跑属 S2-R 范畴。
+- 进程崩溃时在途的 active worker run 不恢复现场（cancelled + 诊断）；worker session 续跑属 S2-R 范畴。（2026-09-26 更正：已知问答等待的 worker 与有问答参与的 waiting_children 非根父自 A4 起恢复同一 Session/Run 续跑——本句自此仅对**非问答**的在途 worker 成立；见文首更正与主 guide §5.16。）
 - 工作区归属是单进程 registry + pid 活性标记；不防御共享文件系统上的外部 unmanaged 写入者（含多机共享 DSH_HOME 时 pid 探测对异机进程失效）。
 - 根预算的 token/工具费用只有软统计；配置不可执行的硬限制会在启动/准入拒绝。
 - S4-E 式"独立评估请求自带显式预算 owner"不属本票；replay 经 store 根总额记账已覆盖现有唯一调用方（evolution_replay，由 root session 发起）。

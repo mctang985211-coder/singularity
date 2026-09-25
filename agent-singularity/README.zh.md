@@ -54,7 +54,7 @@
 
 ### 维护的 Service 状态
 
-1. ctx.singularityAgent：注册上述 tools；root agent 恰好只保留上面这 28 个（ROOT_TOOLS allow-list，外加挂载 preset 提供的 `skill` 加载器）
+1. ctx.singularityAgent：注册上述 tools；本组合恒定注册 22 个（`evolution` 开启时 31 个）；root agent 经 ROOT_TOOLS allow-list 保留其中 21 个（开启时 30 个）——`task_ask_parent` 刻意不在 root 面（root 无父可问）
 2. ctx.hitl：原生交互 seam 的画布 answerer——hitl_ask 走 ctx.userQuestions、hitl_approve 走 ctx.approval（审计事件与 fail-closed 由原生层负责）；ctx.hitl 只把这两条 waterfall 桥接成待处理卡片，由画布经 GET/POST /singularity/hitl 回答，回答、取消或服务卸载后移除
 3. ctx.proposalReviewChannel：本 fiber 上挂载的 T2/T3 审核渠道——task runtime 以软解析取得它，并在分解提案等待人工审核（策略 `all`）时请求它。它渲染已保存的批次（父任务、全部子任务、限额、未满足义务、两个上下文指纹），经原生 approval seam 在 store owner 会话上提问，并把回答经 `taskRuntime.decideProposal` 落为 `TaskProposalDecided`，decidedBy 用渠道自身身份（`approval:<owner session>`）；任何 agent 工具都不接受审批凭据，问不到人的提案保持 `pending_review` 并给出原因。
 4. ctx.evolution：只追加的 evolution 台账（`$DSH_HOME/evolution/proposals.jsonl`）外加每提案沙箱（`sandbox/<proposalId>/`）——evolution_prepare 把 candidate 携带的结构化 mutation 与 champion 快照物化到这里，evolution_replay 对图中已终态的历史任务重放候选后把 candidate vs champion 对比报告（`replay-report.json`）也写到这里；台账与沙箱之外唯一的写入是 evolution_apply / evolution_rollback 把 PROMOTE 决定的 skill / agent_preset / capability 落到生产（rollback 从 champion 快照恢复，champion 不存在则删除 apply 产物），每次各过一次原生人审，L4 与记账型永远拒绝；由 agent 自身 fiber 提供而非子插件——evolution_* 工具是通过注册时那个 context 读它的
