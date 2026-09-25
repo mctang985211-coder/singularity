@@ -9,14 +9,14 @@
 | 任务链接 | [定向返工 prompt](../execution-prompts/09-a2-a1-review-rework.md)；合同：计划 D/E 节、[进度审核 Q1–Q4](2026-09-25-a2-a1-progress-review.md) |
 | 开始日期 | 2026-09-25 |
 | 被审基线 | Singularity `0fc8bc6`（`wip/task-runtime-20260917`）；外层 harness `87260b857f`；DSH thirdparty `0d1f50007f`（两仓修改前工作区干净，无 AGENTS.md） |
-| 交付版本 | Singularity `bee6a96`（实现+测试+构建产物）+ 独立复核响应提交（store 缺失判定、页面收尾行保留、非有限分页输入、成员读取失败及对应反例） |
+| 交付版本 | Singularity `bee6a96`（实现+测试+构建产物）+ `6ae5aa0`（独立复核响应：store 缺失判定、页面收尾行保留、非有限分页输入、成员读取失败及对应反例） |
 | 前置验收记录 | 第 8 项 R1、第 8a 项 R3 已验收（提交与唯一表核对一致，见原[交付记录](2026-09-25-a2-a1-delivery-record.md)）；本组前置即本次审核判返工 |
 
 ## Q1：模型请求必须有可信契约
 
 **原反例**：`bindings.ts` 用 `catch { graph = undefined }` 吞掉 graph 查询异常，已绑定 worker 被误归为 unbound；`assembly.ts` 对 `unbound` 一律放行，缺契约即进入模型；已运行 reviewer 的 ledger 冲突/不可读也走同一放行分支。
 
-**修复（`bee6a96` 及独立复核响应提交）**
+**修复（`bee6a96` + `6ae5aa0`）**
 
 - `graphs/src/index.ts:50-67` 新增可区分的注册表事实 `SESSION_NOT_IN_GRAPH` / `SessionNotInGraphError`（消息与原先一致），`graphForSession` 在“无图发布该会话”时抛它。
 - `context/src/bindings.ts:363-373`（`graphOfSession`）把这个**事实**与**读取失败**分开：只有该错误码是“没有图”，其余异常（注册表就绪失败、图 store 读失败等）是具名 `unreadable` 失败。

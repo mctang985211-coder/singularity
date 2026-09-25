@@ -384,7 +384,7 @@ A3 已交付非阻塞批次、执行相位、工作区写入归属、显式提�
 
 实现方提交了 `4a510ed`（显式恢复屏障/纯读拆分）、`f90d05b`（`context` 包读取核心）、`0f41d91`（装配接线/工具适配/迁移删除/旁路封闭）、`6e0f651`（其独立复核缺口闭合）。下列为已提交代码的范围，**不表示 A2-1～A2-6 已验收**；[进度审核](history/2026-09-25-a2-a1-progress-review.md)的可达反例覆盖了原交付声明。
 
-**定向返工（`bee6a96`）**：Q1/Q2/Q4 关闭、Q3 的“中途失败不得伪装成功”关闭，逐项红/绿证据与最小合同冲突见[返工记录](history/2026-09-25-a2-a1-rework-record.md)。修复后的当前事实：
+**定向返工（`bee6a96` + 复核响应 `6ae5aa0`）**：Q1/Q2/Q4 关闭、Q3 的“中途失败不得伪装成功”关闭，逐项红/绿证据与最小合同冲突见[返工记录](history/2026-09-25-a2-a1-rework-record.md)。修复后的当前事实：
 
 - **绑定失败 vs 域外会话**：`context/src/bindings.ts` 的 `CallerUnbound` 带 `placement`。只有“任何图都不发布且无委派记录”是 `outside`（原行为：不注入、原样组装）；graph 查询异常、域 store 不可读、ledger 冲突/不可读、委派无法落图都是 `failed`，`context/src/assembly.ts` 对其抛出以 refusal 命名的 `AssemblyRefusalError`，模型输入为零（`tests/integration/context-binding-zero-input.spec.ts` 用真实 loop 与计数 adapter 证明）。注册表的“无图发布该会话”事实由 `graphs/src/index.ts` 的 `SessionNotInGraphError`（`SESSION_NOT_IN_GRAPH`）区分，读失败不再被读成“没有图”。**store 报“不存在”时**按图 store 自己的 `spawn` 边区分：被本图 spawn 过的会话（其 run 记录在 spawn 时就写在该 store）判 `unreadable`，未被 spawn 的成员保持计划 D 节的成员放行，root 保持 `not-activated`；边读取失败则失败关闭（独立复核发现 1）。
 - **委派者归属**：reviewer 的 ledger 行只有在被委派 graph 的成员表里确实发布该行 `actor` 时才成立；他图 actor → `cross-graph`，未知 actor → `unbound`，成员表读失败 → `unreadable`（`bindings.ts` 的 `delegatorStanding`）。合法同域委派者仍拿到整域（正例保留）。

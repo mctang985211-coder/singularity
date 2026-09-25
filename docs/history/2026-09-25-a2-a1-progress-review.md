@@ -15,7 +15,7 @@
 
 ## 返工结果（实现侧应答，2026-09-25）
 
-定向返工已按 [prompt](../execution-prompts/09-a2-a1-review-rework.md) 完成并留下[返工记录](2026-09-25-a2-a1-rework-record.md)（提交 `bee6a96`）：
+定向返工已按 [prompt](../execution-prompts/09-a2-a1-review-rework.md) 完成并留下[返工记录](2026-09-25-a2-a1-rework-record.md)（提交 `bee6a96` + 复核响应 `6ae5aa0`）：
 
 - **Q1 关闭**：绑定事实读取失败（graph 查询异常、域 store 不可读、ledger 冲突/不可读）现由 `system-prompt/assemble` 具名拒绝，模型输入为零（真实 loop + 计数 adapter 证据）；图查询异常不再被读成“没有图”，`unbound` 不再无条件放行；诊断组装与确实不属 Singularity 的会话保持原行为。
 - **Q2 关闭**：`ReviewerBindingRecord.actor` 与所委派 graph 的实际成员表核对；他图 actor、未知 actor、成员表读取失败均不授权，同域已发布 actor 的合法正例保留。
