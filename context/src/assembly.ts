@@ -27,6 +27,14 @@
  * error named after the refusal (`context-too-large`, `unreadable`, …): a
  * request whose core contract cannot be admitted whole is refused, never
  * assembled from a cut or invented contract.
+ *
+ * The distinction the assembly rests on is the one the resolver records
+ * (2026-09-25 rework, Q1): a session this deployment holds no fact about is
+ * `placement: 'outside'` and assembles what its composition gives it, while a
+ * *bound* session whose facts could not be read (the graph registry, the domain
+ * store, the ledger) is `placement: 'failed'` and its request is refused by
+ * name. A model request for a published or delegated session never goes out
+ * with an empty contract because a read failed.
  * @module @dangosys/dsh-singularity-context/assembly
  */
 
@@ -34,6 +42,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AssembleContext, AssembledSection, PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type { SingularityContextService } from './index.ts'
 import type { ProjectedReadRefused } from './refusals.ts'
+import { refused } from './refusals.ts'
 
 /**
  * Section name of the assembled contract. The name the old contract-reinjection
@@ -153,11 +162,17 @@ export async function assembleSingularityContext(
       withContractSection(assembly, contract.text)
       return next()
     }
-    // A plain member and an unbound session assemble what their composition
-    // gives them: a member has no contract of its own to inject, and a session
-    // outside this domain is not this package's caller.
+    // A plain member assembles what its composition gives it: it has no contract
+    // of its own to inject, and it is a published session of a graph that reads.
     case 'member':
-    case 'unbound':
       return next()
+    // A session this deployment holds no fact about is not this package's
+    // caller. A session it *does* hold a fact about, whose binding could not be
+    // read (the graph registry, the domain store or the ledger failed), is the
+    // opposite case (2026-09-25 rework, Q1): the request is refused by name
+    // rather than sent to the model with nothing in it.
+    case 'unbound':
+      if (resolution.placement === 'outside') return next()
+      throwRefusal(refused(resolution.refusal, resolution.detail))
   }
 }

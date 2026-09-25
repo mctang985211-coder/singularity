@@ -34,7 +34,13 @@ export interface GraphRegistryLike {
 }
 
 export interface GraphRegistryOptions {
-  /** The fixture's own graph lookup. A throw or a miss means "this session is in no graph", as the real registry answers. */
+  /**
+   * The fixture's own graph lookup. A *miss* must be reported the way the real
+   * registry reports it — `SessionNotInGraphError` (its `SESSION_NOT_IN_GRAPH`
+   * fact) — because the read core tells that fact apart from a failed read: any
+   * other throw is a registry or graph-store failure, and a session bound by it
+   * is refused by name rather than read as "this session is in no graph".
+   */
   readonly graphForSession: (sessionId: string) => Promise<GraphRecordFactsLike> | GraphRecordFactsLike
   /**
    * Every graph this deployment owns, for the store→graph direction a recorded

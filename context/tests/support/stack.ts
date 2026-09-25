@@ -42,6 +42,7 @@ import type {
 } from '../../../task/src/index.ts'
 import { ExecutionGate } from '../../../task-runtime/src/gate.ts'
 import type { RunBindingRead, StoreRecoveryStatus } from '../../../task-runtime/src/index.ts'
+import { SessionNotInGraphError } from '../../../graphs/src/index.ts'
 import { SingularityContextService } from '../../src/index.ts'
 import type {
   CallerResolution,
@@ -150,6 +151,12 @@ export class FixtureStack {
   private readonly recovery = new Map<string, StoreRecoveryStatus>()
   private envPath: string | undefined
   private time = 1_760_000_000_000
+  /** The registry stand-in itself, so a spec can break one of its reads without replacing the whole plane. */
+  private graphsService!: {
+    graphForSession(sessionId: string): Promise<unknown>
+    list(): Promise<readonly unknown[]>
+    view(id: string): Promise<{ graph: { readonly agents: readonly { readonly id: string }[] } }>
+  }
 
   constructor() {
     this.ctx = new Context()
@@ -174,7 +181,10 @@ export class FixtureStack {
         for (const entry of this.graphs.values()) {
           if (entry.members.has(String(sessionId))) return this.record(entry)
         }
-        throw new Error(`graphs: session "${String(sessionId)}" is not in a graph`)
+        // The registry's own fact ("no graph publishes this session"), which the
+        // real registry answers with the same distinguishable error: a read
+        // *failure* is a different answer and must not be read as a miss.
+        throw new SessionNotInGraphError(sessionId)
       },
       list: async () => [...this.graphs.values()].map(entry => this.record(entry)),
       view: async (id: string) => {
@@ -183,6 +193,7 @@ export class FixtureStack {
         return { graph: { id, agents: [...entry.members].map(member => ({ id: member })) } }
       },
     }
+    this.graphsService = graphsService
     const gateView = {
       phaseOf: (sessionId: string) => {
         this.observed.gatePhaseOf(sessionId)
@@ -523,6 +534,26 @@ export class FixtureStack {
   /** Set the recovery status the runtime stub reports for one store. */
   recoveryStatus(storeId: string, status: StoreRecoveryStatus): void {
     this.recovery.set(storeId, status)
+  }
+
+  /**
+   * Make the registry's own lookup fail. This is a *read failure*, not the
+   * registry's "no graph publishes this session" fact: the read path must
+   * report it as a named failure and must never read it as a miss.
+   */
+  breakGraphQuery(error: Error = new Error('the graph registry cannot be read')): void {
+    this.graphsService.graphForSession = async () => {
+      throw error
+    }
+  }
+
+  /** Make one graph's published-members view fail (the read a delegation's actor is checked against). */
+  breakGraphView(error: Error = new Error('the graph store cannot be read'), graphId?: string): void {
+    const read = this.graphsService.view.bind(this.graphsService)
+    this.graphsService.view = async (id: string) => {
+      if (graphId === undefined || id === graphId) throw error
+      return await read(id)
+    }
   }
 
   /** Mount the env-builder seam with a path that holds no repository. */

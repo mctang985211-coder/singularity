@@ -125,6 +125,22 @@ function nextGraphId(existing) {
 	while (existing.includes(`graph${n}`)) n += 1;
 	return `graph${n}`;
 }
+/**
+* The registry's own answer when no graph publishes a session, as a
+* distinguishable value: `graphForSession` reports this *fact* as this error,
+* so a reader that has to tell the fact apart from a failed read (the graph
+* registry or one of its stores being unreadable) can do so by code instead of
+* by message, and keeps a read failure a failure.
+*/
+const SESSION_NOT_IN_GRAPH = "graph-session-not-found";
+/** See {@link SESSION_NOT_IN_GRAPH}: the one error that means "no graph holds this session". */
+var SessionNotInGraphError = class extends Error {
+	code = SESSION_NOT_IN_GRAPH;
+	constructor(sessionId) {
+		super(`graphs: session "${String(sessionId)}" is not in a graph`);
+		this.name = "SessionNotInGraphError";
+	}
+};
 var GraphsService = class extends Service {
 	static inject = [
 		"sessionPersistence",
@@ -332,7 +348,7 @@ var GraphsService = class extends Service {
 	async graphForSession(sessionId) {
 		await this.ready;
 		for (const graph of this.state.snapshot().graphs) if ((await this.ctx.graph.snapshotIn(graph.graphStoreId)).agents.some((agent) => agent.id === sessionId)) return graph;
-		throw new Error(`graphs: session "${sessionId}" is not in a graph`);
+		throw new SessionNotInGraphError(sessionId);
 	}
 	async remove(id) {
 		return this.transition(async () => {
@@ -471,4 +487,4 @@ var GraphsService = class extends Service {
 var src_default = GraphsService;
 
 //#endregion
-export { GraphsService, GraphsState, src_default as default };
+export { GraphsService, GraphsState, SESSION_NOT_IN_GRAPH, SessionNotInGraphError, src_default as default };

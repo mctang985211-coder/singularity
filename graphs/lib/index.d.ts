@@ -84,6 +84,19 @@ declare module '@deepseek-ai/cordis' {
     'graphs/selected'(graph: GraphRecord): void;
   }
 }
+/**
+ * The registry's own answer when no graph publishes a session, as a
+ * distinguishable value: `graphForSession` reports this *fact* as this error,
+ * so a reader that has to tell the fact apart from a failed read (the graph
+ * registry or one of its stores being unreadable) can do so by code instead of
+ * by message, and keeps a read failure a failure.
+ */
+declare const SESSION_NOT_IN_GRAPH = "graph-session-not-found";
+/** See {@link SESSION_NOT_IN_GRAPH}: the one error that means "no graph holds this session". */
+declare class SessionNotInGraphError extends Error {
+  readonly code = "graph-session-not-found";
+  constructor(sessionId: SessionId | string);
+}
 declare class GraphsService extends Service {
   static inject: string[];
   private readonly ready;
@@ -133,4 +146,4 @@ declare class GraphsService extends Service {
   private header;
 }
 //#endregion
-export { CreateGraphRequest, CreateGraphResult, GraphArchive, GraphRecord, GraphsEvent, GraphsService, GraphsService as default, GraphsSnapshot, GraphsState };
+export { CreateGraphRequest, CreateGraphResult, GraphArchive, GraphRecord, GraphsEvent, GraphsService, GraphsService as default, GraphsSnapshot, GraphsState, SESSION_NOT_IN_GRAPH, SessionNotInGraphError };

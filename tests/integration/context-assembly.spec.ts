@@ -1,7 +1,8 @@
-import { symlinkSync } from 'node:fs'
+import { appendFileSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RAW_SESSION_READ_DENIAL } from '../../agent-runtime/src/index.ts'
+import { AssemblyRefusalError } from '../../context/src/index.ts'
 import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stack.ts'
 
 /**
@@ -66,6 +67,76 @@ function rootContract(objective: string, constraints: readonly string[] = []) {
     acceptanceCriteria: [{ criterionId: 'root-goal', description: `${objective} is delivered`, command: 'true' }],
     constraints: [...constraints],
   }
+}
+
+/**
+ * The registry plane this deployment boots with, so a case can hand it a
+ * deliberately broken read: a failure must never be read as "no graph publishes
+ * this session".
+ */
+function registryOf(stack: AssemblyStack): { graphForSession: (sessionId: string) => Promise<unknown> } {
+  return stack.ctx.get('graphs') as unknown as { graphForSession: (sessionId: string) => Promise<unknown> }
+}
+
+/** The named refusal one assembly ended in, or the fact that it assembled at all. */
+async function assemblyRefusal(stack: AssemblyStack, sessionId: string): Promise<AssemblyRefusalError> {
+  const outcome = await stack.assemble(sessionId).then(
+    () => undefined,
+    (reason: unknown) => reason,
+  )
+  if (!(outcome instanceof AssemblyRefusalError)) {
+    throw new Error(`expected the assembly to refuse by name, got ${String(outcome)}`)
+  }
+  return outcome
+}
+
+/** The ledger file this deployment's reviewer delegations are read from and written to. */
+function reviewerLedgerFile(stack: AssemblyStack): string {
+  return join(stack.home, 'review-agents', 'agents.jsonl')
+}
+
+/**
+ * Hand the deployment's own backend a failing store read: the store exists and
+ * its log cannot be read, which is the failure the store service reports (not
+ * the "does not exist" answer a never-created store gives).
+ */
+function breakStoreRead(stack: AssemblyStack, storeId: string): void {
+  const persistence = (stack.ctx as unknown as { sessionPersistence: { open(id: string): Promise<unknown> } }).sessionPersistence
+  const original = persistence.open.bind(persistence)
+  persistence.open = async (id: string) => {
+    if (String(id) === storeId) throw new Error('input/output error while reading the store log')
+    return await original(id)
+  }
+}
+
+/** One more row for a session already recorded: how a delegation that contradicts itself is written. */
+function appendLedgerRow(stack: AssemblyStack, row: Record<string, unknown>): void {
+  appendFileSync(reviewerLedgerFile(stack), `${JSON.stringify(row)}\n`, 'utf8')
+}
+
+/** One store whose task settled `failed` — the escalation signal a reviewer is spawned for. */
+async function failedTask(stack: AssemblyStack, rootSession: string): Promise<{ storeId: string; taskId: string }> {
+  const storeId = stack.storeIdOf(rootSession)
+  await stack.seedLog(rootSession, ['ship the release'])
+  const root = await stack.runtime.intakeRootContract(storeId, rootSession, rootContract('ship the release'))
+  const batch = await stack.runtime.decomposeAndRun(storeId, root.taskId, root.runId, rootSession, {
+    reason: 'split the work',
+    children: [{ objective: 'child that fails', acceptanceCriteria: [criterion('false')] }],
+  } as never)
+  const outcomes = await stack.runtime.awaitBatch(storeId, batch.batchId)
+  expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
+  return { storeId, taskId: outcomes[0]!.taskId }
+}
+
+/** One ledger row, rewritten in place: what a delegation that contradicts itself (or another graph) looks like. */
+function rewriteLedger(stack: AssemblyStack, change: (row: Record<string, unknown>) => Record<string, unknown>): void {
+  const file = reviewerLedgerFile(stack)
+  const rows = readFileSync(file, 'utf8')
+    .split('\n')
+    .filter(line => line.trim().length > 0)
+    .map(line => JSON.parse(line) as Record<string, unknown>)
+    .map(change)
+  writeFileSync(file, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`, 'utf8')
 }
 
 /**
@@ -364,20 +435,6 @@ describe('a replay\'s briefing (A2-3)', () => {
 })
 
 describe('a reviewer with no business run (A2-2)', () => {
-  /** One store with a task whose review settled `failed` — the escalation signal a reviewer is spawned for. */
-  async function failedTask(stack: AssemblyStack, rootSession: string): Promise<{ storeId: string; taskId: string }> {
-    const storeId = stack.storeIdOf(rootSession)
-    await stack.seedLog(rootSession, ['ship the release'])
-    const root = await stack.runtime.intakeRootContract(storeId, rootSession, rootContract('ship the release'))
-    const batch = await stack.runtime.decomposeAndRun(storeId, root.taskId, root.runId, rootSession, {
-      reason: 'split the work',
-      children: [{ objective: 'child that fails', acceptanceCriteria: [criterion('false')] }],
-    } as never)
-    const outcomes = await stack.runtime.awaitBatch(storeId, batch.batchId)
-    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
-    return { storeId, taskId: outcomes[0]!.taskId }
-  }
-
   it('reads the delegated contract, marked review-only, once its ledger row is durable', async () => {
     const stack = await boot({ worker: async () => {} })
     const failed = await failedTask(stack, 's-root')
@@ -489,5 +546,165 @@ describe('reads and repeated assemblies are not side effects (A2-4/A2-3)', () =>
     const diagnostic = await stack.ctx.systemPrompt.assemble({})
     expect(diagnostic.sections.some(section => section.name === 'singularity:worker-contract')).toBe(false)
     expect(diagnostic.contexts.some(context => context.name === 'singularity:state')).toBe(false)
+  })
+})
+
+/**
+ * Q1 (2026-09-25 rework): a request whose binding cannot be read is refused by
+ * name, and only a session this deployment genuinely holds no fact about is
+ * assembled from nothing. The three reads a binding is derived from — the
+ * registry's own lookup, the domain store and the reviewer ledger — are broken
+ * one at a time on the real deployment, and each case checks the two doors that
+ * matter: the `system-prompt/assemble` waterfall the loop calls before every
+ * request (it rejects, so no request is sent) and the tool door (it answers the
+ * same name). The loop-level evidence that no model input is spent is
+ * `context-binding-zero-input.spec.ts`, which counts real requests.
+ */
+describe('a binding that cannot be read refuses the request (Q1)', () => {
+  it('refuses a published worker by name when the graph query fails, and assembles nothing in its place', async () => {
+    const stack = await boot({
+      worker: async sessionId => {
+        const bound = await stack.runtime.runForSession(sessionId).catch(() => undefined)
+        if (bound === undefined || bound.task.depth !== 1) return
+        await stack.call(sessionId, 'task_decompose', {
+          reason: 'the deck is a separate deliverable',
+          children: [{ objective: 'grandchild: build the deck', acceptanceCriteria: [criterion('true')] }],
+        })
+      },
+    })
+    const chain = await threeLayers(stack)
+    // The worker really has a contract before the read breaks — so what the
+    // refusal withholds is the contract it would otherwise have carried.
+    expect(await stack.prompt(chain.grandchildSession)).toContain('## Root objective and hard constraints')
+    registryOf(stack).graphForSession = async () => {
+      throw new Error('the graph registry store is corrupt')
+    }
+
+    const refusal = await assemblyRefusal(stack, chain.grandchildSession)
+    expect(refusal.name).toBe('AssemblyRefusalError')
+    expect(refusal.refusal).toBe('unreadable')
+    expect(refusal.message).toContain('system-prompt assembly refused (unreadable)')
+    expect(refusal.message).toContain('the graph registry store is corrupt')
+    expect(refusal.message).not.toContain('not a published member')
+
+    // The tool door answers the same refusal: the same read core, the same name.
+    const read = await stack.call(chain.grandchildSession, 'task_read')
+    expect(read.text).toContain('task_read unreadable')
+    expect(read.text).toContain('the graph registry store is corrupt')
+    expect(read.text).not.toContain('## Your contract')
+    const status = await stack.call(chain.grandchildSession, 'task_status', {})
+    expect(status.text).toContain('task_status unreadable')
+  })
+
+  it('refuses a root whose store cannot be read, on the first request of a restarted process', async () => {
+    const first = await boot({ worker: async () => {} })
+    const storeId = first.storeIdOf('s-root')
+    await first.seedLog('s-root', ['ship the release'])
+    await first.runtime.intakeRootContract(storeId, 's-root', rootContract('ship the release'))
+    expect(await first.prompt('s-root')).toContain('objective: ship the release')
+    await first.crash()
+    await first.dispose({ remove: false })
+
+    // A restarted process whose backend cannot read the store's log: the store
+    // exists (the registry and the log's header do), and reading it fails. This
+    // is the unit fixture's corruption one layer up — the store's own read — and
+    // it must be a refusal, never an empty domain the root request rides on.
+    const second = await boot({
+      dir: first.dir,
+      graphs: [{ id: 'g1', rootSessionId: 's-root' }],
+      worker: async () => {},
+    })
+    breakStoreRead(second, storeId)
+    const refusal = await assemblyRefusal(second, 's-root')
+    expect(refusal.refusal).toBe('unreadable')
+    expect(refusal.message).toContain(`store "${storeId}"`)
+    expect(refusal.message).toContain('cannot be read')
+    const read = await second.call('s-root', 'task_read')
+    expect(read.text).toContain('task_read unreadable')
+    expect(read.text).toContain(`store "${storeId}"`)
+  })
+
+  it('refuses an already-running reviewer whose ledger cannot be read, and lets no delegated contract through', async () => {
+    const stack = await boot({ worker: async () => {} })
+    const failed = await failedTask(stack, 's-root')
+    const answer = await stack.call('s-root', 'task_review_agent', { taskId: failed.taskId })
+    expect(answer.text).not.toContain('spawn failed')
+    const reviewer = stack.spawns.at(-1)!
+    const sessionId = String(reviewer.sessionId)
+    // The delegation is readable, and the reviewer's request carries the
+    // delegated contract — the state the broken ledger below must not soften.
+    expect(await stack.prompt(sessionId)).toContain('review-only')
+    expect(await stack.prompt(sessionId)).toContain(`task ${failed.taskId}`)
+
+    // A ledger this process cannot parse is `unreadable`, never "no delegation".
+    writeFileSync(reviewerLedgerFile(stack), '{ half-written row', 'utf8')
+    const refusal = await assemblyRefusal(stack, sessionId)
+    expect(refusal.refusal).toBe('unreadable')
+    expect(refusal.message).toContain('reviewer ledger cannot be read')
+    const read = await stack.call(sessionId, 'context_read', { kind: 'task', ref: failed.taskId })
+    expect(read.text).toContain('context_read unreadable')
+    expect(read.text).not.toContain('review-only')
+    expect(read.text).not.toContain('objective: child that fails')
+  })
+
+  it('refuses a reviewer whose ledger contradicts itself, on both doors', async () => {
+    const stack = await boot({ worker: async () => {} })
+    const failed = await failedTask(stack, 's-root')
+    await stack.call('s-root', 'task_review_agent', { taskId: failed.taskId })
+    const sessionId = String(stack.spawns.at(-1)!.sessionId)
+    const [row] = readFileSync(reviewerLedgerFile(stack), 'utf8')
+      .split('\n')
+      .filter(line => line.trim().length > 0)
+      .map(line => JSON.parse(line) as Record<string, unknown>)
+
+    // A second row for the same reviewer session that disagrees with the first:
+    // the read domain cannot be chosen by file order, so nothing is assembled
+    // from either delegation.
+    appendLedgerRow(stack, { ...(row as Record<string, unknown>), taskId: 't-contradiction' })
+    const refusal = await assemblyRefusal(stack, sessionId)
+    expect(refusal.refusal).toBe('binding-conflict')
+    expect(refusal.message).toContain('more than one reviewer delegation')
+    const read = await stack.call(sessionId, 'task_read')
+    expect(read.text).toContain('task_read binding-conflict')
+  })
+})
+
+/**
+ * Q2 (2026-09-25 rework): the ledger records *who* delegated a review, and that
+ * delegator has to be a session of the graph it delegated into. The case below
+ * starts from a real reviewer of a real graph and rewrites only the delegator:
+ * everything else about the row is what the deployment itself wrote, so what
+ * refuses the read is the ownership check and nothing else.
+ */
+describe('a delegation is only believed from the graph it delegated into (Q2)', () => {
+  it('refuses a reviewer delegated by another graph\'s session, on assembly and on the read door', async () => {
+    const stack = await boot({
+      graphs: [
+        { id: 'g1', rootSessionId: 's-root' },
+        { id: 'g2', rootSessionId: 's-other', members: ['s-other-worker'] },
+      ],
+      worker: async () => {},
+    })
+    const failed = await failedTask(stack, 's-root')
+    await stack.call('s-root', 'task_review_agent', { taskId: failed.taskId })
+    const sessionId = String(stack.spawns.at(-1)!.sessionId)
+    expect(await stack.prompt(sessionId)).toContain('review-only')
+
+    // The same row, with the delegator replaced by a session the *other* graph
+    // publishes: the delegated store is still this reviewer's graph's store, so
+    // the store check cannot catch it — only the delegator's membership can.
+    rewriteLedger(stack, row => ({ ...row, actor: 's-other-worker' }))
+    const refusal = await assemblyRefusal(stack, sessionId)
+    expect(refusal.refusal).toBe('cross-graph')
+    expect(refusal.message).toContain('s-other-worker')
+    expect(refusal.message).toContain(`graph "g1" does not publish`)
+
+    const read = await stack.call(sessionId, 'context_read', { kind: 'task', ref: failed.taskId })
+    expect(read.text).toContain('context_read cross-graph')
+    expect(read.text).toContain('s-other-worker')
+    expect(read.text).not.toContain('objective: child that fails')
+    // The other graph's own session is not a door either: the id grants nothing.
+    const foreign = await stack.call(sessionId, 'context_read', { kind: 'session', ref: 's-other-worker' })
+    expect(foreign.text).toContain('cross-graph')
   })
 })

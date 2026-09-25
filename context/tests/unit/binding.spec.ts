@@ -31,6 +31,16 @@ async function secondGraph(stack: FixtureStack): Promise<{ storeId: string; task
   return { storeId: rootTaskStoreId('s-root-2'), taskId: 't-other', runId: 'r-other' }
 }
 
+/** Make one store's log answer as a corrupt file does: an unreadable store, not an absent one. */
+function breakStoreLog(stack: FixtureStack, storeId: string): void {
+  const persistence = (stack.ctx as unknown as { sessionPersistence: { open(id: string): Promise<unknown> } }).sessionPersistence
+  const original = persistence.open.bind(persistence)
+  persistence.open = async (id: string) => {
+    if (String(id) === storeId) throw new Error('the task store log is corrupt')
+    return await original(id)
+  }
+}
+
 describe('caller resolution', () => {
   test('a worker resolves through its published membership and its persistent run', async () => {
     const { stack, chain } = await chainStack()
@@ -243,5 +253,134 @@ describe('not activated', () => {
     const storeId = rootTaskStoreId('s-held')
     await stack.task.createStore(storeId)
     expect(expectRefused(await stack.service.taskRead('s-held'), 'not-activated')).toContain('opened, with no root task in it')
+  })
+})
+
+/**
+ * Q1 (2026-09-25 rework): a request that cannot be bound must not come out
+ * looking like a request from outside this deployment. Both refuse reads with a
+ * name — that part never changed — but only the second may go on to assemble a
+ * model request with nothing in it, so the resolution has to say which one it
+ * is (`placement`). The distinction the rework fixes is exactly this:
+ * a *failure* to read the facts a binding is derived from (the graph registry,
+ * the domain store, the reviewer ledger) is not the fact "no binding exists".
+ */
+describe('a binding failure is not "outside the deployment" (Q1)', () => {
+  /** The placement of one refusal, on the resolution the assembly decides from. */
+  async function placementOf(stack: FixtureStack, sessionId: string): Promise<string | undefined> {
+    const resolution = await stack.service.resolveCaller(sessionId)
+    if (resolution.kind !== 'unbound') throw new Error(`expected an unbound caller, got "${resolution.kind}"`)
+    return resolution.placement
+  }
+
+  test('a session no graph publishes and no delegation binds is outside the deployment', async () => {
+    const { stack } = await chainStack()
+    const resolution = await stack.service.resolveCaller('s-stranger')
+    expect(resolution.kind).toBe('unbound')
+    if (resolution.kind !== 'unbound') throw new Error('expected unbound')
+    expect(resolution.refusal).toBe('unbound')
+    expect(resolution.placement).toBe('outside')
+    expect(resolution.detail).toContain('not a published member of any graph')
+  })
+
+  test('a graph query that fails is a named read failure, never "no graph"', async () => {
+    const { stack } = await chainStack()
+    stack.breakGraphQuery(new Error('the graph registry store is corrupt'))
+    const resolution = await stack.service.resolveCaller('s-g1')
+    expect(resolution.kind).toBe('unbound')
+    if (resolution.kind !== 'unbound') throw new Error('expected unbound')
+    expect(resolution.refusal).toBe('unreadable')
+    expect(resolution.placement).toBe('failed')
+    expect(resolution.detail).toContain('the graph registry store is corrupt')
+    // And the read the session would have made fails by name rather than
+    // answering "this session belongs nowhere".
+    expect(expectRefused(await stack.service.taskRead('s-g1'), 'unreadable')).not.toContain('not a published member')
+  })
+
+  test('a published member whose store cannot be read is a failure, not a member of an empty domain', async () => {
+    const { stack } = await chainStack()
+    // A store that exists (the log does) and cannot be opened: its graph's root
+    // and a plain member of that graph both fail by name.
+    stack.graph({ id: 'g-broken', rootSessionId: 's-broken-root', members: ['s-broken-member'] })
+    stack.sessionLog('s-broken-member', ['a request'])
+    stack.sessionLog(rootTaskStoreId('s-broken-root'), ['not a task store'])
+    breakStoreLog(stack, rootTaskStoreId('s-broken-root'))
+    expect(await placementOf(stack, 's-broken-member')).toBe('failed')
+    expect(await placementOf(stack, 's-broken-root')).toBe('failed')
+  })
+
+  test('a ledger that cannot answer one row is a failure for a published member', async () => {
+    const { stack } = await chainStack()
+    stack.bindingSource({
+      read: async () => {
+        throw new ReviewerBindingError('binding-conflict', 'two conflicting rows for one session')
+      },
+    })
+    expect(await placementOf(stack, 's-review')).toBe('failed')
+  })
+
+  test('a delegation no graph can place is a failure, not a session from outside', async () => {
+    const { stack } = await chainStack()
+    stack.bindingSource(stack.ledger({ ...DEPARTMENT, rootStoreId: 'sg-t-nobody' }))
+    const resolution = await stack.service.resolveCaller('s-unpublished-reviewer')
+    expect(resolution.kind).toBe('unbound')
+    if (resolution.kind !== 'unbound') throw new Error('expected unbound')
+    expect(resolution.placement).toBe('failed')
+    expect(resolution.detail).toContain('sg-t-nobody')
+  })
+})
+
+/**
+ * Q2 (2026-09-25 rework): the ledger says who delegated a review, and that
+ * delegation is what opens a graph's read domain to a session with no run of
+ * its own — so the delegator has to be somebody the delegated graph actually
+ * publishes. Nothing here trusts an id the model passed; the actor is the
+ * ledger's own field, and the graph's membership is the registry's own view.
+ */
+describe('a delegation must come from a session of the graph it delegates into (Q2)', () => {
+  test('a delegator the delegated graph publishes keeps the delegation, and the domain stays readable', async () => {
+    const { stack, chain } = await chainStack()
+    stack.bindingSource(stack.ledger(DEPARTMENT))
+    const resolution = expectResolved(await stack.service.resolveCaller('s-review'))
+    expect(resolution.kind).toBe('reviewer')
+    // The whole delegated domain, not one task: the delegated task's contract,
+    // the sibling's evidence and a session of the graph.
+    expect(expectOk(await stack.service.taskRead('s-review')).text).toContain('review-only')
+    expect(expectOk(await stack.service.contextRead('s-review', { kind: 'task', ref: 't-c1' })).text).toContain('t-c1')
+    expect(expectOk(await stack.service.contextRead('s-review', { kind: 'evidence', ref: 'e-c2' })).text).toContain('e-c2')
+    expect(expectOk(await stack.service.contextRead('s-review', { kind: 'session', ref: 's-c1' })).text).toContain('child one')
+    expect(chain.storeId).toBe(DEPARTMENT.rootStoreId)
+  })
+
+  test("a delegator of another graph grants nothing: the review read is refused by name", async () => {
+    const { stack } = await chainStack()
+    const other = await secondGraph(stack)
+    stack.bindingSource(stack.ledger({ ...DEPARTMENT, actor: 's-root-2' }))
+    const detail = expectRefused(await stack.service.taskRead('s-review'), 'cross-graph')
+    expect(detail).toContain('s-root-2')
+    expect(detail).toContain('does not publish')
+    // The delegated task, the other graph's task and the session history are all
+    // out of reach: the refusal is not a narrower read, it is no domain at all.
+    expect(expectRefused(await stack.service.contextRead('s-review', { kind: 'task', ref: 't-c1' }), 'cross-graph')).toContain('s-root-2')
+    expect(expectRefused(await stack.service.contextRead('s-review', { kind: 'task', ref: other.taskId }), 'cross-graph')).toContain('s-root-2')
+    expect(expectRefused(await stack.service.contextRead('s-review', { kind: 'session', ref: 's-c1' }), 'cross-graph')).toContain('s-root-2')
+    expect(expectRefused(await stack.service.taskStatus('s-review'), 'cross-graph')).toContain('s-root-2')
+  })
+
+  test('a delegator no graph publishes is refused, and the refusal names it', async () => {
+    const { stack } = await chainStack()
+    stack.bindingSource(stack.ledger({ ...DEPARTMENT, actor: 's-nobody' }))
+    const detail = expectRefused(await stack.service.taskRead('s-review'), 'unbound')
+    expect(detail).toContain('s-nobody')
+    expect(detail).toContain('no graph in this deployment publishes')
+  })
+
+  test('a delegator check that cannot be read is refused as unreadable', async () => {
+    const { stack, chain } = await chainStack()
+    stack.bindingSource(stack.ledger(DEPARTMENT))
+    stack.breakGraphView(new Error('the graph store is not readable'), chain.graph)
+    const detail = expectRefused(await stack.service.taskRead('s-review'), 'unreadable')
+    expect(detail).toContain('s-root')
+    expect(detail).toContain('not readable')
   })
 })

@@ -601,6 +601,12 @@ export async function taskRead(deps: ReadDeps, loaded: LoadedCaller): Promise<Pr
  *
  * The limit is clamped into 1–100 and a clamp is stated in the result, so a
  * caller that asked for 1000 gets 100 entries *and* knows it asked for more.
+ *
+ * Every page in this read advances: an entry line is shown whole or the page
+ * ends before it. When the page's *first* entry cannot be shown, the page would
+ * repeat the same offset forever, so the entry is refused by name
+ * (`context-too-large`) with both ways forward — its own record read and the
+ * offset that continues the listing past it.
  */
 export async function taskStatus(deps: ReadDeps, loaded: LoadedCaller, query: StatusQuery): Promise<ProjectedRead> {
   const resolution = loaded.resolution
@@ -658,6 +664,21 @@ export async function taskStatus(deps: ReadDeps, loaded: LoadedCaller, query: St
     if (budget.remaining <= footerReserve) break
     if (!budget.add(taskSummaryLine(snapshot, entry.task, entry.roles))) break
     shown += 1
+  }
+  if (shown === 0 && page.length > 0) {
+    // The page's own first entry has no room, and a page of zero entries at this
+    // offset would report the same offset again — the same page forever. The
+    // entry is refused by name instead, with both ways forward: the task's own
+    // record read, and the offset that continues the listing past it.
+    const first = page[0] as { readonly task: TaskInstance; readonly roles: readonly string[] }
+    const lineBytes = utf8Bytes(taskSummaryLine(snapshot, first.task, first.roles))
+    return tooLarge(
+      `the summary line of task "${first.task.taskId}" (${lineBytes} UTF-8 bytes)`,
+      `Nothing of that entry is shown, and a page of zero entries at offset ${offset} would report the same offset again, so the ` +
+        `listing could never move past it. Read that task whole instead with \`context_read\` kind:"task" ` +
+        `ref:"${first.task.taskId}" (its record pages in UTF-8 bytes), or ask for the entries *after* it with offset ` +
+        `${offset + 1} — the rest of the scope stays reachable that way.`,
+    )
   }
   const nextOffset = offset + shown
   const hasMore = nextOffset < entries.length
@@ -882,6 +903,15 @@ async function recordTextOf(
  * of the caller's graph is refused as `cross-graph` before its log is touched;
  * membership is the graph store's own record, so a guessed session id never
  * reaches DSH.
+ *
+ * A page is a whole number of events, never a piece of one. An event's rendered
+ * lines are measured as a block before any of them is added; an event too large
+ * for the page is refused by name (`context-too-large`) when it is the page's
+ * first — a session offset addresses whole events, so there is no cursor inside
+ * one — and merely ends the page before it when it comes later, still reachable
+ * at its own seq. A window that fails after an earlier one succeeded is never
+ * turned into a partial page: the refusal says where the read stopped and that
+ * nothing partial is returned in its place.
  */
 async function sessionRead(
   deps: ReadDeps,
@@ -931,7 +961,9 @@ async function sessionRead(
 
   const events: SessionEvent[] = []
   let cursor = offset
+  let asked = offset
   while (events.length < limit && cursor <= capturedThroughSeq) {
+    asked = cursor
     let window: Awaited<ReturnType<SessionQueryReads['readEvent']>>
     try {
       window = await deps.sessionQuery.readEvent(
@@ -940,15 +972,22 @@ async function sessionRead(
       )
     } catch (error) {
       signal?.throwIfAborted()
-      if (events.length === 0) {
-        const code = errorCode(error)
-        if (code === 'SESSION_QUERY_ABORTED') throw error
-        return refused(
-          code === 'SESSION_QUERY_EVENT_NOT_FOUND' ? 'stale-reference' : 'unreadable',
-          `session "${sessionId}" could not be read at seq ${cursor}: ${message(error)}`,
-        )
-      }
-      break
+      const code = errorCode(error)
+      if (code === 'SESSION_QUERY_ABORTED') throw error
+      // A window that fails once an earlier one has answered leaves the log half
+      // read, and half a log is not a page: the caller is told the read failed,
+      // never handed the events the read could not finish collecting. Only the
+      // first window keeps the code-to-refusal mapping, since it is the answer.
+      return events.length === 0
+        ? refused(
+            code === 'SESSION_QUERY_EVENT_NOT_FOUND' ? 'stale-reference' : 'unreadable',
+            `session "${sessionId}" could not be read at seq ${cursor}: ${message(error)}`,
+          )
+        : refused(
+            'unreadable',
+            `session "${sessionId}" could not be read at seq ${cursor}, after the window at seq ${offset} answered: ${message(error)}. ` +
+              `Nothing partial is returned: the ${events.length} event(s) the read had already collected are not reported as a page of this log.`,
+          )
     }
     for (const event of window.events) {
       if (events.length >= limit) break
@@ -957,30 +996,42 @@ async function sessionRead(
     if (window.endSeq <= cursor) break
     cursor = window.endSeq + 1
   }
+  if (events.length === 0) {
+    // Nothing was read: a window that answers without an event (or without
+    // moving its endSeq) gives the page nothing to carry, and an empty page here
+    // would claim `hasMore` at the same offset and be read again forever.
+    return refused(
+      'unreadable',
+      `session "${sessionId}" could not be read at seq ${asked}: the session query answered without advancing to an event, ` +
+        'so nothing was read and an empty page would only repeat this offset. Nothing is returned in place of the events.',
+    )
+  }
 
   const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES)
   budget.addAll(banner)
   budget.addAll(['', `events: seq ${offset}..${cursor - 1} of a log through seq ${capturedThroughSeq}`])
   let shown = 0
+  let stopped: SessionEvent | undefined
   for (const event of events) {
     const lines = eventLines(event)
-    if (budget.addAll(lines) > 0) {
-      // A session offset addresses whole events, so an event whose text exceeds
-      // the bound has no second page: the cut is named rather than passed over.
-      if (shown === 0) {
-        budget.add(lines[0] as string)
-        const room = Math.max(1, budget.remaining - 96)
-        const slice = sliceUtf8(lines.slice(1).join('\n'), 0, room)
-        for (const line of slice.text.split('\n')) budget.add(`  ${line}`)
-        budget.add(`  … seq ${event.seq} is cut at the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte output bound; its remaining text is not shown`)
-        shown += 1
-      }
+    // The whole event is measured before any of its lines is added: a page
+    // carries whole events, never a partial body.
+    if (!blockFits(budget, lines)) {
+      // A session offset addresses whole events (DSH's read unit), so an event
+      // that does not fit has no second page inside the page: the first one is
+      // refused by name, a later one ends the page before it.
+      if (shown === 0) return refused('context-too-large', oversizedEventDetail(sessionId, event))
+      stopped = event
       break
     }
+    budget.addAll(lines)
     shown += 1
   }
-  const lastShownSeq = shown === 0 ? offset - 1 : (events[shown - 1] as SessionEvent).seq
-  const nextOffset = Number(lastShownSeq) + 1
+  if (stopped !== undefined) budget.add(notShownEventLine(stopped))
+  const lastShownSeq = Number((events[shown - 1] as SessionEvent).seq)
+  // A page that stopped before an event continues at that event's own seq, never
+  // at seq+1: skipping it is the caller's decision, not this read's.
+  const nextOffset = stopped === undefined ? lastShownSeq + 1 : Number(stopped.seq)
   const hasMore = nextOffset <= capturedThroughSeq
   budget.add(
     `- events shown: ${shown} of at most ${limit}` +
@@ -990,6 +1041,41 @@ async function sessionRead(
     budget.text(),
     `session ${sessionId} via the session query, seq ${offset}..${lastShownSeq} of a log through seq ${capturedThroughSeq}`,
     { hasMore, nextOffset },
+  )
+}
+
+/** Whether every one of `lines` fits the page's remaining space as one block (each separator counted). */
+function blockFits(budget: OutputBudget, lines: readonly string[]): boolean {
+  if (lines.length === 0) return true
+  const width = utf8Bytes(lines.join('\n')) + (budget.bytes === 0 ? 0 : 1)
+  return width <= budget.remaining
+}
+
+/** The UTF-8 size of the text one event carries. */
+function eventTextBytes(event: SessionEvent): number {
+  return utf8Bytes(extractSessionEventText(event))
+}
+
+/**
+ * The refusal of an event no page can carry: a session offset addresses whole
+ * events (DSH's read unit), so an event larger than the bound has no second
+ * page. The detail names the event and its size, says none of it is shown, and
+ * hands the caller the one deliberate way past it.
+ */
+function oversizedEventDetail(sessionId: string, event: SessionEvent): string {
+  return (
+    `event seq ${event.seq} of session "${sessionId}" does not fit one ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte page (its text alone is ` +
+    `${eventTextBytes(event)} UTF-8 bytes); a session offset addresses whole events — DSH's read unit — so this read cannot page ` +
+    `inside one event, and none of that event's text is shown here. To continue past it, ask again with offset ` +
+    `${Number(event.seq) + 1}: the read never skips an event on its own, so that choice is the caller's.`
+  )
+}
+
+/** The line a page carries when it stops before an event that does not fit; the caller must choose to move past it. */
+function notShownEventLine(event: SessionEvent): string {
+  return (
+    `- the next event (seq ${event.seq}, ${eventTextBytes(event)} UTF-8 bytes of text) was not shown on this page: ` +
+    `it does not fit the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte bound, so the page ends before it.`
   )
 }
 

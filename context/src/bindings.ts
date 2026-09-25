@@ -9,6 +9,16 @@
  * passes never widens the domain — the caller is resolved first, from its own
  * live session, and only then is the target looked up inside that domain.
  *
+ * A **failure** to read those facts is not the fact "no binding exists"
+ * (2026-09-25 rework, Q1). Three reads can fail: the registry's own lookup (a
+ * read failure is never read as "no graph" — only
+ * `SessionNotInGraphError`, the registry's `SESSION_NOT_IN_GRAPH` fact, is a
+ * miss), the domain store's open, and the reviewer ledger. Each failure becomes
+ * a named refusal carrying `placement: 'failed'`, which is what the prompt
+ * assembly refuses the model request on; only a session this deployment
+ * genuinely holds no fact about is `placement: 'outside'` and left to assemble
+ * whatever its composition gives it.
+ *
  * Three things are deliberately absent here: `taskRuntime.runForSession` (the
  * lookup that recovers and back-fills gate state — a read may not), the
  * `onRunBound`-era in-memory cache (a worker's first request happens before that
@@ -19,13 +29,16 @@
  * The one binding that is not a graph member is a reviewer, whose delegation is
  * recorded in the reviewer ledger. That ledger is injected through the narrow
  * {@link ReviewerBindingSource} seam below, so this package never imports the
- * tool package that owns it.
+ * tool package that owns it. Because a delegation opens a graph's read domain,
+ * it is only believed when the graph it names actually publishes the delegator
+ * it records ({@link delegatorStanding}).
  * @module @dangosys/dsh-singularity-context/bindings
  */
 
 import type { ExecutionPhase, RunProviderBinding, TaskInstance, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import type { RunBindingRead, StoreRecoveryStatus } from '@dangosys/dsh-singularity-task-runtime'
+import { SESSION_NOT_IN_GRAPH } from '@dangosys/dsh-singularity-graphs'
 import type { NamedRefusal } from './refusals.ts'
 
 /* --- the injected delegation seam ---------------------------------------- */
@@ -151,6 +164,20 @@ export interface CallerUnbound {
   readonly detail: string
   /** Present when the caller's graph was resolvable and only the binding failed. */
   readonly graph?: CallerGraph
+  /**
+   * Which of the two situations this is, since the two reads that produce it
+   * answer a caller differently (2026-09-25 rework, Q1):
+   *
+   * - `outside`: no durable fact in this deployment binds the session — it is
+   *   not a member of any graph and no ledger names it. Its assembly is somebody
+   *   else's business, and a read of it refuses `unbound`.
+   * - `failed`: the session **is** bound (or a delegation names it) and a fact
+   *   the binding is derived from could not be read — the graph lookup, the
+   *   domain store's open, or the ledger. The read still refuses by name, and
+   *   the prompt assembly refuses the model request outright: a bound session
+   *   never gets a request assembled from nothing.
+   */
+  readonly placement: 'outside' | 'failed'
 }
 
 /**
@@ -187,8 +214,36 @@ export interface LoadedCaller {
   readonly snapshot?: TaskSnapshot
 }
 
-function unbound(sessionId: string, refusal: NamedRefusal, detail: string, graph?: CallerGraph): LoadedCaller {
-  return { resolution: { kind: 'unbound', sessionId, refusal, detail, ...(graph === undefined ? {} : { graph }) } }
+function unbound(
+  sessionId: string,
+  refusal: NamedRefusal,
+  detail: string,
+  graph: CallerGraph | undefined,
+  placement: 'outside' | 'failed',
+): LoadedCaller {
+  return {
+    resolution: {
+      kind: 'unbound',
+      sessionId,
+      refusal,
+      detail,
+      placement,
+      ...(graph === undefined ? {} : { graph }),
+    },
+  }
+}
+
+function outside(sessionId: string, refusal: NamedRefusal, detail: string): LoadedCaller {
+  return unbound(sessionId, refusal, detail, undefined, 'outside')
+}
+
+function failed(
+  sessionId: string,
+  refusal: NamedRefusal,
+  detail: string,
+  graph?: CallerGraph,
+): LoadedCaller {
+  return unbound(sessionId, refusal, detail, graph, 'failed')
 }
 
 function callerGraph(graph: GraphRecordFacts): CallerGraph {
@@ -245,6 +300,21 @@ type DelegationRead =
   | { readonly kind: 'refused'; readonly refusal: ReviewerBindingFailure; readonly detail: string }
 
 /**
+ * The failure one binding source reported, from the error's own shape. The seam
+ * is implemented by whatever package owns the ledger, so the error a source
+ * raises can be an instance of *its* copy of {@link ReviewerBindingError}: a
+ * class check alone would silently degrade a named conflict to a generic
+ * unreadable answer, so the contract (name plus `kind`) is what decides, and a
+ * class match is one way to satisfy it.
+ */
+function reviewerFailure(error: unknown): ReviewerBindingFailure | undefined {
+  const kind = (error as { kind?: unknown } | undefined)?.kind
+  if (kind !== 'binding-conflict' && kind !== 'unreadable') return undefined
+  if (error instanceof ReviewerBindingError || (error instanceof Error && error.name === 'ReviewerBindingError')) return kind
+  return undefined
+}
+
+/**
  * Consult every registered source and reduce their answers to one delegation:
  * no source that answered means `none`, one distinct record means that record,
  * and two sources that disagree about the same session mean a conflict rather
@@ -258,7 +328,10 @@ async function readDelegation(deps: BindingDeps, sessionId: string): Promise<Del
     try {
       record = await source.read(sessionId)
     } catch (error) {
-      if (error instanceof ReviewerBindingError) return { kind: 'refused', refusal: error.kind, detail: error.message }
+      const failure = reviewerFailure(error)
+      if (failure !== undefined) {
+        return { kind: 'refused', refusal: failure, detail: error instanceof Error ? error.message : String(error) }
+      }
       return {
         kind: 'refused',
         refusal: 'unreadable',
@@ -293,30 +366,43 @@ async function readDelegation(deps: BindingDeps, sessionId: string): Promise<Del
  * persisted run, then a recorded delegation, then "a member with no binding of
  * its own". Nothing in this function writes: opening the store is the store's
  * own read-only open, and the runtime calls are observations.
+ *
+ * Every read that can fail says so in the resolution it returns: the graph
+ * lookup, the store's open and the ledger all answer `placement: 'failed'` when
+ * they cannot answer at all, so that the assembly (which is the one consumer
+ * that must not carry on regardless) can tell that apart from a session this
+ * deployment simply does not know (`placement: 'outside'`).
  */
 export async function loadCaller(deps: BindingDeps, sessionId: string, signal?: AbortSignal): Promise<LoadedCaller> {
   signal?.throwIfAborted()
-  const delegation = await readDelegation(deps, sessionId)
-  let graph: GraphRecordFacts | undefined
-  try {
-    graph = await deps.graphs.graphForSession(sessionId)
-  } catch {
-    graph = undefined
-  }
+  const membership = await graphOfSession(deps.graphs, sessionId)
+  if (membership.kind === 'failed') return failed(sessionId, 'unreadable', membership.detail)
+  const graph = membership.kind === 'graph' ? membership.graph : undefined
 
   if (graph === undefined) {
-    if (delegation.kind === 'refused') return unbound(sessionId, delegation.refusal, delegation.detail)
+    const delegation = await readDelegation(deps, sessionId)
+    if (delegation.kind === 'refused') return failed(sessionId, delegation.refusal, delegation.detail)
     if (delegation.kind === 'none') {
-      return unbound(
+      return outside(
         sessionId,
         'unbound',
         `session "${sessionId}" is not a published member of any graph and no delegation binds it; ` +
           'a context read needs a graph, and a session is never placed by the ids it passes.',
       )
     }
-    const placed = await graphForStore(deps.graphs, delegation.record.rootStoreId)
+    let placed: GraphRecordFacts | undefined
+    try {
+      placed = await graphForStore(deps.graphs, delegation.record.rootStoreId)
+    } catch (error) {
+      return failed(
+        sessionId,
+        'unreadable',
+        `the delegation of session "${sessionId}" names store "${delegation.record.rootStoreId}", and the graph registry ` +
+          `could not be listed to place it: ${message(error)}`,
+      )
+    }
     if (placed === undefined) {
-      return unbound(
+      return failed(
         sessionId,
         'unbound',
         `session "${sessionId}" is delegated to store "${delegation.record.rootStoreId}", which no graph in this ` +
@@ -330,7 +416,7 @@ export async function loadCaller(deps: BindingDeps, sessionId: string, signal?: 
   const storeId = rootTaskStoreId(graph.rootSessionId)
   const opened = await openDomain(deps.task, storeId)
   if (opened.failure !== undefined) {
-    return unbound(
+    return failed(
       sessionId,
       'unreadable',
       `the domain store "${storeId}" of graph "${graph.id}" cannot be read: ${opened.failure}`,
@@ -342,8 +428,18 @@ export async function loadCaller(deps: BindingDeps, sessionId: string, signal?: 
   const base: CallerBase = { sessionId, graph: facts, storeId, recovery }
   const own = snapshot === undefined ? undefined : runOfSessionIn(snapshot, sessionId)
   const task = snapshot === undefined ? undefined : taskOfRun(snapshot, own)
-
-  if (sessionId === String(graph.rootSessionId)) {
+  const isRoot = sessionId === String(graph.rootSessionId)
+  const workerRun = !isRoot && own !== undefined && task !== undefined
+  // The ledger is the authority only for a session with no run of its own. A
+  // *conflict* names this session and contradicts its identity, so it refuses
+  // whoever the session is; an unreadable ledger does not refuse a session whose
+  // own run already binds it (the fault says nothing about that session, and a
+  // corrupt file must not take every worker of the deployment down with it).
+  const ledger = isRoot || workerRun ? await readDelegation(deps, sessionId) : undefined
+  if (ledger?.kind === 'refused' && ledger.refusal === 'binding-conflict') {
+    return failed(sessionId, ledger.refusal, ledger.detail, facts)
+  }
+  if (isRoot) {
     // How a root is identified (A2 §D): the run whose session *is* the graph's
     // root session. Never "the first parentless task" — a store also holds a
     // replay's parentless task, and adopting that as the root crosses lineages.
@@ -356,14 +452,15 @@ export async function loadCaller(deps: BindingDeps, sessionId: string, signal?: 
       ...(snapshot === undefined ? {} : { snapshot }),
     }
   }
-  if (own !== undefined && task !== undefined) {
+  if (workerRun) {
     return {
-      resolution: { ...base, kind: 'worker', task, run: own },
+      resolution: { ...base, kind: 'worker', task: task as TaskInstance, run: own as TaskRun },
       ...(snapshot === undefined ? {} : { snapshot }),
     }
   }
+  const delegation = ledger ?? (await readDelegation(deps, sessionId))
   if (delegation.kind === 'refused') {
-    return unbound(sessionId, delegation.refusal, delegation.detail, facts)
+    return failed(sessionId, delegation.refusal, delegation.detail, facts)
   }
   if (delegation.kind === 'record') {
     return await reviewerOf(deps, sessionId, graph, delegation.record, signal)
@@ -374,12 +471,52 @@ export async function loadCaller(deps: BindingDeps, sessionId: string, signal?: 
   }
 }
 
+/** One error message, from whatever a read threw. */
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+type GraphOfSession =
+  | { readonly kind: 'graph'; readonly graph: GraphRecordFacts }
+  | { readonly kind: 'none' }
+  | { readonly kind: 'failed'; readonly detail: string }
+
+/**
+ * The graph a session is a published member of — the registry's own lookup, read
+ * as the two different answers it really has. `SESSION_NOT_IN_GRAPH` is the
+ * registry's *fact* that no graph holds this session; anything else it throws is
+ * a failed read of the registry or of one of its stores, and is reported as
+ * such. Reading a failure as "no graph" is what let a bound worker's request be
+ * assembled with no contract at all (2026-09-25 rework, Q1).
+ */
+async function graphOfSession(graphs: ReadOnlyGraphs, sessionId: string): Promise<GraphOfSession> {
+  try {
+    return { kind: 'graph', graph: await graphs.graphForSession(sessionId) }
+  } catch (error) {
+    if ((error as { code?: unknown } | undefined)?.code === SESSION_NOT_IN_GRAPH) return { kind: 'none' }
+    return {
+      kind: 'failed',
+      detail:
+        `graph membership for session "${sessionId}" could not be read: ${message(error)}. ` +
+        'A registry that cannot be read is not a session without a graph.',
+    }
+  }
+}
+
 /**
  * A reviewer's resolved domain: the graph its delegation names, checked against
  * the graph its session is a member of. The delegation must agree with the live
  * membership (`cross-graph` when it does not), and it is the delegation — not
  * the caller's word — that names the delegated task; a task the store no longer
  * holds leaves the contract reads at `not-found`.
+ *
+ * A delegation opens a graph's read domain, so its `actor` is checked too
+ * (2026-09-25 rework, Q2): the session the ledger records as the delegator must
+ * be one the delegated graph actually publishes (or, for a session the registry
+ * places nowhere, something this deployment never published at all — which is
+ * just as disqualifying). The actor is the ledger's own field and the
+ * membership is the registry's own view, so neither a model-supplied id nor a
+ * hand-written ledger row can grant a domain the graph does not own.
  */
 async function reviewerOf(
   deps: BindingDeps,
@@ -392,7 +529,7 @@ async function reviewerOf(
   const facts = callerGraph(graph)
   const storeId = rootTaskStoreId(graph.rootSessionId)
   if (storeId !== record.rootStoreId) {
-    return unbound(
+    return failed(
       sessionId,
       'cross-graph',
       `session "${sessionId}" is a member of graph "${graph.id}" (store "${storeId}") but its recorded delegation ` +
@@ -400,9 +537,11 @@ async function reviewerOf(
       facts,
     )
   }
+  const standing = await delegatorStanding(deps, sessionId, graph, record.actor)
+  if (standing.kind === 'refused') return failed(sessionId, standing.refusal, standing.detail, facts)
   const opened = await openDomain(deps.task, storeId)
   if (opened.failure !== undefined) {
-    return unbound(sessionId, 'unreadable', `the delegated store "${storeId}" cannot be read: ${opened.failure}`, facts)
+    return failed(sessionId, 'unreadable', `the delegated store "${storeId}" cannot be read: ${opened.failure}`, facts)
   }
   const recovery = await deps.taskRuntime.recoveryStatus(storeId)
   const task = opened.snapshot?.tasks.find(item => item.taskId === record.taskId)
@@ -417,6 +556,70 @@ async function reviewerOf(
       delegation: record,
     },
     ...(opened.snapshot === undefined ? {} : { snapshot: opened.snapshot }),
+  }
+}
+
+type DelegatorStanding = { readonly kind: 'member' } | { readonly kind: 'refused'; readonly refusal: NamedRefusal; readonly detail: string }
+
+/**
+ * Whether the session a delegation names as its delegator is really a session of
+ * the graph it delegated into. The check is the registry's published members
+ * (`view`) — the same record a `session` reference is checked against — and a
+ * registry that cannot be read refuses rather than assuming the actor is fine.
+ */
+async function delegatorStanding(
+  deps: BindingDeps,
+  sessionId: string,
+  graph: GraphRecordFacts,
+  actor: string,
+): Promise<DelegatorStanding> {
+  let member: boolean
+  try {
+    member = await isGraphMember(deps.graphs, graph.id, actor)
+  } catch (error) {
+    return {
+      kind: 'refused',
+      refusal: 'unreadable',
+      detail:
+        `the delegator "${actor}" of the review delegation of session "${sessionId}" cannot be checked against graph ` +
+        `"${graph.id}": ${message(error)}. An unverifiable delegator is not an authorization.`,
+    }
+  }
+  if (member) return { kind: 'member' }
+  // Not a member of the graph it delegated into. Where it is decides how to say
+  // so: another graph's session is the cross-graph case; a session no graph
+  // publishes is not a delegator this deployment has any record of.
+  let elsewhere: GraphRecordFacts | undefined
+  try {
+    elsewhere = await deps.graphs.graphForSession(actor)
+  } catch (error) {
+    if ((error as { code?: unknown } | undefined)?.code === SESSION_NOT_IN_GRAPH) {
+      return {
+        kind: 'refused',
+        refusal: 'unbound',
+        detail:
+          `the delegation of session "${sessionId}" into graph "${graph.id}" (store ` +
+          `"${rootTaskStoreId(graph.rootSessionId)}") records "${actor}" as its delegator, and no graph in this ` +
+          'deployment publishes that session; a delegation is granted by a session of the graph it delegates into, ' +
+          'not by a name in a file.',
+      }
+    }
+    return {
+      kind: 'refused',
+      refusal: 'unreadable',
+      detail:
+        `the delegator "${actor}" of the review delegation of session "${sessionId}" cannot be placed: ${message(error)}. ` +
+        'A delegator whose ownership cannot be read is not an authorization.',
+    }
+  }
+  return {
+    kind: 'refused',
+    refusal: 'cross-graph',
+    detail:
+      `the delegation of session "${sessionId}" into graph "${graph.id}" (store ` +
+      `"${rootTaskStoreId(graph.rootSessionId)}") was recorded by "${actor}", which graph "${graph.id}" does not ` +
+      `publish: the delegator belongs to graph "${elsewhere?.id ?? '(unknown)'}", and a delegation never opens ` +
+      "another graph's read domain.",
   }
 }
 

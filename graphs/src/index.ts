@@ -47,6 +47,25 @@ function nextGraphId(existing: readonly string[]): string {
   return `graph${n}`
 }
 
+/**
+ * The registry's own answer when no graph publishes a session, as a
+ * distinguishable value: `graphForSession` reports this *fact* as this error,
+ * so a reader that has to tell the fact apart from a failed read (the graph
+ * registry or one of its stores being unreadable) can do so by code instead of
+ * by message, and keeps a read failure a failure.
+ */
+export const SESSION_NOT_IN_GRAPH = 'graph-session-not-found'
+
+/** See {@link SESSION_NOT_IN_GRAPH}: the one error that means "no graph holds this session". */
+export class SessionNotInGraphError extends Error {
+  readonly code = SESSION_NOT_IN_GRAPH
+
+  constructor(sessionId: SessionId | string) {
+    super(`graphs: session "${String(sessionId)}" is not in a graph`)
+    this.name = 'SessionNotInGraphError'
+  }
+}
+
 export class GraphsService extends Service {
   // taskRuntime is resolved lazily at create() time: task-runtime injects
   // graphs, so a hard inject here would deadlock the plugin loader.
@@ -295,7 +314,7 @@ export class GraphsService extends Service {
       const snapshot = await this.ctx.graph.snapshotIn(graph.graphStoreId)
       if (snapshot.agents.some(agent => agent.id === sessionId)) return graph
     }
-    throw new Error(`graphs: session "${sessionId}" is not in a graph`)
+    throw new SessionNotInGraphError(sessionId)
   }
 
   async remove(id: string): Promise<void> {

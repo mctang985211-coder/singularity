@@ -1,8 +1,49 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import { rootTaskStoreId } from "@dangosys/dsh-singularity-task";
+import { SESSION_NOT_IN_GRAPH } from "@dangosys/dsh-singularity-graphs";
 import { SESSION_QUERY_READ_WINDOW_MAX, extractSessionEventText } from "@deepseek-ai/dsh-session-query";
 import { checkObligationCoverage, findRepoRoot, loadObligationTemplates } from "@dangosys/dsh-singularity-task-runtime";
 
+//#region src/refusals.ts
+/**
+* The same vocabulary as a value, so a tool schema or a test can pin the whole
+* set instead of trusting that no ninth name was added quietly.
+*/
+const NAMED_REFUSALS = [
+	"not-activated",
+	"unbound",
+	"binding-conflict",
+	"cross-graph",
+	"not-found",
+	"stale-reference",
+	"unreadable",
+	"context-too-large"
+];
+/** One successful read; the continuation fields appear only when something is left. */
+function read(text, source, continuation) {
+	if (continuation === void 0) return {
+		ok: true,
+		text,
+		source
+	};
+	return {
+		ok: true,
+		text,
+		source,
+		hasMore: continuation.hasMore,
+		nextOffset: continuation.nextOffset
+	};
+}
+/** One refused read: the name first, then the detail a caller renders as-is. */
+function refused(refusal, detail) {
+	return {
+		ok: false,
+		refusal,
+		detail
+	};
+}
+
+//#endregion
 //#region src/assembly.ts
 /**
 * Section name of the assembled contract. The name the old contract-reinjection
@@ -110,8 +151,10 @@ async function assembleSingularityContext(service, assembly, context, next) {
 			withContractSection(assembly, contract.text);
 			return next();
 		}
-		case "member":
-		case "unbound": return next();
+		case "member": return next();
+		case "unbound":
+			if (resolution.placement === "outside") return next();
+			throwRefusal(refused(resolution.refusal, resolution.detail));
 	}
 }
 
@@ -127,20 +170,27 @@ async function assembleSingularityContext(service, assembly, context, next) {
 */
 var ReviewerBindingError = class extends Error {
 	kind;
-	constructor(kind, message$1) {
-		super(message$1);
+	constructor(kind, message$2) {
+		super(message$2);
 		this.name = "ReviewerBindingError";
 		this.kind = kind;
 	}
 };
-function unbound(sessionId, refusal, detail, graph) {
+function unbound(sessionId, refusal, detail, graph, placement) {
 	return { resolution: {
 		kind: "unbound",
 		sessionId,
 		refusal,
 		detail,
+		placement,
 		...graph === void 0 ? {} : { graph }
 	} };
+}
+function outside(sessionId, refusal, detail) {
+	return unbound(sessionId, refusal, detail, void 0, "outside");
+}
+function failed(sessionId, refusal, detail, graph) {
+	return unbound(sessionId, refusal, detail, graph, "failed");
 }
 function callerGraph(graph) {
 	return {
@@ -185,6 +235,19 @@ async function openDomain(task, storeId) {
 	}
 }
 /**
+* The failure one binding source reported, from the error's own shape. The seam
+* is implemented by whatever package owns the ledger, so the error a source
+* raises can be an instance of *its* copy of {@link ReviewerBindingError}: a
+* class check alone would silently degrade a named conflict to a generic
+* unreadable answer, so the contract (name plus `kind`) is what decides, and a
+* class match is one way to satisfy it.
+*/
+function reviewerFailure(error) {
+	const kind = error?.kind;
+	if (kind !== "binding-conflict" && kind !== "unreadable") return void 0;
+	if (error instanceof ReviewerBindingError || error instanceof Error && error.name === "ReviewerBindingError") return kind;
+}
+/**
 * Consult every registered source and reduce their answers to one delegation:
 * no source that answered means `none`, one distinct record means that record,
 * and two sources that disagree about the same session mean a conflict rather
@@ -198,10 +261,11 @@ async function readDelegation(deps, sessionId) {
 		try {
 			record = await source.read(sessionId);
 		} catch (error) {
-			if (error instanceof ReviewerBindingError) return {
+			const failure = reviewerFailure(error);
+			if (failure !== void 0) return {
 				kind: "refused",
-				refusal: error.kind,
-				detail: error.message
+				refusal: failure,
+				detail: error instanceof Error ? error.message : String(error)
 			};
 			return {
 				kind: "refused",
@@ -230,27 +294,35 @@ async function readDelegation(deps, sessionId) {
 * persisted run, then a recorded delegation, then "a member with no binding of
 * its own". Nothing in this function writes: opening the store is the store's
 * own read-only open, and the runtime calls are observations.
+*
+* Every read that can fail says so in the resolution it returns: the graph
+* lookup, the store's open and the ledger all answer `placement: 'failed'` when
+* they cannot answer at all, so that the assembly (which is the one consumer
+* that must not carry on regardless) can tell that apart from a session this
+* deployment simply does not know (`placement: 'outside'`).
 */
 async function loadCaller(deps, sessionId, signal) {
 	signal?.throwIfAborted();
-	const delegation = await readDelegation(deps, sessionId);
-	let graph;
-	try {
-		graph = await deps.graphs.graphForSession(sessionId);
-	} catch {
-		graph = void 0;
-	}
+	const membership = await graphOfSession(deps.graphs, sessionId);
+	if (membership.kind === "failed") return failed(sessionId, "unreadable", membership.detail);
+	const graph = membership.kind === "graph" ? membership.graph : void 0;
 	if (graph === void 0) {
-		if (delegation.kind === "refused") return unbound(sessionId, delegation.refusal, delegation.detail);
-		if (delegation.kind === "none") return unbound(sessionId, "unbound", `session "${sessionId}" is not a published member of any graph and no delegation binds it; a context read needs a graph, and a session is never placed by the ids it passes.`);
-		const placed = await graphForStore(deps.graphs, delegation.record.rootStoreId);
-		if (placed === void 0) return unbound(sessionId, "unbound", `session "${sessionId}" is delegated to store "${delegation.record.rootStoreId}", which no graph in this deployment owns; the delegation cannot be placed, so there is no domain to read.`);
-		return await reviewerOf(deps, sessionId, placed, delegation.record, signal);
+		const delegation$1 = await readDelegation(deps, sessionId);
+		if (delegation$1.kind === "refused") return failed(sessionId, delegation$1.refusal, delegation$1.detail);
+		if (delegation$1.kind === "none") return outside(sessionId, "unbound", `session "${sessionId}" is not a published member of any graph and no delegation binds it; a context read needs a graph, and a session is never placed by the ids it passes.`);
+		let placed;
+		try {
+			placed = await graphForStore(deps.graphs, delegation$1.record.rootStoreId);
+		} catch (error) {
+			return failed(sessionId, "unreadable", `the delegation of session "${sessionId}" names store "${delegation$1.record.rootStoreId}", and the graph registry could not be listed to place it: ${message$1(error)}`);
+		}
+		if (placed === void 0) return failed(sessionId, "unbound", `session "${sessionId}" is delegated to store "${delegation$1.record.rootStoreId}", which no graph in this deployment owns; the delegation cannot be placed, so there is no domain to read.`);
+		return await reviewerOf(deps, sessionId, placed, delegation$1.record, signal);
 	}
 	const facts = callerGraph(graph);
 	const storeId = rootTaskStoreId(graph.rootSessionId);
 	const opened = await openDomain(deps.task, storeId);
-	if (opened.failure !== void 0) return unbound(sessionId, "unreadable", `the domain store "${storeId}" of graph "${graph.id}" cannot be read: ${opened.failure}`, facts);
+	if (opened.failure !== void 0) return failed(sessionId, "unreadable", `the domain store "${storeId}" of graph "${graph.id}" cannot be read: ${opened.failure}`, facts);
 	const snapshot = opened.snapshot;
 	const base = {
 		sessionId,
@@ -260,7 +332,11 @@ async function loadCaller(deps, sessionId, signal) {
 	};
 	const own = snapshot === void 0 ? void 0 : runOfSessionIn(snapshot, sessionId);
 	const task = snapshot === void 0 ? void 0 : taskOfRun(snapshot, own);
-	if (sessionId === String(graph.rootSessionId)) return {
+	const isRoot = sessionId === String(graph.rootSessionId);
+	const workerRun = !isRoot && own !== void 0 && task !== void 0;
+	const ledger = isRoot || workerRun ? await readDelegation(deps, sessionId) : void 0;
+	if (ledger?.kind === "refused" && ledger.refusal === "binding-conflict") return failed(sessionId, ledger.refusal, ledger.detail, facts);
+	if (isRoot) return {
 		resolution: {
 			...base,
 			kind: "root",
@@ -271,7 +347,7 @@ async function loadCaller(deps, sessionId, signal) {
 		},
 		...snapshot === void 0 ? {} : { snapshot }
 	};
-	if (own !== void 0 && task !== void 0) return {
+	if (workerRun) return {
 		resolution: {
 			...base,
 			kind: "worker",
@@ -280,7 +356,8 @@ async function loadCaller(deps, sessionId, signal) {
 		},
 		...snapshot === void 0 ? {} : { snapshot }
 	};
-	if (delegation.kind === "refused") return unbound(sessionId, delegation.refusal, delegation.detail, facts);
+	const delegation = ledger ?? await readDelegation(deps, sessionId);
+	if (delegation.kind === "refused") return failed(sessionId, delegation.refusal, delegation.detail, facts);
 	if (delegation.kind === "record") return await reviewerOf(deps, sessionId, graph, delegation.record, signal);
 	return {
 		resolution: {
@@ -290,20 +367,56 @@ async function loadCaller(deps, sessionId, signal) {
 		...snapshot === void 0 ? {} : { snapshot }
 	};
 }
+/** One error message, from whatever a read threw. */
+function message$1(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+/**
+* The graph a session is a published member of — the registry's own lookup, read
+* as the two different answers it really has. `SESSION_NOT_IN_GRAPH` is the
+* registry's *fact* that no graph holds this session; anything else it throws is
+* a failed read of the registry or of one of its stores, and is reported as
+* such. Reading a failure as "no graph" is what let a bound worker's request be
+* assembled with no contract at all (2026-09-25 rework, Q1).
+*/
+async function graphOfSession(graphs, sessionId) {
+	try {
+		return {
+			kind: "graph",
+			graph: await graphs.graphForSession(sessionId)
+		};
+	} catch (error) {
+		if (error?.code === SESSION_NOT_IN_GRAPH) return { kind: "none" };
+		return {
+			kind: "failed",
+			detail: `graph membership for session "${sessionId}" could not be read: ${message$1(error)}. A registry that cannot be read is not a session without a graph.`
+		};
+	}
+}
 /**
 * A reviewer's resolved domain: the graph its delegation names, checked against
 * the graph its session is a member of. The delegation must agree with the live
 * membership (`cross-graph` when it does not), and it is the delegation — not
 * the caller's word — that names the delegated task; a task the store no longer
 * holds leaves the contract reads at `not-found`.
+*
+* A delegation opens a graph's read domain, so its `actor` is checked too
+* (2026-09-25 rework, Q2): the session the ledger records as the delegator must
+* be one the delegated graph actually publishes (or, for a session the registry
+* places nowhere, something this deployment never published at all — which is
+* just as disqualifying). The actor is the ledger's own field and the
+* membership is the registry's own view, so neither a model-supplied id nor a
+* hand-written ledger row can grant a domain the graph does not own.
 */
 async function reviewerOf(deps, sessionId, graph, record, signal) {
 	signal?.throwIfAborted();
 	const facts = callerGraph(graph);
 	const storeId = rootTaskStoreId(graph.rootSessionId);
-	if (storeId !== record.rootStoreId) return unbound(sessionId, "cross-graph", `session "${sessionId}" is a member of graph "${graph.id}" (store "${storeId}") but its recorded delegation names store "${record.rootStoreId}"; a delegation never moves a session into another graph's domain.`, facts);
+	if (storeId !== record.rootStoreId) return failed(sessionId, "cross-graph", `session "${sessionId}" is a member of graph "${graph.id}" (store "${storeId}") but its recorded delegation names store "${record.rootStoreId}"; a delegation never moves a session into another graph's domain.`, facts);
+	const standing = await delegatorStanding(deps, sessionId, graph, record.actor);
+	if (standing.kind === "refused") return failed(sessionId, standing.refusal, standing.detail, facts);
 	const opened = await openDomain(deps.task, storeId);
-	if (opened.failure !== void 0) return unbound(sessionId, "unreadable", `the delegated store "${storeId}" cannot be read: ${opened.failure}`, facts);
+	if (opened.failure !== void 0) return failed(sessionId, "unreadable", `the delegated store "${storeId}" cannot be read: ${opened.failure}`, facts);
 	const recovery = await deps.taskRuntime.recoveryStatus(storeId);
 	const task = opened.snapshot?.tasks.find((item) => item.taskId === record.taskId);
 	return {
@@ -317,6 +430,45 @@ async function reviewerOf(deps, sessionId, graph, record, signal) {
 			delegation: record
 		},
 		...opened.snapshot === void 0 ? {} : { snapshot: opened.snapshot }
+	};
+}
+/**
+* Whether the session a delegation names as its delegator is really a session of
+* the graph it delegated into. The check is the registry's published members
+* (`view`) — the same record a `session` reference is checked against — and a
+* registry that cannot be read refuses rather than assuming the actor is fine.
+*/
+async function delegatorStanding(deps, sessionId, graph, actor) {
+	let member;
+	try {
+		member = await isGraphMember(deps.graphs, graph.id, actor);
+	} catch (error) {
+		return {
+			kind: "refused",
+			refusal: "unreadable",
+			detail: `the delegator "${actor}" of the review delegation of session "${sessionId}" cannot be checked against graph "${graph.id}": ${message$1(error)}. An unverifiable delegator is not an authorization.`
+		};
+	}
+	if (member) return { kind: "member" };
+	let elsewhere;
+	try {
+		elsewhere = await deps.graphs.graphForSession(actor);
+	} catch (error) {
+		if (error?.code === SESSION_NOT_IN_GRAPH) return {
+			kind: "refused",
+			refusal: "unbound",
+			detail: `the delegation of session "${sessionId}" into graph "${graph.id}" (store "${rootTaskStoreId(graph.rootSessionId)}") records "${actor}" as its delegator, and no graph in this deployment publishes that session; a delegation is granted by a session of the graph it delegates into, not by a name in a file.`
+		};
+		return {
+			kind: "refused",
+			refusal: "unreadable",
+			detail: `the delegator "${actor}" of the review delegation of session "${sessionId}" cannot be placed: ${message$1(error)}. A delegator whose ownership cannot be read is not an authorization.`
+		};
+	}
+	return {
+		kind: "refused",
+		refusal: "cross-graph",
+		detail: `the delegation of session "${sessionId}" into graph "${graph.id}" (store "${rootTaskStoreId(graph.rootSessionId)}") was recorded by "${actor}", which graph "${graph.id}" does not publish: the delegator belongs to graph "${elsewhere?.id ?? "(unknown)"}", and a delegation never opens another graph's read domain.`
 	};
 }
 /**
@@ -473,46 +625,6 @@ function notActivatedLines(graph, storeId, snapshot) {
 		"- `task_decompose` cannot run before that: it works on the root task, which does not exist until a contract is accepted.",
 		"- no objective is reported here: this graph's name and its setup work are not a goal, and no contract has named one yet."
 	];
-}
-
-//#endregion
-//#region src/refusals.ts
-/**
-* The same vocabulary as a value, so a tool schema or a test can pin the whole
-* set instead of trusting that no ninth name was added quietly.
-*/
-const NAMED_REFUSALS = [
-	"not-activated",
-	"unbound",
-	"binding-conflict",
-	"cross-graph",
-	"not-found",
-	"stale-reference",
-	"unreadable",
-	"context-too-large"
-];
-/** One successful read; the continuation fields appear only when something is left. */
-function read(text, source, continuation) {
-	if (continuation === void 0) return {
-		ok: true,
-		text,
-		source
-	};
-	return {
-		ok: true,
-		text,
-		source,
-		hasMore: continuation.hasMore,
-		nextOffset: continuation.nextOffset
-	};
-}
-/** One refused read: the name first, then the detail a caller renders as-is. */
-function refused(refusal, detail) {
-	return {
-		ok: false,
-		refusal,
-		detail
-	};
 }
 
 //#endregion
@@ -1184,6 +1296,12 @@ async function taskRead(deps, loaded) {
 *
 * The limit is clamped into 1–100 and a clamp is stated in the result, so a
 * caller that asked for 1000 gets 100 entries *and* knows it asked for more.
+*
+* Every page in this read advances: an entry line is shown whole or the page
+* ends before it. When the page's *first* entry cannot be shown, the page would
+* repeat the same offset forever, so the entry is refused by name
+* (`context-too-large`) with both ways forward — its own record read and the
+* offset that continues the listing past it.
 */
 async function taskStatus(deps, loaded, query) {
 	const resolution = loaded.resolution;
@@ -1221,6 +1339,11 @@ async function taskStatus(deps, loaded, query) {
 		if (budget.remaining <= footerReserve) break;
 		if (!budget.add(taskSummaryLine(snapshot, entry.task, entry.roles))) break;
 		shown += 1;
+	}
+	if (shown === 0 && page.length > 0) {
+		const first = page[0];
+		const lineBytes = utf8Bytes(taskSummaryLine(snapshot, first.task, first.roles));
+		return tooLarge(`the summary line of task "${first.task.taskId}" (${lineBytes} UTF-8 bytes)`, `Nothing of that entry is shown, and a page of zero entries at offset ${offset} would report the same offset again, so the listing could never move past it. Read that task whole instead with \`context_read\` kind:"task" ref:"${first.task.taskId}" (its record pages in UTF-8 bytes), or ask for the entries *after* it with offset ${offset + 1} — the rest of the scope stays reachable that way.`);
 	}
 	const nextOffset = offset + shown;
 	const hasMore = nextOffset < entries.length;
@@ -1413,6 +1536,15 @@ async function recordTextOf(deps, snapshot, record) {
 * of the caller's graph is refused as `cross-graph` before its log is touched;
 * membership is the graph store's own record, so a guessed session id never
 * reaches DSH.
+*
+* A page is a whole number of events, never a piece of one. An event's rendered
+* lines are measured as a block before any of them is added; an event too large
+* for the page is refused by name (`context-too-large`) when it is the page's
+* first — a session offset addresses whole events, so there is no cursor inside
+* one — and merely ends the page before it when it comes later, still reachable
+* at its own seq. A window that fails after an earlier one succeeded is never
+* turned into a partial page: the refusal says where the read stopped and that
+* nothing partial is returned in its place.
 */
 async function sessionRead(deps, loaded, sessionId, requestedOffset, requestedLimit, signal) {
 	const resolution = loaded.resolution;
@@ -1446,7 +1578,9 @@ async function sessionRead(deps, loaded, sessionId, requestedOffset, requestedLi
 	}
 	const events = [];
 	let cursor = offset;
+	let asked = offset;
 	while (events.length < limit && cursor <= capturedThroughSeq) {
+		asked = cursor;
 		let window;
 		try {
 			window = await deps.sessionQuery.readEvent({
@@ -1457,12 +1591,9 @@ async function sessionRead(deps, loaded, sessionId, requestedOffset, requestedLi
 			}, signal);
 		} catch (error) {
 			signal?.throwIfAborted();
-			if (events.length === 0) {
-				const code = errorCode(error);
-				if (code === "SESSION_QUERY_ABORTED") throw error;
-				return refused(code === "SESSION_QUERY_EVENT_NOT_FOUND" ? "stale-reference" : "unreadable", `session "${sessionId}" could not be read at seq ${cursor}: ${message(error)}`);
-			}
-			break;
+			const code = errorCode(error);
+			if (code === "SESSION_QUERY_ABORTED") throw error;
+			return events.length === 0 ? refused(code === "SESSION_QUERY_EVENT_NOT_FOUND" ? "stale-reference" : "unreadable", `session "${sessionId}" could not be read at seq ${cursor}: ${message(error)}`) : refused("unreadable", `session "${sessionId}" could not be read at seq ${cursor}, after the window at seq ${offset} answered: ${message(error)}. Nothing partial is returned: the ${events.length} event(s) the read had already collected are not reported as a page of this log.`);
 		}
 		for (const event of window.events) {
 			if (events.length >= limit) break;
@@ -1471,33 +1602,53 @@ async function sessionRead(deps, loaded, sessionId, requestedOffset, requestedLi
 		if (window.endSeq <= cursor) break;
 		cursor = window.endSeq + 1;
 	}
+	if (events.length === 0) return refused("unreadable", `session "${sessionId}" could not be read at seq ${asked}: the session query answered without advancing to an event, so nothing was read and an empty page would only repeat this offset. Nothing is returned in place of the events.`);
 	const budget = new OutputBudget(CONTEXT_OUTPUT_LIMIT_BYTES);
 	budget.addAll(banner);
 	budget.addAll(["", `events: seq ${offset}..${cursor - 1} of a log through seq ${capturedThroughSeq}`]);
 	let shown = 0;
+	let stopped;
 	for (const event of events) {
 		const lines = eventLines(event);
-		if (budget.addAll(lines) > 0) {
-			if (shown === 0) {
-				budget.add(lines[0]);
-				const room = Math.max(1, budget.remaining - 96);
-				const slice = sliceUtf8(lines.slice(1).join("\n"), 0, room);
-				for (const line of slice.text.split("\n")) budget.add(`  ${line}`);
-				budget.add(`  … seq ${event.seq} is cut at the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte output bound; its remaining text is not shown`);
-				shown += 1;
-			}
+		if (!blockFits(budget, lines)) {
+			if (shown === 0) return refused("context-too-large", oversizedEventDetail(sessionId, event));
+			stopped = event;
 			break;
 		}
+		budget.addAll(lines);
 		shown += 1;
 	}
-	const lastShownSeq = shown === 0 ? offset - 1 : events[shown - 1].seq;
-	const nextOffset = Number(lastShownSeq) + 1;
+	if (stopped !== void 0) budget.add(notShownEventLine(stopped));
+	const lastShownSeq = Number(events[shown - 1].seq);
+	const nextOffset = stopped === void 0 ? lastShownSeq + 1 : Number(stopped.seq);
 	const hasMore = nextOffset <= capturedThroughSeq;
 	budget.add(`- events shown: ${shown} of at most ${limit}` + (hasMore ? ` · more follows from seq ${nextOffset}` : " · end of the log"));
 	return read(budget.text(), `session ${sessionId} via the session query, seq ${offset}..${lastShownSeq} of a log through seq ${capturedThroughSeq}`, {
 		hasMore,
 		nextOffset
 	});
+}
+/** Whether every one of `lines` fits the page's remaining space as one block (each separator counted). */
+function blockFits(budget, lines) {
+	if (lines.length === 0) return true;
+	return utf8Bytes(lines.join("\n")) + (budget.bytes === 0 ? 0 : 1) <= budget.remaining;
+}
+/** The UTF-8 size of the text one event carries. */
+function eventTextBytes(event) {
+	return utf8Bytes(extractSessionEventText(event));
+}
+/**
+* The refusal of an event no page can carry: a session offset addresses whole
+* events (DSH's read unit), so an event larger than the bound has no second
+* page. The detail names the event and its size, says none of it is shown, and
+* hands the caller the one deliberate way past it.
+*/
+function oversizedEventDetail(sessionId, event) {
+	return `event seq ${event.seq} of session "${sessionId}" does not fit one ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte page (its text alone is ${eventTextBytes(event)} UTF-8 bytes); a session offset addresses whole events — DSH's read unit — so this read cannot page inside one event, and none of that event's text is shown here. To continue past it, ask again with offset ${Number(event.seq) + 1}: the read never skips an event on its own, so that choice is the caller's.`;
+}
+/** The line a page carries when it stops before an event that does not fit; the caller must choose to move past it. */
+function notShownEventLine(event) {
+	return `- the next event (seq ${event.seq}, ${eventTextBytes(event)} UTF-8 bytes of text) was not shown on this page: it does not fit the ${CONTEXT_OUTPUT_LIMIT_BYTES}-byte bound, so the page ends before it.`;
 }
 function eventLines(event) {
 	const text = extractSessionEventText(event);

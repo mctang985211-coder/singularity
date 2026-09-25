@@ -39,6 +39,7 @@ import { createScope } from '../../../../thirdparty/deepseek-harness/packages/co
 import type { Agent, ToolDefinition } from '@deepseek-ai/dsh-agent'
 import type { TaskEvent, TaskSnapshot } from '../../task/src/index.ts'
 import { rootTaskStoreId, TaskService } from '../../task/src/index.ts'
+import { SessionNotInGraphError } from '../../graphs/src/index.ts'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
 import { SingularityAgent } from '../../agent-singularity/src/index.ts'
@@ -188,7 +189,11 @@ export class AssemblyStack {
       graphForSession: async (sessionId: string) => {
         const graphId = this.membership.get(String(sessionId))
         const graph = this.graphs.find(candidate => candidate.id === graphId)
-        if (graph === undefined) throw new Error(`graphs: session "${String(sessionId)}" is not in a graph`)
+        // The registry's own fact, told apart from a failed read the way the
+        // real registry tells it: this error means "no graph publishes that
+        // session", and any other throw is a read this fixture's specs can hand
+        // back deliberately broken.
+        if (graph === undefined) throw new SessionNotInGraphError(sessionId)
         return { id: graph.id, name: graph.id, envId: 'env1', rootSessionId: graph.rootSessionId }
       },
       list: async () => this.graphs.map(graph => ({

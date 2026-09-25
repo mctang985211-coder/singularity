@@ -6,8 +6,9 @@
  */
 
 import { describe, expect, test } from 'vitest'
+import { SESSION_QUERY_READ_WINDOW_MAX } from '@deepseek-ai/dsh-session-query'
 import type { TaskProposalRoot, TaskSnapshot } from '../../../task/src/index.ts'
-import { notActivatedLines } from '../../src/index.ts'
+import { notActivatedLines, taskSummaryLine } from '../../src/index.ts'
 import { FixtureStack, seedChain, type Chain } from '../support/stack.ts'
 import { expectOk, expectRefused } from '../support/stack.ts'
 
@@ -15,6 +16,41 @@ async function chainStack(): Promise<{ stack: FixtureStack; chain: Chain }> {
   const stack = new FixtureStack()
   const chain = await seedChain(stack)
   return { stack, chain }
+}
+
+/** The session plane as a seam: only the method a case replaces, typed structurally. */
+interface SessionQuerySeam {
+  readEvent(
+    request: { readonly sessionId: string; readonly seq: number; readonly before?: number; readonly after?: number },
+    signal?: AbortSignal,
+  ): Promise<{ readonly target: unknown; readonly events: readonly unknown[]; readonly startSeq: number; readonly endSeq: number }>
+}
+
+/** One task whose summary line exceeds the whole output bound, with its index in the graph scope. */
+async function seedOversizedStatusEntry(
+  stack: FixtureStack,
+  chain: Chain,
+): Promise<{ taskId: string; index: number; lineBytes: number }> {
+  const taskId = 't-m-bigstatus'
+  // Read the scope first: without the oversized entry the page is complete, so
+  // the index the entry will sort to is counted off the ids it must fall among.
+  const before = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph', limit: 100 }))
+  const ids = [...before.text.matchAll(/^- (t-[a-z0-9-]+) /gm)].map(match => match[1] as string)
+  const index = ids.filter(id => id < taskId).length
+  stack.member(chain.graph, 's-worker-bigstatus')
+  stack.sessionLog('s-worker-bigstatus', ['request'])
+  await stack.seed({
+    taskId,
+    sessionId: 's-worker-bigstatus',
+    runId: 'r-bigstatus',
+    objective: 'z'.repeat(20_000),
+    parentTaskId: 't-root',
+    depth: 1,
+  })
+  const snapshot = await stack.snapshot(chain.storeId)
+  const task = snapshot.tasks.find(item => item.taskId === taskId)
+  if (task === undefined) throw new Error(`fixture: ${taskId} was not seeded`)
+  return { taskId, index, lineBytes: Buffer.byteLength(taskSummaryLine(snapshot, task), 'utf8') }
 }
 
 /** The body of a task-record page: the record text between the banner and the continuation footer. */
@@ -261,6 +297,83 @@ describe('the output bound', () => {
     expect(past.text).toContain('at or past the end of the log')
     expect(past.hasMore).toBe(false)
   })
+
+  test('a window that fails after an earlier one succeeded is unreadable, never a partial page', async () => {
+    const { stack, chain } = await chainStack()
+    stack.member(chain.graph, 's-flaky')
+    // One window carries at most SESSION_QUERY_READ_WINDOW_MAX events, so a page
+    // one event longer than that has to be collected from a second window.
+    stack.sessionLog('s-flaky', Array.from({ length: SESSION_QUERY_READ_WINDOW_MAX + 1 }, (_, seq) => `event ${seq}`))
+    const query = (stack.ctx as unknown as { sessionQuery: SessionQuerySeam }).sessionQuery
+    const real = query.readEvent.bind(query)
+    let calls = 0
+    query.readEvent = async (request, signal) => {
+      calls += 1
+      if (calls > 1) throw new Error('the log stopped answering mid-read')
+      return await real(request, signal)
+    }
+    const result = await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-flaky', limit: 100 })
+    // The first window really did succeed — the failure is the second read — and
+    // the events the first window carried are not handed back as a page.
+    expect(calls).toBe(2)
+    const detail = expectRefused(result, 'unreadable')
+    expect(detail).toContain(`seq ${SESSION_QUERY_READ_WINDOW_MAX}`)
+    expect(detail).toMatch(/nothing partial/i)
+    expect('text' in result).toBe(false)
+  })
+
+  test('a window that answers without advancing is unreadable, never an empty page with more to come', async () => {
+    const { stack, chain } = await chainStack()
+    stack.member(chain.graph, 's-stalled')
+    stack.sessionLog('s-stalled', ['first', 'second'])
+    const query = (stack.ctx as unknown as { sessionQuery: SessionQuerySeam }).sessionQuery
+    query.readEvent = async request => ({ target: {}, events: [], startSeq: request.seq, endSeq: request.seq })
+    // Nothing was read, so there is no page to report — an empty page here would
+    // claim `hasMore` at the same offset and be read again forever.
+    const detail = expectRefused(await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-stalled' }), 'unreadable')
+    expect(detail).toContain('seq 0')
+    expect(detail).toMatch(/advanc/)
+  })
+
+  test('an event larger than the bound is refused by name, never cut', async () => {
+    const { stack, chain } = await chainStack()
+    stack.member(chain.graph, 's-big-event')
+    stack.sessionLog('s-big-event', ['x'.repeat(20_000)])
+    const result = await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-big-event', limit: 1 })
+    // The refusal names the seq, the size of the event's own text, the fact that
+    // an offset addresses whole events, and the one deliberate way past it.
+    const detail = expectRefused(result, 'context-too-large')
+    expect(detail).toContain('seq 0')
+    expect(detail).toContain('20000')
+    expect(detail).toMatch(/whole events/)
+    expect(detail).toMatch(/offset 1\b/)
+    // It is a refusal, not a page: no partial body of that event is returned.
+    expect('text' in result).toBe(false)
+    expect(detail).not.toContain('xxxx')
+  })
+
+  test('a page ends before an event that does not fit, and the next read refuses at that seq', async () => {
+    const { stack, chain } = await chainStack()
+    stack.member(chain.graph, 's-mixed-events')
+    stack.sessionLog('s-mixed-events', ['a short event', 'y'.repeat(20_000)])
+    const page = expectOk(await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-mixed-events', limit: 2 }))
+    expect(page.text).toContain('seq 0 | user/message')
+    expect(page.text).not.toContain('yyy')
+    // The page ends *before* the oversized event: the next offset is that
+    // event's own seq, never seq+1, so the read skips nothing on its own.
+    expect(page.hasMore).toBe(true)
+    expect(page.nextOffset).toBe(1)
+    expect(page.text).toMatch(/seq 1\b.*not shown/)
+    expect(page.text).toContain('20000')
+    // A follow-up read at that seq hits the whole-event refusal and names the one
+    // offset that moves past it — the caller's choice, not the read's.
+    const detail = expectRefused(
+      await stack.service.contextRead('s-g1', { kind: 'session', ref: 's-mixed-events', offset: 1, limit: 2 }),
+      'context-too-large',
+    )
+    expect(detail).toContain('seq 1')
+    expect(detail).toMatch(/offset 2\b/)
+  })
 })
 
 describe('task_status pagination', () => {
@@ -284,6 +397,43 @@ describe('task_status pagination', () => {
     const past = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph', offset: 50 }))
     expect(past.hasMore).toBe(false)
     expect(past.text).toContain('this is the end of the scope')
+  })
+
+  test('a first entry over the bound is refused by name, with both ways forward', async () => {
+    const { stack, chain } = await chainStack()
+    const { taskId, index, lineBytes } = await seedOversizedStatusEntry(stack, chain)
+    // The listing starts at the entry that cannot be shown: a page of zero
+    // entries at this offset would report the same offset again, so it is a
+    // refusal that names the entry and both ways past it.
+    const result = await stack.service.taskStatus('s-g1', { scope: 'graph', offset: index, limit: 1 })
+    const detail = expectRefused(result, 'context-too-large')
+    expect(detail).toContain(taskId)
+    expect(detail).toContain(String(lineBytes))
+    expect(detail).toMatch(/same offset/)
+    expect(detail).toContain('context_read')
+    expect(detail).toContain('kind:"task"')
+    expect(detail).toContain(`offset ${index + 1}`)
+    // A refusal carries no continuation fields at all.
+    expect(result).not.toHaveProperty('hasMore')
+    expect(result).not.toHaveProperty('nextOffset')
+  })
+
+  test('a page that meets an over-bound entry stops before it, at that entry\'s own index', async () => {
+    const { stack, chain } = await chainStack()
+    const { taskId, index } = await seedOversizedStatusEntry(stack, chain)
+    const page = expectOk(await stack.service.taskStatus('s-g1', { scope: 'graph', offset: 0, limit: 100 }))
+    const shownIds = [...page.text.matchAll(/^- (t-[a-z0-9-]+) /gm)].map(match => match[1] as string)
+    // Every entry before the oversized one is shown — none is skipped for the one
+    // that does not fit — and the page ends exactly at its index.
+    expect(shownIds).not.toContain(taskId)
+    expect(shownIds.length).toBe(index)
+    expect(page.hasMore).toBe(true)
+    expect(page.nextOffset).toBe(index)
+    expect(page.nextOffset as number).toBeGreaterThan(0)
+    // No cut summary line for it either: nothing of the entry is in the text.
+    expect(page.text).not.toContain(taskId)
+    expect(page.text).not.toContain('zzz')
+    expect(page.text).toContain(`continue with offset ${index}`)
   })
 
   test('a limit outside 1–100 is clamped, and the result says so', async () => {

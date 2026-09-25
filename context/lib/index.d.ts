@@ -166,6 +166,20 @@ interface CallerUnbound {
   readonly detail: string;
   /** Present when the caller's graph was resolvable and only the binding failed. */
   readonly graph?: CallerGraph;
+  /**
+   * Which of the two situations this is, since the two reads that produce it
+   * answer a caller differently (2026-09-25 rework, Q1):
+   *
+   * - `outside`: no durable fact in this deployment binds the session — it is
+   *   not a member of any graph and no ledger names it. Its assembly is somebody
+   *   else's business, and a read of it refuses `unbound`.
+   * - `failed`: the session **is** bound (or a delegation names it) and a fact
+   *   the binding is derived from could not be read — the graph lookup, the
+   *   domain store's open, or the ledger. The read still refuses by name, and
+   *   the prompt assembly refuses the model request outright: a bound session
+   *   never gets a request assembled from nothing.
+   */
+  readonly placement: 'outside' | 'failed';
 }
 /**
  * What a caller may read. `root` carries its task and run when the graph's root
@@ -203,6 +217,12 @@ interface LoadedCaller {
  * persisted run, then a recorded delegation, then "a member with no binding of
  * its own". Nothing in this function writes: opening the store is the store's
  * own read-only open, and the runtime calls are observations.
+ *
+ * Every read that can fail says so in the resolution it returns: the graph
+ * lookup, the store's open and the ledger all answer `placement: 'failed'` when
+ * they cannot answer at all, so that the assembly (which is the one consumer
+ * that must not carry on regardless) can tell that apart from a session this
+ * deployment simply does not know (`placement: 'outside'`).
  */
 declare function loadCaller(deps: BindingDeps, sessionId: string, signal?: AbortSignal): Promise<LoadedCaller>;
 /**
@@ -330,6 +350,12 @@ declare function taskRead(deps: ReadDeps, loaded: LoadedCaller): Promise<Project
  *
  * The limit is clamped into 1–100 and a clamp is stated in the result, so a
  * caller that asked for 1000 gets 100 entries *and* knows it asked for more.
+ *
+ * Every page in this read advances: an entry line is shown whole or the page
+ * ends before it. When the page's *first* entry cannot be shown, the page would
+ * repeat the same offset forever, so the entry is refused by name
+ * (`context-too-large`) with both ways forward — its own record read and the
+ * offset that continues the listing past it.
  */
 declare function taskStatus(deps: ReadDeps, loaded: LoadedCaller, query: StatusQuery): Promise<ProjectedRead>;
 /**
