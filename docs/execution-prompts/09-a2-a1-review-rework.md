@@ -1,5 +1,7 @@
 # 第 9 项 A2+A1 进度审核返工
 
+> 历史返工合同，已由 `bee6a96`、`6ae5aa0` 执行；复审后仍有 Q3 单事件续读缺口。当前派发[Q3 收尾 prompt](09-a2-a1-q3-closure.md)，不要重复执行本票全文。
+
 你是 Singularity 第 9 项的返工实现主代理。只修[进度审核 Q1–Q4](../history/2026-09-25-a2-a1-progress-review.md)的可达缺陷并重验 A2+A1；**本票未验收，不开始第 11 项 A4**。
 
 工作区：`/home/ROXY/code/bb_work/harness/packages/singularity`；外层：`/home/ROXY/code/bb_work/harness`。先读[公共执行合同](README.md)、[计划唯一表与 D/E 节](../2026-09-20-vrtc-code-change-plan.md)、[原 A2 prompt](09-a2-a1-context.md)及[交付记录](../history/2026-09-25-a2-a1-delivery-record.md)。原实现与已成立证据保留；修改前检查两仓状态并建立 Git 基线。返工完成后停在进度审核。

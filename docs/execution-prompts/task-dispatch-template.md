@@ -6,7 +6,7 @@
 
 ## 直接派发入口
 
-以下入口只在当前票没有待审核交付时交给实现主代理。当前第 9 项 A2+A1 的[定向返工](../history/2026-09-25-a2-a1-rework-record.md)已完成并停在进度审核（Q1/Q2/Q4 关闭、Q3 剩冻结接口冲突待裁决），本模板的通用入口留给通过后的下一票。票据交付后改用[进度审核 prompt](progress-review-and-dispatch.md)，审核前不连续施工。
+以下入口只在当前票没有待审核交付时交给实现主代理。第 9 项 A2+A1 复审仍返工，当前使用[Q3 收尾 prompt](09-a2-a1-q3-closure.md)；本模板的通用入口留给整组验收后的下一票。票据交付后改用[进度审核 prompt](progress-review-and-dispatch.md)，审核前不连续施工。
 
 ```text
 你是 Singularity 本次实现主代理，工作区：
@@ -18,9 +18,8 @@ docs/2026-09-20-vrtc-code-change-plan.md 的唯一执行表，
 docs/execution-prompts/README.md 的公共合同，以及本模板的实施约束。
 只执行唯一表中首个未完成的有效票号；跳过已注明合并的历史编号。
 前置不满足就报告阻塞；已有交付待验收时只指出应走进度审核，不接下一票。
-第 9 项返工已按 docs/execution-prompts/09-a2-a1-review-rework.md 执行完毕并停在进度审核（见[返工记录](../history/2026-09-25-a2-a1-rework-record.md)）；Q3 的合同冲突裁决或复验通过前不得跳到 A4。
-进度审核尚未完成时停下，交给 progress-review-and-dispatch.md。
-审核提出新的定向返工合同时，才按该合同实施，不沿用旧实验预算。
+第 9 项复审已裁决 Q3 的最小合同，当前只执行 docs/execution-prompts/09-a2-a1-q3-closure.md；整组验收前不得跳到 A4。
+交付待审核时停下，交给 progress-review-and-dispatch.md。
 其他票只读本模板合同索引所指的段落及必要源码，按既定合同实施。
 
 修改前保存 Git 基线。先简列本票交付、所有者、验收编号与内部交接顺序，
@@ -42,7 +41,7 @@ docs/execution-prompts/README.md 的公共合同，以及本模板的实施约�
 
 | 当前票 | 建设计划中的合同 | 必须引用的验收 |
 |---|---|---|
-| A2 + A1（返工） | D：读取/绑定与迁移；E：显式恢复 | Q1–Q4、A2-1–A2-6；见 `09-a2-a1-review-rework.md` |
+| A2 + A1（返工） | D：读取/绑定与迁移；E：显式恢复 | Q1–Q4、A2-1–A2-6；当前见 `09-a2-a1-q3-closure.md` |
 | A4 | F.1 | A4-1–A4-5，含结算归属 |
 | S4-E | F.2 与 S4-E 专项 | EVAL-1–EVAL-5，含旧生命周期删除 |
 | A5 + S2-E | F.3；E 的 Session 观测及 Diagnosis 迁移 | REV-1–REV-5，含观测与终态分工 |
@@ -157,7 +156,7 @@ docs/2026-09-20-vrtc-code-change-plan.md 的本票状态、证据与下一项前
 
 ## A2 + A1 填写示例
 
-下面替换模板的“任务”部分，其余约束沿用。**R3 已验收；第 9 项 A2+A1 的原交付经审核返工，该示例仅供填写参照**。当前按[返工 prompt](09-a2-a1-review-rework.md)施工，范围仍以[唯一计划 D/E 节](../2026-09-20-vrtc-code-change-plan.md)为准。
+下面替换模板的“任务”部分，其余约束沿用。**R3 已验收；第 9 项 A2+A1 的原交付经审核返工，该示例仅供填写参照**。当前按[Q3 收尾 prompt](09-a2-a1-q3-closure.md)施工，范围仍以[唯一计划 D/E 节](../2026-09-20-vrtc-code-change-plan.md)为准。
 
 ```text
 票号/名称：A2 + A1，Agent 状态上下文（一个交付组）。

@@ -23,7 +23,7 @@
 | 7 | R2：按证据整理运行时 | 已验收（2026-09-24） | — | [历史记录](history/2026-09-24-vrtc-execution-records.md) | Q1 两条取消交错、恢复及合法 active 路径通过；其他取消边界未证明 |
 | 8 | R1：真实运行验证 | 已验收（2026-09-24） | — | [历史记录](history/2026-09-24-vrtc-execution-records.md) | 完成轮 3 `pass / path2-limited-goal` 且独立复核通过；失败轮与用量缺报保留；仅证明固定场景 |
 | 8a | R3：已有 Task 合同归位 | 已验收（2026-09-24） | — | [历史记录](history/2026-09-24-vrtc-execution-records.md) | R3-1–R3-3 全通过；内容身份、Task 依赖与旧数据行为保持 |
-| 9 | A2 + A1：Agent 状态上下文（一个交付组） | **返工（2026-09-25 定向返工：Q1/Q2/Q4 关闭；Q3 大事件为冻结接口冲突待裁决）** | 实现主代理 + 子代理 | 本文 D/E 节；[交付记录](history/2026-09-25-a2-a1-delivery-record.md)、[进度审核](history/2026-09-25-a2-a1-progress-review.md)、[返工记录](history/2026-09-25-a2-a1-rework-record.md)、[返工 prompt](execution-prompts/09-a2-a1-review-rework.md) | Q1（绑定失败具名拒绝、零模型输入）、Q2（委派者归属核对）、Q4（分页必前进）已关闭并经红/绿反例复现；Q3 的“中途失败不得伪装成功”关闭，但“>16 KiB 单事件可续读”在冻结四参数下不可表达，须先裁决最小合同修订（见返工记录）或按已实现行为调整该条款；独立复核与整组回归通过后才审，不派 A4 |
+| 9 | A2 + A1：Agent 状态上下文（一个交付组） | **返工（2026-09-25 复审：Q1/Q2/Q4 关闭；Q3 大事件仍不可续读）** | 实现主代理 + 子代理 | 本文 D/E 节；[交付记录](history/2026-09-25-a2-a1-delivery-record.md)、[进度审核及复审](history/2026-09-25-a2-a1-progress-review.md)、[返工记录](history/2026-09-25-a2-a1-rework-record.md)、[Q3 收尾 prompt](execution-prompts/09-a2-a1-q3-closure.md) | 按 D 节已定的单事件引用补齐 Q3 的有界续读，复验 Q1–Q4、A2-1～A2-6 和公共检查；整组经独立审核通过后才派 A4 |
 | 10 | A1 原独立排位 | 并入第 9 项，不单独派发 | — | 保留编号供历史引用 | 第 9 项整组验收后直接进入第 11 项 |
 | 11 | A4：父子澄清 | 待前置；合同已定、未实施 | 待填 | 本文 F.1、深入架构 §7 | agent-runtime + DSH 负责持久消息与投递；context 呈现，task-runtime 负责阻塞执行效果；父子/三层、故障恢复与写闸完整 |
 | 12 | S4-E：评估基础（S4 内的子票） | 待前置；合同已定、未实施 | 待填 | 本文 F.2 | 现有 Evolution 生命周期随本票迁入 evolution 包；单文件 Skill 的可比实验、真实证据与晋升闸，旧 ledger/回滚保留 |
@@ -67,7 +67,7 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 9 项 A2+A1 已经[进度审核](history/2026-09-25-a2-a1-progress-review.md)判返工，定向返工已完成并留下[返工记录](history/2026-09-25-a2-a1-rework-record.md)（Q1/Q2/Q4 关闭；Q3 的 16 KiB 单事件续读为冻结接口冲突，待裁决）。当前不派新票：返工复验通过（或计划所有者先裁决 Q3 合同）后才进入第 11 项 A4。历史补救、R1 和 R3 的逐轮证据见[执行与验收记录](history/2026-09-24-vrtc-execution-records.md)。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 9 项 A2+A1 的[复审](history/2026-09-25-a2-a1-progress-review.md)确认 Q3 仍未关闭；当前只派[Q3 收尾返工](execution-prompts/09-a2-a1-q3-closure.md)，整组独立验收后才进入第 11 项 A4。历史补救、R1 和 R3 的逐轮证据见[执行与验收记录](history/2026-09-24-vrtc-execution-records.md)。
 
 ## 当前施工合同（D/E/F）
 
@@ -75,7 +75,7 @@ S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进
 
 状态：实现方于 2026-09-25 交付 `4a510ed`、`f90d05b`、`0f41d91`、`6e0f651`；[进度审核](history/2026-09-25-a2-a1-progress-review.md)发现 A2-2/A2-3/A2-5 的可达反例，**第 9 项返工、整组未验收**。原交付证据保留于[交付记录](history/2026-09-25-a2-a1-delivery-record.md)，职责及依赖方向见[主 guide §1.4](singularity-harness-guide.md)。
 
-**定向返工（2026-09-25，提交 `bee6a96` + 复核响应 `6ae5aa0`）**：Q1（绑定事实读取失败必须具名拒绝模型请求、零模型输入；图查询异常不得改写为“没有图”）、Q2（委派者必须是所委派 graph 实际发布的成员）、Q3 的“中途读失败不得返回局部成功页”、Q4（状态分页必前进）已实现并有红/绿反例，见[返工记录](history/2026-09-25-a2-a1-rework-record.md)。**未关闭**：单个 DSH 事件正文超过 16 KiB 时，冻结的 `context_read` 四参数（Session 的 `offset` 沿 DSH 事件 offset，读取单位是整个事件）无法表达事件内续读游标，本票按返工 prompt 要求实现“不截断、不跳过、具名 `context-too-large` + `offset: seq+1` 显式续读其余日志”并报告最小合同修订选项，整组保持返工、不填待验收。修改其一（允许事件内位置、允许 `ref` 指向单事件、或另给有界通道）才能让 Q3 完全成立。
+**定向返工（2026-09-25，提交 `bee6a96` + 复核响应 `6ae5aa0`）**：Q1（绑定事实读取失败具名拒绝模型请求、零模型输入）、Q2（委派者属于所委派 graph）、Q3 的“中途读失败不得返回局部成功页”、Q4（状态分页必前进）已有红/绿反例，见[返工记录](history/2026-09-25-a2-a1-rework-record.md)。**复审未关闭**：单个事件正文超过 16 KiB 时，当前工具只能具名拒绝并提示 `offset: seq+1` 跳过，不能取得该事件正文。D 节现固定采用同一四参数工具的单事件引用按字节续读；这是当前可派[Q3 收尾返工](execution-prompts/09-a2-a1-q3-closure.md)，不是放宽 Q3 验收。实现及整组复验前仍保持返工。
 
 **直接消费者与需要回答的问题**
 
@@ -105,9 +105,9 @@ S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进
 |---|---|---|
 | `task_read({})` | 普通节点读自己实际 Run 的完整契约；root 未接受契约返回 not-activated；reviewer 读委派目标契约并标明 review-only、无业务 Run | 不把 reviewer 冒充目标 Run 的执行者；无可信绑定为 unbound，不猜 root |
 | `task_status({scope?, offset?, limit?})` | scope 为 related/graph，默认 related；related 为本人、直属子与直接依赖，graph 为同域任务概览。按 taskId 稳定排序，offset 从 0 起，limit 默认 20、范围 1–100 | 返回来源、实际条目、是否还有后续及下一 offset；两次读取可能观察不同状态，不承诺分页快照一致 |
-| `context_read({kind, ref, offset?, limit?})` | kind 为 task/run/evidence/review/diagnosis/session；ref 使用对应现有记录身份，Session 复用 DSH reference/seq。offset/limit 沿 DSH 读取单位；Task 类读完整单条记录，超限返回可续读的文本片段 | 服务先以 live caller 解析域，再核对目标归属；不存在/不可读/引用失效具名返回，不允许模型指定授权用 graphId/storeId/callerId |
+| `context_read({kind, ref, offset?, limit?})` | kind 为 task/run/evidence/review/diagnosis/session；Task 类按现有记录 id。Session 的 `ref: sessionId` 按事件 seq/条数分页；`ref: {sessionId, seq}` 定位一个事件，其 `offset/limit` 按该事件正文的 UTF-8 字节分页 | 服务先以 live caller 解析域，再核对目标归属；不存在/不可读/引用失效具名返回，不允许模型指定授权用 graphId/storeId/callerId |
 
-ref 的形状固定沿现有身份：task/run/evidence/diagnosis 使用各自 id，review 使用 `{taskId, runId}`（无 Run 时 runId 为 null），session 使用 DSH 原生引用；不为没有独立 id 的 Review 再造全局索引。工具 schema 必须标明各 kind 的 offset 单位：Task 类为 UTF-8 字节，Session 沿 DSH 既有事件 offset；不拆 UTF-8 字符，返回实际 nextOffset。context 的外围输出与单次详情默认上限统一为 16 KiB，由包内一个常量控制，不新增预算配置平台；包括引用列表本身，不能用无限 omittedRefs 绕开。核心契约不静默裁剪：工具超限提供明确续读引用，自动装配核心若无法完整容纳则以 context-too-large 拒绝本次模型请求，供调用方处理，不伪造准入成功或改写已接受契约。默认装配和显式概览采用同一相关性规则；稳定角色政策不包含动态状态副本。
+ref 的形状固定沿现有身份：task/run/evidence/diagnosis 使用各自 id，review 使用 `{taskId, runId}`（无 Run 时 runId 为 null），session 列表使用 DSH sessionId，单事件使用 `{sessionId, seq}`；不为 Review 或 Session 再造全局索引。Session 列表的 `offset/limit` 仍是事件 seq/条数，遇超限事件停在该 seq、给单事件引用，不自动跳过；单事件引用用 `sessionQuery.readEvent({sessionId,seq,before:0,after:0})` 取同一事件，按已有 `extractSessionEventText` 文本视图的 UTF-8 字节分页，`offset/limit` 是正文中的字节位置/页量。单事件成功页的模型可见文本是含 `sessionId,seq,offset,nextOffset,hasMore,body` 的 JSON 对象，`body` 为本页原文片段，偏移只计原文而不计 JSON 包装；最终页说明返回列表 `offset=seq+1`。每页重新核对同 graph 成员，校验取回的 seq；`ProjectedRead` 的续读字段与可见 JSON 一致，连续 `body` 必须还原整段正文。工具 schema 必须说明两种单位；不拆 UTF-8 字符，非边界 offset 或越界 offset 具名 `stale-reference`，返回实际 nextOffset。单事件 `seq/offset` 必须是非负安全整数，`limit` 必须是正安全整数；缺省 `limit` 用当前上限，显式值钳在 4～16384 字节，保证一个 UTF-8 字符可前进；非空正文的 `offset >= 正文字节数` 具名 `stale-reference`，空正文只接受 offset 0 的终页。非法引用/数值具名拒绝，不调用 DSH。context 的外围输出与单次详情上限统一为 16 KiB，**包括单事件 JSON 转义后的完整字节数**，由包内一个常量控制，不新增预算配置平台；包括引用列表本身，不能用无限 omittedRefs 绕开。核心契约不静默裁剪：工具超限提供明确续读引用，自动装配核心若无法完整容纳则以 context-too-large 拒绝本次模型请求，供调用方处理，不伪造准入成功或改写已接受契约。默认装配和显式概览采用同一相关性规则；稳定角色政策不包含动态状态副本。
 
 无业务 Run 的 reviewer 使用**既有 reviewer ledger** 的 `sessionId/rootStoreId/taskId/actor` 作可信委派来源。agent-singularity 装配时向 context 注入窄的只读 binding resolver，context 不反向导入工具包；ledger 缺失、同 session 冲突绑定、graph/root store/委派者不一致均拒绝，不靠 prompt 或仅靠 parentSession 推定授权。其读取域仍为所委派 graph，不收窄成只能看一个 task。`task_review_agent` 通过 agent-runtime 内部 awaited `beforePrompt` 回调，在 graph 成员发布后、首条 followup 前写入并确认 ledger；回调不接受模型传入，失败就 dispose handle、标记失败节点且零模型输入。已持久化的委派占用既有预算，重启恢复同一 session 不再次扣数；A2 不新增自动 reviewer 调度，A5 的源去重另见 F.3。旧 ledger 记录按原格式读取。
 

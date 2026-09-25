@@ -1,6 +1,6 @@
 # Singularity Harness 工作指南
 
-当前进度（2026-09-25）：R1、R2、R3 已验收；第 9 项 A2+A1 的[进度审核](history/2026-09-25-a2-a1-progress-review.md)发现绑定失败放行、reviewer 委派归属与分页缺陷，**整组返工、未验收**。当前只派[第 9 项定向返工](execution-prompts/09-a2-a1-review-rework.md)，不派 A4。施工合同仍以[建设计划 D/E/F](2026-09-20-vrtc-code-change-plan.md)为准；原[交付记录](history/2026-09-25-a2-a1-delivery-record.md)保留为实现方当时证据。
+当前进度（2026-09-25）：R1、R2、R3 已验收；第 9 项 A2+A1 的 Q1/Q2/Q4 与 Q3 中途读取失败已修复，但[返工复审](history/2026-09-25-a2-a1-progress-review.md)确认超长 Session 事件正文仍不可续读，**整组返工、未验收**。当前只派[第 9 项 Q3 收尾返工](execution-prompts/09-a2-a1-q3-closure.md)，不派 A4。施工合同以[建设计划 D/E/F](2026-09-20-vrtc-code-change-plan.md)为准；原[交付记录](history/2026-09-25-a2-a1-delivery-record.md)保留当时证据。
 
 本文负责方向、职责与当前事实；[术语表](../CONTEXT.md)定义概念。[历史指南](history/2026-09-21-harness-guide-snapshot.md)保留旧编号和操作经验。深入实施参考：[Task 契约与可选人审](task-contract-construction-guide.md)、[有目标的探索/自进化架构](exploration-evolution-architecture.md)、[角色与 System Prompt 合同](agent-prompt-contracts.md)。[开源机制调研](2026-09-21-open-source-agent-patterns.md)记录一手来源。
 
@@ -19,7 +19,7 @@
 
 DSH 提供 agent/session、skill 发现与加载、preset、MCP、上下文与原生审批。Singularity 负责任务契约、能力选择、证据、组合验收、缺口恢复与复盘。继续使用现有服务，不另造通用 skill loader 或全局调度平台。
 
-**当前阶段判断（2026-09-25，A2+A1 定向返工后）**：递归执行、证据、审核、恢复骨架和根契约入口已经接线；A0、R2、R1、R3 各按原有限合同验收。第 9 项已建立 `context` 包读取、装配和迁移路径；审核发现的绑定失败放行、reviewer 委派者归属与状态分页停滞已按 Q1/Q2/Q4 修复并有红/绿反例（`bee6a96`），Q3 的“中途读失败不得伪装成功”亦已关闭（§5.15）。**整组仍保持返工**：单个 DSH 事件正文超过 16 KiB 时，冻结的四参数 `context_read` 无法表达事件内续读游标；本票已实现具名拒绝（不截断、不跳过）并报告最小合同修订，须先裁决该冲突。
+**当前阶段判断（2026-09-25，A2+A1 返工复审后）**：递归执行、证据、审核、恢复骨架和根契约入口已经接线；A0、R2、R1、R3 各按原有限合同验收。第 9 项已建立 `context` 包读取、装配和迁移路径；Q1/Q2/Q4 及 Q3 的中途读取失败已修复并有红/绿反例。**整组仍保持返工**：单个 DSH 事件正文超过 16 KiB 时，目前只能具名拒绝或提示跳过，无法取回正文。计划 D 节已固定四参数内的 `{sessionId,seq}` 单事件引用，待[Q3 收尾](execution-prompts/09-a2-a1-q3-closure.md)实现并复验。
 
 R0 的默认工具面收敛、R2 的 marker 顺序及无用途 API 清理保留有效，不重做整套框架。R1 的 V6 历史更正保留：按现存记录至少 175461 输入/输出 token、58 次工具调用（含缓存至少 501349），首轮完整日志缺失，为下界而非精确全量；后续各轮尝试另计（补验证轮 入+出 51036 / 工具调用 17 / 缓存读 168704；完成轮 1 61435+19961 / 23 / 199936；完成轮 2 57421+21536 / 22 / 239872；完成轮 3 25051+7733 / 14 / 106752），各轮缓存写列一律为**未报告**——原始 `usage` 对象没有该字段，真报 0 才算 0。自主改进闭环仍未交付。
 
@@ -82,7 +82,7 @@ R1 的 [专项 prompt 与 V1–V6 验收指标](execution-prompts/07-r1-suppleme
 |---|---|---|
 | 契约、Task/Run/提案及其已提交事实 | 现有 `task` | 持久化、reducer、快照及原子提交；既有 Evidence/Review/Diagnosis 历史继续可读。不在这里构造 prompt、检索历史、评分、规划或选择候选 |
 | 准入、批次、提交、取消、恢复、执行预算与写闸 | 现有 `task-runtime` | 唯一执行状态与副作用仲裁；提供已存在事实及必要只读执行观测，不维护第二套上下文/记忆库，不承载 supervisor 推理 |
-| 目标/约束/依赖/产物/历史的相关性组织、来源引用、按需读取与上下文装配 | **`context` 包**（A2+A1 已提交实现、定向返工后仍返工：Q1/Q2/Q4 关闭、Q3 剩接口冲突，2026-09-25） | 读既有来源，供模型工具和 prompt 两个实际消费者共用；不复制任务真相、不改变相位，不默认调用 LLM 生成摘要。这里承担当前所谓“工作记忆”的读取组织 |
+| 目标/约束/依赖/产物/历史的相关性组织、来源引用、按需读取与上下文装配 | **`context` 包**（A2+A1 已提交实现、返工复审后仍返工：Q3 单事件续读待实现，2026-09-25） | 读既有来源，供模型工具和 prompt 两个实际消费者共用；不复制任务真相、不改变相位，不默认调用 LLM 生成摘要。这里承担当前所谓“工作记忆”的读取组织 |
 | 长期经验与共享知识 | 现有 Skill/文件、DSH 历史与 Evolution 记录；**暂不另建 memory 包** | 当前项目状态从权威记录重建；经验带来源、适用范围及验证状态。只有出现明确跨任务写入/检索消费者，才定独立 memory 持久合同，不让 memory 变成第二个 Task store |
 | Agent 创建、身份与消息投递 | 现有 `agent-runtime` + DSH Session/inbox | A4 的通信主体在这里；问题/答案正文沿 Session 持久记录，context 负责呈现，task-runtime 只管阻塞执行效果与取消恢复；不把消息收发器搬进 task |
 | 判据执行与 Evidence 生成 | 现有 `verifier` | 独立产物判断；不决定候选是否值得晋升 |
@@ -94,7 +94,7 @@ R1 的 [专项 prompt 与 V1–V6 验收指标](execution-prompts/07-r1-suppleme
 
 模型接线复用 DSH 的异步 `system-prompt/assemble` scoped waterfall（静态 section provider 仍是同步接口），由 context 在组装时读源；复用 DSH 动态 context snapshot、压缩和引用读取，不增加刷新循环或第二份日志。不可变契约、可变项目事实与稳定角色政策各有一个来源；实际请求装配、普通分解、replay、恢复的消费者须一起迁移。包数可以增加两个明确所有者（context、后续 evolution），但旧实现要被替换，不能在原巨型模块之上叠一层空转发。
 
-A2 与 A1 合成一个可验收交付组：授权概览、按引用取细节、实际 prompt 消费、重启/压缩重建一起交付。内部依次分为显式恢复/纯读分离、读取投影、模型接线、独立验收，不能每个子代理都承担整组。具体场景、读取授权和迁移清单见[建设计划 D/E 节](2026-09-20-vrtc-code-change-plan.md)。唯一顺序在 R1 后先安排有限的 R3 合同归位，再派 A2+A1；A4/S4-E/A5/A6 的职责迁移分别随各自票的行为同批验证，不纳入 A2+A1，不先建空包，也不等功能膨胀后另立无限重构阶段。**该组于 2026-09-25 提交实现、经进度审核判返工，并于同日完成定向返工但仍返工**：四个内部子目标按序交付（`4a510ed`/`f90d05b`/`0f41d91`/`6e0f651`），返工提交 `bee6a96`；证据与未覆盖范围见[交付记录](history/2026-09-25-a2-a1-delivery-record.md)与[返工记录](history/2026-09-25-a2-a1-rework-record.md)（Q1/Q2/Q4 关闭，Q3 的 >16 KiB 单事件续读为冻结接口冲突）。
+A2 与 A1 合成一个可验收交付组：授权概览、按引用取细节、实际 prompt 消费、重启/压缩重建一起交付。内部依次分为显式恢复/纯读分离、读取投影、模型接线、独立验收，不能每个子代理都承担整组。具体场景、读取授权和迁移清单见[建设计划 D/E 节](2026-09-20-vrtc-code-change-plan.md)。唯一顺序在 R1 后先安排有限的 R3 合同归位，再派 A2+A1；A4/S4-E/A5/A6 的职责迁移分别随各自票的行为同批验证，不纳入 A2+A1，不先建空包，也不等功能膨胀后另立无限重构阶段。**该组于 2026-09-25 提交实现、经进度审核判返工，定向返工后复审仍返工**：四个内部子目标按序交付（`4a510ed`/`f90d05b`/`0f41d91`/`6e0f651`），返工提交 `bee6a96`、`6ae5aa0`；证据与未覆盖范围见[交付记录](history/2026-09-25-a2-a1-delivery-record.md)、[返工记录](history/2026-09-25-a2-a1-rework-record.md)与[复审记录](history/2026-09-25-a2-a1-progress-review.md)（Q1/Q2/Q4 关闭，Q3 的 >16 KiB 单事件续读待实现）。
 
 三类事项的合同只维护在计划 D/E/F；其中**读取与恢复已随第 9 项提交实现，审核判返工后已完成定向返工、整组仍未验收**（2026-09-25，[交付记录](history/2026-09-25-a2-a1-delivery-record.md)、[进度审核](history/2026-09-25-a2-a1-progress-review.md)、[返工记录](history/2026-09-25-a2-a1-rework-record.md)）：
 
@@ -200,7 +200,7 @@ KISS §4.2 的 Skill 指能提供可验证能力的执行实现；DSH 的 `SKILL
 
 ## 3. 建设顺序与完成条件
 
-执行只使用 [建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一表。A0、R2、R1、R3 已验收；第 9 项 A2+A1 经进度审核返工、定向返工后仍返工（Q3 接口冲突待裁决）。原交付、审核与返工分别见[交付记录](history/2026-09-25-a2-a1-delivery-record.md)、[审核记录](history/2026-09-25-a2-a1-progress-review.md)、[返工记录](history/2026-09-25-a2-a1-rework-record.md)。
+执行只使用 [建设计划](2026-09-20-vrtc-code-change-plan.md)文首唯一表。A0、R2、R1、R3 已验收；第 9 项 A2+A1 经返工复审仍返工（Q3 单事件续读合同已定、代码待实现）。原交付、审核与返工分别见[交付记录](history/2026-09-25-a2-a1-delivery-record.md)、[审核及复审记录](history/2026-09-25-a2-a1-progress-review.md)、[返工记录](history/2026-09-25-a2-a1-rework-record.md)。
 
 ### 上下文、协作与诊断的方向决定
 
@@ -391,7 +391,7 @@ A3 已交付非阻塞批次、执行相位、工作区写入归属、显式提�
 - **Session 页**：第二窗口之后的读失败返回具名 `unreadable`（不再返回局部成功页）；整块事件先量后加，页面只承载完整事件；单个事件超过 16 KiB 时页面首事件即放不下 → 具名 `context-too-large`（点名 seq、正文字节数、说明 offset 以整个事件为单位、给出 `offset: seq+1` 显式续读其余日志）；后续事件放不下 → 页面止于该事件 seq。**收尾两行（`events shown` 与“下一事件未展示”）在加入事件前预留**，因此模型收到的每一页都说得出自己停在哪里、从哪里继续（独立复核发现 2：此前接近上限的页面会两行皆丢）。
 - **状态页**：首条目放不下时具名 `context-too-large` 并给 `context_read` 引用与 `offset+1`，不再返回“同 offset 且 `hasMore: true`”的停滞页；排序、`nextOffset = offset + shown` 与越界空页语义不变。
 
-**冻结接口冲突（本票未关闭项，需计划所有者裁决）**：`context_read` 只有四参数且 Session 的 `offset` 沿 DSH 事件 offset，而 DSH 的读取单位是整个事件（无事件内字节游标）。因此 >16 KiB 的单事件在冻结接口下**不可续读**：截断并推进游标、或停在原 seq 形成不前进分页，都是已被判定为缺陷的行为。本票实现“不截断、不跳过、具名拒绝 + 显式跳过指令”，并按返工 prompt 报告三条最小修订（允许事件内位置 / 允许 `ref` 指向单事件并对其按字节分页 / 明确接受不可读并另给有界通道）。修订前 Q3 不能声称完成。
+**Q3 复审裁决（未实现）**：`context_read` 仍只有四参数。`ref: sessionId` 保持按事件 seq 分页；新增 `ref: {sessionId,seq}` 精确指向一个事件，`offset/limit` 对该引用按 `extractSessionEventText` 可见正文的 UTF-8 字节分页。每页从真实调用者解析 graph 并核对目标 Session 成员资格，再由 DSH `readEvent` 取该 seq；完整正文可还原后再从列表 `seq+1` 继续。当前实现只在超长事件处具名拒绝并提示跳过，不能取得正文，**Q3 未关闭**。细节与验收见[计划 D 节](2026-09-20-vrtc-code-change-plan.md)和[收尾 prompt](execution-prompts/09-a2-a1-q3-closure.md)。
 
 - **绑定与读取域**：`context/src/bindings.ts` 从持久事实解析调用者（已发布 graph 成员 + 持久 `TaskStarted`；reviewer 经注入的窄 `ReviewerBindingSource` 核实现有 ledger），不读 runtime 的内存绑定缓存；读取域=当前 graph，跨 graph 具名拒绝（`cross-graph`/`not-found`/`unbound`/`binding-conflict` 等 8 个具名结果词表在 `context/src/refusals.ts`）。
 - **三工具一面**：`task_read({})`、`task_status({scope:related|graph,offset,limit})`、`context_read({kind,ref,offset,limit})` 均为 agent-singularity 薄适配，共用 context 读源；16 KiB 上限唯一常量 `CONTEXT_OUTPUT_LIMIT_BYTES`，核心契约超限具名 `context-too-large` 不静默裁剪。
@@ -400,7 +400,7 @@ A3 已交付非阻塞批次、执行相位、工作区写入归属、显式提�
 - **迁移闭合**：`renderWorkerPrompt`、`task-runtime/src/contract.ts`、`contract-reinjection.ts`、runtime 侧 `renderRunBinding`、`root-store.ts`、`run-phase.ts` 已删除；runtime 保留执行绑定校验（`bindRunProviders`/`readRunBinding`）、持久 handoff（`buildHandoff`/`recordHandoffIn`）与恢复闸；`SpawnRequest.contract` 移除，`taskWorker`/`beforePrompt` 进入 spawn 合同。
 - **测试锚**：`tests/integration/context-assembly.spec.ts`（三层链/域隔离/压缩重启/replay/reviewer/零副作用 + 返工新增的绑定失败三例与委派者归属一例）、`tests/integration/context-binding-zero-input.spec.ts`（真实 loop 的零模型输入两例）、`tests/integration/context-read-limits.spec.ts`（工具门的 Q3/Q4 三例）、`worker-contract.spec.ts`（真实 SystemPromptProjection 与 RuntimeContextProjection 去重）、`cancellation-gate.spec.ts`（R2 反例保留，第 2 例锚定恢复屏障）、`context/tests/unit/*`（绑定/读取/界限/副作用；返工新增 9 例绑定与 5 例 Session/状态页用例）。证据、未覆盖范围（D3/D5/D8/D9 等）与独立复核结论见[交付记录](history/2026-09-25-a2-a1-delivery-record.md)；返工红/绿证据与合同冲突见[返工记录](history/2026-09-25-a2-a1-rework-record.md)。
 
-**进度审核阻断（关闭情况）**：Q1（已绑定请求在 graph/store/ledger 读取故障时可能无契约进入模型）与 Q4（`task_status` 超长单条分页不前进）已关闭；Q2（reviewer 委派者未核对同图归属）已关闭；Q3 的“中途读失败返回局部成功页”已关闭，“>16 KiB 单事件可续读”为上文冻结接口冲突、**未关闭**。详见[审核记录](history/2026-09-25-a2-a1-progress-review.md)与[返工记录](history/2026-09-25-a2-a1-rework-record.md)；Q3 冲突裁决（或按已实现行为调整验收条款）与整组复验通过前，本组不得标为已验收、不得进入 A4。
+**进度审核阻断（关闭情况）**：Q1（绑定故障放行）、Q2（委派归属）、Q4（状态分页停滞）与 Q3 中途读取失败已关闭；Q3 的“>16 KiB 单事件可续读”仍**未关闭**。详见[复审记录](history/2026-09-25-a2-a1-progress-review.md)与[返工记录](history/2026-09-25-a2-a1-rework-record.md)；单事件引用实现及整组复验通过前，本组不得标为已验收、不得进入 A4。
 
 ## 6. 文档维护
 

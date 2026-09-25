@@ -1,6 +1,6 @@
 # 第 9 项 A2+A1：Agent 状态上下文
 
-原始实现合同：2026-09-25 的[交付记录](../history/2026-09-25-a2-a1-delivery-record.md)已由[进度审核](../history/2026-09-25-a2-a1-progress-review.md)判返工。本文件供合同对照；当前派发[定向返工 prompt](09-a2-a1-review-rework.md)，整组验收后才进入第 11 项 A4。
+原始实现合同：2026-09-25 的[交付记录](../history/2026-09-25-a2-a1-delivery-record.md)已由[进度审核](../history/2026-09-25-a2-a1-progress-review.md)判返工。本文件只供合同对照；当前派发[Q3 收尾 prompt](09-a2-a1-q3-closure.md)，整组验收后才进入第 11 项 A4。
 
 ## 可直接续跑的 prompt
 
