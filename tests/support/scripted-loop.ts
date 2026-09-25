@@ -62,6 +62,8 @@ import { SingularityContextService } from '../../context/src/index.ts'
 import { ProposalReviewService } from '../../agent-singularity/src/proposal-review.ts'
 import { defineCapabilityListTool } from '../../agent-singularity/src/tools/capability-list.ts'
 import { defineContextReadTool } from '../../agent-singularity/src/tools/context-read.ts'
+import { defineTaskAnswerTool } from '../../agent-singularity/src/tools/task-answer.ts'
+import { defineTaskAskParentTool } from '../../agent-singularity/src/tools/task-ask-parent.ts'
 import { defineTaskCancelTool } from '../../agent-singularity/src/tools/task-cancel.ts'
 import { defineTaskDecomposeTool } from '../../agent-singularity/src/tools/task-decompose.ts'
 import { defineTaskIntakeTool } from '../../agent-singularity/src/tools/task-intake.ts'
@@ -79,7 +81,7 @@ import { graphRegistry, sessionQueryReads } from './context-plane.ts'
 /** The root agent's allow-list, exactly as `agent-runtime` composes it. Exported so a fixture that mounts no loop still composes the deployment's root surface. */
 export const ROOT_TOOLS = [
   'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'context_read', 'skill', 'task_intake', 'task_decompose',
-  'task_submit_result', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
+  'task_submit_result', 'task_answer', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
   'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
 
@@ -90,22 +92,31 @@ export const ROOT_TOOLS = [
  * puts on them is an execution guard (`agent-runtime/src/raw-session-guard.ts`),
  * and a guard can only be shown to hold against a surface that would otherwise
  * answer the call.
+ *
+ * The global plane a fixture enumerates is `ROOT_TOOLS` plus this list, and the
+ * two never overlap: `task_answer` (A4 §F.1) rides the root's own allow-list
+ * (the root is a legal addressee), while `task_ask_parent` — which no root may
+ * call — is named here. This fixture registers the **shipped** definition of
+ * both, because a spec built on it runs the deployment's own tool surface. A
+ * spec whose subject is the runtime entry rather than the tool asks for the
+ * stand-in instead (`questionTools: 'stand-in'`), so the scripted call does not
+ * perform the effect the spec is about to drive itself.
  */
 export const OTHER_TOOLS = [
   'bash', 'read', 'write', 'edit', 'read_image', 'glob', 'grep', 'job_output', 'job_list', 'job_kill', 'ask_user_question',
   'web_fetch', 'subagent_fetchless', 'session_search', 'session_event_read', 'session_event_trace', 'session_trace',
-  // The two question tools stand in here for A4 §F.1's shipped definitions
-  // (sub-goal ③c owns those): the fixture only needs them *registered* so a
-  // model call reaches the real waterfall and leaves a `tool/call` event, which
-  // is the citation a spec then hands to the runtime entry it is testing.
-  'task_ask_parent', 'task_answer',
+  'task_ask_parent',
 ]
 
 /** The tools this fixture registers for real; every other name is a stand-in. */
 const REAL_TOOLS = [
   'task_read', 'task_status', 'context_read', 'capability_list', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel',
   'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel',
+  'task_ask_parent', 'task_answer',
 ]
+
+/** The two question tools a spec can keep as stand-ins while it drives the runtime entries itself (`questionTools: 'stand-in'`). */
+const QUESTION_TOOLS: readonly string[] = ['task_ask_parent', 'task_answer']
 
 /**
  * The arguments of one scripted tool call: fixed, or derived at request time
@@ -185,6 +196,14 @@ export interface ScriptedLoopOptions {
   readonly graphRootFor?: (sessionId: string) => string | undefined
   /** The review policy this deployment runs under (`Config.generatedTaskReview`). Defaults to the runtime's own (`off`). */
   readonly generatedTaskReview?: 'off' | 'all'
+  /**
+   * Which `task_ask_parent`/`task_answer` a scripted call reaches: the shipped
+   * definitions — the default, so a spec built on this fixture runs the
+   * deployment's own tool surface — or the fixture's stand-ins, for a spec that
+   * drives the runtime entries itself and needs the *call* to leave nothing but
+   * its `tool/call` citation behind.
+   */
+  readonly questionTools?: 'shipped' | 'stand-in'
   /**
    * How the approval seam answers one review ask. Defaults to answering every
    * ask `allowed-once` — an answerer that decides without a person. Returning
@@ -709,8 +728,9 @@ class ScriptedLoopImpl implements ScriptedLoop {
         else this.executedNames.push(ran)
       }))
     }
+    const shippedQuestionTools = this.options.questionTools !== 'stand-in'
     for (const name of [...ROOT_TOOLS, ...OTHER_TOOLS]) {
-      if (REAL_TOOLS.includes(name)) continue
+      if (REAL_TOOLS.includes(name) && (shippedQuestionTools || !QUESTION_TOOLS.includes(name))) continue
       register(name)
     }
     ctx.tools.register(defineTaskReadTool(ctx))
@@ -727,6 +747,14 @@ class ScriptedLoopImpl implements ScriptedLoop {
     ctx.tools.register(defineTaskProposalReadTool(ctx))
     ctx.tools.register(defineTaskProposalContinueTool(ctx))
     ctx.tools.register(defineTaskProposalCancelTool(ctx))
+    // The shipped question tools (A4 §F.1, sub-goal ③c): a scripted
+    // `task_ask_parent`/`task_answer` runs the deployment's own definition, so a
+    // spec that never calls a runtime entry itself still exercises the whole
+    // path — the model's call, the tool, the store, the delivery.
+    if (shippedQuestionTools) {
+      ctx.tools.register(defineTaskAskParentTool(ctx))
+      ctx.tools.register(defineTaskAnswerTool(ctx))
+    }
 
     // The dispatch record: every call the deployment ran through the registry,
     // deny included (a denied call reports a result too), in order.

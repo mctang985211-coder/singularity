@@ -39,12 +39,12 @@ var HitlService = class extends Service {
 		ctx.on("user-questions/request", async (request, next) => {
 			if (request.questions.length !== 1) return next();
 			const question = request.questions[0];
-			const text$28 = await this.enqueue(request.agent?.id ?? "unknown", "ask", question.question, request.signal);
-			if (text$28.kind !== "ask") throw new Error("hitl: expected ask answer");
+			const text$30 = await this.enqueue(request.agent?.id ?? "unknown", "ask", question.question, request.signal);
+			if (text$30.kind !== "ask") throw new Error("hitl: expected ask answer");
 			return { answers: [{
 				id: question.id,
 				selected: [],
-				custom: text$28.text
+				custom: text$30.text
 			}] };
 		}, { prepend: true });
 		ctx.on("approval/request", async (request) => {
@@ -230,14 +230,14 @@ var EscalationService = class extends Service {
 		return escalations;
 	}
 	async load() {
-		let text$28;
+		let text$30;
 		try {
-			text$28 = await readFile(this.file, "utf8");
+			text$30 = await readFile(this.file, "utf8");
 		} catch (error) {
 			if (error.code === "ENOENT") return;
 			throw error;
 		}
-		const records = text$28.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
+		const records = text$30.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
 			try {
 				return JSON.parse(line);
 			} catch {
@@ -482,9 +482,9 @@ function entryEnd(lines, head, regionEnd, headerIndent) {
 * task-runtime entry, more than one (the error names every matching line —
 * refusing to guess which one governs), or no capabilities mapping.
 */
-function locateCapabilityRow(text$28, name) {
-	const eol = text$28.includes("\r\n") ? "\r\n" : "\n";
-	const lines = text$28.split(eol);
+function locateCapabilityRow(text$30, name) {
+	const eol = text$30.includes("\r\n") ? "\r\n" : "\n";
+	const lines = text$30.split(eol);
 	const docEnd = lines.findIndex((line) => line.trim() === "---");
 	const doc1End = docEnd === -1 ? lines.length : docEnd;
 	const itemIndices = [];
@@ -556,8 +556,8 @@ function locateCapabilityRow(text$28, name) {
 * beats re-rendering the registry entry, whose schema fills default arrays the
 * source text never spelled out.
 */
-function readCapabilityRowSource(text$28, name) {
-	const located = locateCapabilityRow(text$28, name);
+function readCapabilityRowSource(text$30, name) {
+	const located = locateCapabilityRow(text$30, name);
 	if (located.rowStart === -1) return null;
 	return located.lines.slice(located.rowStart, located.rowStart + located.rowSpan).join("\n");
 }
@@ -567,8 +567,8 @@ function readCapabilityRowSource(text$28, name) {
 * row is gone, insert the lines where a new row would go. Every other byte of
 * the file is preserved, exactly as with `editCapabilityRow`.
 */
-function restoreCapabilityRowSource(text$28, name, source) {
-	const { lines, eol, capIndex, capIndent, capCollapsed, rowStart, rowSpan, insertAt } = locateCapabilityRow(text$28, name);
+function restoreCapabilityRowSource(text$30, name, source) {
+	const { lines, eol, capIndex, capIndent, capCollapsed, rowStart, rowSpan, insertAt } = locateCapabilityRow(text$30, name);
 	const sourceLines = source.replace(/\r?\n$/, "").split("\n");
 	if (rowStart !== -1) {
 		lines.splice(rowStart, rowSpan, ...sourceLines);
@@ -597,8 +597,8 @@ function restoreCapabilityRowSource(text$28, name, source) {
 * than one (the error names every matching line — refusing to guess which one
 * governs), no capabilities mapping, or a removal names no existing row.
 */
-function editCapabilityRow(text$28, name, entry) {
-	const { lines, eol, capIndex, capIndent, capCollapsed, regionEnd, rowStart, rowSpan, insertAt, entryIndent } = locateCapabilityRow(text$28, name);
+function editCapabilityRow(text$30, name, entry) {
+	const { lines, eol, capIndex, capIndent, capCollapsed, regionEnd, rowStart, rowSpan, insertAt, entryIndent } = locateCapabilityRow(text$30, name);
 	const rowLine = `${" ".repeat(rowStart === -1 ? entryIndent : indentOf(lines[rowStart]))}${keySpelling(name)}: ${flowEntry(entry ?? {})}`;
 	if (entry !== null && rowStart !== -1) {
 		lines.splice(rowStart, rowSpan, rowLine);
@@ -714,16 +714,16 @@ function assertOnlyKeys(value, allowed, field) {
 }
 /** A single safe path segment (one directory name): no separators, never `.`/`..`, never absolute. */
 function assertSegment(value, field) {
-	const text$28 = nonEmpty(value, field);
-	if (text$28 === "." || text$28 === ".." || text$28.includes("/") || text$28.includes("\\") || isAbsolute(text$28)) throw new Error(`evolution: ${field} must be a single safe path segment, got "${text$28}"`);
-	return text$28;
+	const text$30 = nonEmpty(value, field);
+	if (text$30 === "." || text$30 === ".." || text$30.includes("/") || text$30.includes("\\") || isAbsolute(text$30)) throw new Error(`evolution: ${field} must be a single safe path segment, got "${text$30}"`);
+	return text$30;
 }
 /** A clean relative path: never absolute (posix or drive-letter), no `\`, no empty / `.` / `..` segments. */
 function assertSandboxPath(value, field) {
-	const text$28 = nonEmpty(value, field);
-	if (isAbsolute(text$28) || /^[A-Za-z]:[\\/]/.test(text$28) || text$28.includes("\\") || text$28.includes("\0")) throw new Error(`evolution: ${field} must be a relative path inside the sandbox, got "${text$28}"`);
-	if (text$28.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) throw new Error(`evolution: ${field} must be a clean relative path (no empty / "." / ".." segments), got "${text$28}"`);
-	return text$28;
+	const text$30 = nonEmpty(value, field);
+	if (isAbsolute(text$30) || /^[A-Za-z]:[\\/]/.test(text$30) || text$30.includes("\\") || text$30.includes("\0")) throw new Error(`evolution: ${field} must be a relative path inside the sandbox, got "${text$30}"`);
+	if (text$30.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) throw new Error(`evolution: ${field} must be a clean relative path (no empty / "." / ".." segments), got "${text$30}"`);
+	return text$30;
 }
 /** Resolve `rel` under `base`, refusing anything that would land outside — the sandbox confinement belt. */
 function resolveWithin(base, rel) {
@@ -904,8 +904,8 @@ function championEntryYaml(name, entry) {
 	].join("\n");
 }
 /** Read back the champion capability snapshot: the single JSON line under the `#` header, keyed by the capability name. */
-function parseChampionEntry(text$28, name) {
-	const line = text$28.split("\n").map((item) => item.trim()).filter((item) => item.length > 0 && !item.startsWith("#")).at(-1);
+function parseChampionEntry(text$30, name) {
+	const line = text$30.split("\n").map((item) => item.trim()).filter((item) => item.length > 0 && !item.startsWith("#")).at(-1);
 	if (line === void 0) throw new Error("evolution: the champion capability snapshot carries no entry line");
 	const parsed = JSON.parse(line);
 	if (!isRecord$2(parsed) || !(name in parsed) || !isRecord$2(parsed[name])) throw new Error(`evolution: the champion capability snapshot does not hold an entry for "${name}"`);
@@ -1588,24 +1588,24 @@ var EvolutionService = class extends Service {
 			}
 			case "capability": {
 				const { name, entry } = proposal.mutation;
-				const text$28 = await readFile(this.configFile, "utf8");
+				const text$30 = await readFile(this.configFile, "utf8");
 				let row;
 				let edited;
 				if (direction === "apply") {
 					row = entry;
-					edited = editCapabilityRow(text$28, name, row);
+					edited = editCapabilityRow(text$30, name, row);
 				} else if (champion === "missing") {
 					row = null;
-					edited = editCapabilityRow(text$28, name, null);
+					edited = editCapabilityRow(text$30, name, null);
 				} else if (proposal.prepared?.championSource === "config-text") {
 					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = restoreCapabilityRowSource(text$28, name, await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.source.txt`), "utf8"));
+					edited = restoreCapabilityRowSource(text$30, name, await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.source.txt`), "utf8"));
 				} else if (proposal.prepared?.championSource === "code-default") {
 					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = editCapabilityRow(text$28, name, null);
+					edited = editCapabilityRow(text$30, name, null);
 				} else {
 					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = editCapabilityRow(text$28, name, row);
+					edited = editCapabilityRow(text$30, name, row);
 				}
 				await writeFile(this.configFile, edited.text, "utf8");
 				return {
@@ -1642,14 +1642,14 @@ var EvolutionService = class extends Service {
 	* apply would.
 	*/
 	async capabilityRowSource(name) {
-		let text$28;
+		let text$30;
 		try {
-			text$28 = await readFile(this.configFile, "utf8");
+			text$30 = await readFile(this.configFile, "utf8");
 		} catch (error) {
 			if (error.code === "ENOENT") return null;
 			throw error;
 		}
-		return readCapabilityRowSource(text$28, name);
+		return readCapabilityRowSource(text$30, name);
 	}
 	/**
 	* Early state-machine check so a wrong-state call reports the transition
@@ -1879,14 +1879,14 @@ var EvolutionService = class extends Service {
 		return proposals;
 	}
 	async load() {
-		let text$28;
+		let text$30;
 		try {
-			text$28 = await readFile(this.file, "utf8");
+			text$30 = await readFile(this.file, "utf8");
 		} catch (error) {
 			if (error.code === "ENOENT") return;
 			throw error;
 		}
-		const records = text$28.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
+		const records = text$30.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
 			try {
 				return JSON.parse(line);
 			} catch {
@@ -2463,15 +2463,15 @@ function reviewAgentBudget() {
 * reads as zero; a corrupt line throws rather than silently undercounting.
 */
 async function countReviewAgentRuns(rootStoreId) {
-	let text$28;
+	let text$30;
 	try {
-		text$28 = await readFile(reviewAgentLedgerFile(), "utf8");
+		text$30 = await readFile(reviewAgentLedgerFile(), "utf8");
 	} catch (error) {
 		if (error.code === "ENOENT") return 0;
 		throw error;
 	}
 	let count = 0;
-	text$28.split("\n").forEach((line, index) => {
+	text$30.split("\n").forEach((line, index) => {
 		if (line.trim().length === 0) return;
 		let record;
 		try {
@@ -2496,15 +2496,15 @@ async function appendReviewAgentRun(record) {
 }
 /** Every ledger row, or `undefined` when the ledger has never been written (zero rows is a state, not a failure). */
 async function readLedgerRows() {
-	let text$28;
+	let text$30;
 	try {
-		text$28 = await readFile(reviewAgentLedgerFile(), "utf8");
+		text$30 = await readFile(reviewAgentLedgerFile(), "utf8");
 	} catch (error) {
 		if (error.code === "ENOENT") return void 0;
 		throw error;
 	}
 	const rows = [];
-	text$28.split("\n").forEach((line, index) => {
+	text$30.split("\n").forEach((line, index) => {
 		if (line.trim().length === 0) return;
 		try {
 			rows.push(JSON.parse(line));
@@ -2551,7 +2551,7 @@ function reviewerBindingSource() {
 
 //#endregion
 //#region src/tools/approve.ts
-const text$27 = (value) => [{
+const text$29 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2566,7 +2566,7 @@ function defineApproveTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$27(v)
+			render: (_a, v) => text$29(v)
 		},
 		execute: async (args, exec) => {
 			if (args.prompt.trim().length === 0) throw new Error("hitl_approve: prompt is empty");
@@ -2590,7 +2590,7 @@ function defineApproveTool(ctx) {
 
 //#endregion
 //#region src/tools/ask.ts
-const text$26 = (value) => [{
+const text$28 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2606,7 +2606,7 @@ function defineAskTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$26(v)
+			render: (_a, v) => text$28(v)
 		},
 		execute: async (args, exec) => {
 			if (args.prompt.trim().length === 0) throw new Error("hitl_ask: prompt is empty");
@@ -2625,7 +2625,7 @@ function defineAskTool(ctx) {
 
 //#endregion
 //#region src/tools/capability-list.ts
-const text$25 = (value) => [{
+const text$27 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2684,7 +2684,7 @@ function defineCapabilityListTool(ctx) {
 		parameters: {},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$25(v)
+			render: (_a, v) => text$27(v)
 		},
 		execute: async (_args, exec) => {
 			const capabilities = ctx.taskRuntime.listCapabilities();
@@ -2747,12 +2747,12 @@ function adaptRead(tool, result) {
 
 //#endregion
 //#region src/tools/context-read.ts
-const text$24 = (value) => [{
+const text$26 = (value) => [{
 	type: "text",
 	text: value
 }];
 /** Every parameter this tool declares; anything else is refused by name before any read happens. */
-const DECLARED = [
+const DECLARED$2 = [
 	"kind",
 	"ref",
 	"offset",
@@ -2763,12 +2763,12 @@ const DECLARED = [
 * `storeId` or `callerId` above all: the reference never authorizes, and an
 * undeclared key is named rather than silently ignored.
 */
-function undeclared(args) {
-	const extra = Object.keys(args).filter((key) => !DECLARED.includes(key));
+function undeclared$2(args) {
+	const extra = Object.keys(args).filter((key) => !DECLARED$2.includes(key));
 	if (extra.length === 0) return void 0;
 	return [
 		`context_read rejected: undeclared parameter${extra.length === 1 ? "" : "s"} ${extra.map((key) => `"${key}"`).join(", ")} —`,
-		`this tool accepts ${DECLARED.join(", ")} and has no argument that names a graph, a store or a caller:`,
+		`this tool accepts ${DECLARED$2.join(", ")} and has no argument that names a graph, a store or a caller:`,
 		"the read domain is the calling session's own graph, and nothing here can widen it. Nothing was read."
 	].join(" ");
 }
@@ -2824,10 +2824,10 @@ function defineContextReadTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$24(v)
+			render: (_a, v) => text$26(v)
 		},
 		execute: async (args, exec) => {
-			const refused = undeclared(args);
+			const refused = undeclared$2(args);
 			if (refused !== void 0) return refused;
 			const caller = callerSessionId(exec, "context_read");
 			return adaptRead("context_read", await ctx.singularityContext.contextRead(caller, {
@@ -2842,7 +2842,7 @@ function defineContextReadTool(ctx) {
 
 //#endregion
 //#region src/tools/escalate.ts
-const text$23 = (value) => [{
+const text$25 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2919,7 +2919,7 @@ function defineEscalateTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$23(v)
+			render: (_a, v) => text$25(v)
 		},
 		execute: async (args, exec) => {
 			if (args.list === true) {
@@ -2979,7 +2979,7 @@ function defineEscalateTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-apply.ts
-const text$22 = (value) => [{
+const text$24 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3017,7 +3017,7 @@ function defineEvolutionApplyTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$22(v)
+			render: (_a, v) => text$24(v)
 		},
 		execute: async (args, exec) => {
 			const caller = sessionId$18(exec);
@@ -3085,7 +3085,7 @@ function defineEvolutionApplyTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-candidate.ts
-const text$21 = (value) => [{
+const text$23 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3118,7 +3118,7 @@ function defineEvolutionCandidateTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$21(v)
+			render: (_a, v) => text$23(v)
 		},
 		execute: async (args, exec) => {
 			const caller = sessionId$17(exec);
@@ -3137,7 +3137,7 @@ function defineEvolutionCandidateTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-decide.ts
-const text$20 = (value) => [{
+const text$22 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3169,7 +3169,7 @@ function defineEvolutionDecideTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$20(v)
+			render: (_a, v) => text$22(v)
 		},
 		execute: async (args, exec) => {
 			const caller = sessionId$16(exec);
@@ -3222,7 +3222,7 @@ function defineEvolutionDecideTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-gate.ts
-const text$19 = (value) => [{
+const text$21 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3280,7 +3280,7 @@ function defineEvolutionGateTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$19(v)
+			render: (_a, v) => text$21(v)
 		},
 		execute: async (args, exec) => {
 			const caller = sessionId$15(exec);
@@ -3312,7 +3312,7 @@ function defineEvolutionGateTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-list.ts
-const text$18 = (value) => [{
+const text$20 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3358,7 +3358,7 @@ function defineEvolutionListTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$18(v)
+			render: (_a, v) => text$20(v)
 		},
 		execute: async (args) => {
 			const proposals = await ctx.evolution.list({
@@ -3405,7 +3405,7 @@ function defineEvolutionListTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-prepare.ts
-const text$17 = (value) => [{
+const text$19 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3452,7 +3452,7 @@ function defineEvolutionPrepareTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$17(v)
+			render: (_a, v) => text$19(v)
 		},
 		execute: async (args, exec) => {
 			const caller = sessionId$14(exec);
@@ -3490,7 +3490,7 @@ function defineEvolutionPrepareTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-propose.ts
-const text$16 = (value) => [{
+const text$18 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3578,7 +3578,7 @@ function defineEvolutionProposeTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$16(v)
+			render: (_a, v) => text$18(v)
 		},
 		execute: async (args, exec) => {
 			const caller = sessionId$13(exec);
@@ -3624,7 +3624,7 @@ function defineEvolutionProposeTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-replay.ts
-const text$15 = (value) => [{
+const text$17 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3744,7 +3744,7 @@ function defineEvolutionReplayTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$15(v)
+			render: (_a, v) => text$17(v)
 		},
 		execute: async (args, exec) => {
 			const caller = sessionId$12(exec);
@@ -3889,7 +3889,7 @@ function defineEvolutionReplayTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-rollback.ts
-const text$14 = (value) => [{
+const text$16 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3909,7 +3909,7 @@ function defineEvolutionRollbackTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$14(v)
+			render: (_a, v) => text$16(v)
 		},
 		execute: async (args, exec) => {
 			const caller = sessionId$11(exec);
@@ -3963,7 +3963,7 @@ function defineEvolutionRollbackTool(ctx) {
 
 //#endregion
 //#region src/tools/mark-ready.ts
-const text$13 = (value) => [{
+const text$15 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3974,7 +3974,7 @@ function defineMarkReadyTool(ctx) {
 		parameters: {},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$13(v)
+			render: (_a, v) => text$15(v)
 		},
 		execute: async (_args, exec) => {
 			const sessionId$20 = exec.agent?.id;
@@ -4034,6 +4034,219 @@ function defineSpawnTool(ctx) {
 			const result = event.data.message.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
 			if (result.length === 0) throw new Error(`graph_spawn: worker ${handle.agent.id} produced no text response`);
 			return `Worker ${handle.agent.id} completed:\n${result}`;
+		}
+	});
+}
+
+//#endregion
+//#region src/tools/question-call.ts
+/** The caller's own session. A call with no live agent has no identity to ask or answer with. */
+function questionCaller(exec, tool) {
+	const id = exec.agent?.id;
+	if (typeof id !== "string" || id.length === 0) throw new Error(`${tool}: missing agent id`);
+	return id;
+}
+/**
+* The identity a question call runs under. The registration id is required, not
+* defaulted: the whole protocol rests on the body being read back from the
+* caller's own message, so a call that cannot name its own `tool/call` is
+* refused by name before anything is written or sent.
+*/
+function questionCall(exec, tool) {
+	const caller = questionCaller(exec, tool);
+	const callId = exec.callId;
+	if (typeof callId !== "string" || callId.length === 0) throw new Error(`${tool}: this call carries no registration id, so the body it would record cannot be cited; a question or an answer is only ever recorded from the message the caller itself wrote`);
+	return {
+		caller,
+		callId
+	};
+}
+
+//#endregion
+//#region src/tools/task-answer.ts
+const text$14 = (value) => [{
+	type: "text",
+	text: value
+}];
+/** Every parameter this tool declares; anything else is refused by name, before the store is touched. */
+const DECLARED$1 = [
+	"questionId",
+	"requestKey",
+	"answer",
+	"resolves"
+];
+/**
+* Refuse a call carrying a key this tool does not declare: the asking run is the
+* question's own child run, and there is no argument here that could address a
+* message, grant a permission or classify the answer.
+*/
+function undeclared$1(args) {
+	const extra = Object.keys(args).filter((key) => !DECLARED$1.includes(key));
+	if (extra.length === 0) return void 0;
+	return [
+		`task_answer rejected: undeclared parameter${extra.length === 1 ? "" : "s"} ${extra.map((key) => `"${key}"`).join(", ")} —`,
+		`this tool accepts ${DECLARED$1.join(", ")} and has no argument that names a recipient, an authorization or a category:`,
+		"the answer goes to the run that asked the question you name. Nothing was answered and nothing was sent."
+	].join(" ");
+}
+/** How one delivery settled, in the answering model's words — `unavailable` is a retry, never a re-send under a new key. */
+function deliveryText$1(delivery) {
+	switch (delivery.status) {
+		case "delivered": return `message ${delivery.messageId} is in the asking run's session`;
+		case "already-present": return `message ${delivery.messageId} was already in the asking run's session, so nothing was sent twice`;
+		case "unavailable": return `message ${delivery.messageId} is not delivered yet: the asking run's session is not live in this process. Your answer is on the record and recovery delivers that same identity — do not answer the same question again under a new request key`;
+		case "refused": return `message ${delivery.messageId} could not be delivered (${delivery.reason ?? "the attempt could not be settled"}). Your answer is on the record; delivery is retried from there`;
+	}
+}
+/** One answer as its reply: what was recorded, how it was delivered, and what it did to the asking run. */
+function answeredText(outcome) {
+	const answer = outcome.answer;
+	const lines = [`task_answer: answer ${answer.answerId} recorded for question ${answer.questionId}; ${deliveryText$1(outcome.delivery)}.`];
+	if (!outcome.created) lines.push("This is the answer the same request key already recorded: nothing was written a second time and the same identity stands.");
+	lines.push(answer.resolves ? "`resolves: true` releases exactly that question: the asking run's block is recomputed from the store, so another question of its own keeps it blocked. It changes no contract, no permission and no task state, and the framework does not vouch for what the answer says." : "`resolves: false` keeps the question open: the asking run stays blocked on it and your words are recorded as an answer that settled nothing. Answer it again with `resolves: true` once it is settled.");
+	lines.push("Your words reach the asking run as a message in its session and in its context, under the identity recorded here.");
+	return lines.join("\n");
+}
+function defineTaskAnswerTool(ctx) {
+	return defineTool({
+		name: "task_answer",
+		description: "Answer one question a child run asked you. `questionId` is the identity on the question you were told about (in your context under the pending questions, or in the message that reached you) — you cannot address an answer anywhere else, and an answer to a question that was not asked of your run is refused. `resolves: true` declares the question settled and releases exactly that block on the asking run; `resolves: false` keeps it open and records words that settle nothing. Neither changes the asking run's contract, permissions or task state, and neither is a judgement of the answer's correctness — say what you decided and what it rests on, because the child acts on your words. `requestKey` is your own stable key for this answer: answer a question you have already answered by repeating the same key instead of inventing one, and it comes back as the answer already recorded.",
+		parameters: {
+			questionId: {
+				type: "string",
+				required: true,
+				description: "The question being answered, exactly as the question or the record names it (`q-…`); it must be the question this call's own arguments name, and it must be a question addressed to your run"
+			},
+			requestKey: {
+				type: "string",
+				required: true,
+				description: "Your own stable key for this answer, e.g. \"contract-holds\". The recorded answer id derives from it; several keys may answer one open question, and a repeat of the same key is the answer already on the record"
+			},
+			answer: {
+				type: "string",
+				required: true,
+				description: "What you are telling the child, in your own words. This text is the body the store cites, read back from this call itself — the child reads exactly these words"
+			},
+			resolves: {
+				type: "boolean",
+				required: true,
+				description: "Your declaration: `true` settles this question and releases the asking run's block on it; `false` keeps it open. Required — there is no default, because silence about whether the question is settled is not an answer"
+			}
+		},
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text$14(v)
+		},
+		execute: async (args, exec) => {
+			const refused = undeclared$1(args);
+			if (refused !== void 0) return refused;
+			const { caller, callId } = questionCall(exec, "task_answer");
+			let outcome;
+			try {
+				outcome = await ctx.taskRuntime.answerParentQuestion(caller, {
+					callId,
+					questionId: args.questionId,
+					requestKey: args.requestKey,
+					resolves: args.resolves
+				});
+			} catch (error) {
+				return `task_answer rejected: ${error instanceof Error ? error.message : String(error)}`;
+			}
+			return answeredText(outcome);
+		}
+	});
+}
+
+//#endregion
+//#region src/tools/task-ask-parent.ts
+const text$13 = (value) => [{
+	type: "text",
+	text: value
+}];
+/** Every parameter this tool declares; anything else is refused by name, before the store is touched. */
+const DECLARED = [
+	"requestKey",
+	"question",
+	"blocking"
+];
+/**
+* Refuse a call carrying a key this tool does not declare — a recipient, a
+* parent session, a run id or an authorization above all: the addressee is the
+* store's own derivation, and an undeclared key is named rather than ignored.
+*/
+function undeclared(args) {
+	const extra = Object.keys(args).filter((key) => !DECLARED.includes(key));
+	if (extra.length === 0) return void 0;
+	return [
+		`task_ask_parent rejected: undeclared parameter${extra.length === 1 ? "" : "s"} ${extra.map((key) => `"${key}"`).join(", ")} —`,
+		`this tool accepts ${DECLARED.join(", ")} and has no argument that names a recipient, a parent or an authorization:`,
+		"the question goes to your own task's direct parent, resolved from your run. Nothing was asked and nothing was sent."
+	].join(" ");
+}
+/**
+* How one delivery settled, in the caller's words. `unavailable` is not a
+* failure and is not reported as one: the intent is durable from the moment the
+* store recorded it, so a parent that is not live right now means the message
+* arrives when recovery delivers the same identity — never "ask again".
+*/
+function deliveryText(delivery) {
+	switch (delivery.status) {
+		case "delivered": return `message ${delivery.messageId} is in your parent's session`;
+		case "already-present": return `message ${delivery.messageId} was already in your parent's session, so nothing was sent twice`;
+		case "unavailable": return `message ${delivery.messageId} is not delivered yet: your parent's session is not live in this process. The question is on the record and recovery delivers that same identity when the parent is back — do not ask the same question again under a new request key`;
+		case "refused": return `message ${delivery.messageId} could not be delivered (${delivery.reason ?? "the attempt could not be settled"}). The question is on the record; delivery is retried from there, and a new request key would only add a second question`;
+	}
+}
+/** One ask as its answer: what was recorded, how it was delivered, and what the asking run may do now. */
+function askedText(outcome) {
+	const question = outcome.question;
+	const lines = [`task_ask_parent: question ${question.questionId} recorded for your direct parent (run ${question.parentRunId}); ${deliveryText(outcome.delivery)}.`];
+	if (!outcome.created) lines.push("This is the question the same request key already recorded, word for word: nothing was written a second time and the same identity stands. Do not re-send it under a new key.");
+	if (question.blocking) {
+		lines.push("This run is now blocked on that answer: writes, shell commands, another decomposition and `task_submit_result` are refused until an answer with `resolves: true` is recorded. Stop the work that would write and end this step — an idle run waiting on this question is not counted as no progress, while the run's own deadline still applies.");
+		lines.push("The answer arrives as a message in this session and in your context, where the question stays while it is open; read it before you continue, and keep to what it says.");
+	} else lines.push("This run is not blocked: it may carry on working while the answer is pending, so it may pass you later in this session or in your context — do not treat the silence as an answer.");
+	return lines.join("\n");
+}
+function defineTaskAskParentTool(ctx) {
+	return defineTool({
+		name: "task_ask_parent",
+		description: "Ask your direct parent one question and stop guessing. The addressee is fixed by your own run — its task's direct parent — and you cannot name one: there is no recipient parameter, and a call carrying an undeclared one is refused. By default the question blocks this run (`blocking` defaults to `true`): writes, shell commands, another decomposition and `task_submit_result` are refused until the parent answers with `resolves: true`, and the answer then reaches you as a message and in your context. Pass `blocking: false` for a question you can work without. Ask when the contract, the scope or the acceptance is genuinely undecidable from what you were given — not for facts `task_read`/`task_status`/`context_read` already answer, and not to hand back work you could decide yourself. `requestKey` is your stable key for this question: resend the identical question under the same key after a failure instead of inventing a new one, and it comes back as the question already recorded.",
+		parameters: {
+			requestKey: {
+				type: "string",
+				required: true,
+				description: "Your own stable key for this question, e.g. \"which-contract-holds\". The recorded question id derives from it, and a resend under the same key with the same words is answered as the question already on the record"
+			},
+			question: {
+				type: "string",
+				required: true,
+				description: "The question, in your own words. This text is the body the store cites and the parent reads — it is read back from this call itself, so what you write here is what is recorded"
+			},
+			blocking: {
+				type: "boolean",
+				description: "Whether this run waits for the answer: true (the default) closes writes, shell commands, another decomposition and submission until an answer resolves it; false leaves this run deciding its own work while the answer is pending"
+			}
+		},
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text$13(v)
+		},
+		execute: async (args, exec) => {
+			const refused = undeclared(args);
+			if (refused !== void 0) return refused;
+			const { caller, callId } = questionCall(exec, "task_ask_parent");
+			let outcome;
+			try {
+				outcome = await ctx.taskRuntime.askParentQuestion(caller, {
+					callId,
+					requestKey: args.requestKey,
+					...args.blocking === void 0 ? {} : { blocking: args.blocking }
+				});
+			} catch (error) {
+				return `task_ask_parent rejected: ${error instanceof Error ? error.message : String(error)}`;
+			}
+			return askedText(outcome);
 		}
 	});
 }
@@ -4842,10 +5055,10 @@ async function pendingText(ctx, storeId, proposalId, detail) {
 * @returns the refusal text, or `undefined` when the call carries nothing undeclared.
 */
 function undeclaredParameters(args, declared, toolName) {
-	const undeclared$1 = Object.keys(args).filter((key) => !declared.includes(key));
-	if (undeclared$1.length === 0) return void 0;
+	const undeclared$3 = Object.keys(args).filter((key) => !declared.includes(key));
+	if (undeclared$3.length === 0) return void 0;
 	return [
-		`${toolName} rejected: undeclared parameter${undeclared$1.length === 1 ? "" : "s"} ${undeclared$1.map((key) => `"${key}"`).join(", ")} —`,
+		`${toolName} rejected: undeclared parameter${undeclared$3.length === 1 ? "" : "s"} ${undeclared$3.map((key) => `"${key}"`).join(", ")} —`,
 		`this tool accepts ${declared.join(", ")} and has no argument that approves, decides, or stands in for a review;`,
 		"nothing was read and nothing was changed."
 	].join(" ");
@@ -4876,8 +5089,8 @@ function defineTaskProposalCancelTool(ctx) {
 			render: (_a, v) => text$8(v)
 		},
 		execute: async (args, exec) => {
-			const undeclared$1 = undeclaredParameters(args, ["proposalId"], "task_proposal_cancel");
-			if (undeclared$1 !== void 0) return undeclared$1;
+			const undeclared$3 = undeclaredParameters(args, ["proposalId"], "task_proposal_cancel");
+			if (undeclared$3 !== void 0) return undeclared$3;
 			const caller = sessionId$6(exec);
 			const { storeId } = await ctx.taskRuntime.runForSession(caller);
 			try {
@@ -4963,8 +5176,8 @@ function defineTaskProposalContinueTool(ctx) {
 			render: (_a, v) => text$7(v)
 		},
 		execute: async (args, exec) => {
-			const undeclared$1 = undeclaredParameters(args, ["proposalId"], "task_proposal_continue");
-			if (undeclared$1 !== void 0) return undeclared$1;
+			const undeclared$3 = undeclaredParameters(args, ["proposalId"], "task_proposal_continue");
+			if (undeclared$3 !== void 0) return undeclared$3;
 			const caller = sessionId$5(exec);
 			let continuation;
 			try {
@@ -5084,8 +5297,8 @@ function defineTaskProposalReadTool(ctx) {
 			render: (_a, v) => text$6(v)
 		},
 		execute: async (args, exec) => {
-			const undeclared$1 = undeclaredParameters(args, ["proposalId"], "task_proposal_read");
-			if (undeclared$1 !== void 0) return undeclared$1;
+			const undeclared$3 = undeclaredParameters(args, ["proposalId"], "task_proposal_read");
+			if (undeclared$3 !== void 0) return undeclared$3;
 			const caller = sessionId$4(exec);
 			try {
 				const storeId = await proposalStoreFor(ctx, caller);
@@ -5803,6 +6016,8 @@ var SingularityAgent = class extends Service {
 		ctx.tools.register(defineTaskProposalCancelTool(ctx));
 		ctx.tools.register(defineTaskStatusTool(ctx));
 		ctx.tools.register(defineTaskSubmitResultTool(ctx));
+		ctx.tools.register(defineTaskAskParentTool(ctx));
+		ctx.tools.register(defineTaskAnswerTool(ctx));
 		ctx.tools.register(defineTaskCancelTool(ctx));
 		ctx.tools.register(defineTaskVerifyTool(ctx));
 		ctx.tools.register(defineTaskReviewPackTool(ctx));

@@ -12,11 +12,12 @@ function agent(value: string): Agent {
 type Spy = ReturnType<typeof vi.fn>
 
 /**
- * The twenty tools every root composition may call; the deployment's evolution
- * switch does not touch them. `context_read` is one of them (A2): the root's reads
- * name records by id, and the raw cross-session readers it replaced were never on
- * this surface — the execution seal covers them (`./agent-runtime.spec.ts`,
- * the guard cases).
+ * The twenty-one tools every root composition may call; the deployment's
+ * evolution switch does not touch them. `context_read` is one of them (A2): the
+ * root's reads name records by id, and the raw cross-session readers it replaced
+ * were never on this surface — the execution seal covers them
+ * (`./agent-runtime.spec.ts`, the guard cases). `task_answer` is one too (A4
+ * §F.1): the root is a legal addressee for its children's questions.
  */
 const ROOT_CORE_TOOLS = [
   'graph_spawn',
@@ -30,6 +31,9 @@ const ROOT_CORE_TOOLS = [
   'task_intake',
   'task_decompose',
   'task_submit_result',
+  // The root is a legal addressee (A4 §F.1), so its own allow-list carries the
+  // answer half of the question protocol and not the asking half.
+  'task_answer',
   'task_cancel',
   'task_proposal_read',
   'task_proposal_continue',

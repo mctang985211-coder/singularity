@@ -24,14 +24,16 @@ import {
  * drivers of `task-runtime`. What is scripted is the model's answers, and
  * nothing else.
  *
- * The two question tools are registered as stand-ins (`OTHER_TOOLS`): their
- * shipped definitions are A4 sub-goal ③c's, and what a tool layer *does* is hand
- * the runtime the caller's own call id. That is exactly what these specs do —
- * the scripted call leaves the real `tool/call` event in the caller's session,
- * and the spec calls the runtime entry with that citation. The store, the gate
- * and the delivery are never faked, and the gate's decision on
- * `task_ask_parent`/`task_answer` is asserted through the real waterfall before
- * any entry is called.
+ * The two question tools are kept as stand-ins in these stacks
+ * (`questionTools: 'stand-in'`): these cases drive the runtime entries
+ * themselves, and what a tool layer *does* is hand the runtime the caller's own
+ * call id. That is exactly what these specs do — the scripted call leaves the
+ * real `tool/call` event in the caller's session, and the spec calls the runtime
+ * entry with that citation. The shipped definitions, and the model-driven turns
+ * that run them end to end, are A4 sub-goal ③c's own spec
+ * (`a4-question-loop.spec.ts`). The store, the gate and the delivery are never
+ * faked here, and the gate's decision on `task_ask_parent`/`task_answer` is
+ * asserted through the real waterfall before any entry is called.
  *
  * The tree the blocking cases use is three layers deep on purpose
  * (`root → middle → grandchild`): the grandchild and the middle are workers (the
@@ -99,6 +101,11 @@ describe('the write gate under a question block (A4 §F.1)', () => {
     const released = Promise.withResolvers<void>()
     let grandchildRunId = ''
     const h = await startScriptedLoop({
+      // These cases drive the runtime entries themselves: the question tools stay
+      // the fixture's stand-ins so the scripted call leaves nothing but the
+      // `tool/call` citation the entry is handed (the shipped definitions are
+      // ③c's, and its own spec runs them).
+      questionTools: 'stand-in',
       probes: ['write', 'task_decompose', 'task_submit_result'],
       script: (_sessionId, index): readonly ScriptEntry[] => {
         if (index === 0) {
@@ -222,6 +229,11 @@ describe('the write gate under a question block (A4 §F.1)', () => {
     const secondAnswered = Promise.withResolvers<void>()
     let childRunId = ''
     const h = await startScriptedLoop({
+      // These cases drive the runtime entries themselves: the question tools stay
+      // the fixture's stand-ins so the scripted call leaves nothing but the
+      // `tool/call` citation the entry is handed (the shipped definitions are
+      // ③c's, and its own spec runs them).
+      questionTools: 'stand-in',
       probes: ['write'],
       script: (_sessionId, index): readonly ScriptEntry[] => {
         if (index === 0) {
@@ -313,6 +325,11 @@ describe('the orchestration entries (A4 §F.1)', () => {
     const again = Promise.withResolvers<void>()
     const finished = Promise.withResolvers<void>()
     const h = await startScriptedLoop({
+      // These cases drive the runtime entries themselves: the question tools stay
+      // the fixture's stand-ins so the scripted call leaves nothing but the
+      // `tool/call` citation the entry is handed (the shipped definitions are
+      // ③c's, and its own spec runs them).
+      questionTools: 'stand-in',
       script: (_sessionId, index): readonly ScriptEntry[] => index === 0
         ? [{ tool: 'task_decompose', args: { reason: 'split the release work', children: children('child work') } }]
         : [
@@ -392,6 +409,11 @@ describe('the orchestration entries (A4 §F.1)', () => {
   it('delivers a non-blocking question without blocking anything', async () => {
     const finished = Promise.withResolvers<void>()
     const h = await startScriptedLoop({
+      // These cases drive the runtime entries themselves: the question tools stay
+      // the fixture's stand-ins so the scripted call leaves nothing but the
+      // `tool/call` citation the entry is handed (the shipped definitions are
+      // ③c's, and its own spec runs them).
+      questionTools: 'stand-in',
       script: (_sessionId, index): readonly ScriptEntry[] => index === 0
         ? [{ tool: 'task_decompose', args: { reason: 'split the release work', children: children('child work') } }]
         : [
@@ -427,6 +449,11 @@ describe('the budget still ends a blocked wait (A4 §F.1)', () => {
   it('cancels a run whose question is never answered when its wall time runs out, voiding the derivation and owing no delivery', async () => {
     const started = Promise.withResolvers<void>()
     const h = await startScriptedLoop({
+      // These cases drive the runtime entries themselves: the question tools stay
+      // the fixture's stand-ins so the scripted call leaves nothing but the
+      // `tool/call` citation the entry is handed (the shipped definitions are
+      // ③c's, and its own spec runs them).
+      questionTools: 'stand-in',
       // The run's own wall time is this case's clock: the child asks, goes idle
       // waiting for an answer, and the deadline is what ends the wait.
       budget: { wallTimeMs: 250 },
@@ -532,6 +559,11 @@ describe('questions inside a replay (A4 §F.1)', () => {
   it("refuses a parentless replay task's ask by name, with no question and no delivery", async () => {
     const keep = Promise.withResolvers<void>()
     const h = await startScriptedLoop({
+      // These cases drive the runtime entries themselves: the question tools stay
+      // the fixture's stand-ins so the scripted call leaves nothing but the
+      // `tool/call` citation the entry is handed (the shipped definitions are
+      // ③c's, and its own spec runs them).
+      questionTools: 'stand-in',
       script: (_sessionId, index): readonly ScriptEntry[] => {
         if (index === 0) return [{ waitFor: () => keep.promise }]
         // The replay's own session: it asks, and then waits — a lot like a worker
@@ -575,6 +607,11 @@ describe('questions inside a replay (A4 §F.1)', () => {
     let questionId = ''
     let childRunId = ''
     const h = await startScriptedLoop({
+      // These cases drive the runtime entries themselves: the question tools stay
+      // the fixture's stand-ins so the scripted call leaves nothing but the
+      // `tool/call` citation the entry is handed (the shipped definitions are
+      // ③c's, and its own spec runs them).
+      questionTools: 'stand-in',
       script: (sessionId, index): readonly ScriptEntry[] => {
         // The replay's own child: it asks its direct parent, which is the replay
         // task — the case §F.1 allows inside an experiment.

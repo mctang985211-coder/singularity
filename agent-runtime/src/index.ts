@@ -72,6 +72,11 @@ const ROOT_CORE_TOOLS = [
   'task_intake',
   'task_decompose',
   'task_submit_result',
+  // The root is a legal addressee (A4 §F.1): its children ask it their
+  // questions, so answering one is a coordination action of the root's own
+  // surface. `task_ask_parent` is deliberately absent — the root has no parent
+  // to ask, and a tool that cannot be answered is one not worth offering.
+  'task_answer',
   'task_cancel',
   'task_proposal_read',
   'task_proposal_continue',

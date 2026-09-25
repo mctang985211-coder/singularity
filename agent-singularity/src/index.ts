@@ -32,6 +32,8 @@ import { defineEvolutionReplayTool } from './tools/evolution-replay.ts'
 import { defineEvolutionRollbackTool } from './tools/evolution-rollback.ts'
 import { defineMarkReadyTool } from './tools/mark-ready.ts'
 import { defineSpawnTool } from './tools/spawn.ts'
+import { defineTaskAnswerTool } from './tools/task-answer.ts'
+import { defineTaskAskParentTool } from './tools/task-ask-parent.ts'
 import { defineTaskCancelTool } from './tools/task-cancel.ts'
 import { defineTaskDecomposeTool } from './tools/task-decompose.ts'
 import { defineTaskDiagnoseTool } from './tools/task-diagnose.ts'
@@ -210,6 +212,14 @@ export class SingularityAgent extends Service {
     ctx.tools.register(defineTaskProposalCancelTool(ctx))
     ctx.tools.register(defineTaskStatusTool(ctx))
     ctx.tools.register(defineTaskSubmitResultTool(ctx))
+    // The two halves of the direct parent/child question protocol (A4 §F.1): a
+    // worker asks its own direct parent, and a parent answers the child that
+    // asked it. Registered unconditionally, like the rest of the task surface —
+    // who may ask whom, and what a call may say, is decided by the caller's run
+    // binding, the store's parent relation and the write gate, never by a
+    // registration switch; the reviewer's own surface leaves both names out.
+    ctx.tools.register(defineTaskAskParentTool(ctx))
+    ctx.tools.register(defineTaskAnswerTool(ctx))
     ctx.tools.register(defineTaskCancelTool(ctx))
     ctx.tools.register(defineTaskVerifyTool(ctx))
     ctx.tools.register(defineTaskReviewPackTool(ctx))

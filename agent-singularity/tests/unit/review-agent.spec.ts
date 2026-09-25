@@ -88,6 +88,18 @@ describe('reviewer grant', () => {
     for (const name of FORBIDDEN) expect(allow).not.toContain(name)
   })
 
+  test('carries neither half of the question protocol: a reviewer has no run to ask from and no child to answer', () => {
+    // A reviewer judges with the records it was delegated; its own surface is
+    // read-only. `reviewerGrant`'s baseline names what a reviewer keeps, so a
+    // question tool that reached it would be a tool whose answer would move the
+    // run of a session that has no business Run (A4 §F.1).
+    expect(REVIEWER_BASELINE).not.toContain('task_ask_parent')
+    expect(REVIEWER_BASELINE).not.toContain('task_answer')
+    const allow = resolveGrant(grantHarness().ctx, worker(), reviewerGrant()).allow
+    expect(allow).not.toContain('task_ask_parent')
+    expect(allow).not.toContain('task_answer')
+  })
+
   test('keepPresetTools is false, so the mounted preset contributes no tool plane', () => {
     const h = grantHarness(['preset_shell_passthrough', 'preset_write'])
     const allow = resolveGrant(h.ctx, worker(), reviewerGrant()).allow
