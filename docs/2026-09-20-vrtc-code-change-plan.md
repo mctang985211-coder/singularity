@@ -26,7 +26,7 @@
 | 9 | A2 + A1：Agent 状态上下文（一个交付组） | **已验收（2026-09-25）**：Q1–Q4、A2-1～A2-6 与公共检查通过 | 实现主代理 + 子代理 | 本文 D/E 节；[交付记录](history/2026-09-25-a2-a1-delivery-record.md)、[进度审核及复审](history/2026-09-25-a2-a1-progress-review.md)、[返工记录](history/2026-09-25-a2-a1-rework-record.md)、[Q3 收尾记录](history/2026-09-25-a2-a1-q3-closure-record.md) | 已按 D 节的单事件引用实现有界续读（上限 50000 字节、字节窗口与省略措辞复用 `@deepseek-ai/dsh-output-retention`）；进度审核通过；下一项为第 11 项 A4 |
 | 10 | A1 原独立排位 | 并入第 9 项，不单独派发 | — | 保留编号供历史引用 | 第 9 项整组验收后直接进入第 11 项 |
 | 11 | A4：父子澄清 | **已验收（2026-09-26）**：恢复期唤醒移到屏障 ready 后，A4-1～A4-5 闭合 | 实现主代理 | 本文 E/F.1、[返工交付](history/2026-09-26-a4-rework-record.md)、[唤醒收尾](history/2026-09-26-a4-barrier-wake-record.md)、[最终审核](history/2026-09-26-a4-final-review.md) | 下一项为第 12 项 S4-E |
-| 12 | S4-E：评估基础（S4 内的子票） | **待派发**；A4 前置已验收 | 实现主代理 | 本文 F.2、[已填写派发 prompt](execution-prompts/12-s4-e-skill-evaluation.md) | 本票闭合现有 Evolution 生命周期迁移、单文件 Skill 双侧真实 Run 与晋升闸，旧 ledger/已应用对象回滚保留；EVAL-1～EVAL-5 验收后进入第 13 项 |
+| 12 | S4-E：评估基础（S4 内的子票） | **待验收**（2026-09-26 交付）：EVAL-1～EVAL-5 实现与证据已提交 | 实现主代理 + 子代理 | 本文 F.2、[交付记录](history/2026-09-26-s4-e-delivery-record.md)、[持久化说明](persistence-changes/2026-09-26-s4-e-experiment-ledger.md) | 本票闭合现有 Evolution 生命周期迁移、单文件 Skill 双侧真实 Run 与晋升闸，旧 ledger/已应用对象回滚保留；EVAL-1～EVAL-5 经进度审核验收后进入第 13 项 |
 | 13 | A5 + S2-E：诊断与缺口交接（一个交付组） | 待前置；合同已定、未实施 | 待填 | 本文 F.3、深入架构 §8 | agent-singularity/review 按源身份触发只读复盘并保存交接；runtime 结算不等 reviewer；缺口可见与诊断失败恢复完整 |
 | 14 | A6 + S2-R + S3：自主改进与恢复（一个交付组） | 待前置；合同已定、未实施 | 待填 | 本文 F.4 | evolution 组织有限候选路径，task-runtime 重检并恢复原图；L1/L2、能力/产物缺口、拒绝/重启/回滚均验收 |
 
@@ -82,7 +82,7 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 9 项 A2+A1 和第 11 项 A4 已验收；A4 的屏障内提前唤醒交错由[收尾返工](history/2026-09-26-a4-barrier-wake-record.md)关闭并经[最终审核](history/2026-09-26-a4-final-review.md)确认。当前只派第 12 项 S4-E。历史补救、R1 和 R3 的逐轮证据见[执行与验收记录](history/2026-09-24-vrtc-execution-records.md)。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 9 项 A2+A1 和第 11 项 A4 已验收；A4 的屏障内提前唤醒交错由[收尾返工](history/2026-09-26-a4-barrier-wake-record.md)关闭并经[最终审核](history/2026-09-26-a4-final-review.md)确认。第 12 项 S4-E 已交付、**待验收**（[交付记录](history/2026-09-26-s4-e-delivery-record.md)）；进度审核通过前不派第 13 项。历史补救、R1 和 R3 的逐轮证据见[执行与验收记录](history/2026-09-24-vrtc-execution-records.md)。
 
 ## 当前施工合同（D/E/F）
 
@@ -207,7 +207,7 @@ S4-E 按 D 节整体迁移现有 Evolution 生命周期与工具消费者；不�
 
 ### F. 后续交付组的冻结合同（2026-09-24）
 
-本节与 D 的读取合同、E 的显式恢复合同共同作为派发依据。A4 的二次进度审核阻断已由[收尾返工](history/2026-09-26-a4-barrier-wake-record.md)关闭并[最终验收](history/2026-09-26-a4-final-review.md)；S4-E/A5/A6 合同已定、代码未实施。不改变文首唯一顺序。这里固定对外行为、所有者和失败处置，私有文件布局与等价 helper 实现由工程 agent 决定。
+本节与 D 的读取合同、E 的显式恢复合同共同作为派发依据。A4 的二次进度审核阻断已由[收尾返工](history/2026-09-26-a4-barrier-wake-record.md)关闭并[最终验收](history/2026-09-26-a4-final-review.md)；**S4-E 已实施、待验收**（[交付记录](history/2026-09-26-s4-e-delivery-record.md)）；A5/A6 合同已定、代码未实施。不改变文首唯一顺序。这里固定对外行为、所有者和失败处置，私有文件布局与等价 helper 实现由工程 agent 决定。
 
 #### F.1 A4：有持久来源的直属父子问答
 

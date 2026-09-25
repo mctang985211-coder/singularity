@@ -457,7 +457,8 @@ describe('S4-E: evolution_replay evaluates a skill candidate as the two-sided ex
     expect(lines.filter(line => line.kind === 'replayed')).toHaveLength(0)
     expect(lines.filter(line => line.kind === 'proposed' || line.kind === 'candidate' || line.kind === 'prepared')).toHaveLength(3)
     // A skill proposal is not moved to `replayed`: its evaluation is an
-    // experiment, and the promotion gate reads that experiment (next ticket).
+    // experiment, and the promotion gate reads that experiment (the end-to-end
+    // describe below drives exactly that chain).
     expect((await f.evolution.get(PROPOSAL)).status).toBe('prepared')
   })
 
