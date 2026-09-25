@@ -190,6 +190,35 @@ describe('one session event, by its own reference (Q3-1)', () => {
   const SHORT = 'a short first event'
   const TAIL = 'the tail event after the giant one'
 
+  it('pages an event whose text carries astral characters byte for byte', async () => {
+    const stack = await boot({ worker: async () => {} })
+    // Emoji, a musical symbol and a CJK-extension character: each is one
+    // character in two UTF-16 code units and four UTF-8 bytes. A cursor that
+    // counted characters but cut code units would start every page after one of
+    // these a unit early — a lone surrogate in the page and a cursor inside a
+    // character, so the rest of the body could never be read.
+    const body = `开始😀${'🎵'.repeat(40)}𠀀${'😀中'.repeat(60)}结束`
+    const seq = 1
+    await stack.seedLog(SESSION, ['a short first event', body, TAIL])
+    const event = (await stack.log(SESSION)).find(item => Number(item.seq) === seq)
+    expect(event).toBeDefined()
+    const visible = extractSessionEventText(event!)
+    expect(visible).toBe(body)
+
+    // Four bytes a page: exactly one astral character at a time, all the way out.
+    const narrow = await readEventPages(stack, SESSION, { sessionId: SESSION, seq }, 4)
+    expect(narrow.pages.length).toBeGreaterThan(100)
+    expect(narrow.pages.map(page => page.body).join('')).toBe(visible)
+    for (const page of narrow.pages) {
+      expect(page.body, `page at offset ${page.offset}`).not.toContain('\uFFFD')
+      expect(page.offset + utf8Bytes(page.body), `page at offset ${page.offset}`).toBe(page.nextOffset)
+    }
+    // A page wider than one character still cuts on a character boundary.
+    const wide = await readEventPages(stack, SESSION, { sessionId: SESSION, seq }, 33)
+    expect(wide.pages.length).toBeGreaterThan(1)
+    expect(wide.pages.map(page => page.body).join('')).toBe(visible)
+  })
+
   it('is named by the listing, pages by bytes to the whole body, and returns the listing at the next event', async () => {
     const stack = await boot({ worker: async () => {} })
     const giant = giantBody()

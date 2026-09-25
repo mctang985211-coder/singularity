@@ -353,6 +353,46 @@ describe('the output bound', () => {
     expect(record.includes('结束')).toBe(true)
   })
 
+  test('a record whose text carries astral characters pages out whole too', async () => {
+    const { stack, chain } = await chainStack()
+    stack.member(chain.graph, 's-worker-astral')
+    stack.sessionLog('s-worker-astral', ['request'])
+    // An objective with emoji and a musical symbol: four-byte characters, each
+    // two UTF-16 code units. The page cursor is a byte offset, so the walk must
+    // cross them without dropping or duplicating a byte.
+    await stack.seed({
+      taskId: 't-astral',
+      sessionId: 's-worker-astral',
+      runId: 'r-astral',
+      objective: `验收 😀${'🎵'.repeat(400)}😀 结束`,
+      parentTaskId: 't-root',
+      depth: 1,
+    })
+
+    const whole = expectOk(await stack.service.contextRead('s-worker-astral', { kind: 'task', ref: 't-astral' }))
+    expect(whole.hasMore).toBe(false)
+    const record = pageBody(whole.text)
+
+    let offset = 0
+    let pages = 0
+    const joined: string[] = []
+    for (;;) {
+      const page = expectOk(await stack.service.contextRead('s-worker-astral', { kind: 'task', ref: 't-astral', offset, limit: 256 }))
+      const body = pageBody(page.text)
+      expect(body).not.toContain('\uFFFD')
+      expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(256)
+      joined.push(body)
+      pages += 1
+      if (page.hasMore !== true) break
+      expect(page.nextOffset).toBeGreaterThan(offset)
+      offset = page.nextOffset as number
+      expect(pages).toBeLessThan(500)
+    }
+    expect(pages).toBeGreaterThan(1)
+    expect(joined.join('')).toBe(record)
+    expect(record).toContain('🎵')
+  })
+
   test('a core contract over the bound is refused as context-too-large, never cut', async () => {
     const { stack, chain } = await chainStack()
     stack.member(chain.graph, 's-worker-huge')
@@ -572,6 +612,28 @@ describe('one session event by its {sessionId, seq} reference', () => {
     const narrow = await walkEvent(stack, 's-g1', 's-long', 0, 4)
     expect(narrow.pages).toBeGreaterThan(1_000)
     expect(narrow.text).toBe(visible)
+  })
+
+  test('a body of astral characters walks out page by page, character for character', { timeout: 60_000 }, async () => {
+    const { stack, chain } = await chainStack()
+    stack.member(chain.graph, 's-astral')
+    // Emoji and a musical symbol: one character in *two* UTF-16 code units, four
+    // UTF-8 bytes. A window that counted characters but cut code units would start
+    // every page after one of these a unit early — a lone surrogate in the page,
+    // and a cursor inside a character, so the rest of the body could never be read.
+    const seeded = `开始😀${'😀'.repeat(300)}中${'🎵'.repeat(80)}结束`
+    stack.sessionLog('s-astral', [seeded])
+    const visible = extractSessionEventText(await loggedEvent(stack, 's-astral', 0))
+    expect(visible).toBe(seeded)
+
+    // Four bytes a page: exactly one astral character at a time.
+    const narrow = await walkEvent(stack, 's-g1', 's-astral', 0, 4)
+    expect(narrow.pages).toBeGreaterThan(300)
+    expect(narrow.text).toBe(visible)
+    // And a page wider than one character must still cut on a character boundary.
+    const wide = await walkEvent(stack, 's-g1', 's-astral', 0, 33)
+    expect(wide.pages).toBeGreaterThan(1)
+    expect(wide.text).toBe(visible)
   })
 
   test('an escape-heavy body never exceeds the page bound, and every page still advances', async () => {

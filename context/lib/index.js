@@ -519,6 +519,26 @@ function utf8Bytes(text) {
 	return Buffer.byteLength(text, "utf8");
 }
 /**
+* The UTF-8 width of the character starting at UTF-16 index `index`.
+*
+* Widths are read off the code point, so an astral character (a surrogate pair,
+* one character in two code units) is four bytes, and a lone surrogate — text a
+* valid log cannot produce, but a string can hold — is counted as the three bytes
+* the decoder writes for it. `utf8Bytes` on the same character agrees, which is
+* what lets the retained byte count become the cursor below.
+*/
+function utf8WidthAt(text, index) {
+	const code = text.codePointAt(index);
+	if (code <= 127) return 1;
+	if (code <= 2047) return 2;
+	if (code <= 65535) return 3;
+	return 4;
+}
+/** How many UTF-16 code units the character at `index` occupies (2 for an astral character). */
+function codeUnitsAt(text, index) {
+	return text.codePointAt(index) > 65535 ? 2 : 1;
+}
+/**
 * Take at most `maxBytes` bytes starting at `offsetBytes` from `text`, never
 * splitting a UTF-8 character, and report where the next page starts.
 *
@@ -531,29 +551,28 @@ function utf8Bytes(text) {
 * that keeps a caller moving — an offset inside a character starts at the next
 * character, and a page always carries at least that one character, so feeding
 * `nextOffset` back never loops on the same offset.
+*
+* Both walks below advance by **code point**, and the string is cut by **code
+* unit**: a surrogate pair is one character in two units, so counting characters
+* into `String#slice` would start every page after an astral character one unit
+* early — a lone surrogate in the page and a cursor inside a character.
 */
 function sliceUtf8(text, offsetBytes, maxBytes) {
 	const start = Math.max(0, Math.trunc(offsetBytes));
 	const budget = Math.max(0, Math.trunc(maxBytes));
 	let position = 0;
 	let index = 0;
-	let startIndex = -1;
-	let firstWidth = 0;
-	for (const character of text) {
-		if (position >= start) {
-			startIndex = index;
-			firstWidth = utf8Bytes(character);
-			break;
-		}
-		position += utf8Bytes(character);
-		index += 1;
+	while (index < text.length && position < start) {
+		position += utf8WidthAt(text, index);
+		index += codeUnitsAt(text, index);
 	}
-	if (startIndex < 0) return {
+	if (index >= text.length) return {
 		text: "",
 		nextOffset: position,
 		done: true
 	};
-	const rest = text.slice(startIndex);
+	const rest = text.slice(index);
+	const firstWidth = utf8WidthAt(text, index);
 	const retainer = new TextRetainer({
 		kind: "head",
 		maxBytes: Math.max(budget, firstWidth)
@@ -1440,7 +1459,15 @@ async function taskStatus(deps, loaded, query) {
 	];
 	if (budget.addAll(header) > 0) return tooLarge("the status header", "Ask for a smaller page (a lower `limit`) or the `related` scope.");
 	const obligations = await obligationLines(deps.envBuilder, resolution.graph.envId, snapshot);
-	const footerReserve = utf8Bytes("- more: yes — continue with offset 999999") + 1 + utf8Bytes("- source: ") + 200 + 1 + obligations.reduce((total, line) => total + utf8Bytes(line) + 1, 0);
+	const obligationsClause = (omitted) => omissionLine({
+		scope: "obligation lines",
+		unit: "lines",
+		kept: obligations.length - omitted,
+		limit: obligations.length,
+		omitted,
+		recovery: "the status page reached its output bound"
+	});
+	const footerReserve = utf8Bytes("- more: yes — continue with offset 999999") + 1 + utf8Bytes("- source: ") + 200 + 1 + obligations.reduce((total, line) => total + utf8Bytes(line) + 1, 0) + utf8Bytes(obligationsClause(obligations.length)) + 1;
 	let shown = 0;
 	for (const entry of page) {
 		const line = taskSummaryLine(snapshot, entry.task, entry.roles);
@@ -1458,14 +1485,7 @@ async function taskStatus(deps, loaded, query) {
 	const footer = [`- more: ${hasMore ? `yes — continue with offset ${nextOffset}` : "no — this is the end of the scope"}`, `- source: one read of store ${resolution.storeId}; pages are observations, not a consistent snapshot across calls` + (shown < page.length ? "; this page stopped at the output bound" : "")];
 	if (budget.addAll(footer) > 0) return tooLarge("the status page footer", "Ask for a smaller page (a lower `limit`).");
 	const omittedObligations = budget.addAll(obligations);
-	if (omittedObligations > 0) budget.add(omissionLine({
-		scope: "obligation lines",
-		unit: "lines",
-		kept: obligations.length - omittedObligations,
-		limit: obligations.length,
-		omitted: omittedObligations,
-		recovery: "the status page reached its output bound"
-	}));
+	if (omittedObligations > 0) budget.add(obligationsClause(omittedObligations));
 	return read(budget.text(), storeSource(resolution.graph, resolution.storeId, `listed ${scope} tasks`), {
 		hasMore,
 		nextOffset

@@ -56,6 +56,28 @@ export interface Utf8Slice {
 }
 
 /**
+ * The UTF-8 width of the character starting at UTF-16 index `index`.
+ *
+ * Widths are read off the code point, so an astral character (a surrogate pair,
+ * one character in two code units) is four bytes, and a lone surrogate — text a
+ * valid log cannot produce, but a string can hold — is counted as the three bytes
+ * the decoder writes for it. `utf8Bytes` on the same character agrees, which is
+ * what lets the retained byte count become the cursor below.
+ */
+function utf8WidthAt(text: string, index: number): number {
+  const code = text.codePointAt(index) as number
+  if (code <= 0x7f) return 1
+  if (code <= 0x7ff) return 2
+  if (code <= 0xffff) return 3
+  return 4
+}
+
+/** How many UTF-16 code units the character at `index` occupies (2 for an astral character). */
+function codeUnitsAt(text: string, index: number): number {
+  return (text.codePointAt(index) as number) > 0xffff ? 2 : 1
+}
+
+/**
  * Take at most `maxBytes` bytes starting at `offsetBytes` from `text`, never
  * splitting a UTF-8 character, and report where the next page starts.
  *
@@ -68,29 +90,29 @@ export interface Utf8Slice {
  * that keeps a caller moving — an offset inside a character starts at the next
  * character, and a page always carries at least that one character, so feeding
  * `nextOffset` back never loops on the same offset.
+ *
+ * Both walks below advance by **code point**, and the string is cut by **code
+ * unit**: a surrogate pair is one character in two units, so counting characters
+ * into `String#slice` would start every page after an astral character one unit
+ * early — a lone surrogate in the page and a cursor inside a character.
  */
 export function sliceUtf8(text: string, offsetBytes: number, maxBytes: number): Utf8Slice {
   const start = Math.max(0, Math.trunc(offsetBytes))
   const budget = Math.max(0, Math.trunc(maxBytes))
-  // Walk to the first character at or after `start`: its byte offset is where the
-  // page really begins, and its width is the page's floor.
+  // Walk to the first character at or after `start`: `position` is its byte
+  // offset (where the page really begins) and `index` its UTF-16 index (where the
+  // string is cut).
   let position = 0
   let index = 0
-  let startIndex = -1
-  let firstWidth = 0
-  for (const character of text) {
-    if (position >= start) {
-      startIndex = index
-      firstWidth = utf8Bytes(character)
-      break
-    }
-    position += utf8Bytes(character)
-    index += 1
+  while (index < text.length && position < start) {
+    position += utf8WidthAt(text, index)
+    index += codeUnitsAt(text, index)
   }
   // Past the end: nothing left to take, and the cursor stays where the text does.
-  if (startIndex < 0) return { text: '', nextOffset: position, done: true }
+  if (index >= text.length) return { text: '', nextOffset: position, done: true }
 
-  const rest = text.slice(startIndex)
+  const rest = text.slice(index)
+  const firstWidth = utf8WidthAt(text, index)
   const retainer = new TextRetainer({ kind: 'head', maxBytes: Math.max(budget, firstWidth) })
   retainer.push(rest)
   const retained = retainer.finish()

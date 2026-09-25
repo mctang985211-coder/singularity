@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, test } from 'vitest'
-import { CONTEXT_OUTPUT_LIMIT_BYTES, NAMED_REFUSALS, utf8Bytes } from '../../src/index.ts'
+import { CONTEXT_OUTPUT_LIMIT_BYTES, NAMED_REFUSALS, sliceUtf8, utf8Bytes } from '../../src/index.ts'
 import { FixtureStack, seedChain, type Chain } from '../support/stack.ts'
 import { expectOk, expectRefused } from '../support/stack.ts'
 
@@ -124,6 +124,39 @@ describe('the output bound', () => {
       whole || /Omitted \d+ items\. read them by id/.test(evidenceSection),
       evidenceSection.slice(-400),
     ).toBe(true)
+  })
+})
+
+describe('the byte window itself', () => {
+  test('advances by character across BMP and astral characters alike', () => {
+    // An astral character is one character in two UTF-16 code units; a window
+    // that counts characters but cuts code units would start every page after one
+    // of these one unit early (a lone surrogate, and a cursor inside a character).
+    const emoji = '😀😀'
+    expect(sliceUtf8(emoji, 0, 4)).toEqual({ text: '😀', nextOffset: 4, done: false })
+    expect(sliceUtf8(emoji, 4, 4)).toEqual({ text: '😀', nextOffset: 8, done: true })
+    expect(sliceUtf8(emoji, 8, 4)).toEqual({ text: '', nextOffset: 8, done: true })
+    // A surrogate pair cut in half is *not* a boundary: the page starts at the
+    // next character, and the cursor is the byte offset of a whole one.
+    expect(sliceUtf8(emoji, 2, 4)).toEqual({ text: '😀', nextOffset: 8, done: true })
+    // An offset inside the *last* character aligns to its end: there is no
+    // character left to carry, so the page is empty and finished.
+    expect(sliceUtf8(emoji, 6, 4)).toEqual({ text: '', nextOffset: 8, done: true })
+
+    // A one-byte budget still advances, and a mixed body walks out whole. The
+    // floor is the width of the character the page starts at, astral included.
+    const mixed = '😀abc中文😀🎵'
+    const parts: string[] = []
+    let offset = 0
+    for (let pages = 0; ; pages += 1) {
+      const page = sliceUtf8(mixed, offset, 1)
+      parts.push(page.text)
+      if (page.done) break
+      expect(page.nextOffset).toBeGreaterThan(offset)
+      offset = page.nextOffset
+      expect(pages).toBeLessThan(64)
+    }
+    expect(parts.join('')).toBe(mixed)
   })
 })
 

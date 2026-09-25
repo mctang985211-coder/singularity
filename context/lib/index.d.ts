@@ -454,6 +454,11 @@ interface Utf8Slice {
  * that keeps a caller moving — an offset inside a character starts at the next
  * character, and a page always carries at least that one character, so feeding
  * `nextOffset` back never loops on the same offset.
+ *
+ * Both walks below advance by **code point**, and the string is cut by **code
+ * unit**: a surrogate pair is one character in two units, so counting characters
+ * into `String#slice` would start every page after an astral character one unit
+ * early — a lone surrogate in the page and a cursor inside a character.
  */
 declare function sliceUtf8(text: string, offsetBytes: number, maxBytes: number): Utf8Slice;
 /**

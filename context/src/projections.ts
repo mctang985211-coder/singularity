@@ -759,10 +759,22 @@ export async function taskStatus(deps: ReadDeps, loaded: LoadedCaller, query: St
   if (budget.addAll(header) > 0) return tooLarge('the status header', 'Ask for a smaller page (a lower `limit`) or the `related` scope.')
 
   const obligations = await obligationLines(deps.envBuilder, resolution.graph.envId, snapshot)
+  const obligationsClause = (omitted: number): string =>
+    omissionLine({
+      scope: 'obligation lines',
+      unit: 'lines',
+      kept: obligations.length - omitted,
+      limit: obligations.length,
+      omitted,
+      recovery: 'the status page reached its output bound',
+    })
+  // The widest clause the obligation block can need, measured before the entries
+  // so the page can never end without naming what it left out.
   const footerReserve =
     utf8Bytes('- more: yes — continue with offset 999999') + 1 +
     utf8Bytes('- source: ') + 200 + 1 +
-    obligations.reduce((total, line) => total + utf8Bytes(line) + 1, 0)
+    obligations.reduce((total, line) => total + utf8Bytes(line) + 1, 0) +
+    utf8Bytes(obligationsClause(obligations.length)) + 1
   let shown = 0
   for (const entry of page) {
     const line = taskSummaryLine(snapshot, entry.task, entry.roles)
@@ -797,18 +809,9 @@ export async function taskStatus(deps: ReadDeps, loaded: LoadedCaller, query: St
   ]
   if (budget.addAll(footer) > 0) return tooLarge('the status page footer', 'Ask for a smaller page (a lower `limit`).')
   const omittedObligations = budget.addAll(obligations)
-  if (omittedObligations > 0) {
-    budget.add(
-      omissionLine({
-        scope: 'obligation lines',
-        unit: 'lines',
-        kept: obligations.length - omittedObligations,
-        limit: obligations.length,
-        omitted: omittedObligations,
-        recovery: 'the status page reached its output bound',
-      }),
-    )
-  }
+  // The reservation above is an upper bound for this clause, so a page that had
+  // to leave obligation lines out always says how many it left out.
+  if (omittedObligations > 0) budget.add(obligationsClause(omittedObligations))
 
   return read(budget.text(), storeSource(resolution.graph, resolution.storeId, `listed ${scope} tasks`), { hasMore, nextOffset })
 }
