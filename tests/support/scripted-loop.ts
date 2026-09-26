@@ -184,6 +184,14 @@ export interface ScriptedLoopOptions {
   readonly writeDrainTimeoutMs?: number
   /** The per-run budget this deployment enforces (`Config.budget`) — the deadline a spec drives a blocked wait into. */
   readonly budget?: Readonly<{ maxToolCalls?: number; tokens?: number; wallTimeMs?: number; attempts?: number }>
+  /**
+   * The provider routes the scripted adapter serves. Defaults to `['mock']`, the
+   * route the deployment's default selection names. A case that freezes a model
+   * route of its own (a replay's `agentOptions`) names it here: the loop routes
+   * every request to the adapter its provider resolves to, so a route nothing
+   * serves is refused rather than quietly answered by the default.
+   */
+  readonly providers?: readonly string[]
   /** Tools whose recorded execution also keeps its arguments — the side-effect probe a denial is asserted against. */
   readonly probes?: readonly string[]
   /**
@@ -618,7 +626,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
     await ctx.plugin(SystemPrompt, {})
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(AgentRegistry)
-    ctx.effect(() => ctx.llm.registerAdapter(['mock'], this.adapter))
+    ctx.effect(() => ctx.llm.registerAdapter([...(this.options.providers ?? ['mock'])], this.adapter))
     for (const header of this.roots) {
       this.log.set(header, {
         header: {

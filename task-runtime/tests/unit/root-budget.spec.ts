@@ -363,6 +363,27 @@ describe('runDeadlineMs', () => {
   test('reports no bound at all when neither is configured', () => {
     expect(runDeadlineMs('2026-09-22T00:00:00.000Z', undefined, undefined, Date.parse('2026-09-22T00:20:00.000Z'))).toBe(Number.POSITIVE_INFINITY)
   })
+
+  test('takes the tighter of a caller-placed instant too, measured from the observation — never re-anchored', () => {
+    const now = Date.parse('2026-09-22T00:10:00.000Z')
+    // The run's own wall time has 5 minutes left, the root has 30, and the caller
+    // placed its own instant 8 minutes out: the tightest bound still wins, so a
+    // caller-placed deadline can only shorten a run, never extend it.
+    expect(runDeadlineMs('2026-09-22T00:00:00.000Z', 15 * 60_000, '2026-09-22T00:40:00.000Z', now, '2026-09-22T00:18:00.000Z')).toBe(5 * 60_000)
+    // Two minutes out, the caller's instant is the tightest of the three.
+    expect(runDeadlineMs('2026-09-22T00:00:00.000Z', 15 * 60_000, '2026-09-22T00:40:00.000Z', now, '2026-09-22T00:12:00.000Z')).toBe(2 * 60_000)
+    // The same instant observed later leaves exactly what is left of it: a run
+    // that started later under it inherits a *remaining* window, not a fresh one.
+    expect(runDeadlineMs('2026-09-22T00:09:30.000Z', undefined, undefined, now, '2026-09-22T00:18:00.000Z')).toBe(8 * 60_000)
+    expect(runDeadlineMs('2026-09-22T00:09:30.000Z', undefined, undefined, Date.parse('2026-09-22T00:16:00.000Z'), '2026-09-22T00:18:00.000Z')).toBe(2 * 60_000)
+    // A caller-placed instant nobody can read is treated as reached, exactly as
+    // the other two bounds are.
+    expect(runDeadlineMs('2026-09-22T00:00:00.000Z', undefined, undefined, now, 'never')).toBe(0)
+    // And an instant that has passed leaves nothing.
+    expect(runDeadlineMs('2026-09-22T00:00:00.000Z', undefined, undefined, now, '2026-09-22T00:09:00.000Z')).toBe(0)
+    // No caller-placed instant, no extra bound: the other two still decide alone.
+    expect(runDeadlineMs('2026-09-22T00:00:00.000Z', 15 * 60_000, undefined, now, undefined)).toBe(5 * 60_000)
+  })
 })
 
 describe('countSubtreeFacts', () => {

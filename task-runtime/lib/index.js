@@ -2356,17 +2356,22 @@ function checkBatchAdmission(snapshot, budget, childCount) {
 /**
 * What is left of the tightest deadline that applies to a run, in milliseconds.
 *
-* `min` semantics over the two bounds that can be in force: the run's own wall
-* time measured from its persisted `startedAt` (so a resumed run keeps the clock
-* it started with) and what is left of the root's deadline. A bound that has
-* passed returns 0 rather than a negative number, and `Infinity` means neither
-* bound is configured.
+* `min` semantics over the bounds that can be in force: the run's own wall time
+* measured from its persisted `startedAt` (so a resumed run keeps the clock it
+* started with), what is left of the root's deadline, and `runDeadlineAt` — an
+* absolute instant a caller placed on this one run and on everything it spawns.
+* That third bound is an instant and not a duration on purpose: a window
+* re-measured from each descendant's own start would hand a child that began
+* later a *fresh* allowance and let it outlive the run that was capped, so a
+* sub-execution inherits what is left of the same deadline rather than a copy of
+* it (`OrchestrateEnv.runDeadlineAt`). A bound that has passed returns 0 rather
+* than a negative number, and `Infinity` means no bound at all is configured.
 *
 * A bound whose instant cannot be read is treated as *reached* (`0`): a start
 * time nobody can parse is not a licence to run without a deadline, which is the
 * same discipline `resolveRootBudget` applies to a missing root start.
 */
-function runDeadlineMs(runStartedAt, perRunWallTimeMs, rootDeadlineAt, nowMs) {
+function runDeadlineMs(runStartedAt, perRunWallTimeMs, rootDeadlineAt, nowMs, runDeadlineAt) {
 	const parts = [];
 	if (perRunWallTimeMs !== void 0) {
 		const started = instant(runStartedAt);
@@ -2374,6 +2379,10 @@ function runDeadlineMs(runStartedAt, perRunWallTimeMs, rootDeadlineAt, nowMs) {
 	}
 	if (rootDeadlineAt !== void 0) {
 		const deadline = instant(rootDeadlineAt);
+		parts.push(deadline === void 0 ? 0 : Math.max(0, deadline - nowMs));
+	}
+	if (runDeadlineAt !== void 0) {
+		const deadline = instant(runDeadlineAt);
 		parts.push(deadline === void 0 ? 0 : Math.max(0, deadline - nowMs));
 	}
 	return parts.length === 0 ? Number.POSITIVE_INFINITY : Math.min(...parts);
@@ -4819,7 +4828,7 @@ function noProgressReason(rounds, factCount, limit) {
 * stopped with the no-progress reason.
 *
 * The deadline comes from the run's own persisted `startedAt` through
-* {@link runDeadlineMs}: a run resumed in a new process keeps the clock it
+* {@link remainingRunMs}: a run resumed in a new process keeps the clock it
 * started with (§3.5, §7.4).
 */
 async function observeWorkerRun(env, storeId, task, run, handle, signal) {
@@ -4831,7 +4840,7 @@ async function observeWorkerRun(env, storeId, task, run, handle, signal) {
 	}));
 	const rootDeadline = await rootDeadlineOf(env, storeId);
 	for (;;) {
-		const remaining = runDeadlineMs(run.startedAt, env.budget?.wallTimeMs, rootDeadline, Date.now());
+		const remaining = remainingRunMs(env, run, rootDeadline, Date.now());
 		if (remaining <= 0) {
 			handle.agent.cancel({ kind: "parent" });
 			return { kind: "budget-exhausted" };
@@ -4869,12 +4878,13 @@ async function observeWorkerRun(env, storeId, task, run, handle, signal) {
 /**
 * Wait for one run that is *waiting* — its own batch is running, or its
 * submission is inside verification — under the two bounds the active case also
-* runs under: the run's own deadline (`min` of its wall time and what is left of
-* the root's, both measured from its persisted `startedAt`) and the batch's
-* abort. Idle is the one input that stops here, because an idle worker in these
-* phases is expected rather than progress: waiting on the store's terminal state
-* is the only honest observation left, and marking a round would count a
-* legitimate wait as stagnation.
+* runs under: the run's own deadline (`min` of its wall time, what is left of the
+* root's, and the instant a caller placed on it — all measured from its persisted
+* `startedAt`, {@link remainingRunMs}) and the batch's abort. Idle is the one
+* input that stops here, because an idle worker in these phases is expected
+* rather than progress: waiting on the store's terminal state is the only honest
+* observation left, and marking a round would count a legitimate wait as
+* stagnation.
 *
 * The abort is what a batch cancellation rides: a driver parked here without it
 * would leave `cancelBatch` waiting for a settlement nobody produces — the
@@ -4896,7 +4906,7 @@ async function awaitWaitingTerminal(env, run, cancel, signal, rootDeadline, term
 		stop();
 		return { kind: "aborted" };
 	}
-	const remaining = runDeadlineMs(run.startedAt, env.budget?.wallTimeMs, rootDeadline, Date.now());
+	const remaining = remainingRunMs(env, run, rootDeadline, Date.now());
 	if (remaining <= 0) {
 		stop();
 		return { kind: "budget-exhausted" };
@@ -4940,6 +4950,50 @@ function cancelAgentOf(env, sessionId) {
 async function rootDeadlineOf(env, storeId) {
 	const resolved = resolveRootBudget(await env.task.snapshotIn(storeId), env.rootBudget ?? {});
 	return resolved.ok ? resolved.deadlineAt : void 0;
+}
+/**
+* What is left of the tightest deadline that applies to one run of this
+* orchestration — the one call site of `runDeadlineMs` inside the orchestration,
+* so the rule reads the same everywhere a worker is awaited: the run's own
+* per-run wall time, what is left of the root's deadline, and the instant the
+* caller placed on this run when it placed one ({@link
+* OrchestrateEnv.runDeadlineAt} — an experiment's per-run bound, inherited by the
+* sub-execution). Any of them reaching zero is the budget stop
+* {@link observeWorkerRun} acts on.
+*/
+function remainingRunMs(env, run, rootDeadline, nowMs) {
+	return runDeadlineMs(run.startedAt, env.budget?.wallTimeMs, rootDeadline, nowMs, env.runDeadlineAt);
+}
+/**
+* The absolute instant a caller's per-run wall time places on one run
+* (`ReplayRunInit.wallTimeMs`), or `undefined` when it places none.
+*
+* Anchored at the run's own `startedAt` — the anchor the per-run budget and the
+* root's deadline already measure from, so a run resumed in a new process keeps
+* the clock it started with and never gets a fresh window (§3.5, §7.4) — and
+* returned as an *instant* rather than a duration, because a duration re-measured
+* from every descendant's own start would hand a later child a fresh allowance.
+* A value that cannot be a duration (non-finite, zero or negative) places no
+* bound; a caller that means one is expected to have refused such a value before
+* anything exists (`ReplayTaskOptions.wallTimeMs`).
+*/
+function runDeadlineInstantOf(startedAt, wallTimeMs) {
+	if (wallTimeMs === void 0 || !Number.isFinite(wallTimeMs) || wallTimeMs <= 0) return void 0;
+	return new Date(startedAt.getTime() + wallTimeMs).toISOString();
+}
+/**
+* The wall-clock exhaustion a worker observation is recorded as: the reason
+* shape every budget stop carries (KISS §5 — a budget stop is never reported as
+* a criteria failure), naming the bound(s) this orchestration's runs are under so
+* a reader knows which number to change. A deployment with only its own per-run
+* wall time configured gets exactly the text it always had; one whose run was
+* placed under a caller's deadline sees that instant named, which is the value
+* that actually ended the run.
+*/
+function wallClockExhaustedReason(env) {
+	const perRun = env.budget?.wallTimeMs;
+	const placed = env.runDeadlineAt;
+	return budgetExhaustedReason("wallTimeMs", `worker run exceeded its wall-clock budget (${perRun !== void 0 && placed !== void 0 ? `${perRun}ms from its own startedAt, or its caller's deadline ${placed}, whichever came first` : placed !== void 0 ? `its caller's deadline ${placed}` : perRun !== void 0 ? `${perRun}ms from its own startedAt` : "the root tree’s own deadline"})`);
 }
 /**
 * The evidence one child's own submission, verification, or failure left in the
@@ -5041,7 +5095,7 @@ async function driveChildRound(env, batch, child) {
 			dependencyTaskIds
 		}, {
 			status: "failed",
-			localizedCause: budgetExhaustedReason("wallTimeMs", `worker run exceeded its wall-clock budget (${env.budget?.wallTimeMs}ms from its own startedAt)`)
+			localizedCause: wallClockExhaustedReason(env)
 		});
 		case "no-progress":
 			handle.agent.cancel({ kind: "parent" });
@@ -5287,6 +5341,8 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 			...agentPreset === void 0 ? {} : { agentPreset },
 			...permissionPreset === void 0 ? {} : { permissionPreset },
 			...env.workerCwd === void 0 ? {} : { cwd: env.workerCwd },
+			...env.agentOptions === void 0 ? {} : { agentOptions: env.agentOptions },
+			...env.runDeadlineAt === void 0 ? {} : { runDeadlineAt: env.runDeadlineAt },
 			signal: batch.signal
 		});
 	} catch (error) {
@@ -5465,7 +5521,7 @@ async function awaitAdoptedQuestionWait(env, batch, item, run, dependencyTaskIds
 			dependencyTaskIds
 		}, {
 			status: "failed",
-			localizedCause: budgetExhaustedReason("wallTimeMs", `worker run exceeded its wall-clock budget (${env.budget?.wallTimeMs}ms from its own startedAt)`)
+			localizedCause: wallClockExhaustedReason(env)
 		});
 		case "aborted": return await settleChildRun(env, batch.storeId, {
 			item,
@@ -5780,6 +5836,15 @@ async function parentBatchOf(env, storeId, task, run) {
 * run shares ({@link settleSubmittedRun}). A workerless replay is born
 * `submitted` (origin `runtime`) because there is nobody to submit: its
 * criteria are judged by the verifier and the run settles on the verdict.
+*
+* What the run is *placed under* travels with the init (S4-E §Q3): the caller's
+* frozen model selection ({@link ReplayRunInit.agentOptions}) and its own wall
+* clock ({@link ReplayRunInit.wallTimeMs}, anchored at this run's persisted start
+* and enforced through the existing {@link remainingRunMs} rule). Both are carried
+* on the spawn request, so the deployment remembers them for the session and the
+* sub-execution a replayed worker decomposes into inherits exactly the same
+* binding; both are absent for an ordinary replay, whose run and spawn are what
+* they always were.
 */
 async function runReplayTask(env, storeId, init, signals = {}) {
 	const task = init.task;
@@ -5802,6 +5867,8 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 		submittedAt: (/* @__PURE__ */ new Date()).toISOString(),
 		origin: "runtime"
 	};
+	const startedAt = /* @__PURE__ */ new Date();
+	const runDeadlineAt = runDeadlineInstantOf(startedAt, init.wallTimeMs);
 	const run = {
 		runId,
 		taskId: task.taskId,
@@ -5814,7 +5881,12 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 		artifacts: [],
 		verifierResults: [],
 		status: "running",
-		startedAt: (/* @__PURE__ */ new Date()).toISOString()
+		startedAt: startedAt.toISOString()
+	};
+	const bound = {
+		...env,
+		...init.agentOptions === void 0 ? {} : { agentOptions: init.agentOptions },
+		...runDeadlineAt === void 0 ? {} : { runDeadlineAt }
 	};
 	let contentBinding;
 	try {
@@ -5846,14 +5918,16 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 		await assertPresetUsable(env, init.manifest, init.agentPreset);
 		const permissionPreset = permissionFor(env, init.manifest);
 		const roots = skillRootsForRun(init.skillRoots ?? [], contentBinding);
-		handle = await env.spawn({
+		handle = await bound.spawn({
 			sessionId,
 			name: task.objective.trim().replace(/\s+/g, " ").slice(0, 40) || `replay-${task.taskId}`,
 			taskWorker: true,
 			grant: await authorizedGrant(env, init.manifest, roots),
 			...init.agentPreset === void 0 ? {} : { agentPreset: init.agentPreset },
 			...permissionPreset === void 0 ? {} : { permissionPreset },
-			...env.workerCwd === void 0 ? {} : { cwd: env.workerCwd },
+			...bound.workerCwd === void 0 ? {} : { cwd: bound.workerCwd },
+			...bound.agentOptions === void 0 ? {} : { agentOptions: bound.agentOptions },
+			...bound.runDeadlineAt === void 0 ? {} : { runDeadlineAt: bound.runDeadlineAt },
 			...advance === void 0 ? {} : { signal: advance }
 		});
 	} catch (error) {
@@ -5872,48 +5946,73 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 		taskId: task.taskId,
 		runId: run.runId
 	});
-	const observation = await observeWorkerRun(env, storeId, task, run, handle, advance);
+	const observation = await observeWorkerRun(bound, storeId, task, run, handle, advance);
 	switch (observation.kind) {
 		case "terminal": return await finishReplay(env, storeId, run, statusOutcome(observation.status));
-		case "aborted":
-			await env.task.markRunStatusIn(storeId, task.taskId, run.runId, "cancelled", env.actor, { reason: "cancelled while the replayed worker ran" });
-			await recordTerminalReview(env, storeId, task.taskId, "cancelled", {
-				run,
-				anomalies
-			});
-			env.onRunSettled?.(storeId, task.taskId, run.runId, "cancelled");
-			return await finishReplay(env, storeId, run, "cancelled");
+		case "aborted": return await settleReplayRun(env, storeId, task, run, {
+			status: "cancelled",
+			reason: "cancelled while the replayed worker ran",
+			anomalies
+		});
 		case "budget-exhausted": {
-			const reason = budgetExhaustedReason("wallTimeMs", `worker run exceeded its wall-clock budget (${env.budget?.wallTimeMs}ms from its own startedAt)`);
-			await env.task.markRunStatusIn(storeId, task.taskId, run.runId, "failed", env.actor, { reason });
-			await recordTerminalReview(env, storeId, task.taskId, "failed", {
-				run,
+			const reason = wallClockExhaustedReason(bound);
+			return await settleReplayRun(env, storeId, task, run, {
+				status: "failed",
+				reason,
 				localizedCause: reason,
 				anomalies
 			});
-			env.onRunSettled?.(storeId, task.taskId, run.runId, "failed");
-			return await finishReplay(env, storeId, run, "failed");
 		}
 		case "no-progress":
 			handle.agent.cancel({ kind: "parent" });
-			await env.task.markRunStatusIn(storeId, task.taskId, run.runId, "failed", env.actor, { reason: observation.reason });
-			await recordTerminalReview(env, storeId, task.taskId, "failed", {
-				run,
+			return await settleReplayRun(env, storeId, task, run, {
+				status: "failed",
+				reason: observation.reason,
 				localizedCause: observation.reason,
 				anomalies: [...anomalies, `no-progress round ${observation.rounds} of ${env.noProgressRounds}`]
 			});
-			env.onRunSettled?.(storeId, task.taskId, run.runId, "failed");
-			return await finishReplay(env, storeId, run, "failed");
-		case "failed":
-			await env.task.markRunStatusIn(storeId, task.taskId, run.runId, "failed", env.actor, { reason: observation.reason });
-			await recordTerminalReview(env, storeId, task.taskId, "failed", {
-				run,
-				localizedCause: observation.reason,
-				anomalies
-			});
-			env.onRunSettled?.(storeId, task.taskId, run.runId, "failed");
-			return await finishReplay(env, storeId, run, "failed");
+		case "failed": return await settleReplayRun(env, storeId, task, run, {
+			status: "failed",
+			reason: observation.reason,
+			localizedCause: observation.reason,
+			anomalies
+		});
 	}
+}
+/**
+* Settle one replay run the replay's own observation decided — a cancellation, a
+* deadline, an unsubmitted idle, a worker error — and report what the run settled
+* as.
+*
+* Two settlement paths can reach one run at once, and this is not hypothetical for
+* a replay: a replayed worker that decomposed is settled by its own batch (the
+* ordinary parent acceptance submits and verifies the parent run) while this path
+* is deciding, and a run whose own deadline expires is exactly when both are in
+* flight. The arbitration is the one the batch's per-child settlement already
+* applies ({@link settleChildRun}, `settleRunFromRuntime` beside it): the store is
+* the arbiter — a run it now holds terminal stands, this settlement adds nothing,
+* and the outcome reports the state the store holds rather than the one this wait
+* was about to write. The two writes are otherwise exactly what they were: the
+* status event with its reason, one terminal review carrying the localized cause
+* and the lineage anomaly, and the settlement bookkeeping.
+*/
+async function settleReplayRun(env, storeId, task, run, settlement) {
+	const current = await env.task.runIn(storeId, run.runId);
+	if (isTerminalRun(current.status)) return await finishReplay(env, storeId, run, statusOutcome(current.status));
+	try {
+		await env.task.markRunStatusIn(storeId, task.taskId, run.runId, settlement.status, env.actor, { ...settlement.reason === void 0 ? {} : { reason: settlement.reason } });
+	} catch (error) {
+		const settled = await env.task.runIn(storeId, run.runId).catch(() => void 0);
+		if (settled === void 0 || !isTerminalRun(settled.status)) throw error;
+		return await finishReplay(env, storeId, run, statusOutcome(settled.status));
+	}
+	await recordTerminalReview(env, storeId, task.taskId, settlement.status, {
+		run,
+		...settlement.localizedCause === void 0 ? {} : { localizedCause: settlement.localizedCause },
+		...settlement.anomalies === void 0 ? {} : { anomalies: settlement.anomalies }
+	});
+	env.onRunSettled?.(storeId, task.taskId, run.runId, settlement.status);
+	return await finishReplay(env, storeId, run, settlement.status);
 }
 /** A settled run status as a replay outcome; a `blocked` run is reported as failed — a replay cannot be blocked by a sibling. */
 function statusOutcome(status) {
@@ -6366,6 +6465,24 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* forgets it), which is exactly as long as anything can resolve through it.
 	*/
 	sessionWorkspaces = /* @__PURE__ */ new Map();
+	/**
+	* What each session this process spawned *runs under*, keyed by session: the
+	* model selection its agent was created with (`agentOptions`) and, when its
+	* caller placed one, the absolute instant its run must be done by
+	* (`runDeadlineAt`). A replay carries an experiment's frozen binding (S4-E §Q3),
+	* and the sub-execution its worker decomposes into is the same run of the same
+	* experiment — so the orchestration that session's own decomposition builds
+	* resolves the binding from here, exactly as it resolves the workspace it works
+	* in from {@link sessionWorkspaces} beside it.
+	*
+	* In-process only, for the same reason and with the same honesty: a session this
+	* process never spawned has no entry, and the binding is not part of any record
+	* (a replay resumed in a new process continues under the deployment's own
+	* selection, as it always continued without a lineage tag). An entry lives while
+	* the run bound to its session is non-terminal ({@link runSettledFromRuntime}
+	* forgets it), which is exactly as long as anything resolves through it.
+	*/
+	sessionExecutionBindings = /* @__PURE__ */ new Map();
 	/** The tool-execution gate and the write drain (A3 §3.3); this runtime owns every phase it writes. */
 	executionGate;
 	/**
@@ -8792,12 +8909,21 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* unusable or already-held directory refuses the replay with nothing written,
 	* and every directory the run resolves against — the pre-check, the protected
 	* inputs, the worker and its children, the verifier — is that one.
+	*
+	* The execution the comparison rests on is the caller's to freeze (S4-E §Q3):
+	* `options.agentOptions` is the model selection this run's worker and its
+	* sub-execution are created under, and `options.wallTimeMs` a wall clock of its
+	* own, folded into the run's existing deadline rule (`runDeadlineMs`) rather
+	* than timed beside it. Both are forwarded verbatim to the orchestration — this
+	* entry resolves neither the model nor the budget, because what a run really ran
+	* under is the caller's frozen fact, and the runtime's job is to make it true.
 	*/
 	async replayTask(storeId, championTaskId, options, callerSessionId) {
 		await this.assertRecoveryReady(storeId, "a replay");
 		const champion = await this.ctx.task.taskIn(storeId, championTaskId);
 		if (champion.status !== "verified" && champion.status !== "failed") throw new Error(`task-runtime: champion task "${championTaskId}" is ${champion.status}; only a terminal (verified or failed) task can be replayed`);
 		const championRunId = champion.runIds[champion.runIds.length - 1];
+		if (options.wallTimeMs !== void 0 && !(Number.isFinite(options.wallTimeMs) && options.wallTimeMs > 0)) throw new Error(`task-runtime: replay of "${championTaskId}" was given wallTimeMs ${options.wallTimeMs}, which is not a positive number of milliseconds; a per-run deadline that cannot be measured refuses the replay rather than running the run without one`);
 		const effective = options.contract ?? {
 			objective: champion.objective,
 			acceptanceCriteria: champion.acceptanceCriteria,
@@ -8873,6 +8999,8 @@ var TaskRuntime = class TaskRuntime extends Service {
 					lineage: options.lineage,
 					agentPreset: options.overlay?.presetOverride ?? resolvePreset(manifest, this.config.defaultPreset),
 					...options.overlay?.extraSkillRoots === void 0 ? {} : { skillRoots: [...options.overlay.extraSkillRoots] },
+					...options.agentOptions === void 0 ? {} : { agentOptions: { ...options.agentOptions } },
+					...options.wallTimeMs === void 0 ? {} : { wallTimeMs: options.wallTimeMs },
 					spawn,
 					championRunId
 				}, {
@@ -9033,6 +9161,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 			this.warn(`run ${runId}: the workspace layer it held could not be released (${error instanceof Error ? error.message : String(error)})`);
 		}).finally(() => {
 			if (this.sessionWorkspaces.size > 0) this.sessionWorkspaces.delete(sessionId);
+			if (this.sessionExecutionBindings.size > 0) this.sessionExecutionBindings.delete(sessionId);
 		});
 	}
 	/**
@@ -10328,6 +10457,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 	async orchestrateEnv(callerSessionId, actor, workspace) {
 		const named = workspace ?? this.sessionWorkspaces.get(callerSessionId);
 		const workspacePath = named ?? await this.workspacePathForSession(callerSessionId);
+		const binding = this.sessionExecutionBindings.get(callerSessionId);
 		return {
 			task: this.ctx.task,
 			actor,
@@ -10340,6 +10470,8 @@ var TaskRuntime = class TaskRuntime extends Service {
 			workspaces: this.workspaces,
 			...workspacePath === void 0 ? {} : { workspacePath },
 			...named === void 0 ? {} : { workerCwd: named },
+			...binding?.agentOptions === void 0 ? {} : { agentOptions: binding.agentOptions },
+			...binding?.runDeadlineAt === void 0 ? {} : { runDeadlineAt: binding.runDeadlineAt },
 			noProgressRounds: this.config.noProgressRounds,
 			writeDrainTimeoutMs: this.config.writeDrainTimeoutMs,
 			...this.config.rootBudget === void 0 ? {} : { rootBudget: { ...this.config.rootBudget } },
@@ -10380,6 +10512,10 @@ var TaskRuntime = class TaskRuntime extends Service {
 				const parent = this.liveAgent(callerSessionId);
 				const sessionWorkspace = request.cwd ?? named;
 				if (sessionWorkspace !== void 0) this.sessionWorkspaces.set(request.sessionId, sessionWorkspace);
+				if (request.agentOptions !== void 0 || request.runDeadlineAt !== void 0) this.sessionExecutionBindings.set(request.sessionId, {
+					...request.agentOptions === void 0 ? {} : { agentOptions: request.agentOptions },
+					...request.runDeadlineAt === void 0 ? {} : { runDeadlineAt: request.runDeadlineAt }
+				});
 				return this.ctx.agentRuntime.spawn(parent, {
 					sessionId: SessionId(request.sessionId),
 					name: request.name,
@@ -10387,6 +10523,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 					...request.agentPreset !== void 0 ? { agentPreset: request.agentPreset } : {},
 					...request.permissionPreset !== void 0 ? { permissionPreset: request.permissionPreset } : {},
 					...request.cwd !== void 0 ? { cwd: request.cwd } : {},
+					...request.agentOptions !== void 0 ? { agentOptions: request.agentOptions } : {},
 					...request.grant !== void 0 ? { grant: request.grant } : {},
 					...request.signal !== void 0 ? { signal: request.signal } : {}
 				});
@@ -10403,8 +10540,8 @@ var TaskRuntime = class TaskRuntime extends Service {
 			},
 			readLogTail: async (logRef) => this.runVerifier()?.logTail?.(logRef),
 			observeSession: async (sessionId) => this.observeSession(sessionId),
-			onRunBound: (sessionId, binding) => {
-				this.sessions.set(sessionId, binding);
+			onRunBound: (sessionId, binding$1) => {
+				this.sessions.set(sessionId, binding$1);
 				this.startedSessions.add(sessionId);
 			}
 		};

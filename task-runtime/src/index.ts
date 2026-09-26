@@ -13,7 +13,7 @@ import { SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/d
 import type {} from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@dangosys/dsh-singularity-agent-runtime'
-import type { GraphScope } from '@dangosys/dsh-singularity-agent-runtime'
+import type { AgentOptions, GraphScope } from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {
   AcceptanceCriterion,
@@ -668,6 +668,35 @@ export interface ReplayTaskOptions {
    * resolved refuses the replay before anything persists.
    */
   workspace?: { path: string }
+  /**
+   * The model selection this replay runs under (S4-E §Q3), replacing the
+   * deployment's default for this run's worker and for every worker its
+   * decomposition spawns — the experiment's frozen identity. Merged over the
+   * default exactly as `SpawnRequest.agentOptions` always is (`{@link AgentOptions}`
+   * is DSH's own: provider, model, reasoning effort, max output tokens), so an
+   * option this deployment's default fixes can still be frozen here, and one
+   * neither names keeps the loop's own fallback. Absent replays on the
+   * deployment's current selection, exactly as before. The options are forwarded
+   * verbatim: the runtime does not resolve, default or validate them — the
+   * caller freezes what the deployment's real configuration and registry say, and
+   * an unregistered route fails the worker's first request loudly rather than
+   * silently falling back.
+   */
+  agentOptions?: AgentOptions
+  /**
+   * Wall-clock this one replay run may take (S4-E §Q3), for an experiment's
+   * budget: measured from the run's own persisted `startedAt`, so a resumed run
+   * keeps the clock it started with and never gets a fresh window. It is *not* a
+   * second timer — what is left of it is `min`-ed with `Config.budget.wallTimeMs`
+   * and the root budget's remainder by `runDeadlineMs`, so it can only shorten a
+   * run, and reaching it cancels the worker in flight and settles the run
+   * `failed` with the stop recorded as a budget exhaustion (`budget exhausted:
+   * wallTimeMs`), never as a criteria failure. The sub-execution this run's worker
+   * decomposes into inherits the same instant: a child gets what is *left* of the
+   * run's window, not a copy of its length. A value that is not a positive finite
+   * number of milliseconds refuses the replay before anything persists.
+   */
+  wallTimeMs?: number
   signal?: AbortSignal
 }
 
@@ -1437,6 +1466,24 @@ export class TaskRuntime extends Service {
    * forgets it), which is exactly as long as anything can resolve through it.
    */
   private readonly sessionWorkspaces = new Map<string, string>()
+  /**
+   * What each session this process spawned *runs under*, keyed by session: the
+   * model selection its agent was created with (`agentOptions`) and, when its
+   * caller placed one, the absolute instant its run must be done by
+   * (`runDeadlineAt`). A replay carries an experiment's frozen binding (S4-E §Q3),
+   * and the sub-execution its worker decomposes into is the same run of the same
+   * experiment — so the orchestration that session's own decomposition builds
+   * resolves the binding from here, exactly as it resolves the workspace it works
+   * in from {@link sessionWorkspaces} beside it.
+   *
+   * In-process only, for the same reason and with the same honesty: a session this
+   * process never spawned has no entry, and the binding is not part of any record
+   * (a replay resumed in a new process continues under the deployment's own
+   * selection, as it always continued without a lineage tag). An entry lives while
+   * the run bound to its session is non-terminal ({@link runSettledFromRuntime}
+   * forgets it), which is exactly as long as anything resolves through it.
+   */
+  private readonly sessionExecutionBindings = new Map<string, { agentOptions?: AgentOptions; runDeadlineAt?: string }>()
   /** The tool-execution gate and the write drain (A3 §3.3); this runtime owns every phase it writes. */
   private readonly executionGate: ExecutionGate
   /**
@@ -4498,6 +4545,14 @@ export class TaskRuntime extends Service {
    * unusable or already-held directory refuses the replay with nothing written,
    * and every directory the run resolves against — the pre-check, the protected
    * inputs, the worker and its children, the verifier — is that one.
+   *
+   * The execution the comparison rests on is the caller's to freeze (S4-E §Q3):
+   * `options.agentOptions` is the model selection this run's worker and its
+   * sub-execution are created under, and `options.wallTimeMs` a wall clock of its
+   * own, folded into the run's existing deadline rule (`runDeadlineMs`) rather
+   * than timed beside it. Both are forwarded verbatim to the orchestration — this
+   * entry resolves neither the model nor the budget, because what a run really ran
+   * under is the caller's frozen fact, and the runtime's job is to make it true.
    */
   async replayTask(
     storeId: string,
@@ -4513,6 +4568,17 @@ export class TaskRuntime extends Service {
     // A verified/failed task always has at least one run; the latest is the
     // champion run the replay's own run descends from (execution lineage).
     const championRunId = champion.runIds[champion.runIds.length - 1]!
+    // The experiment's per-run wall clock is a hard limit, so a value with no
+    // measurable window refuses the replay here — before a task, a run or a spawn
+    // exists. Granting the run an unbounded clock instead would be exactly the
+    // silent degradation §3.5 forbids: the caller would hold a report of a run that
+    // never ran under the budget it named.
+    if (options.wallTimeMs !== undefined && !(Number.isFinite(options.wallTimeMs) && options.wallTimeMs > 0)) {
+      throw new Error(
+        `task-runtime: replay of "${championTaskId}" was given wallTimeMs ${options.wallTimeMs}, which is not a positive number of milliseconds; ` +
+        'a per-run deadline that cannot be measured refuses the replay rather than running the run without one',
+      )
+    }
     const effective = options.contract ?? {
       objective: champion.objective,
       acceptanceCriteria: champion.acceptanceCriteria,
@@ -4645,6 +4711,12 @@ export class TaskRuntime extends Service {
           lineage: options.lineage,
           agentPreset: options.overlay?.presetOverride ?? resolvePreset(manifest, this.config.defaultPreset),
           ...(options.overlay?.extraSkillRoots === undefined ? {} : { skillRoots: [...options.overlay.extraSkillRoots] }),
+          // The execution binding this run is placed under (S4-E §Q3): the caller's
+          // frozen selection and its own wall clock, forwarded verbatim — the
+          // orchestration carries them to the spawn the worker's sub-execution
+          // inherits them from.
+          ...(options.agentOptions === undefined ? {} : { agentOptions: { ...options.agentOptions } }),
+          ...(options.wallTimeMs === undefined ? {} : { wallTimeMs: options.wallTimeMs }),
           spawn,
           championRunId,
         }, {
@@ -4824,6 +4896,9 @@ export class TaskRuntime extends Service {
       // session is refused by the store long before it could.
       .finally(() => {
         if (this.sessionWorkspaces.size > 0) this.sessionWorkspaces.delete(sessionId)
+        // What the session ran under (S4-E §Q3) is forgotten with it: a terminal
+        // run cannot decompose, so the binding has nothing left to propagate to.
+        if (this.sessionExecutionBindings.size > 0) this.sessionExecutionBindings.delete(sessionId)
       })
   }
 
@@ -6474,6 +6549,12 @@ export class TaskRuntime extends Service {
     // workspace it was placed in is the one its children inherit.
     const named = workspace ?? this.sessionWorkspaces.get(callerSessionId)
     const workspacePath = named ?? await this.workspacePathForSession(callerSessionId)
+    // …and it keeps running under what it was spawned under (S4-E §Q3): the frozen
+    // model selection of the experiment it belongs to, and the instant its run must
+    // be done by. The same session-level propagation as the workspace above, for
+    // the same reason — the sub-execution a replay's worker decomposes into is part
+    // of that run, not a new one.
+    const binding = this.sessionExecutionBindings.get(callerSessionId)
     return {
       task: this.ctx.task,
       actor,
@@ -6486,6 +6567,8 @@ export class TaskRuntime extends Service {
       workspaces: this.workspaces,
       ...(workspacePath === undefined ? {} : { workspacePath }),
       ...(named === undefined ? {} : { workerCwd: named }),
+      ...(binding?.agentOptions === undefined ? {} : { agentOptions: binding.agentOptions }),
+      ...(binding?.runDeadlineAt === undefined ? {} : { runDeadlineAt: binding.runDeadlineAt }),
       noProgressRounds: this.config.noProgressRounds,
       writeDrainTimeoutMs: this.config.writeDrainTimeoutMs,
       ...(this.config.rootBudget === undefined ? {} : { rootBudget: { ...this.config.rootBudget } }),
@@ -6548,6 +6631,16 @@ export class TaskRuntime extends Service {
         // recovery of one of its runs — resolves its checkout from here.
         const sessionWorkspace = request.cwd ?? named
         if (sessionWorkspace !== undefined) this.sessionWorkspaces.set(request.sessionId, sessionWorkspace)
+        // What the session *runs under* is remembered the same way (S4-E §Q3): a
+        // replay's worker carries the experiment's frozen selection and its own
+        // per-run deadline, and the sub-execution that worker decomposes into is the
+        // same run — it resolves both from here rather than from its own defaults.
+        if (request.agentOptions !== undefined || request.runDeadlineAt !== undefined) {
+          this.sessionExecutionBindings.set(request.sessionId, {
+            ...(request.agentOptions === undefined ? {} : { agentOptions: request.agentOptions }),
+            ...(request.runDeadlineAt === undefined ? {} : { runDeadlineAt: request.runDeadlineAt }),
+          })
+        }
         return this.ctx.agentRuntime.spawn(parent, {
           sessionId: SessionId(request.sessionId),
           name: request.name,
@@ -6555,6 +6648,10 @@ export class TaskRuntime extends Service {
           ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
           ...(request.permissionPreset !== undefined ? { permissionPreset: request.permissionPreset } : {}),
           ...(request.cwd !== undefined ? { cwd: request.cwd } : {}),
+          // The agent runtime merges this over the deployment's default selection,
+          // which is the whole point of carrying it: the worker's loop is created on
+          // the frozen route, not patched per request.
+          ...(request.agentOptions !== undefined ? { agentOptions: request.agentOptions } : {}),
           ...(request.grant !== undefined ? { grant: request.grant } : {}),
           ...(request.signal !== undefined ? { signal: request.signal } : {}),
         })
