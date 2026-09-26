@@ -27,7 +27,7 @@
 | 10 | A1 原独立排位 | 并入第 9 项，不单独派发 | — | 保留编号供历史引用 | 第 9 项整组验收后直接进入第 11 项 |
 | 11 | A4：父子澄清 | **已验收（2026-09-26）**：恢复期唤醒移到屏障 ready 后，A4-1～A4-5 闭合 | 实现主代理 | 本文 E/F.1、[返工交付](history/2026-09-26-a4-rework-record.md)、[唤醒收尾](history/2026-09-26-a4-barrier-wake-record.md)、[最终审核](history/2026-09-26-a4-final-review.md) | 下一项为第 12 项 S4-E |
 | 12 | S4-E：评估基础 | 原范围已验收；生产提交崩溃缺口由 K2 定向修复，完整 Skill 改进单位由 K3 修正 | 实现主代理 | 本文 F.2、[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md) | 保留原证据，不能据原验收宣称应用崩溃已闭合 |
-| 12a | K1：子批次结束后继续探索 | **待验收（2026-09-27）**：K1-1～K1-5 与公共检查全绿，待进度审核 | 实现主代理 + 子代理 | [完整合同 prompt](execution-prompts/12a-k1-exploration.md)、[交付记录](history/2026-09-27-k1-delivery-record.md) | K1-1～K1-5：多批、父主动提交、问答/取消/恢复与唯一 driver；进度审核通过后才派 K2 |
+| 12a | K1：子批次结束后继续探索 | **待验收（2026-09-27，含同日返工）**：K1-1～K1-5 与公共检查全绿；返工闭合交还顺序（先确认子停止再交还工作区）、批次成员缺记录/读失败具名失败，以及跨 graph 引用拒绝与写入接管失败的替代证据缺口 | 实现主代理 + 子代理 | [完整合同 prompt](execution-prompts/12a-k1-exploration.md)、[交付记录](history/2026-09-27-k1-delivery-record.md)、[返工记录](history/2026-09-27-k1-rework-record.md) | K1-1～K1-5：多批、父主动提交、问答/取消/恢复与唯一 driver；进度审核通过后才派 K2 |
 | 12b | K2：应用与回滚可恢复 | 待 K1 验收 | 待填 | [完整合同 prompt](execution-prompts/12b-k2-evolution-commit.md) | K2-1～K2-5：意图、原子替换、对账与真实准入阻断 |
 | 12c | K3：完整 Skill 改进单位 | 待 K2 验收 | 待填 | [完整合同 prompt](execution-prompts/12c-k3-skill-unit.md) | K3-1～K3-5：已有执行型 Skill 同名更新、双侧评估与整组回滚 |
 | 12d | K4：复盘与执行预算分离 | 待 K3 验收 | 待填 | [完整合同 prompt](execution-prompts/12d-k4-review-budget.md) | K4-1～K4-5：过期任务可复盘，人审扩额、不重置累计用量 |
