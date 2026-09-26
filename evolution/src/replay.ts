@@ -21,10 +21,11 @@
  * so any reader can recompute it. {@link assertExperimentReport} does exactly
  * that and refuses a report whose verdicts do not match its own evidence.
  *
- * The vocabulary the numbers are written in ({@link ReplayVerdict},
- * {@link ReplayRelation} and their constant lists) stays exported because the
- * fold still reads the v1 `replayed` ledger lines a build before this one
- * wrote; no current entry produces one.
+ * One comparer serves the @2 report: {@link compareReplaySides} compares a
+ * baseline side with a candidate side and answers in {@link SideRelation},
+ * which {@link compareExperimentSides} reduces to the sample verdict. The v1
+ * `replayed` ledger vocabulary it used to be named after is gone with the v1
+ * ledger (S4-E 收尾); nothing writes that line, in any build this one reads.
  * @module dsh-singularity-evolution
  */
 
@@ -32,16 +33,14 @@ import { createHash } from 'node:crypto'
 import type { ReviewMetrics } from '@dangosys/dsh-singularity-task'
 
 /**
- * The v1 replay's overall verdict vocabulary: whether the candidate was not
- * worse than the champion. Kept for the fold of a `replayed` ledger line a
- * build before this one wrote; no current entry produces one.
+ * One candidate side's relation to its baseline, as {@link compareReplaySides}
+ * answers it: a side that ranks above its baseline is `not-worse`, one that
+ * ranks below it or regresses a criterion is `worse`, and an unrankable side
+ * (cancelled / interrupted) or a comparison across changed criteria is
+ * `inconclusive`. The `@2` sample verdict ({@link compareExperimentSides}) is
+ * read off this answer.
  */
-export type ReplayVerdict = 'not-worse' | 'worse' | 'inconclusive' | 'manual'
-/** Per-task comparison outcome; `manual` marked the agent_preset v1 boundary (nothing executed). */
-export type ReplayRelation = 'not-worse' | 'worse' | 'inconclusive' | 'manual'
-
-export const REPLAY_VERDICTS: readonly ReplayVerdict[] = ['not-worse', 'worse', 'inconclusive', 'manual']
-export const REPLAY_RELATIONS: readonly ReplayRelation[] = ['not-worse', 'worse', 'inconclusive', 'manual']
+export type SideRelation = 'not-worse' | 'worse' | 'inconclusive'
 
 /** One criterion's verdict on one side, as the record / fresh run reported it. */
 export interface ReplayCriterionSummary {
@@ -94,7 +93,7 @@ const OUTCOME_RANK: Readonly<Record<string, number>> = { verified: 1, failed: 0 
 export function compareReplaySides(
   champion: ReplaySideSummary,
   candidate: ReplaySideSummary,
-): { verdictMatch: boolean; criteriaDiff: ReplayCriterionDiff[]; relation: ReplayRelation } {
+): { verdictMatch: boolean; criteriaDiff: ReplayCriterionDiff[]; relation: SideRelation } {
   const championCriteria = new Map(champion.criteria.map(item => [item.criterionId, item.verdict]))
   const candidateCriteria = new Map(candidate.criteria.map(item => [item.criterionId, item.verdict]))
   const criteriaDiff: ReplayCriterionDiff[] = []
@@ -118,7 +117,7 @@ export function compareReplaySides(
   const regressedCriterion = criteriaDiff.some(diff => diff.champion === 'pass')
   const changedContract = criteriaDiff.some(diff => diff.champion === undefined || diff.candidate === undefined)
     || champion.criteria.some(before => candidate.criteria.find(after => after.criterionId === before.criterionId)?.command !== before.command)
-  const relation: ReplayRelation = candidateRank < championRank || regressedCriterion
+  const relation: SideRelation = candidateRank < championRank || regressedCriterion
     ? 'worse'
     : changedContract ? 'inconclusive' : 'not-worse'
   return { verdictMatch, criteriaDiff, relation }

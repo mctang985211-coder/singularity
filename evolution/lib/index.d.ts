@@ -6,15 +6,14 @@ import { ProposalTargetType, ReviewCriterion, ReviewMetrics, ReviewRecord, TaskS
 //#region src/replay.d.ts
 
 /**
- * The v1 replay's overall verdict vocabulary: whether the candidate was not
- * worse than the champion. Kept for the fold of a `replayed` ledger line a
- * build before this one wrote; no current entry produces one.
+ * One candidate side's relation to its baseline, as {@link compareReplaySides}
+ * answers it: a side that ranks above its baseline is `not-worse`, one that
+ * ranks below it or regresses a criterion is `worse`, and an unrankable side
+ * (cancelled / interrupted) or a comparison across changed criteria is
+ * `inconclusive`. The `@2` sample verdict ({@link compareExperimentSides}) is
+ * read off this answer.
  */
-type ReplayVerdict = 'not-worse' | 'worse' | 'inconclusive' | 'manual';
-/** Per-task comparison outcome; `manual` marked the agent_preset v1 boundary (nothing executed). */
-type ReplayRelation = 'not-worse' | 'worse' | 'inconclusive' | 'manual';
-declare const REPLAY_VERDICTS: readonly ReplayVerdict[];
-declare const REPLAY_RELATIONS: readonly ReplayRelation[];
+type SideRelation = 'not-worse' | 'worse' | 'inconclusive';
 /** One criterion's verdict on one side, as the record / fresh run reported it. */
 interface ReplayCriterionSummary {
   criterionId: string;
@@ -59,7 +58,7 @@ interface ReplayCriterionDiff {
 declare function compareReplaySides(champion: ReplaySideSummary, candidate: ReplaySideSummary): {
   verdictMatch: boolean;
   criteriaDiff: ReplayCriterionDiff[];
-  relation: ReplayRelation;
+  relation: SideRelation;
 };
 /**
  * The comparer a v2 report names, and the only one this build can re-check:
@@ -553,7 +552,8 @@ interface ExperimentKey {
 }
 /** One `experiment_started` ledger line: the frozen experiment, recorded before the first run. */
 interface ExperimentStartedRecord {
-  formatVersion: 1;
+  /** The `proposals.jsonl` format version, not the report's — the ledger is one format, `formatVersion: 2` (S4-E 收尾). */
+  formatVersion: 2;
   kind: 'experiment_started';
   proposalId: string;
   experimentId: string;
@@ -580,7 +580,8 @@ interface ExperimentStartedRecord {
  * under the same key.
  */
 interface ExperimentSampleRecord {
-  formatVersion: 1;
+  /** The `proposals.jsonl` format version, not the report's — the ledger is one format, `formatVersion: 2` (S4-E 收尾). */
+  formatVersion: 2;
   kind: 'experiment_sample';
   proposalId: string;
   experimentId: string;
@@ -822,21 +823,20 @@ declare function foldExperiments(records: readonly {
 //#endregion
 //#region src/evolution.d.ts
 type EvolutionLevel = 'L1' | 'L2' | 'L3' | 'L4';
-type EvolutionStatus = 'proposed' | 'candidate' | 'prepared' | 'replayed' | 'gated' | 'decided' | 'applied' | 'rolledback';
+type EvolutionStatus = 'proposed' | 'candidate' | 'prepared' | 'gated' | 'decided' | 'applied' | 'rolledback';
 /** The three frozen decision values of the Validation Gate (细化想法4.md §32). */
 type EvolutionDecision = 'PROMOTE' | 'REJECT' | 'KEEP_FOR_FURTHER_RESEARCH';
 declare const EVOLUTION_LEVELS: readonly EvolutionLevel[];
 declare const EVOLUTION_DECISIONS: readonly EvolutionDecision[];
 /**
- * The ledger's vocabulary of mechanical target types: the four whose mutations
- * older records materialized into a sandbox (`mechanical: true`). Mutations on
- * the other five target types (tool / decomposition_policy / workflow_policy /
- * verifier / runtime_policy) are free-form structured descriptions, recorded
- * with `mechanical: false` — bookkeeping only, never materialized.
- *
- * The fold validates an old record against this vocabulary, so the four stay
- * named here; `candidate` admits a **skill** candidate only, which is the one
- * type this build materializes, evaluates and promotes (§F.2).
+ * The ledger's vocabulary of mechanical target types: the one whose mutation a
+ * v2 record materializes into a sandbox (`mechanical: true`). `candidate`
+ * admits a **skill** candidate only — the single type this build materializes,
+ * evaluates and promotes (§F.2) — and the fold validates every `prepared`
+ * record against that same vocabulary, so v2 holds skill prepares and nothing
+ * else. The target types an older build materialized (agent_preset, capability,
+ * task_definition) are no longer candidate types here and have no `prepared`
+ * record of their own.
  */
 declare const MECHANICAL_TARGET_TYPES: readonly ProposalTargetType[];
 /** True for the target types whose mutations materialize mechanically into the sandbox. */
@@ -859,33 +859,12 @@ type ChampionState = /** Written under the sandbox's `champion/` dir. */
 /** The production target does not exist yet (new skill / capability / …) — champion: null. */ | 'missing'
 /** Non-mechanical mutation: nothing materialized, no anchor. */ | 'none';
 declare const CHAMPION_STATES: readonly ChampionState[];
-/**
- * Where a capability champion snapshot came from (W19, guide §4.2 #18). The
- * rows are the recorded vocabulary of ledgers written before this build
- * narrowed the lifecycle to skill:
- * - `config-text` — the row existed in config.yml; the snapshot also holds its
- *   verbatim source lines (`champion/capability-table.source.txt`) and rollback
- *   wrote those lines back byte-for-byte.
- * - `code-default` — the capability exists only in the code default table (no
- *   config.yml row); the snapshot holds the registry entry as the comparison
- *   anchor, and rollback removed the config.yml row so the default governs
- *   again (plus a runtime override back to the default entry).
- * - `missing` — the capability did not exist at all; rollback deleted what the
- *   apply added (`champion: 'missing'` carries the same fact; this field keeps
- *   the three-way distinction readable on one field).
- * Recorded on the `prepared` ledger record of capability proposals only, and
- * validated by the fold; no current entry writes one.
- */
-type ChampionSource = 'config-text' | 'code-default' | 'missing';
-declare const CHAMPION_SOURCES: readonly ChampionSource[];
 /** Folded view of one `prepared` record. */
 interface PreparedView {
   /** Sandbox dir relative to the ledger root (`sandbox/<proposalId>`); null when nothing was materialized. */
   sandbox: string | null;
   mechanical: boolean;
   champion: ChampionState;
-  /** Recorded capability prepares only (W19); validated by the fold, never written now. */
-  championSource?: ChampionSource;
   /** Skill prepares only (P2): the content identity recorded for the materialized candidate `SKILL.md`. */
   skillContent?: SkillContentIdentity;
   /**
@@ -929,9 +908,15 @@ interface GateAnswers {
   /** Evidence behind the regression/replay answers: evidence ids or paths, existence-checked, never executed. */
   regressionEvidenceRefs: string[];
 }
-/** One immutable ledger line. A state migration appends a new record; nothing is ever rewritten in place. */
+/**
+ * One immutable ledger line, `formatVersion: 2` throughout (S4-E 收尾). A state
+ * migration appends a new record; nothing is ever rewritten in place. The
+ * version is the whole ledger's, not one line's: a line declaring anything but
+ * 2 — or declaring nothing — makes the ledger refuse to load, and no entry here
+ * writes one.
+ */
 type EvolutionRecord = {
-  formatVersion: 1;
+  formatVersion: 2;
   kind: 'proposed';
   proposalId: string;
   targetType: ProposalTargetType;
@@ -943,10 +928,10 @@ type EvolutionRecord = {
   actor: string;
   at: string;
 } | {
-  formatVersion: 1;
+  formatVersion: 2;
   kind: 'candidate';
   proposalId: string;
-  /** Complete version set the candidate aligns to (branch-model bookkeeping; v1 builds no real branch). */
+  /** Complete version set the candidate aligns to (branch-model bookkeeping; this build creates no real branch). */
   versionSet: Record<string, string>;
   /**
    * Optional structured patch description, shaped by the proposal's
@@ -958,68 +943,41 @@ type EvolutionRecord = {
   actor: string;
   at: string;
 } | {
-  formatVersion: 1;
+  formatVersion: 2;
   kind: 'prepared';
   proposalId: string;
   /** Sandbox dir relative to the ledger root, or null for a bookkeeping-only (non-mechanical) mutation. */
   sandbox: string | null;
   mechanical: boolean;
   champion: ChampionState;
-  /** Capability prepares only (W19): where the champion snapshot came from; absent on pre-W19 records. */
-  championSource?: ChampionSource;
   /**
    * Skill prepares only (P2): the content identity of the materialized
    * candidate `SKILL.md` — the skill name plus the SHA-256 of the exact
-   * file bytes. Absent on records written before content binding and on
-   * every non-skill targetType; those old skill candidates cannot be newly
-   * promoted without a fresh candidate and evaluation.
+   * file bytes. Absent on records written before content binding; those old
+   * skill candidates cannot be newly promoted without a fresh candidate and
+   * evaluation.
    */
   skillContent?: SkillContentIdentity;
   /**
    * Skill prepares only (P3): the content identity of the production
    * `SKILL.md` as it stood at prepare. Absent on records written before the
-   * baseline was recorded and on every non-skill targetType; those old
-   * skill candidates cannot be newly applied without a fresh candidate and
-   * evaluation.
+   * baseline was recorded; those old skill candidates cannot be newly
+   * applied without a fresh candidate and evaluation.
    */
   skillBaseline?: SkillContentIdentity;
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
   files: string[];
   actor: string;
   at: string;
-}
-/**
- * The v1 candidate-vs-champion replay, recorded by a build that had that
- * evaluation. Nothing writes this line now — a skill candidate is evaluated
- * by the experiment family below — and the fold keeps reading it so a ledger
- * written before this narrowing still loads.
- */ | {
-  formatVersion: 1;
-  kind: 'replayed';
-  proposalId: string;
-  /** SHA-256 of the report bytes. Historical records may lack it. */
-  reportDigest?: string;
-  /** Report path relative to the ledger root (`sandbox/<proposalId>/replay-report.json`). */
-  report: string;
-  /** Overall verdict: whether the candidate was not worse than the champion. */
-  verdict: ReplayVerdict;
-  /** Per-task relation summary, observed then holdout. */
-  tasks: {
-    taskId: string;
-    relation: ReplayRelation;
-    holdout: boolean;
-  }[];
-  actor: string;
-  at: string;
 } | {
-  formatVersion: 1;
+  formatVersion: 2;
   kind: 'gated';
   proposalId: string;
   gate: GateAnswers;
   actor: string;
   at: string;
 } | {
-  formatVersion: 1;
+  formatVersion: 2;
   kind: 'decided';
   proposalId: string;
   decision: EvolutionDecision;
@@ -1035,17 +993,17 @@ type EvolutionRecord = {
   actor: string;
   at: string;
 } | {
-  formatVersion: 1;
+  formatVersion: 2;
   kind: 'applied';
   proposalId: string;
-  /** Production write targets, for audit (absolute paths; the capability entry describes its config.yml row). */
+  /** Production write targets, for audit (absolute paths). */
   targets: string[];
   /** Human-review evidence: the approval call id of the evolution_apply request that granted this write. */
   approvalRef: string;
   actor: string;
   at: string;
 } | {
-  formatVersion: 1;
+  formatVersion: 2;
   kind: 'rolledback';
   proposalId: string;
   /** Production write targets of the rollback (restored champion or deleted product), for audit. */
@@ -1059,10 +1017,9 @@ type EvolutionRecord = {
  * The experiment family (S4-E §F.2): the two-sided skill evaluation's frozen
  * identity and its per-sample runs. These lines are not lifecycle transitions
  * — an experiment does not move a proposal's status — so the proposal fold
- * leaves them alone and {@link foldExperiments} folds them; a build that
- * predates them cannot fold a ledger that holds one, which is the one
- * compatibility limit of adding them (said in the delivery record, not
- * papered over). `formatVersion` stays 1: the envelope did not change.
+ * leaves them alone and {@link foldExperiments} folds them. Their records
+ * carry the ledger's own `formatVersion: 2` as well; the experiment *report*
+ * at `experiment-report.json` has its own, separate version field.
  */ | ExperimentStartedRecord | ExperimentSampleRecord;
 /** Folded view of one `applied` or `rolledback` record. */
 interface ApplyView {
@@ -1116,20 +1073,6 @@ interface PromotionCheck {
 }
 /** One provider role per line, for a decision or apply report. */
 declare function renderProviderRoles(providers: readonly PromotionProvider[]): string[];
-/** Folded view of one `replayed` record — read from a ledger written before this build's narrowing. */
-interface ReplayedView {
-  /** SHA-256 recorded at replay, when the record carried one. */
-  reportDigest?: string;
-  /** Report path relative to the ledger root (`sandbox/<proposalId>/replay-report.json`). */
-  report: string;
-  verdict: ReplayVerdict;
-  /** Per-task relation summary, observed then holdout. */
-  tasks: {
-    taskId: string;
-    relation: ReplayRelation;
-    holdout: boolean;
-  }[];
-}
 /** The folded view of one proposal: its `proposed` record plus everything later records added. */
 interface EvolutionProposal {
   proposalId: string;
@@ -1144,8 +1087,6 @@ interface EvolutionProposal {
   /** The candidate's structured mutation, verbatim as recorded. */
   mutation?: unknown;
   prepared?: PreparedView;
-  /** The v1 candidate-vs-champion replay a ledger written before this build's narrowing holds; nothing writes one now. */
-  replayed?: ReplayedView;
   gate?: GateAnswers;
   decision?: EvolutionDecision;
   decisionNote?: string;
@@ -1323,9 +1264,8 @@ declare class EvolutionService extends Service {
    */
   prepare(proposalId: string, actor: string): Promise<EvolutionProposal>;
   /**
-   * Move candidate → gated (manual candidates), prepared → gated (skill
-   * candidates), or replayed → gated (a ledger written before this build's
-   * narrowing): all six Gate answers plus regression evidence refs. Every ref
+   * Move candidate → gated (manual candidates) or prepared → gated (skill
+   * candidates): all six Gate answers plus regression evidence refs. Every ref
    * must exist — a path on disk (relative to the repo root or absolute) or an id
    * the caller-side resolver knows (task-store evidence). Existence only;
    * nothing here executes anything. A **skill** proposal must have a completed
@@ -1535,11 +1475,9 @@ declare class EvolutionService extends Service {
    * proposed starts a new id; each later kind must be exactly an allowed next
    * state, and payload-bearing kinds re-run the write path's payload
    * validation (candidate versionSet/mutation, gate answers, the
-   * prepared/replayed/applied/rolledback shapes), so a hand-forged line fails
+   * prepared/applied/rolledback shapes), so a hand-forged line fails
    * load exactly as it would fail append. The same rules guard folding and live
-   * appends, so an illegal migration is rejected identically in both paths —
-   * including a record kind this build no longer writes, whose line still has
-   * to be the shape the build that recorded it validated.
+   * appends, so an illegal migration is rejected identically in both paths.
    *
    * The experiment family is not a lifecycle transition and is skipped here;
    * {@link foldLedger} folds it beside this fold.
@@ -1615,4 +1553,4 @@ declare class EvolutionService extends Service {
   private experimentSources;
 }
 //#endregion
-export { APPLYABLE_TARGET_TYPES, ApplyOutcome, ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, ChampionSource, ChampionState, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCriterion, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, GateAnswers, ListFilter, MECHANICAL_TARGET_TYPES, ModelSelection, PrecheckSkillVerdict, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, ProviderPrecheckView, REPLAY_RELATIONS, REPLAY_VERDICTS, ReplayCriterionDiff, ReplayCriterionSummary, ReplayRelation, ReplaySideSummary, ReplayVerdict, ReplayedView, SkillContentIdentity, SkillMutation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, mutationMechanical, overallExperimentVerdict, protectedInputsDigest, renderProviderRoles, resumeExperiment, runExperiment };
+export { APPLYABLE_TARGET_TYPES, ApplyOutcome, ApplyView, CHAMPION_STATES, ChampionState, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCriterion, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, GateAnswers, ListFilter, MECHANICAL_TARGET_TYPES, ModelSelection, PrecheckSkillVerdict, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, ProviderPrecheckView, ReplayCriterionDiff, ReplayCriterionSummary, ReplaySideSummary, SideRelation, SkillContentIdentity, SkillMutation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, mutationMechanical, overallExperimentVerdict, protectedInputsDigest, renderProviderRoles, resumeExperiment, runExperiment };

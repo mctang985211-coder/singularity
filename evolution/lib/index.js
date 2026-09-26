@@ -8,18 +8,6 @@ import { capabilityToolQuery, loadSkillSidecar, optionalService, readVerifiedFil
 import { rootTaskStoreId } from "@dangosys/dsh-singularity-task";
 
 //#region src/replay.ts
-const REPLAY_VERDICTS = [
-	"not-worse",
-	"worse",
-	"inconclusive",
-	"manual"
-];
-const REPLAY_RELATIONS = [
-	"not-worse",
-	"worse",
-	"inconclusive",
-	"manual"
-];
 /** verified outranks failed; anything else (cancelled) has no rank and reads inconclusive. */
 const OUTCOME_RANK = {
 	verified: 1,
@@ -883,7 +871,7 @@ function runFactsOf(snapshot, task, settled) {
 /** The one ledger line a sample side writes, from the facts its run settled to. */
 function sampleRecord(input) {
 	return {
-		formatVersion: 1,
+		formatVersion: 2,
 		kind: "experiment_sample",
 		proposalId: input.view.proposalId,
 		experimentId: input.view.experimentId,
@@ -1123,7 +1111,7 @@ async function runExperiment(sources, request) {
 		if (prior !== void 0 && prior.experimentId !== experimentId) throw sameKeyRefusal(key, prior, experimentId);
 	}
 	await sources.evolution.recordExperimentStart({
-		formatVersion: 1,
+		formatVersion: 2,
 		kind: "experiment_started",
 		proposalId: spec.proposalId,
 		experimentId,
@@ -1907,22 +1895,16 @@ const EVOLUTION_DECISIONS = [
 	"KEEP_FOR_FURTHER_RESEARCH"
 ];
 /**
-* The ledger's vocabulary of mechanical target types: the four whose mutations
-* older records materialized into a sandbox (`mechanical: true`). Mutations on
-* the other five target types (tool / decomposition_policy / workflow_policy /
-* verifier / runtime_policy) are free-form structured descriptions, recorded
-* with `mechanical: false` — bookkeeping only, never materialized.
-*
-* The fold validates an old record against this vocabulary, so the four stay
-* named here; `candidate` admits a **skill** candidate only, which is the one
-* type this build materializes, evaluates and promotes (§F.2).
+* The ledger's vocabulary of mechanical target types: the one whose mutation a
+* v2 record materializes into a sandbox (`mechanical: true`). `candidate`
+* admits a **skill** candidate only — the single type this build materializes,
+* evaluates and promotes (§F.2) — and the fold validates every `prepared`
+* record against that same vocabulary, so v2 holds skill prepares and nothing
+* else. The target types an older build materialized (agent_preset, capability,
+* task_definition) are no longer candidate types here and have no `prepared`
+* record of their own.
 */
-const MECHANICAL_TARGET_TYPES = [
-	"skill",
-	"agent_preset",
-	"capability",
-	"task_definition"
-];
+const MECHANICAL_TARGET_TYPES = ["skill"];
 /** True for the target types whose mutations materialize mechanically into the sandbox. */
 function mutationMechanical(targetType) {
 	return MECHANICAL_TARGET_TYPES.includes(targetType);
@@ -1935,36 +1917,21 @@ function mutationMechanical(targetType) {
 */
 const APPLYABLE_TARGET_TYPES = ["skill"];
 /**
-* The target types whose `applied` record the state machine still admits, so a
-* ledger written by an older build — which applied a preset directory or a
-* `config.yml` row — folds and stays readable. It is the recorded vocabulary,
-* not a capability of this build: {@link APPLYABLE_TARGET_TYPES} names the one
-* type an executor here has, and every other type is refused by name at
-* {@link EvolutionService.apply} and at the tools.
-*/
-const LEDGER_APPLIED_TARGET_TYPES = [
-	"skill",
-	"agent_preset",
-	"capability"
-];
-/**
 * Whether a decided proposal's `applied` record is admissible: the decision is
 * PROMOTE, the level is not L4 (L4 harness evolution is human-run by rule,
-* §2.7.7 / §2.9.2), the target type is one the ledger admits, and a sandbox was
-* actually materialized (a mutation-less manual candidate has nothing to copy).
+* §2.7.7 / §2.9.2), the target type is one this build can execute
+* ({@link APPLYABLE_TARGET_TYPES} — skill and nothing else), and a sandbox was
+* actually materialized. The state machine admits exactly what the current write
+* path writes: an `applied` record of a type no executor here has is refused at
+* the fold, the same way {@link EvolutionService.apply} refuses it live.
 */
 function applyable(proposal) {
-	return proposal.decision === "PROMOTE" && proposal.level !== "L4" && LEDGER_APPLIED_TARGET_TYPES.includes(proposal.targetType) && proposal.prepared?.sandbox != null;
+	return proposal.decision === "PROMOTE" && proposal.level !== "L4" && APPLYABLE_TARGET_TYPES.includes(proposal.targetType) && proposal.prepared?.sandbox != null;
 }
 const CHAMPION_STATES = [
 	"captured",
 	"missing",
 	"none"
-];
-const CHAMPION_SOURCES = [
-	"config-text",
-	"code-default",
-	"missing"
 ];
 /** One accepted verdict as a promotion report entry: the role, the content it was taken from, and the verifier ref only an execution provider has. */
 function promotionProviderOf(verdict) {
@@ -2127,32 +2094,23 @@ function validateGateAnswers(answers) {
 /**
 * The state machine, data-dependent at candidate: a candidate carrying a
 * mutation must be prepared (sandbox materialization) before anything else; a
-* mutation-less (manual) candidate gates directly — the pre-mutation shape old
-* ledgers replay against.
+* mutation-less (manual) candidate gates directly.
 *
 * A prepared **skill** candidate gates straight from prepared: its evaluation is
 * the two-sided experiment (§F.2), which is recorded in the ledger's experiment
 * family and is deliberately *not* a lifecycle transition — the proposal stays
 * `prepared` while its samples run — so {@link EvolutionService.gate} requires
-* the completed experiment instead of a `replayed` record.
-*
-* `replayed` and the `prepared → replayed → gated` arc of the four mechanical
-* types stay admissible for one reason only: a ledger written before this
-* build's narrowing holds those lines, and the fold has to replay the state
-* machine over them exactly as it was recorded. No current entry writes one —
-* `candidate` admits a skill candidate, this build's one candidate type, and
-* nothing evaluates a non-skill one. After the human decision, only a PROMOTE
-* on an applyable, materialized, sub-L4 mutation can be applied (W16), and only
-* an applied proposal can be rolled back.
+* the completed experiment. The machine admits what the current entries write
+* and nothing else: `candidate` admits a skill candidate — this build's one
+* candidate type — and there is no other arc to take. After the human decision,
+* only a PROMOTE on an applyable, materialized, sub-L4 mutation can be applied
+* (W16), and only an applied proposal can be rolled back.
 */
 function nextStates(proposal) {
 	switch (proposal.status) {
 		case "proposed": return ["candidate"];
 		case "candidate": return proposal.mutation === void 0 ? ["gated"] : ["prepared"];
-		case "prepared":
-			if (proposal.targetType === "skill") return ["gated", "replayed"];
-			return mutationMechanical(proposal.targetType) ? ["replayed"] : ["gated"];
-		case "replayed": return ["gated"];
+		case "prepared": return ["gated"];
 		case "gated": return ["decided"];
 		case "decided": return applyable(proposal) ? ["applied"] : [];
 		case "applied": return ["rolledback"];
@@ -2264,7 +2222,7 @@ var EvolutionService = class extends Service {
 	}
 	async propose(input, actor) {
 		const record = {
-			formatVersion: 1,
+			formatVersion: 2,
 			kind: "proposed",
 			proposalId: nonEmpty(input.proposalId, "proposalId"),
 			targetType: input.targetType,
@@ -2300,7 +2258,7 @@ var EvolutionService = class extends Service {
 		validateVersionSet(versionSet);
 		if (mutation !== void 0) validateMutation(current.targetType, mutation, current.baseVersion);
 		await this.append({
-			formatVersion: 1,
+			formatVersion: 2,
 			kind: "candidate",
 			proposalId,
 			versionSet: { ...versionSet },
@@ -2340,7 +2298,7 @@ var EvolutionService = class extends Service {
 			sha256: sha256Hex(await readVerifiedFile(this.root, `${sandbox}/skills/${name}/SKILL.md`))
 		};
 		await this.append({
-			formatVersion: 1,
+			formatVersion: 2,
 			kind: "prepared",
 			proposalId,
 			sandbox,
@@ -2355,9 +2313,8 @@ var EvolutionService = class extends Service {
 		return this.get(proposalId);
 	}
 	/**
-	* Move candidate → gated (manual candidates), prepared → gated (skill
-	* candidates), or replayed → gated (a ledger written before this build's
-	* narrowing): all six Gate answers plus regression evidence refs. Every ref
+	* Move candidate → gated (manual candidates) or prepared → gated (skill
+	* candidates): all six Gate answers plus regression evidence refs. Every ref
 	* must exist — a path on disk (relative to the repo root or absolute) or an id
 	* the caller-side resolver knows (task-store evidence). Existence only;
 	* nothing here executes anything. A **skill** proposal must have a completed
@@ -2387,7 +2344,7 @@ var EvolutionService = class extends Service {
 			if (!(this.refExistsOnDisk(ref) || refKnown !== void 0 && await refKnown(ref))) throw new Error(`evolution: regression evidence ref "${ref}" matches no known evidence id and no existing path`);
 		}
 		await this.append({
-			formatVersion: 1,
+			formatVersion: 2,
 			kind: "gated",
 			proposalId,
 			gate: {
@@ -2414,7 +2371,7 @@ var EvolutionService = class extends Service {
 		if (note !== void 0) nonEmpty(note, "note");
 		if (decision === "PROMOTE") await this.checkPromotion(proposalId);
 		await this.append({
-			formatVersion: 1,
+			formatVersion: 2,
 			kind: "decided",
 			proposalId,
 			decision,
@@ -2455,7 +2412,7 @@ var EvolutionService = class extends Service {
 		await this.checkProductionBaseline(proposalId);
 		const outcome = await this.writeProduction(current, "apply");
 		await this.append({
-			formatVersion: 1,
+			formatVersion: 2,
 			kind: "applied",
 			proposalId,
 			targets: outcome.targets,
@@ -2711,7 +2668,7 @@ var EvolutionService = class extends Service {
 		nonEmpty(approvalRef, "approvalRef");
 		const outcome = await this.writeProduction(current, "rollback");
 		await this.append({
-			formatVersion: 1,
+			formatVersion: 2,
 			kind: "rolledback",
 			proposalId,
 			targets: outcome.targets,
@@ -2821,11 +2778,9 @@ var EvolutionService = class extends Service {
 	* proposed starts a new id; each later kind must be exactly an allowed next
 	* state, and payload-bearing kinds re-run the write path's payload
 	* validation (candidate versionSet/mutation, gate answers, the
-	* prepared/replayed/applied/rolledback shapes), so a hand-forged line fails
+	* prepared/applied/rolledback shapes), so a hand-forged line fails
 	* load exactly as it would fail append. The same rules guard folding and live
-	* appends, so an illegal migration is rejected identically in both paths —
-	* including a record kind this build no longer writes, whose line still has
-	* to be the shape the build that recorded it validated.
+	* appends, so an illegal migration is rejected identically in both paths.
 	*
 	* The experiment family is not a lifecycle transition and is skipped here;
 	* {@link foldLedger} folds it beside this fold.
@@ -2878,11 +2833,6 @@ var EvolutionService = class extends Service {
 					if (!Array.isArray(record.files) || record.files.some((file) => typeof file !== "string")) throw new Error(`evolution: prepared record for "${record.proposalId}" has a non-string file list`);
 					if (mechanical && (record.sandbox === null || record.champion === "none")) throw new Error(`evolution: prepared record for "${record.proposalId}" is mechanical but names no sandbox`);
 					if (!mechanical && (record.sandbox !== null || record.champion !== "none" || record.files.length > 0)) throw new Error(`evolution: prepared record for "${record.proposalId}" is bookkeeping-only but carries sandbox artifacts`);
-					if (record.championSource !== void 0) {
-						if (!CHAMPION_SOURCES.includes(record.championSource)) throw new Error(`evolution: prepared record for "${record.proposalId}" has unknown championSource "${String(record.championSource)}"`);
-						if (current.targetType !== "capability") throw new Error(`evolution: prepared record for "${record.proposalId}" carries championSource but targetType "${current.targetType}" is not capability`);
-						if (record.championSource === "missing" !== (record.champion === "missing")) throw new Error(`evolution: prepared record for "${record.proposalId}" has championSource "${record.championSource}" but champion "${record.champion}"`);
-					}
 					if (record.skillContent !== void 0) {
 						if (current.targetType !== "skill") throw new Error(`evolution: prepared record for "${record.proposalId}" carries skillContent but targetType "${current.targetType}" is not skill`);
 						if (!isRecord(record.skillContent) || typeof record.skillContent.name !== "string" || record.skillContent.name.length === 0 || typeof record.skillContent.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(record.skillContent.sha256)) throw new Error(`evolution: prepared record for "${record.proposalId}" has a malformed skillContent identity`);
@@ -2895,7 +2845,6 @@ var EvolutionService = class extends Service {
 						sandbox: record.sandbox,
 						mechanical: record.mechanical,
 						champion: record.champion,
-						...record.championSource === void 0 ? {} : { championSource: record.championSource },
 						...record.skillContent === void 0 ? {} : { skillContent: {
 							name: record.skillContent.name,
 							sha256: record.skillContent.sha256
@@ -2908,18 +2857,6 @@ var EvolutionService = class extends Service {
 					};
 					break;
 				}
-				case "replayed":
-					if (typeof record.report !== "string" || record.report.length === 0) throw new Error(`evolution: replayed record for "${record.proposalId}" has no report path`);
-					if (!REPLAY_VERDICTS.includes(record.verdict)) throw new Error(`evolution: replayed record for "${record.proposalId}" has unknown verdict "${String(record.verdict)}"`);
-					if (!Array.isArray(record.tasks) || record.tasks.some((item) => !isRecord(item) || typeof item.taskId !== "string" || !REPLAY_RELATIONS.includes(item.relation) || typeof item.holdout !== "boolean")) throw new Error(`evolution: replayed record for "${record.proposalId}" has a malformed task summary`);
-					if (record.reportDigest !== void 0 && !/^[a-f0-9]{64}$/.test(record.reportDigest)) throw new Error(`evolution: replayed record for "${record.proposalId}" has an invalid report digest`);
-					current.replayed = {
-						report: record.report,
-						verdict: record.verdict,
-						tasks: record.tasks.map((item) => ({ ...item })),
-						...record.reportDigest === void 0 ? {} : { reportDigest: record.reportDigest }
-					};
-					break;
 				case "gated":
 					validateGateAnswers(record.gate);
 					current.gate = record.gate;
@@ -2961,7 +2898,10 @@ var EvolutionService = class extends Service {
 				throw new Error(`evolution: corrupt ledger line ${index + 1} in ${this.file}`);
 			}
 		});
-		for (const record of records) if (record.formatVersion !== 1) throw new Error(`evolution: unsupported ledger formatVersion "${String(record.formatVersion)}"`);
+		for (const [index, record] of records.entries()) {
+			const version = record.formatVersion;
+			if (version !== 2) throw new Error(`evolution: ledger line ${index + 1} in ${this.file} declares formatVersion ${JSON.stringify(version ?? null)} — this build reads and writes formatVersion 2 only, so a v1, unversioned or mixed ledger is refused before any new record is appended (archive the old ledger and start a new one; no migration or dual-format read is offered)`);
+		}
 		this.records = records;
 		this.foldLedger(this.records);
 	}
@@ -3111,4 +3051,4 @@ var EvolutionService = class extends Service {
 var evolution_default = EvolutionService;
 
 //#endregion
-export { APPLYABLE_TARGET_TYPES, CHAMPION_SOURCES, CHAMPION_STATES, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionService, MECHANICAL_TARGET_TYPES, REPLAY_RELATIONS, REPLAY_VERDICTS, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, evolution_default as default, digestOf, directoryDigest, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, mutationMechanical, overallExperimentVerdict, protectedInputsDigest, renderProviderRoles, resumeExperiment, runExperiment };
+export { APPLYABLE_TARGET_TYPES, CHAMPION_STATES, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionService, MECHANICAL_TARGET_TYPES, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, evolution_default as default, digestOf, directoryDigest, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, mutationMechanical, overallExperimentVerdict, protectedInputsDigest, renderProviderRoles, resumeExperiment, runExperiment };

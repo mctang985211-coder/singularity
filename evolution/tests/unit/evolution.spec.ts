@@ -138,42 +138,6 @@ async function refusalOf(action: Promise<unknown>): Promise<string> {
 /** The production roots one fixture service writes to. */
 type ProductionRoots = { root: string; skillRoot: string }
 
-/**
- * Reach the `applied` state the way a ledger written before this ticket holds
- * one, for a skill candidate whose records predate this build's evidence.
- *
- * A skill candidate with no production file to replace is not what §F.2's
- * experiment evaluates, and a pre-binding record cannot newly promote — but the
- * record stays readable and an already-applied skill still rolls back. The
- * service materializes the sandbox for real (propose → candidate → prepare),
- * the lifecycle lines an older build appended after it are written directly,
- * and the production write those records imply is performed by
- * `applyProduction`, so the rollback under test is the service's own against a
- * real ledger and real production files.
- */
-async function legacyAppliedPromotion(options: {
-  roots: ProductionRoots
-  input: ProposeInput
-  mutation: unknown
-  applyProduction: (roots: ProductionRoots) => Promise<void>
-}): Promise<EvolutionService> {
-  const { roots, input } = options
-  const svc = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, ...roots })
-  await svc.propose(input, 'root-1')
-  await svc.candidate(input.proposalId, VERSION_SET, 'root-1', options.mutation)
-  await svc.prepare(input.proposalId, 'root-1')
-  const report = `sandbox/${input.proposalId}/replay-report.json`
-  const lines = [
-    { formatVersion: 1, kind: 'replayed', proposalId: input.proposalId, report, verdict: 'not-worse', tasks: [], actor: 'root-1', at: '2026-09-20T00:00:03.000Z' },
-    { formatVersion: 1, kind: 'gated', proposalId: input.proposalId, gate: gateAnswers([report]), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
-    { formatVersion: 1, kind: 'decided', proposalId: input.proposalId, decision: 'PROMOTE', approvalRef: 'approval:legacy-decide', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' },
-    { formatVersion: 1, kind: 'applied', proposalId: input.proposalId, targets: ['legacy apply'], approvalRef: 'approval:legacy-apply', actor: 'root-1', at: '2026-09-20T00:00:06.000Z' },
-  ]
-  await appendFile(join(roots.root, 'proposals.jsonl'), `${lines.map(line => JSON.stringify(line)).join('\n')}\n`)
-  await options.applyProduction(roots)
-  return new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, ...roots })
-}
-
 /** The report path of a skill proposal's recorded experiment — the evidence its gate must cite. */
 async function experimentReportPathOf(svc: EvolutionService, proposalId = 's1'): Promise<string> {
   const [experiment] = await svc.experiments(proposalId)
@@ -417,11 +381,11 @@ describe('EvolutionService ledger', () => {
     await expect(reopened.list()).rejects.toThrow('corrupt ledger line 2')
   })
 
-  it('fails loudly when a replayed migration violates the state machine', async () => {
+  it('fails loudly when a hand-written line violates the state machine on read-back', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evolution-'))
     const svc = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root })
     await svc.propose(proposal, 'root-1')
-    const forged = { formatVersion: 1, kind: 'decided', proposalId: 'p1', decision: 'PROMOTE', actor: 'x', at: 'now' }
+    const forged = { formatVersion: 2, kind: 'decided', proposalId: 'p1', decision: 'PROMOTE', actor: 'x', at: 'now' }
     await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
     const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root })
     await expect(reopened.list()).rejects.toThrow('cannot record "decided"')
@@ -892,30 +856,7 @@ describe('EvolutionService sandbox materialization', () => {
   })
 })
 
-describe('EvolutionService replay compatibility', () => {
-  it('replays a pre-mutation (graph12-era) five-line ledger without drift', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'evolution-'))
-    const lines = [
-      { formatVersion: 1, kind: 'proposed', proposalId: 'e1', targetType: 'skill', targetId: 'verify', baseVersion: 'v1', level: 'L2', rationale: 'r1', sourceRefs: ['diagnosis:d1'], actor: 'root-1', at: '2026-09-16T09:00:00.000Z' },
-      { formatVersion: 1, kind: 'proposed', proposalId: 'e2', targetType: 'verifier', targetId: 'verifier:build', baseVersion: 'v1', level: 'L4', rationale: 'r2', sourceRefs: ['evidence:ev-1'], actor: 'root-1', at: '2026-09-16T09:05:00.000Z' },
-      { formatVersion: 1, kind: 'candidate', proposalId: 'e1', versionSet: { skill: 'v1', verifier: 'v1' }, actor: 'root-1', at: '2026-09-16T09:10:00.000Z' },
-      { formatVersion: 1, kind: 'gated', proposalId: 'e1', gate: gateAnswers(['ev-1']), actor: 'root-1', at: '2026-09-16T09:20:00.000Z' },
-      { formatVersion: 1, kind: 'decided', proposalId: 'e1', decision: 'PROMOTE', note: 'ok', actor: 'root-1', at: '2026-09-16T09:30:00.000Z' },
-    ]
-    await writeFile(join(root, 'proposals.jsonl'), `${lines.map(line => JSON.stringify(line)).join('\n')}\n`)
-    const svc = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root })
-    expect((await svc.list()).map(item => [item.proposalId, item.status])).toEqual([['e2', 'proposed'], ['e1', 'decided']])
-    const e1 = await svc.get('e1')
-    expect(e1.history.map(entry => entry.status)).toEqual(['proposed', 'candidate', 'gated', 'decided'])
-    // the decided line predates approvalRef; the fold tolerates its absence
-    expect(e1.decisionApprovalRef).toBeUndefined()
-    expect(e1.mutation).toBeUndefined()
-    expect(e1.prepared).toBeUndefined()
-    // The second proposal carries no candidate either: it is a recorded
-    // suggestion, and this build admits a skill candidate only.
-    expect((await svc.get('e2')).status).toBe('proposed')
-  })
-
+describe('EvolutionService fold on read-back', () => {
   it('replays a ledger with prepared records to the same fold as the live service', async () => {
     const { svc, root, skillRoot } = await serviceWithRoots()
     await mkdir(join(skillRoot, 'verify'), { recursive: true })
@@ -943,43 +884,10 @@ describe('EvolutionService replay compatibility', () => {
     const svc = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root })
     await svc.propose(skillProposal, 'root-1')
     await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') })
-    const forged = { formatVersion: 1, kind: 'prepared', proposalId: 's1', sandbox: 'sandbox/s1', mechanical: false, champion: 'captured', files: ['x'], actor: 'x', at: 'now' }
+    const forged = { formatVersion: 2, kind: 'prepared', proposalId: 's1', sandbox: 'sandbox/s1', mechanical: false, champion: 'captured', files: ['x'], actor: 'x', at: 'now' }
     await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
     const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root })
     await expect(reopened.list()).rejects.toThrow('mechanical')
-  })
-
-  it('fails loud on a forged championSource, and folds a valid pre-W19 record unchanged', async () => {
-    // A capability candidate cannot be recorded any more, so the forged lines
-    // stand on their own — hand-written the way a pre-S4-E ledger holds them,
-    // which is exactly what the fold has to keep judging.
-    const reopenWith = async (input: {
-      targetType: 'capability' | 'skill'
-      mutation: Record<string, unknown>
-      record: Record<string, unknown>
-    }) => {
-      const proposalId = input.targetType === 'capability' ? 'c1' : 's1'
-      const dir = await mkdtemp(join(tmpdir(), 'evolution-'))
-      const lines = [
-        { formatVersion: 1, kind: 'proposed', proposalId, targetType: input.targetType, targetId: 'x', baseVersion: 'v1', level: 'L2', rationale: 'the fixture target', sourceRefs: ['diagnosis:d1'], actor: 'root-1', at: '2026-09-20T00:00:00.000Z' },
-        { formatVersion: 1, kind: 'candidate', proposalId, versionSet: { x: 'v1' }, mutation: input.mutation, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
-      ]
-      await writeFile(join(dir, 'proposals.jsonl'), [...lines, input.record].map(line => JSON.stringify(line)).join('\n') + '\n')
-      return new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root: dir })
-    }
-    const capabilityMutationLine = { name: 'research', entry: { preset: 'standard' } }
-    const skillMutationLine = { name: 'verify', content: skillText('x') }
-    const prepared = { formatVersion: 1, kind: 'prepared', sandbox: 'sandbox/x', mechanical: true, champion: 'captured', files: ['x'], actor: 'x', at: 'now' }
-    await expect((await reopenWith({ targetType: 'capability', mutation: capabilityMutationLine, record: { ...prepared, proposalId: 'c1', championSource: 'bogus' } })).list())
-      .rejects.toThrow('unknown championSource "bogus"')
-    await expect((await reopenWith({ targetType: 'skill', mutation: skillMutationLine, record: { ...prepared, proposalId: 's1', championSource: 'config-text' } })).list())
-      .rejects.toThrow('not capability')
-    await expect((await reopenWith({ targetType: 'capability', mutation: capabilityMutationLine, record: { ...prepared, proposalId: 'c1', champion: 'missing', championSource: 'code-default' } })).list())
-      .rejects.toThrow('but champion "missing"')
-
-    // a valid pre-W19 record (no championSource) folds unchanged
-    const reopened = await reopenWith({ targetType: 'capability', mutation: capabilityMutationLine, record: { ...prepared, proposalId: 'c1' } })
-    expect((await reopened.get('c1')).prepared).toEqual({ sandbox: 'sandbox/x', mechanical: true, champion: 'captured', files: ['x'] })
   })
 
   it('fails loud on a forged candidate or gated record: the fold reruns the write-path payload checks', async () => {
@@ -987,7 +895,7 @@ describe('EvolutionService replay compatibility', () => {
     const root = await mkdtemp(join(tmpdir(), 'evolution-'))
     const svc = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root })
     await svc.propose(proposal, 'root-1')
-    const forgedCandidate = { formatVersion: 1, kind: 'candidate', proposalId: 'p1', versionSet: {}, actor: 'x', at: 'now' }
+    const forgedCandidate = { formatVersion: 2, kind: 'candidate', proposalId: 'p1', versionSet: {}, actor: 'x', at: 'now' }
     await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forgedCandidate)}\n`, { flag: 'a' })
     const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root })
     await expect(reopened.list()).rejects.toThrow('at least one version')
@@ -997,7 +905,7 @@ describe('EvolutionService replay compatibility', () => {
     const svc2 = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root: root2 })
     await svc2.propose(skillProposal, 'root-1')
     await svc2.candidate('s1', VERSION_SET, 'root-1')
-    const emptyAnswer = { formatVersion: 1, kind: 'gated', proposalId: 's1', gate: { ...gateAnswers(['ev-1']), targetFailureFixed: '' }, actor: 'x', at: 'now' }
+    const emptyAnswer = { formatVersion: 2, kind: 'gated', proposalId: 's1', gate: { ...gateAnswers(['ev-1']), targetFailureFixed: '' }, actor: 'x', at: 'now' }
     await writeFile(join(root2, 'proposals.jsonl'), `${JSON.stringify(emptyAnswer)}\n`, { flag: 'a' })
     const reopened2 = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root: root2 })
     await expect(reopened2.list()).rejects.toThrow('Target failure fixed')
@@ -1007,7 +915,7 @@ describe('EvolutionService replay compatibility', () => {
     const svc3 = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root: root3 })
     await svc3.propose(skillProposal, 'root-1')
     await svc3.candidate('s1', VERSION_SET, 'root-1')
-    const noEvidence = { formatVersion: 1, kind: 'gated', proposalId: 's1', gate: gateAnswers([]), actor: 'x', at: 'now' }
+    const noEvidence = { formatVersion: 2, kind: 'gated', proposalId: 's1', gate: gateAnswers([]), actor: 'x', at: 'now' }
     await writeFile(join(root3, 'proposals.jsonl'), `${JSON.stringify(noEvidence)}\n`, { flag: 'a' })
     const reopened3 = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root: root3 })
     await expect(reopened3.list()).rejects.toThrow('at least one evidence ref')
@@ -1183,20 +1091,6 @@ describe('EvolutionService: the two-sided experiment is the gate evidence', () =
     expect((await reopened.experiments('s1')).map(view => view.experimentId)).toHaveLength(1)
   })
 
-  it('fails loud on a v1 replayed record a pre-S4-E ledger holds: unknown verdict, or a record after gated', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'evolution-'))
-    const svc = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root })
-    await svc.propose(skillProposal, 'root-1')
-    await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') })
-    await svc.prepare('s1', 'root-1')
-    const forged = {
-      formatVersion: 1, kind: 'replayed', proposalId: 's1', report: 'sandbox/s1/replay-report.json',
-      verdict: 'great', tasks: [], actor: 'x', at: 'now',
-    }
-    await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
-    const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root })
-    await expect(reopened.list()).rejects.toThrow('unknown verdict')
-  })
 })
 
 describe('replay comparison', () => {
@@ -1514,7 +1408,7 @@ describe('evolution_replay tool', () => {
     expect(refused).toContain('"capability"')
     expect(refused).toMatch(/single-file SKILL\.md candidate/)
     // A refused call runs nothing and writes nothing: the tool is the model's
-    // entry, so it must not even reach the v1 replay it no longer has.
+    // entry, so a target type with no evaluator must not reach the experiment.
     expect(replayTask).not.toHaveBeenCalled()
     expect(existsSync(join(svc.root, 'sandbox'))).toBe(false)
     expect(await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')).toBe(before)
@@ -1807,7 +1701,7 @@ async function recordSkillExperiment(
   const reportPath = experimentReportPath(proposalId, experimentId)
   const at = '2026-09-26T00:00:00.000Z'
   await svc.recordExperimentStart({
-    formatVersion: 1,
+    formatVersion: 2,
     kind: 'experiment_started',
     proposalId,
     experimentId,
@@ -1859,7 +1753,7 @@ async function recordSkillExperiment(
         criteria,
       })
       await svc.recordExperimentSample({
-        formatVersion: 1,
+        formatVersion: 2,
         kind: 'experiment_sample',
         proposalId,
         experimentId,
@@ -2028,8 +1922,35 @@ describe('EvolutionService apply/rollback state machine', () => {
     expect(folded.applied?.approvalRef).toBe('approval:call-1')
     expect(folded.rolledback?.approvalRef).toBe('approval:call-2')
     // proposed, candidate, prepared, gated, decided, applied, rolledback — a
-    // skill candidate's evaluation is the experiment, not a `replayed` line.
+    // skill candidate's evaluation is the experiment, not a lifecycle line.
     expect(folded.history).toHaveLength(7)
+  })
+
+  it('writes one v2 ledger through the whole walk, with no v1 vocabulary in any line', async () => {
+    const { svc, root, skillRoot } = await serviceWithProduction()
+    await productionSkill(skillRoot)
+    await walkToDecided(svc, skillProposal, { name: 'verify', content: skillText('# new verify skill') })
+    await svc.apply('s1', 'root-1', 'approval:call-1')
+    await svc.rollback('s1', 'root-1', 'approval:call-2')
+
+    const raw = (await readFile(join(root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
+    const records = raw.map(line => JSON.parse(line) as { formatVersion: number; kind: string })
+    // Every line this build writes declares the ledger's own format version.
+    expect(records.map(record => record.formatVersion)).toEqual(records.map(() => 2))
+    // The lifecycle plus the experiment family — and no `replayed` record.
+    expect(records.map(record => record.kind)).toEqual(expect.arrayContaining([
+      'proposed', 'candidate', 'prepared', 'experiment_started', 'experiment_sample', 'gated', 'decided', 'applied', 'rolledback',
+    ]))
+    expect(records.map(record => record.kind)).not.toContain('replayed')
+    expect(raw.join('\n')).not.toContain('"replayed"')
+
+    // The reopen folds the v2 ledger to the same state the live service holds.
+    const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root, skillRoot })
+    expect(await reopened.list()).toEqual(await svc.list())
+    expect((await reopened.get('s1')).history.map(entry => entry.status)).toEqual([
+      'proposed', 'candidate', 'prepared', 'gated', 'decided', 'applied', 'rolledback',
+    ])
+    expect(await reopened.experiments('s1')).toHaveLength(1)
   })
 
   it('fails loudly on a forged applied record: wrong base state or a malformed payload', async () => {
@@ -2041,7 +1962,7 @@ describe('EvolutionService apply/rollback state machine', () => {
     await recordSkillExperiment(svc, 's1')
     await svc.gate('s1', gateAnswers([await experimentReportPathOf(svc)]), 'root-1')
     await svc.decide('s1', 'REJECT', 'root-1', 'approval:call-1')
-    const forged = { formatVersion: 1, kind: 'applied', proposalId: 's1', targets: ['/x'], approvalRef: 'approval:call-9', actor: 'x', at: 'now' }
+    const forged = { formatVersion: 2, kind: 'applied', proposalId: 's1', targets: ['/x'], approvalRef: 'approval:call-9', actor: 'x', at: 'now' }
     await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
     const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root, skillRoot })
     await expect(reopened.list()).rejects.toThrow('cannot record "applied"')
@@ -2056,7 +1977,7 @@ describe('EvolutionService apply/rollback state machine', () => {
     const { reportPath: svc2Report } = await recordSkillExperiment(svc2, 's1')
     await svc2.gate('s1', gateAnswers([svc2Report]), 'root-1')
     await svc2.decide('s1', 'PROMOTE', 'root-1', 'approval:call-1')
-    const malformed = { formatVersion: 1, kind: 'applied', proposalId: 's1', targets: [], approvalRef: '', actor: 'x', at: 'now' }
+    const malformed = { formatVersion: 2, kind: 'applied', proposalId: 's1', targets: [], approvalRef: '', actor: 'x', at: 'now' }
     await writeFile(join(svc2.root, 'proposals.jsonl'), `${JSON.stringify(malformed)}\n`, { flag: 'a' })
     const reopened2 = reopenLike(svc2, { modelSelection: () => FIXTURE_SELECTION, root: svc2.root, skillRoot: skillRoot2 })
     await expect(reopened2.list()).rejects.toThrow('malformed target list')
@@ -2082,56 +2003,29 @@ describe('EvolutionService apply/rollback production writes', () => {
     expect(await readFile(join(skillRoot, 'verify', 'reference.md'), 'utf8')).toBe('# aux file the snapshot never captured\n')
   })
 
-  it('refuses to create a brand-new skill (no production file to replace) while its legacy applied record still rolls back', async () => {
-    const { svc, skillRoot, root, presetRoot, configFile } = await serviceWithProduction()
-    // EVAL-4/§F.2: the two-sided experiment evaluates a replacement of an
-    // existing SKILL.md — promoting a brand-new skill is not what its evidence
-    // could show, so the candidate cannot even be evaluated, let alone promoted.
-    await svc.propose({ ...skillProposal, proposalId: 's-new' }, 'root-1')
-    await svc.candidate('s-new', VERSION_SET, 'root-1', { name: 'verify', content: skillText('# new verify skill') })
-    await svc.prepare('s-new', 'root-1')
-    expect((await svc.get('s-new')).prepared?.champion).toBe('missing')
-    expect(await refusalOf(svc.gate('s-new', gateAnswers(['sandbox/s-new/replay-report.json']), 'root-1'))).toContain('has no two-sided experiment')
-
-    // The rollback of a skill an older build applied stays live.
-    const legacy = await legacyAppliedPromotion({
-      roots: { root, skillRoot },
-      input: skillProposal,
-      mutation: { name: 'verify', content: skillText('# new verify skill') },
-      applyProduction: async roots => {
-        await mkdir(join(roots.skillRoot, 'verify'), { recursive: true })
-        await writeFile(join(roots.skillRoot, 'verify', 'SKILL.md'), skillText('# new verify skill'))
-      },
-    })
-    expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe(skillText('# new verify skill'))
-    const rolledback = await legacy.rollback('s1', 'root-1', 'approval:call-2')
-    expect(existsSync(join(skillRoot, 'verify'))).toBe(false)
-    expect(rolledback.targets[0]).toContain('deleted')
-  })
-
-  it('refuses to roll back an applied record of another target type: no executor writes or restores one', async () => {
+  it('is the state machine, not a reader, that refuses an applied record of another target type', async () => {
     const { svc, root } = await serviceWithProduction()
-    // A ledger an older build wrote, hand-written the way it holds one: the
-    // candidate line is what the fold validates, and this build would refuse
-    // that candidate outright (no executor for a capability).
+    // The v2 state machine admits exactly what the current entries write
+    // (`APPLYABLE_TARGET_TYPES` is skill and nothing else), so a hand-written
+    // capability lifecycle — the shape a ledger written before this build
+    // holds — is refused at load, before anything is read from it.
     await svc.propose(capabilityProposal, 'root-1')
     await appendFile(
       join(root, 'proposals.jsonl'),
       [
-        { formatVersion: 1, kind: 'candidate', proposalId: 'c1', versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
-        { formatVersion: 1, kind: 'prepared', proposalId: 'c1', sandbox: 'sandbox/c1', mechanical: true, champion: 'captured', files: ['capability-table.patch.yml'], actor: 'root-1', at: '2026-09-20T00:00:02.000Z' },
-        { formatVersion: 1, kind: 'replayed', proposalId: 'c1', report: 'sandbox/c1/replay-report.json', verdict: 'not-worse', tasks: [], actor: 'root-1', at: '2026-09-20T00:00:03.000Z' },
-        { formatVersion: 1, kind: 'gated', proposalId: 'c1', gate: gateAnswers(['sandbox/c1/replay-report.json']), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
-        { formatVersion: 1, kind: 'decided', proposalId: 'c1', decision: 'PROMOTE', approvalRef: 'approval:legacy-decide', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' },
-        { formatVersion: 1, kind: 'applied', proposalId: 'c1', targets: ['legacy apply'], approvalRef: 'approval:legacy-apply', actor: 'root-1', at: '2026-09-20T00:00:06.000Z' },
+        { formatVersion: 2, kind: 'candidate', proposalId: 'c1', versionSet: { capabilityTable: 'config.yml#doc1' }, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
+        { formatVersion: 2, kind: 'gated', proposalId: 'c1', gate: gateAnswers(['sandbox/c1/replay-report.json']), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
+        { formatVersion: 2, kind: 'decided', proposalId: 'c1', decision: 'PROMOTE', approvalRef: 'approval:legacy-decide', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' },
+        { formatVersion: 2, kind: 'applied', proposalId: 'c1', targets: ['legacy apply'], approvalRef: 'approval:legacy-apply', actor: 'root-1', at: '2026-09-20T00:00:06.000Z' },
       ].map(line => JSON.stringify(line)).join('\n') + '\n',
     )
+    const verbatim = await readFile(join(root, 'proposals.jsonl'), 'utf8')
     const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root })
-    expect((await reopened.get('c1')).status).toBe('applied')
-    expect(await refusalOf(reopened.checkPromotion('c1'))).toContain('no evaluator in this build')
-    const rolledback = await refusalOf(reopened.rollback('c1', 'root-1', 'approval:call-2'))
-    expect(rolledback).toContain('this build writes and restores a single')
-    expect((await reopened.get('c1')).status).toBe('applied')
+    await expect(reopened.list()).rejects.toThrow('cannot record "applied"')
+    await expect(reopened.get('c1')).rejects.toThrow('cannot record "applied"')
+    // Nothing was read out of it and nothing was written beside it.
+    await expect(reopened.rollback('c1', 'root-1', 'approval:call-2')).rejects.toThrow('cannot record "applied"')
+    expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(verbatim)
   })
 })
 
@@ -2150,29 +2044,6 @@ async function prepareSkill(svc: EvolutionService, content: string = SKILL_CANDI
   await svc.candidate('s1', { skill: 'v2' }, 'root-1', { name: 'verify', content })
   const prepared = await svc.prepare('s1', 'root-1')
   return prepared.prepared!.skillContent!
-}
-
-/** A pre-binding (pre-P2) skill ledger: no skillContent, no reportDigest, sandbox files on disk. */
-async function writeLegacySkillLedger(svc: EvolutionService, root: string, upTo: 'gated' | 'applied') {
-  await mkdir(join(root, 'sandbox', 's1', 'skills', 'verify'), { recursive: true })
-  await mkdir(join(root, 'sandbox', 's1', 'champion', 'skills', 'verify'), { recursive: true })
-  await writeFile(join(root, 'sandbox', 's1', 'skills', 'verify', 'SKILL.md'), 'candidate')
-  await writeFile(join(root, 'sandbox', 's1', 'champion', 'skills', 'verify', 'SKILL.md'), 'champion bytes')
-  const at = (minute: number) => `2026-09-16T09:${String(minute).padStart(2, '0')}:00.000Z`
-  const lines: Record<string, unknown>[] = [
-    { formatVersion: 1, kind: 'proposed', proposalId: 's1', targetType: 'skill', targetId: 'verify', baseVersion: 'v1', level: 'L2', rationale: 'the skill never mentions empty-input fixtures', sourceRefs: ['diagnosis:d1'], actor: 'root-1', at: at(0) },
-    { formatVersion: 1, kind: 'candidate', proposalId: 's1', versionSet: { skill: 'v1' }, mutation: { name: 'verify', content: 'candidate' }, actor: 'root-1', at: at(1) },
-    { formatVersion: 1, kind: 'prepared', proposalId: 's1', sandbox: 'sandbox/s1', mechanical: true, champion: 'captured', files: ['skills/verify/SKILL.md', 'champion/skills/verify/SKILL.md'], actor: 'root-1', at: at(2) },
-    { formatVersion: 1, kind: 'replayed', proposalId: 's1', report: 'sandbox/s1/replay-report.json', verdict: 'not-worse', tasks: [], actor: 'root-1', at: at(3) },
-    { formatVersion: 1, kind: 'gated', proposalId: 's1', gate: gateAnswers(['sandbox/s1/replay-report.json']), actor: 'root-1', at: at(4) },
-  ]
-  if (upTo === 'applied') {
-    lines.push(
-      { formatVersion: 1, kind: 'decided', proposalId: 's1', decision: 'PROMOTE', approvalRef: 'approval:decide', actor: 'root-1', at: at(5) },
-      { formatVersion: 1, kind: 'applied', proposalId: 's1', targets: ['/production/skills/verify/SKILL.md'], approvalRef: 'approval:apply', actor: 'root-1', at: at(6) },
-    )
-  }
-  await writeFile(join(root, 'proposals.jsonl'), `${lines.map(line => JSON.stringify(line)).join('\n')}\n`)
 }
 
 describe('skill candidate content binding (P2)', () => {
@@ -2379,30 +2250,6 @@ describe('skill candidate content binding (P2)', () => {
     expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe('# old verify skill\n')
   })
 
-  it('P2-F: a pre-binding ledger stays readable, its applied object still rolls back, and its un-applied skill cannot newly promote', async () => {
-    const { svc, root, skillRoot, presetRoot, configFile } = await serviceWithProduction()
-    await writeLegacySkillLedger(svc, root, 'applied')
-    await mkdir(join(skillRoot, 'verify'), { recursive: true })
-    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), 'applied bytes')
-    const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root, skillRoot, presetRoot, configFile })
-    // readable
-    expect((await reopened.get('s1')).status).toBe('applied')
-    expect((await reopened.get('s1')).prepared!.skillContent).toBeUndefined()
-    // the old applied object still rolls back
-    const rolledback = await reopened.rollback('s1', 'root-1', 'approval:rollback')
-    expect(rolledback.proposal.status).toBe('rolledback')
-    expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe('champion bytes')
-
-    // an old un-applied skill candidate cannot bypass the new checks
-    const gatedRoot = await mkdtemp(join(tmpdir(), 'evolution-legacy-'))
-    await writeLegacySkillLedger(new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root: gatedRoot }), gatedRoot, 'gated')
-    const legacy = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root: gatedRoot, skillRoot, presetRoot, configFile })
-    await expect(legacy.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0'))
-      .rejects.toThrow('prepared before content binding; propose a new candidate and re-evaluate it')
-    // and the state machine has no v1 replay for it to fall back on
-    await expect(legacy.apply('s1', 'root-1', 'approval:call-1')).rejects.toThrow('cannot record "applied"')
-  })
-
   it('P2-G: an illegitimate candidate is refused before the human is asked', async () => {
     const { svc, root, skillRoot } = await serviceWithProduction()
     await mkdir(join(skillRoot, 'verify'), { recursive: true })
@@ -2478,21 +2325,6 @@ describe('skill candidate content binding (P2)', () => {
     expect(kinds).not.toContain('applied')
   })
 
-  it('P2-F: a forged skillContent on a non-skill prepared record fails the fold', async () => {
-    // Hand-written lines: a capability candidate would be refused by this build,
-    // and what the fold judges is the line an older ledger really holds.
-    const root = await mkdtemp(join(tmpdir(), 'evolution-forge-'))
-    const lines = [
-      { formatVersion: 1, kind: 'proposed', proposalId: 'c1', targetType: 'capability', targetId: 'research', baseVersion: 'v1', level: 'L2', rationale: 'the fixture row', sourceRefs: ['diagnosis:d1'], actor: 'root-1', at: '2026-09-20T00:00:00.000Z' },
-      { formatVersion: 1, kind: 'candidate', proposalId: 'c1', versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
-    ]
-    const forged = {
-      formatVersion: 1, kind: 'prepared', proposalId: 'c1', sandbox: 'sandbox/c1', mechanical: true,
-      champion: 'captured', files: ['x'], skillContent: { name: 'verify', sha256: 'c'.repeat(64) }, actor: 'x', at: 'now',
-    }
-    await writeFile(join(root, 'proposals.jsonl'), [...lines, forged].map(line => JSON.stringify(line)).join('\n') + '\n')
-    await expect(new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root }).list()).rejects.toThrow('carries skillContent but targetType "capability" is not skill')
-  })
 })
 
 /* ------------------------------------------------------------------ */
@@ -2813,90 +2645,43 @@ describe('production baseline check (P3)', () => {
     // production is untouched and no applied record was taken
     expect(await readFile(skillProductionFile(skillRoot), 'utf8')).toBe(P3_BASELINE)
     expect(await ledgerKinds(root)).not.toContain('applied')
-    // the old ledger still reads, and its history is intact
+    // the ledger still reads, and its history is intact
     expect((await reopened.get('s1')).status).toBe('decided')
   })
 
-  it('P3-G: a missing-champion legacy applied record still rolls back by deletion, while a new promotion of it is refused', async () => {
-    const { root, skillRoot, presetRoot, configFile } = await serviceWithProduction()
-    const legacy = await legacyAppliedPromotion({
-      roots: { root, skillRoot },
-      input: skillProposal,
-      mutation: { name: 'verify', content: P3_CANDIDATE_A },
-      applyProduction: async roots => {
-        await mkdir(join(roots.skillRoot, 'verify'), { recursive: true })
-        await writeFile(skillProductionFile(roots.skillRoot), P3_CANDIDATE_A)
-      },
-    })
-    // `champion: 'missing'` is the recorded proof that no production file existed,
-    // which is why the rollback deletes what the old apply created.
-    expect((await legacy.get('s1')).prepared!.champion).toBe('missing')
-    expect((await legacy.get('s1')).prepared!.skillBaseline).toBeUndefined()
-    const rolledback = await legacy.rollback('s1', 'root-1', 'approval:call-1')
-    expect(rolledback.targets[0]).toContain('deleted')
-    expect(existsSync(skillProductionFile(skillRoot))).toBe(false)
-
-    // The same shape cannot be promoted again: a brand-new skill is not what the
-    // two-sided experiment evaluates (see P3-C).
-    const { svc: other } = await serviceWithProduction()
-    await other.propose(skillProposal, 'root-1')
-    await other.candidate('s1', { skill: 'v2' }, 'root-1', { name: 'verify', content: P3_CANDIDATE_B })
-    await other.prepare('s1', 'root-1')
-    await dropBaselineField(other.root)
-    expect(await refusalOf(other.checkPromotion('s1'))).toContain('carries no two-sided experiment')
-  })
-
-  it('P3-G: a forged skillBaseline on a non-skill prepared record fails the fold', async () => {
-    // A capability candidate cannot be recorded any more, so the forged line
-    // stands on the proposed and hand-written candidate lines — the shape a
-    // ledger written before this build holds and the fold still judges.
+  it('P3-G: a malformed skillBaseline on a skill prepared record fails the fold', async () => {
     const root = await mkdtemp(join(tmpdir(), 'evolution-forge-'))
-    const lines = [
-      { formatVersion: 1, kind: 'proposed', proposalId: 'c1', targetType: 'capability', targetId: 'research', baseVersion: 'v1', level: 'L2', rationale: 'the fixture row', sourceRefs: ['diagnosis:d1'], actor: 'root-1', at: '2026-09-20T00:00:00.000Z' },
-      { formatVersion: 1, kind: 'candidate', proposalId: 'c1', versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
-    ]
+    const svc = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root })
+    await svc.propose(skillProposal, 'root-1')
+    await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') })
     const forged = {
-      formatVersion: 1, kind: 'prepared', proposalId: 'c1', sandbox: 'sandbox/c1', mechanical: true,
-      champion: 'captured', files: ['x'], skillBaseline: { name: 'verify', sha256: 'd'.repeat(64) }, actor: 'x', at: 'now',
+      formatVersion: 2, kind: 'prepared', proposalId: 's1', sandbox: 'sandbox/s1', mechanical: true, champion: 'captured',
+      files: ['x'], skillBaseline: { name: 'verify', sha256: 'not-a-digest' }, actor: 'x', at: 'now',
     }
-    await writeFile(join(root, 'proposals.jsonl'), [...lines, forged].map(line => JSON.stringify(line)).join('\n') + '\n')
-    await expect(new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root }).list()).rejects.toThrow('carries skillBaseline but targetType "capability" is not skill')
-
-    // a malformed digest on the right targetType fails the same way
-    const other = await mkdtemp(join(tmpdir(), 'evolution-forge-'))
-    const svc2 = new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root: other })
-    await svc2.propose(skillProposal, 'root-1')
-    await svc2.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('x') })
-    const malformed = { ...forged, proposalId: 's1', skillBaseline: { name: 'verify', sha256: 'not-a-digest' } }
-    await writeFile(join(other, 'proposals.jsonl'), `${JSON.stringify(malformed)}\n`, { flag: 'a' })
-    await expect(new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root: other }).list()).rejects.toThrow('malformed skillBaseline identity')
+    await writeFile(join(root, 'proposals.jsonl'), `${JSON.stringify(forged)}\n`, { flag: 'a' })
+    await expect(new EvolutionService(fixtureCtx(), { modelSelection: () => FIXTURE_SELECTION, root }).list()).rejects.toThrow('malformed skillBaseline identity')
   })
 })
 
 describe('evolution_apply / evolution_rollback tools', () => {
   /** toolCtx on top of a production-fixture service (capability champion resolves from the taskRuntime mock). */
   /**
-   * Hand-write the lifecycle an older build recorded for a non-skill proposal
-   * this build refuses to promote — candidate, prepared, the v1 replay, the
-   * gate and the `decided(PROMOTE)` record — and return a service that folds it.
-   * The apply/rollback tool guidance those records meet is what these cases
-   * assert; the proposal itself is only proposed on the live service.
+   * Hand-write a decided(PROMOTE) state for a non-skill proposal this build
+   * refuses to promote — a mutation-less candidate, its gate and the decision,
+   * all v2 records — and return a service that folds it. The apply tool
+   * guidance those records meet is what this case asserts; the proposal itself
+   * is only proposed on the live service, and no entry here writes a candidate
+   * of another target type.
    */
-  async function legacyDecided(
+  async function decidedWithoutExecutor(
     svc: EvolutionService,
     proposalId: string,
     roots: ProductionRoots,
-    targetType: 'capability' | 'task_definition' = 'task_definition',
   ): Promise<EvolutionService> {
-    const mutation = targetType === 'capability'
-      ? { name: 'research', entry: { preset: 'standard' } }
-      : { baseVersion: 'v3', definition: { objective: 'x' } }
     await appendFile(join(svc.root, 'proposals.jsonl'), [
-      { formatVersion: 1, kind: 'candidate', proposalId, versionSet: { x: 'v1' }, mutation, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
-      { formatVersion: 1, kind: 'prepared', proposalId, sandbox: `sandbox/${proposalId}`, mechanical: true, champion: 'captured', files: ['x'], actor: 'root-1', at: '2026-09-20T00:00:02.000Z' },
-      { formatVersion: 1, kind: 'replayed', proposalId, report: `sandbox/${proposalId}/replay-report.json`, verdict: 'not-worse', tasks: [], actor: 'root-1', at: '2026-09-20T00:00:03.000Z' },
-      { formatVersion: 1, kind: 'gated', proposalId, gate: gateAnswers([`sandbox/${proposalId}/replay-report.json`]), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
-      { formatVersion: 1, kind: 'decided', proposalId, decision: 'PROMOTE', approvalRef: 'approval:legacy-decide', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' },
+      { formatVersion: 2, kind: 'candidate', proposalId, versionSet: { x: 'v1' }, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
+      { formatVersion: 2, kind: 'gated', proposalId, gate: gateAnswers([`sandbox/${proposalId}/replay-report.json`]), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
+      { formatVersion: 2, kind: 'decided', proposalId, decision: 'PROMOTE', approvalRef: 'approval:legacy-decide', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' },
     ].map(line => JSON.stringify(line)).join('\n') + '\n')
     return reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, ...roots })
   }
@@ -3013,38 +2798,12 @@ describe('evolution_apply / evolution_rollback tools', () => {
     // still reaches the apply entry.
     const roots: ProductionRoots = { root: svc.root, skillRoot }
     await svc.propose(proposal, 'root-1')
-    const legacyDefinition = await legacyDecided(svc, 'p1', roots)
-    expect((await defineEvolutionApplyTool({ ...(ctx as object), evolution: legacyDefinition } as never).execute({ proposalId: 'p1' }, exec('root-1'))) as string)
+    const decidedDefinition = await decidedWithoutExecutor(svc, 'p1', roots)
+    expect((await defineEvolutionApplyTool({ ...(ctx as object), evolution: decidedDefinition } as never).execute({ proposalId: 'p1' }, exec('root-1'))) as string)
       .toContain('has no executor here')
 
     expect(approval.request).not.toHaveBeenCalled()
     expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe('# old\n')
-  })
-
-  it('refuses to roll back an applied record of another target type through the tool', async () => {
-    const { svc, ctx, approval, root, skillRoot } = await toolCtxWithProduction()
-    // The applied state an older build recorded for a capability row: this build
-    // writes a SKILL.md only, so the rollback entry refuses it by name instead
-    // of touching config.yml.
-    await svc.propose({ ...capabilityProposal, proposalId: 'c2' }, 'root-1')
-    await appendFile(
-      join(root, 'proposals.jsonl'),
-      [
-        { formatVersion: 1, kind: 'candidate', proposalId: 'c2', versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
-        { formatVersion: 1, kind: 'prepared', proposalId: 'c2', sandbox: 'sandbox/c2', mechanical: true, champion: 'captured', files: ['capability-table.patch.yml'], actor: 'root-1', at: '2026-09-20T00:00:02.000Z' },
-        { formatVersion: 1, kind: 'replayed', proposalId: 'c2', report: 'sandbox/c2/replay-report.json', verdict: 'not-worse', tasks: [], actor: 'root-1', at: '2026-09-20T00:00:03.000Z' },
-        { formatVersion: 1, kind: 'gated', proposalId: 'c2', gate: gateAnswers(['sandbox/c2/replay-report.json']), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
-        { formatVersion: 1, kind: 'decided', proposalId: 'c2', decision: 'PROMOTE', approvalRef: 'approval:legacy-decide', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' },
-        { formatVersion: 1, kind: 'applied', proposalId: 'c2', targets: ['legacy apply'], approvalRef: 'approval:legacy-apply', actor: 'root-1', at: '2026-09-20T00:00:06.000Z' },
-      ].map(line => JSON.stringify(line)).join('\n') + '\n',
-    )
-    const reopened = await reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root, skillRoot })
-    const legacyCtx = { ...(ctx as object), evolution: reopened } as never
-    const result = (await defineEvolutionRollbackTool(legacyCtx).execute({ proposalId: 'c2' }, exec('root-1'))) as string
-    expect(result).toContain('evolution_rollback rejected:')
-    expect(result).toContain('no executor to roll back an applied record of another type')
-    expect(approval.request).not.toHaveBeenCalled()
-    expect((await reopened.get('c2')).status).toBe('applied')
   })
 
   it('evolution_rollback refuses a proposal that is not applied, without asking the human', async () => {
@@ -3130,20 +2889,19 @@ async function writeSkillDirectory(directory: string, name: string, content: str
 }
 
 /**
- * Hand-write a gated capability proposal — the shape a ledger written before
- * this build holds, whose candidate this build would refuse — and return a
- * service that folds it. The state is not reachable through the live entries
- * any more, which is exactly what the refusal paths below are about.
+ * Hand-write a gated capability proposal — a mutation-less candidate and its
+ * gate, v2 records the state machine still folds, while this build's `candidate`
+ * admits a skill candidate only — and return a service that folds it. The
+ * promotion state is not reachable through the live entries, which is exactly
+ * what the refusal paths below are about.
  */
 async function capabilityProposalGated(svc: EvolutionService, proposalId: string): Promise<EvolutionService> {
   await svc.propose({ ...capabilityProposal, proposalId }, 'root-1')
   await appendFile(
     join(svc.root, 'proposals.jsonl'),
     [
-      { formatVersion: 1, kind: 'candidate', proposalId, versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: PROMOTION_ROW, entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
-      { formatVersion: 1, kind: 'prepared', proposalId, sandbox: `sandbox/${proposalId}`, mechanical: true, champion: 'captured', files: ['capability-table.patch.yml'], actor: 'root-1', at: '2026-09-20T00:00:02.000Z' },
-      { formatVersion: 1, kind: 'replayed', proposalId, report: `sandbox/${proposalId}/replay-report.json`, verdict: 'not-worse', tasks: [], actor: 'root-1', at: '2026-09-20T00:00:03.000Z' },
-      { formatVersion: 1, kind: 'gated', proposalId, gate: gateAnswers([`sandbox/${proposalId}/replay-report.json`]), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
+      { formatVersion: 2, kind: 'candidate', proposalId, versionSet: { capabilityTable: 'config.yml#doc1' }, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
+      { formatVersion: 2, kind: 'gated', proposalId, gate: gateAnswers([`sandbox/${proposalId}/replay-report.json`]), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
     ].map(line => JSON.stringify(line)).join('\n') + '\n',
   )
   return reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root: svc.root, skillRoot: svc.skillRoot })
@@ -3209,7 +2967,7 @@ describe('capability promotion has no evaluator (EVAL-4)', () => {
     const gated = await capabilityProposalGated(svc, 'c2')
     const lines = (await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
       .map(line => JSON.parse(line) as Record<string, unknown>)
-    lines.push({ formatVersion: 1, kind: 'decided', proposalId: 'c2', decision: 'PROMOTE', approvalRef: 'approval:legacy', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' })
+    lines.push({ formatVersion: 2, kind: 'decided', proposalId: 'c2', decision: 'PROMOTE', approvalRef: 'approval:legacy', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' })
     await writeFile(join(svc.root, 'proposals.jsonl'), `${lines.map(line => JSON.stringify(line)).join('\n')}\n`)
     const reopened = reopenLike(gated, { modelSelection: () => FIXTURE_SELECTION, root: svc.root, skillRoot: svc.skillRoot })
 
@@ -3218,9 +2976,9 @@ describe('capability promotion has no evaluator (EVAL-4)', () => {
     expect(viaApplyTool).toContain('evolution_apply rejected:')
     expect(viaApplyTool).toContain('has no executor here')
     expect(approval.request).not.toHaveBeenCalled()
-    // A direct service call meets the same boundary: the promotion gate refuses
-    // a target type with no evaluator before anything is written.
-    await expect(reopened.apply('c2', 'root-1', 'approval:call-1')).rejects.toThrow(/no evaluator in this build/)
+    // A direct service call meets the boundary one step earlier: the state
+    // machine admits an `applied` record only for a type this build executes.
+    await expect(reopened.apply('c2', 'root-1', 'approval:call-1')).rejects.toThrow(/only a materialized skill mutation at L1–L3 applies/)
     expect((await reopened.get('c2')).status).toBe('decided')
     expect(await readFile(configFile, 'utf8')).toBe(CONFIG_FIXTURE)
   })

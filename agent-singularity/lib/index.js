@@ -1727,11 +1727,6 @@ function defineEvolutionListTool(ctx) {
 						lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, ${championText}${contentText}${baselineText})`);
 					}
 				}
-				if (proposal.replayed !== void 0) {
-					const view = proposal.replayed;
-					const summary = view.tasks.map((item) => `${item.taskId}${item.holdout ? " (holdout)" : ""}: ${item.relation}`).join(", ");
-					lines.push(`  replayed (v1, historical): verdict ${view.verdict} — report ${view.report}${summary === "" ? "" : ` (${summary})`}`);
-				}
 				if (proposal.gate !== void 0) lines.push(`  gate regression evidence: [${proposal.gate.regressionEvidenceRefs.join(", ")}]`);
 				if (proposal.applied !== void 0) lines.push(`  applied: [${proposal.applied.targets.join(", ")}] (approval ${proposal.applied.approvalRef})`);
 				if (proposal.rolledback !== void 0) lines.push(`  rolled back: [${proposal.rolledback.targets.join(", ")}] (approval ${proposal.rolledback.approvalRef})`);

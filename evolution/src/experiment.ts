@@ -188,7 +188,8 @@ export interface ExperimentKey {
 
 /** One `experiment_started` ledger line: the frozen experiment, recorded before the first run. */
 export interface ExperimentStartedRecord {
-  formatVersion: 1
+  /** The `proposals.jsonl` format version, not the report's — the ledger is one format, `formatVersion: 2` (S4-E 收尾). */
+  formatVersion: 2
   kind: 'experiment_started'
   proposalId: string
   experimentId: string
@@ -216,7 +217,8 @@ export interface ExperimentStartedRecord {
  * under the same key.
  */
 export interface ExperimentSampleRecord {
-  formatVersion: 1
+  /** The `proposals.jsonl` format version, not the report's — the ledger is one format, `formatVersion: 2` (S4-E 收尾). */
+  formatVersion: 2
   kind: 'experiment_sample'
   proposalId: string
   experimentId: string
@@ -900,7 +902,7 @@ function sampleRecord(input: {
   actor: string
 }): ExperimentSampleRecord {
   return {
-    formatVersion: 1,
+    formatVersion: 2,
     kind: 'experiment_sample',
     proposalId: input.view.proposalId,
     experimentId: input.view.experimentId,
@@ -1195,7 +1197,7 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
   }
 
   await sources.evolution.recordExperimentStart({
-    formatVersion: 1,
+    formatVersion: 2,
     kind: 'experiment_started',
     proposalId: spec.proposalId,
     experimentId,

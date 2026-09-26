@@ -58,13 +58,6 @@ export function defineEvolutionListTool(ctx: Context) {
             lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, ${championText}${contentText}${baselineText})`)
           }
         }
-        if (proposal.replayed !== undefined) {
-          // A ledger written before this build's narrowing: the v1 candidate-vs-champion
-          // report is part of the record and is rendered as history, never as evidence.
-          const view = proposal.replayed
-          const summary = view.tasks.map(item => `${item.taskId}${item.holdout ? ' (holdout)' : ''}: ${item.relation}`).join(', ')
-          lines.push(`  replayed (v1, historical): verdict ${view.verdict} — report ${view.report}${summary === '' ? '' : ` (${summary})`}`)
-        }
         if (proposal.gate !== undefined) {
           lines.push(`  gate regression evidence: [${proposal.gate.regressionEvidenceRefs.join(', ')}]`)
         }

@@ -1,6 +1,6 @@
 /**
- * Where the ledger lives by default, and whether the ledger this working copy
- * has actually accumulated still folds.
+ * Where the ledger lives by default, and what the service does with the v1
+ * ledger this working copy has accumulated.
  *
  * Two regressions the S4-E package move could have introduced without any test
  * failing elsewhere:
@@ -10,13 +10,15 @@
  *    the harness source tree. The service now sits in the `evolution` package,
  *    whose depth is different, so the root is an explicit config member the
  *    assembly passes — these cases pin the resolution it must keep.
- * 2. The append-only ledger keeps records written before `reportDigest`,
- *    `skillContent` and `approvalRef` existed. The copy below is read back
- *    through a real service, so a fold that only understood the newest shape
- *    would fail here instead of silently refusing a real proposal.
+ * 2. The ledger is `formatVersion: 2` and nothing else (S4-E 收尾). The v1
+ *    ledger archived below is refused at load by name, with the line and the
+ *    version it saw, and the refusal appends nothing — the v1 reader is gone
+ *    with the v1 format, and the operator's step is the persistence contract's:
+ *    archive the old bytes and start a new ledger.
  */
 
 import { copyFile, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -27,10 +29,7 @@ import type { Config } from '../../src/index.ts'
 /** The harness working copy this package is built inside: five levels up from this file. */
 const HARNESS_ROOT = fileURLToPath(new URL('../../../../../', import.meta.url))
 
-/** The ledger this working copy accumulated (mount-time smoke runs, 2026-09-18); `/…/.dsh` is gitignored. */
-const LIVE_LEDGER = join(HARNESS_ROOT, '.dsh', 'evolution', 'proposals.jsonl')
-
-/** Byte-identical archive of {@link LIVE_LEDGER}, so the fold regression also runs where no `.dsh` exists. */
+/** Byte-identical archive of the v1 ledger this working copy accumulated (mount-time smoke runs, 2026-09-18). */
 const ARCHIVED_LEDGER = fileURLToPath(new URL('./fixtures/evolution-ledger-2026-09-26.jsonl', import.meta.url))
 
 function fixtureCtx() {
@@ -83,47 +82,35 @@ describe('EvolutionService default roots', () => {
   })
 })
 
-describe('EvolutionService against the accumulated ledger', () => {
-  it('loads and lists the working copy\'s old-format ledger without rewriting or refusing a record', async () => {
-    // The live ledger when this working copy has one, else its archived copy —
-    // same bytes either way, so the fold regression is not skipped where `/…/.dsh` is absent.
-    const source = await readFile(LIVE_LEDGER, 'utf8').then(
-      text => ({ path: LIVE_LEDGER, text }),
-      () => readFile(ARCHIVED_LEDGER, 'utf8').then(text => ({ path: ARCHIVED_LEDGER, text })),
-    )
+describe('EvolutionService against the accumulated v1 ledger', () => {
+  it('refuses the v1 ledger by name — line and version — and appends nothing either way', async () => {
+    const text = await readFile(ARCHIVED_LEDGER, 'utf8')
     const root = await mkdtemp(join(tmpdir(), 'evolution-old-ledger-'))
     const file = join(root, 'proposals.jsonl')
-    await copyFile(source.path, file)
+    await copyFile(ARCHIVED_LEDGER, file)
     const svc = new EvolutionService(fixtureCtx(), { root })
-    const proposals = await svc.list()
 
-    // Newest first, and every id the ledger never rewrote is still there.
-    expect(proposals.map(item => item.proposalId)).toEqual(
-      expect.arrayContaining(['m3-prop-skill', 'm3-prop-cap', 'm2-prop-manual', 'm2-prop-diag']),
-    )
-    expect((await svc.get('m2-prop-manual')).targetType).toBe('workflow_policy')
-    expect((await svc.get('m2-prop-manual')).status).toBe('proposed')
+    // The refusal names the first line and the version it saw; the v1 records
+    // (including its two `replayed` lines) are never folded.
+    await expect(svc.list()).rejects.toThrow(/line 1 in .*proposals\.jsonl declares formatVersion 1/)
+    await expect(svc.get('m3-prop-skill')).rejects.toThrow(/formatVersion 1/)
 
-    // Pre-`reportDigest` replay evidence still folds, and the applied/rolledback
-    // pair it produced is still readable with its approval refs.
-    const rolledBack = await svc.get('m3-prop-skill')
-    expect(rolledBack.status).toBe('rolledback')
-    expect(rolledBack.replayed).toEqual({
-      report: 'sandbox/m3-prop-skill/replay-report.json',
-      verdict: 'not-worse',
-      tasks: [{ taskId: 't-e504bab7-d56c-44a6-a7fc-76348d002935', relation: 'not-worse', holdout: false }],
-    })
-    expect(rolledBack.replayed!.reportDigest).toBeUndefined()
-    expect(rolledBack.applied!.approvalRef).toMatch(/^approval:/)
-    expect(rolledBack.rolledback!.approvalRef).toMatch(/^approval:/)
+    // A write appends nothing either: the loaded ledger rejects before the
+    // write queue is ever reached, so the v1 bytes stay exactly as archived.
+    await expect(svc.propose({
+      proposalId: 'new-1',
+      targetType: 'skill',
+      targetId: 'verify',
+      baseVersion: 'v1',
+      level: 'L2',
+      rationale: 'must not land',
+      sourceRefs: ['diagnosis:d1'],
+    }, 'root-1')).rejects.toThrow(/formatVersion 1/)
+    expect(await readFile(file, 'utf8')).toBe(text)
 
-    // A skill candidate prepared before content binding carries no identity, and
-    // a decided record written before the approval ref existed carries none.
-    expect(rolledBack.prepared!.skillContent).toBeUndefined()
-    expect((await svc.get('m2-prop-diag')).decisionApprovalRef).toBeUndefined()
-
-    // Reading never rewrote the file: byte for byte what was copied in.
-    expect(await readFile(file, 'utf8')).toBe(source.text)
+    // Nothing beside the ledger was created either — no sandbox, no archive.
+    expect(existsSync(join(root, 'sandbox'))).toBe(false)
+    expect(existsSync(join(root, 'new-1'))).toBe(false)
     await rm(root, { recursive: true, force: true })
   })
 })

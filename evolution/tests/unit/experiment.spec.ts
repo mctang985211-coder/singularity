@@ -191,7 +191,7 @@ function startedRecord(frozen: FrozenExperiment, overrides: Partial<ExperimentSt
   const frozenDigest = frozenDigestOf(frozen)
   const experimentId = experimentIdOf(frozen.proposalId, frozenDigest)
   return {
-    formatVersion: 1,
+    formatVersion: 2,
     kind: 'experiment_started',
     proposalId: frozen.proposalId,
     experimentId,
@@ -602,7 +602,7 @@ describe('the experiment ledger family', () => {
     await svc.recordExperimentStart(started)
     const key = experimentSampleKeyOf({ proposalId: frozen.proposalId, frozen }, 't-failure', 'baseline')
     const record: ExperimentSampleRecord = {
-      formatVersion: 1,
+      formatVersion: 2,
       kind: 'experiment_sample',
       proposalId: frozen.proposalId,
       experimentId: started.experimentId,
@@ -643,7 +643,7 @@ describe('the experiment ledger family', () => {
     const started = startedRecord(frozen)
     await svc.recordExperimentStart(started)
     const base: ExperimentSampleRecord = {
-      formatVersion: 1,
+      formatVersion: 2,
       kind: 'experiment_sample',
       proposalId: frozen.proposalId,
       experimentId: started.experimentId,
@@ -727,7 +727,7 @@ describe('the experiment ledger family', () => {
     const frozen = frozenFixture()
     const started = startedRecord(frozen)
     const record = (sampleTaskId: string, sampleSide: ExperimentSide, outcome: ExperimentSampleRecord['outcome']): ExperimentSampleRecord => ({
-      formatVersion: 1,
+      formatVersion: 2,
       kind: 'experiment_sample',
       proposalId: frozen.proposalId,
       experimentId: started.experimentId,
@@ -820,17 +820,17 @@ describe('the experiment ledger family', () => {
     expect(inconclusive.samples[0]!.baseline.cost).toEqual({ status: 'unknown', reason: 'the fixture reports no metrics' })
   })
 
-  it('reads a ledger an older build wrote beside the new experiment lines', async () => {
+  it('folds a hand-written proposal beside the experiment family, each by its own rules', async () => {
     const root = await mkdtemp(join(tmpdir(), 'experiment-ledger-'))
     const line = JSON.stringify({
-      formatVersion: 1,
+      formatVersion: 2,
       kind: 'proposed',
       proposalId: 'p-old',
       targetType: 'skill',
       targetId: 'old-skill',
       baseVersion: 'v1',
       level: 'L2',
-      rationale: 'hand-written by the older build',
+      rationale: 'hand-written proposal',
       sourceRefs: ['diagnosis:d1'],
       actor: 'root-1',
       at: '2026-01-01T00:00:00.000Z',
