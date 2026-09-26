@@ -70,8 +70,6 @@ function evolutionOf(h: RunStack): EvolutionService {
   return new EvolutionService(h.ctx, {
     root: join(h.workspace, 'evolution'),
     skillRoot: join(h.home, 'skills'),
-    presetRoot: join(h.workspace, 'production-presets'),
-    configFile: join(h.workspace, 'config.yml'),
     // The same resolver the deployment wires: the model selection the experiment
     // freezes and the promotion gate re-reads from the runs' own requests.
     modelSelection: () => deploymentModelSelection(h.ctx),

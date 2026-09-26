@@ -5,11 +5,11 @@
  * Two regressions the S4-E package move could have introduced without any test
  * failing elsewhere:
  *
- * 1. The ledger's defaults (`$DSH_HOME/evolution`, `<repoRoot>/.dsh/evolution`,
- *    `<repoRoot>/config.yml`) used to be derived from the module's own depth in
- *    the harness source tree. The service now sits in the `evolution` package,
- *    whose depth is different, so the root is an explicit config member the
- *    assembly passes — these cases pin the resolution it must keep.
+ * 1. The ledger's defaults (`$DSH_HOME/evolution`, `<repoRoot>/.dsh/evolution`)
+ *    used to be derived from the module's own depth in the harness source tree.
+ *    The service now sits in the `evolution` package, whose depth is different,
+ *    so the root is an explicit config member the assembly passes — these cases
+ *    pin the resolution it must keep.
  * 2. The ledger is `formatVersion: 2` and nothing else (S4-E 收尾). The v1
  *    ledger archived below is refused at load by name, with the line and the
  *    version it saw, and the refusal appends nothing — the v1 reader is gone
@@ -48,21 +48,17 @@ describe('EvolutionService default roots', () => {
     expect(svc.repoRoot).toBe(repoRoot)
     expect(svc.root).toBe(resolve(join(repoRoot, '.dsh', 'evolution')))
     expect(svc.skillRoot).toBe(resolve(join(repoRoot, '.dsh', 'skills')))
-    expect(svc.presetRoot).toBe(resolve(join(repoRoot, '.dsh', '.agent-presets')))
-    expect(svc.configFile).toBe(resolve(join(repoRoot, 'config.yml')))
     expect(svc.file).toBe(resolve(join(repoRoot, '.dsh', 'evolution', 'proposals.jsonl')))
     await rm(repoRoot, { recursive: true, force: true })
   })
 
-  it('lets DSH_HOME govern the data roots while config.yml stays under the repoRoot', async () => {
+  it('lets DSH_HOME govern the data roots', async () => {
     const home = await mkdtemp(join(tmpdir(), 'evolution-home-'))
     const repoRoot = await mkdtemp(join(tmpdir(), 'evolution-repo-'))
     vi.stubEnv('DSH_HOME', home)
     const svc = new EvolutionService(fixtureCtx(), { repoRoot })
     expect(svc.root).toBe(resolve(join(home, 'evolution')))
     expect(svc.skillRoot).toBe(resolve(join(home, 'skills')))
-    expect(svc.presetRoot).toBe(resolve(join(home, '.agent-presets')))
-    expect(svc.configFile).toBe(resolve(join(repoRoot, 'config.yml')))
     await rm(home, { recursive: true, force: true })
     await rm(repoRoot, { recursive: true, force: true })
   })
@@ -73,12 +69,9 @@ describe('EvolutionService default roots', () => {
       repoRoot: join(HARNESS_ROOT, 'not-the-real-root'),
       root: '/tmp/ledger',
       skillRoot: '/tmp/skills',
-      presetRoot: '/tmp/presets',
-      configFile: '/tmp/config.yml',
     }
     const svc = new EvolutionService(fixtureCtx(), config)
-    expect([svc.root, svc.skillRoot, svc.presetRoot, svc.configFile])
-      .toEqual(['/tmp/ledger', '/tmp/skills', '/tmp/presets', '/tmp/config.yml'])
+    expect([svc.root, svc.skillRoot]).toEqual(['/tmp/ledger', '/tmp/skills'])
   })
 })
 

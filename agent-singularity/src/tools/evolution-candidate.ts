@@ -32,9 +32,10 @@ export function defineEvolutionCandidateTool(ctx: Context) {
       mutation: {
         type: 'object',
         additionalProperties: true,
+        required: true,
         description:
-          'The structured patch: { name, content } — the skill name and the full replacement SKILL.md text. It must be ' +
-          'recorded for the candidate to be evaluated at all (a candidate without one has nothing to materialize).',
+          'The structured patch, required: { name, content } — the skill name and the full replacement SKILL.md text this ' +
+          'candidate is materialized from and evaluated on.',
       },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
@@ -49,12 +50,10 @@ export function defineEvolutionCandidateTool(ctx: Context) {
           args.mutation,
         )
         const versionsText = Object.entries(proposal.versionSet!).map(([key, value]) => `${key}=${value}`).join(', ')
-        const next = proposal.mutation === undefined
-          ? 'no mutation recorded — nothing this build can evaluate; a candidate it can promote carries the replacement SKILL.md text'
-          : 'mutation recorded — next: evolution_prepare (sandbox materialization), then evolution_replay (the two-sided experiment), then evolution_gate'
         return [
           `proposal ${proposal.proposalId} [candidate] version set: ${versionsText}`,
-          `ledger entry only — no branch created, nothing executed; ${next}`,
+          'ledger entry only — no branch created, nothing executed; mutation recorded — next: evolution_prepare (sandbox ' +
+          'materialization), then evolution_replay (the two-sided experiment), then evolution_gate',
         ].join('\n')
       } catch (error) {
         return `evolution_candidate rejected: ${error instanceof Error ? error.message : String(error)}`

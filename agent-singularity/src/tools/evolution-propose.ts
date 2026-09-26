@@ -31,7 +31,10 @@ export function defineEvolutionProposeTool(ctx: Context) {
     name: 'evolution_propose',
     description:
       'Register an EvolutionProposal in the evolution ledger (status: proposed). Pure bookkeeping: nothing here executes ' +
-      'or changes production — promotion requires evolution_candidate, evolution_gate, and a human-approved evolution_decide. ' +
+      'or changes production. This build has one promotion path — a proposal that replaces an existing single-file SKILL.md ' +
+      'goes through evolution_candidate (carrying the full replacement text), evolution_prepare, evolution_replay (the ' +
+      'two-sided experiment), evolution_gate, and a human-approved evolution_decide plus evolution_apply. Every other target ' +
+      'type stays a recorded suggestion and is never opened as a candidate, so it is never evaluated and never promoted. ' +
       'Fill targetType/targetId/rationale manually, or pass fromDiagnosis to transcribe one proposal out of a recorded ' +
       'diagnosis (task_diagnose). baseVersion, level, and at least one sourceRef (diagnosisId / reviewRef / evidenceId) are required.',
     parameters: {
@@ -40,7 +43,7 @@ export function defineEvolutionProposeTool(ctx: Context) {
         type: 'string',
         required: true,
         enum: ['L1', 'L2', 'L3', 'L4'],
-        description: 'Evolution level (L1 execution adaptation / L2 capability / L3 workflow / L4 harness); v1 routes every level through human review',
+        description: 'Evolution level (L1 execution adaptation / L2 capability / L3 workflow / L4 harness); every level goes through human review, with no exemption',
       },
       baseVersion: { type: 'string', required: true, description: 'Version of the target this proposal starts from' },
       targetType: { type: 'string', enum: TARGET_TYPES, description: 'The mutation surface the proposal points at (required unless fromDiagnosis)' },
@@ -99,11 +102,18 @@ export function defineEvolutionProposeTool(ctx: Context) {
           },
           caller,
         )
+        const skillReplacement =
+          'ledger entry only — nothing was executed or changed; next: evolution_candidate, carrying the full replacement ' +
+          "text of the existing skill's SKILL.md"
+        const recordedSuggestion =
+          `ledger entry only — nothing was executed or changed; this build executes one promotion path only — replacing an ` +
+          `existing single-file SKILL.md — so a "${proposal.targetType}" proposal stays a recorded suggestion: it cannot become ` +
+          'a candidate, is never evaluated, and is never promoted'
         return [
           `proposal ${proposal.proposalId} registered [proposed] ${proposal.level} ${proposal.targetType} ${proposal.targetId} (base ${proposal.baseVersion})`,
           `rationale: ${proposal.rationale}`,
           `sourceRefs: [${proposal.sourceRefs.join(', ')}]`,
-          'ledger entry only — nothing was executed or changed; next: evolution_candidate',
+          proposal.targetType === 'skill' ? skillReplacement : recordedSuggestion,
         ].join('\n')
       } catch (error) {
         return `evolution_propose rejected: ${error instanceof Error ? error.message : String(error)}`

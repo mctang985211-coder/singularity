@@ -510,19 +510,16 @@ async function experimentCandidate(
     throw new Error(`proposal ${proposalId} is ${proposal.status}; only a prepared proposal can be evaluated`)
   }
   const prepared = proposal.prepared
+  // The checks below narrow the view's optional fields; every one of them is
+  // also enforced by the ledger fold, so a prepared proposal reached here is
+  // already a materialized skill prepare with both content identities.
   if (prepared === undefined || prepared.sandbox === null || !prepared.mechanical) {
     throw new Error(`proposal ${proposalId} has no materialized candidate; prepare it before evaluating it`)
-  }
-  if (prepared.champion !== 'captured') {
-    throw new Error(
-      `proposal ${proposalId} was prepared with no production skill to replace — this experiment evaluates a replacement of an ` +
-      'existing single-file SKILL.md only; promoting a brand-new skill is not what its evidence can show',
-    )
   }
   const candidate = prepared.skillContent
   if (candidate === undefined) {
     throw new Error(
-      `proposal ${proposalId} carries no candidate content identity (it was prepared before content binding) — ` +
+      `proposal ${proposalId} carries no candidate content identity — ` +
       'propose a new candidate and prepare it',
     )
   }

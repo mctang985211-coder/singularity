@@ -264,8 +264,6 @@ async function harness(options: { capabilities?: Readonly<Record<string, Capabil
   const evolution = new EvolutionService(ctx, {
     root: join(workspace, 'evolution'),
     skillRoot: join(workspace, 'production-skills'),
-    presetRoot: join(workspace, 'production-presets'),
-    configFile: join(workspace, 'config.yml'),
     // The deployment's model selection: the experiment freezes it, the promotion
     // gate re-reads the runs' own requests against it (S4-E §F.2/§Q3).
     modelSelection: () => modelSelectionOf({ provider: 'p', model: 'm' })!,

@@ -54,9 +54,12 @@ function fixtureCtx() {
   return { reflect: { provide: () => {} }, effect: () => {} } as never
 }
 
-async function service(root?: string): Promise<{ svc: EvolutionService; root: string }> {
+async function service(root?: string, skillRoot?: string): Promise<{ svc: EvolutionService; root: string }> {
   const directory = root ?? (await mkdtemp(join(tmpdir(), 'experiment-ledger-')))
-  const svc = new EvolutionService(fixtureCtx(), { root: directory, configFile: join(directory, 'config.yml') })
+  const svc = new EvolutionService(fixtureCtx(), {
+    root: directory,
+    ...(skillRoot === undefined ? {} : { skillRoot }),
+  })
   // Every experiment record names a proposal that exists in the ledger — the
   // orchestrator reads it through `get` before it freezes anything — so the
   // fixtures propose p1 first, exactly as a live call would find it.
@@ -631,7 +634,7 @@ describe('the experiment ledger family', () => {
     expect((await svc.experiment(started.experimentId)).samples).toHaveLength(1)
 
     // A second service over the same ledger reads the same view.
-    const reopened = new EvolutionService(fixtureCtx(), { root, configFile: join(root, 'config.yml') })
+    const reopened = new EvolutionService(fixtureCtx(), { root })
     expect((await reopened.experiment(started.experimentId)).samples).toHaveLength(1)
     expect((await reopened.experiments('p1'))[0]!.samples[0]).toMatchObject({ runId: 'r-replay' })
     await rm(root, { recursive: true, force: true })
@@ -709,15 +712,21 @@ describe('the experiment ledger family', () => {
   })
 
   it('keeps the v1 family readable beside the new one, and the two keys apart', async () => {
-    const { svc, root } = await service()
-    // The proposal this ledger already carries, walked through the v1 lifecycle.
+    const root = await mkdtemp(join(tmpdir(), 'experiment-ledger-'))
+    const skillRoot = join(root, 'skills')
+    // This build prepares a replacement of an existing production SKILL.md, so
+    // the fixture walks its candidate only against one that is there.
+    await mkdir(join(skillRoot, 'fixture-skill'), { recursive: true })
+    await writeFile(join(skillRoot, 'fixture-skill', 'SKILL.md'), '---\nname: fixture-skill\ndescription: x\n---\n\nbody\n')
+    const { svc } = await service(root, skillRoot)
+    // The proposal this ledger already carries, walked through the lifecycle.
     await svc.candidate('p1', { skill: 'v2' }, 'root-1', { name: 'fixture-skill', content: '---\nname: fixture-skill\ndescription: x\n---\n\nbody\n' })
     await svc.prepare('p1', 'root-1')
     expect((await svc.get('p1')).status).toBe('prepared')
 
     const frozen = frozenFixture()
     await svc.recordExperimentStart(startedRecord(frozen))
-    const reopened = new EvolutionService(fixtureCtx(), { root, configFile: join(root, 'config.yml') })
+    const reopened = new EvolutionService(fixtureCtx(), { root, skillRoot })
     expect((await reopened.get('p1')).status).toBe('prepared')
     expect((await reopened.experiments('p1'))[0]!.frozen.samples).toHaveLength(2)
     await rm(root, { recursive: true, force: true })
@@ -836,13 +845,13 @@ describe('the experiment ledger family', () => {
       at: '2026-01-01T00:00:00.000Z',
     })
     await writeFile(join(root, 'proposals.jsonl'), `${line}\n`, 'utf8')
-    const svc = new EvolutionService(fixtureCtx(), { root, configFile: join(root, 'config.yml') })
+    const svc = new EvolutionService(fixtureCtx(), { root })
     expect((await svc.get('p-old')).status).toBe('proposed')
 
     // An experiment beside it: the two families fold independently, and neither
     // changes what the other reads.
     await svc.recordExperimentStart(startedRecord(frozenFixture({ proposalId: 'p-old' })))
-    const reopened = new EvolutionService(fixtureCtx(), { root, configFile: join(root, 'config.yml') })
+    const reopened = new EvolutionService(fixtureCtx(), { root })
     expect((await reopened.get('p-old')).status).toBe('proposed')
     expect(await reopened.experiments()).toHaveLength(1)
     await rm(root, { recursive: true, force: true })
@@ -856,5 +865,184 @@ describe('the experiment ledger family', () => {
     expect(experimentSampleKey(experimentSampleKeyOf(view, 't-holdout', 'baseline'))).not.toBe(experimentSampleKey(key))
     expect(experimentSampleKey(experimentSampleKeyOf({ ...view, frozen: frozenFixture({ repetition: 1 }) }, 't-failure', 'baseline')))
       .not.toBe(experimentSampleKey(key))
+  })
+})
+
+/**
+ * S4-E 收尾: the candidate lifecycle is one file — a mutation this build can
+ * materialize, evaluate and promote — and `prepare` only prepares a replacement
+ * of a production skill that already exists. Both refusals land before the
+ * first write, so a candidate nothing can evaluate never becomes a flow.
+ */
+describe('the candidate and prepare refusals (S4-E 收尾)', () => {
+  it('refuses a candidate that carries nothing to materialize or evaluate', async () => {
+    const { svc, root } = await service()
+    try {
+      await expect(svc.candidate('p1', { skill: '1' }, 'root-1', undefined)).rejects.toThrow('mutation must be an object')
+      // No candidate line was written: the proposal is still the record it was.
+      expect((await svc.get('p1')).status).toBe('proposed')
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('refuses a prepare whose production Skill does not exist, before writing sandbox or ledger', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'experiment-prepare-refusal-'))
+    const svc = new EvolutionService(fixtureCtx(), { root, skillRoot: join(root, 'production') })
+    try {
+      await svc.propose({ proposalId: 'p1', targetType: 'skill', targetId: 'fixture-skill', baseVersion: '1', level: 'L2', rationale: 'replace existing', sourceRefs: ['d1'] }, 'root-1')
+      await svc.candidate('p1', { skill: '1' }, 'root-1', { name: 'fixture-skill', content: 'candidate' })
+      const before = await readFile(svc.file, 'utf8')
+      const err = await svc.prepare('p1', 'root-1').then(() => undefined, e => e)
+      expect.soft(err, 'a prepare with no production skill to replace must refuse').toBeInstanceOf(Error)
+      expect.soft(await readFile(svc.file, 'utf8'), 'the ledger bytes must stay unchanged').toBe(before)
+      expect.soft(await readdir(root), 'no sandbox directory may be created').not.toContain('sandbox')
+      expect.soft((await svc.get('p1')).status, 'the candidate stays the state it was').toBe('candidate')
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+})
+
+/* ------------------------------------------------------------------------ *
+ * The write boundary and the fold: what the ledger accepts, and where.
+ *
+ * The independent review's counterexamples (S4-E 收尾): the ledger reads and
+ * writes one format — `formatVersion: 2` — and the fold admits only the
+ * lifecycle this build's entries write. Each case below takes the entry
+ * directly, the shape a forged call or a stale caller takes, and pins that the
+ * refusal lands before the first byte changes and leaves the ledger a fresh
+ * service can still read.
+ * ------------------------------------------------------------------------ */
+
+describe('the ledger write boundary is formatVersion 2 (S4-E 收尾)', () => {
+  it('refuses a direct experiment start that declares an old version, before the append', async () => {
+    const { svc, root } = await service()
+    try {
+      const before = await readFile(svc.file, 'utf8')
+      const err = await svc.recordExperimentStart({ ...startedRecord(frozenFixture()), formatVersion: 1 } as never).then(() => undefined, e => e)
+      expect.soft(err, 'an old-version start must throw before append').toBeInstanceOf(Error)
+      expect.soft(String((err as Error).message), 'the refusal must name the version it saw and the version this build writes')
+        .toMatch(/formatVersion 1[\s\S]*formatVersion 2/)
+      expect.soft(await readFile(svc.file, 'utf8'), 'ledger bytes must stay unchanged').toBe(before)
+      await expect.soft(new EvolutionService(fixtureCtx(), { root }).list(), 'the ledger must remain readable').resolves.toBeDefined()
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('refuses a direct experiment start that declares no version', async () => {
+    const { svc, root } = await service()
+    try {
+      const before = await readFile(svc.file, 'utf8')
+      const unversioned = { ...startedRecord(frozenFixture()) } as Record<string, unknown>
+      delete unversioned.formatVersion
+      const err = await svc.recordExperimentStart(unversioned as never).then(() => undefined, e => e)
+      expect.soft(err, 'an unversioned start must throw before append').toBeInstanceOf(Error)
+      expect.soft(String((err as Error).message)).toMatch(/declares formatVersion null/)
+      expect.soft(await readFile(svc.file, 'utf8'), 'ledger bytes must stay unchanged').toBe(before)
+      await expect.soft(new EvolutionService(fixtureCtx(), { root }).list(), 'the ledger must remain readable').resolves.toBeDefined()
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('refuses an old-version start that repeats a recorded identity, instead of the idempotent no-op', async () => {
+    const { svc, root } = await service()
+    try {
+      const frozen = frozenFixture()
+      const started = startedRecord(frozen)
+      await svc.recordExperimentStart(started)
+      const before = await readFile(svc.file, 'utf8')
+      const err = await svc.recordExperimentStart({ ...started, formatVersion: 1 } as never).then(() => undefined, e => e)
+      expect.soft(err, 'a repeat at another version is a refusal, not the idempotent return').toBeInstanceOf(Error)
+      expect.soft(String((err as Error).message)).toMatch(/formatVersion 1/)
+      expect.soft(await readFile(svc.file, 'utf8'), 'the recorded line stays the only line for this experiment').toBe(before)
+      expect.soft((await svc.experiments('p1')).length, 'no second experiment was opened').toBe(1)
+      await expect.soft(new EvolutionService(fixtureCtx(), { root }).list(), 'the ledger must remain readable').resolves.toBeDefined()
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('refuses a direct experiment sample that declares an old version, before the append', async () => {
+    const {svc, root} = await service()
+    try {
+      const frozen=frozenFixture(), started=startedRecord(frozen)
+      await svc.recordExperimentStart(started)
+      const before=await readFile(svc.file,'utf8')
+      const err=await svc.recordExperimentSample({
+        formatVersion:1, kind:'experiment_sample', proposalId:'p1', experimentId:started.experimentId,
+        preparedContentDigest:frozen.candidate.sha256, sampleTaskId:'t-failure', side:'baseline', repetition:0,
+        taskId:'t-replay', runId:'r-replay', outcome:'failed', reviewRef:'t-replay#r-replay', evidenceRefs:['e-1'],
+        criteria:[{criterionId:'ac1',verdict:'fail'}],workspace:'/tmp/ws',initialDigest:frozen.snapshot.digest,
+        cost:{status:'unknown',reason:'review fixture'}, actor:'root-1',at:'2026-09-26T00:00:00.000Z'
+      } as never).then(()=>undefined,e=>e)
+      expect.soft(err, 'an old-version sample must throw before append').toBeInstanceOf(Error)
+      expect.soft(String((err as Error).message)).toMatch(/formatVersion 1/)
+      expect.soft(await readFile(svc.file,'utf8'), 'ledger bytes must stay unchanged').toBe(before)
+      await expect.soft(new EvolutionService(fixtureCtx(),{root}).list(), 'the ledger must remain readable').resolves.toBeDefined()
+    } finally { await rm(root,{recursive:true,force:true}) }
+  })
+})
+
+describe('the fold admits only the current lifecycle (S4-E 收尾)', () => {
+  const common = { formatVersion: 2, proposalId: 'p1', actor: 'root-1', at: '2026-09-26T00:00:00.000Z' }
+  const proposed = (over: Record<string, unknown> = {}) => ({
+    ...common, kind: 'proposed', targetType: 'skill', targetId: 'fixture-skill', baseVersion: 'v1', level: 'L2',
+    rationale: 'the fixture proposal', sourceRefs: ['diagnosis:d1'], ...over,
+  })
+  const candidate = (over: Record<string, unknown> = {}) => ({
+    ...common, kind: 'candidate', versionSet: { skill: 'v2' }, mutation: { name: 'fixture-skill', content: 'candidate bytes' }, ...over,
+  })
+  const prepared = (over: Record<string, unknown> = {}) => ({
+    ...common, kind: 'prepared', sandbox: 'sandbox/p1', mechanical: true, champion: 'captured',
+    skillContent: { name: 'fixture-skill', sha256: 'a'.repeat(64) },
+    skillBaseline: { name: 'fixture-skill', sha256: 'b'.repeat(64) },
+    files: ['skills/fixture-skill/SKILL.md'], ...over,
+  })
+  const gated = () => ({
+    ...common, kind: 'gated',
+    gate: {
+      targetFailureFixed: 'fixed', originalAcceptanceMaintained: 'maintained', existingRegressionMaintained: 'maintained',
+      noUnacceptableSideEffects: 'none', holdoutPerformanceAcceptable: 'acceptable', resourceCostAcceptable: 'acceptable',
+      regressionEvidenceRefs: ['evidence:1'],
+    },
+  })
+
+  /** The raw bytes a hostile caller could write, and the service that must refuse them. */
+  async function forged(lines: readonly Record<string, unknown>[]): Promise<{ svc: EvolutionService; root: string; bytes: string }> {
+    const root = await mkdtemp(join(tmpdir(), 's4e-fold-refusal-'))
+    const bytes = `${lines.map(line => JSON.stringify(line)).join('\n')}\n`
+    await writeFile(join(root, 'proposals.jsonl'), bytes)
+    return { svc: new EvolutionService(fixtureCtx(), { root }), root, bytes }
+  }
+
+  /** One refusal: the entry throws, the message names the defect, the bytes stay put, and a second service agrees. */
+  async function refuses(lines: readonly Record<string, unknown>[], expected: RegExp): Promise<void> {
+    const { svc, root, bytes } = await forged(lines)
+    try {
+      const err = await svc.list().then(() => undefined, e => e)
+      expect(err, `a ledger of ${JSON.stringify(lines.map(line => line.kind))} must be refused`).toBeInstanceOf(Error)
+      expect(String((err as Error).message)).toMatch(expected)
+      expect(await readFile(join(root, 'proposals.jsonl'), 'utf8'), 'the refused ledger stays byte for byte').toBe(bytes)
+      await expect(new EvolutionService(fixtureCtx(), { root }).list(), 'the verdict belongs to the bytes, not one instance').rejects.toThrow(expected)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  }
+
+  it('refuses a candidate of another target type', async () => {
+    await refuses([
+      proposed({ targetType: 'capability', targetId: 'research' }),
+      candidate({ versionSet: { capability: '1' }, mutation: { name: 'research', entry: { preset: 'standard' } } }),
+    ], /targets "capability"/)
+  })
+
+  it('refuses a candidate that carries no mutation', async () => {
+    await refuses([proposed(), candidate({ mutation: undefined })], /mutation must be an object/)
+  })
+
+  it('refuses a prepared record with no candidate content identity', async () => {
+    await refuses([proposed(), candidate(), prepared({ skillContent: undefined })], /no valid skillContent identity/)
+  })
+
+  it('refuses a prepared record with no production baseline', async () => {
+    await refuses([proposed(), candidate(), prepared({ skillBaseline: undefined })], /no valid skillBaseline identity/)
+  })
+
+  it('refuses a decided record with no human-approval evidence ref', async () => {
+    await refuses(
+      [proposed(), candidate(), prepared(), gated(), { ...common, kind: 'decided', decision: 'PROMOTE' }],
+      /no human-approval evidence ref/,
+    )
   })
 })

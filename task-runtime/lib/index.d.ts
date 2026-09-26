@@ -3088,7 +3088,10 @@ type RootAdoption = {
   detail: string;
 };
 /**
- * Options for {@link TaskRuntime.replayTask} (guide §2.7.6, W15).
+ * Options for {@link TaskRuntime.replayTask} (guide §2.7.6, W15). The set is
+ * closed: a key this build does not read — the experiment clock
+ * (`wallTimeMs`/`durationMs`) it deleted above all — refuses the replay by name
+ * before anything runs.
  */
 interface ReplayTaskOptions {
   /** Lineage tag, e.g. `evolution-replay:<proposalId>` — written into the replayed task's objective and the review record's anomalies. */
@@ -3748,6 +3751,15 @@ declare class TaskRuntime extends Service {
    * would read as a promise the deployment breaks silently.
    */
   private assertClosedRootBudget;
+  /**
+   * Refuse a replay option this build does not read, before anything else runs.
+   * The option set is closed — the experiment clock this build deleted
+   * (`wallTimeMs`/`durationMs`) above all: a replay places no clock of its own,
+   * because a run's time is the deployment's (`rootBudget.wallTimeMs`,
+   * `Config.budget.wallTimeMs`). An option named here and quietly dropped would
+   * let the caller hold a promise this deployment never keeps.
+   */
+  private assertReplayOptions;
   /**
    * Refuse a review policy this build does not implement. The configuration
    * schema types the member, but a deployment that constructs the runtime
@@ -4708,7 +4720,9 @@ declare class TaskRuntime extends Service {
    * this entry does not resolve the model, because what a run really ran under is
    * the caller's frozen fact, and the runtime's job is to make it true. The run's
    * clock is this runtime's own (the per-run `Config.budget.wallTimeMs` and the
-   * root tree's deadline); a replay places no separate one.
+   * root tree's deadline); a replay places no separate one. The options are a
+   * closed set: a key this build does not read — the deleted experiment clock
+   * above all — refuses the replay by name here, before anything else runs.
    */
   replayTask(storeId: string, championTaskId: TaskId, options: ReplayTaskOptions, callerSessionId: string): Promise<ReplayRunOutcome>;
   /**

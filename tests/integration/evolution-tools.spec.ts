@@ -182,6 +182,47 @@ it('drives evolution_propose and evolution_list through the plugin context onto 
   }
 })
 
+it('points a skill proposal at the candidate lifecycle and leaves a suggestion without a next step', async () => {
+  const { tools, home } = await mountAgent()
+  try {
+    const propose = tools.get('evolution_propose')!
+    const suggestion = (await propose.execute({
+      proposalId: 'p-cap-suggestion',
+      level: 'L2',
+      baseVersion: 'v1',
+      targetType: 'capability',
+      targetId: 'research',
+      rationale: 'research needs the verify skill',
+      sourceRefs: ['diagnosis:d1'],
+    }, exec('root-1'))) as string
+    expect(suggestion).toContain('proposal p-cap-suggestion registered [proposed] L2 capability research (base v1)')
+    expect(suggestion).toContain('stays a recorded suggestion')
+    expect(suggestion).not.toContain('next: evolution_candidate')
+
+    // The one target type this build promotes is a replacement of an existing
+    // SKILL.md, and only there does the answer name a next step.
+    const replacement = (await propose.execute({
+      proposalId: 'p-skill-1',
+      level: 'L2',
+      baseVersion: 'v1',
+      targetType: 'skill',
+      targetId: 'verify',
+      rationale: 'the skill never mentions empty-input fixtures',
+      sourceRefs: ['diagnosis:d1'],
+    }, exec('root-1'))) as string
+    expect(replacement).toContain('proposal p-skill-1 registered [proposed] L2 skill verify (base v1)')
+    expect(replacement).toContain('next: evolution_candidate')
+
+    // The next-step line is wording, not a lifecycle: both proposals are ledger
+    // records and nothing more — no candidate, no sandbox.
+    const ledger = (await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n')
+    expect(ledger.map(line => (JSON.parse(line) as { kind: string }).kind)).toEqual(['proposed', 'proposed'])
+    expect(existsSync(join(home, 'evolution', 'sandbox'))).toBe(false)
+  } finally {
+    vi.unstubAllEnvs()
+  }
+})
+
 it('resolves the interaction services the hitl tools ask through, from the same plugin context', async () => {
   const { tools, approval, userQuestions } = await mountAgent()
   try {
@@ -275,12 +316,18 @@ it('refuses a tampered skill candidate through the plugin, leaving production an
       rationale: 'the skill never mentions empty-input fixtures',
       sourceRefs: ['diagnosis:d1'],
     }, exec('root-1'))
-    await candidate.execute({
+    const candidateOut = (await candidate.execute({
       proposalId: 'p-skill-2',
       versionSet: { skill: 'v2' },
       mutation: { name: 'verify', content: skillText('# new verify skill') },
-    }, exec('root-1'))
-    await prepare.execute({ proposalId: 'p-skill-2' }, exec('root-1'))
+    }, exec('root-1'))) as string
+    expect(candidateOut).toContain('proposal p-skill-2 [candidate] version set: skill=v2')
+    expect(candidateOut).toContain('mutation recorded — next: evolution_prepare')
+    const preparedOut = (await prepare.execute({ proposalId: 'p-skill-2' }, exec('root-1'))) as string
+    expect(preparedOut).toContain('proposal p-skill-2 [prepared] sandbox:')
+    expect(preparedOut).toContain('champion snapshot: captured under champion/')
+    expect(preparedOut).toContain('production baseline: verify sha256:')
+    expect(preparedOut).toContain('next: evolution_replay')
     // the candidate changes after prepare — the service identity check must refuse it
     await writeFile(join(home, 'evolution', 'sandbox', 'p-skill-2', 'skills', 'verify', 'SKILL.md'), 'tampered\n')
 
@@ -353,6 +400,10 @@ it('refuses a skill call the two-sided experiment cannot honour, without running
 it('refuses a skill gate without an experiment through the tools, leaving the ledger at prepared', async () => {
   const { tools, home, approval } = await mountAgent()
   try {
+    const championDir = join(home, 'skills', 'verify')
+    await mkdir(championDir, { recursive: true })
+    await writeFile(join(championDir, 'SKILL.md'), '# old verify skill\n')
+
     const propose = tools.get('evolution_propose')!
     const candidate = tools.get('evolution_candidate')!
     const prepare = tools.get('evolution_prepare')!
@@ -379,7 +430,8 @@ it('refuses a skill gate without an experiment through the tools, leaving the le
       versionSet: { skill: 'v2' },
       mutation: { name: 'verify', content: skillText('# new verify skill') },
     }, exec('root-1'))
-    await prepare.execute({ proposalId: 'p-skill-eval4' }, exec('root-1'))
+    const prepared = await prepare.execute({ proposalId: 'p-skill-eval4' }, exec('root-1'))
+    expect(prepared).toContain('production baseline: verify sha256:')
     const refusedGate = await gate.execute({ proposalId: 'p-skill-eval4', ...answers }, exec('root-1'))
     expect(refusedGate).toContain('evolution_gate rejected:')
     expect(refusedGate).toContain('has no two-sided experiment')

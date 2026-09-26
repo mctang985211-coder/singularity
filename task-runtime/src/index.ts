@@ -645,7 +645,10 @@ export type RootAdoption =
     }
 
 /**
- * Options for {@link TaskRuntime.replayTask} (guide §2.7.6, W15).
+ * Options for {@link TaskRuntime.replayTask} (guide §2.7.6, W15). The set is
+ * closed: a key this build does not read — the experiment clock
+ * (`wallTimeMs`/`durationMs`) it deleted above all — refuses the replay by name
+ * before anything runs.
  */
 export interface ReplayTaskOptions {
   /** Lineage tag, e.g. `evolution-replay:<proposalId>` — written into the replayed task's objective and the review record's anomalies. */
@@ -1553,6 +1556,28 @@ export class TaskRuntime extends Service {
     throw new Error(
       `task-runtime: rootBudget names [${unknown.join(', ')}], which this deployment does not enforce; ` +
       'a hard limit that cannot be executed refuses to start rather than running under a promise nobody keeps',
+    )
+  }
+
+  /**
+   * Refuse a replay option this build does not read, before anything else runs.
+   * The option set is closed — the experiment clock this build deleted
+   * (`wallTimeMs`/`durationMs`) above all: a replay places no clock of its own,
+   * because a run's time is the deployment's (`rootBudget.wallTimeMs`,
+   * `Config.budget.wallTimeMs`). An option named here and quietly dropped would
+   * let the caller hold a promise this deployment never keeps.
+   */
+  private assertReplayOptions(options: ReplayTaskOptions): void {
+    const known = new Set(['lineage', 'overlay', 'contract', 'spawn', 'workspace', 'agentOptions', 'signal'])
+    const unknown = Object.keys(options).filter(key => !known.has(key))
+    if (unknown.length === 0) return
+    const removed = unknown.filter(key => key === 'wallTimeMs' || key === 'durationMs')
+    throw new Error(
+      `task-runtime: replayTask options name [${unknown.join(', ')}], which this build does not read` +
+      (removed.length === 0
+        ? ''
+        : ` — the experiment clock ${removed.join('/')} was removed: a replay places no clock of its own, and a run's time is bounded by rootBudget.wallTimeMs and Config.budget.wallTimeMs`) +
+      '; the replay is refused rather than run under a promise nobody keeps',
     )
   }
 
@@ -4537,7 +4562,9 @@ export class TaskRuntime extends Service {
    * this entry does not resolve the model, because what a run really ran under is
    * the caller's frozen fact, and the runtime's job is to make it true. The run's
    * clock is this runtime's own (the per-run `Config.budget.wallTimeMs` and the
-   * root tree's deadline); a replay places no separate one.
+   * root tree's deadline); a replay places no separate one. The options are a
+   * closed set: a key this build does not read — the deleted experiment clock
+   * above all — refuses the replay by name here, before anything else runs.
    */
   async replayTask(
     storeId: string,
@@ -4545,6 +4572,7 @@ export class TaskRuntime extends Service {
     options: ReplayTaskOptions,
     callerSessionId: string,
   ): Promise<ReplayRunOutcome> {
+    this.assertReplayOptions(options)
     await this.assertRecoveryReady(storeId, 'a replay')
     const champion = await this.ctx.task.taskIn(storeId, championTaskId)
     if (champion.status !== 'verified' && champion.status !== 'failed') {

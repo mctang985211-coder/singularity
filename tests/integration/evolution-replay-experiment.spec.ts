@@ -260,8 +260,6 @@ async function fixture(options: { candidateBody?: string; skipSamples?: boolean 
   const evolution = new EvolutionService(h.ctx, {
     root: join(h.workspace, 'evolution'),
     skillRoot,
-    presetRoot: join(h.workspace, 'presets'),
-    configFile: join(h.workspace, 'config.yml'),
     // The deployment's model selection: the experiment freezes it, places every
     // replayed spawn under it, and the promotion gate re-reads the runs' own
     // requests against it (S4-E §F.2/§Q3).

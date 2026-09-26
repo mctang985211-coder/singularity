@@ -181,8 +181,6 @@ async function fixture(options: FixtureOptions = {}) {
   const svc = new EvolutionService(ctx as never, {
     root,
     skillRoot,
-    presetRoot: join(dir, 'presets'),
-    configFile: join(dir, 'config.yml'),
     modelSelection: () => selectionOf(options.model ?? MODEL),
   })
   await svc.propose({
@@ -402,8 +400,6 @@ async function fixture(options: FixtureOptions = {}) {
     return new EvolutionService(reopenedCtx as never, {
       root,
       skillRoot,
-      presetRoot: join(dir, 'presets'),
-      configFile: join(dir, 'config.yml'),
       modelSelection: () => selectionOf(overrides.model ?? options.model ?? MODEL),
     })
   }
@@ -871,17 +867,20 @@ describe('skill promotion gate: the gate answers cite the completed experiment (
 
 describe('skill promotion gate: the other target types have no evaluator (EVAL-4)', () => {
   /**
-   * A gated capability proposal — a mutation-less candidate and its gate, the
-   * v2 records the state machine still folds. This build's `candidate` admits a
-   * skill candidate only, so the promotion state is not reachable through the
-   * live entries; what these cases assert is where a promotion of it stops.
+   * Hand-write the gated capability lifecycle — a candidate carrying the
+   * capability mutation with the bookkeeping prepare of its shape, then its
+   * gate — into the fixture's ledger. That is the shape a ledger written before
+   * this build holds; this build's fold refuses it at the candidate line, so the
+   * promotion state is not reachable through the live entries, and these cases
+   * pin the entry refusal beside the EVAL-4 refusal for the states that are.
    */
   async function capabilityGated(svc: EvolutionService, id = 'c1') {
     await svc.propose({ proposalId: id, targetType: 'capability', targetId: 'research', baseVersion: 'v1', level: 'L2', rationale: 'the fixture row', sourceRefs: ['diagnosis:d1'] }, 'root-1')
     await appendFile(
       join(svc.root, 'proposals.jsonl'),
       [
-        { formatVersion: 2, kind: 'candidate', proposalId: id, versionSet: { capabilityTable: 'config.yml#doc1' }, actor: 'root-1', at: '2026-09-26T00:00:01.000Z' },
+        { formatVersion: 2, kind: 'candidate', proposalId: id, versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-26T00:00:01.000Z' },
+        { formatVersion: 2, kind: 'prepared', proposalId: id, sandbox: null, mechanical: false, champion: 'none', files: [], actor: 'root-1', at: '2026-09-26T00:00:02.000Z' },
         { formatVersion: 2, kind: 'gated', proposalId: id, gate: gateAnswers([`sandbox/${id}/replay-report.json`]), actor: 'root-1', at: '2026-09-26T00:00:04.000Z' },
       ].map(line => JSON.stringify(line)).join('\n') + '\n',
     )
@@ -898,48 +897,55 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     },
   )
 
-  it('refuses a capability decide and an apply reached from a legacy decided record, writing nothing', async () => {
+  it('refuses a hand-written capability lifecycle at the entry, before decide or apply can read it', async () => {
     const f = await fixture()
     await capabilityGated(f.svc)
     const gated = await f.reopen()
+
+    // The candidate line of another target type never folds, so no `gated`
+    // capability proposal exists to decide.
+    expect(await refusal(gated.list())).toContain('targets "capability"')
     const decideMessage = await refusal(gated.decide('c1', 'PROMOTE', 'root-1', 'approval:decide'))
-    expect(decideMessage).toContain('has no evaluator in this build')
+    expect(decideMessage).toContain('targets "capability"')
     expect(await f.ledgerKinds()).not.toContain('decided')
 
-    // The apply entry meets the state machine instead: an `applied` record is
-    // admitted only for a type this build executes, so the PROMOTE is refused
-    // before the write and before any approval this test does not grant.
+    // A decided and an applied line on top of the same lifecycle change nothing:
+    // the refusal still lands at the candidate line, before the write and before
+    // any approval this test does not grant.
     const lines = (await readFile(join(f.root, 'proposals.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as Record<string, any>)
     lines.push({ formatVersion: 2, kind: 'decided', proposalId: 'c1', decision: 'PROMOTE', approvalRef: 'approval:legacy', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' })
     await writeFile(join(f.root, 'proposals.jsonl'), `${lines.map(line => JSON.stringify(line)).join('\n')}\n`)
     const reopened = await f.reopen()
-    expect((await reopened.get('c1')).status).toBe('decided')
     const applyMessage = await refusal(reopened.apply('c1', 'root-1', 'approval:apply'))
-    expect(applyMessage).toContain('cannot record "applied"')
-    expect((await reopened.get('c1')).status).toBe('decided')
+    expect(applyMessage).toContain('targets "capability"')
+    expect(await f.ledgerKinds()).not.toContain('applied')
   })
 
-  it('refuses an applied capability record: v2 admits only what this build can execute', async () => {
+  it('refuses an applied capability record at the entry: v2 admits only what this build can execute', async () => {
     const f = await fixture()
-    const configFile = join((f.svc as unknown as { configFile: string }).configFile)
+    // The config.yml an older capability apply would have edited. This build's
+    // entries never know the path, so the fixture owns it and asserts its bytes
+    // stay put.
+    const configFile = join(f.root, 'config.yml')
     await writeFile(configFile, ['- id: task-runtime', '  config:', '    capabilities:', '      research: { preset: changed }', '', '---', 'api:', '  upstream: https://example.invalid', ''].join('\n'))
     await writeFile(join(f.root, 'proposals.jsonl'), [
       { formatVersion: 2, kind: 'proposed', proposalId: 'old1', targetType: 'capability', targetId: 'research', baseVersion: 'v1', level: 'L2', rationale: 'the recorded suggestion', sourceRefs: ['diagnosis:d0'], actor: 'root-1', at: '2026-09-20T00:00:00.000Z' },
-      { formatVersion: 2, kind: 'candidate', proposalId: 'old1', versionSet: { capabilityTable: 'config.yml#doc1' }, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
+      { formatVersion: 2, kind: 'candidate', proposalId: 'old1', versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
+      { formatVersion: 2, kind: 'prepared', proposalId: 'old1', sandbox: null, mechanical: false, champion: 'none', files: [], actor: 'root-1', at: '2026-09-20T00:00:02.000Z' },
       { formatVersion: 2, kind: 'gated', proposalId: 'old1', gate: gateAnswers(['sandbox/old1/replay-report.json']), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
       { formatVersion: 2, kind: 'decided', proposalId: 'old1', decision: 'PROMOTE', approvalRef: 'approval:decide', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' },
       { formatVersion: 2, kind: 'applied', proposalId: 'old1', targets: [`${configFile} — document 1 task-runtime capabilities row "research"`], approvalRef: 'approval:apply', actor: 'root-1', at: '2026-09-20T00:00:06.000Z' },
     ].map(line => JSON.stringify(line)).join('\n') + '\n')
     const before = await readFile(configFile, 'utf8')
 
-    // The applied line is refused at load — the state machine admits what the
-    // current entries write, and this build writes a single SKILL.md only.
+    // The applied line is refused at load — at the candidate line above it, since
+    // v2 admits what the current entries write, and this build writes a single
+    // SKILL.md only.
     const reopened = await f.reopen()
-    expect(await refusal(reopened.get('old1'))).toContain('cannot record "applied"')
-    expect(await refusal(reopened.list())).toContain('cannot record "applied"')
+    expect(await refusal(reopened.get('old1'))).toContain('targets "capability"')
+    expect(await refusal(reopened.list())).toContain('targets "capability"')
     expect(await readFile(configFile, 'utf8')).toBe(before)
-    // Its promotion would have no evaluator even if the record stood.
-    expect(await refusal(reopened.checkPromotion('old1'))).toContain('cannot record "applied"')
+    expect(await refusal(reopened.checkPromotion('old1'))).toContain('targets "capability"')
     expect(await readFile(configFile, 'utf8')).toBe(before)
   })
 })

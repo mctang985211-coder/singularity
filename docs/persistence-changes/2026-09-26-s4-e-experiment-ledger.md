@@ -2,7 +2,7 @@
 
 kind: persistence-change
 
-Evolution 外部账本 `proposals.jsonl` 的目标是所有新记录统一用 `formatVersion: 2`。当前正常流程已写 v2，加载遇 v1、无版本或混合记录会具名抛错；但[独立审核](../history/2026-09-26-s4-e-final-closure-review.md)证实公开 `recordExperimentStart/Sample` 仍能把 v1 记录追加到 v2 账，重开才失败。**第 12 项仍返工**，必须在写边界拒绝，不能把加载拒绝当成“不混写”完成。不做双格式 fold、在线迁移或忽略未知行。
+Evolution 外部账本 `proposals.jsonl` 的记录统一用 `formatVersion: 2`。写边界与加载同一判据：`load` 逐行拒绝 v1/无版本/混合；`append` 共用漏斗与 `recordExperimentStart`（在幂等成功返回之前）于持久写前对旧版本记录具名抛错，账本字节不变（[定点返工交付](../history/2026-09-26-s4-e-final-closure-rework-record.md)，`assertLedgerFormatVersion`，evolution.ts:765/1702/1730/1790）。fold 只接受当前可写形状：非 Skill 仅 proposed；candidate 必带 Skill mutation；prepared 必有 captured 基线与 skillContent/skillBaseline；decided 必有 approvalRef。不做双格式 fold、在线迁移或忽略未知行。
 
 新格式的可执行候选只保留单文件 Skill 替换；其他改进方向仍可记录为建议，但不能进入旧候选执行链。`experiment_started` 固定样本角色和观测结果、输入快照、候选与生产基线内容身份、模型选择、可选总 `maxTokens`、裁判版本、比较器版本和 `frozenDigest`；`experiment_sample` 逐样本、侧与重复次数记录真实 task/run/review/evidence、工作区快照、结果、裁判身份和 reported/unknown 成本。Skill 实验报告为 `experiment-report.json` 的 `formatVersion: 2`；此报告版本与 ledger 版本是两个字段。旧 v1 replay 报告不能晋升，`replayed` 状态/记录不再新写，仅服务该报告的生产实现和测试删除。实验级 `wallTimeMs`/`durationMs` 不进入新账；普通 Review 的 `durationMs` 与根运行时限不受影响。当前仍在使用的 `SKILL.contract.json` v1 侧车也不受此切换影响。
 

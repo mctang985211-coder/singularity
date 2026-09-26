@@ -32,7 +32,9 @@ import { disposeScriptedLoops, startScriptedLoop, type ScriptedLoop, type Script
  * An experiment places no clock of its own: the run's time is the runtime's own
  * limits (`Config.budget.wallTimeMs`, the root budget), pinned by
  * `task-runtime/tests/unit/orchestrate.spec.ts` and the pure `runDeadlineMs`
- * cases in `task-runtime/tests/unit/root-budget.spec.ts`.
+ * cases in `task-runtime/tests/unit/root-budget.spec.ts`. A caller that still
+ * names the deleted `wallTimeMs` option is refused by name at the entry, before
+ * a Run, a spawn or any other write exists.
  */
 
 const ROOT = 's-root' as SessionId
@@ -224,5 +226,31 @@ describe('S4-E: the execution binding of a replayed run (real loop)', () => {
     expect((await h.runForSession(worker)).run.status).toBe('running')
     release.resolve()
     expect((await replaying).status).toBe('verified')
+  })
+
+  it('refuses the removed wallTimeMs option by name, before any Run exists', async () => {
+    const h = await startScriptedLoop({
+      providers: ['mock'],
+      script: (_sessionId, index): readonly ScriptEntry[] => index === 0
+        ? [{ text: 'root: the tree is active' }]
+        : [
+          { tool: 'task_submit_result', args: { summary: 'the replayed work is done' } },
+          { text: 'worker: handed in' },
+        ],
+    })
+    const root = await h.begin(ROOT_CONTRACT)
+    const champion = await writeChampion(h, root.storeId, championCriterion('true'))
+    const before = await h.snapshot(root.storeId)
+
+    // The clock this build deleted is refused at the entry, before a task, a run
+    // or a spawn exists: nothing may stand in for a deadline nobody keeps.
+    const err = await h.runtime
+      .replayTask(root.storeId, champion.taskId, { lineage: `${LINEAGE}:removed-clock`, wallTimeMs: 1 } as never, ROOT)
+      .then(() => undefined, (error: unknown) => error)
+
+    expect.soft(err, 'old option must not be silently ignored').toBeInstanceOf(Error)
+    expect.soft(err instanceof Error ? err.message : '', 'the refusal names the removed option').toContain('wallTimeMs')
+    expect.soft(h.spawns).toHaveLength(0)
+    expect.soft((await h.snapshot(root.storeId)).runs).toHaveLength(before.runs.length)
   })
 })

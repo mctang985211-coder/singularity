@@ -482,17 +482,13 @@ describe('the two-sided orchestrator', () => {
   it('refuses a proposal that is not a prepared single-file skill replacement', async () => {
     const w = await world()
     const prepared = w.proposal.prepared!
-    // A candidate prepared against a skill that was not there: this experiment
-    // evaluates replacements, and says so instead of inventing a baseline.
-    w.proposal.prepared = { ...prepared, champion: 'missing', skillBaseline: undefined }
-    await expect(runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' }))
-      .rejects.toThrow(/no production skill to replace/)
-    expect(w.calls).toHaveLength(0)
-    expect(w.records).toHaveLength(0)
-
+    // A prepared record with no candidate content identity is not a
+    // replacement this experiment can evaluate — it says so instead of
+    // inventing the content it would run.
     w.proposal.prepared = { ...prepared, skillContent: undefined }
     await expect(runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' }))
       .rejects.toThrow(/carries no candidate content identity/)
+    expect(w.calls).toHaveLength(0)
     expect(w.records).toHaveLength(0)
     await rm(w.root, { recursive: true, force: true })
   })

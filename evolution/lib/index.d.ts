@@ -829,19 +829,6 @@ type EvolutionDecision = 'PROMOTE' | 'REJECT' | 'KEEP_FOR_FURTHER_RESEARCH';
 declare const EVOLUTION_LEVELS: readonly EvolutionLevel[];
 declare const EVOLUTION_DECISIONS: readonly EvolutionDecision[];
 /**
- * The ledger's vocabulary of mechanical target types: the one whose mutation a
- * v2 record materializes into a sandbox (`mechanical: true`). `candidate`
- * admits a **skill** candidate only — the single type this build materializes,
- * evaluates and promotes (§F.2) — and the fold validates every `prepared`
- * record against that same vocabulary, so v2 holds skill prepares and nothing
- * else. The target types an older build materialized (agent_preset, capability,
- * task_definition) are no longer candidate types here and have no `prepared`
- * record of their own.
- */
-declare const MECHANICAL_TARGET_TYPES: readonly ProposalTargetType[];
-/** True for the target types whose mutations materialize mechanically into the sandbox. */
-declare function mutationMechanical(targetType: ProposalTargetType): boolean;
-/**
  * The one target type `evolution_apply` promotes mechanically (W16): the
  * sandbox copy lands on the production skill root. Every other type has no
  * executor in this build — a capability row, an agent_preset directory and a
@@ -853,28 +840,30 @@ interface SkillMutation {
   name: string;
   content: string;
 }
-/** Where the champion snapshot of one prepared proposal stands. */
-type ChampionState = /** Written under the sandbox's `champion/` dir. */
-'captured'
-/** The production target does not exist yet (new skill / capability / …) — champion: null. */ | 'missing'
-/** Non-mechanical mutation: nothing materialized, no anchor. */ | 'none';
-declare const CHAMPION_STATES: readonly ChampionState[];
+/**
+ * The champion snapshot of one prepared proposal. `captured` is the only state
+ * there is: this build replaces an existing production `SKILL.md`, so a target
+ * that is not there has nothing to prepare from and is refused before any
+ * sandbox write, and every `prepared` record the fold admits carries the
+ * snapshot's state. The bookkeeping-only prepare (`none` — nothing materialized,
+ * no anchor) belonged to target types this build's candidate never admits and
+ * has no producer or consumer left (S4-E 收尾).
+ */
+type ChampionState = 'captured';
 /** Folded view of one `prepared` record. */
 interface PreparedView {
   /** Sandbox dir relative to the ledger root (`sandbox/<proposalId>`); null when nothing was materialized. */
   sandbox: string | null;
   mechanical: boolean;
   champion: ChampionState;
-  /** Skill prepares only (P2): the content identity recorded for the materialized candidate `SKILL.md`. */
+  /** The content identity recorded for the materialized candidate `SKILL.md` (P2) — every prepare records it. */
   skillContent?: SkillContentIdentity;
   /**
-   * Skill prepares only (P3): the content identity of the production
-   * `skills/<name>/SKILL.md` as it stood at prepare — from the same single read
-   * that produced the champion snapshot, so snapshot and digest can never
-   * disagree. Absent on records written before the baseline was recorded, on
-   * `champion: 'missing'` prepares (nothing was there to digest), and on every
-   * non-skill targetType; a captured champion without it cannot prove its
-   * baseline and refuses a new apply.
+   * The content identity of the production `skills/<name>/SKILL.md` as it stood
+   * at prepare (P3) — from the same single read that produced the champion
+   * snapshot, so snapshot and digest can never disagree. Every prepare records
+   * it; a captured champion without it cannot prove its baseline and refuses a
+   * new apply.
    */
   skillBaseline?: SkillContentIdentity;
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
@@ -934,35 +923,43 @@ type EvolutionRecord = {
   /** Complete version set the candidate aligns to (branch-model bookkeeping; this build creates no real branch). */
   versionSet: Record<string, string>;
   /**
-   * Optional structured patch description, shaped by the proposal's
-   * targetType (see the *Mutation interfaces). A candidate carrying one
-   * must be prepared (sandbox materialization) before it can gate; a
-   * mutation-less (manual) candidate gates directly.
+   * The structured patch description, shaped by the proposal's targetType
+   * (see the *Mutation interfaces) and always recorded: this build's
+   * candidate is a single-file `SKILL.md` replacement, so a candidate that
+   * carries nothing to materialize and evaluate would be a flow going
+   * nowhere. Every line `candidate` writes holds one; a line written before
+   * that rule (or by hand) folds to a candidate with no next state,
+   * because `prepared` is the one transition a candidate admits.
    */
-  mutation?: unknown;
+  mutation: unknown;
   actor: string;
   at: string;
 } | {
   formatVersion: 2;
   kind: 'prepared';
   proposalId: string;
-  /** Sandbox dir relative to the ledger root, or null for a bookkeeping-only (non-mechanical) mutation. */
+  /**
+   * Sandbox dir relative to the ledger root. Every prepare this build
+   * writes materializes one; nullable in the type only so a hand-forged
+   * line naming none is refused by name at the fold.
+   */
   sandbox: string | null;
+  /** True on every prepare the fold admits: this build's candidate is a materialized skill mutation. */
   mechanical: boolean;
+  /** Always `captured`: a prepare snapshots the production bytes it replaces. */
   champion: ChampionState;
   /**
-   * Skill prepares only (P2): the content identity of the materialized
-   * candidate `SKILL.md` — the skill name plus the SHA-256 of the exact
-   * file bytes. Absent on records written before content binding; those old
-   * skill candidates cannot be newly promoted without a fresh candidate and
-   * evaluation.
+   * The content identity of the materialized candidate `SKILL.md` (P2) — the
+   * skill name plus the SHA-256 of the exact file bytes. Required: the fold
+   * refuses a prepare without it, so a candidate nothing can re-verify never
+   * becomes a flow.
    */
   skillContent?: SkillContentIdentity;
   /**
-   * Skill prepares only (P3): the content identity of the production
-   * `SKILL.md` as it stood at prepare. Absent on records written before the
-   * baseline was recorded; those old skill candidates cannot be newly
-   * applied without a fresh candidate and evaluation.
+   * The content identity of the production `SKILL.md` as it stood at prepare
+   * (P3), from the same read that produced the champion snapshot. Required:
+   * the fold refuses a prepare without it, so a captured champion always
+   * names the baseline a later apply compares production against.
    */
   skillBaseline?: SkillContentIdentity;
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
@@ -985,9 +982,8 @@ type EvolutionRecord = {
   /**
    * Human-review evidence: the approval call id of the evolution_decide
    * request that granted this decision, the same `approval:<callId>` shape
-   * as applied/rolledback. Optional in the record type only so ledger
-   * lines written before this field existed still fold; every new decided
-   * record carries it.
+   * as applied/rolledback. Required: `decide` writes it on both of its
+   * paths, and the fold refuses a decided line without one.
    */
   approvalRef?: string;
   actor: string;
@@ -1132,21 +1128,8 @@ interface Config {
   /** Production skill root — champion snapshots read from here; apply/rollback write here. Defaults to `$DSH_HOME/skills`. */
   skillRoot?: string;
   /**
-   * Production agent-preset root. Resolved for the ledger's own root vocabulary
-   * (an old record's targets name it) and pinned by the root regression; no
-   * current entry writes here. Defaults to `$DSH_HOME/.agent-presets`.
-   */
-  presetRoot?: string;
-  /**
-   * The production `config.yml`, resolved for the ledger's own root vocabulary
-   * (an old capability record's targets name it) and pinned by the root
-   * regression; no current entry edits it. Defaults to `<repoRoot>/config.yml`.
-   */
-  configFile?: string;
-  /**
    * The harness repo root: the parent of the `$DSH_HOME` fallback
-   * (`<repoRoot>/.dsh`), the base of the default `config.yml`, and the base
-   * relative evidence refs resolve against.
+   * (`<repoRoot>/.dsh`) and the base relative evidence refs resolve against.
    *
    * It is a configuration member rather than something this package derives:
    * the ledger used to sit at the depth of the harness source tree, and this
@@ -1199,17 +1182,6 @@ declare class EvolutionService extends Service {
   readonly root: string;
   /** Production skill root — champion snapshots read from here; apply/rollback write here. */
   readonly skillRoot: string;
-  /**
-   * Production agent-preset root, resolved for the ledger's own root vocabulary
-   * (an old record's targets name it). No current entry writes here: the only
-   * executor this build has writes a single `SKILL.md`.
-   */
-  readonly presetRoot: string;
-  /**
-   * Production config.yml, resolved for the ledger's own root vocabulary (an
-   * old capability record's targets name it). No current entry edits it.
-   */
-  readonly configFile: string;
   /** Repo root that relative evidence paths resolve against (see {@link Config.repoRoot}). */
   readonly repoRoot: string;
   /** The injected model-selection resolver, if the assembly wired one (see {@link Config.modelSelection}). */
@@ -1236,9 +1208,11 @@ declare class EvolutionService extends Service {
   propose(input: ProposeInput, actor: string): Promise<EvolutionProposal>;
   /**
    * Move proposed → candidate, recording the complete version set the candidate
-   * aligns to. `mutation` is the optional structured patch description, shaped
-   * and checked against the proposal's targetType; a candidate carrying one
-   * must be prepared before it can gate.
+   * aligns to and the structured patch it carries. `mutation` is required and
+   * shaped by the proposal's targetType: a candidate the ledger cannot
+   * materialize and evaluate is a flow going nowhere, so it is refused here,
+   * before the first candidate line is written. A proposal whose mutation does
+   * not survive {@link validateMutation} stays exactly as it was.
    *
    * **A skill candidate only** (§F.2): a capability, agent_preset,
    * task_definition or bookkeeping-only proposal stays the recorded suggestion
@@ -1246,31 +1220,32 @@ declare class EvolutionService extends Service {
    * ledger line of the candidate lifecycle. Its proposal keeps its place in the
    * ledger — a record is not a candidate.
    */
-  candidate(proposalId: string, versionSet: Record<string, string>, actor: string, mutation?: unknown): Promise<EvolutionProposal>;
+  candidate(proposalId: string, versionSet: Record<string, string>, actor: string, mutation: unknown): Promise<EvolutionProposal>;
   /**
-   * Move candidate → prepared: materialize the skill mutation into
-   * `<root>/sandbox/<proposalId>/` and snapshot the champion (the production
-   * `SKILL.md`) under `champion/` — the anchor for the experiment's baseline and
-   * for rollback. A production target that does not exist yet records
-   * `champion: 'missing'` (champion: null). Materialization runs before the
-   * ledger append; every write is confined to the sandbox dir.
+   * Move candidate → prepared: confirm the production `SKILL.md` this candidate
+   * replaces, materialize the skill mutation into `<root>/sandbox/<proposalId>/`
+   * and snapshot those same champion bytes under `champion/` — the anchor for
+   * the experiment's baseline and for rollback.
+   *
+   * The production read comes first, before any sandbox or ledger write: this
+   * build replaces an existing single-file `SKILL.md`, so a target that is not
+   * there has nothing to prepare, and a prepare that found none writes nothing
+   * at all. That one read yields both the snapshot and `skillBaseline` (P3),
+   * the digest the later apply compares the production target against.
    *
    * The candidate also records `skillContent` (P2): the name plus the SHA-256 of
    * the exact bytes of the file that was actually materialized (read back from
    * disk, never re-rendered from the mutation string), so the experiment, the
-   * gates, and apply can verify this exact content later. The same single read
-   * of the production file also yields `skillBaseline` (P3), the digest the
-   * later apply compares the production target against.
+   * gates, and apply can verify this exact content later.
    */
   prepare(proposalId: string, actor: string): Promise<EvolutionProposal>;
   /**
-   * Move candidate → gated (manual candidates) or prepared → gated (skill
-   * candidates): all six Gate answers plus regression evidence refs. Every ref
-   * must exist — a path on disk (relative to the repo root or absolute) or an id
-   * the caller-side resolver knows (task-store evidence). Existence only;
-   * nothing here executes anything. A **skill** proposal must have a completed
-   * two-sided experiment and cite that experiment's report (§F.2); the six
-   * answers are recorded over it.
+   * Move prepared → gated: all six Gate answers plus regression evidence refs.
+   * Every ref must exist — a path on disk (relative to the repo root or
+   * absolute) or an id the caller-side resolver knows (task-store evidence).
+   * Existence only; nothing here executes anything. A **skill** proposal must
+   * have a completed two-sided experiment and cite that experiment's report
+   * (§F.2); the six answers are recorded over it.
    */
   gate(proposalId: string, answers: GateAnswers, actor: string, refKnown?: (ref: string) => Promise<boolean>): Promise<EvolutionProposal>;
   /**
@@ -1422,24 +1397,22 @@ declare class EvolutionService extends Service {
    * cannot bypass it. Nothing here writes, merges, or overwrites — a conflict
    * only throws.
    *
-   * `captured` requires a real regular file whose bytes still hash to the
-   * digest prepare recorded; `missing` requires the target to still be absent.
-   * A file that appeared, changed, disappeared, changed type (now a directory),
-   * or sits behind a symbolic link (the file itself or an ancestor) is a
-   * conflict. Only `targetType: skill` carries a baseline; every other
-   * targetType passes untouched.
+   * The prepare-time baseline is a real regular file whose bytes still hash to
+   * the digest prepare recorded. A file that changed, disappeared, changed type
+   * (now a directory), or sits behind a symbolic link (the file itself or an
+   * ancestor) is a conflict. Only `targetType: skill` carries a baseline; every
+   * other targetType passes untouched.
    */
   checkProductionBaseline(proposalId: string): Promise<void>;
   private assertProductionBaseline;
   private readVerifiedSkillCandidate;
   /**
-   * Move applied → rolledback: undo the apply. Champion captured → restore the
-   * champion `SKILL.md` snapshot; champion missing → delete the skill directory
-   * the apply created. A record of another target type has no executor here:
-   * this build writes and restores a single `SKILL.md` only, and an applied
-   * capability row or preset directory is refused by name rather than touched.
-   * Same approval discipline as apply: the tool asks a human first, the service
-   * only executes and records.
+   * Move applied → rolledback: undo the apply by restoring the champion
+   * `SKILL.md` snapshot taken at prepare. A record of another target type has no
+   * executor here: this build writes and restores a single `SKILL.md` only, and
+   * an applied capability row or preset directory is refused by name rather than
+   * touched. Same approval discipline as apply: the tool asks a human first, the
+   * service only executes and records.
    */
   rollback(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome>;
   /**
@@ -1463,11 +1436,12 @@ declare class EvolutionService extends Service {
   private assertNext;
   /**
    * Write the skill mutation into the sandbox dir `dir`, then the champion
-   * snapshot. Every path goes through `resolveWithin`, so a write can never
-   * land outside the sandbox; the production skill root is read-only here. The
-   * champion is read exactly once (P3): those bytes become both the snapshot
-   * and the recorded `skillBaseline` digest, so the two can never describe two
-   * different reads of the production file.
+   * snapshot from the production bytes the caller already read (P3: one read,
+   * before anything was written — those bytes become the snapshot and the
+   * recorded `skillBaseline` digest together, so the two can never describe two
+   * different reads of the production file). Every path goes through
+   * `resolveWithin`, so a write can never land outside the sandbox; the
+   * production skill root is read-only here.
    */
   private materialize;
   /**
@@ -1478,6 +1452,12 @@ declare class EvolutionService extends Service {
    * prepared/applied/rolledback shapes), so a hand-forged line fails
    * load exactly as it would fail append. The same rules guard folding and live
    * appends, so an illegal migration is rejected identically in both paths.
+   *
+   * The fold admits the shape the current entries write and nothing else (S4-E
+   * 收尾): a candidate is a skill mutation, a prepared record carries both
+   * content identities a prepare captured, and a decided record names the human
+   * approval that granted it. A line missing any of them is refused here,
+   * before any later entry can act on the state it would have folded to.
    *
    * The experiment family is not a lifecycle transition and is skipped here;
    * {@link foldLedger} folds it beside this fold.
@@ -1491,7 +1471,13 @@ declare class EvolutionService extends Service {
    * gets its own checks ({@link foldExperiments}).
    */
   private foldLedger;
-  /** Validate the staged fold first; memory commits only after the line is on disk. */
+  /**
+   * Validate the staged fold first; memory commits only after the line is on
+   * disk. The format check runs before the fold, so a record declaring another
+   * version is refused before it can be folded — and, because nothing is
+   * written until the fold has accepted the staged ledger, before a byte
+   * changes on disk.
+   */
   private append;
   /** The folded views of every experiment, one per id — the ledger's experiment family, validated. */
   private experimentViews;
@@ -1553,4 +1539,4 @@ declare class EvolutionService extends Service {
   private experimentSources;
 }
 //#endregion
-export { APPLYABLE_TARGET_TYPES, ApplyOutcome, ApplyView, CHAMPION_STATES, ChampionState, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCriterion, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, GateAnswers, ListFilter, MECHANICAL_TARGET_TYPES, ModelSelection, PrecheckSkillVerdict, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, ProviderPrecheckView, ReplayCriterionDiff, ReplayCriterionSummary, ReplaySideSummary, SideRelation, SkillContentIdentity, SkillMutation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, mutationMechanical, overallExperimentVerdict, protectedInputsDigest, renderProviderRoles, resumeExperiment, runExperiment };
+export { APPLYABLE_TARGET_TYPES, ApplyOutcome, ApplyView, ChampionState, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCriterion, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, GateAnswers, ListFilter, ModelSelection, PrecheckSkillVerdict, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, ProviderPrecheckView, ReplayCriterionDiff, ReplayCriterionSummary, ReplaySideSummary, SideRelation, SkillContentIdentity, SkillMutation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, overallExperimentVerdict, protectedInputsDigest, renderProviderRoles, resumeExperiment, runExperiment };

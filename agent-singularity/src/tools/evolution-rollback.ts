@@ -16,12 +16,11 @@ export function defineEvolutionRollbackTool(ctx: Context) {
   return defineTool({
     name: 'evolution_rollback',
     description:
-      'Roll back an applied EvolutionProposal (status: rolledback). Restores the champion snapshot taken at prepare ' +
-      'time — the production SKILL.md of an applied single-file skill replacement; when the champion did not exist ' +
-      '(champion: null), deletes the skill directory the apply created. An applied record of any other target type has ' +
-      'no executor here and is refused. Always asks a human through the native approval seam first — reject / cancel / ' +
-      'unavailable writes nothing and the proposal stays applied. Only an applied proposal can be rolled back; a ' +
-      'rolled-back proposal keeps its full ledger history.',
+      'Roll back an applied EvolutionProposal (status: rolledback). Restores the champion snapshot taken at prepare — the ' +
+      'production SKILL.md of an applied single-file skill replacement, put back byte for byte. An applied record of any ' +
+      'other target type has no executor here and is refused. Always asks a human through the native approval seam first — ' +
+      'reject / cancel / unavailable writes nothing and the proposal stays applied. Only an applied proposal can be rolled ' +
+      'back; a rolled-back proposal keeps its full ledger history.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Applied proposal to roll back' },
     },
@@ -43,14 +42,11 @@ export function defineEvolutionRollbackTool(ctx: Context) {
       if (targets.length === 0) {
         return `evolution_rollback rejected: proposal ${proposal.proposalId} targets "${proposal.targetType}" — this build writes and restores a single SKILL.md only, so there is no executor to roll back an applied record of another type`
       }
-      const restore = proposal.prepared?.champion !== 'captured'
-        ? 'the champion did not exist (champion: null) — this DELETES what the apply created:'
-        : 'this restores the champion snapshot over production targets:'
       const reason = [
         `Evolution rollback for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,
         `rationale: ${proposal.rationale}`,
         `applied at: ${proposal.applied!.targets.join(', ')} (approval ${proposal.applied!.approvalRef})`,
-        restore,
+        'this restores the champion snapshot over production targets:',
         ...targets.map(target => `  - ${target}`),
       ].join('\n')
       const outcome = await ctx.approval.request({

@@ -1,6 +1,5 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import { mutationMechanical } from '@dangosys/dsh-singularity-evolution'
 import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
@@ -16,9 +15,9 @@ export function defineEvolutionListTool(ctx: Context) {
     description:
       'Read-only. List EvolutionProposals in the evolution ledger, optionally filtered by status / targetType / targetId, ' +
       'each with its derived history (proposed → candidate → prepared → gated → decided → applied → rolledback for an ' +
-      'applied single-file skill replacement; a candidate without a mutation gates directly, and a non-skill proposal stays ' +
-      'proposed — this build admits a skill candidate only). The ledger records proposals, sandbox materializations, human ' +
-      'decisions, and human-approved applies/rollbacks.',
+      'applied single-file skill replacement; a non-skill proposal stays proposed — this build admits a skill candidate ' +
+      'only). The ledger records proposals, sandbox materializations, human decisions, and human-approved ' +
+      'applies/rollbacks.',
     parameters: {
       status: { type: 'string', enum: ['proposed', 'candidate', 'prepared', 'gated', 'decided', 'applied', 'rolledback'], description: 'Only proposals in this status' },
       targetType: { type: 'string', enum: TARGET_TYPES, description: 'Only proposals pointing at this mutation surface' },
@@ -42,20 +41,22 @@ export function defineEvolutionListTool(ctx: Context) {
           lines.push(`  version set: ${Object.entries(proposal.versionSet).map(([key, value]) => `${key}=${value}`).join(', ')}`)
         }
         if (proposal.mutation !== undefined) {
-          const kind = mutationMechanical(proposal.targetType) ? 'mechanical' : 'bookkeeping-only (mechanical: false)'
-          lines.push(`  mutation: ${kind} ${proposal.targetType} mutation`)
+          lines.push(`  mutation: ${proposal.targetType} mutation recorded`)
         }
         if (proposal.prepared !== undefined) {
           const view = proposal.prepared
           if (view.sandbox === null) {
-            lines.push('  prepared: bookkeeping only, nothing materialized')
+            // Belt for the view's own optional field: the fold admits no prepare
+            // without a materialized sandbox, so no entry here writes one.
+            lines.push('  prepared: no sandbox recorded')
           } else {
-            const championText = view.champion === 'captured' ? 'champion snapshot captured' : 'champion: null'
+            // The fold admits one prepared shape: a materialized skill prepare
+            // whose champion snapshot was captured.
             // P2: a skill candidate shows the content identity later stages verify against.
             const contentText = view.skillContent === undefined ? '' : `, candidate content ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}…`
             // P3: the production baseline the apply compares against.
             const baselineText = view.skillBaseline === undefined ? '' : `, production baseline ${view.skillBaseline.name} sha256:${view.skillBaseline.sha256.slice(0, 12)}…`
-            lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, ${championText}${contentText}${baselineText})`)
+            lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, champion snapshot captured${contentText}${baselineText})`)
           }
         }
         if (proposal.gate !== undefined) {

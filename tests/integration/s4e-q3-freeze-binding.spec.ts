@@ -289,8 +289,6 @@ async function fixture(options: {
   const evolution = new EvolutionService(h.ctx, {
     root: join(h.workspace, 'evolution'),
     skillRoot,
-    presetRoot: join(h.workspace, 'presets'),
-    configFile: join(h.workspace, 'config.yml'),
     modelSelection: () => options.unresolvableSelection === true ? undefined : modelSelectionOf(defaultSelection.current),
   })
   await evolution.propose({

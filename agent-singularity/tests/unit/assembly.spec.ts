@@ -184,4 +184,23 @@ describe('SingularityAgent assembly', () => {
     expect(Object.keys(replay.parameters.properties.budget!.properties!)).toEqual(['maxTokens', 'note'])
     expect(JSON.stringify(replay.parameters)).not.toContain('wallTimeMs')
   })
+
+  it('declares the candidate mutation required on the model surface, in skill-replacement terms', async () => {
+    // `evolution_candidate` admits one shape: a replacement of an existing
+    // single-file SKILL.md, whose full text the mutation carries. The model
+    // surface has to say so — the schema requires the mutation instead of
+    // leaving a mutation-less call to be refused after the fact, and a
+    // suggestion-only proposal is named as something that never becomes a
+    // candidate.
+    const { tools } = await mount({ evolution: 'on' })
+    const candidate = tools.get('evolution_candidate') as unknown as {
+      description: string
+      parameters: { required: string[]; properties: Record<string, { description?: string }> }
+    }
+    expect(candidate.parameters.required).toContain('mutation')
+    expect(candidate.parameters.required).toContain('versionSet')
+    expect(candidate.parameters.properties.mutation!.description).toContain('{ name, content }')
+    expect(candidate.description).toContain('Only a single-file SKILL.md replacement can become a candidate in this build')
+    expect(candidate.description).toContain('a suggestion never becomes a candidate')
+  })
 })

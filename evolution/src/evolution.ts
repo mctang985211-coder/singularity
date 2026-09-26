@@ -1,14 +1,18 @@
 /**
  * Evolution admission track (guide §2.7.6/§2.7.7): an append-only ledger of
  * EvolutionProposals with the state machine proposed → candidate → prepared →
- * gated → decided. A candidate may carry a structured mutation; only then is
- * the prepared state reachable, and evolution_prepare materializes it into the
- * per-proposal sandbox (`<root>/sandbox/<proposalId>/`) plus a champion
- * snapshot of the current production target. A **skill** candidate — the only
- * candidate this build admits — is then evaluated by the two-sided experiment
- * of §F.2 (`evolution_replay`), recorded in the ledger's experiment family and
- * re-read by the promotion gate; the experiment is evidence, not a lifecycle
- * transition, so a skill proposal gates from prepared.
+ * gated → decided. Every candidate carries a structured mutation — this build's
+ * one candidate is a single-file `SKILL.md` replacement — and `prepared` is the
+ * one state it admits: evolution_prepare reads the production `SKILL.md` it
+ * replaces once, before any write, and materializes the mutation into the
+ * per-proposal sandbox (`<root>/sandbox/<proposalId>/`) plus a champion snapshot
+ * of those same bytes. A prepare whose production target is not there has
+ * nothing to replace and is refused before any sandbox or ledger write. A
+ * **skill** candidate — the only candidate this build admits — is then evaluated
+ * by the two-sided experiment of §F.2 (`evolution_replay`), recorded in the
+ * ledger's experiment family and re-read by the promotion gate; the experiment
+ * is evidence, not a lifecycle transition, so a skill proposal gates from
+ * prepared.
  *
  * `evolution_propose` and a Diagnosis may still record any targetType as a
  * suggestion, but a suggestion never becomes a candidate: `candidate` refuses
@@ -23,12 +27,13 @@
  * report is never upgraded into new evidence).
  *
  * The ledger is one format, `formatVersion: 2` (S4-E 收尾): every line a current
- * entry writes carries it, and {@link EvolutionService} refuses a v1, an
- * unversioned or a mixed ledger at load, naming the line and the version it saw,
- * before any new record is appended. There is no dual-format reader, no online
- * migration and no fallback helper: an older ledger is archived by the operator
- * and a new one started (the persistence contract's own deployment step), never
- * migrated or read beside v2 lines.
+ * entry writes carries it, {@link EvolutionService} refuses a v1, an unversioned
+ * or a mixed ledger at load, naming the line and the version it saw, and every
+ * write door — the append funnel and the experiment start — refuses a record
+ * declaring anything else before a byte changes. There is no dual-format reader,
+ * no online migration and no fallback helper: an older ledger is archived by the
+ * operator and a new one started (the persistence contract's own deployment
+ * step), never migrated or read beside v2 lines.
  *
  * PROMOTE takes effect through `evolution_apply` (W16): the candidate's
  * `SKILL.md` is copied from the sandbox into production — decided → applied →
@@ -91,7 +96,7 @@
  * @module dsh-singularity-evolution
  */
 
-import { appendFile, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
@@ -147,23 +152,6 @@ export const EVOLUTION_LEVELS: readonly EvolutionLevel[] = ['L1', 'L2', 'L3', 'L
 export const EVOLUTION_DECISIONS: readonly EvolutionDecision[] = ['PROMOTE', 'REJECT', 'KEEP_FOR_FURTHER_RESEARCH']
 
 /**
- * The ledger's vocabulary of mechanical target types: the one whose mutation a
- * v2 record materializes into a sandbox (`mechanical: true`). `candidate`
- * admits a **skill** candidate only — the single type this build materializes,
- * evaluates and promotes (§F.2) — and the fold validates every `prepared`
- * record against that same vocabulary, so v2 holds skill prepares and nothing
- * else. The target types an older build materialized (agent_preset, capability,
- * task_definition) are no longer candidate types here and have no `prepared`
- * record of their own.
- */
-export const MECHANICAL_TARGET_TYPES: readonly ProposalTargetType[] = ['skill']
-
-/** True for the target types whose mutations materialize mechanically into the sandbox. */
-export function mutationMechanical(targetType: ProposalTargetType): boolean {
-  return MECHANICAL_TARGET_TYPES.includes(targetType)
-}
-
-/**
  * The one target type `evolution_apply` promotes mechanically (W16): the
  * sandbox copy lands on the production skill root. Every other type has no
  * executor in this build — a capability row, an agent_preset directory and a
@@ -195,16 +183,16 @@ export interface SkillMutation {
   content: string
 }
 
-/** Where the champion snapshot of one prepared proposal stands. */
-export type ChampionState =
-  /** Written under the sandbox's `champion/` dir. */
-  | 'captured'
-  /** The production target does not exist yet (new skill / capability / …) — champion: null. */
-  | 'missing'
-  /** Non-mechanical mutation: nothing materialized, no anchor. */
-  | 'none'
-
-export const CHAMPION_STATES: readonly ChampionState[] = ['captured', 'missing', 'none']
+/**
+ * The champion snapshot of one prepared proposal. `captured` is the only state
+ * there is: this build replaces an existing production `SKILL.md`, so a target
+ * that is not there has nothing to prepare from and is refused before any
+ * sandbox write, and every `prepared` record the fold admits carries the
+ * snapshot's state. The bookkeeping-only prepare (`none` — nothing materialized,
+ * no anchor) belonged to target types this build's candidate never admits and
+ * has no producer or consumer left (S4-E 收尾).
+ */
+export type ChampionState = 'captured'
 
 /** Folded view of one `prepared` record. */
 export interface PreparedView {
@@ -212,16 +200,14 @@ export interface PreparedView {
   sandbox: string | null
   mechanical: boolean
   champion: ChampionState
-  /** Skill prepares only (P2): the content identity recorded for the materialized candidate `SKILL.md`. */
+  /** The content identity recorded for the materialized candidate `SKILL.md` (P2) — every prepare records it. */
   skillContent?: SkillContentIdentity
   /**
-   * Skill prepares only (P3): the content identity of the production
-   * `skills/<name>/SKILL.md` as it stood at prepare — from the same single read
-   * that produced the champion snapshot, so snapshot and digest can never
-   * disagree. Absent on records written before the baseline was recorded, on
-   * `champion: 'missing'` prepares (nothing was there to digest), and on every
-   * non-skill targetType; a captured champion without it cannot prove its
-   * baseline and refuses a new apply.
+   * The content identity of the production `skills/<name>/SKILL.md` as it stood
+   * at prepare (P3) — from the same single read that produced the champion
+   * snapshot, so snapshot and digest can never disagree. Every prepare records
+   * it; a captured champion without it cannot prove its baseline and refuses a
+   * new apply.
    */
   skillBaseline?: SkillContentIdentity
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
@@ -285,12 +271,15 @@ export type EvolutionRecord =
       /** Complete version set the candidate aligns to (branch-model bookkeeping; this build creates no real branch). */
       versionSet: Record<string, string>
       /**
-       * Optional structured patch description, shaped by the proposal's
-       * targetType (see the *Mutation interfaces). A candidate carrying one
-       * must be prepared (sandbox materialization) before it can gate; a
-       * mutation-less (manual) candidate gates directly.
+       * The structured patch description, shaped by the proposal's targetType
+       * (see the *Mutation interfaces) and always recorded: this build's
+       * candidate is a single-file `SKILL.md` replacement, so a candidate that
+       * carries nothing to materialize and evaluate would be a flow going
+       * nowhere. Every line `candidate` writes holds one; a line written before
+       * that rule (or by hand) folds to a candidate with no next state,
+       * because `prepared` is the one transition a candidate admits.
        */
-      mutation?: unknown
+      mutation: unknown
       actor: string
       at: string
     }
@@ -298,23 +287,28 @@ export type EvolutionRecord =
       formatVersion: 2
       kind: 'prepared'
       proposalId: string
-      /** Sandbox dir relative to the ledger root, or null for a bookkeeping-only (non-mechanical) mutation. */
+      /**
+       * Sandbox dir relative to the ledger root. Every prepare this build
+       * writes materializes one; nullable in the type only so a hand-forged
+       * line naming none is refused by name at the fold.
+       */
       sandbox: string | null
+      /** True on every prepare the fold admits: this build's candidate is a materialized skill mutation. */
       mechanical: boolean
+      /** Always `captured`: a prepare snapshots the production bytes it replaces. */
       champion: ChampionState
       /**
-       * Skill prepares only (P2): the content identity of the materialized
-       * candidate `SKILL.md` — the skill name plus the SHA-256 of the exact
-       * file bytes. Absent on records written before content binding; those old
-       * skill candidates cannot be newly promoted without a fresh candidate and
-       * evaluation.
+       * The content identity of the materialized candidate `SKILL.md` (P2) — the
+       * skill name plus the SHA-256 of the exact file bytes. Required: the fold
+       * refuses a prepare without it, so a candidate nothing can re-verify never
+       * becomes a flow.
        */
       skillContent?: SkillContentIdentity
       /**
-       * Skill prepares only (P3): the content identity of the production
-       * `SKILL.md` as it stood at prepare. Absent on records written before the
-       * baseline was recorded; those old skill candidates cannot be newly
-       * applied without a fresh candidate and evaluation.
+       * The content identity of the production `SKILL.md` as it stood at prepare
+       * (P3), from the same read that produced the champion snapshot. Required:
+       * the fold refuses a prepare without it, so a captured champion always
+       * names the baseline a later apply compares production against.
        */
       skillBaseline?: SkillContentIdentity
       /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
@@ -332,9 +326,8 @@ export type EvolutionRecord =
       /**
        * Human-review evidence: the approval call id of the evolution_decide
        * request that granted this decision, the same `approval:<callId>` shape
-       * as applied/rolledback. Optional in the record type only so ledger
-       * lines written before this field existed still fold; every new decided
-       * record carries it.
+       * as applied/rolledback. Required: `decide` writes it on both of its
+       * paths, and the fold refuses a decided line without one.
        */
       approvalRef?: string
       actor: string
@@ -514,21 +507,8 @@ export interface Config {
   /** Production skill root — champion snapshots read from here; apply/rollback write here. Defaults to `$DSH_HOME/skills`. */
   skillRoot?: string
   /**
-   * Production agent-preset root. Resolved for the ledger's own root vocabulary
-   * (an old record's targets name it) and pinned by the root regression; no
-   * current entry writes here. Defaults to `$DSH_HOME/.agent-presets`.
-   */
-  presetRoot?: string
-  /**
-   * The production `config.yml`, resolved for the ledger's own root vocabulary
-   * (an old capability record's targets name it) and pinned by the root
-   * regression; no current entry edits it. Defaults to `<repoRoot>/config.yml`.
-   */
-  configFile?: string
-  /**
    * The harness repo root: the parent of the `$DSH_HOME` fallback
-   * (`<repoRoot>/.dsh`), the base of the default `config.yml`, and the base
-   * relative evidence refs resolve against.
+   * (`<repoRoot>/.dsh`) and the base relative evidence refs resolve against.
    *
    * It is a configuration member rather than something this package derives:
    * the ledger used to sit at the depth of the harness source tree, and this
@@ -586,19 +566,9 @@ function assertSegment(value: unknown, field: string): string {
   return text
 }
 
-/** A clean relative path: never absolute (posix or drive-letter), no `\`, no empty / `.` / `..` segments. */
-function assertSandboxPath(value: unknown, field: string): string {
-  const text = nonEmpty(value, field)
-  if (isAbsolute(text) || /^[A-Za-z]:[\\/]/.test(text) || text.includes('\\') || text.includes('\0')) {
-    throw new Error(`evolution: ${field} must be a relative path inside the sandbox, got "${text}"`)
-  }
-  if (text.split('/').some(segment => segment === '' || segment === '.' || segment === '..')) {
-    throw new Error(`evolution: ${field} must be a clean relative path (no empty / "." / ".." segments), got "${text}"`)
-  }
-  return text
-}
-
-/** Resolve `rel` under `base`, refusing anything that would land outside — the sandbox confinement belt. */
+/**
+ * Resolve `rel` under `base`, refusing anything that would land outside — the sandbox confinement belt.
+ */
 function resolveWithin(base: string, rel: string): string {
   const abs = resolve(base, rel)
   if (abs !== base && !abs.startsWith(`${base}${sep}`)) {
@@ -628,74 +598,29 @@ async function readProductionSkill(skillRoot: string, name: string): Promise<{ b
 }
 
 /**
- * Validate a candidate's mutation against the proposal's targetType. The four
- * mechanical types have fixed schemas and every path field is checked to stay
- * inside the sandbox; the five other types take any structured object and are
- * bookkeeping-only (mechanical: false).
+ * Validate a candidate's mutation. This build has exactly one candidate
+ * mutation — the single-file `SKILL.md` replacement of §F.2 — so the schema is
+ * the skill one and the only callers are the paths that already admitted a
+ * skill candidate (the write path and the fold, which refuses a candidate of
+ * any other target type first). A mutation of another target type has no
+ * schema here, and is named rather than silently accepted: the old schemas
+ * (agent_preset, capability, task_definition) and the bookkeeping-only default
+ * belonged to a lifecycle this build no longer has.
  */
 function validateMutation(
   targetType: ProposalTargetType,
   mutation: unknown,
-  baseVersion: string,
 ): asserts mutation is Record<string, unknown> {
   if (!isRecord(mutation)) throw new Error('evolution: mutation must be an object')
-  switch (targetType) {
-    case 'skill': {
-      assertOnlyKeys(mutation, ['name', 'content'], 'skill mutation')
-      assertSegment(mutation.name, 'mutation.name')
-      nonEmpty(mutation.content, 'mutation.content')
-      return
-    }
-    case 'agent_preset': {
-      assertOnlyKeys(mutation, ['presetId', 'files'], 'agent_preset mutation')
-      assertSegment(mutation.presetId, 'mutation.presetId')
-      if (!Array.isArray(mutation.files) || mutation.files.length === 0) {
-        throw new Error('evolution: mutation.files must be a non-empty array of { path, content }')
-      }
-      mutation.files.forEach((file: unknown, index: number) => {
-        if (!isRecord(file)) throw new Error(`evolution: mutation.files[${index}] must be an object`)
-        assertOnlyKeys(file, ['path', 'content'], `mutation.files[${index}]`)
-        assertSandboxPath(file.path, `mutation.files[${index}].path`)
-        nonEmpty(file.content, `mutation.files[${index}].content`)
-      })
-      return
-    }
-    case 'capability': {
-      assertOnlyKeys(mutation, ['name', 'entry'], 'capability mutation')
-      nonEmpty(mutation.name, 'mutation.name')
-      if (!isRecord(mutation.entry)) throw new Error('evolution: mutation.entry must be an object')
-      assertOnlyKeys(mutation.entry, ['skills', 'tools', 'preset', 'permission', 'mcpServers'], 'mutation.entry')
-      if (Object.keys(mutation.entry).length === 0) {
-        throw new Error('evolution: mutation.entry must grant at least one of skills / tools / preset / permission / mcpServers')
-      }
-      for (const list of ['skills', 'tools', 'mcpServers'] as const) {
-        const value = mutation.entry[list]
-        if (value === undefined) continue
-        if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || item.trim().length === 0)) {
-          throw new Error(`evolution: mutation.entry.${list} must be an array of non-empty strings`)
-        }
-      }
-      for (const scalar of ['preset', 'permission'] as const) {
-        if (mutation.entry[scalar] !== undefined) nonEmpty(mutation.entry[scalar], `mutation.entry.${scalar}`)
-      }
-      return
-    }
-    case 'task_definition': {
-      assertOnlyKeys(mutation, ['baseVersion', 'definition'], 'task_definition mutation')
-      const base = nonEmpty(mutation.baseVersion, 'mutation.baseVersion')
-      if (base !== baseVersion) {
-        throw new Error(`evolution: mutation.baseVersion "${base}" must equal the proposal's baseVersion "${baseVersion}"`)
-      }
-      if (!isRecord(mutation.definition) || Object.keys(mutation.definition).length === 0) {
-        throw new Error("evolution: mutation.definition must be a non-empty object (the new version's definition fields)")
-      }
-      return
-    }
-    default:
-      // tool / decomposition_policy / workflow_policy / verifier / runtime_policy:
-      // any structured object, bookkeeping only (mechanical: false).
-      return
+  if (targetType !== 'skill') {
+    throw new Error(
+      `evolution: a "${targetType}" mutation has no schema in this build — the only candidate lifecycle here is a single-file ` +
+      'SKILL.md replacement, and every other target type is a recorded proposal',
+    )
   }
+  assertOnlyKeys(mutation, ['name', 'content'], 'skill mutation')
+  assertSegment(mutation.name, 'mutation.name')
+  nonEmpty(mutation.content, 'mutation.content')
 }
 
 /**
@@ -738,9 +663,11 @@ function validateGateAnswers(answers: unknown): void {
 }
 
 /**
- * The state machine, data-dependent at candidate: a candidate carrying a
- * mutation must be prepared (sandbox materialization) before anything else; a
- * mutation-less (manual) candidate gates directly.
+ * The state machine. A candidate is a mutation — this build's candidate is a
+ * single-file `SKILL.md` replacement — so a candidate has exactly one next
+ * state: `prepared` (sandbox materialization). There is no mutation-less
+ * candidate and no direct candidate → gated arc: a proposal with nothing to
+ * evaluate is a recorded proposal, not a flow.
  *
  * A prepared **skill** candidate gates straight from prepared: its evaluation is
  * the two-sided experiment (§F.2), which is recorded in the ledger's experiment
@@ -757,7 +684,7 @@ function nextStates(proposal: EvolutionProposal): readonly EvolutionStatus[] {
     case 'proposed':
       return ['candidate']
     case 'candidate':
-      return proposal.mutation === undefined ? ['gated'] : ['prepared']
+      return ['prepared']
     case 'prepared':
       // A skill candidate gates straight from prepared: its evaluation is the
       // experiment, which does not move the proposal.
@@ -776,8 +703,8 @@ function nextStates(proposal: EvolutionProposal): readonly EvolutionStatus[] {
 /** The one transition check shared by live appends and replay, so an illegal migration reads identically in both. */
 function assertTransition(current: EvolutionProposal, kind: EvolutionStatus): void {
   if (nextStates(current).includes(kind)) return
-  const hint = current.status === 'candidate' && current.mutation !== undefined && kind === 'gated'
-    ? ' — this candidate carries a mutation; record "prepared" first (evolution_prepare)'
+  const hint = current.status === 'candidate'
+    ? ' — record "prepared" first (evolution_prepare), the sandbox materialization this candidate\'s mutation needs'
     : current.status === 'decided' && kind === 'applied'
       ? current.decision !== 'PROMOTE'
         ? ` — the recorded decision is ${current.decision}; only a PROMOTE decision can be applied`
@@ -821,6 +748,30 @@ async function unsupportedCandidateEntries(directory: string): Promise<string[]>
 }
 
 /**
+ * One format, one check (S4-E 收尾): every line this ledger reads, folds or
+ * writes declares `formatVersion: 2`, and nothing else — no v1, no missing
+ * version, no mix. The same refusal guards all three doors the record type
+ * cannot guard on its own: the load (per line, naming the file and the line),
+ * the {@link EvolutionService.append} funnel every lifecycle and sample write
+ * goes through, and {@link EvolutionService.recordExperimentStart}, which
+ * appends beside that funnel. A record that declares anything else is refused
+ * before it is folded or written, and the caller's step is the persistence
+ * contract's: archive the old ledger and start a new one.
+ *
+ * `position` names the line or the record in the operator's own vocabulary
+ * (e.g. `ledger line 3 in /…/proposals.jsonl`), so the message points at the
+ * bytes that are wrong rather than at the entry that noticed them.
+ */
+function assertLedgerFormatVersion(record: { formatVersion?: unknown }, position: string): void {
+  if (record.formatVersion === 2) return
+  throw new Error(
+    `evolution: ${position} declares formatVersion ${JSON.stringify(record.formatVersion ?? null)} — ` +
+    'this build reads and writes formatVersion 2 only, so a v1, unversioned or mixed ledger is refused before any new record ' +
+    'is appended (archive the old ledger and start a new one; no migration or dual-format read is offered)',
+  )
+}
+
+/**
  * The Evolution plane ledger (plane separation: this store is independent of
  * the task store and refers to it by id only). Folding and appending share one
  * fold, so a corrupt or out-of-order log fails loudly instead of silently
@@ -833,17 +784,6 @@ export class EvolutionService extends Service {
   readonly root: string
   /** Production skill root — champion snapshots read from here; apply/rollback write here. */
   readonly skillRoot: string
-  /**
-   * Production agent-preset root, resolved for the ledger's own root vocabulary
-   * (an old record's targets name it). No current entry writes here: the only
-   * executor this build has writes a single `SKILL.md`.
-   */
-  readonly presetRoot: string
-  /**
-   * Production config.yml, resolved for the ledger's own root vocabulary (an
-   * old capability record's targets name it). No current entry edits it.
-   */
-  readonly configFile: string
   /** Repo root that relative evidence paths resolve against (see {@link Config.repoRoot}). */
   readonly repoRoot: string
   /** The injected model-selection resolver, if the assembly wired one (see {@link Config.modelSelection}). */
@@ -860,8 +800,6 @@ export class EvolutionService extends Service {
     const dshHome = process.env.DSH_HOME ?? join(this.repoRoot, '.dsh')
     this.root = resolve(config.root ?? join(dshHome, 'evolution'))
     this.skillRoot = resolve(config.skillRoot ?? join(dshHome, 'skills'))
-    this.presetRoot = resolve(config.presetRoot ?? join(dshHome, '.agent-presets'))
-    this.configFile = resolve(config.configFile ?? join(this.repoRoot, 'config.yml'))
     this.loaded = this.load()
     ctx.effect(
       () => async () => {
@@ -935,9 +873,11 @@ export class EvolutionService extends Service {
 
   /**
    * Move proposed → candidate, recording the complete version set the candidate
-   * aligns to. `mutation` is the optional structured patch description, shaped
-   * and checked against the proposal's targetType; a candidate carrying one
-   * must be prepared before it can gate.
+   * aligns to and the structured patch it carries. `mutation` is required and
+   * shaped by the proposal's targetType: a candidate the ledger cannot
+   * materialize and evaluate is a flow going nowhere, so it is refused here,
+   * before the first candidate line is written. A proposal whose mutation does
+   * not survive {@link validateMutation} stays exactly as it was.
    *
    * **A skill candidate only** (§F.2): a capability, agent_preset,
    * task_definition or bookkeeping-only proposal stays the recorded suggestion
@@ -949,7 +889,7 @@ export class EvolutionService extends Service {
     proposalId: string,
     versionSet: Record<string, string>,
     actor: string,
-    mutation?: unknown,
+    mutation: unknown,
   ): Promise<EvolutionProposal> {
     const current = await this.assertNext(proposalId, 'candidate')
     if (current.targetType !== 'skill') {
@@ -961,13 +901,13 @@ export class EvolutionService extends Service {
       )
     }
     validateVersionSet(versionSet)
-    if (mutation !== undefined) validateMutation(current.targetType, mutation, current.baseVersion)
+    validateMutation(current.targetType, mutation)
     await this.append({
       formatVersion: 2,
       kind: 'candidate',
       proposalId,
       versionSet: { ...versionSet },
-      ...(mutation === undefined ? {} : { mutation: structuredClone(mutation) }),
+      mutation: structuredClone(mutation),
       actor,
       at: new Date().toISOString(),
     })
@@ -975,34 +915,49 @@ export class EvolutionService extends Service {
   }
 
   /**
-   * Move candidate → prepared: materialize the skill mutation into
-   * `<root>/sandbox/<proposalId>/` and snapshot the champion (the production
-   * `SKILL.md`) under `champion/` — the anchor for the experiment's baseline and
-   * for rollback. A production target that does not exist yet records
-   * `champion: 'missing'` (champion: null). Materialization runs before the
-   * ledger append; every write is confined to the sandbox dir.
+   * Move candidate → prepared: confirm the production `SKILL.md` this candidate
+   * replaces, materialize the skill mutation into `<root>/sandbox/<proposalId>/`
+   * and snapshot those same champion bytes under `champion/` — the anchor for
+   * the experiment's baseline and for rollback.
+   *
+   * The production read comes first, before any sandbox or ledger write: this
+   * build replaces an existing single-file `SKILL.md`, so a target that is not
+   * there has nothing to prepare, and a prepare that found none writes nothing
+   * at all. That one read yields both the snapshot and `skillBaseline` (P3),
+   * the digest the later apply compares the production target against.
    *
    * The candidate also records `skillContent` (P2): the name plus the SHA-256 of
    * the exact bytes of the file that was actually materialized (read back from
    * disk, never re-rendered from the mutation string), so the experiment, the
-   * gates, and apply can verify this exact content later. The same single read
-   * of the production file also yields `skillBaseline` (P3), the digest the
-   * later apply compares the production target against.
+   * gates, and apply can verify this exact content later.
    */
   async prepare(proposalId: string, actor: string): Promise<EvolutionProposal> {
     const current = await this.assertNext(proposalId, 'prepared')
+    // Every candidate the fold admits carries a validated mutation: `candidate`
+    // refuses to write one without, and the fold re-runs the same
+    // {@link validateMutation}, so there is no mutation-less candidate to guard
+    // against here. The assert also narrows the view's `unknown` mutation.
     const mutation = current.mutation
-    if (mutation === undefined) {
-      // Unreachable via nextStates (a mutation-less candidate admits only
-      // "gated"); stated so the invariant sits next to its use.
-      throw new Error(`evolution: proposal "${proposalId}" carries no mutation; nothing to prepare`)
-    }
-    validateMutation(current.targetType, mutation, current.baseVersion)
+    validateMutation(current.targetType, mutation)
     assertSegment(proposalId, 'proposalId')
-    const dir = join(this.root, 'sandbox', proposalId)
-    const written = await this.materialize(dir, current, mutation)
-    const sandbox = `sandbox/${proposalId}`
     const { name } = mutation as unknown as SkillMutation
+    // P3: one verified read of the production file, before anything is
+    // written, yields the snapshot and the baseline digest together. A
+    // production path that is a symlink or not a regular file fails here
+    // instead of being followed, and a missing target is refused by name
+    // rather than prepared against nothing.
+    const production = await readProductionSkill(this.skillRoot, name)
+    if (production === null) {
+      throw new Error(
+        `evolution: the production skill "${join(this.skillRoot, name, 'SKILL.md')}" does not exist, so proposal ` +
+        `"${proposalId}" has nothing to replace — this build prepares and promotes a replacement of an existing single-file ` +
+        'SKILL.md only, and a brand-new skill is not what its evidence could show; create the skill in production and propose ' +
+        'a replacement of it',
+      )
+    }
+    const dir = join(this.root, 'sandbox', proposalId)
+    const written = await this.materialize(dir, mutation, production)
+    const sandbox = `sandbox/${proposalId}`
     const skillContent: SkillContentIdentity = {
       name,
       sha256: sha256Hex(await readVerifiedFile(this.root, `${sandbox}/skills/${name}/SKILL.md`)),
@@ -1013,8 +968,8 @@ export class EvolutionService extends Service {
       proposalId,
       sandbox,
       mechanical: true,
-      champion: written.champion,
-      ...(written.skillBaseline === undefined ? {} : { skillBaseline: written.skillBaseline }),
+      champion: 'captured',
+      skillBaseline: written.skillBaseline,
       skillContent,
       files: written.files,
       actor,
@@ -1024,13 +979,12 @@ export class EvolutionService extends Service {
   }
 
   /**
-   * Move candidate → gated (manual candidates) or prepared → gated (skill
-   * candidates): all six Gate answers plus regression evidence refs. Every ref
-   * must exist — a path on disk (relative to the repo root or absolute) or an id
-   * the caller-side resolver knows (task-store evidence). Existence only;
-   * nothing here executes anything. A **skill** proposal must have a completed
-   * two-sided experiment and cite that experiment's report (§F.2); the six
-   * answers are recorded over it.
+   * Move prepared → gated: all six Gate answers plus regression evidence refs.
+   * Every ref must exist — a path on disk (relative to the repo root or
+   * absolute) or an id the caller-side resolver knows (task-store evidence).
+   * Existence only; nothing here executes anything. A **skill** proposal must
+   * have a completed two-sided experiment and cite that experiment's report
+   * (§F.2); the six answers are recorded over it.
    */
   async gate(
     proposalId: string,
@@ -1377,12 +1331,11 @@ export class EvolutionService extends Service {
    * cannot bypass it. Nothing here writes, merges, or overwrites — a conflict
    * only throws.
    *
-   * `captured` requires a real regular file whose bytes still hash to the
-   * digest prepare recorded; `missing` requires the target to still be absent.
-   * A file that appeared, changed, disappeared, changed type (now a directory),
-   * or sits behind a symbolic link (the file itself or an ancestor) is a
-   * conflict. Only `targetType: skill` carries a baseline; every other
-   * targetType passes untouched.
+   * The prepare-time baseline is a real regular file whose bytes still hash to
+   * the digest prepare recorded. A file that changed, disappeared, changed type
+   * (now a directory), or sits behind a symbolic link (the file itself or an
+   * ancestor) is a conflict. Only `targetType: skill` carries a baseline; every
+   * other targetType passes untouched.
    */
   async checkProductionBaseline(proposalId: string): Promise<void> {
     await this.assertProductionBaseline(await this.get(proposalId))
@@ -1406,20 +1359,12 @@ export class EvolutionService extends Service {
         `(${(error as Error).message.replace(/^evolution: /, '')}) — ${guidance}`,
       )
     }
-    if (prepared.champion === 'missing') {
-      if (current !== null) {
-        throw new Error(
-          `evolution: skill proposal "${proposal.proposalId}" was prepared with no production "${target}", ` +
-          `but the file exists now (sha256 ${current.sha256}) — ${guidance}`,
-        )
-      }
-      return
-    }
     const identity = prepared.skillBaseline
     if (identity === undefined) {
+      // The fold requires the baseline on every prepared record, so this branch
+      // is a belt for the view's optional field rather than a reachable state.
       throw new Error(
-        `evolution: skill proposal "${proposal.proposalId}" records no production baseline identity ` +
-        `(it was prepared before the baseline was recorded) — ${guidance}`,
+        `evolution: skill proposal "${proposal.proposalId}" records no production baseline identity — ${guidance}`,
       )
     }
     if (current === null) {
@@ -1442,9 +1387,11 @@ export class EvolutionService extends Service {
     const sandbox = proposal.prepared?.sandbox
     const identity = proposal.prepared?.skillContent
     if (sandbox == null || identity === undefined) {
+      // The fold requires both on every prepared record, so this branch is a
+      // belt for the view's optional fields rather than a reachable state.
       throw new Error(
         `evolution: skill proposal "${proposal.proposalId}" carries no recorded candidate content identity — ` +
-        'it was prepared before content binding; propose a new candidate and re-evaluate it (prepare records the SHA-256 of the materialized SKILL.md)',
+        'propose a new candidate and re-evaluate it (prepare records the SHA-256 of the materialized SKILL.md)',
       )
     }
     const rel = `${sandbox}/skills/${identity.name}/SKILL.md`
@@ -1460,13 +1407,12 @@ export class EvolutionService extends Service {
   }
 
   /**
-   * Move applied → rolledback: undo the apply. Champion captured → restore the
-   * champion `SKILL.md` snapshot; champion missing → delete the skill directory
-   * the apply created. A record of another target type has no executor here:
-   * this build writes and restores a single `SKILL.md` only, and an applied
-   * capability row or preset directory is refused by name rather than touched.
-   * Same approval discipline as apply: the tool asks a human first, the service
-   * only executes and records.
+   * Move applied → rolledback: undo the apply by restoring the champion
+   * `SKILL.md` snapshot taken at prepare. A record of another target type has no
+   * executor here: this build writes and restores a single `SKILL.md` only, and
+   * an applied capability row or preset directory is refused by name rather than
+   * touched. Same approval discipline as apply: the tool asks a human first, the
+   * service only executes and records.
    */
   async rollback(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome> {
     const current = await this.assertNext(proposalId, 'rolledback')
@@ -1499,15 +1445,14 @@ export class EvolutionService extends Service {
     }
     const sandbox = proposal.prepared?.sandbox
     const champion = proposal.prepared?.champion
-    if (sandbox == null || champion === undefined || proposal.mutation === undefined) {
+    if (sandbox == null || champion !== 'captured' || proposal.mutation === undefined) {
+      // The fold admits only a materialized skill prepare (sandbox, champion
+      // snapshot, mutation all present), so this is the belt that narrows the
+      // view for the write below rather than a reachable state.
       throw new Error(`evolution: proposal "${proposal.proposalId}" has no materialized sandbox; nothing to ${direction}`)
     }
     const { name } = proposal.mutation as unknown as SkillMutation
     const dst = resolveWithin(this.skillRoot, join(name, 'SKILL.md'))
-    if (direction === 'rollback' && champion === 'missing') {
-      await rm(resolveWithin(this.skillRoot, name), { recursive: true, force: true })
-      return { targets: [`${resolveWithin(this.skillRoot, name)} (deleted — the apply had created it)`] }
-    }
     if (direction === 'apply') {
       // P2: read the candidate once, verify the digest prepare recorded, and
       // write exactly those verified bytes. The path is never re-read after the
@@ -1564,17 +1509,18 @@ export class EvolutionService extends Service {
 
   /**
    * Write the skill mutation into the sandbox dir `dir`, then the champion
-   * snapshot. Every path goes through `resolveWithin`, so a write can never
-   * land outside the sandbox; the production skill root is read-only here. The
-   * champion is read exactly once (P3): those bytes become both the snapshot
-   * and the recorded `skillBaseline` digest, so the two can never describe two
-   * different reads of the production file.
+   * snapshot from the production bytes the caller already read (P3: one read,
+   * before anything was written — those bytes become the snapshot and the
+   * recorded `skillBaseline` digest together, so the two can never describe two
+   * different reads of the production file). Every path goes through
+   * `resolveWithin`, so a write can never land outside the sandbox; the
+   * production skill root is read-only here.
    */
   private async materialize(
     dir: string,
-    proposal: EvolutionProposal,
     mutation: Record<string, unknown>,
-  ): Promise<{ files: string[]; champion: 'captured' | 'missing'; skillBaseline?: SkillContentIdentity }> {
+    production: { bytes: Buffer; sha256: string },
+  ): Promise<{ files: string[]; skillBaseline: SkillContentIdentity }> {
     const files: string[] = []
     const write = async (rel: string, content: string): Promise<void> => {
       const abs = resolveWithin(dir, rel)
@@ -1583,16 +1529,11 @@ export class EvolutionService extends Service {
       files.push(rel)
     }
     // This build materializes a skill candidate and nothing else: `candidate`
-    // admits no other target type, so the switch below has no other arm to take.
+    // admits no other target type, so there is no other arm to take.
     const { name, content } = mutation as unknown as SkillMutation
     await write(`skills/${name}/SKILL.md`, content)
-    // P3: one verified read of the production file yields the snapshot and
-    // the baseline digest together; a production path that is a symlink or
-    // not a regular file fails here instead of being followed.
-    const production = await readProductionSkill(this.skillRoot, name)
-    if (production === null) return { files, champion: 'missing' }
     await write(`champion/skills/${name}/SKILL.md`, production.bytes.toString('utf8'))
-    return { files, champion: 'captured', skillBaseline: { name, sha256: production.sha256 } }
+    return { files, skillBaseline: { name, sha256: production.sha256 } }
   }
 
   /**
@@ -1603,6 +1544,12 @@ export class EvolutionService extends Service {
    * prepared/applied/rolledback shapes), so a hand-forged line fails
    * load exactly as it would fail append. The same rules guard folding and live
    * appends, so an illegal migration is rejected identically in both paths.
+   *
+   * The fold admits the shape the current entries write and nothing else (S4-E
+   * 收尾): a candidate is a skill mutation, a prepared record carries both
+   * content identities a prepare captured, and a decided record names the human
+   * approval that granted it. A line missing any of them is refused here,
+   * before any later entry can act on the state it would have folded to.
    *
    * The experiment family is not a lifecycle transition and is skipped here;
    * {@link foldLedger} folds it beside this fold.
@@ -1631,65 +1578,65 @@ export class EvolutionService extends Service {
       assertTransition(current, record.kind)
       current.history.push({ status: record.kind, actor: record.actor, at: record.at })
       switch (record.kind) {
-        case 'candidate':
-          validateVersionSet(record.versionSet)
-          if (record.mutation !== undefined) {
-            validateMutation(current.targetType, record.mutation, current.baseVersion)
-            current.mutation = structuredClone(record.mutation)
-          }
-          current.versionSet = { ...record.versionSet }
-          break
-        case 'prepared': {
-          const mechanical = mutationMechanical(current.targetType)
-          if (record.mechanical !== mechanical) {
+        case 'candidate': {
+          // One candidate lifecycle (S4-E 收尾): a skill candidate carrying the
+          // mutation this build materializes. A hand-forged line of another
+          // target type, or without a mutation, has no next state here, so it
+          // is refused where a live `candidate` call would refuse it.
+          if (current.targetType !== 'skill') {
             throw new Error(
-              `evolution: prepared record for "${record.proposalId}" marks mechanical=${record.mechanical}, ` +
-              `but targetType "${current.targetType}" implies ${mechanical}`,
+              `evolution: candidate record for "${record.proposalId}" targets "${current.targetType}" — this build's candidate ` +
+              'lifecycle is a single-file SKILL.md replacement only, and no other target type has an evaluator here',
             )
           }
-          if (!CHAMPION_STATES.includes(record.champion)) {
-            throw new Error(`evolution: prepared record for "${record.proposalId}" has unknown champion state "${String(record.champion)}"`)
-          }
-          if (record.sandbox !== null && typeof record.sandbox !== 'string') {
-            throw new Error(`evolution: prepared record for "${record.proposalId}" has a non-string sandbox`)
+          validateVersionSet(record.versionSet)
+          validateMutation(current.targetType, record.mutation)
+          current.mutation = structuredClone(record.mutation)
+          current.versionSet = { ...record.versionSet }
+          break
+        }
+        case 'prepared': {
+          // One prepared shape (S4-E 收尾): the materialized skill prepare, with
+          // both content identities it captured. The bookkeeping-only prepare
+          // (mechanical: false, no sandbox, no champion) belonged to target
+          // types this build's candidate never admits, so it is refused here.
+          if (record.mechanical !== true || record.champion !== 'captured'
+            || typeof record.sandbox !== 'string' || record.sandbox.length === 0) {
+            throw new Error(
+              `evolution: prepared record for "${record.proposalId}" is not a materialized skill prepare ` +
+              `(mechanical=${String(record.mechanical)}, champion=${JSON.stringify(record.champion ?? null)}, ` +
+              `sandbox=${JSON.stringify(record.sandbox ?? null)}) — this build prepares a single-file SKILL.md replacement only`,
+            )
           }
           if (!Array.isArray(record.files) || record.files.some(file => typeof file !== 'string')) {
             throw new Error(`evolution: prepared record for "${record.proposalId}" has a non-string file list`)
           }
-          if (mechanical && (record.sandbox === null || record.champion === 'none')) {
-            throw new Error(`evolution: prepared record for "${record.proposalId}" is mechanical but names no sandbox`)
+          // P2/P3, required (S4-E 收尾): a prepare without the candidate's
+          // content identity or without the production baseline it read is a
+          // prepare whose evidence cannot be re-proved, and no entry here writes
+          // one.
+          const skillContent = record.skillContent
+          if (!isRecord(skillContent) || typeof skillContent.name !== 'string' || skillContent.name.length === 0
+            || typeof skillContent.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(skillContent.sha256)) {
+            throw new Error(
+              `evolution: prepared record for "${record.proposalId}" has no valid skillContent identity — every prepare records the ` +
+              'content identity of the materialized candidate SKILL.md',
+            )
           }
-          if (!mechanical && (record.sandbox !== null || record.champion !== 'none' || record.files.length > 0)) {
-            throw new Error(`evolution: prepared record for "${record.proposalId}" is bookkeeping-only but carries sandbox artifacts`)
-          }
-          // P2: skillContent is optional (pre-binding records fold without it)
-          // but when present it must be a real identity on a skill proposal.
-          if (record.skillContent !== undefined) {
-            if (current.targetType !== 'skill') {
-              throw new Error(`evolution: prepared record for "${record.proposalId}" carries skillContent but targetType "${current.targetType}" is not skill`)
-            }
-            if (!isRecord(record.skillContent) || typeof record.skillContent.name !== 'string' || record.skillContent.name.length === 0
-              || typeof record.skillContent.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(record.skillContent.sha256)) {
-              throw new Error(`evolution: prepared record for "${record.proposalId}" has a malformed skillContent identity`)
-            }
-          }
-          // P3: skillBaseline is optional (pre-baseline records fold without
-          // it) but when present it must be a real identity on a skill proposal.
-          if (record.skillBaseline !== undefined) {
-            if (current.targetType !== 'skill') {
-              throw new Error(`evolution: prepared record for "${record.proposalId}" carries skillBaseline but targetType "${current.targetType}" is not skill`)
-            }
-            if (!isRecord(record.skillBaseline) || typeof record.skillBaseline.name !== 'string' || record.skillBaseline.name.length === 0
-              || typeof record.skillBaseline.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(record.skillBaseline.sha256)) {
-              throw new Error(`evolution: prepared record for "${record.proposalId}" has a malformed skillBaseline identity`)
-            }
+          const skillBaseline = record.skillBaseline
+          if (!isRecord(skillBaseline) || typeof skillBaseline.name !== 'string' || skillBaseline.name.length === 0
+            || typeof skillBaseline.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(skillBaseline.sha256)) {
+            throw new Error(
+              `evolution: prepared record for "${record.proposalId}" has no valid skillBaseline identity — every prepare records the ` +
+              'production baseline it read before materializing the candidate',
+            )
           }
           current.prepared = {
             sandbox: record.sandbox,
-            mechanical: record.mechanical,
-            champion: record.champion,
-            ...(record.skillContent === undefined ? {} : { skillContent: { name: record.skillContent.name, sha256: record.skillContent.sha256 } }),
-            ...(record.skillBaseline === undefined ? {} : { skillBaseline: { name: record.skillBaseline.name, sha256: record.skillBaseline.sha256 } }),
+            mechanical: true,
+            champion: 'captured',
+            skillContent: { name: skillContent.name, sha256: skillContent.sha256 },
+            skillBaseline: { name: skillBaseline.name, sha256: skillBaseline.sha256 },
             files: [...record.files],
           }
           break
@@ -1701,14 +1648,17 @@ export class EvolutionService extends Service {
         case 'decided':
           current.decision = record.decision
           if (record.note !== undefined) current.decisionNote = record.note
-          // approvalRef is optional only so ledger lines written before the
-          // field existed still fold; when present it must be real evidence.
-          if (record.approvalRef !== undefined) {
-            if (typeof record.approvalRef !== 'string' || record.approvalRef.length === 0) {
-              throw new Error(`evolution: decided record for "${record.proposalId}" has an empty human-approval evidence ref`)
-            }
-            current.decisionApprovalRef = record.approvalRef
+          // The human review is not optional (S4-E 收尾): `decide` writes the
+          // approval call id of the request that granted the decision on both of
+          // its paths — PROMOTE and REJECT — so a decided line without one is a
+          // line no entry here writes.
+          if (typeof record.approvalRef !== 'string' || record.approvalRef.length === 0) {
+            throw new Error(
+              `evolution: decided record for "${record.proposalId}" has no human-approval evidence ref — every decision this build ` +
+              'records was granted through a human approval and carries that call id',
+            )
           }
+          current.decisionApprovalRef = record.approvalRef
           break
         case 'applied':
         case 'rolledback': {
@@ -1746,18 +1696,10 @@ export class EvolutionService extends Service {
     // One format, one check (S4-E 收尾): the ledger is `formatVersion: 2`, and
     // every line must say so. A v1, unversioned or mixed ledger is refused here
     // — at load, before any entry can append — naming the line and the version
-    // it saw. The operator's step is the persistence contract's: archive the old
-    // ledger and start a new one. There is no dual-format read, no online
-    // migration and no fallback helper.
+    // it saw. There is no dual-format read, no online migration and no fallback
+    // helper.
     for (const [index, record] of records.entries()) {
-      const version: unknown = (record as { formatVersion?: unknown }).formatVersion
-      if (version !== 2) {
-        throw new Error(
-          `evolution: ledger line ${index + 1} in ${this.file} declares formatVersion ${JSON.stringify(version ?? null)} — ` +
-          'this build reads and writes formatVersion 2 only, so a v1, unversioned or mixed ledger is refused before any new record ' +
-          'is appended (archive the old ledger and start a new one; no migration or dual-format read is offered)',
-        )
-      }
+      assertLedgerFormatVersion(record, `ledger line ${index + 1} in ${this.file}`)
     }
     this.records = records
     this.foldLedger(this.records)
@@ -1775,10 +1717,17 @@ export class EvolutionService extends Service {
     return proposals
   }
 
-  /** Validate the staged fold first; memory commits only after the line is on disk. */
+  /**
+   * Validate the staged fold first; memory commits only after the line is on
+   * disk. The format check runs before the fold, so a record declaring another
+   * version is refused before it can be folded — and, because nothing is
+   * written until the fold has accepted the staged ledger, before a byte
+   * changes on disk.
+   */
   private async append(record: EvolutionRecord): Promise<void> {
     await this.loaded
     const run = this.writes.then(async () => {
+      assertLedgerFormatVersion(record, `the ${record.kind} record for proposal "${record.proposalId}"`)
       this.foldLedger([...this.records, record])
       await mkdir(this.root, { recursive: true })
       await appendFile(this.file, `${JSON.stringify(record)}\n`, 'utf8')
@@ -1834,6 +1783,11 @@ export class EvolutionService extends Service {
   async recordExperimentStart(record: ExperimentStartedRecord): Promise<void> {
     await this.loaded
     const run = this.writes.then(async () => {
+      // One format at this door too, before anything is decided about the
+      // record — and before the idempotent return below: a v1 line that repeats
+      // an experiment's identity must be refused, not silently accepted as the
+      // repeat of what the ledger already holds.
+      assertLedgerFormatVersion(record, `the experiment_started record for "${record.experimentId}"`)
       // The line must stand on its own before anything is decided about it:
       // frozen block, digest, id, budget and report path all re-derived.
       assertExperimentStartRecord(record, this.fold(this.records))
