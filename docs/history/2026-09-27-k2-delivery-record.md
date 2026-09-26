@@ -2,7 +2,7 @@
 
 - 合同：[execution-prompts/12b-k2-evolution-commit.md](../execution-prompts/12b-k2-evolution-commit.md)；公共合同：execution-prompts/README.md。
 - 基线：Singularity `274cb30`（K1 已验收）、外层 `d39f44c5d3`；开工前两仓工作树干净（外层 thirdparty/deepseek-harness 未跟踪变更保留未动）。
-- 交付：Singularity `c0c1393`（代码+测试）+ 本记录与文档同步提交（见 git log）；外层指针提交见 git log。日期 2026-09-27。无真实模型费用、无推送、无部署。
+- 交付：Singularity `c0c1393`（代码+测试）、`5b503d8`（guide/计划/持久化记录/本记录）及文档收口提交（见 git log）；外层指针 `b1ebb2b` 及收口指针提交（见 git log）。日期 2026-09-27。无真实模型费用、无推送、无部署。
 - 执行：实现主代理 + 三个 coder 子代理（分工见文末）。
 
 ## 新行为一句话
