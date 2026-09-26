@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { EvolutionService } from '../../evolution/src/index.ts'
 import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
-import { deploymentModelIdentity } from '../../agent-singularity/src/index.ts'
+import { deploymentModelSelection } from '../../agent-singularity/src/index.ts'
 import { promotionExperimentContext, recordPromotionExperiment } from '../support/promotion-experiment.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
@@ -72,9 +72,9 @@ function evolutionOf(h: RunStack): EvolutionService {
     skillRoot: join(h.home, 'skills'),
     presetRoot: join(h.workspace, 'production-presets'),
     configFile: join(h.workspace, 'config.yml'),
-    // The same resolver the deployment wires: the model identity the experiment
-    // freezes and the promotion gate re-reads.
-    modelIdentity: () => deploymentModelIdentity(h.ctx),
+    // The same resolver the deployment wires: the model selection the experiment
+    // freezes and the promotion gate re-reads from the runs' own requests.
+    modelSelection: () => deploymentModelSelection(h.ctx),
   })
 }
 
@@ -179,7 +179,7 @@ async function applySkillVersion(h: RunStack, name: string, content: string, pro
   // store a live batch is still settling in.
   const { reportPath } = await recordPromotionExperiment(promotionExperimentContext(h), svc, {
     proposalId,
-    model: deploymentModelIdentity(h.ctx)!,
+    selection: deploymentModelSelection(h.ctx)!,
   })
   await svc.gate(proposalId, gateAnswers([reportPath]), ROOT_A)
   await svc.decide(proposalId, 'PROMOTE', ROOT_A, 'approval:decide')

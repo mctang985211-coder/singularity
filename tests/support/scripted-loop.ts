@@ -192,6 +192,14 @@ export interface ScriptedLoopOptions {
    * serves is refused rather than quietly answered by the default.
    */
   readonly providers?: readonly string[]
+  /**
+   * The deployment's default model selection, read live (`agentDefaultModel`).
+   * Defaults to `{ provider: 'mock', model: 'mock' }`. A case that moves the
+   * deployment's default *between* two runs — the freeze-drift counterexample
+   * (S4-E §Q3) — reads it through a value the spec mutates, exactly as a
+   * settings write moves a real deployment's default.
+   */
+  readonly defaultSelection?: () => { provider: string; model: string; reasoningEffort?: string }
   /** Tools whose recorded execution also keeps its arguments — the side-effect probe a denial is asserted against. */
   readonly probes?: readonly string[]
   /**
@@ -662,7 +670,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
     ctx.on('session/flush', () => {})
     // The deployment's other services. The loop's own turn drives everything
     // else, so these are the seams a graph deployment provides and nothing more.
-    ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'mock', model: 'mock' }) })
+    ctx.provide('agentDefaultModel', { currentSelection: () => this.options.defaultSelection?.() ?? { provider: 'mock', model: 'mock' } })
     ctx.provide('agentPresets', { defaultId: 'standard', mount: async () => {}, resolve: async () => ({}) })
     ctx.provide('permissionPresets', { set: vi.fn(), resolve: () => ({}) })
     // The human seam, driven by the spec: the channel below asks through it, and

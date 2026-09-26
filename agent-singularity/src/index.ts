@@ -12,7 +12,8 @@ import type {} from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-context'
 import type {} from '@dangosys/dsh-singularity-task'
 import { optionalService } from '@dangosys/dsh-singularity-task-runtime'
-import { EvolutionService, modelIdentityOf } from '@dangosys/dsh-singularity-evolution'
+import { EvolutionService, modelSelectionOf } from '@dangosys/dsh-singularity-evolution'
+import type { ModelSelection } from '@dangosys/dsh-singularity-evolution'
 import { HitlService } from './hitl.ts'
 import { EscalationService } from './escalation.ts'
 import { ProposalReviewService } from './proposal-review.ts'
@@ -145,24 +146,28 @@ const REPO_ROOT = fileURLToPath(new URL('../../../../', import.meta.url))
 interface ModelSelectionLike {
   provider?: unknown
   model?: unknown
+  reasoningEffort?: unknown
+  maxTokens?: unknown
 }
 
 /**
- * The model identity the evolution plane freezes with an experiment and re-reads
- * before a promotion (see `Config.modelIdentity` of the evolution service).
+ * The model selection the evolution plane freezes with an experiment and
+ * re-reads before a promotion (see `Config.modelSelection` of the evolution
+ * service).
  *
  * One source for both ends: the deployment's own default selection
  * (`agentDefaultModel.currentSelection()`), which is the configuration a session
- * without an explicit selection — and every replay the runtime spawns for an
- * experiment — runs under. The experiment tool freezes exactly this value, so
- * the identity a report is frozen under is the one the gate later compares
- * against; a deployment that mounts no such service answers `undefined`, and the
- * ledger then refuses to evaluate or promote rather than skipping the check.
+ * without an explicit selection runs under — and the selection every replay the
+ * runtime spawns for an experiment is now placed under verbatim. The experiment
+ * tool freezes exactly this value, so the selection a report is frozen under is
+ * the one the gate later re-checks against the runs' own session logs; a
+ * deployment that mounts no such service answers `undefined`, and the ledger
+ * then refuses to evaluate or promote rather than skipping the check.
  */
-export function deploymentModelIdentity(ctx: Context): string | undefined {
+export function deploymentModelSelection(ctx: Context): ModelSelection | undefined {
   const defaults = optionalService<{ currentSelection(): ModelSelectionLike }>(ctx, 'agentDefaultModel')
   try {
-    return modelIdentityOf(defaults?.currentSelection())
+    return modelSelectionOf(defaults?.currentSelection())
   } catch {
     return undefined
   }
@@ -183,7 +188,7 @@ export class SingularityAgent extends Service {
     // lifecycle itself is the evolution package's; this assembly says where the
     // harness root is and which model the deployment's runs share — the one
     // fact the package cannot derive from a process with no agent of its own.
-    new EvolutionService(ctx, { repoRoot: REPO_ROOT, modelIdentity: () => deploymentModelIdentity(ctx) })
+    new EvolutionService(ctx, { repoRoot: REPO_ROOT, modelSelection: () => deploymentModelSelection(ctx) })
     // Same discipline for the escalation ledger: the `escalate` tool reads
     // `ctx.escalation` from this fiber, and the parent never injects it.
     new EscalationService(ctx)

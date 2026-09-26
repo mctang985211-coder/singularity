@@ -23,11 +23,23 @@
  *   snapshot, loops or names something unreadable before any run starts;
  * - `frozen.candidate` / `frozen.productionBaseline` — the content identity of
  *   the bytes the candidate side runs and of the production skill it replaces;
- * - `frozen.model` and `frozen.budget` — the caller's model identity and budget,
- *   recorded as given. This plane enforces no run-level budget and says so
- *   rather than implying otherwise: `ReplayTaskOptions` carries no budget to
+ * - `frozen.model` and `frozen.budget` — the deployment's structured model
+ *   selection and the caller's budget, both fixed before the first side. The
+ *   selection is handed to every run verbatim as its `agentOptions` (S4-E §Q3),
+ *   so both sides — and whatever a side's worker decomposes into — run on the
+ *   route it names whatever the deployment's default becomes afterwards; the
+ *   promotion gate re-reads it from the runs' own session logs. The budget is
+ *   recorded as given: this plane enforces no run-level budget and says so
+ *   rather than implying otherwise (`ReplayTaskOptions` carries no budget to
  *   pass through, and what a tree actually spends stays the runtime's own root
- *   budget, measured where the runs are;
+ *   budget, measured where the runs are);
+ * - each sample's `frozen.samples[i].provider` — the provider identity the
+ *   production baseline side of that sample must bind, read before anything runs
+ *   through the runtime's own pre-check (rows, registry revision, MCP servers,
+ *   preset and every resolved skill). The candidate side is compared against it
+ *   with the promoted skill's own content substituted — the one difference the
+ *   overlay is there to produce — and each side's criterion judge is frozen with
+ *   its `verifierRef` and the version the registry declared then;
  * - `frozen.comparerVersion` and `frozen.overlay` — how the verdicts are
  *   computed and what each side ran under.
  * `frozenDigest` covers the block, and the experiment id derives from it: a
@@ -72,7 +84,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import type { AcceptanceCriterion, ReviewCriterion, ReviewRecord, TaskInstance, TaskSnapshot } from '@dangosys/dsh-singularity-task'
-import type { ReplayRunOutcome, ReplayTaskOptions } from '@dangosys/dsh-singularity-task-runtime'
+import type { CapabilityConfig, ReplayRunOutcome, ReplayTaskOptions } from '@dangosys/dsh-singularity-task-runtime'
 import type { EvolutionProposal } from './evolution.ts'
 import type {
   ExperimentBudget,
@@ -84,10 +96,14 @@ import type {
   ExperimentSideDetail,
   FrozenCriterion,
   FrozenExperiment,
+  FrozenProviderIdentity,
+  FrozenProviderSkill,
   FrozenSample,
+  ModelSelection,
   SkillContentIdentity,
 } from './replay.ts'
 import {
+  agentOptionsOf,
   assertExperimentReport,
   assertFrozenExperiment,
   canonicalJson,
@@ -120,13 +136,13 @@ export interface ExperimentSpec {
   /** The directory whose recursive content is the frozen input both workspaces are built from. */
   snapshot: { sourceDir: string }
   /**
-   * The model identity the caller froze — an opaque string (a model name, a
-   * scripted configuration's digest, the tool set the runs share). Nothing here
-   * interprets it, and nothing here can verify that a run used it: it is the
-   * caller's declaration, recorded in the frozen block so a later reader sees
-   * exactly what was claimed.
+   * The deployment's own model selection, frozen before the first run (S4-E
+   * §Q3). It reaches every run verbatim as its `agentOptions`, so both sides —
+   * and whatever a side's worker decomposes into — run on the route it names,
+   * whatever the deployment's default selection becomes afterwards. The
+   * promotion gate re-reads the selection off the runs' own session logs.
    */
-  model: string
+  model: ModelSelection
   budget: ExperimentBudget
   /**
    * This experiment's repetition index. `0` is the first run of the frozen
@@ -274,6 +290,22 @@ export interface ExperimentLedger {
   recordExperimentSample(record: ExperimentSampleRecord): Promise<void>
 }
 
+/** One accepted provider verdict, as a freeze reads it off the runtime's own pre-check (the members it records, and no more). */
+export interface PrecheckSkillVerdict {
+  readonly valid: boolean
+  readonly name: string
+  readonly role?: string
+  readonly contractDigest?: string | null
+  readonly contentDigest?: string
+  readonly defects?: readonly { readonly code: string; readonly detail: string }[]
+}
+
+/** The runtime's provider pre-check as the freeze consumes it (`TaskRuntime.capabilityProviderReport`). */
+export interface ProviderPrecheckView {
+  readonly capabilities: readonly { readonly capability: string; readonly skills: readonly PrecheckSkillVerdict[] }[]
+  readonly revision: string
+}
+
 /** The services one experiment reads, as the caller's context holds them. */
 export interface ExperimentSources {
   readonly evolution: ExperimentLedger
@@ -281,7 +313,24 @@ export interface ExperimentSources {
   readonly task: { openStore(storeId: string): Promise<TaskSnapshot> }
   readonly taskRuntime: {
     replayTask(storeId: string, championTaskId: string, options: ReplayTaskOptions, callerSessionId: string): Promise<ReplayRunOutcome>
+    /**
+     * The runtime's own provider pre-check for one session's viewpoint (S4-E
+     * §Q3): the freeze reads the production configuration's provider identity
+     * for a sample's rows through the same entry `capability_list` renders, so
+     * the identity a gate later compares against is the runtime's own
+     * conclusion, never this plane's guess.
+     */
+    capabilityProviderReport(sessionId: string, capabilities?: readonly string[]): Promise<ProviderPrecheckView>
+    /** The effective capability table, as the runtime holds it — the rows a pre-check covered and the servers they grant. */
+    listCapabilities?(): Readonly<Record<string, CapabilityConfig>>
   }
+  /**
+   * The registered judge vocabulary at freeze time (S4-E §Q3), or `undefined`
+   * when the deployment cannot list it — which is a named refusal for a
+   * criterion that pins a `verifierRef`, and is read through the same helper
+   * every provider check uses.
+   */
+  verifierVocabulary?(): Promise<VerifierVocabularyView | undefined>
 }
 
 /** What one experiment call produced. */
@@ -471,7 +520,14 @@ async function experimentCandidate(
 /** The specification's own shape, before anything is read or frozen. */
 function validateSpec(spec: ExperimentSpec): void {
   nonEmpty(spec.proposalId, 'proposalId')
-  nonEmpty(spec.model, 'model')
+  if (spec.model === null || typeof spec.model !== 'object'
+    || typeof spec.model.provider !== 'string' || spec.model.provider.length === 0
+    || typeof spec.model.model !== 'string' || spec.model.model.length === 0) {
+    throw new Error(
+      'experiment: model must be the structured selection { provider, model } the runs are placed under — a bare string names no ' +
+      'route a spawn can be given, so nothing may be frozen under it',
+    )
+  }
   if (typeof spec.snapshot?.sourceDir !== 'string' || spec.snapshot.sourceDir.trim().length === 0) {
     throw new Error('experiment: snapshot.sourceDir must be the directory both sides are built from')
   }
@@ -506,8 +562,27 @@ function assertSampleRole(sample: ExperimentSampleSpec, task: TaskInstance, revi
   }
 }
 
-/** The frozen acceptance identity of one criterion, taken from the sample's own stored contract. */
-function frozenCriterionOf(criterion: AcceptanceCriterion): FrozenCriterion {
+/** The registered judge vocabulary one freeze reads: the ids and declared versions the runs are judged by. */
+export interface VerifierVocabularyView {
+  readonly ids: readonly string[]
+  readonly versions: Readonly<Record<string, string>>
+}
+
+/**
+ * One criterion's frozen judge identity (S4-E §Q3), read from the criterion's
+ * own declaration and the registry as it stands *before* the first run.
+ *
+ * A pinned ref (`AcceptanceCriterion.verifierRef`) is exactly recallable: the
+ * registry names the instance, and when that instance declares a version the
+ * version is frozen beside it. A pinned judge that declares no version is
+ * anchored by its registration id, named here. A criterion that pins no ref
+ * lets the registry dispatch by `verificationMode`, which this plane cannot
+ * resolve into one instance without re-implementing dispatch — so the anchor
+ * says exactly that, and the gate requires the deciding judge's id and version
+ * (read from the run's own verdicts) to still be registered at the version it
+ * judged with.
+ */
+function frozenCriterionOf(criterion: AcceptanceCriterion, where: string, vocabulary: VerifierVocabularyView | undefined): FrozenCriterion {
   const inputs = criterion.protectedInputs ?? []
   for (const input of inputs) {
     if (typeof input?.path !== 'string' || input.path.length === 0 || !isHex64(input?.sha256)) {
@@ -517,19 +592,149 @@ function frozenCriterionOf(criterion: AcceptanceCriterion): FrozenCriterion {
       )
     }
   }
+  const ref = criterion.verifierRef
+  let verifierVersion: string | undefined
+  let verifierAnchor: string
+  if (ref === undefined) {
+    verifierAnchor =
+      `the criterion pins no verifierRef; the registry dispatches mode "${criterion.verificationMode}" to a registered judge, and the ` +
+      'deciding judge\'s id and version are read from the run\'s verdicts and re-checked against the registry'
+  } else if (vocabulary === undefined) {
+    throw new Error(
+      `${where} pins verifier "${ref}" but this deployment cannot list its verifier registry (verifierIds()/verifierVersions() are ` +
+      'unavailable), so the judge identity cannot be frozen — an experiment whose judge nobody can name is refused before it runs',
+    )
+  } else if (!vocabulary.ids.includes(ref)) {
+    throw new Error(
+      `${where} pins verifier "${ref}", which the registry does not hold (registered: ${vocabulary.ids.length === 0 ? 'none' : vocabulary.ids.join(', ')}) — ` +
+      'the criterion would be judged inconclusive by a judge that does not exist; name a registered verifier before freezing the experiment',
+    )
+  } else {
+    const declared = vocabulary.versions[ref]
+    if (declared === undefined) {
+      verifierAnchor = `registered verifier "${ref}" declares no version; its registration id is the anchor the gate re-checks`
+    } else {
+      verifierVersion = declared
+      verifierAnchor = `registered verifier "${ref}" declares version "${declared}"`
+    }
+  }
   return {
     criterionId: criterion.criterionId,
     verificationMode: criterion.verificationMode,
     ...(criterion.command === undefined ? {} : { command: criterion.command }),
     protectedInputsDigest: protectedInputsDigest(inputs),
+    verifierRef: ref ?? null,
+    ...(verifierVersion === undefined ? {} : { verifierVersion }),
+    verifierAnchor,
   }
 }
 
-/** Freeze one sample from its store record: what the case is, and the acceptance the replay mirrors into both sides. */
-function frozenSampleOf(sample: ExperimentSampleSpec, task: TaskInstance, review: ReviewRecord): FrozenSample {
+/**
+ * The provider identity the production baseline side of one sample must bind
+ * (S4-E §Q3): the runtime's own pre-check over the rows the sample's required
+ * capabilities resolve to, run from the caller's viewpoint before anything
+ * runs, plus the MCP servers and preset the effective table declares for those
+ * rows. Every value here is read from the deployment's own configuration — the
+ * pre-check's revision is the runtime's own conclusion, not a guess this plane
+ * makes.
+ *
+ * Refused by name when the deployment cannot answer (no runtime pre-check, a
+ * row the table does not hold, a refused provider, conflicting presets): a
+ * sample whose provider identity cannot be fixed is not an experiment this
+ * build may run.
+ */
+async function frozenProviderIdentity(input: {
+  sources: ExperimentSources
+  caller: SessionId
+  sampleTaskId: string
+  required: readonly string[]
+  where: string
+}): Promise<FrozenProviderIdentity> {
+  const { sources, caller, sampleTaskId, required, where } = input
+  const table = sources.taskRuntime.listCapabilities?.()
+  if (table === undefined) {
+    throw new Error(
+      `${where} cannot fix the provider identity the production baseline runs under: this deployment's task runtime exposes no ` +
+      'capability table (listCapabilities), so which rows, servers and skills the sample resolves to is not knowable before it runs — ' +
+      'the experiment is refused rather than run under an identity nobody can compare against',
+    )
+  }
+  const missing = [...new Set(required)].filter(name => table[name] === undefined).sort()
+  if (missing.length > 0) {
+    throw new Error(
+      `${where} requires ${missing.length > 1 ? 'capabilities' : 'capability'} [${missing.join(', ')}], which the effective capability ` +
+      'table does not hold — the runtime would refuse the replay for a capability gap after freezing; name rows the deployment has',
+    )
+  }
+  const rows = [...new Set(required)].sort()
+  let precheck: ProviderPrecheckView
+  try {
+    precheck = await sources.taskRuntime.capabilityProviderReport(caller, rows)
+  } catch (error) {
+    throw new Error(
+      `${where} cannot run the runtime's provider pre-check over rows [${rows.join(', ') || 'none'}] (${error instanceof Error ? error.message : String(error)}) — ` +
+      'the provider identity the production baseline would bind cannot be fixed, so the experiment is refused before it runs',
+    )
+  }
+  const refused = precheck.capabilities.flatMap(row => row.skills.filter(skill => !skill.valid).map(skill =>
+    `${row.capability}: skill "${skill.name}" (${(skill.defects ?? []).map(defect => `${defect.code}: ${defect.detail}`).join('; ')})`))
+  if (refused.length > 0) {
+    throw new Error(
+      `${where} resolves to providers the deployment cannot use, so the production baseline could not run under them:\n- ${refused.join('\n- ')}`,
+    )
+  }
+  const skills: FrozenProviderSkill[] = precheck.capabilities
+    .flatMap(row => row.skills)
+    .filter(skill => skill.valid)
+    .filter((skill, index, all) => all.findIndex(entry => entry.name === skill.name) === index)
+    .map((skill): FrozenProviderSkill => {
+      const role = skill.role
+      if (role !== 'execution-provider' && role !== 'knowledge' && role !== 'guidance') {
+        throw new Error(`${where} resolved skill "${skill.name}" to an unknown role "${String(role)}"; the provider identity cannot be frozen`)
+      }
+      if (typeof skill.contentDigest !== 'string' || skill.contentDigest.length === 0) {
+        throw new Error(`${where} resolved skill "${skill.name}" without a content digest; the provider identity cannot be frozen`)
+      }
+      return {
+        name: skill.name,
+        role,
+        contractDigest: skill.contractDigest ?? null,
+        contentDigest: skill.contentDigest,
+      }
+    })
+    .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
+  const mcpServers = [...new Set(rows.flatMap(row => table[row]?.mcpServers ?? []))].sort()
+  const declaredPresets = new Set(rows.flatMap(row => {
+    const preset = table[row]?.preset
+    return preset === undefined ? [] : [preset]
+  }))
+  if (declaredPresets.size > 1) {
+    throw new Error(
+      `${where}'s rows declare conflicting presets (${[...declaredPresets].sort().join(', ')}); one worker requires one preset, so the ` +
+      'runtime would refuse the replay — split the rows or align the presets before freezing the experiment',
+    )
+  }
+  return {
+    capabilities: rows,
+    registryRevision: precheck.revision,
+    mcpServers,
+    preset: declaredPresets.size === 0 ? null : [...declaredPresets][0]!,
+    skills,
+  }
+}
+
+/** Freeze one sample from its store record: what the case is, the acceptance the replay mirrors into both sides, and the provider identity. */
+function frozenSampleOf(
+  sample: ExperimentSampleSpec,
+  task: TaskInstance,
+  review: ReviewRecord,
+  provider: FrozenProviderIdentity,
+  vocabulary: VerifierVocabularyView | undefined,
+): FrozenSample {
   if (task.acceptanceCriteria.length === 0) {
     throw new Error(`sample "${sample.taskId}" carries no acceptance criteria; there is nothing for the two sides to be judged by`)
   }
+  const where = `sample "${sample.taskId}"`
   return {
     taskId: sample.taskId,
     role: sample.role,
@@ -538,11 +743,12 @@ function frozenSampleOf(sample: ExperimentSampleSpec, task: TaskInstance, review
       acceptanceCriteria: task.acceptanceCriteria,
       requiredCapabilities: task.requestedCapabilities,
     }),
-    criteria: task.acceptanceCriteria.map(frozenCriterionOf),
+    criteria: task.acceptanceCriteria.map(criterion => frozenCriterionOf(criterion, where, vocabulary)),
     observed: {
       outcome: review.outcome === 'failed' ? 'failed' : 'verified',
       ...(review.runId === undefined ? {} : { runId: review.runId }),
     },
+    provider,
   }
 }
 
@@ -561,7 +767,13 @@ function freezeExperiment(input: {
     repetition: input.spec.repetition,
     candidate: { name: input.candidate.name, sha256: input.candidate.sha256 },
     ...(input.productionBaseline === undefined ? {} : { productionBaseline: { ...input.productionBaseline } }),
-    model: input.spec.model,
+    model: {
+      provider: input.spec.model.provider,
+      model: input.spec.model.model,
+      ...(input.spec.model.reasoningEffort === undefined ? {} : { reasoningEffort: input.spec.model.reasoningEffort }),
+      ...(input.spec.model.maxTokens === undefined ? {} : { maxTokens: input.spec.model.maxTokens }),
+      label: `${input.spec.model.provider}/${input.spec.model.model}`,
+    },
     budget: { ...input.spec.budget },
     samples: input.samples,
     snapshot: { sourceDir: resolve(input.spec.snapshot.sourceDir), digest: input.snapshotDigest },
@@ -847,7 +1059,12 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
   validateSpec(spec)
   const { sandbox, candidate, proposal } = await experimentCandidate(sources, spec.proposalId)
   const { storeId, snapshot } = await experimentStore(sources, caller)
-  const samples = spec.samples.map(sample => {
+  // The judge vocabulary the criteria are frozen against, read before anything
+  // is written: a pinned verifierRef the registry does not hold is a refusal
+  // here, not an inconclusive verdict after a run.
+  const vocabulary = await sources.verifierVocabulary?.()
+  const samples = []
+  for (const sample of spec.samples) {
     const task = snapshot.tasks.find(item => item.taskId === sample.taskId)
     if (task === undefined) throw new Error(`unknown sample task "${sample.taskId}" in this graph's task store`)
     if (task.status !== 'verified' && task.status !== 'failed') {
@@ -858,8 +1075,17 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
       throw new Error(`sample "${sample.taskId}" has no review record on its latest run; there is no case to reproduce`)
     }
     assertSampleRole(sample, task, review)
-    return frozenSampleOf(sample, task, review)
-  })
+    // Before anything runs: the provider identity the production baseline side
+    // of this sample must bind, read through the runtime's own pre-check.
+    const provider = await frozenProviderIdentity({
+      sources,
+      caller,
+      sampleTaskId: sample.taskId,
+      required: task.requestedCapabilities,
+      where: `sample "${sample.taskId}"`,
+    })
+    samples.push(frozenSampleOf(sample, task, review, provider, vocabulary))
+  }
   const frozen = freezeExperiment({
     proposalId: spec.proposalId,
     spec,
@@ -869,6 +1095,13 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
     snapshotDigest: await directoryDigest(spec.snapshot.sourceDir),
     samples,
   })
+  // The model selection, verbatim, as every side's `agentOptions` (S4-E §Q3):
+  // the runtime forwards it to the real spawn, and the frozen block keeps the
+  // structured value the gate re-reads from the runs' own session logs. The
+  // effort member is the deployment's own branded id coming back through the
+  // frozen block, which is why it is handed back as `AgentOptions` rather than
+  // re-typed here.
+  const agentOptions = agentOptionsOf(frozen.model) as ReplayTaskOptions['agentOptions']
   const frozenDigest = frozenDigestOf(frozen)
   const experimentId = experimentIdOf(spec.proposalId, frozenDigest)
   const sandboxRel = `${sandbox}/exp-${experimentId}`
@@ -927,6 +1160,7 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
         const outcome = await sources.taskRuntime.replayTask(storeId, sample.taskId, {
           lineage,
           workspace: { path: real },
+          agentOptions: { ...agentOptions },
           ...(side === 'candidate' ? { overlay: { extraSkillRoots: [resolve(sources.evolution.root, sandbox, 'skills')] } } : {}),
           ...(request.signal === undefined ? {} : { signal: request.signal }),
         }, caller)

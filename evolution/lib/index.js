@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { Context, Service } from "@deepseek-ai/cordis";
+import { SessionId } from "@deepseek-ai/dsh-session";
 import { capabilityToolQuery, loadSkillSidecar, optionalService, readVerifiedFile, registeredVerifierIds, registeredVerifierVocabulary, unlistableVerifierRefusal, validateSkillProvider, walkVerified } from "@dangosys/dsh-singularity-task-runtime";
 import { rootTaskStoreId } from "@dangosys/dsh-singularity-task";
 
@@ -403,6 +404,36 @@ const EXPERIMENT_VERDICTS = [
 	"inconclusive"
 ];
 /**
+* Read one selection as the structured identity, or `undefined` when it names
+* no route. A selection without a provider or without a model is not a
+* structured selection — a caller that cannot produce one is refused rather
+* than given a placeholder (`provider` empty means the request would be routed
+* by adapter defaults nobody froze).
+*/
+function modelSelectionOf(selection) {
+	const provider = typeof selection?.provider === "string" && selection.provider.length > 0 ? selection.provider : void 0;
+	const model = typeof selection?.model === "string" && selection.model.length > 0 ? selection.model : void 0;
+	if (provider === void 0 || model === void 0) return void 0;
+	const reasoningEffort = typeof selection?.reasoningEffort === "string" && selection.reasoningEffort.length > 0 ? selection.reasoningEffort : void 0;
+	const maxTokens = typeof selection?.maxTokens === "number" && Number.isFinite(selection.maxTokens) && selection.maxTokens > 0 ? selection.maxTokens : void 0;
+	return {
+		provider,
+		model,
+		...reasoningEffort === void 0 ? {} : { reasoningEffort },
+		...maxTokens === void 0 ? {} : { maxTokens },
+		label: `${provider}/${model}`
+	};
+}
+/** The `AgentOptions` a frozen selection travels as: the four members, verbatim, with no label. */
+function agentOptionsOf(selection) {
+	return {
+		provider: selection.provider,
+		model: selection.model,
+		...selection.reasoningEffort === void 0 ? {} : { reasoningEffort: selection.reasoningEffort },
+		...selection.maxTokens === void 0 ? {} : { maxTokens: selection.maxTokens }
+	};
+}
+/**
 * JSON with object keys sorted recursively — the one serialization every digest
 * in this schema is taken over. `undefined` members are dropped, so a digest is
 * the same whether an absent optional member was omitted or written as
@@ -507,7 +538,7 @@ function assertFrozenExperiment(value) {
 	if (!Number.isInteger(value.repetition) || value.repetition < 0) throw new Error("evolution: experiment report frozen.repetition must be a non-negative integer");
 	assertIdentity(value.candidate, "frozen.candidate");
 	if (value.productionBaseline !== void 0) assertIdentity(value.productionBaseline, "frozen.productionBaseline");
-	if (typeof value.model !== "string" || value.model.length === 0) throw new Error("evolution: experiment report frozen.model must be a non-empty string (the model identity the caller froze)");
+	assertModelSelection(value.model, "frozen.model");
 	assertExperimentBudget(value.budget, "frozen.budget");
 	if (!isRecord$2(value.snapshot) || typeof value.snapshot.sourceDir !== "string" || value.snapshot.sourceDir.length === 0 || !isHex64$1(value.snapshot.digest)) throw new Error("evolution: experiment report frozen.snapshot must be { sourceDir, digest } with a SHA-256 content digest");
 	if (value.comparerVersion !== EXPERIMENT_COMPARER_VERSION) throw new Error(`evolution: experiment report frozen.comparerVersion must be "${EXPERIMENT_COMPARER_VERSION}" — got ${JSON.stringify(value.comparerVersion)}; a report this build cannot re-derive is refused, not trusted`);
@@ -528,6 +559,42 @@ function assertExperimentBudget(value, field) {
 	}
 	if (value.note !== void 0 && (typeof value.note !== "string" || value.note.length === 0)) throw new Error(`evolution: ${field}.note must be a non-empty string`);
 }
+function assertModelSelection(value, field) {
+	if (!isRecord$2(value)) throw new Error(`evolution: experiment report ${field} must be the structured model selection { provider, model } this build froze — a record that froze a bare string cannot name the route its runs took, so it is refused rather than read as one`);
+	for (const key of Object.keys(value)) if (![
+		"provider",
+		"model",
+		"reasoningEffort",
+		"maxTokens",
+		"label"
+	].includes(key)) throw new Error(`evolution: experiment report ${field} has unknown key "${key}"`);
+	if (typeof value.provider !== "string" || value.provider.length === 0) throw new Error(`evolution: experiment report ${field}.provider must be the provider route the runs go through`);
+	if (typeof value.model !== "string" || value.model.length === 0) throw new Error(`evolution: experiment report ${field}.model must be the model id the runs go through`);
+	if (value.reasoningEffort !== void 0 && (typeof value.reasoningEffort !== "string" || value.reasoningEffort.length === 0)) throw new Error(`evolution: experiment report ${field}.reasoningEffort must be a non-empty string when present`);
+	if (value.maxTokens !== void 0 && (typeof value.maxTokens !== "number" || !Number.isFinite(value.maxTokens) || value.maxTokens <= 0)) throw new Error(`evolution: experiment report ${field}.maxTokens must be a positive number when present`);
+	if (value.label !== `${value.provider}/${value.model}`) throw new Error(`evolution: experiment report ${field}.label must be the derived display form "${value.provider}/${value.model}" — the label is a rendering of the structured members, never an identity of its own`);
+}
+function assertFrozenProviderSkill(value, field) {
+	if (!isRecord$2(value) || typeof value.name !== "string" || value.name.length === 0 || ![
+		"execution-provider",
+		"knowledge",
+		"guidance"
+	].includes(value.role) || value.contractDigest !== null && !isHex64$1(value.contractDigest) || !isHex64$1(value.contentDigest)) throw new Error(`evolution: experiment report ${field} must be a resolved skill identity { name, role, contractDigest, contentDigest }`);
+}
+function assertFrozenProviderIdentity(value, field) {
+	if (!isRecord$2(value)) throw new Error(`evolution: experiment report ${field} must be the frozen provider identity of the sample's production baseline (capabilities, registryRevision, mcpServers, preset, skills) — a sample frozen before that identity was recorded cannot constrain what its sides really ran against`);
+	if (!Array.isArray(value.capabilities) || value.capabilities.some((item) => typeof item !== "string" || item.length === 0)) throw new Error(`evolution: experiment report ${field}.capabilities must be an array of capability names`);
+	if (typeof value.registryRevision !== "string" || value.registryRevision.length === 0) throw new Error(`evolution: experiment report ${field}.registryRevision must be the revision the runtime's pre-check produced`);
+	if (!Array.isArray(value.mcpServers) || value.mcpServers.some((item) => typeof item !== "string" || item.length === 0)) throw new Error(`evolution: experiment report ${field}.mcpServers must be an array of MCP server names`);
+	if (value.preset !== null && (typeof value.preset !== "string" || value.preset.length === 0)) throw new Error(`evolution: experiment report ${field}.preset must be the declared preset or null (the deployment default governs)`);
+	if (!Array.isArray(value.skills)) throw new Error(`evolution: experiment report ${field}.skills must be an array`);
+	const names = /* @__PURE__ */ new Set();
+	for (const skill of value.skills) {
+		assertFrozenProviderSkill(skill, `${field}.skills[${skill.name}]`);
+		if (names.has(skill.name)) throw new Error(`evolution: experiment report ${field} repeats skill "${skill.name}"`);
+		names.add(skill.name);
+	}
+}
 function assertFrozenSample(value, field, seen) {
 	if (!isRecord$2(value) || typeof value.taskId !== "string" || value.taskId.length === 0) throw new Error(`evolution: experiment report ${field} must carry a taskId`);
 	if (seen.has(value.taskId)) throw new Error(`evolution: experiment report ${field} repeats task "${value.taskId}"`);
@@ -538,9 +605,13 @@ function assertFrozenSample(value, field, seen) {
 	const criterionIds = /* @__PURE__ */ new Set();
 	for (const criterion of value.criteria) {
 		if (!isRecord$2(criterion) || typeof criterion.criterionId !== "string" || criterion.criterionId.length === 0 || criterionIds.has(criterion.criterionId) || typeof criterion.verificationMode !== "string" || criterion.verificationMode.length === 0 || criterion.command !== void 0 && typeof criterion.command !== "string" || !isHex64$1(criterion.protectedInputsDigest)) throw new Error(`evolution: experiment report ${field} has an invalid or duplicate frozen criterion`);
+		if (criterion.verifierRef !== null && (typeof criterion.verifierRef !== "string" || criterion.verifierRef.length === 0)) throw new Error(`evolution: experiment report ${field} criterion "${criterion.criterionId}" must pin the judge it was frozen with — a criterion that names neither a ref nor "no ref" cannot be recalled against the judge that decides it`);
+		if (criterion.verifierVersion !== void 0 && (typeof criterion.verifierVersion !== "string" || criterion.verifierVersion.length === 0)) throw new Error(`evolution: experiment report ${field} criterion "${criterion.criterionId}" has a malformed frozen verifier version`);
+		if (typeof criterion.verifierAnchor !== "string" || criterion.verifierAnchor.length === 0) throw new Error(`evolution: experiment report ${field} criterion "${criterion.criterionId}" must name how its judge identity is anchored`);
 		criterionIds.add(criterion.criterionId);
 	}
 	if (!isRecord$2(value.observed) || value.observed.outcome !== "verified" && value.observed.outcome !== "failed" || value.observed.runId !== void 0 && (typeof value.observed.runId !== "string" || value.observed.runId.length === 0)) throw new Error(`evolution: experiment report ${field}.observed must record the historical outcome (and run, when known) the sample was chosen for`);
+	assertFrozenProviderIdentity(value.provider, `${field}.provider`);
 }
 function assertCriterionDetail(value, field) {
 	if (!isRecord$2(value) || typeof value.criterionId !== "string" || value.criterionId.length === 0 || !EXPERIMENT_CONDITION_VERDICTS.includes(value.verdict) || value.verifierId !== void 0 && (typeof value.verifierId !== "string" || value.verifierId.length === 0) || value.verifierVersion !== void 0 && (typeof value.verifierVersion !== "string" || value.verifierVersion.length === 0) || value.command !== void 0 && typeof value.command !== "string" || value.exitCode !== void 0 && typeof value.exitCode !== "number") throw new Error(`evolution: experiment report ${field} has an invalid criterion verdict`);
@@ -904,7 +975,7 @@ async function experimentCandidate(sources, proposalId) {
 /** The specification's own shape, before anything is read or frozen. */
 function validateSpec(spec) {
 	nonEmpty$1(spec.proposalId, "proposalId");
-	nonEmpty$1(spec.model, "model");
+	if (spec.model === null || typeof spec.model !== "object" || typeof spec.model.provider !== "string" || spec.model.provider.length === 0 || typeof spec.model.model !== "string" || spec.model.model.length === 0) throw new Error("experiment: model must be the structured selection { provider, model } the runs are placed under — a bare string names no route a spawn can be given, so nothing may be frozen under it");
 	if (typeof spec.snapshot?.sourceDir !== "string" || spec.snapshot.sourceDir.trim().length === 0) throw new Error("experiment: snapshot.sourceDir must be the directory both sides are built from");
 	if (!Number.isInteger(spec.repetition) || spec.repetition < 0) throw new Error("experiment: repetition must be the experiment's non-negative integer repeat index");
 	if (!Array.isArray(spec.samples) || spec.samples.length === 0) throw new Error("experiment: samples must name at least one sample");
@@ -922,20 +993,105 @@ function assertSampleRole(sample, task, review) {
 	if (review.outcome !== required) throw new Error(`sample "${sample.taskId}" is an ${sample.role} but its latest review record is "${review.outcome}", not "${required}" — a sample must be the case its role names`);
 	if (task.status !== review.outcome) throw new Error(`sample "${sample.taskId}" is ${task.status} but its latest review record is "${review.outcome}"; the two must agree`);
 }
-/** The frozen acceptance identity of one criterion, taken from the sample's own stored contract. */
-function frozenCriterionOf(criterion) {
+/**
+* One criterion's frozen judge identity (S4-E §Q3), read from the criterion's
+* own declaration and the registry as it stands *before* the first run.
+*
+* A pinned ref (`AcceptanceCriterion.verifierRef`) is exactly recallable: the
+* registry names the instance, and when that instance declares a version the
+* version is frozen beside it. A pinned judge that declares no version is
+* anchored by its registration id, named here. A criterion that pins no ref
+* lets the registry dispatch by `verificationMode`, which this plane cannot
+* resolve into one instance without re-implementing dispatch — so the anchor
+* says exactly that, and the gate requires the deciding judge's id and version
+* (read from the run's own verdicts) to still be registered at the version it
+* judged with.
+*/
+function frozenCriterionOf(criterion, where, vocabulary) {
 	const inputs = criterion.protectedInputs ?? [];
 	for (const input of inputs) if (typeof input?.path !== "string" || input.path.length === 0 || !isHex64(input?.sha256)) throw new Error(`the sample's criterion "${criterion.criterionId}" carries a protected input that was never fixed to { path, sha256 } — an acceptance input nobody fixed is not a frozen input`);
+	const ref = criterion.verifierRef;
+	let verifierVersion;
+	let verifierAnchor;
+	if (ref === void 0) verifierAnchor = `the criterion pins no verifierRef; the registry dispatches mode "${criterion.verificationMode}" to a registered judge, and the deciding judge's id and version are read from the run's verdicts and re-checked against the registry`;
+	else if (vocabulary === void 0) throw new Error(`${where} pins verifier "${ref}" but this deployment cannot list its verifier registry (verifierIds()/verifierVersions() are unavailable), so the judge identity cannot be frozen — an experiment whose judge nobody can name is refused before it runs`);
+	else if (!vocabulary.ids.includes(ref)) throw new Error(`${where} pins verifier "${ref}", which the registry does not hold (registered: ${vocabulary.ids.length === 0 ? "none" : vocabulary.ids.join(", ")}) — the criterion would be judged inconclusive by a judge that does not exist; name a registered verifier before freezing the experiment`);
+	else {
+		const declared = vocabulary.versions[ref];
+		if (declared === void 0) verifierAnchor = `registered verifier "${ref}" declares no version; its registration id is the anchor the gate re-checks`;
+		else {
+			verifierVersion = declared;
+			verifierAnchor = `registered verifier "${ref}" declares version "${declared}"`;
+		}
+	}
 	return {
 		criterionId: criterion.criterionId,
 		verificationMode: criterion.verificationMode,
 		...criterion.command === void 0 ? {} : { command: criterion.command },
-		protectedInputsDigest: protectedInputsDigest(inputs)
+		protectedInputsDigest: protectedInputsDigest(inputs),
+		verifierRef: ref ?? null,
+		...verifierVersion === void 0 ? {} : { verifierVersion },
+		verifierAnchor
 	};
 }
-/** Freeze one sample from its store record: what the case is, and the acceptance the replay mirrors into both sides. */
-function frozenSampleOf$1(sample, task, review) {
+/**
+* The provider identity the production baseline side of one sample must bind
+* (S4-E §Q3): the runtime's own pre-check over the rows the sample's required
+* capabilities resolve to, run from the caller's viewpoint before anything
+* runs, plus the MCP servers and preset the effective table declares for those
+* rows. Every value here is read from the deployment's own configuration — the
+* pre-check's revision is the runtime's own conclusion, not a guess this plane
+* makes.
+*
+* Refused by name when the deployment cannot answer (no runtime pre-check, a
+* row the table does not hold, a refused provider, conflicting presets): a
+* sample whose provider identity cannot be fixed is not an experiment this
+* build may run.
+*/
+async function frozenProviderIdentity(input) {
+	const { sources, caller, sampleTaskId, required, where } = input;
+	const table = sources.taskRuntime.listCapabilities?.();
+	if (table === void 0) throw new Error(`${where} cannot fix the provider identity the production baseline runs under: this deployment's task runtime exposes no capability table (listCapabilities), so which rows, servers and skills the sample resolves to is not knowable before it runs — the experiment is refused rather than run under an identity nobody can compare against`);
+	const missing = [...new Set(required)].filter((name) => table[name] === void 0).sort();
+	if (missing.length > 0) throw new Error(`${where} requires ${missing.length > 1 ? "capabilities" : "capability"} [${missing.join(", ")}], which the effective capability table does not hold — the runtime would refuse the replay for a capability gap after freezing; name rows the deployment has`);
+	const rows = [...new Set(required)].sort();
+	let precheck;
+	try {
+		precheck = await sources.taskRuntime.capabilityProviderReport(caller, rows);
+	} catch (error) {
+		throw new Error(`${where} cannot run the runtime's provider pre-check over rows [${rows.join(", ") || "none"}] (${error instanceof Error ? error.message : String(error)}) — the provider identity the production baseline would bind cannot be fixed, so the experiment is refused before it runs`);
+	}
+	const refused = precheck.capabilities.flatMap((row) => row.skills.filter((skill) => !skill.valid).map((skill) => `${row.capability}: skill "${skill.name}" (${(skill.defects ?? []).map((defect) => `${defect.code}: ${defect.detail}`).join("; ")})`));
+	if (refused.length > 0) throw new Error(`${where} resolves to providers the deployment cannot use, so the production baseline could not run under them:\n- ${refused.join("\n- ")}`);
+	const skills = precheck.capabilities.flatMap((row) => row.skills).filter((skill) => skill.valid).filter((skill, index, all) => all.findIndex((entry) => entry.name === skill.name) === index).map((skill) => {
+		const role = skill.role;
+		if (role !== "execution-provider" && role !== "knowledge" && role !== "guidance") throw new Error(`${where} resolved skill "${skill.name}" to an unknown role "${String(role)}"; the provider identity cannot be frozen`);
+		if (typeof skill.contentDigest !== "string" || skill.contentDigest.length === 0) throw new Error(`${where} resolved skill "${skill.name}" without a content digest; the provider identity cannot be frozen`);
+		return {
+			name: skill.name,
+			role,
+			contractDigest: skill.contractDigest ?? null,
+			contentDigest: skill.contentDigest
+		};
+	}).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+	const mcpServers = [...new Set(rows.flatMap((row) => table[row]?.mcpServers ?? []))].sort();
+	const declaredPresets = new Set(rows.flatMap((row) => {
+		const preset = table[row]?.preset;
+		return preset === void 0 ? [] : [preset];
+	}));
+	if (declaredPresets.size > 1) throw new Error(`${where}'s rows declare conflicting presets (${[...declaredPresets].sort().join(", ")}); one worker requires one preset, so the runtime would refuse the replay — split the rows or align the presets before freezing the experiment`);
+	return {
+		capabilities: rows,
+		registryRevision: precheck.revision,
+		mcpServers,
+		preset: declaredPresets.size === 0 ? null : [...declaredPresets][0],
+		skills
+	};
+}
+/** Freeze one sample from its store record: what the case is, the acceptance the replay mirrors into both sides, and the provider identity. */
+function frozenSampleOf$1(sample, task, review, provider, vocabulary) {
 	if (task.acceptanceCriteria.length === 0) throw new Error(`sample "${sample.taskId}" carries no acceptance criteria; there is nothing for the two sides to be judged by`);
+	const where = `sample "${sample.taskId}"`;
 	return {
 		taskId: sample.taskId,
 		role: sample.role,
@@ -944,11 +1100,12 @@ function frozenSampleOf$1(sample, task, review) {
 			acceptanceCriteria: task.acceptanceCriteria,
 			requiredCapabilities: task.requestedCapabilities
 		}),
-		criteria: task.acceptanceCriteria.map(frozenCriterionOf),
+		criteria: task.acceptanceCriteria.map((criterion) => frozenCriterionOf(criterion, where, vocabulary)),
 		observed: {
 			outcome: review.outcome === "failed" ? "failed" : "verified",
 			...review.runId === void 0 ? {} : { runId: review.runId }
-		}
+		},
+		provider
 	};
 }
 /** Build the frozen identity block (§F.2), then check it against the schema the report and the ledger share. */
@@ -961,7 +1118,13 @@ function freezeExperiment(input) {
 			sha256: input.candidate.sha256
 		},
 		...input.productionBaseline === void 0 ? {} : { productionBaseline: { ...input.productionBaseline } },
-		model: input.spec.model,
+		model: {
+			provider: input.spec.model.provider,
+			model: input.spec.model.model,
+			...input.spec.model.reasoningEffort === void 0 ? {} : { reasoningEffort: input.spec.model.reasoningEffort },
+			...input.spec.model.maxTokens === void 0 ? {} : { maxTokens: input.spec.model.maxTokens },
+			label: `${input.spec.model.provider}/${input.spec.model.model}`
+		},
 		budget: { ...input.spec.budget },
 		samples: input.samples,
 		snapshot: {
@@ -1184,15 +1347,24 @@ async function runExperiment(sources, request) {
 	validateSpec(spec);
 	const { sandbox, candidate, proposal } = await experimentCandidate(sources, spec.proposalId);
 	const { storeId, snapshot } = await experimentStore(sources, caller);
-	const samples = spec.samples.map((sample) => {
+	const vocabulary = await sources.verifierVocabulary?.();
+	const samples = [];
+	for (const sample of spec.samples) {
 		const task = snapshot.tasks.find((item) => item.taskId === sample.taskId);
 		if (task === void 0) throw new Error(`unknown sample task "${sample.taskId}" in this graph's task store`);
 		if (task.status !== "verified" && task.status !== "failed") throw new Error(`sample "${sample.taskId}" is ${task.status}; only a terminal (verified or failed) sample can be evaluated`);
 		const review = latestReview(snapshot, task);
 		if (review === void 0) throw new Error(`sample "${sample.taskId}" has no review record on its latest run; there is no case to reproduce`);
 		assertSampleRole(sample, task, review);
-		return frozenSampleOf$1(sample, task, review);
-	});
+		const provider = await frozenProviderIdentity({
+			sources,
+			caller,
+			sampleTaskId: sample.taskId,
+			required: task.requestedCapabilities,
+			where: `sample "${sample.taskId}"`
+		});
+		samples.push(frozenSampleOf$1(sample, task, review, provider, vocabulary));
+	}
 	const frozen = freezeExperiment({
 		proposalId: spec.proposalId,
 		spec,
@@ -1202,6 +1374,7 @@ async function runExperiment(sources, request) {
 		snapshotDigest: await directoryDigest(spec.snapshot.sourceDir),
 		samples
 	});
+	const agentOptions = agentOptionsOf(frozen.model);
 	const frozenDigest = frozenDigestOf(frozen);
 	const experimentId = experimentIdOf(spec.proposalId, frozenDigest);
 	const sandboxRel = `${sandbox}/exp-${experimentId}`;
@@ -1260,6 +1433,7 @@ async function runExperiment(sources, request) {
 			const outcome = await sources.taskRuntime.replayTask(storeId, sample.taskId, {
 				lineage,
 				workspace: { path: real },
+				agentOptions: { ...agentOptions },
 				...side === "candidate" ? { overlay: { extraSkillRoots: [resolve(sources.evolution.root, sandbox, "skills")] } } : {},
 				...request.signal === void 0 ? {} : { signal: request.signal }
 			}, caller);
@@ -1528,7 +1702,7 @@ function reportBytes(report) {
 */
 function assertSideEvidence(input) {
 	const { sample, detail, experimentId, snapshot, where } = input;
-	if (detail.outcome === "interrupted") return;
+	if (detail.outcome === "interrupted") return void 0;
 	const lineage = experimentLineage(experimentId, sample.taskId, detail.side);
 	const task = snapshot.tasks.find((item) => item.objective?.startsWith(`[${lineage}] `));
 	if (task === void 0) throw new Error(`evolution: the experiment report's ${where} does not cite a replayed task this experiment created — the store holds no task of lineage "${lineage}" (${detail.taskId ?? "no task"}/${detail.runId ?? "no run"}); a side that is not one of this experiment's own runs is not a baseline, whatever the record says`);
@@ -1561,6 +1735,7 @@ function assertSideEvidence(input) {
 		if (bundle.taskRunId !== runId) throw new Error(`evolution: the experiment report's ${where} cites evidence "${ref}" of run "${String(bundle.taskRunId)}", not of its own run "${runId}" — evidence from another run cannot stand for this side`);
 	}
 	if (detail.initialDigest === void 0) throw new Error(`evolution: the experiment report's ${where} settled a run and records no workspace digest — the frozen input the side ran from cannot be re-proved`);
+	return task;
 }
 /** The store's contract of one sample, as the freeze derived its digest: objective, criteria, required capabilities. */
 function contractDigestOf(task) {
@@ -1610,17 +1785,207 @@ async function assertProtectedInputIntact(taskId, input, productionWorkspace) {
 	if (digest !== input.sha256) throw new Error(`evolution: the protected input "${input.path}" of sample "${taskId}" changed since the experiment froze it (sha256 ${digest} != ${input.sha256}) — a criterion whose input moved is not the criterion the candidate was judged by`);
 }
 /**
-* Whether every criterion verdict a report side carries still names a registered
-* judge, at the version it judged with. Fail-closed: a deployment that cannot
-* list its verifier vocabulary refuses rather than assuming the judge is there.
+* Whether every criterion verdict a report side carries was decided by the
+* judge the frozen block fixed *before* the run (S4-E §Q3), and whether that
+* judge is still the registered instance it was.
+*
+* The frozen half: a criterion that pinned a `verifierRef` at freeze must have
+* been decided by that ref — and, when the registry declared a version then, at
+* exactly that version — so re-registering a same-named judge with a new version
+* after the freeze is a refusal that names the frozen value. A criterion that
+* pinned nothing was dispatched by mode, which the frozen block says; there the
+* run's own verdicts name the judge, and the registry half below re-checks it.
+* Fail-closed: a deployment that cannot list its verifier vocabulary refuses
+* rather than assuming the judge is there.
 */
-function assertJudgeUnchanged(detail, where, vocabulary) {
+function assertJudgeUnchanged(sample, detail, where, vocabulary) {
+	const frozenById = new Map(sample.criteria.map((criterion) => [criterion.criterionId, criterion]));
 	for (const criterion of detail.criteria) {
+		const frozen = frozenById.get(criterion.criterionId);
+		if (frozen === void 0) throw new Error(`evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" of sample "${sample.taskId}", which the frozen block does not carry — a verdict outside the frozen acceptance is not evidence this promotion may read`);
 		if (criterion.verifierId === void 0) throw new Error(`evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" without the verifier that decided it — a verdict nobody can be recalled against is not evidence a promotion may read`);
+		if (frozen.verifierRef !== null && criterion.verifierId !== frozen.verifierRef) throw new Error(`evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" decided by verifier "${criterion.verifierId}", but the frozen block pinned "${frozen.verifierRef}" (${frozen.verifierAnchor}) — the verdicts a promotion reads must be the ones the frozen judge produced`);
+		if (frozen.verifierRef !== null && criterion.verifierVersion !== frozen.verifierVersion) throw new Error(`evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" decided by "${frozen.verifierRef}" at version ${criterion.verifierVersion === void 0 ? "(none declared)" : criterion.verifierVersion}, but the block froze it at ${frozen.verifierVersion === void 0 ? "(no version declared)" : frozen.verifierVersion} (${frozen.verifierAnchor}) — a verdict belongs to the instance that judged, so a judge that moved since the freeze invalidates the evidence`);
 		if (!vocabulary.ids.includes(criterion.verifierId)) throw new Error(`evolution: the experiment report's ${where} was decided by verifier "${criterion.verifierId}", which is no longer registered (registered: ${vocabulary.ids.length === 0 ? "none" : vocabulary.ids.join(", ")}) — the judge moved, so the verdicts on record cannot be reproduced`);
 		const current = vocabulary.versions[criterion.verifierId];
 		if (criterion.verifierVersion !== current) throw new Error(`evolution: the experiment report's ${where} was decided by verifier "${criterion.verifierId}" at version ${criterion.verifierVersion === void 0 ? "(none declared)" : criterion.verifierVersion}, but the registered instance declares ${current === void 0 ? "(none)" : current} now — a verdict belongs to the instance that judged, so a re-registered version invalidates the evidence`);
 	}
+}
+/**
+* Every request identity one session's own log records, in order: one entry per
+* `request/header` event, read from the event data the live loop appended (its
+* canonical header, not a summary). A session with no such event is reported as
+* an empty list — the caller decides whether that is the no-worker exemption or
+* a refusal, and this function never invents an identity.
+*/
+function requestIdentities(events) {
+	const identities = [];
+	for (const event of events) {
+		if (event.type !== "request/header") continue;
+		const config = event.data.header?.config;
+		if (config === void 0 || typeof config.provider !== "string" || typeof config.model !== "string") continue;
+		identities.push({
+			provider: config.provider,
+			model: config.model,
+			...typeof config.reasoningEffort === "string" ? { reasoningEffort: config.reasoningEffort } : {},
+			...typeof config.maxTokens === "number" ? { maxTokens: config.maxTokens } : {}
+		});
+	}
+	return identities;
+}
+/** Whether one request identity is the frozen selection: the route exactly, and each declared option exactly. */
+function requestMatchesSelection(identity, selection) {
+	if (identity.provider !== selection.provider || identity.model !== selection.model) return false;
+	if (selection.reasoningEffort !== void 0 && identity.reasoningEffort !== selection.reasoningEffort) return false;
+	if (selection.maxTokens !== void 0 && identity.maxTokens !== selection.maxTokens) return false;
+	return true;
+}
+/**
+* Whether one run is the runtime's own no-worker criteria replay — the one
+* recorded shape with no model path at all (`spawn: false`: the run is born
+* `submitted` with a runtime-origin submission, and no worker ever existed to
+* make a request). This is the *only* exemption from the model check, and it is
+* read from the run's own record rather than assumed from an empty log.
+*/
+function isNoWorkerRun(run) {
+	return run.executionPhase === "submitted" && run.submission?.origin === "runtime";
+}
+/** The side's task and every task below it — the subtree whose runs are this side's execution. */
+function subtreeOf(snapshot, rootTaskId) {
+	const root = new Map(snapshot.tasks.map((task) => [task.taskId, task])).get(rootTaskId);
+	if (root === void 0) return [];
+	const found = [];
+	const pending = [root];
+	const seen = /* @__PURE__ */ new Set();
+	while (pending.length > 0) {
+		const task = pending.pop();
+		if (seen.has(task.taskId)) continue;
+		seen.add(task.taskId);
+		found.push(task);
+		for (const child of snapshot.tasks) if (child.parentTaskId === task.taskId) pending.push(child);
+	}
+	return found;
+}
+/**
+* The model half of the gate (S4-E §Q3): what the side's runs *really* went
+* through, re-read from the durable session logs of the side's task and every
+* sub-execution below it.
+*
+* Every run of the subtree that had a worker must have a readable session log,
+* and every request it recorded must have been made on the frozen selection —
+* the route exactly, and the reasoning effort / output ceiling when the frozen
+* selection declared them. A log that cannot be read, a session with no request
+* at all, or one request on another route is a named refusal: a run whose
+* identity cannot be proved is not a side this promotion may read, and the one
+* exemption is the runtime's own criteria replay, whose run record says no
+* worker ever existed.
+*
+* This is deliberately *not* a comparison of the experiment's start value with
+* today's value: the deployment's selection may move and move back without ever
+* touching these requests, and a run that really went through another route is
+* caught here whatever the deployment resolves now.
+*/
+async function assertSideModelBinding(input) {
+	const { sources, detail, task, snapshot, selection, where } = input;
+	if (detail.outcome === "interrupted" || task === void 0) return;
+	const runs = [];
+	for (const subtreeTask of subtreeOf(snapshot, task.taskId)) for (const runId of subtreeTask.runIds) {
+		const run = snapshot.runs.find((item) => item.runId === runId);
+		if (run === void 0) throw new Error(`evolution: the experiment report's ${where} names task "${subtreeTask.taskId}" of this experiment, but the store holds no run "${runId}" of it — the execution this side rests on cannot be re-read`);
+		runs.push(run);
+	}
+	for (const run of runs) {
+		if (isNoWorkerRun(run)) continue;
+		let events;
+		try {
+			events = await sources.sessionLog(run.sessionId);
+		} catch (error) {
+			throw new Error(`evolution: the session log of run "${run.runId}" (session "${run.sessionId}") of the ${where} cannot be read (${error instanceof Error ? error.message : String(error)}) — the requests that run really made are the evidence this promotion compares against the frozen selection, so a run whose log is gone cannot be promoted on`);
+		}
+		if (events === void 0) throw new Error(`evolution: this deployment cannot read session logs (sessionQuery.readSession is unavailable), so the requests of run "${run.runId}" of the ${where} cannot be compared against the frozen model selection "${selection.label}" — the promotion is refused rather than granted on an unverifiable model binding`);
+		const identities = requestIdentities(events);
+		if (identities.length === 0) throw new Error(`evolution: run "${run.runId}" (session "${run.sessionId}") of the ${where} recorded no request at all, so the frozen model selection "${selection.label}" cannot be shown to be what it ran under — a run with no request identity to check is refused (the runtime's own criteria replay, the one no-worker path, is exempt; this run records a worker)`);
+		for (const identity of identities) {
+			if (requestMatchesSelection(identity, selection)) continue;
+			throw new Error(`evolution: run "${run.runId}" (session "${run.sessionId}") of the ${where} really made its requests on ${identity.provider}/${identity.model}${identity.reasoningEffort === void 0 ? "" : ` (effort ${identity.reasoningEffort})`}${identity.maxTokens === void 0 ? "" : ` (maxTokens ${identity.maxTokens})`}, not on the frozen selection "${selection.label}"${selection.reasoningEffort === void 0 ? "" : ` (effort ${selection.reasoningEffort})`}${selection.maxTokens === void 0 ? "" : ` (maxTokens ${selection.maxTokens})`} — the runs a promotion reads must be the runs the frozen selection was fixed for`);
+		}
+	}
+}
+/**
+* Whether one side's run binding is the provider identity the experiment froze
+* for the sample (S4-E §Q3): the capability rows, the registry revision, the MCP
+* servers (with a resolved template each) and every resolved skill's identity.
+*
+* The promoted skill's *content* is the one difference the frozen block allows,
+* and it is checked against the bytes the run actually bound: the side's
+* snapshot must hold the frozen `SKILL.md` — the production baseline's bytes for
+* the baseline side, the candidate's for the candidate side.
+*/
+async function assertSideProviderBinding(input) {
+	const { sample, detail, run, frozen, where } = input;
+	if (detail.outcome === "interrupted") return;
+	const expected = sample.provider;
+	const binding = run.providerBinding;
+	if (binding === void 0) throw new Error(`evolution: run "${run.runId}" of the ${where} records no provider binding — which rows, servers and skills it resolved against cannot be re-read, so the frozen provider identity cannot be compared and the promotion is refused`);
+	const rows = [...binding.capabilities].sort();
+	if (rows.join(", ") !== [...expected.capabilities].sort().join(", ")) throw new Error(`evolution: run "${run.runId}" of the ${where} bound capabilities [${rows.join(", ") || "none"}] but the experiment froze [${expected.capabilities.join(", ") || "none"}] — the rows this side ran under are not the frozen production configuration's`);
+	if (binding.registryRevision !== expected.registryRevision) throw new Error(`evolution: run "${run.runId}" of the ${where} bound registry revision ${binding.registryRevision}, but the experiment froze ${expected.registryRevision} — a capability row, a tool label or a declared provider contract moved since the freeze, so the side did not run under the frozen production configuration`);
+	const servers = [...binding.mcpServers].map((server) => server.serverName).sort();
+	if (servers.join(", ") !== [...expected.mcpServers].sort().join(", ")) throw new Error(`evolution: run "${run.runId}" of the ${where} bound MCP servers [${servers.join(", ") || "none"}] but the experiment froze [${expected.mcpServers.join(", ") || "none"}] — the granted server plane moved since the freeze`);
+	for (const server of binding.mcpServers) if (server.templateDigest === null) throw new Error(`evolution: run "${run.runId}" of the ${where} bound MCP server "${server.serverName}" with no resolvable template — the run recorded no identity for the server it was granted, so the frozen server plane cannot be compared`);
+	if (expected.preset !== null && run.agentPreset !== expected.preset) throw new Error(`evolution: run "${run.runId}" of the ${where} ran under agent preset ${run.agentPreset === void 0 ? "(none)" : `"${run.agentPreset}"`}, but the frozen provider identity declares "${expected.preset}" — the preset plane this side ran under is not the frozen one`);
+	const frozenSkills = new Map(expected.skills.map((skill) => [skill.name, skill]));
+	const boundSkills = new Map(binding.skills.map((skill) => [skill.name, skill]));
+	for (const name of boundSkills.keys()) if (!frozenSkills.has(name)) throw new Error(`evolution: run "${run.runId}" of the ${where} bound skill "${name}", which the frozen production configuration does not resolve (frozen: ${expected.skills.map((skill) => skill.name).join(", ") || "none"}) — content the freeze never admitted reached this run`);
+	for (const [name, expectedSkill] of frozenSkills) {
+		const bound = boundSkills.get(name);
+		if (bound === void 0) throw new Error(`evolution: run "${run.runId}" of the ${where} bound no skill "${name}", which the frozen production configuration resolves — the run under this side did not load content the freeze named`);
+		if (bound.role !== expectedSkill.role || (bound.contractDigest ?? null) !== expectedSkill.contractDigest) throw new Error(`evolution: run "${run.runId}" of the ${where} bound skill "${name}" as ${bound.role}${bound.contractDigest === null ? "" : ` (contract ${bound.contractDigest})`}, but the frozen identity is ${expectedSkill.role}${expectedSkill.contractDigest === null ? "" : ` (contract ${expectedSkill.contractDigest})`} — the provider this side loaded is not the one the experiment froze`);
+		if (name === frozen.candidate.name) {
+			if (detail.side === "baseline" && bound.contentDigest !== expectedSkill.contentDigest) throw new Error(`evolution: run "${run.runId}" of the ${where} bound skill "${name}" content ${bound.contentDigest}, but the production configuration's content at freeze was ${expectedSkill.contentDigest} — the bytes this side loaded moved since the freeze`);
+			continue;
+		}
+		if (bound.contentDigest !== expectedSkill.contentDigest) throw new Error(`evolution: run "${run.runId}" of the ${where} bound skill "${name}" content ${bound.contentDigest}, but the production configuration's content at freeze was ${expectedSkill.contentDigest} — the bytes this side loaded moved since the freeze`);
+	}
+	if (boundSkills.get(frozen.candidate.name) !== void 0) {
+		const expectedBytes = detail.side === "candidate" ? frozen.candidate.sha256 : frozen.productionBaseline?.sha256;
+		if (expectedBytes !== void 0) {
+			if (binding.snapshotRoot === void 0) throw new Error(`evolution: run "${run.runId}" of the ${where} bound skill "${frozen.candidate.name}" but records no snapshot root — the bytes it loaded cannot be re-read, so the frozen content identity cannot be compared`);
+			let bytes;
+			try {
+				bytes = await readFile(join(binding.snapshotRoot, frozen.candidate.name, "SKILL.md"));
+			} catch (error) {
+				throw new Error(`evolution: the content run "${run.runId}" of the ${where} was bound to cannot be read (${error instanceof Error ? error.message : String(error)}) — the promoted skill's frozen bytes cannot be re-proved, so the promotion is refused`);
+			}
+			const digest = sha256Hex$1(bytes);
+			if (digest !== expectedBytes) throw new Error(`evolution: run "${run.runId}" of the ${where} bound skill "${frozen.candidate.name}" whose SKILL.md hashes to ${digest}, but the experiment froze ${expectedBytes} for the ${detail.side} side — the bytes this side ran are not the frozen ones`);
+			if (detail.side === "candidate" && digest === frozen.productionBaseline?.sha256) throw new Error(`evolution: the candidate side of the ${where} loaded the production bytes ("${frozen.candidate.name}" hashes to ${digest}, the frozen production baseline) — the candidate was never really run, so the comparison proves nothing`);
+		}
+	}
+}
+/**
+* Whether the two sides' bindings agree everywhere the frozen block allows
+* agreement and nowhere else (S4-E §Q3): every field of the run binding and the
+* run's preset must match between the baseline and the candidate side, except
+* the promoted skill's own content digest — the one difference the experiment's
+* overlay is supposed to produce.
+*/
+function assertSidesAgree(frozen, baseline, candidate, where) {
+	const comparable = (binding) => ({
+		capabilities: [...binding.capabilities].sort(),
+		registryRevision: binding.registryRevision,
+		mcpServers: [...binding.mcpServers].sort((left$1, right$1) => left$1.serverName < right$1.serverName ? -1 : left$1.serverName > right$1.serverName ? 1 : 0),
+		skills: [...binding.skills].sort((left$1, right$1) => left$1.name < right$1.name ? -1 : left$1.name > right$1.name ? 1 : 0).map((skill) => ({
+			name: skill.name,
+			role: skill.role,
+			contractDigest: skill.contractDigest ?? null,
+			...skill.name === frozen.candidate.name ? {} : { contentDigest: skill.contentDigest }
+		}))
+	});
+	const left = JSON.stringify(comparable(baseline.binding));
+	const right = JSON.stringify(comparable(candidate.binding));
+	if (left !== right) throw new Error(`evolution: the two sides of ${where} did not bind the same provider identity — apart from the promoted skill's own content, which the candidate overlay is what changes, every field must agree:\n- baseline: ${left}\n- candidate: ${right}`);
+	if (baseline.run.agentPreset !== candidate.run.agentPreset) throw new Error(`evolution: the two sides of ${where} ran under different agent presets (${baseline.run.agentPreset === void 0 ? "(none)" : `"${baseline.run.agentPreset}"`} vs ${candidate.run.agentPreset === void 0 ? "(none)" : `"${candidate.run.agentPreset}"`}) — a preset that moved between the sides is not the frozen execution`);
 }
 /** Whether a side's cost is known enough for a frozen budget that declares a ceiling. */
 function assertCostWithinDeclaredBudget(report, where, detail) {
@@ -1671,29 +2036,52 @@ async function assertSkillPromotionEvidence(sources, proposal) {
 	if (vocabulary === void 0) throw new Error("evolution: the verifier registry cannot be listed in this context, so the judges behind the experiment's verdicts cannot be re-checked — the promotion is refused rather than granted on unverifiable evidence");
 	for (const sample of report.samples) {
 		const frozenSample = frozenSampleOf(report, sample.taskId);
+		const sideRuns = {};
 		for (const side of ["baseline", "candidate"]) {
 			const detail = side === "baseline" ? sample.baseline : sample.candidate;
 			const label = `sample "${sample.taskId}" ${side} side`;
-			assertSideEvidence({
+			const task = assertSideEvidence({
 				sample: frozenSample,
 				detail,
 				experimentId: experiment.experimentId,
 				snapshot,
 				where: label
 			});
-			assertJudgeUnchanged(detail, label, vocabulary);
+			assertJudgeUnchanged(frozenSample, detail, label, vocabulary);
 			assertCostWithinDeclaredBudget(report, label, detail);
 			if (detail.outcome === "interrupted") continue;
 			if (detail.initialDigest !== frozen.snapshot.digest) throw new Error(`evolution: the experiment report's ${label} ran from workspace digest ${detail.initialDigest}, not the frozen snapshot ${frozen.snapshot.digest} — both sides of a sample start from the same frozen input`);
+			await assertSideModelBinding({
+				sources,
+				detail,
+				task,
+				snapshot,
+				selection: frozen.model,
+				where: label
+			});
+			const run = detail.runId === void 0 ? void 0 : snapshot.runs.find((item) => item.runId === detail.runId);
+			if (run === void 0) throw new Error(`evolution: the experiment report's ${label} cites run "${String(detail.runId)}", which the store no longer holds — its provider binding cannot be re-read, so the promotion is refused`);
+			await assertSideProviderBinding({
+				sample: frozenSample,
+				detail,
+				run,
+				frozen,
+				where: label
+			});
+			if (run.providerBinding !== void 0) sideRuns[side] = {
+				run,
+				binding: run.providerBinding
+			};
 		}
+		if (sideRuns.baseline !== void 0 && sideRuns.candidate !== void 0) assertSidesAgree(frozen, sideRuns.baseline, sideRuns.candidate, `sample "${sample.taskId}"`);
 		await assertSampleInputsIntact({
 			sample: frozenSample,
 			snapshot,
 			productionWorkspace: frozen.snapshot.sourceDir
 		});
 	}
-	const currentModel = sources.modelIdentity();
-	if (currentModel !== frozen.model) throw new Error(`evolution: the experiment froze model "${frozen.model}" but this deployment resolves "${currentModel}" now — the runs on record were not run under the model this promotion would be judged against`);
+	const currentSelection = sources.modelSelection();
+	if (currentSelection.provider !== frozen.model.provider || currentSelection.model !== frozen.model.model || currentSelection.reasoningEffort !== frozen.model.reasoningEffort || currentSelection.maxTokens !== frozen.model.maxTokens) throw new Error(`evolution: the experiment froze model selection "${frozen.model.label}"${frozen.model.reasoningEffort === void 0 ? "" : ` (effort ${frozen.model.reasoningEffort})`}${frozen.model.maxTokens === void 0 ? "" : ` (maxTokens ${frozen.model.maxTokens})`}, but this deployment resolves "${currentSelection.label}"${currentSelection.reasoningEffort === void 0 ? "" : ` (effort ${currentSelection.reasoningEffort})`}${currentSelection.maxTokens === void 0 ? "" : ` (maxTokens ${currentSelection.maxTokens})`} now — the runs on record were not run under the selection this promotion would be judged against`);
 	if (report.verdict !== "fixed") throw new Error(`evolution: the two-sided experiment "${experiment.experimentId}" did not show a clean fix — ${VERDICT_REFUSALS[report.verdict]}:\n${sampleVerdictLines(report.samples).map((line) => `- ${line}`).join("\n")}`);
 	return {
 		experimentId: experiment.experimentId,
@@ -1785,18 +2173,6 @@ function renderProviderRoles(providers) {
 		if (provider.role === "knowledge") return `provider: skill \`${provider.name}\` → knowledge (loadable content; it does not close an execution gap)`;
 		return `provider: skill \`${provider.name}\` → guidance (no sidecar; loadable guidance, not an execution provider)`;
 	});
-}
-/**
-* The model identity one selection names: `provider/model` when the route is
-* known, the model id alone otherwise. `undefined` for a selection that names no
-* model — a deployment configured without one is a case to refuse, not to paper
-* over with a placeholder.
-*/
-function modelIdentityOf(selection) {
-	const model = typeof selection?.model === "string" && selection.model.length > 0 ? selection.model : void 0;
-	if (model === void 0) return void 0;
-	const provider = typeof selection?.provider === "string" && selection.provider.length > 0 ? selection.provider : void 0;
-	return provider === void 0 ? model : `${provider}/${model}`;
 }
 function nonEmpty(value, field) {
 	if (typeof value !== "string" || value.trim().length === 0) throw new Error(`evolution: ${field} must be a non-empty string`);
@@ -2075,15 +2451,15 @@ var EvolutionService = class extends Service {
 	configFile;
 	/** Repo root that relative evidence paths resolve against (see {@link Config.repoRoot}). */
 	repoRoot;
-	/** The injected model-identity resolver, if the assembly wired one (see {@link Config.modelIdentity}). */
-	resolveModelIdentity;
+	/** The injected model-selection resolver, if the assembly wired one (see {@link Config.modelSelection}). */
+	resolveModelSelection;
 	records = [];
 	loaded;
 	writes = Promise.resolve();
 	constructor(ctx, config = {}) {
 		super(ctx, "evolution");
 		this.repoRoot = config.repoRoot ?? process.cwd();
-		this.resolveModelIdentity = config.modelIdentity;
+		this.resolveModelSelection = config.modelSelection;
 		const dshHome = process.env.DSH_HOME ?? join(this.repoRoot, ".dsh");
 		this.root = resolve(config.root ?? join(dshHome, "evolution"));
 		this.skillRoot = resolve(config.skillRoot ?? join(dshHome, "skills"));
@@ -2099,22 +2475,25 @@ var EvolutionService = class extends Service {
 		return join(this.root, "proposals.jsonl");
 	}
 	/**
-	* The model identity this deployment's runs share — the one the experiment
-	* freezes before anything runs and the promotion gate re-reads ({@link Config.modelIdentity}).
+	* The model selection this deployment's runs share — the one the experiment
+	* freezes before anything runs, passes to each replayed spawn verbatim, and
+	* the promotion gate re-reads from the runs' own session logs
+	* ({@link Config.modelSelection}).
 	*
-	* Fail-closed: no resolver, a resolver that throws, or one that names nothing
-	* is a named refusal. The experiment tool freezes this value, so a deployment
-	* that cannot name its model can neither evaluate nor promote a candidate —
-	* and neither case silently skips the check.
+	* Fail-closed: no resolver, a resolver that throws, or one that answers
+	* anything but a structured selection with a provider and a model is a named
+	* refusal. The experiment tool freezes this value, so a deployment that cannot
+	* name its selection can neither evaluate nor promote a candidate — and
+	* neither case silently skips the check.
 	*/
-	modelIdentity() {
+	modelSelection() {
 		let resolved;
 		try {
-			resolved = this.resolveModelIdentity?.();
+			resolved = modelSelectionOf(this.resolveModelSelection?.());
 		} catch (error) {
-			throw new Error(`evolution: the model identity cannot be resolved (${error instanceof Error ? error.message : String(error)}) — the experiment freezes the model its runs share and a promotion re-reads it, so a deployment that cannot name one neither evaluates nor promotes a candidate`);
+			throw new Error(`evolution: the model selection cannot be resolved (${error instanceof Error ? error.message : String(error)}) — the experiment freezes the selection its runs share and a promotion re-reads it, so a deployment that cannot name one neither evaluates nor promotes a candidate`);
 		}
-		if (typeof resolved !== "string" || resolved.trim().length === 0) throw new Error("evolution: this deployment cannot name the model its runs share — no model-identity resolver was injected (or it named none); the two-sided experiment freezes the model identity before anything runs and the promotion gate re-reads it, so a deployment that cannot name it can neither evaluate nor promote a candidate");
+		if (resolved === void 0) throw new Error("evolution: this deployment cannot name the model selection its runs share — no model-selection resolver was injected (or it answered without a structured { provider, model } route); the two-sided experiment freezes the selection before anything runs and the promotion gate re-reads it from the runs' own session logs, so a deployment that cannot name it can neither evaluate nor promote a candidate");
 		return resolved;
 	}
 	async propose(input, actor) {
@@ -2440,7 +2819,8 @@ var EvolutionService = class extends Service {
 	/**
 	* The services the promotion gate re-reads from this context: the experiment
 	* family of this same ledger, the task store the experiment names, the live
-	* verifier vocabulary and this deployment's model identity. Resolved softly
+	* verifier vocabulary, this deployment's model selection and its session
+	* logs. Resolved softly
 	* one by one, so a context that cannot offer one gets a refusal naming it
 	* rather than a gate that silently checks less.
 	*/
@@ -2458,8 +2838,22 @@ var EvolutionService = class extends Service {
 					versions: vocabulary.versions
 				};
 			},
-			modelIdentity: () => this.modelIdentity()
+			modelSelection: () => this.modelSelection(),
+			sessionLog: (sessionId) => this.sessionLog(sessionId)
 		};
+	}
+	/**
+	* One session's own durable log, read through the deployment's session plane
+	* (`sessionQuery.readSession`) — the source the promotion gate re-reads a
+	* run's real requests from (S4-E §Q3). `undefined` when the deployment cannot
+	* serve the read at all, which the gate reports as a named refusal rather than
+	* skipping the check; a session the store does not hold throws, and the gate
+	* names that too.
+	*/
+	async sessionLog(sessionId) {
+		const query = optionalService(this.ctx, "sessionQuery");
+		if (query === void 0 || typeof query.readSession !== "function") return void 0;
+		return (await query.readSession(SessionId(sessionId))).events;
 	}
 	/**
 	* The candidate skill's provider verdict, taken from the directory the
@@ -3146,7 +3540,14 @@ var EvolutionService = class extends Service {
 			evolution: this,
 			graphs,
 			task,
-			taskRuntime
+			taskRuntime,
+			verifierVocabulary: async () => {
+				const vocabulary = await registeredVerifierVocabulary(this.ctx);
+				return vocabulary === void 0 ? void 0 : {
+					ids: vocabulary.ids,
+					versions: vocabulary.versions
+				};
+			}
 		};
 	}
 };
@@ -3415,4 +3816,4 @@ async function runReplayExperiment(sources, request) {
 }
 
 //#endregion
-export { APPLYABLE_TARGET_TYPES, CHAMPION_SOURCES, CHAMPION_STATES, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionService, MECHANICAL_TARGET_TYPES, PRESET_REPLAY_MANUAL_REASON, REPLAY_RELATIONS, REPLAY_VERDICTS, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, assertReplayPromotable, assertReplayReport, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, evolution_default as default, digestOf, directoryDigest, editCapabilityRow, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelIdentityOf, mutationMechanical, overallExperimentVerdict, overallReplayVerdict, protectedInputsDigest, readCapabilityRowSource, renderProviderRoles, replayLineage, resolvePrepareChampion, restoreCapabilityRowSource, resumeExperiment, runExperiment, runReplayExperiment };
+export { APPLYABLE_TARGET_TYPES, CHAMPION_SOURCES, CHAMPION_STATES, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionService, MECHANICAL_TARGET_TYPES, PRESET_REPLAY_MANUAL_REASON, REPLAY_RELATIONS, REPLAY_VERDICTS, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, assertReplayPromotable, assertReplayReport, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, evolution_default as default, digestOf, directoryDigest, editCapabilityRow, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, mutationMechanical, overallExperimentVerdict, overallReplayVerdict, protectedInputsDigest, readCapabilityRowSource, renderProviderRoles, replayLineage, resolvePrepareChampion, restoreCapabilityRowSource, resumeExperiment, runExperiment, runReplayExperiment };

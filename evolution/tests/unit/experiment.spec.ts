@@ -36,6 +36,7 @@ import type {
   ExperimentSideDetail,
   FrozenExperiment,
   FrozenSample,
+  ModelSelection,
 } from '../../src/replay.ts'
 import {
   assertExperimentReport,
@@ -44,6 +45,7 @@ import {
   digestOf,
   EXPERIMENT_COMPARER_VERSION,
   frozenDigestOf,
+  modelSelectionOf,
   overallExperimentVerdict,
   protectedInputsDigest,
 } from '../../src/replay.ts'
@@ -87,8 +89,18 @@ function frozenSample(overrides: Partial<FrozenSample> = {}): FrozenSample {
       verificationMode: 'deterministic',
       command: 'test -f answer.txt',
       protectedInputsDigest: protectedInputsDigest([]),
+      verifierRef: 'command',
+      verifierVersion: '1',
+      verifierAnchor: 'registered verifier "command" declares version "1"',
     }],
     observed: { outcome: 'failed', runId: 'r-historical' },
+    provider: {
+      capabilities: [],
+      registryRevision: HEX('4'),
+      mcpServers: [],
+      preset: null,
+      skills: [],
+    },
     ...overrides,
   }
 }
@@ -99,7 +111,7 @@ function frozenFixture(overrides: Partial<FrozenExperiment> = {}): FrozenExperim
     repetition: 0,
     candidate: { ...CANDIDATE },
     productionBaseline: { name: CANDIDATE.name, sha256: HEX('2') },
-    model: 'scripted:fixture',
+    model: selectionFixture(),
     budget: { wallTimeMs: 60_000, maxTokens: 1_000, note: 'fixture budget' },
     samples: [
       frozenSample(),
@@ -110,6 +122,11 @@ function frozenFixture(overrides: Partial<FrozenExperiment> = {}): FrozenExperim
     overlay: { baseline: 'none', candidate: 'extraSkillRoots: [sandbox/p1/skills]' },
     ...overrides,
   }
+}
+
+/** The structured selection the fixture freezes, and the one the fixture's service resolves. */
+function selectionFixture(model = 'fixture'): ModelSelection {
+  return modelSelectionOf({ provider: 'scripted', model })!
 }
 
 function criterion(criterionId: string, verdict: ExperimentCriterionDetail['verdict']): ExperimentCriterionDetail {
@@ -305,7 +322,7 @@ describe('the frozen identity block', () => {
     expect(experimentReportPath('p1', id)).toBe(`sandbox/p1/exp-${id}/experiment-report.json`)
     // Any member moving freezes a different experiment.
     expect(experimentIdOf('p1', frozenDigestOf(frozenFixture({ repetition: 1 })))).not.toBe(id)
-    expect(experimentIdOf('p1', frozenDigestOf(frozenFixture({ model: 'scripted:other' })))).not.toBe(id)
+    expect(experimentIdOf('p1', frozenDigestOf(frozenFixture({ model: selectionFixture('other') })))).not.toBe(id)
     expect(experimentIdOf('p1', frozenDigestOf(frozenFixture({ budget: { note: 'smaller' } })))).not.toBe(id)
     expect(experimentIdOf('other', digest)).not.toBe(id)
   })
@@ -468,7 +485,7 @@ describe('assertExperimentReport', () => {
     expect(() => assertExperimentReport(report)).toThrow(/frozenDigest does not match its frozen identity block/)
 
     const swapped = reportFixture()
-    swapped.frozen = frozenFixture({ model: 'scripted:other' })
+    swapped.frozen = frozenFixture({ model: selectionFixture('other') })
     expect(() => assertExperimentReport(swapped)).toThrow(/frozenDigest does not match/)
   })
 
@@ -564,17 +581,17 @@ describe('the experiment ledger family', () => {
 
     // A line whose frozen block does not hash to the digest it carries is not a
     // record of anything: the derivation is re-run on the way in.
-    await expect(svc.recordExperimentStart({ ...record, frozen: frozenFixture({ model: 'scripted:other' }) }))
+    await expect(svc.recordExperimentStart({ ...record, frozen: frozenFixture({ model: selectionFixture('other') }) }))
       .rejects.toThrow(/digest that does not match its frozen block/)
     expect(await svc.experiments()).toHaveLength(1)
 
     // A differently frozen experiment is a different experiment: its own id,
     // its own record, and the first one is untouched.
-    const other = startedRecord(frozenFixture({ model: 'scripted:other' }))
+    const other = startedRecord(frozenFixture({ model: selectionFixture('other') }))
     expect(other.experimentId).not.toBe(record.experimentId)
     await svc.recordExperimentStart(other)
     expect(await svc.experiments('p1')).toHaveLength(2)
-    expect((await svc.experiment(record.experimentId)).frozen.model).toBe('scripted:fixture')
+    expect((await svc.experiment(record.experimentId)).frozen.model).toEqual(selectionFixture())
     await rm(root, { recursive: true, force: true })
   })
 

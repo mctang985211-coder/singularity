@@ -22,22 +22,62 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { EvolutionService } from '../../src/evolution.ts'
 import type { EvolutionProposal, GateAnswers } from '../../src/evolution.ts'
 import type { ExperimentSampleRecord, ExperimentStartedRecord, ExperimentView } from '../../src/experiment.ts'
 import { buildExperimentReport, directoryDigest, experimentIdOf, experimentLineage, experimentReportPath } from '../../src/experiment.ts'
-import type { ExperimentBudget, FrozenExperiment, FrozenSample, SkillContentIdentity } from '../../src/replay.ts'
-import { digestOf, EXPERIMENT_COMPARER_VERSION, frozenDigestOf, protectedInputsDigest } from '../../src/replay.ts'
+import type { ExperimentBudget, FrozenExperiment, FrozenProviderIdentity, FrozenSample, ModelSelection, SkillContentIdentity } from '../../src/replay.ts'
+import { digestOf, EXPERIMENT_COMPARER_VERSION, frozenDigestOf, modelSelectionOf, protectedInputsDigest } from '../../src/replay.ts'
 
 const PROPOSAL = 's1'
 const SKILL = 'verify'
 const FAIL_SAMPLE = 't-fail'
 const HOLDOUT_SAMPLE = 't-holdout'
 const REGRESSION_SAMPLE = 't-regression'
-const MODEL = 'p/m'
+/** The deployment's model route: the selection the fixture freezes and the one its sides recorded. */
+const MODEL_PROVIDER = 'p'
+const MODEL = 'm'
+const MODEL_LABEL = `${MODEL_PROVIDER}/${MODEL}`
+/** The registry revision the fixture's production configuration resolves to (frozen and bound alike). */
+const REGISTRY_REVISION = 'r'.repeat(64)
 const VERIFIER_VERSION = '1'
 const CANDIDATE = skillText('# the fixed body\n')
 const PRODUCTION = '# the production body\n'
+
+/** One structured selection of this fixture's route. */
+function selectionOf(model = MODEL): ModelSelection {
+  return modelSelectionOf({ provider: MODEL_PROVIDER, model })!
+}
+
+/**
+ * The `request/header` event one side's session log carries — the shape the live
+ * loop appends (the canonical header of the request it really made), recorded
+ * here for the sides this fixture settles by hand.
+ */
+function requestHeader(selection: ModelSelection, seq: number): SessionEvent {
+  return {
+    type: 'request/header',
+    seq,
+    time: 0,
+    data: {
+      header: {
+        config: {
+          provider: selection.provider,
+          model: selection.model,
+          ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
+          ...(selection.maxTokens === undefined ? {} : { maxTokens: selection.maxTokens }),
+        },
+      },
+      reason: 'initial',
+    },
+  } as unknown as SessionEvent
+}
+
+/** The provider identity this fixture's production configuration resolves to (no rows, no skills). */
+function providerIdentity(): FrozenProviderIdentity {
+  return { capabilities: [], registryRevision: REGISTRY_REVISION, mcpServers: [], preset: null, skills: [] }
+}
 
 function skillText(body: string, name = SKILL): string {
   return `---\nname: ${name}\ndescription: gate fixture skill\n---\n\n${body}`
@@ -69,9 +109,9 @@ interface FixtureOptions {
   /** Add a verified sample the candidate must not break, and its two sides. */
   regression?: { baseline?: Settlement; candidate?: Settlement }
   budget?: ExperimentBudget
-  /** The model identity the experiment froze (default: the one the service resolves). */
-  frozenModel?: string
-  /** The model identity the service resolves now (default {@link MODEL}). */
+  /** The model id the experiment froze (default: the one the service resolves). */
+  frozenModel?: ModelSelection
+  /** The model id the service resolves now (default {@link MODEL}). */
   model?: string
   /** The verifier version the registry reports now (default {@link VERIFIER_VERSION}). */
   verifierVersion?: string
@@ -85,6 +125,14 @@ interface FixtureOptions {
   metrics?: Record<string, unknown>
   /** Leave the `storeId` off the experiment record (an older line). */
   omitStoreId?: boolean
+  /**
+   * Pin the samples' judge in the frozen block (S4-E §Q3): the criteria then
+   * carry this `verifierRef`, and the frozen version is read from the registry
+   * the fixture reports at freeze.
+   */
+  frozenJudge?: { ref: string; version?: string }
+  /** The version the sides' own verdicts carry (default: the frozen one) — the re-registered-judge arm. */
+  sideJudgeVersion?: string
 }
 
 interface Rows {
@@ -111,6 +159,7 @@ async function fixture(options: FixtureOptions = {}) {
   await writeFile(join(workspace, protectedInput.path), protectedInput.bytes)
 
   const rows: Rows = { tasks: [], runs: [], reviews: [], evidence: [] }
+  const sessions = new Map<string, SessionEvent[]>()
   const ctx = {
     reflect: { provide: () => {} },
     effect: () => {},
@@ -121,13 +170,20 @@ async function fixture(options: FixtureOptions = {}) {
       verifierIds: () => ['command', 'composite', 'review'],
       verifierVersions: () => ({ command: options.verifierVersion ?? VERIFIER_VERSION, composite: '1', review: '1' }),
     },
+    sessionQuery: {
+      readSession: async (sessionId: string) => {
+        const events = sessions.get(sessionId)
+        if (events === undefined) throw new Error(`missing session ${sessionId}`)
+        return { session: { id: sessionId }, inheritedEventCount: 0, events }
+      },
+    },
   }
   const svc = new EvolutionService(ctx as never, {
     root,
     skillRoot,
     presetRoot: join(dir, 'presets'),
     configFile: join(dir, 'config.yml'),
-    modelIdentity: () => options.model ?? MODEL,
+    modelSelection: () => selectionOf(options.model ?? MODEL),
   })
   await svc.propose({
     proposalId: PROPOSAL,
@@ -183,8 +239,14 @@ async function fixture(options: FixtureOptions = {}) {
         verificationMode: 'deterministic',
         command: input.command,
         protectedInputsDigest: protectedInputsDigest(input.protectedInputs ?? []),
+        verifierRef: options.frozenJudge?.ref ?? null,
+        ...(options.frozenJudge?.version === undefined ? {} : { verifierVersion: options.frozenJudge.version }),
+        verifierAnchor: options.frozenJudge === undefined
+          ? 'the fixture criterion pins no verifierRef; the registry dispatches by mode'
+          : `registered verifier "${options.frozenJudge.ref}" declares version "${String(options.frozenJudge.version)}"`,
       }],
       observed: { outcome: input.outcome, runId: `r-history-${input.taskId}` },
+      provider: providerIdentity(),
     })
   }
   addSample({
@@ -206,7 +268,7 @@ async function fixture(options: FixtureOptions = {}) {
     repetition: 0,
     candidate: options.candidateIdentity ?? prepared.prepared!.skillContent!,
     productionBaseline: options.frozenBaseline ?? prepared.prepared!.skillBaseline!,
-    model: options.frozenModel ?? MODEL,
+    model: options.frozenModel ?? selectionOf(options.model ?? MODEL),
     budget: { ...(options.budget ?? {}) },
     samples,
     snapshot: { sourceDir: workspace, digest: await directoryDigest(workspace) },
@@ -238,7 +300,20 @@ async function fixture(options: FixtureOptions = {}) {
       runIds: [runId],
       childTaskIds: [],
     })
-    rows.runs.push({ runId, taskId, sessionId: `s-${runId}`, status: outcome, startedAt: '2026-09-26T00:00:00.000Z' })
+    rows.runs.push({
+      runId,
+      taskId,
+      sessionId: `s-${runId}`,
+      status: outcome,
+      startedAt: '2026-09-26T00:00:00.000Z',
+      providerBinding: {
+        registryRevision: REGISTRY_REVISION,
+        capabilities: [],
+        skills: [],
+        mcpServers: [],
+      },
+    })
+    sessions.set(`s-${runId}`, [requestHeader(frozen.model, 1)])
     rows.evidence.push({ evidenceId: `e-${runId}`, taskRunId: runId, taskId, artifacts: [], verifierResults: [], claims: [], generatedAt: '2026-09-26T00:00:00.000Z' })
     rows.reviews.push({
       taskId,
@@ -247,7 +322,12 @@ async function fixture(options: FixtureOptions = {}) {
       evidenceRefs: [`e-${runId}`],
       anomalies: [],
       ...(options.metrics === undefined ? {} : { metrics: options.metrics }),
-      criteria: [{ criterionId, verdict, verifierId: 'command', verifierVersion: VERIFIER_VERSION }],
+      criteria: [{
+        criterionId,
+        verdict,
+        verifierId: options.frozenJudge?.ref ?? 'command',
+        verifierVersion: options.sideJudgeVersion ?? options.frozenJudge?.version ?? VERIFIER_VERSION,
+      }],
     })
     const record: ExperimentSampleRecord = {
       formatVersion: 1,
@@ -263,7 +343,12 @@ async function fixture(options: FixtureOptions = {}) {
       outcome,
       reviewRef: `${taskId}#${runId}`,
       evidenceRefs: [`e-${runId}`],
-      criteria: [{ criterionId, verdict, verifierId: 'command', verifierVersion: VERIFIER_VERSION }],
+      criteria: [{
+        criterionId,
+        verdict,
+        verifierId: options.frozenJudge?.ref ?? 'command',
+        verifierVersion: options.sideJudgeVersion ?? options.frozenJudge?.version ?? VERIFIER_VERSION,
+      }],
       workspace: join(root, 'sandbox', PROPOSAL, `exp-${experimentId}`, sample.taskId, side),
       initialDigest: frozen.snapshot.digest,
       cost: options.metrics === undefined
@@ -316,12 +401,12 @@ async function fixture(options: FixtureOptions = {}) {
       skillRoot,
       presetRoot: join(dir, 'presets'),
       configFile: join(dir, 'config.yml'),
-      modelIdentity: () => overrides.model ?? options.model ?? MODEL,
+      modelSelection: () => selectionOf(overrides.model ?? options.model ?? MODEL),
     })
   }
 
   return {
-    svc, reopen, root, skillRoot, workspace, rows, reportPath, experimentId, frozen, prepared: prepared.prepared!,
+    svc, reopen, root, skillRoot, workspace, rows, sessions, reportPath, experimentId, frozen, prepared: prepared.prepared!,
     /** Read the report back from disk, parse it, mutate it, and write it again. */
     async tamperReport(mutate: (report: Record<string, any>) => void) {
       const parsed = JSON.parse(await readFile(reportAbs, 'utf8'))
@@ -543,23 +628,74 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
     expect(await refusal(reopened.checkPromotion(PROPOSAL))).toContain("cannot be listed in this context")
   })
 
-  it('refuses when the model identity moved', async () => {
+  it('refuses a side whose session log records a request on another route (S4-E §Q3)', async () => {
     const f = await fixture()
-    expect(await refusal((await f.reopen({ model: 'p/other' })).checkPromotion(PROPOSAL))).toContain('the experiment froze model "p/m"')
+    // The durable surface — the run's own session log — says the candidate side's
+    // request went somewhere the frozen selection does not name.
+    ;(f.sessions.get(`s-r-${FAIL_SAMPLE}-candidate`) as unknown[]).push({
+      type: 'request/header',
+      seq: 99,
+      time: 0,
+      data: { header: { config: { provider: 'p', model: 'other' } }, reason: 'change' },
+    })
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain('really made its requests on p/other')
+    expect(message).toContain(`not on the frozen selection "${MODEL_LABEL}"`)
   })
 
-  it('refuses a deployment that cannot resolve a model identity at all', async () => {
+  it('refuses a side whose session log cannot be read at all', async () => {
+    const f = await fixture()
+    f.sessions.delete(`s-r-${FAIL_SAMPLE}-candidate`)
+    expect(await refusal(f.svc.checkPromotion(PROPOSAL))).toContain('cannot be read')
+  })
+
+  it('refuses a side whose run binding is not the frozen provider identity (S4-E §Q3)', async () => {
+    const f = await fixture()
+    const run = f.rows.runs.find(item => item.runId === `r-${FAIL_SAMPLE}-candidate`)!
+    ;(run.providerBinding as { registryRevision: string }).registryRevision = 'x'.repeat(64)
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain('bound registry revision')
+    expect(message).toContain('moved since the freeze')
+  })
+
+  it('refuses a side whose run records no provider binding at all', async () => {
+    const f = await fixture()
+    const run = f.rows.runs.find(item => item.runId === `r-${FAIL_SAMPLE}-baseline`)!
+    delete run.providerBinding
+    expect(await refusal(f.svc.checkPromotion(PROPOSAL))).toContain('records no provider binding')
+  })
+
+  it('refuses a verdict from a judge re-registered after the freeze, by the frozen version (S4-E §Q3)', async () => {
+    const f = await fixture({ frozenJudge: { ref: 'command', version: '1' }, sideJudgeVersion: '2' })
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain('but the block froze it at 1')
+    expect(message).toContain('a judge that moved since the freeze invalidates the evidence')
+  })
+
+  it('refuses when the model selection moved', async () => {
+    const f = await fixture()
+    const message = await refusal((await f.reopen({ model: 'other' })).checkPromotion(PROPOSAL))
+    expect(message).toContain(`the experiment froze model selection "${MODEL_LABEL}"`)
+    expect(message).toContain('but this deployment resolves "p/other" now')
+  })
+
+  it('refuses a deployment that cannot resolve a structured model selection', async () => {
     const f = await fixture()
     const bare = new EvolutionService(
       (f.svc as unknown as { ctx: object }).ctx as never,
-      { root: f.root, skillRoot: f.skillRoot, modelIdentity: () => undefined },
+      { root: f.root, skillRoot: f.skillRoot, modelSelection: () => undefined },
     )
-    expect(await refusal(bare.checkPromotion(PROPOSAL))).toContain('cannot name the model its runs share')
+    expect(await refusal(bare.checkPromotion(PROPOSAL))).toContain('cannot name the model selection its runs share')
+    const unstructured = new EvolutionService(
+      (f.svc as unknown as { ctx: object }).ctx as never,
+      { root: f.root, skillRoot: f.skillRoot, modelSelection: () => ({ provider: '', model: 'm' }) as never },
+    )
+    expect(await refusal(unstructured.checkPromotion(PROPOSAL))).toContain('cannot name the model selection its runs share')
     const unwired = new EvolutionService(
       (f.svc as unknown as { ctx: object }).ctx as never,
       { root: f.root, skillRoot: f.skillRoot },
     )
-    expect(await refusal(unwired.checkPromotion(PROPOSAL))).toContain('no model-identity resolver was injected')
+    expect(await refusal(unwired.checkPromotion(PROPOSAL))).toContain('no model-selection resolver was injected')
   })
 
   it.each([

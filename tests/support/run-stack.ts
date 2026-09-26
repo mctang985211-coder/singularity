@@ -273,7 +273,7 @@ class RunStackImpl implements RunStack {
     // the order a cordis deployment resolves in.
     this.task = new TaskService(this.ctx)
     this.verifier = new VerifierRegistry(this.ctx, { evidenceRoot: join(this.workspace, 'evidence') })
-    this.agentRuntime = new RecordingAgentRuntime(this.ctx, this.sessionRoot, () => this.primary)
+    this.agentRuntime = new RecordingAgentRuntime(this.ctx, this.sessionRoot, () => this.primary, request => this.recordSpawnRequest(request))
     this.runtime = new TaskRuntime(this.ctx, {
       capabilities: { ...(this.options.capabilities ?? {}) },
       ...(this.options.maxDepth === undefined ? {} : { maxDepth: this.options.maxDepth }),
@@ -405,6 +405,40 @@ class RunStackImpl implements RunStack {
     }
     for (const root of this.roots) await this.agentRuntime.ensureRoot(root, { graphStoreId: 'sg-g-root', layoutStoreId: 'sg-l-root' })
     return this
+  }
+
+  /**
+   * Record the request a spawn's own selection implies, on the session it
+   * created (S4-E §Q3). This fixture mounts no model loop, so there is no real
+   * `request/header` for a spec to read — and a run placed under a selection the
+   * *runtime* was asked for is the one thing that can stand in for it here: the
+   * entry is the loop's own event shape, carrying the merge the loop performs
+   * (`{ ...currentSelection(), ...request.agentOptions }`), so a spec that reads
+   * a session's requests sees exactly what the real loop would have logged.
+   *
+   * Written only when the spawn named a selection: an ordinary spawn leaves the
+   * log as it was, and a run that was supposed to be bound but was not has no
+   * header to show — which is the fact the promotion gate refuses. The session's
+   * log is created here when the fixture has none yet (a spawned session gets
+   * one from the deployment's persistence in a real deployment, and this
+   * fixture's `sessionQuery` serves the same map). The real-loop evidence lives
+   * in `tests/integration/s4e-q3-freeze-binding.spec.ts`.
+   */
+  private recordSpawnRequest(request: SpawnRequest): void {
+    if (request.agentOptions === undefined) return
+    const id = String(request.sessionId)
+    const existing = this.log.get(id)
+    const events = existing ?? []
+    if (existing === undefined) this.log.set(id, events)
+    events.push({
+      type: 'request/header',
+      seq: events.length,
+      time: Date.now(),
+      data: {
+        header: { config: { provider: request.agentOptions.provider, model: request.agentOptions.model, ...(request.agentOptions.reasoningEffort === undefined ? {} : { reasoningEffort: request.agentOptions.reasoningEffort }), ...(request.agentOptions.maxTokens === undefined ? {} : { maxTokens: request.agentOptions.maxTokens }) } },
+        reason: 'initial',
+      },
+    } as unknown as SessionEvent)
   }
 
   private handle(id: SessionId) {
@@ -599,6 +633,7 @@ class RecordingAgentRuntime extends AgentRuntime {
     ctx: Context,
     private readonly sessionRoot: Map<string, string>,
     private readonly primary: () => string,
+    private readonly onSpawned: (request: SpawnRequest) => void,
   ) {
     super(ctx)
   }
@@ -606,7 +641,9 @@ class RecordingAgentRuntime extends AgentRuntime {
   override async spawn(parent: Agent, request: SpawnRequest): Promise<AgentHandle> {
     this.requests.push(request)
     this.sessionRoot.set(request.sessionId, this.sessionRoot.get(parent.id) ?? this.primary())
-    return super.spawn(parent, request)
+    const handle = await super.spawn(parent, request)
+    this.onSpawned(request)
+    return handle
   }
 }
 

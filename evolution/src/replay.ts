@@ -484,20 +484,162 @@ export interface ExperimentSampleComparison {
   verdict: ExperimentSampleVerdict
 }
 
-/** One criterion's frozen identity: the acceptance condition as the sample's own contract holds it. */
+/**
+ * The model selection one deployment's runs share, as that deployment resolves
+ * it before anything runs (S4-E §Q3).
+ *
+ * It is structured on purpose: a `"<provider>/<model>"` string cannot be read
+ * back (a model id may contain `/`), and it drops the options that decide what a
+ * request really is — the reasoning effort and the output ceiling. The four
+ * fields are exactly `AgentOptions`' own model members, so the frozen selection
+ * travels to the real spawn verbatim and the requests that spawn produces can be
+ * compared against it member by member.
+ */
+export interface ModelSelection {
+  /** The registered provider route the runs go through. */
+  provider: string
+  /** The provider-owned model id. */
+  model: string
+  /** The adapter-owned reasoning effort, when the deployment selected one. */
+  reasoningEffort?: string
+  /** The per-request output ceiling, when the deployment selected one. */
+  maxTokens?: number
+  /**
+   * Derived display form `<provider>/<model>`. It is shown to humans and never
+   * parsed back: the structured members above are the identity, and a model id
+   * that contains `/` is exactly why the string cannot be one.
+   */
+  label: string
+}
+
+/**
+ * Read one selection as the structured identity, or `undefined` when it names
+ * no route. A selection without a provider or without a model is not a
+ * structured selection — a caller that cannot produce one is refused rather
+ * than given a placeholder (`provider` empty means the request would be routed
+ * by adapter defaults nobody froze).
+ */
+export function modelSelectionOf(selection: {
+  provider?: unknown
+  model?: unknown
+  reasoningEffort?: unknown
+  maxTokens?: unknown
+} | undefined): ModelSelection | undefined {
+  const provider = typeof selection?.provider === 'string' && selection.provider.length > 0 ? selection.provider : undefined
+  const model = typeof selection?.model === 'string' && selection.model.length > 0 ? selection.model : undefined
+  if (provider === undefined || model === undefined) return undefined
+  const reasoningEffort = typeof selection?.reasoningEffort === 'string' && selection.reasoningEffort.length > 0
+    ? selection.reasoningEffort
+    : undefined
+  const maxTokens = typeof selection?.maxTokens === 'number' && Number.isFinite(selection.maxTokens) && selection.maxTokens > 0
+    ? selection.maxTokens
+    : undefined
+  return {
+    provider,
+    model,
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    ...(maxTokens === undefined ? {} : { maxTokens }),
+    label: `${provider}/${model}`,
+  }
+}
+
+/** The `AgentOptions` a frozen selection travels as: the four members, verbatim, with no label. */
+export function agentOptionsOf(selection: ModelSelection): { provider: string; model: string; reasoningEffort?: string; maxTokens?: number } {
+  return {
+    provider: selection.provider,
+    model: selection.model,
+    ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
+    ...(selection.maxTokens === undefined ? {} : { maxTokens: selection.maxTokens }),
+  }
+}
+
+/**
+ * One criterion's frozen identity: the acceptance condition as the sample's own
+ * contract holds it, plus the judge identity it was frozen under (S4-E §Q3).
+ */
 export interface FrozenCriterion {
   criterionId: string
   verificationMode: string
   command?: string
   /** SHA-256 over the criterion's protected input identities (`<path>\0<sha256>` lines, sorted); the empty list hashes too. */
   protectedInputsDigest: string
+  /**
+   * The judge the criterion pins (`AcceptanceCriterion.verifierRef`), or `null`
+   * when it pins none and the registry's mode dispatch chooses. A pinned ref is
+   * the only case whose *version* can be frozen before the run: the freeze reads
+   * it from the same registry the runs are judged by.
+   */
+  verifierRef: string | null
+  /**
+   * The pinned judge's registered version at freeze, when the registry declared
+   * one then. Absent for a judge that declares no version, and for a criterion
+   * that pins none — `verifierAnchor` says what stands in for it.
+   */
+  verifierVersion?: string
+  /**
+   * How this criterion's judge identity is anchored, named at freeze so a later
+   * reader never has to guess: the registered version for a pinned, versioned
+   * judge; the registration id for a pinned judge that declares no version; and
+   * for an unpinned criterion, the dispatch mode plus the rule that the deciding
+   * judge's id and version are read from the run's verdicts and re-checked
+   * against the registry.
+   */
+  verifierAnchor: string
+}
+
+/**
+ * One skill the production configuration's pre-check resolved for a sample's
+ * rows, as it stood when the experiment froze: the identity a run's own binding
+ * has to agree with before the run may stand as this sample's side.
+ */
+export interface FrozenProviderSkill {
+  name: string
+  role: 'execution-provider' | 'knowledge' | 'guidance'
+  /** `skillContractDigest` of the sidecar the provider was validated against, or `null` for a skill that declares none. */
+  contractDigest: string | null
+  /** `skillContentDigest` of the bytes the run is expected to load for this skill in the production configuration. */
+  contentDigest: string
+}
+
+/**
+ * The provider identity the *production baseline* side of one sample must bind,
+ * fixed before the first run (S4-E §Q3): the capability rows the sample's
+ * required capabilities resolve to, the registry revision the runtime's own
+ * pre-check produces for them, the MCP servers those rows grant, the preset they
+ * declare, and every skill their providers resolved to. The candidate side's
+ * binding is compared against the same baseline with exactly one substituted
+ * entry — the promoted skill's own content — which is the overlay difference
+ * this ticket approved.
+ */
+export interface FrozenProviderIdentity {
+  /** The capability rows in play, sorted (the sample's required capabilities as the table holds them). */
+  capabilities: string[]
+  /**
+   * The registry revision the runtime's own pre-check produces for those rows
+   * over the production table at freeze. Every side's run binding must carry it:
+   * a capability row, a tool label or a declared contract that moved since the
+   * freeze moves it too.
+   */
+  registryRevision: string
+  /** The MCP server names those rows grant, sorted. Every side must bind exactly these, with a resolved template. */
+  mcpServers: string[]
+  /**
+   * The preset those rows declare — one worker, one preset — or `null` when none
+   * declares one and the deployment's own default governs. A declared preset is
+   * compared against each side's run; an undeclared one is compared side to side,
+   * so a default that moved between the sides still refuses.
+   */
+  preset: string | null
+  /** Every skill the rows' providers resolved to at freeze, sorted by name. */
+  skills: FrozenProviderSkill[]
 }
 
 /**
  * One sample's frozen identity: the case it locates, and the acceptance
  * identity the replay will mirror into both sides. `observed` is the historical
  * record the sample was chosen for — it locates the case and is *not* a
- * baseline: every report side must cite a different run.
+ * baseline: every report side must cite a different run. `provider` is the
+ * production configuration's provider identity for this sample, frozen with it.
  */
 export interface FrozenSample {
   taskId: string
@@ -506,13 +648,15 @@ export interface FrozenSample {
   contractDigest: string
   criteria: FrozenCriterion[]
   observed: { outcome: 'verified' | 'failed'; runId?: string }
+  /** The provider identity the production-baseline side of this sample must bind (S4-E §Q3). */
+  provider: FrozenProviderIdentity
 }
 
 /**
  * The identity block fixed before the first run (§F.2). Everything a reader
  * needs to say *what* was compared: the candidate's exact bytes, the input
  * snapshot both workspaces were built from, the samples and their acceptance
- * identity, the model identity the caller froze, the budget, the overlay each
+ * identity, the structured model selection the deployment froze, the budget, the overlay each
  * side ran under, and the comparer that judged. {@link frozenDigestOf} is the
  * digest of this whole block, so a report and a ledger record name the same
  * frozen experiment only if every one of these fields agrees.
@@ -530,8 +674,13 @@ export interface FrozenExperiment {
   candidate: SkillContentIdentity
   /** The production baseline the candidate replaces, when prepare captured one (a replacement, not a new skill). */
   productionBaseline?: SkillContentIdentity
-  /** The model identity the caller froze — an opaque string (a config digest, a model name), never interpreted here. */
-  model: string
+  /**
+   * The model selection every run of this experiment is placed under (S4-E
+   * §Q3), frozen before the first side and passed to the runtime verbatim as
+   * each side's `agentOptions`. `model.label` is the display form; the identity
+   * is the structured members beside it.
+   */
+  model: ModelSelection
   budget: ExperimentBudget
   samples: FrozenSample[]
   /** The input snapshot both sides' workspaces are built from, and its recursive content digest. */
@@ -704,9 +853,7 @@ export function assertFrozenExperiment(value: unknown): asserts value is FrozenE
   }
   assertIdentity(value.candidate, 'frozen.candidate')
   if (value.productionBaseline !== undefined) assertIdentity(value.productionBaseline, 'frozen.productionBaseline')
-  if (typeof value.model !== 'string' || value.model.length === 0) {
-    throw new Error('evolution: experiment report frozen.model must be a non-empty string (the model identity the caller froze)')
-  }
+  assertModelSelection(value.model, 'frozen.model')
   assertExperimentBudget(value.budget, 'frozen.budget')
   if (!isRecord(value.snapshot) || typeof value.snapshot.sourceDir !== 'string' || value.snapshot.sourceDir.length === 0
     || !isHex64(value.snapshot.digest)) {
@@ -754,6 +901,78 @@ function assertExperimentBudget(value: unknown, field: string): asserts value is
   }
 }
 
+function assertModelSelection(value: unknown, field: string): asserts value is ModelSelection {
+  if (!isRecord(value)) {
+    throw new Error(
+      `evolution: experiment report ${field} must be the structured model selection { provider, model } this build froze — ` +
+      'a record that froze a bare string cannot name the route its runs took, so it is refused rather than read as one',
+    )
+  }
+  for (const key of Object.keys(value)) {
+    if (!['provider', 'model', 'reasoningEffort', 'maxTokens', 'label'].includes(key)) {
+      throw new Error(`evolution: experiment report ${field} has unknown key "${key}"`)
+    }
+  }
+  if (typeof value.provider !== 'string' || value.provider.length === 0) {
+    throw new Error(`evolution: experiment report ${field}.provider must be the provider route the runs go through`)
+  }
+  if (typeof value.model !== 'string' || value.model.length === 0) {
+    throw new Error(`evolution: experiment report ${field}.model must be the model id the runs go through`)
+  }
+  if (value.reasoningEffort !== undefined && (typeof value.reasoningEffort !== 'string' || value.reasoningEffort.length === 0)) {
+    throw new Error(`evolution: experiment report ${field}.reasoningEffort must be a non-empty string when present`)
+  }
+  if (value.maxTokens !== undefined && (typeof value.maxTokens !== 'number' || !Number.isFinite(value.maxTokens) || value.maxTokens <= 0)) {
+    throw new Error(`evolution: experiment report ${field}.maxTokens must be a positive number when present`)
+  }
+  if (value.label !== `${value.provider}/${value.model}`) {
+    throw new Error(
+      `evolution: experiment report ${field}.label must be the derived display form "${value.provider}/${value.model}" — ` +
+      'the label is a rendering of the structured members, never an identity of its own',
+    )
+  }
+}
+
+function assertFrozenProviderSkill(value: unknown, field: string): asserts value is FrozenProviderSkill {
+  if (!isRecord(value) || typeof value.name !== 'string' || value.name.length === 0
+    || !['execution-provider', 'knowledge', 'guidance'].includes(value.role as string)
+    || (value.contractDigest !== null && !isHex64(value.contractDigest))
+    || !isHex64(value.contentDigest)) {
+    throw new Error(`evolution: experiment report ${field} must be a resolved skill identity { name, role, contractDigest, contentDigest }`)
+  }
+}
+
+function assertFrozenProviderIdentity(value: unknown, field: string): asserts value is FrozenProviderIdentity {
+  if (!isRecord(value)) {
+    throw new Error(
+      `evolution: experiment report ${field} must be the frozen provider identity of the sample's production baseline ` +
+      '(capabilities, registryRevision, mcpServers, preset, skills) — a sample frozen before that identity was recorded cannot ' +
+      'constrain what its sides really ran against',
+    )
+  }
+  if (!Array.isArray(value.capabilities) || value.capabilities.some(item => typeof item !== 'string' || item.length === 0)) {
+    throw new Error(`evolution: experiment report ${field}.capabilities must be an array of capability names`)
+  }
+  if (typeof value.registryRevision !== 'string' || value.registryRevision.length === 0) {
+    throw new Error(`evolution: experiment report ${field}.registryRevision must be the revision the runtime's pre-check produced`)
+  }
+  if (!Array.isArray(value.mcpServers) || value.mcpServers.some(item => typeof item !== 'string' || item.length === 0)) {
+    throw new Error(`evolution: experiment report ${field}.mcpServers must be an array of MCP server names`)
+  }
+  if (value.preset !== null && (typeof value.preset !== 'string' || value.preset.length === 0)) {
+    throw new Error(`evolution: experiment report ${field}.preset must be the declared preset or null (the deployment default governs)`)
+  }
+  if (!Array.isArray(value.skills)) throw new Error(`evolution: experiment report ${field}.skills must be an array`)
+  const names = new Set<string>()
+  for (const skill of value.skills) {
+    assertFrozenProviderSkill(skill, `${field}.skills[${(skill as { name?: unknown }).name as string}]`)
+    if (names.has((skill as FrozenProviderSkill).name)) {
+      throw new Error(`evolution: experiment report ${field} repeats skill "${(skill as FrozenProviderSkill).name}"`)
+    }
+    names.add((skill as FrozenProviderSkill).name)
+  }
+}
+
 function assertFrozenSample(value: unknown, field: string, seen: Set<string>): asserts value is FrozenSample {
   if (!isRecord(value) || typeof value.taskId !== 'string' || value.taskId.length === 0) {
     throw new Error(`evolution: experiment report ${field} must carry a taskId`)
@@ -774,12 +993,25 @@ function assertFrozenSample(value: unknown, field: string, seen: Set<string>): a
       || (criterion.command !== undefined && typeof criterion.command !== 'string') || !isHex64(criterion.protectedInputsDigest)) {
       throw new Error(`evolution: experiment report ${field} has an invalid or duplicate frozen criterion`)
     }
+    if (criterion.verifierRef !== null && (typeof criterion.verifierRef !== 'string' || criterion.verifierRef.length === 0)) {
+      throw new Error(
+        `evolution: experiment report ${field} criterion "${criterion.criterionId}" must pin the judge it was frozen with — ` +
+        'a criterion that names neither a ref nor "no ref" cannot be recalled against the judge that decides it',
+      )
+    }
+    if (criterion.verifierVersion !== undefined && (typeof criterion.verifierVersion !== 'string' || criterion.verifierVersion.length === 0)) {
+      throw new Error(`evolution: experiment report ${field} criterion "${criterion.criterionId}" has a malformed frozen verifier version`)
+    }
+    if (typeof criterion.verifierAnchor !== 'string' || criterion.verifierAnchor.length === 0) {
+      throw new Error(`evolution: experiment report ${field} criterion "${criterion.criterionId}" must name how its judge identity is anchored`)
+    }
     criterionIds.add(criterion.criterionId)
   }
   if (!isRecord(value.observed) || (value.observed.outcome !== 'verified' && value.observed.outcome !== 'failed')
     || (value.observed.runId !== undefined && (typeof value.observed.runId !== 'string' || value.observed.runId.length === 0))) {
     throw new Error(`evolution: experiment report ${field}.observed must record the historical outcome (and run, when known) the sample was chosen for`)
   }
+  assertFrozenProviderIdentity(value.provider, `${field}.provider`)
 }
 
 function assertCriterionDetail(value: unknown, field: string): asserts value is ExperimentCriterionDetail {

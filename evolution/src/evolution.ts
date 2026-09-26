@@ -65,7 +65,7 @@
  * the proposal's newest experiment: a completed two-sided experiment whose
  * report the ledger's own records recompute to, whose sides are runs of that
  * experiment's lineage in the task store, whose frozen contracts, protected
- * inputs, judge versions and model identity still hold, whose verdict is `fixed`
+ * inputs, judge versions and model selection still hold, whose verdict is `fixed`
  * and whose cost is known whenever the frozen budget declares a ceiling. All of
  * it is reads, and every condition is a named refusal.
  *
@@ -86,7 +86,7 @@ import { existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
-import type { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
 import {
   capabilityToolQuery,
@@ -106,7 +106,8 @@ import type {
 } from '@dangosys/dsh-singularity-task-runtime'
 import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
 import type { ReplayRelation, ReplayReport, ReplayVerdict, SkillContentIdentity } from './replay.ts'
-import { assertReplayReport, canonicalJson, REPLAY_RELATIONS, REPLAY_VERDICTS } from './replay.ts'
+import { assertReplayReport, canonicalJson, modelSelectionOf, REPLAY_RELATIONS, REPLAY_VERDICTS } from './replay.ts'
+import type { ModelSelection } from './replay.ts'
 import { editCapabilityRow, readCapabilityRowSource, restoreCapabilityRowSource } from './config-edit.ts'
 import type { CapabilityRowResult } from './config-edit.ts'
 import type {
@@ -621,34 +622,24 @@ export interface Config {
    */
   repoRoot?: string
   /**
-   * Resolves the model identity this plane freezes with an experiment and
-   * re-reads before a promotion (`<provider>/<model>`, or the model id alone).
+   * Resolves the model selection this plane freezes with an experiment and
+   * re-reads before a promotion — the deployment's own default selection, as a
+   * structured `{ provider, model, reasoningEffort?, maxTokens? }` (S4-E §Q3).
    *
    * It is injected, not derived here: the deployment knows which selection its
    * sessions and the replay spawns run under, and the process this package runs
    * in has no agent of its own to ask. The assembly
    * (`@dangosys/dsh-singularity-agent`) wires it to the same source the
-   * experiment tool freezes from — one resolver, so the identity a report is
-   * frozen under is exactly the one the gate compares against.
+   * experiment tool freezes from — one resolver, so the selection a report is
+   * frozen under is exactly the one the gate compares against, and the one every
+   * replayed spawn is placed under.
    *
-   * Absent, or answering nothing, is a refusal at both entries (fail-closed):
-   * an experiment cannot freeze a model nobody can name, and a promotion cannot
-   * prove the model did not drift. Neither silently skips the check.
+   * A selection must be structured to be usable: absent, answering nothing, or
+   * answering something without a provider and a model is a refusal at both
+   * entries (fail-closed). Neither silently skips the check, and the frozen
+   * selection is never parsed back out of a display string.
    */
-  modelIdentity?: () => string | undefined
-}
-
-/**
- * The model identity one selection names: `provider/model` when the route is
- * known, the model id alone otherwise. `undefined` for a selection that names no
- * model — a deployment configured without one is a case to refuse, not to paper
- * over with a placeholder.
- */
-export function modelIdentityOf(selection: { provider?: unknown; model?: unknown } | undefined): string | undefined {
-  const model = typeof selection?.model === 'string' && selection.model.length > 0 ? selection.model : undefined
-  if (model === undefined) return undefined
-  const provider = typeof selection?.provider === 'string' && selection.provider.length > 0 ? selection.provider : undefined
-  return provider === undefined ? model : `${provider}/${model}`
+  modelSelection?: () => ModelSelection | undefined
 }
 
 function nonEmpty(value: unknown, field: string): string {
@@ -1009,8 +1000,8 @@ export class EvolutionService extends Service {
   readonly configFile: string
   /** Repo root that relative evidence paths resolve against (see {@link Config.repoRoot}). */
   readonly repoRoot: string
-  /** The injected model-identity resolver, if the assembly wired one (see {@link Config.modelIdentity}). */
-  private readonly resolveModelIdentity?: () => string | undefined
+  /** The injected model-selection resolver, if the assembly wired one (see {@link Config.modelSelection}). */
+  private readonly resolveModelSelection?: () => ModelSelection | undefined
   private records: EvolutionRecord[] = []
   private readonly loaded: Promise<void>
   private writes: Promise<void> = Promise.resolve()
@@ -1019,7 +1010,7 @@ export class EvolutionService extends Service {
     super(ctx, 'evolution')
     // Explicitly configured, never derived here: see Config.repoRoot.
     this.repoRoot = config.repoRoot ?? process.cwd()
-    this.resolveModelIdentity = config.modelIdentity
+    this.resolveModelSelection = config.modelSelection
     const dshHome = process.env.DSH_HOME ?? join(this.repoRoot, '.dsh')
     this.root = resolve(config.root ?? join(dshHome, 'evolution'))
     this.skillRoot = resolve(config.skillRoot ?? join(dshHome, 'skills'))
@@ -1040,30 +1031,34 @@ export class EvolutionService extends Service {
   }
 
   /**
-   * The model identity this deployment's runs share — the one the experiment
-   * freezes before anything runs and the promotion gate re-reads ({@link Config.modelIdentity}).
+   * The model selection this deployment's runs share — the one the experiment
+   * freezes before anything runs, passes to each replayed spawn verbatim, and
+   * the promotion gate re-reads from the runs' own session logs
+   * ({@link Config.modelSelection}).
    *
-   * Fail-closed: no resolver, a resolver that throws, or one that names nothing
-   * is a named refusal. The experiment tool freezes this value, so a deployment
-   * that cannot name its model can neither evaluate nor promote a candidate —
-   * and neither case silently skips the check.
+   * Fail-closed: no resolver, a resolver that throws, or one that answers
+   * anything but a structured selection with a provider and a model is a named
+   * refusal. The experiment tool freezes this value, so a deployment that cannot
+   * name its selection can neither evaluate nor promote a candidate — and
+   * neither case silently skips the check.
    */
-  modelIdentity(): string {
-    let resolved: string | undefined
+  modelSelection(): ModelSelection {
+    let resolved: ModelSelection | undefined
     try {
-      resolved = this.resolveModelIdentity?.()
+      resolved = modelSelectionOf(this.resolveModelSelection?.())
     } catch (error) {
       throw new Error(
-        `evolution: the model identity cannot be resolved (${error instanceof Error ? error.message : String(error)}) — ` +
-        'the experiment freezes the model its runs share and a promotion re-reads it, so a deployment that cannot name one ' +
+        `evolution: the model selection cannot be resolved (${error instanceof Error ? error.message : String(error)}) — ` +
+        'the experiment freezes the selection its runs share and a promotion re-reads it, so a deployment that cannot name one ' +
         'neither evaluates nor promotes a candidate',
       )
     }
-    if (typeof resolved !== 'string' || resolved.trim().length === 0) {
+    if (resolved === undefined) {
       throw new Error(
-        'evolution: this deployment cannot name the model its runs share — no model-identity resolver was injected (or it named ' +
-        'none); the two-sided experiment freezes the model identity before anything runs and the promotion gate re-reads it, so ' +
-        'a deployment that cannot name it can neither evaluate nor promote a candidate',
+        'evolution: this deployment cannot name the model selection its runs share — no model-selection resolver was injected (or it ' +
+        'answered without a structured { provider, model } route); the two-sided experiment freezes the selection before anything ' +
+        'runs and the promotion gate re-reads it from the runs\' own session logs, so a deployment that cannot name it can neither ' +
+        'evaluate nor promote a candidate',
       )
     }
     return resolved
@@ -1450,7 +1445,8 @@ export class EvolutionService extends Service {
   /**
    * The services the promotion gate re-reads from this context: the experiment
    * family of this same ledger, the task store the experiment names, the live
-   * verifier vocabulary and this deployment's model identity. Resolved softly
+   * verifier vocabulary, this deployment's model selection and its session
+   * logs. Resolved softly
    * one by one, so a context that cannot offer one gets a refusal naming it
    * rather than a gate that silently checks less.
    */
@@ -1470,8 +1466,24 @@ export class EvolutionService extends Service {
         const vocabulary = await registeredVerifierVocabulary(this.ctx)
         return vocabulary === undefined ? undefined : { ids: vocabulary.ids, versions: vocabulary.versions }
       },
-      modelIdentity: () => this.modelIdentity(),
+      modelSelection: () => this.modelSelection(),
+      sessionLog: sessionId => this.sessionLog(sessionId),
     }
+  }
+
+  /**
+   * One session's own durable log, read through the deployment's session plane
+   * (`sessionQuery.readSession`) — the source the promotion gate re-reads a
+   * run's real requests from (S4-E §Q3). `undefined` when the deployment cannot
+   * serve the read at all, which the gate reports as a named refusal rather than
+   * skipping the check; a session the store does not hold throws, and the gate
+   * names that too.
+   */
+  private async sessionLog(sessionId: string): Promise<readonly SessionEvent[] | undefined> {
+    const query = optionalService<{ readSession?(id: SessionId): Promise<{ events: readonly SessionEvent[] }> }>(this.ctx, 'sessionQuery')
+    if (query === undefined || typeof query.readSession !== 'function') return undefined
+    const read = await query.readSession(SessionId(sessionId))
+    return read.events
   }
 
   /**
@@ -2291,7 +2303,21 @@ export class EvolutionService extends Service {
         `(missing: ${[graphs === undefined ? 'graphs' : undefined, task === undefined ? 'task' : undefined, taskRuntime === undefined ? 'taskRuntime' : undefined].filter(Boolean).join(', ')})`,
       )
     }
-    return { evolution: this, graphs, task, taskRuntime }
+    return {
+      evolution: this,
+      graphs,
+      task,
+      taskRuntime,
+      // Both freeze-time reads go through the same entries every other consumer
+      // uses: the judge vocabulary the criteria pin, and the runtime's own
+      // capability table the provider identity is read from. A context that
+      // cannot answer them makes the freeze fail by name (see experiment.ts)
+      // rather than freezing a value nobody can compare against.
+      verifierVocabulary: async () => {
+        const vocabulary = await registeredVerifierVocabulary(this.ctx)
+        return vocabulary === undefined ? undefined : { ids: vocabulary.ids, versions: vocabulary.versions }
+      },
+    }
   }
 }
 

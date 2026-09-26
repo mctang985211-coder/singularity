@@ -48,7 +48,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { EvolutionService } from '../../evolution/src/index.ts'
 import type { ExperimentResult, ExperimentSampleRecord, ExperimentSpec } from '../../evolution/src/index.ts'
-import { assertExperimentReport, experimentLineage, overallExperimentVerdict } from '../../evolution/src/index.ts'
+import { assertExperimentReport, experimentLineage, modelSelectionOf, overallExperimentVerdict } from '../../evolution/src/index.ts'
 import type { AcceptanceCriterion } from '../../task/src/index.ts'
 import { disposeRunStacks, startRunStack, type RunStack } from '../support/run-stack.ts'
 
@@ -292,7 +292,7 @@ function spec(fixture: Fixture, overrides: Partial<ExperimentSpec> = {}): Experi
       { taskId: 't-holdout', role: 'holdout' },
     ],
     snapshot: { sourceDir: fixture.snapshotDir },
-    model: 'scripted:run-stack',
+    model: modelSelectionOf({ provider: 'scripted', model: 'run-stack' })!,
     budget: { wallTimeMs: 120_000, maxTokens: 5_000, note: 'the fixture budget' },
     repetition: 0,
     ...overrides,
@@ -342,7 +342,7 @@ describe('S4-E: the two-sided skill experiment', () => {
     expect(result.report.frozen.snapshot.digest).toBe(snapshotDigest)
     expect(result.report.frozen.snapshot.sourceDir).toBe(await realpath(f.snapshotDir))
     expect(result.report.frozen.candidate.sha256).toBe((await f.evolution.get(PROPOSAL)).prepared!.skillContent!.sha256)
-    expect(result.report.frozen.model).toBe('scripted:run-stack')
+    expect(result.report.frozen.model).toEqual(modelSelectionOf({ provider: 'scripted', model: 'run-stack' }))
     expect(result.report.frozen.budget).toEqual(spec(f).budget)
     expect(result.report.frozen.samples.map(sample => [sample.taskId, sample.role, sample.observed.runId])).toEqual([
       ['t-fix', 'observed-failure', 'r-fix-history'],
@@ -546,7 +546,7 @@ describe('S4-E: the two-sided skill experiment', () => {
 
     // The same samples, another model identity: a different frozen experiment,
     // but the sample keys are the ones the first experiment already spent.
-    await expect(f.evolution.runExperiment(spec(f, { model: 'scripted:another-model' }), ROOT, ROOT))
+    await expect(f.evolution.runExperiment(spec(f, { model: modelSelectionOf({ provider: 'scripted', model: 'another-model' })! }), ROOT, ROOT))
       .rejects.toThrow(/is already recorded by experiment .* and its record is never/)
     expect((await ledgerLines(f)).length).toBe(linesBefore)
     const after = await f.h.snapshot(f.storeId)

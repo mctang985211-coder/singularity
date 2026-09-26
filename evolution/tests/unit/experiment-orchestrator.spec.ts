@@ -30,7 +30,7 @@ import type {
 } from '../../src/experiment.ts'
 import { directoryDigest, experimentLineage, runExperiment } from '../../src/experiment.ts'
 import type { FrozenExperiment } from '../../src/replay.ts'
-import { foldExperiments, frozenDigestOf } from '../../src/index.ts'
+import { foldExperiments, frozenDigestOf, modelSelectionOf } from '../../src/index.ts'
 
 const PROPOSAL = 'p1'
 const SKILL = 'fixture-skill'
@@ -184,6 +184,8 @@ async function world(options: { outcomes?: ScriptedOutcome[] } = {}) {
     graphs: { graphForSession: async () => ({ rootSessionId: 's-root' as never }) },
     task: { openStore: async () => snapshot() },
     taskRuntime: {
+      capabilityProviderReport: async () => ({ capabilities: [], revision: 'stub-revision' }),
+      listCapabilities: () => ({}),
       replayTask: async (_storeId: string, championTaskId: string, taskOptions: ReplayTaskOptions): Promise<ReplayRunOutcome> => {
         counter += 1
         const scriptedOutcome = scripted.shift() ?? { outcome: 'verified' as const }
@@ -251,14 +253,14 @@ async function world(options: { outcomes?: ScriptedOutcome[] } = {}) {
     runs,
     reviews,
     proposal,
-    spec: (overrides: { model?: string; repetition?: number } = {}) => ({
+    spec: (overrides: { selection?: { provider: string; model: string }; repetition?: number } = {}) => ({
       proposalId: PROPOSAL,
       samples: [
         { taskId: 't-fix', role: 'observed-failure' as const },
         { taskId: 't-holdout', role: 'holdout' as const },
       ],
       snapshot: { sourceDir: snapshotDir },
-      model: overrides.model ?? 'scripted:stub',
+      model: modelSelectionOf(overrides.selection ?? { provider: 'scripted', model: 'stub' })!,
       budget: { note: 'the stub budget' },
       repetition: overrides.repetition ?? 0,
     }),
@@ -403,7 +405,7 @@ describe('the two-sided orchestrator', () => {
     await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
     const linesBefore = w.records.length
 
-    await expect(runExperiment(w.sources, { spec: w.spec({ model: 'scripted:other' }), caller: CALLER, actor: 'root-1' }))
+    await expect(runExperiment(w.sources, { spec: w.spec({ selection: { provider: 'scripted', model: 'other' } }), caller: CALLER, actor: 'root-1' }))
       .rejects.toThrow(/is already recorded by experiment .* and its record is never overwritten/)
     expect(w.records).toHaveLength(linesBefore)
     expect(w.calls).toHaveLength(4)

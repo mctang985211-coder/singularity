@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '../../../../thirdparty/deepseek-harness/vendor/cordis/lib/index.js'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
-import { EvolutionService } from '../../evolution/src/index.ts'
+import { EvolutionService, modelSelectionOf } from '../../evolution/src/index.ts'
 import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
 import { recordPromotionExperiment } from '../support/promotion-experiment.ts'
 import { defineEvolutionDecideTool } from '../../agent-singularity/src/tools/evolution-decide.ts'
@@ -222,6 +222,16 @@ async function harness(options: { capabilities?: Readonly<Record<string, Capabil
       }
     },
   } as never)
+  // The session plane's own read (`sessionQuery.readSession`): the model half of
+  // the promotion gate re-reads each side's requests through it (S4-E §Q3), so
+  // the harness serves the same in-memory log its persistence writes.
+  ctx.provide('sessionQuery', {
+    readSession: async (id: SessionId) => {
+      const events = log.get(id)
+      if (events === undefined) throw new Error(`missing session ${id}`)
+      return { session: { id }, inheritedEventCount: 0, events }
+    },
+  } as never)
   ctx.provide('agentRuntime', {
     spawn: async (_parent: unknown, request: { sessionId: string }) => ({
       agent: {
@@ -256,9 +266,9 @@ async function harness(options: { capabilities?: Readonly<Record<string, Capabil
     skillRoot: join(workspace, 'production-skills'),
     presetRoot: join(workspace, 'production-presets'),
     configFile: join(workspace, 'config.yml'),
-    // The deployment's model identity: the experiment freezes it, the promotion
-    // gate re-reads it (S4-E §F.2).
-    modelIdentity: () => 'p/m',
+    // The deployment's model selection: the experiment freezes it, the promotion
+    // gate re-reads the runs' own requests against it (S4-E §F.2/§Q3).
+    modelSelection: () => modelSelectionOf({ provider: 'p', model: 'm' })!,
   })
   await writeFile(join(workspace, 'config.yml'), CONFIG_FIXTURE)
   ctx.provide('tools', {
@@ -367,7 +377,7 @@ async function skillCandidateGated(h: Harness, content: string, proposalId = 's1
   await svc.prepare(proposalId, ROOT_SESSION)
   // S4-E §F.2: the evidence a promotion reads is the completed two-sided
   // experiment, recorded through the ledger's own write entries.
-  const { reportPath } = await recordPromotionExperiment(promotionExperimentContextFor(h), svc, { proposalId, model: 'p/m' })
+  const { reportPath } = await recordPromotionExperiment(promotionExperimentContextFor(h), svc, { proposalId, selection: modelSelectionOf({ provider: 'p', model: 'm' })! })
   await svc.gate(proposalId, gateAnswers([reportPath]), ROOT_SESSION)
 }
 

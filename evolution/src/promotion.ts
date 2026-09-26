@@ -24,21 +24,41 @@
  *    evidence must be bundles of that run. A record or report pointing anywhere
  *    else — at the sample's historical run, at another side's run, at an evidence
  *    id nobody holds — is refused instead of read as a baseline.
- * 5. **The inputs and the judge have not drifted.** Each frozen sample's contract
- *    digest must still equal the store's contract, each criterion's protected
- *    inputs digest and file bytes must still be the frozen ones (re-read in the
+ * 5. **The inputs have not drifted.** Each frozen sample's contract digest must
+ *    still equal the store's contract, and each criterion's protected inputs
+ *    digest and file bytes must still be the frozen ones (re-read in the
  *    production workspace the experiment froze, the same read rule the verifier
- *    uses), and every criterion in the report must name a verifier that is
- *    registered *now* with the same version it judged with.
- * 6. **The model has not drifted.** The model identity the deployment resolves now
- *    — the one injected into this service, the same source the experiment freezes
- *    from — must equal `frozen.model`. No resolver, or one that names nothing, is
- *    a refusal, never a skipped check.
- * 7. **The verdict.** Only `fixed` is promotable. `fixed-with-regression`,
+ *    uses).
+ * 6. **The judge is the one the freeze pinned** (S4-E §Q3). A criterion that
+ *    pinned a `verifierRef` at freeze must have been decided by that ref, at the
+ *    version the registry declared *then* — a judge re-registered at another
+ *    version after the freeze is refused by the frozen value, not by what the
+ *    registry says now. And every reported judge must still be registered at the
+ *    version it judged with.
+ * 7. **The model the runs really ran under is the frozen selection** (§Q3). Every
+ *    request each side's session log records — the side's own runs and every
+ *    sub-execution below it — must have been made on the frozen selection: the
+ *    route exactly, and the reasoning effort and output ceiling when the frozen
+ *    selection declared them. A log that cannot be read, a session with no
+ *    request at all (the runtime's own criteria replay, whose run record says no
+ *    worker existed, is the one exemption), or one request on another route is a
+ *    named refusal. The deployment's selection *now* is read as well — a
+ *    deployment that moved on has to freeze a new experiment — but it is the
+ *    second half of the check, never the whole of it: comparing the experiment's
+ *    opening value with today's would pass a run that really went elsewhere and
+ *    came back.
+ * 8. **The provider identity the sides bound is the frozen one** (§Q3). Each
+ *    side's run binding — its capability rows, registry revision, MCP servers,
+ *    preset and resolved skills — must be the identity the freeze read from the
+ *    production configuration, and the promoted skill's bytes are the one
+ *    allowed difference: the baseline side's bound snapshot must hold the frozen
+ *    production `SKILL.md`, the candidate side's the frozen candidate's. Apart
+ *    from that difference the two sides must agree.
+ * 9. **The verdict.** Only `fixed` is promotable. `fixed-with-regression`,
  *    `regressed`, `not-fixed`, `both-failed` and `inconclusive` each get their own
  *    named refusal, so "the failure is not fixed", "a holdout degraded" and "the
  *    evidence never settled" are distinguishable without reading the report.
- * 8. **The cost the frozen budget demands.** A frozen budget that declares a cost
+ * 10. **The cost the frozen budget demands.** A frozen budget that declares a cost
  *    ceiling cannot be shown to hold while a side's cost is `unknown`: the
  *    promotion is refused. With no ceiling declared, `unknown` stays the honest
  *    observation it is and is recorded, not turned into a zero and not treated as
@@ -56,8 +76,9 @@
 
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
-import type { ReviewCriterion, ReviewRecord, TaskInstance, TaskSnapshot } from '@dangosys/dsh-singularity-task'
+import { join, resolve } from 'node:path'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { ReviewCriterion, ReviewRecord, RunProviderBinding, TaskInstance, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import type { EvolutionProposal } from './evolution.ts'
 import { experimentLineage, evidenceRefsOf } from './experiment.ts'
 import type { ExperimentView } from './experiment.ts'
@@ -68,7 +89,9 @@ import type {
   ExperimentSideDetail,
   ExperimentVerdict,
   FrozenCriterion,
+  FrozenProviderIdentity,
   FrozenSample,
+  ModelSelection,
 } from './replay.ts'
 import { assertExperimentReport, digestOf, protectedInputsDigest } from './replay.ts'
 
@@ -97,8 +120,18 @@ export interface SkillPromotionSources {
   readonly task: PromotionStoreReads
   /** The registered judges, or `undefined` when the deployment cannot list them (fail-closed). */
   verifierVocabulary(): Promise<VerifierVocabulary | undefined>
-  /** The model identity both sides ran under; throws when the deployment cannot name one (fail-closed). */
-  modelIdentity(): string
+  /**
+   * The deployment's own selection now. It is the second half of the model
+   * check — the first half is the runs' own requests — and a resolver that
+   * cannot name a structured selection throws (fail-closed).
+   */
+  modelSelection(): ModelSelection
+  /**
+   * One session's own durable log (`sessionQuery.readSession`), or `undefined`
+   * when this deployment cannot read session logs at all — the case the gate
+   * reports as a named refusal instead of checking nothing (S4-E §Q3).
+   */
+  sessionLog(sessionId: string): Promise<readonly SessionEvent[] | undefined>
 }
 
 /** What a passing gate proves, for the caller to report: the experiment, its report and where it sits. */
@@ -184,9 +217,9 @@ function assertSideEvidence(input: {
   experimentId: string
   snapshot: TaskSnapshot
   where: string
-}): void {
+}): TaskInstance | undefined {
   const { sample, detail, experimentId, snapshot, where } = input
-  if (detail.outcome === 'interrupted') return
+  if (detail.outcome === 'interrupted') return undefined
   const lineage = experimentLineage(experimentId, sample.taskId, detail.side)
   const task: TaskInstance | undefined = snapshot.tasks.find(item => item.objective?.startsWith(`[${lineage}] `))
   if (task === undefined) {
@@ -290,6 +323,7 @@ function assertSideEvidence(input: {
       'from cannot be re-proved',
     )
   }
+  return task
 }
 
 /** The store's contract of one sample, as the freeze derived its digest: objective, criteria, required capabilities. */
@@ -387,16 +421,53 @@ async function assertProtectedInputIntact(
 }
 
 /**
- * Whether every criterion verdict a report side carries still names a registered
- * judge, at the version it judged with. Fail-closed: a deployment that cannot
- * list its verifier vocabulary refuses rather than assuming the judge is there.
+ * Whether every criterion verdict a report side carries was decided by the
+ * judge the frozen block fixed *before* the run (S4-E §Q3), and whether that
+ * judge is still the registered instance it was.
+ *
+ * The frozen half: a criterion that pinned a `verifierRef` at freeze must have
+ * been decided by that ref — and, when the registry declared a version then, at
+ * exactly that version — so re-registering a same-named judge with a new version
+ * after the freeze is a refusal that names the frozen value. A criterion that
+ * pinned nothing was dispatched by mode, which the frozen block says; there the
+ * run's own verdicts name the judge, and the registry half below re-checks it.
+ * Fail-closed: a deployment that cannot list its verifier vocabulary refuses
+ * rather than assuming the judge is there.
  */
-function assertJudgeUnchanged(detail: ExperimentSideDetail, where: string, vocabulary: VerifierVocabulary): void {
+function assertJudgeUnchanged(
+  sample: FrozenSample,
+  detail: ExperimentSideDetail,
+  where: string,
+  vocabulary: VerifierVocabulary,
+): void {
+  const frozenById = new Map(sample.criteria.map(criterion => [criterion.criterionId, criterion]))
   for (const criterion of detail.criteria) {
+    const frozen = frozenById.get(criterion.criterionId)
+    if (frozen === undefined) {
+      throw new Error(
+        `evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" of sample "${sample.taskId}", ` +
+        'which the frozen block does not carry — a verdict outside the frozen acceptance is not evidence this promotion may read',
+      )
+    }
     if (criterion.verifierId === undefined) {
       throw new Error(
         `evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" without the verifier that ` +
         'decided it — a verdict nobody can be recalled against is not evidence a promotion may read',
+      )
+    }
+    if (frozen.verifierRef !== null && criterion.verifierId !== frozen.verifierRef) {
+      throw new Error(
+        `evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" decided by verifier ` +
+        `"${criterion.verifierId}", but the frozen block pinned "${frozen.verifierRef}" (${frozen.verifierAnchor}) — the verdicts a ` +
+        'promotion reads must be the ones the frozen judge produced',
+      )
+    }
+    if (frozen.verifierRef !== null && criterion.verifierVersion !== frozen.verifierVersion) {
+      throw new Error(
+        `evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" decided by "${frozen.verifierRef}" ` +
+        `at version ${criterion.verifierVersion === undefined ? '(none declared)' : criterion.verifierVersion}, but the block froze it ` +
+        `at ${frozen.verifierVersion === undefined ? '(no version declared)' : frozen.verifierVersion} (${frozen.verifierAnchor}) — ` +
+        'a verdict belongs to the instance that judged, so a judge that moved since the freeze invalidates the evidence',
       )
     }
     if (!vocabulary.ids.includes(criterion.verifierId)) {
@@ -415,6 +486,352 @@ function assertJudgeUnchanged(detail: ExperimentSideDetail, where: string, vocab
         're-registered version invalidates the evidence',
       )
     }
+  }
+}
+
+/** One `request/header` event's call configuration, as the request identity it is. */
+interface RequestIdentity {
+  provider: string
+  model: string
+  reasoningEffort?: string
+  maxTokens?: number
+}
+
+/**
+ * Every request identity one session's own log records, in order: one entry per
+ * `request/header` event, read from the event data the live loop appended (its
+ * canonical header, not a summary). A session with no such event is reported as
+ * an empty list — the caller decides whether that is the no-worker exemption or
+ * a refusal, and this function never invents an identity.
+ */
+function requestIdentities(events: readonly SessionEvent[]): RequestIdentity[] {
+  const identities: RequestIdentity[] = []
+  for (const event of events) {
+    if (event.type !== 'request/header') continue
+    const config = (event.data as { header?: { config?: { provider?: unknown; model?: unknown; reasoningEffort?: unknown; maxTokens?: unknown } } })
+      .header?.config
+    if (config === undefined || typeof config.provider !== 'string' || typeof config.model !== 'string') continue
+    identities.push({
+      provider: config.provider,
+      model: config.model,
+      ...(typeof config.reasoningEffort === 'string' ? { reasoningEffort: config.reasoningEffort } : {}),
+      ...(typeof config.maxTokens === 'number' ? { maxTokens: config.maxTokens } : {}),
+    })
+  }
+  return identities
+}
+
+/** Whether one request identity is the frozen selection: the route exactly, and each declared option exactly. */
+function requestMatchesSelection(identity: RequestIdentity, selection: ModelSelection): boolean {
+  if (identity.provider !== selection.provider || identity.model !== selection.model) return false
+  if (selection.reasoningEffort !== undefined && identity.reasoningEffort !== selection.reasoningEffort) return false
+  if (selection.maxTokens !== undefined && identity.maxTokens !== selection.maxTokens) return false
+  return true
+}
+
+/**
+ * Whether one run is the runtime's own no-worker criteria replay — the one
+ * recorded shape with no model path at all (`spawn: false`: the run is born
+ * `submitted` with a runtime-origin submission, and no worker ever existed to
+ * make a request). This is the *only* exemption from the model check, and it is
+ * read from the run's own record rather than assumed from an empty log.
+ */
+function isNoWorkerRun(run: TaskRun): boolean {
+  return run.executionPhase === 'submitted' && run.submission?.origin === 'runtime'
+}
+
+/** The side's task and every task below it — the subtree whose runs are this side's execution. */
+function subtreeOf(snapshot: TaskSnapshot, rootTaskId: string): TaskInstance[] {
+  const tasks = new Map(snapshot.tasks.map(task => [task.taskId, task]))
+  const root = tasks.get(rootTaskId)
+  if (root === undefined) return []
+  const found: TaskInstance[] = []
+  const pending = [root]
+  const seen = new Set<string>()
+  while (pending.length > 0) {
+    const task = pending.pop() as TaskInstance
+    if (seen.has(task.taskId)) continue
+    seen.add(task.taskId)
+    found.push(task)
+    for (const child of snapshot.tasks) if (child.parentTaskId === task.taskId) pending.push(child)
+  }
+  return found
+}
+
+/**
+ * The model half of the gate (S4-E §Q3): what the side's runs *really* went
+ * through, re-read from the durable session logs of the side's task and every
+ * sub-execution below it.
+ *
+ * Every run of the subtree that had a worker must have a readable session log,
+ * and every request it recorded must have been made on the frozen selection —
+ * the route exactly, and the reasoning effort / output ceiling when the frozen
+ * selection declared them. A log that cannot be read, a session with no request
+ * at all, or one request on another route is a named refusal: a run whose
+ * identity cannot be proved is not a side this promotion may read, and the one
+ * exemption is the runtime's own criteria replay, whose run record says no
+ * worker ever existed.
+ *
+ * This is deliberately *not* a comparison of the experiment's start value with
+ * today's value: the deployment's selection may move and move back without ever
+ * touching these requests, and a run that really went through another route is
+ * caught here whatever the deployment resolves now.
+ */
+async function assertSideModelBinding(input: {
+  sources: SkillPromotionSources
+  detail: ExperimentSideDetail
+  task: TaskInstance | undefined
+  snapshot: TaskSnapshot
+  selection: ModelSelection
+  where: string
+}): Promise<void> {
+  const { sources, detail, task, snapshot, selection, where } = input
+  if (detail.outcome === 'interrupted' || task === undefined) return
+  const runs: TaskRun[] = []
+  for (const subtreeTask of subtreeOf(snapshot, task.taskId)) {
+    for (const runId of subtreeTask.runIds) {
+      const run = snapshot.runs.find(item => item.runId === runId)
+      if (run === undefined) {
+        throw new Error(
+          `evolution: the experiment report's ${where} names task "${subtreeTask.taskId}" of this experiment, but the store holds ` +
+          `no run "${runId}" of it — the execution this side rests on cannot be re-read`,
+        )
+      }
+      runs.push(run)
+    }
+  }
+  for (const run of runs) {
+    if (isNoWorkerRun(run)) continue
+    let events: readonly SessionEvent[] | undefined
+    try {
+      events = await sources.sessionLog(run.sessionId)
+    } catch (error) {
+      throw new Error(
+        `evolution: the session log of run "${run.runId}" (session "${run.sessionId}") of the ${where} cannot be read ` +
+        `(${error instanceof Error ? error.message : String(error)}) — the requests that run really made are the evidence this ` +
+        'promotion compares against the frozen selection, so a run whose log is gone cannot be promoted on',
+      )
+    }
+    if (events === undefined) {
+      throw new Error(
+        `evolution: this deployment cannot read session logs (sessionQuery.readSession is unavailable), so the requests of run ` +
+        `"${run.runId}" of the ${where} cannot be compared against the frozen model selection "${selection.label}" — the promotion ` +
+        'is refused rather than granted on an unverifiable model binding',
+      )
+    }
+    const identities = requestIdentities(events)
+    if (identities.length === 0) {
+      throw new Error(
+        `evolution: run "${run.runId}" (session "${run.sessionId}") of the ${where} recorded no request at all, so the frozen model ` +
+        `selection "${selection.label}" cannot be shown to be what it ran under — a run with no request identity to check is refused ` +
+        '(the runtime\'s own criteria replay, the one no-worker path, is exempt; this run records a worker)',
+      )
+    }
+    for (const identity of identities) {
+      if (requestMatchesSelection(identity, selection)) continue
+      throw new Error(
+        `evolution: run "${run.runId}" (session "${run.sessionId}") of the ${where} really made its requests on ` +
+        `${identity.provider}/${identity.model}${identity.reasoningEffort === undefined ? '' : ` (effort ${identity.reasoningEffort})`}` +
+        `${identity.maxTokens === undefined ? '' : ` (maxTokens ${identity.maxTokens})`}, not on the frozen selection ` +
+        `"${selection.label}"${selection.reasoningEffort === undefined ? '' : ` (effort ${selection.reasoningEffort})`}` +
+        `${selection.maxTokens === undefined ? '' : ` (maxTokens ${selection.maxTokens})`} — the runs a promotion reads must be the ` +
+        'runs the frozen selection was fixed for',
+      )
+    }
+  }
+}
+
+/**
+ * Whether one side's run binding is the provider identity the experiment froze
+ * for the sample (S4-E §Q3): the capability rows, the registry revision, the MCP
+ * servers (with a resolved template each) and every resolved skill's identity.
+ *
+ * The promoted skill's *content* is the one difference the frozen block allows,
+ * and it is checked against the bytes the run actually bound: the side's
+ * snapshot must hold the frozen `SKILL.md` — the production baseline's bytes for
+ * the baseline side, the candidate's for the candidate side.
+ */
+async function assertSideProviderBinding(input: {
+  sample: FrozenSample
+  detail: ExperimentSideDetail
+  run: TaskRun
+  frozen: ExperimentReport['frozen']
+  where: string
+}): Promise<void> {
+  const { sample, detail, run, frozen, where } = input
+  if (detail.outcome === 'interrupted') return
+  const expected: FrozenProviderIdentity = sample.provider
+  const binding: RunProviderBinding | undefined = run.providerBinding
+  if (binding === undefined) {
+    throw new Error(
+      `evolution: run "${run.runId}" of the ${where} records no provider binding — which rows, servers and skills it resolved ` +
+      'against cannot be re-read, so the frozen provider identity cannot be compared and the promotion is refused',
+    )
+  }
+  const rows = [...binding.capabilities].sort()
+  if (rows.join(', ') !== [...expected.capabilities].sort().join(', ')) {
+    throw new Error(
+      `evolution: run "${run.runId}" of the ${where} bound capabilities [${rows.join(', ') || 'none'}] but the experiment froze ` +
+      `[${expected.capabilities.join(', ') || 'none'}] — the rows this side ran under are not the frozen production configuration's`,
+    )
+  }
+  if (binding.registryRevision !== expected.registryRevision) {
+    throw new Error(
+      `evolution: run "${run.runId}" of the ${where} bound registry revision ${binding.registryRevision}, but the experiment froze ` +
+      `${expected.registryRevision} — a capability row, a tool label or a declared provider contract moved since the freeze, so the ` +
+      'side did not run under the frozen production configuration',
+    )
+  }
+  const servers = [...binding.mcpServers].map(server => server.serverName).sort()
+  if (servers.join(', ') !== [...expected.mcpServers].sort().join(', ')) {
+    throw new Error(
+      `evolution: run "${run.runId}" of the ${where} bound MCP servers [${servers.join(', ') || 'none'}] but the experiment froze ` +
+      `[${expected.mcpServers.join(', ') || 'none'}] — the granted server plane moved since the freeze`,
+    )
+  }
+  for (const server of binding.mcpServers) {
+    if (server.templateDigest === null) {
+      throw new Error(
+        `evolution: run "${run.runId}" of the ${where} bound MCP server "${server.serverName}" with no resolvable template — the run ` +
+        'recorded no identity for the server it was granted, so the frozen server plane cannot be compared',
+      )
+    }
+  }
+  if (expected.preset !== null && run.agentPreset !== expected.preset) {
+    throw new Error(
+      `evolution: run "${run.runId}" of the ${where} ran under agent preset ${run.agentPreset === undefined ? '(none)' : `"${run.agentPreset}"`}, ` +
+      `but the frozen provider identity declares "${expected.preset}" — the preset plane this side ran under is not the frozen one`,
+    )
+  }
+  const frozenSkills = new Map(expected.skills.map(skill => [skill.name, skill]))
+  const boundSkills = new Map(binding.skills.map(skill => [skill.name, skill]))
+  for (const name of boundSkills.keys()) {
+    if (!frozenSkills.has(name)) {
+      throw new Error(
+        `evolution: run "${run.runId}" of the ${where} bound skill "${name}", which the frozen production configuration does not ` +
+        `resolve (frozen: ${expected.skills.map(skill => skill.name).join(', ') || 'none'}) — content the freeze never admitted reached this run`,
+      )
+    }
+  }
+  for (const [name, expectedSkill] of frozenSkills) {
+    const bound = boundSkills.get(name)
+    if (bound === undefined) {
+      throw new Error(
+        `evolution: run "${run.runId}" of the ${where} bound no skill "${name}", which the frozen production configuration resolves ` +
+        '— the run under this side did not load content the freeze named',
+      )
+    }
+    if (bound.role !== expectedSkill.role || (bound.contractDigest ?? null) !== expectedSkill.contractDigest) {
+      throw new Error(
+        `evolution: run "${run.runId}" of the ${where} bound skill "${name}" as ${bound.role}` +
+        `${bound.contractDigest === null ? '' : ` (contract ${bound.contractDigest})`}, but the frozen identity is ` +
+        `${expectedSkill.role}${expectedSkill.contractDigest === null ? '' : ` (contract ${expectedSkill.contractDigest})`} — the ` +
+        'provider this side loaded is not the one the experiment froze',
+      )
+    }
+    if (name === frozen.candidate.name) {
+      // The promoted skill's own content is the one difference the frozen block
+      // allows: the baseline side must bind exactly the production identity the
+      // freeze read, and the candidate side's bytes are read off its snapshot
+      // below (the candidate's content is not the production content, so its
+      // recorded digest is not compared to the frozen one).
+      if (detail.side === 'baseline' && bound.contentDigest !== expectedSkill.contentDigest) {
+        throw new Error(
+          `evolution: run "${run.runId}" of the ${where} bound skill "${name}" content ${bound.contentDigest}, but the production ` +
+          `configuration's content at freeze was ${expectedSkill.contentDigest} — the bytes this side loaded moved since the freeze`,
+        )
+      }
+      continue
+    }
+    if (bound.contentDigest !== expectedSkill.contentDigest) {
+      throw new Error(
+        `evolution: run "${run.runId}" of the ${where} bound skill "${name}" content ${bound.contentDigest}, but the production ` +
+        `configuration's content at freeze was ${expectedSkill.contentDigest} — the bytes this side loaded moved since the freeze`,
+      )
+    }
+  }
+  // The promoted skill's own bytes: read from the snapshot the run bound, so the
+  // check is against what the run really loaded, not against what it recorded.
+  const target = boundSkills.get(frozen.candidate.name)
+  if (target !== undefined) {
+    const expectedBytes = detail.side === 'candidate'
+      ? frozen.candidate.sha256
+      : frozen.productionBaseline?.sha256
+    if (expectedBytes !== undefined) {
+      if (binding.snapshotRoot === undefined) {
+        throw new Error(
+          `evolution: run "${run.runId}" of the ${where} bound skill "${frozen.candidate.name}" but records no snapshot root — ` +
+          'the bytes it loaded cannot be re-read, so the frozen content identity cannot be compared',
+        )
+      }
+      let bytes: Buffer
+      try {
+        bytes = await readFile(join(binding.snapshotRoot, frozen.candidate.name, 'SKILL.md'))
+      } catch (error) {
+        throw new Error(
+          `evolution: the content run "${run.runId}" of the ${where} was bound to cannot be read ` +
+          `(${error instanceof Error ? error.message : String(error)}) — the promoted skill's frozen bytes cannot be re-proved, so ` +
+          'the promotion is refused',
+        )
+      }
+      const digest = sha256Hex(bytes)
+      if (digest !== expectedBytes) {
+        throw new Error(
+          `evolution: run "${run.runId}" of the ${where} bound skill "${frozen.candidate.name}" whose SKILL.md hashes to ${digest}, ` +
+          `but the experiment froze ${expectedBytes} for the ${detail.side} side — the bytes this side ran are not the frozen ones`,
+        )
+      }
+      if (detail.side === 'candidate' && digest === frozen.productionBaseline?.sha256) {
+        throw new Error(
+          `evolution: the candidate side of the ${where} loaded the production bytes ("${frozen.candidate.name}" hashes to ` +
+          `${digest}, the frozen production baseline) — the candidate was never really run, so the comparison proves nothing`,
+        )
+      }
+    }
+  }
+}
+
+/**
+ * Whether the two sides' bindings agree everywhere the frozen block allows
+ * agreement and nowhere else (S4-E §Q3): every field of the run binding and the
+ * run's preset must match between the baseline and the candidate side, except
+ * the promoted skill's own content digest — the one difference the experiment's
+ * overlay is supposed to produce.
+ */
+function assertSidesAgree(
+  frozen: ExperimentReport['frozen'],
+  baseline: { run: TaskRun; binding: RunProviderBinding },
+  candidate: { run: TaskRun; binding: RunProviderBinding },
+  where: string,
+): void {
+  const comparable = (binding: RunProviderBinding) => ({
+    capabilities: [...binding.capabilities].sort(),
+    registryRevision: binding.registryRevision,
+    mcpServers: [...binding.mcpServers].sort((left, right) => (left.serverName < right.serverName ? -1 : left.serverName > right.serverName ? 1 : 0)),
+    skills: [...binding.skills]
+      .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
+      .map(skill => ({
+        name: skill.name,
+        role: skill.role,
+        contractDigest: skill.contractDigest ?? null,
+        ...(skill.name === frozen.candidate.name ? {} : { contentDigest: skill.contentDigest }),
+      })),
+  })
+  const left = JSON.stringify(comparable(baseline.binding))
+  const right = JSON.stringify(comparable(candidate.binding))
+  if (left !== right) {
+    throw new Error(
+      `evolution: the two sides of ${where} did not bind the same provider identity — apart from the promoted skill's own content, ` +
+      `which the candidate overlay is what changes, every field must agree:\n- baseline: ${left}\n- candidate: ${right}`,
+    )
+  }
+  if (baseline.run.agentPreset !== candidate.run.agentPreset) {
+    throw new Error(
+      `evolution: the two sides of ${where} ran under different agent presets ` +
+      `(${baseline.run.agentPreset === undefined ? '(none)' : `"${baseline.run.agentPreset}"`} vs ` +
+      `${candidate.run.agentPreset === undefined ? '(none)' : `"${candidate.run.agentPreset}"`}) — a preset that moved between the ` +
+      'sides is not the frozen execution',
+    )
   }
 }
 
@@ -524,11 +941,12 @@ export async function assertSkillPromotionEvidence(
   }
   for (const sample of report.samples) {
     const frozenSample = frozenSampleOf(report, sample.taskId)
+    const sideRuns: Partial<Record<'baseline' | 'candidate', { run: TaskRun; binding: RunProviderBinding }>> = {}
     for (const side of ['baseline', 'candidate'] as const) {
       const detail = side === 'baseline' ? sample.baseline : sample.candidate
       const label = `sample "${sample.taskId}" ${side} side`
-      assertSideEvidence({ sample: frozenSample, detail, experimentId: experiment.experimentId, snapshot, where: label })
-      assertJudgeUnchanged(detail, label, vocabulary)
+      const task = assertSideEvidence({ sample: frozenSample, detail, experimentId: experiment.experimentId, snapshot, where: label })
+      assertJudgeUnchanged(frozenSample, detail, label, vocabulary)
       assertCostWithinDeclaredBudget(report, label, detail)
       if (detail.outcome === 'interrupted') continue
       if (detail.initialDigest !== frozen.snapshot.digest) {
@@ -537,15 +955,42 @@ export async function assertSkillPromotionEvidence(
           `${frozen.snapshot.digest} — both sides of a sample start from the same frozen input`,
         )
       }
+      // 5a. What the side's runs really went through (S4-E §Q3), re-read from
+      // the durable session logs of the side and its sub-executions.
+      await assertSideModelBinding({ sources, detail, task, snapshot, selection: frozen.model, where: label })
+      // 5b. And what they were bound to: the frozen production provider
+      // identity, with the promoted skill's own bytes as the one allowed
+      // difference.
+      const run = detail.runId === undefined ? undefined : snapshot.runs.find(item => item.runId === detail.runId)
+      if (run === undefined) {
+        throw new Error(
+          `evolution: the experiment report's ${label} cites run "${String(detail.runId)}", which the store no longer holds — its ` +
+          'provider binding cannot be re-read, so the promotion is refused',
+        )
+      }
+      await assertSideProviderBinding({ sample: frozenSample, detail, run, frozen, where: label })
+      if (run.providerBinding !== undefined) sideRuns[side] = { run, binding: run.providerBinding }
+    }
+    if (sideRuns.baseline !== undefined && sideRuns.candidate !== undefined) {
+      assertSidesAgree(frozen, sideRuns.baseline, sideRuns.candidate, `sample "${sample.taskId}"`)
     }
     await assertSampleInputsIntact({ sample: frozenSample, snapshot, productionWorkspace: frozen.snapshot.sourceDir })
   }
-  // 6. The model identity the deployment resolves now.
-  const currentModel = sources.modelIdentity()
-  if (currentModel !== frozen.model) {
+  // 6. The model selection: the runs' own requests were checked above, and the
+  // deployment's selection now is the second half — a deployment that moved on
+  // since the freeze has to freeze a new experiment rather than promote this
+  // one's evidence.
+  const currentSelection = sources.modelSelection()
+  if (currentSelection.provider !== frozen.model.provider || currentSelection.model !== frozen.model.model
+    || currentSelection.reasoningEffort !== frozen.model.reasoningEffort || currentSelection.maxTokens !== frozen.model.maxTokens) {
     throw new Error(
-      `evolution: the experiment froze model "${frozen.model}" but this deployment resolves "${currentModel}" now — the runs on ` +
-      'record were not run under the model this promotion would be judged against',
+      `evolution: the experiment froze model selection "${frozen.model.label}"` +
+      `${frozen.model.reasoningEffort === undefined ? '' : ` (effort ${frozen.model.reasoningEffort})`}` +
+      `${frozen.model.maxTokens === undefined ? '' : ` (maxTokens ${frozen.model.maxTokens})`}, but this deployment resolves ` +
+      `"${currentSelection.label}"` +
+      `${currentSelection.reasoningEffort === undefined ? '' : ` (effort ${currentSelection.reasoningEffort})`}` +
+      `${currentSelection.maxTokens === undefined ? '' : ` (maxTokens ${currentSelection.maxTokens})`} now — the runs on record were ` +
+      'not run under the selection this promotion would be judged against',
     )
   }
   // 7. The verdict.

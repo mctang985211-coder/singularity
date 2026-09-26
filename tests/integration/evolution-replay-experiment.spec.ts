@@ -50,7 +50,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { EvolutionService } from '../../evolution/src/index.ts'
 import { overallExperimentVerdict, PRESET_REPLAY_MANUAL_REASON } from '../../evolution/src/index.ts'
 import type { ExperimentReport } from '../../evolution/src/index.ts'
-import { deploymentModelIdentity } from '../../agent-singularity/src/index.ts'
+import { deploymentModelSelection } from '../../agent-singularity/src/index.ts'
 import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
 import { defineEvolutionDecideTool } from '../../agent-singularity/src/tools/evolution-decide.ts'
 import { defineEvolutionGateTool } from '../../agent-singularity/src/tools/evolution-gate.ts'
@@ -254,9 +254,10 @@ async function fixture(options: { candidateBody?: string; skipSamples?: boolean 
     skillRoot,
     presetRoot: join(h.workspace, 'presets'),
     configFile: join(h.workspace, 'config.yml'),
-    // The deployment's model identity: the experiment freezes it and the
-    // promotion gate re-reads the same resolver (S4-E §F.2).
-    modelIdentity: () => deploymentModelIdentity(h.ctx),
+    // The deployment's model selection: the experiment freezes it, places every
+    // replayed spawn under it, and the promotion gate re-reads the runs' own
+    // requests against it (S4-E §F.2/§Q3).
+    modelSelection: () => deploymentModelSelection(h.ctx),
   })
   await evolution.propose({
     proposalId: PROPOSAL,
@@ -387,7 +388,7 @@ describe('S4-E: evolution_replay evaluates a skill candidate as the two-sided ex
     expect(report.frozen.snapshot.sourceDir).toBe(f.h.checkout)
     expect(report.frozen.candidate.sha256).toBe(sha256Of(CANDIDATE_BODY))
     expect(report.frozen.productionBaseline).toEqual({ name: SKILL, sha256: sha256Of(PRODUCTION_BODY) })
-    expect(report.frozen.model).toBe(MODEL)
+    expect(report.frozen.model).toEqual({ provider: 'p', model: 'm', label: 'p/m' })
     expect(report.frozen.budget).toEqual(BUDGET)
     expect(report.frozen.comparerVersion).toBe('experiment-comparer@2')
     expect(report.frozen.samples.map(sample => [sample.taskId, sample.role, sample.observed.outcome])).toEqual([

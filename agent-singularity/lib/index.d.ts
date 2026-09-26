@@ -1,6 +1,7 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import { ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest } from "@dangosys/dsh-singularity-task-runtime";
+import { ModelSelection } from "@dangosys/dsh-singularity-evolution";
 import "@dangosys/dsh-singularity-task";
 
 //#region src/hitl.d.ts
@@ -168,7 +169,6 @@ declare class EscalationService extends Service {
 }
 //#endregion
 //#region src/proposal-review.d.ts
-
 declare module '@deepseek-ai/cordis' {
   interface Context {
     proposalReviewChannel: ProposalReviewService;
@@ -310,18 +310,20 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 /**
- * The model identity the evolution plane freezes with an experiment and re-reads
- * before a promotion (see `Config.modelIdentity` of the evolution service).
+ * The model selection the evolution plane freezes with an experiment and
+ * re-reads before a promotion (see `Config.modelSelection` of the evolution
+ * service).
  *
  * One source for both ends: the deployment's own default selection
  * (`agentDefaultModel.currentSelection()`), which is the configuration a session
- * without an explicit selection — and every replay the runtime spawns for an
- * experiment — runs under. The experiment tool freezes exactly this value, so
- * the identity a report is frozen under is the one the gate later compares
- * against; a deployment that mounts no such service answers `undefined`, and the
- * ledger then refuses to evaluate or promote rather than skipping the check.
+ * without an explicit selection runs under — and the selection every replay the
+ * runtime spawns for an experiment is now placed under verbatim. The experiment
+ * tool freezes exactly this value, so the selection a report is frozen under is
+ * the one the gate later re-checks against the runs' own session logs; a
+ * deployment that mounts no such service answers `undefined`, and the ledger
+ * then refuses to evaluate or promote rather than skipping the check.
  */
-declare function deploymentModelIdentity(ctx: Context): string | undefined;
+declare function deploymentModelSelection(ctx: Context): ModelSelection | undefined;
 declare class SingularityAgent extends Service {
   static inject: string[];
   static Config: z<Config>;
@@ -343,4 +345,4 @@ declare class SingularityAgent extends Service {
   private resolveEvolution;
 }
 //#endregion
-export { Config, DEFAULT_EVOLUTION, ESCALATION_TRIGGERS, type Escalation, type EscalationInput, type EscalationRecord, EscalationService, type EscalationTrigger, EvolutionExposure, type HitlAnswer, type HitlKind, type HitlPending, HitlService, ProposalReviewService, SingularityAgent, SingularityAgent as default, deploymentModelIdentity, ownerSessionOfStore, renderProposalReview, reviewDecider };
+export { Config, DEFAULT_EVOLUTION, ESCALATION_TRIGGERS, type Escalation, type EscalationInput, type EscalationRecord, EscalationService, type EscalationTrigger, EvolutionExposure, type HitlAnswer, type HitlKind, type HitlPending, HitlService, ProposalReviewService, SingularityAgent, SingularityAgent as default, deploymentModelSelection, ownerSessionOfStore, renderProposalReview, reviewDecider };

@@ -32,7 +32,7 @@ import {
   frozenDigestOf,
   protectedInputsDigest,
 } from '../../evolution/src/index.ts'
-import type { ExperimentBudget, ExperimentSampleRecord, FrozenExperiment, FrozenSample } from '../../evolution/src/index.ts'
+import type { ExperimentBudget, ExperimentSampleRecord, FrozenExperiment, FrozenProviderIdentity, FrozenSample, ModelSelection } from '../../evolution/src/index.ts'
 import type { RunStack } from './run-stack.ts'
 
 type Settlement = 'verified' | 'failed' | 'cancelled'
@@ -76,8 +76,12 @@ export function promotionExperimentContext(h: RunStack, rootSession = 's-promoti
 
 export interface PromotionExperimentOptions {
   proposalId: string
-  /** The model identity the deployment resolves (the one the promotion gate re-reads). */
-  model: string
+  /**
+   * The structured model selection the deployment resolves — the one the
+   * experiment freezes, the one each side's session log records as its request,
+   * and the one the promotion gate re-reads (S4-E §Q3).
+   */
+  selection: ModelSelection
   /** The observed-failure sample's two sides. Default: reproduced on the baseline, fixed by the candidate. */
   failure?: { baseline?: Settlement; candidate?: Settlement }
   /** The holdout sample's two sides. Default: both verified. */
@@ -85,6 +89,47 @@ export interface PromotionExperimentOptions {
   budget?: ExperimentBudget
   /** A protected input the failure sample's criterion declares, written into the frozen snapshot. */
   protectedInput?: { path: string; bytes: string }
+}
+
+/** The registry revision this fixture's production configuration resolves to (frozen and bound alike). */
+const FIXTURE_REGISTRY_REVISION = 'r'.repeat(64)
+
+/** The provider identity this fixture's production configuration resolves to (no rows, no skills). */
+function fixtureProviderIdentity(): FrozenProviderIdentity {
+  return { capabilities: [], registryRevision: FIXTURE_REGISTRY_REVISION, mcpServers: [], preset: null, skills: [] }
+}
+
+/**
+ * The session one side's run was placed under, minted through the deployment's
+ * own persistence and given the one `request/header` event the live loop would
+ * have appended for a request on `selection` — the durable record the promotion
+ * gate re-reads (S4-E §Q3). A deployment whose `sessionPersistence` cannot mint
+ * a session makes this fixture fail loudly rather than write a side with no
+ * request evidence.
+ */
+async function writeSideSession(context: PromotionExperimentContext, sessionId: string, selection: ModelSelection): Promise<void> {
+  const persistence = (context.ctx as {
+    get(name: string): {
+      create(header: unknown): Promise<{ append(events: readonly unknown[]): Promise<void>; close?(): Promise<void> }>
+    }
+  }).get('sessionPersistence')
+  const handle = await persistence.create({ id: sessionId, cwd: context.cwd, agentPreset: 'standard' })
+  await handle.append([{
+    type: 'request/header',
+    seq: 0,
+    time: Date.now(),
+    data: {
+      header: {
+        config: {
+          provider: selection.provider,
+          model: selection.model,
+          ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
+          ...(selection.maxTokens === undefined ? {} : { maxTokens: selection.maxTokens }),
+        },
+      },
+      reason: 'initial',
+    },
+  }])
 }
 
 /**
@@ -197,8 +242,11 @@ export async function recordPromotionExperiment(
         verificationMode: 'deterministic',
         command: input.command,
         protectedInputsDigest: protectedInputsDigest(acceptance.protectedInputs ?? []),
+        verifierRef: null,
+        verifierAnchor: 'the fixture criterion pins no verifierRef; the registry dispatches by mode',
       }],
       observed: { outcome: input.outcome, runId },
+      provider: fixtureProviderIdentity(),
     })
   }
   // Sample ids are scoped to the proposal: one fixture records several
@@ -213,7 +261,7 @@ export async function recordPromotionExperiment(
     repetition: 0,
     candidate: { name: candidate.name, sha256: candidate.sha256 },
     productionBaseline: { name: baseline.name, sha256: baseline.sha256 },
-    model: options.model,
+    model: options.selection,
     budget: { ...(options.budget ?? {}) },
     samples,
     snapshot: { sourceDir: snapshotDir, digest: await directoryDigest(snapshotDir) },
@@ -271,7 +319,9 @@ export async function recordPromotionExperiment(
         verifierResults: [],
         status: 'running',
         startedAt: at,
+        providerBinding: { registryRevision: FIXTURE_REGISTRY_REVISION, capabilities: [], skills: [], mcpServers: [] },
       }, 'tester')
+      await writeSideSession(context, `s-${runId}`, options.selection)
       if (settlement !== 'cancelled') {
         await context.task.recordEvidenceIn(storeId, {
           evidenceId: `e-${runId}`,

@@ -20,11 +20,12 @@
  * What this adapter supplies beyond the call's own arguments: the caller
  * session (from the live call), the input snapshot both experiment workspaces
  * are built from — the workspace the caller's session runs in, read through
- * `TaskRuntime.workspacePathFor` — and the model identity the experiment
+ * `TaskRuntime.workspacePathFor` — and the model selection the experiment
  * freezes, read through the evolution service's injected resolver
- * (`EvolutionService.modelIdentity`), the same source the promotion gate
- * re-reads. All three are read, never asked of the model: a caller's prose is
- * not evidence of where a run happened or which model ran it.
+ * (`EvolutionService.modelSelection`), the selection every replayed spawn is
+ * placed under and the one the promotion gate re-reads from the runs' own
+ * session logs. All three are read, never asked of the model: a caller's prose
+ * is not evidence of where a run happened or which model ran it.
  *
  * The experiment itself (its frozen identity, the per-sample workspaces, the
  * idempotency keys, the report and its ledger records) and the v1 replay both
@@ -48,6 +49,7 @@ import type {
   ExperimentCriterionDetail,
   ExperimentResult,
   ExperimentSampleSpec,
+  ModelSelection,
   ReplayExperimentResult,
   ReplayTaskComparison,
 } from '@dangosys/dsh-singularity-evolution'
@@ -61,16 +63,16 @@ function sessionId(exec: ToolRunContext): SessionId {
 }
 
 /**
- * The model identity this experiment freezes — read from the evolution plane's
+ * The model selection this experiment freezes — read from the evolution plane's
  * injected resolver, never from the caller (§F.2: the model is frozen before the
  * runs, and a model-filled string could not be one). The injection is the whole
- * point: the promotion gate re-reads the same resolver off the same service, so
- * the identity this call freezes is the one that gate later compares against.
- * A deployment that cannot name its model gets the service's own refusal here —
- * before any run, before any ledger line.
+ * point: the runtime places every replayed spawn under exactly this selection,
+ * and the promotion gate re-reads the runs' own requests against it.
+ * A deployment that cannot name a structured selection gets the service's own
+ * refusal here — before any run, before any ledger line.
  */
-function modelIdentity(ctx: Context): string {
-  return ctx.evolution.modelIdentity()
+function modelSelection(ctx: Context): ModelSelection {
+  return ctx.evolution.modelSelection()
 }
 
 /** The workspace the caller's own session runs in — the frozen input snapshot both experiment sides are built from. */
@@ -201,7 +203,7 @@ function renderExperiment(result: ExperimentResult, targetId: string): string {
     `report: ${result.reportPath}`,
     `experiment ${result.experimentId} (repetition ${report.frozen.repetition}, frozen ${report.frozenDigest}); ` +
     `candidate sha256 ${report.frozen.candidate.sha256}; production baseline sha256 ${baseline?.sha256 ?? 'not recorded'}; ` +
-    `model ${report.frozen.model}; budget ${budget}; snapshot ${report.frozen.snapshot.digest}; comparer ${report.frozen.comparerVersion}`,
+    `model ${report.frozen.model.label}; budget ${budget}; snapshot ${report.frozen.snapshot.digest}; comparer ${report.frozen.comparerVersion}`,
     'next: evolution_gate (cite the report path in regressionEvidenceRefs)',
   ].join('\n')
 }
@@ -234,7 +236,7 @@ function renderReplayResult(result: ReplayExperimentResult): string {
   ].join('\n')
 }
 
-/** The experiment one skill call runs: the derived samples, the caller's frozen input, and the model identity it runs under. */
+/** The experiment one skill call runs: the derived samples, the caller's frozen input, and the model selection it runs under. */
 async function runSkillExperiment(
   ctx: Context,
   args: { proposalId: string; taskIds: readonly string[]; holdoutTaskIds: readonly string[]; repetition?: number; budget?: ExperimentBudget },
@@ -252,7 +254,7 @@ async function runSkillExperiment(
     proposalId: args.proposalId,
     samples: deriveExperimentSamples(snapshot, args.taskIds, args.holdoutTaskIds),
     snapshot: { sourceDir: await callerWorkspace(ctx, caller) },
-    model: modelIdentity(ctx),
+    model: modelSelection(ctx),
     budget: { ...(args.budget ?? {}) },
     repetition: args.repetition ?? 0,
   }, caller, caller, { signal })

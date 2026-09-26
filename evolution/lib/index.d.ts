@@ -1,7 +1,7 @@
 import { Context, Service } from "@deepseek-ai/cordis";
+import { SessionId } from "@deepseek-ai/dsh-session";
 import { CapabilityConfig, ReplayRunOutcome, ReplayTaskOptions } from "@dangosys/dsh-singularity-task-runtime";
 import { ProposalTargetType, ReviewCriterion, ReviewMetrics, ReviewRecord, TaskSnapshot } from "@dangosys/dsh-singularity-task";
-import { SessionId } from "@deepseek-ai/dsh-session";
 
 //#region src/config-edit.d.ts
 
@@ -296,19 +296,137 @@ interface ExperimentSampleComparison {
   candidate: ExperimentSideDetail;
   verdict: ExperimentSampleVerdict;
 }
-/** One criterion's frozen identity: the acceptance condition as the sample's own contract holds it. */
+/**
+ * The model selection one deployment's runs share, as that deployment resolves
+ * it before anything runs (S4-E §Q3).
+ *
+ * It is structured on purpose: a `"<provider>/<model>"` string cannot be read
+ * back (a model id may contain `/`), and it drops the options that decide what a
+ * request really is — the reasoning effort and the output ceiling. The four
+ * fields are exactly `AgentOptions`' own model members, so the frozen selection
+ * travels to the real spawn verbatim and the requests that spawn produces can be
+ * compared against it member by member.
+ */
+interface ModelSelection {
+  /** The registered provider route the runs go through. */
+  provider: string;
+  /** The provider-owned model id. */
+  model: string;
+  /** The adapter-owned reasoning effort, when the deployment selected one. */
+  reasoningEffort?: string;
+  /** The per-request output ceiling, when the deployment selected one. */
+  maxTokens?: number;
+  /**
+   * Derived display form `<provider>/<model>`. It is shown to humans and never
+   * parsed back: the structured members above are the identity, and a model id
+   * that contains `/` is exactly why the string cannot be one.
+   */
+  label: string;
+}
+/**
+ * Read one selection as the structured identity, or `undefined` when it names
+ * no route. A selection without a provider or without a model is not a
+ * structured selection — a caller that cannot produce one is refused rather
+ * than given a placeholder (`provider` empty means the request would be routed
+ * by adapter defaults nobody froze).
+ */
+declare function modelSelectionOf(selection: {
+  provider?: unknown;
+  model?: unknown;
+  reasoningEffort?: unknown;
+  maxTokens?: unknown;
+} | undefined): ModelSelection | undefined;
+/** The `AgentOptions` a frozen selection travels as: the four members, verbatim, with no label. */
+declare function agentOptionsOf(selection: ModelSelection): {
+  provider: string;
+  model: string;
+  reasoningEffort?: string;
+  maxTokens?: number;
+};
+/**
+ * One criterion's frozen identity: the acceptance condition as the sample's own
+ * contract holds it, plus the judge identity it was frozen under (S4-E §Q3).
+ */
 interface FrozenCriterion {
   criterionId: string;
   verificationMode: string;
   command?: string;
   /** SHA-256 over the criterion's protected input identities (`<path>\0<sha256>` lines, sorted); the empty list hashes too. */
   protectedInputsDigest: string;
+  /**
+   * The judge the criterion pins (`AcceptanceCriterion.verifierRef`), or `null`
+   * when it pins none and the registry's mode dispatch chooses. A pinned ref is
+   * the only case whose *version* can be frozen before the run: the freeze reads
+   * it from the same registry the runs are judged by.
+   */
+  verifierRef: string | null;
+  /**
+   * The pinned judge's registered version at freeze, when the registry declared
+   * one then. Absent for a judge that declares no version, and for a criterion
+   * that pins none — `verifierAnchor` says what stands in for it.
+   */
+  verifierVersion?: string;
+  /**
+   * How this criterion's judge identity is anchored, named at freeze so a later
+   * reader never has to guess: the registered version for a pinned, versioned
+   * judge; the registration id for a pinned judge that declares no version; and
+   * for an unpinned criterion, the dispatch mode plus the rule that the deciding
+   * judge's id and version are read from the run's verdicts and re-checked
+   * against the registry.
+   */
+  verifierAnchor: string;
+}
+/**
+ * One skill the production configuration's pre-check resolved for a sample's
+ * rows, as it stood when the experiment froze: the identity a run's own binding
+ * has to agree with before the run may stand as this sample's side.
+ */
+interface FrozenProviderSkill {
+  name: string;
+  role: 'execution-provider' | 'knowledge' | 'guidance';
+  /** `skillContractDigest` of the sidecar the provider was validated against, or `null` for a skill that declares none. */
+  contractDigest: string | null;
+  /** `skillContentDigest` of the bytes the run is expected to load for this skill in the production configuration. */
+  contentDigest: string;
+}
+/**
+ * The provider identity the *production baseline* side of one sample must bind,
+ * fixed before the first run (S4-E §Q3): the capability rows the sample's
+ * required capabilities resolve to, the registry revision the runtime's own
+ * pre-check produces for them, the MCP servers those rows grant, the preset they
+ * declare, and every skill their providers resolved to. The candidate side's
+ * binding is compared against the same baseline with exactly one substituted
+ * entry — the promoted skill's own content — which is the overlay difference
+ * this ticket approved.
+ */
+interface FrozenProviderIdentity {
+  /** The capability rows in play, sorted (the sample's required capabilities as the table holds them). */
+  capabilities: string[];
+  /**
+   * The registry revision the runtime's own pre-check produces for those rows
+   * over the production table at freeze. Every side's run binding must carry it:
+   * a capability row, a tool label or a declared contract that moved since the
+   * freeze moves it too.
+   */
+  registryRevision: string;
+  /** The MCP server names those rows grant, sorted. Every side must bind exactly these, with a resolved template. */
+  mcpServers: string[];
+  /**
+   * The preset those rows declare — one worker, one preset — or `null` when none
+   * declares one and the deployment's own default governs. A declared preset is
+   * compared against each side's run; an undeclared one is compared side to side,
+   * so a default that moved between the sides still refuses.
+   */
+  preset: string | null;
+  /** Every skill the rows' providers resolved to at freeze, sorted by name. */
+  skills: FrozenProviderSkill[];
 }
 /**
  * One sample's frozen identity: the case it locates, and the acceptance
  * identity the replay will mirror into both sides. `observed` is the historical
  * record the sample was chosen for — it locates the case and is *not* a
- * baseline: every report side must cite a different run.
+ * baseline: every report side must cite a different run. `provider` is the
+ * production configuration's provider identity for this sample, frozen with it.
  */
 interface FrozenSample {
   taskId: string;
@@ -320,12 +438,14 @@ interface FrozenSample {
     outcome: 'verified' | 'failed';
     runId?: string;
   };
+  /** The provider identity the production-baseline side of this sample must bind (S4-E §Q3). */
+  provider: FrozenProviderIdentity;
 }
 /**
  * The identity block fixed before the first run (§F.2). Everything a reader
  * needs to say *what* was compared: the candidate's exact bytes, the input
  * snapshot both workspaces were built from, the samples and their acceptance
- * identity, the model identity the caller froze, the budget, the overlay each
+ * identity, the structured model selection the deployment froze, the budget, the overlay each
  * side ran under, and the comparer that judged. {@link frozenDigestOf} is the
  * digest of this whole block, so a report and a ledger record name the same
  * frozen experiment only if every one of these fields agrees.
@@ -343,8 +463,13 @@ interface FrozenExperiment {
   candidate: SkillContentIdentity;
   /** The production baseline the candidate replaces, when prepare captured one (a replacement, not a new skill). */
   productionBaseline?: SkillContentIdentity;
-  /** The model identity the caller froze — an opaque string (a config digest, a model name), never interpreted here. */
-  model: string;
+  /**
+   * The model selection every run of this experiment is placed under (S4-E
+   * §Q3), frozen before the first side and passed to the runtime verbatim as
+   * each side's `agentOptions`. `model.label` is the display form; the identity
+   * is the structured members beside it.
+   */
+  model: ModelSelection;
   budget: ExperimentBudget;
   samples: FrozenSample[];
   /** The input snapshot both sides' workspaces are built from, and its recursive content digest. */
@@ -471,13 +596,13 @@ interface ExperimentSpec {
     sourceDir: string;
   };
   /**
-   * The model identity the caller froze — an opaque string (a model name, a
-   * scripted configuration's digest, the tool set the runs share). Nothing here
-   * interprets it, and nothing here can verify that a run used it: it is the
-   * caller's declaration, recorded in the frozen block so a later reader sees
-   * exactly what was claimed.
+   * The deployment's own model selection, frozen before the first run (S4-E
+   * §Q3). It reaches every run verbatim as its `agentOptions`, so both sides —
+   * and whatever a side's worker decomposes into — run on the route it names,
+   * whatever the deployment's default selection becomes afterwards. The
+   * promotion gate re-reads the selection off the runs' own session logs.
    */
-  model: string;
+  model: ModelSelection;
   budget: ExperimentBudget;
   /**
    * This experiment's repetition index. `0` is the first run of the frozen
@@ -616,6 +741,26 @@ interface ExperimentLedger {
   /** Record one sample side. A key that is already recorded refuses a different content by name. */
   recordExperimentSample(record: ExperimentSampleRecord): Promise<void>;
 }
+/** One accepted provider verdict, as a freeze reads it off the runtime's own pre-check (the members it records, and no more). */
+interface PrecheckSkillVerdict {
+  readonly valid: boolean;
+  readonly name: string;
+  readonly role?: string;
+  readonly contractDigest?: string | null;
+  readonly contentDigest?: string;
+  readonly defects?: readonly {
+    readonly code: string;
+    readonly detail: string;
+  }[];
+}
+/** The runtime's provider pre-check as the freeze consumes it (`TaskRuntime.capabilityProviderReport`). */
+interface ProviderPrecheckView {
+  readonly capabilities: readonly {
+    readonly capability: string;
+    readonly skills: readonly PrecheckSkillVerdict[];
+  }[];
+  readonly revision: string;
+}
 /** The services one experiment reads, as the caller's context holds them. */
 interface ExperimentSources {
   readonly evolution: ExperimentLedger;
@@ -629,7 +774,24 @@ interface ExperimentSources {
   };
   readonly taskRuntime: {
     replayTask(storeId: string, championTaskId: string, options: ReplayTaskOptions, callerSessionId: string): Promise<ReplayRunOutcome>;
+    /**
+     * The runtime's own provider pre-check for one session's viewpoint (S4-E
+     * §Q3): the freeze reads the production configuration's provider identity
+     * for a sample's rows through the same entry `capability_list` renders, so
+     * the identity a gate later compares against is the runtime's own
+     * conclusion, never this plane's guess.
+     */
+    capabilityProviderReport(sessionId: string, capabilities?: readonly string[]): Promise<ProviderPrecheckView>;
+    /** The effective capability table, as the runtime holds it — the rows a pre-check covered and the servers they grant. */
+    listCapabilities?(): Readonly<Record<string, CapabilityConfig>>;
   };
+  /**
+   * The registered judge vocabulary at freeze time (S4-E §Q3), or `undefined`
+   * when the deployment cannot list it — which is a named refusal for a
+   * criterion that pins a `verifierRef`, and is read through the same helper
+   * every provider check uses.
+   */
+  verifierVocabulary?(): Promise<VerifierVocabularyView | undefined>;
 }
 /** What one experiment call produced. */
 interface ExperimentResult {
@@ -671,6 +833,11 @@ declare function directoryDigest(directory: string): Promise<string>;
  * evidence is, not two.
  */
 declare function evidenceRefsOf(snapshot: TaskSnapshot, runId: string | undefined, review: ReviewRecord | undefined): string[];
+/** The registered judge vocabulary one freeze reads: the ids and declared versions the runs are judged by. */
+interface VerifierVocabularyView {
+  readonly ids: readonly string[];
+  readonly versions: Readonly<Record<string, string>>;
+}
 /** The key one frozen sample's side has under one experiment. */
 declare function experimentSampleKeyOf(view: Pick<ExperimentView, 'proposalId' | 'frozen'>, sampleTaskId: string, side: ExperimentSide): ExperimentKey;
 /**
@@ -1161,32 +1328,25 @@ interface Config {
    */
   repoRoot?: string;
   /**
-   * Resolves the model identity this plane freezes with an experiment and
-   * re-reads before a promotion (`<provider>/<model>`, or the model id alone).
+   * Resolves the model selection this plane freezes with an experiment and
+   * re-reads before a promotion — the deployment's own default selection, as a
+   * structured `{ provider, model, reasoningEffort?, maxTokens? }` (S4-E §Q3).
    *
    * It is injected, not derived here: the deployment knows which selection its
    * sessions and the replay spawns run under, and the process this package runs
    * in has no agent of its own to ask. The assembly
    * (`@dangosys/dsh-singularity-agent`) wires it to the same source the
-   * experiment tool freezes from — one resolver, so the identity a report is
-   * frozen under is exactly the one the gate compares against.
+   * experiment tool freezes from — one resolver, so the selection a report is
+   * frozen under is exactly the one the gate compares against, and the one every
+   * replayed spawn is placed under.
    *
-   * Absent, or answering nothing, is a refusal at both entries (fail-closed):
-   * an experiment cannot freeze a model nobody can name, and a promotion cannot
-   * prove the model did not drift. Neither silently skips the check.
+   * A selection must be structured to be usable: absent, answering nothing, or
+   * answering something without a provider and a model is a refusal at both
+   * entries (fail-closed). Neither silently skips the check, and the frozen
+   * selection is never parsed back out of a display string.
    */
-  modelIdentity?: () => string | undefined;
+  modelSelection?: () => ModelSelection | undefined;
 }
-/**
- * The model identity one selection names: `provider/model` when the route is
- * known, the model id alone otherwise. `undefined` for a selection that names no
- * model — a deployment configured without one is a case to refuse, not to paper
- * over with a placeholder.
- */
-declare function modelIdentityOf(selection: {
-  provider?: unknown;
-  model?: unknown;
-} | undefined): string | undefined;
 /**
  * The production write targets of an apply (and its matching rollback), for
  * the approval reason and the audit record — the human sees exactly what a
@@ -1216,8 +1376,8 @@ declare class EvolutionService extends Service {
   readonly configFile: string;
   /** Repo root that relative evidence paths resolve against (see {@link Config.repoRoot}). */
   readonly repoRoot: string;
-  /** The injected model-identity resolver, if the assembly wired one (see {@link Config.modelIdentity}). */
-  private readonly resolveModelIdentity?;
+  /** The injected model-selection resolver, if the assembly wired one (see {@link Config.modelSelection}). */
+  private readonly resolveModelSelection?;
   private records;
   private readonly loaded;
   private writes;
@@ -1225,15 +1385,18 @@ declare class EvolutionService extends Service {
   /** Ledger file path (`<root>/proposals.jsonl`). */
   get file(): string;
   /**
-   * The model identity this deployment's runs share — the one the experiment
-   * freezes before anything runs and the promotion gate re-reads ({@link Config.modelIdentity}).
+   * The model selection this deployment's runs share — the one the experiment
+   * freezes before anything runs, passes to each replayed spawn verbatim, and
+   * the promotion gate re-reads from the runs' own session logs
+   * ({@link Config.modelSelection}).
    *
-   * Fail-closed: no resolver, a resolver that throws, or one that names nothing
-   * is a named refusal. The experiment tool freezes this value, so a deployment
-   * that cannot name its model can neither evaluate nor promote a candidate —
-   * and neither case silently skips the check.
+   * Fail-closed: no resolver, a resolver that throws, or one that answers
+   * anything but a structured selection with a provider and a model is a named
+   * refusal. The experiment tool freezes this value, so a deployment that cannot
+   * name its selection can neither evaluate nor promote a candidate — and
+   * neither case silently skips the check.
    */
-  modelIdentity(): string;
+  modelSelection(): ModelSelection;
   propose(input: ProposeInput, actor: string): Promise<EvolutionProposal>;
   /**
    * Move proposed → candidate, recording the complete version set the candidate
@@ -1361,11 +1524,21 @@ declare class EvolutionService extends Service {
   /**
    * The services the promotion gate re-reads from this context: the experiment
    * family of this same ledger, the task store the experiment names, the live
-   * verifier vocabulary and this deployment's model identity. Resolved softly
+   * verifier vocabulary, this deployment's model selection and its session
+   * logs. Resolved softly
    * one by one, so a context that cannot offer one gets a refusal naming it
    * rather than a gate that silently checks less.
    */
   private promotionSources;
+  /**
+   * One session's own durable log, read through the deployment's session plane
+   * (`sessionQuery.readSession`) — the source the promotion gate re-reads a
+   * run's real requests from (S4-E §Q3). `undefined` when the deployment cannot
+   * serve the read at all, which the gate reports as a named refusal rather than
+   * skipping the check; a session the store does not hold throws, and the gate
+   * names that too.
+   */
+  private sessionLog;
   /**
    * The candidate skill's provider verdict, taken from the directory the
    * promotion would write — plus the executor boundary this promotion cannot
@@ -1669,4 +1842,4 @@ interface ReplayExperimentResult {
  */
 declare function runReplayExperiment(sources: ReplayExperimentSources, request: ReplayExperimentRequest): Promise<ReplayExperimentResult>;
 //#endregion
-export { APPLYABLE_TARGET_TYPES, AgentPresetMutation, ApplyOutcome, ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, CapabilityMutation, CapabilityRowAction, CapabilityRowResult, ChampionSource, ChampionState, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCriterion, FrozenExperiment, FrozenSample, GateAnswers, ListFilter, MECHANICAL_TARGET_TYPES, MechanicalMutation, PRESET_REPLAY_MANUAL_REASON, PrepareChampion, PrepareChampionSources, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, REPLAY_RELATIONS, REPLAY_VERDICTS, ReplayCriterionDiff, ReplayCriterionSummary, ReplayExperimentRequest, ReplayExperimentResult, ReplayExperimentSources, ReplayLedger, ReplayRelation, ReplayReport, ReplaySideSummary, ReplayTaskComparison, ReplayVerdict, ReplayedView, SkillContentIdentity, SkillMutation, TaskDefinitionMutation, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, assertReplayPromotable, assertReplayReport, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, editCapabilityRow, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelIdentityOf, mutationMechanical, overallExperimentVerdict, overallReplayVerdict, protectedInputsDigest, readCapabilityRowSource, renderProviderRoles, replayLineage, resolvePrepareChampion, restoreCapabilityRowSource, resumeExperiment, runExperiment, runReplayExperiment };
+export { APPLYABLE_TARGET_TYPES, AgentPresetMutation, ApplyOutcome, ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, CapabilityMutation, CapabilityRowAction, CapabilityRowResult, ChampionSource, ChampionState, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCriterion, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, GateAnswers, ListFilter, MECHANICAL_TARGET_TYPES, MechanicalMutation, ModelSelection, PRESET_REPLAY_MANUAL_REASON, PrecheckSkillVerdict, PrepareChampion, PrepareChampionSources, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, ProviderPrecheckView, REPLAY_RELATIONS, REPLAY_VERDICTS, ReplayCriterionDiff, ReplayCriterionSummary, ReplayExperimentRequest, ReplayExperimentResult, ReplayExperimentSources, ReplayLedger, ReplayRelation, ReplayReport, ReplaySideSummary, ReplayTaskComparison, ReplayVerdict, ReplayedView, SkillContentIdentity, SkillMutation, TaskDefinitionMutation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, assertReplayPromotable, assertReplayReport, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, editCapabilityRow, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, mutationMechanical, overallExperimentVerdict, overallReplayVerdict, protectedInputsDigest, readCapabilityRowSource, renderProviderRoles, replayLineage, resolvePrepareChampion, restoreCapabilityRowSource, resumeExperiment, runExperiment, runReplayExperiment };
