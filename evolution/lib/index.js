@@ -373,7 +373,7 @@ function assertReplayPromotable(report) {
 * by {@link assertExperimentReport} instead of being re-derived with rules this
 * build does not have.
 */
-const EXPERIMENT_COMPARER_VERSION = "experiment-comparer@1";
+const EXPERIMENT_COMPARER_VERSION = "experiment-comparer@2";
 const EXPERIMENT_SAMPLE_ROLES = [
 	"observed-failure",
 	"observed-regression",
@@ -444,8 +444,11 @@ function asReplaySide(side) {
 * and a comparison whose two contracts differ (a criterion added, removed or
 * re-commanded) are both `inconclusive` — the v1 semantics, unchanged. A role of
 * `observed-failure` asks whether the target failure was reproduced and then
-* fixed; a regression or holdout sample asks only whether the candidate is
-* worse, and its answer is `regressed` or `maintained`.
+* fixed. A regression or holdout sample stands for a historical success that
+* must still hold: its own baseline must be `verified` for the sample to be
+* comparable at all — a baseline that did not pass reproduced nothing, so the
+* sample is `inconclusive` whatever the candidate did — and only then does the
+* candidate's relation answer `regressed` or `maintained`.
 */
 function compareExperimentSides(role, baseline, candidate) {
 	const relation = compareReplaySides(asReplaySide(baseline), asReplaySide(candidate)).relation;
@@ -456,6 +459,7 @@ function compareExperimentSides(role, baseline, candidate) {
 		if (baselineRank === 0 && candidateRank === 0) return "both-failed";
 		return baselineRank === 0 && candidateRank === 1 ? "fixed" : "not-fixed";
 	}
+	if (baselineRank !== 1) return "inconclusive";
 	return relation === "worse" ? "regressed" : "maintained";
 }
 /**

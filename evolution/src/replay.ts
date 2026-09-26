@@ -328,7 +328,7 @@ export function assertReplayPromotable(report: ReplayReport): void {
  * by {@link assertExperimentReport} instead of being re-derived with rules this
  * build does not have.
  */
-export const EXPERIMENT_COMPARER_VERSION = 'experiment-comparer@1'
+export const EXPERIMENT_COMPARER_VERSION = 'experiment-comparer@2'
 
 /**
  * Why a sample is in the experiment:
@@ -336,8 +336,12 @@ export const EXPERIMENT_COMPARER_VERSION = 'experiment-comparer@1'
  *   historical record must be `failed`, and its baseline run must reproduce
  *   that failure for a fix to be claimable.
  * - `observed-regression` — a case the proposal's evidence already covers and
- *   that must keep passing.
- * - `holdout` — a case the candidate was not selected on; it must not degrade.
+ *   that must keep passing: its historical record is `verified`, so this run's
+ *   baseline must reproduce that pass before the candidate can be compared
+ *   against it.
+ * - `holdout` — a case the candidate was not selected on; it must not degrade,
+ *   and like a regression sample it is only readable when this run reproduced
+ *   its historical pass.
  * At least one `observed-failure` and one `holdout` are required (§F.2).
  */
 export type ExperimentSampleRole = 'observed-failure' | 'observed-regression' | 'holdout'
@@ -365,11 +369,13 @@ export const EXPERIMENT_OUTCOMES: readonly ExperimentOutcome[] = ['verified', 'f
  *   fixed. The distinguishable sub-case of `not-fixed`.
  * - `not-fixed` — the candidate did not pass where the baseline failed, or the
  *   baseline did not fail at all (nothing was reproduced to fix).
- * - `maintained` — a regression/holdout sample whose candidate side is not
- *   worse than its baseline.
- * - `regressed` — a regression/holdout sample whose candidate side is worse.
- * - `inconclusive` — a side that could not settle, or a comparison whose two
- *   contracts differ; it says nothing about the candidate.
+ * - `maintained` — a regression/holdout sample whose baseline *verified* and
+ *   whose candidate is not worse than it.
+ * - `regressed` — a regression/holdout sample whose baseline *verified* and
+ *   whose candidate is worse.
+ * - `inconclusive` — a side that could not settle, a comparison whose two
+ *   contracts differ, or a regression/holdout sample whose baseline did not
+ *   reproduce the historical pass; it says nothing about the candidate.
  */
 export type ExperimentSampleVerdict = 'fixed' | 'both-failed' | 'not-fixed' | 'maintained' | 'regressed' | 'inconclusive'
 export const EXPERIMENT_SAMPLE_VERDICTS: readonly ExperimentSampleVerdict[] = [
@@ -621,8 +627,11 @@ function asReplaySide(side: ExperimentSideComparison): ReplaySideSummary {
  * and a comparison whose two contracts differ (a criterion added, removed or
  * re-commanded) are both `inconclusive` — the v1 semantics, unchanged. A role of
  * `observed-failure` asks whether the target failure was reproduced and then
- * fixed; a regression or holdout sample asks only whether the candidate is
- * worse, and its answer is `regressed` or `maintained`.
+ * fixed. A regression or holdout sample stands for a historical success that
+ * must still hold: its own baseline must be `verified` for the sample to be
+ * comparable at all — a baseline that did not pass reproduced nothing, so the
+ * sample is `inconclusive` whatever the candidate did — and only then does the
+ * candidate's relation answer `regressed` or `maintained`.
  */
 export function compareExperimentSides(
   role: ExperimentSampleRole,
@@ -637,6 +646,10 @@ export function compareExperimentSides(
     if (baselineRank === 0 && candidateRank === 0) return 'both-failed'
     return baselineRank === 0 && candidateRank === 1 ? 'fixed' : 'not-fixed'
   }
+  // `verified` is the only comparable baseline: a shared failure is not
+  // maintenance (nothing was reproduced to keep), and a candidate that passed
+  // over a baseline that never did is no evidence of a kept success either.
+  if (baselineRank !== 1) return 'inconclusive'
   return relation === 'worse' ? 'regressed' : 'maintained'
 }
 

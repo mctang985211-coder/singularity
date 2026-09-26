@@ -583,6 +583,79 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
     const reported = await fixture({ budget: { maxTokens: 5_000 }, metrics: { tokens: { uncachedInputTokens: 10, outputTokens: 5 } } })
     expect(await refusal(reported.svc.checkPromotion(PROPOSAL))).toBe('')
   })
+
+  it.each([
+    ['holdout', { holdout: { baseline: 'failed', candidate: 'failed' } }, HOLDOUT_SAMPLE, 'holdout'],
+    ['observed-regression', { regression: { baseline: 'failed', candidate: 'failed' } }, REGRESSION_SAMPLE, 'observed-regression'],
+  ])(
+    'refuses a target fix that would launder a %s history which never reproduced its pass',
+    async (_role, options, taskId, role) => {
+      // The target failure is fixed on both sides; the historical success sample
+      // fails on both sides of this run. The pre-rework comparer called that
+      // `maintained` and the whole chain — gate, decide, apply — ran through to
+      // production. The refusal now lands on the entries that can write, exactly
+      // where a `both-failed` experiment is refused: `gate` itself records the
+      // human answers over a complete, cited experiment.
+      const f = await fixture(options as FixtureOptions)
+
+      const report = JSON.parse(await readFile(join(f.root, f.reportPath), 'utf8'))
+      expect(report.samples.find((sample: { taskId: string }) => sample.taskId === taskId).verdict).toBe('inconclusive')
+      expect(report.verdict).toBe('inconclusive')
+
+      const gated = await f.svc.gate(PROPOSAL, gateAnswers([f.reportPath]), 'root-1')
+      expect(gated.status).toBe('gated')
+      const decide = await refusal(f.svc.decide(PROPOSAL, 'PROMOTE', 'root-1', 'approval:decide'))
+      expect(decide).toContain('could not settle')
+      expect(decide).toContain(`sample ${taskId} [${role}]: inconclusive`)
+      expect(decide).not.toContain(`sample ${taskId} [${role}]: maintained`)
+      expect(await refusal(f.svc.apply(PROPOSAL, 'root-1', 'approval:apply'))).not.toBe('')
+
+      const kinds = await f.ledgerKinds()
+      expect(kinds).not.toContain('decided')
+      expect(kinds).not.toContain('applied')
+      expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(PRODUCTION)
+
+      // Even an apply reached from a decided record re-reads the evidence and
+      // refuses by name: no entry lets this experiment reach production.
+      await f.tamperLedger(lines => {
+        lines.push({
+          formatVersion: 1, kind: 'decided', proposalId: PROPOSAL, decision: 'PROMOTE',
+          approvalRef: 'approval:decide', actor: 'root-1', at: '2026-09-26T00:00:00.000Z',
+        })
+      })
+      const reopened = await f.reopen()
+      const forged = await refusal(reopened.apply(PROPOSAL, 'root-1', 'approval:apply'))
+      expect(forged).toContain('could not settle')
+      expect(await f.ledgerKinds()).not.toContain('applied')
+      expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(PRODUCTION)
+    },
+  )
+
+  it('lets a target fix through when the historical successes are reproduced on both sides', async () => {
+    const f = await fixture({ regression: { baseline: 'verified', candidate: 'verified' } })
+    const report = JSON.parse(await readFile(join(f.root, f.reportPath), 'utf8'))
+    expect(report.samples.map((sample: { verdict: string }) => sample.verdict)).toEqual(['fixed', 'maintained', 'maintained'])
+    await f.svc.gate(PROPOSAL, gateAnswers([f.reportPath]), 'root-1')
+    await f.svc.decide(PROPOSAL, 'PROMOTE', 'root-1', 'approval:decide')
+    const applied = await f.svc.apply(PROPOSAL, 'root-1', 'approval:apply')
+    expect(applied.proposal.status).toBe('applied')
+    expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(CANDIDATE)
+    expect(await f.ledgerKinds()).toContain('applied')
+  })
+
+  it('refuses a report this build cannot re-derive: the comparer a pre-rework build wrote', async () => {
+    const f = await fixture()
+    await f.tamperReport(report => { report.frozen.comparerVersion = 'experiment-comparer@1' })
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain('comparerVersion must be "experiment-comparer@2"')
+    expect(message).toContain('cannot re-derive')
+    // The entry that can write refuses the same way, and writes nothing.
+    await f.svc.gate(PROPOSAL, gateAnswers([f.reportPath]), 'root-1')
+    expect(await refusal(f.svc.decide(PROPOSAL, 'PROMOTE', 'root-1', 'approval:decide')))
+      .toContain('comparerVersion must be "experiment-comparer@2"')
+    expect(await f.ledgerKinds()).not.toContain('decided')
+    expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(PRODUCTION)
+  })
 })
 
 describe('skill promotion gate: apply re-checks the evidence before it writes (EVAL-3)', () => {

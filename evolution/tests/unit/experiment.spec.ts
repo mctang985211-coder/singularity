@@ -302,12 +302,31 @@ describe('the mechanical verdicts', () => {
         side(role, 'baseline', { criteria: [criterion('ac1', 'pass'), criterion('ac2', 'pass')] }),
         side(role, 'candidate', { criteria: [criterion('ac1', 'pass'), criterion('ac2', 'fail')] }),
       )).toBe('regressed')
-      // An improvement is not a regression.
-      expect(compareExperimentSides(
-        role,
-        side(role, 'baseline', { outcome: 'failed', criteria: [criterion('ac1', 'fail')] }),
-        side(role, 'candidate'),
-      )).toBe('maintained')
+    }
+  })
+
+  it('calls a regression or holdout sample whose baseline did not pass inconclusive, never maintained', () => {
+    for (const role of ['observed-regression', 'holdout'] as const) {
+      const failedBaseline = side(role, 'baseline', { outcome: 'failed', criteria: [criterion('ac1', 'fail')] })
+      const failedCandidate = side(role, 'candidate', { outcome: 'failed', criteria: [criterion('ac1', 'fail')] })
+      // A historical success this run never reproduced, both sides failing: the
+      // sample says nothing about the candidate, so it cannot read as
+      // `maintained` — the failure is shared, not absent.
+      expect(compareExperimentSides(role, failedBaseline, failedCandidate)).toBe('inconclusive')
+      // A candidate that passes over a baseline that never passed is no more
+      // evidence: there is no reproduced success for the candidate to keep.
+      expect(compareExperimentSides(role, failedBaseline, side(role, 'candidate'))).toBe('inconclusive')
+      for (const outcome of ['cancelled', 'interrupted'] as const) {
+        expect(compareExperimentSides(
+          role,
+          side(role, 'baseline', { outcome, criteria: [] }),
+          side(role, 'candidate'),
+        )).toBe('inconclusive')
+      }
+      // A verified baseline keeps the old rule exactly: only a worse candidate
+      // is a regression, and a candidate that does not degrade is maintained.
+      expect(compareExperimentSides(role, side(role, 'baseline'), failedCandidate)).toBe('regressed')
+      expect(compareExperimentSides(role, side(role, 'baseline'), side(role, 'candidate'))).toBe('maintained')
     }
   })
 
@@ -363,6 +382,25 @@ describe('assertExperimentReport', () => {
     expect(() => assertExperimentReport(overall)).toThrow(/verdict "fixed-with-regression" does not match its samples/)
   })
 
+  it('refuses a report that reads a holdout whose two sides failed as maintained, and recomputes it as inconclusive', () => {
+    const masked = reportFixture()
+    const failedBaseline = side('holdout', 'baseline', { outcome: 'failed', criteria: [criterion('ac1', 'fail')] })
+    const failedCandidate = side('holdout', 'candidate', { outcome: 'failed', criteria: [criterion('ac1', 'fail')] })
+    masked.samples[1]!.baseline = failedBaseline as never
+    masked.samples[1]!.candidate = failedCandidate as never
+    // The report still claims the holdout was maintained: its own evidence says
+    // the historical success never reproduced, so the claim is refused.
+    expect(() => assertExperimentReport(masked)).toThrow(/does not match its own evidence/)
+
+    // Told honestly about the sample, the report must tell the truth about the
+    // experiment too: an overall verdict that stayed `fixed` no longer matches
+    // its samples, so the recomputation catches it.
+    masked.samples[1]!.verdict = 'inconclusive' as never
+    expect(() => assertExperimentReport(masked)).toThrow(/verdict "fixed" does not match its samples/)
+    masked.verdict = 'inconclusive' as never
+    expect(() => assertExperimentReport(masked)).not.toThrow()
+  })
+
   it('refuses a frozen block that does not hash to the digest the report names', () => {
     const report = reportFixture()
     report.frozenDigest = HEX('f')
@@ -407,7 +445,16 @@ describe('assertExperimentReport', () => {
     const unknownComparer = reportFixture()
     unknownComparer.frozen = frozenFixture({ comparerVersion: 'experiment-comparer@9' })
     unknownComparer.frozenDigest = frozenDigestOf(unknownComparer.frozen)
-    expect(() => assertExperimentReport(unknownComparer)).toThrow(/comparerVersion must be "experiment-comparer@1"/)
+    expect(() => assertExperimentReport(unknownComparer)).toThrow(/comparerVersion must be "experiment-comparer@2"/)
+
+    // The comparison rules themselves moved in this build: the version a
+    // pre-rework report names is refused by name, never re-derived under rules
+    // its verdicts were not computed with.
+    const oldComparer = reportFixture()
+    oldComparer.frozen = frozenFixture({ comparerVersion: 'experiment-comparer@1' })
+    oldComparer.frozenDigest = frozenDigestOf(oldComparer.frozen)
+    expect(() => assertExperimentReport(oldComparer)).toThrow(/comparerVersion must be "experiment-comparer@2"/)
+    expect(() => assertExperimentReport(oldComparer)).toThrow(/cannot re-derive/)
   })
 
   it('refuses a verified side with no criteria, an interrupted side with no reason, and a cost with no explanation', () => {
@@ -657,6 +704,20 @@ describe('the experiment ledger family', () => {
     const unreproduced = buildExperimentReport(view)
     expect(unreproduced.samples[0]!.verdict).toBe('not-fixed')
     expect(unreproduced.verdict).toBe('not-fixed')
+
+    // A fixed target beside a holdout whose baseline never reproduced the
+    // historical pass: the holdout is inconclusive, and the overall verdict
+    // follows it instead of reading as a clean fix.
+    view.samples = [
+      record('t-failure', 'baseline', 'failed'),
+      record('t-failure', 'candidate', 'verified'),
+      record('t-holdout', 'baseline', 'failed'),
+      record('t-holdout', 'candidate', 'failed'),
+    ]
+    const masked = buildExperimentReport(view)
+    expect(masked.samples.map(item => item.verdict)).toEqual(['fixed', 'inconclusive'])
+    expect(masked.verdict).toBe('inconclusive')
+    expect(() => assertExperimentReport(masked)).not.toThrow()
 
     // A side that never settled is inconclusive, and an interrupted side keeps
     // its reason with the store's own words.

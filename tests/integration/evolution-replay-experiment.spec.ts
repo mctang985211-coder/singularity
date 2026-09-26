@@ -389,7 +389,7 @@ describe('S4-E: evolution_replay evaluates a skill candidate as the two-sided ex
     expect(report.frozen.productionBaseline).toEqual({ name: SKILL, sha256: sha256Of(PRODUCTION_BODY) })
     expect(report.frozen.model).toBe(MODEL)
     expect(report.frozen.budget).toEqual(BUDGET)
-    expect(report.frozen.comparerVersion).toBe('experiment-comparer@1')
+    expect(report.frozen.comparerVersion).toBe('experiment-comparer@2')
     expect(report.frozen.samples.map(sample => [sample.taskId, sample.role, sample.observed.outcome])).toEqual([
       ['t-fix', 'observed-failure', 'failed'],
       ['t-holdout', 'holdout', 'verified'],
