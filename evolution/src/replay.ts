@@ -397,15 +397,26 @@ export const EXPERIMENT_VERDICTS: readonly ExperimentVerdict[] = [
 ]
 
 /**
- * The run-level budget the caller freezes with the experiment (§F.2: samples,
- * inputs, judge, model/tools, budget and comparison rules are frozen before the
- * run). Recorded verbatim in the frozen block, the ledger and the report.
+ * The budget the caller freezes with the experiment (§F.2: samples, inputs,
+ * judge, model/tools, budget and comparison rules are frozen before the run).
+ * Recorded verbatim in the frozen block, the ledger and the report — and both
+ * ceilings bound the **whole experiment**, not one side of it:
  *
- * This plane enforces none of it, and says so rather than implying otherwise:
- * `ReplayTaskOptions` carries no run-level budget, so there is no limit here to
- * pass through, and the budget a tree actually spends belongs to the runtime's
- * own root budget, measured where the runs are. A gate may read these numbers
- * as the frozen intent they are — never as a spent amount.
+ * - `maxTokens` — the orchestrator adds up the token four buckets every side
+ *   already settled reported (from the ledger, so a restart never resets the
+ *   count) and does not start a further side once that total has consumed the
+ *   ceiling; the promotion gate re-adds the same buckets over every side and
+ *   refuses a recorded total above the ceiling, because a run's own counts only
+ *   become readable once it settled;
+ * - `wallTimeMs` — the experiment's deadline is its own `experiment_started`
+ *   record plus this window, every side is placed under what is left of it
+ *   (`ReplayTaskOptions.wallTimeMs`, which cancels the run in flight at that
+ *   instant), and the gate measures the same span (`experiment_started` record
+ *   to the newest settled record) against the window, so a restart extends
+ *   nothing.
+ *
+ * A budget that declares neither member constrains nothing: a cost nobody
+ * reported then stays the honest unknown it is — recorded, never zeroed.
  */
 export interface ExperimentBudget {
   /** Wall-clock ceiling for the whole experiment, in milliseconds. */
@@ -470,6 +481,13 @@ export interface ExperimentSideDetail {
   initialDigest?: string
   criteria: ExperimentCriterionDetail[]
   cost: ExperimentCost
+  /**
+   * How long this side's run took, in milliseconds, as the run's own terminal
+   * review record reports it (the run's start to its terminal transition,
+   * verification included). Absent when nobody timed the run — never a zero;
+   * a declared budget `wallTimeMs` requires it on every settled side.
+   */
+  durationMs?: number
   /** Why this side has no terminal run; required for `interrupted`, absent otherwise. */
   reason?: string
 }
@@ -884,7 +902,7 @@ export function assertFrozenExperiment(value: unknown): asserts value is FrozenE
 }
 
 function assertExperimentBudget(value: unknown, field: string): asserts value is ExperimentBudget {
-  if (!isRecord(value)) throw new Error(`evolution: ${field} must be an object (a run-level budget, recorded only)`)
+  if (!isRecord(value)) throw new Error(`evolution: ${field} must be an object (the whole experiment's token and wall-clock ceilings)`)
   for (const key of Object.keys(value)) {
     if (key !== 'wallTimeMs' && key !== 'maxTokens' && key !== 'note') {
       throw new Error(`evolution: ${field} has unknown key "${key}"`)
@@ -1089,6 +1107,12 @@ function assertSideDetail(value: unknown, field: string, sampleTaskId: string, o
     ids.add((criterion as ExperimentCriterionDetail).criterionId)
   }
   assertCost(value.cost, `${field}.cost`)
+  if (value.durationMs !== undefined && (typeof value.durationMs !== 'number' || !Number.isFinite(value.durationMs) || value.durationMs < 0)) {
+    throw new Error(
+      `evolution: experiment report ${field}.durationMs must be a finite, non-negative number of milliseconds — a side nobody timed ` +
+      'omits the member rather than carrying a value that is not a duration',
+    )
+  }
   if (value.outcome === 'interrupted') {
     if (typeof value.reason !== 'string' || value.reason.length === 0) {
       throw new Error(`evolution: experiment report ${field} is interrupted and must carry the reason it has no terminal run`)

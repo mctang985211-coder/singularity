@@ -2128,18 +2128,18 @@ function defineEvolutionReplayTool(ctx) {
 				properties: {
 					wallTimeMs: {
 						type: "integer",
-						description: "Wall-clock ceiling for the whole experiment, in milliseconds"
+						description: "Wall-clock ceiling for the whole experiment, in milliseconds. The experiment's deadline is the frozen experiment_started record plus this window: every side runs under what is left of it and is cancelled in flight when it passes; a restart reads the same deadline"
 					},
 					maxTokens: {
 						type: "integer",
-						description: "Token ceiling for the whole experiment"
+						description: "Token ceiling for the whole experiment. No further side is started once the sides already settled have reported this many tokens (the ledger is the count, so a restart does not reset it)"
 					},
 					note: {
 						type: "string",
 						description: "What the budget was derived from and why it is judged enough"
 					}
 				},
-				description: "The budget frozen with the experiment, recorded as given (defaults to none stated)"
+				description: "The budget frozen with the experiment; both ceilings bound the whole experiment and are enforced (defaults to none stated). A declared ceiling also becomes a promotion condition: the gate re-adds the sides' reported tokens and measures the experiment's own elapsed wall clock against it, and refuses the promotion when either passes it"
 			}
 		},
 		output: {

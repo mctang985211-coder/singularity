@@ -549,6 +549,15 @@ describe('assertExperimentReport', () => {
     const noReason = reportFixture()
     noReason.samples[1]!.candidate.cost = { status: 'unknown' } as never
     expect(() => assertExperimentReport(noReason)).toThrow(/must say why the cost is unknown/)
+
+    // A duration is a measured number of milliseconds or nothing at all: a
+    // negative or unreadable value is not a slower run.
+    const badDuration = reportFixture()
+    badDuration.samples[1]!.candidate.durationMs = -1
+    expect(() => assertExperimentReport(badDuration)).toThrow(/durationMs must be a finite, non-negative number/)
+    const textDuration = reportFixture()
+    textDuration.samples[1]!.candidate.durationMs = 'soon' as never
+    expect(() => assertExperimentReport(textDuration)).toThrow(/durationMs must be a finite, non-negative number/)
   })
 
   it('keeps v1 out of it: a v2 report is not a v1 report, whatever it carries', () => {
@@ -668,6 +677,10 @@ describe('the experiment ledger family', () => {
       .rejects.toThrow(/which the experiment never froze/)
     await expect(svc.recordExperimentSample({ ...base, initialDigest: undefined }))
       .rejects.toThrow(/must carry the frozen digest its workspace was built from/)
+    // The side's own duration is a real measurement or an omission, never a
+    // value that is not a duration.
+    await expect(svc.recordExperimentSample({ ...base, durationMs: -1 }))
+      .rejects.toThrow(/malformed run duration/)
     // Nothing was written by any of the refusals.
     expect((await svc.experiment(started.experimentId)).samples).toHaveLength(0)
     await rm(root, { recursive: true, force: true })

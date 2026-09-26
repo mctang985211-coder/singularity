@@ -58,11 +58,20 @@
  *    `regressed`, `not-fixed`, `both-failed` and `inconclusive` each get their own
  *    named refusal, so "the failure is not fixed", "a holdout degraded" and "the
  *    evidence never settled" are distinguishable without reading the report.
- * 10. **The cost the frozen budget demands.** A frozen budget that declares a cost
- *    ceiling cannot be shown to hold while a side's cost is `unknown`: the
- *    promotion is refused. With no ceiling declared, `unknown` stays the honest
- *    observation it is and is recorded, not turned into a zero and not treated as
- *    a refusal.
+ * 10. **The cost the frozen budget demands.** The ceilings are the *whole
+ *    experiment's* (§F.2; the review rework's Q1), and they are compared with
+ *    what the records actually hold, not merely read: a side whose cost is
+ *    `unknown` cannot be shown to fit a declared ceiling, a declared `maxTokens`
+ *    needs every side's `tokens` four buckets (tool-call counters alone do not
+ *    show tokens) and refuses a total over the ceiling even when no single side
+ *    was, and a declared `wallTimeMs` needs every side's own `durationMs` and
+ *    refuses the experiment whose `experiment_started` record to its newest
+ *    settled record spans more than the frozen window — an overspend the
+ *    orchestrator could not have seen in time is still recorded, and still
+ *    refused. Tokens and time are judged separately; both declared, both
+ *    checked; equality fits. With no ceiling declared, `unknown` stays the
+ *    honest observation it is and is recorded, not turned into a zero and not
+ *    treated as a refusal.
  *
  * Nothing here writes: the whole gate is reads. The production write, its own
  * re-check of the candidate (P2) and the production baseline (P3), and the two
@@ -259,6 +268,13 @@ function assertSideEvidence(input: {
     throw new Error(
       `evolution: the experiment report's ${where} reports outcome "${detail.outcome}" but the store's review record for run ` +
       `"${runId}" settled "${review.outcome}" — the report and the store disagree about what ran`,
+    )
+  }
+  if (detail.durationMs !== undefined && detail.durationMs !== review.durationMs) {
+    throw new Error(
+      `evolution: the experiment report's ${where} records a run duration of ${detail.durationMs}ms, but the store's review record for ` +
+      `run "${runId}" reports ${review.durationMs === undefined ? 'none' : `${review.durationMs}ms`} — the timing a promotion reads ` +
+      "must be the run's own",
     )
   }
   if (detail.reviewRef !== `${task.taskId}#${runId}`) {
@@ -835,7 +851,19 @@ function assertSidesAgree(
   }
 }
 
-/** Whether a side's cost is known enough for a frozen budget that declares a ceiling. */
+/**
+ * Whether one side's cost is known enough for a frozen budget that declares a
+ * ceiling — the per-side half of the rule (S4-E §F.2; Q1 of the progress
+ * review: the ceilings bound the *whole experiment*).
+ *
+ * A declared ceiling still refuses a side whose cost is `unknown` — the reviewed
+ * gate's own rule, unchanged. On top of it, each ceiling requires the metric it
+ * is measured with, and names the one that is missing:
+ * - `maxTokens` needs the run's `tokens` four buckets; tool-call counters alone
+ *   do not show tokens, and neither does a numeric total nobody reported;
+ * - `wallTimeMs` needs the side's own `durationMs` — real elapsed time, never a
+ *   value derived from the token counters or from the wall clock of the reading.
+ */
 function assertCostWithinDeclaredBudget(report: ExperimentReport, where: string, detail: ExperimentSideDetail): void {
   const budget = report.frozen.budget
   const ceiling = budget.maxTokens ?? budget.wallTimeMs
@@ -846,6 +874,98 @@ function assertCostWithinDeclaredBudget(report: ExperimentReport, where: string,
       `and the ${where} reports no cost (${detail.cost.reason}) — an unknown cost cannot be shown to fit a ceiling the frozen ` +
       'budget set, so the promotion is refused rather than inferred',
     )
+  }
+  if (budget.maxTokens !== undefined) tokenTotalOf(detail, where, budget.maxTokens)
+  if (budget.wallTimeMs !== undefined && detail.durationMs === undefined) {
+    throw new Error(
+      `evolution: the frozen budget declares wallTimeMs ${budget.wallTimeMs} for the whole experiment and the ${where} records no run ` +
+      "duration (`durationMs`, the run's own start to its terminal review record) — the time the experiment was frozen to fit cannot " +
+      'be shown for this side, so the promotion is refused rather than inferred',
+    )
+  }
+}
+
+/**
+ * The four token buckets one settled side reports, summed the way the runtime's
+ * own post-hoc budget check sums them. A side without the `tokens` projection,
+ * or with counters that are not four readable numbers, is refused by name
+ * rather than counted as zero: an unknown is never a zero, and only a total
+ * that is really readable can be compared with a ceiling.
+ */
+function tokenTotalOf(detail: ExperimentSideDetail, where: string, ceiling: number): number {
+  const tokens = detail.cost.status === 'reported' ? detail.cost.metrics.tokens : undefined
+  if (tokens === undefined || typeof tokens !== 'object') {
+    throw new Error(
+      `evolution: the frozen budget declares maxTokens ${ceiling} for the whole experiment, and the ${where} reports cost metrics ` +
+      'without the `tokens` projection (tool-call counters alone do not show tokens) — a ceiling this side cannot be measured ' +
+      'against is not evidence the promotion may read',
+    )
+  }
+  const buckets = ['uncachedInputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'] as const
+  const values = buckets.map(bucket => (tokens as unknown as Record<string, unknown>)[bucket])
+  if (values.some(value => typeof value !== 'number' || !Number.isFinite(value) || value < 0)) {
+    throw new Error(
+      `evolution: the ${where} reports token usage that is not four readable counters ` +
+      `(${buckets.map((bucket, index) => `${bucket}: ${String(values[index])}`).join(', ')}) — an unreadable total is not a total the ` +
+      `frozen maxTokens ${ceiling} can be checked against, so the promotion is refused`,
+    )
+  }
+  return (values as readonly number[]).reduce((sum, value) => sum + value, 0)
+}
+
+/**
+ * The whole experiment's cost against the frozen budget (S4-E §F.2; Q1 of the
+ * progress review): the token four buckets summed over every settled side, and
+ * the experiment's own wall clock — its `experiment_started` record to its
+ * newest settled record (`report.at`), which counts the gaps a restart or a
+ * stopped process left between the sides — each compared with the ceiling the
+ * freeze declared, and each judged on its own (both declared: both checked).
+ * Equality fits; only exceeding refuses.
+ *
+ * A recorded total that passed its ceiling is refused here. The orchestrator
+ * stops starting sides once the total the settled ones reported has consumed
+ * the ceiling, but a run's own counts are only readable once it settled, so the
+ * side that crossed the ceiling stays recorded — and this half refuses to pass
+ * the overspend off as a fit. With no ceiling declared, an unreadable cost stays
+ * the honest observation it is: recorded, never zeroed, never a refusal.
+ */
+function assertExperimentCostWithinBudget(report: ExperimentReport, startedAt: string): void {
+  const budget = report.frozen.budget
+  if (budget.maxTokens !== undefined) {
+    let spent = 0
+    let sides = 0
+    for (const sample of report.samples) {
+      for (const detail of [sample.baseline, sample.candidate]) {
+        spent += tokenTotalOf(detail, `sample "${sample.taskId}" ${detail.side} side`, budget.maxTokens)
+        sides += 1
+      }
+    }
+    if (spent > budget.maxTokens) {
+      throw new Error(
+        `evolution: the frozen budget declares maxTokens ${budget.maxTokens} for the whole experiment, but its ${sides} settled sides ` +
+        `report ${spent} tokens together (${spent - budget.maxTokens} over the ceiling) — the budget bounds the experiment as a whole and ` +
+        'not one side, and a total its own records place above the ceiling is refused rather than promoted',
+      )
+    }
+  }
+  if (budget.wallTimeMs !== undefined) {
+    const startedMs = Date.parse(startedAt)
+    const settledMs = Date.parse(report.at)
+    if (!Number.isFinite(startedMs) || !Number.isFinite(settledMs) || settledMs < startedMs) {
+      throw new Error(
+        `evolution: the frozen budget declares wallTimeMs ${budget.wallTimeMs} for the whole experiment, but its own timestamps cannot be ` +
+        `read (experiment_started "${startedAt}" → newest settled record "${report.at}") — the window the experiment was frozen to fit ` +
+        'cannot be measured, so the promotion is refused rather than inferred',
+      )
+    }
+    const elapsedMs = settledMs - startedMs
+    if (elapsedMs > budget.wallTimeMs) {
+      throw new Error(
+        `evolution: the frozen budget declares wallTimeMs ${budget.wallTimeMs} for the whole experiment, but ${elapsedMs}ms passed between ` +
+        `its own experiment_started record ("${startedAt}") and its newest settled record ("${report.at}") — the experiment's wall clock ` +
+        'counts the gaps between sides too (a restart does not hand out a fresh window), so the promotion is refused rather than inferred',
+      )
+    }
   }
 }
 
@@ -976,7 +1096,12 @@ export async function assertSkillPromotionEvidence(
     }
     await assertSampleInputsIntact({ sample: frozenSample, snapshot, productionWorkspace: frozen.snapshot.sourceDir })
   }
-  // 6. The model selection: the runs' own requests were checked above, and the
+  // 6. The whole experiment's cost against the ceilings the freeze declared: the
+  // totals the per-side checks above each made readable, summed over every side
+  // (Q1: the budget bounds the experiment, not one side), and the wall clock
+  // its own records span.
+  assertExperimentCostWithinBudget(report, experiment.at)
+  // 7. The model selection: the runs' own requests were checked above, and the
   // deployment's selection now is the second half — a deployment that moved on
   // since the freeze has to freeze a new experiment rather than promote this
   // one's evidence.
@@ -993,7 +1118,7 @@ export async function assertSkillPromotionEvidence(
       'not run under the selection this promotion would be judged against',
     )
   }
-  // 7. The verdict.
+  // 8. The verdict.
   if (report.verdict !== 'fixed') {
     throw new Error(
       `evolution: the two-sided experiment "${experiment.experimentId}" did not show a clean fix — ` +

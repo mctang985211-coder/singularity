@@ -28,8 +28,8 @@ import type {
   ExperimentSources,
   ExperimentView,
 } from '../../src/experiment.ts'
-import { directoryDigest, experimentLineage, runExperiment } from '../../src/experiment.ts'
-import type { FrozenExperiment } from '../../src/replay.ts'
+import { directoryDigest, experimentLineage, resumeExperiment, runExperiment } from '../../src/experiment.ts'
+import type { ExperimentBudget, FrozenExperiment } from '../../src/replay.ts'
 import { foldExperiments, frozenDigestOf, modelSelectionOf } from '../../src/index.ts'
 
 const PROPOSAL = 'p1'
@@ -42,6 +42,8 @@ interface Call {
   lineage: string
   workspace?: string
   extraSkillRoots: readonly string[]
+  /** The wall clock the caller placed on this run, when it placed one (the experiment's remaining window). */
+  wallTimeMs?: number
 }
 
 /** What the scripted runtime answers with, one entry per run it is asked for. */
@@ -50,10 +52,14 @@ interface ScriptedOutcome {
   criteria?: ReviewCriterion[]
   /** `true` for a run whose review record reports no metrics at all — the cost this plane must call unknown. */
   noMetrics?: boolean
+  /** The tokens the run's review reports (default 10: the fixture's own bucket split). */
+  tokens?: number
+  /** The duration the run's review reports in milliseconds (default 1000; `null` reports none). */
+  durationMs?: number | null
 }
 
 /** A little world: one prepared skill proposal, one store, one scripted runtime, one ledger. */
-async function world(options: { outcomes?: ScriptedOutcome[] } = {}) {
+async function world(options: { outcomes?: ScriptedOutcome[]; startedAt?: string } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'experiment-orchestrator-'))
   const snapshotDir = join(root, 'snapshot')
   await mkdir(join(snapshotDir, 'nested'), { recursive: true })
@@ -170,8 +176,11 @@ async function world(options: { outcomes?: ScriptedOutcome[] } = {}) {
     experiments: async () => [...folded().values()].reverse(),
     recordExperimentStart: async record => {
       if (folded().has(record.experimentId)) return
-      foldExperiments([...records, record], proposals)
-      records.push(record)
+      // A durable started record from an earlier instant, when the case needs an
+      // experiment that froze a while ago (what a restart meets).
+      const staged = options.startedAt === undefined ? record : { ...record, at: options.startedAt }
+      foldExperiments([...records, staged], proposals)
+      records.push(staged)
     },
     recordExperimentSample: async record => {
       foldExperiments([...records, record], proposals)
@@ -196,6 +205,7 @@ async function world(options: { outcomes?: ScriptedOutcome[] } = {}) {
           lineage: taskOptions.lineage,
           ...(taskOptions.workspace === undefined ? {} : { workspace: taskOptions.workspace.path }),
           extraSkillRoots: taskOptions.overlay?.extraSkillRoots ?? [],
+          ...(taskOptions.wallTimeMs === undefined ? {} : { wallTimeMs: taskOptions.wallTimeMs }),
         })
         tasks.push({
           taskId,
@@ -227,7 +237,14 @@ async function world(options: { outcomes?: ScriptedOutcome[] } = {}) {
           criteria: scriptedOutcome.criteria ?? [{ criterionId: 'ac', verdict: 'pass', verifierId: 'command' }],
           ...(scriptedOutcome.noMetrics === true
             ? {}
-            : { metrics: { tokens: { uncachedInputTokens: 7, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 } } }),
+            : {
+              metrics: {
+                tokens: scriptedOutcome.tokens === undefined
+                  ? { uncachedInputTokens: 7, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 }
+                  : { uncachedInputTokens: scriptedOutcome.tokens, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+              },
+            }),
+          ...(scriptedOutcome.durationMs === null ? {} : { durationMs: scriptedOutcome.durationMs ?? 1_000 }),
         } as unknown as ReviewRecord)
         evidence.push({ evidenceId: `e-${runId}`, taskRunId: runId, taskId })
         return {
@@ -235,6 +252,7 @@ async function world(options: { outcomes?: ScriptedOutcome[] } = {}) {
           runId,
           status: scriptedOutcome.outcome,
           criteria: scriptedOutcome.criteria ?? [{ criterionId: 'ac', verdict: 'pass', verifierId: 'command' }],
+          ...(scriptedOutcome.durationMs === null ? {} : { durationMs: scriptedOutcome.durationMs ?? 1_000 }),
           ...(taskOptions.workspace === undefined ? {} : { workspace: taskOptions.workspace.path }),
         }
       },
@@ -253,7 +271,7 @@ async function world(options: { outcomes?: ScriptedOutcome[] } = {}) {
     runs,
     reviews,
     proposal,
-    spec: (overrides: { selection?: { provider: string; model: string }; repetition?: number } = {}) => ({
+    spec: (overrides: { selection?: { provider: string; model: string }; repetition?: number; budget?: ExperimentBudget } = {}) => ({
       proposalId: PROPOSAL,
       samples: [
         { taskId: 't-fix', role: 'observed-failure' as const },
@@ -261,7 +279,7 @@ async function world(options: { outcomes?: ScriptedOutcome[] } = {}) {
       ],
       snapshot: { sourceDir: snapshotDir },
       model: modelSelectionOf(overrides.selection ?? { provider: 'scripted', model: 'stub' })!,
-      budget: { note: 'the stub budget' },
+      budget: overrides.budget ?? { note: 'the stub budget' },
       repetition: overrides.repetition ?? 0,
     }),
   }
@@ -279,6 +297,23 @@ function recordOf(records: readonly ExperimentRecord[], sampleTaskId: string, si
   return found
 }
 
+/** The experiment id the stub ledger's own started record names. */
+function experimentIdOfWorld(records: readonly ExperimentRecord[]): string {
+  const started = records.find(record => record.kind === 'experiment_started')
+  if (started === undefined || started.kind !== 'experiment_started') throw new Error('the stub ledger holds no started record')
+  return started.experimentId
+}
+
+/** The refusal message of one call, or `''` when it resolved. */
+async function refusal(action: Promise<unknown>): Promise<string> {
+  try {
+    await action
+    return ''
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+}
+
 describe('the two-sided orchestrator', () => {
   it('runs both sides from one frozen snapshot, and reuses every key on a repeat call', async () => {
     const w = await world({
@@ -292,6 +327,8 @@ describe('the two-sided orchestrator', () => {
     const result = await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
 
     expect(w.calls).toHaveLength(4)
+    // No budget was declared, so no side was placed under a window this plane invented.
+    for (const call of w.calls) expect(call.wallTimeMs).toBeUndefined()
     expect(result.report.verdict).toBe('fixed')
     expect(result.report.samples.map(item => item.verdict)).toEqual(['fixed', 'maintained'])
 
@@ -365,6 +402,8 @@ describe('the two-sided orchestrator', () => {
     expect(interrupted.runId).toBe(runId)
     expect(interrupted.reason).toMatch(/holds run .* as running .*never re-runs an in-flight sample/)
     expect(interrupted.cost).toEqual({ status: 'unknown', reason: 'the run never settled, so it reported no cost' })
+    // A run that never settled has no duration to report: absent, never a zero.
+    expect(interrupted.durationMs).toBeUndefined()
     expect(resumed.report.verdict).toBe('inconclusive')
 
     // And once more: the record is what it is, and nothing runs again.
@@ -396,6 +435,8 @@ describe('the two-sided orchestrator', () => {
     expect(recovered.runId).toBe(recorded.runId)
     expect(recovered.reviewRef).toBe(`${recovered.taskId}#${recorded.runId}`)
     expect(recovered.cost).toEqual({ status: 'reported', metrics: expect.objectContaining({ tokens: expect.any(Object) }) })
+    // The recovered duration is the one the store's review reports.
+    expect(recovered.durationMs).toBe(1_000)
     expect(resumed.report.verdict).toBe('fixed')
     await rm(w.root, { recursive: true, force: true })
   })
@@ -477,6 +518,140 @@ describe('the two-sided orchestrator', () => {
     expect(w.records).toHaveLength(0)
     expect(await readdir(join(w.ledgerRoot, 'sandbox', PROPOSAL))).toEqual(['skills'])
     expect(await readFile(outside, 'utf8')).toBe('the production bytes\n')
+    await rm(w.root, { recursive: true, force: true })
+  })
+
+  it('stops starting sides once the settled sides have consumed the frozen token total', async () => {
+    const w = await world({
+      outcomes: [
+        { outcome: 'failed', criteria: [{ criterionId: 'ac-fix', verdict: 'fail', verifierId: 'command' }], tokens: 10 },
+        { outcome: 'verified', criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }], tokens: 10 },
+        { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }], tokens: 10 },
+      ],
+    })
+    const message = await refusal(runExperiment(w.sources, { spec: w.spec({ budget: { maxTokens: 30 } }), caller: CALLER, actor: 'root-1' }))
+    expect(message).toContain('maxTokens 30')
+    expect(message).toContain('3 settled side(s) already report 30 tokens')
+    expect(message).toContain('no further sample side is started')
+    // The settled runs stay recorded as what the experiment spent.
+    expect(message).toContain('the experiment stopped')
+
+    // Three sides ran; the fourth — which the spent total leaves no room for —
+    // never started, so no run was spawned and no ledger line written for it.
+    expect(w.calls).toHaveLength(3)
+    expect(w.records.filter(record => record.kind === 'experiment_sample')).toHaveLength(3)
+
+    // A restarted process resumes by id: the total comes back off the ledger
+    // (never reset), the settled keys are not run again, and the same ceiling
+    // stops the same side.
+    const resumed = await refusal(resumeExperiment(w.sources, { experimentId: experimentIdOfWorld(w.records), caller: CALLER, actor: 'root-1' }))
+    expect(resumed).toContain('maxTokens 30')
+    expect(resumed).toContain('3 settled side(s) already report 30 tokens')
+    expect(w.calls).toHaveLength(3)
+    expect(w.records.filter(record => record.kind === 'experiment_sample')).toHaveLength(3)
+    await rm(w.root, { recursive: true, force: true })
+  })
+
+  it('lets the side the ceiling still had room for run, and records the overspend it really made', async () => {
+    const w = await world({
+      outcomes: [
+        { outcome: 'failed', criteria: [{ criterionId: 'ac-fix', verdict: 'fail', verifierId: 'command' }], tokens: 10 },
+        { outcome: 'verified', criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }], tokens: 10 },
+        { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }], tokens: 10 },
+        { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }], tokens: 10 },
+      ],
+    })
+    // 30 of 35 were spent when the last side started, and the run reported 10
+    // more: the experiment finished, and the overspend is recorded as it is.
+    const result = await runExperiment(w.sources, { spec: w.spec({ budget: { maxTokens: 35 } }), caller: CALLER, actor: 'root-1' })
+    expect(w.calls).toHaveLength(4)
+    expect(w.records.filter(record => record.kind === 'experiment_sample')).toHaveLength(4)
+    const spent = result.report.samples
+      .flatMap(sample => [sample.baseline, sample.candidate])
+      .reduce((sum, detail) => sum + (detail.cost.status === 'reported' && detail.cost.metrics.tokens !== undefined
+        ? Object.values(detail.cost.metrics.tokens).reduce((inner, value) => inner + value, 0)
+        : 0), 0)
+    // The total is the truth, not a fit: 40 against a ceiling of 35 is exactly
+    // the overspend the promotion gate refuses (never rounded down to 35).
+    expect(spent).toBe(40)
+    expect(spent).toBeGreaterThan(35)
+    await rm(w.root, { recursive: true, force: true })
+  })
+
+  it('counts a cancelled side as spend, so a resumed experiment does not get its budget back', async () => {
+    const w = await world({
+      outcomes: [
+        { outcome: 'failed', criteria: [{ criterionId: 'ac-fix', verdict: 'fail', verifierId: 'command' }], tokens: 10 },
+        { outcome: 'verified', criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }], tokens: 10 },
+        { outcome: 'cancelled', criteria: [{ criterionId: 'ac-hold', verdict: 'inconclusive', verifierId: 'command' }], tokens: 10 },
+        { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }], tokens: 10 },
+      ],
+    })
+    // The cancelled side stops the first call where it stands (three records),
+    // and its own 10 tokens are part of what the experiment has spent.
+    const stopped = await refusal(runExperiment(w.sources, { spec: w.spec({ budget: { maxTokens: 25 } }), caller: CALLER, actor: 'root-1' }))
+    expect(stopped).toContain('is incomplete')
+    expect(w.calls).toHaveLength(3)
+    const records = w.records.filter(record => record.kind === 'experiment_sample')
+    expect(records).toHaveLength(3)
+    expect(recordOf(w.records, 't-holdout', 'baseline').outcome).toBe('cancelled')
+
+    const resumed = await refusal(resumeExperiment(w.sources, { experimentId: experimentIdOfWorld(w.records), caller: CALLER, actor: 'root-1' }))
+    expect(resumed).toContain('maxTokens 25')
+    expect(resumed).toContain('3 settled side(s) already report 30 tokens')
+    expect(w.calls).toHaveLength(3)
+    expect(w.records.filter(record => record.kind === 'experiment_sample')).toHaveLength(3)
+    await rm(w.root, { recursive: true, force: true })
+  })
+
+  it('hands each side what is left of the window the ledger anchored, not a fresh one', async () => {
+    const w = await world({ startedAt: new Date(Date.now() - 30_000).toISOString() })
+    await runExperiment(w.sources, { spec: w.spec({ budget: { wallTimeMs: 60_000 } }), caller: CALLER, actor: 'root-1' })
+
+    expect(w.calls).toHaveLength(4)
+    for (const call of w.calls) {
+      // Half the frozen minute is already gone — the window is measured from the
+      // experiment_started record, so a restart never hands out a new one.
+      expect(call.wallTimeMs).toBeGreaterThan(29_000)
+      expect(call.wallTimeMs).toBeLessThanOrEqual(30_000)
+    }
+    await rm(w.root, { recursive: true, force: true })
+  })
+
+  it('refuses to start any side once the deadline the ledger anchored has passed', async () => {
+    const w = await world({ startedAt: new Date(Date.now() - 120_000).toISOString() })
+    const message = await refusal(runExperiment(w.sources, { spec: w.spec({ budget: { wallTimeMs: 60_000 } }), caller: CALLER, actor: 'root-1' }))
+    expect(message).toContain('wallTimeMs 60000')
+    expect(message).toContain('passed')
+
+    // The freeze is recorded (the experiment exists), and nothing else: no run,
+    // no side's workspace, no sample record.
+    expect(w.calls).toHaveLength(0)
+    expect(w.records.filter(record => record.kind === 'experiment_started')).toHaveLength(1)
+    expect(w.records.filter(record => record.kind === 'experiment_sample')).toHaveLength(0)
+    expect(await readdir(join(w.ledgerRoot, 'sandbox', PROPOSAL))).toEqual(['skills'])
+    await rm(w.root, { recursive: true, force: true })
+  })
+
+  it('records the duration each side reported, and never invents one', async () => {
+    const w = await world({
+      outcomes: [
+        { outcome: 'failed', criteria: [{ criterionId: 'ac-fix', verdict: 'fail', verifierId: 'command' }], durationMs: 42 },
+        { outcome: 'verified', criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }], durationMs: 43 },
+        { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }], durationMs: 44 },
+        { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }], durationMs: null },
+      ],
+    })
+    const result = await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
+
+    expect(result.report.samples[0]!.baseline.durationMs).toBe(42)
+    expect(result.report.samples[0]!.candidate.durationMs).toBe(43)
+    expect(result.report.samples[1]!.baseline.durationMs).toBe(44)
+    // The run that reported none is absent, not a zero.
+    expect(result.report.samples[1]!.candidate.durationMs).toBeUndefined()
+    // And the record, not only the report, is where it lives.
+    expect(recordOf(w.records, 't-fix', 'baseline').durationMs).toBe(42)
+    expect(recordOf(w.records, 't-holdout', 'candidate').durationMs).toBeUndefined()
     await rm(w.root, { recursive: true, force: true })
   })
 })

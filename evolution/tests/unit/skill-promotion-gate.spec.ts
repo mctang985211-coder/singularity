@@ -123,6 +123,14 @@ interface FixtureOptions {
   protectedInput?: { path: string; bytes: string }
   /** Metrics every settled review carries (absent: the cost is reported as unknown). */
   metrics?: Record<string, unknown>
+  /**
+   * The wall-clock duration every settled side's review record and ledger line
+   * carry in milliseconds (default 1000). `null` records none on either: the
+   * run's own time nobody could read.
+   */
+  durationMs?: number | null
+  /** How long after the freeze every sample record was written (default 0: the whole experiment in one instant). */
+  settledAfterMs?: number
   /** Leave the `storeId` off the experiment record (an older line). */
   omitStoreId?: boolean
   /**
@@ -287,6 +295,8 @@ async function fixture(options: FixtureOptions = {}) {
     const runId = `r-${sample.taskId}-${side}`
     const criterionId = sample.criteria[0]!.criterionId
     const verdict = outcome === 'verified' ? 'pass' : outcome === 'failed' ? 'fail' : 'inconclusive'
+    const durationMs = options.durationMs === null ? undefined : options.durationMs ?? 1_000
+    const at = new Date(Date.parse('2026-09-26T00:00:00.000Z') + (options.settledAfterMs ?? 0)).toISOString()
     rows.tasks.push({
       taskId,
       definitionRef: { taskType: 'subtask', version: 1 },
@@ -322,6 +332,7 @@ async function fixture(options: FixtureOptions = {}) {
       evidenceRefs: [`e-${runId}`],
       anomalies: [],
       ...(options.metrics === undefined ? {} : { metrics: options.metrics }),
+      ...(durationMs === undefined ? {} : { durationMs }),
       criteria: [{
         criterionId,
         verdict,
@@ -354,8 +365,9 @@ async function fixture(options: FixtureOptions = {}) {
       cost: options.metrics === undefined
         ? { status: 'unknown', reason: "the run's review record carries no metrics, so no cost was reported for it" }
         : { status: 'reported', metrics: options.metrics as never },
+      ...(durationMs === undefined ? {} : { durationMs }),
       actor: 'root-1',
-      at: '2026-09-26T00:00:00.000Z',
+      at,
     }
     return record
   }
@@ -716,7 +728,10 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
     const ceiling = await fixture({ budget: { maxTokens: 5_000, note: 'the fixture ceiling' } })
     expect(await refusal(ceiling.svc.checkPromotion(PROPOSAL))).toContain('an unknown cost cannot be shown to fit a ceiling')
 
-    const reported = await fixture({ budget: { maxTokens: 5_000 }, metrics: { tokens: { uncachedInputTokens: 10, outputTokens: 5 } } })
+    const reported = await fixture({
+      budget: { maxTokens: 5_000 },
+      metrics: { tokens: { uncachedInputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 } },
+    })
     expect(await refusal(reported.svc.checkPromotion(PROPOSAL))).toBe('')
   })
 
@@ -940,5 +955,131 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     expect(rolledback.proposal.status).toBe('rolledback')
     expect(await readFile(configFile, 'utf8')).toContain('research: { preset: standard }')
     expect(existsSync(join(f.root, 'proposals.jsonl'))).toBe(true)
+  })
+})
+
+/**
+ * Q1 of the progress review: the frozen budget's `maxTokens` / `wallTimeMs` are
+ * the *whole experiment's* ceilings, and the gate has to compare the recorded
+ * spend against them — not merely refuse a side whose cost is unknown. The
+ * counterexample this block is written from is the review's own: `maxTokens: 1`
+ * with four sides reporting 15 tokens each reached `applied` on the reviewed
+ * build (`docs/history/2026-09-26-s4-e-progress-review.md`).
+ */
+describe('Q1: the frozen budget bounds the whole experiment, and the gate reads the numbers', () => {
+  /** The four token buckets the deployment's own projection reports, summed to `total`. */
+  const tokens = (total: number) => ({
+    tokens: { uncachedInputTokens: total, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  })
+
+  it('refuses the review counterexample: maxTokens 1 with four sides of 15 tokens, at every writing entry', async () => {
+    const f = await fixture({ budget: { maxTokens: 1 }, metrics: tokens(15) })
+
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain('maxTokens 1')
+    expect(message).toContain('60 tokens together')
+    expect(message).toContain('59 over the ceiling')
+
+    // The entries that can write re-read the same evidence: neither PROMOTE nor
+    // apply lands, the ledger holds no decided/applied line, and production is
+    // byte-identical.
+    await f.svc.gate(PROPOSAL, gateAnswers([f.reportPath]), 'root-1')
+    expect(await refusal(f.svc.decide(PROPOSAL, 'PROMOTE', 'root-1', 'approval:decide'))).toContain('maxTokens 1')
+    expect(await refusal(f.svc.apply(PROPOSAL, 'root-1', 'approval:apply'))).not.toBe('')
+    const kinds = await f.ledgerKinds()
+    expect(kinds).not.toContain('decided')
+    expect(kinds).not.toContain('applied')
+    expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(PRODUCTION)
+  })
+
+  it('refuses a total over the ceiling even though every side is under it', async () => {
+    const f = await fixture({ budget: { maxTokens: 40 }, metrics: tokens(15) })
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain('maxTokens 40')
+    expect(message).toContain('60 tokens together')
+    expect(message).toContain('20 over the ceiling')
+    expect(await f.ledgerKinds()).not.toContain('decided')
+  })
+
+  it('refuses a side that reports tool calls but no tokens when maxTokens is declared', async () => {
+    const f = await fixture({ budget: { maxTokens: 5_000 }, metrics: { toolCalls: { calls: 3, failures: 0 } } })
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain('the `tokens` projection')
+    expect(message).toContain('tool-call counters alone do not show tokens')
+    expect(await f.ledgerKinds()).not.toContain('decided')
+  })
+
+  it('lets a total exactly at the ceiling through to the human chain', async () => {
+    const f = await fixture({ budget: { maxTokens: 60 }, metrics: tokens(15) })
+    expect(await refusal(f.svc.checkPromotion(PROPOSAL))).toBe('')
+    await f.svc.gate(PROPOSAL, gateAnswers([f.reportPath]), 'root-1')
+    await f.svc.decide(PROPOSAL, 'PROMOTE', 'root-1', 'approval:decide')
+    const applied = await f.svc.apply(PROPOSAL, 'root-1', 'approval:apply')
+    expect(applied.proposal.status).toBe('applied')
+    expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(CANDIDATE)
+    await f.svc.rollback(PROPOSAL, 'root-1', 'approval:rollback')
+    expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(PRODUCTION)
+  })
+
+  it('judges tokens and the wall clock separately when both ceilings are declared', async () => {
+    // The clock fits (the records were written 60s after the freeze, exactly the
+    // window) and the tokens fit; both ceilings hold, so the gate passes.
+    const fits = await fixture({ budget: { maxTokens: 60, wallTimeMs: 60_000 }, metrics: tokens(15), settledAfterMs: 60_000 })
+    expect(await refusal(fits.svc.checkPromotion(PROPOSAL))).toBe('')
+
+    // The clock fits but the tokens do not: the token arm refuses on its own.
+    const overTokens = await fixture({ budget: { maxTokens: 1, wallTimeMs: 60_000 }, metrics: tokens(15) })
+    expect(await refusal(overTokens.svc.checkPromotion(PROPOSAL))).toContain('maxTokens 1')
+
+    // The tokens fit but the experiment ran ten minutes past its one-minute
+    // window: the recorded overspend refuses, and the elapsed wall clock is the
+    // experiment_started record to the newest record, gaps included.
+    const overTime = await fixture({ budget: { maxTokens: 60, wallTimeMs: 60_000 }, metrics: tokens(15), settledAfterMs: 600_000 })
+    const message = await refusal(overTime.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain('wallTimeMs 60000')
+    expect(message).toContain('600000ms')
+    expect(await overTime.ledgerKinds()).not.toContain('decided')
+  })
+
+  it('refuses a side that records no duration when wallTimeMs is declared', async () => {
+    const f = await fixture({ budget: { wallTimeMs: 60_000 }, metrics: tokens(15), durationMs: null })
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain('wallTimeMs 60000')
+    expect(message).toContain('records no run duration')
+    expect(await f.ledgerKinds()).not.toContain('decided')
+  })
+
+  it('refuses a record whose recorded duration is not the one its run reported', async () => {
+    const f = await fixture({ budget: { wallTimeMs: 60_000 }, metrics: tokens(15) })
+    expect(await refusal(f.svc.checkPromotion(PROPOSAL))).toBe('')
+    await f.tamperLedger(lines => {
+      const sample = lines.find(line => line.kind === 'experiment_sample')
+      if (sample === undefined) throw new Error('the fixture ledger holds no experiment_sample line')
+      sample.durationMs = 1
+    })
+    const reopened = await f.reopen()
+    const message = await refusal(reopened.checkPromotion(PROPOSAL))
+    expect(message).toContain('the timing a promotion reads must be the run\'s own')
+    expect(await f.ledgerKinds()).not.toContain('decided')
+  })
+
+  it('refuses the review counterexample\'s own metrics shape: a partial tokenUsage is no readable total', async () => {
+    // The audit's counterexample reported `{ tokens: { uncachedInputTokens: 10,
+    // outputTokens: 5 } }` — the two buckets its author typed, not the four the
+    // deployment's projection reports. That total is unreadable rather than 15,
+    // and an unreadable total is refused rather than filled in.
+    const f = await fixture({ budget: { maxTokens: 1 }, metrics: { tokens: { uncachedInputTokens: 10, outputTokens: 5 } } })
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain('not four readable counters')
+    expect(message).toContain('cacheReadTokens')
+    expect(await refusal(f.svc.decide(PROPOSAL, 'PROMOTE', 'root-1', 'approval:decide'))).not.toBe('')
+    expect(await f.ledgerKinds()).not.toContain('decided')
+  })
+
+  it('records an unreadable cost without refusing it when no ceiling is declared', async () => {
+    // The status quo the rework keeps: with nothing declared, an unreadable cost
+    // stays the honest observation it is — recorded, never zeroed, never refused.
+    const f = await fixture({ metrics: { toolCalls: { calls: 3, failures: 0 } } })
+    expect(await refusal(f.svc.checkPromotion(PROPOSAL))).toBe('')
   })
 })

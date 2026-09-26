@@ -551,7 +551,7 @@ function assertFrozenExperiment(value) {
 	if (!roles.includes("holdout")) throw new Error("evolution: an experiment frozen block needs at least one holdout sample (§F.2: the candidate must not be selected on every case)");
 }
 function assertExperimentBudget(value, field) {
-	if (!isRecord$2(value)) throw new Error(`evolution: ${field} must be an object (a run-level budget, recorded only)`);
+	if (!isRecord$2(value)) throw new Error(`evolution: ${field} must be an object (the whole experiment's token and wall-clock ceilings)`);
 	for (const key of Object.keys(value)) if (key !== "wallTimeMs" && key !== "maxTokens" && key !== "note") throw new Error(`evolution: ${field} has unknown key "${key}"`);
 	for (const key of ["wallTimeMs", "maxTokens"]) {
 		const member = value[key];
@@ -647,6 +647,7 @@ function assertSideDetail(value, field, sampleTaskId, observedRunId) {
 		ids.add(criterion.criterionId);
 	}
 	assertCost(value.cost, `${field}.cost`);
+	if (value.durationMs !== void 0 && (typeof value.durationMs !== "number" || !Number.isFinite(value.durationMs) || value.durationMs < 0)) throw new Error(`evolution: experiment report ${field}.durationMs must be a finite, non-negative number of milliseconds — a side nobody timed omits the member rather than carrying a value that is not a duration`);
 	if (value.outcome === "interrupted") {
 		if (typeof value.reason !== "string" || value.reason.length === 0) throw new Error(`evolution: experiment report ${field} is interrupted and must carry the reason it has no terminal run`);
 		return;
@@ -1181,16 +1182,23 @@ function runFactsOf(snapshot, task, settled) {
 	const review = runId === void 0 ? void 0 : snapshot.reviews.find((item) => item.runId === runId);
 	const outcome = review !== void 0 && TERMINAL_RUN_STATUSES.includes(review.outcome) ? review.outcome : run !== void 0 && TERMINAL_RUN_STATUSES.includes(run.status) ? run.status : void 0;
 	const detail = runId === void 0 ? "the store holds no run of this side's task" : run === void 0 ? `the store holds no run "${runId}" of this side's task` : `the store holds run ${run.runId} as ${run.status}${run.executionPhase === void 0 ? "" : ` (${run.executionPhase})`} with no terminal review record`;
+	const outcomeValue = outcome === void 0 ? "interrupted" : outcome;
+	const durationMs = readableDuration(review?.durationMs) ?? readableDuration(settled?.durationMs);
 	return {
-		outcome: outcome === void 0 ? "interrupted" : outcome,
+		outcome: outcomeValue,
 		taskId: task.taskId,
 		...runId === void 0 ? {} : { runId },
 		...review === void 0 ? {} : { review },
 		criteria: criteriaOf(review, settled),
 		evidenceRefs: evidenceRefsOf(snapshot, runId, review),
 		terminal: outcome !== void 0,
-		detail
+		detail,
+		...durationMs === void 0 ? {} : { durationMs }
 	};
+}
+/** A duration a record may carry: a finite, non-negative number of milliseconds, or nothing. */
+function readableDuration(value) {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : void 0;
 }
 /** The one ledger line a sample side writes, from the facts its run settled to. */
 function sampleRecord(input) {
@@ -1212,6 +1220,7 @@ function sampleRecord(input) {
 		workspace: input.workspace,
 		...input.initialDigest === void 0 ? {} : { initialDigest: input.initialDigest },
 		cost: input.cost,
+		...input.durationMs === void 0 ? {} : { durationMs: input.durationMs },
 		...input.reason === void 0 ? {} : { reason: input.reason },
 		actor: input.actor,
 		at: (/* @__PURE__ */ new Date()).toISOString()
@@ -1257,6 +1266,7 @@ function recoveredSampleRecord(input) {
 		workspace: input.workspace,
 		initialDigest: input.view.frozen.snapshot.digest,
 		cost: costOf(facts.review),
+		...facts.durationMs === void 0 ? {} : { durationMs: facts.durationMs },
 		actor: input.actor
 	});
 }
@@ -1276,6 +1286,7 @@ function sideDetailOf(view, sample, side) {
 		...record.initialDigest === void 0 ? {} : { initialDigest: record.initialDigest },
 		criteria: record.criteria.map(criterionDetail),
 		cost: record.cost,
+		...record.durationMs === void 0 ? {} : { durationMs: record.durationMs },
 		...record.reason === void 0 ? {} : { reason: record.reason }
 	};
 }
@@ -1336,11 +1347,63 @@ async function experimentStore(sources, caller) {
 	}
 }
 /**
+* The token total one settled side reported: the four buckets the run's own
+* session projection carries, summed exactly the way the runtime's own post-hoc
+* budget check sums them (`budgetBreaches`). `undefined` for a side that
+* reported none — what nobody reported adds nothing to what is known, and is
+* never read as a zero.
+*/
+function tokensOfRecord(record) {
+	if (record.cost.status !== "reported") return void 0;
+	const tokens = record.cost.metrics.tokens;
+	if (tokens === void 0 || typeof tokens !== "object") return void 0;
+	const total = tokens.uncachedInputTokens + tokens.outputTokens + tokens.cacheReadTokens + tokens.cacheWriteTokens;
+	return Number.isFinite(total) && total >= 0 ? total : void 0;
+}
+/** The known token total of a set of settled sides: every reported four-bucket sum, added up. */
+function reportedTokensSpent(records) {
+	return records.reduce((sum, record) => sum + (tokensOfRecord(record) ?? 0), 0);
+}
+/**
+* Whether the frozen budget still leaves room for one more side to start (S4-E
+* §F.2; the progress review's Q1: the maxima bound the *whole experiment*, not
+* one side).
+*
+* - `maxTokens` — the sides already settled report a known total, and no further
+*   side is started once that total has consumed the ceiling: the next side's
+*   own spend is not knowable before it settles, so starting one into an
+*   exhausted budget could only overshoot, and the promotion gate refuses a
+*   recorded total above the ceiling either way;
+* - `wallTimeMs` — the experiment has one deadline, anchored on its own
+*   `experiment_started` record, so a restart reads the same instant instead of
+*   granting a new window; a side is started only with time left, and what is
+*   left is what the runtime is handed (`ReplayTaskOptions.wallTimeMs`) to
+*   cancel the run in flight at that instant.
+*
+* Both refusals are named and carry the numbers; the settled runs stay in the
+* task store and the ledger as what this experiment spent.
+*/
+function assertBudgetAllowsStart(input) {
+	const { experimentId, budget, startedAt, remainingMs, spentTokens, settledSides, where } = input;
+	if (budget.maxTokens !== void 0 && spentTokens >= budget.maxTokens) {
+		const left = budget.maxTokens - spentTokens;
+		const position = left > 0 ? `${left} tokens left` : left === 0 ? "the ceiling exactly consumed" : `${-left} over the ceiling`;
+		throw new Error(`evolution: experiment "${experimentId}" is stopped by its frozen budget — maxTokens ${budget.maxTokens} is the whole experiment's ceiling and its ${settledSides} settled side(s) already report ${spentTokens} tokens (${position}), so no further sample side is started (${where} would have been next); the settled runs stay in the task store and the ledger as what this experiment spent, and a promotion whose recorded total passes the ceiling is refused rather than inferred`);
+	}
+	if (remainingMs !== void 0 && remainingMs <= 0) throw new Error(`evolution: experiment "${experimentId}" is stopped by its frozen budget — wallTimeMs ${String(budget.wallTimeMs)} is the whole experiment's window, measured from its own experiment_started record ("${startedAt}"), so its deadline was ${new Date(remainingMs + Date.now()).toISOString()} and passed ${Math.abs(remainingMs)}ms ago; no further sample side is started (${where} would have been next), and the settled runs stay in the task store and the ledger as what this experiment spent`);
+}
+/**
 * Run — or continue — the frozen two-sided experiment, and return the report the
 * ledger records. Idempotent per sample key: a recorded side is reused, an
 * in-flight side is settled from the store and never re-run, and only a side
 * that never ran is started. Every refusal throws with its reason, and the runs
 * that did settle stay in the task store and in the ledger.
+*
+* The frozen budget bounds this whole experiment and is enforced on the entry
+* points this plane has: the token total the settled sides reported, and the
+* deadline its own `experiment_started` record anchors. A side the budget has no
+* room for is not started, and the refusal names the ceiling and the recorded
+* total; what a settled side really spent is the gate's half of the same rule.
 */
 async function runExperiment(sources, request) {
 	const { spec, caller, actor } = request;
@@ -1402,6 +1465,11 @@ async function runExperiment(sources, request) {
 		at: (/* @__PURE__ */ new Date()).toISOString()
 	});
 	const view = await sources.evolution.experiment(experimentId);
+	const budget = view.frozen.budget;
+	const deadlineMs = budget.wallTimeMs === void 0 ? void 0 : Date.parse(view.at) + budget.wallTimeMs;
+	if (deadlineMs !== void 0 && !Number.isFinite(deadlineMs)) throw new Error(`evolution: the frozen budget declares wallTimeMs ${budget.wallTimeMs} but the experiment_started record's own timestamp ("${view.at}") cannot be read — the whole experiment's deadline cannot be anchored, so no side is started under it`);
+	let spentTokens = reportedTokensSpent(view.samples);
+	let settledSides = view.samples.length;
 	let started = 0;
 	try {
 		sampleLoop: for (const sample of view.frozen.samples) for (const side of EXPERIMENT_SIDES) {
@@ -1427,14 +1495,27 @@ async function runExperiment(sources, request) {
 				});
 				await sources.evolution.recordExperimentSample(recovered);
 				recorded.set(experimentSampleKey(key), recovered);
+				spentTokens += tokensOfRecord(recovered) ?? 0;
+				settledSides += 1;
 				continue;
 			}
+			const remainingMs = deadlineMs === void 0 ? void 0 : deadlineMs - Date.now();
+			assertBudgetAllowsStart({
+				experimentId: view.experimentId,
+				budget,
+				startedAt: view.at,
+				remainingMs,
+				spentTokens,
+				settledSides,
+				where: `sample "${sample.taskId}" ${side} side`
+			});
 			const real = await buildWorkspace(spec.snapshot.sourceDir, workspace, view.frozen.snapshot.digest);
 			const outcome = await sources.taskRuntime.replayTask(storeId, sample.taskId, {
 				lineage,
 				workspace: { path: real },
 				agentOptions: { ...agentOptions },
 				...side === "candidate" ? { overlay: { extraSkillRoots: [resolve(sources.evolution.root, sandbox, "skills")] } } : {},
+				...remainingMs === void 0 ? {} : { wallTimeMs: remainingMs },
 				...request.signal === void 0 ? {} : { signal: request.signal }
 			}, caller);
 			if (outcome.workspace !== void 0 && outcome.workspace !== real) throw new Error(`the replay of "${sample.taskId}" reported workspace "${outcome.workspace}" but was given "${real}"; a side's frozen input and the directory its run went through must be the same directory`);
@@ -1455,10 +1536,13 @@ async function runExperiment(sources, request) {
 				workspace: real,
 				initialDigest: view.frozen.snapshot.digest,
 				cost: costOf(facts.review),
+				...facts.durationMs === void 0 ? {} : { durationMs: facts.durationMs },
 				actor
 			});
 			await sources.evolution.recordExperimentSample(fresh);
 			recorded.set(experimentSampleKey(key), fresh);
+			spentTokens += tokensOfRecord(fresh) ?? 0;
+			settledSides += 1;
 			started += 1;
 			if (facts.outcome === "cancelled") break sampleLoop;
 		}
@@ -1592,6 +1676,7 @@ function assertExperimentSample(record, view, key) {
 	if (record.cost.status === "unknown") {
 		if (typeof record.cost.reason !== "string" || record.cost.reason.length === 0) throw new Error(`evolution: ${field} reports an unknown cost without saying why`);
 	} else if (record.cost.status !== "reported" || record.cost.metrics === null || typeof record.cost.metrics !== "object") throw new Error(`evolution: ${field} has a malformed cost report`);
+	if (record.durationMs !== void 0 && readableDuration(record.durationMs) === void 0) throw new Error(`evolution: ${field} has a malformed run duration — the side's durationMs must be a finite, non-negative number of milliseconds; a run nobody timed omits the member rather than reporting a value that is not a duration`);
 	if (record.outcome === "interrupted") {
 		if (typeof record.reason !== "string" || record.reason.length === 0) throw new Error(`evolution: ${field} is interrupted and must carry the reason it has no terminal run`);
 		return;
@@ -1713,6 +1798,7 @@ function assertSideEvidence(input) {
 	if (review === void 0) throw new Error(`evolution: the experiment report's ${where} cites run "${runId}", which the store settles with no review record — a side without a terminal review record is not a settled run`);
 	if (review.taskId !== task.taskId) throw new Error(`evolution: the review record for run "${runId}" belongs to task "${review.taskId}", not the replayed task "${task.taskId}" the experiment report's ${where} cites`);
 	if (review.outcome !== detail.outcome) throw new Error(`evolution: the experiment report's ${where} reports outcome "${detail.outcome}" but the store's review record for run "${runId}" settled "${review.outcome}" — the report and the store disagree about what ran`);
+	if (detail.durationMs !== void 0 && detail.durationMs !== review.durationMs) throw new Error(`evolution: the experiment report's ${where} records a run duration of ${detail.durationMs}ms, but the store's review record for run "${runId}" reports ${review.durationMs === void 0 ? "none" : `${review.durationMs}ms`} — the timing a promotion reads must be the run's own`);
 	if (detail.reviewRef !== `${task.taskId}#${runId}`) throw new Error(`evolution: the experiment report's ${where} cites review ref "${String(detail.reviewRef)}" but its run "${runId}" settles as "${task.taskId}#${runId}" — the reference a promotion reads must name the record that exists`);
 	const recorded = review.criteria ?? [];
 	const reported = detail.criteria;
@@ -1987,11 +2073,80 @@ function assertSidesAgree(frozen, baseline, candidate, where) {
 	if (left !== right) throw new Error(`evolution: the two sides of ${where} did not bind the same provider identity — apart from the promoted skill's own content, which the candidate overlay is what changes, every field must agree:\n- baseline: ${left}\n- candidate: ${right}`);
 	if (baseline.run.agentPreset !== candidate.run.agentPreset) throw new Error(`evolution: the two sides of ${where} ran under different agent presets (${baseline.run.agentPreset === void 0 ? "(none)" : `"${baseline.run.agentPreset}"`} vs ${candidate.run.agentPreset === void 0 ? "(none)" : `"${candidate.run.agentPreset}"`}) — a preset that moved between the sides is not the frozen execution`);
 }
-/** Whether a side's cost is known enough for a frozen budget that declares a ceiling. */
+/**
+* Whether one side's cost is known enough for a frozen budget that declares a
+* ceiling — the per-side half of the rule (S4-E §F.2; Q1 of the progress
+* review: the ceilings bound the *whole experiment*).
+*
+* A declared ceiling still refuses a side whose cost is `unknown` — the reviewed
+* gate's own rule, unchanged. On top of it, each ceiling requires the metric it
+* is measured with, and names the one that is missing:
+* - `maxTokens` needs the run's `tokens` four buckets; tool-call counters alone
+*   do not show tokens, and neither does a numeric total nobody reported;
+* - `wallTimeMs` needs the side's own `durationMs` — real elapsed time, never a
+*   value derived from the token counters or from the wall clock of the reading.
+*/
 function assertCostWithinDeclaredBudget(report, where, detail) {
 	const budget = report.frozen.budget;
 	if ((budget.maxTokens ?? budget.wallTimeMs) === void 0) return;
 	if (detail.cost.status === "unknown") throw new Error(`evolution: the frozen budget declares a cost ceiling (${budget.maxTokens === void 0 ? `wallTimeMs ${budget.wallTimeMs}` : `maxTokens ${budget.maxTokens}`}) and the ${where} reports no cost (${detail.cost.reason}) — an unknown cost cannot be shown to fit a ceiling the frozen budget set, so the promotion is refused rather than inferred`);
+	if (budget.maxTokens !== void 0) tokenTotalOf(detail, where, budget.maxTokens);
+	if (budget.wallTimeMs !== void 0 && detail.durationMs === void 0) throw new Error(`evolution: the frozen budget declares wallTimeMs ${budget.wallTimeMs} for the whole experiment and the ${where} records no run duration (\`durationMs\`, the run's own start to its terminal review record) — the time the experiment was frozen to fit cannot be shown for this side, so the promotion is refused rather than inferred`);
+}
+/**
+* The four token buckets one settled side reports, summed the way the runtime's
+* own post-hoc budget check sums them. A side without the `tokens` projection,
+* or with counters that are not four readable numbers, is refused by name
+* rather than counted as zero: an unknown is never a zero, and only a total
+* that is really readable can be compared with a ceiling.
+*/
+function tokenTotalOf(detail, where, ceiling) {
+	const tokens = detail.cost.status === "reported" ? detail.cost.metrics.tokens : void 0;
+	if (tokens === void 0 || typeof tokens !== "object") throw new Error(`evolution: the frozen budget declares maxTokens ${ceiling} for the whole experiment, and the ${where} reports cost metrics without the \`tokens\` projection (tool-call counters alone do not show tokens) — a ceiling this side cannot be measured against is not evidence the promotion may read`);
+	const buckets = [
+		"uncachedInputTokens",
+		"outputTokens",
+		"cacheReadTokens",
+		"cacheWriteTokens"
+	];
+	const values = buckets.map((bucket) => tokens[bucket]);
+	if (values.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0)) throw new Error(`evolution: the ${where} reports token usage that is not four readable counters (${buckets.map((bucket, index) => `${bucket}: ${String(values[index])}`).join(", ")}) — an unreadable total is not a total the frozen maxTokens ${ceiling} can be checked against, so the promotion is refused`);
+	return values.reduce((sum, value) => sum + value, 0);
+}
+/**
+* The whole experiment's cost against the frozen budget (S4-E §F.2; Q1 of the
+* progress review): the token four buckets summed over every settled side, and
+* the experiment's own wall clock — its `experiment_started` record to its
+* newest settled record (`report.at`), which counts the gaps a restart or a
+* stopped process left between the sides — each compared with the ceiling the
+* freeze declared, and each judged on its own (both declared: both checked).
+* Equality fits; only exceeding refuses.
+*
+* A recorded total that passed its ceiling is refused here. The orchestrator
+* stops starting sides once the total the settled ones reported has consumed
+* the ceiling, but a run's own counts are only readable once it settled, so the
+* side that crossed the ceiling stays recorded — and this half refuses to pass
+* the overspend off as a fit. With no ceiling declared, an unreadable cost stays
+* the honest observation it is: recorded, never zeroed, never a refusal.
+*/
+function assertExperimentCostWithinBudget(report, startedAt) {
+	const budget = report.frozen.budget;
+	if (budget.maxTokens !== void 0) {
+		let spent = 0;
+		let sides = 0;
+		for (const sample of report.samples) for (const detail of [sample.baseline, sample.candidate]) {
+			spent += tokenTotalOf(detail, `sample "${sample.taskId}" ${detail.side} side`, budget.maxTokens);
+			sides += 1;
+		}
+		if (spent > budget.maxTokens) throw new Error(`evolution: the frozen budget declares maxTokens ${budget.maxTokens} for the whole experiment, but its ${sides} settled sides report ${spent} tokens together (${spent - budget.maxTokens} over the ceiling) — the budget bounds the experiment as a whole and not one side, and a total its own records place above the ceiling is refused rather than promoted`);
+	}
+	if (budget.wallTimeMs !== void 0) {
+		const startedMs = Date.parse(startedAt);
+		const settledMs = Date.parse(report.at);
+		if (!Number.isFinite(startedMs) || !Number.isFinite(settledMs) || settledMs < startedMs) throw new Error(`evolution: the frozen budget declares wallTimeMs ${budget.wallTimeMs} for the whole experiment, but its own timestamps cannot be read (experiment_started "${startedAt}" → newest settled record "${report.at}") — the window the experiment was frozen to fit cannot be measured, so the promotion is refused rather than inferred`);
+		const elapsedMs = settledMs - startedMs;
+		if (elapsedMs > budget.wallTimeMs) throw new Error(`evolution: the frozen budget declares wallTimeMs ${budget.wallTimeMs} for the whole experiment, but ${elapsedMs}ms passed between its own experiment_started record ("${startedAt}") and its newest settled record ("${report.at}") — the experiment's wall clock counts the gaps between sides too (a restart does not hand out a fresh window), so the promotion is refused rather than inferred`);
+	}
 }
 /**
 * The whole skill promotion gate, as reads. Returns the experiment it validated
@@ -2080,6 +2235,7 @@ async function assertSkillPromotionEvidence(sources, proposal) {
 			productionWorkspace: frozen.snapshot.sourceDir
 		});
 	}
+	assertExperimentCostWithinBudget(report, experiment.at);
 	const currentSelection = sources.modelSelection();
 	if (currentSelection.provider !== frozen.model.provider || currentSelection.model !== frozen.model.model || currentSelection.reasoningEffort !== frozen.model.reasoningEffort || currentSelection.maxTokens !== frozen.model.maxTokens) throw new Error(`evolution: the experiment froze model selection "${frozen.model.label}"${frozen.model.reasoningEffort === void 0 ? "" : ` (effort ${frozen.model.reasoningEffort})`}${frozen.model.maxTokens === void 0 ? "" : ` (maxTokens ${frozen.model.maxTokens})`}, but this deployment resolves "${currentSelection.label}"${currentSelection.reasoningEffort === void 0 ? "" : ` (effort ${currentSelection.reasoningEffort})`}${currentSelection.maxTokens === void 0 ? "" : ` (maxTokens ${currentSelection.maxTokens})`} now — the runs on record were not run under the selection this promotion would be judged against`);
 	if (report.verdict !== "fixed") throw new Error(`evolution: the two-sided experiment "${experiment.experimentId}" did not show a clean fix — ${VERDICT_REFUSALS[report.verdict]}:\n${sampleVerdictLines(report.samples).map((line) => `- ${line}`).join("\n")}`);
