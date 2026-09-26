@@ -26,15 +26,15 @@
 | 9 | A2 + A1：Agent 状态上下文（一个交付组） | **已验收（2026-09-25）**：Q1–Q4、A2-1～A2-6 与公共检查通过 | 实现主代理 + 子代理 | 本文 D/E 节；[交付记录](history/2026-09-25-a2-a1-delivery-record.md)、[进度审核及复审](history/2026-09-25-a2-a1-progress-review.md)、[返工记录](history/2026-09-25-a2-a1-rework-record.md)、[Q3 收尾记录](history/2026-09-25-a2-a1-q3-closure-record.md) | 已按 D 节的单事件引用实现有界续读（上限 50000 字节、字节窗口与省略措辞复用 `@deepseek-ai/dsh-output-retention`）；进度审核通过；下一项为第 11 项 A4 |
 | 10 | A1 原独立排位 | 并入第 9 项，不单独派发 | — | 保留编号供历史引用 | 第 9 项整组验收后直接进入第 11 项 |
 | 11 | A4：父子澄清 | **已验收（2026-09-26）**：恢复期唤醒移到屏障 ready 后，A4-1～A4-5 闭合 | 实现主代理 | 本文 E/F.1、[返工交付](history/2026-09-26-a4-rework-record.md)、[唤醒收尾](history/2026-09-26-a4-barrier-wake-record.md)、[最终审核](history/2026-09-26-a4-final-review.md) | 下一项为第 12 项 S4-E |
-| 12 | S4-E：评估基础 | 原范围已验收；生产提交崩溃缺口由 K2 定向修复，完整 Skill 改进单位由 K3 修正 | 实现主代理 | 本文 F.2、[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md) | 保留原证据，不能据原验收宣称应用崩溃已闭合 |
+| 12 | S4-E：评估基础 | 原范围已验收；生产提交崩溃缺口已由 K2 修复（待验收），完整 Skill 改进单位由 K3 修正 | 实现主代理 | 本文 F.2、[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md) | 保留原证据，不能据原验收宣称应用崩溃已闭合 |
 | 12a | K1：子批次结束后继续探索 | **已验收（2026-09-27，含同日返工与独立审核）**：K1-1～K1-5 与公共检查全绿；返工闭合交还顺序（先确认子停止再交还工作区）、批次成员缺记录/读失败具名失败，以及跨 graph 引用拒绝与写入接管失败的替代证据缺口 | 实现主代理 + 子代理 | [完整合同 prompt](execution-prompts/12a-k1-exploration.md)、[交付记录](history/2026-09-27-k1-delivery-record.md)、[返工记录](history/2026-09-27-k1-rework-record.md)、[独立审核](history/2026-09-27-k1-review.md) | K1-1～K1-5：多批、父主动提交、问答/取消/恢复与唯一 driver；进度审核通过后才派 K2 |
-| 12b | K2：应用与回滚可恢复 | 待派发（K1 已验收） | 待填 | [完整合同 prompt](execution-prompts/12b-k2-evolution-commit.md) | K2-1～K2-5：意图、原子替换、对账与真实准入阻断 |
+| 12b | K2：应用与回滚可恢复 | **待验收（2026-09-27 交付）**：K2-1～K2-5 与公共检查全绿；ledger 单版本切换 formatVersion 3（commit_intent 意图 + 完成行 intentId），原子替换与启动/恢复对账，准入阻断开放意图目标；现场 v1 旧账按原字节归档 | 实现主代理 + 子代理 | [完整合同 prompt](execution-prompts/12b-k2-evolution-commit.md)、[交付记录](history/2026-09-27-k2-delivery-record.md) | K2-1～K2-5：意图、原子替换、对账与真实准入阻断；进度审核通过后才派 K3 |
 | 12c | K3：完整 Skill 改进单位 | 待 K2 验收 | 待填 | [完整合同 prompt](execution-prompts/12c-k3-skill-unit.md) | K3-1～K3-5：已有执行型 Skill 同名更新、双侧评估与整组回滚 |
 | 12d | K4：复盘与执行预算分离 | 待 K3 验收 | 待填 | [完整合同 prompt](execution-prompts/12d-k4-review-budget.md) | K4-1～K4-5：过期任务可复盘，人审扩额、不重置累计用量 |
 | 13 | A5 + S2-E：诊断与缺口交接 | 待 K1～K4 验收；未实施 | 待填 | 本文 F.3、[派发 prompt](execution-prompts/13-a5-s2-e-diagnosis.md) | REV-1～REV-5；消费 K4 预算规则，不重复实现 |
 | 14 | A6 + S2-R + S3：自主改进与恢复 | 待 A5 验收；未实施 | 待填 | 本文 F.4 | EVO-1～EVO-5；复用 K1 批次、K2/K3 提交与 K4 有效预算 |
 
-K1～K4 修正已确认的架构反例；K1 已验收，K2～K4 均未实施；不是全仓整理或提前开放一个残缺版本。四份 prompt 是各票唯一详细合同，本文不复制它们的施工步骤。顺序为 K1 → K2 → K3 → K4 → A5 → A6，每票独立审核后再派下一票。只有 K2 → K3 有直接提交协议依赖，其余串行用于避免共享 runtime/工具合同同时迁移。历史已验收记录不改写，受影响保证按这四票重新验证。
+K1～K4 修正已确认的架构反例；K1 已验收，K2 已交付待验收，K3～K4 均未实施；不是全仓整理或提前开放一个残缺版本。四份 prompt 是各票唯一详细合同，本文不复制它们的施工步骤。顺序为 K1 → K2 → K3 → K4 → A5 → A6，每票独立审核后再派下一票。只有 K2 → K3 有直接提交协议依赖，其余串行用于避免共享 runtime/工具合同同时迁移。历史已验收记录不改写，受影响保证按这四票重新验证。
 
 ### 五问复核：保留领域差异，直接用现成底座
 
@@ -88,7 +88,7 @@ K1～K4 修正已确认的架构反例；K1 已验收，K2～K4 均未实施；�
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。K1 已验收（交付记录见文首表），下一票 K2；K2/K3/K4 合同已备好，前置未验收不能启动；A5 暂不派发。历史验收证据保持原样。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。K1 已验收（交付记录见文首表），K2 已交付待验收（[交付记录](history/2026-09-27-k2-delivery-record.md)），验收后下一票 K3；K3/K4 合同已备好，前置未验收不能启动；A5 暂不派发。历史验收证据保持原样。
 
 ## 当前施工合同（D/E/F）
 
@@ -243,7 +243,7 @@ S4-E 原实现只支持已有单文件 SKILL.md；K2 修复其提交崩溃缺口
 
 实验幂等键使用 proposal、prepared 内容身份、样本、baseline/candidate、重复序号；已结算 Run 复用其证据，在途实验按 runtime 恢复结果记录 interrupted/failed，不偷偷补跑或覆写。明确的新实验才能再计预算运行。decide/apply 两次既有人审保留，报告/候选/生产基线在应用前复检；取消和失败仍保存已发生实验与成本。
 
-S4-E 的[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md)保留原交付证据。现行基线已删除实验级 wallTimeMs、旧 Evolution v1 replay 和旧候选执行入口；gate 只记事实，PROMOTE/apply 检查资格；Evolution ledger 基线为 formatVersion 2。K2/K3 如需格式升级就一次切换，旧账原字节归档，未闭合生产应用先由对应版本处置，不混写、不加兼容 reader、不自动迁移用户数据。新格式的重开/回滚由本次修改票重新验收。
+S4-E 的[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md)保留原交付证据。现行基线已删除实验级 wallTimeMs、旧 Evolution v1 replay 和旧候选执行入口；gate 只记事实，PROMOTE/apply 检查资格；Evolution ledger 基线为 formatVersion 2。K2/K3 如需格式升级就一次切换，旧账原字节归档，未闭合生产应用先由对应版本处置，不混写、不加兼容 reader、不自动迁移用户数据。新格式的重开/回滚由本次修改票重新验收。（2026-09-27 K2 已按此规则执行切换：ledger 现行 formatVersion 3，含 `commit_intent` 意图行与完成行 `intentId`；现场 v1 旧账按原字节归档，详见 [K2 持久化记录](persistence-changes/2026-09-27-k2-evolution-commit-intent.md)与[交付记录](history/2026-09-27-k2-delivery-record.md)，待验收。）
 
 验收 EVAL-1：双侧真实 runtime/verifier 执行且互不污染，报告可回溯所有身份。EVAL-2：历史基线冒充、输入/裁判/模型漂移、伪造证据、双侧同失败、回归/holdout 退化在 PROMOTE/apply 拒绝且无应用副作用；gate 可记录失败证据但不等于晋升通过；合法修复允许进入原人审；实验无显式版本化裁判在首个持久写前拒绝。EVAL-3：重复调用、取消/重启不重计已完成样本、不替换失败记录；内容/报告/生产基线变化拒绝应用；旧调用传实验级 wallTimeMs 立即拒绝，根运行时限仍有效。EVAL-4：新包真实接管全部现行工具消费者；formatVersion 2 当前账可重开且其 applied 可回滚，formatVersion 1 旧账在写前具名拒绝，不混写或自动迁移；非 Skill 旧请求直调零副作用。EVAL-5（迁移闭合）：`evolution` 是候选、实验、决定、应用与回滚的唯一实现；模型可见 root prompt、九个工具 schema/说明/成功返回只引导当前 Skill 路径，旧 Evolution v1 replay 的生产导出、调用方、状态分支和报告/fixture 删除，`agent-singularity` 仅保留薄工具适配；以真实调用链核对，不以搬走的行数判定。验收在 fixture 中完成，不作模型效果声明。
 
