@@ -21,6 +21,7 @@ import type {
 } from '../../src/types.ts'
 import { TaskService } from '../../src/index.ts'
 import { TaskState } from '../../src/service/state.ts'
+import { admitBatchFixture } from '../support/batch.ts'
 
 const NOW = '2026-09-16T00:00:00.000Z'
 const STORE = 'sg-t-root-session'
@@ -436,7 +437,16 @@ async function parentChildStore(): Promise<{ h: Harness; service: TaskService }>
   await service.createTaskIn(STORE, task({ taskId: 'root', decompositionStatus: 'decomposable' }), 'tester')
   await service.admitTaskIn(STORE, 'root', 'tester', { decompositionStatus: 'decomposable' })
   await service.startRunIn(STORE, run({ runId: 'pr', taskId: 'root', sessionId: PARENT_SESSION, executionPhase: 'active' }), 'tester')
-  await service.decomposeIn(STORE, 'root', [task({ taskId: 'c1', parentTaskId: 'root', depth: 1 })], 'tester')
+  // The child is admitted as one batch's member (K1): a stored proposal and its
+  // consumption are what name a batch, so the fixture writes the proposal and
+  // then admits its child in one commit.
+  await admitBatchFixture(service, {
+    storeId: STORE,
+    parentTaskId: 'root',
+    parentRunId: 'pr',
+    callerSessionId: PARENT_SESSION,
+    children: [task({ taskId: 'c1', parentTaskId: 'root', depth: 1 })],
+  })
   await service.startRunIn(STORE, run({ executionPhase: 'active' }), 'tester')
   return { h, service }
 }
@@ -685,7 +695,8 @@ describe('TaskService parent question entries', () => {
 
   test('new writes never carry the A3 question-id fields, old records stay readable', async () => {
     const { h, service } = await parentChildStore()
-    await service.changeRunPhaseIn(STORE, 'root', 'pr', 'tester', { phase: 'waiting_children', batchId: 'b-root' })
+    // The store's own batch admission already moved `pr` into
+    // `waiting_children`; the phase event it wrote is what this test reads.
     await service.askParentQuestionIn(STORE, questionAsk(), 'child')
     for (const stored of storedEvents(h)) {
       const data = stored.data as TaskEvent

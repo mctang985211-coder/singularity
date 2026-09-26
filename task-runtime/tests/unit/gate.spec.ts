@@ -221,6 +221,35 @@ describe('the question block (A4 §F.1)', () => {
     expect(gate.decide('s-1', 'task_read')).toEqual({ allow: true })
   })
 
+  test('a phase change keeps the question block: the batch end hands back active, never a licence to write', () => {
+    const gate = new ExecutionGate()
+    gate.setPhase('s-1', 'waiting_children')
+    gate.setQuestionsBlocked('s-1', true)
+
+    // The batch ended: the run is active again (K1 §2) and its own question is
+    // still unresolved. `active` is the *phase* the handback gives back; the
+    // block is a separate fact about the run, and the phase writer never moves
+    // it in either direction.
+    gate.setPhase('s-1', 'active')
+    expect(gate.phaseOf('s-1')).toBe('active')
+    expect(gate.questionsBlocked('s-1')).toBe(true)
+    const denied = gate.decide('s-1', 'write')
+    expect(denied.allow).toBe(false)
+    expect(denied.allow === false ? denied.reason : '').toContain('waiting on an unresolved blocking question')
+    expect(denied.allow === false ? denied.reason : '').toContain('phase is "active"')
+
+    // A phase that only the store implies keeps it too: only the terminal states
+    // clear the flag, because an open question requires both runs to be running.
+    const applied = new ExecutionGate()
+    applied.setPhase('s-2', 'waiting_children')
+    applied.setQuestionsBlocked('s-2', true)
+    expect(applied.applyStorePhase('s-2', 'active', applied.decisionToken('s-2'))).toBe(true)
+    expect(applied.questionsBlocked('s-2')).toBe(true)
+
+    gate.setQuestionsBlocked('s-1', false)
+    for (const tool of ['write', 'task_decompose', 'task_submit_result']) expect(gate.decide('s-1', tool)).toEqual({ allow: true })
+  })
+
   test('a session with no phase is not gated by a block either (the gate handles runs, not sessions in the abstract)', () => {
     const gate = new ExecutionGate()
     gate.setQuestionsBlocked('s-1', true)

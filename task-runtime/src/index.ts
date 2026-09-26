@@ -13,6 +13,7 @@ import { SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/d
 import type {} from '@deepseek-ai/dsh-tools'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@dangosys/dsh-singularity-agent-runtime'
+import type { AgentMessageIntent } from '@dangosys/dsh-singularity-agent-runtime'
 import type { AgentOptions, GraphScope } from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-graphs'
 import type {
@@ -35,6 +36,7 @@ import type {
   TaskId,
   TaskInstance,
   TaskProposal,
+  TaskProposalBatchConsumption,
   TaskProposalDecomposition,
   TaskProposalDecisionOutcome,
   TaskProposalPolicy,
@@ -49,6 +51,7 @@ import {
   ROOT_PROPOSAL_TASK_ID,
   TASK_CONTRACT_VERSION,
   admissionContextDigest,
+  batchIdFor,
   blockingQuestionsOf,
   contractDigest,
   questionOf,
@@ -56,6 +59,7 @@ import {
   rootProposalDigest,
   rootProposalId,
   rootTaskStoreId,
+  runMemberTaskIds,
   taskProposalId,
 } from '@dangosys/dsh-singularity-task'
 import { resolveCapabilities, capabilitySnapshot, resolvePreset, type CapabilityConfig, type PermissionSpec } from './capability.ts'
@@ -75,6 +79,8 @@ import {
   fixSpecProtectedInputs,
 } from './protected-inputs.ts'
 import {
+  batchEndMessageId,
+  batchEndMessageText,
   blockUnstartedChildren,
   deriveChildOutcomes,
   driveBatch,
@@ -87,6 +93,8 @@ import {
   type AdoptedWorkerResume,
   type AdoptedWorkerResumeRequest,
   type BatchContext,
+  type BatchResultDeliveryStatus,
+  type BatchResultMessage,
   type BudgetConfig,
   type ChildOutcome,
   type OrchestrateEnv,
@@ -245,6 +253,8 @@ export type {
   AdoptedWorkerResume,
   AdoptedWorkerResumeRequest,
   BatchContext,
+  BatchResultDeliveryStatus,
+  BatchResultMessage,
   BudgetConfig,
   ChildOutcome,
   OrchestrateEnv,
@@ -257,6 +267,8 @@ export type {
   VerifyRunOptions,
 } from './orchestrate.ts'
 export {
+  batchEndMessageId,
+  batchEndMessageText,
   blockUnstartedChildren,
   deriveChildOutcomes,
   driveBatch,
@@ -812,6 +824,15 @@ export const DEFAULT_BUDGET: Readonly<BudgetConfig> = {
 export const DEFAULT_NO_PROGRESS_ROUNDS = 3
 
 /**
+ * The proposal statuses that hold a run (K1 §1: at most one proposal in flight
+ * per run): a batch that is waiting for its review, ready to be admitted, or
+ * approved and not yet continued. `admitted` is a consumption rather than a
+ * hold, and rejected/cancelled/stale/expired are terminal — neither keeps the
+ * run from proposing the next batch.
+ */
+const IN_FLIGHT_PROPOSAL_STATUSES: ReadonlySet<TaskProposalStatus> = new Set(['pending_review', 'ready', 'approved'])
+
+/**
  * The shipped review policy (T2/T3 §5): `off`. Every decomposition this
  * deployment has ever run was admitted on the machine rules alone, and the
  * guide's decision is that a human review is something a deployment *turns on*
@@ -867,8 +888,9 @@ export const DEFAULT_MAX_CHILDREN = 8
  * The switch relaxes no guardrail, so `true` is the shipped default. A batch
  * still clears every admission rule — structure, acyclic dependencies,
  * executable criteria carrying a command, the capability-gap rule,
- * {@link Config.maxDepth}, {@link Config.maxChildren} — and a task chain still
- * splits at most once (`already decomposed`, `task/src/service/state.ts`).
+ * {@link Config.maxDepth}, {@link Config.maxChildren} — and a run still holds at
+ * most one unfinished batch and one proposal in flight (K1 §1; an *active* run
+ * is the whole of that rule, and a batch that ended hands the run back active).
  * A deployment that wants every split pre-declared by the parent sets `false`
  * and keeps the pre-switch refusal, named message included.
  */
@@ -972,6 +994,14 @@ interface DriverEntry {
   readonly promise: Promise<ChildOutcome[]>
   /** The store this driver works in — how a graph-level cancellation finds it. */
   readonly storeId: string
+  /**
+   * The parent task whose batch this driver works on, when it drives a batch.
+   * Named here because a batch id is a pair
+   * (`b-<parentRunId>-<proposalId>`, {@link batchIdFor}) and can no longer be
+   * parsed back into a task: a subtree cancellation reads the membership it
+   * needs off the registration instead of an id.
+   */
+  readonly parentTaskId?: TaskId
 }
 
 /**
@@ -1015,17 +1045,21 @@ interface StoreRecoveryState {
    * failed or invalidated barrier — nothing that matters depends on a notice.
    */
   pendingNotices: { sessionId: string; text: string }[]
+  /**
+   * The end-of-batch results a driver raised while the store was `recovering`
+   * ({@link TaskRuntime.deliverBatchResult}): the same wake-order rule as the
+   * notices above, but with an *identity*, so the ready handle delivers each one
+   * through the relay rather than a plain notice. A dropped one loses nothing —
+   * the facts are the store's, and the recovery pass re-derives the same message
+   * from the run's own accumulated batches.
+   */
+  pendingBatchResults: BatchResultMessage[]
   /** Why a failed barrier failed, verbatim. */
   reason?: string
   /** The original error a failed barrier threw. */
   failure?: unknown
   /** A cancellation or the unload invalidated this barrier: it finishes its pass but leaves no ready handle. */
   cancelled?: boolean
-}
-
-/** The batch id a parent's decomposition records: `b-<parentTaskId>`, deterministic because a task splits once (§1.2). */
-function batchIdFor(parentTaskId: TaskId): string {
-  return `b-${parentTaskId}`
 }
 
 /* --- the proposal contract (T2/T3 §5–§6) ---------------------------------- */
@@ -1919,6 +1953,7 @@ export class TaskRuntime extends Service {
       released,
       pendingDrivers: [],
       pendingNotices: [],
+      pendingBatchResults: [],
     }
     this.storeRecovery.set(storeId, state)
     try {
@@ -1946,6 +1981,7 @@ export class TaskRuntime extends Service {
       state.pendingQuestionDelivery = undefined
       if (!state.cancelled) {
         for (const notice of state.pendingNotices.splice(0)) this.notify(notice.sessionId, notice.text)
+        for (const result of state.pendingBatchResults.splice(0)) await this.deliverBatchResultNow(result)
         if (deferred !== undefined) await deferred()
       }
       // The drivers start only now — after the facts, the gates and the
@@ -1962,6 +1998,7 @@ export class TaskRuntime extends Service {
       // activation that retries.
       state.pendingQuestionDelivery = undefined
       state.pendingNotices.length = 0
+      state.pendingBatchResults.length = 0
       // Not-started is not executed (A2 §E): the drivers this barrier
       // registered are aborted and removed, nothing is written on their behalf,
       // and the next explicit activation re-registers them from the persistent
@@ -2604,11 +2641,24 @@ export class TaskRuntime extends Service {
   /**
    * The run protocol one decomposition has to satisfy before anything is
    * proposed: the run belongs to this task, it is bound to this caller, it is
-   * `active` (the admission gate — a run with an admitted batch settles it
-   * before deciding anything else), and the call was not already cancelled.
-   * Unknown and non-`active` phases are refusals rather than guesses, and a
-   * phase-less run is an old record whose only legal continuation is
-   * cancellation.
+   * `active`, it is not waiting on an unresolved blocking question, and the call
+   * was not already cancelled. Unknown and non-`active` phases are refusals
+   * rather than guesses, and a phase-less run is an old record whose only legal
+   * continuation is cancellation.
+   *
+   * **`active` is the batch gate (K1 §1).** A run holds at most one unfinished
+   * batch, and an admitted batch moves it `active → waiting_children` in the same
+   * commit that creates the children, so "this run is `active`" is the whole of
+   * "this run has no unfinished batch" — no second count of batches is kept, and
+   * a second batch may be proposed exactly when the first one has ended and the
+   * run is active again.
+   *
+   * **A blocking question is the run's own wait (K1 §1).** A run that asked its
+   * parent something unresolved is parked where the protocol put it, and
+   * delegating from there would start writers beside a wait that has not ended.
+   * The fact is read from the store's question records rather than from the
+   * gate's in-memory flag, because admission has to answer the same way in a
+   * process that never delivered the question.
    *
    * These checks are asked *after* a request the store already answers has been
    * answered from the record: a retry of a request the run has already proposed
@@ -2616,7 +2666,13 @@ export class TaskRuntime extends Service {
    * never builds a second batch), while a genuinely new batch may only be
    * proposed by a run that is still deciding its own work.
    */
-  private assertDecomposableRun(parentTask: TaskInstance, parentRun: TaskRun, callerSessionId: string, signal?: AbortSignal): void {
+  private async assertDecomposableRun(
+    storeId: string,
+    parentTask: TaskInstance,
+    parentRun: TaskRun,
+    callerSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const parentTaskId = parentTask.taskId
     if (parentRun.taskId !== parentTaskId) {
       throw new Error(`task-runtime: run "${parentRun.runId}" belongs to task "${parentRun.taskId}", not "${parentTaskId}"`)
@@ -2636,9 +2692,39 @@ export class TaskRuntime extends Service {
         '(a run with an admitted batch settles it before deciding anything else)',
       )
     }
+    const openQuestions = blockingQuestionsOf(await this.ctx.task.snapshotIn(storeId), parentRun.runId)
+    if (openQuestions.length > 0) {
+      throw new Error(
+        `task-runtime: run "${parentRun.runId}" is waiting on ${openQuestions.length === 1 ? 'an unresolved blocking question' : `${openQuestions.length} unresolved blocking questions`} ` +
+        `(${openQuestions.map(question => question.questionId).join(', ')}); an answer releases the wait, and only then may the run delegate`,
+      )
+    }
     if (signal?.aborted === true) {
       throw new Error(`task-runtime: decomposition of "${parentTaskId}" was cancelled before anything was persisted`)
     }
+  }
+
+  /**
+   * The tasks this run has already asked a person about — its `pending_review`
+   * and `approved`/`ready` decomposition proposals that are neither consumed nor
+   * terminal (K1 §1: at most one proposal in flight per run).
+   *
+   * The question is asked of the run, not the task: a parent that ended one batch
+   * and proposed another is a different run state from the run that proposed the
+   * first, and the store's proposal records are where "in flight" is defined —
+   * `admitted` is a consumption, and rejected/cancelled/stale/expired are
+   * terminal, so neither holds the run.
+   */
+  private async inFlightProposalsOf(storeId: string, parentRunId: RunId): Promise<TaskProposalDecomposition[]> {
+    const index = (await this.ctx.task.snapshotIn(storeId)).proposals
+    // An index this snapshot does not carry (a hand-built one) is not "no
+    // proposal exists": the check is skipped rather than answered wrongly, and the
+    // store's own submission rules still refuse a key bound to other content.
+    if (index === undefined) return []
+    return index.all.filter((proposal): proposal is TaskProposalDecomposition =>
+      proposal.kind !== 'root'
+      && proposal.identity.parentRunId === parentRunId
+      && IN_FLIGHT_PROPOSAL_STATUSES.has(proposal.status))
   }
 
   /**
@@ -2869,15 +2955,24 @@ export class TaskRuntime extends Service {
     // admission's own closing act: either the batch exists with the gate shut
     // behind it and the record of which proposal became it, or nothing happened
     // at all.
-    const batchId = batchIdFor(parentTaskId)
-    await this.ctx.task.admitBatchIn(storeId, parentTaskId, parentRun.runId, children, actor, edges, batch.admission, manifests, {
+    //
+    // The batch is identified by the pair (this parent run, this proposal), and
+    // the id is that pair's single spelling (`batchIdFor`, the same derivation
+    // the reducer recomputes from the consumption): the consumption, the parent's
+    // decomposition event and the phase change all name one batch instead of
+    // three spellings of it — and a parent that admits a second batch later gets
+    // an id that cannot be confused with the first's.
+    const consumption: TaskProposalBatchConsumption = {
       proposalId: proposal.proposalId,
       proposalDigest: proposal.proposalDigest,
       reviewContextDigest: proposal.reviewContextDigest,
-      batchId,
+      parentRunId: parentRun.runId,
+      batchId: batchIdFor(parentRun.runId, proposal.proposalId),
       childTaskIds,
       admittedAt: now(),
-    })
+    }
+    const { batchId } = consumption
+    await this.ctx.task.admitBatchIn(storeId, parentTaskId, parentRun.runId, children, actor, edges, batch.admission, manifests, consumption)
     // The phase is committed, so the gate closes for this session now: from here
     // the parent may read, diagnose, ask or cancel, and nothing else (§3.3).
     this.executionGate.setPhase(callerSessionId, 'waiting_children')
@@ -3698,8 +3793,21 @@ export class TaskRuntime extends Service {
     }
 
     // (3) A genuinely new batch: only a run that may still decide its own work
-    //     may propose one, and the batch has to clear every admission rule.
-    this.assertDecomposableRun(parentTask, parentRun, callerSessionId, options.exec?.signal)
+    //     may propose one, and the batch has to clear every admission rule. Two
+    //     holds are asked about before the record is written — the run is not
+    //     already holding a batch, and it is not already holding a proposal
+    //     (K1 §1) — because "one batch at a time" and "one proposal at a time"
+    //     are what make the run's own state readable without counting anything.
+    await this.assertDecomposableRun(storeId, parentTask, parentRun, callerSessionId, options.exec?.signal)
+    const inFlight = await this.inFlightProposalsOf(storeId, parentRunId)
+    if (inFlight.length > 0) {
+      const held = inFlight[0]!
+      throw new Error(
+        `task-runtime: run "${parentRunId}" already has a proposal in flight — "${held.proposalId}" is ${held.status}; ` +
+        'a run has at most one batch proposal at a time, so continue that one (or withdraw it with task_proposal_cancel) ' +
+        'rather than proposing a second, and nothing was recorded',
+      )
+    }
     const checked = await this.checkDerivedBatch({
       identity,
       parentTask,
@@ -3863,21 +3971,51 @@ export class TaskRuntime extends Service {
 
     const parentTaskId = proposal.identity.parentTaskId
     const parentTask = await this.ctx.task.taskIn(storeId, parentTaskId)
-    const parentRun = await this.ctx.task.runIn(storeId, proposal.identity.parentRunId)
-    // (1) The parent's own state. A task that already decomposed lost this batch
-    // the race — the winner's commit is durable, and §6 says the loser is
-    // invalidated rather than queued behind it.
-    if (parentTask.decompositionStatus === 'decomposed') {
+    // (1) The run's own state, re-read here (K1 §3): an approval is a record, and
+    // what it may still become is a question about the run *now*, never about the
+    // task's decomposition history — a run that returned to `active` after a batch
+    // may approve another one, and the once-per-task rule is gone. Two answers,
+    // and which one a caller gets says what to do next:
+    //
+    //  - this run already waits on an unfinished batch: the proposal lost the race
+    //    for that run (two processes, or a batch admitted while the review was in
+    //    flight), so it is invalidated (`stale`) by name — the approval never
+    //    travels to another batch, and the record stays readable;
+    //  - the run cannot host a batch at all: it is gone, it is no longer running,
+    //    it is no longer `active` (submitted, or terminal), or it is blocked on an
+    //    unresolved question of its own. The continuation is **refused** by name
+    //    with nothing written: any of those states can still move on its own (an
+    //    answer releases a block), and invalidating a proposal for a state that
+    //    may change would spend an approval the facts do not yet refuse.
+    const parentRun = await this.ctx.task.runIn(storeId, proposal.identity.parentRunId).catch(() => undefined)
+    if (parentRun === undefined) {
+      throw new Error(
+        `task-runtime: proposal "${proposalId}" cannot be continued: its parent run "${proposal.identity.parentRunId}" is not in store "${storeId}", ` +
+        'and a batch is never admitted against a run the store does not hold',
+      )
+    }
+    if (parentRun.batchId !== undefined) {
       return await this.staleProposal(
         storeId,
         proposal,
-        `the parent task "${parentTaskId}" already has a batch, so this proposal's batch cannot become it (a task decomposes once); ` +
-        'the approval is not transferred to another batch',
+        `run "${parentRun.runId}" is already waiting on batch "${parentRun.batchId}", so this proposal's batch cannot become it ` +
+        '(a run holds at most one unfinished batch); the approval is not transferred to another batch',
       )
     }
-    const ended = await this.parentRunEndedReason(storeId, proposal)
-    if (ended !== undefined) {
-      return await this.expireProposal(storeId, proposal, `the batch can no longer be dispatched: ${ended}`)
+    if (parentRun.status !== 'running' || parentRun.executionPhase !== 'active') {
+      throw new Error(
+        `task-runtime: proposal "${proposalId}" cannot be continued: its parent run "${parentRun.runId}" is ` +
+        `${parentRun.status === 'running' ? `in phase "${parentRun.executionPhase ?? 'none'}"` : parentRun.status}` +
+        '; only an active run may admit a batch, nothing was admitted, and the approval stays on the record',
+      )
+    }
+    const blocking = blockingQuestionsOf(await this.ctx.task.snapshotIn(storeId), parentRun.runId)
+    if (blocking.length > 0) {
+      throw new Error(
+        `task-runtime: proposal "${proposalId}" cannot be continued: its parent run "${parentRun.runId}" is waiting on ` +
+        `${blocking.length === 1 ? 'an unresolved blocking question' : `${blocking.length} unresolved blocking questions`} ` +
+        `(${blocking.map(question => question.questionId).join(', ')}); an answer releases the wait, and nothing was admitted`,
+      )
     }
 
     // (2) The policy gate (§5). A batch born under `off` that has not been
@@ -4074,14 +4212,16 @@ export class TaskRuntime extends Service {
   }
 
   /**
-   * Why the parent run can no longer host a batch, or `undefined` when it can.
-   * Three states, each named by what it means rather than by the field:
-   * the run is no longer running (cancelled, failed, verified), it predates the
-   * coordination phases (an old record whose only legal continuation is
-   * cancellation), or it has left the deciding phase by submitting its own
-   * result. A parent that *is* decomposed is not answered here: §6 treats that
-   * as a lost race (`stale`, a context that moved) rather than as a run that
-   * ended.
+   * Why the parent run can no longer host a batch, or `undefined` when it can —
+   * the question {@link approvalLatenessReason} asks (a late approval
+   * may only invalidate, §6). Three states, each named by what it means rather
+   * than by the field: the run is no longer running (cancelled, failed,
+   * verified), it predates the coordination phases (an old record whose only
+   * legal continuation is cancellation), or it has left the deciding phase by
+   * submitting its own result. A run that *is* waiting on an unfinished batch is
+   * not answered here either: that is a run which may hold another batch later
+   * (K1 §1), and {@link continueProposalIn}'s own re-check is where the batch a
+   * proposal competes with is judged.
    */
   private async parentRunEndedReason(storeId: string, proposal: TaskProposal): Promise<string | undefined> {
     // Only a decomposition batch has a parent run to ask about: a root contract's
@@ -4740,8 +4880,14 @@ export class TaskRuntime extends Service {
    * rejection for a key that names no batch (a replay, whose own caller already
    * receives the error), so nothing surfaces as an unhandled rejection.
    */
-  private registerDriver(key: string, storeId: string, controller: AbortController, promise: Promise<ChildOutcome[]>): void {
-    this.drivers.set(key, { controller, promise, storeId })
+  private registerDriver(
+    key: string,
+    storeId: string,
+    controller: AbortController,
+    promise: Promise<ChildOutcome[]>,
+    parentTaskId?: TaskId,
+  ): void {
+    this.drivers.set(key, { controller, promise, storeId, ...(parentTaskId === undefined ? {} : { parentTaskId }) })
     const forget = () => {
       if (this.drivers.get(key)?.controller === controller) this.drivers.delete(key)
     }
@@ -4804,19 +4950,46 @@ export class TaskRuntime extends Service {
    * there is no second terminal-record writer here.
    */
   private async failBatchFromRuntime(storeId: string, key: string, reason: string, outcome: 'failed' | 'cancelled' = 'failed'): Promise<void> {
-    const prefix = `${storeId}/b-`
+    const prefix = `${storeId}/`
     if (!key.startsWith(prefix)) return
-    const parentTaskId = key.slice(prefix.length) as TaskId
+    const batchId = key.slice(prefix.length)
     const parts = this.settlementParts(`fail-batch:${storeId}`)
     try {
-      await blockUnstartedChildren(parts, storeId, parentTaskId, reason)
-      const snapshot = await this.ctx.task.snapshotIn(storeId)
-      const parentRun = [...snapshot.runs].reverse().find(run => run.taskId === parentTaskId && run.status === 'running')
-      if (parentRun === undefined) return
-      await settleRunFromRuntime(parts, storeId, parentRun, outcome, `batch ${key.slice(prefix.length - 2)} ${outcome}: ${reason}`)
+      const found = await this.batchRecordIn(storeId, batchId)
+      if (found === undefined) return
+      await blockUnstartedChildren(parts, storeId, found.taskId, reason)
+      const parentRun = await this.ctx.task.runIn(storeId, found.run.runId).catch(() => undefined)
+      if (parentRun === undefined || parentRun.status !== 'running') return
+      await settleRunFromRuntime(parts, storeId, parentRun, outcome, `batch ${batchId} ${outcome}: ${reason}`)
     } catch (error) {
       this.warn(`store ${storeId}: the failed driver ${key} could not be settled (${error instanceof Error ? error.message : String(error)})`)
     }
+  }
+
+  /**
+   * The batch one id names, as the store itself records it: the run whose current
+   * unfinished batch it is, or a run whose accumulated batches hold it, together
+   * with the parent task that run works on. `undefined` when no run of the store
+   * records the id.
+   *
+   * A batch id is the pair (parent run, proposal) and is never parsed back into a
+   * task: a parent admits more than one batch, so `b-…` carries no task, and the
+   * one honest source for "whose batch is this" is the accumulation the reducer
+   * derived. A read that fails answers `undefined` rather than guessing — every
+   * caller here reports by name instead of writing a settlement for a batch it
+   * cannot name.
+   */
+  private async batchRecordIn(storeId: string, batchId: string): Promise<{ taskId: TaskId; run: TaskRun } | undefined> {
+    let snapshot: TaskSnapshot
+    try {
+      snapshot = await this.ctx.task.snapshotIn(storeId)
+    } catch {
+      return undefined
+    }
+    const records = (run: TaskRun): boolean =>
+      run.batchId === batchId || run.batches?.some(batch => batch.batchId === batchId) === true
+    const run = [...snapshot.runs].reverse().find(records)
+    return run === undefined ? undefined : { taskId: run.taskId, run }
   }
 
   /**
@@ -4890,7 +5063,7 @@ export class TaskRuntime extends Service {
    *
    * This is the orchestration side of the same step `settleRunFromRuntime` takes
    * where its caller awaits it: the two settlements — the driver's own
-   * (`settleChildRun`, `settleParentBatch`, `settleSubmittedRun`) and the
+   * (`settleChildRun`, `finishBatch`, `settleSubmittedRun`) and the
    * runtime-level entry — must not differ in what the gate shows afterwards, and
    * both derive the value the same way. The read is reported rather than
    * propagated: the run is settled and its record written by now, and a store
@@ -4995,7 +5168,7 @@ export class TaskRuntime extends Service {
       const env = await this.orchestrateEnv(options.callerSessionId, options.callerSessionId)
       return await driveBatch(env, { ...batch, signal: controller.signal })
     })()
-    this.registerDriver(key, options.storeId, controller, promise)
+    this.registerDriver(key, options.storeId, controller, promise, options.parentTaskId)
   }
 
   /**
@@ -5006,8 +5179,10 @@ export class TaskRuntime extends Service {
    * A submission that arrives twice is answered from the record rather than
    * applied again — the phase event is unique by construction, so the second
    * caller reads the first one's result. A run waiting on its children may not
-   * submit at all: its batch has to settle first, and that settlement submits on
-   * its behalf.
+   * submit at all: its batch has to end first (K1 §2), and the batch end hands
+   * the run back `active` — only then, with the workspace back and the children's
+   * outcomes in the store, may the parent hand in the result that starts its own
+   * acceptance.
    */
   async submitResult(
     callerSessionId: string,
@@ -5042,7 +5217,8 @@ export class TaskRuntime extends Service {
     if (phase === 'waiting_children') {
       throw new Error(
         `task-runtime: run "${run.runId}" is waiting on its child batch (${run.batchId ?? 'unrecorded'}); ` +
-        'the batch settles it — a parent cannot submit while its children are still running',
+        'a parent cannot submit while its children are still running — the batch has to end and hand the run back ' +
+        'before the parent may hand in its own result',
       )
     }
     if (phase === undefined) {
@@ -5065,9 +5241,15 @@ export class TaskRuntime extends Service {
     this.executionGate.setPhase(callerSessionId, 'submitted')
     const env = await this.orchestrateEnv(callerSessionId, callerSessionId)
     const lineage = this.replayLineage.get(task.taskId)
+    // What this receipt is about: a run that admitted batches is judged on them
+    // (K1 §4's accumulated membership), so its review record names its members —
+    // the same list the runtime's own submission used to hand over, read from the
+    // run's projection instead of from a caller.
+    const members = runMemberTaskIds(run)
     const status = await settleSubmittedRun(env, storeId, task.taskId, run.runId, {
       ...(exec.callId === undefined ? {} : { excludeCallId: exec.callId }),
       ...(lineage === undefined ? {} : { anomalies: [lineage] }),
+      ...(members.length === 0 ? {} : { relatedTaskIds: members }),
     })
     return {
       status,
@@ -5105,15 +5287,12 @@ export class TaskRuntime extends Service {
    */
   async answerParentQuestion(callerSessionId: string, request: ParentAnswerCall): Promise<AnsweredQuestionOutcome> {
     const caller = await this.questionCaller(callerSessionId, 'task_answer')
-    const answered = await answerParentQuestion(this.questionCoordination(), caller, request)
-    // A coordination item closing can be the event that releases a waiting
-    // parent's own automatic submission (see {@link redriveWaitingParent}): both
-    // runs whose pending lists changed are re-driven, and nothing is settled here.
-    const snapshot = await this.ctx.task.snapshotIn(caller.storeId)
-    const question = questionOf(snapshot, answered.answer.questionId)
-    if (question !== undefined) await this.redriveWaitingParent(caller.storeId, question.childRunId)
-    await this.redriveWaitingParent(caller.storeId, caller.runId)
-    return answered
+    // Nothing is settled here: what the answer changes is the *asking* run's own
+    // block (recomputed by the question entry from the store) and its Session,
+    // which the answer is delivered to. A waiting parent needs no re-drive — the
+    // batch ends on its children's terminal states and hands the run back
+    // `active` (K1 §2) — so closing a coordination item never settles a run.
+    return await answerParentQuestion(this.questionCoordination(), caller, request)
   }
 
   /**
@@ -5150,44 +5329,17 @@ export class TaskRuntime extends Service {
   }
 
   /**
-   * Re-drive a waiting parent whose last coordination item just closed (A4 §F.1).
-   *
-   * The parent's own submission has exactly one owner — the batch driver's
-   * `settleParentBatch` — and that owner holds it back while a coordination item
-   * is open. When the last one closes, the driver that owns the submission is
-   * re-entered (the same entry the recovery pass uses), so the answer that
-   * released the parent is what lets it submit instead of leaving a settled batch
-   * with a parent nobody owns. This writes nothing itself: the driver re-reads
-   * the store and the gate it applies is the same one.
-   */
-  private async redriveWaitingParent(storeId: string, runId: RunId): Promise<void> {
-    const snapshot = await this.ctx.task.snapshotIn(storeId)
-    const run = snapshot.runs.find(candidate => candidate.runId === runId)
-    if (run === undefined || run.status !== 'running' || run.executionPhase !== 'waiting_children' || run.batchId === undefined) return
-    if (pendingCoordinationOf(snapshot, runId).length > 0) return
-    if (this.drivers.has(`${storeId}/${run.batchId}`)) return
-    const task = snapshot.tasks.find(candidate => candidate.taskId === run.taskId)
-    const children = task?.childTaskIds ?? []
-    const childrenSettled = children.length > 0 && children.every(taskId => {
-      const status = snapshot.tasks.find(candidate => candidate.taskId === taskId)?.status
-      return status === 'verified' || status === 'failed' || status === 'blocked' || status === 'cancelled'
-    })
-    if (!childrenSettled) return
-    this.startBatchDriver({
-      storeId,
-      parentTaskId: run.taskId,
-      parentRunId: run.runId,
-      batchId: run.batchId,
-      callerSessionId: run.sessionId,
-      reason: `coordination item settled for batch ${run.batchId}`,
-    })
-  }
-
-  /**
    * Cancel one batch (`task_cancel`, §3.6): abort its driver, which settles the
    * children — the one in flight is cancelled, the ones that never started are
    * blocked before start, and the parent run is cancelled — and return that
    * settlement.
+   *
+   * The batch is located by the **caller's own run**, never by parsing the id: a
+   * batch id names a pair (`b-<parentRunId>-<proposalId>`, {@link batchIdFor}),
+   * and a parent that admitted more than one batch has one id per batch. The
+   * caller's run is the fact this entry is authorized by, and its *current*
+   * unfinished batch (`run.batchId`) is the only batch that can be cancelled —
+   * a batch this run already ended is not in flight any more.
    *
    * Only the batch's own parent session may cancel it, and only while the batch
    * is in flight. A batch this process is not driving (already settled, or
@@ -5198,19 +5350,23 @@ export class TaskRuntime extends Service {
    */
   async cancelBatch(storeId: string, batchId: string, callerSessionId: string): Promise<ChildOutcome[]> {
     if (!batchId.startsWith('b-')) {
-      throw new Error(`task-runtime: "${batchId}" is not a batch id (a batch id is "b-<parentTaskId>")`)
+      throw new Error(`task-runtime: "${batchId}" is not a batch id (a batch id is "b-<parentRunId>-<proposalId>")`)
     }
-    const parentTaskId = batchId.slice(2)
     const snapshot = await this.ctx.task.snapshotIn(storeId)
-    const parentRun = [...snapshot.runs].reverse().find(run => run.taskId === parentTaskId && run.batchId === batchId)
+    const parentRun = [...snapshot.runs].reverse().find(run => run.sessionId === callerSessionId)
     if (parentRun === undefined) {
-      throw new Error(`task-runtime: batch "${batchId}" is not recorded in store "${storeId}"`)
-    }
-    if (parentRun.sessionId !== callerSessionId) {
       throw new Error(
-        `task-runtime: batch "${batchId}" belongs to session "${parentRun.sessionId}"; session "${callerSessionId}" may not cancel it`,
+        `task-runtime: batch "${batchId}" cannot be cancelled by session "${callerSessionId}": no run of store "${storeId}" is bound to it`,
       )
     }
+    if (parentRun.batchId !== batchId) {
+      throw new Error(
+        `task-runtime: batch "${batchId}" is not the batch run "${parentRun.runId}" is waiting on ` +
+        `(${parentRun.batchId === undefined ? 'it holds no unfinished batch' : `it waits on "${parentRun.batchId}"`}); ` +
+        'a batch is cancelled by the run that admitted it, while it is in flight',
+      )
+    }
+    const parentTaskId = parentRun.taskId
     if (parentRun.status !== 'running' || parentRun.executionPhase !== 'waiting_children') {
       throw new Error(
         `task-runtime: batch "${batchId}" is not in flight (its parent run is ${parentRun.status}` +
@@ -5279,9 +5435,10 @@ export class TaskRuntime extends Service {
 
   /**
    * Abort every batch driver of `storeId` whose parent task is a strict
-   * descendant of `taskId`, and wait for their settlements. A batch's driver key
-   * carries its parent (`<storeId>/b-<parentTaskId>`), so the subtree is read
-   * from the store's own task list and no extra bookkeeping is needed.
+   * descendant of `taskId`, and wait for their settlements. Each registration
+   * names the parent task it drives, so the subtree is read from the store's own
+   * task list plus the registrations — never from the batch id, which names the
+   * pair (parent run, proposal) and cannot be parsed back into a task.
    */
   private async abortDescendantBatches(storeId: string, taskId: TaskId): Promise<void> {
     let snapshot: TaskSnapshot
@@ -5298,11 +5455,9 @@ export class TaskRuntime extends Service {
       }
       return false
     }
-    const prefix = `${storeId}/b-`
-    const entries = [...this.drivers.entries()].filter(([key, driver]) => {
-      if (driver.storeId !== storeId || !key.startsWith(prefix)) return false
-      const owner = key.slice(prefix.length) as TaskId
-      return owner !== taskId && under(owner)
+    const entries = [...this.drivers.entries()].filter(([, driver]) => {
+      if (driver.storeId !== storeId || driver.parentTaskId === undefined) return false
+      return driver.parentTaskId !== taskId && under(driver.parentTaskId)
     })
     for (const [, driver] of entries) driver.controller.abort()
     await Promise.all(entries.map(([, driver]) => driver.promise.catch(() => [])))
@@ -5371,14 +5526,29 @@ export class TaskRuntime extends Service {
    * records when the batch settled earlier (or in another process). §3.8's
    * `awaitBatch` — the entry a test or a service uses to wait for a batch a tool
    * call no longer waits for.
+   *
+   * The batch is resolved through the store's own accumulation — the run whose
+   * record holds this batch id, and that batch's members — never by parsing the
+   * id: an id names a pair, and a parent that admitted several batches holds one
+   * entry per batch. A batch no run records is refused by name rather than
+   * answered with another batch's children.
    */
   async awaitBatch(storeId: string, batchId: string): Promise<ChildOutcome[]> {
     if (!batchId.startsWith('b-')) {
-      throw new Error(`task-runtime: "${batchId}" is not a batch id (a batch id is "b-<parentTaskId>")`)
+      throw new Error(`task-runtime: "${batchId}" is not a batch id (a batch id is "b-<parentRunId>-<proposalId>")`)
     }
     const entry = this.drivers.get(`${storeId}/${batchId}`)
     if (entry !== undefined) return await entry.promise
-    return await deriveChildOutcomes(this.ctx.task, storeId, batchId.slice(2))
+    const snapshot = await this.ctx.task.snapshotIn(storeId)
+    const parentRun = [...snapshot.runs].reverse().find(run =>
+      run.batchId === batchId || run.batches?.some(batch => batch.batchId === batchId) === true)
+    if (parentRun === undefined) {
+      throw new Error(
+        `task-runtime: batch "${batchId}" is not recorded in store "${storeId}"; a batch is read from the run that admitted it, never derived from its id`,
+      )
+    }
+    const members = parentRun.batches?.find(batch => batch.batchId === batchId)?.memberTaskIds
+    return await deriveChildOutcomes(this.ctx.task, storeId, parentRun.taskId, members)
   }
 
   /**
@@ -5967,30 +6137,25 @@ export class TaskRuntime extends Service {
   /**
    * The fallback batch-failure seam the orchestration calls when a run's own
    * settlement cannot finish the batch (verification unavailable in a nested
-   * submission): every child that is not terminal is blocked, the parent run is
-   * failed with the reason, and the batch's driver is aborted so its own loop
-   * stops seeing work that no longer exists.
-   */
-  /**
-   * The fallback batch-failure seam the orchestration calls when a run's own
-   * settlement cannot finish the batch (verification unavailable in a nested
    * submission): every child that never started is blocked, the parent run is
    * failed with the reason, and the batch's driver is aborted so its own loop
    * stops seeing work that no longer exists.
    *
    * Both writes are the orchestration's own (A4-5): {@link blockUnstartedChildren}
    * and {@link settleRunFromRuntime} — the same pair `failBatchFromRuntime` uses —
-   * so this file holds no second copy of either record shape.
+   * so this file holds no second copy of either record shape. The batch is
+   * resolved through the store's accumulation ({@link batchRecordIn}): the id
+   * names a pair, not a task.
    */
   private async failBatch(storeId: string, batchId: string, reason: string): Promise<void> {
-    const parentTaskId = batchId.startsWith('b-') ? batchId.slice(2) : undefined
-    if (parentTaskId === undefined) return
+    const found = await this.batchRecordIn(storeId, batchId)
+    if (found === undefined) return
     const entry = this.drivers.get(`${storeId}/${batchId}`)
     entry?.controller.abort()
     const env = await this.orchestrateEnv(await this.sessionForStore(storeId), `fail-batch:${storeId}`)
-    await blockUnstartedChildren(env, storeId, parentTaskId, reason)
+    await blockUnstartedChildren(env, storeId, found.taskId, reason)
     const snapshot = await this.ctx.task.snapshotIn(storeId)
-    const parentRun = [...snapshot.runs].reverse().find(run => run.taskId === parentTaskId && run.batchId === batchId)
+    const parentRun = snapshot.runs.find(run => run.runId === found.run.runId)
     if (parentRun === undefined || parentRun.status !== 'running') return
     await settleRunFromRuntime(env, storeId, parentRun, 'failed', reason)
   }
@@ -6401,6 +6566,100 @@ export class TaskRuntime extends Service {
   }
 
   /**
+   * Deliver one ended batch's result to the Session that waited for it (K1 §2),
+   * through the same relay A4's question messages use
+   * ({@link AgentRuntimeHandle.ensureAgentMessageDelivered}) and under the order
+   * {@link notifyWhenReady} established for every wake.
+   *
+   * The message is *identified* (`m-batchend-<batchId>`), which is what makes
+   * this call idempotent and re-entrant: a second call — a retry in this process,
+   * or the recovery pass re-deriving the same message from the run's accumulated
+   * batches — states the same identity, and the target's own fold decides that it
+   * is already present instead of the runtime keeping a ledger. The body is the
+   * one the driver handed over, rendered from the store's own facts.
+   *
+   * The barrier rule is the wake rule: while a store is `recovering`, a turn in
+   * one of its Sessions is refused by the recovery door with nothing left to wake
+   * it, so the delivery is registered on the barrier and the ready handle makes
+   * it once the gates are in place. A failed or invalidated barrier drops the
+   * registration, which loses nothing: the facts are the store's, and the next
+   * activation (or the recovery slice's pass) derives the same message again.
+   */
+  private async deliverBatchResult(message: BatchResultMessage): Promise<BatchResultDeliveryStatus> {
+    const barrier = this.storeRecovery.get(message.storeId)
+    if (barrier !== undefined && barrier.status === 'recovering' && barrier.cancelled !== true) {
+      barrier.pendingBatchResults.push(message)
+      return 'unavailable'
+    }
+    return await this.deliverBatchResultNow(message)
+  }
+
+  /**
+   * One delivery attempt, reporting rather than throwing: the batch's facts are
+   * the store's and the message is the wake that points at them, so a relay that
+   * is absent, refuses or has no live Session changes nothing about the batch —
+   * it is named once for the operator, and the next activation retries.
+   */
+  private async deliverBatchResultNow(message: BatchResultMessage): Promise<BatchResultDeliveryStatus> {
+    // Read structurally: a deployment (or a test context) may mount no relay at
+    // all, which is a deployment that cannot deliver — not a defect of the batch.
+    const relay = this.ctx.agentRuntime as unknown as
+      | { ensureAgentMessageDelivered?: (intent: AgentMessageIntent) => Promise<{ status: string }> }
+      | undefined
+    if (typeof relay?.ensureAgentMessageDelivered !== 'function') {
+      this.warn(`store ${message.storeId}: batch "${message.batchId}" ended with no message relay in this deployment; run "${message.runId}" was handed back active and its Session was not told`)
+      return 'unavailable'
+    }
+    try {
+      const delivery = await relay.ensureAgentMessageDelivered({
+        targetSessionId: SessionId(message.sessionId),
+        senderSessionId: SessionId(message.sessionId),
+        messageId: message.messageId,
+        text: message.text,
+      })
+      if (delivery.status === 'delivered' || delivery.status === 'already-present') return delivery.status
+      this.warn(`store ${message.storeId}: the end-of-batch message for "${message.batchId}" was not delivered to session ${message.sessionId} (${delivery.status}); the batch's facts stand and the next activation retries the delivery`)
+      return delivery.status === 'unavailable' ? 'unavailable' : 'refused'
+    } catch (error) {
+      this.warn(`store ${message.storeId}: the end-of-batch message for "${message.batchId}" could not be delivered (${error instanceof Error ? error.message : String(error)})`)
+      return 'refused'
+    }
+  }
+
+  /**
+   * Re-deliver one ended batch's result from the store's own facts (K1 §2's
+   * message, re-derived): the entry a recovery pass uses for a batch whose end is
+   * durable and whose Session was never told — or was told and never recorded it
+   * (§F.1's "恢复只补缺失投递", applied to batches). It is also what a recovery
+   * pass reconciles with, one owed batch at a time.
+   *
+   * Idempotent and re-entrant by construction, not by a ledger: the identity is
+   * derived from the batch (`batchEndMessageId`), the body from its members'
+   * terminal states and evidence, and the target's own fold decides whether the
+   * message is already there (`already-present`, nothing delivered twice). A
+   * batch no run of the store records is refused by name — a batch id names a
+   * pair, and one nothing records cannot be guessed at.
+   */
+  async redeliverBatchResult(storeId: string, batchId: string): Promise<BatchResultDeliveryStatus> {
+    const found = await this.batchRecordIn(storeId, batchId)
+    if (found === undefined) {
+      throw new Error(
+        `task-runtime: batch "${batchId}" is not recorded in store "${storeId}"; there is nothing to re-deliver`,
+      )
+    }
+    const members = found.run.batches?.find(batch => batch.batchId === batchId)?.memberTaskIds
+    const outcomes = await deriveChildOutcomes(this.ctx.task, storeId, found.taskId, members)
+    return await this.deliverBatchResult({
+      storeId,
+      runId: found.run.runId,
+      batchId,
+      sessionId: found.run.sessionId,
+      messageId: batchEndMessageId(batchId),
+      text: batchEndMessageText(batchId, outcomes),
+    })
+  }
+
+  /**
    * Kill and confirm one session's managed jobs — the half of the write
    * convergence a cancellation owes its checkout. A deployment with no jobs
    * service, or a session whose agent is gone, has nothing to reconcile, and
@@ -6568,6 +6827,7 @@ export class TaskRuntime extends Service {
         this.runSettledFromRuntime(storeId, taskId, runId, status)
       },
       failBatch: (storeId, batchId, reason) => this.failBatch(storeId, batchId, reason),
+      deliverBatchResult: message => this.deliverBatchResult(message),
       assertPreset: async preset => {
         // The same registry agentRuntime.spawn mounts through; absent only in test contexts.
         const presets = (this.ctx.get?.('agentPresets') ?? (this.ctx as unknown as { agentPresets?: AgentPresetRegistry }).agentPresets) as

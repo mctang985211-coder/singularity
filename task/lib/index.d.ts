@@ -2690,18 +2690,8 @@ declare class TaskService extends Service {
   taskIn(storeId: string, taskId: TaskId): Promise<TaskInstance>;
   runIn(storeId: string, runId: RunId): Promise<TaskRun>;
   /**
-   * Every child of one task, in the order the task accumulated them — the
-   * task-level view of its subtree, across all the batches it ever admitted
-   * (a parent decomposes more than once). It is *not* the sequence a parent
-   * criterion's `childIndex` names and not a batch: a criterion's evidence map
-   * resolves against the members one *run* admitted ({@link runMembersIn}), and
-   * "which child is the third of this task" is not a question a batch identity
-   * answers.
-   */
-  childrenIn(storeId: string, taskId: TaskId): Promise<TaskInstance[]>;
-  /**
    * The tasks one run has admitted altogether, in the order their batches were
-   * admitted (`runMemberTaskIds` of the run's own projection) — the run's
+   * admitted ({@link runMemberTaskIds} of the run's own projection) — the run's
    * accumulative membership, which is the sequence a parent criterion's
    * `childIndex` names. Deliberately not the task's children: a task's children
    * are every batch ever admitted under it, while a run's members are the ones
@@ -2716,15 +2706,15 @@ declare class TaskService extends Service {
     manifest?: CapabilityManifest;
   }): Promise<void>;
   rejectTaskIn(storeId: string, taskId: TaskId, actor: string, reason: string, manifest?: CapabilityManifest): Promise<void>;
-  decomposeIn(storeId: string, parentTaskId: TaskId, children: readonly TaskInstance[], actor: string, edges?: readonly DependencyEdge[], admission?: DecompositionAdmission): Promise<void>;
   /**
    * The atomic batch-admission entry (A3 §1.3): every child's creation and
    * admission, the dependency edges, the parent's decomposition record with the
    * batch identity, the per-child capability manifests and the parent run's
    * `active → waiting_children` phase change land in one commit — a batch is
    * either fully admitted with the gate closed behind it, or not admitted at
-   * all. `decomposeIn` stays as the historical entry that leaves the parent
-   * run's phase untouched; this is the entry that makes admission atomic.
+   * all. It is the only entry that creates children: a batch that is not a
+   * recorded proposal's consumption has no identity, so there is no second
+   * "historic" door that admits children without one.
    *
    * `manifests` is aligned with `children` by index (the caller's own batch
    * order): a list of another length is refused before anything is written.

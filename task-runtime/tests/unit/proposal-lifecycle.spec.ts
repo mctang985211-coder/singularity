@@ -17,14 +17,18 @@ import type {
   TaskProposalRoot,
   VerificationResult,
 } from '../../../task/src/index.ts'
-import { ROOT_PROPOSAL_TASK_ID, TaskService, rootProposalDigest, rootProposalId, rootTaskStoreId } from '../../../task/src/index.ts'
+import { ROOT_PROPOSAL_TASK_ID, TaskService, batchIdFor, rootProposalDigest, rootProposalId, rootTaskStoreId } from '../../../task/src/index.ts'
 import type { Config, DecomposeSpec, RootContractSpec } from '../../src/index.ts'
 import {
   TaskRuntime,
+  decompositionIdentity,
   isOpenProposal,
   openProposalOf,
   resolveRootBudget,
 } from '../../src/index.ts'
+import { decompositionDigest } from '../../../task/src/contract.ts'
+import { taskProposalId } from '../../../task/src/proposal.ts'
+import type { TaskProposalDecomposition } from '../../../task/src/proposal.ts'
 import { seedLegacyRoot } from '../../../tests/support/legacy-root.ts'
 import { personRequest, pluginNotice } from '../support/person-request.ts'
 import { pinSkillHome, releaseSkillHomes } from '../support/skill-roots.ts'
@@ -411,6 +415,50 @@ async function approveInStore(h: Harness, proposalId: string): Promise<void> {
 }
 
 /**
+ * The proposal record a racing process leaves behind (K1 §3): a batch for a run
+ * that already holds one.
+ *
+ * The runtime refuses a second proposal for a run that already has one, which is
+ * what makes this state unreachable inside one process — so the raced record is
+ * built from a record the runtime itself wrote (its content, its admission and
+ * review contexts and their digests are the runtime's own) and re-addressed to
+ * the run under test. Only the identity moves: that is exactly what a second
+ * process's submission for the same run is.
+ */
+async function seedRacedProposal(
+  h: Harness,
+  spec: DecomposeSpec,
+  target: { taskId: string; runId: string },
+): Promise<string> {
+  const elsewhere = await createSecondParent(h)
+  const template = await h.runtime.submitDecompositionProposal(
+    STORE, elsewhere.taskId, elsewhere.runId, elsewhere.sessionId, spec, { requestKey: 'k-raced-template' },
+  )
+  const captured = await proposalOf(h, template.proposalId) as TaskProposalDecomposition
+  const identity = decompositionIdentity(
+    { storeId: STORE, parentTaskId: target.taskId, parentRunId: target.runId, callerSessionId: ROOT_SESSION },
+    captured.identity.reason,
+    // The stored children are the normalized ones the runtime wrote (same four
+    // fields the identity covers), so they go back in unchanged.
+    captured.batch.map(child => ({
+      contract: child.contract,
+      dependsOn: [...child.dependsOn],
+      decomposable: child.decomposable,
+      requiresIndependentAcceptance: child.requiresIndependentAcceptance,
+    })),
+  )
+  const raced: TaskProposalDecomposition = {
+    ...captured,
+    proposalId: taskProposalId(identity),
+    requestKey: 'k-raced',
+    identity,
+    proposalDigest: decompositionDigest(identity),
+  }
+  await h.task.submitProposalIn(STORE, raced, ROOT_SESSION)
+  return raced.proposalId
+}
+
+/**
  * A second parent task with its own active run, authored directly in the store.
  * It exists for the checks that need a parent of their own *and* the real root
  * untouched: its session is not the store's root session, so it claims no root
@@ -794,7 +842,7 @@ describe('TaskRuntime request keys (§6)', () => {
     const h = harness({ config: { generatedTaskReview: 'off' } })
     const { taskId, runId } = await createRoot(h)
 
-    await h.runtime.submitDecompositionProposal(STORE, taskId, runId, ROOT_SESSION, batchSpec([childSpec('task a')]), {
+    const first = await h.runtime.submitDecompositionProposal(STORE, taskId, runId, ROOT_SESSION, batchSpec([childSpec('task a')]), {
       requestKey: 'caller-key-1',
     })
     await expect(h.runtime.submitDecompositionProposal(STORE, taskId, runId, ROOT_SESSION, batchSpec([childSpec('task b')]), {
@@ -803,9 +851,19 @@ describe('TaskRuntime request keys (§6)', () => {
 
     expect(await h.runtime.proposalsForParent(STORE, taskId)).toHaveLength(1)
 
+    // …and a *different* key is refused as well while that proposal is in
+    // flight, by name and with nothing recorded (K1 §1: one proposal per run).
+    await expect(h.runtime.submitDecompositionProposal(STORE, taskId, runId, ROOT_SESSION, batchSpec([childSpec('task b')]), {
+      requestKey: 'caller-key-2',
+    })).rejects.toThrow(/already has a proposal in flight/)
+    expect(await h.runtime.proposalsForParent(STORE, taskId)).toHaveLength(1)
+
     // The derived key of the same caller for *different* content differs, which
-    // is what makes a revision a new request rather than a rewrite.
+    // is what makes a revision a new request rather than a rewrite — and a
+    // revision withdraws the proposal it replaces (one at a time).
+    await h.runtime.cancelProposal(STORE, first.proposalId, ROOT_SESSION)
     const derivedA = await h.runtime.submitDecompositionProposal(STORE, taskId, runId, ROOT_SESSION, batchSpec([childSpec('task c')]))
+    await h.runtime.cancelProposal(STORE, derivedA.proposalId, ROOT_SESSION)
     const derivedB = await h.runtime.submitDecompositionProposal(STORE, taskId, runId, ROOT_SESSION, batchSpec([childSpec('task d')]))
     expect((await proposalOf(h, derivedA.proposalId)).requestKey)
       .not.toBe((await proposalOf(h, derivedB.proposalId)).requestKey)
@@ -903,33 +961,94 @@ describe('TaskRuntime post-approval re-check (§6)', () => {
     const { taskId, runId } = await createRoot(h)
     const specA = batchSpec([childSpec('task a')], 'split one way')
     const specB = batchSpec([childSpec('task b')], 'split another way')
+    // One proposal at a time (K1 §1): the second submission is refused by name
+    // while the first is in flight, so two proposals for one run can only arise
+    // the way an approval from elsewhere does — written into the store by a
+    // process that raced this one (a second process's approval).
     const first = await h.runtime.submitDecompositionProposal(STORE, taskId, runId, ROOT_SESSION, specA)
-    const second = await h.runtime.submitDecompositionProposal(STORE, taskId, runId, ROOT_SESSION, specB)
+    await expect(h.runtime.submitDecompositionProposal(STORE, taskId, runId, ROOT_SESSION, specB))
+      .rejects.toThrow(/already has a proposal in flight/)
     await approveInStore(h, first.proposalId)
-    await approveInStore(h, second.proposalId)
 
-    // Both continuations race for the same parent. One parent decomposes once
-    // (§6), so exactly one may win — the runtime serializes them per parent and
-    // the loser's re-check sees the parent it was proposed for already gone.
-    const [one, two] = await Promise.all([
-      h.runtime.continueProposal(STORE, first.proposalId, ROOT_SESSION, { spec: specA }),
-      h.runtime.continueProposal(STORE, second.proposalId, ROOT_SESSION, { spec: specB }),
-    ])
-    const statuses = [one.status, two.status].sort()
-    expect(statuses).toEqual(['admitted', 'stale'])
-    const stale = one.status === 'stale' ? one : two
-    expect(stale.status === 'stale' ? stale.reason : '').toContain('already has a batch')
+    // The first proposal is admitted, and the run now holds an unfinished batch.
+    const admitted = await h.runtime.continueProposal(STORE, first.proposalId, ROOT_SESSION, { spec: specA })
+    expect(admitted.status).toBe('admitted')
+    if (admitted.status !== 'admitted') throw new Error('unreachable')
+
+    // The raced approval's proposal is written directly into the store — the
+    // shape a second process's interleaving leaves — and its continuation has to
+    // meet the state the run is in *now*, not the one it proposed into.
+    const secondProposal = await seedRacedProposal(h, specB, { taskId, runId })
+    await approveInStore(h, secondProposal)
+    const loser = await h.runtime.continueProposal(STORE, secondProposal, ROOT_SESSION, { spec: specB })
+    expect(loser.status).toBe('stale')
+    if (loser.status !== 'stale') throw new Error('unreachable')
+    expect(loser.reason).toContain(`already waiting on batch "${admitted.batchId}"`)
+    expect((await proposalOf(h, secondProposal)).status).toBe('stale')
 
     const snapshot = await h.task.snapshotIn(STORE)
     expect(childTasks(snapshot, taskId)).toHaveLength(1)
     expect(taskEvents(h).filter(event => event.kind === 'TaskDecomposed')).toHaveLength(1)
     // The winner's batch is the one that exists, bound to the winner's proposal.
-    const winner = one.status === 'admitted' ? first : second
-    const winnerProposal = await proposalOf(h, winner.proposalId)
+    const winnerProposal = await proposalOf(h, first.proposalId)
     expect(winnerProposal.status).toBe('admitted')
     expect(consumedBatch(winnerProposal).childTaskIds).toEqual(childTasks(snapshot, taskId).map(task => task.taskId))
     expect(await h.runtime.awaitBatch(STORE, consumedBatch(winnerProposal).batchId))
       .toHaveLength(1)
+  })
+
+  test('a continuation re-checks the run it is about: a run that left the deciding phase is refused by name', async () => {
+    const h = harness({ config: { generatedTaskReview: 'all' } })
+    const { taskId, runId } = await createRoot(h)
+    const first = await h.runtime.submitDecompositionProposal(STORE, taskId, runId, ROOT_SESSION, batchSpec([childSpec('task a')]), {
+      requestKey: 'k-before-submit',
+    })
+    await approveInStore(h, first.proposalId)
+
+    // The run hands its own result in while the approval waits: a late
+    // continuation must re-check what the run *is*, not what it was when the
+    // batch was proposed (K1 §3). The refusal is by name, and it writes nothing:
+    // the run's state can still be a fact of somebody else's settlement.
+    expect(await h.runtime.submitResult(ROOT_SESSION, { summary: 'the run is done here' }))
+      .toMatchObject({ status: 'verified' })
+    await expect(h.runtime.continueProposal(STORE, first.proposalId, ROOT_SESSION, { spec: batchSpec([childSpec('task a')]) }))
+      .rejects.toThrow(/only an active run may admit a batch/)
+    const after = await proposalOf(h, first.proposalId)
+    expect(after.status).toBe('approved')
+    expect(taskEvents(h).filter(event => event.kind === 'TaskDecomposed')).toHaveLength(0)
+    expect(h.spawned).toHaveLength(0)
+    expect(childTasks(await h.task.snapshotIn(STORE), taskId)).toHaveLength(0)
+  })
+
+  test('a batch that ended hands the run back: the same run proposes and admits a second batch, members accumulating', async () => {
+    const h = harness({ config: { generatedTaskReview: 'off' } })
+    const { taskId, runId } = await createRoot(h)
+
+    const first = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, batchSpec([childSpec('task a')], 'the first round'))
+    if (first.status !== 'admitted') throw new Error('unreachable')
+    expect((await h.runtime.awaitBatch(STORE, first.batchId)).map(outcome => outcome.status)).toEqual(['verified'])
+
+    // The run took execution back with its first batch's members accumulated,
+    // and nothing about the first batch's proposal holds it any more.
+    const handedBack = await h.task.runIn(STORE, runId)
+    expect(handedBack.executionPhase).toBe('active')
+    expect(handedBack.batchId).toBeUndefined()
+    expect(handedBack.batches?.map(batch => batch.memberTaskIds)).toEqual([first.childTaskIds])
+
+    const second = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, batchSpec([childSpec('task b')], 'the second round'))
+    if (second.status !== 'admitted') throw new Error('unreachable')
+    expect(second.batchId).not.toBe(first.batchId)
+    expect((await h.runtime.awaitBatch(STORE, second.batchId)).map(outcome => outcome.status)).toEqual(['verified'])
+
+    // The old members are not renumbered and the new batch names its own: one
+    // run, two batches, in admission order (K1 §4).
+    const accumulated = await h.task.runIn(STORE, runId)
+    expect(accumulated.batches?.map(batch => batch.batchId)).toEqual([first.batchId, second.batchId])
+    expect(accumulated.batches?.map(batch => batch.memberTaskIds)).toEqual([first.childTaskIds, second.childTaskIds])
+    expect((await h.task.runMembersIn(STORE, runId)).map(task => task.taskId)).toEqual([...first.childTaskIds, ...second.childTaskIds])
+    // Each batch is read back as its own, never as the task's whole child list.
+    expect((await h.runtime.awaitBatch(STORE, first.batchId)).map(outcome => outcome.taskId)).toEqual(first.childTaskIds)
+    expect((await h.runtime.awaitBatch(STORE, second.batchId)).map(outcome => outcome.taskId)).toEqual(second.childTaskIds)
   })
 
   test('a continuation is idempotent: an admitted proposal answers with its own batch and never admits twice', async () => {
@@ -1150,6 +1269,7 @@ describe('TaskRuntime recovery (§6 restart and idempotency)', () => {
       reason: 'the post-approval re-check passed (seeded: this test starts after it)',
     }, ROOT_SESSION)
     const childTaskIds = ['t-crash-a', 't-crash-b']
+    const derivedBatchId = batchIdFor(runId, pending.proposalId)
     const children = childTaskIds.map((taskId_, index) => ({
       taskId: taskId_,
       definitionRef: { taskType: 'subtask', version: 1 },
@@ -1177,7 +1297,8 @@ describe('TaskRuntime recovery (§6 restart and idempotency)', () => {
       proposalId: pending.proposalId,
       proposalDigest: proposal.proposalDigest,
       reviewContextDigest: proposal.reviewContextDigest,
-      batchId: `b-${taskId}`,
+      parentRunId: runId,
+      batchId: derivedBatchId,
       childTaskIds,
       admittedAt: new Date().toISOString(),
     })
@@ -1190,7 +1311,7 @@ describe('TaskRuntime recovery (§6 restart and idempotency)', () => {
     await restarted.task.openStore(STORE)
     const report = await restarted.runtime.reconcileStore(STORE)
     expect(report.unresolvedProposals).toEqual([])
-    const outcomes = await restarted.runtime.awaitBatch(STORE, `b-${taskId}`)
+    const outcomes = await restarted.runtime.awaitBatch(STORE, derivedBatchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
     expect(outcomes.map(outcome => outcome.taskId)).toEqual(childTaskIds)
     expect(childTasks(await restarted.task.snapshotIn(STORE), taskId).map(task => task.taskId)).toEqual(childTaskIds)
@@ -1297,7 +1418,7 @@ describe('TaskRuntime no-progress rule and known waits (§7.4)', () => {
     // The cancellation is the deterministic release: the driver settles the batch
     // only here, so everything the no-progress rule did (or did not do) is on the
     // record by the time this returns.
-    const outcomes = await h.runtime.cancelBatch(STORE, submitted.status === 'pending_review' ? `b-${taskId}` : '', ROOT_SESSION)
+    const outcomes = await h.runtime.cancelBatch(STORE, (await h.task.runIn(STORE, runId)).batchId!, ROOT_SESSION)
     expect(taskEvents(h).filter(event => event.kind === 'RunProgressMarked' && event.runId === workerRun.runId)).toHaveLength(0)
     expect((await h.task.runIn(STORE, workerRun.runId)).status).toBe('cancelled')
     expect(h.cancelled).toContain(h.spawned[0]?.sessionId)
@@ -1411,7 +1532,7 @@ describe('TaskRuntime compatibility entry (§6)', () => {
     const off = harness({ config: { generatedTaskReview: 'off' } })
     const offRoot = await createRoot(off)
     const admitted = await off.runtime.decomposeAndRun(STORE, offRoot.taskId, offRoot.runId, ROOT_SESSION, batchSpec([childSpec('task a')]))
-    expect(admitted).toMatchObject({ status: 'admitted', batchId: `b-${offRoot.taskId}` })
+    expect(admitted).toMatchObject({ status: 'admitted', batchId: batchIdFor(offRoot.runId, admitted.proposalId) })
     expect(admitted.status === 'admitted' ? admitted.childTaskIds : []).toHaveLength(1)
 
     const on = harness({ config: { generatedTaskReview: 'all' } })
@@ -1994,6 +2115,10 @@ describe('TaskRuntime root contract intake (A0 §1–§2)', () => {
     const batch = await h.runtime.decomposeAndRun(STORE, legacy.taskId, legacy.runId, ROOT_SESSION, batchSpec([childSpec('legacy work')]))
     if (batch.status !== 'admitted') throw new Error('unreachable')
     expect((await h.runtime.awaitBatch(STORE, batch.batchId)).map(outcome => outcome.status)).toEqual(['verified'])
+    // The legacy root's own acceptance is its own submission, like every other
+    // parent's (K1 §2).
+    expect(await h.runtime.submitResult(ROOT_SESSION, { summary: 'the legacy tree reports what its batch delivered' }))
+      .toMatchObject({ status: 'verified' })
     expect((await h.task.taskIn(STORE, legacy.taskId)).status).toBe('verified')
     // Reading it is not a rewrite: the store still holds one task, one run and the
     // contract it was created with.

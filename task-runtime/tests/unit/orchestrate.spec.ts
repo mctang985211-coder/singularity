@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { AcceptanceCriterion, EvidenceBundle, TaskEvent, TaskInstance, TaskRun, VerificationResult } from '../../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
+import { sha256Hex } from '../../../task/src/contract.ts'
 import { CompositeVerifier } from '../../../verifier/src/composite-verifier.ts'
 import { requestedSession } from '../support/person-request.ts'
 import { pinSkillHome, releaseSkillHomes } from '../support/skill-roots.ts'
@@ -111,6 +112,13 @@ function harness(
   const spawned: SpawnCall[] = []
   const cancelled: string[] = []
   const notifications: { sessionId: string; text: string }[] = []
+  /**
+   * The messages this process relayed, by session — the stand-in for
+   * agent-runtime's own fold. An identity already listed here is `already-present`
+   * on a retry, exactly as the real fold answers for a Session that holds it
+   * (A4 §F.1 / K1 §2).
+   */
+  const relayed: { sessionId: string; messageId: string; text: string }[] = []
   /** The agents this process spawned, by session — the registry's live entries. */
   const liveAgents = new Map<string, unknown>()
   let idleBehavior: ((sessionId: string) => Promise<void>) | undefined
@@ -120,6 +128,14 @@ function harness(
     followup: (message: { content: readonly { text?: string }[] }) => {
       notifications.push({
         sessionId: ROOT_SESSION,
+        text: message.content.map(block => block.text ?? '').join('\n'),
+      })
+    },
+    steer: (message: { id: string; content: readonly { text?: string }[] }) => {
+      if (relayed.some(item => item.messageId === message.id)) throw new Error(`message "${message.id}" is already pending`)
+      relayed.push({
+        sessionId: ROOT_SESSION,
+        messageId: message.id,
         text: message.content.map(block => block.text ?? '').join('\n'),
       })
     },
@@ -176,9 +192,33 @@ function harness(
             text: message.content.map(block => block.text ?? '').join('\n'),
           })
         },
+        steer: (message: { id: string; content: readonly { text?: string }[] }) => {
+          if (relayed.some(item => item.messageId === message.id)) throw new Error(`message "${message.id}" is already pending`)
+          relayed.push({
+            sessionId: request.sessionId,
+            messageId: message.id,
+            text: message.content.map(block => block.text ?? '').join('\n'),
+          })
+        },
       }
       liveAgents.set(request.sessionId, agent)
       return { agent, dispose: vi.fn(async () => {}) }
+    }),
+    /**
+     * The relay the batch-end message rides (K1 §2): `delivered` the first time,
+     * `already-present` when the target's own fold holds the identity, and
+     * `unavailable` for a session with no live agent — the three answers the
+     * real handle gives.
+     */
+    ensureAgentMessageDelivered: vi.fn(async (intent: { targetSessionId: string; messageId: string; text: string }) => {
+      const live = intent.targetSessionId === ROOT_SESSION || liveAgents.has(intent.targetSessionId)
+      if (!live) return { messageId: intent.messageId, status: 'unavailable' as const }
+      if (relayed.some(item => item.messageId === intent.messageId)) {
+        return { messageId: intent.messageId, status: 'already-present' as const }
+      }
+      ;(intent.targetSessionId === ROOT_SESSION ? parentAgent : liveAgents.get(intent.targetSessionId) as { steer: (m: unknown) => void })
+        .steer({ id: intent.messageId, content: [{ text: intent.text }] })
+      return { messageId: intent.messageId, status: 'delivered' as const }
     }),
   }
   const graphs = {
@@ -301,6 +341,7 @@ function harness(
     spawned,
     cancelled,
     notifications,
+    relayed,
     graphs,
     setIdleBehavior: (behavior: (sessionId: string) => Promise<void>) => { idleBehavior = behavior },
   }
@@ -349,6 +390,30 @@ async function decomposeAndSettle(
 ): Promise<ChildOutcome[]> {
   const { batchId } = await h.runtime.decomposeAndRun(...args)
   return await h.runtime.awaitBatch(args[0], batchId)
+}
+
+/**
+ * The parent's own submission (K1 §2): a batch end hands the run back `active`,
+ * and *only* this call starts the parent's acceptance — the runtime submits
+ * nothing on the parent's behalf. Returns the status the run settled as.
+ */
+async function submitParentResult(h: Harness, sessionId: string = ROOT_SESSION): Promise<string> {
+  return (await h.runtime.submitResult(sessionId, { summary: 'the parent reports what its batch delivered' })).status
+}
+
+/**
+ * The whole conversation one parent has with one batch: admit it, wait for it to
+ * end, then hand in the parent's own result. Cases whose subject is the parent's
+ * *verdict* use this; cases about the handback itself read
+ * {@link decomposeAndSettle} and the batch-end message directly.
+ */
+async function decomposeSubmitAndSettle(
+  h: Harness,
+  ...args: Parameters<TaskRuntime['decomposeAndRun']>
+): Promise<ChildOutcome[]> {
+  const outcomes = await decomposeAndSettle(h, ...args)
+  await submitParentResult(h, args[3])
+  return outcomes
 }
 
 /**
@@ -530,6 +595,11 @@ function leafWorkerDecomposition(h: Harness, children: DecomposeSpec['children']
         reason: 'the work turned out not to be atomic',
         children,
       })
+      // The nested batch ended and handed the run back `active` (K1 §2): the
+      // worker's own result is what settles it now — the runtime no longer
+      // submits on its behalf, so a worker that stopped here without submitting
+      // would be stopped by the no-progress rule instead.
+      await h.runtime.submitResult(sessionId, { summary: 'the split ran; the work continues under the children' })
       return
     } catch (error) {
       captured.refusal = error instanceof Error ? error.message : String(error)
@@ -835,10 +905,11 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(obligationEvents[0]!.actor).toBe(ROOT_SESSION)
     expect(obligationEvents[0]!.actor).toBe(artifactBlocked[0]!.actor)
 
-    // The batch settles otherwise; the harness verifier passes the parent's
-    // composite criterion unconditionally (the real composite verifier's
-    // unverified-child failure is covered in the verifier package's own tests).
-    expect((await h.task.runIn(STORE, rootRunId)).status).toBe('verified')
+    // The batch ends otherwise, and the parent's own acceptance is its own call
+    // (K1 §2): the harness verifier passes the parent's composite criterion
+    // unconditionally (the real composite verifier's unverified-child failure is
+    // covered in the verifier package's own tests).
+    expect(await submitParentResult(h)).toBe('verified')
   })
 
   test('P4-C: a required artifact from a verified run lets the child run — the stage is legitimately skipped', async () => {
@@ -919,7 +990,12 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
 
     expect((await h.task.taskIn(STORE, outcomes[1]!.taskId)).status).toBe('blocked')
     expect(snapshot.tasks.every(task => task.status !== 'admitted')).toBe(true)
-    expect((await h.task.runIn(STORE, rootRunId)).status).toBe('failed')
+    // The child's failure is a fact the parent judges with, never a verdict about
+    // the parent: the batch end returns it `active`, and its own submission —
+    // judged by the harness verifier, which fails this root's objective — settles
+    // it.
+    expect((await h.task.runIn(STORE, rootRunId)).status).toBe('running')
+    expect(await submitParentResult(h)).toBe('failed')
     expect(runEventKinds(h, rootRunId)).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskFailed', 'ReviewRecorded'])
   })
 
@@ -1075,7 +1151,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     })).rejects.toThrow(/capability "typo" declares unknown tool label "filesytem"; known labels: /)
 
     expect(h.spawned).toHaveLength(0)
-    // Admission rejected before `decomposeIn`: the root is still undecomposed and alone in the store.
+    // Admission rejected before anything was written: the root is still undecomposed and alone in the store.
     const snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.tasks).toHaveLength(1)
     expect(snapshot.tasks[0]!.decompositionStatus).toBe('decomposable')
@@ -1232,13 +1308,16 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(kinds).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskVerified', 'ReviewRecorded'])
     expect(kinds.filter(kind => kind === 'TaskVerifying')).toHaveLength(1)
     expect(h.verifier.verifyRun).not.toHaveBeenCalledWith(STORE, nestedRunId, expect.anything())
-    expect(h.verifier.verifyRun).toHaveBeenCalledWith(STORE, rootRunId, expect.anything())
 
     expect((await h.task.taskIn(STORE, outcomes[0]!.taskId)).status).toBe('verified')
     expect((await h.task.runIn(STORE, nestedRunId)).status).toBe('verified')
     // The nested settlement counts as `verified`, so the dependent child still runs.
     expect(runEventKinds(h, outcomes[1]!.runId!)).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskVerified', 'ReviewRecorded'])
-    expect((await h.task.runIn(STORE, rootRunId)).status).toBe('verified')
+    // The parent's own acceptance is its own submission (K1 §2), and it is the
+    // call that consults the harness verifier for this run.
+    expect((await h.task.runIn(STORE, rootRunId)).status).toBe('running')
+    expect(await submitParentResult(h)).toBe('verified')
+    expect(h.verifier.verifyRun).toHaveBeenCalledWith(STORE, rootRunId, expect.anything())
   })
 
   test('a child that settled itself failed is adopted as failed instead of being marked again', async () => {
@@ -1372,7 +1451,9 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(outcomes[0]!.evidenceId).toBe(`e-${childRunId}`)
     expect(h.verifier.verifyRun).toHaveBeenCalledWith(STORE, childRunId, expect.anything())
     expect(runEventKinds(h, childRunId)).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskVerified', 'ReviewRecorded'])
-    expect((await h.task.runIn(STORE, rootRunId)).status).toBe('verified')
+    // The root's own acceptance waits for the root's own submission (K1 §2).
+    expect((await h.task.runIn(STORE, rootRunId)).status).toBe('running')
+    expect(await submitParentResult(h)).toBe('verified')
   })
 
   test('a leaf worker that overreaches is refused by the batch limit, and the refusal names the limit, not the leaf rule', async () => {
@@ -1643,7 +1724,7 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     expect(h.verifier.verifyRun).toHaveBeenCalledWith(STORE, expect.any(String), { timeoutMs: 1234 })
   })
 
-  test('settles the parent run verified, with its own evidence, once every child verified', async () => {
+  test('a batch end hands the parent back active; the parent\'s own submission is what its verifier judges', async () => {
     const h = harness()
     const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
     const outcomes = await decomposeAndSettle(h, STORE, rootTaskId, rootRunId, ROOT_SESSION, {
@@ -1652,8 +1733,24 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
     })
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
 
+    // The batch ended and gave execution back: the run is active, nothing is
+    // submitted, and the children's facts are in the store.
+    const handedBack = await h.task.runIn(STORE, rootRunId)
+    expect(handedBack.executionPhase).toBe('active')
+    expect(handedBack.batchId).toBeUndefined()
+    expect(handedBack.status).toBe('running')
+    expect(handedBack.submission).toBeUndefined()
+    expect((await h.task.taskIn(STORE, rootTaskId)).status).not.toBe('verified')
+    expect(h.relayed.filter(item => item.sessionId === ROOT_SESSION)).toHaveLength(1)
+    expect(h.relayed[0]!.messageId).toBe(`m-batchend-${handedBack.batches![0]!.batchId}`)
+    expect(h.relayed[0]!.text).toContain('task_submit_result')
+    expect(h.runtime.gate.phaseOf(ROOT_SESSION)).toBe('active')
+    expect(runEventKinds(h, rootRunId)).toEqual(['TaskStarted'])
+
+    // Only the parent's own result starts its acceptance, and it is judged by
+    // the same verifier as before.
+    expect(await submitParentResult(h)).toBe('verified')
     expect((await h.task.taskIn(STORE, rootTaskId)).status).toBe('verified')
-    expect((await h.task.runIn(STORE, rootRunId)).status).toBe('verified')
     const snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.evidence.some(item => item.taskRunId === rootRunId)).toBe(true)
     expect(runEventKinds(h, rootRunId)).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskVerified', 'ReviewRecorded'])
@@ -1695,8 +1792,12 @@ describe('TaskRuntime.decomposeAndRun orchestration', () => {
       children: [childSpec('task a')],
     })
 
+    // A verified child says nothing about the parent's own criteria: the run is
+    // active until the parent hands its result in, and that verdict is what
+    // fails it here.
+    expect((await h.task.runIn(STORE, rootRunId)).status).toBe('running')
+    expect(await submitParentResult(h)).toBe('failed')
     expect((await h.task.taskIn(STORE, rootTaskId)).status).toBe('failed')
-    expect((await h.task.runIn(STORE, rootRunId)).status).toBe('failed')
     expect(runEventKinds(h, rootRunId)).toEqual(['TaskStarted', 'TaskVerifying', 'EvidenceProduced', 'TaskFailed', 'ReviewRecorded'])
   })
 
@@ -2015,8 +2116,10 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
     })
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
+    // The map is judged against the parent's *own* submission (K1 §2), which is
+    // also where the run-level `childIndex` resolution happens.
+    expect(await submitParentResult(h)).toBe('verified')
     expect((await h.task.taskIn(STORE, taskId)).status).toBe('verified')
-    expect((await h.task.runIn(STORE, runId)).status).toBe('verified')
   })
 
   test('P4-B: a map pointing at a criterion no child has fails the parent, naming the missing item', async () => {
@@ -2035,8 +2138,10 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
       children: [childSpec('child a'), childSpec('child b')],
     })
 
-    // Every child verified — the conjunction alone would have passed the parent.
+    // Every child verified — the conjunction alone would have passed the parent,
+    // and the parent's own submission is what fails it.
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
+    expect(await submitParentResult(h)).toBe('failed')
     expect((await h.task.taskIn(STORE, taskId)).status).toBe('failed')
     const failed = taskEvents(h).find(item => item.kind === 'TaskFailed' && item.taskId === taskId)
     const reason = failed?.kind === 'TaskFailed' ? failed.payload.reason : undefined
@@ -2125,7 +2230,9 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     // The child verified and the harness verifier passed the parent's
     // criterion; the heuristic label is the only thing standing between that
-    // verdict and a deterministic pass — and it holds.
+    // verdict and a deterministic pass — and it holds across the parent's own
+    // submission (K1 §2).
+    expect(await submitParentResult(h)).toBe('failed')
     expect((await h.task.taskIn(STORE, taskId)).status).toBe('failed')
     const failed = taskEvents(h).find(item => item.kind === 'TaskFailed' && item.taskId === taskId)
     const reason = failed?.kind === 'TaskFailed' ? failed.payload.reason : undefined
@@ -2148,6 +2255,7 @@ describe('TaskRuntime parent acceptance and evidence identity (P4)', () => {
       children: [childSpec('child a')],
     })
 
+    expect(await submitParentResult(h)).toBe('verified')
     expect((await h.task.taskIn(STORE, taskId)).status).toBe('verified')
   })
 
@@ -2251,8 +2359,10 @@ describe('TaskRuntime budget (KISS §5, VRTC plan 1.3)', () => {
         'raise the budget, split the task, or accept the overspend',
       )}`,
     ])
-    // The root session's own log is empty, so the parent record stays clean.
-    expect(snapshot.reviews.find(item => item.runId === rootRunId)!.anomalies).toEqual([])
+    // The root session's own log is empty, so the parent's own record — written
+    // when the parent submits its result (K1 §2) — stays clean.
+    expect(await submitParentResult(h)).toBe('verified')
+    expect((await h.task.snapshotIn(STORE)).reviews.find(item => item.runId === rootRunId)!.anomalies).toEqual([])
   })
 
   test('a token total over budget is annotated post-hoc and named session-scoped', async () => {
@@ -2966,6 +3076,9 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
         reason: 'the replayed work is not atomic',
         children: [childSpec('the child of the replayed work')],
       })
+      // The nested batch ended and handed the replayed worker its run back
+      // (K1 §2): the worker's own submission is what settles it now.
+      await h.runtime.submitResult(sessionId, { summary: 'the split ran; the replayed work continues under the child' })
     })
 
     const outcome = await h.runtime.replayTask(STORE, championTaskId, {
@@ -3253,7 +3366,10 @@ describe('A3 coordination', () => {
       children: [childSpec('task a')],
     })
 
-    expect(batchId).toBe(`b-${taskId}`)
+    // The batch id is the pair (parent run, proposal) — a run admits more than
+    // one batch, so the task id alone could not name this one (K1 §3).
+    const proposal = (await h.runtime.proposalIn(STORE, (await h.task.runIn(STORE, runId)).batches![0]!.proposalId))
+    expect(batchId).toBe(`b-${runId}-${proposal.proposalId}`)
     expect(childTaskIds).toHaveLength(1)
     // The handle came back with the children still unsettled, and the store says
     // the same: the parent is waiting, the child is running. (The driver starts
@@ -3287,7 +3403,11 @@ describe('A3 coordination', () => {
 
     const outcomes = await h.runtime.awaitBatch(STORE, batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
-    expect((await h.task.runIn(STORE, runId)).status).toBe('verified')
+    // The batch ended on the runtime's own controller — no caller signal reached
+    // it — and handed the parent back `active`: the run is not terminal until its
+    // own submission says so (K1 §2).
+    expect((await h.task.runIn(STORE, runId)).status).toBe('running')
+    expect(await submitParentResult(h)).toBe('verified')
   })
 
   test('an idle without a submission is marked, reminded once, and stopped at the no-progress limit', async () => {
@@ -3318,9 +3438,12 @@ describe('A3 coordination', () => {
     expect(record.outcome).toBe('failed')
     expect(record.localizedCause).toContain('no progress')
     expect(record.localizedCause).toContain('budget stop on the no-progress rule')
-    // The parent run is settled by its own batch rules: the child failed, so the
-    // parent cannot verify — it is judged, and the verdict is the judge's.
-    expect(['failed', 'verified']).toContain((await h.task.runIn(STORE, runId)).status)
+    // The parent's own run is not judged by its child's stop: the batch ended and
+    // handed it back `active`, and the parent's own submission is what would be
+    // judged (K1 §2).
+    const parentRun = await h.task.runIn(STORE, runId)
+    expect(parentRun.status).toBe('running')
+    expect(parentRun.executionPhase).toBe('active')
   })
 
   test('an explicit submission settles the run, a second one is answered from the record, and a waiting parent refuses to submit', async () => {
@@ -3350,12 +3473,26 @@ describe('A3 coordination', () => {
     expect(childRun.submission).toMatchObject({ summary: 'implemented and checked', evidenceRefs: ['docs/r.md'], origin: 'worker' })
     const phaseEvents = taskEvents(h).filter(item => item.kind === 'RunPhaseChanged' && item.runId === childRun.runId && item.payload.phase === 'submitted')
     expect(phaseEvents).toHaveLength(1)
-    // The parent's own submission is the runtime's, and it carries the batch's
-    // evidence: the worker never wrote it.
+    // Nothing submitted anything for the parent: the batch ended, its own
+    // `waiting_children → active` is on the record, and the run holds no
+    // submission until its own agent writes one (K1 §2).
     const parentRun = await h.task.runIn(STORE, runId)
-    expect(parentRun.submission?.origin).toBe('runtime')
-    expect(parentRun.submission?.summary).toContain(`batch ${batchId} settled`)
-    expect(parentRun.submission?.evidenceRefs).toEqual(['e-' + childRun.runId])
+    expect(parentRun.submission).toBeUndefined()
+    expect(parentRun.executionPhase).toBe('active')
+    const parentPhases = taskEvents(h)
+      .filter(item => item.kind === 'RunPhaseChanged' && item.runId === runId)
+      .map(item => (item.kind === 'RunPhaseChanged' ? item.payload.phase : undefined))
+    expect(parentPhases).toEqual(['waiting_children', 'active'])
+    const parentPhaseEvents = taskEvents(h).filter(item => item.kind === 'RunPhaseChanged' && item.runId === runId)
+    expect(parentPhaseEvents.every(item => item.kind !== 'RunPhaseChanged' || item.payload.batchId === batchId)).toBe(true)
+
+    // The parent may now submit, and its acceptance is its own: the same entry
+    // the worker used, judged by the verifier the deployment wires.
+    const settled = await h.runtime.submitResult(ROOT_SESSION, { summary: 'the parent combines what the batch delivered' })
+    expect(settled.status).toBe('verified')
+    const submitted = await h.task.runIn(STORE, runId)
+    expect(submitted.submission?.origin).toBe('worker')
+    expect(submitted.submission?.summary).toBe('the parent combines what the batch delivered')
   })
 
   test('a parent waiting on its children refuses a submission', async () => {
@@ -3437,6 +3574,210 @@ describe('A3 coordination', () => {
     expect(late.allow === false ? late.reason : '').toContain('late call')
   })
 
+  test('a batch end counts as progress: the no-progress marker does not carry a pre-split round to the limit', async () => {
+    const h = harness({ config: { noProgressRounds: 2 } })
+    const { taskId, runId } = await createRoot(h)
+    let idleRounds = 0
+    h.setIdleBehavior(async sessionId => {
+      const bound = await h.runtime.runForSession(sessionId)
+      if (bound.task.depth !== 1) {
+        await h.runtime.submitResult(sessionId, { summary: 'the grandchild is done' })
+        return
+      }
+      idleRounds += 1
+      if (idleRounds !== 2) return
+      // The worker splits its own work instead of submitting: the nested batch
+      // runs to its end inside this idle, so the next observation finds the run
+      // `active` again with the facts the batch produced on the record.
+      await decomposeAndSettle(h, STORE, bound.task.taskId, bound.run.runId, sessionId, {
+        reason: 'the work is not atomic',
+        children: [childSpec('grandchild')],
+      })
+    })
+
+    const outcomes = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('splittable child', { decomposable: true })],
+    })
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
+
+    const middleRun = (await h.task.snapshotIn(STORE)).runs.find(run => run.taskId !== taskId)!
+    const marks = taskEvents(h)
+      .filter(item => item.kind === 'RunProgressMarked' && item.runId === middleRun.runId)
+      .map(item => (item.kind === 'RunProgressMarked' ? item.payload : undefined))
+    // round 1 (idle) → round 1 again (the batch's facts are new progress, so the
+    // counter restarts) → round 2 (the limit). A marker that carried the
+    // pre-split count would have stopped the run one round earlier, at the round
+    // the batch end never answered.
+    expect(marks.map(mark => mark?.rounds)).toEqual([1, 1, 2])
+    expect(marks[1]!.factCount).toBeGreaterThan(marks[0]!.factCount)
+    expect(marks[2]!.factCount).toBe(marks[1]!.factCount)
+    expect(middleRun.status).toBe('failed')
+    const record = (await h.task.snapshotIn(STORE)).reviews.find(review => review.runId === middleRun.runId)!
+    expect(record.localizedCause).toContain('no progress')
+    expect(record.localizedCause).toContain('no-progress rule')
+  })
+
+  test('the batch end opens the gate again: writing, delegating and submitting are the parent\'s own decisions', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+    const outcomes = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
+
+    const gate = h.runtime.gate
+    // The phase the batch gave back (K1 §2), and what it admits: the handback is
+    // not a report — the parent may write, delegate again and submit.
+    expect(gate.phaseOf(ROOT_SESSION)).toBe('active')
+    expect(gate.questionsBlocked(ROOT_SESSION)).toBe(false)
+    for (const tool of ['write', 'bash', 'task_decompose', 'task_submit_result']) {
+      expect([tool, gate.decide(ROOT_SESSION, tool).allow]).toEqual([tool, true])
+    }
+    expect((await h.task.runIn(STORE, runId)).executionPhase).toBe('active')
+  })
+
+  test('a batch end never answers the parent\'s own question: active, and its writes stay refused', async () => {
+    const h = harness()
+    const { taskId: rootTaskId, runId: rootRunId } = await createRoot(h)
+    const state: { middleBatchId?: string; middleSession?: string } = {}
+    let asked!: () => void
+    const askedInStore = new Promise<void>(resolve => { asked = resolve })
+    h.setIdleBehavior(async sessionId => {
+      const bound = await h.runtime.runForSession(sessionId)
+      if (bound.task.depth === 1) {
+        // The middle worker delegates once — its own batch — and then asks its
+        // parent something it cannot continue without. The ask is recorded
+        // through the store's own entry (the tool layer's citation path is A4's
+        // own test); the point here is what the *batch end* does with it.
+        const { batchId } = await h.runtime.decomposeAndRun(STORE, bound.task.taskId, bound.run.runId, sessionId, {
+          reason: 'the middle worker splits its own work',
+          children: [childSpec('grandchild')],
+        })
+        state.middleBatchId = batchId
+        state.middleSession = sessionId
+        await h.task.askParentQuestionIn(STORE, {
+          childRunId: bound.run.runId,
+          requestKey: 'k-middle',
+          questionDigest: sha256Hex('the middle worker cannot continue without an answer'),
+          questionRef: { sessionId, seq: 1 },
+          messageId: 'm-middle-question',
+          blocking: true,
+        }, sessionId)
+        asked()
+        return
+      }
+      // The grandchild finishes only once its parent has asked: the batch end
+      // under test is the one that happens with the question already open.
+      await askedInStore
+      await h.runtime.submitResult(sessionId, { summary: 'the grandchild is done' })
+    })
+
+    const rootBatchId = (await h.runtime.decomposeAndRun(STORE, rootTaskId, rootRunId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('middle child', { decomposable: true })],
+    })).batchId
+    await vi.waitFor(() => expect(state.middleBatchId).toBeDefined())
+    const middleOutcomes = await h.runtime.awaitBatch(STORE, state.middleBatchId!)
+    expect(middleOutcomes.map(outcome => outcome.status)).toEqual(['verified'])
+
+    const middleSession = state.middleSession!
+    const middleRun = (await h.task.snapshotIn(STORE)).runs.find(run => run.sessionId === middleSession)!
+    // The batch ended on the children's terminal states, question or not: the
+    // run took execution back and was told so.
+    expect(middleRun.executionPhase).toBe('active')
+    expect(middleRun.batchId).toBeUndefined()
+    expect(h.relayed.find(item => item.messageId === `m-batchend-${state.middleBatchId}`)).toBeDefined()
+    // …but the question is still open, and the phase the batch gave back is not a
+    // licence to write: the batch ending answered nothing (K1 §2).
+    const gate = h.runtime.gate
+    expect(gate.phaseOf(middleSession)).toBe('active')
+    expect(gate.questionsBlocked(middleSession)).toBe(true)
+    const refused = gate.decide(middleSession, 'write')
+    expect(refused.allow).toBe(false)
+    expect(refused.allow === false ? refused.reason : '').toContain('unresolved blocking question')
+    // The record agrees with the gate, and the question is nobody's answer.
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.questions!.all.filter(question => question.childRunId === middleRun.runId).map(question => question.answers ?? []))
+      .toEqual([[]])
+    await h.runtime.cancelBatch(STORE, rootBatchId, ROOT_SESSION)
+  })
+
+  test('the batch-end message is delivered once: re-deriving it answers already-present and writes nothing', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+    await h.runtime.awaitBatch(STORE, batchId)
+    expect(h.relayed.filter(item => item.sessionId === ROOT_SESSION)).toHaveLength(1)
+
+    // The recovery pass's entry (K1 §2): the same message, re-derived from the
+    // store after the batch ended. The target's own fold is the record — the
+    // second attempt delivers nothing, and the text is the store's own account.
+    expect(await h.runtime.redeliverBatchResult(STORE, batchId)).toBe('already-present')
+    expect(h.relayed.filter(item => item.sessionId === ROOT_SESSION)).toHaveLength(1)
+    expect(h.relayed[0]!.messageId).toBe(`m-batchend-${batchId}`)
+    expect(h.relayed[0]!.text).toContain(batchId)
+
+    // A batch no run records is refused by name rather than answered with
+    // another batch's children.
+    await expect(h.runtime.redeliverBatchResult(STORE, 'b-not-a-batch'))
+      .rejects.toThrow(/is not recorded in store/)
+  })
+
+  test('a child whose writes cannot be confirmed stopped fails the parent by name and hands nothing back', async () => {
+    const h = harness({ config: { writeDrainTimeoutMs: 20 } })
+    // A jobs service that reports one job the drain can never confirm: it is
+    // armed after the batch started, so admission and the child's own run are
+    // unaffected and the *child drain at the batch end* is what meets it.
+    let armed = false
+    h.ctx.jobs = {
+      list: () => (armed ? [{ id: 'job-1', status: 'running' }] : []),
+      kill: () => {},
+      wait: async () => ({ status: 'running' }),
+    }
+    const { taskId, runId } = await createRoot(h)
+    let releaseChild!: () => void
+    const release = new Promise<void>(resolve => { releaseChild = resolve })
+    h.setIdleBehavior(async sessionId => {
+      await release
+      await h.runtime.submitResult(sessionId, { summary: 'the child is done' })
+    })
+
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+    await vi.waitFor(() => expect(h.spawned).toHaveLength(1))
+    armed = true
+    releaseChild()
+    const outcomes = await h.runtime.awaitBatch(STORE, batchId)
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
+
+    // The batch end did not hand the run back: the phase is not persisted, the
+    // gate is not opened, and the parent is failed with the convergence named —
+    // "you may write again" is a promise only a confirmed stop can make.
+    const parentRun = await h.task.runIn(STORE, runId)
+    expect(parentRun.status).toBe('failed')
+    expect(parentRun.executionPhase).toBe('waiting_children')
+    expect(parentRun.batchId).toBe(batchId)
+    expect(h.runtime.gate.phaseOf(ROOT_SESSION)).not.toBe('active')
+    expect(h.runtime.gate.decide(ROOT_SESSION, 'write').allow).toBe(false)
+    const phases = taskEvents(h)
+      .filter(item => item.kind === 'RunPhaseChanged' && item.runId === runId)
+      .map(item => (item.kind === 'RunPhaseChanged' ? item.payload.phase : undefined))
+    expect(phases).toEqual(['waiting_children'])
+    const record = (await h.task.snapshotIn(STORE)).reviews.find(review => review.runId === runId)!
+    expect(record.outcome).toBe('failed')
+    expect(record.localizedCause).toContain('write convergence of the batch\'s children could not be confirmed')
+    // Nothing was delivered as a batch result either: there is no result to hand
+    // back while the checkout is unconfirmed.
+    expect(h.relayed.some(item => item.messageId === `m-batchend-${batchId}`)).toBe(false)
+  })
+
   test('the root budget refuses a batch whole, refuses a start past maxRuns, and is not reset by reopening the store', async () => {
     const h = harness({ config: { rootBudget: { maxRuns: 2 } } })
     const { taskId, runId } = await createRoot(h)
@@ -3454,7 +3795,8 @@ describe('A3 coordination', () => {
     expect((await h.task.runIn(STORE, runId)).executionPhase).toBe('active')
 
     // A batch that fits is admitted, and the count is a store fact: a restarted
-    // process counts the same runs.
+    // process counts the same runs. (The refused batch left one proposal in
+    // flight, and re-sending the *same* one is answered from that record.)
     const reopened = harness({ config: { rootBudget: { maxRuns: 2 } } }, h.sessions)
     await reopened.task.openStore(STORE)
     await expect(reopened.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
@@ -3462,13 +3804,74 @@ describe('A3 coordination', () => {
       children: [childSpec('task a'), childSpec('task b')],
     })).rejects.toThrow(/would need 2 run slot/)
 
+    // A *different* batch is refused by name while that proposal is in flight
+    // (K1 §1: one proposal per run at a time), with nothing recorded; withdrawing
+    // it frees the run.
+    const pendingOfRun = (await h.task.snapshotIn(STORE)).proposals!.all
+      .filter(proposal => proposal.kind !== 'root' && proposal.identity.parentRunId === runId)
+    expect(pendingOfRun.map(proposal => proposal.status)).toEqual(['ready'])
+    const leftover = pendingOfRun[0]!
+    await expect(h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'a different split',
+      children: [childSpec('task a')],
+    })).rejects.toThrow(/already has a proposal in flight/)
+    expect((await h.task.snapshotIn(STORE)).proposals!.all
+      .filter(proposal => proposal.kind !== 'root' && proposal.identity.parentRunId === runId)).toHaveLength(1)
+    await h.runtime.cancelProposal(STORE, leftover.proposalId, ROOT_SESSION)
+
     const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
-      reason: 'split the work',
+      reason: 'a different split',
       children: [childSpec('task a')],
     })
     expect((await h.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['verified'])
     snapshot = await h.task.snapshotIn(STORE)
     expect(snapshot.runs).toHaveLength(2)
+  })
+
+  test('a second batch reserves against the same root budget: it accumulates across batches and survives a reopen', async () => {
+    const h = harness({ config: { rootBudget: { maxRuns: 3 } } })
+    const { taskId, runId } = await createRoot(h)
+
+    const first = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'the first round',
+      children: [childSpec('task a')],
+    })
+    expect(first.map(outcome => outcome.status)).toEqual(['verified'])
+    // The batch ended and the run took execution back, with its member
+    // accumulated (K1 §1/§4): the second batch is a new admission against the
+    // same root budget.
+    const handedBack = await h.task.runIn(STORE, runId)
+    expect(handedBack.executionPhase).toBe('active')
+    expect(handedBack.batches?.map(batch => batch.memberTaskIds.length)).toEqual([1])
+
+    const second = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'the second round',
+      children: [childSpec('task b')],
+    })
+    expect(second.map(outcome => outcome.status)).toEqual(['verified'])
+    const accumulated = await h.task.runIn(STORE, runId)
+    expect(accumulated.batches?.map(batch => batch.memberTaskIds.length)).toEqual([1, 1])
+    expect(accumulated.batches?.[1]?.memberTaskIds).not.toEqual(accumulated.batches?.[0]?.memberTaskIds)
+
+    // The reservation is cumulative and measured against the store: three runs
+    // are recorded, so a third batch would need a fourth slot. The refusal is
+    // whole and carries no side effect; and because the count is a store fact, a
+    // process that reopens the store counts exactly the same.
+    const before = await h.task.snapshotIn(STORE)
+    await expect(decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'the third round',
+      children: [childSpec('task c')],
+    })).rejects.toThrow(/would need 1 run slot\(s\) and the root budget allows 3 run\(s\) in total, of which 3 are already recorded/)
+    const reopened = harness({ config: { rootBudget: { maxRuns: 3 } } }, h.sessions)
+    await reopened.task.openStore(STORE)
+    await expect(reopened.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'the third round',
+      children: [childSpec('task c')],
+    })).rejects.toThrow(/run slot/)
+    const after = await h.task.snapshotIn(STORE)
+    expect(after.runs).toHaveLength(3)
+    expect(after.tasks.map(task => task.taskId).sort()).toEqual(before.tasks.map(task => task.taskId).sort())
+    expect(h.spawned).toHaveLength(2)
   })
 
   test('a root deadline that has already passed refuses to start the child, naming the deadline', async () => {
@@ -3595,6 +3998,10 @@ describe('A3 coordination', () => {
       children: [childSpec('task a')],
     })
     expect((await h.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['verified'])
+    // The batch ended and handed the checkout back to its parent, which still
+    // holds it (K1 §2): the batch's layer is gone, the run's own remains.
+    expect(await ownershipMarkers(bindingRoot)).toHaveLength(1)
+    await submitParentResult(h)
     // The tree is done: the root run released its own layer with the settlement,
     // so no ownership marker is left behind.
     await vi.waitFor(async () => expect(await ownershipMarkers(bindingRoot)).toHaveLength(0))
@@ -3736,8 +4143,10 @@ describe('A3 coordination', () => {
       children: [childSpec('task a')],
     })
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
-    // One verification for the child and one for the parent's own acceptance,
-    // each holding the workspace exclusively.
+    // One verification for the child and one for the parent's own acceptance —
+    // which the parent asks for itself (K1 §2) — each holding the workspace
+    // exclusively.
+    await submitParentResult(h)
     expect(heldDuringVerification).toEqual(['verifier', 'verifier'])
     // And no verifier layer is left behind: the tree's own settlement released the
     // workspace it held (§3.4: a terminal run releases its claim).
@@ -3901,6 +4310,13 @@ describe('A3 coordination', () => {
     expect(restarted.spawned[0]!.sessionId).not.toBe(crashedSession)
     const settled = await restarted.runtime.awaitBatch(STORE, batchId)
     expect(settled.map(outcome => outcome.status)).toEqual(['cancelled', 'verified'])
+    // The resumed batch ended the same way a first-run batch does: the parent is
+    // active again with the batch's result delivered to it.
+    const resumed = await restarted.task.runIn(STORE, runId)
+    expect(resumed.status).toBe('running')
+    expect(resumed.executionPhase).toBe('active')
+    expect(restarted.relayed.find(item => item.messageId === `m-batchend-${batchId}`)?.text).toContain('task_submit_result')
+    expect((await restarted.runtime.submitResult(ROOT_SESSION, { summary: 'the parent reports what the batch delivered' })).status).toBe('verified')
     expect((await restarted.task.runIn(STORE, runId)).status).toBe('verified')
   })
 

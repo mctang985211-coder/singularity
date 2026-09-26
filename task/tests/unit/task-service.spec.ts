@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from 'vitest'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { Diagnosis, EvidenceBundle, Obligation, RunId, TaskEvent, TaskHandoff, TaskInstance, TaskRun } from '../../src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../src/index.ts'
+import { admitBatchFixture, batchFixture } from '../support/batch.ts'
 
 const NOW = '2026-09-16T00:00:00.000Z'
 const STORE = 'sg-t-root-session'
@@ -292,69 +293,101 @@ describe('TaskService admission', () => {
 })
 
 describe('TaskService decomposition', () => {
-  test('decomposeIn creates and admits children, wires edges, and decomposes the parent', async () => {
+  test('admitBatchIn creates and admits children, wires edges, and decomposes the parent', async () => {
     const h = harness()
     const service = new TaskService(h.ctx as never)
     await service.createStore(STORE)
     await service.createTaskIn(STORE, task({ taskId: 'root', decompositionStatus: 'decomposable' }), 'tester')
     await service.admitTaskIn(STORE, 'root', 'tester', { decompositionStatus: 'decomposable' })
+    await service.startRunIn(STORE, run({ runId: 'r-root', taskId: 'root', sessionId: 's-root', executionPhase: 'active' }), 'tester')
 
-    await service.decomposeIn(STORE, 'root', [
+    const children = [
       task({ taskId: 'c1', parentTaskId: 'root', depth: 1 }),
       task({ taskId: 'c2', parentTaskId: 'root', depth: 1 }),
-    ], 'tester', [{ from: 'c1', to: 'c2' }])
+    ]
+    await admitBatchFixture(service, {
+      storeId: STORE,
+      parentTaskId: 'root',
+      parentRunId: 'r-root',
+      callerSessionId: 's-root',
+      children,
+      edges: [{ from: 'c1', to: 'c2' }],
+    })
 
     const parent = await service.taskIn(STORE, 'root')
     expect(parent.decompositionStatus).toBe('decomposed')
     expect(parent.childTaskIds).toEqual(['c1', 'c2'])
-    const children = await service.childrenIn(STORE, 'root')
-    expect(children.map(child => child.status)).toEqual(['admitted', 'admitted'])
+    const admitted = (await service.snapshotIn(STORE)).tasks.filter(item => item.parentTaskId === 'root')
+    expect(admitted.map(child => child.status)).toEqual(['admitted', 'admitted'])
     expect((await service.snapshotIn(STORE)).edges).toEqual([{ from: 'c1', to: 'c2' }])
     expect(persistedKinds(h)).toEqual([
       'TaskCreated',
       'TaskAdmitted',
+      'TaskStarted',
+      'TaskProposalSubmitted',
       'TaskCreated',
       'TaskAdmitted',
       'TaskCreated',
       'TaskAdmitted',
       'DependencyAdded',
       'TaskDecomposed',
+      'RunPhaseChanged',
+      'TaskProposalAdmitted',
     ])
 
     await expect(service.addDependencyIn(STORE, { from: 'c2', to: 'c1' }, 'tester')).rejects.toThrow('cycle')
   })
 
-  test('a cyclic decompose batch persists nothing and the store stays writable', async () => {
+  test('a cyclic batch persists nothing and the store stays writable', async () => {
     const h = harness()
     const service = new TaskService(h.ctx as never)
     await service.createStore(STORE)
     await service.createTaskIn(STORE, task({ taskId: 'root', decompositionStatus: 'decomposable' }), 'tester')
     await service.admitTaskIn(STORE, 'root', 'tester', { decompositionStatus: 'decomposable' })
+    await service.startRunIn(STORE, run({ runId: 'r-root', taskId: 'root', sessionId: 's-root', executionPhase: 'active' }), 'tester')
 
     const children = () => [
       task({ taskId: 'c1', parentTaskId: 'root', depth: 1 }),
       task({ taskId: 'c2', parentTaskId: 'root', depth: 1 }),
     ]
+    const cyclic = batchFixture({
+      storeId: STORE, parentTaskId: 'root', parentRunId: 'r-root', callerSessionId: 's-root', children: children(),
+    })
+    await service.submitProposalIn(STORE, cyclic.proposal, 'tester')
     await expect(
-      service.decomposeIn(STORE, 'root', children(), 'tester', [{ from: 'c1', to: 'c2' }, { from: 'c2', to: 'c1' }]),
+      service.admitBatchIn(STORE, 'root', 'r-root', children(), 'tester', [{ from: 'c1', to: 'c2' }, { from: 'c2', to: 'c1' }], undefined, undefined, cyclic.consumption),
     ).rejects.toThrow('cycle')
-    expect(persistedKinds(h)).toEqual(['TaskCreated', 'TaskAdmitted'])
+    expect(persistedKinds(h)).toEqual(['TaskCreated', 'TaskAdmitted', 'TaskStarted', 'TaskProposalSubmitted'])
     expect((await service.snapshotIn(STORE)).tasks).toHaveLength(1)
 
-    await service.decomposeIn(STORE, 'root', children(), 'tester', [{ from: 'c1', to: 'c2' }])
+    // The same batch without the cycle is admitted: a refused commit leaves the
+    // store and its proposal exactly where they were.
+    await service.admitBatchIn(STORE, 'root', 'r-root', children(), 'tester', [{ from: 'c1', to: 'c2' }], undefined, undefined, cyclic.consumption)
     expect((await service.taskIn(STORE, 'root')).decompositionStatus).toBe('decomposed')
   })
 
-  test('decomposeIn rejects empty children and wrong parent links before committing', async () => {
+  test('admitBatchIn rejects empty children and wrong parent links before committing', async () => {
     const h = harness()
     const service = new TaskService(h.ctx as never)
     await service.createStore(STORE)
     await service.createTaskIn(STORE, task({ taskId: 'root' }), 'tester')
-    await expect(service.decomposeIn(STORE, 'root', [], 'tester')).rejects.toThrow('at least one child')
+    await service.admitTaskIn(STORE, 'root', 'tester')
+    await service.startRunIn(STORE, run({ runId: 'r-root', taskId: 'root', sessionId: 's-root', executionPhase: 'active' }), 'tester')
+    const request = {
+      storeId: STORE,
+      parentTaskId: 'root',
+      parentRunId: 'r-root',
+      callerSessionId: 's-root',
+    }
+    // An empty batch is refused by the entry itself, with nothing written —
+    // `TaskDecomposed` has at least one child or the batch is not a batch.
+    await expect(service.admitBatchIn(STORE, 'root', 'r-root', [], 'tester')).rejects.toThrow('at least one child')
+    const foreign = batchFixture({ ...request, children: [task({ taskId: 'c1', parentTaskId: 'other', depth: 1 })] })
+    await service.submitProposalIn(STORE, foreign.proposal, 'tester')
     await expect(
-      service.decomposeIn(STORE, 'root', [task({ taskId: 'c1', parentTaskId: 'other', depth: 1 })], 'tester'),
+      service.admitBatchIn(STORE, 'root', 'r-root', [task({ taskId: 'c1', parentTaskId: 'other', depth: 1 })], 'tester', [], undefined, undefined, foreign.consumption),
     ).rejects.toThrow('parentTaskId')
-    expect(persistedKinds(h)).toEqual(['TaskCreated'])
+    expect(persistedKinds(h)).toEqual(['TaskCreated', 'TaskAdmitted', 'TaskStarted', 'TaskProposalSubmitted'])
   })
 })
 
@@ -365,8 +398,14 @@ describe('TaskService handoffs', () => {
     await service.createStore(STORE)
     await service.createTaskIn(STORE, task({ taskId: 'root', decompositionStatus: 'decomposable' }), 'tester')
     await service.admitTaskIn(STORE, 'root', 'tester', { decompositionStatus: 'decomposable' })
-    await service.startRunIn(STORE, run({ taskId: 'root' }), 'tester')
-    await service.decomposeIn(STORE, 'root', [task({ taskId: 'c1', parentTaskId: 'root', depth: 1 })], 'tester')
+    await service.startRunIn(STORE, run({ taskId: 'root', sessionId: 's1', executionPhase: 'active' }), 'tester')
+    await admitBatchFixture(service, {
+      storeId: STORE,
+      parentTaskId: 'root',
+      parentRunId: 'r1',
+      callerSessionId: 's1',
+      children: [task({ taskId: 'c1', parentTaskId: 'root', depth: 1 })],
+    })
 
     await expect(
       service.recordHandoffIn(STORE, handoff({ parentTaskId: 'root', childTaskId: 'c1', parentRunId: 'ghost' }), 'tester'),
@@ -523,10 +562,18 @@ describe('TaskService replay', () => {
     await service.createStore(storeId)
     await service.createTaskIn(storeId, task({ taskId: 'root', decompositionStatus: 'decomposable' }), 'tester')
     await service.admitTaskIn(storeId, 'root', 'tester', { decompositionStatus: 'decomposable' })
-    await service.decomposeIn(storeId, 'root', [
-      task({ taskId: 'c1', parentTaskId: 'root', depth: 1 }),
-      task({ taskId: 'c2', parentTaskId: 'root', depth: 1 }),
-    ], 'tester', [{ from: 'c1', to: 'c2' }])
+    await service.startRunIn(storeId, run({ runId: 'r-root', taskId: 'root', sessionId: 's-root', executionPhase: 'active' }), 'tester')
+    await admitBatchFixture(service, {
+      storeId,
+      parentTaskId: 'root',
+      parentRunId: 'r-root',
+      callerSessionId: 's-root',
+      children: [
+        task({ taskId: 'c1', parentTaskId: 'root', depth: 1 }),
+        task({ taskId: 'c2', parentTaskId: 'root', depth: 1 }),
+      ],
+      edges: [{ from: 'c1', to: 'c2' }],
+    })
     await service.startRunIn(storeId, run({ taskId: 'c1' }), 'tester')
     await service.markRunStatusIn(storeId, 'c1', 'r1', 'verifying', 'tester')
     await service.recordEvidenceIn(storeId, evidence({ taskId: 'c1' }), 'tester')
@@ -581,7 +628,14 @@ describe('TaskService event log', () => {
     await service.createStore(storeId)
     await service.createTaskIn(storeId, task({ taskId: 'root', decompositionStatus: 'decomposable' }), 'tester')
     await service.admitTaskIn(storeId, 'root', 'tester', { decompositionStatus: 'decomposable' })
-    await service.decomposeIn(storeId, 'root', [task({ taskId: 'c1', parentTaskId: 'root', depth: 1 })], 'tester', [])
+    await service.startRunIn(storeId, run({ runId: 'r-root', taskId: 'root', sessionId: 's-root', executionPhase: 'active' }), 'tester')
+    await admitBatchFixture(service, {
+      storeId,
+      parentTaskId: 'root',
+      parentRunId: 'r-root',
+      callerSessionId: 's-root',
+      children: [task({ taskId: 'c1', parentTaskId: 'root', depth: 1 })],
+    })
     await service.startRunIn(storeId, run({ taskId: 'c1' }), 'tester')
     await service.markRunStatusIn(storeId, 'c1', 'r1', 'failed', 'tester')
 

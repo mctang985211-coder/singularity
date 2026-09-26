@@ -290,7 +290,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
       ] }],
     })
     await h.runtime.awaitBatch(STORE, batchId)
-    expect((await h.task.childrenIn(STORE, taskId))[0]!.status).toBe('verified')
+    expect((await h.task.runMembersIn(STORE, runId))[0]!.status).toBe('verified')
     expect((await h.task.taskIn(STORE, taskId)).status).toBe(heuristic ? 'failed' : 'verified')
     if (heuristic) {
       expect(payloadOf(h, 'TaskFailed', taskId)?.reason).toContain('heuristic')

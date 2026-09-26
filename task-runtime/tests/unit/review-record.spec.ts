@@ -260,6 +260,15 @@ async function decomposeAndSettle(
 }
 
 /**
+ * The parent's own submission (K1 §2): a batch end hands the run back `active`
+ * and the runtime no longer submits for it, so a case about the parent's review
+ * record asks for it the way the parent's agent does.
+ */
+async function submitParentResult(h: Harness): Promise<string> {
+  return (await h.runtime.submitResult(ROOT_SESSION, { summary: 'the parent reports what its batch delivered' })).status
+}
+
+/**
  * Stand-in for a nested cascade settling a child, review record included: the
  * nested cascade writes the run's one review as it settles its parent run.
  */
@@ -338,6 +347,7 @@ describe('runChildrenCascade review records', () => {
       ],
     })
     expect(outcomes.map(outcome => outcome.status)).toEqual(['failed', 'blocked', 'verified'])
+    expect(await submitParentResult(h)).toBe('verified')
 
     const snapshot = await h.task.snapshotIn(STORE)
     expectReviewInvariant(snapshot.reviews, snapshot.runs)
@@ -448,6 +458,7 @@ describe('runChildrenCascade review records', () => {
       ],
     })
     expect(outcomes.map(outcome => outcome.status)).toEqual(['failed', 'blocked'])
+    expect(await submitParentResult(h)).toBe('verified')
 
     const snapshot = await h.task.snapshotIn(STORE)
     expectReviewInvariant(snapshot.reviews, snapshot.runs)
@@ -480,6 +491,7 @@ describe('runChildrenCascade review records', () => {
       ],
     })
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
+    expect(await submitParentResult(h)).toBe('verified')
 
     const snapshot = await h.task.snapshotIn(STORE)
     expectReviewInvariant(snapshot.reviews, snapshot.runs)

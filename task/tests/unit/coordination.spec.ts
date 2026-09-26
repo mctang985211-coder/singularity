@@ -503,8 +503,8 @@ describe('TaskService batch admission', () => {
     const parent = await service.taskIn(STORE, 'root')
     expect(parent.decompositionStatus).toBe('decomposed')
     expect(parent.childTaskIds).toEqual(['c1', 'c2'])
-    expect((await service.childrenIn(STORE, 'root')).map(child => child.status)).toEqual(['admitted', 'admitted'])
     const snapshot = await service.snapshotIn(STORE)
+    expect(snapshot.tasks.filter(item => item.parentTaskId === 'root').map(child => child.status)).toEqual(['admitted', 'admitted'])
     expect(snapshot.edges).toEqual([{ from: 'c1', to: 'c2' }])
     expect(snapshot.capabilities['c1']).toEqual(manifests[0])
     expect(snapshot.capabilities['c2']).toEqual(manifests[1])
@@ -646,14 +646,22 @@ describe('TaskService batch admission', () => {
     expect((await service.taskIn(STORE, 'root')).childTaskIds).toEqual(['c1', 'c2', 'c3'])
   })
 
-  test('decomposeIn still admits a batch without touching the parent run phase', async () => {
-    const { service } = await rootWithRun()
-    await service.decomposeIn(STORE, 'root', [task({ taskId: 'c1', parentTaskId: 'root', depth: 1 })], 'tester')
+  test('there is no second door that admits children without a batch identity', async () => {
+    const { h, service } = await rootWithRun()
+    const children = [task({ taskId: 'c1', parentTaskId: 'root', depth: 1 })]
+    const before = persistedKinds(h)
+    // The batch identity is the pair (parent run, proposal), so a call that
+    // names no consumption cannot create children at all: the entry that could
+    // (the historic `decomposeIn`) is gone, and `admitBatchIn` refuses the call
+    // whole rather than writing a batch nothing identifies.
+    await expect(
+      service.admitBatchIn(STORE, 'root', 'r1', children, 'tester'),
+    ).rejects.toThrow('requires the proposal consumption the batch is')
+    expect(persistedKinds(h)).toEqual(before)
+    expect((await service.snapshotIn(STORE)).tasks.map(item => item.taskId)).toEqual(['root'])
     const parentRun = await service.runIn(STORE, 'r1')
     expect(parentRun.executionPhase).toBe('active')
     expect(parentRun.batchId).toBeUndefined()
-    // Nothing names the run this decomposition belongs to, so no run
-    // accumulation is invented for it (the legacy shape, kept readable).
     expect(parentRun.batches).toBeUndefined()
     expect(await service.runMembersIn(STORE, 'r1')).toEqual([])
   })

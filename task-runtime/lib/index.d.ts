@@ -1543,6 +1543,30 @@ interface ChildOutcome {
    */
   evidenceId?: string;
 }
+/**
+ * One ended batch's result, handed to the Session that was waiting for it (K1
+ * §2): the batch's identity, the run whose wait it ends, the Session it goes to,
+ * and the body the store's own facts render to.
+ *
+ * Both halves are *derived*, never minted: the identity is
+ * `m-batchend-<batchId>` ({@link batchEndMessageId}) and the body is rendered
+ * from the members' terminal states and evidence
+ * ({@link batchEndMessageText}), so the delivery this process performs, a
+ * re-delivery after a restart and a recovery pass all state one message — and
+ * the target Session's own fold, never a ledger here, decides whether it is
+ * already present.
+ */
+interface BatchResultMessage {
+  readonly storeId: string;
+  readonly runId: RunId;
+  readonly batchId: string;
+  /** The parent's own Session: the target of the message and the Session it is sent from. */
+  readonly sessionId: string;
+  readonly messageId: string;
+  readonly text: string;
+}
+/** What one end-of-batch delivery settled as. `unavailable` and `refused` are reported, never fatal. */
+type BatchResultDeliveryStatus = 'delivered' | 'already-present' | 'unavailable' | 'refused';
 interface SpawnChildRequest {
   sessionId: string;
   name: string;
@@ -1591,7 +1615,7 @@ interface SpawnChildRequest {
  *   `budget exhausted: wallTimeMs (...)`, named as a budget exhaustion, not a
  *   criteria failure. The same clock bounds the run a batch settles on its worker's
  *   behalf: a parent whose deadline has already passed is cancelled instead of
- *   accepted (`settleParentBatch`), so no run is reported `verified` after the
+ *   ended (`finishBatch`), so no run is reported `verified` after the
  *   clock that was supposed to stop it.
  * - `maxToolCalls` — **post-hoc check only**: the session log is readable only
  *   once the run has settled, so a breach lands as an anomaly on the terminal
@@ -1748,6 +1772,18 @@ interface OrchestrateEnv {
    * a failing notification never fails the settlement it reports on.
    */
   notify?(sessionId: string, text: string): void;
+  /**
+   * Deliver one ended batch's result to its parent's Session (K1 §2) — the wake
+   * that tells the parent it is `active` again, that the workspace is back, and
+   * that only its own submission starts its acceptance.
+   *
+   * The delivery is addressed by the identity the batch derives, so a second
+   * call delivers nothing when the target already holds that message: a caller
+   * may call this again after a crash, and the runtime's recovery pass calls it
+   * for the batches a store still owes. Absent means this deployment has no
+   * relay: the batch still ends, and the caller falls back to a plain notice.
+   */
+  deliverBatchResult?(message: BatchResultMessage): Promise<BatchResultDeliveryStatus>;
   /**
    * Observe one run's terminal transition: subscribe, then read the current
    * state, so a run that settled between the caller's last read and the
@@ -1967,8 +2003,14 @@ interface BatchContext {
  * terminal state in a settled batch has no outcome to report and is named
  * `failed` — the batch is over, so a still-running child is a defect of the
  * settlement, never evidence of work in progress.
+ *
+ * `memberTaskIds` names the batch whose outcomes are asked for, when the caller
+ * knows it. A run admits more than one batch (K1), and the task's children are
+ * *every* batch's members, so a driver that read them would report a second
+ * batch as its first batch's children. Absent, the task's own children are the
+ * answer — the single-batch reading this entry always had.
  */
-declare function deriveChildOutcomes(task: TaskService, storeId: string, parentTaskId: TaskId): Promise<ChildOutcome[]>;
+declare function deriveChildOutcomes(task: TaskService, storeId: string, parentTaskId: TaskId, memberTaskIds?: readonly TaskId[]): Promise<ChildOutcome[]>;
 /**
  * Block every child of one parent task that never started, naming one reason —
  * the runtime-level entry for the paths that settle a batch without a driver
@@ -1982,6 +2024,26 @@ declare function deriveChildOutcomes(task: TaskService, storeId: string, parentT
  * runtime's failure seams share it with the driver.
  */
 declare function blockUnstartedChildren(env: RuntimeSettlementEnv, storeId: string, parentTaskId: TaskId, reason: string): Promise<ChildOutcome[]>;
+/**
+ * The `m-` identity one ended batch's result message carries: derived from the
+ * batch id, never minted — the same derivation `questionMessageIdOf` makes for a
+ * question, and for the same reason. A retry in this process or after a restart
+ * states the same identity, so the target's own fold answers "this one is
+ * already here" instead of the runtime keeping a ledger of what it sent.
+ */
+declare function batchEndMessageId(batchId: string): string;
+/**
+ * The body one batch-end message carries, rendered from the store's own account
+ * of the batch: every member's terminal state and the evidence it left, and what
+ * the parent may do now. It is reprojected from the facts on every call (never
+ * remembered, never edited between attempts), so the live delivery and a
+ * recovery re-delivery carry the same words about the same batch.
+ *
+ * What it deliberately does not say is that anything was submitted: the runtime
+ * submits nothing on the parent's behalf (K1 §2), and only the parent's own
+ * `task_submit_result` starts its acceptance.
+ */
+declare function batchEndMessageText(batchId: string, outcomes: readonly ChildOutcome[]): string;
 /**
  * Drive one admitted batch to settlement (A3 §3.1): reentrant, store-driven,
  * and owned by the runtime rather than by the tool call that admitted it.
@@ -2008,11 +2070,12 @@ declare function driveBatch(env: OrchestrateEnv, batch: BatchContext): Promise<C
  * already committed is drained, judged, and settled.
  *
  * Everything that verifies a run goes through here — the worker's own
- * `task_submit_result`, the parent's automatic submission once its batch
- * settles, and the recovery path's continuation of a run that submitted before
- * a restart. That is what makes the three paths share the budget, the drain,
- * the verifier deadline and the review discipline instead of three
- * implementations that drift (§3.1 "验证权唯一").
+ * `task_submit_result` (a parent's included: a batch ending hands the run back
+ * `active` and only the parent's own submission starts its acceptance), and the
+ * recovery path's continuation of a run that submitted before a restart. That is
+ * what makes the paths share the budget, the drain, the verifier deadline and
+ * the review discipline instead of separate implementations that drift (§3.1
+ * "验证权唯一").
  *
  * A drain that cannot be confirmed fails the run with the pending work named:
  * judging a run whose writers may still be running would produce a verdict
@@ -3303,8 +3366,9 @@ declare const DEFAULT_MAX_CHILDREN = 8;
  * The switch relaxes no guardrail, so `true` is the shipped default. A batch
  * still clears every admission rule — structure, acyclic dependencies,
  * executable criteria carrying a command, the capability-gap rule,
- * {@link Config.maxDepth}, {@link Config.maxChildren} — and a task chain still
- * splits at most once (`already decomposed`, `task/src/service/state.ts`).
+ * {@link Config.maxDepth}, {@link Config.maxChildren} — and a run still holds at
+ * most one unfinished batch and one proposal in flight (K1 §1; an *active* run
+ * is the whole of that rule, and a batch that ended hands the run back active).
  * A deployment that wants every split pre-declared by the parent sets `false`
  * and keeps the pre-switch refusal, named message included.
  */
@@ -4227,11 +4291,24 @@ declare class TaskRuntime extends Service {
   /**
    * The run protocol one decomposition has to satisfy before anything is
    * proposed: the run belongs to this task, it is bound to this caller, it is
-   * `active` (the admission gate — a run with an admitted batch settles it
-   * before deciding anything else), and the call was not already cancelled.
-   * Unknown and non-`active` phases are refusals rather than guesses, and a
-   * phase-less run is an old record whose only legal continuation is
-   * cancellation.
+   * `active`, it is not waiting on an unresolved blocking question, and the call
+   * was not already cancelled. Unknown and non-`active` phases are refusals
+   * rather than guesses, and a phase-less run is an old record whose only legal
+   * continuation is cancellation.
+   *
+   * **`active` is the batch gate (K1 §1).** A run holds at most one unfinished
+   * batch, and an admitted batch moves it `active → waiting_children` in the same
+   * commit that creates the children, so "this run is `active`" is the whole of
+   * "this run has no unfinished batch" — no second count of batches is kept, and
+   * a second batch may be proposed exactly when the first one has ended and the
+   * run is active again.
+   *
+   * **A blocking question is the run's own wait (K1 §1).** A run that asked its
+   * parent something unresolved is parked where the protocol put it, and
+   * delegating from there would start writers beside a wait that has not ended.
+   * The fact is read from the store's question records rather than from the
+   * gate's in-memory flag, because admission has to answer the same way in a
+   * process that never delivered the question.
    *
    * These checks are asked *after* a request the store already answers has been
    * answered from the record: a retry of a request the run has already proposed
@@ -4240,6 +4317,18 @@ declare class TaskRuntime extends Service {
    * proposed by a run that is still deciding its own work.
    */
   private assertDecomposableRun;
+  /**
+   * The tasks this run has already asked a person about — its `pending_review`
+   * and `approved`/`ready` decomposition proposals that are neither consumed nor
+   * terminal (K1 §1: at most one proposal in flight per run).
+   *
+   * The question is asked of the run, not the task: a parent that ended one batch
+   * and proposed another is a different run state from the run that proposed the
+   * first, and the store's proposal records are where "in flight" is defined —
+   * `admitted` is a consumption, and rejected/cancelled/stale/expired are
+   * terminal, so neither holds the run.
+   */
+  private inFlightProposalsOf;
   /**
    * The second half of the pure pre-check (§2): the batch's own admission rules
    * over a derived batch — structural admission (`contractDefects`,
@@ -4534,14 +4623,16 @@ declare class TaskRuntime extends Service {
    */
   private expireProposal;
   /**
-   * Why the parent run can no longer host a batch, or `undefined` when it can.
-   * Three states, each named by what it means rather than by the field:
-   * the run is no longer running (cancelled, failed, verified), it predates the
-   * coordination phases (an old record whose only legal continuation is
-   * cancellation), or it has left the deciding phase by submitting its own
-   * result. A parent that *is* decomposed is not answered here: §6 treats that
-   * as a lost race (`stale`, a context that moved) rather than as a run that
-   * ended.
+   * Why the parent run can no longer host a batch, or `undefined` when it can —
+   * the question {@link approvalLatenessReason} asks (a late approval
+   * may only invalidate, §6). Three states, each named by what it means rather
+   * than by the field: the run is no longer running (cancelled, failed,
+   * verified), it predates the coordination phases (an old record whose only
+   * legal continuation is cancellation), or it has left the deciding phase by
+   * submitting its own result. A run that *is* waiting on an unfinished batch is
+   * not answered here either: that is a run which may hold another batch later
+   * (K1 §1), and {@link continueProposalIn}'s own re-check is where the batch a
+   * proposal competes with is judged.
    */
   private parentRunEndedReason;
   /** The proposal a request key already names, or `undefined` when the key is free; a key bound to other content is a refusal by name (§6). */
@@ -4764,6 +4855,20 @@ declare class TaskRuntime extends Service {
    */
   private failBatchFromRuntime;
   /**
+   * The batch one id names, as the store itself records it: the run whose current
+   * unfinished batch it is, or a run whose accumulated batches hold it, together
+   * with the parent task that run works on. `undefined` when no run of the store
+   * records the id.
+   *
+   * A batch id is the pair (parent run, proposal) and is never parsed back into a
+   * task: a parent admits more than one batch, so `b-…` carries no task, and the
+   * one honest source for "whose batch is this" is the accumulation the reducer
+   * derived. A read that fails answers `undefined` rather than guessing — every
+   * caller here reports by name instead of writing a settlement for a batch it
+   * cannot name.
+   */
+  private batchRecordIn;
+  /**
    * The narrow capabilities one runtime-level settlement holds — the store, the
    * actor, the notification seam and the gate/workspace bookkeeping — for the one
    * path that writes a terminal state without an orchestration env
@@ -4796,7 +4901,7 @@ declare class TaskRuntime extends Service {
    *
    * This is the orchestration side of the same step `settleRunFromRuntime` takes
    * where its caller awaits it: the two settlements — the driver's own
-   * (`settleChildRun`, `settleParentBatch`, `settleSubmittedRun`) and the
+   * (`settleChildRun`, `finishBatch`, `settleSubmittedRun`) and the
    * runtime-level entry — must not differ in what the gate shows afterwards, and
    * both derive the value the same way. The read is reported rather than
    * propagated: the run is settled and its record written by now, and a store
@@ -4841,8 +4946,10 @@ declare class TaskRuntime extends Service {
    * A submission that arrives twice is answered from the record rather than
    * applied again — the phase event is unique by construction, so the second
    * caller reads the first one's result. A run waiting on its children may not
-   * submit at all: its batch has to settle first, and that settlement submits on
-   * its behalf.
+   * submit at all: its batch has to end first (K1 §2), and the batch end hands
+   * the run back `active` — only then, with the workspace back and the children's
+   * outcomes in the store, may the parent hand in the result that starts its own
+   * acceptance.
    */
   submitResult(callerSessionId: string, spec: {
     summary: string;
@@ -4886,22 +4993,17 @@ declare class TaskRuntime extends Service {
   /** The services question coordination reaches: the store's entries, the session read path, agent-runtime's handle, and the gate. */
   private questionCoordination;
   /**
-   * Re-drive a waiting parent whose last coordination item just closed (A4 §F.1).
-   *
-   * The parent's own submission has exactly one owner — the batch driver's
-   * `settleParentBatch` — and that owner holds it back while a coordination item
-   * is open. When the last one closes, the driver that owns the submission is
-   * re-entered (the same entry the recovery pass uses), so the answer that
-   * released the parent is what lets it submit instead of leaving a settled batch
-   * with a parent nobody owns. This writes nothing itself: the driver re-reads
-   * the store and the gate it applies is the same one.
-   */
-  private redriveWaitingParent;
-  /**
    * Cancel one batch (`task_cancel`, §3.6): abort its driver, which settles the
    * children — the one in flight is cancelled, the ones that never started are
    * blocked before start, and the parent run is cancelled — and return that
    * settlement.
+   *
+   * The batch is located by the **caller's own run**, never by parsing the id: a
+   * batch id names a pair (`b-<parentRunId>-<proposalId>`, {@link batchIdFor}),
+   * and a parent that admitted more than one batch has one id per batch. The
+   * caller's run is the fact this entry is authorized by, and its *current*
+   * unfinished batch (`run.batchId`) is the only batch that can be cancelled —
+   * a batch this run already ended is not in flight any more.
    *
    * Only the batch's own parent session may cancel it, and only while the batch
    * is in flight. A batch this process is not driving (already settled, or
@@ -4920,9 +5022,10 @@ declare class TaskRuntime extends Service {
   private settleCancelledDescendants;
   /**
    * Abort every batch driver of `storeId` whose parent task is a strict
-   * descendant of `taskId`, and wait for their settlements. A batch's driver key
-   * carries its parent (`<storeId>/b-<parentTaskId>`), so the subtree is read
-   * from the store's own task list and no extra bookkeeping is needed.
+   * descendant of `taskId`, and wait for their settlements. Each registration
+   * names the parent task it drives, so the subtree is read from the store's own
+   * task list plus the registrations — never from the batch id, which names the
+   * pair (parent run, proposal) and cannot be parsed back into a task.
    */
   private abortDescendantBatches;
   /**
@@ -4947,6 +5050,12 @@ declare class TaskRuntime extends Service {
    * records when the batch settled earlier (or in another process). §3.8's
    * `awaitBatch` — the entry a test or a service uses to wait for a batch a tool
    * call no longer waits for.
+   *
+   * The batch is resolved through the store's own accumulation — the run whose
+   * record holds this batch id, and that batch's members — never by parsing the
+   * id: an id names a pair, and a parent that admitted several batches holds one
+   * entry per batch. A batch no run records is refused by name rather than
+   * answered with another batch's children.
    */
   awaitBatch(storeId: string, batchId: string): Promise<ChildOutcome[]>;
   /**
@@ -5094,20 +5203,15 @@ declare class TaskRuntime extends Service {
   /**
    * The fallback batch-failure seam the orchestration calls when a run's own
    * settlement cannot finish the batch (verification unavailable in a nested
-   * submission): every child that is not terminal is blocked, the parent run is
-   * failed with the reason, and the batch's driver is aborted so its own loop
-   * stops seeing work that no longer exists.
-   */
-  /**
-   * The fallback batch-failure seam the orchestration calls when a run's own
-   * settlement cannot finish the batch (verification unavailable in a nested
    * submission): every child that never started is blocked, the parent run is
    * failed with the reason, and the batch's driver is aborted so its own loop
    * stops seeing work that no longer exists.
    *
    * Both writes are the orchestration's own (A4-5): {@link blockUnstartedChildren}
    * and {@link settleRunFromRuntime} — the same pair `failBatchFromRuntime` uses —
-   * so this file holds no second copy of either record shape.
+   * so this file holds no second copy of either record shape. The batch is
+   * resolved through the store's accumulation ({@link batchRecordIn}): the id
+   * names a pair, not a task.
    */
   private failBatch;
   /** The session whose viewpoint a store-wide operation (recovery, cancellation) resolves its checkout from. */
@@ -5280,6 +5384,49 @@ declare class TaskRuntime extends Service {
    * no barrier in flight this is {@link notify}, unchanged.
    */
   private notifyWhenReady;
+  /**
+   * Deliver one ended batch's result to the Session that waited for it (K1 §2),
+   * through the same relay A4's question messages use
+   * ({@link AgentRuntimeHandle.ensureAgentMessageDelivered}) and under the order
+   * {@link notifyWhenReady} established for every wake.
+   *
+   * The message is *identified* (`m-batchend-<batchId>`), which is what makes
+   * this call idempotent and re-entrant: a second call — a retry in this process,
+   * or the recovery pass re-deriving the same message from the run's accumulated
+   * batches — states the same identity, and the target's own fold decides that it
+   * is already present instead of the runtime keeping a ledger. The body is the
+   * one the driver handed over, rendered from the store's own facts.
+   *
+   * The barrier rule is the wake rule: while a store is `recovering`, a turn in
+   * one of its Sessions is refused by the recovery door with nothing left to wake
+   * it, so the delivery is registered on the barrier and the ready handle makes
+   * it once the gates are in place. A failed or invalidated barrier drops the
+   * registration, which loses nothing: the facts are the store's, and the next
+   * activation (or the recovery slice's pass) derives the same message again.
+   */
+  private deliverBatchResult;
+  /**
+   * One delivery attempt, reporting rather than throwing: the batch's facts are
+   * the store's and the message is the wake that points at them, so a relay that
+   * is absent, refuses or has no live Session changes nothing about the batch —
+   * it is named once for the operator, and the next activation retries.
+   */
+  private deliverBatchResultNow;
+  /**
+   * Re-deliver one ended batch's result from the store's own facts (K1 §2's
+   * message, re-derived): the entry a recovery pass uses for a batch whose end is
+   * durable and whose Session was never told — or was told and never recorded it
+   * (§F.1's "恢复只补缺失投递", applied to batches). It is also what a recovery
+   * pass reconciles with, one owed batch at a time.
+   *
+   * Idempotent and re-entrant by construction, not by a ledger: the identity is
+   * derived from the batch (`batchEndMessageId`), the body from its members'
+   * terminal states and evidence, and the target's own fold decides whether the
+   * message is already there (`already-present`, nothing delivered twice). A
+   * batch no run of the store records is refused by name — a batch id names a
+   * pair, and one nothing records cannot be guessed at.
+   */
+  redeliverBatchResult(storeId: string, batchId: string): Promise<BatchResultDeliveryStatus>;
   /**
    * Kill and confirm one session's managed jobs — the half of the write
    * convergence a cancellation owes its checkout. A deployment with no jobs
@@ -5467,4 +5614,4 @@ declare class TaskRuntime extends Service {
   private agentOrUndefined;
 }
 //#endregion
-export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AdoptedWorkerResume, type AdoptedWorkerResumeRequest, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, QuestionResumeReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AdoptedWorkerResume, type AdoptedWorkerResumeRequest, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BatchResultDeliveryStatus, type BatchResultMessage, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, QuestionResumeReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
