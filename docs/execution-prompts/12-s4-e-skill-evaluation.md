@@ -1,5 +1,7 @@
 # 第 12 项 S4-E：单文件 Skill 的真实双侧评估
 
+本文件保留原合同；`4de0056` 的交付已被[进度审核](../history/2026-09-26-s4-e-progress-review.md)判返工。当前直接派[定向返工 prompt](12-s4-e-review-rework.md)，不从头重复迁移。
+
 你是 S4-E 的实现主代理。只交付[唯一计划 F.2](../2026-09-20-vrtc-code-change-plan.md)与 EVAL-1～EVAL-5，完成后停在进度审核；不启动 A5 或 A6。先读[公共执行合同](README.md)、[主 guide 当前状态及 §1.4–1.5](../singularity-harness-guide.md)和计划文首唯一表、F.2。A4 的[最终审核](../history/2026-09-26-a4-final-review.md)是前置证据。工作区为 `/home/ROXY/code/bb_work/harness/packages/singularity`，外层为 `/home/ROXY/code/bb_work/harness`；核对实际 HEAD 和工作树，修改前按公共合同保存基线。
 
 ## 本票交付与边界

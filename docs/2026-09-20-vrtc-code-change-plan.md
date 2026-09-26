@@ -26,7 +26,7 @@
 | 9 | A2 + A1：Agent 状态上下文（一个交付组） | **已验收（2026-09-25）**：Q1–Q4、A2-1～A2-6 与公共检查通过 | 实现主代理 + 子代理 | 本文 D/E 节；[交付记录](history/2026-09-25-a2-a1-delivery-record.md)、[进度审核及复审](history/2026-09-25-a2-a1-progress-review.md)、[返工记录](history/2026-09-25-a2-a1-rework-record.md)、[Q3 收尾记录](history/2026-09-25-a2-a1-q3-closure-record.md) | 已按 D 节的单事件引用实现有界续读（上限 50000 字节、字节窗口与省略措辞复用 `@deepseek-ai/dsh-output-retention`）；进度审核通过；下一项为第 11 项 A4 |
 | 10 | A1 原独立排位 | 并入第 9 项，不单独派发 | — | 保留编号供历史引用 | 第 9 项整组验收后直接进入第 11 项 |
 | 11 | A4：父子澄清 | **已验收（2026-09-26）**：恢复期唤醒移到屏障 ready 后，A4-1～A4-5 闭合 | 实现主代理 | 本文 E/F.1、[返工交付](history/2026-09-26-a4-rework-record.md)、[唤醒收尾](history/2026-09-26-a4-barrier-wake-record.md)、[最终审核](history/2026-09-26-a4-final-review.md) | 下一项为第 12 项 S4-E |
-| 12 | S4-E：评估基础（S4 内的子票） | **待验收**（2026-09-26 交付）：EVAL-1～EVAL-5 实现与证据已提交 | 实现主代理 + 子代理 | 本文 F.2、[交付记录](history/2026-09-26-s4-e-delivery-record.md)、[持久化说明](persistence-changes/2026-09-26-s4-e-experiment-ledger.md) | 本票闭合现有 Evolution 生命周期迁移、单文件 Skill 双侧真实 Run 与晋升闸，旧 ledger/已应用对象回滚保留；EVAL-1～EVAL-5 经进度审核验收后进入第 13 项 |
+| 12 | S4-E：评估基础（S4 内的子票） | **返工（2026-09-26 审核）**：成本、成功回归保持、执行身份冻结、快照隔离四组阻断 | 实现主代理 + 子代理 | 本文 F.2、[原交付](history/2026-09-26-s4-e-delivery-record.md)、[进度审核](history/2026-09-26-s4-e-progress-review.md)、[返工 prompt](execution-prompts/12-s4-e-review-rework.md) | Q1～Q4 关闭，EVAL-1～EVAL-5 重验通过后才进入第 13 项；现有迁移及旧账回滚保留 |
 | 13 | A5 + S2-E：诊断与缺口交接（一个交付组） | 待前置；合同已定、未实施 | 待填 | 本文 F.3、深入架构 §8 | agent-singularity/review 按源身份触发只读复盘并保存交接；runtime 结算不等 reviewer；缺口可见与诊断失败恢复完整 |
 | 14 | A6 + S2-R + S3：自主改进与恢复（一个交付组） | 待前置；合同已定、未实施 | 待填 | 本文 F.4 | evolution 组织有限候选路径，task-runtime 重检并恢复原图；L1/L2、能力/产物缺口、拒绝/重启/回滚均验收 |
 
@@ -82,7 +82,7 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 9 项 A2+A1 和第 11 项 A4 已验收；A4 的屏障内提前唤醒交错由[收尾返工](history/2026-09-26-a4-barrier-wake-record.md)关闭并经[最终审核](history/2026-09-26-a4-final-review.md)确认。第 12 项 S4-E 已交付、**待验收**（[交付记录](history/2026-09-26-s4-e-delivery-record.md)）；进度审核通过前不派第 13 项。历史补救、R1 和 R3 的逐轮证据见[执行与验收记录](history/2026-09-24-vrtc-execution-records.md)。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 9 项 A2+A1 和第 11 项 A4 已验收。第 12 项 S4-E 经[进度审核](history/2026-09-26-s4-e-progress-review.md)判**返工**，当前只派 Q1～Q4 的[定向返工](execution-prompts/12-s4-e-review-rework.md)，通过前不派第 13 项。历史补救、R1 和 R3 的逐轮证据见[执行与验收记录](history/2026-09-24-vrtc-execution-records.md)。
 
 ## 当前施工合同（D/E/F）
 
@@ -207,7 +207,7 @@ S4-E 按 D 节整体迁移现有 Evolution 生命周期与工具消费者；不�
 
 ### F. 后续交付组的冻结合同（2026-09-24）
 
-本节与 D 的读取合同、E 的显式恢复合同共同作为派发依据。A4 的二次进度审核阻断已由[收尾返工](history/2026-09-26-a4-barrier-wake-record.md)关闭并[最终验收](history/2026-09-26-a4-final-review.md)；**S4-E 已实施、待验收**（[交付记录](history/2026-09-26-s4-e-delivery-record.md)）；A5/A6 合同已定、代码未实施。不改变文首唯一顺序。这里固定对外行为、所有者和失败处置，私有文件布局与等价 helper 实现由工程 agent 决定。
+本节与 D 的读取合同、E 的显式恢复合同共同作为派发依据。A4 已[最终验收](history/2026-09-26-a4-final-review.md)；**S4-E 已实施、审核返工**（[Q1～Q4](history/2026-09-26-s4-e-progress-review.md)）；A5/A6 合同已定、代码未实施。不改变文首唯一顺序。这里固定对外行为、所有者和失败处置，私有文件布局与等价 helper 实现由工程 agent 决定。
 
 #### F.1 A4：有持久来源的直属父子问答
 
@@ -236,6 +236,8 @@ agent-runtime 复用 live Agent.steer/followup、agents.resume 与 Session flush
 运行器从同一初始快照建两个独立工作区，依次新跑基线与候选；每项报告关联真实 Task/Run/Review/Evidence 与内容身份。历史 champion 只定位原任务/失败，不是本次基线。成功率不能来自模型自填；主目标必须从失败变通过，成功回归保持通过，holdout 不退化。费用缺报保持 unknown；若冻结目标要求成本改善或某成本硬上限，未知即不足以晋升，否则仅作不可推断的观测，不当 0。最终 holdout 使用后不能再作为修订候选的未见样本，需新 holdout 或撤回未见泛化声明。
 
 实验幂等键使用 proposal、prepared 内容身份、样本、baseline/candidate、重复序号；已结算 Run 复用其证据，在途实验按 runtime 恢复结果记录 interrupted/failed，不偷偷补跑或覆写。明确的新实验才能再计预算运行。decide/apply 两次既有人审保留，报告/候选/生产基线在应用前复检；取消和失败仍保存已发生实验与成本。
+
+2026-09-26 [审核澄清](history/2026-09-26-s4-e-progress-review.md)：冻结值须约束并核对实际 Run 的模型/工具/provider/裁判，不能只记录字符串再比较结束时配置；历史成功的回归/holdout 在本次基线不能复现通过时不得用“两侧同败”取得晋升；声明的实验总额/截止必须兑现，目标指标缺失或合计超限拒晋升，取消/重启不重置；快照链接不得让两侧共享可写输入。Q1～Q4 是原 EVAL-1～EVAL-3 的违约，按[返工 prompt](execution-prompts/12-s4-e-review-rework.md)同票关闭，不留给 A6。
 
 验收 EVAL-1：双侧真实 runtime/verifier 执行且互不污染，报告可回溯所有身份。EVAL-2：历史基线冒充、输入/裁判/模型漂移、伪造证据、双侧同失败、回归/holdout 退化均拒晋升；合法修复允许进入原人审。EVAL-3：重复调用、取消/重启不重计已完成样本、不替换失败记录；内容/报告/生产基线变化拒绝应用。EVAL-4：新包真实接管全部旧工具消费者，旧 ledger 可读及旧 applied 可回滚；没有 evaluator 的类型仍可查看历史但不得用旧报告绕过新晋升闸。EVAL-5（迁移闭合）：`evolution` 包承担候选、实验、决定、应用与回滚的唯一实现，`agent-singularity` 中原 Evolution 位置只保留有真实调用方的薄工具适配；全部生产消费者已改接新所有者，旧生命周期实现和同名转发删除。以实际调用链和原账读取/回滚回归核对，不以搬走的行数判定。验收在 fixture 中完成，不作模型效果声明。
 

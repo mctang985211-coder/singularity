@@ -8,7 +8,7 @@
 
 ## 直接派发入口
 
-以下入口只在当前票没有待审核交付时交给实现主代理。第 9 项 A2+A1 与第 11 项 A4 已验收，当前第 12 项 S4-E 直接使用[已填写 prompt](12-s4-e-skill-evaluation.md)；票据交付后改用[进度审核 prompt](progress-review-and-dispatch.md)，审核前不连续施工。
+以下入口只在当前票没有待审核交付时交给实现主代理。第 9 项 A2+A1 与第 11 项 A4 已验收，第 12 项 S4-E 审核返工，当前直接使用[Q1～Q4 返工 prompt](12-s4-e-review-rework.md)；票据交付后改用[进度审核 prompt](progress-review-and-dispatch.md)，审核前不连续施工。
 
 ```text
 你是 Singularity 本次实现主代理，工作区：
@@ -20,7 +20,8 @@ docs/2026-09-20-vrtc-code-change-plan.md 的唯一执行表，
 docs/execution-prompts/README.md 的公共合同，以及本模板的实施约束。
 只执行唯一表中首个未完成的有效票号；跳过已注明合并的历史编号。
 前置不满足就报告阻塞；已有交付待验收时只指出应走进度审核，不接下一票。
-第 11 项 A4 已通过进度审核（见 docs/history/2026-09-26-a4-final-review.md）；当前执行第 12 项 S4-E，合同为计划 F.2，直接派发已填写的 12-s4-e-skill-evaluation.md。
+第 11 项 A4 已验收；第 12 项 S4-E 经 docs/history/2026-09-26-s4-e-progress-review.md 判返工。
+当前执行计划 F.2 的 Q1～Q4，直接派发 12-s4-e-review-rework.md，不重新迁移、不派 A5。
 交付待审核时停下，交给 progress-review-and-dispatch.md。
 其他票只读本模板合同索引所指的段落及必要源码，按既定合同实施。
 
@@ -45,7 +46,7 @@ docs/execution-prompts/README.md 的公共合同，以及本模板的实施约�
 |---|---|---|
 | A2 + A1（已验收，历史对照） | D：读取/绑定与迁移；E：显式恢复 | Q1–Q4、A2-1–A2-6；当前见 `09-a2-a1-q3-closure.md` |
 | A4 | F.1；[已填写派发 prompt](11-a4-parent-child-clarification.md) | A4-1–A4-5，含结算归属 |
-| S4-E | F.2；[已填写派发 prompt](12-s4-e-skill-evaluation.md) | EVAL-1–EVAL-5，含旧生命周期删除 |
+| S4-E | F.2；[原合同](12-s4-e-skill-evaluation.md)、[当前返工 prompt](12-s4-e-review-rework.md) | Q1～Q4 + EVAL-1–EVAL-5，含旧生命周期删除 |
 | A5 + S2-E | F.3；E 的 DSH 观测复用及 Diagnosis 职责 | REV-1–REV-5，含观测与终态分工 |
 | A6 + S2-R + S3 | F.4 | EVO-1–EVO-5；EVO-1 真实 Agent 运行是整组验收条件 |
 
@@ -159,7 +160,7 @@ docs/2026-09-20-vrtc-code-change-plan.md 的本票状态、证据与下一项前
 
 ## A2 + A1 填写示例
 
-下面替换模板的“任务”部分，其余约束沿用。**以下 A2+A1 示例是已验收任务的历史填写参照；当前第 12 项 S4-E 直接使用[已填写 prompt](12-s4-e-skill-evaluation.md)与[唯一计划 F.2](../2026-09-20-vrtc-code-change-plan.md)的合同与验收。**
+下面替换模板的“任务”部分，其余约束沿用。**以下 A2+A1 示例是已验收任务的历史填写参照；当前第 12 项 S4-E 直接使用[返工 prompt](12-s4-e-review-rework.md)与[唯一计划 F.2](../2026-09-20-vrtc-code-change-plan.md)的合同与验收。**
 
 ```text
 票号/名称：A2 + A1，Agent 状态上下文（一个交付组）。
