@@ -159,30 +159,15 @@ function sha256Hex(bytes: Buffer | string): string {
  * The refusal every other target type gets: no evaluator, no promotion. This
  * build evaluates a replacement of an existing single-file `SKILL.md`;
  * capability, agent_preset, task_definition, the bookkeeping-only types and L4
- * have no evidence this gate could read, so a historical report cannot be
- * reused to promote them (§F.2: "没有支持的评估器就拒绝新晋升"). Their records
- * stay readable and an already-applied one still rolls back.
+ * have no evidence this gate could read, so no record of one is reused to
+ * promote it (§F.2: "没有支持的评估器就拒绝新晋升"). Their records stay
+ * readable.
  */
 export function noEvaluatorRefusal(proposal: EvolutionProposal): Error {
-  const history = proposal.replayed === undefined
-    ? ''
-    : ` Its recorded v1 replay report (${proposal.replayed.report}) is not this build's evidence either: ` +
-      'a historical report is never upgraded into a new promotion.'
   return new Error(
     `evolution: proposal "${proposal.proposalId}" targets "${proposal.targetType}", which has no evaluator in this build — ` +
     'the two-sided experiment (§F.2) evaluates a replacement of an existing single-file SKILL.md only, and a promotion ' +
-    'without supported evaluation evidence is refused rather than granted from a historical report.' + history,
-  )
-}
-
-/** The refusal of a skill candidate whose evaluation is still the v1 candidate-vs-champion replay. */
-function historicalReportRefusal(proposal: EvolutionProposal): Error {
-  const replay = proposal.replayed
-  const where = replay === undefined ? '' : ` (${replay.report}, verdict ${replay.verdict})`
-  return new Error(
-    `evolution: skill proposal "${proposal.proposalId}" holds a v1 candidate-vs-champion replay report${where} and no two-sided ` +
-    'experiment — a historical report is not upgraded into this build\'s evidence (§F.2); run the two-sided experiment ' +
-    '(evolution_replay) so the candidate is compared against a new baseline run of the same frozen samples',
+    'without supported evaluation evidence is refused rather than granted from an older record.',
   )
 }
 
@@ -988,7 +973,7 @@ export async function assertSkillPromotionEvidence(
   }
   // 1. The newest experiment, complete.
   const [experiment] = await sources.experiments(proposal.proposalId)
-  if (experiment === undefined) throw proposal.replayed === undefined ? noExperimentRefusal(proposal) : historicalReportRefusal(proposal)
+  if (experiment === undefined) throw noExperimentRefusal(proposal)
   let report: ExperimentReport
   try {
     report = buildExperimentReport(experiment)

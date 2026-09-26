@@ -596,6 +596,13 @@ describe('AgentRuntime root lifecycle', () => {
     expect(prompt).toContain('a new baseline run under the production configuration and a new candidate run on the prepared bytes')
     expect(prompt).toContain('promotes single-file skill replacements only')
     expect(prompt).toContain('evolution_list reads the ledger')
+    // S4-E 收尾: the protocol names the single-file skill path and nothing else.
+    // The v1 candidate-vs-champion chain is not a request this prompt may send —
+    // an agent that cannot see it cannot keep asking for it.
+    expect(prompt).toContain('evolution_candidate for a replacement of an existing single-file SKILL.md')
+    expect(prompt).not.toContain('candidate vs champion')
+    expect(prompt).not.toContain('candidate-vs-champion')
+    expect(prompt).not.toContain('v1 replay')
     // The domain reference map is a deployed skill, not part of the general root prompt.
     expect(prompt).not.toContain('Buckyball')
   })

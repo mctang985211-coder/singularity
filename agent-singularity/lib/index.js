@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
 import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, optionalService, workerBaseline } from "@dangosys/dsh-singularity-task-runtime";
-import { APPLYABLE_TARGET_TYPES, EVOLUTION_DECISIONS, EvolutionService, PRESET_REPLAY_MANUAL_REASON, applyTargets, modelSelectionOf, mutationMechanical, renderProviderRoles, resolvePrepareChampion, runReplayExperiment } from "@dangosys/dsh-singularity-evolution";
+import { APPLYABLE_TARGET_TYPES, EVOLUTION_DECISIONS, EvolutionService, applyTargets, modelSelectionOf, mutationMechanical, renderProviderRoles } from "@dangosys/dsh-singularity-evolution";
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -1340,27 +1340,23 @@ function sessionId$18(exec) {
 	return id;
 }
 /**
-* Why a decided PROMOTE proposal still cannot be applied, per boundary
-* L4 and non-materialized surfaces have no production executor yet.
+* Why a decided PROMOTE proposal still cannot be applied: L4 harness evolution
+* and every target type this build has no executor for.
 */
 function manualGuidance(proposal) {
 	if (proposal.level === "L4") return "L4 harness evolution has no executor in evolution_apply: supervisor implementation and validation must precede human review through the harness change workflow";
-	if (!APPLYABLE_TARGET_TYPES.includes(proposal.targetType)) return proposal.targetType === "task_definition" ? "task_definition has no production registry to write (the task store keeps denormalized instances only): a definition executor is still required before supervisor candidates can be promoted here" : `${proposal.targetType} mutations are bookkeeping-only (mechanical: false): an executor and target-specific validation are still required; the ledger keeps the record`;
+	if (!APPLYABLE_TARGET_TYPES.includes(proposal.targetType)) return `this build writes a single SKILL.md only, so a decided "${proposal.targetType}" proposal has no executor here — its ledger record stays readable and a human edits production by hand (A6 introduces the capability evaluation)`;
 	if (proposal.prepared?.sandbox == null) return "this candidate carried no structured mutation, so nothing was materialized: create a new structured candidate, evaluate it, then request human review";
 	return null;
 }
-/** How fast each applied type takes effect, stated honestly in the output. */
-function effectNote(proposal) {
-	switch (proposal.targetType) {
-		case "skill": return "effective immediately — the skill filesystem watches the skill root, so the write is live";
-		case "agent_preset": return "effective immediately — preset discovery re-reads the roots on every resolve";
-		default: return "effective immediately for admissions in this process (the runtime registry row was replaced); config.yml keeps it across restarts";
-	}
+/** How fast an applied skill takes effect, stated honestly in the output. */
+function effectNote() {
+	return "effective immediately — the skill filesystem watches the skill root, so the write is live";
 }
 function defineEvolutionApplyTool(ctx) {
 	return defineTool({
 		name: "evolution_apply",
-		description: "Apply a PROMOTE-decided EvolutionProposal to production (status: applied). Only the three mechanical types (skill / agent_preset / capability) at L1–L3 with a materialized sandbox; task_definition, the five bookkeeping-only types, and L4 lack executors and are refused with instructions. Always asks a human through the native approval seam first — a second gate after evolution_decide — naming every production path it will write; a reject, cancel, or unavailable answerer writes nothing and leaves the proposal decided. A skill apply additionally re-verifies the production baseline recorded at prepare (the production SKILL.md must still be those exact bytes, or still be absent) before the human is asked and again after the grant, and refuses a stale candidate instead of overwriting a production skill that changed. A skill candidate is promoted as one file: one carrying a SKILL.contract.json or any resource is refused (the executor writes SKILL.md only, so such a candidate would be reported as a provider production never received). skill and agent_preset take effect on write; a capability row is mirrored into the running registry and persists in config.yml. evolution_rollback restores the champion snapshot.",
+		description: "Apply a PROMOTE-decided EvolutionProposal to production (status: applied). One target type: a single-file SKILL.md replacement at L1–L3 with a materialized sandbox. Every other target type and L4 lack executors and are refused with instructions. Always asks a human through the native approval seam first — a second gate after evolution_decide — naming every production path it will write; a reject, cancel, or unavailable answerer writes nothing and leaves the proposal decided. A skill apply additionally re-verifies the production baseline recorded at prepare (the production SKILL.md must still be those exact bytes, or still be absent) before the human is asked and again after the grant, and refuses a stale candidate instead of overwriting a production skill that changed. A skill candidate is promoted as one file: one carrying a SKILL.contract.json or any resource is refused (the executor writes SKILL.md only, so such a candidate would be reported as a provider production never received). evolution_rollback restores the champion snapshot.",
 		parameters: { proposalId: {
 			type: "string",
 			required: true,
@@ -1399,7 +1395,7 @@ function defineEvolutionApplyTool(ctx) {
 				"this writes production targets:",
 				...targets.map((target) => `  - ${target}`),
 				...renderProviderRoles(promotion.providers),
-				effectNote(proposal),
+				effectNote(),
 				"rollback: evolution_rollback restores the champion snapshot from the sandbox"
 			].join("\n");
 			const outcome = await ctx.approval.request({
@@ -1412,21 +1408,14 @@ function defineEvolutionApplyTool(ctx) {
 			if (outcome !== "allowed-once") return `evolution_apply: nothing written — ${outcome === "rejected" ? "the human rejected it" : outcome === "cancelled" ? "the request was cancelled before the human decided" : "no approval answerer available"}; proposal ${proposal.proposalId} stays decided`;
 			try {
 				const applied = await ctx.evolution.apply(args.proposalId, caller, `approval:${exec.callId}`);
-				let runtimeNote = "";
-				if (applied.capability !== void 0) try {
-					await ctx.taskRuntime.applyCapabilityRow(applied.capability.name, applied.capability.entry);
-					runtimeNote = "\nruntime registry row replaced — new admissions in this process use it now";
-				} catch (error) {
-					runtimeNote = `\nruntime override failed (${error instanceof Error ? error.message : String(error)}) — the config.yml row takes effect on the next restart`;
-				}
 				return [
 					`proposal ${applied.proposal.proposalId} [applied] ${applied.proposal.level} ${applied.proposal.targetType} ${applied.proposal.targetId} — PROMOTE in effect`,
 					"wrote production targets:",
 					...applied.targets.map((target) => `  - ${target}`),
 					...renderProviderRoles(applied.providers ?? []),
-					effectNote(proposal),
+					effectNote(),
 					`human approval: approval:${exec.callId} — rollback with evolution_rollback`
-				].join("\n") + runtimeNote;
+				].join("\n");
 			} catch (error) {
 				return `evolution_apply rejected: ${error instanceof Error ? error.message : String(error)}`;
 			}
@@ -1448,7 +1437,7 @@ function sessionId$17(exec) {
 function defineEvolutionCandidateTool(ctx) {
 	return defineTool({
 		name: "evolution_candidate",
-		description: "Claim a proposed EvolutionProposal into validation (status: candidate) by recording the complete version set it aligns to (e.g. taskDefinition / skill / toolProfile / agentPreset / verifier / runtimePolicy versions). Bookkeeping for the branch model only: no branch is created and nothing is executed or changed. Optionally attach a structured mutation — the patch description; a candidate carrying one must pass evolution_prepare (sandbox materialization) and evolution_replay (candidate vs champion over this graph's terminal tasks) before evolution_gate, a candidate without one gates directly.",
+		description: "Claim a proposed EvolutionProposal into validation (status: candidate) by recording the complete version set it aligns to (e.g. taskDefinition / skill / toolProfile / agentPreset / verifier / runtimePolicy versions). Bookkeeping for the branch model only: no branch is created and nothing is executed or changed. Only a single-file SKILL.md replacement can become a candidate in this build: the mutation { name, content } carries the full SKILL.md text, and the candidate must then pass evolution_prepare (sandbox materialization) and evolution_replay (the two-sided experiment) before evolution_gate. A proposal of any other target type is refused by name and stays a record — evolution_propose may still record such a suggestion, but a suggestion never becomes a candidate.",
 		parameters: {
 			proposalId: {
 				type: "string",
@@ -1464,7 +1453,7 @@ function defineEvolutionCandidateTool(ctx) {
 			mutation: {
 				type: "object",
 				additionalProperties: true,
-				description: "Optional structured patch description, shape fixed by targetType — skill: { name, content } (full SKILL.md text); agent_preset: { presetId, files: [{ path, content }] } (paths relative to the preset dir); capability: { name, entry } (entry = { skills?, tools?, preset?, permission?, mcpServers? }); task_definition: { baseVersion, definition }. The other five target types take a free-form object, recorded mechanical: false (bookkeeping only)."
+				description: "The structured patch: { name, content } — the skill name and the full replacement SKILL.md text. It must be recorded for the candidate to be evaluated at all (a candidate without one has nothing to materialize)."
 			}
 		},
 		output: {
@@ -1477,7 +1466,7 @@ function defineEvolutionCandidateTool(ctx) {
 			try {
 				const proposal = await ctx.evolution.candidate(args.proposalId, versions, caller, args.mutation);
 				const versionsText = Object.entries(proposal.versionSet).map(([key, value]) => `${key}=${value}`).join(", ");
-				const next = proposal.mutation === void 0 ? "next: evolution_gate" : "mutation recorded — next: evolution_prepare (sandbox materialization), then evolution_replay (candidate vs champion), then evolution_gate";
+				const next = proposal.mutation === void 0 ? "no mutation recorded — nothing this build can evaluate; a candidate it can promote carries the replacement SKILL.md text" : "mutation recorded — next: evolution_prepare (sandbox materialization), then evolution_replay (the two-sided experiment), then evolution_gate";
 				return [`proposal ${proposal.proposalId} [candidate] version set: ${versionsText}`, `ledger entry only — no branch created, nothing executed; ${next}`].join("\n");
 			} catch (error) {
 				return `evolution_candidate rejected: ${error instanceof Error ? error.message : String(error)}`;
@@ -1585,7 +1574,7 @@ function sessionId$15(exec) {
 function defineEvolutionGateTool(ctx) {
 	return defineTool({
 		name: "evolution_gate",
-		description: "Answer the minimal Validation Gate for a candidate (status: gated). The six questions (细化想法4 §32): 1. Target failure fixed? 2. Original acceptance maintained? 3. Existing regression maintained? 4. No unacceptable side effects? 5. Holdout performance acceptable? 6. Resource cost acceptable? All six answers are required, and the regression side must cite evidence ids (from this graph's task store) or file paths whose existence is checked — cited evidence is never executed. A candidate carrying a mutation must pass evolution_prepare (sandbox materialization) and then be evaluated by evolution_replay: for a skill candidate that is the two-sided experiment (a new baseline run and a new candidate run per frozen sample), and its report path must be one of the regressionEvidenceRefs — the gate refuses a skill candidate whose experiment is not complete. A capability / agent_preset / task_definition candidate keeps the v1 replay path and cites its replay report the same way; note that this build promotes single-file skill replacements only, so those types cannot be promoted even though they can be recorded. Records the ledger entry only; nothing is promoted or changed. Next step is evolution_decide, which always asks a human.",
+		description: "Answer the minimal Validation Gate for a candidate (status: gated). The six questions (细化想法4 §32): 1. Target failure fixed? 2. Original acceptance maintained? 3. Existing regression maintained? 4. No unacceptable side effects? 5. Holdout performance acceptable? 6. Resource cost acceptable? All six answers are required, and the regression side must cite evidence ids (from this graph's task store) or file paths whose existence is checked — cited evidence is never executed. A skill candidate must pass evolution_prepare (sandbox materialization) and then evolution_replay (the two-sided experiment: a new baseline run and a new candidate run per frozen sample), and its report path must be one of the regressionEvidenceRefs — the gate refuses a skill candidate whose experiment is not complete. A proposal of any other target type cannot become a candidate and has no gate to answer. Records the ledger entry only; nothing is promoted or changed. Next step is evolution_decide, which always asks a human.",
 		parameters: {
 			proposalId: {
 				type: "string",
@@ -1626,7 +1615,7 @@ function defineEvolutionGateTool(ctx) {
 				type: "array",
 				items: { type: "string" },
 				required: true,
-				description: "Evidence behind the regression/replay answers: evidence ids or paths (existence-checked, never executed), at least one"
+				description: "Evidence behind the regression answers: the experiment report path plus evidence ids or paths (existence-checked, never executed), at least one"
 			}
 		},
 		output: {
@@ -1681,7 +1670,7 @@ const TARGET_TYPES$2 = [
 function defineEvolutionListTool(ctx) {
 	return defineTool({
 		name: "evolution_list",
-		description: "Read-only. List EvolutionProposals in the evolution ledger, optionally filtered by status / targetType / targetId, each with its derived history (proposed → candidate → prepared → replayed → gated → decided → applied → rolledback for applied mechanical mutations; a mutation-less candidate gates directly). The ledger records proposals, sandbox materializations, human decisions, and human-approved applies/rollbacks.",
+		description: "Read-only. List EvolutionProposals in the evolution ledger, optionally filtered by status / targetType / targetId, each with its derived history (proposed → candidate → prepared → gated → decided → applied → rolledback for an applied single-file skill replacement; a candidate without a mutation gates directly, and a non-skill proposal stays proposed — this build admits a skill candidate only). The ledger records proposals, sandbox materializations, human decisions, and human-approved applies/rollbacks.",
 		parameters: {
 			status: {
 				type: "string",
@@ -1689,7 +1678,6 @@ function defineEvolutionListTool(ctx) {
 					"proposed",
 					"candidate",
 					"prepared",
-					"replayed",
 					"gated",
 					"decided",
 					"applied",
@@ -1742,7 +1730,7 @@ function defineEvolutionListTool(ctx) {
 				if (proposal.replayed !== void 0) {
 					const view = proposal.replayed;
 					const summary = view.tasks.map((item) => `${item.taskId}${item.holdout ? " (holdout)" : ""}: ${item.relation}`).join(", ");
-					lines.push(`  replayed: verdict ${view.verdict} — report ${view.report}${summary === "" ? "" : ` (${summary})`}`);
+					lines.push(`  replayed (v1, historical): verdict ${view.verdict} — report ${view.report}${summary === "" ? "" : ` (${summary})`}`);
 				}
 				if (proposal.gate !== void 0) lines.push(`  gate regression evidence: [${proposal.gate.regressionEvidenceRefs.join(", ")}]`);
 				if (proposal.applied !== void 0) lines.push(`  applied: [${proposal.applied.targets.join(", ")}] (approval ${proposal.applied.approvalRef})`);
@@ -1768,11 +1756,11 @@ function sessionId$14(exec) {
 function defineEvolutionPrepareTool(ctx) {
 	return defineTool({
 		name: "evolution_prepare",
-		description: "Materialize a candidate's structured mutation into the proposal sandbox (status: prepared). Writes go only to .dsh/evolution/sandbox/<proposalId>/ — skills/<name>/SKILL.md for a skill, .agent-presets/<presetId>/… for an agent_preset, capability-table.patch.yml (whole-row replacement semantics) for a capability, task-definition.json for a task_definition — plus a champion/ snapshot of the current production target (champion: null when it is new). The other five target types are bookkeeping-only (mechanical: false) and materialize nothing. Nothing here touches production; next step is evolution_replay for the mechanical types, evolution_gate for bookkeeping-only ones.",
+		description: "Materialize a skill candidate's structured mutation into the proposal sandbox (status: prepared). Writes go only to .dsh/evolution/sandbox/<proposalId>/ — skills/<name>/SKILL.md for the candidate — plus a champion/ snapshot of the production SKILL.md (champion: null when the production skill does not exist yet). A proposal of any other target type cannot become a candidate and has nothing to prepare. Nothing here touches production; the next step is evolution_replay, the two-sided experiment.",
 		parameters: { proposalId: {
 			type: "string",
 			required: true,
-			description: "Candidate carrying a mutation, to materialize into its sandbox"
+			description: "Skill candidate carrying a mutation, to materialize into its sandbox"
 		} },
 		output: {
 			schema: { type: "string" },
@@ -1780,29 +1768,17 @@ function defineEvolutionPrepareTool(ctx) {
 		},
 		execute: async (args, exec) => {
 			const caller = sessionId$14(exec);
-			let proposal;
 			try {
-				proposal = await ctx.evolution.get(args.proposalId);
-			} catch (error) {
-				return `evolution_prepare rejected: ${error instanceof Error ? error.message : String(error)}`;
-			}
-			const champion = await resolvePrepareChampion({
-				graphs: ctx.graphs,
-				task: ctx.task,
-				taskRuntime: ctx.taskRuntime
-			}, proposal, caller);
-			try {
-				const prepared = await ctx.evolution.prepare(args.proposalId, caller, champion);
+				const prepared = await ctx.evolution.prepare(args.proposalId, caller);
 				const view = prepared.prepared;
-				if (!view.mechanical) return [`proposal ${prepared.proposalId} [prepared] bookkeeping only — ${prepared.targetType} mutations are not mechanically applied (mechanical: false)`, "ledger entry only — nothing materialized; next: evolution_gate"].join("\n");
-				const championText = view.champion === "captured" ? view.championSource === "config-text" ? "champion snapshot: captured under champion/ (config.yml row source text — rollback restores it verbatim)" : view.championSource === "code-default" ? "champion snapshot: captured under champion/ (code default, no config.yml row — rollback removes the applied row so the default governs again)" : "champion snapshot: captured under champion/" : "champion snapshot: none — champion: null (the production target does not exist yet)";
-				const baselineText = prepared.targetType === "skill" ? view.skillBaseline === void 0 ? "production baseline: none — the production skill does not exist yet (an apply refuses if one appears)" : `production baseline: ${view.skillBaseline.name} sha256:${view.skillBaseline.sha256.slice(0, 12)}… (an apply refuses if the production skill changed since this read)` : null;
+				const championText = view.champion === "captured" ? "champion snapshot: captured under champion/" : "champion snapshot: none — champion: null (the production target does not exist yet)";
+				const baselineText = view.skillBaseline === void 0 ? "production baseline: none — the production skill does not exist yet (an apply refuses if one appears)" : `production baseline: ${view.skillBaseline.name} sha256:${view.skillBaseline.sha256.slice(0, 12)}… (an apply refuses if the production skill changed since this read)`;
 				return [
 					`proposal ${prepared.proposalId} [prepared] sandbox: ${ctx.evolution.root}/${view.sandbox}`,
 					...view.files.map((file) => `  wrote ${file}`),
 					championText,
-					...baselineText === null ? [] : [baselineText],
-					"sandbox only — production was not touched; next: evolution_replay (candidate vs champion), then evolution_gate"
+					baselineText,
+					"sandbox only — production was not touched; next: evolution_replay (the two-sided experiment), then evolution_gate"
 				].join("\n");
 			} catch (error) {
 				return `evolution_prepare rejected: ${error instanceof Error ? error.message : String(error)}`;
@@ -2023,11 +1999,6 @@ function deriveExperimentSamples(snapshot, taskIds, holdoutTaskIds) {
 	if (!samples.some((sample) => sample.role === "observed-failure")) throw new Error("none of taskIds has a failed latest review, so there is no observed failure for this candidate to fix — name the task whose recorded failure this candidate addresses (a candidate with no reproduced failure cannot be evaluated as a fix)");
 	return samples;
 }
-/** The v1 replay's criterion diff: `criterionId champion→candidate`, as the report recorded it. */
-function renderReplayCriterionDiff(diff) {
-	if (diff.length === 0) return "no criterion diff";
-	return diff.map((item) => `${item.criterionId} ${item.champion ?? "—"}→${item.candidate ?? "—"}`).join(", ");
-}
 /** The experiment's criterion diff: the baseline run's verdict → the candidate run's, per criterion that moved. */
 function renderExperimentCriterionDiff(baseline, candidate) {
 	const byId = new Map(candidate.map((item) => [item.criterionId, item]));
@@ -2061,24 +2032,6 @@ function renderExperiment(result, targetId) {
 		"next: evolution_gate (cite the report path in regressionEvidenceRefs)"
 	].join("\n");
 }
-/** The v1 replay rendering, unchanged: the comparison groups as the caller reads them, historical side first. */
-function renderReplayResult(result) {
-	if (result.manual) return [
-		`proposal ${result.proposalId} [replayed] manual — nothing was executed`,
-		PRESET_REPLAY_MANUAL_REASON,
-		`report: ${result.reportPath}`,
-		"next: evolution_gate (cite the report path in regressionEvidenceRefs)"
-	].join("\n");
-	const renderGroup = (title, group) => [`${title} (${group.length}):`, ...group.map((item) => `  ${item.taskId} champion ${item.champion.outcome} → candidate ${item.candidate.outcome} (${renderReplayCriterionDiff(item.criteriaDiff)}) — ${item.relation}`)];
-	return [
-		`proposal ${result.proposalId} [replayed] ${result.targetType} ${result.targetId} — verdict: ${result.report.verdict}`,
-		...renderGroup("observed", result.observed),
-		result.holdout.length === 0 ? "holdout: not run (no holdoutTaskIds given)" : renderGroup("holdout", result.holdout).join("\n"),
-		`report: ${result.reportPath}`,
-		"comparison only — the replay ran as new evolution-replay tasks; the historical tree and production were not changed",
-		"next: evolution_gate (cite the report path in regressionEvidenceRefs)"
-	].join("\n");
-}
 /** The experiment one skill call runs: the derived samples, the caller's frozen input, and the model selection it runs under. */
 async function runSkillExperiment(ctx, args, caller, signal) {
 	let snapshot;
@@ -2100,23 +2053,23 @@ async function runSkillExperiment(ctx, args, caller, signal) {
 function defineEvolutionReplayTool(ctx) {
 	return defineTool({
 		name: "evolution_replay",
-		description: "Evaluate a prepared mechanical EvolutionProposal and record the comparison. A **skill** candidate that replaces an existing single-file SKILL.md runs the two-sided experiment: every named task is run twice — a new baseline run under the production configuration and a new candidate run on the prepared bytes — each in its own workspace built from the caller session's env workspace (the frozen input snapshot), all under one frozen identity (samples, snapshot digest, candidate content, model, budget, comparer). Sample roles are derived from the store's history: a task whose latest review is failed is the observed failure, a verified one is an observed regression, and holdoutTaskIds are the held-out cases; a call with no failed sample, or with an empty holdout, is refused — the experiment requires both. The historical record locates each case and is never a baseline. Every other targetType keeps the v1 replay path: capability re-runs each historical task under the mutation entry as a per-run capability overlay, task_definition replays the candidate definition's criteria through the verifier alone, and agent_preset is manual in v1 (nothing executes and the report says so). Writes the report under sandbox/<proposalId>/ and records the ledger entries; cite the report path in evolution_gate's regressionEvidenceRefs. Repeating the same call reuses the settled runs — it never re-runs or overwrites one; a higher `repetition` freezes a new experiment.",
+		description: "Evaluate a prepared single-file SKILL.md candidate with the two-sided experiment. Every named task is run twice — a new baseline run under the production configuration and a new candidate run on the prepared bytes — each in its own workspace built from the caller session's env workspace (the frozen input snapshot), all under one frozen identity (samples, snapshot digest, candidate content, model, budget, comparer). Sample roles are derived from the store's history: a task whose latest review is failed is the observed failure, a verified one is an observed regression, and holdoutTaskIds are the held-out cases; a call with no failed sample, or with an empty holdout, is refused — the experiment requires both. The historical record locates each case and is never a baseline. This is the only evaluation this build has: a proposal targeting anything but a single-file skill replacement is refused by name. Writes the report under sandbox/<proposalId>/ and records the ledger entries; cite the report path in evolution_gate's regressionEvidenceRefs. Repeating the same call reuses the settled runs — it never re-runs or overwrites one; a higher `repetition` freezes a new experiment.",
 		parameters: {
 			proposalId: {
 				type: "string",
 				required: true,
-				description: "Prepared proposal (mechanical mutation) to evaluate"
+				description: "Prepared skill candidate to evaluate"
 			},
 			taskIds: {
 				type: "array",
 				items: { type: "string" },
 				required: true,
-				description: "Sample task ids from this graph's task store: for a skill candidate at least one whose latest review is failed (the observed failure) plus any verified regressions; otherwise the terminal tasks to replay against"
+				description: "Sample task ids from this graph's task store: at least one whose latest review is failed (the observed failure the candidate is meant to fix) plus any verified regressions it must not break"
 			},
 			holdoutTaskIds: {
 				type: "array",
 				items: { type: "string" },
-				description: "Verified task ids the candidate was not selected on; a skill experiment requires at least one"
+				description: "Verified task ids the candidate was not selected on; the experiment requires at least one"
 			},
 			repetition: {
 				type: "integer",
@@ -2152,25 +2105,14 @@ function defineEvolutionReplayTool(ctx) {
 			const holdoutTaskIds = (args.holdoutTaskIds ?? []).map((id) => String(id));
 			try {
 				const proposal = await ctx.evolution.get(args.proposalId);
-				if (proposal.targetType === "skill") return renderExperiment(await runSkillExperiment(ctx, {
+				if (proposal.targetType !== "skill") throw new Error(`proposal ${proposal.proposalId} targets "${proposal.targetType}" — this tool evaluates a prepared single-file SKILL.md candidate only (a new baseline run and a new candidate run per frozen sample); no other target type has an evaluator in this build, so its proposal stays a record`);
+				return renderExperiment(await runSkillExperiment(ctx, {
 					proposalId: args.proposalId,
 					taskIds,
 					holdoutTaskIds,
 					...args.repetition === void 0 ? {} : { repetition: args.repetition },
 					...args.budget === void 0 ? {} : { budget: args.budget }
 				}, caller, exec.signal), proposal.targetId);
-				return renderReplayResult(await runReplayExperiment({
-					evolution: ctx.evolution,
-					graphs: ctx.graphs,
-					task: ctx.task,
-					taskRuntime: ctx.taskRuntime
-				}, {
-					proposalId: args.proposalId,
-					taskIds,
-					holdoutTaskIds,
-					caller,
-					signal: exec.signal
-				}));
 			} catch (error) {
 				return `evolution_replay rejected: ${error instanceof Error ? error.message : String(error)}`;
 			}
@@ -2192,7 +2134,7 @@ function sessionId$11(exec) {
 function defineEvolutionRollbackTool(ctx) {
 	return defineTool({
 		name: "evolution_rollback",
-		description: "Roll back an applied EvolutionProposal (status: rolledback). Restores the champion snapshot taken at prepare time (skill SKILL.md / preset directory / capability config.yml row); when the champion did not exist (champion: null), deletes what the apply created. Always asks a human through the native approval seam first — reject / cancel / unavailable writes nothing and the proposal stays applied. Only an applied proposal can be rolled back; a rolled-back proposal keeps its full ledger history.",
+		description: "Roll back an applied EvolutionProposal (status: rolledback). Restores the champion snapshot taken at prepare time — the production SKILL.md of an applied single-file skill replacement; when the champion did not exist (champion: null), deletes the skill directory the apply created. An applied record of any other target type has no executor here and is refused. Always asks a human through the native approval seam first — reject / cancel / unavailable writes nothing and the proposal stays applied. Only an applied proposal can be rolled back; a rolled-back proposal keeps its full ledger history.",
 		parameters: { proposalId: {
 			type: "string",
 			required: true,
@@ -2214,7 +2156,8 @@ function defineEvolutionRollbackTool(ctx) {
 			}
 			if (proposal.status !== "applied") return `evolution_rollback rejected: proposal ${proposal.proposalId} is ${proposal.status}; only an applied proposal can be rolled back`;
 			const targets = applyTargets(proposal, ctx.evolution);
-			const restore = proposal.prepared?.champion !== "captured" ? "the champion did not exist (champion: null) — this DELETES what the apply created:" : proposal.prepared?.championSource === "code-default" ? "the champion is a code default (no config.yml row at prepare time) — this REMOVES the applied row so the default governs again:" : "this restores the champion snapshot over production targets:";
+			if (targets.length === 0) return `evolution_rollback rejected: proposal ${proposal.proposalId} targets "${proposal.targetType}" — this build writes and restores a single SKILL.md only, so there is no executor to roll back an applied record of another type`;
+			const restore = proposal.prepared?.champion !== "captured" ? "the champion did not exist (champion: null) — this DELETES what the apply created:" : "this restores the champion snapshot over production targets:";
 			const reason = [
 				`Evolution rollback for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,
 				`rationale: ${proposal.rationale}`,
@@ -2232,19 +2175,12 @@ function defineEvolutionRollbackTool(ctx) {
 			if (outcome !== "allowed-once") return `evolution_rollback: nothing written — ${outcome === "rejected" ? "the human rejected it" : outcome === "cancelled" ? "the request was cancelled before the human decided" : "no approval answerer available"}; proposal ${proposal.proposalId} stays applied`;
 			try {
 				const rolledback = await ctx.evolution.rollback(args.proposalId, caller, `approval:${exec.callId}`);
-				let runtimeNote = "";
-				if (rolledback.capability !== void 0) try {
-					await ctx.taskRuntime.applyCapabilityRow(rolledback.capability.name, rolledback.capability.entry);
-					runtimeNote = rolledback.capability.entry === null ? "\nruntime registry row removed — new admissions in this process no longer see it" : "\nruntime registry row restored — new admissions in this process use the champion entry now";
-				} catch (error) {
-					runtimeNote = `\nruntime override failed (${error instanceof Error ? error.message : String(error)}) — the config.yml row takes effect on the next restart`;
-				}
 				return [
 					`proposal ${rolledback.proposal.proposalId} [rolledback] ${rolledback.proposal.level} ${rolledback.proposal.targetType} ${rolledback.proposal.targetId} — champion restored`,
 					"wrote production targets:",
 					...rolledback.targets.map((target) => `  - ${target}`),
 					`human approval: approval:${exec.callId}`
-				].join("\n") + runtimeNote;
+				].join("\n");
 			} catch (error) {
 				return `evolution_rollback rejected: ${error instanceof Error ? error.message : String(error)}`;
 			}

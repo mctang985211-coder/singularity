@@ -1,21 +1,16 @@
 /**
  * `evolution_replay` (guide §2.7.6, W15 / S4-E §F.2): evaluate a prepared
- * mechanical mutation and record the comparison.
+ * single-file skill candidate with the two-sided experiment.
  *
- * Two evaluation paths, chosen by what the proposal targets — a routing
- * decision the tool owns because it is a property of the *call*, not of the
- * ledger:
- *
- * - a **skill** candidate that replaces an existing `SKILL.md` is evaluated by
- *   the two-sided experiment ({@link ExperimentSpec}): every sample runs the
- *   baseline and the candidate as *new* runs of this graph, each in its own
- *   workspace built from one frozen snapshot. The sample roles are derived from
- *   the store's own history here rather than taken from the caller (§F.2): the
- *   caller names tasks, the ledger's latest review calls each one an observed
- *   failure, an observed regression or a holdout;
- * - every other target type keeps the v1 replay path
- *   ({@link runReplayExperiment}) unchanged: the candidate against the
- *   historical terminal records, agent_preset manual.
+ * One evaluation path: a **skill** candidate that replaces an existing
+ * `SKILL.md` ({@link ExperimentSpec}) — every sample runs the baseline and the
+ * candidate as *new* runs of this graph, each in its own workspace built from
+ * one frozen snapshot. The sample roles are derived from the store's own
+ * history here rather than taken from the caller (§F.2): the caller names
+ * tasks, the ledger's latest review calls each one an observed failure, an
+ * observed regression or a holdout. Any other target type is refused by name —
+ * this build evaluates skill replacements only, and a capability, agent_preset
+ * or task_definition proposal stays the record `evolution_propose` wrote.
  *
  * What this adapter supplies beyond the call's own arguments: the caller
  * session (from the live call), the input snapshot both experiment workspaces
@@ -28,8 +23,8 @@
  * is not evidence of where a run happened or which model ran it.
  *
  * The experiment itself (its frozen identity, the per-sample workspaces, the
- * idempotency keys, the report and its ledger records) and the v1 replay both
- * live in `@dangosys/dsh-singularity-evolution`; this adapter declares the tool,
+ * idempotency keys, the report and its ledger records) lives in
+ * `@dangosys/dsh-singularity-evolution`; this adapter declares the tool,
  * derives the call's identity, and renders what came back.
  * @module dsh-singularity-agent/tools/evolution-replay
  */
@@ -43,15 +38,12 @@ import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import type { ReviewRecord, TaskInstance, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { optionalService } from '@dangosys/dsh-singularity-task-runtime'
 import type {} from '@dangosys/dsh-singularity-task-runtime'
-import { PRESET_REPLAY_MANUAL_REASON, runReplayExperiment } from '@dangosys/dsh-singularity-evolution'
 import type {
   ExperimentBudget,
   ExperimentCriterionDetail,
   ExperimentResult,
   ExperimentSampleSpec,
   ModelSelection,
-  ReplayExperimentResult,
-  ReplayTaskComparison,
 } from '@dangosys/dsh-singularity-evolution'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
@@ -162,12 +154,6 @@ function deriveExperimentSamples(
   return samples
 }
 
-/** The v1 replay's criterion diff: `criterionId champion→candidate`, as the report recorded it. */
-function renderReplayCriterionDiff(diff: ReplayTaskComparison['criteriaDiff']): string {
-  if (diff.length === 0) return 'no criterion diff'
-  return diff.map(item => `${item.criterionId} ${item.champion ?? '—'}→${item.candidate ?? '—'}`).join(', ')
-}
-
 /** The experiment's criterion diff: the baseline run's verdict → the candidate run's, per criterion that moved. */
 function renderExperimentCriterionDiff(baseline: readonly ExperimentCriterionDetail[], candidate: readonly ExperimentCriterionDetail[]): string {
   const byId = new Map(candidate.map(item => [item.criterionId, item]))
@@ -208,34 +194,6 @@ function renderExperiment(result: ExperimentResult, targetId: string): string {
   ].join('\n')
 }
 
-/** The v1 replay rendering, unchanged: the comparison groups as the caller reads them, historical side first. */
-function renderReplayResult(result: ReplayExperimentResult): string {
-  if (result.manual) {
-    return [
-      `proposal ${result.proposalId} [replayed] manual — nothing was executed`,
-      PRESET_REPLAY_MANUAL_REASON,
-      `report: ${result.reportPath}`,
-      'next: evolution_gate (cite the report path in regressionEvidenceRefs)',
-    ].join('\n')
-  }
-  const renderGroup = (title: string, group: readonly ReplayTaskComparison[]) => [
-    `${title} (${group.length}):`,
-    ...group.map(item =>
-      `  ${item.taskId} champion ${item.champion.outcome} → candidate ${item.candidate!.outcome} ` +
-      `(${renderReplayCriterionDiff(item.criteriaDiff)}) — ${item.relation}`),
-  ]
-  return [
-    `proposal ${result.proposalId} [replayed] ${result.targetType} ${result.targetId} — verdict: ${result.report.verdict}`,
-    ...renderGroup('observed', result.observed),
-    result.holdout.length === 0
-      ? 'holdout: not run (no holdoutTaskIds given)'
-      : renderGroup('holdout', result.holdout).join('\n'),
-    `report: ${result.reportPath}`,
-    'comparison only — the replay ran as new evolution-replay tasks; the historical tree and production were not changed',
-    'next: evolution_gate (cite the report path in regressionEvidenceRefs)',
-  ].join('\n')
-}
-
 /** The experiment one skill call runs: the derived samples, the caller's frozen input, and the model selection it runs under. */
 async function runSkillExperiment(
   ctx: Context,
@@ -264,32 +222,29 @@ export function defineEvolutionReplayTool(ctx: Context) {
   return defineTool({
     name: 'evolution_replay',
     description:
-      'Evaluate a prepared mechanical EvolutionProposal and record the comparison. A **skill** candidate that replaces an ' +
-      'existing single-file SKILL.md runs the two-sided experiment: every named task is run twice — a new baseline run under ' +
-      'the production configuration and a new candidate run on the prepared bytes — each in its own workspace built from the ' +
-      'caller session\'s env workspace (the frozen input snapshot), all under one frozen identity (samples, snapshot digest, ' +
-      'candidate content, model, budget, comparer). Sample roles are derived from the store\'s history: a task whose latest ' +
-      'review is failed is the observed failure, a verified one is an observed regression, and holdoutTaskIds are the held-out ' +
-      'cases; a call with no failed sample, or with an empty holdout, is refused — the experiment requires both. The historical ' +
-      'record locates each case and is never a baseline. Every other targetType keeps the v1 replay path: capability re-runs ' +
-      'each historical task under the mutation entry as a per-run capability overlay, task_definition replays the candidate ' +
-      'definition\'s criteria through the verifier alone, and agent_preset is manual in v1 (nothing executes and the report says ' +
-      'so). Writes the report under sandbox/<proposalId>/ and records the ledger entries; cite the report path in ' +
-      'evolution_gate\'s regressionEvidenceRefs. Repeating the same call reuses the settled runs — it never re-runs or ' +
-      'overwrites one; a higher `repetition` freezes a new experiment.',
+      'Evaluate a prepared single-file SKILL.md candidate with the two-sided experiment. Every named task is run twice — a new ' +
+      'baseline run under the production configuration and a new candidate run on the prepared bytes — each in its own workspace ' +
+      'built from the caller session\'s env workspace (the frozen input snapshot), all under one frozen identity (samples, ' +
+      'snapshot digest, candidate content, model, budget, comparer). Sample roles are derived from the store\'s history: a task ' +
+      'whose latest review is failed is the observed failure, a verified one is an observed regression, and holdoutTaskIds are ' +
+      'the held-out cases; a call with no failed sample, or with an empty holdout, is refused — the experiment requires both. ' +
+      'The historical record locates each case and is never a baseline. This is the only evaluation this build has: a proposal ' +
+      'targeting anything but a single-file skill replacement is refused by name. Writes the report under sandbox/<proposalId>/ ' +
+      'and records the ledger entries; cite the report path in evolution_gate\'s regressionEvidenceRefs. Repeating the same call ' +
+      'reuses the settled runs — it never re-runs or overwrites one; a higher `repetition` freezes a new experiment.',
     parameters: {
-      proposalId: { type: 'string', required: true, description: 'Prepared proposal (mechanical mutation) to evaluate' },
+      proposalId: { type: 'string', required: true, description: 'Prepared skill candidate to evaluate' },
       taskIds: {
         type: 'array',
         items: { type: 'string' },
         required: true,
-        description: 'Sample task ids from this graph\'s task store: for a skill candidate at least one whose latest review is ' +
-          'failed (the observed failure) plus any verified regressions; otherwise the terminal tasks to replay against',
+        description: 'Sample task ids from this graph\'s task store: at least one whose latest review is failed (the observed ' +
+          'failure the candidate is meant to fix) plus any verified regressions it must not break',
       },
       holdoutTaskIds: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Verified task ids the candidate was not selected on; a skill experiment requires at least one',
+        description: 'Verified task ids the candidate was not selected on; the experiment requires at least one',
       },
       repetition: {
         type: 'integer',
@@ -325,21 +280,21 @@ export function defineEvolutionReplayTool(ctx: Context) {
       const holdoutTaskIds = ((args.holdoutTaskIds as unknown[] | undefined) ?? []).map(id => String(id))
       try {
         const proposal = await ctx.evolution.get(args.proposalId)
-        if (proposal.targetType === 'skill') {
-          const result = await runSkillExperiment(ctx, {
-            proposalId: args.proposalId,
-            taskIds,
-            holdoutTaskIds,
-            ...(args.repetition === undefined ? {} : { repetition: args.repetition }),
-            ...(args.budget === undefined ? {} : { budget: args.budget }),
-          }, caller, exec.signal)
-          return renderExperiment(result, proposal.targetId)
+        if (proposal.targetType !== 'skill') {
+          throw new Error(
+            `proposal ${proposal.proposalId} targets "${proposal.targetType}" — this tool evaluates a prepared single-file ` +
+            'SKILL.md candidate only (a new baseline run and a new candidate run per frozen sample); no other target type has ' +
+            'an evaluator in this build, so its proposal stays a record',
+          )
         }
-        const result = await runReplayExperiment(
-          { evolution: ctx.evolution, graphs: ctx.graphs, task: ctx.task, taskRuntime: ctx.taskRuntime },
-          { proposalId: args.proposalId, taskIds, holdoutTaskIds, caller, signal: exec.signal },
-        )
-        return renderReplayResult(result)
+        const result = await runSkillExperiment(ctx, {
+          proposalId: args.proposalId,
+          taskIds,
+          holdoutTaskIds,
+          ...(args.repetition === undefined ? {} : { repetition: args.repetition }),
+          ...(args.budget === undefined ? {} : { budget: args.budget }),
+        }, caller, exec.signal)
+        return renderExperiment(result, proposal.targetId)
       } catch (error) {
         return `evolution_replay rejected: ${error instanceof Error ? error.message : String(error)}`
       }

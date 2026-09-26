@@ -105,41 +105,6 @@ async function registeredSkill(h: RunStack, agent: Agent, name: string): Promise
   return skill as { content: string; path?: string }
 }
 
-/** The one executed-report shape the replay entry accepts; this file is about the version move, not about running a replay. */
-function replayReport(proposalId: string, targetType: 'capability' | 'skill', candidateContent?: { name: string; sha256: string }): unknown {
-  const side = (taskId: string) => ({ taskId, runId: `r-${taskId}`, outcome: 'verified', criteria: [{ criterionId: 'ac1', verdict: 'pass' }] })
-  return {
-    formatVersion: 1,
-    proposalId,
-    targetType,
-    at: new Date().toISOString(),
-    mode: 'executed',
-    observed: [{
-      taskId: 't-champ',
-      candidateTaskId: 't-candidate',
-      champion: side('t-champ'),
-      candidate: side('t-candidate'),
-      verdictMatch: true,
-      criteriaDiff: [],
-      relation: 'not-worse',
-    }],
-    holdout: {
-      executed: true,
-      tasks: [{
-        taskId: 't-holdout',
-        candidateTaskId: 't-holdout-candidate',
-        champion: side('t-holdout'),
-        candidate: side('t-holdout-candidate'),
-        verdictMatch: true,
-        criteriaDiff: [],
-        relation: 'not-worse',
-      }],
-    },
-    verdict: 'not-worse',
-    ...(targetType === 'skill' && candidateContent !== undefined ? { candidateContent } : {}),
-  }
-}
-
 function gateAnswers(refs: string[]) {
   return {
     targetFailureFixed: 'the fixture now passes',
@@ -379,32 +344,11 @@ describe('a new version in production and the runs that are already bound (S1-C)
       .find((event): event is Extract<TaskEvent, { kind: 'CapabilityResolved' }> => event.kind === 'CapabilityResolved' && event.taskId === first.taskId)!
     expect(beforeManifest.payload.manifest.capabilities[ROW]!.tools).not.toContain('bash')
 
-    // The legal replacement row: same skill, a wider tool plane.
-    const svc = evolutionOf(h)
+    // The row moves in the running table — the runtime registry mirror, which is
+    // where a capability replacement still has a live consumer (this build's
+    // evolution lifecycle admits a single-file skill candidate only, so the row
+    // is no evolution candidate at all).
     const row: CapabilityConfig = { skills: [SKILL], tools: ['filesystem', 'bash'] }
-    await svc.propose({
-      proposalId: 'p-row-1',
-      targetType: 'capability',
-      targetId: ROW,
-      baseVersion: 'v1',
-      level: 'L2',
-      rationale: 'the row should grant the shell its skill needs',
-      sourceRefs: ['diagnosis:d1'],
-    }, ROOT_A)
-    await svc.candidate('p-row-1', { capabilityTable: 'config.yml#doc1' }, ROOT_A, { name: ROW, entry: row })
-    await svc.prepare('p-row-1', ROOT_A, { capabilityEntry: h.runtime.listCapabilities()[ROW] ?? null })
-    await svc.replay('p-row-1', ROOT_A, replayReport('p-row-1', 'capability'))
-    await svc.gate('p-row-1', gateAnswers(['sandbox/p-row-1/replay-report.json']), ROOT_A)
-    // S4-E EVAL-4: a capability PROMOTE has no evaluator in this build, so the
-    // evolution entry refuses it and writes nothing. The row's own replacement is
-    // the runtime registry mirror's job now (`TaskRuntime.applyCapabilityRow`,
-    // the entry the rollback tool calls and the admission pre-check shared).
-    await expect(svc.decide('p-row-1', 'PROMOTE', ROOT_A, 'approval:decide')).rejects.toThrow('has no evaluator in this build')
-    const refusal = (await defineEvolutionApplyTool(h.ctx).execute({ proposalId: 'p-row-1' }, exec(h.rootAgent(ROOT_A), 'call-row-apply'))) as string
-    expect(refusal).toContain('evolution_apply rejected:')
-    expect(await readFile(join(h.workspace, 'config.yml'), 'utf8')).toBe(CONFIG_FIXTURE)
-
-    // The row moves in the running table…
     await h.runtime.applyCapabilityRow(ROW, row)
     expect(h.runtime.listCapabilities()[ROW]).toEqual(row)
 

@@ -48,7 +48,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { EvolutionService } from '../../evolution/src/index.ts'
-import { overallExperimentVerdict, PRESET_REPLAY_MANUAL_REASON } from '../../evolution/src/index.ts'
+import { overallExperimentVerdict } from '../../evolution/src/index.ts'
 import type { ExperimentReport } from '../../evolution/src/index.ts'
 import { deploymentModelSelection } from '../../agent-singularity/src/index.ts'
 import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
@@ -583,11 +583,8 @@ describe('S4-E: evolution_replay evaluates a skill candidate as the two-sided ex
     expect((await f.h.snapshot(f.storeId)).tasks).toHaveLength(afterFirst.tasks.length + 4)
   })
 
-  it('keeps the v1 replay path for a non-skill target: an agent_preset candidate stays manual', async () => {
+  it('refuses a non-skill target: no experiment, no run, no ledger write', async () => {
     const f = await fixture()
-    const presetRoot = join(f.h.workspace, 'presets')
-    await mkdir(join(presetRoot, PRESET), { recursive: true })
-    await writeFile(join(presetRoot, PRESET, 'preset.yml'), 'preset: old\n', 'utf8')
     await f.evolution.propose({
       proposalId: PRESET_PROPOSAL,
       targetType: 'agent_preset',
@@ -597,29 +594,31 @@ describe('S4-E: evolution_replay evaluates a skill candidate as the two-sided ex
       rationale: 'the fixture preset needs the verification skill',
       sourceRefs: ['diagnosis:d2'],
     }, ROOT)
-    await f.evolution.candidate(PRESET_PROPOSAL, { agentPreset: 'v2' }, ROOT, {
-      presetId: PRESET,
-      files: [{ path: 'preset.yml', content: 'preset: new\n' }],
-    })
-    await f.evolution.prepare(PRESET_PROPOSAL, ROOT)
 
     const before = await f.h.snapshot(f.storeId)
     const spawnsBefore = f.h.spawns.length
+    const linesBefore = await ledgerLines(f)
     const answer = await f.replay({ proposalId: PRESET_PROPOSAL, taskIds: ['t-fix'], holdoutTaskIds: ['t-holdout'] })
-    expect(answer).toContain(`proposal ${PRESET_PROPOSAL} [replayed] manual — nothing was executed`)
-    expect(answer).toContain(PRESET_REPLAY_MANUAL_REASON)
-    expect(answer).toContain(`report: sandbox/${PRESET_PROPOSAL}/replay-report.json`)
-    // The v1 report is the recorded evidence, the lifecycle moves on, and no
-    // experiment was frozen for it.
-    const report = JSON.parse(await readFile(join(f.h.workspace, 'evolution', 'sandbox', PRESET_PROPOSAL, 'replay-report.json'), 'utf8'))
-    expect(report).toMatchObject({ formatVersion: 1, mode: 'manual', verdict: 'manual' })
-    expect((await f.evolution.get(PRESET_PROPOSAL)).status).toBe('replayed')
-    const kinds = (await ledgerLines(f)).map(line => line.kind as string)
-    expect(kinds).toContain('replayed')
-    expect(kinds).not.toContain('experiment_started')
-    // Manual means manual: nothing ran and the store gained nothing.
+    // The model-facing entry refuses by name: this build evaluates a prepared
+    // single-file skill candidate only, and the proposal stays a record.
+    expect(answer).toContain('evolution_replay rejected:')
+    expect(answer).toContain(`"agent_preset"`)
+    expect(answer).toMatch(/single-file SKILL\.md candidate/)
+    expect((await f.evolution.get(PRESET_PROPOSAL)).status).toBe('proposed')
+    // Nothing ran and nothing was written: no run, no spawn, no ledger line, no
+    // experiment and no report.
     expect((await f.h.snapshot(f.storeId)).tasks).toHaveLength(before.tasks.length)
     expect(f.h.spawns).toHaveLength(spawnsBefore)
+    expect((await ledgerLines(f)).map(line => line.kind)).toEqual(linesBefore.map(line => line.kind))
+    expect((await ledgerLines(f)).map(line => line.kind)).not.toContain('experiment_started')
+    expect(existsSync(join(f.h.workspace, 'evolution', 'sandbox', PRESET_PROPOSAL))).toBe(false)
+
+    // The same shape is refused where its lifecycle would start, before any write.
+    const candidateRefusal = await f.evolution
+      .candidate(PRESET_PROPOSAL, { agentPreset: 'v2' }, ROOT, { presetId: PRESET, files: [{ path: 'preset.yml', content: 'preset: new\n' }] })
+      .then(() => '', (error: unknown) => (error instanceof Error ? error.message : String(error)))
+    expect(candidateRefusal).toContain('cannot become a candidate in this build')
+    expect((await ledgerLines(f)).map(line => line.kind)).toEqual(linesBefore.map(line => line.kind))
   })
 })
 

@@ -1,13 +1,12 @@
 /**
- * The evolution plane: candidates, their replay evidence, and human-approved
+ * The evolution plane: candidates, their evidence, and human-approved
  * applies/rollbacks (guide §1.4, S4-E).
  *
  * One owner for the whole lifecycle. The append-only ledger
  * (`<root>/proposals.jsonl`), its fold and state machine, the sandbox
- * materialization under `<root>/sandbox/<proposalId>/`, the replay report
- * schema and the experiment that produces one, the production write behind
- * apply/rollback, and the capability-row surgery those writes perform all live
- * here. The model-facing `evolution_*` tools
+ * materialization under `<root>/sandbox/<proposalId>/`, the experiment that
+ * evaluates a candidate, the production write behind apply/rollback, and the
+ * report schema all live here. The model-facing `evolution_*` tools
  * (`@dangosys/dsh-singularity-agent`) are adapters: they declare schemas,
  * extract the caller, ask the human through the native approval seam, and
  * render what this package decided. Task-runtime executes runs; it does not
@@ -18,11 +17,8 @@
  * @module dsh-singularity-evolution
  */
 
-export * from './config-edit.ts'
 export * from './evolution.ts'
 export * from './experiment.ts'
-export * from './prepare-champion.ts'
-export * from './replay-experiment.ts'
 export * from './replay.ts'
 
 export { default } from './evolution.ts'

@@ -336,24 +336,6 @@ async function admissionRefusal(h: Harness, capability: string): Promise<string>
   throw new Error('the runtime admitted a batch naming an unusable provider')
 }
 
-/** Walk one capability candidate carrying `entry` to `gated`, ready for its promotion checks. */
-async function capabilityCandidateGated(h: Harness, entry: CapabilityConfig, proposalId = 'c1'): Promise<void> {
-  const svc = h.evolution
-  await svc.propose({
-    proposalId,
-    targetType: 'capability',
-    targetId: ROW,
-    baseVersion: 'v1',
-    level: 'L2',
-    rationale: 'the row should grant the verified provider',
-    sourceRefs: ['diagnosis:d1'],
-  }, ROOT_SESSION)
-  await svc.candidate(proposalId, { capabilityTable: 'config.yml#doc1' }, ROOT_SESSION, { name: ROW, entry })
-  await svc.prepare(proposalId, ROOT_SESSION, { capabilityEntry: h.runtime.listCapabilities()[ROW] ?? null })
-  await svc.replay(proposalId, ROOT_SESSION, replayReport(proposalId, 'capability'))
-  await svc.gate(proposalId, gateAnswers([`sandbox/${proposalId}/replay-report.json`]), ROOT_SESSION)
-}
-
 /** Walk one skill candidate named `name` whose sandbox holds `content` to `gated`, ready for its promotion checks. */
 async function skillCandidateGated(h: Harness, content: string, proposalId = 's1', name = SKILL): Promise<void> {
   const svc = h.evolution
@@ -396,40 +378,6 @@ function promotionExperimentContextFor(h: Harness) {
   }
 }
 
-/** The one executed-report shape the replay entry accepts; this file is about the promotion entries, not about running the replay. */
-function replayReport(proposalId: string, targetType: 'capability' | 'skill', candidateContent?: { name: string; sha256: string }): unknown {
-  const side = (taskId: string) => ({ taskId, runId: `r-${taskId}`, outcome: 'verified', criteria: [{ criterionId: 'ac1', verdict: 'pass' }] })
-  return {
-    formatVersion: 1,
-    proposalId,
-    targetType,
-    at: new Date().toISOString(),
-    mode: 'executed',
-    observed: [{
-      taskId: 't-champ',
-      candidateTaskId: 't-candidate',
-      champion: side('t-champ'),
-      candidate: side('t-candidate'),
-      verdictMatch: true,
-      criteriaDiff: [],
-      relation: 'not-worse',
-    }],
-    holdout: {
-      executed: true,
-      tasks: [{
-        taskId: 't-holdout',
-        candidateTaskId: 't-holdout-candidate',
-        champion: side('t-holdout'),
-        candidate: side('t-holdout-candidate'),
-        verdictMatch: true,
-        criteriaDiff: [],
-        relation: 'not-worse',
-      }],
-    },
-    verdict: 'not-worse',
-    ...(targetType === 'skill' && candidateContent !== undefined ? { candidateContent } : {}),
-  }
-}
 
 function gateAnswers(refs: string[]) {
   return {
@@ -521,13 +469,10 @@ describe('one illegal provider, one defect code, every entry that still judges i
     expect(load.defects[0]).toContain(`${shape.defect}:`)
 
     // 3. A capability replacement: the row's own provider, judged before the row
-    //    becomes effective. S4-E EVAL-4 took this consumer away from the evolution
-    //    promotion entry (a capability PROMOTE has no evaluator and is refused by
-    //    name), so the row check is exercised where it still has a live consumer —
-    //    the runtime registry mirror the rollback tool also calls.
-    await capabilityCandidateGated(h, { skills: [SKILL], tools: [...(shape.row[ROW]!.tools ?? [])] })
-    expect(await h.evolution.checkPromotion('c1').catch((error: unknown) => (error instanceof Error ? error.message : String(error))))
-      .toContain('has no evaluator in this build')
+    //    becomes effective. S4-E took this consumer away from the evolution
+    //    promotion entry (a capability proposal cannot even become a candidate in
+    //    this build), so the row check is exercised where it still has a live
+    //    consumer — the runtime registry mirror the rollback tool also calls.
     let capabilityRefusal = ''
     try {
       await h.runtime.applyCapabilityRow(ROW, { skills: [SKILL], tools: [...(shape.row[ROW]!.tools ?? [])] })
@@ -556,15 +501,11 @@ describe('one illegal provider, one defect code, every entry that still judges i
     // The same refusal through the tool a human decision goes through: the skill
     // candidate's defect is what `evolution_decide` reports — it runs the promotion
     // check *before* it asks for approval, so a proposal that cannot be promoted
-    // never burns a sign-off. The capability proposal is refused there too, for the
-    // one reason this build gives every non-skill type (EVAL-4: no evaluator).
+    // never burns a sign-off.
     const toolCtx = { evolution: h.evolution, approval: h.approval, taskRuntime: h.runtime } as never
     const decided = (await defineEvolutionDecideTool(toolCtx).execute({ proposalId: 's1', decision: 'PROMOTE' }, exec(ROOT_SESSION))) as string
     expect(decided).toContain('evolution_decide rejected:')
     expect(decided).toContain(`${shape.defect}:`)
-    const capabilityDecided = (await defineEvolutionDecideTool(toolCtx).execute({ proposalId: 'c1', decision: 'PROMOTE' }, exec(ROOT_SESSION))) as string
-    expect(capabilityDecided).toContain('evolution_decide rejected:')
-    expect(capabilityDecided).toContain('has no evaluator in this build')
     expect(h.approval.request).not.toHaveBeenCalled()
 
     // None of the refusals had a side effect: no row written, no production skill,
@@ -605,13 +546,10 @@ describe('one illegal provider, one defect code, every entry that still judges i
     expect(load.defects).toEqual([])
     expect(load.failed).toBeUndefined()
 
-    // 3. The capability replacement is refused by the evolution entry (EVAL-4: a
-    //    capability PROMOTE has no evaluator), and the row's own provider is
-    //    admitted where it still becomes effective — the runtime registry mirror,
-    //    which runs the same admission pre-check over the replacement.
-    await capabilityCandidateGated(h, { skills: [SKILL], tools: ['filesystem', 'bash'] })
-    await expect(h.evolution.decide('c1', 'PROMOTE', ROOT_SESSION, 'approval:decide')).rejects.toThrow('has no evaluator in this build')
-    expect((await h.evolution.get('c1')).status).toBe('gated')
+    // 3. A capability row's own provider is admitted where it still becomes
+    //    effective — the runtime registry mirror, which runs the same admission
+    //    pre-check over the replacement. The evolution promotion entry no longer
+    //    judges it: a capability proposal cannot become a candidate in this build.
     await h.runtime.applyCapabilityRow(ROW, { skills: [SKILL], tools: ['filesystem', 'bash'] })
     expect(h.runtime.listCapabilities()[ROW]).toEqual({ skills: [SKILL], tools: ['filesystem', 'bash'] })
 

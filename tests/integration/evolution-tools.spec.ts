@@ -199,7 +199,7 @@ it('resolves the interaction services the hitl tools ask through, from the same 
   }
 })
 
-it('drives candidate(mutation) → prepare through the plugin, materializing only under $DSH_HOME/evolution/sandbox', async () => {
+it('refuses a non-skill candidate through the plugin: no candidate, no sandbox, no ledger write', async () => {
   const { tools, home } = await mountAgent()
   try {
     const propose = tools.get('evolution_propose')!
@@ -207,7 +207,6 @@ it('drives candidate(mutation) → prepare through the plugin, materializing onl
     const prepare = tools.get('evolution_prepare')!
     const gate = tools.get('evolution_gate')!
     const list = tools.get('evolution_list')!
-    expect(prepare).toBeDefined()
 
     await propose.execute({
       proposalId: 'p-cap-1',
@@ -218,15 +217,22 @@ it('drives candidate(mutation) → prepare through the plugin, materializing onl
       rationale: 'research needs the verify skill',
       sourceRefs: ['diagnosis:d1'],
     }, exec('root-1'))
+
+    // The model's own entry refuses the lifecycle this build no longer has: a
+    // capability suggestion stays a proposal, and nothing is written.
     const candidateOut = await candidate.execute({
       proposalId: 'p-cap-1',
       versionSet: { capabilityTable: 'config.yml#doc1' },
       mutation: { name: 'research', entry: { preset: 'standard', skills: ['verify'] } },
     }, exec('root-1'))
-    expect(candidateOut).toContain('next: evolution_prepare')
+    expect(candidateOut).toContain('evolution_candidate rejected:')
+    expect(candidateOut).toContain('cannot become a candidate in this build')
 
-    // a mutation-carrying candidate cannot gate before it is prepared
-    const gatedEarly = await gate.execute({
+    const prepared = await prepare.execute({ proposalId: 'p-cap-1' }, exec('root-1'))
+    expect(prepared).toContain('evolution_prepare rejected:')
+    expect(prepared).toContain('cannot record "prepared"')
+
+    const gated = await gate.execute({
       proposalId: 'p-cap-1',
       targetFailureFixed: 'a',
       originalAcceptanceMaintained: 'b',
@@ -236,184 +242,19 @@ it('drives candidate(mutation) → prepare through the plugin, materializing onl
       resourceCostAcceptable: 'f',
       regressionEvidenceRefs: ['/tmp/x'],
     }, exec('root-1'))
-    expect(gatedEarly).toContain('cannot record "gated"')
+    expect(gated).toContain('cannot record "gated"')
 
-    const prepared = await prepare.execute({ proposalId: 'p-cap-1' }, exec('root-1'))
-    expect(prepared).toContain('proposal p-cap-1 [prepared]')
-    expect(prepared).toContain('champion snapshot: captured')
-    // W19: the research row exists in the repo's config.yml, so the champion is config-text sourced
-    expect(prepared).toContain('config.yml row source text')
-
-    const sandbox = join(home, 'evolution', 'sandbox', 'p-cap-1')
-    const patch = await readFile(join(sandbox, 'capability-table.patch.yml'), 'utf8')
-    expect(patch).toContain('whole-row replacement')
-    expect(JSON.parse(patch.trim().split('\n').at(-1)!)).toEqual({ research: { preset: 'standard', skills: ['verify'] } })
-    const champion = await readFile(join(sandbox, 'champion', 'capability-table.entry.yml'), 'utf8')
-    expect(JSON.parse(champion.trim().split('\n').at(-1)!)).toEqual({ research: { preset: 'standard' } })
-    const championSource = await readFile(join(sandbox, 'champion', 'capability-table.source.txt'), 'utf8')
-    expect(championSource).toContain('research:')
-
+    // Only the proposal itself, and no sandbox anywhere near it.
     const ledger = (await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n')
-    expect(ledger.map(line => (JSON.parse(line) as { kind: string }).kind)).toEqual(['proposed', 'candidate', 'prepared'])
+    expect(ledger.map(line => (JSON.parse(line) as { kind: string }).kind)).toEqual(['proposed'])
+    expect(existsSync(join(home, 'evolution', 'sandbox'))).toBe(false)
 
-    const listed = await list.execute({ status: 'prepared' })
-    expect(listed).toContain('p-cap-1 [prepared]')
-    expect(listed).toContain('sandbox')
+    const listed = await list.execute({ status: 'proposed' })
+    expect(listed).toContain('p-cap-1 [proposed]')
   } finally {
     vi.unstubAllEnvs()
   }
 })
-
-
-it('drives the mechanical chain prepared → replayed → gated, with the gate requiring the replay report', async () => {
-  const { tools, home, replayTask } = await mountAgent()
-  try {
-    const propose = tools.get('evolution_propose')!
-    const candidate = tools.get('evolution_candidate')!
-    const prepare = tools.get('evolution_prepare')!
-    const replay = tools.get('evolution_replay')!
-    const gate = tools.get('evolution_gate')!
-    const list = tools.get('evolution_list')!
-    expect(replay).toBeDefined()
-
-    await propose.execute({
-      proposalId: 'p-replay-1',
-      level: 'L2',
-      baseVersion: 'v1',
-      targetType: 'capability',
-      targetId: 'research',
-      rationale: 'research needs the verify skill',
-      sourceRefs: ['diagnosis:d1'],
-    }, exec('root-1'))
-    await candidate.execute({
-      proposalId: 'p-replay-1',
-      versionSet: { capabilityTable: 'config.yml#doc1' },
-      mutation: { name: 'research', entry: { preset: 'standard', skills: ['verify'] } },
-    }, exec('root-1'))
-    await prepare.execute({ proposalId: 'p-replay-1' }, exec('root-1'))
-
-    // a prepared mechanical mutation cannot gate before the replay
-    const gatedEarly = await gate.execute({
-      proposalId: 'p-replay-1',
-      targetFailureFixed: 'a', originalAcceptanceMaintained: 'b', existingRegressionMaintained: 'c',
-      noUnacceptableSideEffects: 'd', holdoutPerformanceAcceptable: 'e', resourceCostAcceptable: 'f',
-      regressionEvidenceRefs: ['ev-champ'],
-    }, exec('root-1'))
-    expect(gatedEarly).toContain('cannot record "gated"')
-    expect(gatedEarly).toContain('evolution_replay')
-
-    const replayed = await replay.execute({ proposalId: 'p-replay-1', taskIds: ['t-champ'] }, exec('root-1'))
-    expect(replayed).toContain('proposal p-replay-1 [replayed] capability research — verdict: not-worse')
-    expect(replayed).toContain('t-champ champion verified → candidate verified')
-    expect(replayTask).toHaveBeenCalledOnce()
-    expect(replayTask.mock.calls[0]![2]).toMatchObject({
-      lineage: 'evolution-replay:p-replay-1',
-      overlay: { capabilityOverrides: { research: { preset: 'standard', skills: ['verify'] } } },
-    })
-
-    // the report sits in the sandbox; the ledger carries the replayed record
-    const report = JSON.parse(await readFile(join(home, 'evolution', 'sandbox', 'p-replay-1', 'replay-report.json'), 'utf8'))
-    expect(report.mode).toBe('executed')
-    expect(report.verdict).toBe('not-worse')
-    expect(report.observed[0]).toMatchObject({ taskId: 't-champ', verdictMatch: true, relation: 'not-worse' })
-    const ledger = (await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n')
-    expect(ledger.map(line => (JSON.parse(line) as { kind: string }).kind)).toEqual(['proposed', 'candidate', 'prepared', 'replayed'])
-
-    // the gate must cite the replay report among its regression evidence
-    const gatedMissing = await gate.execute({
-      proposalId: 'p-replay-1',
-      targetFailureFixed: 'a', originalAcceptanceMaintained: 'b', existingRegressionMaintained: 'c',
-      noUnacceptableSideEffects: 'd', holdoutPerformanceAcceptable: 'e', resourceCostAcceptable: 'f',
-      regressionEvidenceRefs: ['ev-champ'],
-    }, exec('root-1'))
-    expect(gatedMissing).toContain('must cite the replay report')
-    const gated = await gate.execute({
-      proposalId: 'p-replay-1',
-      targetFailureFixed: 'a', originalAcceptanceMaintained: 'b', existingRegressionMaintained: 'c',
-      noUnacceptableSideEffects: 'd', holdoutPerformanceAcceptable: 'e', resourceCostAcceptable: 'f',
-      regressionEvidenceRefs: ['sandbox/p-replay-1/replay-report.json', 'ev-champ'],
-    }, exec('root-1'))
-    expect(gated).toContain('[gated] gate answered 6/6')
-
-    const listed = await list.execute({ status: 'gated' })
-    expect(listed).toContain('p-replay-1 [gated]')
-    expect(listed).toContain('replayed: verdict not-worse')
-  } finally {
-    vi.unstubAllEnvs()
-  }
-})
-
-
-it('stops the mechanical chain at the gate for agent_preset: the manual report is recorded but never promoted', async () => {
-  const { tools, home, approval, replayTask } = await mountAgent()
-  try {
-    const championDir = join(home, '.agent-presets', 'bb-verify')
-    await mkdir(championDir, { recursive: true })
-    await writeFile(join(championDir, 'preset.yml'), 'preset: old\n')
-
-    const propose = tools.get('evolution_propose')!
-    const candidate = tools.get('evolution_candidate')!
-    const prepare = tools.get('evolution_prepare')!
-    const replay = tools.get('evolution_replay')!
-    const gate = tools.get('evolution_gate')!
-    const decide = tools.get('evolution_decide')!
-    const list = tools.get('evolution_list')!
-
-    await propose.execute({
-      proposalId: 'p-preset-1',
-      level: 'L2',
-      baseVersion: 'v1',
-      targetType: 'agent_preset',
-      targetId: 'bb-verify',
-      rationale: 'the preset never mentions empty-input fixtures',
-      sourceRefs: ['diagnosis:d1'],
-    }, exec('root-1'))
-    await candidate.execute({
-      proposalId: 'p-preset-1',
-      versionSet: { agentPreset: 'v2' },
-      mutation: { presetId: 'bb-verify', files: [{ path: 'preset.yml', content: 'preset: new\n' }] },
-    }, exec('root-1'))
-    const prepared = await prepare.execute({ proposalId: 'p-preset-1' }, exec('root-1'))
-    expect(prepared).toContain('champion snapshot: captured')
-
-    // The v1 path, unchanged for every non-skill targetType: agent_preset is
-    // manual — the report is recorded and nothing executes.
-    const replayed = await replay.execute({ proposalId: 'p-preset-1', taskIds: ['t-champ'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))
-    expect(replayed).toContain('proposal p-preset-1 [replayed] manual — nothing was executed')
-    expect(replayed).toContain('report: sandbox/p-preset-1/replay-report.json')
-    expect(replayTask).not.toHaveBeenCalled()
-    const manualReport = JSON.parse(await readFile(join(home, 'evolution', 'sandbox', 'p-preset-1', 'replay-report.json'), 'utf8'))
-    expect(manualReport).toMatchObject({ formatVersion: 1, mode: 'manual', verdict: 'manual' })
-
-    const gated = await gate.execute({
-      proposalId: 'p-preset-1',
-      targetFailureFixed: 'a', originalAcceptanceMaintained: 'b', existingRegressionMaintained: 'c',
-      noUnacceptableSideEffects: 'd', holdoutPerformanceAcceptable: 'e', resourceCostAcceptable: 'f',
-      regressionEvidenceRefs: ['sandbox/p-preset-1/replay-report.json', 'ev-champ'],
-    }, exec('root-1'))
-    expect(gated).toContain('[gated]')
-
-    // A manual report is never promotion evidence, and neither is any report at
-    // all for this target type: S4-E §F.2/EVAL-4 gives a capability, agent_preset
-    // or task_definition proposal no evaluator in this build, so its PROMOTE is
-    // refused by name and no human is asked to promote it.
-    const decided = await decide.execute({ proposalId: 'p-preset-1', decision: 'PROMOTE' }, exec('root-1'))
-    expect(decided).toContain('evolution_decide rejected:')
-    expect(decided).toContain('has no evaluator in this build')
-    expect(approval.request).not.toHaveBeenCalled()
-    expect(await readFile(join(championDir, 'preset.yml'), 'utf8')).toBe('preset: old\n')
-
-    const ledger = (await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n')
-    expect(ledger.map(line => (JSON.parse(line) as { kind: string }).kind))
-      .toEqual(['proposed', 'candidate', 'prepared', 'replayed', 'gated'])
-    const listed = await list.execute({ status: 'gated' })
-    expect(listed).toContain('p-preset-1 [gated]')
-    expect(listed).toContain('replayed: verdict manual')
-  } finally {
-    vi.unstubAllEnvs()
-  }
-})
-
 it('refuses a tampered skill candidate through the plugin, leaving production and the ledger untouched', async () => {
   const { tools, home, replayTask } = await mountAgent()
   try {
@@ -509,48 +350,18 @@ it('refuses a skill call the two-sided experiment cannot honour, without running
   }
 })
 
-it('refuses a capability PROMOTE and a skill gate without an experiment through the tools, leaving the ledger at gated', async () => {
+it('refuses a skill gate without an experiment through the tools, leaving the ledger at prepared', async () => {
   const { tools, home, approval } = await mountAgent()
   try {
     const propose = tools.get('evolution_propose')!
     const candidate = tools.get('evolution_candidate')!
     const prepare = tools.get('evolution_prepare')!
-    const replay = tools.get('evolution_replay')!
     const gate = tools.get('evolution_gate')!
-    const decide = tools.get('evolution_decide')!
     const answers = {
       targetFailureFixed: 'a', originalAcceptanceMaintained: 'b', existingRegressionMaintained: 'c',
       noUnacceptableSideEffects: 'd', holdoutPerformanceAcceptable: 'e', resourceCostAcceptable: 'f',
       regressionEvidenceRefs: ['ev-champ'],
     }
-
-    // A capability candidate can be recorded and gated; its PROMOTE is refused by
-    // name (EVAL-4: no evaluator for this target type in this build).
-    await propose.execute({
-      proposalId: 'p-cap-eval4',
-      level: 'L2',
-      baseVersion: 'v1',
-      targetType: 'capability',
-      targetId: 'research',
-      rationale: 'the row should grant the verify skill',
-      sourceRefs: ['diagnosis:d1'],
-    }, exec('root-1'))
-    await candidate.execute({
-      proposalId: 'p-cap-eval4',
-      versionSet: { capabilityTable: 'config.yml#doc1' },
-      mutation: { name: 'research', entry: { preset: 'standard', skills: ['verify'] } },
-    }, exec('root-1'))
-    await prepare.execute({ proposalId: 'p-cap-eval4' }, exec('root-1'))
-    await replay.execute({ proposalId: 'p-cap-eval4', taskIds: ['t-champ'] }, exec('root-1'))
-    await gate.execute({
-      proposalId: 'p-cap-eval4',
-      ...answers,
-      regressionEvidenceRefs: ['sandbox/p-cap-eval4/replay-report.json', 'ev-champ'],
-    }, exec('root-1'))
-    const refusedDecide = await decide.execute({ proposalId: 'p-cap-eval4', decision: 'PROMOTE' }, exec('root-1'))
-    expect(refusedDecide).toContain('evolution_decide rejected:')
-    expect(refusedDecide).toContain('has no evaluator in this build')
-    expect(approval.request).not.toHaveBeenCalled()
 
     // A skill candidate gates on its experiment: with none recorded, the gate is
     // refused and only the ledger's three lifecycle lines exist.
@@ -572,12 +383,17 @@ it('refuses a capability PROMOTE and a skill gate without an experiment through 
     const refusedGate = await gate.execute({ proposalId: 'p-skill-eval4', ...answers }, exec('root-1'))
     expect(refusedGate).toContain('evolution_gate rejected:')
     expect(refusedGate).toContain('has no two-sided experiment')
+    // and the same proposal cannot be decided on a gate it never answered
+    const decide = tools.get('evolution_decide')!
+    const refusedDecide = await decide.execute({ proposalId: 'p-skill-eval4', decision: 'PROMOTE' }, exec('root-1'))
+    expect(refusedDecide).toContain('evolution_decide rejected:')
+    expect(approval.request).not.toHaveBeenCalled()
 
     const ledger = (await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n')
       .map(line => (JSON.parse(line) as { kind: string }).kind)
     expect(ledger).not.toContain('decided')
     expect(ledger).not.toContain('applied')
-    expect(ledger.filter(kind => kind === 'gated')).toHaveLength(1)
+    expect(ledger).not.toContain('gated')
   } finally {
     vi.unstubAllEnvs()
   }

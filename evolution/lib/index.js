@@ -1,4 +1,4 @@
-import { appendFile, cp, lstat, mkdir, readFile, readdir, readlink, realpath, rm, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, readFile, readdir, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -7,224 +7,6 @@ import { SessionId } from "@deepseek-ai/dsh-session";
 import { capabilityToolQuery, loadSkillSidecar, optionalService, readVerifiedFile, registeredVerifierIds, registeredVerifierVocabulary, unlistableVerifierRefusal, validateSkillProvider, walkVerified } from "@dangosys/dsh-singularity-task-runtime";
 import { rootTaskStoreId } from "@dangosys/dsh-singularity-task";
 
-//#region src/config-edit.ts
-/** A plain YAML scalar needs no quoting; anything else renders JSON-quoted (valid YAML 1.2 flow). */
-function flowScalar(value) {
-	return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) ? value : JSON.stringify(value);
-}
-/**
-* The row's flow value, keys in the mutation schema's fixed order:
-* `{ skills: [verify], preset: bb-verify, mcpServers: [bbdev] }`. Every key of
-* `CapabilityConfig` renders, `mcpServers` included — a row that dropped it
-* would leave the runtime override granting a server plane the restarted
-* process no longer mounts.
-*/
-function flowEntry(entry) {
-	const parts = [];
-	if (entry.skills !== void 0) parts.push(`skills: [${entry.skills.map(flowScalar).join(", ")}]`);
-	if (entry.tools !== void 0) parts.push(`tools: [${entry.tools.map(flowScalar).join(", ")}]`);
-	if (entry.preset !== void 0) parts.push(`preset: ${flowScalar(entry.preset)}`);
-	if (entry.permission !== void 0) parts.push(`permission: ${flowScalar(entry.permission)}`);
-	if (entry.mcpServers !== void 0) parts.push(`mcpServers: [${entry.mcpServers.map(flowScalar).join(", ")}]`);
-	return `{ ${parts.join(", ")} }`;
-}
-/** The row key as written: a plain scalar when safe, else its JSON-quoted form. */
-function keySpelling(name) {
-	return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name) ? name : JSON.stringify(name);
-}
-/** Does this line open the capabilities row for `name` (`name: {…}` or block-form `name:`)? */
-function rowKeyMatch(trimmed, name) {
-	for (const spelling of [name, JSON.stringify(name)]) if (trimmed === `${spelling}:` || trimmed.startsWith(`${spelling}: `) || trimmed.startsWith(`${spelling}:\t`)) return true;
-	return false;
-}
-function indentOf(line) {
-	return line.length - line.trimStart().length;
-}
-function isCommentOrBlank(line) {
-	const trimmed = line.trim();
-	return trimmed === "" || trimmed.startsWith("#");
-}
-/** The capabilities mapping header: `capabilities:`, `capabilities: {}`, and an optional trailing comment. */
-const CAPABILITIES_HEADER = /^\s+capabilities:\s*(\{\s*\})?\s*(#.*)?$/;
-/** The trailing `# …` comment of a header line, whitespace-normalized, or `''`. */
-function commentSuffix(line) {
-	const comment = /\s(#.*)$/.exec(line)?.[1];
-	return comment === void 0 ? "" : ` ${comment}`;
-}
-/**
-* Exclusive end of the entry starting at `head`: its own line, the deeper lines
-* of a block-form body, and the comment or blank lines that ride with it. A
-* comment or blank line indented at or above the mapping-header indent ends the
-* entry — it belongs to the header (or to the next sibling), not to this row —
-* unless the next content line is still part of this entry's deeper body, which
-* keeps a blank line *inside* a block body with the entry.
-*/
-function entryEnd(lines, head, regionEnd, headerIndent) {
-	const indent = indentOf(lines[head]);
-	let end = head + 1;
-	for (let index = head + 1; index < regionEnd; index += 1) {
-		const line = lines[index];
-		if (isCommentOrBlank(line)) {
-			let after = index + 1;
-			while (after < regionEnd && isCommentOrBlank(lines[after])) after += 1;
-			if (!(after < regionEnd && indentOf(lines[after]) > indent) && indentOf(line) <= headerIndent) break;
-			end = index + 1;
-			continue;
-		}
-		if (indentOf(line) <= indent) break;
-		end = index + 1;
-	}
-	return end;
-}
-/**
-* Locate the capabilities row for `name`, scanning exactly the region
-* `editCapabilityRow` edits. Throws — locating nothing — when document 1 has no
-* task-runtime entry, more than one (the error names every matching line —
-* refusing to guess which one governs), or no capabilities mapping.
-*/
-function locateCapabilityRow(text, name) {
-	const eol = text.includes("\r\n") ? "\r\n" : "\n";
-	const lines = text.split(eol);
-	const docEnd = lines.findIndex((line) => line.trim() === "---");
-	const doc1End = docEnd === -1 ? lines.length : docEnd;
-	const itemIndices = [];
-	for (let index = 0; index < doc1End; index += 1) if (/^\s*-\s+id:\s*task-runtime\s*$/.test(lines[index])) itemIndices.push(index);
-	if (itemIndices.length === 0) throw new Error("config.yml: document 1 has no \"- id: task-runtime\" entry");
-	if (itemIndices.length > 1) throw new Error(`config.yml: document 1 has ${itemIndices.length} "- id: task-runtime" entries (lines ${itemIndices.map((index) => index + 1).join(", ")}); refusing to guess — keep exactly one`);
-	const itemIndex = itemIndices[0];
-	const itemIndent = indentOf(lines[itemIndex]);
-	let blockEnd = doc1End;
-	for (let index = itemIndex + 1; index < doc1End; index += 1) {
-		const line = lines[index];
-		if (!isCommentOrBlank(line) && indentOf(line) <= itemIndent) {
-			blockEnd = index;
-			break;
-		}
-	}
-	let capIndex = -1;
-	for (let index = itemIndex + 1; index < blockEnd; index += 1) if (CAPABILITIES_HEADER.test(lines[index])) {
-		capIndex = index;
-		break;
-	}
-	if (capIndex === -1) throw new Error("config.yml: the task-runtime entry has no \"capabilities:\" mapping");
-	const capIndent = indentOf(lines[capIndex]);
-	const capCollapsed = /^\s+capabilities:\s*\{\s*\}/.test(lines[capIndex]);
-	let regionEnd = blockEnd;
-	for (let index = capIndex + 1; index < blockEnd; index += 1) {
-		const line = lines[index];
-		if (!isCommentOrBlank(line) && indentOf(line) <= capIndent) {
-			regionEnd = index;
-			break;
-		}
-	}
-	let rowStart = -1;
-	let rowSpan = 0;
-	let lastEntryEnd = -1;
-	let entryIndent = capIndent + 2;
-	for (let index = capIndex + 1; index < regionEnd; index += 1) {
-		const line = lines[index];
-		if (isCommentOrBlank(line) || index < lastEntryEnd) continue;
-		lastEntryEnd = entryEnd(lines, index, regionEnd, capIndent);
-		entryIndent = indentOf(line);
-		if (rowStart === -1 && rowKeyMatch(line.trimStart(), name)) {
-			rowStart = index;
-			rowSpan = lastEntryEnd - index;
-		}
-	}
-	let insertAt = lastEntryEnd;
-	if (insertAt === -1) {
-		insertAt = capIndex + 1;
-		while (insertAt < regionEnd && isCommentOrBlank(lines[insertAt])) insertAt += 1;
-	}
-	return {
-		lines,
-		eol,
-		capIndex,
-		capIndent,
-		capCollapsed,
-		regionEnd,
-		rowStart,
-		rowSpan,
-		insertAt,
-		entryIndent
-	};
-}
-/**
-* The row's verbatim source lines (`\n`-joined, block-form body and riding
-* comments included), or null when no row for `name` exists. The rollback
-* anchor of a capability prepare (W19, guide §4.2 #18): restoring these lines
-* beats re-rendering the registry entry, whose schema fills default arrays the
-* source text never spelled out.
-*/
-function readCapabilityRowSource(text, name) {
-	const located = locateCapabilityRow(text, name);
-	if (located.rowStart === -1) return null;
-	return located.lines.slice(located.rowStart, located.rowStart + located.rowSpan).join("\n");
-}
-/**
-* Splice `source` (the `\n`-joined lines `readCapabilityRowSource` captured at
-* prepare time) back over the current row for `name`, byte-for-byte; when the
-* row is gone, insert the lines where a new row would go. Every other byte of
-* the file is preserved, exactly as with `editCapabilityRow`.
-*/
-function restoreCapabilityRowSource(text, name, source) {
-	const { lines, eol, capIndex, capIndent, capCollapsed, rowStart, rowSpan, insertAt } = locateCapabilityRow(text, name);
-	const sourceLines = source.replace(/\r?\n$/, "").split("\n");
-	if (rowStart !== -1) {
-		lines.splice(rowStart, rowSpan, ...sourceLines);
-		return {
-			text: lines.join(eol),
-			action: "replaced"
-		};
-	}
-	if (capCollapsed) lines[capIndex] = `${" ".repeat(capIndent)}capabilities:${commentSuffix(lines[capIndex])}`;
-	lines.splice(insertAt, 0, ...sourceLines);
-	return {
-		text: lines.join(eol),
-		action: "added"
-	};
-}
-/**
-* Replace (`entry` given, row exists), add (`entry` given, row absent), or
-* remove (`entry` null) the capabilities row for `name`. The row is one line in
-* flow form (`name: { … }`) or a block-form span (`name:` plus deeper-indented
-* lines and the comment lines that ride with it); a replacement always lands as
-* one flow line at the row's indent, an addition after the last existing row's
-* whole span. Removing the final row collapses the mapping header to
-* `capabilities: {}` so the document still parses as a mapping, and adding to a
-* collapsed header reopens it — `capabilities: {}` cannot take block rows below
-* it. Throws — editing nothing — when document 1 has no task-runtime entry, more
-* than one (the error names every matching line — refusing to guess which one
-* governs), no capabilities mapping, or a removal names no existing row.
-*/
-function editCapabilityRow(text, name, entry) {
-	const { lines, eol, capIndex, capIndent, capCollapsed, regionEnd, rowStart, rowSpan, insertAt, entryIndent } = locateCapabilityRow(text, name);
-	const rowLine = `${" ".repeat(rowStart === -1 ? entryIndent : indentOf(lines[rowStart]))}${keySpelling(name)}: ${flowEntry(entry ?? {})}`;
-	if (entry !== null && rowStart !== -1) {
-		lines.splice(rowStart, rowSpan, rowLine);
-		return {
-			text: lines.join(eol),
-			action: "replaced"
-		};
-	}
-	if (entry !== null) {
-		if (capCollapsed) lines[capIndex] = `${" ".repeat(capIndent)}capabilities:${commentSuffix(lines[capIndex])}`;
-		lines.splice(insertAt, 0, rowLine);
-		return {
-			text: lines.join(eol),
-			action: "added"
-		};
-	}
-	if (rowStart === -1) throw new Error(`config.yml: no capabilities row for "${name}" to remove`);
-	lines.splice(rowStart, rowSpan);
-	if (!lines.slice(capIndex + 1, regionEnd - rowSpan).some((line) => !isCommentOrBlank(line))) lines[capIndex] = `${" ".repeat(capIndent)}capabilities: {}`;
-	return {
-		text: lines.join(eol),
-		action: "removed"
-	};
-}
-
-//#endregion
 //#region src/replay.ts
 const REPLAY_VERDICTS = [
 	"not-worse",
@@ -247,7 +29,9 @@ const OUTCOME_RANK = {
 * Compare one task's two sides. A regression is mechanical: the candidate's
 * outcome ranks below the champion's, or a criterion both sides report flipped
 * from pass to anything else. An unrankable candidate outcome (cancelled) is
-* inconclusive — it says nothing about the candidate's quality.
+* inconclusive — it says nothing about the candidate's quality. The v2 comparer
+* ({@link compareExperimentSides}) reads exactly this answer off one sample's
+* two sides.
 */
 function compareReplaySides(champion, candidate) {
 	const championCriteria = new Map(champion.criteria.map((item) => [item.criterionId, item.verdict]));
@@ -277,95 +61,6 @@ function compareReplaySides(champion, candidate) {
 		criteriaDiff,
 		relation: candidateRank < championRank || regressedCriterion ? "worse" : changedContract ? "inconclusive" : "not-worse"
 	};
-}
-/** The overall verdict over one group of comparisons: any regression wins; absent that, any inconclusive holds it back. */
-function overallReplayVerdict(comparisons) {
-	if (comparisons.some((item) => item.relation === "worse")) return "worse";
-	if (comparisons.length === 0 || comparisons.some((item) => item.relation === "inconclusive")) return "inconclusive";
-	if (comparisons.every((item) => item.relation === "manual")) return "manual";
-	if (comparisons.some((item) => item.relation === "manual")) return "inconclusive";
-	return "not-worse";
-}
-function isRecord$2(value) {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-function assertSide(value, field) {
-	if (!isRecord$2(value) || typeof value.taskId !== "string" || value.taskId.length === 0 || ![
-		"verified",
-		"failed",
-		"cancelled"
-	].includes(value.outcome) || !Array.isArray(value.criteria)) throw new Error(`evolution: replay report ${field} must carry a taskId, a valid outcome and criteria`);
-	const ids = /* @__PURE__ */ new Set();
-	for (const criterion of value.criteria) {
-		if (!isRecord$2(criterion) || typeof criterion.criterionId !== "string" || criterion.criterionId.length === 0 || ids.has(criterion.criterionId) || ![
-			"pass",
-			"fail",
-			"inconclusive"
-		].includes(criterion.verdict) || criterion.command !== void 0 && typeof criterion.command !== "string") throw new Error(`evolution: replay report ${field} has an invalid or duplicate criterion`);
-		ids.add(criterion.criterionId);
-	}
-	if (value.outcome === "verified" && ids.size === 0) throw new Error(`evolution: replay report ${field} verified outcome needs criterion evidence`);
-}
-function assertComparison(value, field, mode) {
-	if (!isRecord$2(value)) throw new Error(`evolution: replay report ${field} must be an object`);
-	if (typeof value.taskId !== "string" || value.taskId.length === 0) throw new Error(`evolution: replay report ${field}.taskId must be a non-empty string`);
-	if (!isRecord$2(value.champion) || typeof value.champion.outcome !== "string") throw new Error(`evolution: replay report ${field}.champion must carry an outcome`);
-	if (typeof value.relation !== "string" || !REPLAY_RELATIONS.includes(value.relation)) throw new Error(`evolution: replay report ${field}.relation must be one of ${REPLAY_RELATIONS.join(" / ")}`);
-	assertSide(value.champion, `${field}.champion`);
-	if (value.taskId !== value.champion.taskId) throw new Error(`evolution: replay report ${field} champion identity mismatch`);
-	if (mode === "manual") {
-		if (value.relation !== "manual" || value.candidate !== void 0) throw new Error(`evolution: replay report ${field} manual comparison cannot claim an executed candidate`);
-		return;
-	}
-	assertSide(value.candidate, `${field}.candidate`);
-	if (value.candidateTaskId !== value.candidate.taskId || value.candidate.taskId === value.taskId) throw new Error(`evolution: replay report ${field} candidate identity mismatch`);
-	const computed = compareReplaySides(value.champion, value.candidate);
-	if (value.relation !== computed.relation || value.verdictMatch !== computed.verdictMatch || JSON.stringify(value.criteriaDiff) !== JSON.stringify(computed.criteriaDiff)) throw new Error(`evolution: replay report ${field} comparison does not match its evidence`);
-}
-/**
-* Validate a report against the proposal it claims to serve. The v1 manual
-* boundary is enforced here: only an agent_preset replay may record
-* `mode: 'manual'` (the preset roster scans constructor-fixed roots and cannot
-* mount a sandbox-materialized preset), and only a manual report may carry the
-* `manual` verdict — every other targetType must produce executed evidence.
-* A skill report must additionally carry the candidate content identity
-* (`candidateContent`) the replay ran against; equality with the prepared
-* record is the service's check, not this schema's.
-*/
-function assertReplayReport(proposal, report) {
-	if (!isRecord$2(report)) throw new Error("evolution: replay report must be an object");
-	if (report.formatVersion !== 1) throw new Error("evolution: replay report formatVersion must be 1");
-	if (report.proposalId !== proposal.proposalId) throw new Error(`evolution: replay report proposalId "${String(report.proposalId)}" does not match "${proposal.proposalId}"`);
-	if (report.targetType !== proposal.targetType) throw new Error(`evolution: replay report targetType "${String(report.targetType)}" does not match "${proposal.targetType}"`);
-	if (typeof report.at !== "string" || report.at.length === 0) throw new Error("evolution: replay report.at must be a non-empty string");
-	if (report.mode !== "executed" && report.mode !== "manual") throw new Error("evolution: replay report mode must be \"executed\" or \"manual\"");
-	if (report.mode === "manual") {
-		if (proposal.targetType !== "agent_preset") throw new Error(`evolution: a manual replay report is only valid for agent_preset proposals, not "${proposal.targetType}"`);
-		if (typeof report.manualReason !== "string" || report.manualReason.length === 0) throw new Error("evolution: a manual replay report requires a manualReason");
-	}
-	if (typeof report.verdict !== "string" || !REPLAY_VERDICTS.includes(report.verdict)) throw new Error(`evolution: replay report verdict must be one of ${REPLAY_VERDICTS.join(" / ")}`);
-	if (report.mode === "manual" && report.verdict !== "manual") throw new Error("evolution: a manual replay report must carry verdict \"manual\"");
-	if (report.mode === "executed" && report.verdict === "manual") throw new Error("evolution: an executed replay report cannot carry verdict \"manual\"");
-	if (!Array.isArray(report.observed)) throw new Error("evolution: replay report.observed must be an array");
-	report.observed.forEach((item, index) => assertComparison(item, `observed[${index}]`, report.mode));
-	if (!isRecord$2(report.holdout) || typeof report.holdout.executed !== "boolean" || !Array.isArray(report.holdout.tasks)) throw new Error("evolution: replay report.holdout must be { executed: boolean, tasks: [] }");
-	report.holdout.tasks.forEach((item, index) => assertComparison(item, `holdout.tasks[${index}]`, report.mode));
-	if (report.holdout.executed !== report.holdout.tasks.length > 0) throw new Error("evolution: replay report.holdout.executed must agree with its task list (empty = not run)");
-	if (report.mode === "executed" && report.observed.length === 0) throw new Error("evolution: an executed replay report needs at least one observed task comparison");
-	const comparisons = [...report.observed, ...report.holdout.tasks];
-	const taskIds = comparisons.map((item) => item.taskId);
-	const candidateIds = comparisons.flatMap((item) => item.candidate === void 0 ? [] : [item.candidate.taskId]);
-	if (new Set(taskIds).size !== taskIds.length || new Set(candidateIds).size !== candidateIds.length || candidateIds.some((id) => taskIds.includes(id))) throw new Error("evolution: replay report observed and holdout must use distinct champion and candidate tasks");
-	if (report.mode === "executed" && report.verdict !== overallReplayVerdict(comparisons)) throw new Error("evolution: replay report verdict does not match its comparisons");
-	if (proposal.targetType === "skill") {
-		const identity = report.candidateContent;
-		if (!isRecord$2(identity) || typeof identity.name !== "string" || identity.name.length === 0 || typeof identity.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(identity.sha256)) throw new Error("evolution: a skill replay report must carry candidateContent { name, sha256 } bound at prepare — evidence without the candidate content identity predates content binding; propose a new candidate and re-evaluate it");
-	}
-}
-/** A human approval cannot substitute for two independent, non-regressing replay groups. */
-function assertReplayPromotable(report) {
-	if (report.mode !== "executed") throw new Error("evolution: promotion requires executed replay evidence, not a manual report");
-	for (const [name, tasks] of [["observed", report.observed], ["holdout", report.holdout.tasks]]) if (overallReplayVerdict(tasks) !== "not-worse") throw new Error(`evolution: promotion requires non-empty ${name} replay with no regressions or inconclusive results`);
 }
 /**
 * The comparer a v2 report names, and the only one this build can re-check:
@@ -518,11 +213,14 @@ const EXPERIMENT_CONDITION_VERDICTS = [
 	"fail",
 	"inconclusive"
 ];
+function isRecord$1(value) {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 function isHex64$1(value) {
 	return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
 function assertIdentity(value, field) {
-	if (!isRecord$2(value) || typeof value.name !== "string" || value.name.length === 0 || !isHex64$1(value.sha256)) throw new Error(`evolution: experiment report ${field} must be a content identity { name, sha256 }`);
+	if (!isRecord$1(value) || typeof value.name !== "string" || value.name.length === 0 || !isHex64$1(value.sha256)) throw new Error(`evolution: experiment report ${field} must be a content identity { name, sha256 }`);
 }
 /**
 * Validate a frozen identity block: every member present and shaped, the
@@ -533,16 +231,16 @@ function assertIdentity(value, field) {
 * checks a live run's record passes.
 */
 function assertFrozenExperiment(value) {
-	if (!isRecord$2(value)) throw new Error("evolution: experiment report frozen must be an object");
+	if (!isRecord$1(value)) throw new Error("evolution: experiment report frozen must be an object");
 	if (typeof value.proposalId !== "string" || value.proposalId.length === 0) throw new Error("evolution: experiment report frozen.proposalId must be a non-empty string");
 	if (!Number.isInteger(value.repetition) || value.repetition < 0) throw new Error("evolution: experiment report frozen.repetition must be a non-negative integer");
 	assertIdentity(value.candidate, "frozen.candidate");
 	if (value.productionBaseline !== void 0) assertIdentity(value.productionBaseline, "frozen.productionBaseline");
 	assertModelSelection(value.model, "frozen.model");
 	assertExperimentBudget(value.budget, "frozen.budget");
-	if (!isRecord$2(value.snapshot) || typeof value.snapshot.sourceDir !== "string" || value.snapshot.sourceDir.length === 0 || !isHex64$1(value.snapshot.digest)) throw new Error("evolution: experiment report frozen.snapshot must be { sourceDir, digest } with a SHA-256 content digest");
+	if (!isRecord$1(value.snapshot) || typeof value.snapshot.sourceDir !== "string" || value.snapshot.sourceDir.length === 0 || !isHex64$1(value.snapshot.digest)) throw new Error("evolution: experiment report frozen.snapshot must be { sourceDir, digest } with a SHA-256 content digest");
 	if (value.comparerVersion !== EXPERIMENT_COMPARER_VERSION) throw new Error(`evolution: experiment report frozen.comparerVersion must be "${EXPERIMENT_COMPARER_VERSION}" — got ${JSON.stringify(value.comparerVersion)}; a report this build cannot re-derive is refused, not trusted`);
-	if (!isRecord$2(value.overlay) || typeof value.overlay.baseline !== "string" || value.overlay.baseline.length === 0 || typeof value.overlay.candidate !== "string" || value.overlay.candidate.length === 0) throw new Error("evolution: experiment report frozen.overlay must name what each side ran under");
+	if (!isRecord$1(value.overlay) || typeof value.overlay.baseline !== "string" || value.overlay.baseline.length === 0 || typeof value.overlay.candidate !== "string" || value.overlay.candidate.length === 0) throw new Error("evolution: experiment report frozen.overlay must name what each side ran under");
 	if (!Array.isArray(value.samples) || value.samples.length === 0) throw new Error("evolution: experiment report frozen.samples must be a non-empty array");
 	const taskIds = /* @__PURE__ */ new Set();
 	value.samples.forEach((sample, index) => assertFrozenSample(sample, `frozen.samples[${index}]`, taskIds));
@@ -551,7 +249,7 @@ function assertFrozenExperiment(value) {
 	if (!roles.includes("holdout")) throw new Error("evolution: an experiment frozen block needs at least one holdout sample (§F.2: the candidate must not be selected on every case)");
 }
 function assertExperimentBudget(value, field) {
-	if (!isRecord$2(value)) throw new Error(`evolution: ${field} must be an object (the whole experiment's token and wall-clock ceilings)`);
+	if (!isRecord$1(value)) throw new Error(`evolution: ${field} must be an object (the whole experiment's token and wall-clock ceilings)`);
 	for (const key of Object.keys(value)) if (key !== "wallTimeMs" && key !== "maxTokens" && key !== "note") throw new Error(`evolution: ${field} has unknown key "${key}"`);
 	for (const key of ["wallTimeMs", "maxTokens"]) {
 		const member = value[key];
@@ -560,7 +258,7 @@ function assertExperimentBudget(value, field) {
 	if (value.note !== void 0 && (typeof value.note !== "string" || value.note.length === 0)) throw new Error(`evolution: ${field}.note must be a non-empty string`);
 }
 function assertModelSelection(value, field) {
-	if (!isRecord$2(value)) throw new Error(`evolution: experiment report ${field} must be the structured model selection { provider, model } this build froze — a record that froze a bare string cannot name the route its runs took, so it is refused rather than read as one`);
+	if (!isRecord$1(value)) throw new Error(`evolution: experiment report ${field} must be the structured model selection { provider, model } this build froze — a record that froze a bare string cannot name the route its runs took, so it is refused rather than read as one`);
 	for (const key of Object.keys(value)) if (![
 		"provider",
 		"model",
@@ -575,14 +273,14 @@ function assertModelSelection(value, field) {
 	if (value.label !== `${value.provider}/${value.model}`) throw new Error(`evolution: experiment report ${field}.label must be the derived display form "${value.provider}/${value.model}" — the label is a rendering of the structured members, never an identity of its own`);
 }
 function assertFrozenProviderSkill(value, field) {
-	if (!isRecord$2(value) || typeof value.name !== "string" || value.name.length === 0 || ![
+	if (!isRecord$1(value) || typeof value.name !== "string" || value.name.length === 0 || ![
 		"execution-provider",
 		"knowledge",
 		"guidance"
 	].includes(value.role) || value.contractDigest !== null && !isHex64$1(value.contractDigest) || !isHex64$1(value.contentDigest)) throw new Error(`evolution: experiment report ${field} must be a resolved skill identity { name, role, contractDigest, contentDigest }`);
 }
 function assertFrozenProviderIdentity(value, field) {
-	if (!isRecord$2(value)) throw new Error(`evolution: experiment report ${field} must be the frozen provider identity of the sample's production baseline (capabilities, registryRevision, mcpServers, preset, skills) — a sample frozen before that identity was recorded cannot constrain what its sides really ran against`);
+	if (!isRecord$1(value)) throw new Error(`evolution: experiment report ${field} must be the frozen provider identity of the sample's production baseline (capabilities, registryRevision, mcpServers, preset, skills) — a sample frozen before that identity was recorded cannot constrain what its sides really ran against`);
 	if (!Array.isArray(value.capabilities) || value.capabilities.some((item) => typeof item !== "string" || item.length === 0)) throw new Error(`evolution: experiment report ${field}.capabilities must be an array of capability names`);
 	if (typeof value.registryRevision !== "string" || value.registryRevision.length === 0) throw new Error(`evolution: experiment report ${field}.registryRevision must be the revision the runtime's pre-check produced`);
 	if (!Array.isArray(value.mcpServers) || value.mcpServers.some((item) => typeof item !== "string" || item.length === 0)) throw new Error(`evolution: experiment report ${field}.mcpServers must be an array of MCP server names`);
@@ -596,7 +294,7 @@ function assertFrozenProviderIdentity(value, field) {
 	}
 }
 function assertFrozenSample(value, field, seen) {
-	if (!isRecord$2(value) || typeof value.taskId !== "string" || value.taskId.length === 0) throw new Error(`evolution: experiment report ${field} must carry a taskId`);
+	if (!isRecord$1(value) || typeof value.taskId !== "string" || value.taskId.length === 0) throw new Error(`evolution: experiment report ${field} must carry a taskId`);
 	if (seen.has(value.taskId)) throw new Error(`evolution: experiment report ${field} repeats task "${value.taskId}"`);
 	seen.add(value.taskId);
 	if (!EXPERIMENT_SAMPLE_ROLES.includes(value.role)) throw new Error(`evolution: experiment report ${field}.role must be one of ${EXPERIMENT_SAMPLE_ROLES.join(" / ")}`);
@@ -604,28 +302,28 @@ function assertFrozenSample(value, field, seen) {
 	if (!Array.isArray(value.criteria) || value.criteria.length === 0) throw new Error(`evolution: experiment report ${field}.criteria must be a non-empty array (the acceptance the replay mirrors)`);
 	const criterionIds = /* @__PURE__ */ new Set();
 	for (const criterion of value.criteria) {
-		if (!isRecord$2(criterion) || typeof criterion.criterionId !== "string" || criterion.criterionId.length === 0 || criterionIds.has(criterion.criterionId) || typeof criterion.verificationMode !== "string" || criterion.verificationMode.length === 0 || criterion.command !== void 0 && typeof criterion.command !== "string" || !isHex64$1(criterion.protectedInputsDigest)) throw new Error(`evolution: experiment report ${field} has an invalid or duplicate frozen criterion`);
+		if (!isRecord$1(criterion) || typeof criterion.criterionId !== "string" || criterion.criterionId.length === 0 || criterionIds.has(criterion.criterionId) || typeof criterion.verificationMode !== "string" || criterion.verificationMode.length === 0 || criterion.command !== void 0 && typeof criterion.command !== "string" || !isHex64$1(criterion.protectedInputsDigest)) throw new Error(`evolution: experiment report ${field} has an invalid or duplicate frozen criterion`);
 		if (criterion.verifierRef !== null && (typeof criterion.verifierRef !== "string" || criterion.verifierRef.length === 0)) throw new Error(`evolution: experiment report ${field} criterion "${criterion.criterionId}" must pin the judge it was frozen with — a criterion that names neither a ref nor "no ref" cannot be recalled against the judge that decides it`);
 		if (criterion.verifierVersion !== void 0 && (typeof criterion.verifierVersion !== "string" || criterion.verifierVersion.length === 0)) throw new Error(`evolution: experiment report ${field} criterion "${criterion.criterionId}" has a malformed frozen verifier version`);
 		if (typeof criterion.verifierAnchor !== "string" || criterion.verifierAnchor.length === 0) throw new Error(`evolution: experiment report ${field} criterion "${criterion.criterionId}" must name how its judge identity is anchored`);
 		criterionIds.add(criterion.criterionId);
 	}
-	if (!isRecord$2(value.observed) || value.observed.outcome !== "verified" && value.observed.outcome !== "failed" || value.observed.runId !== void 0 && (typeof value.observed.runId !== "string" || value.observed.runId.length === 0)) throw new Error(`evolution: experiment report ${field}.observed must record the historical outcome (and run, when known) the sample was chosen for`);
+	if (!isRecord$1(value.observed) || value.observed.outcome !== "verified" && value.observed.outcome !== "failed" || value.observed.runId !== void 0 && (typeof value.observed.runId !== "string" || value.observed.runId.length === 0)) throw new Error(`evolution: experiment report ${field}.observed must record the historical outcome (and run, when known) the sample was chosen for`);
 	assertFrozenProviderIdentity(value.provider, `${field}.provider`);
 }
 function assertCriterionDetail(value, field) {
-	if (!isRecord$2(value) || typeof value.criterionId !== "string" || value.criterionId.length === 0 || !EXPERIMENT_CONDITION_VERDICTS.includes(value.verdict) || value.verifierId !== void 0 && (typeof value.verifierId !== "string" || value.verifierId.length === 0) || value.verifierVersion !== void 0 && (typeof value.verifierVersion !== "string" || value.verifierVersion.length === 0) || value.command !== void 0 && typeof value.command !== "string" || value.exitCode !== void 0 && typeof value.exitCode !== "number") throw new Error(`evolution: experiment report ${field} has an invalid criterion verdict`);
+	if (!isRecord$1(value) || typeof value.criterionId !== "string" || value.criterionId.length === 0 || !EXPERIMENT_CONDITION_VERDICTS.includes(value.verdict) || value.verifierId !== void 0 && (typeof value.verifierId !== "string" || value.verifierId.length === 0) || value.verifierVersion !== void 0 && (typeof value.verifierVersion !== "string" || value.verifierVersion.length === 0) || value.command !== void 0 && typeof value.command !== "string" || value.exitCode !== void 0 && typeof value.exitCode !== "number") throw new Error(`evolution: experiment report ${field} has an invalid criterion verdict`);
 }
 function assertCost(value, field) {
-	if (!isRecord$2(value)) throw new Error(`evolution: experiment report ${field} must be a cost object`);
+	if (!isRecord$1(value)) throw new Error(`evolution: experiment report ${field} must be a cost object`);
 	if (value.status === "unknown") {
 		if (typeof value.reason !== "string" || value.reason.length === 0) throw new Error(`evolution: experiment report ${field} must say why the cost is unknown`);
 		return;
 	}
-	if (value.status !== "reported" || !isRecord$2(value.metrics)) throw new Error(`evolution: experiment report ${field} must be { status: "reported", metrics } or { status: "unknown", reason }`);
+	if (value.status !== "reported" || !isRecord$1(value.metrics)) throw new Error(`evolution: experiment report ${field} must be { status: "reported", metrics } or { status: "unknown", reason }`);
 }
 function assertSideDetail(value, field, sampleTaskId, observedRunId) {
-	if (!isRecord$2(value)) throw new Error(`evolution: experiment report ${field} must be an object`);
+	if (!isRecord$1(value)) throw new Error(`evolution: experiment report ${field} must be an object`);
 	if (value.taskId !== void 0 && (typeof value.taskId !== "string" || value.taskId.length === 0)) throw new Error(`evolution: experiment report ${field}.taskId must be a non-empty string when present`);
 	if (value.taskId === sampleTaskId) throw new Error(`evolution: experiment report ${field} names the sample's own historical task "${sampleTaskId}" as a run of this experiment — the historical task is the case, not a baseline; both sides must be new replayed tasks`);
 	if (!EXPERIMENT_SAMPLE_ROLES.includes(value.role)) throw new Error(`evolution: experiment report ${field}.role must be one of ${EXPERIMENT_SAMPLE_ROLES.join(" / ")}`);
@@ -657,9 +355,9 @@ function assertSideDetail(value, field, sampleTaskId, observedRunId) {
 	if (value.outcome === "verified" && ids.size === 0) throw new Error(`evolution: experiment report ${field} verified outcome needs criterion evidence`);
 }
 /**
-* Validate a v2 report against itself, the way `assertReplayReport` validates a
-* v1 one — and further: every verdict the report carries must equal the one its
-* own details recompute (`compareExperimentSides` per sample,
+* Validate a v2 report against itself — and further than a shape check: every
+* verdict the report carries must equal the one its own details recompute
+* (`compareExperimentSides` per sample,
 * `overallExperimentVerdict` overall), and the frozen block must hash to the
 * `frozenDigest` the report names. A report whose judgement and evidence
 * disagree is refused rather than read.
@@ -672,7 +370,7 @@ function assertSideDetail(value, field, sampleTaskId, observedRunId) {
 * experiment's own lineage names.
 */
 function assertExperimentReport(report) {
-	if (!isRecord$2(report)) throw new Error("evolution: experiment report must be an object");
+	if (!isRecord$1(report)) throw new Error("evolution: experiment report must be an object");
 	if (report.formatVersion !== 2) throw new Error("evolution: experiment report formatVersion must be 2");
 	if (typeof report.proposalId !== "string" || report.proposalId.length === 0) throw new Error("evolution: experiment report.proposalId must be a non-empty string");
 	if (typeof report.experimentId !== "string" || report.experimentId.length === 0) throw new Error("evolution: experiment report.experimentId must be a non-empty string");
@@ -688,7 +386,7 @@ function assertExperimentReport(report) {
 	const seen = /* @__PURE__ */ new Set();
 	reportSamples.forEach((entry, index) => {
 		const field = `samples[${index}]`;
-		if (!isRecord$2(entry)) throw new Error(`evolution: experiment report ${field} must be an object`);
+		if (!isRecord$1(entry)) throw new Error(`evolution: experiment report ${field} must be an object`);
 		const taskId = entry.taskId;
 		const frozenSample = typeof taskId === "string" ? byTask.get(taskId) : void 0;
 		if (frozenSample === void 0) throw new Error(`evolution: experiment report ${field}.taskId is not one of the frozen samples`);
@@ -1744,19 +1442,12 @@ function sha256Hex$1(bytes) {
 * The refusal every other target type gets: no evaluator, no promotion. This
 * build evaluates a replacement of an existing single-file `SKILL.md`;
 * capability, agent_preset, task_definition, the bookkeeping-only types and L4
-* have no evidence this gate could read, so a historical report cannot be
-* reused to promote them (§F.2: "没有支持的评估器就拒绝新晋升"). Their records
-* stay readable and an already-applied one still rolls back.
+* have no evidence this gate could read, so no record of one is reused to
+* promote it (§F.2: "没有支持的评估器就拒绝新晋升"). Their records stay
+* readable.
 */
 function noEvaluatorRefusal(proposal) {
-	const history = proposal.replayed === void 0 ? "" : ` Its recorded v1 replay report (${proposal.replayed.report}) is not this build's evidence either: a historical report is never upgraded into a new promotion.`;
-	return /* @__PURE__ */ new Error(`evolution: proposal "${proposal.proposalId}" targets "${proposal.targetType}", which has no evaluator in this build — the two-sided experiment (§F.2) evaluates a replacement of an existing single-file SKILL.md only, and a promotion without supported evaluation evidence is refused rather than granted from a historical report.` + history);
-}
-/** The refusal of a skill candidate whose evaluation is still the v1 candidate-vs-champion replay. */
-function historicalReportRefusal(proposal) {
-	const replay = proposal.replayed;
-	const where = replay === void 0 ? "" : ` (${replay.report}, verdict ${replay.verdict})`;
-	return /* @__PURE__ */ new Error(`evolution: skill proposal "${proposal.proposalId}" holds a v1 candidate-vs-champion replay report${where} and no two-sided experiment — a historical report is not upgraded into this build's evidence (§F.2); run the two-sided experiment (evolution_replay) so the candidate is compared against a new baseline run of the same frozen samples`);
+	return /* @__PURE__ */ new Error(`evolution: proposal "${proposal.proposalId}" targets "${proposal.targetType}", which has no evaluator in this build — the two-sided experiment (§F.2) evaluates a replacement of an existing single-file SKILL.md only, and a promotion without supported evaluation evidence is refused rather than granted from an older record.`);
 }
 /** The refusal of a skill proposal nothing has evaluated yet. */
 function noExperimentRefusal(proposal) {
@@ -2158,7 +1849,7 @@ async function assertSkillPromotionEvidence(sources, proposal) {
 	const candidate = prepared?.skillContent;
 	if (candidate === void 0) throw new Error(`evolution: skill proposal "${proposal.proposalId}" records no candidate content identity — it was prepared before content binding; propose a new candidate and evaluate it (prepare records the SHA-256 of the materialized SKILL.md)`);
 	const [experiment] = await sources.experiments(proposal.proposalId);
-	if (experiment === void 0) throw proposal.replayed === void 0 ? noExperimentRefusal(proposal) : historicalReportRefusal(proposal);
+	if (experiment === void 0) throw noExperimentRefusal(proposal);
 	let report;
 	try {
 		report = buildExperimentReport(experiment);
@@ -2266,11 +1957,15 @@ const EVOLUTION_DECISIONS = [
 	"KEEP_FOR_FURTHER_RESEARCH"
 ];
 /**
-* The four target types whose mutations this version materializes mechanically
-* into the sandbox. Mutations on the other five target types (tool /
-* decomposition_policy / workflow_policy / verifier / runtime_policy) are
-* free-form structured descriptions, recorded with `mechanical: false` —
-* bookkeeping only, never materialized.
+* The ledger's vocabulary of mechanical target types: the four whose mutations
+* older records materialized into a sandbox (`mechanical: true`). Mutations on
+* the other five target types (tool / decomposition_policy / workflow_policy /
+* verifier / runtime_policy) are free-form structured descriptions, recorded
+* with `mechanical: false` — bookkeeping only, never materialized.
+*
+* The fold validates an old record against this vocabulary, so the four stay
+* named here; `candidate` admits a **skill** candidate only, which is the one
+* type this build materializes, evaluates and promotes (§F.2).
 */
 const MECHANICAL_TARGET_TYPES = [
 	"skill",
@@ -2283,25 +1978,33 @@ function mutationMechanical(targetType) {
 	return MECHANICAL_TARGET_TYPES.includes(targetType);
 }
 /**
-* The three target types `evolution_apply` promotes mechanically (W16): the
-* sandbox copy lands on a real production root. task_definition stays manual
-* (the task store keeps no definitions registry — W14's fidelity cap), and the
-* five bookkeeping-only types never materialized anything to apply.
+* The one target type `evolution_apply` promotes mechanically (W16): the
+* sandbox copy lands on the production skill root. Every other type has no
+* executor in this build — a capability row, an agent_preset directory and a
+* task_definition were written by an older build and are not written here.
 */
-const APPLYABLE_TARGET_TYPES = [
+const APPLYABLE_TARGET_TYPES = ["skill"];
+/**
+* The target types whose `applied` record the state machine still admits, so a
+* ledger written by an older build — which applied a preset directory or a
+* `config.yml` row — folds and stays readable. It is the recorded vocabulary,
+* not a capability of this build: {@link APPLYABLE_TARGET_TYPES} names the one
+* type an executor here has, and every other type is refused by name at
+* {@link EvolutionService.apply} and at the tools.
+*/
+const LEDGER_APPLIED_TARGET_TYPES = [
 	"skill",
 	"agent_preset",
 	"capability"
 ];
 /**
-* Whether a decided proposal may record `applied`: the decision is PROMOTE,
-* the level is not L4 (L4 harness evolution is human-run by rule, §2.7.7 /
-* §2.9.2), the target type is one of the three applyable mechanical ones, and
-* a sandbox was actually materialized (a mutation-less manual candidate has
-* nothing to copy).
+* Whether a decided proposal's `applied` record is admissible: the decision is
+* PROMOTE, the level is not L4 (L4 harness evolution is human-run by rule,
+* §2.7.7 / §2.9.2), the target type is one the ledger admits, and a sandbox was
+* actually materialized (a mutation-less manual candidate has nothing to copy).
 */
 function applyable(proposal) {
-	return proposal.decision === "PROMOTE" && proposal.level !== "L4" && APPLYABLE_TARGET_TYPES.includes(proposal.targetType) && proposal.prepared?.sandbox != null;
+	return proposal.decision === "PROMOTE" && proposal.level !== "L4" && LEDGER_APPLIED_TARGET_TYPES.includes(proposal.targetType) && proposal.prepared?.sandbox != null;
 }
 const CHAMPION_STATES = [
 	"captured",
@@ -2334,7 +2037,7 @@ function nonEmpty(value, field) {
 	if (typeof value !== "string" || value.trim().length === 0) throw new Error(`evolution: ${field} must be a non-empty string`);
 	return value;
 }
-function isRecord$1(value) {
+function isRecord(value) {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function assertOnlyKeys(value, allowed, field) {
@@ -2387,7 +2090,7 @@ async function readProductionSkill(skillRoot, name) {
 * bookkeeping-only (mechanical: false).
 */
 function validateMutation(targetType, mutation, baseVersion) {
-	if (!isRecord$1(mutation)) throw new Error("evolution: mutation must be an object");
+	if (!isRecord(mutation)) throw new Error("evolution: mutation must be an object");
 	switch (targetType) {
 		case "skill":
 			assertOnlyKeys(mutation, ["name", "content"], "skill mutation");
@@ -2399,7 +2102,7 @@ function validateMutation(targetType, mutation, baseVersion) {
 			assertSegment(mutation.presetId, "mutation.presetId");
 			if (!Array.isArray(mutation.files) || mutation.files.length === 0) throw new Error("evolution: mutation.files must be a non-empty array of { path, content }");
 			mutation.files.forEach((file, index) => {
-				if (!isRecord$1(file)) throw new Error(`evolution: mutation.files[${index}] must be an object`);
+				if (!isRecord(file)) throw new Error(`evolution: mutation.files[${index}] must be an object`);
 				assertOnlyKeys(file, ["path", "content"], `mutation.files[${index}]`);
 				assertSandboxPath(file.path, `mutation.files[${index}].path`);
 				nonEmpty(file.content, `mutation.files[${index}].content`);
@@ -2408,7 +2111,7 @@ function validateMutation(targetType, mutation, baseVersion) {
 		case "capability":
 			assertOnlyKeys(mutation, ["name", "entry"], "capability mutation");
 			nonEmpty(mutation.name, "mutation.name");
-			if (!isRecord$1(mutation.entry)) throw new Error("evolution: mutation.entry must be an object");
+			if (!isRecord(mutation.entry)) throw new Error("evolution: mutation.entry must be an object");
 			assertOnlyKeys(mutation.entry, [
 				"skills",
 				"tools",
@@ -2432,7 +2135,7 @@ function validateMutation(targetType, mutation, baseVersion) {
 			assertOnlyKeys(mutation, ["baseVersion", "definition"], "task_definition mutation");
 			const base = nonEmpty(mutation.baseVersion, "mutation.baseVersion");
 			if (base !== baseVersion) throw new Error(`evolution: mutation.baseVersion "${base}" must equal the proposal's baseVersion "${baseVersion}"`);
-			if (!isRecord$1(mutation.definition) || Object.keys(mutation.definition).length === 0) throw new Error("evolution: mutation.definition must be a non-empty object (the new version's definition fields)");
+			if (!isRecord(mutation.definition) || Object.keys(mutation.definition).length === 0) throw new Error("evolution: mutation.definition must be a non-empty object (the new version's definition fields)");
 			return;
 		}
 		default: return;
@@ -2444,7 +2147,7 @@ function validateMutation(targetType, mutation, baseVersion) {
 * checks a live append does.
 */
 function validateVersionSet(versionSet) {
-	if (!isRecord$1(versionSet)) throw new Error("evolution: versionSet must be an object");
+	if (!isRecord(versionSet)) throw new Error("evolution: versionSet must be an object");
 	const entries = Object.entries(versionSet);
 	if (entries.length === 0) throw new Error("evolution: versionSet must record at least one version");
 	for (const [key, value] of entries) {
@@ -2461,7 +2164,7 @@ function validateVersionSet(versionSet) {
 * rotate away.
 */
 function validateGateAnswers(answers) {
-	if (!isRecord$1(answers)) throw new Error("evolution: gate answers must be an object");
+	if (!isRecord(answers)) throw new Error("evolution: gate answers must be an object");
 	nonEmpty(answers.targetFailureFixed, "gate answer \"1. Target failure fixed?\"");
 	nonEmpty(answers.originalAcceptanceMaintained, "gate answer \"2. Original acceptance maintained?\"");
 	nonEmpty(answers.existingRegressionMaintained, "gate answer \"3. Existing regression maintained?\"");
@@ -2475,21 +2178,22 @@ function validateGateAnswers(answers) {
 * The state machine, data-dependent at candidate: a candidate carrying a
 * mutation must be prepared (sandbox materialization) before anything else; a
 * mutation-less (manual) candidate gates directly — the pre-mutation shape old
-* ledgers replay against. A prepared MECHANICAL mutation must then be replayed
-* (the v1 candidate-vs-champion comparison) before it can gate; a
-* bookkeeping-only (non-mechanical) one has nothing to replay and gates from
-* prepared.
+* ledgers replay against.
 *
 * A prepared **skill** candidate gates straight from prepared: its evaluation is
 * the two-sided experiment (§F.2), which is recorded in the ledger's experiment
 * family and is deliberately *not* a lifecycle transition — the proposal stays
 * `prepared` while its samples run — so {@link EvolutionService.gate} requires
-* the completed experiment instead of a `replayed` record. `replayed` stays
-* reachable for a skill proposal only so a ledger written by the pre-S4-E build
-* folds and replays; nothing current writes it, and the promotion gate refuses
-* to promote from one. After the human decision, only a PROMOTE on an applyable,
-* materialized, sub-L4 mutation can be applied (W16), and only an applied
-* proposal can be rolled back.
+* the completed experiment instead of a `replayed` record.
+*
+* `replayed` and the `prepared → replayed → gated` arc of the four mechanical
+* types stay admissible for one reason only: a ledger written before this
+* build's narrowing holds those lines, and the fold has to replay the state
+* machine over them exactly as it was recorded. No current entry writes one —
+* `candidate` admits a skill candidate, this build's one candidate type, and
+* nothing evaluates a non-skill one. After the human decision, only a PROMOTE
+* on an applyable, materialized, sub-L4 mutation can be applied (W16), and only
+* an applied proposal can be rolled back.
 */
 function nextStates(proposal) {
 	switch (proposal.status) {
@@ -2508,61 +2212,18 @@ function nextStates(proposal) {
 /** The one transition check shared by live appends and replay, so an illegal migration reads identically in both. */
 function assertTransition(current, kind) {
 	if (nextStates(current).includes(kind)) return;
-	const hint = current.status === "candidate" && current.mutation !== void 0 && kind === "gated" ? " — this candidate carries a mutation; record \"prepared\" first (evolution_prepare)" : current.status === "prepared" && mutationMechanical(current.targetType) && current.targetType !== "skill" && kind === "gated" ? " — this mutation was materialized; record \"replayed\" first (evolution_replay)" : current.status === "decided" && kind === "applied" ? current.decision !== "PROMOTE" ? ` — the recorded decision is ${current.decision}; only a PROMOTE decision can be applied` : " — only a materialized skill / agent_preset / capability mutation at L1–L3 applies; anything else stays a manual human edit" : "";
+	const hint = current.status === "candidate" && current.mutation !== void 0 && kind === "gated" ? " — this candidate carries a mutation; record \"prepared\" first (evolution_prepare)" : current.status === "decided" && kind === "applied" ? current.decision !== "PROMOTE" ? ` — the recorded decision is ${current.decision}; only a PROMOTE decision can be applied` : " — only a materialized skill mutation at L1–L3 applies; anything else stays a manual human edit" : "";
 	throw new Error(`evolution: proposal "${current.proposalId}" is ${current.status}; cannot record "${kind}"${hint}`);
-}
-/**
-* The capability patch file: a YAML header recording the whole-row replacement
-* semantics, then the entry as one JSON object line (JSON is valid YAML 1.2, so
-* the artifact stays parseable without a YAML dependency).
-*/
-function capabilityPatchYaml(proposalId, name, entry) {
-	return [
-		`# Evolution capability patch — proposal ${proposalId}, capability "${name}"`,
-		"# Apply semantics: whole-row replacement — this entry replaces the row for this name",
-		"# under `capabilities:` in config.yml doc 1's task-runtime line verbatim (no deep merge).",
-		"# Sandbox artifact only: nothing applies it automatically; a human edit of production",
-		"# is the only way it takes effect.",
-		JSON.stringify({ [name]: entry }),
-		""
-	].join("\n");
-}
-/**
-* Champion twin of the patch file: the entry currently in effect, same whole-row
-* semantics. Comparison anchor and runtime-override payload; the rollback text
-* anchor is the source-text snapshot (`capability-table.source.txt`) when the
-* row lives in config.yml (W19).
-*/
-function championEntryYaml(name, entry) {
-	return [
-		`# Champion snapshot — capability "${name}" as in effect at prepare time`,
-		"# (task-runtime capability registry). Anchor for candidate-vs-champion diff and",
-		"# rollback; whole-row replacement semantics, same as the patch file.",
-		JSON.stringify({ [name]: entry }),
-		""
-	].join("\n");
-}
-/** Read back the champion capability snapshot: the single JSON line under the `#` header, keyed by the capability name. */
-function parseChampionEntry(text, name) {
-	const line = text.split("\n").map((item) => item.trim()).filter((item) => item.length > 0 && !item.startsWith("#")).at(-1);
-	if (line === void 0) throw new Error("evolution: the champion capability snapshot carries no entry line");
-	const parsed = JSON.parse(line);
-	if (!isRecord$1(parsed) || !(name in parsed) || !isRecord$1(parsed[name])) throw new Error(`evolution: the champion capability snapshot does not hold an entry for "${name}"`);
-	return parsed[name];
 }
 /**
 * The production write targets of an apply (and its matching rollback), for
 * the approval reason and the audit record — the human sees exactly what a
-* grant will touch.
+* grant will touch. One file: the candidate's `SKILL.md`, which is what this
+* build's executor writes and restores.
 */
 function applyTargets(proposal, roots) {
-	const mutation = proposal.mutation;
-	switch (proposal.targetType) {
-		case "skill": return [join(roots.skillRoot, mutation.name, "SKILL.md")];
-		case "agent_preset": return [join(roots.presetRoot, mutation.presetId)];
-		case "capability": return [`${roots.configFile} — document 1 task-runtime capabilities row "${mutation.name}"`];
-		default: return [];
-	}
+	if (proposal.targetType !== "skill") return [];
+	return [join(roots.skillRoot, proposal.mutation.name, "SKILL.md")];
 }
 /**
 * The entries of a candidate's own directory beyond the one file the skill
@@ -2580,17 +2241,9 @@ async function unsupportedCandidateEntries(directory) {
 	}
 	return entries.filter((entry) => entry.name !== "SKILL.md").map((entry) => entry.isDirectory() ? `${entry.name}/` : entry.name).sort();
 }
-/** All files under `dir` as `/`-joined relative paths, sorted for a deterministic ledger record. */
-async function listFiles(dir) {
-	const entries = await readdir(dir, { withFileTypes: true });
-	const files = [];
-	for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) if (entry.isDirectory()) for (const nested of await listFiles(join(dir, entry.name))) files.push(`${entry.name}/${nested}`);
-	else files.push(entry.name);
-	return files;
-}
 /**
 * The Evolution plane ledger (plane separation: this store is independent of
-* the task store and refers to it by id only). Replay and append share one
+* the task store and refers to it by id only). Folding and appending share one
 * fold, so a corrupt or out-of-order log fails loudly instead of silently
 * drifting. Writes are serialized; the file is opened per append, so closing
 * the service is just draining the write queue. Sandbox materialization is the
@@ -2601,9 +2254,16 @@ var EvolutionService = class extends Service {
 	root;
 	/** Production skill root — champion snapshots read from here; apply/rollback write here. */
 	skillRoot;
-	/** Production agent-preset root — champion snapshots read from here; apply/rollback write here. */
+	/**
+	* Production agent-preset root, resolved for the ledger's own root vocabulary
+	* (an old record's targets name it). No current entry writes here: the only
+	* executor this build has writes a single `SKILL.md`.
+	*/
 	presetRoot;
-	/** Production config.yml a capability apply/rollback edits. */
+	/**
+	* Production config.yml, resolved for the ledger's own root vocabulary (an
+	* old capability record's targets name it). No current entry edits it.
+	*/
 	configFile;
 	/** Repo root that relative evidence paths resolve against (see {@link Config.repoRoot}). */
 	repoRoot;
@@ -2677,9 +2337,16 @@ var EvolutionService = class extends Service {
 	* aligns to. `mutation` is the optional structured patch description, shaped
 	* and checked against the proposal's targetType; a candidate carrying one
 	* must be prepared before it can gate.
+	*
+	* **A skill candidate only** (§F.2): a capability, agent_preset,
+	* task_definition or bookkeeping-only proposal stays the recorded suggestion
+	* `evolution_propose` wrote and is refused here by name, before the first
+	* ledger line of the candidate lifecycle. Its proposal keeps its place in the
+	* ledger — a record is not a candidate.
 	*/
 	async candidate(proposalId, versionSet, actor, mutation) {
 		const current = await this.assertNext(proposalId, "candidate");
+		if (current.targetType !== "skill") throw new Error(`evolution: proposal "${proposalId}" targets "${current.targetType}", which cannot become a candidate in this build — the only candidate lifecycle here is a single-file SKILL.md replacement (evolution_prepare → the two-sided experiment evolution_replay → evolution_gate → evolution_apply), and no other target type has an evaluator until A6 introduces one, so its proposal stays a recorded proposal`);
 		validateVersionSet(versionSet);
 		if (mutation !== void 0) validateMutation(current.targetType, mutation, current.baseVersion);
 		await this.append({
@@ -2694,128 +2361,58 @@ var EvolutionService = class extends Service {
 		return this.get(proposalId);
 	}
 	/**
-	* Move candidate → prepared: materialize a mechanical mutation into
-	* `<root>/sandbox/<proposalId>/` and snapshot the champion (the current
-	* production target) under `champion/` — the anchor for candidate-vs-champion
-	* comparison and rollback. A production target that does not exist yet
-	* records `champion: 'missing'` (champion: null). Non-mechanical mutations
-	* materialize nothing and record `mechanical: false`. Materialization runs
-	* before the ledger append; every write is confined to the sandbox dir.
+	* Move candidate → prepared: materialize the skill mutation into
+	* `<root>/sandbox/<proposalId>/` and snapshot the champion (the production
+	* `SKILL.md`) under `champion/` — the anchor for the experiment's baseline and
+	* for rollback. A production target that does not exist yet records
+	* `champion: 'missing'` (champion: null). Materialization runs before the
+	* ledger append; every write is confined to the sandbox dir.
 	*
-	* A skill candidate additionally records `skillContent` (P2): the name plus
-	* the SHA-256 of the exact bytes of the file that was actually materialized
-	* (read back from disk, never re-rendered from the mutation string), so
-	* replay, the gates, and apply can verify this exact content later. The same
-	* single read of the production file also yields `skillBaseline` (P3), the
-	* digest the later apply compares the production target against.
+	* The candidate also records `skillContent` (P2): the name plus the SHA-256 of
+	* the exact bytes of the file that was actually materialized (read back from
+	* disk, never re-rendered from the mutation string), so the experiment, the
+	* gates, and apply can verify this exact content later. The same single read
+	* of the production file also yields `skillBaseline` (P3), the digest the
+	* later apply compares the production target against.
 	*/
-	async prepare(proposalId, actor, champion = {}) {
+	async prepare(proposalId, actor) {
 		const current = await this.assertNext(proposalId, "prepared");
 		const mutation = current.mutation;
 		if (mutation === void 0) throw new Error(`evolution: proposal "${proposalId}" carries no mutation; nothing to prepare`);
 		validateMutation(current.targetType, mutation, current.baseVersion);
-		const mechanical = mutationMechanical(current.targetType);
-		let sandbox = null;
-		let championState = "none";
-		let championSource;
-		let skillContent;
-		let skillBaseline;
-		let files = [];
-		if (mechanical) {
-			if (current.targetType === "capability" && !("capabilityEntry" in champion)) throw new Error("evolution: preparing a capability mutation requires champion.capabilityEntry (pass null when the capability is new)");
-			if (current.targetType === "task_definition" && !("taskDefinition" in champion)) throw new Error("evolution: preparing a task_definition mutation requires champion.taskDefinition (pass null when the base definition is unresolvable)");
-			assertSegment(proposalId, "proposalId");
-			const dir = join(this.root, "sandbox", proposalId);
-			const written = await this.materialize(dir, current, mutation, champion);
-			sandbox = `sandbox/${proposalId}`;
-			championState = written.champion;
-			championSource = written.championSource;
-			skillBaseline = written.skillBaseline;
-			files = written.files;
-			if (current.targetType === "skill") {
-				const { name } = mutation;
-				skillContent = {
-					name,
-					sha256: sha256Hex(await readVerifiedFile(this.root, `${sandbox}/skills/${name}/SKILL.md`))
-				};
-			}
-		}
+		assertSegment(proposalId, "proposalId");
+		const dir = join(this.root, "sandbox", proposalId);
+		const written = await this.materialize(dir, current, mutation);
+		const sandbox = `sandbox/${proposalId}`;
+		const { name } = mutation;
+		const skillContent = {
+			name,
+			sha256: sha256Hex(await readVerifiedFile(this.root, `${sandbox}/skills/${name}/SKILL.md`))
+		};
 		await this.append({
 			formatVersion: 1,
 			kind: "prepared",
 			proposalId,
 			sandbox,
-			mechanical,
-			champion: championState,
-			...championSource === void 0 ? {} : { championSource },
-			...skillContent === void 0 ? {} : { skillContent },
-			...skillBaseline === void 0 ? {} : { skillBaseline },
-			files,
+			mechanical: true,
+			champion: written.champion,
+			...written.skillBaseline === void 0 ? {} : { skillBaseline: written.skillBaseline },
+			skillContent,
+			files: written.files,
 			actor,
 			at: (/* @__PURE__ */ new Date()).toISOString()
 		});
 		return this.get(proposalId);
 	}
 	/**
-	* Move prepared → replayed: record the outcome of the candidate-vs-champion
-	* replay (the `evolution_replay` tool ran it) and write the comparison report
-	* to `<sandbox>/replay-report.json`. Only a prepared mechanical mutation can
-	* be replayed; the report is validated against the proposal (manual mode is
-	* the agent_preset v1 boundary — the preset roster cannot mount
-	* sandbox-materialized presets — and every other targetType must carry
-	* executed evidence). The report write is confined to the sandbox; the ledger
-	* record cites it by root-relative path, and the gate later requires that
-	* path in its regression evidence.
-	*
-	* A **skill** candidate has no path here: its evaluation is the two-sided
-	* experiment (§F.2), so a live call that hands this entry a skill report is
-	* refused by name. The transition itself stays admissible so a ledger written
-	* by the pre-S4-E build still folds and replays; nothing current produces one,
-	* and the promotion gate refuses to promote from one.
-	*/
-	async replay(proposalId, actor, report) {
-		const current = await this.assertNext(proposalId, "replayed");
-		if (current.targetType === "skill") throw new Error(`evolution: proposal "${proposalId}" targets skill — a skill candidate is evaluated by the two-sided experiment (a new baseline run and a new candidate run per frozen sample, evolution_replay), not by the candidate-vs-champion replay this entry records`);
-		assertReplayReport(current, report);
-		const sandbox = current.prepared?.sandbox;
-		if (sandbox === void 0 || sandbox === null) throw new Error(`evolution: proposal "${proposalId}" names no sandbox; cannot place the replay report`);
-		const rel = `${sandbox}/replay-report.json`;
-		const abs = resolveWithin(this.root, rel);
-		await mkdir(dirname(abs), { recursive: true });
-		const content = `${JSON.stringify(report, null, 2)}\n`;
-		await writeFile(abs, content, "utf8");
-		await this.append({
-			formatVersion: 1,
-			kind: "replayed",
-			proposalId,
-			reportDigest: createHash("sha256").update(content).digest("hex"),
-			report: rel,
-			verdict: report.verdict,
-			tasks: [...report.observed.map((item) => ({
-				taskId: item.taskId,
-				relation: item.relation,
-				holdout: false
-			})), ...report.holdout.tasks.map((item) => ({
-				taskId: item.taskId,
-				relation: item.relation,
-				holdout: true
-			}))],
-			actor,
-			at: (/* @__PURE__ */ new Date()).toISOString()
-		});
-		return this.get(proposalId);
-	}
-	/**
-	* Move candidate → gated (manual candidates), prepared → gated
-	* (bookkeeping-only mutations and skill candidates), or replayed → gated
-	* (mechanical mutations): all six Gate answers plus regression evidence refs.
-	* Every ref must exist — a path on disk (relative to the repo root or
-	* absolute) or an id the caller-side resolver knows (task-store evidence).
-	* Existence only; nothing here executes anything. A replayed proposal must
-	* cite its replay report path, and its contents must match the recorded digest
-	* and schema. A **skill** proposal has no `replayed` record — its evaluation is
-	* the two-sided experiment — so it must have a completed experiment and cite
-	* that experiment's report instead (§F.2).
+	* Move candidate → gated (manual candidates), prepared → gated (skill
+	* candidates), or replayed → gated (a ledger written before this build's
+	* narrowing): all six Gate answers plus regression evidence refs. Every ref
+	* must exist — a path on disk (relative to the repo root or absolute) or an id
+	* the caller-side resolver knows (task-store evidence). Existence only;
+	* nothing here executes anything. A **skill** proposal must have a completed
+	* two-sided experiment and cite that experiment's report (§F.2); the six
+	* answers are recorded over it.
 	*/
 	async gate(proposalId, answers, actor, refKnown) {
 		const current = await this.assertNext(proposalId, "gated");
@@ -2831,18 +2428,11 @@ var EvolutionService = class extends Service {
 			}
 			experimentReport = experiment.report;
 		}
-		if (current.replayed !== void 0) {
-			const report = current.replayed.report;
-			if (!answers.regressionEvidenceRefs.includes(report)) throw new Error(`evolution: a replayed candidate's regression evidence must cite the replay report "${report}"`);
-			if (!existsSync(resolveWithin(this.root, report))) throw new Error(`evolution: the replay report "${report}" no longer exists under the ledger root`);
-			await this.readRecordedReplay(current);
-		}
 		if (experimentReport !== void 0) {
 			if (!answers.regressionEvidenceRefs.includes(experimentReport)) throw new Error(`evolution: a skill candidate's regression evidence must cite its experiment report "${experimentReport}" — the six answers are answered over that experiment, and the gate records the evidence they rest on`);
 			if (!existsSync(resolveWithin(this.root, experimentReport))) throw new Error(`evolution: the experiment report "${experimentReport}" no longer exists under the ledger root`);
 		}
 		for (const ref of answers.regressionEvidenceRefs) {
-			if (current.replayed !== void 0 && ref === current.replayed.report) continue;
 			if (experimentReport !== void 0 && ref === experimentReport) continue;
 			if (!(this.refExistsOnDisk(ref) || refKnown !== void 0 && await refKnown(ref))) throw new Error(`evolution: regression evidence ref "${ref}" matches no known evidence id and no existing path`);
 		}
@@ -2887,18 +2477,15 @@ var EvolutionService = class extends Service {
 	}
 	/**
 	* Move decided → applied: copy the sandbox materialization into production
-	* (W16). Reachable only for a PROMOTE decision on a materialized skill /
-	* agent_preset / capability mutation at L1–L3 (the state machine itself
-	* refuses anything else); the caller (the evolution_apply tool) must hold a
-	* human grant from `ctx.approval.request` first, exactly as for decide.
-	* Production writes run BEFORE the ledger append, so a failed write leaves
-	* the proposal decided and retryable. skill: the sandbox SKILL.md replaces
-	* the production one (the champion snapshot covers that file only, so the
-	* write is file-level, never a directory delete). agent_preset: whole-dir
-	* replacement (the champion snapshot is the full directory). capability:
-	* text-level surgery on the one capabilities row in config.yml document 1 —
-	* the runtime registry is NOT hot-reloaded by that edit; the tool mirrors
-	* the row into the running TaskRuntime afterwards.
+	* (W16). Reachable only for a PROMOTE decision on a materialized skill
+	* mutation at L1–L3 (the state machine itself refuses anything else — every
+	* other target type has no executor in this build); the caller (the
+	* evolution_apply tool) must hold a human grant from `ctx.approval.request`
+	* first, exactly as for decide. The production write runs BEFORE the ledger
+	* append, so a failed write leaves the proposal decided and retryable: the
+	* sandbox `SKILL.md` replaces the production one (the champion snapshot
+	* covers that file only, so the write is file-level, never a directory
+	* delete).
 	*
 	* A skill apply re-verifies the production baseline (P3) after the human
 	* grant and immediately before the write: the production target must still be
@@ -2907,10 +2494,9 @@ var EvolutionService = class extends Service {
 	*
 	* The promotion check (S1-C item 3) runs here too, immediately before the
 	* write and after the grant: a candidate whose provider role changed while the
-	* human was deciding (a sidecar that appeared in the sandbox, a capability row
-	* whose skill stopped being reachable, a verifier that was unregistered) is
-	* refused here, so no entry can write something a later admission would have
-	* refused.
+	* human was deciding (a sidecar that appeared in the sandbox, a verifier that
+	* was unregistered) is refused here, so no entry can write something a later
+	* admission would have refused.
 	*/
 	async apply(proposalId, actor, approvalRef) {
 		const current = await this.assertNext(proposalId, "applied");
@@ -2941,8 +2527,8 @@ var EvolutionService = class extends Service {
 	*
 	* Only a `skill` proposal is promotable in this build (EVAL-4/§F.2): every
 	* other target type is refused by name — a type with no evaluator gets no
-	* promotion, and a historical replay report is never upgraded into new
-	* evidence ({@link noEvaluatorRefusal}).
+	* promotion, and a record of one is never upgraded into new evidence
+	* ({@link noEvaluatorRefusal}).
 	*
 	* For a skill candidate three checks run here, in this order, all of them
 	* shared with the service entry the tools ultimately call:
@@ -3101,8 +2687,8 @@ var EvolutionService = class extends Service {
 	/**
 	* Read a prepared skill candidate's materialized bytes and verify them
 	* against the content identity recorded at prepare (P2). The one read path
-	* every stage shares: the replay tool's pre-execution check, the `replayed`
-	* record's post-execution recheck, every promotion gate, and the apply write.
+	* every stage shares: the experiment's pre-run check, every promotion gate,
+	* and the apply write.
 	* Throws — never silently re-digests — when the candidate file is missing,
 	* is not a regular file, its path crosses a symbolic link, or its bytes no
 	* longer match the recorded digest.
@@ -3161,25 +2747,14 @@ var EvolutionService = class extends Service {
 		if (digest !== identity.sha256) throw new Error(`evolution: skill candidate "${rel}" no longer matches the content identity recorded at prepare (sha256 ${digest} != ${identity.sha256}) — propose a new candidate and re-evaluate it; recorded identities are never re-digested`);
 		return bytes;
 	}
-	async readRecordedReplay(proposal) {
-		const replay = proposal.replayed;
-		if (replay?.reportDigest === void 0) throw new Error("evolution: replay has no report digest; run a new candidate replay before promotion");
-		const content = await readFile(resolveWithin(this.root, replay.report), "utf8");
-		if (createHash("sha256").update(content).digest("hex") !== replay.reportDigest) throw new Error("evolution: replay report changed after recording; candidate must be evaluated again");
-		const report = JSON.parse(content);
-		assertReplayReport(proposal, report);
-		return report;
-	}
 	/**
 	* Move applied → rolledback: undo the apply. Champion captured → restore the
-	* snapshot (skill SKILL.md written back, preset directory replaced,
-	* capability row restored — verbatim from `champion/capability-table.source.txt`
-	* for a `config-text` champion (W19), row removed for a `code-default`
-	* champion so the code default governs again, registry-form restore from
-	* `champion/capability-table.entry.yml` for pre-W19 records);
-	* champion missing → delete what the apply created (production skill/preset
-	* dir removed, capability row dropped). Same approval discipline as apply:
-	* the tool asks a human first, the service only executes and records.
+	* champion `SKILL.md` snapshot; champion missing → delete the skill directory
+	* the apply created. A record of another target type has no executor here:
+	* this build writes and restores a single `SKILL.md` only, and an applied
+	* capability row or preset directory is refused by name rather than touched.
+	* Same approval discipline as apply: the tool asks a human first, the service
+	* only executes and records.
 	*/
 	async rollback(proposalId, actor, approvalRef) {
 		const current = await this.assertNext(proposalId, "rolledback");
@@ -3200,87 +2775,35 @@ var EvolutionService = class extends Service {
 		};
 	}
 	/**
-	* The production write behind apply/rollback. The write side is picked by
-	* `direction`; every path goes through `resolveWithin`, so a write can never
-	* leave the production root it targets.
+	* The production write behind apply/rollback: one `SKILL.md` at the candidate
+	* name under the production skill root. `apply` writes the verified candidate
+	* bytes, `rollback` the champion snapshot. Every path goes through
+	* `resolveWithin`, so a write can never leave the production root it targets.
 	*/
 	async writeProduction(proposal, direction) {
+		if (proposal.targetType !== "skill") throw new Error(`evolution: proposal "${proposal.proposalId}" targets "${proposal.targetType}" — this build writes and restores a single SKILL.md only, so there is no executor to ${direction} an applied ${proposal.targetType} record`);
 		const sandbox = proposal.prepared?.sandbox;
 		const champion = proposal.prepared?.champion;
 		if (sandbox == null || champion === void 0 || proposal.mutation === void 0) throw new Error(`evolution: proposal "${proposal.proposalId}" has no materialized sandbox; nothing to ${direction}`);
-		switch (proposal.targetType) {
-			case "skill": {
-				const { name } = proposal.mutation;
-				const dst = resolveWithin(this.skillRoot, join(name, "SKILL.md"));
-				if (direction === "rollback" && champion === "missing") {
-					await rm(resolveWithin(this.skillRoot, name), {
-						recursive: true,
-						force: true
-					});
-					return { targets: [`${resolveWithin(this.skillRoot, name)} (deleted — the apply had created it)`] };
-				}
-				if (direction === "apply") {
-					const bytes = await this.readVerifiedSkillCandidate(proposal);
-					await mkdir(dirname(dst), { recursive: true });
-					await writeFile(dst, bytes);
-					return { targets: [dst] };
-				}
-				const content = await readVerifiedFile(this.root, `${sandbox}/champion/skills/${name}/SKILL.md`);
-				await mkdir(dirname(dst), { recursive: true });
-				await writeFile(dst, content);
-				return { targets: [dst] };
-			}
-			case "agent_preset": {
-				const { presetId } = proposal.mutation;
-				const dst = resolveWithin(this.presetRoot, presetId);
-				if (direction === "rollback" && champion === "missing") {
-					await rm(dst, {
-						recursive: true,
-						force: true
-					});
-					return { targets: [`${dst} (deleted — the apply had created it)`] };
-				}
-				const src = resolveWithin(this.root, direction === "apply" ? `${sandbox}/.agent-presets/${presetId}` : `${sandbox}/champion/.agent-presets/${presetId}`);
-				await rm(dst, {
-					recursive: true,
-					force: true
-				});
-				await mkdir(dirname(dst), { recursive: true });
-				await cp(src, dst, { recursive: true });
-				return { targets: [dst] };
-			}
-			case "capability": {
-				const { name, entry } = proposal.mutation;
-				const text = await readFile(this.configFile, "utf8");
-				let row;
-				let edited;
-				if (direction === "apply") {
-					row = entry;
-					edited = editCapabilityRow(text, name, row);
-				} else if (champion === "missing") {
-					row = null;
-					edited = editCapabilityRow(text, name, null);
-				} else if (proposal.prepared?.championSource === "config-text") {
-					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = restoreCapabilityRowSource(text, name, await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.source.txt`), "utf8"));
-				} else if (proposal.prepared?.championSource === "code-default") {
-					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = editCapabilityRow(text, name, null);
-				} else {
-					row = parseChampionEntry(await readFile(resolveWithin(this.root, `${sandbox}/champion/capability-table.entry.yml`), "utf8"), name);
-					edited = editCapabilityRow(text, name, row);
-				}
-				await writeFile(this.configFile, edited.text, "utf8");
-				return {
-					targets: [`${this.configFile} — document 1 task-runtime capabilities row "${name}" (${edited.action})`],
-					capability: {
-						name,
-						entry: row === null ? null : structuredClone(row)
-					}
-				};
-			}
-			default: throw new Error(`evolution: targetType "${proposal.targetType}" never applies mechanically`);
+		const { name } = proposal.mutation;
+		const dst = resolveWithin(this.skillRoot, join(name, "SKILL.md"));
+		if (direction === "rollback" && champion === "missing") {
+			await rm(resolveWithin(this.skillRoot, name), {
+				recursive: true,
+				force: true
+			});
+			return { targets: [`${resolveWithin(this.skillRoot, name)} (deleted — the apply had created it)`] };
 		}
+		if (direction === "apply") {
+			const bytes = await this.readVerifiedSkillCandidate(proposal);
+			await mkdir(dirname(dst), { recursive: true });
+			await writeFile(dst, bytes);
+			return { targets: [dst] };
+		}
+		const content = await readVerifiedFile(this.root, `${sandbox}/champion/skills/${name}/SKILL.md`);
+		await mkdir(dirname(dst), { recursive: true });
+		await writeFile(dst, content);
+		return { targets: [dst] };
 	}
 	/** Folded view of one proposal, or throws on an unknown id. */
 	async get(proposalId) {
@@ -3298,23 +2821,6 @@ var EvolutionService = class extends Service {
 		return existsSync(isAbsolute(ref) ? ref : resolve(this.repoRoot, ref));
 	}
 	/**
-	* The verbatim source lines of the capability's row in the production
-	* config.yml (W19), or null when the file or the row is absent — the latter
-	* meaning the capability comes from the code default table. A config.yml
-	* without a task-runtime capabilities mapping fails loudly, exactly as an
-	* apply would.
-	*/
-	async capabilityRowSource(name) {
-		let text;
-		try {
-			text = await readFile(this.configFile, "utf8");
-		} catch (error) {
-			if (error.code === "ENOENT") return null;
-			throw error;
-		}
-		return readCapabilityRowSource(text, name);
-	}
-	/**
 	* Early state-machine check so a wrong-state call reports the transition
 	* error before any payload validation; `append` re-checks under the write
 	* lock, which is the authoritative gate. Returns the folded proposal so
@@ -3328,94 +2834,37 @@ var EvolutionService = class extends Service {
 		return current;
 	}
 	/**
-	* Write one mechanical mutation into the sandbox dir `dir`, then the champion
+	* Write the skill mutation into the sandbox dir `dir`, then the champion
 	* snapshot. Every path goes through `resolveWithin`, so a write can never
-	* land outside the sandbox; production roots are read-only here. Capability
-	* champions carry a `championSource` (W19): the rollback anchor is the
-	* config.yml row's verbatim source text when the row exists there. A skill
+	* land outside the sandbox; the production skill root is read-only here. The
 	* champion is read exactly once (P3): those bytes become both the snapshot
 	* and the recorded `skillBaseline` digest, so the two can never describe two
 	* different reads of the production file.
 	*/
-	async materialize(dir, proposal, mutation, champion) {
+	async materialize(dir, proposal, mutation) {
 		const files = [];
-		const write = async (rel, content) => {
+		const write = async (rel, content$1) => {
 			const abs = resolveWithin(dir, rel);
 			await mkdir(dirname(abs), { recursive: true });
-			await writeFile(abs, content, "utf8");
+			await writeFile(abs, content$1, "utf8");
 			files.push(rel);
 		};
-		switch (proposal.targetType) {
-			case "skill": {
-				const { name, content } = mutation;
-				await write(`skills/${name}/SKILL.md`, content);
-				const production = await readProductionSkill(this.skillRoot, name);
-				if (production === null) return {
-					files,
-					champion: "missing"
-				};
-				await write(`champion/skills/${name}/SKILL.md`, production.bytes.toString("utf8"));
-				return {
-					files,
-					champion: "captured",
-					skillBaseline: {
-						name,
-						sha256: production.sha256
-					}
-				};
+		const { name, content } = mutation;
+		await write(`skills/${name}/SKILL.md`, content);
+		const production = await readProductionSkill(this.skillRoot, name);
+		if (production === null) return {
+			files,
+			champion: "missing"
+		};
+		await write(`champion/skills/${name}/SKILL.md`, production.bytes.toString("utf8"));
+		return {
+			files,
+			champion: "captured",
+			skillBaseline: {
+				name,
+				sha256: production.sha256
 			}
-			case "agent_preset": {
-				const { presetId, files: presetFiles } = mutation;
-				for (const file of presetFiles) await write(`.agent-presets/${presetId}/${file.path}`, file.content);
-				const championDir = join(this.presetRoot, presetId);
-				if (!existsSync(championDir)) return {
-					files,
-					champion: "missing"
-				};
-				const target = resolveWithin(dir, `champion/.agent-presets/${presetId}`);
-				await mkdir(dirname(target), { recursive: true });
-				await cp(championDir, target, { recursive: true });
-				for (const rel of await listFiles(target)) files.push(`champion/.agent-presets/${presetId}/${rel}`);
-				return {
-					files,
-					champion: "captured"
-				};
-			}
-			case "capability": {
-				const { name, entry } = mutation;
-				await write("capability-table.patch.yml", capabilityPatchYaml(proposal.proposalId, name, entry));
-				if (champion.capabilityEntry == null) return {
-					files,
-					champion: "missing",
-					championSource: "missing"
-				};
-				await write("champion/capability-table.entry.yml", championEntryYaml(name, champion.capabilityEntry));
-				const source = await this.capabilityRowSource(name);
-				if (source === null) return {
-					files,
-					champion: "captured",
-					championSource: "code-default"
-				};
-				await write("champion/capability-table.source.txt", `${source}\n`);
-				return {
-					files,
-					champion: "captured",
-					championSource: "config-text"
-				};
-			}
-			case "task_definition":
-				await write("task-definition.json", `${JSON.stringify(mutation.definition, null, 2)}\n`);
-				if (champion.taskDefinition == null) return {
-					files,
-					champion: "missing"
-				};
-				await write("champion/task-definition.json", `${JSON.stringify(champion.taskDefinition, null, 2)}\n`);
-				return {
-					files,
-					champion: "captured"
-				};
-			default: throw new Error(`evolution: targetType "${proposal.targetType}" has no mechanical materialization`);
-		}
+		};
 	}
 	/**
 	* Fold records into proposals, enforcing the state machine on every step:
@@ -3423,8 +2872,10 @@ var EvolutionService = class extends Service {
 	* state, and payload-bearing kinds re-run the write path's payload
 	* validation (candidate versionSet/mutation, gate answers, the
 	* prepared/replayed/applied/rolledback shapes), so a hand-forged line fails
-	* load exactly as it would fail append. The same rules guard replay and live
-	* appends, so an illegal migration is rejected identically in both paths.
+	* load exactly as it would fail append. The same rules guard folding and live
+	* appends, so an illegal migration is rejected identically in both paths —
+	* including a record kind this build no longer writes, whose line still has
+	* to be the shape the build that recorded it validated.
 	*
 	* The experiment family is not a lifecycle transition and is skipped here;
 	* {@link foldLedger} folds it beside this fold.
@@ -3484,11 +2935,11 @@ var EvolutionService = class extends Service {
 					}
 					if (record.skillContent !== void 0) {
 						if (current.targetType !== "skill") throw new Error(`evolution: prepared record for "${record.proposalId}" carries skillContent but targetType "${current.targetType}" is not skill`);
-						if (!isRecord$1(record.skillContent) || typeof record.skillContent.name !== "string" || record.skillContent.name.length === 0 || typeof record.skillContent.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(record.skillContent.sha256)) throw new Error(`evolution: prepared record for "${record.proposalId}" has a malformed skillContent identity`);
+						if (!isRecord(record.skillContent) || typeof record.skillContent.name !== "string" || record.skillContent.name.length === 0 || typeof record.skillContent.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(record.skillContent.sha256)) throw new Error(`evolution: prepared record for "${record.proposalId}" has a malformed skillContent identity`);
 					}
 					if (record.skillBaseline !== void 0) {
 						if (current.targetType !== "skill") throw new Error(`evolution: prepared record for "${record.proposalId}" carries skillBaseline but targetType "${current.targetType}" is not skill`);
-						if (!isRecord$1(record.skillBaseline) || typeof record.skillBaseline.name !== "string" || record.skillBaseline.name.length === 0 || typeof record.skillBaseline.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(record.skillBaseline.sha256)) throw new Error(`evolution: prepared record for "${record.proposalId}" has a malformed skillBaseline identity`);
+						if (!isRecord(record.skillBaseline) || typeof record.skillBaseline.name !== "string" || record.skillBaseline.name.length === 0 || typeof record.skillBaseline.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(record.skillBaseline.sha256)) throw new Error(`evolution: prepared record for "${record.proposalId}" has a malformed skillBaseline identity`);
 					}
 					current.prepared = {
 						sandbox: record.sandbox,
@@ -3510,7 +2961,7 @@ var EvolutionService = class extends Service {
 				case "replayed":
 					if (typeof record.report !== "string" || record.report.length === 0) throw new Error(`evolution: replayed record for "${record.proposalId}" has no report path`);
 					if (!REPLAY_VERDICTS.includes(record.verdict)) throw new Error(`evolution: replayed record for "${record.proposalId}" has unknown verdict "${String(record.verdict)}"`);
-					if (!Array.isArray(record.tasks) || record.tasks.some((item) => !isRecord$1(item) || typeof item.taskId !== "string" || !REPLAY_RELATIONS.includes(item.relation) || typeof item.holdout !== "boolean")) throw new Error(`evolution: replayed record for "${record.proposalId}" has a malformed task summary`);
+					if (!Array.isArray(record.tasks) || record.tasks.some((item) => !isRecord(item) || typeof item.taskId !== "string" || !REPLAY_RELATIONS.includes(item.relation) || typeof item.holdout !== "boolean")) throw new Error(`evolution: replayed record for "${record.proposalId}" has a malformed task summary`);
 					if (record.reportDigest !== void 0 && !/^[a-f0-9]{64}$/.test(record.reportDigest)) throw new Error(`evolution: replayed record for "${record.proposalId}" has an invalid report digest`);
 					current.replayed = {
 						report: record.report,
@@ -3710,266 +3161,4 @@ var EvolutionService = class extends Service {
 var evolution_default = EvolutionService;
 
 //#endregion
-//#region src/prepare-champion.ts
-/**
-* Champion anchor for a task_definition target. The task store keeps no
-* definitions registry — definition fields live denormalized on each task
-* instance — so the snapshot is the first instance matching
-* { taskType: targetId, version: baseVersion } ('v3' and '3' both read as 3),
-* reduced to the fields instances actually hold (decompositionPolicy and
-* budgetPolicy are not retained per instance). No match, or no store, means the
-* champion is unresolvable: null.
-*/
-async function definitionChampion(sources, caller, targetId, baseVersion) {
-	const version = Number(baseVersion.replace(/^v/, ""));
-	if (!Number.isInteger(version)) return null;
-	try {
-		const graph = await sources.graphs.graphForSession(caller);
-		const task = (await sources.task.openStore(rootTaskStoreId(graph.rootSessionId))).tasks.find((item) => item.definitionRef.taskType === targetId && item.definitionRef.version === version);
-		if (task === void 0) return null;
-		return {
-			taskType: task.definitionRef.taskType,
-			version: task.definitionRef.version,
-			objective: task.objective,
-			acceptanceCriteria: task.acceptanceCriteria,
-			requiredCapabilities: task.requestedCapabilities
-		};
-	} catch {
-		return null;
-	}
-}
-/**
-* Resolve the caller-supplied half of a prepare: the capability champion from
-* the effective registry, the task_definition champion from the task store;
-* skill / preset champions the ledger reads from the production roots itself.
-* A capability prepare whose row is absent records `null` — the capability is
-* new — while a task_definition whose base definition is unresolvable also
-* records `null`.
-*/
-async function resolvePrepareChampion(sources, proposal, caller) {
-	const champion = {};
-	if (proposal.targetType === "capability" && proposal.mutation !== void 0) {
-		const name = proposal.mutation.name;
-		champion.capabilityEntry = sources.taskRuntime.listCapabilities()[name] ?? null;
-	}
-	if (proposal.targetType === "task_definition") champion.taskDefinition = await definitionChampion(sources, caller, proposal.targetId, proposal.baseVersion);
-	return champion;
-}
-
-//#endregion
-//#region src/replay-experiment.ts
-/** The lineage tag every replay artifact (objective, review anomalies) carries. */
-function replayLineage(proposalId) {
-	return `evolution-replay:${proposalId}`;
-}
-/** Why agent_preset replay is manual in v1 — recorded verbatim in the report. */
-const PRESET_REPLAY_MANUAL_REASON = "agent_preset replay is manual in v1: the agent-presets roster (AgentPresets.resolve/mount) scans constructor-fixed roots only and cannot mount a sandbox-materialized preset without reconfiguring the production service; review the sandbox composition under .agent-presets/ by hand and answer the gate accordingly";
-const VERIFICATION_MODES = [
-	"deterministic",
-	"simulation",
-	"formal",
-	"measurement",
-	"review",
-	"composite"
-];
-function isRecord(value) {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-/** The terminal review record of a champion task's latest run — the comparison anchor. */
-function championRecord(snapshot, task) {
-	const runId = task.runIds[task.runIds.length - 1];
-	return snapshot.reviews.find((item) => item.runId === runId);
-}
-function sideFromRecord(task, record) {
-	return {
-		taskId: task.taskId,
-		...record.runId === void 0 ? {} : { runId: record.runId },
-		outcome: record.outcome,
-		...record.durationMs === void 0 ? {} : { durationMs: record.durationMs },
-		criteria: (record.criteria ?? []).map((item) => ({
-			criterionId: item.criterionId,
-			verdict: item.verdict,
-			...item.command === void 0 ? {} : { command: item.command },
-			...item.exitCode === void 0 ? {} : { exitCode: item.exitCode }
-		}))
-	};
-}
-function sideFromOutcome(outcome) {
-	return {
-		taskId: outcome.taskId,
-		runId: outcome.runId,
-		outcome: outcome.status,
-		...outcome.durationMs === void 0 ? {} : { durationMs: outcome.durationMs },
-		criteria: (outcome.criteria ?? []).map((item) => ({
-			criterionId: item.criterionId,
-			verdict: item.verdict,
-			...item.command === void 0 ? {} : { command: item.command },
-			...item.exitCode === void 0 ? {} : { exitCode: item.exitCode }
-		}))
-	};
-}
-/**
-* Normalize the candidate definition's contract for a deterministic criteria
-* replay. The definition is the free-form object the mutation carried; the
-* replay needs real criteria, so a missing/empty `acceptanceCriteria` or a
-* criterion without a `criterionId` fails loudly. Fields the definition omits
-* (objective / requiredCapabilities) fall back to the champion task's.
-*/
-function candidateContract(definition, champion) {
-	if (!isRecord(definition)) throw new Error("evolution_replay: the sandbox task-definition.json must hold an object");
-	const rawCriteria = definition.acceptanceCriteria;
-	if (!Array.isArray(rawCriteria) || rawCriteria.length === 0) throw new Error("evolution_replay: the candidate definition must carry a non-empty acceptanceCriteria array");
-	const acceptanceCriteria = rawCriteria.map((raw, index) => {
-		if (!isRecord(raw)) throw new Error(`evolution_replay: candidate acceptanceCriteria[${index}] must be an object`);
-		if (typeof raw.criterionId !== "string" || raw.criterionId.length === 0) throw new Error(`evolution_replay: candidate acceptanceCriteria[${index}].criterionId must be a non-empty string`);
-		const command = raw.command === void 0 ? void 0 : raw.command;
-		if (command !== void 0 && typeof command !== "string") throw new Error(`evolution_replay: candidate acceptanceCriteria[${index}].command must be a string`);
-		const mode = raw.verificationMode ?? (command === void 0 ? "review" : "deterministic");
-		if (typeof mode !== "string" || !VERIFICATION_MODES.includes(mode)) throw new Error(`evolution_replay: candidate acceptanceCriteria[${index}].verificationMode must be one of ${VERIFICATION_MODES.join(" / ")}`);
-		return {
-			criterionId: raw.criterionId,
-			description: typeof raw.description === "string" ? raw.description : "",
-			verificationMode: mode,
-			requiredEvidence: Array.isArray(raw.requiredEvidence) ? raw.requiredEvidence.filter((item) => typeof item === "string") : [],
-			mandatory: typeof raw.mandatory === "boolean" ? raw.mandatory : true,
-			...command === void 0 ? {} : { command }
-		};
-	});
-	return {
-		objective: typeof definition.objective === "string" && definition.objective.length > 0 ? definition.objective : champion.objective,
-		acceptanceCriteria,
-		requiredCapabilities: Array.isArray(definition.requiredCapabilities) ? definition.requiredCapabilities.filter((item) => typeof item === "string") : [...champion.requestedCapabilities]
-	};
-}
-/**
-* Run one replay experiment and record it. Every refusal throws with the text
-* the model-facing adapter reports after its own `evolution_replay rejected:`
-* prefix; nothing is recorded on any refusal, and the runs that did settle stay
-* in the task store as evidence (said in the mid-flight failure message).
-*/
-async function runReplayExperiment(sources, request) {
-	const { proposalId, caller } = request;
-	const proposal = await sources.evolution.get(proposalId);
-	if (proposal.status !== "prepared") throw new Error(`proposal ${proposal.proposalId} is ${proposal.status}; only a prepared proposal can be replayed`);
-	const prepared = proposal.prepared;
-	if (!prepared.mechanical) throw new Error(`proposal ${proposal.proposalId} is bookkeeping-only (mechanical: false); nothing to replay — gate it directly with evolution_gate`);
-	if (proposal.targetType === "skill") throw new Error(`proposal ${proposal.proposalId} targets "skill": a skill candidate is evaluated by the two-sided experiment (a new baseline run and a new candidate run per frozen sample), not by this candidate-vs-champion replay`);
-	const lineage = replayLineage(proposal.proposalId);
-	if (proposal.targetType === "agent_preset") {
-		const report$1 = {
-			formatVersion: 1,
-			proposalId: proposal.proposalId,
-			targetType: proposal.targetType,
-			at: (/* @__PURE__ */ new Date()).toISOString(),
-			mode: "manual",
-			manualReason: PRESET_REPLAY_MANUAL_REASON,
-			observed: [],
-			holdout: {
-				executed: false,
-				tasks: []
-			},
-			verdict: "manual"
-		};
-		const replayed$1 = await sources.evolution.replay(proposal.proposalId, caller, report$1);
-		return {
-			proposalId: replayed$1.proposalId,
-			targetType: proposal.targetType,
-			targetId: proposal.targetId,
-			report: report$1,
-			reportPath: replayed$1.replayed.report,
-			observed: [],
-			holdout: [],
-			manual: true
-		};
-	}
-	const taskIds = [...request.taskIds];
-	const holdoutIds = [...request.holdoutTaskIds];
-	if (taskIds.length === 0) throw new Error("taskIds must name at least one champion task");
-	if (new Set([...taskIds, ...holdoutIds]).size !== taskIds.length + holdoutIds.length) throw new Error("taskIds and holdoutTaskIds must not overlap or repeat");
-	let snapshot;
-	let storeId;
-	try {
-		storeId = rootTaskStoreId((await sources.graphs.graphForSession(caller)).rootSessionId);
-		snapshot = await sources.task.openStore(storeId);
-	} catch (error) {
-		throw new Error(`cannot open this graph's task store: ${error instanceof Error ? error.message : String(error)}`);
-	}
-	const champions = /* @__PURE__ */ new Map();
-	for (const taskId of [...taskIds, ...holdoutIds]) {
-		const task = snapshot.tasks.find((item) => item.taskId === taskId);
-		if (task === void 0) throw new Error(`unknown task "${taskId}" in this graph's task store`);
-		if (task.status !== "verified" && task.status !== "failed") throw new Error(`task "${taskId}" is ${task.status}; only a terminal (verified or failed) task can be a replay champion`);
-		const record = championRecord(snapshot, task);
-		if (record === void 0) throw new Error(`task "${taskId}" has no review record on its latest run; nothing to compare the candidate against`);
-		champions.set(taskId, {
-			task,
-			record
-		});
-	}
-	const sandboxAbs = join(sources.evolution.root, prepared.sandbox);
-	const mutation = proposal.mutation;
-	const comparisons = [];
-	try {
-		for (const [taskId, holdout$1] of [...taskIds.map((id) => [id, false]), ...holdoutIds.map((id) => [id, true])]) {
-			const { task: champion, record } = champions.get(taskId);
-			let options;
-			if (proposal.targetType === "capability") {
-				const capability = mutation;
-				options = { overlay: { capabilityOverrides: { [capability.name]: capability.entry } } };
-			} else if (proposal.targetType === "task_definition") options = {
-				contract: candidateContract(JSON.parse(await readFile(join(sandboxAbs, "task-definition.json"), "utf8")), champion),
-				spawn: false
-			};
-			else throw new Error(`evolution_replay: targetType "${proposal.targetType}" has no replay path`);
-			const outcome = await sources.taskRuntime.replayTask(storeId, taskId, {
-				lineage,
-				...options,
-				signal: request.signal
-			}, caller);
-			const championSide = sideFromRecord(champion, record);
-			const candidateSide = sideFromOutcome(outcome);
-			comparisons.push({
-				taskId,
-				holdout: holdout$1,
-				comparison: {
-					taskId,
-					candidateTaskId: outcome.taskId,
-					champion: championSide,
-					candidate: candidateSide,
-					...compareReplaySides(championSide, candidateSide)
-				}
-			});
-		}
-	} catch (error) {
-		throw new Error(`${error instanceof Error ? error.message : String(error)} (no replay was recorded; ${comparisons.length} run(s) already settled stay in the task store as evidence)`);
-	}
-	const observed = comparisons.filter((item) => !item.holdout).map((item) => item.comparison);
-	const holdout = comparisons.filter((item) => item.holdout).map((item) => item.comparison);
-	const report = {
-		formatVersion: 1,
-		proposalId: proposal.proposalId,
-		targetType: proposal.targetType,
-		at: (/* @__PURE__ */ new Date()).toISOString(),
-		mode: "executed",
-		observed,
-		holdout: {
-			executed: holdout.length > 0,
-			tasks: holdout
-		},
-		verdict: overallReplayVerdict([...observed, ...holdout])
-	};
-	const replayed = await sources.evolution.replay(proposal.proposalId, caller, report);
-	return {
-		proposalId: replayed.proposalId,
-		targetType: proposal.targetType,
-		targetId: proposal.targetId,
-		report,
-		reportPath: replayed.replayed.report,
-		observed,
-		holdout,
-		manual: false
-	};
-}
-
-//#endregion
-export { APPLYABLE_TARGET_TYPES, CHAMPION_SOURCES, CHAMPION_STATES, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionService, MECHANICAL_TARGET_TYPES, PRESET_REPLAY_MANUAL_REASON, REPLAY_RELATIONS, REPLAY_VERDICTS, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, assertReplayPromotable, assertReplayReport, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, evolution_default as default, digestOf, directoryDigest, editCapabilityRow, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, mutationMechanical, overallExperimentVerdict, overallReplayVerdict, protectedInputsDigest, readCapabilityRowSource, renderProviderRoles, replayLineage, resolvePrepareChampion, restoreCapabilityRowSource, resumeExperiment, runExperiment, runReplayExperiment };
+export { APPLYABLE_TARGET_TYPES, CHAMPION_SOURCES, CHAMPION_STATES, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionService, MECHANICAL_TARGET_TYPES, REPLAY_RELATIONS, REPLAY_VERDICTS, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, evolution_default as default, digestOf, directoryDigest, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, mutationMechanical, overallExperimentVerdict, protectedInputsDigest, renderProviderRoles, resumeExperiment, runExperiment };

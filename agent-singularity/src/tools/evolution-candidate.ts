@@ -16,9 +16,11 @@ export function defineEvolutionCandidateTool(ctx: Context) {
     description:
       'Claim a proposed EvolutionProposal into validation (status: candidate) by recording the complete version set it ' +
       'aligns to (e.g. taskDefinition / skill / toolProfile / agentPreset / verifier / runtimePolicy versions). Bookkeeping ' +
-      'for the branch model only: no branch is created and nothing is executed or changed. Optionally attach a structured ' +
-      'mutation — the patch description; a candidate carrying one must pass evolution_prepare (sandbox materialization) ' +
-      'and evolution_replay (candidate vs champion over this graph\'s terminal tasks) before evolution_gate, a candidate without one gates directly.',
+      'for the branch model only: no branch is created and nothing is executed or changed. Only a single-file SKILL.md ' +
+      'replacement can become a candidate in this build: the mutation { name, content } carries the full SKILL.md text, and ' +
+      'the candidate must then pass evolution_prepare (sandbox materialization) and evolution_replay (the two-sided ' +
+      'experiment) before evolution_gate. A proposal of any other target type is refused by name and stays a record — ' +
+      'evolution_propose may still record such a suggestion, but a suggestion never becomes a candidate.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Proposal to move into candidate' },
       versionSet: {
@@ -31,10 +33,8 @@ export function defineEvolutionCandidateTool(ctx: Context) {
         type: 'object',
         additionalProperties: true,
         description:
-          'Optional structured patch description, shape fixed by targetType — skill: { name, content } (full SKILL.md text); ' +
-          'agent_preset: { presetId, files: [{ path, content }] } (paths relative to the preset dir); capability: ' +
-          '{ name, entry } (entry = { skills?, tools?, preset?, permission?, mcpServers? }); task_definition: { baseVersion, definition }. ' +
-          'The other five target types take a free-form object, recorded mechanical: false (bookkeeping only).',
+          'The structured patch: { name, content } — the skill name and the full replacement SKILL.md text. It must be ' +
+          'recorded for the candidate to be evaluated at all (a candidate without one has nothing to materialize).',
       },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
@@ -50,8 +50,8 @@ export function defineEvolutionCandidateTool(ctx: Context) {
         )
         const versionsText = Object.entries(proposal.versionSet!).map(([key, value]) => `${key}=${value}`).join(', ')
         const next = proposal.mutation === undefined
-          ? 'next: evolution_gate'
-          : 'mutation recorded — next: evolution_prepare (sandbox materialization), then evolution_replay (candidate vs champion), then evolution_gate'
+          ? 'no mutation recorded — nothing this build can evaluate; a candidate it can promote carries the replacement SKILL.md text'
+          : 'mutation recorded — next: evolution_prepare (sandbox materialization), then evolution_replay (the two-sided experiment), then evolution_gate'
         return [
           `proposal ${proposal.proposalId} [candidate] version set: ${versionsText}`,
           `ledger entry only — no branch created, nothing executed; ${next}`,

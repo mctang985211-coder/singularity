@@ -3,48 +3,15 @@ import { SessionId } from "@deepseek-ai/dsh-session";
 import { CapabilityConfig, ReplayRunOutcome, ReplayTaskOptions } from "@dangosys/dsh-singularity-task-runtime";
 import { ProposalTargetType, ReviewCriterion, ReviewMetrics, ReviewRecord, TaskSnapshot } from "@dangosys/dsh-singularity-task";
 
-//#region src/config-edit.d.ts
-
-type CapabilityRowAction = 'replaced' | 'added' | 'removed';
-interface CapabilityRowResult {
-  text: string;
-  action: CapabilityRowAction;
-}
-/**
- * The row's verbatim source lines (`\n`-joined, block-form body and riding
- * comments included), or null when no row for `name` exists. The rollback
- * anchor of a capability prepare (W19, guide §4.2 #18): restoring these lines
- * beats re-rendering the registry entry, whose schema fills default arrays the
- * source text never spelled out.
- */
-declare function readCapabilityRowSource(text: string, name: string): string | null;
-/**
- * Splice `source` (the `\n`-joined lines `readCapabilityRowSource` captured at
- * prepare time) back over the current row for `name`, byte-for-byte; when the
- * row is gone, insert the lines where a new row would go. Every other byte of
- * the file is preserved, exactly as with `editCapabilityRow`.
- */
-declare function restoreCapabilityRowSource(text: string, name: string, source: string): CapabilityRowResult;
-/**
- * Replace (`entry` given, row exists), add (`entry` given, row absent), or
- * remove (`entry` null) the capabilities row for `name`. The row is one line in
- * flow form (`name: { … }`) or a block-form span (`name:` plus deeper-indented
- * lines and the comment lines that ride with it); a replacement always lands as
- * one flow line at the row's indent, an addition after the last existing row's
- * whole span. Removing the final row collapses the mapping header to
- * `capabilities: {}` so the document still parses as a mapping, and adding to a
- * collapsed header reopens it — `capabilities: {}` cannot take block rows below
- * it. Throws — editing nothing — when document 1 has no task-runtime entry, more
- * than one (the error names every matching line — refusing to guess which one
- * governs), no capabilities mapping, or a removal names no existing row.
- */
-declare function editCapabilityRow(text: string, name: string, entry: CapabilityConfig | null): CapabilityRowResult;
-//#endregion
 //#region src/replay.d.ts
 
-/** Overall replay verdict: whether the candidate is not worse than the champion. */
+/**
+ * The v1 replay's overall verdict vocabulary: whether the candidate was not
+ * worse than the champion. Kept for the fold of a `replayed` ledger line a
+ * build before this one wrote; no current entry produces one.
+ */
 type ReplayVerdict = 'not-worse' | 'worse' | 'inconclusive' | 'manual';
-/** Per-task comparison outcome; `manual` marks the agent_preset v1 boundary (nothing executed). */
+/** Per-task comparison outcome; `manual` marked the agent_preset v1 boundary (nothing executed). */
 type ReplayRelation = 'not-worse' | 'worse' | 'inconclusive' | 'manual';
 declare const REPLAY_VERDICTS: readonly ReplayVerdict[];
 declare const REPLAY_RELATIONS: readonly ReplayRelation[];
@@ -58,10 +25,9 @@ interface ReplayCriterionSummary {
 /**
  * The content identity of a single-file skill candidate (P2): the skill name
  * plus the SHA-256 of the exact bytes of the materialized `SKILL.md`. Recorded
- * at prepare, carried by the replay report, and re-verified before the
- * `replayed` record is written, at every promotion gate, and on the apply
- * write — so the chain can never validate one file's content and apply
- * another's. Only `targetType: skill` candidates carry one.
+ * at prepare, carried by the experiment's frozen block, and re-verified by the
+ * experiment's pre-run check, at every promotion gate, and on the apply write —
+ * so the chain can never validate one file's content and apply another's.
  */
 interface SkillContentIdentity {
   /** The skill name the mutation targets (`mutation.name`, the proposal's targetId). */
@@ -69,7 +35,7 @@ interface SkillContentIdentity {
   /** Lowercase SHA-256 hex over the exact file bytes — no trim, no newline conversion. */
   sha256: string;
 }
-/** One side of one task's comparison. The champion is the historical record; the candidate is the fresh replay run. */
+/** One side of one task's comparison: an outcome and the criterion verdicts the run reported. */
 interface ReplaySideSummary {
   taskId: string;
   runId?: string;
@@ -83,67 +49,19 @@ interface ReplayCriterionDiff {
   champion?: string;
   candidate?: string;
 }
-interface ReplayTaskComparison {
-  /** The champion (historical) task id. */
-  taskId: string;
-  /** The replay task created for the candidate run. */
-  candidateTaskId?: string;
-  champion: ReplaySideSummary;
-  candidate?: ReplaySideSummary;
-  /** True when outcome and every shared criterion verdict agree and no criterion moved between the sides. */
-  verdictMatch: boolean;
-  /** Criterion-level differences (both verdict flips and added/removed criteria). */
-  criteriaDiff: ReplayCriterionDiff[];
-  relation: ReplayRelation;
-}
-interface ReplayReport {
-  formatVersion: 1;
-  proposalId: string;
-  targetType: ProposalTargetType;
-  at: string;
-  /** `executed`: candidate runs really ran. `manual`: nothing executed (agent_preset v1) and `manualReason` says why. */
-  mode: 'executed' | 'manual';
-  manualReason?: string;
-  /**
-   * Skill candidates only (P2): the candidate content identity this replay ran
-   * against — it must equal the `prepared` record's `skillContent`. Other
-   * targetTypes carry no skill fields.
-   */
-  candidateContent?: SkillContentIdentity;
-  /** Comparisons over `taskIds` (the tasks the proposal's evidence already covers). */
-  observed: ReplayTaskComparison[];
-  /** Comparisons over `holdoutTaskIds`; `executed: false` + empty tasks reads as "not run". */
-  holdout: {
-    executed: boolean;
-    tasks: ReplayTaskComparison[];
-  };
-  verdict: ReplayVerdict;
-}
 /**
  * Compare one task's two sides. A regression is mechanical: the candidate's
  * outcome ranks below the champion's, or a criterion both sides report flipped
  * from pass to anything else. An unrankable candidate outcome (cancelled) is
- * inconclusive — it says nothing about the candidate's quality.
+ * inconclusive — it says nothing about the candidate's quality. The v2 comparer
+ * ({@link compareExperimentSides}) reads exactly this answer off one sample's
+ * two sides.
  */
-declare function compareReplaySides(champion: ReplaySideSummary, candidate: ReplaySideSummary): Pick<ReplayTaskComparison, 'verdictMatch' | 'criteriaDiff' | 'relation'>;
-/** The overall verdict over one group of comparisons: any regression wins; absent that, any inconclusive holds it back. */
-declare function overallReplayVerdict(comparisons: readonly Pick<ReplayTaskComparison, 'relation'>[]): ReplayVerdict;
-/**
- * Validate a report against the proposal it claims to serve. The v1 manual
- * boundary is enforced here: only an agent_preset replay may record
- * `mode: 'manual'` (the preset roster scans constructor-fixed roots and cannot
- * mount a sandbox-materialized preset), and only a manual report may carry the
- * `manual` verdict — every other targetType must produce executed evidence.
- * A skill report must additionally carry the candidate content identity
- * (`candidateContent`) the replay ran against; equality with the prepared
- * record is the service's check, not this schema's.
- */
-declare function assertReplayReport(proposal: {
-  proposalId: string;
-  targetType: ProposalTargetType;
-}, report: unknown): asserts report is ReplayReport;
-/** A human approval cannot substitute for two independent, non-regressing replay groups. */
-declare function assertReplayPromotable(report: ReplayReport): void;
+declare function compareReplaySides(champion: ReplaySideSummary, candidate: ReplaySideSummary): {
+  verdictMatch: boolean;
+  criteriaDiff: ReplayCriterionDiff[];
+  relation: ReplayRelation;
+};
 /**
  * The comparer a v2 report names, and the only one this build can re-check:
  * the verdict rules of {@link compareExperimentSides} and
@@ -578,9 +496,9 @@ declare function overallExperimentVerdict(samples: readonly Pick<ExperimentSampl
  */
 declare function assertFrozenExperiment(value: unknown): asserts value is FrozenExperiment;
 /**
- * Validate a v2 report against itself, the way `assertReplayReport` validates a
- * v1 one — and further: every verdict the report carries must equal the one its
- * own details recompute (`compareExperimentSides` per sample,
+ * Validate a v2 report against itself — and further than a shape check: every
+ * verdict the report carries must equal the one its own details recompute
+ * (`compareExperimentSides` per sample,
  * `overallExperimentVerdict` overall), and the frozen block must hash to the
  * `frozenDigest` the report names. A report whose judgement and evidence
  * disagree is refused rather than read.
@@ -595,6 +513,7 @@ declare function assertFrozenExperiment(value: unknown): asserts value is Frozen
 declare function assertExperimentReport(report: unknown): asserts report is ExperimentReport;
 //#endregion
 //#region src/experiment.d.ts
+
 /** One sample as the caller's specification names it. */
 interface ExperimentSampleSpec {
   taskId: string;
@@ -936,20 +855,24 @@ type EvolutionDecision = 'PROMOTE' | 'REJECT' | 'KEEP_FOR_FURTHER_RESEARCH';
 declare const EVOLUTION_LEVELS: readonly EvolutionLevel[];
 declare const EVOLUTION_DECISIONS: readonly EvolutionDecision[];
 /**
- * The four target types whose mutations this version materializes mechanically
- * into the sandbox. Mutations on the other five target types (tool /
- * decomposition_policy / workflow_policy / verifier / runtime_policy) are
- * free-form structured descriptions, recorded with `mechanical: false` —
- * bookkeeping only, never materialized.
+ * The ledger's vocabulary of mechanical target types: the four whose mutations
+ * older records materialized into a sandbox (`mechanical: true`). Mutations on
+ * the other five target types (tool / decomposition_policy / workflow_policy /
+ * verifier / runtime_policy) are free-form structured descriptions, recorded
+ * with `mechanical: false` — bookkeeping only, never materialized.
+ *
+ * The fold validates an old record against this vocabulary, so the four stay
+ * named here; `candidate` admits a **skill** candidate only, which is the one
+ * type this build materializes, evaluates and promotes (§F.2).
  */
 declare const MECHANICAL_TARGET_TYPES: readonly ProposalTargetType[];
 /** True for the target types whose mutations materialize mechanically into the sandbox. */
 declare function mutationMechanical(targetType: ProposalTargetType): boolean;
 /**
- * The three target types `evolution_apply` promotes mechanically (W16): the
- * sandbox copy lands on a real production root. task_definition stays manual
- * (the task store keeps no definitions registry — W14's fidelity cap), and the
- * five bookkeeping-only types never materialized anything to apply.
+ * The one target type `evolution_apply` promotes mechanically (W16): the
+ * sandbox copy lands on the production skill root. Every other type has no
+ * executor in this build — a capability row, an agent_preset directory and a
+ * task_definition were written by an older build and are not written here.
  */
 declare const APPLYABLE_TARGET_TYPES: readonly ProposalTargetType[];
 /** skill mutation: the full SKILL.md text for `<skills root>/<name>/SKILL.md`. */
@@ -957,29 +880,6 @@ interface SkillMutation {
   name: string;
   content: string;
 }
-/** agent_preset mutation: full file contents, paths relative to the preset directory. */
-interface AgentPresetMutation {
-  presetId: string;
-  files: {
-    path: string;
-    content: string;
-  }[];
-}
-/**
- * capability mutation: one entry of the task-runtime capability table
- * (`{ skills?, tools?, preset?, permission?, mcpServers? }`); takes effect with
- * whole-row replacement semantics, and only when a human edits production.
- */
-interface CapabilityMutation {
-  name: string;
-  entry: CapabilityConfig;
-}
-/** task_definition mutation: the new version's definition fields, deltaing from baseVersion. */
-interface TaskDefinitionMutation {
-  baseVersion: string;
-  definition: Record<string, unknown>;
-}
-type MechanicalMutation = SkillMutation | AgentPresetMutation | CapabilityMutation | TaskDefinitionMutation;
 /** Where the champion snapshot of one prepared proposal stands. */
 type ChampionState = /** Written under the sandbox's `champion/` dir. */
 'captured'
@@ -987,20 +887,21 @@ type ChampionState = /** Written under the sandbox's `champion/` dir. */
 /** Non-mechanical mutation: nothing materialized, no anchor. */ | 'none';
 declare const CHAMPION_STATES: readonly ChampionState[];
 /**
- * Where a capability champion snapshot came from (W19, guide §4.2 #18):
+ * Where a capability champion snapshot came from (W19, guide §4.2 #18). The
+ * rows are the recorded vocabulary of ledgers written before this build
+ * narrowed the lifecycle to skill:
  * - `config-text` — the row existed in config.yml; the snapshot also holds its
  *   verbatim source lines (`champion/capability-table.source.txt`) and rollback
- *   writes those lines back byte-for-byte.
+ *   wrote those lines back byte-for-byte.
  * - `code-default` — the capability exists only in the code default table (no
  *   config.yml row); the snapshot holds the registry entry as the comparison
- *   anchor, and rollback removes the config.yml row so the default governs
+ *   anchor, and rollback removed the config.yml row so the default governs
  *   again (plus a runtime override back to the default entry).
- * - `missing` — the capability did not exist at all; rollback deletes what the
+ * - `missing` — the capability did not exist at all; rollback deleted what the
  *   apply added (`champion: 'missing'` carries the same fact; this field keeps
  *   the three-way distinction readable on one field).
- * Recorded on the `prepared` ledger record of capability proposals only;
- * records written before this field existed carry no `championSource`, hold a
- * registry-form snapshot, and roll back exactly as they always did.
+ * Recorded on the `prepared` ledger record of capability proposals only, and
+ * validated by the fold; no current entry writes one.
  */
 type ChampionSource = 'config-text' | 'code-default' | 'missing';
 declare const CHAMPION_SOURCES: readonly ChampionSource[];
@@ -1010,7 +911,7 @@ interface PreparedView {
   sandbox: string | null;
   mechanical: boolean;
   champion: ChampionState;
-  /** Capability prepares only (W19): where the champion snapshot came from; absent on pre-W19 records. */
+  /** Recorded capability prepares only (W19); validated by the fold, never written now. */
   championSource?: ChampionSource;
   /** Skill prepares only (P2): the content identity recorded for the materialized candidate `SKILL.md`. */
   skillContent?: SkillContentIdentity;
@@ -1026,25 +927,6 @@ interface PreparedView {
   skillBaseline?: SkillContentIdentity;
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
   files: string[];
-}
-/**
- * Champion content the caller resolves for the target types whose production
- * state lives outside this plane (plane separation: the ledger never reads the
- * task store or the capability registry itself; skill/preset champions it reads
- * from the production roots directly). Pass null when the production target is
- * known absent; omitting the key for a capability / task_definition prepare is
- * an error.
- */
-interface PrepareChampion {
-  /**
-   * The mutation-named capability's current effective entry (taskRuntime.listCapabilities), or null when new.
-   * Kept as the comparison anchor and the runtime-override payload; the rollback
-   * text anchor is the config.yml row's source text, which the service reads
-   * itself (W19).
-   */
-  capabilityEntry?: CapabilityConfig | null;
-  /** The baseVersion definition snapshot from the task store, or null when unresolvable. */
-  taskDefinition?: unknown;
 }
 /**
  * The minimal Validation Gate (细化想法4.md §32, verbatim questions):
@@ -1132,15 +1014,21 @@ type EvolutionRecord = {
   files: string[];
   actor: string;
   at: string;
-} | {
+}
+/**
+ * The v1 candidate-vs-champion replay, recorded by a build that had that
+ * evaluation. Nothing writes this line now — a skill candidate is evaluated
+ * by the experiment family below — and the fold keeps reading it so a ledger
+ * written before this narrowing still loads.
+ */ | {
   formatVersion: 1;
   kind: 'replayed';
   proposalId: string;
-  /** SHA-256 of the report bytes. Historical records may lack it; those cannot newly promote. */
+  /** SHA-256 of the report bytes. Historical records may lack it. */
   reportDigest?: string;
   /** Report path relative to the ledger root (`sandbox/<proposalId>/replay-report.json`). */
   report: string;
-  /** Overall verdict: whether the candidate is not worse than the champion. */
+  /** Overall verdict: whether the candidate was not worse than the champion. */
   verdict: ReplayVerdict;
   /** Per-task relation summary, observed then holdout. */
   tasks: {
@@ -1213,24 +1101,13 @@ interface ApplyOutcome {
   proposal: EvolutionProposal;
   targets: string[];
   /**
-   * Capability only: the row now in effect — the candidate entry on apply, the
-   * restored champion entry on rollback, null when the rollback removed a
-   * newly-added row. The tool mirrors it into the runtime registry so the
-   * change takes effect without a restart.
-   */
-  capability?: {
-    name: string;
-    entry: CapabilityConfig | null;
-  };
-  /**
    * What the promotion check validated about the providers this apply put in
    * place ({@link PromotionCheck.providers}): the candidate skill of a skill
-   * apply, every skill a replaced/added capability row grants — each with the
-   * role it may be counted as, so a knowledge or guidance provider is reported
-   * as such rather than presented as the execution provider it is not. Empty
-   * when the target carries no provider. Not persisted: the ledger's `applied`
-   * record keeps its shape, and a run's own binding is where a selected role is
-   * recorded for real.
+   * apply, with the role it may be counted as, so a knowledge or guidance
+   * provider is reported as such rather than presented as the execution
+   * provider it is not. Empty when the target carries no provider. Not
+   * persisted: the ledger's `applied` record keeps its shape, and a run's own
+   * binding is where a selected role is recorded for real.
    */
   providers?: readonly PromotionProvider[];
 }
@@ -1266,9 +1143,9 @@ interface PromotionCheck {
 }
 /** One provider role per line, for a decision or apply report. */
 declare function renderProviderRoles(providers: readonly PromotionProvider[]): string[];
-/** Folded view of one `replayed` record. */
+/** Folded view of one `replayed` record — read from a ledger written before this build's narrowing. */
 interface ReplayedView {
-  /** SHA-256 recorded at replay; required for new promotion of a mechanical candidate. */
+  /** SHA-256 recorded at replay, when the record carried one. */
   reportDigest?: string;
   /** Report path relative to the ledger root (`sandbox/<proposalId>/replay-report.json`). */
   report: string;
@@ -1294,6 +1171,7 @@ interface EvolutionProposal {
   /** The candidate's structured mutation, verbatim as recorded. */
   mutation?: unknown;
   prepared?: PreparedView;
+  /** The v1 candidate-vs-champion replay a ledger written before this build's narrowing holds; nothing writes one now. */
   replayed?: ReplayedView;
   gate?: GateAnswers;
   decision?: EvolutionDecision;
@@ -1339,12 +1217,16 @@ interface Config {
   root?: string;
   /** Production skill root — champion snapshots read from here; apply/rollback write here. Defaults to `$DSH_HOME/skills`. */
   skillRoot?: string;
-  /** Production agent-preset root — champion snapshots read from here; apply/rollback write here. Defaults to `$DSH_HOME/.agent-presets`. */
+  /**
+   * Production agent-preset root. Resolved for the ledger's own root vocabulary
+   * (an old record's targets name it) and pinned by the root regression; no
+   * current entry writes here. Defaults to `$DSH_HOME/.agent-presets`.
+   */
   presetRoot?: string;
   /**
-   * The production `config.yml` whose document-1 task-runtime row a capability
-   * apply/rollback edits (text-level surgery on that one row; every other byte
-   * is preserved). Defaults to `<repoRoot>/config.yml`.
+   * The production `config.yml`, resolved for the ledger's own root vocabulary
+   * (an old capability record's targets name it) and pinned by the root
+   * regression; no current entry edits it. Defaults to `<repoRoot>/config.yml`.
    */
   configFile?: string;
   /**
@@ -1384,16 +1266,15 @@ interface Config {
 /**
  * The production write targets of an apply (and its matching rollback), for
  * the approval reason and the audit record — the human sees exactly what a
- * grant will touch.
+ * grant will touch. One file: the candidate's `SKILL.md`, which is what this
+ * build's executor writes and restores.
  */
 declare function applyTargets(proposal: EvolutionProposal, roots: {
   skillRoot: string;
-  presetRoot: string;
-  configFile: string;
 }): string[];
 /**
  * The Evolution plane ledger (plane separation: this store is independent of
- * the task store and refers to it by id only). Replay and append share one
+ * the task store and refers to it by id only). Folding and appending share one
  * fold, so a corrupt or out-of-order log fails loudly instead of silently
  * drifting. Writes are serialized; the file is opened per append, so closing
  * the service is just draining the write queue. Sandbox materialization is the
@@ -1404,9 +1285,16 @@ declare class EvolutionService extends Service {
   readonly root: string;
   /** Production skill root — champion snapshots read from here; apply/rollback write here. */
   readonly skillRoot: string;
-  /** Production agent-preset root — champion snapshots read from here; apply/rollback write here. */
+  /**
+   * Production agent-preset root, resolved for the ledger's own root vocabulary
+   * (an old record's targets name it). No current entry writes here: the only
+   * executor this build has writes a single `SKILL.md`.
+   */
   readonly presetRoot: string;
-  /** Production config.yml a capability apply/rollback edits. */
+  /**
+   * Production config.yml, resolved for the ledger's own root vocabulary (an
+   * old capability record's targets name it). No current entry edits it.
+   */
   readonly configFile: string;
   /** Repo root that relative evidence paths resolve against (see {@link Config.repoRoot}). */
   readonly repoRoot: string;
@@ -1437,54 +1325,39 @@ declare class EvolutionService extends Service {
    * aligns to. `mutation` is the optional structured patch description, shaped
    * and checked against the proposal's targetType; a candidate carrying one
    * must be prepared before it can gate.
+   *
+   * **A skill candidate only** (§F.2): a capability, agent_preset,
+   * task_definition or bookkeeping-only proposal stays the recorded suggestion
+   * `evolution_propose` wrote and is refused here by name, before the first
+   * ledger line of the candidate lifecycle. Its proposal keeps its place in the
+   * ledger — a record is not a candidate.
    */
   candidate(proposalId: string, versionSet: Record<string, string>, actor: string, mutation?: unknown): Promise<EvolutionProposal>;
   /**
-   * Move candidate → prepared: materialize a mechanical mutation into
-   * `<root>/sandbox/<proposalId>/` and snapshot the champion (the current
-   * production target) under `champion/` — the anchor for candidate-vs-champion
-   * comparison and rollback. A production target that does not exist yet
-   * records `champion: 'missing'` (champion: null). Non-mechanical mutations
-   * materialize nothing and record `mechanical: false`. Materialization runs
-   * before the ledger append; every write is confined to the sandbox dir.
+   * Move candidate → prepared: materialize the skill mutation into
+   * `<root>/sandbox/<proposalId>/` and snapshot the champion (the production
+   * `SKILL.md`) under `champion/` — the anchor for the experiment's baseline and
+   * for rollback. A production target that does not exist yet records
+   * `champion: 'missing'` (champion: null). Materialization runs before the
+   * ledger append; every write is confined to the sandbox dir.
    *
-   * A skill candidate additionally records `skillContent` (P2): the name plus
-   * the SHA-256 of the exact bytes of the file that was actually materialized
-   * (read back from disk, never re-rendered from the mutation string), so
-   * replay, the gates, and apply can verify this exact content later. The same
-   * single read of the production file also yields `skillBaseline` (P3), the
-   * digest the later apply compares the production target against.
+   * The candidate also records `skillContent` (P2): the name plus the SHA-256 of
+   * the exact bytes of the file that was actually materialized (read back from
+   * disk, never re-rendered from the mutation string), so the experiment, the
+   * gates, and apply can verify this exact content later. The same single read
+   * of the production file also yields `skillBaseline` (P3), the digest the
+   * later apply compares the production target against.
    */
-  prepare(proposalId: string, actor: string, champion?: PrepareChampion): Promise<EvolutionProposal>;
+  prepare(proposalId: string, actor: string): Promise<EvolutionProposal>;
   /**
-   * Move prepared → replayed: record the outcome of the candidate-vs-champion
-   * replay (the `evolution_replay` tool ran it) and write the comparison report
-   * to `<sandbox>/replay-report.json`. Only a prepared mechanical mutation can
-   * be replayed; the report is validated against the proposal (manual mode is
-   * the agent_preset v1 boundary — the preset roster cannot mount
-   * sandbox-materialized presets — and every other targetType must carry
-   * executed evidence). The report write is confined to the sandbox; the ledger
-   * record cites it by root-relative path, and the gate later requires that
-   * path in its regression evidence.
-   *
-   * A **skill** candidate has no path here: its evaluation is the two-sided
-   * experiment (§F.2), so a live call that hands this entry a skill report is
-   * refused by name. The transition itself stays admissible so a ledger written
-   * by the pre-S4-E build still folds and replays; nothing current produces one,
-   * and the promotion gate refuses to promote from one.
-   */
-  replay(proposalId: string, actor: string, report: unknown): Promise<EvolutionProposal>;
-  /**
-   * Move candidate → gated (manual candidates), prepared → gated
-   * (bookkeeping-only mutations and skill candidates), or replayed → gated
-   * (mechanical mutations): all six Gate answers plus regression evidence refs.
-   * Every ref must exist — a path on disk (relative to the repo root or
-   * absolute) or an id the caller-side resolver knows (task-store evidence).
-   * Existence only; nothing here executes anything. A replayed proposal must
-   * cite its replay report path, and its contents must match the recorded digest
-   * and schema. A **skill** proposal has no `replayed` record — its evaluation is
-   * the two-sided experiment — so it must have a completed experiment and cite
-   * that experiment's report instead (§F.2).
+   * Move candidate → gated (manual candidates), prepared → gated (skill
+   * candidates), or replayed → gated (a ledger written before this build's
+   * narrowing): all six Gate answers plus regression evidence refs. Every ref
+   * must exist — a path on disk (relative to the repo root or absolute) or an id
+   * the caller-side resolver knows (task-store evidence). Existence only;
+   * nothing here executes anything. A **skill** proposal must have a completed
+   * two-sided experiment and cite that experiment's report (§F.2); the six
+   * answers are recorded over it.
    */
   gate(proposalId: string, answers: GateAnswers, actor: string, refKnown?: (ref: string) => Promise<boolean>): Promise<EvolutionProposal>;
   /**
@@ -1498,18 +1371,15 @@ declare class EvolutionService extends Service {
   decide(proposalId: string, decision: EvolutionDecision, actor: string, approvalRef: string, note?: string): Promise<EvolutionProposal>;
   /**
    * Move decided → applied: copy the sandbox materialization into production
-   * (W16). Reachable only for a PROMOTE decision on a materialized skill /
-   * agent_preset / capability mutation at L1–L3 (the state machine itself
-   * refuses anything else); the caller (the evolution_apply tool) must hold a
-   * human grant from `ctx.approval.request` first, exactly as for decide.
-   * Production writes run BEFORE the ledger append, so a failed write leaves
-   * the proposal decided and retryable. skill: the sandbox SKILL.md replaces
-   * the production one (the champion snapshot covers that file only, so the
-   * write is file-level, never a directory delete). agent_preset: whole-dir
-   * replacement (the champion snapshot is the full directory). capability:
-   * text-level surgery on the one capabilities row in config.yml document 1 —
-   * the runtime registry is NOT hot-reloaded by that edit; the tool mirrors
-   * the row into the running TaskRuntime afterwards.
+   * (W16). Reachable only for a PROMOTE decision on a materialized skill
+   * mutation at L1–L3 (the state machine itself refuses anything else — every
+   * other target type has no executor in this build); the caller (the
+   * evolution_apply tool) must hold a human grant from `ctx.approval.request`
+   * first, exactly as for decide. The production write runs BEFORE the ledger
+   * append, so a failed write leaves the proposal decided and retryable: the
+   * sandbox `SKILL.md` replaces the production one (the champion snapshot
+   * covers that file only, so the write is file-level, never a directory
+   * delete).
    *
    * A skill apply re-verifies the production baseline (P3) after the human
    * grant and immediately before the write: the production target must still be
@@ -1518,10 +1388,9 @@ declare class EvolutionService extends Service {
    *
    * The promotion check (S1-C item 3) runs here too, immediately before the
    * write and after the grant: a candidate whose provider role changed while the
-   * human was deciding (a sidecar that appeared in the sandbox, a capability row
-   * whose skill stopped being reachable, a verifier that was unregistered) is
-   * refused here, so no entry can write something a later admission would have
-   * refused.
+   * human was deciding (a sidecar that appeared in the sandbox, a verifier that
+   * was unregistered) is refused here, so no entry can write something a later
+   * admission would have refused.
    */
   apply(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome>;
   /**
@@ -1532,8 +1401,8 @@ declare class EvolutionService extends Service {
    *
    * Only a `skill` proposal is promotable in this build (EVAL-4/§F.2): every
    * other target type is refused by name — a type with no evaluator gets no
-   * promotion, and a historical replay report is never upgraded into new
-   * evidence ({@link noEvaluatorRefusal}).
+   * promotion, and a record of one is never upgraded into new evidence
+   * ({@link noEvaluatorRefusal}).
    *
    * For a skill candidate three checks run here, in this order, all of them
    * shared with the service entry the tools ultimately call:
@@ -1625,8 +1494,8 @@ declare class EvolutionService extends Service {
   /**
    * Read a prepared skill candidate's materialized bytes and verify them
    * against the content identity recorded at prepare (P2). The one read path
-   * every stage shares: the replay tool's pre-execution check, the `replayed`
-   * record's post-execution recheck, every promotion gate, and the apply write.
+   * every stage shares: the experiment's pre-run check, every promotion gate,
+   * and the apply write.
    * Throws — never silently re-digests — when the candidate file is missing,
    * is not a regular file, its path crosses a symbolic link, or its bytes no
    * longer match the recorded digest.
@@ -1650,23 +1519,21 @@ declare class EvolutionService extends Service {
   checkProductionBaseline(proposalId: string): Promise<void>;
   private assertProductionBaseline;
   private readVerifiedSkillCandidate;
-  private readRecordedReplay;
   /**
    * Move applied → rolledback: undo the apply. Champion captured → restore the
-   * snapshot (skill SKILL.md written back, preset directory replaced,
-   * capability row restored — verbatim from `champion/capability-table.source.txt`
-   * for a `config-text` champion (W19), row removed for a `code-default`
-   * champion so the code default governs again, registry-form restore from
-   * `champion/capability-table.entry.yml` for pre-W19 records);
-   * champion missing → delete what the apply created (production skill/preset
-   * dir removed, capability row dropped). Same approval discipline as apply:
-   * the tool asks a human first, the service only executes and records.
+   * champion `SKILL.md` snapshot; champion missing → delete the skill directory
+   * the apply created. A record of another target type has no executor here:
+   * this build writes and restores a single `SKILL.md` only, and an applied
+   * capability row or preset directory is refused by name rather than touched.
+   * Same approval discipline as apply: the tool asks a human first, the service
+   * only executes and records.
    */
   rollback(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome>;
   /**
-   * The production write behind apply/rollback. The write side is picked by
-   * `direction`; every path goes through `resolveWithin`, so a write can never
-   * leave the production root it targets.
+   * The production write behind apply/rollback: one `SKILL.md` at the candidate
+   * name under the production skill root. `apply` writes the verified candidate
+   * bytes, `rollback` the champion snapshot. Every path goes through
+   * `resolveWithin`, so a write can never leave the production root it targets.
    */
   private writeProduction;
   /** Folded view of one proposal, or throws on an unknown id. */
@@ -1675,14 +1542,6 @@ declare class EvolutionService extends Service {
   list(filter?: ListFilter): Promise<EvolutionProposal[]>;
   private refExistsOnDisk;
   /**
-   * The verbatim source lines of the capability's row in the production
-   * config.yml (W19), or null when the file or the row is absent — the latter
-   * meaning the capability comes from the code default table. A config.yml
-   * without a task-runtime capabilities mapping fails loudly, exactly as an
-   * apply would.
-   */
-  private capabilityRowSource;
-  /**
    * Early state-machine check so a wrong-state call reports the transition
    * error before any payload validation; `append` re-checks under the write
    * lock, which is the authoritative gate. Returns the folded proposal so
@@ -1690,11 +1549,9 @@ declare class EvolutionService extends Service {
    */
   private assertNext;
   /**
-   * Write one mechanical mutation into the sandbox dir `dir`, then the champion
+   * Write the skill mutation into the sandbox dir `dir`, then the champion
    * snapshot. Every path goes through `resolveWithin`, so a write can never
-   * land outside the sandbox; production roots are read-only here. Capability
-   * champions carry a `championSource` (W19): the rollback anchor is the
-   * config.yml row's verbatim source text when the row exists there. A skill
+   * land outside the sandbox; the production skill root is read-only here. The
    * champion is read exactly once (P3): those bytes become both the snapshot
    * and the recorded `skillBaseline` digest, so the two can never describe two
    * different reads of the production file.
@@ -1706,8 +1563,10 @@ declare class EvolutionService extends Service {
    * state, and payload-bearing kinds re-run the write path's payload
    * validation (candidate versionSet/mutation, gate answers, the
    * prepared/replayed/applied/rolledback shapes), so a hand-forged line fails
-   * load exactly as it would fail append. The same rules guard replay and live
-   * appends, so an illegal migration is rejected identically in both paths.
+   * load exactly as it would fail append. The same rules guard folding and live
+   * appends, so an illegal migration is rejected identically in both paths —
+   * including a record kind this build no longer writes, whose line still has
+   * to be the shape the build that recorded it validated.
    *
    * The experiment family is not a lifecycle transition and is skipped here;
    * {@link foldLedger} folds it beside this fold.
@@ -1783,97 +1642,4 @@ declare class EvolutionService extends Service {
   private experimentSources;
 }
 //#endregion
-//#region src/prepare-champion.d.ts
-/**
- * The graph / task / task-runtime services champion resolution reads, as the
- * caller's context holds them — only the members used here.
- */
-interface PrepareChampionSources {
-  readonly graphs: {
-    graphForSession(sessionId: SessionId): Promise<{
-      readonly rootSessionId: SessionId;
-    }>;
-  };
-  readonly task: {
-    openStore(storeId: string): Promise<TaskSnapshot>;
-  };
-  readonly taskRuntime: {
-    listCapabilities(): Readonly<Record<string, CapabilityConfig>>;
-  };
-}
-/**
- * Resolve the caller-supplied half of a prepare: the capability champion from
- * the effective registry, the task_definition champion from the task store;
- * skill / preset champions the ledger reads from the production roots itself.
- * A capability prepare whose row is absent records `null` — the capability is
- * new — while a task_definition whose base definition is unresolvable also
- * records `null`.
- */
-declare function resolvePrepareChampion(sources: PrepareChampionSources, proposal: EvolutionProposal, caller: SessionId): Promise<PrepareChampion>;
-//#endregion
-//#region src/replay-experiment.d.ts
-/** The lineage tag every replay artifact (objective, review anomalies) carries. */
-declare function replayLineage(proposalId: string): string;
-/** Why agent_preset replay is manual in v1 — recorded verbatim in the report. */
-declare const PRESET_REPLAY_MANUAL_REASON: string;
-/**
- * The ledger service the experiment records through, as this module uses it: the
- * sandbox root it materialized under and the `replayed` transition itself.
- */
-interface ReplayLedger {
-  /** Absolute ledger directory; the sandbox and the report live under it. */
-  readonly root: string;
-  get(proposalId: string): Promise<EvolutionProposal>;
-  replay(proposalId: string, actor: string, report: ReplayReport): Promise<EvolutionProposal>;
-}
-/**
- * The graph / task / task-runtime services the experiment reads, as the caller's
- * context holds them. Only the members used here are named, so a caller cannot
- * hand over a capability this module has no business taking (guide §1.5).
- */
-interface ReplayExperimentSources {
-  readonly evolution: ReplayLedger;
-  readonly graphs: {
-    graphForSession(sessionId: SessionId): Promise<{
-      readonly rootSessionId: SessionId;
-    }>;
-  };
-  readonly task: {
-    openStore(storeId: string): Promise<TaskSnapshot>;
-  };
-  readonly taskRuntime: {
-    replayTask(storeId: string, championTaskId: string, options: ReplayTaskOptions, callerSessionId: string): Promise<ReplayRunOutcome>;
-  };
-}
-interface ReplayExperimentRequest {
-  readonly proposalId: string;
-  /** Champion task ids replayed as the observed set. */
-  readonly taskIds: readonly string[];
-  /** Champion task ids replayed the same way but reported as the held-out group. */
-  readonly holdoutTaskIds: readonly string[];
-  readonly caller: SessionId;
-  readonly signal?: AbortSignal;
-}
-/** What one replay experiment produced: the recorded report and the comparison groups, for the caller to render. */
-interface ReplayExperimentResult {
-  readonly proposalId: string;
-  readonly targetType: ProposalTargetType;
-  readonly targetId: string;
-  /** The report exactly as recorded in the ledger. */
-  readonly report: ReplayReport;
-  /** Report path relative to the ledger root. */
-  readonly reportPath: string;
-  readonly observed: readonly ReplayTaskComparison[];
-  readonly holdout: readonly ReplayTaskComparison[];
-  /** True for the agent_preset v1 boundary: nothing executed, `manualReason` says why. */
-  readonly manual: boolean;
-}
-/**
- * Run one replay experiment and record it. Every refusal throws with the text
- * the model-facing adapter reports after its own `evolution_replay rejected:`
- * prefix; nothing is recorded on any refusal, and the runs that did settle stay
- * in the task store as evidence (said in the mid-flight failure message).
- */
-declare function runReplayExperiment(sources: ReplayExperimentSources, request: ReplayExperimentRequest): Promise<ReplayExperimentResult>;
-//#endregion
-export { APPLYABLE_TARGET_TYPES, AgentPresetMutation, ApplyOutcome, ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, CapabilityMutation, CapabilityRowAction, CapabilityRowResult, ChampionSource, ChampionState, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCriterion, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, GateAnswers, ListFilter, MECHANICAL_TARGET_TYPES, MechanicalMutation, ModelSelection, PRESET_REPLAY_MANUAL_REASON, PrecheckSkillVerdict, PrepareChampion, PrepareChampionSources, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, ProviderPrecheckView, REPLAY_RELATIONS, REPLAY_VERDICTS, ReplayCriterionDiff, ReplayCriterionSummary, ReplayExperimentRequest, ReplayExperimentResult, ReplayExperimentSources, ReplayLedger, ReplayRelation, ReplayReport, ReplaySideSummary, ReplayTaskComparison, ReplayVerdict, ReplayedView, SkillContentIdentity, SkillMutation, TaskDefinitionMutation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, assertReplayPromotable, assertReplayReport, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, editCapabilityRow, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, mutationMechanical, overallExperimentVerdict, overallReplayVerdict, protectedInputsDigest, readCapabilityRowSource, renderProviderRoles, replayLineage, resolvePrepareChampion, restoreCapabilityRowSource, resumeExperiment, runExperiment, runReplayExperiment };
+export { APPLYABLE_TARGET_TYPES, ApplyOutcome, ApplyView, CHAMPION_SOURCES, CHAMPION_STATES, ChampionSource, ChampionState, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCriterion, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, GateAnswers, ListFilter, MECHANICAL_TARGET_TYPES, ModelSelection, PrecheckSkillVerdict, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, ProviderPrecheckView, REPLAY_RELATIONS, REPLAY_VERDICTS, ReplayCriterionDiff, ReplayCriterionSummary, ReplayRelation, ReplaySideSummary, ReplayVerdict, ReplayedView, SkillContentIdentity, SkillMutation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, mutationMechanical, overallExperimentVerdict, protectedInputsDigest, renderProviderRoles, resumeExperiment, runExperiment };

@@ -2,7 +2,6 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
-import type {} from '@dangosys/dsh-singularity-task-runtime'
 import { APPLYABLE_TARGET_TYPES, applyTargets, renderProviderRoles } from '@dangosys/dsh-singularity-evolution'
 import type { EvolutionProposal } from '@dangosys/dsh-singularity-evolution'
 
@@ -15,17 +14,15 @@ function sessionId(exec: ToolRunContext): string {
 }
 
 /**
- * Why a decided PROMOTE proposal still cannot be applied, per boundary
- * L4 and non-materialized surfaces have no production executor yet.
+ * Why a decided PROMOTE proposal still cannot be applied: L4 harness evolution
+ * and every target type this build has no executor for.
  */
 function manualGuidance(proposal: EvolutionProposal): string | null {
   if (proposal.level === 'L4') {
     return 'L4 harness evolution has no executor in evolution_apply: supervisor implementation and validation must precede human review through the harness change workflow'
   }
   if (!APPLYABLE_TARGET_TYPES.includes(proposal.targetType)) {
-    return proposal.targetType === 'task_definition'
-      ? 'task_definition has no production registry to write (the task store keeps denormalized instances only): a definition executor is still required before supervisor candidates can be promoted here'
-      : `${proposal.targetType} mutations are bookkeeping-only (mechanical: false): an executor and target-specific validation are still required; the ledger keeps the record`
+    return `this build writes a single SKILL.md only, so a decided "${proposal.targetType}" proposal has no executor here — its ledger record stays readable and a human edits production by hand (A6 introduces the capability evaluation)`
   }
   if (proposal.prepared?.sandbox == null) {
     return 'this candidate carried no structured mutation, so nothing was materialized: create a new structured candidate, evaluate it, then request human review'
@@ -33,34 +30,25 @@ function manualGuidance(proposal: EvolutionProposal): string | null {
   return null
 }
 
-/** How fast each applied type takes effect, stated honestly in the output. */
-function effectNote(proposal: EvolutionProposal): string {
-  switch (proposal.targetType) {
-    case 'skill':
-      return 'effective immediately — the skill filesystem watches the skill root, so the write is live'
-    case 'agent_preset':
-      return 'effective immediately — preset discovery re-reads the roots on every resolve'
-    default:
-      return 'effective immediately for admissions in this process (the runtime registry row was replaced); config.yml keeps it across restarts'
-  }
+/** How fast an applied skill takes effect, stated honestly in the output. */
+function effectNote(): string {
+  return 'effective immediately — the skill filesystem watches the skill root, so the write is live'
 }
 
 export function defineEvolutionApplyTool(ctx: Context) {
   return defineTool({
     name: 'evolution_apply',
     description:
-      'Apply a PROMOTE-decided EvolutionProposal to production (status: applied). Only the three mechanical types ' +
-      '(skill / agent_preset / capability) at L1–L3 with a materialized sandbox; task_definition, the five ' +
-      'bookkeeping-only types, and L4 lack executors and are refused with instructions. Always asks a human through the ' +
-      'native approval seam first — a second gate after evolution_decide — naming every production path it will ' +
-      'write; a reject, cancel, or unavailable answerer writes nothing and leaves the proposal decided. A skill ' +
-      'apply additionally re-verifies the production baseline recorded at prepare (the production SKILL.md must ' +
-      'still be those exact bytes, or still be absent) before the human is asked and again after the grant, and ' +
-      'refuses a stale candidate instead of overwriting a production skill that changed. A skill candidate is ' +
-      'promoted as one file: one carrying a SKILL.contract.json or any resource is refused (the executor writes ' +
-      'SKILL.md only, so such a candidate would be reported as a provider production never received). skill and ' +
-      'agent_preset take effect on write; a capability row is mirrored into the running registry and persists in ' +
-      'config.yml. evolution_rollback restores the champion snapshot.',
+      'Apply a PROMOTE-decided EvolutionProposal to production (status: applied). One target type: a single-file ' +
+      'SKILL.md replacement at L1–L3 with a materialized sandbox. Every other target type and L4 lack executors and are ' +
+      'refused with instructions. Always asks a human through the native approval seam first — a second gate after ' +
+      'evolution_decide — naming every production path it will write; a reject, cancel, or unavailable answerer writes ' +
+      'nothing and leaves the proposal decided. A skill apply additionally re-verifies the production baseline recorded ' +
+      'at prepare (the production SKILL.md must still be those exact bytes, or still be absent) before the human is ' +
+      'asked and again after the grant, and refuses a stale candidate instead of overwriting a production skill that ' +
+      'changed. A skill candidate is promoted as one file: one carrying a SKILL.contract.json or any resource is refused ' +
+      '(the executor writes SKILL.md only, so such a candidate would be reported as a provider production never ' +
+      'received). evolution_rollback restores the champion snapshot.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Decided (PROMOTE) proposal to apply to production' },
     },
@@ -103,7 +91,7 @@ export function defineEvolutionApplyTool(ctx: Context) {
         'this writes production targets:',
         ...targets.map(target => `  - ${target}`),
         ...renderProviderRoles(promotion.providers),
-        effectNote(proposal),
+        effectNote(),
         'rollback: evolution_rollback restores the champion snapshot from the sandbox',
       ].join('\n')
       const outcome = await ctx.approval.request({
@@ -123,23 +111,14 @@ export function defineEvolutionApplyTool(ctx: Context) {
       }
       try {
         const applied = await ctx.evolution.apply(args.proposalId, caller, `approval:${exec.callId}`)
-        let runtimeNote = ''
-        if (applied.capability !== undefined) {
-          try {
-            await ctx.taskRuntime.applyCapabilityRow(applied.capability.name, applied.capability.entry)
-            runtimeNote = '\nruntime registry row replaced — new admissions in this process use it now'
-          } catch (error) {
-            runtimeNote = `\nruntime override failed (${error instanceof Error ? error.message : String(error)}) — the config.yml row takes effect on the next restart`
-          }
-        }
         return [
           `proposal ${applied.proposal.proposalId} [applied] ${applied.proposal.level} ${applied.proposal.targetType} ${applied.proposal.targetId} — PROMOTE in effect`,
           'wrote production targets:',
           ...applied.targets.map(target => `  - ${target}`),
           ...renderProviderRoles(applied.providers ?? []),
-          effectNote(proposal),
+          effectNote(),
           `human approval: approval:${exec.callId} — rollback with evolution_rollback`,
-        ].join('\n') + runtimeNote
+        ].join('\n')
       } catch (error) {
         return `evolution_apply rejected: ${error instanceof Error ? error.message : String(error)}`
       }

@@ -14,8 +14,7 @@
  * Template files live at `<repoRoot>/.agents/skills/<name>/obligations.yml`
  * and are scanned wholesale, so any domain pack can carry one. The file is
  * JSON-compatible YAML (YAML 1.2 accepts JSON), parsed with `JSON.parse` —
- * the same dependency-free trick the evolution package's `config-edit.ts` uses
- * for its patch files.
+ * the same dependency-free trick the evolution package's sandbox artifacts use.
  * @module @dangosys/dsh-singularity-task-runtime/obligation
  */
 

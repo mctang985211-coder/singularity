@@ -17,7 +17,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -487,15 +487,23 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
 
   it('refuses a skill proposal that holds only the v1 replay report, and one with no experiment at all', async () => {
     const f = await fixture()
-    // The historical shape: a v1 report on the ledger, no experiment.
+    // The historical shape: a v1 report on the ledger, no experiment. The report
+    // is not this build's evidence — the promotion needs the two-sided
+    // experiment, and a record of the old kind is never upgraded into one.
     await f.tamperLedger(lines => {
       const index = lines.findIndex(line => line.kind === 'experiment_started')
       for (let at = lines.length - 1; at >= index; at -= 1) lines.splice(at, 1)
       lines.push({ formatVersion: 1, kind: 'replayed', proposalId: PROPOSAL, report: `sandbox/${PROPOSAL}/replay-report.json`, verdict: 'not-worse', tasks: [], actor: 'root-1', at: '2026-09-26T00:00:00.000Z' })
     })
-    const historical = await refusal((await f.reopen()).checkPromotion(PROPOSAL))
-    expect(historical).toContain('a historical report is not upgraded')
-    expect(historical).toContain('v1 candidate-vs-champion replay report')
+    const reopened = await f.reopen()
+    // The v1 line itself still folds — the ledger stays readable …
+    expect((await reopened.get(PROPOSAL)).replayed?.verdict).toBe('not-worse')
+    // … and it is not evidence: the promotion refuses for want of the experiment.
+    expect(await refusal(reopened.checkPromotion(PROPOSAL))).toContain('carries no two-sided experiment')
+    // The state machine also stops there: a `replayed` proposal has only `gated`
+    // ahead of it, so a PROMOTE cannot even be recorded on it.
+    expect(await refusal(reopened.decide(PROPOSAL, 'PROMOTE', 'root-1', 'approval:decide'))).toContain('cannot record "decided"')
+    expect(await f.ledgerKinds()).not.toContain('decided')
 
     const bare = await fixture()
     await bare.tamperLedger(lines => {
@@ -872,30 +880,22 @@ describe('skill promotion gate: the gate answers cite the completed experiment (
 })
 
 describe('skill promotion gate: the other target types have no evaluator (EVAL-4)', () => {
-  /** A gated capability proposal, the shape the old promotion path used. */
+  /**
+   * A gated capability proposal — the shape the old promotion path used. A
+   * ledger written before this build holds it, so the lines are hand-written
+   * the way that build recorded them; nothing here would admit the candidate.
+   */
   async function capabilityGated(svc: EvolutionService, id = 'c1') {
     await svc.propose({ proposalId: id, targetType: 'capability', targetId: 'research', baseVersion: 'v1', level: 'L2', rationale: 'the fixture row', sourceRefs: ['diagnosis:d1'] }, 'root-1')
-    await svc.candidate(id, { capabilityTable: 'config.yml#doc1' }, 'root-1', { name: 'research', entry: { preset: 'standard' } })
-    await svc.prepare(id, 'root-1', { capabilityEntry: { preset: 'standard' } })
-    await svc.replay(id, 'root-1', {
-      formatVersion: 1,
-      proposalId: id,
-      targetType: 'capability',
-      at: '2026-09-26T00:00:00.000Z',
-      mode: 'executed',
-      observed: [{
-        taskId: 't-case',
-        candidateTaskId: 't-case-candidate',
-        champion: { taskId: 't-case', outcome: 'verified', criteria: [{ criterionId: 'ac1', verdict: 'pass' }] },
-        candidate: { taskId: 't-case-candidate', outcome: 'verified', criteria: [{ criterionId: 'ac1', verdict: 'pass' }] },
-        verdictMatch: true,
-        criteriaDiff: [],
-        relation: 'not-worse',
-      }],
-      holdout: { executed: false, tasks: [] },
-      verdict: 'not-worse',
-    })
-    await svc.gate(id, gateAnswers([`sandbox/${id}/replay-report.json`]), 'root-1')
+    await appendFile(
+      join(svc.root, 'proposals.jsonl'),
+      [
+        { formatVersion: 1, kind: 'candidate', proposalId: id, versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-26T00:00:01.000Z' },
+        { formatVersion: 1, kind: 'prepared', proposalId: id, sandbox: `sandbox/${id}`, mechanical: true, champion: 'captured', files: ['capability-table.patch.yml'], actor: 'root-1', at: '2026-09-26T00:00:02.000Z' },
+        { formatVersion: 1, kind: 'replayed', proposalId: id, report: `sandbox/${id}/replay-report.json`, verdict: 'not-worse', tasks: [], actor: 'root-1', at: '2026-09-26T00:00:03.000Z' },
+        { formatVersion: 1, kind: 'gated', proposalId: id, gate: gateAnswers([`sandbox/${id}/replay-report.json`]), actor: 'root-1', at: '2026-09-26T00:00:04.000Z' },
+      ].map(line => JSON.stringify(line)).join('\n') + '\n',
+    )
   }
 
   it.each(['capability', 'agent_preset', 'task_definition', 'workflow_policy'] as const)(
@@ -912,7 +912,8 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
   it('refuses a capability decide and an apply reached from a legacy decided record, writing nothing', async () => {
     const f = await fixture()
     await capabilityGated(f.svc)
-    const decideMessage = await refusal(f.svc.decide('c1', 'PROMOTE', 'root-1', 'approval:decide'))
+    const gated = await f.reopen()
+    const decideMessage = await refusal(gated.decide('c1', 'PROMOTE', 'root-1', 'approval:decide'))
     expect(decideMessage).toContain('has no evaluator in this build')
     expect(await f.ledgerKinds()).not.toContain('decided')
 
@@ -929,7 +930,7 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     expect((await reopened.get('c1')).status).toBe('decided')
   })
 
-  it('keeps an old applied capability readable and rollback intact', async () => {
+  it('keeps an old applied capability readable, and refuses to roll it back', async () => {
     const f = await fixture()
     const configFile = join((f.svc as unknown as { configFile: string }).configFile)
     await writeFile(configFile, ['- id: task-runtime', '  config:', '    capabilities:', '      research: { preset: changed }', '', '---', 'api:', '  upstream: https://example.invalid', ''].join('\n'))
@@ -946,14 +947,18 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     await writeFile(join(f.root, 'sandbox', 'old1', 'champion', 'capability-table.entry.yml'), '# Champion snapshot — capability "research" as in effect at prepare time\n{"research":{"preset":"standard"}}\n')
     await writeFile(join(f.root, 'sandbox', 'old1', 'champion', 'capability-table.source.txt'), '      research: { preset: standard }\n')
 
+    // The record stays readable — a ledger written by an older build folds …
     const reopened = await f.reopen()
     const read = await reopened.get('old1')
     expect(read.status).toBe('applied')
     expect(read.applied?.approvalRef).toBe('approval:apply')
     expect((await reopened.list({ targetType: 'capability' })).map(item => item.proposalId)).toContain('old1')
-    const rolledback = await reopened.rollback('old1', 'root-1', 'approval:rollback')
-    expect(rolledback.proposal.status).toBe('rolledback')
-    expect(await readFile(configFile, 'utf8')).toContain('research: { preset: standard }')
+    // … while neither its promotion nor its rollback has an executor here: this
+    // build writes and restores a single SKILL.md, and config.yml is untouched.
+    expect(await refusal(reopened.checkPromotion('old1'))).toContain('has no evaluator in this build')
+    expect(await refusal(reopened.rollback('old1', 'root-1', 'approval:rollback'))).toContain('this build writes and restores a single')
+    expect((await reopened.get('old1')).status).toBe('applied')
+    expect(await readFile(configFile, 'utf8')).toContain('research: { preset: changed }')
     expect(existsSync(join(f.root, 'proposals.jsonl'))).toBe(true)
   })
 })

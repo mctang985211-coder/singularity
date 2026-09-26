@@ -15,11 +15,12 @@ export function defineEvolutionListTool(ctx: Context) {
     name: 'evolution_list',
     description:
       'Read-only. List EvolutionProposals in the evolution ledger, optionally filtered by status / targetType / targetId, ' +
-      'each with its derived history (proposed → candidate → prepared → replayed → gated → decided → applied → ' +
-      'rolledback for applied mechanical mutations; a mutation-less candidate gates directly). The ledger records ' +
-      'proposals, sandbox materializations, human decisions, and human-approved applies/rollbacks.',
+      'each with its derived history (proposed → candidate → prepared → gated → decided → applied → rolledback for an ' +
+      'applied single-file skill replacement; a candidate without a mutation gates directly, and a non-skill proposal stays ' +
+      'proposed — this build admits a skill candidate only). The ledger records proposals, sandbox materializations, human ' +
+      'decisions, and human-approved applies/rollbacks.',
     parameters: {
-      status: { type: 'string', enum: ['proposed', 'candidate', 'prepared', 'replayed', 'gated', 'decided', 'applied', 'rolledback'], description: 'Only proposals in this status' },
+      status: { type: 'string', enum: ['proposed', 'candidate', 'prepared', 'gated', 'decided', 'applied', 'rolledback'], description: 'Only proposals in this status' },
       targetType: { type: 'string', enum: TARGET_TYPES, description: 'Only proposals pointing at this mutation surface' },
       targetId: { type: 'string', description: 'Only proposals pointing at this target' },
     },
@@ -58,9 +59,11 @@ export function defineEvolutionListTool(ctx: Context) {
           }
         }
         if (proposal.replayed !== undefined) {
+          // A ledger written before this build's narrowing: the v1 candidate-vs-champion
+          // report is part of the record and is rendered as history, never as evidence.
           const view = proposal.replayed
           const summary = view.tasks.map(item => `${item.taskId}${item.holdout ? ' (holdout)' : ''}: ${item.relation}`).join(', ')
-          lines.push(`  replayed: verdict ${view.verdict} — report ${view.report}${summary === '' ? '' : ` (${summary})`}`)
+          lines.push(`  replayed (v1, historical): verdict ${view.verdict} — report ${view.report}${summary === '' ? '' : ` (${summary})`}`)
         }
         if (proposal.gate !== undefined) {
           lines.push(`  gate regression evidence: [${proposal.gate.regressionEvidenceRefs.join(', ')}]`)
