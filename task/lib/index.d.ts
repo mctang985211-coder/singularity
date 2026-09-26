@@ -340,11 +340,15 @@ interface TaskProposalDecision {
  * name.
  *
  * Two shapes for the two kinds (A0 §2). A decomposition batch is consumed as
- * `b-<parentTaskId>` plus its children; a root contract is consumed as the one
- * root task and root run the activation minted, because there is no parent to
- * derive a batch id from and "one intake, one root" is not a batch at all. The
- * kind is a discriminant on the record, and its absence means the batch arm —
- * a consumption written before root intake existed still reads as it was.
+ * its parent run and its children, under the batch id {@link batchIdFor}
+ * derives from the parent run and the proposal; a root contract is consumed as
+ * the one root task and root run the activation minted, because there is no
+ * parent run to derive a batch id from and "one intake, one root" is not a
+ * batch at all. The kind is a discriminant on the record, and its absence means
+ * the batch arm — a consumption written before root intake existed still reads
+ * as it was, and one written before batches were identified as
+ * `(parentRunId, proposalId)` is refused by name rather than guessed at (see
+ * `docs/persistence-changes/2026-09-26-k1-multi-batch.md`).
  */
 interface TaskProposalBatchConsumption {
   /** The kind, when the writer stated it. Absent means this arm. */
@@ -355,7 +359,9 @@ interface TaskProposalBatchConsumption {
   proposalDigest: string;
   /** The review-context fingerprint the admission re-check confirmed; must equal the stored one. */
   reviewContextDigest: string;
-  /** The batch's id in the run coordination protocol: `b-<parentTaskId>` (A3). */
+  /** The parent run whose batch this is; must equal the stored identity's `parentRunId`. */
+  parentRunId: RunId;
+  /** The batch's id in the run coordination protocol: `b-<parentRunId>-<proposalId>` ({@link batchIdFor}). */
   batchId: string;
   /** The children this proposal became, in batch order — the ids the admission commit created. */
   childTaskIds: TaskId[];
@@ -367,10 +373,11 @@ interface TaskProposalBatchConsumption {
 /**
  * What a root contract was activated as (A0 §2): the root task and the root run
  * the activation commit created, named by id. The batch vocabulary does not
- * apply — a root intake has no parent to derive `b-<parentTaskId>` from — so the
- * consumption names the minted ids instead, and the reducer checks that they
- * are the store's one root task and a run born `active` in the proposal's root
- * session, carrying the contract the proposal committed to.
+ * apply — a root intake has no parent run and no proposal consumption to derive
+ * a batch id from — so the consumption names the minted ids instead, and the
+ * reducer checks that they are the store's one root task and a run born
+ * `active` in the proposal's root session, carrying the contract the proposal
+ * committed to.
  *
  * `kind: 'root'` is required: a root activation is written by one entry
  * (`admitRootProposalIn`), so there is no legacy record to stay compatible
@@ -577,6 +584,28 @@ interface TaskProposalIndex {
  * a new revision with its own key).
  */
 declare function taskProposalId(identity: DecompositionIdentity): string;
+/**
+ * The id one admitted batch carries in the run coordination protocol:
+ * `b-<parentRunId>-<proposalId>`. A batch *is* a consumed proposal
+ * ({@link TaskProposalBatchConsumption}), so its identity is the pair (parent
+ * run, proposal) and the id is nothing but that pair, spelled out.
+ *
+ * Why the pair and not the task: a parent decomposes more than once — one
+ * batch per delegation round — so `b-<parentTaskId>` cannot name which batch a
+ * run waits on, and a reader that derived a batch from a task id would read the
+ * wrong one after the second admission. The parent run is the thing that opens
+ * and closes a batch (`active → waiting_children → active`), and the proposal
+ * is the content identity of the batch it opened, so the two together name
+ * exactly one batch of this store with nothing guessed.
+ *
+ * One implementation, used by the writer that admits a batch
+ * (`admitBatchIn`), by the reducer that binds a consumption to it, and by every
+ * reader that asks which batch an id is — so a batch id written by one of them
+ * cannot be addressed by another under a different spelling. Nothing here
+ * verifies the arguments: a run id and a proposal id are opaque strings, and
+ * the reducer is where the pair is checked against the stored facts.
+ */
+declare function batchIdFor(parentRunId: RunId, proposalId: string): string;
 /**
  * The root contract's identity: SHA-256 over {@link canonicalize} of
  * {@link RootProposalIdentity} — which store, which root session, which request
@@ -939,14 +968,19 @@ interface ProtectedInputRef {
 }
 /**
  * One entry of a parent criterion's evidence map ({@link
- * AcceptanceCriterion.childEvidence}): a child of the decomposing task, named
- * by its position in the decomposition batch — the only child identity that
- * exists when the parent's criteria are authored, since child task ids are
- * minted by the orchestrator at decomposition time. Existence of the mapping
- * target is an acceptance-time question; admission validates the shape only.
+ * AcceptanceCriterion.childEvidence}): a member of the parent run's admitted
+ * batches, named by its stable position in that run's accumulation — the only
+ * child identity that exists when the parent's criteria are authored, since
+ * child task ids are minted by the orchestrator at admission time. Position `i`
+ * is the `i`-th member of the run's batches in admission order
+ * ({@link TaskRun.batches}), so a later batch appends and never renumbers the
+ * members an earlier one contributed: the first member of the second batch has
+ * the position after the last member of the first, not 0 again. Existence of
+ * the mapping target is an acceptance-time question; admission validates the
+ * shape only.
  */
 interface ChildEvidenceRef {
-  /** Position of the child in the parent's decomposition batch (0-based). */
+  /** Position of the member in the parent run's accumulated batch members (0-based, admission order). */
   childIndex: number;
   /** The child criterion whose passing verdict is required; absent requires only the child's verified state. */
   criterionId?: string;
@@ -974,6 +1008,13 @@ interface TaskInstance {
   acceptanceCriteria: AcceptanceCriterion[];
   /** Capability requirements by name: the projection of {@link TaskContract.requiredCapabilities}. */
   requestedCapabilities: string[];
+  /**
+   * Where the task sits in the decomposition tree; `decomposed` is written when
+   * the task registers children. History, not a gate: a parent admits several
+   * batches over its life (`TaskDecomposed` accumulates members), so no reader
+   * may treat `decomposed` as "this task can never decompose again" — the run
+   * phase (`ExecutionPhase`) and the batch identity are what answer that.
+   */
   decompositionStatus: DecompositionStatus;
   status: TaskStatus;
   runIds: RunId[];
@@ -1124,6 +1165,13 @@ interface RunProviderBinding {
  * that handed in a {@link SubmissionRecord} and is waiting for (or inside)
  * verification.
  *
+ * Four edges are legal: `active → waiting_children` (a batch is admitted and
+ * the writing gate closes), `waiting_children → active` (that batch ended and
+ * execution is handed back to the parent), and `active → submitted` /
+ * `waiting_children → submitted` (the parent hands its own result in). A
+ * parent that returned to `active` may open another batch, so
+ * `active → waiting_children` is not a once-in-a-life edge.
+ *
  * The phase — not the run status — is the admission gate: a run in
  * verification still carries status `running`, so `submitted` is what refuses
  * a second submission, a write after the gate closed, and a decomposition
@@ -1179,6 +1227,24 @@ interface NoProgressRecord {
   /** When the marking was recorded — the event's own timestamp. */
   markedAt: string;
 }
+/**
+ * One batch a run admitted, as the run's snapshot projects it: the batch id
+ * {@link batchIdFor} derives, the proposal it consumed, and the member task ids
+ * that admission created, in batch order.
+ *
+ * The record is derived by the reducer from the parent's `TaskDecomposed`
+ * event and never written into a run at start — a run's members are facts the
+ * store already holds as tasks, and the projection is the one place that orders
+ * them across a parent's several batches.
+ */
+interface TaskRunBatch {
+  /** The batch id: {@link batchIdFor} of this run and this proposal. */
+  batchId: string;
+  /** The proposal this batch consumed; the content identity its members were admitted under. */
+  proposalId: string;
+  /** The member task ids this batch created, in batch order. */
+  memberTaskIds: TaskId[];
+}
 interface TaskRun {
   runId: RunId;
   taskId: TaskId;
@@ -1196,17 +1262,40 @@ interface TaskRun {
   /**
    * Where this run sits in the A3 coordination protocol. A new run is born
    * `active`, or `submitted` when it has no worker at all (a `spawn: false`
-   * replay). Absent on every run created before the field existed; its phase
-   * is read as unknown, never defaulted to `active`.
+   * replay). Absent on every run created before the field existed; its phase is
+   * read as unknown, never defaulted to `active`.
    */
   executionPhase?: ExecutionPhase;
   /**
-   * The decomposition batch this run waits on, `b-<parentTaskId>` — the
-   * deterministic id a run records when it enters `waiting_children`. The
-   * parent decomposes once (the phase gate refuses a second batch), so the id
-   * needs no minted uniqueness. Absent on a run that never admitted a batch.
+   * The batch this run is waiting on: the one still open, the id
+   * {@link batchIdFor} derives from this run and the proposal it consumed.
+   * Written by the `active → waiting_children` edge and cleared by the
+   * `waiting_children → active` edge that closes it, so it names the *current*
+   * unfinished batch — a run that returned to `active` reads with no batch id
+   * even though its history holds batches, and a run that submitted while
+   * waiting on children keeps the id it was waiting under (that phase change
+   * does not close the batch).
+   *
+   * A parent decomposes more than once, so this field is not a function of the
+   * task: it is what the run is waiting on now, and which batches a run
+   * admitted altogether is {@link batches}. Absent on a run that never admitted
+   * a batch.
    */
   batchId?: string;
+  /**
+   * Every batch this run admitted, in admission order, with the member task ids
+   * each created — the run's accumulative membership. The reducer appends one
+   * entry per `TaskDecomposed` event that names this run, so members an earlier
+   * batch contributed are never overwritten by a later one and
+   * {@link runMemberTaskIds} is the concatenation in that order.
+   *
+   * Absent — not empty — on a run that admitted no batch of this shape, which
+   * includes every run written before batches were identified by
+   * `(parentRunId, proposalId)`; such a run's members are not guessed from its
+   * task's children (see
+   * `docs/persistence-changes/2026-09-26-k1-multi-batch.md`).
+   */
+  batches?: TaskRunBatch[];
   /**
    * What this run handed in, written by the transition into `submitted`.
    * Absent on a run that has not submitted; its presence is what makes a
@@ -1236,6 +1325,20 @@ interface TaskRun {
   startedAt: string;
   finishedAt?: string;
 }
+/**
+ * The member task ids one run has admitted altogether: the `memberTaskIds` of
+ * its batches concatenated in admission order ({@link TaskRun.batches}). The
+ * accumulation is append-only, so position `i` of the result is the stable
+ * position a parent criterion's `childIndex` names, and a later batch never
+ * moves an earlier member. One derivation, shared by the runtime read
+ * (`TaskService.runMembersIn`) and by any reader that needs the ids alone, so
+ * "the run's members" cannot mean two different orders.
+ *
+ * A run with no batches has no members here — an empty list, never its task's
+ * children: those belong to whichever batch admitted them, and a run that
+ * admitted no batch of this shape is not given one by guessing.
+ */
+declare function runMemberTaskIds(run: TaskRun): TaskId[];
 interface VerificationResult {
   criterionId: string;
   status: 'pass' | 'fail' | 'inconclusive';
@@ -1799,7 +1902,19 @@ interface TaskEventPayloads {
   TaskRejected: {
     reason: string;
   };
-  /** A decomposable task's children are registered and the parent closes as decomposed. */
+  /**
+   * A decomposable task's children are registered under it and the parent
+   * closes as decomposed. A parent decomposes more than once — one batch per
+   * delegation round — so this event is not a once-in-a-life record: each
+   * admission appends its members to the parent's children and, when it names
+   * the run that admitted it, one batch to that run's accumulation.
+   *
+   * The batch identity (`batchId`, `parentRunId`, `proposalId`) is all three or
+   * none: an admission this build writes carries the pair a batch is identified
+   * by, and an event written before batches had that identity carries none of
+   * them and is read as the decomposition it was (no run accumulation, no
+   * guessed batch).
+   */
   TaskDecomposed: {
     childTaskIds: TaskId[];
     /**
@@ -1809,6 +1924,12 @@ interface TaskEventPayloads {
      * and nothing is invented for them on read.
      */
     admission?: DecompositionAdmission;
+    /** The batch id {@link batchIdFor} derives from the run and the proposal below; refused when it is not that id. */
+    batchId?: string;
+    /** The run that admitted this batch; its accumulation gains one entry naming these members. */
+    parentRunId?: RunId;
+    /** The proposal this batch consumed — the second half of the batch's identity. */
+    proposalId?: string;
   };
   /** A dependency edge is added to the DAG (from must verify before to starts). */
   DependencyAdded: {
@@ -1843,19 +1964,25 @@ interface TaskEventPayloads {
   /**
    * A running run's coordination phase changes (A3). The transition is the
    * admission gate: `active → waiting_children` when its decomposition batch
-   * is admitted atomically, and `→ submitted` when it hands in a submission
-   * (explicitly or by runtime settlement). Replaying the store reconstructs
-   * exactly one path through {@link ExecutionPhase}, so a second submission, a
-   * decomposition admitted after the gate closed, and any late phase write are
-   * refused by the phase alone — the run status stays `running` through
-   * verification and cannot serve as that gate.
+   * is admitted atomically, `waiting_children → active` when that batch ends
+   * and execution is handed back to the parent, and `→ submitted` when the run
+   * hands in a submission (explicitly or by runtime settlement). Replaying the
+   * store reconstructs exactly one path through {@link ExecutionPhase}, so a
+   * second submission, a decomposition admitted after the gate closed, and any
+   * late phase write are refused by the phase alone — the run status stays
+   * `running` through verification and cannot serve as that gate.
    *
    * A refused transition applies nothing: the reducer validates the whole
    * payload before the run is touched.
    */
   RunPhaseChanged: {
     phase: ExecutionPhase;
-    /** The batch a `waiting_children` run waits on (`b-<parentTaskId>`); required for that phase and refused elsewhere. */
+    /**
+     * The batch an `active ↔ waiting_children` edge names: the batch opened on
+     * the way out and the batch closed on the way back
+     * (`b-<parentRunId>-<proposalId>`, {@link batchIdFor}). Required for both
+     * batch edges and refused for `submitted`, which closes no batch.
+     */
     batchId?: string;
     /** The record a `submitted` run hands in; required for that phase and refused elsewhere. */
     submission?: SubmissionRecord;
@@ -2014,18 +2141,22 @@ interface TaskEventPayloads {
   /**
    * A proposal is consumed (T2/T3, §6; root contracts A0 §2): what it asked for
    * now exists, bound to the ids this event carries. For a decomposition batch
-   * that means the child task ids and the batch id, written in the same commit as
-   * the children, the decomposition record and the parent run's `active →
-   * waiting_children` change (A3 `admitBatchIn`), so a crash after admission is
-   * recovered from the log alone — "this proposal was consumed and these are its
-   * tasks" is one durable fact, never a second batch. For a root contract it
-   * means the one root task and root run the activation minted, written in the
-   * same commit as both (`admitRootProposalIn`), so the same crash is recovered
-   * the same way and never mints a second root. The reducer refuses a second
-   * consumption of one proposal, a consumption whose digests do not match what
-   * was approved, a batch consumption whose batch id or child ids do not match
-   * what the store holds, and a root consumption naming anything but the store's
-   * one parentless task and its own born-active root run.
+   * that means the child task ids and the batch id of its parent run and
+   * proposal (`b-<parentRunId>-<proposalId>`, {@link batchIdFor}), written in
+   * the same commit as the children, the decomposition record carrying the same
+   * identity and the parent run's `active → waiting_children` change (A3
+   * `admitBatchIn`), so a crash after admission is recovered from the log alone
+   * — "this proposal was consumed and these are its tasks" is one durable fact,
+   * never a second batch. For a root contract it means the one root task and
+   * root run the activation minted, written in the same commit as both
+   * (`admitRootProposalIn`), so the same crash is recovered the same way and
+   * never mints a second root. The reducer refuses a second consumption of one
+   * proposal, a consumption whose digests do not match what was approved, a
+   * batch consumption whose parent run, derived batch id or child ids do not
+   * match what the store holds — including one written before batches were
+   * identified by run and proposal, which is refused by name rather than
+   * guessed at — and a root consumption naming anything but the store's one
+   * parentless task and its own born-active root run.
    */
   TaskProposalAdmitted: TaskProposalConsumption;
 }
@@ -2088,7 +2219,45 @@ declare class TaskState {
    */
   private assertAdmissionLimits;
   private admit;
+  /**
+   * A decomposition records the members one batch contributed to the parent:
+   * the children are already under it (`TaskCreated`), and this event says they
+   * were admitted together, as one batch, by one run.
+   *
+   * A parent decomposes more than once — one batch per delegation round — so
+   * there is no once-in-a-life gate here: a second admission of different
+   * content under a different batch identity is the normal case. What must be
+   * refused is the *same* batch twice: one (run, proposal) pair names one
+   * batch, and a second record under it would count the same members twice and
+   * let one batch answer two ways. The batch a run waits on is the run's own
+   * (`batchId`, `RunPhaseChanged`), while the members accumulate on the parent
+   * in event order — a member from an earlier batch is never dropped by a later
+   * one.
+   *
+   * The batch identity is all three fields or none: an event written before
+   * batches were identified by `(parentRunId, proposalId)` carries none of them
+   * and is read as the decomposition it was, with no run accumulation invented
+   * for it (see `docs/persistence-changes/2026-09-26-k1-multi-batch.md`). An
+   * event that names one must name a real run of this task and must carry the
+   * id that pair derives, so a batch id in the store can never be read as
+   * another batch's.
+   *
+   * `decompositionStatus` is still written (the parent closes as `decomposed`,
+   * and a record from before this rule keeps its old meaning) but nothing here
+   * gates on it: it is history a reader may show, not a permission.
+   */
   private decompose;
+  /**
+   * The batch identity one decomposition event carries, or `undefined` for a
+   * record written before batches had one. The three fields are one fact, so
+   * two of them is not a half-batch but a malformed record, and a record that
+   * carries the id of a batch the run already holds is the second record of one
+   * batch — both are refused rather than half-applied. The id must be exactly
+   * {@link batchIdFor} of the pair it names, so a reader that derives a batch id
+   * (the writer, a recovery, the composite judge's member positions) and the id
+   * in the log cannot be two different addresses for one batch.
+   */
+  private assertBatchIdentity;
   /**
    * The content identity a run records is what a later reader re-checks the
    * snapshot against, so a malformed record is refused rather than stored: a
@@ -2113,10 +2282,12 @@ declare class TaskState {
    * A run's birth phase is written by the runtime, and the reducer judges its
    * shape only — the transition semantics belong to `changeRunPhase`. A run
    * with no phase is a record from before the protocol and stays legal; a run
-   * born `active` carries neither a submission nor a batch; a run born
-   * `submitted` (a workerless replay) must carry a well-shaped submission and
-   * no batch. `waiting_children` is not a birth phase: no creation path admits
-   * a batch before the run exists.
+   * born `active` carries neither a submission, a batch nor an accumulation of
+   * batches; a run born `submitted` (a workerless replay) must carry a
+   * well-shaped submission and no batch either. `waiting_children` is not a
+   * birth phase: no creation path admits a batch before the run exists, and a
+   * run's `batches` are the decompositions it admits — facts the store already
+   * holds as tasks — never a projection a caller hands in.
    */
   private assertBirthPhase;
   /**
@@ -2145,14 +2316,20 @@ declare class TaskState {
   private cancel;
   /**
    * The coordination phase is the A3 admission gate, so this handler is where
-   * a transition is either the one legal edge or a refusal: a run accepts
-   * `active → waiting_children`, `active → submitted` and
-   * `waiting_children → submitted`, and nothing else. Same phase, a rollback,
-   * a run with no phase at all and a run that is no longer running are all
-   * refused, because "already submitted" and "already decomposed" have to be
+   * a transition is either one of the four legal edges or a refusal: a run
+   * accepts `active → waiting_children`, `waiting_children → active`,
+   * `active → submitted` and `waiting_children → submitted`, and nothing else.
+   * Same phase, a rollback, a run with no phase at all and a run that is no
+   * longer running are all refused, because "already submitted" has to be
    * answered by this one field — a second submission that overwrote the first
-   * record, or a decomposition admitted after the gate closed, would make the
-   * field answer differently at two reads.
+   * record would make the field answer differently at two reads.
+   *
+   * The two batch edges carry the batch they name — the one opened on the way
+   * out and the one closed on the way back — and the return edge clears the
+   * run's current batch id: after `waiting_children → active` the run holds no
+   * unfinished batch, while the batches it admitted stay in `batches` as
+   * history. Returning to `active` therefore does not erase which batches ran;
+   * it says the parent is free to open another one.
    *
    * The run status is checked first because a phase change on a failed or
    * cancelled run is late by definition; verification is the case the phase
@@ -2294,11 +2471,12 @@ declare class TaskState {
    * what it became. The status gate is the re-check having passed on the record
    * (`ready` only — an approval alone never admits, so `approved → admitted` is
    * refused), and the binding is checked in full for the proposal's kind: a
-   * decomposition batch names the batch of its parent and children the store
-   * holds under that parent; a root contract names the root task and root run of
-   * its activation, and the store refuses one intake that would leave it with
-   * two roots. A second consumption is a transition refusal, so one proposal can
-   * never produce two batches — or two roots.
+   * decomposition batch names the parent run and the derived batch id of its
+   * identity, plus children the store holds under that parent; a root contract
+   * names the root task and root run of its activation, and the store refuses
+   * one intake that would leave it with two roots. A second consumption is a
+   * transition refusal, so one proposal can never produce two batches — or two
+   * roots.
    */
   private admitProposal;
   /** The stored proposal one event names, or a refusal naming the id. */
@@ -2426,19 +2604,30 @@ declare class TaskState {
   /**
    * A consumption binds a proposal to what it became, so it has to name the same
    * dossier and the resolution the admission re-check confirmed — for both kinds
-   * — and then the kind's own shape: a batch names the batch id that belongs to
-   * its parent (`b-<parentTaskId>`) and children the store really holds under
+   * — and then the kind's own shape: a batch names the parent run of its
+   * identity, the batch id that pair derives
+   * (`b-<parentRunId>-<proposalId>`) and children the store really holds under
    * that parent; a root contract names the root task and root run of its
    * activation. The common half is checked here so the two kinds cannot drift
    * apart on the numbers that make an approval non-transferable.
    */
   private assertConsumptionBinding;
   /**
-   * The batch half of a consumption: the batch of this parent, and children the
-   * store really holds under it — the record a crash recovery reads to find the
-   * batch it already admitted instead of admitting a second one. The batch
-   * vocabulary is the only one this arm may use, and its `kind` may only be
-   * absent (a record written before kinds existed) or `batch`.
+   * The batch half of a consumption: the batch this run admitted, and children
+   * the store really holds under the proposal's parent — the record a crash
+   * recovery reads to find the batch it already admitted instead of admitting a
+   * second one. The batch vocabulary is the only one this arm may use, its
+   * `kind` may only be absent (a record written before kinds existed) or
+   * `batch`, and its identity is the pair the batch is named by: the parent run
+   * the proposal's identity names, and the id that pair derives
+   * ({@link batchIdFor}).
+   *
+   * A consumption written before batches had that identity names none of it
+   * (its `batchId` was `b-<parentTaskId>`) and is refused by name, not guessed
+   * at: the store has no way to tell which run admitted it or which proposal it
+   * was, and inventing either would hand a later reader a batch that is not the
+   * one the record describes (see
+   * `docs/persistence-changes/2026-09-26-k1-multi-batch.md`).
    */
   private assertBatchConsumptionShape;
   /**
@@ -2500,7 +2689,27 @@ declare class TaskService extends Service {
   snapshotIn(storeId: string): Promise<TaskSnapshot>;
   taskIn(storeId: string, taskId: TaskId): Promise<TaskInstance>;
   runIn(storeId: string, runId: RunId): Promise<TaskRun>;
+  /**
+   * Every child of one task, in the order the task accumulated them — the
+   * task-level view of its subtree, across all the batches it ever admitted
+   * (a parent decomposes more than once). It is *not* the sequence a parent
+   * criterion's `childIndex` names and not a batch: a criterion's evidence map
+   * resolves against the members one *run* admitted ({@link runMembersIn}), and
+   * "which child is the third of this task" is not a question a batch identity
+   * answers.
+   */
   childrenIn(storeId: string, taskId: TaskId): Promise<TaskInstance[]>;
+  /**
+   * The tasks one run has admitted altogether, in the order their batches were
+   * admitted (`runMemberTaskIds` of the run's own projection) — the run's
+   * accumulative membership, which is the sequence a parent criterion's
+   * `childIndex` names. Deliberately not the task's children: a task's children
+   * are every batch ever admitted under it, while a run's members are the ones
+   * *this* run admitted, so a parent that returned to `active` and ran again on
+   * a new run has the two answer differently. A run that admitted no batch
+   * answers `[]` — its members are not guessed from its task's children.
+   */
+  runMembersIn(storeId: string, runId: RunId): Promise<TaskInstance[]>;
   createTaskIn(storeId: string, task: TaskInstance, actor: string): Promise<void>;
   admitTaskIn(storeId: string, taskId: TaskId, actor: string, options?: {
     decompositionStatus?: 'leaf' | 'decomposable';
@@ -2510,8 +2719,8 @@ declare class TaskService extends Service {
   decomposeIn(storeId: string, parentTaskId: TaskId, children: readonly TaskInstance[], actor: string, edges?: readonly DependencyEdge[], admission?: DecompositionAdmission): Promise<void>;
   /**
    * The atomic batch-admission entry (A3 §1.3): every child's creation and
-   * admission, the dependency edges, the parent's decomposition record, the
-   * per-child capability manifests and the parent run's
+   * admission, the dependency edges, the parent's decomposition record with the
+   * batch identity, the per-child capability manifests and the parent run's
    * `active → waiting_children` phase change land in one commit — a batch is
    * either fully admitted with the gate closed behind it, or not admitted at
    * all. `decomposeIn` stays as the historical entry that leaves the parent
@@ -2520,13 +2729,21 @@ declare class TaskService extends Service {
    * `manifests` is aligned with `children` by index (the caller's own batch
    * order): a list of another length is refused before anything is written.
    *
-   * `proposal` consumes the proposal this batch *is* (T2/T3 §6): the
-   * `TaskProposalAdmitted` event joins the same commit, so "this proposal was
-   * consumed and these are its tasks" is one durable fact. The consumption must
-   * name exactly these children in this order — the batch and the record of it
-   * are the same batch, checked here because this is the one place that sees
-   * both — and the reducer then checks the rest of the binding (digests, batch
-   * id, the proposal's status, and that no second consumption is written).
+   * `proposal` is the consumption this batch *is* (T2/T3 §6), and it is
+   * required: a batch is identified by its parent run and the proposal it
+   * consumed, so the batch id is derived from exactly those
+   * ({@link batchIdFor}) and a batch that consumed no proposal has no identity
+   * to write. The `TaskProposalAdmitted` event joins the same commit, so "this
+   * proposal was consumed and these are its tasks" is one durable fact — and
+   * the batch identity written on the parent's `TaskDecomposed` event is the
+   * same id, so the run's accumulation, the phase change and the consumption
+   * name one batch rather than three spellings of it.
+   *
+   * The consumption must name this parent run and exactly these children in
+   * this order — the batch and the record of it are the same batch, checked
+   * here because this is the one place that sees both — and the reducer then
+   * checks the rest of the binding (digests, derived batch id, the proposal's
+   * status, and that no second consumption is written).
    */
   admitBatchIn(storeId: string, parentTaskId: TaskId, parentRunId: RunId, children: readonly TaskInstance[], actor: string, edges?: readonly DependencyEdge[], admission?: DecompositionAdmission, manifests?: readonly CapabilityManifest[], proposal?: TaskProposalConsumption): Promise<void>;
   /**
@@ -2559,9 +2776,11 @@ declare class TaskService extends Service {
   }): Promise<void>;
   /**
    * Records one coordination-phase change on a run (A3). The reducer is the
-   * gate: only `active → waiting_children` (carrying the batch id) and
+   * gate: only `active → waiting_children` and `waiting_children → active`
+   * (both carrying the batch id they open or close) and
    * `active|waiting_children → submitted` (carrying the submission) apply, and
-   * a refused transition commits nothing.
+   * a refused transition commits nothing. A parent that returned to `active`
+   * may admit another batch, so this entry is not once-in-a-life either.
    *
    * The A3 question-id mount points are no longer part of this write shape
    * (A4): what a run waits on comes from the question records, and a payload
@@ -2678,4 +2897,4 @@ declare class TaskService extends Service {
   private header;
 }
 //#endregion
-export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, ExecutionPhase, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, NoProgressRecord, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ProtectedInputRef, QuestionAnswer, QuestionAnswerIdentity, QuestionAnswerRecord, QuestionAnswerResult, QuestionAsk, QuestionAskResult, QuestionIdentity, QuestionMessageRef, QuestionRecord, ROOT_PROPOSAL_TASK_ID, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootProposalIdentity, RunId, RunMcpServerBinding, RunProviderBinding, RunSkillBinding, RunStatus, SkillFitFacts, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskContract, TaskContractVersion, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskQuestionIndex, TaskRun, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, admissionContextDigest, answerIdOf, blockingQuestionsOf, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, sha256Hex, taskProposalId };
+export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, ExecutionPhase, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, NoProgressRecord, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ProtectedInputRef, QuestionAnswer, QuestionAnswerIdentity, QuestionAnswerRecord, QuestionAnswerResult, QuestionAsk, QuestionAskResult, QuestionIdentity, QuestionMessageRef, QuestionRecord, ROOT_PROPOSAL_TASK_ID, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootProposalIdentity, RunId, RunMcpServerBinding, RunProviderBinding, RunSkillBinding, RunStatus, SkillFitFacts, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskContract, TaskContractVersion, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskQuestionIndex, TaskRun, TaskRunBatch, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, admissionContextDigest, answerIdOf, batchIdFor, blockingQuestionsOf, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberTaskIds, sha256Hex, taskProposalId };

@@ -83,14 +83,28 @@ function snapshot(children: TaskInstance[], runs: TaskRun[], evidence: EvidenceB
   }
 }
 
-function request(criteria: AcceptanceCriterion[] = [criterion()]): VerifyRequest {
-  return { taskId: 'root', runId: 'r1', criteria, cwd: '/unused', logDir: '/unused' }
+function request(criteria: AcceptanceCriterion[] = [criterion()], runId = 'r1'): VerifyRequest {
+  return { taskId: 'root', runId, criteria, cwd: '/unused', logDir: '/unused' }
 }
 
-function source(children: TaskInstance[], runs: TaskRun[] = [], evidence: EvidenceBundle[] = []) {
+function source(members: TaskInstance[], runs: TaskRun[] = [], evidence: EvidenceBundle[] = []) {
   return {
-    childrenIn: vi.fn(async (_storeId: string, _taskId: string) => children),
-    snapshotIn: vi.fn(async (_storeId: string) => snapshot(children, runs, evidence)),
+    runMembersIn: vi.fn(async (_storeId: string, _runId: string) => members),
+    snapshotIn: vi.fn(async (_storeId: string) => snapshot(members, runs, evidence)),
+  }
+}
+
+/**
+ * A source whose membership is read per run: what a parent that admitted
+ * several batches — or that ran twice, with its batches belonging to the run
+ * that admitted each — looks like to the judge. `snapshotIn` serves every
+ * member of every run, because the store holds them all.
+ */
+function runSource(byRun: Record<string, TaskInstance[]>, runs: TaskRun[] = [], evidence: EvidenceBundle[] = []) {
+  const all = Object.values(byRun).flat()
+  return {
+    runMembersIn: vi.fn(async (_storeId: string, runId: string) => byRun[runId] ?? []),
+    snapshotIn: vi.fn(async (_storeId: string) => snapshot(all, runs, evidence)),
   }
 }
 
@@ -102,12 +116,13 @@ describe('CompositeVerifier', () => {
   })
 
   test('passes when every child is verified', async () => {
-    const childrenIn = source([child('c1', 'verified'), child('c2', 'verified')])
-    const verifier = new CompositeVerifier(childrenIn)
+    const members = source([child('c1', 'verified'), child('c2', 'verified')])
+    const verifier = new CompositeVerifier(members)
     const [result] = await verifier.verifyIn('sg-t-root', request())
     expect(result.status).toBe('pass')
     expect(result.verifierId).toBe('composite')
-    expect(childrenIn.childrenIn).toHaveBeenCalledWith('sg-t-root', 'root')
+    // The membership is read for the judged run, not for its task.
+    expect(members.runMembersIn).toHaveBeenCalledWith('sg-t-root', 'r1')
   })
 
   test('fails when any child is not verified, naming the stragglers', async () => {
@@ -260,6 +275,94 @@ describe('CompositeVerifier parent evidence map (P4, KISS §6 C2)', () => {
     // Without the label the conjunction verdict carries no heuristic marker.
     const [plain] = await verifier.verifyIn('sg-t-root', request())
     expect(plain.details).toBeUndefined()
+  })
+})
+
+describe('CompositeVerifier run membership (K1 multi-batch)', () => {
+  /** One verified member carrying the criterion a map names, with the bundle that proves it. */
+  function verifiedMember(taskId: string, criterionId: string): {
+    member: TaskInstance
+    run: TaskRun
+    evidence: EvidenceBundle
+  } {
+    return {
+      member: child(taskId, 'verified', [criterion({ criterionId, verificationMode: 'deterministic', command: 'true' })]),
+      run: run(`r-${taskId}`, taskId, 'verified'),
+      evidence: bundle(`e-${taskId}`, `r-${taskId}`, taskId, [verdict(criterionId, 'pass')]),
+    }
+  }
+
+  test('a childIndex is a run-level position: the second batch appends and does not renumber the first', async () => {
+    const first = verifiedMember('c1', 'ac1-1')
+    const second = verifiedMember('c2', 'ac2-1')
+    // One run, two batches: c1 was admitted by the first, c2 by the second.
+    const source = runSource(
+      { r1: [first.member, second.member] },
+      [first.run, second.run],
+      [first.evidence, second.evidence],
+    )
+    const verifier = new CompositeVerifier(source)
+    const [ok] = await verifier.verifyIn('sg-t-root', request([criterion({
+      childEvidence: [
+        { childIndex: 0, criterionId: 'ac1-1' },
+        { childIndex: 1, criterionId: 'ac2-1' },
+      ],
+    })]))
+    expect(ok.status).toBe('pass')
+    expect(ok.details).toContain('child #1 (c2) criterion "ac2-1" passed')
+
+    // The second batch's first member is not position 0 at run level: a map
+    // that spelled it as one resolves the first batch's member instead and
+    // fails on the criterion that member does not carry.
+    const [confused] = await verifier.verifyIn('sg-t-root', request([criterion({
+      childEvidence: [{ childIndex: 0, criterionId: 'ac2-1' }],
+    })]))
+    expect(confused.status).toBe('fail')
+    expect(confused.details).toContain('child #0 (c1) has no criterion "ac2-1"')
+  })
+
+  test('a childIndex past the run\'s accumulated members fails, naming the count', async () => {
+    const first = verifiedMember('c1', 'ac1-1')
+    const second = verifiedMember('c2', 'ac2-1')
+    const verifier = new CompositeVerifier(runSource(
+      { r1: [first.member, second.member] },
+      [first.run, second.run],
+      [first.evidence, second.evidence],
+    ))
+    const [result] = await verifier.verifyIn('sg-t-root', request([criterion({
+      childEvidence: [{ childIndex: 2 }, { childIndex: 1, criterionId: 'ac2-1' }],
+    })]))
+    expect(result.status).toBe('fail')
+    // Only the out-of-range entry is defective: the other entry is satisfied,
+    // so a missing member does not turn the whole map into noise.
+    expect(result.details).toBe('incomplete childEvidence map: child #2 does not exist (the run\'s batches have admitted 2 members)')
+  })
+
+  test('historical members belong to their own run: run2 resolves run2\'s first member', async () => {
+    const old = verifiedMember('c1', 'ac1-1')
+    const current = verifiedMember('c9', 'ac9-1')
+    const verifier = new CompositeVerifier(runSource(
+      { r1: [old.member], r2: [current.member] },
+      [old.run, current.run],
+      [old.evidence, current.evidence],
+    ))
+    const [result] = await verifier.verifyIn('sg-t-root', request([criterion({
+      childEvidence: [{ childIndex: 0, criterionId: 'ac9-1' }],
+    })], 'r2'))
+    expect(result.status).toBe('pass')
+    expect(result.details).toContain('child #0 (c9) criterion "ac9-1" passed')
+    expect(result.details).not.toContain('c1')
+
+    // The first run still answers with its own member — the two runs' members
+    // are not one list — and a run that admitted no batch has none at all.
+    const [earlier] = await verifier.verifyIn('sg-t-root', request([criterion({
+      childEvidence: [{ childIndex: 0, criterionId: 'ac1-1' }],
+    })], 'r1'))
+    expect(earlier.status).toBe('pass')
+    expect(earlier.details).toContain('child #0 (c1)')
+    const [none] = await verifier.verifyIn('sg-t-root', request([criterion()], 'r3'))
+    expect(none.status).toBe('inconclusive')
+    expect(none.details).toBe('no child tasks')
   })
 })
 

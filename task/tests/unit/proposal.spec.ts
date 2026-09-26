@@ -6,6 +6,7 @@ import { TASK_CONTRACT_VERSION, canonicalize, contractDigest, decompositionDiges
 import {
   ROOT_PROPOSAL_TASK_ID,
   admissionContextDigest,
+  batchIdFor,
   capabilityManifestDigest,
   reviewContextDigest,
   rootProposalDigest,
@@ -214,7 +215,8 @@ function consumption(overrides: Partial<TaskProposalBatchConsumption> = {}): Tas
     proposalId: value.proposalId,
     proposalDigest: value.proposalDigest,
     reviewContextDigest: value.reviewContextDigest,
-    batchId: `b-${PARENT}`,
+    parentRunId: IDENTITY.parentRunId,
+    batchId: batchIdFor(IDENTITY.parentRunId, value.proposalId),
     childTaskIds: ['c1', 'c2'],
     admittedAt: NOW,
     ...overrides,
@@ -311,6 +313,19 @@ describe('proposal identities', () => {
       children: [IDENTITY.children[0]!, { ...IDENTITY.children[1]!, dependsOn: [0, 0] }],
     })
     expect(revision).not.toBe(PROPOSAL_ID)
+  })
+
+  test('names a batch by its parent run and its proposal, and by nothing else', () => {
+    expect(batchIdFor(IDENTITY.parentRunId, PROPOSAL_ID)).toBe(`b-r-root-${PROPOSAL_ID}`)
+    // The pair is the identity: another run or another proposal is another
+    // batch, and a task id names no batch at all.
+    expect(batchIdFor('r-other', PROPOSAL_ID)).not.toBe(batchIdFor(IDENTITY.parentRunId, PROPOSAL_ID))
+    expect(batchIdFor(IDENTITY.parentRunId, 'p-other')).not.toBe(batchIdFor(IDENTITY.parentRunId, PROPOSAL_ID))
+    expect(batchIdFor(IDENTITY.parentRunId, PROPOSAL_ID)).not.toBe(`b-${PARENT}`)
+    // The consumption a batch is admitted as carries exactly that id, derived
+    // rather than written twice.
+    expect(consumption().batchId).toBe(batchIdFor('r-root', PROPOSAL_ID))
+    expect(consumption().parentRunId).toBe('r-root')
   })
 })
 
@@ -708,7 +723,8 @@ describe('TaskState proposal consumption', () => {
       proposalId: PROPOSAL_ID,
       proposalDigest: decompositionDigest(IDENTITY),
       reviewContextDigest: REVIEW_CONTEXT_SHA256,
-      batchId: 'b-root',
+      parentRunId: 'r-root',
+      batchId: batchIdFor('r-root', PROPOSAL_ID),
       childTaskIds: ['c1', 'c2'],
       admittedAt: NOW,
     })
@@ -732,7 +748,30 @@ describe('TaskState proposal consumption', () => {
     ['a consumption of an expired proposal', () => withChildren(decide(pendingState(), claim({ outcome: 'expired', reason: 'parent run ended' })), ['c1', 'c2']), consumption(), `task: illegal proposal transition "expired" → "admitted" for proposal "${PROPOSAL_ID}"`],
     ['a second consumption of one proposal', admittedState, consumption(), `task: illegal proposal transition "admitted" → "admitted" for proposal "${PROPOSAL_ID}"`],
     ['a consumption without a batch id', () => withChildren(readyState(), ['c1', 'c2']), consumption({ batchId: '' }), `task: proposal "${PROPOSAL_ID}" consumption requires a batch id`],
-    ['a consumption naming a foreign batch', () => withChildren(readyState(), ['c1', 'c2']), consumption({ batchId: 'b-other' }), `task: proposal "${PROPOSAL_ID}" consumption batch "b-other" is not the batch of task "root"`],
+    [
+      'a consumption from before batches were identified by run and proposal',
+      () => withChildren(readyState(), ['c1', 'c2']),
+      consumption({ parentRunId: undefined, batchId: `b-${PARENT}` }),
+      `task: proposal "${PROPOSAL_ID}" consumption requires the parent run its batch belongs to; a consumption from before batches were identified by run and proposal is refused, not guessed at`,
+    ],
+    [
+      'a consumption naming a parent run that is not the identity\'s',
+      () => withChildren(readyState(), ['c1', 'c2']),
+      consumption({ parentRunId: 'r-other' }),
+      `task: proposal "${PROPOSAL_ID}" consumption names parent run "r-other", not the run "r-root" its identity names`,
+    ],
+    [
+      'a consumption naming a foreign batch',
+      () => withChildren(readyState(), ['c1', 'c2']),
+      consumption({ batchId: 'b-other' }),
+      `task: proposal "${PROPOSAL_ID}" consumption batch "b-other" is not the batch of run "r-root" and proposal "${PROPOSAL_ID}" ("${batchIdFor('r-root', PROPOSAL_ID)}")`,
+    ],
+    [
+      'a consumption whose batch id is another proposal\'s',
+      () => withChildren(readyState(), ['c1', 'c2']),
+      consumption({ batchId: batchIdFor('r-root', 'p-other') }),
+      `task: proposal "${PROPOSAL_ID}" consumption batch "${batchIdFor('r-root', 'p-other')}" is not the batch of run "r-root" and proposal "${PROPOSAL_ID}" ("${batchIdFor('r-root', PROPOSAL_ID)}")`,
+    ],
     ['a consumption without children', () => withChildren(readyState(), ['c1', 'c2']), consumption({ childTaskIds: [] }), `task: proposal "${PROPOSAL_ID}" consumption requires at least one child task id`],
     ['a consumption with an empty child id', () => withChildren(readyState(), ['c1', 'c2']), consumption({ childTaskIds: ['c1', ''] }), `task: proposal "${PROPOSAL_ID}" consumption child task ids must be non-empty strings`],
     ['a consumption naming one child twice', () => withChildren(readyState(), ['c1', 'c2']), consumption({ childTaskIds: ['c1', 'c1'] }), `task: proposal "${PROPOSAL_ID}" consumption names task "c1" twice`],
@@ -936,7 +975,7 @@ describe('TaskService proposal entries', () => {
     const snapshot = await service.snapshotIn(STORE)
     expect((await service.taskIn(STORE, PARENT)).childTaskIds).toEqual(['c1', 'c2'])
     expect(snapshot.proposals?.byId[PROPOSAL_ID]?.status).toBe('admitted')
-    expect(batchConsumptionOf(snapshot.proposals?.byId[PROPOSAL_ID])?.batchId).toBe(`b-${PARENT}`)
+    expect(batchConsumptionOf(snapshot.proposals?.byId[PROPOSAL_ID])?.batchId).toBe(batchIdFor('r-root', PROPOSAL_ID))
   })
 
   test('a consumption misaligned with the batch refuses the whole commit', async () => {
@@ -1027,6 +1066,41 @@ describe('TaskService legacy stores', () => {
 
     await service.submitProposalIn(STORE, proposal(), 'tester')
     expect((await service.snapshotIn(STORE)).proposals?.byId[PROPOSAL_ID]?.status).toBe('ready')
+  })
+
+  test('a store holding a batch consumed before the pair identity stops by name at replay', async () => {
+    // The pre-change record: `b-<parentTaskId>`, no parent run, no proposal
+    // binding. This build cannot tell which run admitted it, and guessing would
+    // hand a later reader a batch that is not the one the record describes.
+    const oldConsumption = {
+      kind: 'batch',
+      proposalId: PROPOSAL_ID,
+      proposalDigest: decompositionDigest(IDENTITY),
+      reviewContextDigest: REVIEW_CONTEXT_SHA256,
+      batchId: `b-${PARENT}`,
+      childTaskIds: ['c1', 'c2'],
+      admittedAt: NOW,
+    }
+    const sessions = new Map<string, StoredSession>()
+    const header: SessionHeader = { version: SESSION_FORMAT_VERSION, id: makeSessionId(STORE), createdAt: 0, isSeeded: false }
+    sessions.set(STORE, {
+      header,
+      events: [
+        ev('TaskCreated', { task: task({ taskId: PARENT, decompositionStatus: 'decomposable' }) }, { taskId: PARENT }),
+        ev('TaskAdmitted', { decompositionStatus: 'decomposable' }, { taskId: PARENT }),
+        ev('TaskProposalSubmitted', { proposal: proposal() }, { taskId: PARENT }),
+        ev('TaskCreated', { task: task({ taskId: 'c1', parentTaskId: PARENT, depth: 1 }) }, { taskId: 'c1', parentTaskId: PARENT }),
+        ev('TaskAdmitted', { decompositionStatus: 'leaf' }, { taskId: 'c1' }),
+        ev('TaskCreated', { task: task({ taskId: 'c2', parentTaskId: PARENT, depth: 1 }) }, { taskId: 'c2', parentTaskId: PARENT }),
+        ev('TaskAdmitted', { decompositionStatus: 'leaf' }, { taskId: 'c2' }),
+        ev('TaskProposalAdmitted', oldConsumption as unknown as TaskProposalConsumption, { taskId: PARENT }),
+      ].map((data, seq) => ({ type: 'task/event', seq: SessionSeq(seq), time: 0, ignorable: true, data })) as SessionEvent[],
+    })
+    const service = new TaskService(harness(sessions).ctx as never)
+    await expect(service.openStore(STORE)).rejects.toThrow(
+      `task: proposal "${PROPOSAL_ID}" consumption requires the parent run its batch belongs to; ` +
+      'a consumption from before batches were identified by run and proposal is refused, not guessed at',
+    )
   })
 })
 

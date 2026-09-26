@@ -35,13 +35,18 @@ interface VerifierSelftestSample {
 }
 /**
  * The task-store view one store-reading selftest sample is judged against
- * ({@link VerifierSelftestSample.store}): the child tasks the criterion is
- * judged over, plus the runs and evidence bundles a judge reads for the
- * children's verified states and verdicts. Everything else a full snapshot
- * carries is empty in a sample.
+ * ({@link VerifierSelftestSample.store}): the members the judged run has
+ * admitted, plus the runs and evidence bundles a judge reads for their verified
+ * states and verdicts. Everything else a full snapshot carries is empty in a
+ * sample.
  */
 interface VerifierSelftestStore {
-  /** The sample task's children, by batch position — exactly what a store-reading judge's child lookup returns. */
+  /**
+   * The run's accumulated members, in admission order — exactly the sequence
+   * `TaskService.runMembersIn` returns for a run, and therefore exactly what a
+   * store-reading judge's member lookup hands it. A criterion's `childIndex`
+   * resolves against this list.
+   */
   children: TaskInstance[];
   /** Runs the sample judge reads (a child's verified run); `[]` when the sample needs none. */
   runs?: TaskRun[];
@@ -126,11 +131,20 @@ declare class CommandVerifier implements Verifier {
 }
 //#endregion
 //#region src/composite-verifier.d.ts
-/** The slice of the task service the composite verifier reads. */
+/**
+ * The slice of the task service the composite verifier reads: the members the
+ * judged run has admitted, and the store snapshot they are judged against.
+ *
+ * Membership is read per *run*, not per task: a parent decomposes more than
+ * once (one batch per delegation round), so "the children of this task" is not
+ * the sequence a criterion's `childIndex` names — the run's accumulative
+ * membership is, and a run that admitted no batch has no members rather than
+ * its task's children.
+ */
 interface CompositeTaskSource {
-  childrenIn(storeId: string, taskId: TaskId): Promise<TaskInstance[]>;
+  runMembersIn(storeId: string, runId: RunId): Promise<TaskInstance[]>;
   /**
-   * The full store snapshot. The plain conjunction needs only children, but a
+   * The full store snapshot. The plain conjunction needs only members, but a
    * parent's {@link AcceptanceCriterion.childEvidence} map is judged against
    * child evidence and run states, so the source exposes the snapshot too.
    */
@@ -138,27 +152,32 @@ interface CompositeTaskSource {
 }
 /**
  * Judges a composite criterion. The default is the child-status conjunction
- * (pass iff the task has at least one child and every child is verified),
- * unchanged for criteria that declare nothing.
+ * (pass iff the run has at least one accumulated member and every member is
+ * verified), unchanged for criteria that declare nothing.
  *
  * A criterion carrying a {@link AcceptanceCriterion.childEvidence} map is
  * judged by the map as well: every entry must resolve against the store, and an
  * incomplete mapping fails the criterion with the missing items named — the
  * conjunction alone can never pass a parent whose root goal rests on evidence
- * the children did not produce (KISS §6 C2). A criterion labeled
+ * the members did not produce (KISS §6 C2). A criterion labeled
  * {@link AcceptanceCriterion.heuristic} keeps the conjunction verdict but
  * carries the explicit heuristic label in its details, so a natural-language
  * coverage signal is never mistaken for a mechanical proof (KISS §5.1).
  *
- * Pure by construction — the criterion, the batch's children, and a snapshot
- * getter are the whole input. The getter is called only when a map needs it,
- * so a map-less criterion never reads a snapshot; that also lets the registry
- * judge a selftest sample's declared store view without a store behind it.
- * Reading children needs the store id, which VerifyRequest does not carry, so
- * production dispatches through {@link CompositeVerifier.verifyIn}; the plain
- * `verify` stays inconclusive.
+ * `members` is the judged run's accumulative membership, in admission order
+ * (`TaskService.runMembersIn`) — the sequence `childIndex` names. It is not the
+ * judged task's children: a parent's later batch appends and never renumbers an
+ * earlier one's members, and a run that admitted no batch has none.
+ *
+ * Pure by construction — the criterion, the members, and a snapshot getter are
+ * the whole input. The getter is called only when a map needs it, so a map-less
+ * criterion never reads a snapshot; that also lets the registry judge a selftest
+ * sample's declared store view without a store behind it. Reading the members
+ * needs the store id and the run id, which the registry's own request carries,
+ * so production dispatches through {@link CompositeVerifier.verifyIn}; the
+ * plain `verify` stays inconclusive.
  */
-declare function judgeCompositeCriterion(criterion: AcceptanceCriterion, children: readonly TaskInstance[], snapshot: () => Promise<TaskSnapshot>): Promise<VerificationResult>;
+declare function judgeCompositeCriterion(criterion: AcceptanceCriterion, members: readonly TaskInstance[], snapshot: () => Promise<TaskSnapshot>): Promise<VerificationResult>;
 declare class CompositeVerifier implements Verifier {
   private readonly task;
   readonly id = "composite";

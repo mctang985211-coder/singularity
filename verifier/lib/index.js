@@ -174,15 +174,15 @@ function describeEntry(entry) {
 }
 /**
 * The defect one map entry carries against the store, or `undefined` when the
-* entry is satisfied. Every branch is a store fact: the child exists in the
-* batch, sits in the verified terminal state, and — for the narrowed spellings
-* — the child's *verified run* evidence carries the passing verdict and the
-* named reference. Evidence an earlier failed run produced is an expired
-* reference and never satisfies an entry.
+* entry is satisfied. Every branch is a store fact: the child exists among the
+* run's accumulated members, sits in the verified terminal state, and — for the
+* narrowed spellings — the child's *verified run* evidence carries the passing
+* verdict and the named reference. Evidence an earlier failed run produced is
+* an expired reference and never satisfies an entry.
 */
 function entryDefect(entry, children, snapshot) {
 	const child = children[entry.childIndex];
-	if (child === void 0) return `child #${entry.childIndex} does not exist (the decomposition batch has ${children.length} children)`;
+	if (child === void 0) return `child #${entry.childIndex} does not exist (the run's batches have admitted ${children.length} members)`;
 	if (child.status !== "verified") return `child #${entry.childIndex} (${child.taskId}) is ${child.status}, not verified`;
 	const verifiedRun = snapshot.runs.find((run) => run.taskId === child.taskId && run.status === "verified");
 	const bundles = snapshot.evidence.filter((item) => item.taskRunId === verifiedRun?.runId);
@@ -199,33 +199,38 @@ function entryDefect(entry, children, snapshot) {
 }
 /**
 * Judges a composite criterion. The default is the child-status conjunction
-* (pass iff the task has at least one child and every child is verified),
-* unchanged for criteria that declare nothing.
+* (pass iff the run has at least one accumulated member and every member is
+* verified), unchanged for criteria that declare nothing.
 *
 * A criterion carrying a {@link AcceptanceCriterion.childEvidence} map is
 * judged by the map as well: every entry must resolve against the store, and an
 * incomplete mapping fails the criterion with the missing items named — the
 * conjunction alone can never pass a parent whose root goal rests on evidence
-* the children did not produce (KISS §6 C2). A criterion labeled
+* the members did not produce (KISS §6 C2). A criterion labeled
 * {@link AcceptanceCriterion.heuristic} keeps the conjunction verdict but
 * carries the explicit heuristic label in its details, so a natural-language
 * coverage signal is never mistaken for a mechanical proof (KISS §5.1).
 *
-* Pure by construction — the criterion, the batch's children, and a snapshot
-* getter are the whole input. The getter is called only when a map needs it,
-* so a map-less criterion never reads a snapshot; that also lets the registry
-* judge a selftest sample's declared store view without a store behind it.
-* Reading children needs the store id, which VerifyRequest does not carry, so
-* production dispatches through {@link CompositeVerifier.verifyIn}; the plain
-* `verify` stays inconclusive.
+* `members` is the judged run's accumulative membership, in admission order
+* (`TaskService.runMembersIn`) — the sequence `childIndex` names. It is not the
+* judged task's children: a parent's later batch appends and never renumbers an
+* earlier one's members, and a run that admitted no batch has none.
+*
+* Pure by construction — the criterion, the members, and a snapshot getter are
+* the whole input. The getter is called only when a map needs it, so a map-less
+* criterion never reads a snapshot; that also lets the registry judge a selftest
+* sample's declared store view without a store behind it. Reading the members
+* needs the store id and the run id, which the registry's own request carries,
+* so production dispatches through {@link CompositeVerifier.verifyIn}; the
+* plain `verify` stays inconclusive.
 */
-async function judgeCompositeCriterion(criterion, children, snapshot) {
+async function judgeCompositeCriterion(criterion, members, snapshot) {
 	const map = criterion.childEvidence ?? [];
 	const base = {
 		criterionId: criterion.criterionId,
 		verifierId: COMPOSITE_VERIFIER_ID
 	};
-	if (children.length === 0) {
+	if (members.length === 0) {
 		if (map.length === 0) return {
 			...base,
 			status: "inconclusive",
@@ -234,10 +239,10 @@ async function judgeCompositeCriterion(criterion, children, snapshot) {
 		return {
 			...base,
 			status: "fail",
-			details: `incomplete childEvidence map: the task has no child tasks to satisfy ${map.map(describeEntry).join("; ")}`
+			details: `incomplete childEvidence map: the run has admitted no members to satisfy ${map.map(describeEntry).join("; ")}`
 		};
 	}
-	const unverified = children.filter((child) => child.status !== "verified");
+	const unverified = members.filter((child) => child.status !== "verified");
 	if (unverified.length > 0) return {
 		...base,
 		status: "fail",
@@ -249,7 +254,7 @@ async function judgeCompositeCriterion(criterion, children, snapshot) {
 		...criterion.heuristic === true ? { details: "heuristic conjunction: every child verified — explicitly labeled heuristic (KISS §5.1); a conjunction is a coverage signal, not a deterministic proof of the parent goal, and is not counted as one" } : {}
 	};
 	const store = await snapshot();
-	const defects = map.map((entry) => entryDefect(entry, children, store)).filter((defect) => defect !== void 0);
+	const defects = map.map((entry) => entryDefect(entry, members, store)).filter((defect) => defect !== void 0);
 	if (defects.length > 0) return {
 		...base,
 		status: "fail",
@@ -258,7 +263,7 @@ async function judgeCompositeCriterion(criterion, children, snapshot) {
 	return {
 		...base,
 		status: "pass",
-		details: `childEvidence satisfied: ${map.map((entry) => describeSatisfied(entry, children[entry.childIndex])).join("; ")}`
+		details: `childEvidence satisfied: ${map.map((entry) => describeSatisfied(entry, members[entry.childIndex])).join("; ")}`
 	};
 }
 /** The criterion a selftest sample hands the judge; only the fields the judge reads carry meaning. */
@@ -393,9 +398,9 @@ var CompositeVerifier = class {
 		}));
 	}
 	async verifyIn(storeId, req) {
-		const children = await this.task.childrenIn(storeId, req.taskId);
+		const members = await this.task.runMembersIn(storeId, req.runId);
 		const results = [];
-		for (const criterion of req.criteria) results.push(await judgeCompositeCriterion(criterion, children, () => this.task.snapshotIn(storeId)));
+		for (const criterion of req.criteria) results.push(await judgeCompositeCriterion(criterion, members, () => this.task.snapshotIn(storeId)));
 		return results;
 	}
 };

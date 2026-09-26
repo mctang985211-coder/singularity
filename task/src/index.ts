@@ -25,8 +25,9 @@ import type {
   TaskRun,
   TaskSnapshot,
 } from './types.ts'
+import { runMemberTaskIds } from './types.ts'
 import type { DecompositionAdmission } from './contract.ts'
-import { ROOT_PROPOSAL_TASK_ID } from './proposal.ts'
+import { ROOT_PROPOSAL_TASK_ID, batchIdFor } from './proposal.ts'
 import type {
   TaskProposal,
   TaskProposalConsumption,
@@ -193,11 +194,41 @@ export class TaskService extends Service {
     return run
   }
 
+  /**
+   * Every child of one task, in the order the task accumulated them — the
+   * task-level view of its subtree, across all the batches it ever admitted
+   * (a parent decomposes more than once). It is *not* the sequence a parent
+   * criterion's `childIndex` names and not a batch: a criterion's evidence map
+   * resolves against the members one *run* admitted ({@link runMembersIn}), and
+   * "which child is the third of this task" is not a question a batch identity
+   * answers.
+   */
   async childrenIn(storeId: string, taskId: TaskId): Promise<TaskInstance[]> {
     const snapshot = await this.snapshotIn(storeId)
     const parent = snapshot.tasks.find(item => item.taskId === taskId)
     if (parent === undefined) throw new Error(`task: unknown task "${taskId}"`)
     return parent.childTaskIds.map(childTaskId => snapshot.tasks.find(item => item.taskId === childTaskId) as TaskInstance)
+  }
+
+  /**
+   * The tasks one run has admitted altogether, in the order their batches were
+   * admitted (`runMemberTaskIds` of the run's own projection) — the run's
+   * accumulative membership, which is the sequence a parent criterion's
+   * `childIndex` names. Deliberately not the task's children: a task's children
+   * are every batch ever admitted under it, while a run's members are the ones
+   * *this* run admitted, so a parent that returned to `active` and ran again on
+   * a new run has the two answer differently. A run that admitted no batch
+   * answers `[]` — its members are not guessed from its task's children.
+   */
+  async runMembersIn(storeId: string, runId: RunId): Promise<TaskInstance[]> {
+    const snapshot = await this.snapshotIn(storeId)
+    const run = snapshot.runs.find(item => item.runId === runId)
+    if (run === undefined) throw new Error(`task: unknown run "${runId}"`)
+    return runMemberTaskIds(run).map(memberTaskId => {
+      const task = snapshot.tasks.find(item => item.taskId === memberTaskId)
+      if (task === undefined) throw new Error(`task: unknown task "${memberTaskId}"`)
+      return task
+    })
   }
 
   async createTaskIn(storeId: string, task: TaskInstance, actor: string): Promise<void> {
@@ -264,8 +295,8 @@ export class TaskService extends Service {
 
   /**
    * The atomic batch-admission entry (A3 §1.3): every child's creation and
-   * admission, the dependency edges, the parent's decomposition record, the
-   * per-child capability manifests and the parent run's
+   * admission, the dependency edges, the parent's decomposition record with the
+   * batch identity, the per-child capability manifests and the parent run's
    * `active → waiting_children` phase change land in one commit — a batch is
    * either fully admitted with the gate closed behind it, or not admitted at
    * all. `decomposeIn` stays as the historical entry that leaves the parent
@@ -274,13 +305,21 @@ export class TaskService extends Service {
    * `manifests` is aligned with `children` by index (the caller's own batch
    * order): a list of another length is refused before anything is written.
    *
-   * `proposal` consumes the proposal this batch *is* (T2/T3 §6): the
-   * `TaskProposalAdmitted` event joins the same commit, so "this proposal was
-   * consumed and these are its tasks" is one durable fact. The consumption must
-   * name exactly these children in this order — the batch and the record of it
-   * are the same batch, checked here because this is the one place that sees
-   * both — and the reducer then checks the rest of the binding (digests, batch
-   * id, the proposal's status, and that no second consumption is written).
+   * `proposal` is the consumption this batch *is* (T2/T3 §6), and it is
+   * required: a batch is identified by its parent run and the proposal it
+   * consumed, so the batch id is derived from exactly those
+   * ({@link batchIdFor}) and a batch that consumed no proposal has no identity
+   * to write. The `TaskProposalAdmitted` event joins the same commit, so "this
+   * proposal was consumed and these are its tasks" is one durable fact — and
+   * the batch identity written on the parent's `TaskDecomposed` event is the
+   * same id, so the run's accumulation, the phase change and the consumption
+   * name one batch rather than three spellings of it.
+   *
+   * The consumption must name this parent run and exactly these children in
+   * this order — the batch and the record of it are the same batch, checked
+   * here because this is the one place that sees both — and the reducer then
+   * checks the rest of the binding (digests, derived batch id, the proposal's
+   * status, and that no second consumption is written).
    */
   async admitBatchIn(
     storeId: string,
@@ -297,18 +336,29 @@ export class TaskService extends Service {
     if (manifests !== undefined && manifests.length !== children.length) {
       throw new Error(`task: admit batch requires one manifest per child (${children.length} children, ${manifests.length} manifests)`)
     }
-    if (proposal?.kind === 'root') {
+    if (proposal === undefined) {
+      throw new Error(
+        'task: admit batch requires the proposal consumption the batch is; its id is derived from the parent run and the proposal',
+      )
+    }
+    if (proposal.kind === 'root') {
       throw new Error(
         `task: admit batch cannot record the root consumption of proposal "${proposal.proposalId}"; a root contract is activated with admitRootProposalIn`,
       )
     }
-    if (proposal !== undefined
-      && (proposal.childTaskIds.length !== children.length
-        || !proposal.childTaskIds.every((childTaskId, index) => childTaskId === children[index]?.taskId))) {
+    if (proposal.parentRunId !== parentRunId) {
+      throw new Error(
+        `task: admit batch requires the consumption of proposal "${proposal.proposalId}" to name the parent run it is admitted on ` +
+        `(the consumption names "${proposal.parentRunId}", the call admits "${parentRunId}")`,
+      )
+    }
+    if (proposal.childTaskIds.length !== children.length
+      || !proposal.childTaskIds.every((childTaskId, index) => childTaskId === children[index]?.taskId)) {
       throw new Error(
         `task: admit batch requires the proposal consumption to name its children in batch order (${children.length} children, ${proposal.childTaskIds.length} consumed)`,
       )
     }
+    const batchId = batchIdFor(parentRunId, proposal.proposalId)
     const events: TaskEvent[] = []
     for (const child of children) {
       if (child.parentTaskId !== parentTaskId) throw new Error(`task: child "${child.taskId}" parentTaskId must be "${parentTaskId}"`)
@@ -324,7 +374,13 @@ export class TaskService extends Service {
     events.push(event('TaskDecomposed', {
       taskId: parentTaskId,
       actor,
-      payload: { childTaskIds: children.map(child => child.taskId), ...(admission === undefined ? {} : { admission }) },
+      payload: {
+        childTaskIds: children.map(child => child.taskId),
+        ...(admission === undefined ? {} : { admission }),
+        batchId,
+        parentRunId,
+        proposalId: proposal.proposalId,
+      },
     }))
     if (manifests !== undefined) {
       children.forEach((child, index) => {
@@ -339,11 +395,9 @@ export class TaskService extends Service {
       taskId: parentTaskId,
       runId: parentRunId,
       actor,
-      payload: { phase: 'waiting_children', batchId: `b-${parentTaskId}` },
+      payload: { phase: 'waiting_children', batchId },
     }))
-    if (proposal !== undefined) {
-      events.push(event('TaskProposalAdmitted', { taskId: parentTaskId, actor, payload: proposal }))
-    }
+    events.push(event('TaskProposalAdmitted', { taskId: parentTaskId, actor, payload: proposal }))
     await this.commitIn(storeId, events)
   }
 
@@ -458,9 +512,11 @@ export class TaskService extends Service {
 
   /**
    * Records one coordination-phase change on a run (A3). The reducer is the
-   * gate: only `active → waiting_children` (carrying the batch id) and
+   * gate: only `active → waiting_children` and `waiting_children → active`
+   * (both carrying the batch id they open or close) and
    * `active|waiting_children → submitted` (carrying the submission) apply, and
-   * a refused transition commits nothing.
+   * a refused transition commits nothing. A parent that returned to `active`
+   * may admit another batch, so this entry is not once-in-a-life either.
    *
    * The A3 question-id mount points are no longer part of this write shape
    * (A4): what a run waits on comes from the question records, and a payload

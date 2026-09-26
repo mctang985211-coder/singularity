@@ -8,7 +8,7 @@
  * package back.
  *
  * The types below name task facts in their fields (a criterion, a run id, the
- * children a store-reading judge sees), so this module imports them from
+ * members a store-reading judge sees), so this module imports them from
  * `@dangosys/dsh-singularity-task` — the one direction of the dependency, the
  * same one the registry service itself declares (`static inject = ['task']`).
  * @module @dangosys/dsh-singularity-verifier/types
@@ -57,13 +57,18 @@ export interface VerifierSelftestSample {
 
 /**
  * The task-store view one store-reading selftest sample is judged against
- * ({@link VerifierSelftestSample.store}): the child tasks the criterion is
- * judged over, plus the runs and evidence bundles a judge reads for the
- * children's verified states and verdicts. Everything else a full snapshot
- * carries is empty in a sample.
+ * ({@link VerifierSelftestSample.store}): the members the judged run has
+ * admitted, plus the runs and evidence bundles a judge reads for their verified
+ * states and verdicts. Everything else a full snapshot carries is empty in a
+ * sample.
  */
 export interface VerifierSelftestStore {
-  /** The sample task's children, by batch position — exactly what a store-reading judge's child lookup returns. */
+  /**
+   * The run's accumulated members, in admission order — exactly the sequence
+   * `TaskService.runMembersIn` returns for a run, and therefore exactly what a
+   * store-reading judge's member lookup hands it. A criterion's `childIndex`
+   * resolves against this list.
+   */
   children: TaskInstance[]
   /** Runs the sample judge reads (a child's verified run); `[]` when the sample needs none. */
   runs?: TaskRun[]

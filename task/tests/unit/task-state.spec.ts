@@ -18,8 +18,15 @@ import type {
   TaskRun,
 } from '../../src/types.ts'
 import { TaskState } from '../../src/service/state.ts'
+import { batchIdFor } from '../../src/proposal.ts'
+import { runMemberTaskIds } from '../../src/types.ts'
 
 const NOW = '2026-09-16T00:00:00.000Z'
+
+/** The three fields one batch identity is spelled out as, for a given run and proposal. */
+function batchIdentity(parentRunId: RunId, proposalId: string): { batchId: string; parentRunId: RunId; proposalId: string } {
+  return { batchId: batchIdFor(parentRunId, proposalId), parentRunId, proposalId }
+}
 
 function ev<K extends TaskEventKind>(
   kind: K,
@@ -341,7 +348,58 @@ describe('TaskState decomposition', () => {
     state.apply(ev('TaskAdmitted', { decompositionStatus: 'leaf' }, { taskId: 'c1' }))
     expect(() => state.apply(ev('TaskDecomposed', { childTaskIds: ['stranger'] }, { taskId: 'root' }))).toThrow('not a child')
     state.apply(ev('TaskDecomposed', { childTaskIds: ['c1'] }, { taskId: 'root' }))
-    expect(() => state.apply(ev('TaskDecomposed', { childTaskIds: ['c1'] }, { taskId: 'root' }))).toThrow('already decomposed')
+    // A parent may decompose more than once: the same child, recorded under a
+    // second batch, is a second admission of it, not a repeat of the first.
+    state.apply(ev('TaskDecomposed', { childTaskIds: ['c1'] }, { taskId: 'root' }))
+    expect(state.snapshot().tasks.find(item => item.taskId === 'root')?.decompositionStatus).toBe('decomposed')
+  })
+
+  test('a second batch under the same run and proposal is refused, a different one is not', () => {
+    const state = new TaskState('store')
+    state.apply(ev('TaskCreated', { task: task({ taskId: 'root', decompositionStatus: 'decomposable' }) }, { taskId: 'root' }))
+    state.apply(ev('TaskAdmitted', { decompositionStatus: 'decomposable' }, { taskId: 'root' }))
+    state.apply(ev('TaskStarted', { run: run({ taskId: 'root', executionPhase: 'active' }) }, { taskId: 'root', runId: 'r1' }))
+    for (const childTaskId of ['c1', 'c2']) {
+      state.apply(ev('TaskCreated', { task: task({ taskId: childTaskId, parentTaskId: 'root', depth: 1 }) }, { taskId: childTaskId, parentTaskId: 'root' }))
+      state.apply(ev('TaskAdmitted', { decompositionStatus: 'leaf' }, { taskId: childTaskId }))
+    }
+    const batch = batchIdentity('r1', 'p-one')
+    state.apply(ev('TaskDecomposed', { childTaskIds: ['c1'], ...batch }, { taskId: 'root' }))
+    expect(state.snapshot().runs[0]?.batches).toEqual([
+      { batchId: batch.batchId, proposalId: 'p-one', memberTaskIds: ['c1'] },
+    ])
+    expect(() => state.apply(ev('TaskDecomposed', { childTaskIds: ['c1'], ...batch }, { taskId: 'root' })))
+      .toThrow('already holds batch')
+    // The second proposal of one run is a second batch, and its members append.
+    state.apply(ev('TaskDecomposed', { childTaskIds: ['c2'], ...batchIdentity('r1', 'p-two') }, { taskId: 'root' }))
+    expect(state.snapshot().runs[0]?.batches?.map(item => item.memberTaskIds)).toEqual([['c1'], ['c2']])
+    expect(runMemberTaskIds(state.snapshot().runs[0]!)).toEqual(['c1', 'c2'])
+  })
+
+  test('a batch identity that is not the pair it names, or names another task\'s run, is refused', () => {
+    const state = new TaskState('store')
+    state.apply(ev('TaskCreated', { task: task({ taskId: 'root', decompositionStatus: 'decomposable' }) }, { taskId: 'root' }))
+    state.apply(ev('TaskAdmitted', { decompositionStatus: 'decomposable' }, { taskId: 'root' }))
+    state.apply(ev('TaskCreated', { task: task({ taskId: 'c1', parentTaskId: 'root', depth: 1 }) }, { taskId: 'c1', parentTaskId: 'root' }))
+    state.apply(ev('TaskAdmitted', { decompositionStatus: 'leaf' }, { taskId: 'c1' }))
+    state.apply(ev('TaskStarted', { run: run({ taskId: 'root', executionPhase: 'active' }) }, { taskId: 'root', runId: 'r1' }))
+    const before = state.snapshot()
+    expect(() => state.apply(ev('TaskDecomposed', {
+      childTaskIds: ['c1'], batchId: 'b-r1-p-one', parentRunId: 'r1', proposalId: 'p-two',
+    }, { taskId: 'root' })))
+      .toThrow('is not the batch of run "r1" and proposal "p-two"')
+    expect(() => state.apply(ev('TaskDecomposed', {
+      childTaskIds: ['c1'], batchId: 'b-r1-p-one', parentRunId: 'r1',
+    }, { taskId: 'root' })))
+      .toThrow('a batch is identified by all three or by none')
+    expect(state.snapshot()).toEqual(before)
+    state.apply(ev('TaskCreated', { task: task({ taskId: 'other-run-task', depth: 0 }) }, { taskId: 'other-run-task' }))
+    state.apply(ev('TaskAdmitted', { decompositionStatus: 'leaf' }, { taskId: 'other-run-task' }))
+    state.apply(ev('TaskStarted', { run: run({ runId: 'r2', taskId: 'other-run-task', executionPhase: 'active' }) }, { taskId: 'other-run-task', runId: 'r2' }))
+    expect(() => state.apply(ev('TaskDecomposed', {
+      childTaskIds: ['c1'], ...batchIdentity('r2', 'p-one'),
+    }, { taskId: 'root' })))
+      .toThrow('belongs to task "other-run-task", not "root"')
   })
 })
 

@@ -13,6 +13,7 @@ import {
   TASK_PROPOSAL_KINDS,
   TASK_PROPOSAL_PHASES,
   admissionContextDigest,
+  batchIdFor,
   reviewContextDigest,
   rootProposalDigest,
   type RootProposalIdentity,
@@ -123,7 +124,7 @@ const ROOT_IDENTITY_FIELDS: readonly string[] = [
 ]
 
 /** The batch vocabulary a root consumption must not carry: the ids it names are a task id and a run id, not a batch. */
-const BATCH_CONSUMPTION_FIELDS: readonly string[] = ['batchId', 'childTaskIds']
+const BATCH_CONSUMPTION_FIELDS: readonly string[] = ['batchId', 'parentRunId', 'childTaskIds']
 
 /** The root vocabulary a batch consumption must not carry. */
 const ROOT_CONSUMPTION_FIELDS: readonly string[] = ['rootTaskId', 'rootRunId']
@@ -188,7 +189,7 @@ export class TaskState {
       case 'TaskCreated': this.addTask(event.payload.task); return
       case 'TaskAdmitted': this.admit(event.taskId, event.payload.decompositionStatus); return
       case 'TaskRejected': this.transit(event.taskId, ['created'], 'blocked'); return
-      case 'TaskDecomposed': this.decompose(event.taskId, event.payload.childTaskIds, event.payload.admission); return
+      case 'TaskDecomposed': this.decompose(event.taskId, event.payload); return
       case 'DependencyAdded': this.addDependency(event.payload.edge); return
       case 'TaskStarted': this.start(event.taskId, event.runId, event.payload.run); return
       case 'TaskBlocked': this.block(event.taskId, event.runId); return
@@ -345,16 +346,96 @@ export class TaskState {
     this.updateTask(taskId, { status: 'admitted', decompositionStatus })
   }
 
-  private decompose(taskId: TaskId, childTaskIds: readonly TaskId[], admission?: DecompositionAdmission): void {
+  /**
+   * A decomposition records the members one batch contributed to the parent:
+   * the children are already under it (`TaskCreated`), and this event says they
+   * were admitted together, as one batch, by one run.
+   *
+   * A parent decomposes more than once — one batch per delegation round — so
+   * there is no once-in-a-life gate here: a second admission of different
+   * content under a different batch identity is the normal case. What must be
+   * refused is the *same* batch twice: one (run, proposal) pair names one
+   * batch, and a second record under it would count the same members twice and
+   * let one batch answer two ways. The batch a run waits on is the run's own
+   * (`batchId`, `RunPhaseChanged`), while the members accumulate on the parent
+   * in event order — a member from an earlier batch is never dropped by a later
+   * one.
+   *
+   * The batch identity is all three fields or none: an event written before
+   * batches were identified by `(parentRunId, proposalId)` carries none of them
+   * and is read as the decomposition it was, with no run accumulation invented
+   * for it (see `docs/persistence-changes/2026-09-26-k1-multi-batch.md`). An
+   * event that names one must name a real run of this task and must carry the
+   * id that pair derives, so a batch id in the store can never be read as
+   * another batch's.
+   *
+   * `decompositionStatus` is still written (the parent closes as `decomposed`,
+   * and a record from before this rule keeps its old meaning) but nothing here
+   * gates on it: it is history a reader may show, not a permission.
+   */
+  private decompose(taskId: TaskId, payload: TaskEventPayloads['TaskDecomposed']): void {
     const parent = this.task(taskId)
-    if (parent.decompositionStatus === 'decomposed') throw new Error(`task: task "${taskId}" is already decomposed`)
-    for (const childTaskId of childTaskIds) {
+    for (const childTaskId of payload.childTaskIds) {
       if (!parent.childTaskIds.includes(childTaskId)) throw new Error(`task: task "${childTaskId}" is not a child of "${taskId}"`)
     }
-    const admitted = parent.childTaskIds.filter(childTaskId => ADMITTED_OR_LATER.includes(this.task(childTaskId).status))
-    if (admitted.length === 0) throw new Error(`task: task "${taskId}" cannot decompose without an admitted child`)
-    if (admission !== undefined) this.assertAdmission(taskId, admission)
+    if (payload.childTaskIds.length === 0
+      || payload.childTaskIds.some(childTaskId => !ADMITTED_OR_LATER.includes(this.task(childTaskId).status))) {
+      throw new Error(`task: task "${taskId}" cannot decompose without an admitted child`)
+    }
+    if (payload.admission !== undefined) this.assertAdmission(taskId, payload.admission)
+    const batch = this.assertBatchIdentity(taskId, payload)
     this.updateTask(taskId, { decompositionStatus: 'decomposed' })
+    if (batch === undefined) return
+    this.value = {
+      ...this.value,
+      runs: this.value.runs.map(item => item.runId === batch.parentRunId
+        ? {
+            ...item,
+            batches: [...(item.batches ?? []), {
+              batchId: batch.batchId,
+              proposalId: batch.proposalId,
+              memberTaskIds: [...payload.childTaskIds],
+            }],
+          }
+        : item),
+    }
+  }
+
+  /**
+   * The batch identity one decomposition event carries, or `undefined` for a
+   * record written before batches had one. The three fields are one fact, so
+   * two of them is not a half-batch but a malformed record, and a record that
+   * carries the id of a batch the run already holds is the second record of one
+   * batch — both are refused rather than half-applied. The id must be exactly
+   * {@link batchIdFor} of the pair it names, so a reader that derives a batch id
+   * (the writer, a recovery, the composite judge's member positions) and the id
+   * in the log cannot be two different addresses for one batch.
+   */
+  private assertBatchIdentity(
+    taskId: TaskId,
+    payload: TaskEventPayloads['TaskDecomposed'],
+  ): { batchId: string; parentRunId: RunId; proposalId: string } | undefined {
+    const { batchId, parentRunId, proposalId } = payload
+    if (batchId === undefined && parentRunId === undefined && proposalId === undefined) return undefined
+    if (!nonEmpty(batchId) || !nonEmpty(parentRunId) || !nonEmpty(proposalId)) {
+      throw new Error(
+        `task: task "${taskId}" decomposition batch requires a batch id, a parent run and a proposal; a batch is identified by all three or by none`,
+      )
+    }
+    const run = this.run(parentRunId)
+    if (run.taskId !== taskId) {
+      throw new Error(`task: run "${parentRunId}" belongs to task "${run.taskId}", not "${taskId}"`)
+    }
+    if ((run.batches ?? []).some(batch => batch.batchId === batchId)) {
+      throw new Error(`task: run "${parentRunId}" already holds batch "${batchId}"; one batch identity names one batch`)
+    }
+    const derived = batchIdFor(parentRunId, proposalId)
+    if (batchId !== derived) {
+      throw new Error(
+        `task: task "${taskId}" decomposition batch "${batchId}" is not the batch of run "${parentRunId}" and proposal "${proposalId}" ("${derived}")`,
+      )
+    }
+    return { batchId, parentRunId, proposalId }
   }
 
   /**
@@ -447,10 +528,12 @@ export class TaskState {
    * A run's birth phase is written by the runtime, and the reducer judges its
    * shape only — the transition semantics belong to `changeRunPhase`. A run
    * with no phase is a record from before the protocol and stays legal; a run
-   * born `active` carries neither a submission nor a batch; a run born
-   * `submitted` (a workerless replay) must carry a well-shaped submission and
-   * no batch. `waiting_children` is not a birth phase: no creation path admits
-   * a batch before the run exists.
+   * born `active` carries neither a submission, a batch nor an accumulation of
+   * batches; a run born `submitted` (a workerless replay) must carry a
+   * well-shaped submission and no batch either. `waiting_children` is not a
+   * birth phase: no creation path admits a batch before the run exists, and a
+   * run's `batches` are the decompositions it admits — facts the store already
+   * holds as tasks — never a projection a caller hands in.
    */
   private assertBirthPhase(run: TaskRun): void {
     const phase = run.executionPhase
@@ -460,6 +543,9 @@ export class TaskState {
     }
     if (run.batchId !== undefined) {
       throw new Error(`task: run "${run.runId}" is born ${phase}; a batch id is recorded by a phase change, not at start`)
+    }
+    if (run.batches !== undefined) {
+      throw new Error(`task: run "${run.runId}" is born ${phase}; a run's batches are recorded by the decompositions it admits, not at start`)
     }
     if (phase === 'active') {
       if (run.submission !== undefined) {
@@ -563,14 +649,20 @@ export class TaskState {
 
   /**
    * The coordination phase is the A3 admission gate, so this handler is where
-   * a transition is either the one legal edge or a refusal: a run accepts
-   * `active → waiting_children`, `active → submitted` and
-   * `waiting_children → submitted`, and nothing else. Same phase, a rollback,
-   * a run with no phase at all and a run that is no longer running are all
-   * refused, because "already submitted" and "already decomposed" have to be
+   * a transition is either one of the four legal edges or a refusal: a run
+   * accepts `active → waiting_children`, `waiting_children → active`,
+   * `active → submitted` and `waiting_children → submitted`, and nothing else.
+   * Same phase, a rollback, a run with no phase at all and a run that is no
+   * longer running are all refused, because "already submitted" has to be
    * answered by this one field — a second submission that overwrote the first
-   * record, or a decomposition admitted after the gate closed, would make the
-   * field answer differently at two reads.
+   * record would make the field answer differently at two reads.
+   *
+   * The two batch edges carry the batch they name — the one opened on the way
+   * out and the one closed on the way back — and the return edge clears the
+   * run's current batch id: after `waiting_children → active` the run holds no
+   * unfinished batch, while the batches it admitted stay in `batches` as
+   * history. Returning to `active` therefore does not erase which batches ran;
+   * it says the parent is free to open another one.
    *
    * The run status is checked first because a phase change on a failed or
    * cancelled run is late by definition; verification is the case the phase
@@ -596,33 +688,42 @@ export class TaskState {
       throw new Error(`task: run "${runId}" has no execution phase; only an active run changes phase`)
     }
     const legal = (from === 'active' && (to === 'waiting_children' || to === 'submitted'))
-      || (from === 'waiting_children' && to === 'submitted')
+      || (from === 'waiting_children' && (to === 'active' || to === 'submitted'))
     if (!legal) throw new Error(`task: illegal run phase transition "${from}" → "${to}" for run "${runId}"`)
-    if (to === 'waiting_children') {
-      if (!nonEmpty(payload.batchId)) throw new Error(`task: run "${runId}" entering waiting_children requires a batch id`)
+    if (to === 'waiting_children' || to === 'active') {
+      if (!nonEmpty(payload.batchId)) {
+        throw new Error(to === 'waiting_children'
+          ? `task: run "${runId}" entering waiting_children requires a batch id`
+          : `task: run "${runId}" returning to active requires the batch id it closes`)
+      }
       if (payload.submission !== undefined) {
-        throw new Error(`task: run "${runId}" is entering waiting_children; only the submitted phase carries a submission`)
+        throw new Error(`task: run "${runId}" is entering ${to}; only the submitted phase carries a submission`)
       }
     } else {
       if (payload.submission === undefined) throw new Error(`task: run "${runId}" submitting requires a submission record`)
       this.assertSubmissionShape(runId, payload.submission)
       if (payload.batchId !== undefined) {
-        throw new Error(`task: run "${runId}" is submitting; a batch id belongs to the waiting_children phase`)
+        throw new Error(`task: run "${runId}" is submitting; a batch id belongs to the batch edges, not the submitted phase`)
       }
     }
     this.assertQuestionIds(runId, payload)
     this.value = {
       ...this.value,
-      runs: this.value.runs.map(item => item.runId === runId
-        ? {
-            ...item,
-            executionPhase: to,
-            ...(payload.batchId === undefined ? {} : { batchId: payload.batchId }),
-            ...(payload.submission === undefined ? {} : { submission: copy(payload.submission) }),
-            ...(payload.pendingQuestionIds === undefined ? {} : { pendingQuestionIds: [...payload.pendingQuestionIds] }),
-            ...(payload.blockingQuestionIds === undefined ? {} : { blockingQuestionIds: [...payload.blockingQuestionIds] }),
-          }
-        : item),
+      runs: this.value.runs.map(item => {
+        if (item.runId !== runId) return item
+        const next: TaskRun = {
+          ...item,
+          executionPhase: to,
+          ...(payload.batchId === undefined ? {} : { batchId: payload.batchId }),
+          ...(payload.submission === undefined ? {} : { submission: copy(payload.submission) }),
+          ...(payload.pendingQuestionIds === undefined ? {} : { pendingQuestionIds: [...payload.pendingQuestionIds] }),
+          ...(payload.blockingQuestionIds === undefined ? {} : { blockingQuestionIds: [...payload.blockingQuestionIds] }),
+        }
+        // The batch is closed: the run's current batch id is what it is waiting
+        // on, and it is waiting on nothing. `batches` keeps the history.
+        if (to === 'active') delete next.batchId
+        return next
+      }),
     }
   }
 
@@ -1150,11 +1251,12 @@ export class TaskState {
    * what it became. The status gate is the re-check having passed on the record
    * (`ready` only — an approval alone never admits, so `approved → admitted` is
    * refused), and the binding is checked in full for the proposal's kind: a
-   * decomposition batch names the batch of its parent and children the store
-   * holds under that parent; a root contract names the root task and root run of
-   * its activation, and the store refuses one intake that would leave it with
-   * two roots. A second consumption is a transition refusal, so one proposal can
-   * never produce two batches — or two roots.
+   * decomposition batch names the parent run and the derived batch id of its
+   * identity, plus children the store holds under that parent; a root contract
+   * names the root task and root run of its activation, and the store refuses
+   * one intake that would leave it with two roots. A second consumption is a
+   * transition refusal, so one proposal can never produce two batches — or two
+   * roots.
    */
   private admitProposal(taskId: TaskId, consumption: TaskProposalConsumption, timestamp: string): void {
     if (!isRecord(consumption)) throw new Error('task: proposal consumption must be an object')
@@ -1181,6 +1283,7 @@ export class TaskState {
             proposalId: consumption.proposalId,
             proposalDigest: consumption.proposalDigest,
             reviewContextDigest: consumption.reviewContextDigest,
+            parentRunId: consumption.parentRunId,
             batchId: consumption.batchId,
             childTaskIds: [...consumption.childTaskIds],
             admittedAt: consumption.admittedAt,
@@ -1603,8 +1706,9 @@ export class TaskState {
   /**
    * A consumption binds a proposal to what it became, so it has to name the same
    * dossier and the resolution the admission re-check confirmed — for both kinds
-   * — and then the kind's own shape: a batch names the batch id that belongs to
-   * its parent (`b-<parentTaskId>`) and children the store really holds under
+   * — and then the kind's own shape: a batch names the parent run of its
+   * identity, the batch id that pair derives
+   * (`b-<parentRunId>-<proposalId>`) and children the store really holds under
    * that parent; a root contract names the root task and root run of its
    * activation. The common half is checked here so the two kinds cannot drift
    * apart on the numbers that make an approval non-transferable.
@@ -1636,11 +1740,21 @@ export class TaskState {
   }
 
   /**
-   * The batch half of a consumption: the batch of this parent, and children the
-   * store really holds under it — the record a crash recovery reads to find the
-   * batch it already admitted instead of admitting a second one. The batch
-   * vocabulary is the only one this arm may use, and its `kind` may only be
-   * absent (a record written before kinds existed) or `batch`.
+   * The batch half of a consumption: the batch this run admitted, and children
+   * the store really holds under the proposal's parent — the record a crash
+   * recovery reads to find the batch it already admitted instead of admitting a
+   * second one. The batch vocabulary is the only one this arm may use, its
+   * `kind` may only be absent (a record written before kinds existed) or
+   * `batch`, and its identity is the pair the batch is named by: the parent run
+   * the proposal's identity names, and the id that pair derives
+   * ({@link batchIdFor}).
+   *
+   * A consumption written before batches had that identity names none of it
+   * (its `batchId` was `b-<parentTaskId>`) and is refused by name, not guessed
+   * at: the store has no way to tell which run admitted it or which proposal it
+   * was, and inventing either would hand a later reader a batch that is not the
+   * one the record describes (see
+   * `docs/persistence-changes/2026-09-26-k1-multi-batch.md`).
    */
   private assertBatchConsumptionShape(proposal: TaskProposalDecomposition, consumption: TaskProposalConsumption): void {
     const id = proposal.proposalId
@@ -1657,10 +1771,22 @@ export class TaskState {
       }
     }
     const batch = consumption as TaskProposalBatchConsumption
+    if (!nonEmpty(batch.parentRunId)) {
+      throw new Error(
+        `task: proposal "${id}" consumption requires the parent run its batch belongs to; a consumption from before batches were identified by run and proposal is refused, not guessed at`,
+      )
+    }
+    if (batch.parentRunId !== proposal.identity.parentRunId) {
+      throw new Error(
+        `task: proposal "${id}" consumption names parent run "${batch.parentRunId}", not the run "${proposal.identity.parentRunId}" its identity names`,
+      )
+    }
     if (!nonEmpty(batch.batchId)) throw new Error(`task: proposal "${id}" consumption requires a batch id`)
-    const batchId = `b-${proposal.identity.parentTaskId}`
+    const batchId = batchIdFor(proposal.identity.parentRunId, id)
     if (batch.batchId !== batchId) {
-      throw new Error(`task: proposal "${id}" consumption batch "${batch.batchId}" is not the batch of task "${proposal.identity.parentTaskId}"`)
+      throw new Error(
+        `task: proposal "${id}" consumption batch "${batch.batchId}" is not the batch of run "${proposal.identity.parentRunId}" and proposal "${id}" ("${batchId}")`,
+      )
     }
     if (!Array.isArray(batch.childTaskIds) || batch.childTaskIds.length === 0) {
       throw new Error(`task: proposal "${id}" consumption requires at least one child task id`)

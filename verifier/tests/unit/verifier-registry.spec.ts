@@ -89,13 +89,13 @@ function testDouble(id: string, verify: Verifier['verify'], overrides: Partial<V
   return { id, supports: mode => mode === 'deterministic', verify, ...overrides }
 }
 
-function harness(options: { task: TaskInstance; run?: TaskRun; children?: TaskInstance[]; evidence?: EvidenceBundle[] }) {
+function harness(options: { task: TaskInstance; run?: TaskRun; members?: TaskInstance[]; evidence?: EvidenceBundle[] }) {
   const recorded: EvidenceBundle[] = []
   const warnings: string[] = []
   const taskService = {
     runIn: vi.fn(async (_storeId: string, runId: string) => ({ ...(options.run ?? run()), runId })),
     taskIn: vi.fn(async () => options.task),
-    childrenIn: vi.fn(async () => options.children ?? []),
+    runMembersIn: vi.fn(async () => options.members ?? []),
     snapshotIn: vi.fn(async () => emptySnapshot(options.evidence ?? [...recorded])),
     recordEvidenceIn: vi.fn(async (_storeId: string, bundle: EvidenceBundle, _actor: string) => {
       recorded.push(bundle)
@@ -110,7 +110,7 @@ function harness(options: { task: TaskInstance; run?: TaskRun; children?: TaskIn
 }
 
 async function setup(
-  options: { task: TaskInstance; run?: TaskRun; children?: TaskInstance[]; evidence?: EvidenceBundle[] },
+  options: { task: TaskInstance; run?: TaskRun; members?: TaskInstance[]; evidence?: EvidenceBundle[] },
   extra: { ready?: boolean } = {},
 ) {
   const evidenceRoot = await mkdtemp(join(tmpdir(), 'verifier-registry-'))
@@ -130,7 +130,7 @@ describe('VerifierRegistry mode dispatch', () => {
         criterion({ criterionId: 'frm', verificationMode: 'formal', command: undefined }),
         criterion({ criterionId: 'cmp', verificationMode: 'composite', command: undefined }),
       ]),
-      children: [
+      members: [
         { ...task([], { taskId: 'c1', status: 'verified', depth: 1 }) },
         { ...task([], { taskId: 'c2', status: 'verified', depth: 1 }) },
       ],
@@ -253,7 +253,7 @@ describe('VerifierRegistry evidence bundles', () => {
   test('composite criteria fail through the registry when a child is unverified', async () => {
     const { registry } = await setup({
       task: task([criterion({ criterionId: 'cmp', verificationMode: 'composite', command: undefined })]),
-      children: [{ ...task([], { taskId: 'c1', status: 'running', depth: 1 }) }],
+      members: [{ ...task([], { taskId: 'c1', status: 'running', depth: 1 }) }],
     })
     const bundle = await registry.verifyRun(STORE, 'r1')
     expect(bundle.verifierResults[0]).toMatchObject({ criterionId: 'cmp', verifierId: 'composite', status: 'fail' })

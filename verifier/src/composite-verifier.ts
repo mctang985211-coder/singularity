@@ -2,7 +2,7 @@ import type {
   AcceptanceCriterion,
   ChildEvidenceRef,
   EvidenceBundle,
-  TaskId,
+  RunId,
   TaskInstance,
   TaskRun,
   TaskSnapshot,
@@ -11,11 +11,20 @@ import type {
 } from '@dangosys/dsh-singularity-task'
 import type { Verifier, VerifierSelftest, VerifyRequest } from './types.ts'
 
-/** The slice of the task service the composite verifier reads. */
+/**
+ * The slice of the task service the composite verifier reads: the members the
+ * judged run has admitted, and the store snapshot they are judged against.
+ *
+ * Membership is read per *run*, not per task: a parent decomposes more than
+ * once (one batch per delegation round), so "the children of this task" is not
+ * the sequence a criterion's `childIndex` names — the run's accumulative
+ * membership is, and a run that admitted no batch has no members rather than
+ * its task's children.
+ */
 export interface CompositeTaskSource {
-  childrenIn(storeId: string, taskId: TaskId): Promise<TaskInstance[]>
+  runMembersIn(storeId: string, runId: RunId): Promise<TaskInstance[]>
   /**
-   * The full store snapshot. The plain conjunction needs only children, but a
+   * The full store snapshot. The plain conjunction needs only members, but a
    * parent's {@link AcceptanceCriterion.childEvidence} map is judged against
    * child evidence and run states, so the source exposes the snapshot too.
    */
@@ -43,11 +52,11 @@ function describeEntry(entry: ChildEvidenceRef): string {
 
 /**
  * The defect one map entry carries against the store, or `undefined` when the
- * entry is satisfied. Every branch is a store fact: the child exists in the
- * batch, sits in the verified terminal state, and — for the narrowed spellings
- * — the child's *verified run* evidence carries the passing verdict and the
- * named reference. Evidence an earlier failed run produced is an expired
- * reference and never satisfies an entry.
+ * entry is satisfied. Every branch is a store fact: the child exists among the
+ * run's accumulated members, sits in the verified terminal state, and — for the
+ * narrowed spellings — the child's *verified run* evidence carries the passing
+ * verdict and the named reference. Evidence an earlier failed run produced is
+ * an expired reference and never satisfies an entry.
  */
 function entryDefect(
   entry: ChildEvidenceRef,
@@ -56,7 +65,7 @@ function entryDefect(
 ): string | undefined {
   const child = children[entry.childIndex]
   if (child === undefined) {
-    return `child #${entry.childIndex} does not exist (the decomposition batch has ${children.length} children)`
+    return `child #${entry.childIndex} does not exist (the run's batches have admitted ${children.length} members)`
   }
   if (child.status !== 'verified') {
     return `child #${entry.childIndex} (${child.taskId}) is ${child.status}, not verified`
@@ -93,48 +102,53 @@ function entryDefect(
 
 /**
  * Judges a composite criterion. The default is the child-status conjunction
- * (pass iff the task has at least one child and every child is verified),
- * unchanged for criteria that declare nothing.
+ * (pass iff the run has at least one accumulated member and every member is
+ * verified), unchanged for criteria that declare nothing.
  *
  * A criterion carrying a {@link AcceptanceCriterion.childEvidence} map is
  * judged by the map as well: every entry must resolve against the store, and an
  * incomplete mapping fails the criterion with the missing items named — the
  * conjunction alone can never pass a parent whose root goal rests on evidence
- * the children did not produce (KISS §6 C2). A criterion labeled
+ * the members did not produce (KISS §6 C2). A criterion labeled
  * {@link AcceptanceCriterion.heuristic} keeps the conjunction verdict but
  * carries the explicit heuristic label in its details, so a natural-language
  * coverage signal is never mistaken for a mechanical proof (KISS §5.1).
  *
- * Pure by construction — the criterion, the batch's children, and a snapshot
- * getter are the whole input. The getter is called only when a map needs it,
- * so a map-less criterion never reads a snapshot; that also lets the registry
- * judge a selftest sample's declared store view without a store behind it.
- * Reading children needs the store id, which VerifyRequest does not carry, so
- * production dispatches through {@link CompositeVerifier.verifyIn}; the plain
- * `verify` stays inconclusive.
+ * `members` is the judged run's accumulative membership, in admission order
+ * (`TaskService.runMembersIn`) — the sequence `childIndex` names. It is not the
+ * judged task's children: a parent's later batch appends and never renumbers an
+ * earlier one's members, and a run that admitted no batch has none.
+ *
+ * Pure by construction — the criterion, the members, and a snapshot getter are
+ * the whole input. The getter is called only when a map needs it, so a map-less
+ * criterion never reads a snapshot; that also lets the registry judge a selftest
+ * sample's declared store view without a store behind it. Reading the members
+ * needs the store id and the run id, which the registry's own request carries,
+ * so production dispatches through {@link CompositeVerifier.verifyIn}; the
+ * plain `verify` stays inconclusive.
  */
 export async function judgeCompositeCriterion(
   criterion: AcceptanceCriterion,
-  children: readonly TaskInstance[],
+  members: readonly TaskInstance[],
   snapshot: () => Promise<TaskSnapshot>,
 ): Promise<VerificationResult> {
   const map = criterion.childEvidence ?? []
   const base = { criterionId: criterion.criterionId, verifierId: COMPOSITE_VERIFIER_ID }
 
-  if (children.length === 0) {
+  if (members.length === 0) {
     if (map.length === 0) {
       return { ...base, status: 'inconclusive', details: 'no child tasks' }
     }
-    // A declared map with no children to satisfy it is incomplete, not absent:
+    // A declared map with no members to satisfy it is incomplete, not absent:
     // refusing here is what keeps the declaration from silently degrading.
     return {
       ...base,
       status: 'fail',
-      details: `incomplete childEvidence map: the task has no child tasks to satisfy ${map.map(describeEntry).join('; ')}`,
+      details: `incomplete childEvidence map: the run has admitted no members to satisfy ${map.map(describeEntry).join('; ')}`,
     }
   }
 
-  const unverified = children.filter(child => child.status !== 'verified')
+  const unverified = members.filter(child => child.status !== 'verified')
   if (unverified.length > 0) {
     return {
       ...base,
@@ -158,7 +172,7 @@ export async function judgeCompositeCriterion(
 
   const store = await snapshot()
   const defects = map
-    .map(entry => entryDefect(entry, children, store))
+    .map(entry => entryDefect(entry, members, store))
     .filter((defect): defect is string => defect !== undefined)
   if (defects.length > 0) {
     return { ...base, status: 'fail', details: `incomplete childEvidence map: ${defects.join('; ')}` }
@@ -166,7 +180,7 @@ export async function judgeCompositeCriterion(
   return {
     ...base,
     status: 'pass',
-    details: `childEvidence satisfied: ${map.map(entry => describeSatisfied(entry, children[entry.childIndex]!)).join('; ')}`,
+    details: `childEvidence satisfied: ${map.map(entry => describeSatisfied(entry, members[entry.childIndex]!)).join('; ')}`,
   }
 }
 
@@ -296,10 +310,10 @@ export class CompositeVerifier implements Verifier {
   }
 
   async verifyIn(storeId: string, req: VerifyRequest): Promise<VerificationResult[]> {
-    const children = await this.task.childrenIn(storeId, req.taskId)
+    const members = await this.task.runMembersIn(storeId, req.runId)
     const results: VerificationResult[] = []
     for (const criterion of req.criteria) {
-      results.push(await judgeCompositeCriterion(criterion, children, () => this.task.snapshotIn(storeId)))
+      results.push(await judgeCompositeCriterion(criterion, members, () => this.task.snapshotIn(storeId)))
     }
     return results
   }

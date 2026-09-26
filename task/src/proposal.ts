@@ -322,11 +322,15 @@ interface TaskProposalDecision {
  * name.
  *
  * Two shapes for the two kinds (A0 §2). A decomposition batch is consumed as
- * `b-<parentTaskId>` plus its children; a root contract is consumed as the one
- * root task and root run the activation minted, because there is no parent to
- * derive a batch id from and "one intake, one root" is not a batch at all. The
- * kind is a discriminant on the record, and its absence means the batch arm —
- * a consumption written before root intake existed still reads as it was.
+ * its parent run and its children, under the batch id {@link batchIdFor}
+ * derives from the parent run and the proposal; a root contract is consumed as
+ * the one root task and root run the activation minted, because there is no
+ * parent run to derive a batch id from and "one intake, one root" is not a
+ * batch at all. The kind is a discriminant on the record, and its absence means
+ * the batch arm — a consumption written before root intake existed still reads
+ * as it was, and one written before batches were identified as
+ * `(parentRunId, proposalId)` is refused by name rather than guessed at (see
+ * `docs/persistence-changes/2026-09-26-k1-multi-batch.md`).
  */
 export interface TaskProposalBatchConsumption {
   /** The kind, when the writer stated it. Absent means this arm. */
@@ -337,7 +341,9 @@ export interface TaskProposalBatchConsumption {
   proposalDigest: string
   /** The review-context fingerprint the admission re-check confirmed; must equal the stored one. */
   reviewContextDigest: string
-  /** The batch's id in the run coordination protocol: `b-<parentTaskId>` (A3). */
+  /** The parent run whose batch this is; must equal the stored identity's `parentRunId`. */
+  parentRunId: RunId
+  /** The batch's id in the run coordination protocol: `b-<parentRunId>-<proposalId>` ({@link batchIdFor}). */
   batchId: string
   /** The children this proposal became, in batch order — the ids the admission commit created. */
   childTaskIds: TaskId[]
@@ -350,10 +356,11 @@ export interface TaskProposalBatchConsumption {
 /**
  * What a root contract was activated as (A0 §2): the root task and the root run
  * the activation commit created, named by id. The batch vocabulary does not
- * apply — a root intake has no parent to derive `b-<parentTaskId>` from — so the
- * consumption names the minted ids instead, and the reducer checks that they
- * are the store's one root task and a run born `active` in the proposal's root
- * session, carrying the contract the proposal committed to.
+ * apply — a root intake has no parent run and no proposal consumption to derive
+ * a batch id from — so the consumption names the minted ids instead, and the
+ * reducer checks that they are the store's one root task and a run born
+ * `active` in the proposal's root session, carrying the contract the proposal
+ * committed to.
  *
  * `kind: 'root'` is required: a root activation is written by one entry
  * (`admitRootProposalIn`), so there is no legacy record to stay compatible
@@ -577,6 +584,31 @@ const TASK_PROPOSAL_ID_PREFIX = 'p-'
  */
 export function taskProposalId(identity: DecompositionIdentity): string {
   return `${TASK_PROPOSAL_ID_PREFIX}${decompositionDigest(identity)}`
+}
+
+/**
+ * The id one admitted batch carries in the run coordination protocol:
+ * `b-<parentRunId>-<proposalId>`. A batch *is* a consumed proposal
+ * ({@link TaskProposalBatchConsumption}), so its identity is the pair (parent
+ * run, proposal) and the id is nothing but that pair, spelled out.
+ *
+ * Why the pair and not the task: a parent decomposes more than once — one
+ * batch per delegation round — so `b-<parentTaskId>` cannot name which batch a
+ * run waits on, and a reader that derived a batch from a task id would read the
+ * wrong one after the second admission. The parent run is the thing that opens
+ * and closes a batch (`active → waiting_children → active`), and the proposal
+ * is the content identity of the batch it opened, so the two together name
+ * exactly one batch of this store with nothing guessed.
+ *
+ * One implementation, used by the writer that admits a batch
+ * (`admitBatchIn`), by the reducer that binds a consumption to it, and by every
+ * reader that asks which batch an id is — so a batch id written by one of them
+ * cannot be addressed by another under a different spelling. Nothing here
+ * verifies the arguments: a run id and a proposal id are opaque strings, and
+ * the reducer is where the pair is checked against the stored facts.
+ */
+export function batchIdFor(parentRunId: RunId, proposalId: string): string {
+  return `b-${parentRunId}-${proposalId}`
 }
 
 /**
