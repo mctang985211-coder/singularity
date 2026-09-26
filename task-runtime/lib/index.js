@@ -2358,20 +2358,15 @@ function checkBatchAdmission(snapshot, budget, childCount) {
 *
 * `min` semantics over the bounds that can be in force: the run's own wall time
 * measured from its persisted `startedAt` (so a resumed run keeps the clock it
-* started with), what is left of the root's deadline, and `runDeadlineAt` — an
-* absolute instant a caller placed on this one run and on everything it spawns.
-* That third bound is an instant and not a duration on purpose: a window
-* re-measured from each descendant's own start would hand a child that began
-* later a *fresh* allowance and let it outlive the run that was capped, so a
-* sub-execution inherits what is left of the same deadline rather than a copy of
-* it (`OrchestrateEnv.runDeadlineAt`). A bound that has passed returns 0 rather
-* than a negative number, and `Infinity` means no bound at all is configured.
+* started with) and what is left of the root's deadline. A bound that has passed
+* returns 0 rather than a negative number, and `Infinity` means no bound at all
+* is configured.
 *
 * A bound whose instant cannot be read is treated as *reached* (`0`): a start
 * time nobody can parse is not a licence to run without a deadline, which is the
 * same discipline `resolveRootBudget` applies to a missing root start.
 */
-function runDeadlineMs(runStartedAt, perRunWallTimeMs, rootDeadlineAt, nowMs, runDeadlineAt) {
+function runDeadlineMs(runStartedAt, perRunWallTimeMs, rootDeadlineAt, nowMs) {
 	const parts = [];
 	if (perRunWallTimeMs !== void 0) {
 		const started = instant(runStartedAt);
@@ -2379,10 +2374,6 @@ function runDeadlineMs(runStartedAt, perRunWallTimeMs, rootDeadlineAt, nowMs, ru
 	}
 	if (rootDeadlineAt !== void 0) {
 		const deadline = instant(rootDeadlineAt);
-		parts.push(deadline === void 0 ? 0 : Math.max(0, deadline - nowMs));
-	}
-	if (runDeadlineAt !== void 0) {
-		const deadline = instant(runDeadlineAt);
 		parts.push(deadline === void 0 ? 0 : Math.max(0, deadline - nowMs));
 	}
 	return parts.length === 0 ? Number.POSITIVE_INFINITY : Math.min(...parts);
@@ -4955,49 +4946,24 @@ async function rootDeadlineOf(env, storeId) {
 * What is left of the tightest deadline that applies to one run of this
 * orchestration — the one call site of `runDeadlineMs` inside the orchestration,
 * so the rule reads the same everywhere a worker is awaited: the run's own
-* per-run wall time, what is left of the root's deadline, and the instant the
-* caller placed on this run when it placed one ({@link
-* OrchestrateEnv.runDeadlineAt} — an experiment's per-run bound, inherited by the
-* sub-execution). Any of them reaching zero is the budget stop
-* {@link observeWorkerRun} acts on.
+* per-run wall time and what is left of the root's deadline. Either reaching
+* zero is the budget stop {@link observeWorkerRun} acts on.
 */
 function remainingRunMs(env, run, rootDeadline, nowMs) {
-	return runDeadlineMs(run.startedAt, env.budget?.wallTimeMs, rootDeadline, nowMs, env.runDeadlineAt);
-}
-/**
-* The absolute instant a caller's per-run wall time places on one run
-* (`ReplayRunInit.wallTimeMs`), or `undefined` when it places none.
-*
-* Anchored at the run's own `startedAt` — the anchor the per-run budget and the
-* root's deadline already measure from, so a run resumed in a new process keeps
-* the clock it started with and never gets a fresh window (§3.5, §7.4) — and
-* returned as an *instant* rather than a duration, because a duration re-measured
-* from every descendant's own start would hand a later child a fresh allowance.
-* A value that cannot be a duration (non-finite, zero or negative) places no
-* bound; a caller that means one is expected to have refused such a value before
-* anything exists (`ReplayTaskOptions.wallTimeMs`).
-*/
-function runDeadlineInstantOf(startedAt, wallTimeMs) {
-	if (wallTimeMs === void 0 || !Number.isFinite(wallTimeMs) || wallTimeMs <= 0) return void 0;
-	return new Date(startedAt.getTime() + wallTimeMs).toISOString();
+	return runDeadlineMs(run.startedAt, env.budget?.wallTimeMs, rootDeadline, nowMs);
 }
 /**
 * The wall-clock bound(s) this orchestration's runs are under, as a terminal
-* record names them: what the deployment's per-run budget allows, the instant a
-* caller placed on this run, and — when the caller could resolve it, which only
-* the batch settlement can, `resolveRootBudget` being a store read — the tree's own
-* deadline. Naming every bound in force is deliberate: the record says which limits
-* applied, so a reader knows what to change, while the tightest of them is the one
-* that ended the run (`runDeadlineMs`).
+* record names them: what the deployment's per-run budget allows and — when the
+* caller could resolve it, which only the batch settlement can, `resolveRootBudget`
+* being a store read — the tree's own deadline. Naming every bound in force is
+* deliberate: the record says which limits applied, so a reader knows what to
+* change, while the tightest of them is the one that ended the run
+* (`runDeadlineMs`).
 */
 function wallClockBoundsText(env, rootDeadlineAt) {
 	const perRun = env.budget?.wallTimeMs;
-	const placed = env.runDeadlineAt;
-	const bounds = [
-		...perRun === void 0 ? [] : [`${perRun}ms from its own startedAt`],
-		...placed === void 0 ? [] : [`its caller's deadline ${placed}`],
-		...rootDeadlineAt === void 0 ? [] : [`the root tree's deadline ${rootDeadlineAt}`]
-	];
+	const bounds = [...perRun === void 0 ? [] : [`${perRun}ms from its own startedAt`], ...rootDeadlineAt === void 0 ? [] : [`the root tree's deadline ${rootDeadlineAt}`]];
 	return bounds.length === 0 ? "the root tree’s own deadline" : bounds.join(", or ");
 }
 /**
@@ -5376,7 +5342,6 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 			...permissionPreset === void 0 ? {} : { permissionPreset },
 			...env.workerCwd === void 0 ? {} : { cwd: env.workerCwd },
 			...env.agentOptions === void 0 ? {} : { agentOptions: env.agentOptions },
-			...env.runDeadlineAt === void 0 ? {} : { runDeadlineAt: env.runDeadlineAt },
 			signal: batch.signal
 		});
 	} catch (error) {
@@ -5876,13 +5841,12 @@ async function parentBatchOf(env, storeId, task, run) {
 * criteria are judged by the verifier and the run settles on the verdict.
 *
 * What the run is *placed under* travels with the init (S4-E §Q3): the caller's
-* frozen model selection ({@link ReplayRunInit.agentOptions}) and its own wall
-* clock ({@link ReplayRunInit.wallTimeMs}, anchored at this run's persisted start
-* and enforced through the existing {@link remainingRunMs} rule). Both are carried
-* on the spawn request, so the deployment remembers them for the session and the
+* frozen model selection ({@link ReplayRunInit.agentOptions}). It is carried on
+* the spawn request, so the deployment remembers it for the session and the
 * sub-execution a replayed worker decomposes into inherits exactly the same
-* binding; both are absent for an ordinary replay, whose run and spawn are what
-* they always were.
+* binding; it is absent for an ordinary replay, whose run and spawn are what they
+* always were. The run's clock is not this entry's: its time is bounded by the
+* runtime's own per-run budget and the root tree's deadline alone.
 */
 async function runReplayTask(env, storeId, init, signals = {}) {
 	const task = init.task;
@@ -5906,7 +5870,6 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 		origin: "runtime"
 	};
 	const startedAt = /* @__PURE__ */ new Date();
-	const runDeadlineAt = runDeadlineInstantOf(startedAt, init.wallTimeMs);
 	const run = {
 		runId,
 		taskId: task.taskId,
@@ -5923,8 +5886,7 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 	};
 	const bound = {
 		...env,
-		...init.agentOptions === void 0 ? {} : { agentOptions: init.agentOptions },
-		...runDeadlineAt === void 0 ? {} : { runDeadlineAt }
+		...init.agentOptions === void 0 ? {} : { agentOptions: init.agentOptions }
 	};
 	let contentBinding;
 	try {
@@ -5965,7 +5927,6 @@ async function runReplayTask(env, storeId, init, signals = {}) {
 			...permissionPreset === void 0 ? {} : { permissionPreset },
 			...bound.workerCwd === void 0 ? {} : { cwd: bound.workerCwd },
 			...bound.agentOptions === void 0 ? {} : { agentOptions: bound.agentOptions },
-			...bound.runDeadlineAt === void 0 ? {} : { runDeadlineAt: bound.runDeadlineAt },
 			...advance === void 0 ? {} : { signal: advance }
 		});
 	} catch (error) {
@@ -6505,13 +6466,12 @@ var TaskRuntime = class TaskRuntime extends Service {
 	sessionWorkspaces = /* @__PURE__ */ new Map();
 	/**
 	* What each session this process spawned *runs under*, keyed by session: the
-	* model selection its agent was created with (`agentOptions`) and, when its
-	* caller placed one, the absolute instant its run must be done by
-	* (`runDeadlineAt`). A replay carries an experiment's frozen binding (S4-E §Q3),
-	* and the sub-execution its worker decomposes into is the same run of the same
-	* experiment — so the orchestration that session's own decomposition builds
-	* resolves the binding from here, exactly as it resolves the workspace it works
-	* in from {@link sessionWorkspaces} beside it.
+	* model selection its agent was created with (`agentOptions`). A replay carries
+	* an experiment's frozen binding (S4-E §Q3), and the sub-execution its worker
+	* decomposes into is the same run of the same experiment — so the orchestration
+	* that session's own decomposition builds resolves the binding from here, exactly
+	* as it resolves the workspace it works in from {@link sessionWorkspaces} beside
+	* it.
 	*
 	* In-process only, for the same reason and with the same honesty: a session this
 	* process never spawned has no entry, and the binding is not part of any record
@@ -8950,18 +8910,17 @@ var TaskRuntime = class TaskRuntime extends Service {
 	*
 	* The execution the comparison rests on is the caller's to freeze (S4-E §Q3):
 	* `options.agentOptions` is the model selection this run's worker and its
-	* sub-execution are created under, and `options.wallTimeMs` a wall clock of its
-	* own, folded into the run's existing deadline rule (`runDeadlineMs`) rather
-	* than timed beside it. Both are forwarded verbatim to the orchestration — this
-	* entry resolves neither the model nor the budget, because what a run really ran
-	* under is the caller's frozen fact, and the runtime's job is to make it true.
+	* sub-execution are created under, forwarded verbatim to the orchestration —
+	* this entry does not resolve the model, because what a run really ran under is
+	* the caller's frozen fact, and the runtime's job is to make it true. The run's
+	* clock is this runtime's own (the per-run `Config.budget.wallTimeMs` and the
+	* root tree's deadline); a replay places no separate one.
 	*/
 	async replayTask(storeId, championTaskId, options, callerSessionId) {
 		await this.assertRecoveryReady(storeId, "a replay");
 		const champion = await this.ctx.task.taskIn(storeId, championTaskId);
 		if (champion.status !== "verified" && champion.status !== "failed") throw new Error(`task-runtime: champion task "${championTaskId}" is ${champion.status}; only a terminal (verified or failed) task can be replayed`);
 		const championRunId = champion.runIds[champion.runIds.length - 1];
-		if (options.wallTimeMs !== void 0 && !(Number.isFinite(options.wallTimeMs) && options.wallTimeMs > 0)) throw new Error(`task-runtime: replay of "${championTaskId}" was given wallTimeMs ${options.wallTimeMs}, which is not a positive number of milliseconds; a per-run deadline that cannot be measured refuses the replay rather than running the run without one`);
 		const effective = options.contract ?? {
 			objective: champion.objective,
 			acceptanceCriteria: champion.acceptanceCriteria,
@@ -9038,7 +8997,6 @@ var TaskRuntime = class TaskRuntime extends Service {
 					agentPreset: options.overlay?.presetOverride ?? resolvePreset(manifest, this.config.defaultPreset),
 					...options.overlay?.extraSkillRoots === void 0 ? {} : { skillRoots: [...options.overlay.extraSkillRoots] },
 					...options.agentOptions === void 0 ? {} : { agentOptions: { ...options.agentOptions } },
-					...options.wallTimeMs === void 0 ? {} : { wallTimeMs: options.wallTimeMs },
 					spawn,
 					championRunId
 				}, {
@@ -10509,7 +10467,6 @@ var TaskRuntime = class TaskRuntime extends Service {
 			...workspacePath === void 0 ? {} : { workspacePath },
 			...named === void 0 ? {} : { workerCwd: named },
 			...binding?.agentOptions === void 0 ? {} : { agentOptions: binding.agentOptions },
-			...binding?.runDeadlineAt === void 0 ? {} : { runDeadlineAt: binding.runDeadlineAt },
 			noProgressRounds: this.config.noProgressRounds,
 			writeDrainTimeoutMs: this.config.writeDrainTimeoutMs,
 			...this.config.rootBudget === void 0 ? {} : { rootBudget: { ...this.config.rootBudget } },
@@ -10550,10 +10507,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 				const parent = this.liveAgent(callerSessionId);
 				const sessionWorkspace = request.cwd ?? named;
 				if (sessionWorkspace !== void 0) this.sessionWorkspaces.set(request.sessionId, sessionWorkspace);
-				if (request.agentOptions !== void 0 || request.runDeadlineAt !== void 0) this.sessionExecutionBindings.set(request.sessionId, {
-					...request.agentOptions === void 0 ? {} : { agentOptions: request.agentOptions },
-					...request.runDeadlineAt === void 0 ? {} : { runDeadlineAt: request.runDeadlineAt }
-				});
+				if (request.agentOptions !== void 0) this.sessionExecutionBindings.set(request.sessionId, { agentOptions: request.agentOptions });
 				return this.ctx.agentRuntime.spawn(parent, {
 					sessionId: SessionId(request.sessionId),
 					name: request.name,

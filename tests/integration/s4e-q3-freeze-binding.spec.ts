@@ -364,7 +364,7 @@ async function fixture(options: {
       ],
       snapshot: { sourceDir: snapshotDir },
       model: FROZEN,
-      budget: { wallTimeMs: 120_000, note: 'the fixture budget' },
+      budget: { note: 'the fixture budget' },
       repetition: 0,
       ...overrides,
     }),

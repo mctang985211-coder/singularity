@@ -8,11 +8,11 @@ import { disposeScriptedLoops, startScriptedLoop, type ScriptedLoop, type Script
  * S4-E (Q3, rework): the execution binding a replayed run is placed under, read
  * from the real loop.
  *
- * An experiment freezes its model selection and its wall clock *before* it runs
- * either side, and the frozen values have to reach the worker that really runs —
- * a spawn request field nobody consumes, or a report that restates the frozen
- * string, would prove neither. So every assertion here is read from what the
- * real `AgentLoop` actually did:
+ * An experiment freezes its model selection *before* it runs either side, and
+ * the frozen value has to reach the worker that really runs — a spawn request
+ * field nobody consumes, or a report that restates the frozen string, would
+ * prove neither. So every assertion here is read from what the real `AgentLoop`
+ * actually did:
  *
  * 1. **The identity is the route, not the request field.** The scripted adapter
  *    records every request with the provider and model the loop routed it to
@@ -24,21 +24,15 @@ import { disposeScriptedLoops, startScriptedLoop, type ScriptedLoop, type Script
  *    decomposes gets children adjudicated under the *same* frozen selection —
  *    asserted on the child's own recorded requests, because that is where the
  *    child's identity is real.
- * 3. **The per-run deadline ends work in flight.** A run placed under a wall
- *    clock that runs out cancels the worker's own turn (its session log records
- *    the abort), settles the run `failed` and records the stop as the budget
- *    exhaustion it is — named as the deadline this run was under, not as a
- *    criteria failure.
  *
  * The model's answers are the only scripted thing here; the store, the runtime,
  * the real `AgentRuntime.spawn`, the prompt assembly and the verifier are the
  * deployment's own.
  *
- * What is *not* covered here, and where it is covered instead: the sub-execution
- * sharing the parent's *window* is behavioural and racy to time at this level
- * (the parent's own bound expires at the same instant), so it is pinned by
- * `task-runtime/tests/unit/orchestrate.spec.ts` ("a child of a replayed worker
- * runs on the parent's remaining window") and by the pure `runDeadlineMs` cases.
+ * An experiment places no clock of its own: the run's time is the runtime's own
+ * limits (`Config.budget.wallTimeMs`, the root budget), pinned by
+ * `task-runtime/tests/unit/orchestrate.spec.ts` and the pure `runDeadlineMs`
+ * cases in `task-runtime/tests/unit/root-budget.spec.ts`.
  */
 
 const ROOT = 's-root' as SessionId
@@ -204,38 +198,6 @@ describe('S4-E: the execution binding of a replayed run (real loop)', () => {
       expect(new Set(sent.map(route => `${route.provider}/${route.model}`)))
         .toEqual(new Set([`${FROZEN.provider}/${FROZEN.model}`]))
     }
-  })
-
-  it('cancels the worker in flight when the run\u2019s own deadline passes, and records it as a budget stop', async () => {
-    const h = await startScriptedLoop({
-      providers: [DEPLOYMENT_DEFAULT.provider],
-      // The worker never finishes on its own: only the run's own wall clock ends it.
-      script: (_sessionId, index): readonly ScriptEntry[] => index === 0 ? [{ text: 'root: the tree is active' }] : [{ hang: true }],
-    })
-    const root = await h.begin(ROOT_CONTRACT)
-    const champion = await writeChampion(h, root.storeId, championCriterion('true'))
-
-    const outcome = await h.runtime.replayTask(root.storeId, champion.taskId, {
-      lineage: `${LINEAGE}:deadline`,
-      wallTimeMs: 800,
-    }, ROOT)
-
-    expect(outcome.status).toBe('failed')
-    const worker = workerSession(h, 0)
-    const run = await h.task.runIn(root.storeId, outcome.runId)
-    const deadlineAt = new Date(Date.parse(run.startedAt) + 800).toISOString()
-    expect(run.status).toBe('failed')
-    const record = (await h.snapshot(root.storeId)).reviews.find(item => item.runId === outcome.runId)!
-    expect(record.outcome).toBe('failed')
-    // The stop is named as the budget exhaustion it is, and names the deadline this
-    // run was under — the caller's own wall clock, anchored at the run's start.
-    expect(record.localizedCause).toContain('budget exhausted: wallTimeMs')
-    expect(record.localizedCause).toContain(deadlineAt)
-    // And the deadline reached the worker's own loop: its session log records the
-    // turn ending under the parent's cancel cause (`awaitWorker`'s forced exit).
-    const turnEnds = h.eventsOf(worker).filter(event => event.type === 'turn/end')
-    expect(turnEnds.length).toBeGreaterThan(0)
-    expect(turnEnds[turnEnds.length - 1]!.data).toMatchObject({ reason: { kind: 'aborted', reason: { kind: 'parent' } } })
   })
 
   it('keeps a run with no deadline in flight until its worker submits, exactly as before', async () => {

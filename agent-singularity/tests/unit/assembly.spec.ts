@@ -171,4 +171,17 @@ describe('SingularityAgent assembly', () => {
     expect(evolution?.file).toBe(resolve(join(home, 'evolution', 'proposals.jsonl')))
     await ctx.fiber.dispose()
   })
+
+  it('advertises no experiment wall clock on the evolution_replay budget', async () => {
+    // The experiment has one optional ceiling left (`maxTokens`): a model reading
+    // this schema must not see a wall-clock field, and a caller that still sends
+    // one is refused by the service before the first write rather than run
+    // without the window it named.
+    const { tools } = await mount({ evolution: 'on' })
+    const replay = tools.get('evolution_replay') as unknown as {
+      parameters: { properties: Record<string, { properties?: Record<string, unknown> }> }
+    }
+    expect(Object.keys(replay.parameters.properties.budget!.properties!)).toEqual(['maxTokens', 'note'])
+    expect(JSON.stringify(replay.parameters)).not.toContain('wallTimeMs')
+  })
 })

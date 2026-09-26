@@ -66,7 +66,7 @@ const SKILL = 'replay-fixture-skill'
 const PRESET = 'replay-fixture-preset'
 /** The answer files a skill body tells its worker to write; the samples' criteria are `test -f <file>`. */
 const ANSWER_FILES = ['fix.txt', 'keep.txt', 'holdout.txt']
-const BUDGET = { wallTimeMs: 120_000, maxTokens: 5_000, note: 'the fixture budget' }
+const BUDGET = { maxTokens: 5_000, note: 'the fixture budget' }
 /** What the deployment's own `agentDefaultModel` names — the identity a session without its own selection runs under. */
 const MODEL = 'p/m'
 

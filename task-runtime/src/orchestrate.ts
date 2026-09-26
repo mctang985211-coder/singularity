@@ -90,15 +90,6 @@ export interface SpawnChildRequest {
    * spawns inherits it ({@link OrchestrateEnv.agentOptions}).
    */
   agentOptions?: AgentOptions
-  /**
-   * The absolute instant the run behind this child must be done by, when its
-   * caller placed a narrower bound than the root's — a replay's own per-run wall
-   * clock (§Q3). An instant and not a duration, so the window a child inherits is
-   * what is *left* of the run that was capped; it is enforced through
-   * `runDeadlineMs` exactly as the other bounds are ({@link
-   * OrchestrateEnv.runDeadlineAt}). Absent binds nothing.
-   */
-  runDeadlineAt?: string
   signal?: AbortSignal
 }
 
@@ -272,16 +263,6 @@ export interface OrchestrateEnv {
    * spawn on the deployment's own default selection.
    */
   agentOptions?: AgentOptions
-  /**
-   * The absolute instant the runs this orchestration serves must be done by, when
-   * their caller placed a narrower bound than the root's (a replay's own per-run
-   * wall clock, §Q3). What is left of it is folded into {@link runDeadlineMs} —
-   * `min` with the per-run budget and the root's remainder, never a second clock —
-   * so a deadline that arrives cancels the worker in flight and settles the run as
-   * the budget stop it is. A sub-execution inherits the same instant, which is
-   * what makes its window the parent's *remaining* one and not a fresh copy.
-   */
-  runDeadlineAt?: string
   /**
    * The provider pre-check, for the one case that has no verdict to carry: a
    * batch whose admission happened in an earlier process. A freshly admitted
@@ -1643,49 +1624,26 @@ async function rootDeadlineOf(env: OrchestrateEnv, storeId: string): Promise<str
  * What is left of the tightest deadline that applies to one run of this
  * orchestration — the one call site of `runDeadlineMs` inside the orchestration,
  * so the rule reads the same everywhere a worker is awaited: the run's own
- * per-run wall time, what is left of the root's deadline, and the instant the
- * caller placed on this run when it placed one ({@link
- * OrchestrateEnv.runDeadlineAt} — an experiment's per-run bound, inherited by the
- * sub-execution). Any of them reaching zero is the budget stop
- * {@link observeWorkerRun} acts on.
+ * per-run wall time and what is left of the root's deadline. Either reaching
+ * zero is the budget stop {@link observeWorkerRun} acts on.
  */
 function remainingRunMs(env: OrchestrateEnv, run: TaskRun, rootDeadline: string | undefined, nowMs: number): number {
-  return runDeadlineMs(run.startedAt, env.budget?.wallTimeMs, rootDeadline, nowMs, env.runDeadlineAt)
-}
-
-/**
- * The absolute instant a caller's per-run wall time places on one run
- * (`ReplayRunInit.wallTimeMs`), or `undefined` when it places none.
- *
- * Anchored at the run's own `startedAt` — the anchor the per-run budget and the
- * root's deadline already measure from, so a run resumed in a new process keeps
- * the clock it started with and never gets a fresh window (§3.5, §7.4) — and
- * returned as an *instant* rather than a duration, because a duration re-measured
- * from every descendant's own start would hand a later child a fresh allowance.
- * A value that cannot be a duration (non-finite, zero or negative) places no
- * bound; a caller that means one is expected to have refused such a value before
- * anything exists (`ReplayTaskOptions.wallTimeMs`).
- */
-function runDeadlineInstantOf(startedAt: Date, wallTimeMs: number | undefined): string | undefined {
-  if (wallTimeMs === undefined || !Number.isFinite(wallTimeMs) || wallTimeMs <= 0) return undefined
-  return new Date(startedAt.getTime() + wallTimeMs).toISOString()
+  return runDeadlineMs(run.startedAt, env.budget?.wallTimeMs, rootDeadline, nowMs)
 }
 
 /**
  * The wall-clock bound(s) this orchestration's runs are under, as a terminal
- * record names them: what the deployment's per-run budget allows, the instant a
- * caller placed on this run, and — when the caller could resolve it, which only
- * the batch settlement can, `resolveRootBudget` being a store read — the tree's own
- * deadline. Naming every bound in force is deliberate: the record says which limits
- * applied, so a reader knows what to change, while the tightest of them is the one
- * that ended the run (`runDeadlineMs`).
+ * record names them: what the deployment's per-run budget allows and — when the
+ * caller could resolve it, which only the batch settlement can, `resolveRootBudget`
+ * being a store read — the tree's own deadline. Naming every bound in force is
+ * deliberate: the record says which limits applied, so a reader knows what to
+ * change, while the tightest of them is the one that ended the run
+ * (`runDeadlineMs`).
  */
 function wallClockBoundsText(env: OrchestrateEnv, rootDeadlineAt?: string): string {
   const perRun = env.budget?.wallTimeMs
-  const placed = env.runDeadlineAt
   const bounds = [
     ...(perRun === undefined ? [] : [`${perRun}ms from its own startedAt`]),
-    ...(placed === undefined ? [] : [`its caller's deadline ${placed}`]),
     ...(rootDeadlineAt === undefined ? [] : [`the root tree's deadline ${rootDeadlineAt}`]),
   ]
   // With nothing else configured, the only bound that can have ended a wait is the
@@ -2119,10 +2077,9 @@ async function startChildRound(
       ...(env.workerCwd === undefined ? {} : { cwd: env.workerCwd }),
       // What this batch runs *under*, not only where it runs (S4-E §Q3): a child of
       // an experiment's worker is part of the same run of the experiment, so it is
-      // created under the same frozen model selection and inside the same remaining
-      // window. Absent for every ordinary batch, whose spawns are unchanged.
+      // created under the same frozen model selection. Absent for every ordinary
+      // batch, whose spawns are unchanged.
       ...(env.agentOptions === undefined ? {} : { agentOptions: env.agentOptions }),
-      ...(env.runDeadlineAt === undefined ? {} : { runDeadlineAt: env.runDeadlineAt }),
       signal: batch.signal,
     })
   } catch (error) {
@@ -2743,16 +2700,6 @@ export interface ReplayRunInit {
    * deployment's own default selection, exactly as before.
    */
   agentOptions?: AgentOptions
-  /**
-   * Wall-clock this one replay run may take, measured from the run's own persisted
-   * `startedAt` — never from the moment it was resumed (§3.5, §7.4), which is the
-   * anchor the per-run budget and the root's deadline already use. What is left of
-   * it is folded into `runDeadlineMs` (`min`, no second clock): it can shorten a
-   * run but never extend it, and everything this run spawns inherits the same
-   * instant instead of a fresh window. A value that is not a positive number of
-   * milliseconds is refused by the caller before anything exists.
-   */
-  wallTimeMs?: number
   /** false: deterministic criteria replay — no worker is spawned, the verifier alone settles the run. */
   spawn: boolean
   /** The champion run this replay stands in for, recorded as the run's parentRunId (execution lineage). */
@@ -2810,13 +2757,12 @@ export interface ReplayRunOutcome {
  * criteria are judged by the verifier and the run settles on the verdict.
  *
  * What the run is *placed under* travels with the init (S4-E §Q3): the caller's
- * frozen model selection ({@link ReplayRunInit.agentOptions}) and its own wall
- * clock ({@link ReplayRunInit.wallTimeMs}, anchored at this run's persisted start
- * and enforced through the existing {@link remainingRunMs} rule). Both are carried
- * on the spawn request, so the deployment remembers them for the session and the
+ * frozen model selection ({@link ReplayRunInit.agentOptions}). It is carried on
+ * the spawn request, so the deployment remembers it for the session and the
  * sub-execution a replayed worker decomposes into inherits exactly the same
- * binding; both are absent for an ordinary replay, whose run and spawn are what
- * they always were.
+ * binding; it is absent for an ordinary replay, whose run and spawn are what they
+ * always were. The run's clock is not this entry's: its time is bounded by the
+ * runtime's own per-run budget and the root tree's deadline alone.
  */
 export async function runReplayTask(
   env: OrchestrateEnv,
@@ -2854,7 +2800,6 @@ export async function runReplayTask(
       origin: 'runtime',
     }
   const startedAt = new Date()
-  const runDeadlineAt = runDeadlineInstantOf(startedAt, init.wallTimeMs)
   const run: TaskRun = {
     runId,
     taskId: task.taskId,
@@ -2867,20 +2812,19 @@ export async function runReplayTask(
     artifacts: [],
     verifierResults: [],
     status: 'running',
-    // One instant, read once: it is the run's recorded start *and* the anchor of
-    // the per-run wall clock below, so the deadline a sub-execution inherits is
-    // measured from the record rather than from a second clock reading beside it.
+    // One instant, read once: it is the run's recorded start, and the anchor the
+    // per-run wall clock is measured from rather than from a second clock reading
+    // beside it.
     startedAt: startedAt.toISOString(),
   }
   // The execution binding this run is placed under (S4-E §Q3): the caller's frozen
-  // model selection and its own per-run wall clock, as one *bound view* of the env
-  // that every wait and every spawn of this run reads. `env` stays what the caller
-  // handed in — the store, the actor, the gate, the workspace — and this adds only
-  // what this one run binds, so the rest of the replay is unchanged.
+  // model selection, as one *bound view* of the env that every wait and every spawn
+  // of this run reads. `env` stays what the caller handed in — the store, the
+  // actor, the gate, the workspace — and this adds only what this one run binds, so
+  // the rest of the replay is unchanged.
   const bound: OrchestrateEnv = {
     ...env,
     ...(init.agentOptions === undefined ? {} : { agentOptions: init.agentOptions }),
-    ...(runDeadlineAt === undefined ? {} : { runDeadlineAt }),
   }
   // The replay's content binding comes from the pre-check the caller carried
   // (`ReplayRunInit.providers`), not from a fresh discovery here: the identities
@@ -2927,12 +2871,10 @@ export async function runReplayTask(
       ...(init.agentPreset === undefined ? {} : { agentPreset: init.agentPreset }),
       ...(permissionPreset === undefined ? {} : { permissionPreset }),
       ...(bound.workerCwd === undefined ? {} : { cwd: bound.workerCwd }),
-      // The experiment's frozen selection and its per-run wall clock (both absent
-      // for an ordinary replay): the agent runtime creates this worker under the
-      // first, and the deployment remembers both for the sub-execution this
-      // worker's own decomposition may spawn.
+      // The experiment's frozen selection (absent for an ordinary replay): the
+      // agent runtime creates this worker under it, and the deployment remembers
+      // it for the sub-execution this worker's own decomposition may spawn.
       ...(bound.agentOptions === undefined ? {} : { agentOptions: bound.agentOptions }),
-      ...(bound.runDeadlineAt === undefined ? {} : { runDeadlineAt: bound.runDeadlineAt }),
       ...(advance === undefined ? {} : { signal: advance }),
     })
   } catch (error) {

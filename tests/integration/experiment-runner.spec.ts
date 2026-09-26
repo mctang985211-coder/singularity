@@ -293,7 +293,7 @@ function spec(fixture: Fixture, overrides: Partial<ExperimentSpec> = {}): Experi
     ],
     snapshot: { sourceDir: fixture.snapshotDir },
     model: modelSelectionOf({ provider: 'scripted', model: 'run-stack' })!,
-    budget: { wallTimeMs: 120_000, maxTokens: 5_000, note: 'the fixture budget' },
+    budget: { maxTokens: 5_000, note: 'the fixture budget' },
     repetition: 0,
     ...overrides,
   }

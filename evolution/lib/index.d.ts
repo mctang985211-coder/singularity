@@ -130,28 +130,23 @@ declare const EXPERIMENT_VERDICTS: readonly ExperimentVerdict[];
 /**
  * The budget the caller freezes with the experiment (§F.2: samples, inputs,
  * judge, model/tools, budget and comparison rules are frozen before the run).
- * Recorded verbatim in the frozen block, the ledger and the report — and both
- * ceilings bound the **whole experiment**, not one side of it:
+ * Recorded verbatim in the frozen block, the ledger and the report.
  *
- * - `maxTokens` — the orchestrator adds up the token four buckets every side
- *   already settled reported (from the ledger, so a restart never resets the
- *   count) and does not start a further side once that total has consumed the
- *   ceiling; the promotion gate re-adds the same buckets over every side and
- *   refuses a recorded total above the ceiling, because a run's own counts only
- *   become readable once it settled;
- * - `wallTimeMs` — the experiment's deadline is its own `experiment_started`
- *   record plus this window, every side is placed under what is left of it
- *   (`ReplayTaskOptions.wallTimeMs`, which cancels the run in flight at that
- *   instant), and the gate measures the same span (`experiment_started` record
- *   to the newest settled record) against the window, so a restart extends
- *   nothing.
+ * `maxTokens` is the one ceiling, and it bounds the **whole experiment**, not
+ * one side of it: the orchestrator adds up the token four buckets every side
+ * already settled reported (from the ledger, so a restart never resets the
+ * count) and does not start a further side once that total has consumed the
+ * ceiling; the promotion gate re-adds the same buckets over every side and
+ * refuses a recorded total above the ceiling, because a run's own counts only
+ * become readable once it settled.
  *
- * A budget that declares neither member constrains nothing: a cost nobody
- * reported then stays the honest unknown it is — recorded, never zeroed.
+ * There is no experiment-level wall clock: a Run's time is bounded by the
+ * runtime's own limits alone — the root budget's `rootBudget.wallTimeMs` when
+ * the deployment configures one, and the per-run `Config.budget.wallTimeMs`
+ * fallback. A budget that declares no `maxTokens` constrains nothing: a cost
+ * nobody reported then stays the honest unknown it is — recorded, never zeroed.
  */
 interface ExperimentBudget {
-  /** Wall-clock ceiling for the whole experiment, in milliseconds. */
-  wallTimeMs?: number;
   /** Token ceiling for the whole experiment. */
   maxTokens?: number;
   /** Free text: what the budget was derived from and why it is judged enough. */
@@ -213,13 +208,6 @@ interface ExperimentSideDetail {
   initialDigest?: string;
   criteria: ExperimentCriterionDetail[];
   cost: ExperimentCost;
-  /**
-   * How long this side's run took, in milliseconds, as the run's own terminal
-   * review record reports it (the run's start to its terminal transition,
-   * verification included). Absent when nobody timed the run — never a zero;
-   * a declared budget `wallTimeMs` requires it on every settled side.
-   */
-  durationMs?: number;
   /** Why this side has no terminal run; required for `interrupted`, absent otherwise. */
   reason?: string;
 }
@@ -629,16 +617,6 @@ interface ExperimentSampleRecord {
    */
   initialDigest?: string;
   cost: ExperimentCost;
-  /**
-   * How long this side's run took, in milliseconds, as the run's own terminal
-   * review record reports it (`ReviewRecord.durationMs`: the run's `startedAt`
-   * to its terminal transition, verification included) — the same figure a
-   * settled-from-the-store side is recovered with. Absent when neither the
-   * store's review nor the settled replay reported one: a run nobody timed is
-   * not a run that took zero milliseconds, and the promotion gate refuses a
-   * declared `wallTimeMs` whose sides this cannot show.
-   */
-  durationMs?: number;
   /** Why this side has no terminal run; required for `interrupted`. */
   reason?: string;
   actor: string;
@@ -801,11 +779,11 @@ declare function buildExperimentReport(view: ExperimentView): ExperimentReport;
  * that never ran is started. Every refusal throws with its reason, and the runs
  * that did settle stay in the task store and in the ledger.
  *
- * The frozen budget bounds this whole experiment and is enforced on the entry
- * points this plane has: the token total the settled sides reported, and the
- * deadline its own `experiment_started` record anchors. A side the budget has no
+ * The frozen budget bounds this whole experiment on the one entry point this
+ * plane has: the token total the settled sides reported. A side the budget has no
  * room for is not started, and the refusal names the ceiling and the recorded
  * total; what a settled side really spent is the gate's half of the same rule.
+ * Each Run's clock is the runtime's own — this plane places none.
  */
 declare function runExperiment(sources: ExperimentSources, request: ExperimentRequest): Promise<ExperimentResult>;
 /**

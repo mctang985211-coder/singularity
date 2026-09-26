@@ -2020,7 +2020,8 @@ function renderExperimentCriterionDiff(baseline, candidate) {
 */
 function renderExperiment(result, targetId) {
 	const { report } = result;
-	const budget = JSON.stringify(report.frozen.budget);
+	const ceiling = report.frozen.budget.maxTokens;
+	const budget = ceiling === void 0 ? "no maxTokens ceiling declared" : `maxTokens ${ceiling}`;
 	const baseline = report.frozen.productionBaseline;
 	return [
 		`proposal ${report.proposalId} [experiment] skill ${targetId} — verdict: ${report.verdict}`,
@@ -2079,10 +2080,6 @@ function defineEvolutionReplayTool(ctx) {
 				type: "object",
 				additionalProperties: false,
 				properties: {
-					wallTimeMs: {
-						type: "integer",
-						description: "Wall-clock ceiling for the whole experiment, in milliseconds. The experiment's deadline is the frozen experiment_started record plus this window: every side runs under what is left of it and is cancelled in flight when it passes; a restart reads the same deadline"
-					},
 					maxTokens: {
 						type: "integer",
 						description: "Token ceiling for the whole experiment. No further side is started once the sides already settled have reported this many tokens (the ledger is the count, so a restart does not reset it)"
@@ -2092,7 +2089,7 @@ function defineEvolutionReplayTool(ctx) {
 						description: "What the budget was derived from and why it is judged enough"
 					}
 				},
-				description: "The budget frozen with the experiment; both ceilings bound the whole experiment and are enforced (defaults to none stated). A declared ceiling also becomes a promotion condition: the gate re-adds the sides' reported tokens and measures the experiment's own elapsed wall clock against it, and refuses the promotion when either passes it"
+				description: "The budget frozen with the experiment. The one ceiling is the optional whole-experiment maxTokens total (defaults to none stated): a declared total also becomes a promotion condition, and the gate re-adds the sides' reported tokens and refuses the promotion when they pass it. Runs are bounded by the deployment's own runtime limits, never by a budget this call names"
 			}
 		},
 		output: {

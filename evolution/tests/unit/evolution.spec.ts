@@ -1505,7 +1505,7 @@ describe('evolution_replay tool', () => {
   it('walks a skill candidate through the two-sided experiment: four sides, the sandbox overlay only on the candidate side', async () => {
     const { svc, root, replayTask, replayTool, experiment } = await preparedSkillExperiment()
     const result = (await replayTool.execute(
-      { proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'], budget: { wallTimeMs: 60_000, note: 'the fixture budget' } },
+      { proposalId: 's1', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'], budget: { maxTokens: 5_000, note: 'the fixture budget' } },
       exec('root-1'),
     )) as string
 
@@ -1550,7 +1550,7 @@ describe('evolution_replay tool', () => {
     expect(started.frozen.snapshot.sourceDir).toBe(experiment.workspace)
     expect(started.frozen.snapshot.digest).toBe(snapshotDigest({ 'input.txt': 'the frozen input\n' }))
     expect(started.frozen.model).toEqual(FIXTURE_SELECTION)
-    expect(started.frozen.budget).toEqual({ wallTimeMs: 60_000, note: 'the fixture budget' })
+    expect(started.frozen.budget).toEqual({ maxTokens: 5_000, note: 'the fixture budget' })
     expect(started.frozen.overlay.baseline).toContain('none')
     expect(started.frozen.overlay.candidate).toBe('extraSkillRoots: [sandbox/s1/skills]')
     expect(lines.filter(line => line.kind === 'experiment_sample')).toHaveLength(4)
@@ -1558,6 +1558,41 @@ describe('evolution_replay tool', () => {
     // The proposal lifecycle does not move: a skill experiment is evidence, and
     // what may be promoted from it is the promotion gate's question.
     expect((await svc.get('s1')).status).toBe('prepared')
+  })
+
+  it('refuses the removed experiment wall clock at the service and at the tool, before any write or run', async () => {
+    const { svc, root, replayTask, replayTool, workspace } = await preparedSkillExperiment()
+    const ledgerBefore = await readFile(join(root, 'proposals.jsonl'), 'utf8')
+
+    // A direct service call carries the removed field: the freeze refuses it by
+    // name rather than running the experiment without the window it named.
+    const message = await refusalOf(svc.runExperiment({
+      proposalId: 's1',
+      samples: [
+        { taskId: 't-fail', role: 'observed-failure' },
+        { taskId: 't-holdout', role: 'holdout' },
+      ],
+      snapshot: { sourceDir: workspace },
+      model: FIXTURE_SELECTION,
+      budget: { wallTimeMs: 60_000 } as never,
+      repetition: 0,
+    }, 'root-1' as never, 'root-1'))
+    expect(message).toContain('wallTimeMs')
+    expect(message).toMatch(/removed/)
+
+    // The model's own entry refuses it at the schema boundary — the field is no
+    // longer declared, so the call never reaches the service — and neither call
+    // left a ledger line or started a run.
+    const answer = await refusalOf(replayTool.execute({
+      proposalId: 's1',
+      taskIds: ['t-fail'],
+      holdoutTaskIds: ['t-holdout'],
+      budget: { wallTimeMs: 60_000 },
+    }, exec('root-1')))
+    expect(answer).toContain('budget.wallTimeMs')
+    expect(answer).toContain('not a declared property')
+    expect(replayTask).not.toHaveBeenCalled()
+    expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(ledgerBefore)
   })
 
   it('reuses every settled side when the same skill call is repeated: no run, no new ledger line', async () => {

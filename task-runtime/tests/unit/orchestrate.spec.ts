@@ -56,12 +56,6 @@ interface SpawnCall {
    * replay's frozen experiment binding, inherited by its sub-execution).
    */
   agentOptions?: { provider?: string; model?: string; reasoningEffort?: string; maxTokens?: number }
-  /**
-   * The absolute instant the run behind this spawn must be done by, when its
-   * caller placed one (S4-E: a replay's own per-run deadline, inherited by
-   * everything it spawns — as an instant, never as a fresh window).
-   */
-  runDeadlineAt?: string
   grant?: {
     capabilities: readonly { capability: string; tools: readonly string[]; skills: readonly string[] }[]
     baseline: readonly string[]
@@ -2926,13 +2920,14 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
   /*
    * S4-E (Q3, rework): the execution binding one replay run is placed under.
    *
-   * An experiment freezes a model selection and a wall clock before it runs
-   * either side, and the frozen values have to reach the worker that really runs
-   * — not only the report that describes it. These cases pin the two narrow
-   * pipes: `agentOptions` through to `SpawnRequest`, and a per-run wall time
-   * through the existing `runDeadlineMs` rule; the sub-execution a replayed
-   * worker decomposes into inherits both, because the two sides of an experiment
-   * are only comparable if the whole subtree ran under the same binding.
+   * An experiment freezes a model selection before it runs either side, and the
+   * frozen value has to reach the worker that really runs — not only the report
+   * that describes it. These cases pin the one narrow pipe left: `agentOptions`
+   * through to `SpawnRequest`, and the sub-execution a replayed worker decomposes
+   * into inherits it, because the two sides of an experiment are only comparable
+   * if the whole subtree ran under the same selection. The run's clock is the
+   * runtime's own (`Config.budget.wallTimeMs`, the root budget) — a replay names
+   * none.
    */
   const FROZEN_OPTIONS = { provider: 'frozen-provider', model: 'frozen-model' }
 
@@ -2984,120 +2979,11 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
     // The child was spawned from the replayed worker's own session, and it carries
     // the binding of the experiment it belongs to — the same options the worker
     // itself was created under, so the two sides of the comparison really ran the
-    // same way (`runDeadlineMs`' inherited instant is the other half, pinned by the
-    // sub-execution deadline case below).
+    // same way.
     expect(child!.agentOptions).toEqual(FROZEN_OPTIONS)
     expect(child!.sessionId).not.toBe(worker!.sessionId)
   })
 
-  test('a replay whose own wall clock runs out cancels its worker in flight and settles the run budget-exhausted', async () => {
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
-    const { championTaskId } = await champion(h)
-    // A worker that never hands anything in: only a bound can end this run.
-    h.setIdleBehavior(() => new Promise<void>(() => {}))
-    const before = h.spawned.length
-
-    const outcome = await h.runtime.replayTask(STORE, championTaskId, {
-      lineage: 'evolution-replay:deadline',
-      wallTimeMs: 50,
-    }, ROOT_SESSION)
-
-    expect(outcome.status).toBe('failed')
-    const worker = h.spawned[before]!
-    // The in-flight worker was cancelled, not left running behind a settled run.
-    expect(h.cancelled).toContain(worker.sessionId)
-    const snapshot = await h.task.snapshotIn(STORE)
-    expect(snapshot.runs.find(run => run.runId === outcome.runId)!.status).toBe('failed')
-    const record = snapshot.reviews.find(item => item.runId === outcome.runId)!
-    expect(record.outcome).toBe('failed')
-    // The terminal record names the stop as the budget exhaustion it is, and names
-    // the instant the run was placed under — the caller's own wall clock, anchored
-    // at the run's persisted start (`runDeadlineMs`).
-    const run = await h.task.runIn(STORE, outcome.runId)
-    const deadlineAt = new Date(Date.parse(run.startedAt) + 50).toISOString()
-    expect(record.localizedCause).toContain('budget exhausted: wallTimeMs')
-    expect(record.localizedCause).toContain(deadlineAt)
-    expect(record.localizedCause).toContain('this is a budget exhaustion, not a criteria failure')
-  })
-
-  test('a child of a replayed worker runs on the parent\u2019s remaining window, never a fresh one', async () => {
-    // Two clocks, chosen so that neither run's settlement can coincide with the
-    // other's: the deployment's per-run wall time is the tighter one for the *parent*
-    // (1s from its own start), while the caller's own wall clock (1.2s from that same
-    // start) is what the child inherits — and the child starts 300ms in, so its own
-    // per-run clock would have allowed it 1s from *its* start. Nothing here is a race
-    // between two settlement paths for one run: the parent's clock runs out 200ms
-    // before the window the child is under, and the child is the one that dies of the
-    // inherited instant.
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } }, budget: { wallTimeMs: 1_000 } } })
-    const { championTaskId } = await champion(h)
-    h.setIdleBehavior(async sessionId => {
-      const bound = await h.runtime.runForSession(sessionId)
-      if (bound.task.parentTaskId !== undefined) return await new Promise<void>(() => {})
-      // The split happens well after the run started, which is what tells the
-      // inherited window apart from one measured from the child's own start.
-      await new Promise<void>(resolve => setTimeout(resolve, 300))
-      await h.runtime.decomposeAndRun(bound.storeId, bound.task.taskId, bound.run.runId, sessionId, {
-        reason: 'the replayed work is not atomic',
-        children: [childSpec('the child that never finishes')],
-      })
-    })
-
-    const outcome = await h.runtime.replayTask(STORE, championTaskId, {
-      lineage: 'evolution-replay:sub-deadline',
-      wallTimeMs: 1_200,
-    }, ROOT_SESSION)
-
-    // The parent ends on the tighter bound it was under — its own deployment budget —
-    // and it ends before the window the child is under, so this settlement is the
-    // replay's own rather than a race with the child's.
-    expect(outcome.status).toBe('failed')
-    const run = await h.task.runIn(STORE, outcome.runId)
-    const inheritedAt = new Date(Date.parse(run.startedAt) + 1_200).toISOString()
-    const parentRecord = (await h.task.snapshotIn(STORE)).reviews.find(item => item.runId === outcome.runId)!
-    expect(parentRecord.localizedCause).toContain('budget exhausted: wallTimeMs')
-    expect(parentRecord.localizedCause).toContain('1000ms from its own startedAt')
-    expect(parentRecord.localizedCause).toContain(inheritedAt)
-
-    // The child hangs under the window it inherited, and dies of it. The instant its
-    // record names is the replay run's own start plus the wall clock — *not* the
-    // child's own start plus it: a sub-execution gets what is left of the run's
-    // window, never a fresh copy of it.
-    await vi.waitFor(async () => {
-      const snapshot = await h.task.snapshotIn(STORE)
-      const child = snapshot.tasks.find(task => task.parentTaskId === outcome.taskId)
-      expect(child === undefined ? undefined : snapshot.runs.find(item => item.taskId === child.taskId)?.status).toBe('failed')
-    }, { timeout: 10_000, interval: 25 })
-    const snapshot = await h.task.snapshotIn(STORE)
-    const childTask = snapshot.tasks.find(task => task.parentTaskId === outcome.taskId)!
-    const childRun = snapshot.runs.find(item => item.taskId === childTask.taskId)!
-    const childRecord = snapshot.reviews.find(item => item.runId === childRun.runId)!
-    expect(childRecord.outcome).toBe('failed')
-    expect(childRecord.localizedCause).toContain('budget exhausted: wallTimeMs')
-    expect(childRecord.localizedCause).toContain(inheritedAt)
-    // The counterfactual, named: the child really did start later, so a window
-    // re-anchored at its own start would have named a later instant — and this
-    // record names the run's.
-    expect(Date.parse(childRun.startedAt) - Date.parse(run.startedAt)).toBeGreaterThan(200)
-    expect(childRecord.localizedCause).not.toContain(new Date(Date.parse(childRun.startedAt) + 1_200).toISOString())
-  })
-
-  test('a per-run wall time that is not a positive number of milliseconds refuses the replay, persisting nothing', async () => {
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
-    const { championTaskId } = await champion(h)
-    const before = await h.task.snapshotIn(STORE)
-
-    for (const wallTimeMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
-      await expect(h.runtime.replayTask(STORE, championTaskId, {
-        lineage: 'evolution-replay:bad-deadline',
-        wallTimeMs,
-      }, ROOT_SESSION)).rejects.toThrow(/not a positive number of milliseconds/)
-    }
-    const after = await h.task.snapshotIn(STORE)
-    expect(after.tasks).toHaveLength(before.tasks.length)
-    expect(after.runs).toHaveLength(before.runs.length)
-    expect(h.spawned).toHaveLength(1)
-  })
 })
 
 describe('TaskRuntime normalized contract (T1, construction guide §4)', () => {

@@ -230,14 +230,9 @@ export function checkBatchAdmission(snapshot: TaskSnapshot, budget: ResolvedRoot
  *
  * `min` semantics over the bounds that can be in force: the run's own wall time
  * measured from its persisted `startedAt` (so a resumed run keeps the clock it
- * started with), what is left of the root's deadline, and `runDeadlineAt` — an
- * absolute instant a caller placed on this one run and on everything it spawns.
- * That third bound is an instant and not a duration on purpose: a window
- * re-measured from each descendant's own start would hand a child that began
- * later a *fresh* allowance and let it outlive the run that was capped, so a
- * sub-execution inherits what is left of the same deadline rather than a copy of
- * it (`OrchestrateEnv.runDeadlineAt`). A bound that has passed returns 0 rather
- * than a negative number, and `Infinity` means no bound at all is configured.
+ * started with) and what is left of the root's deadline. A bound that has passed
+ * returns 0 rather than a negative number, and `Infinity` means no bound at all
+ * is configured.
  *
  * A bound whose instant cannot be read is treated as *reached* (`0`): a start
  * time nobody can parse is not a licence to run without a deadline, which is the
@@ -248,7 +243,6 @@ export function runDeadlineMs(
   perRunWallTimeMs: number | undefined,
   rootDeadlineAt: string | undefined,
   nowMs: number,
-  runDeadlineAt?: string,
 ): number {
   const parts: number[] = []
   if (perRunWallTimeMs !== undefined) {
@@ -257,10 +251,6 @@ export function runDeadlineMs(
   }
   if (rootDeadlineAt !== undefined) {
     const deadline = instant(rootDeadlineAt)
-    parts.push(deadline === undefined ? 0 : Math.max(0, deadline - nowMs))
-  }
-  if (runDeadlineAt !== undefined) {
-    const deadline = instant(runDeadlineAt)
     parts.push(deadline === undefined ? 0 : Math.max(0, deadline - nowMs))
   }
   return parts.length === 0 ? Number.POSITIVE_INFINITY : Math.min(...parts)

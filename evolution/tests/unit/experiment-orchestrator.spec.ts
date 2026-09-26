@@ -42,8 +42,6 @@ interface Call {
   lineage: string
   workspace?: string
   extraSkillRoots: readonly string[]
-  /** The wall clock the caller placed on this run, when it placed one (the experiment's remaining window). */
-  wallTimeMs?: number
 }
 
 /** What the scripted runtime answers with, one entry per run it is asked for. */
@@ -54,12 +52,10 @@ interface ScriptedOutcome {
   noMetrics?: boolean
   /** The tokens the run's review reports (default 10: the fixture's own bucket split). */
   tokens?: number
-  /** The duration the run's review reports in milliseconds (default 1000; `null` reports none). */
-  durationMs?: number | null
 }
 
 /** A little world: one prepared skill proposal, one store, one scripted runtime, one ledger. */
-async function world(options: { outcomes?: ScriptedOutcome[]; startedAt?: string } = {}) {
+async function world(options: { outcomes?: ScriptedOutcome[] } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'experiment-orchestrator-'))
   const snapshotDir = join(root, 'snapshot')
   await mkdir(join(snapshotDir, 'nested'), { recursive: true })
@@ -176,11 +172,8 @@ async function world(options: { outcomes?: ScriptedOutcome[]; startedAt?: string
     experiments: async () => [...folded().values()].reverse(),
     recordExperimentStart: async record => {
       if (folded().has(record.experimentId)) return
-      // A durable started record from an earlier instant, when the case needs an
-      // experiment that froze a while ago (what a restart meets).
-      const staged = options.startedAt === undefined ? record : { ...record, at: options.startedAt }
-      foldExperiments([...records, staged], proposals)
-      records.push(staged)
+      foldExperiments([...records, record], proposals)
+      records.push(record)
     },
     recordExperimentSample: async record => {
       foldExperiments([...records, record], proposals)
@@ -205,7 +198,6 @@ async function world(options: { outcomes?: ScriptedOutcome[]; startedAt?: string
           lineage: taskOptions.lineage,
           ...(taskOptions.workspace === undefined ? {} : { workspace: taskOptions.workspace.path }),
           extraSkillRoots: taskOptions.overlay?.extraSkillRoots ?? [],
-          ...(taskOptions.wallTimeMs === undefined ? {} : { wallTimeMs: taskOptions.wallTimeMs }),
         })
         tasks.push({
           taskId,
@@ -244,7 +236,6 @@ async function world(options: { outcomes?: ScriptedOutcome[]; startedAt?: string
                   : { uncachedInputTokens: scriptedOutcome.tokens, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
               },
             }),
-          ...(scriptedOutcome.durationMs === null ? {} : { durationMs: scriptedOutcome.durationMs ?? 1_000 }),
         } as unknown as ReviewRecord)
         evidence.push({ evidenceId: `e-${runId}`, taskRunId: runId, taskId })
         return {
@@ -252,7 +243,6 @@ async function world(options: { outcomes?: ScriptedOutcome[]; startedAt?: string
           runId,
           status: scriptedOutcome.outcome,
           criteria: scriptedOutcome.criteria ?? [{ criterionId: 'ac', verdict: 'pass', verifierId: 'command' }],
-          ...(scriptedOutcome.durationMs === null ? {} : { durationMs: scriptedOutcome.durationMs ?? 1_000 }),
           ...(taskOptions.workspace === undefined ? {} : { workspace: taskOptions.workspace.path }),
         }
       },
@@ -327,8 +317,6 @@ describe('the two-sided orchestrator', () => {
     const result = await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
 
     expect(w.calls).toHaveLength(4)
-    // No budget was declared, so no side was placed under a window this plane invented.
-    for (const call of w.calls) expect(call.wallTimeMs).toBeUndefined()
     expect(result.report.verdict).toBe('fixed')
     expect(result.report.samples.map(item => item.verdict)).toEqual(['fixed', 'maintained'])
 
@@ -402,8 +390,6 @@ describe('the two-sided orchestrator', () => {
     expect(interrupted.runId).toBe(runId)
     expect(interrupted.reason).toMatch(/holds run .* as running .*never re-runs an in-flight sample/)
     expect(interrupted.cost).toEqual({ status: 'unknown', reason: 'the run never settled, so it reported no cost' })
-    // A run that never settled has no duration to report: absent, never a zero.
-    expect(interrupted.durationMs).toBeUndefined()
     expect(resumed.report.verdict).toBe('inconclusive')
 
     // And once more: the record is what it is, and nothing runs again.
@@ -435,8 +421,6 @@ describe('the two-sided orchestrator', () => {
     expect(recovered.runId).toBe(recorded.runId)
     expect(recovered.reviewRef).toBe(`${recovered.taskId}#${recorded.runId}`)
     expect(recovered.cost).toEqual({ status: 'reported', metrics: expect.objectContaining({ tokens: expect.any(Object) }) })
-    // The recovered duration is the one the store's review reports.
-    expect(recovered.durationMs).toBe(1_000)
     expect(resumed.report.verdict).toBe('fixed')
     await rm(w.root, { recursive: true, force: true })
   })
@@ -604,54 +588,36 @@ describe('the two-sided orchestrator', () => {
     await rm(w.root, { recursive: true, force: true })
   })
 
-  it('hands each side what is left of the window the ledger anchored, not a fresh one', async () => {
-    const w = await world({ startedAt: new Date(Date.now() - 30_000).toISOString() })
-    await runExperiment(w.sources, { spec: w.spec({ budget: { wallTimeMs: 60_000 } }), caller: CALLER, actor: 'root-1' })
-
-    expect(w.calls).toHaveLength(4)
-    for (const call of w.calls) {
-      // Half the frozen minute is already gone — the window is measured from the
-      // experiment_started record, so a restart never hands out a new one.
-      expect(call.wallTimeMs).toBeGreaterThan(29_000)
-      expect(call.wallTimeMs).toBeLessThanOrEqual(30_000)
-    }
-    await rm(w.root, { recursive: true, force: true })
-  })
-
-  it('refuses to start any side once the deadline the ledger anchored has passed', async () => {
-    const w = await world({ startedAt: new Date(Date.now() - 120_000).toISOString() })
-    const message = await refusal(runExperiment(w.sources, { spec: w.spec({ budget: { wallTimeMs: 60_000 } }), caller: CALLER, actor: 'root-1' }))
-    expect(message).toContain('wallTimeMs 60000')
-    expect(message).toContain('passed')
-
-    // The freeze is recorded (the experiment exists), and nothing else: no run,
-    // no side's workspace, no sample record.
+  it('refuses an experiment budget that still carries the removed wall clock, before the first write', async () => {
+    // An experiment has no wall-clock ceiling any more: a caller from a build
+    // that had one is refused by name at the freeze, not silently run without
+    // the window it named.
+    const w = await world()
+    const message = await refusal(runExperiment(w.sources, {
+      spec: w.spec({ budget: { wallTimeMs: 60_000 } as never }),
+      caller: CALLER,
+      actor: 'root-1',
+    }))
+    expect(message).toContain('wallTimeMs')
+    expect(message).toMatch(/removed/)
+    // Nothing of the refused experiment exists: no ledger line, no run, no task.
+    expect(w.records).toHaveLength(0)
     expect(w.calls).toHaveLength(0)
-    expect(w.records.filter(record => record.kind === 'experiment_started')).toHaveLength(1)
-    expect(w.records.filter(record => record.kind === 'experiment_sample')).toHaveLength(0)
-    expect(await readdir(join(w.ledgerRoot, 'sandbox', PROPOSAL))).toEqual(['skills'])
+    expect(w.tasks.filter(task => task.taskId.startsWith('t-replay-'))).toHaveLength(0)
     await rm(w.root, { recursive: true, force: true })
   })
 
-  it('records the duration each side reported, and never invents one', async () => {
-    const w = await world({
-      outcomes: [
-        { outcome: 'failed', criteria: [{ criterionId: 'ac-fix', verdict: 'fail', verifierId: 'command' }], durationMs: 42 },
-        { outcome: 'verified', criteria: [{ criterionId: 'ac-fix', verdict: 'pass', verifierId: 'command' }], durationMs: 43 },
-        { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }], durationMs: 44 },
-        { outcome: 'verified', criteria: [{ criterionId: 'ac-hold', verdict: 'pass', verifierId: 'command' }], durationMs: null },
-      ],
-    })
-    const result = await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
-
-    expect(result.report.samples[0]!.baseline.durationMs).toBe(42)
-    expect(result.report.samples[0]!.candidate.durationMs).toBe(43)
-    expect(result.report.samples[1]!.baseline.durationMs).toBe(44)
-    // The run that reported none is absent, not a zero.
-    expect(result.report.samples[1]!.candidate.durationMs).toBeUndefined()
-    // And the record, not only the report, is where it lives.
-    expect(recordOf(w.records, 't-fix', 'baseline').durationMs).toBe(42)
-    expect(recordOf(w.records, 't-holdout', 'candidate').durationMs).toBeUndefined()
+  it('refuses an unknown key in the experiment budget, before the first write', async () => {
+    const w = await world()
+    const message = await refusal(runExperiment(w.sources, {
+      spec: w.spec({ budget: { maxRuns: 3 } as never }),
+      caller: CALLER,
+      actor: 'root-1',
+    }))
+    expect(message).toContain('unknown key "maxRuns"')
+    expect(w.records).toHaveLength(0)
+    expect(w.calls).toHaveLength(0)
     await rm(w.root, { recursive: true, force: true })
   })
+
 })

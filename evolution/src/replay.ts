@@ -203,28 +203,23 @@ export const EXPERIMENT_VERDICTS: readonly ExperimentVerdict[] = [
 /**
  * The budget the caller freezes with the experiment (§F.2: samples, inputs,
  * judge, model/tools, budget and comparison rules are frozen before the run).
- * Recorded verbatim in the frozen block, the ledger and the report — and both
- * ceilings bound the **whole experiment**, not one side of it:
+ * Recorded verbatim in the frozen block, the ledger and the report.
  *
- * - `maxTokens` — the orchestrator adds up the token four buckets every side
- *   already settled reported (from the ledger, so a restart never resets the
- *   count) and does not start a further side once that total has consumed the
- *   ceiling; the promotion gate re-adds the same buckets over every side and
- *   refuses a recorded total above the ceiling, because a run's own counts only
- *   become readable once it settled;
- * - `wallTimeMs` — the experiment's deadline is its own `experiment_started`
- *   record plus this window, every side is placed under what is left of it
- *   (`ReplayTaskOptions.wallTimeMs`, which cancels the run in flight at that
- *   instant), and the gate measures the same span (`experiment_started` record
- *   to the newest settled record) against the window, so a restart extends
- *   nothing.
+ * `maxTokens` is the one ceiling, and it bounds the **whole experiment**, not
+ * one side of it: the orchestrator adds up the token four buckets every side
+ * already settled reported (from the ledger, so a restart never resets the
+ * count) and does not start a further side once that total has consumed the
+ * ceiling; the promotion gate re-adds the same buckets over every side and
+ * refuses a recorded total above the ceiling, because a run's own counts only
+ * become readable once it settled.
  *
- * A budget that declares neither member constrains nothing: a cost nobody
- * reported then stays the honest unknown it is — recorded, never zeroed.
+ * There is no experiment-level wall clock: a Run's time is bounded by the
+ * runtime's own limits alone — the root budget's `rootBudget.wallTimeMs` when
+ * the deployment configures one, and the per-run `Config.budget.wallTimeMs`
+ * fallback. A budget that declares no `maxTokens` constrains nothing: a cost
+ * nobody reported then stays the honest unknown it is — recorded, never zeroed.
  */
 export interface ExperimentBudget {
-  /** Wall-clock ceiling for the whole experiment, in milliseconds. */
-  wallTimeMs?: number
   /** Token ceiling for the whole experiment. */
   maxTokens?: number
   /** Free text: what the budget was derived from and why it is judged enough. */
@@ -285,13 +280,6 @@ export interface ExperimentSideDetail {
   initialDigest?: string
   criteria: ExperimentCriterionDetail[]
   cost: ExperimentCost
-  /**
-   * How long this side's run took, in milliseconds, as the run's own terminal
-   * review record reports it (the run's start to its terminal transition,
-   * verification included). Absent when nobody timed the run — never a zero;
-   * a declared budget `wallTimeMs` requires it on every settled side.
-   */
-  durationMs?: number
   /** Why this side has no terminal run; required for `interrupted`, absent otherwise. */
   reason?: string
 }
@@ -710,17 +698,22 @@ export function assertFrozenExperiment(value: unknown): asserts value is FrozenE
 }
 
 function assertExperimentBudget(value: unknown, field: string): asserts value is ExperimentBudget {
-  if (!isRecord(value)) throw new Error(`evolution: ${field} must be an object (the whole experiment's token and wall-clock ceilings)`)
+  if (!isRecord(value)) throw new Error(`evolution: ${field} must be an object (the whole experiment's token ceiling)`)
   for (const key of Object.keys(value)) {
-    if (key !== 'wallTimeMs' && key !== 'maxTokens' && key !== 'note') {
+    if (key === 'wallTimeMs') {
+      throw new Error(
+        `evolution: ${field}.wallTimeMs is removed — an experiment has no wall-clock ceiling; freeze an optional ` +
+        '`maxTokens` total instead, and bound a run\'s time with the deployment\'s own limits (rootBudget.wallTimeMs, ' +
+        'or the per-run Config.budget.wallTimeMs). A budget this build cannot enforce is refused rather than ignored',
+      )
+    }
+    if (key !== 'maxTokens' && key !== 'note') {
       throw new Error(`evolution: ${field} has unknown key "${key}"`)
     }
   }
-  for (const key of ['wallTimeMs', 'maxTokens'] as const) {
-    const member = value[key]
-    if (member !== undefined && (typeof member !== 'number' || !Number.isFinite(member) || member < 0)) {
-      throw new Error(`evolution: ${field}.${key} must be a non-negative number`)
-    }
+  const member = value.maxTokens
+  if (member !== undefined && (typeof member !== 'number' || !Number.isFinite(member) || member < 0)) {
+    throw new Error(`evolution: ${field}.maxTokens must be a non-negative number`)
   }
   if (value.note !== undefined && (typeof value.note !== 'string' || value.note.length === 0)) {
     throw new Error(`evolution: ${field}.note must be a non-empty string`)
@@ -915,12 +908,6 @@ function assertSideDetail(value: unknown, field: string, sampleTaskId: string, o
     ids.add((criterion as ExperimentCriterionDetail).criterionId)
   }
   assertCost(value.cost, `${field}.cost`)
-  if (value.durationMs !== undefined && (typeof value.durationMs !== 'number' || !Number.isFinite(value.durationMs) || value.durationMs < 0)) {
-    throw new Error(
-      `evolution: experiment report ${field}.durationMs must be a finite, non-negative number of milliseconds — a side nobody timed ` +
-      'omits the member rather than carrying a value that is not a duration',
-    )
-  }
   if (value.outcome === 'interrupted') {
     if (typeof value.reason !== 'string' || value.reason.length === 0) {
       throw new Error(`evolution: experiment report ${field} is interrupted and must carry the reason it has no terminal run`)

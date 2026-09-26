@@ -32,14 +32,13 @@
  *   bounds the *whole experiment*, and this plane enforces it as far as what is
  *   known allows: a declared `maxTokens` is compared with the token total the
  *   sides already settled reported, and no further side is started once that
- *   total has consumed the ceiling; a declared `wallTimeMs` places a deadline on
- *   the experiment's own `experiment_started` record, every side is handed what
- *   is left of it (`ReplayTaskOptions.wallTimeMs`, which the runtime cancels in
- *   flight at that instant), and a restart re-reads the deadline instead of
- *   granting a new one. What a settled run spent is only readable once it
- *   settled, so a side that crossed the ceiling stays recorded as it is and the
- *   promotion gate refuses it — neither this plane nor the gate reports a
- *   strict zero overspend it cannot prove;
+ *   total has consumed the ceiling. What a settled run spent is only readable
+ *   once it settled, so a side that crossed the ceiling stays recorded as it is
+ *   and the promotion gate refuses it — neither this plane nor the gate reports
+ *   a strict zero overspend it cannot prove. Time is not this plane's budget
+ *   member at all: a Run's clock is the runtime's own (`rootBudget.wallTimeMs`
+ *   when configured, and the per-run `Config.budget.wallTimeMs` fallback), and
+ *   nothing here places a second one;
  * - each sample's `frozen.samples[i].provider` — the provider identity the
  *   production baseline side of that sample must bind, read before anything runs
  *   through the runtime's own pre-check (rows, registry revision, MCP servers,
@@ -76,9 +75,9 @@
  * reproduces the same report bytes.
  *
  * Cost is never invented: a side whose review record reports no metrics is
- * `{ status: 'unknown' }` with its reason, never a zero. The time each side took
- * is recorded the same way, from the run's own terminal review record, and a run
- * that reported none leaves the field off rather than filling in a zero.
+ * `{ status: 'unknown' }` with its reason, never a zero. Nothing here records
+ * how long a side took: the experiment's evidence is what it spent in tokens,
+ * and the Run's own clock is the runtime's business.
  *
  * Nothing is cleaned up. Both workspaces stay under
  * `<ledger root>/sandbox/<proposalId>/exp-<experimentId>/<sampleTaskId>/<side>/`
@@ -245,16 +244,6 @@ export interface ExperimentSampleRecord {
    */
   initialDigest?: string
   cost: ExperimentCost
-  /**
-   * How long this side's run took, in milliseconds, as the run's own terminal
-   * review record reports it (`ReviewRecord.durationMs`: the run's `startedAt`
-   * to its terminal transition, verification included) — the same figure a
-   * settled-from-the-store side is recovered with. Absent when neither the
-   * store's review nor the settled replay reported one: a run nobody timed is
-   * not a run that took zero milliseconds, and the promotion gate refuses a
-   * declared `wallTimeMs` whose sides this cannot show.
-   */
-  durationMs?: number
   /** Why this side has no terminal run; required for `interrupted`. */
   reason?: string
   actor: string
@@ -859,8 +848,6 @@ interface RunFacts {
   evidenceRefs: string[]
   terminal: boolean
   detail: string
-  /** The run's own wall clock, as its terminal review (or the settled replay) reported it; absent when nobody did. */
-  durationMs?: number
 }
 
 function runFactsOf(snapshot: TaskSnapshot, task: TaskInstance, settled: ReplayRunOutcome | undefined): RunFacts {
@@ -880,10 +867,6 @@ function runFactsOf(snapshot: TaskSnapshot, task: TaskInstance, settled: ReplayR
   const outcomeValue: ExperimentSideDetail['outcome'] = outcome === undefined
     ? 'interrupted'
     : (outcome as ExperimentSideDetail['outcome'])
-  // The run's own clock: the terminal review record is the durable figure (and
-  // the one a recovered side is read back with), the settled replay the one a
-  // run whose review never landed still reports. Neither: no duration at all.
-  const durationMs = readableDuration(review?.durationMs) ?? readableDuration(settled?.durationMs)
   return {
     outcome: outcomeValue,
     taskId: task.taskId,
@@ -893,13 +876,7 @@ function runFactsOf(snapshot: TaskSnapshot, task: TaskInstance, settled: ReplayR
     evidenceRefs: evidenceRefsOf(snapshot, runId, review),
     terminal: outcome !== undefined,
     detail,
-    ...(durationMs === undefined ? {} : { durationMs }),
   }
-}
-
-/** A duration a record may carry: a finite, non-negative number of milliseconds, or nothing. */
-function readableDuration(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 }
 
 /** The one ledger line a sample side writes, from the facts its run settled to. */
@@ -916,7 +893,6 @@ function sampleRecord(input: {
   workspace: string
   initialDigest?: string
   cost: ExperimentCost
-  durationMs?: number
   reason?: string
   actor: string
 }): ExperimentSampleRecord {
@@ -938,7 +914,6 @@ function sampleRecord(input: {
     workspace: input.workspace,
     ...(input.initialDigest === undefined ? {} : { initialDigest: input.initialDigest }),
     cost: input.cost,
-    ...(input.durationMs === undefined ? {} : { durationMs: input.durationMs }),
     ...(input.reason === undefined ? {} : { reason: input.reason }),
     actor: input.actor,
     at: new Date().toISOString(),
@@ -994,7 +969,6 @@ function recoveredSampleRecord(input: {
     workspace: input.workspace,
     initialDigest: input.view.frozen.snapshot.digest,
     cost: costOf(facts.review),
-    ...(facts.durationMs === undefined ? {} : { durationMs: facts.durationMs }),
     actor: input.actor,
   })
 }
@@ -1015,7 +989,6 @@ function sideDetailOf(view: ExperimentView, sample: FrozenSample, side: Experime
     ...(record.initialDigest === undefined ? {} : { initialDigest: record.initialDigest }),
     criteria: record.criteria.map(criterionDetail),
     cost: record.cost,
-    ...(record.durationMs === undefined ? {} : { durationMs: record.durationMs }),
     ...(record.reason === undefined ? {} : { reason: record.reason }),
   }
 }
@@ -1104,36 +1077,27 @@ function reportedTokensSpent(records: readonly ExperimentSampleRecord[]): number
 
 /**
  * Whether the frozen budget still leaves room for one more side to start (S4-E
- * §F.2; the progress review's Q1: the maxima bound the *whole experiment*, not
+ * §F.2; the progress review's Q1: the maximum bounds the *whole experiment*, not
  * one side).
  *
- * - `maxTokens` — the sides already settled report a known total, and no further
- *   side is started once that total has consumed the ceiling: the next side's
- *   own spend is not knowable before it settles, so starting one into an
- *   exhausted budget could only overshoot, and the promotion gate refuses a
- *   recorded total above the ceiling either way;
- * - `wallTimeMs` — the experiment has one deadline, anchored on its own
- *   `experiment_started` record, so a restart reads the same instant instead of
- *   granting a new window; a side is started only with time left, and what is
- *   left is what the runtime is handed (`ReplayTaskOptions.wallTimeMs`) to
- *   cancel the run in flight at that instant.
+ * `maxTokens` is the one ceiling: the sides already settled report a known
+ * total, and no further side is started once that total has consumed the
+ * ceiling. The next side's own spend is not knowable before it settles, so
+ * starting one into an exhausted budget could only overshoot, and the promotion
+ * gate refuses a recorded total above the ceiling either way.
  *
- * Both refusals are named and carry the numbers; the settled runs stay in the
+ * The refusal is named and carries the numbers; the settled runs stay in the
  * task store and the ledger as what this experiment spent.
  */
 function assertBudgetAllowsStart(input: {
   experimentId: string
   budget: ExperimentBudget
-  /** The `experiment_started` record's own timestamp: the anchor of the whole experiment's window. */
-  startedAt: string
-  /** What is left of the experiment's window, measured once — the same value this side is placed under. */
-  remainingMs: number | undefined
   spentTokens: number
   settledSides: number
   /** The side this start would be, for the refusal to name what it declines. */
   where: string
 }): void {
-  const { experimentId, budget, startedAt, remainingMs, spentTokens, settledSides, where } = input
+  const { experimentId, budget, spentTokens, settledSides, where } = input
   if (budget.maxTokens !== undefined && spentTokens >= budget.maxTokens) {
     const left = budget.maxTokens - spentTokens
     const position = left > 0 ? `${left} tokens left` : left === 0 ? 'the ceiling exactly consumed' : `${-left} over the ceiling`
@@ -1142,14 +1106,6 @@ function assertBudgetAllowsStart(input: {
       `experiment's ceiling and its ${settledSides} settled side(s) already report ${spentTokens} tokens (${position}), so no further ` +
       `sample side is started (${where} would have been next); the settled runs stay in the task store and the ledger as what this ` +
       'experiment spent, and a promotion whose recorded total passes the ceiling is refused rather than inferred',
-    )
-  }
-  if (remainingMs !== undefined && remainingMs <= 0) {
-    throw new Error(
-      `evolution: experiment "${experimentId}" is stopped by its frozen budget — wallTimeMs ${String(budget.wallTimeMs)} is the whole ` +
-      `experiment's window, measured from its own experiment_started record ("${startedAt}"), so its deadline was ` +
-      `${new Date(remainingMs + Date.now()).toISOString()} and passed ${Math.abs(remainingMs)}ms ago; no further sample side is started ` +
-      `(${where} would have been next), and the settled runs stay in the task store and the ledger as what this experiment spent`,
     )
   }
 }
@@ -1161,11 +1117,11 @@ function assertBudgetAllowsStart(input: {
  * that never ran is started. Every refusal throws with its reason, and the runs
  * that did settle stay in the task store and in the ledger.
  *
- * The frozen budget bounds this whole experiment and is enforced on the entry
- * points this plane has: the token total the settled sides reported, and the
- * deadline its own `experiment_started` record anchors. A side the budget has no
+ * The frozen budget bounds this whole experiment on the one entry point this
+ * plane has: the token total the settled sides reported. A side the budget has no
  * room for is not started, and the refusal names the ceiling and the recorded
  * total; what a settled side really spent is the gate's half of the same rule.
+ * Each Run's clock is the runtime's own — this plane places none.
  */
 export async function runExperiment(sources: ExperimentSources, request: ExperimentRequest): Promise<ExperimentResult> {
   const { spec, caller, actor } = request
@@ -1249,18 +1205,10 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
   })
   const view = await sources.evolution.experiment(experimentId)
 
-  // The frozen budget's two clocks, read off the ledger once (§F.2; the review's
-  // Q1): the token total every side already settled has reported, and the
-  // experiment's own deadline — `experiment_started.at` plus the frozen
-  // `wallTimeMs`, so a restart re-reads the deadline rather than resetting it.
+  // The frozen budget's one count, read off the ledger once (§F.2; the review's
+  // Q1): the token total every side already settled has reported, so a restart
+  // continues the same count rather than resetting it.
   const budget = view.frozen.budget
-  const deadlineMs = budget.wallTimeMs === undefined ? undefined : Date.parse(view.at) + budget.wallTimeMs
-  if (deadlineMs !== undefined && !Number.isFinite(deadlineMs)) {
-    throw new Error(
-      `evolution: the frozen budget declares wallTimeMs ${budget.wallTimeMs} but the experiment_started record's own timestamp ` +
-      `("${view.at}") cannot be read — the whole experiment's deadline cannot be anchored, so no side is started under it`,
-    )
-  }
   let spentTokens = reportedTokensSpent(view.samples)
   let settledSides = view.samples.length
 
@@ -1287,16 +1235,12 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
           continue
         }
         // Before this side spends anything: the whole-experiment budget. The
-        // known total and the deadline are read from the ledger (never reset by
-        // a restart), and a side the budget no longer has room for is not
-        // started — by name, with the numbers, rather than silently. The window
-        // this side is handed is the very one the check saw positive.
-        const remainingMs = deadlineMs === undefined ? undefined : deadlineMs - Date.now()
+        // known total is read from the ledger (never reset by a restart), and a
+        // side the budget no longer has room for is not started — by name, with
+        // the numbers, rather than silently.
         assertBudgetAllowsStart({
           experimentId: view.experimentId,
           budget,
-          startedAt: view.at,
-          remainingMs,
           spentTokens,
           settledSides,
           where: `sample "${sample.taskId}" ${side} side`,
@@ -1307,7 +1251,6 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
           workspace: { path: real },
           agentOptions: { ...agentOptions },
           ...(side === 'candidate' ? { overlay: { extraSkillRoots: [resolve(sources.evolution.root, sandbox, 'skills')] } } : {}),
-          ...(remainingMs === undefined ? {} : { wallTimeMs: remainingMs }),
           ...(request.signal === undefined ? {} : { signal: request.signal }),
         }, caller)
         if (outcome.workspace !== undefined && outcome.workspace !== real) {
@@ -1335,7 +1278,6 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
           workspace: real,
           initialDigest: view.frozen.snapshot.digest,
           cost: costOf(facts.review),
-          ...(facts.durationMs === undefined ? {} : { durationMs: facts.durationMs }),
           actor,
         })
         await sources.evolution.recordExperimentSample(fresh)
@@ -1530,12 +1472,6 @@ function assertExperimentSample(record: ExperimentSampleRecord, view: Experiment
     }
   } else if (record.cost.status !== 'reported' || record.cost.metrics === null || typeof record.cost.metrics !== 'object') {
     throw new Error(`evolution: ${field} has a malformed cost report`)
-  }
-  if (record.durationMs !== undefined && readableDuration(record.durationMs) === undefined) {
-    throw new Error(
-      `evolution: ${field} has a malformed run duration — the side's durationMs must be a finite, non-negative number of ` +
-      'milliseconds; a run nobody timed omits the member rather than reporting a value that is not a duration',
-    )
   }
   if (record.outcome === 'interrupted') {
     if (typeof record.reason !== 'string' || record.reason.length === 0) {

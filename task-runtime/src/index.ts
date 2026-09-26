@@ -683,20 +683,6 @@ export interface ReplayTaskOptions {
    * silently falling back.
    */
   agentOptions?: AgentOptions
-  /**
-   * Wall-clock this one replay run may take (S4-E §Q3), for an experiment's
-   * budget: measured from the run's own persisted `startedAt`, so a resumed run
-   * keeps the clock it started with and never gets a fresh window. It is *not* a
-   * second timer — what is left of it is `min`-ed with `Config.budget.wallTimeMs`
-   * and the root budget's remainder by `runDeadlineMs`, so it can only shorten a
-   * run, and reaching it cancels the worker in flight and settles the run
-   * `failed` with the stop recorded as a budget exhaustion (`budget exhausted:
-   * wallTimeMs`), never as a criteria failure. The sub-execution this run's worker
-   * decomposes into inherits the same instant: a child gets what is *left* of the
-   * run's window, not a copy of its length. A value that is not a positive finite
-   * number of milliseconds refuses the replay before anything persists.
-   */
-  wallTimeMs?: number
   signal?: AbortSignal
 }
 
@@ -1468,13 +1454,12 @@ export class TaskRuntime extends Service {
   private readonly sessionWorkspaces = new Map<string, string>()
   /**
    * What each session this process spawned *runs under*, keyed by session: the
-   * model selection its agent was created with (`agentOptions`) and, when its
-   * caller placed one, the absolute instant its run must be done by
-   * (`runDeadlineAt`). A replay carries an experiment's frozen binding (S4-E §Q3),
-   * and the sub-execution its worker decomposes into is the same run of the same
-   * experiment — so the orchestration that session's own decomposition builds
-   * resolves the binding from here, exactly as it resolves the workspace it works
-   * in from {@link sessionWorkspaces} beside it.
+   * model selection its agent was created with (`agentOptions`). A replay carries
+   * an experiment's frozen binding (S4-E §Q3), and the sub-execution its worker
+   * decomposes into is the same run of the same experiment — so the orchestration
+   * that session's own decomposition builds resolves the binding from here, exactly
+   * as it resolves the workspace it works in from {@link sessionWorkspaces} beside
+   * it.
    *
    * In-process only, for the same reason and with the same honesty: a session this
    * process never spawned has no entry, and the binding is not part of any record
@@ -1483,7 +1468,7 @@ export class TaskRuntime extends Service {
    * the run bound to its session is non-terminal ({@link runSettledFromRuntime}
    * forgets it), which is exactly as long as anything resolves through it.
    */
-  private readonly sessionExecutionBindings = new Map<string, { agentOptions?: AgentOptions; runDeadlineAt?: string }>()
+  private readonly sessionExecutionBindings = new Map<string, { agentOptions?: AgentOptions }>()
   /** The tool-execution gate and the write drain (A3 §3.3); this runtime owns every phase it writes. */
   private readonly executionGate: ExecutionGate
   /**
@@ -4548,11 +4533,11 @@ export class TaskRuntime extends Service {
    *
    * The execution the comparison rests on is the caller's to freeze (S4-E §Q3):
    * `options.agentOptions` is the model selection this run's worker and its
-   * sub-execution are created under, and `options.wallTimeMs` a wall clock of its
-   * own, folded into the run's existing deadline rule (`runDeadlineMs`) rather
-   * than timed beside it. Both are forwarded verbatim to the orchestration — this
-   * entry resolves neither the model nor the budget, because what a run really ran
-   * under is the caller's frozen fact, and the runtime's job is to make it true.
+   * sub-execution are created under, forwarded verbatim to the orchestration —
+   * this entry does not resolve the model, because what a run really ran under is
+   * the caller's frozen fact, and the runtime's job is to make it true. The run's
+   * clock is this runtime's own (the per-run `Config.budget.wallTimeMs` and the
+   * root tree's deadline); a replay places no separate one.
    */
   async replayTask(
     storeId: string,
@@ -4568,17 +4553,6 @@ export class TaskRuntime extends Service {
     // A verified/failed task always has at least one run; the latest is the
     // champion run the replay's own run descends from (execution lineage).
     const championRunId = champion.runIds[champion.runIds.length - 1]!
-    // The experiment's per-run wall clock is a hard limit, so a value with no
-    // measurable window refuses the replay here — before a task, a run or a spawn
-    // exists. Granting the run an unbounded clock instead would be exactly the
-    // silent degradation §3.5 forbids: the caller would hold a report of a run that
-    // never ran under the budget it named.
-    if (options.wallTimeMs !== undefined && !(Number.isFinite(options.wallTimeMs) && options.wallTimeMs > 0)) {
-      throw new Error(
-        `task-runtime: replay of "${championTaskId}" was given wallTimeMs ${options.wallTimeMs}, which is not a positive number of milliseconds; ` +
-        'a per-run deadline that cannot be measured refuses the replay rather than running the run without one',
-      )
-    }
     const effective = options.contract ?? {
       objective: champion.objective,
       acceptanceCriteria: champion.acceptanceCriteria,
@@ -4712,11 +4686,9 @@ export class TaskRuntime extends Service {
           agentPreset: options.overlay?.presetOverride ?? resolvePreset(manifest, this.config.defaultPreset),
           ...(options.overlay?.extraSkillRoots === undefined ? {} : { skillRoots: [...options.overlay.extraSkillRoots] }),
           // The execution binding this run is placed under (S4-E §Q3): the caller's
-          // frozen selection and its own wall clock, forwarded verbatim — the
-          // orchestration carries them to the spawn the worker's sub-execution
-          // inherits them from.
+          // frozen selection, forwarded verbatim — the orchestration carries it to
+          // the spawn the worker's sub-execution inherits it from.
           ...(options.agentOptions === undefined ? {} : { agentOptions: { ...options.agentOptions } }),
-          ...(options.wallTimeMs === undefined ? {} : { wallTimeMs: options.wallTimeMs }),
           spawn,
           championRunId,
         }, {
@@ -6550,10 +6522,9 @@ export class TaskRuntime extends Service {
     const named = workspace ?? this.sessionWorkspaces.get(callerSessionId)
     const workspacePath = named ?? await this.workspacePathForSession(callerSessionId)
     // …and it keeps running under what it was spawned under (S4-E §Q3): the frozen
-    // model selection of the experiment it belongs to, and the instant its run must
-    // be done by. The same session-level propagation as the workspace above, for
-    // the same reason — the sub-execution a replay's worker decomposes into is part
-    // of that run, not a new one.
+    // model selection of the experiment it belongs to. The same session-level
+    // propagation as the workspace above, for the same reason — the sub-execution a
+    // replay's worker decomposes into is part of that run, not a new one.
     const binding = this.sessionExecutionBindings.get(callerSessionId)
     return {
       task: this.ctx.task,
@@ -6568,7 +6539,6 @@ export class TaskRuntime extends Service {
       ...(workspacePath === undefined ? {} : { workspacePath }),
       ...(named === undefined ? {} : { workerCwd: named }),
       ...(binding?.agentOptions === undefined ? {} : { agentOptions: binding.agentOptions }),
-      ...(binding?.runDeadlineAt === undefined ? {} : { runDeadlineAt: binding.runDeadlineAt }),
       noProgressRounds: this.config.noProgressRounds,
       writeDrainTimeoutMs: this.config.writeDrainTimeoutMs,
       ...(this.config.rootBudget === undefined ? {} : { rootBudget: { ...this.config.rootBudget } }),
@@ -6632,14 +6602,11 @@ export class TaskRuntime extends Service {
         const sessionWorkspace = request.cwd ?? named
         if (sessionWorkspace !== undefined) this.sessionWorkspaces.set(request.sessionId, sessionWorkspace)
         // What the session *runs under* is remembered the same way (S4-E §Q3): a
-        // replay's worker carries the experiment's frozen selection and its own
-        // per-run deadline, and the sub-execution that worker decomposes into is the
-        // same run — it resolves both from here rather than from its own defaults.
-        if (request.agentOptions !== undefined || request.runDeadlineAt !== undefined) {
-          this.sessionExecutionBindings.set(request.sessionId, {
-            ...(request.agentOptions === undefined ? {} : { agentOptions: request.agentOptions }),
-            ...(request.runDeadlineAt === undefined ? {} : { runDeadlineAt: request.runDeadlineAt }),
-          })
+        // replay's worker carries the experiment's frozen selection, and the
+        // sub-execution that worker decomposes into is the same run — it resolves
+        // the selection from here rather than from its own default.
+        if (request.agentOptions !== undefined) {
+          this.sessionExecutionBindings.set(request.sessionId, { agentOptions: request.agentOptions })
         }
         return this.ctx.agentRuntime.spawn(parent, {
           sessionId: SessionId(request.sessionId),
