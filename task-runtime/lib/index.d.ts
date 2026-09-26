@@ -1603,7 +1603,10 @@ interface SpawnChildRequest {
  * - `wallTimeMs` — **enforced in flight**: the worker wait races the deadline;
  *   on exhaustion the agent is cancelled and the run settles failed with
  *   `budget exhausted: wallTimeMs (...)`, named as a budget exhaustion, not a
- *   criteria failure.
+ *   criteria failure. The same clock bounds the run a batch settles on its worker's
+ *   behalf: a parent whose deadline has already passed is cancelled instead of
+ *   accepted (`settleParentBatch`), so no run is reported `verified` after the
+ *   clock that was supposed to stop it.
  * - `maxToolCalls` — **post-hoc check only**: the session log is readable only
  *   once the run has settled, so a breach lands as an anomaly on the terminal
  *   review record (the verdict stands — the evidence is real). It is never

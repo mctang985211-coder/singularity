@@ -3021,7 +3021,15 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
   })
 
   test('a child of a replayed worker runs on the parent\u2019s remaining window, never a fresh one', async () => {
-    const h = harness({ config: { capabilities: { research: { preset: 'standard' } } } })
+    // Two clocks, chosen so that neither run's settlement can coincide with the
+    // other's: the deployment's per-run wall time is the tighter one for the *parent*
+    // (1s from its own start), while the caller's own wall clock (1.2s from that same
+    // start) is what the child inherits — and the child starts 300ms in, so its own
+    // per-run clock would have allowed it 1s from *its* start. Nothing here is a race
+    // between two settlement paths for one run: the parent's clock runs out 200ms
+    // before the window the child is under, and the child is the one that dies of the
+    // inherited instant.
+    const h = harness({ config: { capabilities: { research: { preset: 'standard' } }, budget: { wallTimeMs: 1_000 } } })
     const { championTaskId } = await champion(h)
     h.setIdleBehavior(async sessionId => {
       const bound = await h.runtime.runForSession(sessionId)
@@ -3040,14 +3048,15 @@ describe('TaskRuntime.replayTask (evolution replay, W15)', () => {
       wallTimeMs: 1_200,
     }, ROOT_SESSION)
 
-    // The window is the parent's instant, so the parent's own stop and the child's
-    // fall fall together — one wait per run, and the store arbitrates each
-    // settlement (`settleReplayRun`). The parent ends on the budget stop it is.
+    // The parent ends on the tighter bound it was under — its own deployment budget —
+    // and it ends before the window the child is under, so this settlement is the
+    // replay's own rather than a race with the child's.
     expect(outcome.status).toBe('failed')
     const run = await h.task.runIn(STORE, outcome.runId)
     const inheritedAt = new Date(Date.parse(run.startedAt) + 1_200).toISOString()
     const parentRecord = (await h.task.snapshotIn(STORE)).reviews.find(item => item.runId === outcome.runId)!
     expect(parentRecord.localizedCause).toContain('budget exhausted: wallTimeMs')
+    expect(parentRecord.localizedCause).toContain('1000ms from its own startedAt')
     expect(parentRecord.localizedCause).toContain(inheritedAt)
 
     // The child hangs under the window it inherited, and dies of it. The instant its
@@ -3628,6 +3637,41 @@ describe('A3 coordination', () => {
     // And the parent is not accepted after its own root deadline: the batch's
     // settlement cancels it with the budget named rather than judging it.
     expect((await h.task.runIn(STORE, runId)).status).toBe('cancelled')
+  })
+
+  test('a parent whose own wall clock ran out is not accepted by its batch: it is cancelled as the budget stop it is', async () => {
+    // The deployment's per-run wall time (`Config.budget`) is what this tree runs
+    // under, and the child is the slow one: it settles on its own clock *after* the
+    // parent's has run out. That is exactly the moment every child is terminal and
+    // the batch would otherwise accept the parent — an acceptance the budget never
+    // allowed (§3.5), which would report work the clock had already stopped as
+    // `verified`.
+    const h = harness({ config: { budget: { wallTimeMs: 250 } } })
+    const { taskId, runId } = await createRoot(h)
+    h.setIdleBehavior(() => new Promise<void>(() => {}))
+
+    const outcomes = await decomposeAndSettle(h, STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('the child that never finishes')],
+    })
+
+    const snapshot = await h.task.snapshotIn(STORE)
+    const childRun = snapshot.runs.find(run => run.taskId !== taskId)!
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
+    // The child died of its own clock, named as the budget stop it is …
+    expect(childRun.status).toBe('failed')
+    expect(snapshot.reviews.find(item => item.runId === childRun.runId)!.localizedCause).toContain('budget exhausted: wallTimeMs')
+    // … and the parent is not accepted after its own: the batch cancels it, naming
+    // the bound that ended it, instead of judging it.
+    expect((await h.task.runIn(STORE, runId)).status).toBe('cancelled')
+    const parentRecord = snapshot.reviews.find(item => item.runId === runId)!
+    expect(parentRecord.outcome).toBe('cancelled')
+    const parentReason = [parentRecord.localizedCause ?? '', ...parentRecord.anomalies].join(' ')
+    expect(parentReason).toContain('budget exhausted: wallTimeMs')
+    expect(parentReason).toContain('passed before this batch could be accepted')
+    expect(parentReason).toContain('250ms from its own startedAt')
+    expect(parentReason).toContain('not a criteria failure')
+    expect((await h.task.taskIn(STORE, taskId)).status).toBe('cancelled')
   })
 
   test('a second root on one checkout is refused before anything is written, and ownership is released when the tree settles', async () => {

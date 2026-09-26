@@ -4982,6 +4982,25 @@ function runDeadlineInstantOf(startedAt, wallTimeMs) {
 	return new Date(startedAt.getTime() + wallTimeMs).toISOString();
 }
 /**
+* The wall-clock bound(s) this orchestration's runs are under, as a terminal
+* record names them: what the deployment's per-run budget allows, the instant a
+* caller placed on this run, and — when the caller could resolve it, which only
+* the batch settlement can, `resolveRootBudget` being a store read — the tree's own
+* deadline. Naming every bound in force is deliberate: the record says which limits
+* applied, so a reader knows what to change, while the tightest of them is the one
+* that ended the run (`runDeadlineMs`).
+*/
+function wallClockBoundsText(env, rootDeadlineAt) {
+	const perRun = env.budget?.wallTimeMs;
+	const placed = env.runDeadlineAt;
+	const bounds = [
+		...perRun === void 0 ? [] : [`${perRun}ms from its own startedAt`],
+		...placed === void 0 ? [] : [`its caller's deadline ${placed}`],
+		...rootDeadlineAt === void 0 ? [] : [`the root tree's deadline ${rootDeadlineAt}`]
+	];
+	return bounds.length === 0 ? "the root tree’s own deadline" : bounds.join(", or ");
+}
+/**
 * The wall-clock exhaustion a worker observation is recorded as: the reason
 * shape every budget stop carries (KISS §5 — a budget stop is never reported as
 * a criteria failure), naming the bound(s) this orchestration's runs are under so
@@ -4991,9 +5010,24 @@ function runDeadlineInstantOf(startedAt, wallTimeMs) {
 * that actually ended the run.
 */
 function wallClockExhaustedReason(env) {
-	const perRun = env.budget?.wallTimeMs;
-	const placed = env.runDeadlineAt;
-	return budgetExhaustedReason("wallTimeMs", `worker run exceeded its wall-clock budget (${perRun !== void 0 && placed !== void 0 ? `${perRun}ms from its own startedAt, or its caller's deadline ${placed}, whichever came first` : placed !== void 0 ? `its caller's deadline ${placed}` : perRun !== void 0 ? `${perRun}ms from its own startedAt` : "the root tree’s own deadline"})`);
+	return budgetExhaustedReason("wallTimeMs", `worker run exceeded its wall-clock budget (${wallClockBoundsText(env)})`);
+}
+/**
+* The reason a batch's parent is cancelled instead of accepted: its run's own
+* deadline had already been reached when every child had settled, and an
+* acceptance after the deadline is one the budget never allowed (§3.5) — the run
+* would be reported `verified` for work the clock had already stopped.
+*
+* The bound is the run's own (`remainingRunMs`: its per-run wall time, what is left
+* of the root's, and any instant its caller placed on it). Every child settling is
+* exactly the moment such a deadline can arrive unnoticed by the parent's own
+* driver — a replayed worker's sub-execution inherits the parent's instant, so the
+* child failing on it is what brings the batch here with the parent's clock already
+* run out — and reading it here is the last moment before the acceptance that would
+* judge the run. Named as a budget stop, never as a criteria failure.
+*/
+function parentDeadlinePassedReason(env, rootDeadlineAt) {
+	return budgetExhaustedReason("wallTimeMs", `${wallClockBoundsText(env, rootDeadlineAt)} passed before this batch could be accepted, so the parent is cancelled without verification`);
 }
 /**
 * The evidence one child's own submission, verification, or failure left in the
@@ -5559,9 +5593,13 @@ function batchSummary(batchId, outcomes) {
 * judges the parent's own criteria — the composite acceptance that closes the
 * loop, unchanged from the cascade it replaces.
 *
-* The one gate that can still refuse here is write convergence: a drain that
-* cannot be confirmed is an unverifiable acceptance and fails the parent by
-* name rather than assuming the writers stopped (§3.3).
+* Two gates can still refuse here, and neither judges the work. A parent whose own
+* deadline has already been reached is cancelled as the budget stop it is — every
+* child settling is exactly when a run's wall clock can run out unnoticed, and an
+* acceptance after it would report work the clock had stopped as `verified`
+* (§3.5). Write convergence is the other: a drain that cannot be confirmed is an
+* unverifiable acceptance and fails the parent by name rather than assuming the
+* writers stopped (§3.3).
 */
 async function settleParentBatch(env, batch, items) {
 	const outcomes = await deriveChildOutcomes(env.task, batch.storeId, batch.parentTaskId);
@@ -5583,10 +5621,10 @@ async function settleParentBatch(env, batch, items) {
 		notifyOwner(env, batch.callerSessionId, `task-runtime: ${reason}. Children: ${batchSummary(batch.batchId, outcomes)}`);
 		return outcomes;
 	}
-	const budget = resolveRootBudget(snapshot, env.rootBudget ?? {});
-	const deadline = budget.ok ? budget.deadlineAt : void 0;
-	if (deadline !== void 0 && Date.now() >= Date.parse(deadline)) {
-		const reason = `budget exhausted: root ${budget.ok ? budget.rootTaskId : "the store"} deadline ${deadline} passed before this batch could be accepted, so the parent is cancelled without verification (a budget stop, not a criteria failure)`;
+	const rootBudget = resolveRootBudget(snapshot, env.rootBudget ?? {});
+	const rootDeadline = rootBudget.ok ? rootBudget.deadlineAt : void 0;
+	if (remainingRunMs(env, parentRun, rootDeadline, Date.now()) <= 0) {
+		const reason = parentDeadlinePassedReason(env, rootDeadline);
 		await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, "cancelled", env.actor, { reason });
 		await recordTerminalReview(env, batch.storeId, batch.parentTaskId, "cancelled", {
 			run: parentRun,

@@ -115,7 +115,10 @@ export interface SpawnChildRequest {
  * - `wallTimeMs` — **enforced in flight**: the worker wait races the deadline;
  *   on exhaustion the agent is cancelled and the run settles failed with
  *   `budget exhausted: wallTimeMs (...)`, named as a budget exhaustion, not a
- *   criteria failure.
+ *   criteria failure. The same clock bounds the run a batch settles on its worker's
+ *   behalf: a parent whose deadline has already passed is cancelled instead of
+ *   accepted (`settleParentBatch`), so no run is reported `verified` after the
+ *   clock that was supposed to stop it.
  * - `maxToolCalls` — **post-hoc check only**: the session log is readable only
  *   once the run has settled, so a breach lands as an anomaly on the terminal
  *   review record (the verdict stands — the evidence is real). It is never
@@ -1669,6 +1672,29 @@ function runDeadlineInstantOf(startedAt: Date, wallTimeMs: number | undefined): 
 }
 
 /**
+ * The wall-clock bound(s) this orchestration's runs are under, as a terminal
+ * record names them: what the deployment's per-run budget allows, the instant a
+ * caller placed on this run, and — when the caller could resolve it, which only
+ * the batch settlement can, `resolveRootBudget` being a store read — the tree's own
+ * deadline. Naming every bound in force is deliberate: the record says which limits
+ * applied, so a reader knows what to change, while the tightest of them is the one
+ * that ended the run (`runDeadlineMs`).
+ */
+function wallClockBoundsText(env: OrchestrateEnv, rootDeadlineAt?: string): string {
+  const perRun = env.budget?.wallTimeMs
+  const placed = env.runDeadlineAt
+  const bounds = [
+    ...(perRun === undefined ? [] : [`${perRun}ms from its own startedAt`]),
+    ...(placed === undefined ? [] : [`its caller's deadline ${placed}`]),
+    ...(rootDeadlineAt === undefined ? [] : [`the root tree's deadline ${rootDeadlineAt}`]),
+  ]
+  // With nothing else configured, the only bound that can have ended a wait is the
+  // root tree's own deadline — read where the reason is built only by the batch
+  // settlement, so a worker stop says so without naming the instant.
+  return bounds.length === 0 ? 'the root tree\u2019s own deadline' : bounds.join(', or ')
+}
+
+/**
  * The wall-clock exhaustion a worker observation is recorded as: the reason
  * shape every budget stop carries (KISS §5 — a budget stop is never reported as
  * a criteria failure), naming the bound(s) this orchestration's runs are under so
@@ -1678,18 +1704,28 @@ function runDeadlineInstantOf(startedAt: Date, wallTimeMs: number | undefined): 
  * that actually ended the run.
  */
 function wallClockExhaustedReason(env: OrchestrateEnv): string {
-  const perRun = env.budget?.wallTimeMs
-  const placed = env.runDeadlineAt
-  const bounds = perRun !== undefined && placed !== undefined
-    ? `${perRun}ms from its own startedAt, or its caller's deadline ${placed}, whichever came first`
-    : placed !== undefined
-      ? `its caller's deadline ${placed}`
-      : perRun !== undefined
-        ? `${perRun}ms from its own startedAt`
-        // No per-run bound and no caller's instant: what is left is the root tree's
-        // own deadline, which ended the run (`runDeadlineMs`).
-        : 'the root tree\u2019s own deadline'
-  return budgetExhaustedReason('wallTimeMs', `worker run exceeded its wall-clock budget (${bounds})`)
+  return budgetExhaustedReason('wallTimeMs', `worker run exceeded its wall-clock budget (${wallClockBoundsText(env)})`)
+}
+
+/**
+ * The reason a batch's parent is cancelled instead of accepted: its run's own
+ * deadline had already been reached when every child had settled, and an
+ * acceptance after the deadline is one the budget never allowed (§3.5) — the run
+ * would be reported `verified` for work the clock had already stopped.
+ *
+ * The bound is the run's own (`remainingRunMs`: its per-run wall time, what is left
+ * of the root's, and any instant its caller placed on it). Every child settling is
+ * exactly the moment such a deadline can arrive unnoticed by the parent's own
+ * driver — a replayed worker's sub-execution inherits the parent's instant, so the
+ * child failing on it is what brings the batch here with the parent's clock already
+ * run out — and reading it here is the last moment before the acceptance that would
+ * judge the run. Named as a budget stop, never as a criteria failure.
+ */
+function parentDeadlinePassedReason(env: OrchestrateEnv, rootDeadlineAt: string | undefined): string {
+  return budgetExhaustedReason(
+    'wallTimeMs',
+    `${wallClockBoundsText(env, rootDeadlineAt)} passed before this batch could be accepted, so the parent is cancelled without verification`,
+  )
 }
 
 /* --- one child, one round (A3 §3.1) --------------------------------------- */
@@ -2326,9 +2362,13 @@ function batchSummary(batchId: string, outcomes: readonly ChildOutcome[]): strin
  * judges the parent's own criteria — the composite acceptance that closes the
  * loop, unchanged from the cascade it replaces.
  *
- * The one gate that can still refuse here is write convergence: a drain that
- * cannot be confirmed is an unverifiable acceptance and fails the parent by
- * name rather than assuming the writers stopped (§3.3).
+ * Two gates can still refuse here, and neither judges the work. A parent whose own
+ * deadline has already been reached is cancelled as the budget stop it is — every
+ * child settling is exactly when a run's wall clock can run out unnoticed, and an
+ * acceptance after it would report work the clock had stopped as `verified`
+ * (§3.5). Write convergence is the other: a drain that cannot be confirmed is an
+ * unverifiable acceptance and fails the parent by name rather than assuming the
+ * writers stopped (§3.3).
  */
 async function settleParentBatch(env: OrchestrateEnv, batch: BatchContext, items: readonly BatchItem[]): Promise<ChildOutcome[]> {
   const outcomes = await deriveChildOutcomes(env.task, batch.storeId, batch.parentTaskId)
@@ -2350,14 +2390,20 @@ async function settleParentBatch(env: OrchestrateEnv, batch: BatchContext, items
     return outcomes
   }
 
-  // The root deadline ends the tree without judging it: a parent accepted after
-  // its own deadline would be an acceptance the budget never allowed (§3.5).
-  const budget = resolveRootBudget(snapshot, env.rootBudget ?? {})
-  const deadline = budget.ok ? budget.deadlineAt : undefined
-  if (deadline !== undefined && Date.now() >= Date.parse(deadline)) {
-    const reason =
-      `budget exhausted: root ${budget.ok ? budget.rootTaskId : 'the store'} deadline ${deadline} passed before this batch could be accepted, ` +
-      'so the parent is cancelled without verification (a budget stop, not a criteria failure)'
+  // The deadline ends the batch without judging it: a parent accepted after its own
+  // deadline would be an acceptance the budget never allowed (§3.5) — a run reported
+  // `verified` for work the clock had already stopped. The bound is the run's own
+  // (`remainingRunMs`: its per-run wall time, what is left of the root's, and any
+  // instant its caller placed on it), read here because this is the last moment
+  // before that acceptance — every child has settled, and a run's deadline can arrive
+  // exactly then: a sub-execution inherits the parent's instant, so the child failing
+  // on the budget is what brings the batch here with the parent's clock already out.
+  // A watched run's own wait stops it the same way (`observeWorkerRun`); this is that
+  // rule reaching the run whose settlement the batch performs.
+  const rootBudget = resolveRootBudget(snapshot, env.rootBudget ?? {})
+  const rootDeadline = rootBudget.ok ? rootBudget.deadlineAt : undefined
+  if (remainingRunMs(env, parentRun, rootDeadline, Date.now()) <= 0) {
+    const reason = parentDeadlinePassedReason(env, rootDeadline)
     await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, 'cancelled', env.actor, { reason })
     await recordTerminalReview(env, batch.storeId, batch.parentTaskId, 'cancelled', { run: parentRun, anomalies: [reason], relatedTaskIds: childTaskIds })
     env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, 'cancelled')
