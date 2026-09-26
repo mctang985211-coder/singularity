@@ -26,7 +26,7 @@
 | 9 | A2 + A1：Agent 状态上下文（一个交付组） | **已验收（2026-09-25）**：Q1–Q4、A2-1～A2-6 与公共检查通过 | 实现主代理 + 子代理 | 本文 D/E 节；[交付记录](history/2026-09-25-a2-a1-delivery-record.md)、[进度审核及复审](history/2026-09-25-a2-a1-progress-review.md)、[返工记录](history/2026-09-25-a2-a1-rework-record.md)、[Q3 收尾记录](history/2026-09-25-a2-a1-q3-closure-record.md) | 已按 D 节的单事件引用实现有界续读（上限 50000 字节、字节窗口与省略措辞复用 `@deepseek-ai/dsh-output-retention`）；进度审核通过；下一项为第 11 项 A4 |
 | 10 | A1 原独立排位 | 并入第 9 项，不单独派发 | — | 保留编号供历史引用 | 第 9 项整组验收后直接进入第 11 项 |
 | 11 | A4：父子澄清 | **已验收（2026-09-26）**：恢复期唤醒移到屏障 ready 后，A4-1～A4-5 闭合 | 实现主代理 | 本文 E/F.1、[返工交付](history/2026-09-26-a4-rework-record.md)、[唤醒收尾](history/2026-09-26-a4-barrier-wake-record.md)、[最终审核](history/2026-09-26-a4-final-review.md) | 下一项为第 12 项 S4-E |
-| 12 | S4-E：评估基础（S4 内的子票） | **简化返工**（2026-09-26）：删除实验级时限、实验裁判要求显式版本；gate 保持记录语义，旧实验格式不兼容 | 实现主代理 + 子代理 | 本文 F.2、[返工复审](history/2026-09-26-s4-e-rework-review.md)、[简化收尾派发](execution-prompts/12-s4-e-final-closure.md)、[持久化说明](persistence-changes/2026-09-26-s4-e-experiment-ledger.md)；原交付/审核/返工记录保留历史 | 两项代码收尾及 Q1～Q4/EVAL-1～EVAL-5 的现行合同通过，独立审核后进入第 13 项；旧实验账须具名拒绝，不造兼容层 |
+| 12 | S4-E：评估基础（S4 内的子票） | **返工**（2026-09-26）：清理旧 Evolution 请求入口及生产路径、删除实验级时限、实验裁判要求显式版本；gate 保持记录语义 | 实现主代理 + 子代理 | 本文 F.2、[返工复审](history/2026-09-26-s4-e-rework-review.md)、[当前收尾派发](execution-prompts/12-s4-e-final-closure.md)、[持久化说明](persistence-changes/2026-09-26-s4-e-experiment-ledger.md)；原交付/审核/返工记录保留历史 | 三项代码收尾及 Q1～Q4/EVAL-1～EVAL-5 的现行合同通过；模型可见入口不诱导旧请求、服务直调在写前拒绝、旧账具名拒绝、当前格式可回滚；独立审核后进入第 13 项 |
 | 13 | A5 + S2-E：诊断与缺口交接（一个交付组） | 待前置；合同已定、未实施 | 待填 | 本文 F.3、深入架构 §8 | agent-singularity/review 按源身份触发只读复盘并保存交接；runtime 结算不等 reviewer；缺口可见与诊断失败恢复完整 |
 | 14 | A6 + S2-R + S3：自主改进与恢复（一个交付组） | 待前置；合同已定、未实施 | 待填 | 本文 F.4 | evolution 组织有限候选路径，task-runtime 重检并恢复原图；L1/L2、能力/产物缺口、拒绝/重启/回滚均验收 |
 
@@ -39,7 +39,7 @@
 | 已验收 1–8a：契约、证据、准入、执行、恢复、人审 | 让任意生成的 Task 有独立裁判并能在失败后保持事实；是 VRTC 骨干 | DSH 有 Agent、Session、Skill 与 approval，但没有 Singularity Task/Run/Verifier 组合验收；Agent Team 的 task board 也没有这些语义 | 保留领域事实和已验收实现；继续调用 DSH 底座，不复刻其 loop、日志、批准或 Skill loader |
 | 第 9 项 D/E：可信项目上下文与显式恢复 | 让模型读到当前契约和同 graph 证据，同时不让读取触发恢复；已存在两个真实消费者 | DSH 已有 prompt waterfall、Session query/reference、compaction；其原始查询仅按 cwd 授权，缺 graph 域 | 保留 context 的绑定/授权/投影和 runtime 的业务恢复闸；删除任何第二日志、索引、压缩器或会话恢复器；Q3 只补有界事件正文适配 |
 | 第 11 项 A4：直属父子澄清 | 子节点不确定时能问等待中的父，回答仅解除对应业务阻塞；否则递归执行会卡住或猜测 | DSH inbox、steer/followup、resume 可用；实验性 Agent Team 有 mailbox，但绑定它的 Lead/roster/task board 与现有 graph/Task 双轨，且不支持此处的独立业务 Run | 只保留 Task 问答身份/阻塞事实和最窄投递对账；复用 DSH inbox，不建通用 mailbox、聊天日志或 Team task board；删单独的提问次数预算 |
-| 第 12 项 S4-E：候选的可比验证 | 晋升 Skill 前证明确实修复且不破坏已通过任务；没有它人审缺证据 | DSH 没有 Task/Run/verifier 对照评估；GEPA 提供候选优化接口，但不直接执行本项目 Skill、权限闸和回滚 | 保留现有 Evolution/replay 的扩充及双侧 Run 证据；不建通用实验服务、优化器或第二套 replay runtime |
+| 第 12 项 S4-E：候选的可比验证 | 晋升 Skill 前证明确实修复且不破坏已通过任务；没有它人审缺证据 | DSH 没有 Task/Run/verifier 对照评估；GEPA 提供候选优化接口，但不直接执行本项目 Skill、权限闸和回滚 | 保留 Skill 双侧 Run 证据及现有 Task replay 执行底座；删除 Evolution v1 replay 的模型入口与生产路径，不建通用实验服务、优化器或第二套 replay runtime |
 | 第 13 项 A5：失败后自主诊断 | 让 supervisor 从失败 Review 启动、取证并交接一个有来源的改进建议 | DSH 已有 Session 查询/指标来源和 Agent 生命周期，没有 Review/Diagnosis/source 去重；OpenHands condenser 不替代领域诊断 | 保留唯一失败源、已有 reviewer ledger 的最小 claim 与 Diagnosis；直接读 DSH 观测，不强制迁出一个通用 Session 观测模块；不建 incident/分类器 |
 | 第 14 项 A6：能力生长与原目标再尝试 | L1/L2 缺口要由 Agent 产出候选、经独立验证和人审后恢复原目标；是自进化闭环 | DSH Skill loader/approval 可直接用；LangGraph/AutoGen/OpenHands 的状态或通信不能代替本项目 TaskRun、证据、应用/回滚账 | 保留有限 capability/Skill 候选、现有 Evolution 闸和 task-runtime 新 Run；复用原准入/执行/验证路径，不复制 scheduler、事务平台或任意对象执行器 |
 
@@ -229,7 +229,7 @@ agent-runtime 复用 live Agent.steer/followup、agents.resume 与 Session flush
 
 #### F.2 S4-E：单文件 Skill 的真实双侧评估
 
-本票的新可比评估只支持**替换已存在的单文件 SKILL.md**，不宣称它能新建执行 provider；资源文件/sidecar 新增仍明确拒绝。现有 Evolution 全生命周期、replay 报告、config-edit 与真实消费者迁入 evolution 包，Task runtime 的 Run 执行不迁；已有可用的旧生命周期读取和回滚路径不主动破坏，但不为 S4-E 未验收的旧实验形状增加 reader 或迁移层。新 PROMOTE 必须具备本票可验证证据，没有支持的评估器就拒绝新晋升；历史报告不自动升级为新证据。
+本票可执行候选只支持**替换已存在的单文件 SKILL.md**，不宣称它能新建执行 provider；资源文件/sidecar 新增仍明确拒绝。现有 Evolution 主体与真实消费者已迁入 evolution 包，Task runtime 的 Run 执行不迁。S4-E 完成时删除非 Skill 候选的旧 candidate→v1 replay→gate→apply 执行路径及仅服务它的生产代码；Diagnosis/`evolution_propose` 可以记录其他改进建议，但建议不得自动取得 candidate、replay、apply 权限。新 PROMOTE 必须具备本票可验证证据；历史报告不自动升级为新证据。普通 Task replay 和仍在使用的 `SKILL.contract.json` v1 侧车协议不属于删除范围。
 
 固定比较目标为“原失败案例修复且冻结的回归/holdout 不退化”；不做多目标打分或自动阈值学习。至少一条失败复现和一条未参与候选选择的 holdout，使用同一预先冻结的客观 verifier/AC，observed/holdout 各自非空。**进入实验的每条 AC 必须显式给出已注册且声明版本的 `verifierRef`；无锚的 mode 派发直接拒绝该实验，普通 Task 判决仍可按 mode 派发。**每个样本两侧各执行一次新的 Run，确定性测试精确断言结果；真实模型需统计推断时另定重复次数与预算，不能拿一次随机成功声称普遍改进。样本、输入、裁判、模型/工具、预算、候选身份和比较规则在运行前冻结，沿现有 replay manifest/report 增补必要身份，不另建实验管理服务。
 
@@ -237,11 +237,11 @@ agent-runtime 复用 live Agent.steer/followup、agents.resume 与 Session flush
 
 实验幂等键使用 proposal、prepared 内容身份、样本、baseline/candidate、重复序号；已结算 Run 复用其证据，在途实验按 runtime 恢复结果记录 interrupted/failed，不偷偷补跑或覆写。明确的新实验才能再计预算运行。decide/apply 两次既有人审保留，报告/候选/生产基线在应用前复检；取消和失败仍保存已发生实验与成本。
 
-2026-09-26 [返工复审](history/2026-09-26-s4-e-rework-review.md)记录了原合同下的绝对截止、gate 成本、无 ref 裁判和旧实验账四处问题。**本轮 KISS 裁决取代其中三项修法**：删除实验级 `wallTimeMs` 及只为它增设的 replay 截止传播；配置了 `rootBudget.wallTimeMs` 时仍按现有规则限制 Run，未配置则不声称有实验时间上限；`gate` 只记录六项回答和证据引用，失败或超额实验可以留下 gated 审计事实，但 `gated` 不代表允许晋升，`decide(PROMOTE)` 与 `apply` 继续在写前复检；不兼容未验收旧实验格式，加载时抛错，由调用者归档/迁移，旧版已应用对象须先用旧版本处理。不新建绝对截止管道、第二个晋升闸或双格式 fold。剩余代码返工只有：实验缺少显式且有版本的 verifierRef 在冻结前抛错，以及删除上述实验时限路径。实现顺序和验收见[简化收尾 prompt](execution-prompts/12-s4-e-final-closure.md)；历史审核记录不改写。
+2026-09-26 [返工复审](history/2026-09-26-s4-e-rework-review.md)记录了原合同下的绝对截止、gate 成本、无 ref 裁判和旧实验账四处问题。**本轮 KISS 裁决**：删除实验级 `wallTimeMs` 及只为它增设的 replay 截止传播；配置了 `rootBudget.wallTimeMs` 时仍按现有规则限制 Run；`gate` 只记录六项回答和证据引用，失败或超额实验可以留下 gated 审计事实，`decide(PROMOTE)` 与 `apply` 仍在写前复检。还须从 root prompt、九个 Evolution 工具 schema/说明/返回文案、服务直调和生产调用方同批删除非 Skill v1 replay 及旧候选执行路径，不能只靠服务报错让 agent 反复发旧请求。Evolution ledger 新写统一用 **formatVersion 2**；旧 formatVersion 1 在任何新写入前具名拒绝，不做双格式 reader、在线迁移或回退 helper。切换真实账本前先核对最终状态、原字节归档，再用空的新账启动；如有未回滚 applied，先由旧版本处置并停止切换，不自动改写用户数据。三项代码收尾是旧路径清理、实验时限删除、实验缺显式版本化 `verifierRef` 的写前拒绝。实现及验收见[当前收尾 prompt](execution-prompts/12-s4-e-final-closure.md)；历史审核记录不改写。
 
-验收 EVAL-1：双侧真实 runtime/verifier 执行且互不污染，报告可回溯所有身份。EVAL-2：历史基线冒充、输入/裁判/模型漂移、伪造证据、双侧同失败、回归/holdout 退化在 PROMOTE/apply 拒绝且无应用副作用；gate 可记录失败证据但不等于晋升通过；合法修复允许进入原人审；实验无显式版本化裁判在首个持久写前拒绝。EVAL-3：重复调用、取消/重启不重计已完成样本、不替换失败记录；内容/报告/生产基线变化拒绝应用；旧调用传实验级 wallTimeMs 立即拒绝，根运行时限仍有效。EVAL-4：新包真实接管全部现行工具消费者，现行格式账可读且其 applied 可回滚；未验收旧实验格式具名抛错，不为它增加 reader/自动迁移；没有 evaluator 的类型不得用旧报告绕过新晋升闸。EVAL-5（迁移闭合）：`evolution` 包承担候选、实验、决定、应用与回滚的唯一实现，`agent-singularity` 中原 Evolution 位置只保留有真实调用方的薄工具适配；全部生产消费者已改接新所有者，旧生命周期实现和同名转发删除。以实际调用链和测试核对，不以搬走的行数判定。验收在 fixture 中完成，不作模型效果声明。
+验收 EVAL-1：双侧真实 runtime/verifier 执行且互不污染，报告可回溯所有身份。EVAL-2：历史基线冒充、输入/裁判/模型漂移、伪造证据、双侧同失败、回归/holdout 退化在 PROMOTE/apply 拒绝且无应用副作用；gate 可记录失败证据但不等于晋升通过；合法修复允许进入原人审；实验无显式版本化裁判在首个持久写前拒绝。EVAL-3：重复调用、取消/重启不重计已完成样本、不替换失败记录；内容/报告/生产基线变化拒绝应用；旧调用传实验级 wallTimeMs 立即拒绝，根运行时限仍有效。EVAL-4：新包真实接管全部现行工具消费者；formatVersion 2 当前账可重开且其 applied 可回滚，formatVersion 1 旧账在写前具名拒绝，不混写或自动迁移；非 Skill 旧请求直调零副作用。EVAL-5（迁移闭合）：`evolution` 是候选、实验、决定、应用与回滚的唯一实现；模型可见 root prompt、九个工具 schema/说明/成功返回只引导当前 Skill 路径，旧 Evolution v1 replay 的生产导出、调用方、状态分支和报告/fixture 删除，`agent-singularity` 仅保留薄工具适配；以真实调用链核对，不以搬走的行数判定。验收在 fixture 中完成，不作模型效果声明。
 
-内部交接顺序：生命周期迁移且旧行为回归 → 双侧执行和证据绑定 → 晋升闸/旧报告兼容 → 独立组合验收。主代理承担新包装配及全部工具接线的集成，不让单个子代理接整票。
+内部交接顺序：旧请求入口及 v1 replay 消费者清理 → 实验预算/裁判合同收紧 → 新账版本及切换拒绝 → 独立组合验收。主代理承担模型可见入口与服务直调的集成，不让单个子代理接整票。
 
 #### F.3 A5 + S2-E：按终态事实启动诊断
 
@@ -259,9 +259,9 @@ reviewer 经 context 自主取证、写 Diagnosis（targetType 为非空开放�
 
 本组保持能力缺口、产物缺口和 L1/L2 的原验收，不把目标偷换成“只改善一个已存在 Skill”。先消费 F.3 的 pending Diagnosis/源 Review，由 evolution 以该交接身份幂等启动 supervisor；绑定复用可信委派 ledger，标明协调角色及有限工具集，无业务 Run 不冒充 root。关闭 evolution 时不启动；预算不足、未知执行目标或需新增权限时保留交接并具名停止。Agent 决定组合/实现方法，人类只审证据与晋升。
 
-**候选支持范围固定**：在 S4-E 单文件 Skill 替换之外，扩展现有 `CapabilityMutation`，支持恰好一条 capability 整行变更，可附一个新 Skill 目录，仅含 SKILL.md 和现有 v1 SKILL.contract.json。L1 使用已有授权工具/Skill 配置这一行；L2 由 Agent 生成附带的执行型 Skill。sidecar 必须引用已注册且独立的 verifier、resources=[]、摘要匹配，requiredTools 不超出现有授权，capabilities 包含该行。指导型 Skill 不能充执行 provider；新工具、verifier 实现、preset/runtime policy 修改和任意资源包不在本次执行范围，具名拒绝，不要求人补写。声明同名生产 Skill 已存在时拒绝新增，替换既有单文件 Skill 沿 S4-E。字段扩展保留旧 mutation 的解释。
+**候选支持范围固定**：在 S4-E 单文件 Skill 替换之外，按当前 Evolution 格式新增一条 capability 双侧评估路径，支持恰好一条 capability 整行变更，可附一个新 Skill 目录，仅含 SKILL.md 和现有 v1 SKILL.contract.json。L1 使用已有授权工具/Skill 配置这一行；L2 由 Agent 生成附带的执行型 Skill。sidecar 必须引用已注册且独立的 verifier、resources=[]、摘要匹配，requiredTools 不超出现有授权，capabilities 包含该行。指导型 Skill 不能充执行 provider；新工具、verifier 实现、preset/runtime policy 修改和任意资源包不在本次执行范围，具名拒绝，不要求人补写。声明同名生产 Skill 已存在时拒绝新增，替换既有单文件 Skill 沿 S4-E。不扩展或复活已删除的旧 mutation/v1 replay 路径。
 
-**评估/应用必须同组补齐**：复用 S4-E 成对运行器，候选同时挂 capabilityOverrides 与 extraSkillRoots。缺 provider 的基线可能在真实准入时拒绝：记录同一冻结契约的真实拒绝及 gap/proposal 来源，标明 not-admitted、无 Run；不得造 champion/失败 Run，也不得跳过基线预检。新增受限的冻结契约评估入口复用 runtime 原规范化/准入/执行链，不能绕过旧 replayTask 的终态要求来伪造已执行。候选必须真执行并通过同一独立判据、回归与 holdout，新增 capability 的单纯准入通过不算修复。prepared 固定 capability 行与文件的组合身份及生产基线；apply intent 在现有 evolution ledger 持久化后才写文件/配置，恢复按 intent 补齐或回滚，全部完成并成功更新运行 registry 才记 applied。部分写入期间禁止新 Run 使用该 provider，失败不报成功；rollback 同样处理整组对象，不删除基线中已存在的文件。旧 ledger 的单对象读取/回滚保留，不引入通用跨库事务平台。
+**评估/应用必须同组补齐**：复用 S4-E 成对运行器，候选同时挂 capabilityOverrides 与 extraSkillRoots。缺 provider 的基线可能在真实准入时拒绝：记录同一冻结契约的真实拒绝及 gap/proposal 来源，标明 not-admitted、无 Run；不得造 champion/失败 Run，也不得跳过基线预检。新增受限的冻结契约评估入口复用 runtime 原规范化/准入/执行链，不能绕过普通 `replayTask` 的终态要求来伪造已执行。候选必须真执行并通过同一独立判据、回归与 holdout，新增 capability 的单纯准入通过不算修复。prepared 固定 capability 行与文件的组合身份及生产基线；apply intent 在当前 Evolution ledger 持久化后才写文件/配置，恢复按 intent 补齐或回滚，全部完成并成功更新运行 registry 才记 applied。部分写入期间禁止新 Run 使用该 provider，失败不报成功；rollback 同样处理整组对象，不删除基线中已存在的文件。只验收当前格式的读取/回滚，不恢复旧账兼容；不引入通用跨库事务平台。
 
 **恢复入口固定为 `task_recover({sourceDiagnosisId, requestKey})`**：仅向可信 supervisor 协调会话开放，工具与直调服务均检查源归属、批准应用/解决证据、原契约/预算、当前没有在途恢复尝试。该入口恢复的是原目标的**新 Run**，不是旧 Run 复活或旧 admitted proposal 再次消费。runtime 在同一 store 为失败原根 Task 创建新 Run 与新 Session（旧 session 保持终态），复用原根预算起点；以原 Task 的不可变目标/AC 做顶层验收。根 graph 绑定仍指原目标，查询显式区分旧失败 Run 和当前恢复 Run。`TaskRetried` 可复用；返回新 Run/Session 身份后，由该协调节点通过现有 task_decompose 提出新批次，runtime 依据持久恢复关联路由到恢复准入分支，不由模型传 bypass 标志。普通 decompose 一次性闸不放宽；无分解的原目标直接按原契约执行新 Run。
 

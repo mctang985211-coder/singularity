@@ -8,7 +8,7 @@
 
 ## 直接派发入口
 
-以下入口只在当前票没有待审核交付时交给实现主代理。第 9 项 A2+A1 与第 11 项 A4 已验收；第 12 项 S4-E 返工复审未通过，本轮 KISS 裁决后直接使用[简化收尾 prompt](12-s4-e-final-closure.md)；交付后改用[进度审核 prompt](progress-review-and-dispatch.md)，审核前不连续施工。
+以下入口只在当前票没有待审核交付时交给实现主代理。第 9 项 A2+A1 与第 11 项 A4 已验收；第 12 项 S4-E 返工复审未通过，直接使用[当前收尾 prompt](12-s4-e-final-closure.md)；交付后改用[进度审核 prompt](progress-review-and-dispatch.md)，审核前不连续施工。
 
 ```text
 你是 Singularity 本次实现主代理，工作区：
@@ -21,7 +21,7 @@ docs/execution-prompts/README.md 的公共合同，以及本模板的实施约�
 只执行唯一表中首个未完成的有效票号；跳过已注明合并的历史编号。
 前置不满足就报告阻塞；已有交付待验收时只指出应走进度审核，不接下一票。
 第 11 项 A4 已验收；第 12 项 S4-E 经 docs/history/2026-09-26-s4-e-rework-review.md 复审仍判返工。
-当前直接派发 12-s4-e-final-closure.md，按 KISS 裁决只做两项代码收尾并重验现行 F.2，不派 A5。
+当前直接派发 12-s4-e-final-closure.md，按 KISS 裁决同批清理旧 Evolution 模型入口/生产路径、实验级时限、无锚裁判，并重验现行 F.2，不派 A5。
 交付待审核时停下，交给 progress-review-and-dispatch.md。
 其他票只读本模板合同索引所指的段落及必要源码，按既定合同实施。
 
@@ -46,7 +46,7 @@ docs/execution-prompts/README.md 的公共合同，以及本模板的实施约�
 |---|---|---|
 | A2 + A1（已验收，历史对照） | D：读取/绑定与迁移；E：显式恢复 | Q1–Q4、A2-1–A2-6；当前见 `09-a2-a1-q3-closure.md` |
 | A4 | F.1；[已填写派发 prompt](11-a4-parent-child-clarification.md) | A4-1–A4-5，含结算归属 |
-| S4-E | F.2；[原合同](12-s4-e-skill-evaluation.md)、[首次返工](12-s4-e-review-rework.md)、[当前简化收尾](12-s4-e-final-closure.md) | Q1～Q4 + EVAL-1–EVAL-5 的现行合同；未验收旧实验格式具名拒绝，现行格式回滚 |
+| S4-E | F.2；[当前收尾](12-s4-e-final-closure.md)；[原合同](12-s4-e-skill-evaluation.md)与[首次返工](12-s4-e-review-rework.md)仅作历史 | Q1～Q4 + EVAL-1–EVAL-5 的现行合同；旧请求不再模型可见、直调零副作用拒绝，ledger v2 可回滚、v1 在写前拒绝 |
 | A5 + S2-E | F.3；E 的 DSH 观测复用及 Diagnosis 职责 | REV-1–REV-5，含观测与终态分工 |
 | A6 + S2-R + S3 | F.4 | EVO-1–EVO-5；EVO-1 真实 Agent 运行是整组验收条件 |
 
@@ -160,7 +160,7 @@ docs/2026-09-20-vrtc-code-change-plan.md 的本票状态、证据与下一项前
 
 ## A2 + A1 填写示例
 
-下面替换模板的“任务”部分，其余约束沿用。**以下 A2+A1 示例是已验收任务的历史填写参照；当前第 12 项 S4-E 直接使用[收尾返工 prompt](12-s4-e-final-closure.md)与[唯一计划 F.2](../2026-09-20-vrtc-code-change-plan.md)的合同与验收。**
+下面替换模板的“任务”部分，其余约束沿用。**以下 A2+A1 示例是已验收任务的历史填写参照；当前第 12 项 S4-E 直接使用[当前收尾 prompt](12-s4-e-final-closure.md)与[唯一计划 F.2](../2026-09-20-vrtc-code-change-plan.md)的合同与验收。**
 
 ```text
 票号/名称：A2 + A1，Agent 状态上下文（一个交付组）。

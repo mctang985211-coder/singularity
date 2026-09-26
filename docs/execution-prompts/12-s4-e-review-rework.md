@@ -1,6 +1,6 @@
 # 第 12 项 S4-E 返工：兑现实验条件与晋升判据
 
-本文件记录首次返工合同；当前派发以[计划 F.2 的 KISS 裁决](../2026-09-20-vrtc-code-change-plan.md)及[简化收尾 prompt](12-s4-e-final-closure.md)为准，下文冲突的实验时限与旧实验兼容要求已撤回。
+本文件只记录首次返工历史，**不得作为当前派发指令**。当前只派[第 12 项收尾](12-s4-e-final-closure.md)并遵守[计划 F.2](../2026-09-20-vrtc-code-change-plan.md)；下文旧 Evolution replay、实验时限及兼容要求均不再执行。
 
 你是 S4-E 返工实现主代理。只关闭[进度审核 Q1～Q4](../history/2026-09-26-s4-e-progress-review.md)，重验 EVAL-1～EVAL-5 后停在进度审核；不开始 A5/A6。工作区 `/home/ROXY/code/bb_work/harness/packages/singularity`，外层 `/home/ROXY/code/bb_work/harness`。被审实现 `4de0056`，外层 `cbe09ce05a`；核对实际 HEAD，先按[公共合同](README.md)保存相关基线。
 
