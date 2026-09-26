@@ -40,10 +40,16 @@ registry-form capability rollback).
 Old readers fail to fold a ledger that contains the new kinds (the unknown
 kind is refused by the transition checks). The repository has a single
 reader/writer, so this is accepted and stated here: downgrading the code past
-this change requires a ledger without experiment records. New code reads old
-ledgers unchanged; the live ledger regression runs against a byte-identical
-archive of the production `proposals.jsonl` (21 lines, including records
-without `reportDigest`/`skillContent`/`approvalRef`).
+this change requires a ledger without experiment records. The live ledger
+regression covers a byte-identical 21-line archive of the production
+`proposals.jsonl`, including older lifecycle records without `reportDigest`,
+`skillContent` or `approvalRef`; it contains no S4-E experiment records.
+Current code still refuses a valid pre-rework `experiment_started` with string
+`frozen.model` and comparer `@1` during whole-ledger fold, blocking unrelated
+reads and historical applied rollback. This is an open EVAL-4 defect under
+the same ticket: [closure](../execution-prompts/12-s4-e-final-closure.md)
+must retain old experiment readability while refusing old evidence for new
+promotion. It is not an accepted incompatibility.
 
 This is not a SessionEventMap root. The four tracked event fingerprints and
 their schema inventory are unchanged; `verify-persistence` covers only those
