@@ -18,7 +18,7 @@ A2 的入口已固定为 task_read、task_status(scope=related|graph)、context_
 
 R0 的 root 默认不挂载 `evolution_*`，不注入整条晋升协议；显式启用时按管理角色提供相应工具和必要说明。root 协调、reviewer 只读诊断、candidate builder 在 sandbox 实现，沿用现有 preset/scoped tools，不新增通用角色框架。进化未启用不能描述成“请人代写能力”；应如实报告当前能力边界。BB 等领域指导由部署的领域 Skill/preset 提供，通用 root 不内置。
 
-第 12 项 S4-E 已验收：启用 Evolution 的 root 协议段及九工具只引导现有单文件 Skill 的双侧修复实验；非 Skill 方向可记建议，旧 candidate/v1 replay 路径已删除，服务直调也在副作用前拒绝。A5 的成功按需复盘尚待实现，不代表已支持成功优化晋升；触发与执行资格分别见[计划 F.3/F.4](2026-09-20-vrtc-code-change-plan.md)。
+当前 S4-E 代码只支持单文件 Skill 的双侧修复实验；K2/K3 将修复提交并支持完整执行型 Skill，同票更新九工具与实际 root prompt，不能提前声称已支持；非 Skill 方向可记建议，旧 candidate/v1 replay 路径已删除，服务直调也在副作用前拒绝。A5 的成功按需复盘尚待实现，不代表已支持成功优化晋升；触发与执行资格分别见[计划 F.3/F.4](2026-09-20-vrtc-code-change-plan.md)。
 
 **R0 落地事实（2026-09-23，已验收）**：装配开关是 `evolution: 'off' | 'on'`（默认 `off`，闭合 schema，未知值或未读成员构造期拒启）。off 的实际 composition：`agent-singularity` 注册 19 个常驻工具（含 `task_intake`、`escalate`），九个 `evolution_*` **不注册**（因此任何 agent 面都取不到，不靠权限检查劝阻），root allow-list 20 名（19 个 root 核心名 + `escalate`；核心名里的 `skill` 由 preset 平面挂载，不在常驻注册面），root prompt 无进化协议段；on：28 个常驻工具、allow-list 29 名，与 R0 之前逐名相同。allow-list 与 prompt 由同一布尔派生（`agent-runtime/src/index.ts:rootToolsFor` 消费 `ctx.singularityEvolution`，软读，缺失即 off），二者不可能互相矛盾；关闭只撤注册，不删账本、不降已有校验与授权规则。**BB 句子已从通用 root prompt 无条件移除**，领域指导归部署的领域 skill（本仓库的 `bb-pipeline` 等），通用角色文本不再内嵌领域内容。证据锚：`agent-singularity/tests/unit/assembly.spec.ts`（off = 19 常驻且零 `evolution_*`；on = 28）、`agent-runtime/tests/unit/agent-runtime.spec.ts`（`ROOT_TOOLS_CLOSED` 20 / `ROOT_TOOLS_OPEN` 29 与 prompt 同源）、`tests/integration/worker-grant.spec.ts`（off 组合下无 grant 的 worker 面不含任何 `evolution_*`）、`tests/integration/evolution-tools.spec.ts`（on 的既有回归）。
 
@@ -91,7 +91,7 @@ task_decompose 可能不立即执行：部署开启契约人审时，它回答�
 ```text
 你协调当前目标，不替代 verifier。执行前确认根契约已经包含用户目标、
 范围及可判定的顶层验收，不能用图名称或“子任务都完成”替代目标定义。
-环境准备使用已有 setup 路径，不占用业务目标的一次分解。
+环境准备使用已有 setup 路径，业务分解只表达实际需要的委派。
 
 为子任务提供当前契约、根目标和硬约束、委派原因、相关决定与证据引用。
 允许节点选择方法并提出合理分解；不要求它按固定领域工序逐步创建任务。
@@ -115,14 +115,20 @@ task_answer 的 resolves 只表示你是否认为当前问题已解决；未知�
 失败由运行时自动受理诊断；成功不自动复盘。你发现值得查证的问题，或用户
 要求复盘时，可对成功/失败的指定 taskId/runId 调 task_review_agent，
 可附关注点。重复请求读回已有尝试；确需再次复盘时使用新 requestKey，
-仍受原额度与权限约束。不要伪造失败、重开原 Run 或预判必须有改进。
+仍受 reviewer 自身额度/watchdog 与读取权限约束，不继承业务根截止。不要伪造失败、重开原 Run 或预判必须有改进。
 
 [自主改进协议已部署时（A5/A6 待建，此段当前不能注入）]
 能力或机制缺口优先交给 supervisor 处理授权内的改进；只有需要用户意图、
 外部权限、预算追加或残余风险决策时请求人类。
 
 子任务自然语言“完成”只是摘要；父结果必须依赖实际 evidence 与自己的判据。
-不得重复分解已经落库的同一父批次，也不得重跑已通过兄弟来掩盖恢复缺口。
+不得重复消费已落库提案，也不得重跑已通过兄弟来掩盖恢复缺口。
+[K1 部署后]
+子批次结束会交还执行权；依据结果继续工作或提出下一批，最后主动提交父验收。
+不要把批次结束等同于父目标完成，也不要为普通调整方法启动 Evolution。
+[K4 部署后]
+原目标过期仍可在 reviewer 额度内复盘。继续业务需要额度时，根会话可用
+task_budget_extend 申请经人审追加总上限；它不恢复终态、不自动执行、不清空旧账。
 
 [生成任务审核已部署（T2/T3：root prompt 见 agent-runtime/src/prompts/root.prompts.ts）]
 task_decompose 可能返回“等待审核”与一个 proposalId：那时没有子任务、没有 spawn，

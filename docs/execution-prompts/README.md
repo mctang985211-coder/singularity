@@ -1,10 +1,19 @@
 # Singularity 构建任务派发入口
 
-当前（2026-09-26）：第 9 项 A2+A1、第 11 项 A4 和第 12 项 S4-E 已验收，见[S4-E 最终复审](../history/2026-09-26-s4-e-final-closure-rework-review.md)。当前只派[第 13 项 A5 + S2-E](13-a5-s2-e-diagnosis.md)；第 14 项尚无前置。状态以计划文首唯一表为准；S4-E prompt 只作历史证据。
+当前（2026-09-26）：原票验收证据保留，整体架构修正尚未实施。当前只派 [K1](12a-k1-exploration.md)。顺序及状态以[唯一计划](../2026-09-20-vrtc-code-change-plan.md)为准，每票经审核后才进入下一票。
 
-第 13 项已按“失败自动、成功按需，共用诊断链”修订，尚未实施；按最新 F.3 的入口、去重/再复盘和 REV-1～REV-5 执行，旧版“只有失败/升级阈值满足才能复盘”的指令失效。
+| 顺序 | 可直接交给实现主代理的完整合同 |
+|---|---|
+| K1 | [子批次结束后继续探索](12a-k1-exploration.md) |
+| K2 | [应用与回滚可恢复](12b-k2-evolution-commit.md) |
+| K3 | [完整 Skill 改进单位](12c-k3-skill-unit.md) |
+| K4 | [复盘与执行预算分离](12d-k4-review-budget.md) |
+| A5 | [自动及按需诊断](13-a5-s2-e-diagnosis.md)，待 K4 验收 |
+| A6 | 待 A5 验收后按计划 F.4 填派发材料 |
 
-进度核实和下一票材料由[进度审核指挥 prompt](progress-review-and-dispatch.md)处理；已派发票尚未验收时不启动下一票。后续单票从[派发模板](task-dispatch-template.md)填写，直接引用计划 D/E/F，不复制旧方案或重新选型。P1–P4 的原始 prompt 保留在本目录供历史回归，不作为当前任务入口。子代理只读获派子目标的相关合同片段。
+K1～K4 的详细合同只维护在各自文件，主 guide/计划记录方向与状态；原 A3/S4-E 施工 prompt 只作历史回归依据。不要同时派四份，也不把前置票工作转交下一票。
+
+交付后使用[进度审核 prompt](progress-review-and-dispatch.md)；后续新票按[精简模板](task-dispatch-template.md)填写。已有完整合同直接派对应文件，不再复制模板及多份 guide 全文。子代理只读获派目标涉及的合同和源码。
 
 ## 公共执行合同
 
