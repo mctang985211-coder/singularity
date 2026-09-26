@@ -2694,7 +2694,7 @@ export class TaskRuntime extends Service {
     if (parentRun.executionPhase !== 'active') {
       throw new Error(
         `task-runtime: run "${parentRun.runId}" is in phase "${parentRun.executionPhase}"; only an active run may decompose ` +
-        '(a run with an admitted batch settles it before deciding anything else)',
+        '(a run with an unfinished batch is handed back `active` when the batch ends; only then may it decompose again)',
       )
     }
     const openQuestions = blockingQuestionsOf(await this.ctx.task.snapshotIn(storeId), parentRun.runId)
@@ -5189,11 +5189,6 @@ export class TaskRuntime extends Service {
       reason: options.reason,
       ...(options.excludeCallId === undefined ? {} : { excludeCallId: options.excludeCallId }),
       ...(options.providers === undefined ? {} : { providers: options.providers }),
-      // A replay's parent task carries its experiment lineage into the record this
-      // process's batch writes for it — the same record the replay driver would
-      // have written. The lineage map is this process's, so a restart's replay
-      // settles from the store's own records and invents no anomaly (A6/S2-R).
-      ...(this.replayLineage.has(options.parentTaskId) ? { lineage: this.replayLineage.get(options.parentTaskId)! } : {}),
     }
     const barrier = this.storeRecovery.get(options.storeId)
     const gate = barrier !== undefined && barrier.status === 'recovering' ? barrier : undefined

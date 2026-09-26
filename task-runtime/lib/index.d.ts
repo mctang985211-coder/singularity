@@ -1993,17 +1993,6 @@ interface BatchContext {
    * and rebuilds its verdicts through {@link OrchestrateEnv.precheck}.
    */
   providers?: ProviderPrecheck;
-  /**
-   * The experiment lineage this batch's parent task belongs to, when it is a
-   * replay's (W15). The parent's own terminal record carries it as an anomaly, so
-   * a replay run the batch settles is the same record the replay driver would have
-   * settled. The lineage is a fact of the *process* that started the experiment
-   * (`replayTask`'s own map), so this covers the in-process case — a batch
-   * settling a replay whose driver is still around; a replay run settled after a
-   * restart keeps the durable lineage it has (the replayed task's contract) and no
-   * invented anomaly, which is A6/S2-R's own bookkeeping.
-   */
-  lineage?: string;
 }
 /**
  * One child's outcome as the store records it. A child that never reached a

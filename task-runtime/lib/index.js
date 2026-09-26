@@ -7604,7 +7604,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 		if (parentRun.taskId !== parentTaskId) throw new Error(`task-runtime: run "${parentRun.runId}" belongs to task "${parentRun.taskId}", not "${parentTaskId}"`);
 		if (parentRun.sessionId !== callerSessionId) throw new Error(`task-runtime: run "${parentRun.runId}" is bound to session "${parentRun.sessionId}", not caller "${callerSessionId}"`);
 		if (parentRun.executionPhase === void 0) throw new Error(`task-runtime: run "${parentRun.runId}" predates coordination phases; it needs recovery (cancel this task tree and re-create it) before it can decompose`);
-		if (parentRun.executionPhase !== "active") throw new Error(`task-runtime: run "${parentRun.runId}" is in phase "${parentRun.executionPhase}"; only an active run may decompose (a run with an admitted batch settles it before deciding anything else)`);
+		if (parentRun.executionPhase !== "active") throw new Error(`task-runtime: run "${parentRun.runId}" is in phase "${parentRun.executionPhase}"; only an active run may decompose (a run with an unfinished batch is handed back \`active\` when the batch ends; only then may it decompose again)`);
 		const openQuestions = blockingQuestionsOf(await this.ctx.task.snapshotIn(storeId), parentRun.runId);
 		if (openQuestions.length > 0) throw new Error(`task-runtime: run "${parentRun.runId}" is waiting on ${openQuestions.length === 1 ? "an unresolved blocking question" : `${openQuestions.length} unresolved blocking questions`} (${openQuestions.map((question) => question.questionId).join(", ")}); an answer releases the wait, and only then may the run delegate`);
 		if (signal?.aborted === true) throw new Error(`task-runtime: decomposition of "${parentTaskId}" was cancelled before anything was persisted`);
@@ -9515,8 +9515,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 			callerSessionId: options.callerSessionId,
 			reason: options.reason,
 			...options.excludeCallId === void 0 ? {} : { excludeCallId: options.excludeCallId },
-			...options.providers === void 0 ? {} : { providers: options.providers },
-			...this.replayLineage.has(options.parentTaskId) ? { lineage: this.replayLineage.get(options.parentTaskId) } : {}
+			...options.providers === void 0 ? {} : { providers: options.providers }
 		};
 		const barrier = this.storeRecovery.get(options.storeId);
 		const gate = barrier !== void 0 && barrier.status === "recovering" ? barrier : void 0;

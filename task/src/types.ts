@@ -355,18 +355,20 @@ export interface RunProviderBinding {
 export type ExecutionPhase = 'active' | 'waiting_children' | 'submitted'
 
 /**
- * What one run handed in when it submitted (A3 `task_submit_result`, or the
- * runtime settling a parent whose children all reached terminal states): the
+ * What one run handed in when it submitted (A3 `task_submit_result`): the
  * submitter's own account plus the references it names as proof. Written onto
  * the run by the transition into `submitted`; that phase is terminal for the
  * transition gate, so the record is written once and never overwritten — a
  * late submission is answered from the record, not applied.
  *
- * `origin` keeps a worker's self-report apart from the runtime's automatic
- * one: only `worker` means the run's own agent made the claim.
+ * `origin` keeps the two recorded sources apart, and there are exactly two:
+ * `worker` is the run's own agent claiming through `task_submit_result`;
+ * `runtime` is the workerless criteria replay (`spawn: false`), whose run is
+ * born with this record because no worker exists to submit and the verifier
+ * alone settles the run.
  */
 export interface SubmissionRecord {
-  /** What was delivered, in the submitter's words (runtime-generated for an automatic submission). */
+  /** What was delivered, in the submitter's words (the runtime writes it for a workerless criteria replay). */
   summary: string
   /** The evidence ids, artifact refs, or review refs the submitter names as proof. */
   evidenceRefs: string[]
@@ -374,7 +376,7 @@ export interface SubmissionRecord {
   notes?: string
   /** When the submission was recorded — the phase-change event's own timestamp. */
   submittedAt: string
-  /** Who submitted: the worker through its explicit call, or the runtime settling the run. */
+  /** Who submitted: the run's own agent through its explicit call, or the runtime recording a workerless criteria replay. */
   origin: 'worker' | 'runtime'
 }
 
