@@ -1,4 +1,4 @@
-import { appendFile, cp, mkdir, readFile, readdir, readlink, realpath, rm, writeFile } from "node:fs/promises";
+import { appendFile, cp, lstat, mkdir, readFile, readdir, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -640,6 +640,109 @@ function assertExperimentReport(report) {
 }
 
 //#endregion
+//#region src/snapshot-input.ts
+function message(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+/** Is the real path `abs` inside the real path `base` — or `base` itself? */
+function inside(base, abs) {
+	return abs === base || abs.startsWith(`${base}${sep}`);
+}
+/**
+* Resolve one symbolic link to the real path it names. A chain that loops
+* (`ELOOP`), a target that is missing or otherwise cannot be resolved, and a
+* target outside the snapshot root are all refusals that name the link, its
+* target text and the reason.
+*/
+async function resolveLink(lex, base) {
+	const text = await readlink(lex).catch(() => "?");
+	let target;
+	try {
+		target = await realpath(lex);
+	} catch (error) {
+		const reason = error.code === "ELOOP" ? "its target chain loops" : message(error);
+		throw new Error(`experiment: the input snapshot link "${lex}" -> "${text}" cannot be resolved: ${reason}`);
+	}
+	if (!inside(base, target)) throw new Error(`experiment: the input snapshot link "${lex}" -> "${text}" resolves to "${target}", outside the snapshot root "${base}" — a frozen input may hold only files and links that resolve inside it`);
+	return target;
+}
+/**
+* Walk the snapshot at `root` in sorted relative-path order, awaiting `visit`
+* for every directory and every regular file of the tree **as the content it
+* really names**: a link is resolved first, so a caller that rebuilds the tree
+* (the copy) writes a parent before its children, and a link position becomes
+* real content rather than a pointer at a shared target. The root itself may be
+* named through a link; the policy measures containment in real paths, so what
+* the snapshot *is* is what is compared.
+*/
+async function walkSnapshotInput(root, visit) {
+	let base;
+	try {
+		base = await realpath(root);
+	} catch (error) {
+		throw new Error(`experiment: the input snapshot "${root}" cannot be resolved: ${message(error)}`);
+	}
+	const open = new Set([base]);
+	const walk = async (current, prefix) => {
+		let names;
+		try {
+			names = [...await readdir(current)].sort();
+		} catch (error) {
+			throw new Error(`experiment: the input snapshot directory "${current}" cannot be read: ${message(error)}`);
+		}
+		for (const name of names) {
+			const rel = prefix === "" ? name : `${prefix}/${name}`;
+			const lex = join(current, name);
+			let entry;
+			try {
+				entry = await lstat(lex);
+			} catch (error) {
+				throw new Error(`experiment: the input snapshot entry "${lex}" cannot be read: ${message(error)}`);
+			}
+			const real = entry.isSymbolicLink() ? await resolveLink(lex, base) : lex;
+			let stat = entry;
+			if (real !== lex) try {
+				stat = await lstat(real);
+			} catch (error) {
+				throw new Error(`experiment: the input snapshot entry "${real}", the target of the link "${lex}", cannot be read: ${message(error)}`);
+			}
+			if (stat.isDirectory()) {
+				if (open.has(real)) {
+					const named = real === lex ? `directory "${lex}"` : `link "${lex}" -> "${real}"`;
+					throw new Error(`experiment: the input snapshot ${named} is already on the way here — the tree it names has no end, so it cannot be frozen as input`);
+				}
+				open.add(real);
+				await visit({
+					kind: "directory",
+					rel,
+					mode: stat.mode & 4095
+				});
+				await walk(real, rel);
+				open.delete(real);
+				continue;
+			}
+			if (!stat.isFile()) {
+				const through = real === lex ? "" : ` (through the link "${lex}")`;
+				throw new Error(`experiment: the input snapshot holds "${real}"${through}, which is neither a regular file nor a directory — only regular files, directories and links into the snapshot can be frozen as input`);
+			}
+			let bytes;
+			try {
+				bytes = await readFile(real);
+			} catch (error) {
+				throw new Error(`experiment: the input snapshot file "${lex}" cannot be read: ${message(error)}`);
+			}
+			await visit({
+				kind: "file",
+				rel,
+				mode: stat.mode & 4095,
+				bytes
+			});
+		}
+	};
+	await walk(base, "");
+}
+
+//#endregion
 //#region src/experiment.ts
 /** True for a record of the experiment family — the lines the proposal fold must leave alone. */
 function isExperimentRecord(record) {
@@ -700,36 +803,20 @@ function experimentSampleLabel(key) {
 /**
 * The recursive content digest of a directory — the input snapshot identity
 * (§F.2): every regular file's relative path and byte digest, sorted by path,
-* hashed together. A symbolic link is digested by its target text rather than
-* followed, because a copy keeps it a link (`cp`'s default): following it would
-* describe bytes the workspace never holds.
+* hashed together. A symbolic link is not an input of its own: the snapshot's
+* policy (`snapshot-input.ts`) resolves every link inside the root first, so the
+* digest covers the bytes a workspace built from the snapshot holds — a link to
+* a file contributes that file's bytes, a link to a directory contributes the
+* subtree it names, and whatever the target text spells contributes nothing. A
+* link that escapes the root, loops, or names something unreadable is refused by
+* name, never ignored into a digest the source does not have.
 */
 async function directoryDigest(directory) {
-	const base = resolve(directory);
 	const lines = [];
-	const walk = async (current, prefix) => {
-		let found;
-		try {
-			found = await readdir(current, { withFileTypes: true });
-		} catch (error) {
-			throw new Error(`experiment: the input snapshot "${current}" cannot be read: ${error instanceof Error ? error.message : String(error)}`);
-		}
-		for (const entry of [...found].sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
-			const rel = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
-			const abs = join(current, entry.name);
-			if (entry.isDirectory()) {
-				await walk(abs, rel);
-				continue;
-			}
-			if (entry.isSymbolicLink()) {
-				lines.push(`${rel}\0link:${await readlink(abs)}`);
-				continue;
-			}
-			if (!entry.isFile()) throw new Error(`experiment: the input snapshot holds "${abs}", which is neither a file nor a directory — only regular files and symbolic links can be frozen as input`);
-			lines.push(`${rel}\0${sha256Hex$2(await readFile(abs))}`);
-		}
-	};
-	await walk(base, "");
+	await walkSnapshotInput(directory, async (entry) => {
+		if (entry.kind !== "file") return;
+		lines.push(`${entry.rel}\0${sha256Hex$2(entry.bytes)}`);
+	});
 	return sha256Hex$2(lines.join("\n"));
 }
 /** The task's latest review record — its terminal outcome is what makes a sample a sample. */
@@ -890,14 +977,36 @@ function freezeExperiment(input) {
 	assertFrozenExperiment(frozen);
 	return frozen;
 }
-/** Build one side's workspace from the frozen snapshot, then prove it holds exactly the frozen bytes. */
+/**
+* Build one side's workspace from the frozen snapshot, then prove it holds
+* exactly the frozen bytes.
+*
+* The copy is the snapshot's own traversal (`snapshot-input.ts`), not `cp`.
+* `cp` keeps a symbolic link a link, and a kept link is a shared target: a run
+* that writes through it writes the source the snapshot was taken from, or
+* another side's copy. Rebuilding the tree's resolved content instead gives this
+* side a real file where a link to a file was and a real directory where a link
+* to a directory was, so the workspace is private by construction — and it is
+* what lets the digest below describe the snapshot and this copy as one input.
+*/
 async function buildWorkspace(sourceDir, target, snapshotDigest) {
 	await rm(target, {
 		recursive: true,
 		force: true
 	});
 	await mkdir(target, { recursive: true });
-	await cp(resolve(sourceDir), target, { recursive: true });
+	await walkSnapshotInput(sourceDir, async (entry) => {
+		const at = join(target, entry.rel);
+		if (entry.kind === "directory") {
+			await mkdir(at, {
+				recursive: true,
+				mode: entry.mode
+			});
+			return;
+		}
+		await mkdir(dirname(at), { recursive: true });
+		await writeFile(at, entry.bytes, { mode: entry.mode });
+	});
 	const real = await realpath(target);
 	const digest = await directoryDigest(real);
 	if (digest !== snapshotDigest) throw new Error(`the workspace "${real}" was built from the frozen snapshot but hashes to ${digest}, not the frozen ${snapshotDigest}; the build did not reproduce the frozen input, so nothing runs in it`);
@@ -1180,9 +1289,9 @@ async function runExperiment(sources, request) {
 			if (facts.outcome === "cancelled") break sampleLoop;
 		}
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		if (started === 0) throw error instanceof Error ? error : new Error(message);
-		throw new Error(`${message} (the experiment stopped; ${started} sample run(s) it started settled and stay in the ledger and the task store as evidence — resume experiment ${experimentId} to continue it)`);
+		const message$1 = error instanceof Error ? error.message : String(error);
+		if (started === 0) throw error instanceof Error ? error : new Error(message$1);
+		throw new Error(`${message$1} (the experiment stopped; ${started} sample run(s) it started settled and stay in the ledger and the task store as evidence — resume experiment ${experimentId} to continue it)`);
 	}
 	const finalView = await sources.evolution.experiment(experimentId);
 	let report;

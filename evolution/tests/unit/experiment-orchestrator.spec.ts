@@ -14,7 +14,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -457,6 +457,24 @@ describe('the two-sided orchestrator', () => {
     await expect(runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' }))
       .rejects.toThrow(/carries no candidate content identity/)
     expect(w.records).toHaveLength(0)
+    await rm(w.root, { recursive: true, force: true })
+  })
+
+  it('refuses a snapshot link that escapes it before the first run, with no ledger line and no workspace', async () => {
+    const w = await world()
+    const outside = join(w.root, 'outside.txt')
+    await writeFile(outside, 'the production bytes\n', 'utf8')
+    await symlink(outside, join(w.snapshotDir, 'shared'))
+
+    await expect(runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' }))
+      .rejects.toThrow(/outside the snapshot root/)
+
+    // Nothing ran, nothing was recorded, no side's workspace was built, and the
+    // file the link names was never read or written.
+    expect(w.calls).toHaveLength(0)
+    expect(w.records).toHaveLength(0)
+    expect(await readdir(join(w.ledgerRoot, 'sandbox', PROPOSAL))).toEqual(['skills'])
+    expect(await readFile(outside, 'utf8')).toBe('the production bytes\n')
     await rm(w.root, { recursive: true, force: true })
   })
 })

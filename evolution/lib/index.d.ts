@@ -655,9 +655,13 @@ declare function experimentSampleLabel(key: ExperimentKey): string;
 /**
  * The recursive content digest of a directory — the input snapshot identity
  * (§F.2): every regular file's relative path and byte digest, sorted by path,
- * hashed together. A symbolic link is digested by its target text rather than
- * followed, because a copy keeps it a link (`cp`'s default): following it would
- * describe bytes the workspace never holds.
+ * hashed together. A symbolic link is not an input of its own: the snapshot's
+ * policy (`snapshot-input.ts`) resolves every link inside the root first, so the
+ * digest covers the bytes a workspace built from the snapshot holds — a link to
+ * a file contributes that file's bytes, a link to a directory contributes the
+ * subtree it names, and whatever the target text spells contributes nothing. A
+ * link that escapes the root, loops, or names something unreadable is refused by
+ * name, never ignored into a digest the source does not have.
  */
 declare function directoryDigest(directory: string): Promise<string>;
 /**

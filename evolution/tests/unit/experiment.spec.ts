@@ -9,7 +9,7 @@
  * verifier, and they live in `tests/integration/experiment-runner.spec.ts`.
  */
 
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -200,7 +200,7 @@ describe('the frozen identity block', () => {
     expect(digestOf({ a: 1 })).not.toBe(digestOf({ a: 2 }))
   })
 
-  it('digests a directory by sorted relative path and bytes, links by their target', async () => {
+  it('digests a directory by sorted relative path and bytes, and a link by the bytes it resolves to', async () => {
     const root = await mkdtemp(join(tmpdir(), 'experiment-digest-'))
     await writeFile(join(root, 'b.txt'), 'second')
     await mkdir(join(root, 'nested'))
@@ -218,23 +218,84 @@ describe('the frozen identity block', () => {
     await writeFile(join(twin, 'nested', 'a.txt'), 'FirsT')
     expect(await directoryDigest(twin)).not.toBe(first)
 
-    // A link is digested by its target text, never followed: a copy keeps it a
-    // link (`cp`'s default), so following it would describe bytes the workspace
-    // never holds. Two directories whose link texts agree hash equal even when
-    // the bytes behind them differ; a real file where the link is hashes
-    // differently.
+    // A link is not an input of its own: the snapshot's policy resolves it
+    // inside the root, so the digest covers the bytes a workspace built from
+    // the snapshot holds. A link and the file it names are the same input
+    // whatever its target text spells, the materialized copy a side's run
+    // actually gets is that same input too, and the same link text over
+    // different bytes is a different input.
     const linked = await mkdtemp(join(tmpdir(), 'experiment-digest-'))
-    await writeFile(join(root, 'plain.txt'), 'plain')
-    await symlink('plain.txt', join(linked, 'plain.txt'))
-    const moved = await mkdtemp(join(tmpdir(), 'experiment-digest-'))
-    await writeFile(join(moved, 'plain.txt'), 'something else entirely')
-    const movedLink = await mkdtemp(join(tmpdir(), 'experiment-digest-'))
-    await symlink('plain.txt', join(movedLink, 'plain.txt'))
-    expect(await directoryDigest(linked)).toBe(await directoryDigest(movedLink))
-    expect(await directoryDigest(linked)).not.toBe(await directoryDigest(root))
+    await writeFile(join(linked, 'plain.txt'), 'plain')
+    await symlink('plain.txt', join(linked, 'alias'))
+    const spelled = await mkdtemp(join(tmpdir(), 'experiment-digest-'))
+    await writeFile(join(spelled, 'plain.txt'), 'plain')
+    await symlink('./plain.txt', join(spelled, 'alias'))
+    expect(await directoryDigest(spelled)).toBe(await directoryDigest(linked))
+    const materialized = await mkdtemp(join(tmpdir(), 'experiment-digest-'))
+    await writeFile(join(materialized, 'plain.txt'), 'plain')
+    await writeFile(join(materialized, 'alias'), 'plain')
+    expect(await directoryDigest(materialized)).toBe(await directoryDigest(linked))
+    const retargeted = await mkdtemp(join(tmpdir(), 'experiment-digest-'))
+    await writeFile(join(retargeted, 'plain.txt'), 'something else entirely')
+    await symlink('plain.txt', join(retargeted, 'alias'))
+    expect(await directoryDigest(retargeted)).not.toBe(await directoryDigest(linked))
 
-    for (const directory of [root, twin, linked, moved, movedLink]) await rm(directory, { recursive: true, force: true })
+    for (const directory of [root, twin, linked, spelled, materialized, retargeted]) {
+      await rm(directory, { recursive: true, force: true })
+    }
   })
+
+  it('refuses an input snapshot link that escapes the root, loops, or names nothing — never digesting it as text', async () => {
+    // The review's counterexample: `shared` is an absolute link to a file
+    // outside the snapshot. Digesting the link's text would describe an input
+    // no workspace holds, and ignoring the link would let a snapshot with an
+    // outside dependency hash equal to the same bytes without it — so the walk
+    // refuses by name, and the bytes outside are never touched.
+    const outside = await mkdtemp(join(tmpdir(), 'experiment-outside-'))
+    const target = join(outside, 'payload.txt')
+    await writeFile(target, 'the production bytes\n', 'utf8')
+    const root = await mkdtemp(join(tmpdir(), 'experiment-digest-'))
+    await writeFile(join(root, 'payload.txt'), 'the production bytes\n', 'utf8')
+    expect(await directoryDigest(root)).toMatch(/^[a-f0-9]{64}$/)
+    await symlink(target, join(root, 'shared'))
+    await expect(directoryDigest(root)).rejects.toThrow(/outside the snapshot root/)
+    expect(await readFile(target, 'utf8')).toBe('the production bytes\n')
+
+    // A link chain that loops…
+    const looping = await mkdtemp(join(tmpdir(), 'experiment-digest-'))
+    await symlink('b', join(looping, 'a'))
+    await symlink('a', join(looping, 'b'))
+    await expect(directoryDigest(looping)).rejects.toThrow(/its target chain loops/)
+
+    // …a link into a directory already on the way here, so the tree it names never ends…
+    const ancestor = await mkdtemp(join(tmpdir(), 'experiment-digest-'))
+    await mkdir(join(ancestor, 'nested'))
+    await symlink('..', join(ancestor, 'nested', 'up'))
+    await expect(directoryDigest(ancestor)).rejects.toThrow(/already on the way here/)
+
+    // …and a link whose target is not there to read.
+    const dangling = await mkdtemp(join(tmpdir(), 'experiment-digest-'))
+    await symlink('missing.txt', join(dangling, 'gone'))
+    await expect(directoryDigest(dangling)).rejects.toThrow(/gone.*cannot be resolved/)
+
+    for (const directory of [outside, root, looping, ancestor, dangling]) {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(typeof process.getuid === 'function' && process.getuid() === 0)(
+    'refuses an input snapshot whose bytes cannot be read, by name',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'experiment-digest-'))
+      const secret = join(root, 'secret.txt')
+      await writeFile(secret, 'unreadable\n')
+      await chmod(secret, 0o000)
+      await symlink('secret.txt', join(root, 'alias'))
+      await expect(directoryDigest(root)).rejects.toThrow(/alias.*cannot be read/)
+      await chmod(secret, 0o600)
+      await rm(root, { recursive: true, force: true })
+    },
+  )
 
   it('names the report path and the experiment id from the frozen block alone', () => {
     const frozen = frozenFixture()

@@ -41,8 +41,8 @@
 
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdir, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { lstat, mkdir, readdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises'
+import { basename, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
@@ -409,6 +409,102 @@ describe('S4-E: the two-sided skill experiment', () => {
     expect(lines.filter(line => line.kind === 'experiment_started')).toHaveLength(1)
     expect(lines.filter(line => line.kind === 'experiment_sample')).toHaveLength(4)
     expect(lines.filter(line => line.kind === 'proposed' || line.kind === 'candidate' || line.kind === 'prepared')).toHaveLength(3)
+  })
+
+  it('refuses a snapshot link that escapes it before the first run, and leaves the linked file untouched', async () => {
+    const f = await fixture()
+    const outside = join(f.h.workspace, 'outside-shared.txt')
+    await writeFile(outside, 'the production bytes\n', 'utf8')
+    await symlink(outside, join(f.snapshotDir, 'shared'))
+
+    const before = await f.h.snapshot(f.storeId)
+    const linesBefore = (await ledgerLines(f)).length
+    const spawnsBefore = f.h.spawns.length
+
+    // The review's counterexample: `source/shared` is an absolute link to a file
+    // outside the snapshot. Digesting the link's text — or copying the link —
+    // would let the baseline run write through it, the candidate run read the
+    // rewritten bytes, and both digests still equal the frozen one. The refusal
+    // is the answer, and it comes before any run, any ledger line and any
+    // workspace.
+    await expect(f.evolution.runExperiment(spec(f), ROOT, ROOT)).rejects.toThrow(/outside the snapshot root/)
+
+    expect(await readFile(outside, 'utf8')).toBe('the production bytes\n')
+    expect((await ledgerLines(f)).length).toBe(linesBefore)
+    expect(f.h.spawns).toHaveLength(spawnsBefore)
+    const after = await f.h.snapshot(f.storeId)
+    expect(after.tasks.map(task => task.taskId)).toEqual(before.tasks.map(task => task.taskId))
+    expect(after.runs).toHaveLength(before.runs.length)
+    // Nothing under the proposal's sandbox but the prepared skills: no experiment
+    // directory, and no side's workspace anywhere.
+    expect((await readdir(join(f.h.workspace, 'evolution', 'sandbox', PROPOSAL))).filter(name => name.startsWith('exp-'))).toEqual([])
+  })
+
+  it('materializes an internal snapshot link into each side\u2019s private workspace, so one side\u2019s write reaches neither the snapshot nor the other side', async () => {
+    const f = await fixture({
+      // The baseline side writes through the link's own path; the candidate side
+      // writes nothing there, so what its copy holds is what the snapshot held.
+      worker: async (h, sessionId, agent) => {
+        if (!await isReplayedWorker(h, sessionId)) return
+        await replayedWorker(h, sessionId, agent)
+        const cwd = agent.session.header.cwd
+        if (basename(cwd) !== 'baseline') return
+        await writeFile(join(cwd, 'linked.txt'), 'written through the link\n')
+        await writeFile(join(cwd, 'assets', 'added.txt'), 'written through the linked directory\n')
+      },
+    })
+    // A real file, an absolute link to it, an absolute link to a directory with
+    // a deep subtree under it, and an empty directory — every link resolves
+    // inside the snapshot root, so the policy follows it to the content it names
+    // and each side's copy is private.
+    await writeFile(join(f.snapshotDir, 'real.txt'), 'the frozen bytes\n', 'utf8')
+    await symlink(join(f.snapshotDir, 'real.txt'), join(f.snapshotDir, 'linked.txt'))
+    await symlink(join(f.snapshotDir, 'nested'), join(f.snapshotDir, 'assets'))
+    await mkdir(join(f.snapshotDir, 'nested', 'deep', 'deeper'), { recursive: true })
+    await writeFile(join(f.snapshotDir, 'nested', 'deep', 'deeper', 'value.txt'), 'deep\n', 'utf8')
+    await mkdir(join(f.snapshotDir, 'empty'))
+
+    const result = await f.evolution.runExperiment(spec(f), ROOT, ROOT)
+    expect(result.report.verdict).toBe('fixed')
+
+    // The snapshot was read, never written through: its link is still a link, its
+    // real file still holds the frozen bytes, and nothing a side wrote through
+    // the link is there.
+    expect((await lstat(join(f.snapshotDir, 'linked.txt'))).isSymbolicLink()).toBe(true)
+    expect(await readFile(join(f.snapshotDir, 'real.txt'), 'utf8')).toBe('the frozen bytes\n')
+    expect(existsSync(join(f.snapshotDir, 'nested', 'added.txt'))).toBe(false)
+
+    const baseline = side(result, 't-fix', 'baseline').workspace!
+    const candidate = side(result, 't-fix', 'candidate').workspace!
+    for (const workspace of [baseline, candidate]) {
+      // Every link position is a real entry of this side's own copy — a file
+      // where the link to a file was, a directory where the link to a directory
+      // was — and the empty directory came along.
+      expect((await lstat(join(workspace, 'linked.txt'))).isSymbolicLink()).toBe(false)
+      expect((await lstat(join(workspace, 'assets'))).isSymbolicLink()).toBe(false)
+      expect((await lstat(join(workspace, 'assets'))).isDirectory()).toBe(true)
+      expect((await lstat(join(workspace, 'empty'))).isDirectory()).toBe(true)
+      // The copy holds the bytes the snapshot held.
+      expect(await readFile(join(workspace, 'assets', 'threshold.txt'), 'utf8')).toBe('42\n')
+      expect(await readFile(join(workspace, 'assets', 'deep', 'deeper', 'value.txt'), 'utf8')).toBe('deep\n')
+      expect(await readFile(join(workspace, 'nested', 'threshold.txt'), 'utf8')).toBe('42\n')
+      expect(await readFile(join(workspace, 'input.txt'), 'utf8')).toBe('the frozen input\n')
+      expect(await readFile(join(workspace, 'real.txt'), 'utf8')).toBe('the frozen bytes\n')
+    }
+    // The baseline's write through the link landed in the baseline's own copy…
+    expect(await readFile(join(baseline, 'linked.txt'), 'utf8')).toBe('written through the link\n')
+    expect(await readFile(join(baseline, 'assets', 'added.txt'), 'utf8')).toBe('written through the linked directory\n')
+    // …while the candidate's copy still holds the frozen bytes — not the baseline
+    // side's write — and never saw the file the baseline added.
+    expect(await readFile(join(candidate, 'linked.txt'), 'utf8')).toBe('the frozen bytes\n')
+    expect(existsSync(join(candidate, 'assets', 'added.txt'))).toBe(false)
+
+    // Both sides were built from the frozen digest — and each build was proven
+    // against it before its run.
+    const frozenDigest = result.report.frozen.snapshot.digest
+    for (const sample of result.report.samples) {
+      for (const detail of [sample.baseline, sample.candidate]) expect(detail.initialDigest).toBe(frozenDigest)
+    }
   })
 
   it('reuses every recorded key on a repeat call: no new run, no new spend, the same report', async () => {

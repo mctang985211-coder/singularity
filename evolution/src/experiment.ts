@@ -16,7 +16,11 @@
  *   acceptance identity (criteria, modes, commands, protected input digests) the
  *   replay mirrors into both sides;
  * - `frozen.snapshot` — the source directory's recursive content digest; both
- *   workspaces are built from it and each side's initial digest must equal it;
+ *   workspaces are built from it and each side's initial digest must equal it.
+ *   A symbolic link is not an input of its own: the snapshot's policy
+ *   (`snapshot-input.ts`) follows it to the content it names, copies that
+ *   content privately into each side, and refuses a link that escapes the
+ *   snapshot, loops or names something unreadable before any run starts;
  * - `frozen.candidate` / `frozen.productionBaseline` — the content identity of
  *   the bytes the candidate side runs and of the production skill it replaces;
  * - `frozen.model` and `frozen.budget` — the caller's model identity and budget,
@@ -63,7 +67,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { cp, mkdir, readdir, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
@@ -96,6 +100,7 @@ import {
   overallExperimentVerdict,
   protectedInputsDigest,
 } from './replay.ts'
+import { walkSnapshotInput } from './snapshot-input.ts'
 
 /** One sample as the caller's specification names it. */
 export interface ExperimentSampleSpec {
@@ -347,43 +352,20 @@ export function experimentSampleLabel(key: ExperimentKey): string {
 /**
  * The recursive content digest of a directory — the input snapshot identity
  * (§F.2): every regular file's relative path and byte digest, sorted by path,
- * hashed together. A symbolic link is digested by its target text rather than
- * followed, because a copy keeps it a link (`cp`'s default): following it would
- * describe bytes the workspace never holds.
+ * hashed together. A symbolic link is not an input of its own: the snapshot's
+ * policy (`snapshot-input.ts`) resolves every link inside the root first, so the
+ * digest covers the bytes a workspace built from the snapshot holds — a link to
+ * a file contributes that file's bytes, a link to a directory contributes the
+ * subtree it names, and whatever the target text spells contributes nothing. A
+ * link that escapes the root, loops, or names something unreadable is refused by
+ * name, never ignored into a digest the source does not have.
  */
 export async function directoryDigest(directory: string): Promise<string> {
-  const base = resolve(directory)
   const lines: string[] = []
-  const walk = async (current: string, prefix: string): Promise<void> => {
-    let found
-    try {
-      found = await readdir(current, { withFileTypes: true })
-    } catch (error) {
-      throw new Error(
-        `experiment: the input snapshot "${current}" cannot be read: ${error instanceof Error ? error.message : String(error)}`,
-      )
-    }
-    for (const entry of [...found].sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))) {
-      const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`
-      const abs = join(current, entry.name)
-      if (entry.isDirectory()) {
-        await walk(abs, rel)
-        continue
-      }
-      if (entry.isSymbolicLink()) {
-        lines.push(`${rel}\0link:${await readlink(abs)}`)
-        continue
-      }
-      if (!entry.isFile()) {
-        throw new Error(
-          `experiment: the input snapshot holds "${abs}", which is neither a file nor a directory — ` +
-          'only regular files and symbolic links can be frozen as input',
-        )
-      }
-      lines.push(`${rel}\0${sha256Hex(await readFile(abs))}`)
-    }
-  }
-  await walk(base, '')
+  await walkSnapshotInput(directory, async entry => {
+    if (entry.kind !== 'file') return
+    lines.push(`${entry.rel}\0${sha256Hex(entry.bytes)}`)
+  })
   return sha256Hex(lines.join('\n'))
 }
 
@@ -593,14 +575,33 @@ function freezeExperiment(input: {
   return frozen
 }
 
-/** Build one side's workspace from the frozen snapshot, then prove it holds exactly the frozen bytes. */
+/**
+ * Build one side's workspace from the frozen snapshot, then prove it holds
+ * exactly the frozen bytes.
+ *
+ * The copy is the snapshot's own traversal (`snapshot-input.ts`), not `cp`.
+ * `cp` keeps a symbolic link a link, and a kept link is a shared target: a run
+ * that writes through it writes the source the snapshot was taken from, or
+ * another side's copy. Rebuilding the tree's resolved content instead gives this
+ * side a real file where a link to a file was and a real directory where a link
+ * to a directory was, so the workspace is private by construction — and it is
+ * what lets the digest below describe the snapshot and this copy as one input.
+ */
 async function buildWorkspace(sourceDir: string, target: string, snapshotDigest: string): Promise<string> {
   // A key that reaches this point has no run in the store, so nothing in the
   // directory is evidence: rebuild from the frozen snapshot rather than merge
   // into whatever an earlier attempt that never ran left there.
   await rm(target, { recursive: true, force: true })
   await mkdir(target, { recursive: true })
-  await cp(resolve(sourceDir), target, { recursive: true })
+  await walkSnapshotInput(sourceDir, async entry => {
+    const at = join(target, entry.rel)
+    if (entry.kind === 'directory') {
+      await mkdir(at, { recursive: true, mode: entry.mode })
+      return
+    }
+    await mkdir(dirname(at), { recursive: true })
+    await writeFile(at, entry.bytes, { mode: entry.mode })
+  })
   const real = await realpath(target)
   const digest = await directoryDigest(real)
   if (digest !== snapshotDigest) {
