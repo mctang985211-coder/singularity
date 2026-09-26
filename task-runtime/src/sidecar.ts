@@ -69,6 +69,8 @@ export type SkillDefectCode =
   | 'verifier-unknown'
   | 'capability-unknown'
   | 'tool-not-covered'
+  | 'commit-intent-open'
+  | 'commit-ledger-unreadable'
 
 /** One named reason a provider is not acceptable, with the detail a caller reports. */
 export interface SkillDefect {

@@ -177,6 +177,14 @@ export class SingularityAgent extends Service {
   static inject = ['tools', 'graphs', 'agentRuntime', 'task', 'taskRuntime', 'singularityContext', 'userQuestions', 'approval']
   static Config: z<Config> = ConfigSchema
 
+  /**
+   * The evolution ledger this assembly owns — kept as a field because the startup
+   * reconciliation (`[Service.init]`, below) settles its open commit intents
+   * before this plugin becomes ready, whether or not the deployment registered the
+   * nine tools.
+   */
+  private readonly evolution: EvolutionService
+
   constructor(ctx: Context, config?: Config) {
     super(ctx, 'singularityAgent')
     this.assertClosedConfig(config)
@@ -188,7 +196,7 @@ export class SingularityAgent extends Service {
     // lifecycle itself is the evolution package's; this assembly says where the
     // harness root is and which model the deployment's runs share — the one
     // fact the package cannot derive from a process with no agent of its own.
-    new EvolutionService(ctx, { repoRoot: REPO_ROOT, modelSelection: () => deploymentModelSelection(ctx) })
+    this.evolution = new EvolutionService(ctx, { repoRoot: REPO_ROOT, modelSelection: () => deploymentModelSelection(ctx) })
     // Same discipline for the escalation ledger: the `escalate` tool reads
     // `ctx.escalation` from this fiber, and the parent never injects it.
     new EscalationService(ctx)
@@ -260,6 +268,40 @@ export class SingularityAgent extends Service {
   }
 
   /**
+   * The startup reconciliation (K2): before this plugin is ready — and whatever
+   * the tool switch says — every commit intent the ledger left open is settled
+   * against what production actually holds. The switch is a statement about the
+   * model surface, not about recovery: an `off` deployment registers none of the
+   * nine tools, and still keeps production consistent with its own ledger.
+   *
+   * A `blocked` intent is reported by name and does not fail the load: the intent
+   * stays open, the admission gate keeps refusing the provider whose target it
+   * names, and settling it (a retry of the apply/rollback, the next startup)
+   * remains the way forward. A failure of the reconciliation itself is not
+   * `blocked` and does fail the load, naming the cause: a deployment that cannot
+   * read its ledger cannot promise anything about the production behind it.
+   */
+  protected async [Service.init](): Promise<void> {
+    let outcomes: Awaited<ReturnType<EvolutionService['reconcile']>>
+    try {
+      outcomes = await this.evolution.reconcile()
+    } catch (error) {
+      throw new Error(
+        `singularity-agent: the evolution ledger could not be reconciled at startup (${error instanceof Error ? error.message : String(error)}); ` +
+        'refusing to become ready with an unreconciled production commit rather than serving a deployment whose production may not ' +
+        'match its ledger',
+      )
+    }
+    for (const outcome of outcomes) {
+      if (outcome.result !== 'blocked') continue
+      this.warn(
+        `evolution: the commit intent "${outcome.intentId}" (${outcome.direction} of proposal "${outcome.proposalId}") targeting ` +
+        `${outcome.target} could not be settled — ${outcome.detail ?? 'no reason reported'}`,
+      )
+    }
+  }
+
+  /**
    * Refuse a configuration member this plugin does not read. The schema keeps
    * unknown keys on the object it validates, so this is where a caller's typo
    * is caught: a misspelled member would otherwise read as a configuration that
@@ -291,6 +333,16 @@ export class SingularityAgent extends Service {
       `singularity-agent: evolution is ${JSON.stringify(value)}; it is "off" or "on" ` +
       '(a switch this build cannot execute refuses to start rather than assembling an exposure nobody chose)',
     )
+  }
+
+  /**
+   * Report a fact nobody should read as a startup failure — the same soft logger
+   * the task runtime uses, so a deployment that mounts no logger still gets the
+   * line rather than an exception about it.
+   */
+  private warn(message: string): void {
+    const logger = (this.ctx as { logger?: (name: string) => { warn(format: string): void } }).logger
+    logger?.('singularity-agent').warn(message)
   }
 }
 

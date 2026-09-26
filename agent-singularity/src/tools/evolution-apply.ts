@@ -4,6 +4,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { APPLYABLE_TARGET_TYPES, applyTargets, renderProviderRoles } from '@dangosys/dsh-singularity-evolution'
 import type { EvolutionProposal } from '@dangosys/dsh-singularity-evolution'
+import { renderOpenIntentRecovery } from './evolution-commit.ts'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
@@ -45,7 +46,17 @@ export function defineEvolutionApplyTool(ctx: Context) {
       'refuses) before the human is asked and again after the grant, and refuses a stale candidate instead of overwriting a ' +
       'production skill that changed. A skill candidate is promoted as one file: one carrying a SKILL.contract.json or any ' +
       'resource is refused (the executor writes SKILL.md only, so such a candidate would be reported as a provider production ' +
-      'never received). evolution_rollback restores the champion snapshot.',
+      'never received). The write is one commit: a durable commit intent — proposal, direction, this approval, the absolute ' +
+      'target, the content identity production must hold before and after, and the bytes to write again — is recorded ' +
+      'before production changes, the SKILL.md is then replaced atomically (a temp file in the same directory, fsynced and ' +
+      'renamed over the target; never truncated, never half-written), and only then is the completion recorded. A failure ' +
+      'at any stage leaves exactly one open intent rather than a half-committed file, and calling this tool again while ' +
+      'an intent is open settles it instead of starting a second write: no approval is asked again (the intent already ' +
+      'binds the grant it was authorised by, and the promotion gate is not re-run because the recorded intent already ' +
+      'names the approved content), and the answer reports the intent id and whether the commit was redone (production ' +
+      'still held the pre-commit state) or only completed (production already held the committed content). A source that ' +
+      'is gone or changed, or a target a third party rewrote, refuses by name with the intent left open. ' +
+      'evolution_rollback restores the champion snapshot.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Decided (PROMOTE) proposal to apply to production' },
     },
@@ -59,6 +70,27 @@ export function defineEvolutionApplyTool(ctx: Context) {
         proposal = await ctx.evolution.get(args.proposalId)
       } catch (error) {
         return `evolution_apply rejected: ${error instanceof Error ? error.message : String(error)}`
+      }
+      // An intent this proposal left open is settled, not bypassed (K2): the
+      // retry asks the service the only question that is still open — what does
+      // production hold? — and the recorded intent already binds the grant and
+      // the content it was approved against, so no human is asked a second time
+      // and the promotion gate is not re-run. Everything the service refuses on
+      // that path (a direction this call cannot settle, a source that is gone, a
+      // target a third party changed) is reported as the service names it.
+      if (proposal.openIntent !== undefined) {
+        try {
+          const recovered = await ctx.evolution.apply(args.proposalId, caller, proposal.openIntent.approvalRef)
+          return [
+            `proposal ${recovered.proposal.proposalId} [applied] ${recovered.proposal.level} ${recovered.proposal.targetType} ${recovered.proposal.targetId} — PROMOTE in effect`,
+            ...renderOpenIntentRecovery(proposal.openIntent, recovered.recovered),
+            'wrote production targets:',
+            ...recovered.targets.map(target => `  - ${target}`),
+            effectNote(),
+          ].join('\n')
+        } catch (error) {
+          return `evolution_apply rejected: ${error instanceof Error ? error.message : String(error)}`
+        }
       }
       // Every refusal lands BEFORE the human is asked — a proposal that cannot
       // apply never burns an approval.

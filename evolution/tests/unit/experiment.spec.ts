@@ -194,7 +194,7 @@ function startedRecord(frozen: FrozenExperiment, overrides: Partial<ExperimentSt
   const frozenDigest = frozenDigestOf(frozen)
   const experimentId = experimentIdOf(frozen.proposalId, frozenDigest)
   return {
-    formatVersion: 2,
+    formatVersion: 3,
     kind: 'experiment_started',
     proposalId: frozen.proposalId,
     experimentId,
@@ -605,7 +605,7 @@ describe('the experiment ledger family', () => {
     await svc.recordExperimentStart(started)
     const key = experimentSampleKeyOf({ proposalId: frozen.proposalId, frozen }, 't-failure', 'baseline')
     const record: ExperimentSampleRecord = {
-      formatVersion: 2,
+      formatVersion: 3,
       kind: 'experiment_sample',
       proposalId: frozen.proposalId,
       experimentId: started.experimentId,
@@ -646,7 +646,7 @@ describe('the experiment ledger family', () => {
     const started = startedRecord(frozen)
     await svc.recordExperimentStart(started)
     const base: ExperimentSampleRecord = {
-      formatVersion: 2,
+      formatVersion: 3,
       kind: 'experiment_sample',
       proposalId: frozen.proposalId,
       experimentId: started.experimentId,
@@ -736,7 +736,7 @@ describe('the experiment ledger family', () => {
     const frozen = frozenFixture()
     const started = startedRecord(frozen)
     const record = (sampleTaskId: string, sampleSide: ExperimentSide, outcome: ExperimentSampleRecord['outcome']): ExperimentSampleRecord => ({
-      formatVersion: 2,
+      formatVersion: 3,
       kind: 'experiment_sample',
       proposalId: frozen.proposalId,
       experimentId: started.experimentId,
@@ -832,7 +832,7 @@ describe('the experiment ledger family', () => {
   it('folds a hand-written proposal beside the experiment family, each by its own rules', async () => {
     const root = await mkdtemp(join(tmpdir(), 'experiment-ledger-'))
     const line = JSON.stringify({
-      formatVersion: 2,
+      formatVersion: 3,
       kind: 'proposed',
       proposalId: 'p-old',
       targetType: 'skill',
@@ -904,14 +904,14 @@ describe('the candidate and prepare refusals (S4-E 收尾)', () => {
  * The write boundary and the fold: what the ledger accepts, and where.
  *
  * The independent review's counterexamples (S4-E 收尾): the ledger reads and
- * writes one format — `formatVersion: 2` — and the fold admits only the
+ * writes one format — `formatVersion: 3` — and the fold admits only the
  * lifecycle this build's entries write. Each case below takes the entry
  * directly, the shape a forged call or a stale caller takes, and pins that the
  * refusal lands before the first byte changes and leaves the ledger a fresh
  * service can still read.
  * ------------------------------------------------------------------------ */
 
-describe('the ledger write boundary is formatVersion 2 (S4-E 收尾)', () => {
+describe('the ledger write boundary is formatVersion 3 (S4-E 收尾)', () => {
   it('refuses a direct experiment start that declares an old version, before the append', async () => {
     const { svc, root } = await service()
     try {
@@ -919,7 +919,7 @@ describe('the ledger write boundary is formatVersion 2 (S4-E 收尾)', () => {
       const err = await svc.recordExperimentStart({ ...startedRecord(frozenFixture()), formatVersion: 1 } as never).then(() => undefined, e => e)
       expect.soft(err, 'an old-version start must throw before append').toBeInstanceOf(Error)
       expect.soft(String((err as Error).message), 'the refusal must name the version it saw and the version this build writes')
-        .toMatch(/formatVersion 1[\s\S]*formatVersion 2/)
+        .toMatch(/formatVersion 1[\s\S]*formatVersion 3/)
       expect.soft(await readFile(svc.file, 'utf8'), 'ledger bytes must stay unchanged').toBe(before)
       await expect.soft(new EvolutionService(fixtureCtx(), { root }).list(), 'the ledger must remain readable').resolves.toBeDefined()
     } finally { await rm(root, { recursive: true, force: true }) }
@@ -977,7 +977,7 @@ describe('the ledger write boundary is formatVersion 2 (S4-E 收尾)', () => {
 })
 
 describe('the fold admits only the current lifecycle (S4-E 收尾)', () => {
-  const common = { formatVersion: 2, proposalId: 'p1', actor: 'root-1', at: '2026-09-26T00:00:00.000Z' }
+  const common = { formatVersion: 3, proposalId: 'p1', actor: 'root-1', at: '2026-09-26T00:00:00.000Z' }
   const proposed = (over: Record<string, unknown> = {}) => ({
     ...common, kind: 'proposed', targetType: 'skill', targetId: 'fixture-skill', baseVersion: 'v1', level: 'L2',
     rationale: 'the fixture proposal', sourceRefs: ['diagnosis:d1'], ...over,

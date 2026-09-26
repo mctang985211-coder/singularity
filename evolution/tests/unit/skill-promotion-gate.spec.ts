@@ -331,7 +331,7 @@ async function fixture(options: FixtureOptions = {}) {
       }],
     })
     const record: ExperimentSampleRecord = {
-      formatVersion: 2,
+      formatVersion: 3,
       kind: 'experiment_sample',
       proposalId: PROPOSAL,
       experimentId,
@@ -362,7 +362,7 @@ async function fixture(options: FixtureOptions = {}) {
   }
 
   const started: ExperimentStartedRecord = {
-    formatVersion: 2,
+    formatVersion: 3,
     kind: 'experiment_started',
     proposalId: PROPOSAL,
     experimentId,
@@ -462,7 +462,9 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
     expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(CANDIDATE)
     await f.svc.rollback(PROPOSAL, 'root-1', 'approval:rollback')
     expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(PRODUCTION)
-    expect(await f.ledgerKinds()).toEqual(['proposed', 'candidate', 'prepared', 'experiment_started', 'experiment_sample', 'experiment_sample', 'experiment_sample', 'experiment_sample', 'gated', 'decided', 'applied', 'rolledback'])
+    // Each production write is one commit: its intent line before the write, its
+    // completion after (K2).
+    expect(await f.ledgerKinds()).toEqual(['proposed', 'candidate', 'prepared', 'experiment_started', 'experiment_sample', 'experiment_sample', 'experiment_sample', 'experiment_sample', 'gated', 'decided', 'commit_intent', 'applied', 'commit_intent', 'rolledback'])
   })
 
   it('records an unknown cost without refusing when the frozen budget declares no ceiling', async () => {
@@ -764,7 +766,7 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
       // refuses by name: no entry lets this experiment reach production.
       await f.tamperLedger(lines => {
         lines.push({
-          formatVersion: 2, kind: 'decided', proposalId: PROPOSAL, decision: 'PROMOTE',
+          formatVersion: 3, kind: 'decided', proposalId: PROPOSAL, decision: 'PROMOTE',
           approvalRef: 'approval:decide', actor: 'root-1', at: '2026-09-26T00:00:00.000Z',
         })
       })
@@ -879,9 +881,9 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     await appendFile(
       join(svc.root, 'proposals.jsonl'),
       [
-        { formatVersion: 2, kind: 'candidate', proposalId: id, versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-26T00:00:01.000Z' },
-        { formatVersion: 2, kind: 'prepared', proposalId: id, sandbox: null, mechanical: false, champion: 'none', files: [], actor: 'root-1', at: '2026-09-26T00:00:02.000Z' },
-        { formatVersion: 2, kind: 'gated', proposalId: id, gate: gateAnswers([`sandbox/${id}/replay-report.json`]), actor: 'root-1', at: '2026-09-26T00:00:04.000Z' },
+        { formatVersion: 3, kind: 'candidate', proposalId: id, versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-26T00:00:01.000Z' },
+        { formatVersion: 3, kind: 'prepared', proposalId: id, sandbox: null, mechanical: false, champion: 'none', files: [], actor: 'root-1', at: '2026-09-26T00:00:02.000Z' },
+        { formatVersion: 3, kind: 'gated', proposalId: id, gate: gateAnswers([`sandbox/${id}/replay-report.json`]), actor: 'root-1', at: '2026-09-26T00:00:04.000Z' },
       ].map(line => JSON.stringify(line)).join('\n') + '\n',
     )
   }
@@ -913,7 +915,7 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     // the refusal still lands at the candidate line, before the write and before
     // any approval this test does not grant.
     const lines = (await readFile(join(f.root, 'proposals.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as Record<string, any>)
-    lines.push({ formatVersion: 2, kind: 'decided', proposalId: 'c1', decision: 'PROMOTE', approvalRef: 'approval:legacy', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' })
+    lines.push({ formatVersion: 3, kind: 'decided', proposalId: 'c1', decision: 'PROMOTE', approvalRef: 'approval:legacy', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' })
     await writeFile(join(f.root, 'proposals.jsonl'), `${lines.map(line => JSON.stringify(line)).join('\n')}\n`)
     const reopened = await f.reopen()
     const applyMessage = await refusal(reopened.apply('c1', 'root-1', 'approval:apply'))
@@ -921,7 +923,7 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     expect(await f.ledgerKinds()).not.toContain('applied')
   })
 
-  it('refuses an applied capability record at the entry: v2 admits only what this build can execute', async () => {
+  it('refuses an applied capability record at the entry: the fold admits only what this build can execute', async () => {
     const f = await fixture()
     // The config.yml an older capability apply would have edited. This build's
     // entries never know the path, so the fixture owns it and asserts its bytes
@@ -929,18 +931,18 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     const configFile = join(f.root, 'config.yml')
     await writeFile(configFile, ['- id: task-runtime', '  config:', '    capabilities:', '      research: { preset: changed }', '', '---', 'api:', '  upstream: https://example.invalid', ''].join('\n'))
     await writeFile(join(f.root, 'proposals.jsonl'), [
-      { formatVersion: 2, kind: 'proposed', proposalId: 'old1', targetType: 'capability', targetId: 'research', baseVersion: 'v1', level: 'L2', rationale: 'the recorded suggestion', sourceRefs: ['diagnosis:d0'], actor: 'root-1', at: '2026-09-20T00:00:00.000Z' },
-      { formatVersion: 2, kind: 'candidate', proposalId: 'old1', versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
-      { formatVersion: 2, kind: 'prepared', proposalId: 'old1', sandbox: null, mechanical: false, champion: 'none', files: [], actor: 'root-1', at: '2026-09-20T00:00:02.000Z' },
-      { formatVersion: 2, kind: 'gated', proposalId: 'old1', gate: gateAnswers(['sandbox/old1/replay-report.json']), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
-      { formatVersion: 2, kind: 'decided', proposalId: 'old1', decision: 'PROMOTE', approvalRef: 'approval:decide', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' },
-      { formatVersion: 2, kind: 'applied', proposalId: 'old1', targets: [`${configFile} — document 1 task-runtime capabilities row "research"`], approvalRef: 'approval:apply', actor: 'root-1', at: '2026-09-20T00:00:06.000Z' },
+      { formatVersion: 3, kind: 'proposed', proposalId: 'old1', targetType: 'capability', targetId: 'research', baseVersion: 'v1', level: 'L2', rationale: 'the recorded suggestion', sourceRefs: ['diagnosis:d0'], actor: 'root-1', at: '2026-09-20T00:00:00.000Z' },
+      { formatVersion: 3, kind: 'candidate', proposalId: 'old1', versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
+      { formatVersion: 3, kind: 'prepared', proposalId: 'old1', sandbox: null, mechanical: false, champion: 'none', files: [], actor: 'root-1', at: '2026-09-20T00:00:02.000Z' },
+      { formatVersion: 3, kind: 'gated', proposalId: 'old1', gate: gateAnswers(['sandbox/old1/replay-report.json']), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
+      { formatVersion: 3, kind: 'decided', proposalId: 'old1', decision: 'PROMOTE', approvalRef: 'approval:decide', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' },
+      { formatVersion: 3, kind: 'applied', proposalId: 'old1', targets: [`${configFile} — document 1 task-runtime capabilities row "research"`], approvalRef: 'approval:apply', actor: 'root-1', at: '2026-09-20T00:00:06.000Z' },
     ].map(line => JSON.stringify(line)).join('\n') + '\n')
     const before = await readFile(configFile, 'utf8')
 
     // The applied line is refused at load — at the candidate line above it, since
-    // v2 admits what the current entries write, and this build writes a single
-    // SKILL.md only.
+    // the fold admits what the current entries write, and this build writes a
+    // single SKILL.md only.
     const reopened = await f.reopen()
     expect(await refusal(reopened.get('old1'))).toContain('targets "capability"')
     expect(await refusal(reopened.list())).toContain('targets "capability"')

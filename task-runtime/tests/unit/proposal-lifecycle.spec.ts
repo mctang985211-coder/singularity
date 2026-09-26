@@ -2328,3 +2328,94 @@ describe('the root contract\'s origin (A0 §1.10)', () => {
     expect(h.reviewCalls).toHaveLength(0)
   })
 })
+
+/*
+ * K2: the recovery barrier's production reconciliation.
+ *
+ * `adoptRoot` is what a graph activation awaits and what a restarted root
+ * session walks through, so it is the one place a deployment asks whether an
+ * interrupted apply/rollback left production behind its ledger. The service is
+ * read softly (`optionalService(ctx, 'evolution')`, declared structurally in
+ * `src/index.ts` — this package never imports the evolution package), a blocked
+ * outcome is reported by name without failing the barrier (the admission gate
+ * refuses the provider whose target it names), and a real failure of the
+ * reconciliation fails the barrier rather than taking a store over.
+ */
+describe('the recovery barrier reconciles an open production commit first', () => {
+  /** A fresh store id no other case in this file holds: the barrier creates it. */
+  const FRESH = 'sg-k2-barrier'
+
+  /** The reconciliation one barrier reported, as the runtime hands it to the warning door. */
+  function warningsSeen(h: Harness): string[] {
+    const warnings: string[] = []
+    h.ctx.logger = () => ({ warn: (message: string) => { warnings.push(message) } })
+    return warnings
+  }
+
+  test('reconciles before the store is touched, and reports a blocked intent without failing the barrier', async () => {
+    const h = harness()
+    const order: string[] = []
+    const task = h.task as unknown as { createStore(id: string): Promise<void> }
+    const createStore = task.createStore.bind(task)
+    task.createStore = async (id: string) => {
+      order.push('store')
+      return createStore(id)
+    }
+    const reconcile = vi.fn(async () => {
+      order.push('reconcile')
+      return [
+        {
+          intentId: 's1/apply', proposalId: 's1', direction: 'apply', target: '/production/skills/verify/SKILL.md',
+          result: 'completed-redone',
+        },
+        {
+          intentId: 's2/apply', proposalId: 's2', direction: 'apply', target: '/production/skills/other/SKILL.md',
+          result: 'blocked', detail: 'the production target holds a version no commit of this proposal wrote',
+        },
+      ]
+    })
+    h.ctx.evolution = { reconcile }
+    const warnings = warningsSeen(h)
+
+    const adopted = await h.runtime.adoptRoot(FRESH, ROOT_SESSION)
+    expect(order).toEqual(['reconcile', 'store'])
+    expect(reconcile).toHaveBeenCalledTimes(1)
+    // The blocked intent did not stop the adoption: it is reported with its own
+    // identity and reason, and the provider it names stays under the gate.
+    expect(adopted.adopted).toBe(false)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('"s2/apply"')
+    expect(warnings[0]).toContain('apply of proposal "s2"')
+    expect(warnings[0]).toContain('/production/skills/other/SKILL.md')
+    expect(warnings[0]).toContain('the production target holds a version no commit of this proposal wrote')
+  })
+
+  test('a reconciliation failure fails the barrier, naming the cause and leaving the store untouched', async () => {
+    const h = harness()
+    const order: string[] = []
+    const task = h.task as unknown as { createStore(id: string): Promise<void> }
+    const createStore = task.createStore.bind(task)
+    task.createStore = async (id: string) => {
+      order.push('store')
+      return createStore(id)
+    }
+    h.ctx.evolution = {
+      reconcile: async () => {
+        order.push('reconcile')
+        throw new Error('evolution: ledger line 1 in /tmp/x/proposals.jsonl declares formatVersion 1')
+      },
+    }
+
+    await expect(h.runtime.adoptRoot(FRESH, ROOT_SESSION)).rejects.toThrow(
+      /could not be reconciled before this store was recovered.*declares formatVersion 1/,
+    )
+    // Nothing was taken over: the barrier failed before its first store read.
+    expect(order).toEqual(['reconcile'])
+  })
+
+  test('a deployment with no evolution service adopts exactly as before', async () => {
+    const h = harness()
+    const adopted = await h.runtime.adoptRoot(FRESH, ROOT_SESSION)
+    expect(adopted.adopted).toBe(false)
+  })
+})

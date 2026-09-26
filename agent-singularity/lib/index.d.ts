@@ -327,7 +327,29 @@ declare function deploymentModelSelection(ctx: Context): ModelSelection | undefi
 declare class SingularityAgent extends Service {
   static inject: string[];
   static Config: z<Config>;
+  /**
+   * The evolution ledger this assembly owns — kept as a field because the startup
+   * reconciliation (`[Service.init]`, below) settles its open commit intents
+   * before this plugin becomes ready, whether or not the deployment registered the
+   * nine tools.
+   */
+  private readonly evolution;
   constructor(ctx: Context, config?: Config);
+  /**
+   * The startup reconciliation (K2): before this plugin is ready — and whatever
+   * the tool switch says — every commit intent the ledger left open is settled
+   * against what production actually holds. The switch is a statement about the
+   * model surface, not about recovery: an `off` deployment registers none of the
+   * nine tools, and still keeps production consistent with its own ledger.
+   *
+   * A `blocked` intent is reported by name and does not fail the load: the intent
+   * stays open, the admission gate keeps refusing the provider whose target it
+   * names, and settling it (a retry of the apply/rollback, the next startup)
+   * remains the way forward. A failure of the reconciliation itself is not
+   * `blocked` and does fail the load, naming the cause: a deployment that cannot
+   * read its ledger cannot promise anything about the production behind it.
+   */
+  protected [Service.init](): Promise<void>;
   /**
    * Refuse a configuration member this plugin does not read. The schema keeps
    * unknown keys on the object it validates, so this is where a caller's typo
@@ -343,6 +365,12 @@ declare class SingularityAgent extends Service {
    * implement would get the closed composition while believing otherwise.
    */
   private resolveEvolution;
+  /**
+   * Report a fact nobody should read as a startup failure — the same soft logger
+   * the task runtime uses, so a deployment that mounts no logger still gets the
+   * line rather than an exception about it.
+   */
+  private warn;
 }
 //#endregion
 export { Config, DEFAULT_EVOLUTION, ESCALATION_TRIGGERS, type Escalation, type EscalationInput, type EscalationRecord, EscalationService, type EscalationTrigger, EvolutionExposure, type HitlAnswer, type HitlKind, type HitlPending, HitlService, ProposalReviewService, SingularityAgent, SingularityAgent as default, deploymentModelSelection, ownerSessionOfStore, renderProposalReview, reviewDecider };

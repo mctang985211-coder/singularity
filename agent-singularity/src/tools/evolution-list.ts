@@ -16,8 +16,10 @@ export function defineEvolutionListTool(ctx: Context) {
       'Read-only. List EvolutionProposals in the evolution ledger, optionally filtered by status / targetType / targetId, ' +
       'each with its derived history (proposed → candidate → prepared → gated → decided → applied → rolledback for an ' +
       'applied single-file skill replacement; a non-skill proposal stays proposed — this build admits a skill candidate ' +
-      'only). The ledger records proposals, sandbox materializations, human decisions, and human-approved ' +
-      'applies/rollbacks.',
+      'only). The ledger records proposals, sandbox materializations, human decisions, human-approved ' +
+      'applies/rollbacks, and the commit intent behind each production write: a proposal whose commit was interrupted ' +
+      'reports that intent — its id, direction, production target and when it was recorded — and stays in the status its ' +
+      'lifecycle had reached, until a reconciliation or a retry of the apply/rollback settles it.',
     parameters: {
       status: { type: 'string', enum: ['proposed', 'candidate', 'prepared', 'gated', 'decided', 'applied', 'rolledback'], description: 'Only proposals in this status' },
       targetType: { type: 'string', enum: TARGET_TYPES, description: 'Only proposals pointing at this mutation surface' },
@@ -54,6 +56,14 @@ export function defineEvolutionListTool(ctx: Context) {
         }
         if (proposal.gate !== undefined) {
           lines.push(`  gate regression evidence: [${proposal.gate.regressionEvidenceRefs.join(', ')}]`)
+        }
+        if (proposal.openIntent !== undefined) {
+          const intent = proposal.openIntent
+          lines.push(
+            `  open commit intent: ${intent.intentId} (${intent.direction}) target ${intent.target} recorded ${intent.at} — ` +
+            'a production write is underway and its completion has not been recorded; a reconciliation (a restart, or a retry of ' +
+            'the apply/rollback) settles it before anything loads against that target',
+          )
         }
         if (proposal.applied !== undefined) {
           lines.push(`  applied: [${proposal.applied.targets.join(', ')}] (approval ${proposal.applied.approvalRef})`)

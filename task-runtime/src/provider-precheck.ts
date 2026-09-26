@@ -35,10 +35,21 @@
  * Verdicts are values, and the pre-check writes nothing: the caller refuses the
  * batch on {@link providerRefusals} before the first store write, so a refused
  * batch leaves no task, no run, no event and no obligation behind.
+ *
+ * One more source of refusal, added by K2: a production target an evolution
+ * commit left open. The ledger is read softly (`commitLedger`, absent when the
+ * deployment mounts no evolution plane), and a provider whose own `SKILL.md` is
+ * such a target is refused by name until a reconciliation settles that commit —
+ * production may not hold the version the ledger describes, and nothing may load
+ * against it. The read is `EvolutionService.openIntentTargets`: pure, so an
+ * admission question never settles a commit as a side effect. A ledger that
+ * cannot be read at all refuses every skill candidate (fail-closed), because
+ * "no commit is open" is exactly the claim such a ledger cannot be trusted to
+ * make.
  * @module @dangosys/dsh-singularity-task-runtime/provider-precheck
  */
 
-import { dirname } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { findSkillFileIn, skillRootsFor } from '@dangosys/dsh-singularity-agent-runtime'
 import type { CapabilityConfig } from './capability.ts'
 import { loadSkillSidecar, registryRevision, skillValidationContext, validateSkillProvider } from './sidecar.ts'
@@ -172,6 +183,109 @@ export function unlistableVerifierRefusal(name: string, directory: string | unde
 }
 
 /**
+ * The evolution commit ledger as a provider check reads it (K2): the production
+ * targets a commit left open. Task-runtime never imports the evolution package —
+ * the dependency runs one way, evolution → task-runtime — so this is a
+ * structural read of whatever service a deployment mounts under `evolution`;
+ * a deployment that mounts none has no commit in flight to gate on.
+ */
+export interface EvolutionCommitLedger {
+  /**
+   * The absolute production targets of every open commit intent, in ledger order
+   * (`EvolutionService.openIntentTargets`). A pure read: it writes nothing and
+   * never reconciles, so asking an admission question cannot settle a commit as
+   * a side effect. Optional because this is a structural read of a service this
+   * package does not own — a service that cannot answer it is refused by name
+   * rather than read as "no commit is open" (`commit-ledger-unreadable`,
+   * fail-closed).
+   */
+  openIntentTargets?(): Promise<readonly string[]>
+}
+
+/**
+ * What one pre-check read from the evolution ledger: the targets a commit left
+ * open, or why that read could not be made.
+ */
+interface CommitGate {
+  /** The resolved absolute targets of the open commit intents; empty when the read failed. */
+  readonly openTargets: ReadonlySet<string>
+  /**
+   * Why the ledger could not be read at all, or absent when it was. Every skill
+   * candidate is then refused by name: a ledger nobody can read cannot be
+   * trusted to say "no commit is open against this provider".
+   */
+  readonly unreadable?: string
+}
+
+/**
+ * Read the ledger's open commit intents, once per pre-check. `undefined` means
+ * this deployment offers no evolution service at all — no commit can be in
+ * flight, so no gate is applied. A ledger that cannot be read answers a gate
+ * that refuses by name instead.
+ */
+async function readCommitGate(ledger: EvolutionCommitLedger | undefined): Promise<CommitGate | undefined> {
+  if (ledger === undefined) return undefined
+  if (ledger.openIntentTargets === undefined) {
+    return { openTargets: new Set(), unreadable: 'the evolution service offers no openIntentTargets() read' }
+  }
+  try {
+    const targets = await ledger.openIntentTargets()
+    return { openTargets: new Set(targets.map(target => resolve(target))) }
+  } catch (error) {
+    return {
+      openTargets: new Set(),
+      unreadable: `reading it failed (${error instanceof Error ? error.message : String(error)})`,
+    }
+  }
+}
+
+/**
+ * The refusal of a provider whose own `SKILL.md` a commit left open (K2-3): the
+ * intent is the record that a production write is underway and its completion
+ * has not been recorded, so production may not be what the ledger says it is —
+ * the provider is refused until a reconciliation settles that commit, and every
+ * other provider in the same pre-check is judged exactly as before.
+ */
+function openCommitRefusal(name: string, directory: string, target: string): RejectedProviderVerdict {
+  return {
+    valid: false,
+    name,
+    directory,
+    defects: [
+      defect(
+        'commit-intent-open',
+        `skill "${name}" is the target of an open evolution commit intent: an apply or rollback of ${target} persisted its intent and ` +
+        'its completion was never recorded, so production may not hold the version the ledger describes; the provider is refused until ' +
+        'a reconciliation settles that commit (the deployment reconciles at startup, or an apply/rollback retry settles it)',
+      ),
+    ],
+  }
+}
+
+/**
+ * The refusal of every skill candidate on a deployment whose evolution ledger
+ * cannot be read: whether a commit intent is open against this provider cannot
+ * be established, so it is refused rather than assumed clear (fail-closed). The
+ * absence of an evolution service is a different situation and is not refused —
+ * a deployment with no ledger has no commit in flight.
+ */
+function unreadableCommitLedgerRefusal(name: string, directory: string, target: string, why: string): RejectedProviderVerdict {
+  return {
+    valid: false,
+    name,
+    directory,
+    defects: [
+      defect(
+        'commit-ledger-unreadable',
+        `skill "${name}" cannot be admitted against ${target}: the deployment's evolution commit ledger is unreadable (${why}), so ` +
+        'whether a commit intent is open against this provider cannot be established — the provider is refused rather than assumed ' +
+        'clear (fail-closed)',
+      ),
+    ],
+  }
+}
+
+/**
  * Where a pre-check looks for a skill: the viewpoint of the worker that would
  * load it. `cwd` is the session's checkout — the directory the worker's own
  * discovery walks upward from — and `extraRoots` are the roots that precede the
@@ -266,10 +380,32 @@ export interface ProviderPrecheckRequest {
    * `ready()`), or absent when the registry cannot be listed.
    */
   readonly verifierRefs?: readonly string[]
+  /**
+   * The deployment's evolution ledger, resolved softly by the caller
+   * (`optionalService(ctx, 'evolution')`) or absent when the deployment mounts
+   * none. Absence means no commit can be in flight; a service that is present
+   * but cannot answer its read is refused by name (fail-closed,
+   * {@link EvolutionCommitLedger}).
+   */
+  readonly commitLedger?: EvolutionCommitLedger
 }
 
 function defect(code: SkillDefect['code'], detail: string): SkillDefect {
   return { code, detail }
+}
+
+/**
+ * The refusal one skill candidate gets from the commit gate, or `undefined` when
+ * the gate has nothing to say about it: only the provider whose own `SKILL.md`
+ * is a target an open commit names is refused, and every other candidate in the
+ * same pre-check is judged exactly as it would be without the gate.
+ */
+function commitRefusalFor(gate: CommitGate | undefined, name: string, directory: string): RejectedProviderVerdict | undefined {
+  if (gate === undefined) return undefined
+  const skillFile = resolve(join(directory, 'SKILL.md'))
+  if (gate.unreadable !== undefined) return unreadableCommitLedgerRefusal(name, directory, skillFile, gate.unreadable)
+  if (!gate.openTargets.has(skillFile)) return undefined
+  return openCommitRefusal(name, directory, skillFile)
 }
 
 /** The search-failure refusal: the skill name and the roots, which no phase-1 validator can know. */
@@ -316,7 +452,8 @@ export function providerContentIdentities(capabilities: readonly CapabilityProvi
  * viewpoint.
  *
  * The rules, in the order they are applied per skill: it must be discoverable
- * from the view's roots; the directory it resolves to must pass
+ * from the view's roots; its own `SKILL.md` must not be a target an evolution
+ * commit left open (K2); the directory it resolves to must pass
  * {@link validateSkillProvider} against the table and the verifier vocabulary.
  * An execution sidecar is refused when the vocabulary is unknown
  * (`verifierRefs` absent) — the one case the phase-1 validator cannot judge,
@@ -324,12 +461,15 @@ export function providerContentIdentities(capabilities: readonly CapabilityProvi
  *
  * Nothing is written and nothing is thrown: every refusal is a verdict, and
  * {@link providerRefusals} turns the refusals into the lines a caller reports
- * before it refuses the whole batch.
+ * before it refuses the whole batch. The commit gate is read once per call and
+ * only refusals — nothing here reconciles, so asking an admission question
+ * never settles a commit as a side effect.
  */
 export async function precheckProviders(request: ProviderPrecheckRequest): Promise<ProviderPrecheck> {
   const roots = await skillSearchRoots(request.view)
   const verifierRefs = request.verifierRefs
   const context = skillValidationContext(request.table, verifierRefs ?? [])
+  const commitGate = await readCommitGate(request.commitLedger)
   const capabilities: CapabilityProviderPrecheck[] = []
   for (const capability of request.capabilities) {
     const declared = request.table[capability]?.skills ?? []
@@ -341,6 +481,14 @@ export async function precheckProviders(request: ProviderPrecheckRequest): Promi
         continue
       }
       const directory = dirname(file)
+      // K2-3: a commit that left its intent behind owns this target until a
+      // reconciliation settles it. The gate answers before the validator runs,
+      // and it answers for this provider only.
+      const commitRefusal = commitRefusalFor(commitGate, name, directory)
+      if (commitRefusal !== undefined) {
+        skills.push(commitRefusal)
+        continue
+      }
       if (verifierRefs === undefined) {
         // The registry cannot be listed, so `ref` cannot be proved registered.
         // Only an execution sidecar loses anything by that: a knowledge or
@@ -391,12 +539,15 @@ export async function precheckReplacedCapabilityRow(request: {
   readonly view: SkillDiscoveryView
   /** The registered verifier ids (`VerifierRegistry.verifierIds()`), or absent when the registry cannot be listed. */
   readonly verifierRefs?: readonly string[]
+  /** The deployment's evolution ledger (`optionalService(ctx, 'evolution')`), or absent when the deployment mounts none. */
+  readonly commitLedger?: EvolutionCommitLedger
 }): Promise<{ readonly precheck: ProviderPrecheck; readonly refusals: readonly string[] }> {
   const precheck = await precheckProviders({
     capabilities: [request.name],
     table: { ...request.table, [request.name]: request.entry },
     view: request.view,
     ...(request.verifierRefs === undefined ? {} : { verifierRefs: request.verifierRefs }),
+    ...(request.commitLedger === undefined ? {} : { commitLedger: request.commitLedger }),
   })
   return { precheck, refusals: providerRefusals(precheck) }
 }

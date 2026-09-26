@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { CapabilityConfig } from '../../src/capability.ts'
 import { precheckProviders, providerRefusals, skillSearchRoots } from '../../src/provider-precheck.ts'
-import type { CapabilityProviderPrecheck, ProviderPrecheck } from '../../src/provider-precheck.ts'
+import type { CapabilityProviderPrecheck, EvolutionCommitLedger, ProviderPrecheck } from '../../src/provider-precheck.ts'
 import { executionProviders } from '../../src/sidecar.ts'
 import type { ExecutionProviderVerdict, RejectedProviderVerdict, SkillProviderVerdict } from '../../src/sidecar.ts'
 
@@ -103,6 +103,7 @@ interface PrecheckOptions {
   cwd?: string | undefined
   extraRoots?: readonly string[]
   verifierRefs?: readonly string[] | undefined
+  commitLedger?: EvolutionCommitLedger | undefined
 }
 
 async function precheck(options: PrecheckOptions = {}): Promise<ProviderPrecheck> {
@@ -116,6 +117,7 @@ async function precheck(options: PrecheckOptions = {}): Promise<ProviderPrecheck
       ...(options.extraRoots === undefined ? {} : { extraRoots: [...options.extraRoots] }),
     },
     ...(verifierRefs === undefined ? {} : { verifierRefs }),
+    ...(options.commitLedger === undefined ? {} : { commitLedger: options.commitLedger }),
   })
 }
 
@@ -428,5 +430,149 @@ describe('the frontmatter name a discovered SKILL.md declares', () => {
     const verdictValue = acceptedExecution(verdict(report, 'verify-ball-functional', 'verify'))
     expect(verdictValue.directory).toBe(directory)
     expect(verdictValue.description).toContain('Verify functional correctness of a Buckyball Ball')
+  })
+})
+
+/**
+ * The evolution commit gate (K2-3): a production target an apply/rollback left
+ * open is not loaded against until a reconciliation settles it. The ledger is
+ * read once per pre-check, softly — a deployment with no evolution service has no
+ * commit in flight and no gate — and the gate answers for the provider whose own
+ * `SKILL.md` the intent targets and for nobody else.
+ */
+describe('the evolution commit gate', () => {
+  /** A ledger that answers the one thing the pre-check asks it. */
+  function ledger(openIntentTargets: () => Promise<readonly string[]>): EvolutionCommitLedger {
+    return { openIntentTargets }
+  }
+
+  test('a skill whose SKILL.md an open intent targets is refused, and only that skill is affected', async () => {
+    const verifyDirectory = await install('verify')
+    const ballDirectory = await install('ball-align')
+    const read = vi.fn(async () => [join(verifyDirectory, 'SKILL.md')])
+    const report = await precheck({
+      capabilities: ['verify-ball-functional', 'design-ball'],
+      commitLedger: ledger(read),
+    })
+
+    const refused = rejected(verdict(report, 'verify-ball-functional', 'verify'))
+    expect(codes(refused)).toEqual(['commit-intent-open'])
+    expect(refused.directory).toBe(verifyDirectory)
+    const detail = refused.defects[0]!.detail
+    expect(detail).toContain(join(verifyDirectory, 'SKILL.md'))
+    expect(detail).toContain('an apply or rollback')
+    expect(detail).toContain('reconciliation')
+    // The refusal line names the capability, the skill and the directory the way
+    // every other refusal does.
+    expect(providerRefusals(report)).toEqual([
+      expect.stringContaining(`capability "verify-ball-functional" skill "verify" (found at ${verifyDirectory})`),
+    ])
+    expect(providerRefusals(report)[0]).toContain('commit-intent-open:')
+
+    // The same pre-check over the unaffected row alone: the other provider
+    // validates exactly as it does with no ledger in play at all, and the
+    // report's other facts (the roots it searched) are intact.
+    const withoutLedger = await precheck({ capabilities: ['design-ball'] })
+    expect(providerRefusals(withoutLedger)).toEqual([])
+    expect(verdict(report, 'design-ball', 'ball-align')).toEqual(verdict(withoutLedger, 'design-ball', 'ball-align'))
+    expect(ballDirectory).toBe(join(checkout, '.agents', 'skills', 'ball-align'))
+    expect(report.roots).toEqual(withoutLedger.roots)
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  test('a target that is not a discovered provider\'s own SKILL.md blocks nothing', async () => {
+    await install('verify')
+    const report = await precheck({
+      capabilities: ['verify-ball-functional'],
+      commitLedger: ledger(async () => [
+        join(home, 'skills', 'verify', 'SKILL.md'),
+        join(home, 'skills', 'verify'),
+        join(home, 'skills', 'another-skill', 'SKILL.md'),
+      ]),
+    })
+
+    expect(providerRefusals(report)).toEqual([])
+    expect(verdict(report, 'verify-ball-functional', 'verify').valid).toBe(true)
+  })
+
+  test('an undeclared directory the intent targets is still a target once discovery resolves it', async () => {
+    // The gate compares absolute paths, so a target written with a redundant
+    // separator or a `.` segment names the same file.
+    const directory = await install('verify')
+    const report = await precheck({
+      capabilities: ['verify-ball-functional'],
+      commitLedger: ledger(async () => [join(directory, '.', 'SKILL.md')]),
+    })
+
+    expect(codes(rejected(verdict(report, 'verify-ball-functional', 'verify')))).toEqual(['commit-intent-open'])
+  })
+
+  test('without an evolution service there is no gate at all', async () => {
+    const directory = await install('verify')
+    const report = await precheck({ capabilities: ['verify-ball-functional'] })
+
+    expect(providerRefusals(report)).toEqual([])
+    expect(verdict(report, 'verify-ball-functional', 'verify').valid).toBe(true)
+    expect(directory).toBe(join(checkout, '.agents', 'skills', 'verify'))
+  })
+
+  test('a ledger that cannot be read refuses every skill candidate, naming the reason (fail-closed)', async () => {
+    const verifyDirectory = await install('verify')
+    await install('ball-align')
+    const read = vi.fn(async () => {
+      throw new Error('evolution: this ledger could not be read')
+    })
+    const report = await precheck({
+      capabilities: ['verify-ball-functional', 'design-ball'],
+      commitLedger: ledger(read),
+    })
+
+    const refused = rejected(verdict(report, 'verify-ball-functional', 'verify'))
+    expect(codes(refused)).toEqual(['commit-ledger-unreadable'])
+    expect(refused.defects[0]!.detail).toContain('this ledger could not be read')
+    expect(refused.defects[0]!.detail).toContain(join(verifyDirectory, 'SKILL.md'))
+    expect(refused.defects[0]!.detail).toContain('fail-closed')
+    // Fail-closed covers every candidate discovery found a directory for — the
+    // state of the ledger is unknown, so none of them can be assumed clear…
+    expect(codes(rejected(verdict(report, 'design-ball', 'ball-align')))).toEqual(['commit-ledger-unreadable'])
+    // …while a skill that has no directory at all is still refused for what is
+    // actually wrong with it, and the rest of the diagnostics are unaffected.
+    const undiscoveredReport = await precheck({
+      capabilities: ['design-ball'],
+      table: { 'design-ball': { skills: ['missing-provider-skill'] } },
+      commitLedger: ledger(read),
+    })
+    expect(codes(rejected(verdict(undiscoveredReport, 'design-ball', 'missing-provider-skill')))).toEqual(['skill-missing'])
+    expect(read).toHaveBeenCalledTimes(2)
+  })
+
+  test('an evolution service that offers no target read is refused the same way, naming the missing read', async () => {
+    await install('verify')
+    const report = await precheck({ capabilities: ['verify-ball-functional'], commitLedger: {} })
+
+    const refused = rejected(verdict(report, 'verify-ball-functional', 'verify'))
+    expect(codes(refused)).toEqual(['commit-ledger-unreadable'])
+    expect(refused.defects[0]!.detail).toContain('openIntentTargets()')
+  })
+
+  test('no ledger write is ever performed: the gate reads the open targets and nothing else', async () => {
+    // The one method the pre-check may call, with everything else on the service
+    // a trap: a pre-check that reconciled, appended, or closed an intent would
+    // fail here rather than pass silently.
+    const directory = await install('verify')
+    const calls: string[] = []
+    const service = new Proxy({}, {
+      get: (_target, property) => {
+        calls.push(String(property))
+        if (property === 'openIntentTargets') return async () => [join(directory, 'SKILL.md')]
+        return () => {
+          throw new Error(`the pre-check called ${String(property)}`)
+        }
+      },
+    }) as EvolutionCommitLedger
+
+    const report = await precheck({ capabilities: ['verify-ball-functional'], commitLedger: service })
+    expect(codes(rejected(verdict(report, 'verify-ball-functional', 'verify')))).toEqual(['commit-intent-open'])
+    expect([...new Set(calls)]).toEqual(['openIntentTargets'])
   })
 })

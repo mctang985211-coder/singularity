@@ -700,17 +700,42 @@ describe('S4-E: the promotion gate promotes a fixed skill candidate end to end',
     expect((await f.evolution.get(PROPOSAL)).status).toBe('rolledback')
 
     // Every step is on the ledger, in order, with the approval evidents the
-    // tools passed to the service.
+    // tools passed to the service — and each production write is one commit:
+    // its `commit_intent` line first, the completion that closes it after.
     const kinds = (await ledgerLines(f)).map(line => line.kind as string)
     expect(kinds).toEqual([
       'proposed', 'candidate', 'prepared',
       'experiment_started', 'experiment_sample', 'experiment_sample', 'experiment_sample', 'experiment_sample',
-      'gated', 'decided', 'applied', 'rolledback',
+      'gated', 'decided', 'commit_intent', 'applied', 'commit_intent', 'rolledback',
     ])
     const lines = await ledgerLines(f)
     expect(lines.filter(line => line.kind === 'decided')[0]).toMatchObject({ decision: 'PROMOTE', approvalRef: expect.stringMatching(/^approval:/) })
-    expect(lines.filter(line => line.kind === 'applied')[0]).toMatchObject({ targets: [production], approvalRef: expect.stringMatching(/^approval:/) })
-    expect(lines.filter(line => line.kind === 'rolledback')[0]).toMatchObject({ targets: [production], approvalRef: expect.stringMatching(/^approval:/) })
+    expect(lines.filter(line => line.kind === 'applied')[0]).toMatchObject({
+      targets: [production],
+      approvalRef: expect.stringMatching(/^approval:/),
+      intentId: `${PROPOSAL}/apply`,
+    })
+    expect(lines.filter(line => line.kind === 'rolledback')[0]).toMatchObject({
+      targets: [production],
+      approvalRef: expect.stringMatching(/^approval:/),
+      intentId: `${PROPOSAL}/rollback`,
+    })
+    // Each intent names the same grant and target its completion closes, so the
+    // two lines of one commit cannot describe different operations.
+    const intents = lines.filter(line => line.kind === 'commit_intent')
+    expect(intents).toHaveLength(2)
+    expect(intents[0]).toMatchObject({
+      proposalId: PROPOSAL,
+      direction: 'apply',
+      target: production,
+      approvalRef: (lines.filter(line => line.kind === 'applied')[0] as { approvalRef: string }).approvalRef,
+    })
+    expect(intents[1]).toMatchObject({
+      proposalId: PROPOSAL,
+      direction: 'rollback',
+      target: production,
+      approvalRef: (lines.filter(line => line.kind === 'rolledback')[0] as { approvalRef: string }).approvalRef,
+    })
     // Nothing rewrote an earlier line: a skill candidate never takes `replayed`.
     expect(kinds).not.toContain('replayed')
   })

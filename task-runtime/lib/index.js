@@ -2061,6 +2061,58 @@ function unlistableVerifierRefusal(name, directory, ref) {
 	};
 }
 /**
+* Read the ledger's open commit intents, once per pre-check. `undefined` means
+* this deployment offers no evolution service at all — no commit can be in
+* flight, so no gate is applied. A ledger that cannot be read answers a gate
+* that refuses by name instead.
+*/
+async function readCommitGate(ledger) {
+	if (ledger === void 0) return void 0;
+	if (ledger.openIntentTargets === void 0) return {
+		openTargets: /* @__PURE__ */ new Set(),
+		unreadable: "the evolution service offers no openIntentTargets() read"
+	};
+	try {
+		const targets = await ledger.openIntentTargets();
+		return { openTargets: new Set(targets.map((target) => resolve(target))) };
+	} catch (error) {
+		return {
+			openTargets: /* @__PURE__ */ new Set(),
+			unreadable: `reading it failed (${error instanceof Error ? error.message : String(error)})`
+		};
+	}
+}
+/**
+* The refusal of a provider whose own `SKILL.md` a commit left open (K2-3): the
+* intent is the record that a production write is underway and its completion
+* has not been recorded, so production may not be what the ledger says it is —
+* the provider is refused until a reconciliation settles that commit, and every
+* other provider in the same pre-check is judged exactly as before.
+*/
+function openCommitRefusal(name, directory, target) {
+	return {
+		valid: false,
+		name,
+		directory,
+		defects: [defect("commit-intent-open", `skill "${name}" is the target of an open evolution commit intent: an apply or rollback of ${target} persisted its intent and its completion was never recorded, so production may not hold the version the ledger describes; the provider is refused until a reconciliation settles that commit (the deployment reconciles at startup, or an apply/rollback retry settles it)`)]
+	};
+}
+/**
+* The refusal of every skill candidate on a deployment whose evolution ledger
+* cannot be read: whether a commit intent is open against this provider cannot
+* be established, so it is refused rather than assumed clear (fail-closed). The
+* absence of an evolution service is a different situation and is not refused —
+* a deployment with no ledger has no commit in flight.
+*/
+function unreadableCommitLedgerRefusal(name, directory, target, why) {
+	return {
+		valid: false,
+		name,
+		directory,
+		defects: [defect("commit-ledger-unreadable", `skill "${name}" cannot be admitted against ${target}: the deployment's evolution commit ledger is unreadable (${why}), so whether a commit intent is open against this provider cannot be established — the provider is refused rather than assumed clear (fail-closed)`)]
+	};
+}
+/**
 * Every root one discovery view covers, in search order — the single root list
 * the pre-check searches and the one a refusal names, so "searched the roots"
 * in an error message is never a hand-written approximation of the search.
@@ -2073,6 +2125,19 @@ function defect(code, detail) {
 		code,
 		detail
 	};
+}
+/**
+* The refusal one skill candidate gets from the commit gate, or `undefined` when
+* the gate has nothing to say about it: only the provider whose own `SKILL.md`
+* is a target an open commit names is refused, and every other candidate in the
+* same pre-check is judged exactly as it would be without the gate.
+*/
+function commitRefusalFor(gate, name, directory) {
+	if (gate === void 0) return void 0;
+	const skillFile = resolve(join(directory, "SKILL.md"));
+	if (gate.unreadable !== void 0) return unreadableCommitLedgerRefusal(name, directory, skillFile, gate.unreadable);
+	if (!gate.openTargets.has(skillFile)) return void 0;
+	return openCommitRefusal(name, directory, skillFile);
 }
 /** The search-failure refusal: the skill name and the roots, which no phase-1 validator can know. */
 function undiscovered(name, roots) {
@@ -2115,7 +2180,8 @@ function providerContentIdentities(capabilities) {
 * viewpoint.
 *
 * The rules, in the order they are applied per skill: it must be discoverable
-* from the view's roots; the directory it resolves to must pass
+* from the view's roots; its own `SKILL.md` must not be a target an evolution
+* commit left open (K2); the directory it resolves to must pass
 * {@link validateSkillProvider} against the table and the verifier vocabulary.
 * An execution sidecar is refused when the vocabulary is unknown
 * (`verifierRefs` absent) — the one case the phase-1 validator cannot judge,
@@ -2123,12 +2189,15 @@ function providerContentIdentities(capabilities) {
 *
 * Nothing is written and nothing is thrown: every refusal is a verdict, and
 * {@link providerRefusals} turns the refusals into the lines a caller reports
-* before it refuses the whole batch.
+* before it refuses the whole batch. The commit gate is read once per call and
+* only refusals — nothing here reconciles, so asking an admission question
+* never settles a commit as a side effect.
 */
 async function precheckProviders(request) {
 	const roots = await skillSearchRoots(request.view);
 	const verifierRefs = request.verifierRefs;
 	const context = skillValidationContext(request.table, verifierRefs ?? []);
+	const commitGate = await readCommitGate(request.commitLedger);
 	const capabilities = [];
 	for (const capability of request.capabilities) {
 		const declared = request.table[capability]?.skills ?? [];
@@ -2140,6 +2209,11 @@ async function precheckProviders(request) {
 				continue;
 			}
 			const directory = dirname(file);
+			const commitRefusal = commitRefusalFor(commitGate, name, directory);
+			if (commitRefusal !== void 0) {
+				skills.push(commitRefusal);
+				continue;
+			}
 			if (verifierRefs === void 0) {
 				const loaded = await loadSkillSidecar(directory);
 				if (loaded.sidecar?.type === "execution") {
@@ -2188,7 +2262,8 @@ async function precheckReplacedCapabilityRow(request) {
 			[request.name]: request.entry
 		},
 		view: request.view,
-		...request.verifierRefs === void 0 ? {} : { verifierRefs: request.verifierRefs }
+		...request.verifierRefs === void 0 ? {} : { verifierRefs: request.verifierRefs },
+		...request.commitLedger === void 0 ? {} : { commitLedger: request.commitLedger }
 	});
 	return {
 		precheck,
@@ -6970,12 +7045,14 @@ var TaskRuntime = class TaskRuntime extends Service {
 	*/
 	async assertReplacementRow(name, entry) {
 		const verifierRefs = await this.registeredVerifierIds();
+		const commitLedger = this.softService("evolution");
 		const { refusals } = await precheckReplacedCapabilityRow({
 			name,
 			entry,
 			table: this.config.capabilities,
 			view: { cwd: process.cwd() },
-			...verifierRefs === void 0 ? {} : { verifierRefs }
+			...verifierRefs === void 0 ? {} : { verifierRefs },
+			...commitLedger === void 0 ? {} : { commitLedger }
 		});
 		if (refusals.length === 0) return;
 		throw new Error(`task-runtime: capability "${name}" was not replaced — the row grants providers that are not usable:\n` + refusals.map((line) => `- ${line}`).join("\n"));
@@ -7027,19 +7104,20 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* dead one set.
 	*
 	* **The recovery barrier (A2 §E).** This entry is what an explicit graph
-	* activation awaits, and the whole pass above is one barrier: reconciliation
-	* of the facts, the gate initialization for *every* session the store knows,
-	* and the registration of the drivers the pass restarts. The barrier waits
-	* for exactly those — never for a batch's execution or a model's output —
-	* because a driver it registers is parked (registered, so a cancellation
-	* finds it, but not started) until the barrier completes. A store-read
-	* failure, a workspace conflict or an exception in the pass fails the barrier
-	* rather than surfacing as a warning over an unrecovered store, and a
-	* cancellation or the unload invalidates the handle it leaves. Nothing here
-	* is a second persisted state machine: the store remains the only source of
-	* truth, the next explicit activation is the retry, and business execution
-	* checks the handle through {@link recoveryStatus} instead of re-running the
-	* pass.
+	* activation awaits, and the whole pass above is one barrier: the
+	* reconciliation of any open production commit intent (K2, before the store is
+	* touched at all — {@link reconcileEvolutionCommits}), reconciliation of the
+	* facts, the gate initialization for *every* session the store knows, and the
+	* registration of the drivers the pass restarts. The barrier waits for exactly
+	* those — never for a batch's execution or a model's output — because a driver
+	* it registers is parked (registered, so a cancellation finds it, but not
+	* started) until the barrier completes. A store-read failure, a workspace
+	* conflict or an exception in the pass fails the barrier rather than surfacing
+	* as a warning over an unrecovered store, and a cancellation or the unload
+	* invalidates the handle it leaves. Nothing here is a second persisted state
+	* machine: the store remains the only source of truth, the next explicit
+	* activation is the retry, and business execution checks the handle through
+	* {@link recoveryStatus} instead of re-running the pass.
 	*/
 	async adoptRoot(storeId, rootSessionId) {
 		const inflight = this.storeRecovery.get(storeId);
@@ -7097,8 +7175,40 @@ var TaskRuntime = class TaskRuntime extends Service {
 			throw error;
 		}
 	}
+	/**
+	* Settle every open evolution commit intent before this process takes a store
+	* over (K2): production is never reconciled lazily, and the deployment's tool
+	* switch does not exempt it — a deployment that registers no evolution tool
+	* still has to know whether production holds what its ledger says. Both
+	* recovery entries reach this through {@link adoptRootThroughBarrier}: an
+	* explicit graph activation (activate → adoptRoot) and a restarted root
+	* session adopting its run.
+	*
+	* Read softly (`optionalService(this.ctx, 'evolution')`): a deployment that
+	* mounts no evolution plane has no commit to settle and is not refused. A
+	* `blocked` outcome is reported by name and does not fail the barrier — the
+	* intent stays open, admission refuses the provider whose target it names, and
+	* settling it (a retry of the apply/rollback, a later activation) remains the
+	* way forward. A real failure of the reconciliation itself does fail the
+	* barrier: it is the one result that cannot be read as "nothing was underway".
+	*/
+	async reconcileEvolutionCommits() {
+		const evolution = this.softService("evolution");
+		if (evolution?.reconcile === void 0) return;
+		let outcomes;
+		try {
+			outcomes = await evolution.reconcile();
+		} catch (error) {
+			throw new Error(`task-runtime: the evolution ledger could not be reconciled before this store was recovered (${error instanceof Error ? error.message : String(error)}); the recovery barrier fails rather than taking a store over while an unsettled production commit may stand behind it`);
+		}
+		for (const outcome of outcomes) {
+			if (outcome.result !== "blocked") continue;
+			this.warn(`evolution: the commit intent "${outcome.intentId}" (${outcome.direction} of proposal "${outcome.proposalId}") targeting ${outcome.target} could not be settled — ${outcome.detail ?? "no reason reported"}`);
+		}
+	}
 	/** {@link adoptRoot}'s own pass, as one barrier body: the adoption in the order it always ran. */
 	async adoptRootThroughBarrier(storeId, rootSessionId) {
+		await this.reconcileEvolutionCommits();
 		await this.openOrCreateStore(storeId);
 		let snapshot = await this.ctx.task.snapshotIn(storeId);
 		this.reindex(storeId, snapshot);
@@ -11150,11 +11260,13 @@ var TaskRuntime = class TaskRuntime extends Service {
 	*/
 	async providerPrecheck(capabilities, view, table = this.config.capabilities) {
 		const verifierRefs = await this.registeredVerifierIds();
+		const commitLedger = this.softService("evolution");
 		return precheckProviders({
 			capabilities,
 			table,
 			view,
-			...verifierRefs === void 0 ? {} : { verifierRefs }
+			...verifierRefs === void 0 ? {} : { verifierRefs },
+			...commitLedger === void 0 ? {} : { commitLedger }
 		});
 	}
 	/**

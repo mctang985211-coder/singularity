@@ -494,6 +494,32 @@ declare function assertFrozenExperiment(value: unknown): asserts value is Frozen
  */
 declare function assertExperimentReport(report: unknown): asserts report is ExperimentReport;
 //#endregion
+//#region src/commit.d.ts
+/**
+ * The durable stages of one commit. A deployment only ever observes them through
+ * {@link CommitHost.probe}, the typed test seam that simulates a process exiting
+ * at that point.
+ */
+type CommitStage = 'intent-recorded' | 'write-staged' | 'write-renamed';
+/** What one reconciliation of an open intent settled to. */
+interface ReconcileOutcome {
+  intentId: string;
+  proposalId: string;
+  direction: CommitDirection;
+  /** The absolute production target the intent committed. */
+  target: string;
+  /**
+   * `completed-redone`: production still held the pre-commit state, so the same
+   * write was redone and the completion recorded. `completed-written`:
+   * production already held the committed content, so only the completion was
+   * recorded. `blocked`: neither state was found (or the source is gone) — the
+   * intent stays open and nothing was written.
+   */
+  result: 'completed-redone' | 'completed-written' | 'blocked';
+  /** The named reason, present on `blocked`: what a human must settle before this commit can proceed. */
+  detail?: string;
+}
+//#endregion
 //#region src/experiment.d.ts
 
 /** One sample as the caller's specification names it. */
@@ -552,8 +578,8 @@ interface ExperimentKey {
 }
 /** One `experiment_started` ledger line: the frozen experiment, recorded before the first run. */
 interface ExperimentStartedRecord {
-  /** The `proposals.jsonl` format version, not the report's — the ledger is one format, `formatVersion: 2` (S4-E 收尾). */
-  formatVersion: 2;
+  /** The `proposals.jsonl` format version, not the report's — the ledger is one format, `formatVersion: 3` (K2). */
+  formatVersion: 3;
   kind: 'experiment_started';
   proposalId: string;
   experimentId: string;
@@ -580,8 +606,8 @@ interface ExperimentStartedRecord {
  * under the same key.
  */
 interface ExperimentSampleRecord {
-  /** The `proposals.jsonl` format version, not the report's — the ledger is one format, `formatVersion: 2` (S4-E 收尾). */
-  formatVersion: 2;
+  /** The `proposals.jsonl` format version, not the report's — the ledger is one format, `formatVersion: 3` (K2). */
+  formatVersion: 3;
   kind: 'experiment_sample';
   proposalId: string;
   experimentId: string;
@@ -898,14 +924,14 @@ interface GateAnswers {
   regressionEvidenceRefs: string[];
 }
 /**
- * One immutable ledger line, `formatVersion: 2` throughout (S4-E 收尾). A state
+ * One immutable ledger line, `formatVersion: 3` throughout (K2). A state
  * migration appends a new record; nothing is ever rewritten in place. The
  * version is the whole ledger's, not one line's: a line declaring anything but
- * 2 — or declaring nothing — makes the ledger refuse to load, and no entry here
+ * 3 — or declaring nothing — makes the ledger refuse to load, and no entry here
  * writes one.
  */
 type EvolutionRecord = {
-  formatVersion: 2;
+  formatVersion: 3;
   kind: 'proposed';
   proposalId: string;
   targetType: ProposalTargetType;
@@ -917,7 +943,7 @@ type EvolutionRecord = {
   actor: string;
   at: string;
 } | {
-  formatVersion: 2;
+  formatVersion: 3;
   kind: 'candidate';
   proposalId: string;
   /** Complete version set the candidate aligns to (branch-model bookkeeping; this build creates no real branch). */
@@ -935,7 +961,7 @@ type EvolutionRecord = {
   actor: string;
   at: string;
 } | {
-  formatVersion: 2;
+  formatVersion: 3;
   kind: 'prepared';
   proposalId: string;
   /**
@@ -967,14 +993,14 @@ type EvolutionRecord = {
   actor: string;
   at: string;
 } | {
-  formatVersion: 2;
+  formatVersion: 3;
   kind: 'gated';
   proposalId: string;
   gate: GateAnswers;
   actor: string;
   at: string;
 } | {
-  formatVersion: 2;
+  formatVersion: 3;
   kind: 'decided';
   proposalId: string;
   decision: EvolutionDecision;
@@ -989,34 +1015,97 @@ type EvolutionRecord = {
   actor: string;
   at: string;
 } | {
-  formatVersion: 2;
+  formatVersion: 3;
   kind: 'applied';
   proposalId: string;
   /** Production write targets, for audit (absolute paths). */
   targets: string[];
   /** Human-review evidence: the approval call id of the evolution_apply request that granted this write. */
   approvalRef: string;
+  /**
+   * The open commit intent this completion closes (K2): the
+   * `commit_intent` line persisted before the write. Required — the fold
+   * refuses a completion with no matching open intent.
+   */
+  intentId: string;
   actor: string;
   at: string;
 } | {
-  formatVersion: 2;
+  formatVersion: 3;
   kind: 'rolledback';
   proposalId: string;
   /** Production write targets of the rollback (restored champion or deleted product), for audit. */
   targets: string[];
   /** Human-review evidence: the approval call id of the evolution_rollback request that granted this write. */
   approvalRef: string;
+  /** The open commit intent this completion closes (K2) — see `applied`. */
+  intentId: string;
   actor: string;
   at: string;
 }
+/** The commit intent (K2) — see {@link CommitIntentRecord}. */ | CommitIntentRecord
 /**
  * The experiment family (S4-E §F.2): the two-sided skill evaluation's frozen
  * identity and its per-sample runs. These lines are not lifecycle transitions
  * — an experiment does not move a proposal's status — so the proposal fold
  * leaves them alone and {@link foldExperiments} folds them. Their records
- * carry the ledger's own `formatVersion: 2` as well; the experiment *report*
+ * carry the ledger's own `formatVersion: 3` as well; the experiment *report*
  * at `experiment-report.json` has its own, separate version field.
  */ | ExperimentStartedRecord | ExperimentSampleRecord;
+/** Which way one commit moves a production target. */
+type CommitDirection = 'apply' | 'rollback';
+/**
+ * One `commit_intent` ledger line (K2): the durable "this apply/rollback is now
+ * underway" record, written before production changes and closed by the
+ * completion line that names the same `intentId`.
+ *
+ * It carries everything a recovery needs without trusting memory: which
+ * proposal and direction, which human grant, the absolute production target, the
+ * digest production must hold before the write (`baselineSha256`) and the digest
+ * it must hold after (`contentSha256`), and the bytes to write again as a path
+ * relative to the ledger root (`source`) — the candidate file for an apply, the
+ * champion snapshot for a rollback. The id is derived, not chosen:
+ * `<proposalId>/<direction>`.
+ *
+ * The line is not a lifecycle transition: it does not move the proposal's
+ * status, so the proposal fold records it as {@link EvolutionProposal.openIntent}
+ * and leaves the state machine alone. A proposal has at most one open intent,
+ * and only one of them can close it (see the fold's admission rules).
+ */
+interface CommitIntentRecord {
+  /** The `proposals.jsonl` format version — the ledger is one format, `formatVersion: 3` (K2). */
+  formatVersion: 3;
+  kind: 'commit_intent';
+  /** `<proposalId>/<direction>` — the derived id the completion line must repeat. */
+  intentId: string;
+  proposalId: string;
+  direction: CommitDirection;
+  /** The human grant that authorised this commit (`approval:<callId>`), recorded on the completion as well. */
+  approvalRef: string;
+  /** The absolute production path this commit replaces. */
+  target: string;
+  /** The digest production must hold before the write — the state a reconciliation redoes the write from. */
+  baselineSha256: string;
+  /** The digest production must hold after the write. */
+  contentSha256: string;
+  /** The recoverable bytes, relative to the ledger root. */
+  source: string;
+  actor: string;
+  at: string;
+}
+/** Folded view of one open `commit_intent` record, as {@link EvolutionProposal} exposes it. */
+interface CommitIntentView {
+  intentId: string;
+  proposalId: string;
+  direction: CommitDirection;
+  approvalRef: string;
+  target: string;
+  baselineSha256: string;
+  contentSha256: string;
+  source: string;
+  actor: string;
+  at: string;
+}
 /** Folded view of one `applied` or `rolledback` record. */
 interface ApplyView {
   targets: string[];
@@ -1027,13 +1116,25 @@ interface ApplyOutcome {
   proposal: EvolutionProposal;
   targets: string[];
   /**
+   * Set only when this call found a commit intent already open for the proposal
+   * and settled it instead of starting a new commit (K2): `redone` — production
+   * still held the pre-commit state, so the same operation was carried out;
+   * `written` — production already held the committed content (the write had
+   * landed, its completion had not), so only the completion was recorded.
+   * Absent on a fresh commit, and on a proposal with nothing open.
+   */
+  recovered?: 'redone' | 'written';
+  /**
    * What the promotion check validated about the providers this apply put in
    * place ({@link PromotionCheck.providers}): the candidate skill of a skill
    * apply, with the role it may be counted as, so a knowledge or guidance
    * provider is reported as such rather than presented as the execution
    * provider it is not. Empty when the target carries no provider. Not
    * persisted: the ledger's `applied` record keeps its shape, and a run's own
-   * binding is where a selected role is recorded for real.
+   * binding is where a selected role is recorded for real. Absent when this
+   * call settled an open intent: a recovery does not re-run the promotion gate
+   * (the approval and the evidence it already rested on are on the ledger), so
+   * it reports what it did and not a second provider verdict.
    */
   providers?: readonly PromotionProvider[];
 }
@@ -1090,6 +1191,14 @@ interface EvolutionProposal {
   decisionApprovalRef?: string;
   applied?: ApplyView;
   rolledback?: ApplyView;
+  /**
+   * The commit intent this proposal has open (K2): a production write is
+   * underway and its completion line has not been recorded. At most one at a
+   * time. It does not move {@link status} — an interrupted apply is still
+   * `decided`, an interrupted rollback still `applied` — which is exactly why a
+   * retry can tell "nothing was committed yet" from "everything was".
+   */
+  openIntent?: CommitIntentView;
   /** One entry per ledger record, oldest first — derived, never stored. */
   history: {
     status: EvolutionStatus;
@@ -1159,6 +1268,17 @@ interface Config {
    * selection is never parsed back out of a display string.
    */
   modelSelection?: () => ModelSelection | undefined;
+  /**
+   * The typed test seam of the commit path (K2): it fires at each durable stage
+   * of one commit — after the `commit_intent` line is on disk, after the new
+   * bytes are staged and fsynced beside the production target but before the
+   * rename, and after the rename has been read back and verified. Throwing from
+   * it aborts the commit exactly where it stands: the intent stays open and no
+   * later stage runs, which is how a process exit between two durable writes is
+   * simulated. A production deployment never sets it; there is no other way to
+   * observe or interrupt a commit.
+   */
+  commitProbe?: (stage: CommitStage) => void;
 }
 /**
  * The production write targets of an apply (and its matching rollback), for
@@ -1186,9 +1306,12 @@ declare class EvolutionService extends Service {
   readonly repoRoot: string;
   /** The injected model-selection resolver, if the assembly wired one (see {@link Config.modelSelection}). */
   private readonly resolveModelSelection?;
+  /** The commit path's typed test seam, if this instance was built with one (see {@link Config.commitProbe}). */
+  private readonly commitProbe?;
   private records;
   private readonly loaded;
   private writes;
+  private commits;
   constructor(ctx: Context, config?: Config);
   /** Ledger file path (`<root>/proposals.jsonl`). */
   get file(): string;
@@ -1259,26 +1382,42 @@ declare class EvolutionService extends Service {
   decide(proposalId: string, decision: EvolutionDecision, actor: string, approvalRef: string, note?: string): Promise<EvolutionProposal>;
   /**
    * Move decided → applied: copy the sandbox materialization into production
-   * (W16). Reachable only for a PROMOTE decision on a materialized skill
-   * mutation at L1–L3 (the state machine itself refuses anything else — every
-   * other target type has no executor in this build); the caller (the
+   * (W16), as one commit. Reachable only for a PROMOTE decision on a materialized
+   * skill mutation at L1–L3 (the state machine itself refuses anything else —
+   * every other target type has no executor in this build); the caller (the
    * evolution_apply tool) must hold a human grant from `ctx.approval.request`
-   * first, exactly as for decide. The production write runs BEFORE the ledger
-   * append, so a failed write leaves the proposal decided and retryable: the
-   * sandbox `SKILL.md` replaces the production one (the champion snapshot
-   * covers that file only, so the write is file-level, never a directory
-   * delete).
+   * first, exactly as for decide. The sandbox `SKILL.md` replaces the production
+   * one (the champion snapshot covers that file only, so the write is
+   * file-level, never a directory delete).
+   *
+   * The commit order is the recovery rule (K2): the `commit_intent` line is
+   * persisted first — proposal, direction, this approval, the absolute target,
+   * the content identity production must hold before (`prepared.skillBaseline`
+   * P3) and after (`prepared.skillContent` P2), and the sandbox candidate as the
+   * recoverable source — then the target is replaced atomically, then the
+   * `applied` record closes the intent. A failure at any stage leaves the intent
+   * open and nothing half-written: the production file is one complete version or
+   * the other, and {@link reconcile} (or a retry of this call) settles the intent
+   * from what production actually holds. Nothing here trusts a promise or a
+   * caller-supplied "approved".
    *
    * A skill apply re-verifies the production baseline (P3) after the human
-   * grant and immediately before the write: the production target must still be
+   * grant and before the intent is recorded: the production target must still be
    * the one prepare recorded. A direct service call therefore cannot bypass the
    * check the tool already ran before asking for approval.
    *
-   * The promotion check (S1-C item 3) runs here too, immediately before the
-   * write and after the grant: a candidate whose provider role changed while the
-   * human was deciding (a sidecar that appeared in the sandbox, a verifier that
-   * was unregistered) is refused here, so no entry can write something a later
+   * The promotion check (S1-C item 3) runs here too, before the intent is
+   * recorded: a candidate whose provider role changed while the human was
+   * deciding (a sidecar that appeared in the sandbox, a verifier that was
+   * unregistered) is refused here, so no entry can write something a later
    * admission would have refused.
+   *
+   * When this proposal already has an open intent — the process died before the
+   * completion landed — this call does not ask for another approval and does not
+   * re-run the promotion gate: the recorded intent already binds the grant and
+   * the content it was approved against, and the only question left is what
+   * production holds. It settles that intent ({@link reconcile}, one intent) and
+   * reports it as {@link ApplyOutcome.recovered}.
    */
   apply(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome>;
   /**
@@ -1335,7 +1474,7 @@ declare class EvolutionService extends Service {
    * promotion would write — plus the executor boundary this promotion cannot
    * cross.
    *
-   * The boundary: `writeProduction` promotes a **single `SKILL.md`**, so a
+   * The boundary: the commit promotes a **single `SKILL.md`**, so a
    * candidate whose directory carries anything else (`SKILL.contract.json`, a
    * `references/` or `scripts/` tree, any other file) is refused here by name.
    * The executor is not being extended to multi-file candidates; what is being
@@ -1408,20 +1547,95 @@ declare class EvolutionService extends Service {
   private readVerifiedSkillCandidate;
   /**
    * Move applied → rolledback: undo the apply by restoring the champion
-   * `SKILL.md` snapshot taken at prepare. A record of another target type has no
-   * executor here: this build writes and restores a single `SKILL.md` only, and
-   * an applied capability row or preset directory is refused by name rather than
+   * `SKILL.md` snapshot taken at prepare, as one commit — the same intent →
+   * atomic write → completion order as apply, so an interrupted rollback is
+   * recoverable the same way. A record of another target type has no executor
+   * here: this build writes and restores a single `SKILL.md` only, and an
+   * applied capability row or preset directory is refused by name rather than
    * touched. Same approval discipline as apply: the tool asks a human first, the
    * service only executes and records.
+   *
+   * A rollback restores *this* proposal's baseline and nothing else, so both
+   * ends are re-verified before the intent is recorded: production must still
+   * carry exactly the content this proposal applied (`prepared.skillContent`,
+   * P2), and the champion snapshot must still hash to the baseline prepare
+   * recorded (`prepared.skillBaseline`, P3). A target a later proposal — or any
+   * other writer — changed since is refused by name with nothing written, and so
+   * is a snapshot that can no longer reproduce the bytes it captured: neither
+   * may be papered over by restoring an old version on top of a newer one.
+   *
+   * As in {@link apply}, an open intent of this proposal is settled rather than
+   * duplicated, and the result reports the recovery.
    */
   rollback(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome>;
   /**
-   * The production write behind apply/rollback: one `SKILL.md` at the candidate
-   * name under the production skill root. `apply` writes the verified candidate
-   * bytes, `rollback` the champion snapshot. Every path goes through
-   * `resolveWithin`, so a write can never leave the production root it targets.
+   * Settle every open commit intent, in ledger order (K2) — the explicit startup
+   * and resume entry. Nothing calls this implicitly: no read path, no `get` /
+   * `list`, and no tool call reconciles as a side effect, so a query stays a
+   * query and a deployment decides when a recovery is due.
+   *
+   * Each intent is settled by {@link settleOpenIntent} under the same serial
+   * queue a fresh commit takes, and each outcome is reported by name:
+   * `completed-redone` (production still held the pre-commit state, so the same
+   * write was carried out), `completed-written` (production already held the
+   * committed content, so only the completion was recorded) or `blocked` (a
+   * source that is gone or changed, a target that holds neither state — the
+   * intent stays open and nothing is overwritten). A blocked intent does not
+   * throw: the rest of the batch is still settled, and the caller decides what a
+   * human does about it. A real I/O failure of a redo write is not a blocked
+   * commit and does throw.
+   *
+   * Repeating it is free: a settled intent has no open intent left, so the fold
+   * refuses a second completion and this call reports nothing for it.
    */
-  private writeProduction;
+  reconcile(): Promise<ReconcileOutcome[]>;
+  /**
+   * The production targets a commit has left open (K2), in ledger order — the
+   * pure read an admission gate or a loader uses to see what must not be loaded
+   * until a reconciliation settled it. It writes nothing, and it never
+   * reconciles: settling is {@link reconcile}'s call to make, at the moment the
+   * deployment decides recovery is due.
+   */
+  openIntentTargets(): Promise<readonly string[]>;
+  /** Every commit intent still open, in ledger order — one per proposal at most, validated by the fold. */
+  private openIntents;
+  /**
+   * Settle one open intent for a caller that named it (an apply/rollback retry),
+   * where a blocked commit is the caller's answer and not a batch's footnote:
+   * the named stop is thrown with the reason intact.
+   */
+  private settleOpenIntent;
+  /**
+   * The commit request one apply/rollback binds, read off the prepared record
+   * the proposal already carries: the absolute target (the same path
+   * {@link applyTargets} names to the human), the content identity production
+   * must hold before and after, and the recoverable source under the ledger
+   * root. `apply` commits the candidate over the recorded baseline; `rollback`
+   * commits the champion snapshot over the content the apply installed — the two
+   * digests swap, and nothing else about the two directions differs.
+   */
+  private commitRequest;
+  /** The one production path a commit of this proposal may write: `<skillRoot>/<name>/SKILL.md`, confined to the skill root. */
+  private commitTarget;
+  /**
+   * The narrow host the commit path runs on (see `commit.ts`): the roots a
+   * target and a source resolve against, the service's own verified reads — P2
+   * for a candidate, the walk-verified production read, the ledger-root read for
+   * a snapshot — the append funnel every line goes through (format check, staged
+   * fold, serialized write), and the probe seam. The commit path owns the order;
+   * the service owns what may be read and what a line must say.
+   */
+  private commitHost;
+  /**
+   * Serialize one commit — its intent, its production write and its completion —
+   * behind every commit already running or queued, and behind every write the
+   * ledger funnel has not appended yet. Two proposals competing for one target
+   * therefore never interleave a read-back with another commit's rename: the
+   * second sees the first's result and refuses on its own baseline check. This
+   * is a single-process queue, not a cross-process lock: the deployment's
+   * one-writer constraint still stands, and a second process is not excluded.
+   */
+  private commitExclusive;
   /** Folded view of one proposal, or throws on an unknown id. */
   get(proposalId: string): Promise<EvolutionProposal>;
   /** Folded views, newest proposal first, optionally filtered. */
@@ -1458,6 +1672,17 @@ declare class EvolutionService extends Service {
    * content identities a prepare captured, and a decided record names the human
    * approval that granted it. A line missing any of them is refused here,
    * before any later entry can act on the state it would have folded to.
+   *
+   * Commit intents (K2) fold here too, because they are the one place where a
+   * ledger line is judged against the *other* lines around it: a `commit_intent`
+   * is admitted only for a proposal in the state its direction commits (`apply`
+   * from decided, `rollback` from applied), only with the derived id
+   * `<proposalId>/<direction>`, and only when the proposal has no other open
+   * intent; an `applied`/`rolledback` completion is admitted only when it closes
+   * the open intent of its own direction — same id, same approval, that exact
+   * target — and it closes it. So a completion cannot be recorded without its
+   * intent, cannot borrow another approval or another target, and cannot be
+   * recorded twice: the second line has nothing left to close.
    *
    * The experiment family is not a lifecycle transition and is skipped here;
    * {@link foldLedger} folds it beside this fold.
@@ -1539,4 +1764,4 @@ declare class EvolutionService extends Service {
   private experimentSources;
 }
 //#endregion
-export { APPLYABLE_TARGET_TYPES, ApplyOutcome, ApplyView, ChampionState, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCriterion, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, GateAnswers, ListFilter, ModelSelection, PrecheckSkillVerdict, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, ProviderPrecheckView, ReplayCriterionDiff, ReplayCriterionSummary, ReplaySideSummary, SideRelation, SkillContentIdentity, SkillMutation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, overallExperimentVerdict, protectedInputsDigest, renderProviderRoles, resumeExperiment, runExperiment };
+export { APPLYABLE_TARGET_TYPES, ApplyOutcome, ApplyView, ChampionState, CommitDirection, CommitIntentRecord, CommitIntentView, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCriterion, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, GateAnswers, ListFilter, ModelSelection, PrecheckSkillVerdict, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, ProviderPrecheckView, ReplayCriterionDiff, ReplayCriterionSummary, ReplaySideSummary, SideRelation, SkillContentIdentity, SkillMutation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, overallExperimentVerdict, protectedInputsDigest, renderProviderRoles, resumeExperiment, runExperiment };

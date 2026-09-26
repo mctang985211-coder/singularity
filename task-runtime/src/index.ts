@@ -66,7 +66,7 @@ import { resolveCapabilities, capabilitySnapshot, resolvePreset, type Capability
 import { checkDecomposition, contractDefects, independentAcceptanceDefects, rootIndependenceDefects } from './admission.ts'
 import { ExecutionGate, type DrainResult, type JobsView } from './gate.ts'
 import { optionalService, precheckProviders, precheckReplacedCapabilityRow, providerContentIdentities, providerDefectLines, providerRefusals, registeredVerifierIds } from './provider-precheck.ts'
-import type { ProviderPrecheck, SkillDiscoveryView } from './provider-precheck.ts'
+import type { EvolutionCommitLedger, ProviderPrecheck, SkillDiscoveryView } from './provider-precheck.ts'
 import { assertRootBudgetConfig, checkBatchAdmission, checkRunStart, hasRootLimits, resolveRootBudget } from './root-budget.ts'
 import type { RootBudgetConfig } from './root-budget.ts'
 import { bindRunProviders, defaultRunBindingRoot, readRunBinding } from './run-binding.ts'
@@ -232,6 +232,7 @@ export type {
 export { RUN_BINDING_SKILLS_DIR, bindRunProviders, defaultRunBindingRoot, readRunBinding } from './run-binding.ts'
 export type {
   CapabilityProviderPrecheck,
+  EvolutionCommitLedger,
   ProviderPrecheck,
   ProviderPrecheckRequest,
   ResolvedProviderIdentity,
@@ -352,6 +353,32 @@ interface SessionProjectionSource {
 /** Soft view of the session-query service: one session's replay-validated raw event log. */
 interface SessionLogSource {
   readSession(sessionId: SessionId): Promise<{ events: readonly SessionEvent[] }>
+}
+
+/**
+ * What one reconciliation of an open evolution commit intent settled to, as this
+ * package reads it: the intent's own identity and the result
+ * (`completed-redone`, `completed-written`, or `blocked` with its named reason).
+ * Declared structurally because task-runtime never imports the evolution package
+ * — the dependency runs one way, evolution → task-runtime.
+ */
+export interface CommitReconcileOutcome {
+  readonly intentId: string
+  readonly proposalId: string
+  readonly direction: string
+  readonly target: string
+  readonly result: 'completed-redone' | 'completed-written' | 'blocked'
+  readonly detail?: string
+}
+
+/**
+ * Soft view of the evolution plane's commit recovery entry
+ * (`EvolutionService.reconcile`): settle every open commit intent against what
+ * production actually holds, or report by name why one could not be settled.
+ * `blocked` is a result, not a throw; a real I/O failure of a redo write throws.
+ */
+interface EvolutionCommitRecovery {
+  reconcile?(): Promise<readonly CommitReconcileOutcome[]>
 }
 
 /**
@@ -1853,6 +1880,7 @@ export class TaskRuntime extends Service {
    */
   private async assertReplacementRow(name: string, entry: CapabilityConfig): Promise<void> {
     const verifierRefs = await this.registeredVerifierIds()
+    const commitLedger = this.softService<EvolutionCommitLedger>('evolution')
     const { refusals } = await precheckReplacedCapabilityRow({
       name,
       entry,
@@ -1861,6 +1889,7 @@ export class TaskRuntime extends Service {
       // load-time report ask from: this process knows its own skill roots.
       view: { cwd: process.cwd() },
       ...(verifierRefs === undefined ? {} : { verifierRefs }),
+      ...(commitLedger === undefined ? {} : { commitLedger }),
     })
     if (refusals.length === 0) return
     throw new Error(
@@ -1916,19 +1945,20 @@ export class TaskRuntime extends Service {
    * dead one set.
    *
    * **The recovery barrier (A2 §E).** This entry is what an explicit graph
-   * activation awaits, and the whole pass above is one barrier: reconciliation
-   * of the facts, the gate initialization for *every* session the store knows,
-   * and the registration of the drivers the pass restarts. The barrier waits
-   * for exactly those — never for a batch's execution or a model's output —
-   * because a driver it registers is parked (registered, so a cancellation
-   * finds it, but not started) until the barrier completes. A store-read
-   * failure, a workspace conflict or an exception in the pass fails the barrier
-   * rather than surfacing as a warning over an unrecovered store, and a
-   * cancellation or the unload invalidates the handle it leaves. Nothing here
-   * is a second persisted state machine: the store remains the only source of
-   * truth, the next explicit activation is the retry, and business execution
-   * checks the handle through {@link recoveryStatus} instead of re-running the
-   * pass.
+   * activation awaits, and the whole pass above is one barrier: the
+   * reconciliation of any open production commit intent (K2, before the store is
+   * touched at all — {@link reconcileEvolutionCommits}), reconciliation of the
+   * facts, the gate initialization for *every* session the store knows, and the
+   * registration of the drivers the pass restarts. The barrier waits for exactly
+   * those — never for a batch's execution or a model's output — because a driver
+   * it registers is parked (registered, so a cancellation finds it, but not
+   * started) until the barrier completes. A store-read failure, a workspace
+   * conflict or an exception in the pass fails the barrier rather than surfacing
+   * as a warning over an unrecovered store, and a cancellation or the unload
+   * invalidates the handle it leaves. Nothing here is a second persisted state
+   * machine: the store remains the only source of truth, the next explicit
+   * activation is the retry, and business execution checks the handle through
+   * {@link recoveryStatus} instead of re-running the pass.
    */
   async adoptRoot(storeId: string, rootSessionId: string): Promise<RootAdoption> {
     // The barrier already in flight for this store is the one to wait for: the
@@ -2023,8 +2053,56 @@ export class TaskRuntime extends Service {
     }
   }
 
+  /**
+   * Settle every open evolution commit intent before this process takes a store
+   * over (K2): production is never reconciled lazily, and the deployment's tool
+   * switch does not exempt it — a deployment that registers no evolution tool
+   * still has to know whether production holds what its ledger says. Both
+   * recovery entries reach this through {@link adoptRootThroughBarrier}: an
+   * explicit graph activation (activate → adoptRoot) and a restarted root
+   * session adopting its run.
+   *
+   * Read softly (`optionalService(this.ctx, 'evolution')`): a deployment that
+   * mounts no evolution plane has no commit to settle and is not refused. A
+   * `blocked` outcome is reported by name and does not fail the barrier — the
+   * intent stays open, admission refuses the provider whose target it names, and
+   * settling it (a retry of the apply/rollback, a later activation) remains the
+   * way forward. A real failure of the reconciliation itself does fail the
+   * barrier: it is the one result that cannot be read as "nothing was underway".
+   */
+  private async reconcileEvolutionCommits(): Promise<void> {
+    const evolution = this.softService<EvolutionCommitRecovery>('evolution')
+    if (evolution?.reconcile === undefined) return
+    let outcomes: readonly CommitReconcileOutcome[]
+    try {
+      outcomes = await evolution.reconcile()
+    } catch (error) {
+      throw new Error(
+        'task-runtime: the evolution ledger could not be reconciled before this store was recovered ' +
+        `(${error instanceof Error ? error.message : String(error)}); the recovery barrier fails rather than taking a store over ` +
+        'while an unsettled production commit may stand behind it',
+      )
+    }
+    for (const outcome of outcomes) {
+      if (outcome.result !== 'blocked') continue
+      this.warn(
+        `evolution: the commit intent "${outcome.intentId}" (${outcome.direction} of proposal "${outcome.proposalId}") targeting ` +
+        `${outcome.target} could not be settled — ${outcome.detail ?? 'no reason reported'}`,
+      )
+    }
+  }
+
   /** {@link adoptRoot}'s own pass, as one barrier body: the adoption in the order it always ran. */
   private async adoptRootThroughBarrier(storeId: string, rootSessionId: string): Promise<RootAdoption> {
+    // K2-3/§E: production is reconciled before this barrier takes anything over.
+    // A graph activation arrives here (activate → adoptRoot), so an interrupted
+    // apply/rollback is settled — or reported by name — before the store's runs
+    // are adopted and before any admission can resolve a provider against a
+    // target a commit left open. A blocked intent does not fail the barrier (the
+    // admission gate refuses the provider it concerns, and a human settles what
+    // production actually holds); a real read/write failure of the
+    // reconciliation does, because half-recovered is not recovered.
+    await this.reconcileEvolutionCommits()
     await this.openOrCreateStore(storeId)
     let snapshot = await this.ctx.task.snapshotIn(storeId)
     this.reindex(storeId, snapshot)
@@ -7312,11 +7390,13 @@ export class TaskRuntime extends Service {
     table: Readonly<Record<string, CapabilityConfig>> = this.config.capabilities,
   ): Promise<ProviderPrecheck> {
     const verifierRefs = await this.registeredVerifierIds()
+    const commitLedger = this.softService<EvolutionCommitLedger>('evolution')
     return precheckProviders({
       capabilities,
       table,
       view,
       ...(verifierRefs === undefined ? {} : { verifierRefs }),
+      ...(commitLedger === undefined ? {} : { commitLedger }),
     })
   }
 

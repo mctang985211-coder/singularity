@@ -101,6 +101,15 @@ export interface RunStackOptions {
   readonly capabilities?: Readonly<Record<string, CapabilityConfig>>
   /** Root sessions of this deployment, in order; the first is the primary. Defaults to `['s-root']`. */
   readonly roots?: readonly string[]
+  /**
+   * The directory this stack lives in — its `home` (`<workspace>/dsh-home`), its
+   * checkout and its scratch. Defaults to a freshly minted tmp directory. A spec
+   * that passes the same path to a second {@link startRunStack} call boots a
+   * second process image (a new `Context`, new services, a new store) over the
+   * first one's durable files: the same-directory reopen a crash-recovery case
+   * needs. The fixture removes only the directory it minted itself.
+   */
+  readonly workspace?: string
   /** Mount the deployment's filesystem skill provider, so a worker's own catalog is real. */
   readonly discovery?: boolean
   /** Mount the real `skill` loader (`@deepseek-ai/dsh-tool-skill`) instead of a stand-in. */
@@ -252,11 +261,14 @@ class RunStackImpl implements RunStack {
   private readonly live = new Map<string, Agent>()
   private readonly sessionRoot = new Map<string, string>()
   private readonly primary: SessionId
+  /** Whether {@link workspace} is this stack's own tmp directory (removed on dispose) or a caller's. */
+  private readonly ownsWorkspace: boolean
   private previousHome: string | undefined
   private callSeq = 0
 
   constructor(private readonly options: RunStackOptions) {
-    this.workspace = mkdtempSync(join(tmpdir(), 'singularity-run-stack-'))
+    this.ownsWorkspace = options.workspace === undefined
+    this.workspace = options.workspace ?? mkdtempSync(join(tmpdir(), 'singularity-run-stack-'))
     // The checkout a worker runs in, the env path admission discovers from, and
     // the directory the root agent's cwd resolves to are one directory, as they
     // are in a deployment.
@@ -630,7 +642,9 @@ class RunStackImpl implements RunStack {
     if (this.previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = this.previousHome
     await this.ctx.fiber.dispose()
-    rmSync(this.workspace, { recursive: true, force: true })
+    // A caller-supplied workspace belongs to the spec (it is the directory a
+    // second boot reopens); only the one this fixture minted is removed here.
+    if (this.ownsWorkspace) rmSync(this.workspace, { recursive: true, force: true })
   }
 }
 

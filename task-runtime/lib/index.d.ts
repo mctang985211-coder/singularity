@@ -553,7 +553,7 @@ type SkillContractDefectCode = 'sidecar-unknown-version' | 'sidecar-unknown-fiel
 //#endregion
 //#region src/sidecar.d.ts
 /** Every reason a provider is refused, named so a caller can act on the kind of problem. */
-type SkillDefectCode = SkillContractDefectCode | 'skill-missing' | 'skill-file-invalid' | 'skill-name-mismatch' | 'sidecar-unreadable' | 'sidecar-mismatch' | 'content-mismatch' | 'content-unsupported' | 'verifier-unknown' | 'capability-unknown' | 'tool-not-covered';
+type SkillDefectCode = SkillContractDefectCode | 'skill-missing' | 'skill-file-invalid' | 'skill-name-mismatch' | 'sidecar-unreadable' | 'sidecar-mismatch' | 'content-mismatch' | 'content-unsupported' | 'verifier-unknown' | 'capability-unknown' | 'tool-not-covered' | 'commit-intent-open' | 'commit-ledger-unreadable';
 /** One named reason a provider is not acceptable, with the detail a caller reports. */
 interface SkillDefect {
   code: SkillDefectCode;
@@ -852,6 +852,25 @@ declare function registeredVerifierVocabulary(host: unknown): Promise<{
  */
 declare function unlistableVerifierRefusal(name: string, directory: string | undefined, ref: string): RejectedProviderVerdict;
 /**
+ * The evolution commit ledger as a provider check reads it (K2): the production
+ * targets a commit left open. Task-runtime never imports the evolution package —
+ * the dependency runs one way, evolution → task-runtime — so this is a
+ * structural read of whatever service a deployment mounts under `evolution`;
+ * a deployment that mounts none has no commit in flight to gate on.
+ */
+interface EvolutionCommitLedger {
+  /**
+   * The absolute production targets of every open commit intent, in ledger order
+   * (`EvolutionService.openIntentTargets`). A pure read: it writes nothing and
+   * never reconciles, so asking an admission question cannot settle a commit as
+   * a side effect. Optional because this is a structural read of a service this
+   * package does not own — a service that cannot answer it is refused by name
+   * rather than read as "no commit is open" (`commit-ledger-unreadable`,
+   * fail-closed).
+   */
+  openIntentTargets?(): Promise<readonly string[]>;
+}
+/**
  * Where a pre-check looks for a skill: the viewpoint of the worker that would
  * load it. `cwd` is the session's checkout — the directory the worker's own
  * discovery walks upward from — and `extraRoots` are the roots that precede the
@@ -939,6 +958,14 @@ interface ProviderPrecheckRequest {
    * `ready()`), or absent when the registry cannot be listed.
    */
   readonly verifierRefs?: readonly string[];
+  /**
+   * The deployment's evolution ledger, resolved softly by the caller
+   * (`optionalService(ctx, 'evolution')`) or absent when the deployment mounts
+   * none. Absence means no commit can be in flight; a service that is present
+   * but cannot answer its read is refused by name (fail-closed,
+   * {@link EvolutionCommitLedger}).
+   */
+  readonly commitLedger?: EvolutionCommitLedger;
 }
 /**
  * Every provider content identity one pre-check resolved, deduplicated by name
@@ -955,7 +982,8 @@ declare function providerContentIdentities(capabilities: readonly CapabilityProv
  * viewpoint.
  *
  * The rules, in the order they are applied per skill: it must be discoverable
- * from the view's roots; the directory it resolves to must pass
+ * from the view's roots; its own `SKILL.md` must not be a target an evolution
+ * commit left open (K2); the directory it resolves to must pass
  * {@link validateSkillProvider} against the table and the verifier vocabulary.
  * An execution sidecar is refused when the vocabulary is unknown
  * (`verifierRefs` absent) — the one case the phase-1 validator cannot judge,
@@ -963,7 +991,9 @@ declare function providerContentIdentities(capabilities: readonly CapabilityProv
  *
  * Nothing is written and nothing is thrown: every refusal is a verdict, and
  * {@link providerRefusals} turns the refusals into the lines a caller reports
- * before it refuses the whole batch.
+ * before it refuses the whole batch. The commit gate is read once per call and
+ * only refusals — nothing here reconciles, so asking an admission question
+ * never settles a commit as a side effect.
  */
 declare function precheckProviders(request: ProviderPrecheckRequest): Promise<ProviderPrecheck>;
 /**
@@ -992,6 +1022,8 @@ declare function precheckReplacedCapabilityRow(request: {
   readonly view: SkillDiscoveryView;
   /** The registered verifier ids (`VerifierRegistry.verifierIds()`), or absent when the registry cannot be listed. */
   readonly verifierRefs?: readonly string[];
+  /** The deployment's evolution ledger (`optionalService(ctx, 'evolution')`), or absent when the deployment mounts none. */
+  readonly commitLedger?: EvolutionCommitLedger;
 }): Promise<{
   readonly precheck: ProviderPrecheck;
   readonly refusals: readonly string[];
@@ -2952,6 +2984,21 @@ interface RunVerifier {
    */
   ready?(): Promise<void>;
 }
+/**
+ * What one reconciliation of an open evolution commit intent settled to, as this
+ * package reads it: the intent's own identity and the result
+ * (`completed-redone`, `completed-written`, or `blocked` with its named reason).
+ * Declared structurally because task-runtime never imports the evolution package
+ * — the dependency runs one way, evolution → task-runtime.
+ */
+interface CommitReconcileOutcome {
+  readonly intentId: string;
+  readonly proposalId: string;
+  readonly direction: string;
+  readonly target: string;
+  readonly result: 'completed-redone' | 'completed-written' | 'blocked';
+  readonly detail?: string;
+}
 interface CriterionSpec {
   /**
    * Stable criterion id (T1). Omitted, the runtime generates one from the batch
@@ -4027,21 +4074,40 @@ declare class TaskRuntime extends Service {
    * dead one set.
    *
    * **The recovery barrier (A2 §E).** This entry is what an explicit graph
-   * activation awaits, and the whole pass above is one barrier: reconciliation
-   * of the facts, the gate initialization for *every* session the store knows,
-   * and the registration of the drivers the pass restarts. The barrier waits
-   * for exactly those — never for a batch's execution or a model's output —
-   * because a driver it registers is parked (registered, so a cancellation
-   * finds it, but not started) until the barrier completes. A store-read
-   * failure, a workspace conflict or an exception in the pass fails the barrier
-   * rather than surfacing as a warning over an unrecovered store, and a
-   * cancellation or the unload invalidates the handle it leaves. Nothing here
-   * is a second persisted state machine: the store remains the only source of
-   * truth, the next explicit activation is the retry, and business execution
-   * checks the handle through {@link recoveryStatus} instead of re-running the
-   * pass.
+   * activation awaits, and the whole pass above is one barrier: the
+   * reconciliation of any open production commit intent (K2, before the store is
+   * touched at all — {@link reconcileEvolutionCommits}), reconciliation of the
+   * facts, the gate initialization for *every* session the store knows, and the
+   * registration of the drivers the pass restarts. The barrier waits for exactly
+   * those — never for a batch's execution or a model's output — because a driver
+   * it registers is parked (registered, so a cancellation finds it, but not
+   * started) until the barrier completes. A store-read failure, a workspace
+   * conflict or an exception in the pass fails the barrier rather than surfacing
+   * as a warning over an unrecovered store, and a cancellation or the unload
+   * invalidates the handle it leaves. Nothing here is a second persisted state
+   * machine: the store remains the only source of truth, the next explicit
+   * activation is the retry, and business execution checks the handle through
+   * {@link recoveryStatus} instead of re-running the pass.
    */
   adoptRoot(storeId: string, rootSessionId: string): Promise<RootAdoption>;
+  /**
+   * Settle every open evolution commit intent before this process takes a store
+   * over (K2): production is never reconciled lazily, and the deployment's tool
+   * switch does not exempt it — a deployment that registers no evolution tool
+   * still has to know whether production holds what its ledger says. Both
+   * recovery entries reach this through {@link adoptRootThroughBarrier}: an
+   * explicit graph activation (activate → adoptRoot) and a restarted root
+   * session adopting its run.
+   *
+   * Read softly (`optionalService(this.ctx, 'evolution')`): a deployment that
+   * mounts no evolution plane has no commit to settle and is not refused. A
+   * `blocked` outcome is reported by name and does not fail the barrier — the
+   * intent stays open, admission refuses the provider whose target it names, and
+   * settling it (a retry of the apply/rollback, a later activation) remains the
+   * way forward. A real failure of the reconciliation itself does fail the
+   * barrier: it is the one result that cannot be read as "nothing was underway".
+   */
+  private reconcileEvolutionCommits;
   /** {@link adoptRoot}'s own pass, as one barrier body: the adoption in the order it always ran. */
   private adoptRootThroughBarrier;
   /**
@@ -5709,4 +5775,4 @@ declare class TaskRuntime extends Service {
   private agentOrUndefined;
 }
 //#endregion
-export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AdoptedWorkerResume, type AdoptedWorkerResumeRequest, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BatchResultDeliveryStatus, type BatchResultMessage, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type OwedBatchResult, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, QuestionResumeReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AdoptedWorkerResume, type AdoptedWorkerResumeRequest, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BatchResultDeliveryStatus, type BatchResultMessage, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, CommitReconcileOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, type EvolutionCommitLedger, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type OwedBatchResult, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, QuestionResumeReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

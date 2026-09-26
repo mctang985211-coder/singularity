@@ -1329,6 +1329,31 @@ function defineEscalateTool(ctx) {
 }
 
 //#endregion
+//#region src/tools/evolution-commit.ts
+/**
+* The lines a commit tool reports for an intent it settled instead of starting a
+* second commit: the intent's own id, what the reconciliation found against
+* production, and the grant the intent already binds.
+* @param intent - the open intent the call found on the proposal.
+* @param recovered - what the service reported for it: `redone` (production still
+* held the state before the commit, so the write was carried out), `written`
+* (production already held the committed content, so only the completion was
+* recorded), or absent — which a service that settled an open intent does not
+* answer, and which is reported rather than guessed.
+*/
+function renderOpenIntentRecovery(intent, recovered) {
+	return [`recovered commit intent ${intent.intentId} (${recovered ?? "unreported"}): ${recoveryNote(recovered)}`, `no second approval was asked — the intent already binds ${intent.approvalRef}`];
+}
+/** What the recovery result means for production, in the words of the commit that performed it. */
+function recoveryNote(recovered) {
+	switch (recovered) {
+		case "redone": return "production still held the state before this commit, so the same write was carried out and its completion recorded";
+		case "written": return "production already held the content this commit installed, so only its completion was recorded and production was not written again";
+		default: return "the service reported no recovery result for a proposal that had an open commit intent — production was left exactly as the intent found it";
+	}
+}
+
+//#endregion
 //#region src/tools/evolution-apply.ts
 const text$24 = (value) => [{
 	type: "text",
@@ -1355,7 +1380,7 @@ function effectNote() {
 function defineEvolutionApplyTool(ctx) {
 	return defineTool({
 		name: "evolution_apply",
-		description: "Apply a PROMOTE-decided EvolutionProposal to production (status: applied). One target type: a single-file SKILL.md replacement at L1–L3 with a materialized sandbox. Every other target type and L4 lack executors and are refused with instructions. Always asks a human through the native approval seam first — a second gate after evolution_decide — naming every production path it will write; a reject, cancel, or unavailable answerer writes nothing and leaves the proposal decided. A skill apply additionally re-verifies the production baseline recorded at prepare (the production SKILL.md must still be those exact bytes; one that changed or disappeared since prepare refuses) before the human is asked and again after the grant, and refuses a stale candidate instead of overwriting a production skill that changed. A skill candidate is promoted as one file: one carrying a SKILL.contract.json or any resource is refused (the executor writes SKILL.md only, so such a candidate would be reported as a provider production never received). evolution_rollback restores the champion snapshot.",
+		description: "Apply a PROMOTE-decided EvolutionProposal to production (status: applied). One target type: a single-file SKILL.md replacement at L1–L3 with a materialized sandbox. Every other target type and L4 lack executors and are refused with instructions. Always asks a human through the native approval seam first — a second gate after evolution_decide — naming every production path it will write; a reject, cancel, or unavailable answerer writes nothing and leaves the proposal decided. A skill apply additionally re-verifies the production baseline recorded at prepare (the production SKILL.md must still be those exact bytes; one that changed or disappeared since prepare refuses) before the human is asked and again after the grant, and refuses a stale candidate instead of overwriting a production skill that changed. A skill candidate is promoted as one file: one carrying a SKILL.contract.json or any resource is refused (the executor writes SKILL.md only, so such a candidate would be reported as a provider production never received). The write is one commit: a durable commit intent — proposal, direction, this approval, the absolute target, the content identity production must hold before and after, and the bytes to write again — is recorded before production changes, the SKILL.md is then replaced atomically (a temp file in the same directory, fsynced and renamed over the target; never truncated, never half-written), and only then is the completion recorded. A failure at any stage leaves exactly one open intent rather than a half-committed file, and calling this tool again while an intent is open settles it instead of starting a second write: no approval is asked again (the intent already binds the grant it was authorised by, and the promotion gate is not re-run because the recorded intent already names the approved content), and the answer reports the intent id and whether the commit was redone (production still held the pre-commit state) or only completed (production already held the committed content). A source that is gone or changed, or a target a third party rewrote, refuses by name with the intent left open. evolution_rollback restores the champion snapshot.",
 		parameters: { proposalId: {
 			type: "string",
 			required: true,
@@ -1372,6 +1397,18 @@ function defineEvolutionApplyTool(ctx) {
 			let proposal;
 			try {
 				proposal = await ctx.evolution.get(args.proposalId);
+			} catch (error) {
+				return `evolution_apply rejected: ${error instanceof Error ? error.message : String(error)}`;
+			}
+			if (proposal.openIntent !== void 0) try {
+				const recovered = await ctx.evolution.apply(args.proposalId, caller, proposal.openIntent.approvalRef);
+				return [
+					`proposal ${recovered.proposal.proposalId} [applied] ${recovered.proposal.level} ${recovered.proposal.targetType} ${recovered.proposal.targetId} — PROMOTE in effect`,
+					...renderOpenIntentRecovery(proposal.openIntent, recovered.recovered),
+					"wrote production targets:",
+					...recovered.targets.map((target) => `  - ${target}`),
+					effectNote()
+				].join("\n");
 			} catch (error) {
 				return `evolution_apply rejected: ${error instanceof Error ? error.message : String(error)}`;
 			}
@@ -1669,7 +1706,7 @@ const TARGET_TYPES$2 = [
 function defineEvolutionListTool(ctx) {
 	return defineTool({
 		name: "evolution_list",
-		description: "Read-only. List EvolutionProposals in the evolution ledger, optionally filtered by status / targetType / targetId, each with its derived history (proposed → candidate → prepared → gated → decided → applied → rolledback for an applied single-file skill replacement; a non-skill proposal stays proposed — this build admits a skill candidate only). The ledger records proposals, sandbox materializations, human decisions, and human-approved applies/rollbacks.",
+		description: "Read-only. List EvolutionProposals in the evolution ledger, optionally filtered by status / targetType / targetId, each with its derived history (proposed → candidate → prepared → gated → decided → applied → rolledback for an applied single-file skill replacement; a non-skill proposal stays proposed — this build admits a skill candidate only). The ledger records proposals, sandbox materializations, human decisions, human-approved applies/rollbacks, and the commit intent behind each production write: a proposal whose commit was interrupted reports that intent — its id, direction, production target and when it was recorded — and stays in the status its lifecycle had reached, until a reconciliation or a retry of the apply/rollback settles it.",
 		parameters: {
 			status: {
 				type: "string",
@@ -1718,6 +1755,10 @@ function defineEvolutionListTool(ctx) {
 					lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, champion snapshot captured, candidate content ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}…, production baseline ${view.skillBaseline.name} sha256:${view.skillBaseline.sha256.slice(0, 12)}…)`);
 				}
 				if (proposal.gate !== void 0) lines.push(`  gate regression evidence: [${proposal.gate.regressionEvidenceRefs.join(", ")}]`);
+				if (proposal.openIntent !== void 0) {
+					const intent = proposal.openIntent;
+					lines.push(`  open commit intent: ${intent.intentId} (${intent.direction}) target ${intent.target} recorded ${intent.at} — a production write is underway and its completion has not been recorded; a reconciliation (a restart, or a retry of the apply/rollback) settles it before anything loads against that target`);
+				}
 				if (proposal.applied !== void 0) lines.push(`  applied: [${proposal.applied.targets.join(", ")}] (approval ${proposal.applied.approvalRef})`);
 				if (proposal.rolledback !== void 0) lines.push(`  rolled back: [${proposal.rolledback.targets.join(", ")}] (approval ${proposal.rolledback.approvalRef})`);
 				lines.push(`  history: ${proposal.history.map((entry) => `${entry.status} by ${entry.actor} at ${entry.at}`).join(" → ")}`);
@@ -2117,7 +2158,7 @@ function sessionId$11(exec) {
 function defineEvolutionRollbackTool(ctx) {
 	return defineTool({
 		name: "evolution_rollback",
-		description: "Roll back an applied EvolutionProposal (status: rolledback). Restores the champion snapshot taken at prepare — the production SKILL.md of an applied single-file skill replacement, put back byte for byte. An applied record of any other target type has no executor here and is refused. Always asks a human through the native approval seam first — reject / cancel / unavailable writes nothing and the proposal stays applied. Only an applied proposal can be rolled back; a rolled-back proposal keeps its full ledger history.",
+		description: "Roll back an applied EvolutionProposal (status: rolledback). Restores the champion snapshot taken at prepare — the production SKILL.md of an applied single-file skill replacement, put back byte for byte. An applied record of any other target type has no executor here and is refused. Always asks a human through the native approval seam first — reject / cancel / unavailable writes nothing and the proposal stays applied. Only an applied proposal can be rolled back; a rolled-back proposal keeps its full ledger history. The restore is one commit, in the same order as apply: a durable commit intent (proposal, direction, this approval, the target, the content identity production must hold before and after, and the champion snapshot as the recoverable bytes) is recorded before production changes, the SKILL.md is replaced atomically, and only then is the completion recorded — so a failure at any stage leaves one open intent and an intact file rather than a half-commit. A rollback restores this proposal's own baseline and refuses by name, with nothing written, a target that a later proposal (or any other writer) has changed since this version was applied, and a champion snapshot that no longer hashes to the baseline recorded at prepare. Calling this tool again while an intent is open settles it instead of asking for a second approval: the answer reports the intent id and whether the write was redone or only its completion recorded.",
 		parameters: { proposalId: {
 			type: "string",
 			required: true,
@@ -2134,6 +2175,17 @@ function defineEvolutionRollbackTool(ctx) {
 			let proposal;
 			try {
 				proposal = await ctx.evolution.get(args.proposalId);
+			} catch (error) {
+				return `evolution_rollback rejected: ${error instanceof Error ? error.message : String(error)}`;
+			}
+			if (proposal.openIntent !== void 0) try {
+				const recovered = await ctx.evolution.rollback(args.proposalId, caller, proposal.openIntent.approvalRef);
+				return [
+					`proposal ${recovered.proposal.proposalId} [rolledback] ${recovered.proposal.level} ${recovered.proposal.targetType} ${recovered.proposal.targetId} — champion restored`,
+					...renderOpenIntentRecovery(proposal.openIntent, recovered.recovered),
+					"wrote production targets:",
+					...recovered.targets.map((target) => `  - ${target}`)
+				].join("\n");
 			} catch (error) {
 				return `evolution_rollback rejected: ${error instanceof Error ? error.message : String(error)}`;
 			}
@@ -4236,12 +4288,19 @@ var SingularityAgent = class extends Service {
 		"approval"
 	];
 	static Config = ConfigSchema;
+	/**
+	* The evolution ledger this assembly owns — kept as a field because the startup
+	* reconciliation (`[Service.init]`, below) settles its open commit intents
+	* before this plugin becomes ready, whether or not the deployment registered the
+	* nine tools.
+	*/
+	evolution;
 	constructor(ctx, config) {
 		super(ctx, "singularityAgent");
 		this.assertClosedConfig(config);
 		const evolution = this.resolveEvolution(config);
 		ctx.plugin(HitlService);
-		new EvolutionService(ctx, {
+		this.evolution = new EvolutionService(ctx, {
 			repoRoot: REPO_ROOT,
 			modelSelection: () => deploymentModelSelection(ctx)
 		});
@@ -4284,6 +4343,32 @@ var SingularityAgent = class extends Service {
 		ctx.tools.register(defineEscalateTool(ctx));
 	}
 	/**
+	* The startup reconciliation (K2): before this plugin is ready — and whatever
+	* the tool switch says — every commit intent the ledger left open is settled
+	* against what production actually holds. The switch is a statement about the
+	* model surface, not about recovery: an `off` deployment registers none of the
+	* nine tools, and still keeps production consistent with its own ledger.
+	*
+	* A `blocked` intent is reported by name and does not fail the load: the intent
+	* stays open, the admission gate keeps refusing the provider whose target it
+	* names, and settling it (a retry of the apply/rollback, the next startup)
+	* remains the way forward. A failure of the reconciliation itself is not
+	* `blocked` and does fail the load, naming the cause: a deployment that cannot
+	* read its ledger cannot promise anything about the production behind it.
+	*/
+	async [Service.init]() {
+		let outcomes;
+		try {
+			outcomes = await this.evolution.reconcile();
+		} catch (error) {
+			throw new Error(`singularity-agent: the evolution ledger could not be reconciled at startup (${error instanceof Error ? error.message : String(error)}); refusing to become ready with an unreconciled production commit rather than serving a deployment whose production may not match its ledger`);
+		}
+		for (const outcome of outcomes) {
+			if (outcome.result !== "blocked") continue;
+			this.warn(`evolution: the commit intent "${outcome.intentId}" (${outcome.direction} of proposal "${outcome.proposalId}") targeting ${outcome.target} could not be settled — ${outcome.detail ?? "no reason reported"}`);
+		}
+	}
+	/**
 	* Refuse a configuration member this plugin does not read. The schema keeps
 	* unknown keys on the object it validates, so this is where a caller's typo
 	* is caught: a misspelled member would otherwise read as a configuration that
@@ -4308,6 +4393,15 @@ var SingularityAgent = class extends Service {
 		if (value === void 0) return DEFAULT_EVOLUTION;
 		if (value === "off" || value === "on") return value;
 		throw new Error(`singularity-agent: evolution is ${JSON.stringify(value)}; it is "off" or "on" (a switch this build cannot execute refuses to start rather than assembling an exposure nobody chose)`);
+	}
+	/**
+	* Report a fact nobody should read as a startup failure — the same soft logger
+	* the task runtime uses, so a deployment that mounts no logger still gets the
+	* line rather than an exception about it.
+	*/
+	warn(message$2) {
+		const logger = this.ctx.logger;
+		logger?.("singularity-agent").warn(message$2);
 	}
 };
 var src_default = SingularityAgent;

@@ -26,14 +26,14 @@
  * `SKILL.md` and nothing else (§F.2: "没有支持的评估器就拒绝新晋升"; a historical
  * report is never upgraded into new evidence).
  *
- * The ledger is one format, `formatVersion: 2` (S4-E 收尾): every line a current
- * entry writes carries it, {@link EvolutionService} refuses a v1, an unversioned
- * or a mixed ledger at load, naming the line and the version it saw, and every
- * write door — the append funnel and the experiment start — refuses a record
- * declaring anything else before a byte changes. There is no dual-format reader,
- * no online migration and no fallback helper: an older ledger is archived by the
- * operator and a new one started (the persistence contract's own deployment
- * step), never migrated or read beside v2 lines.
+ * The ledger is one format, `formatVersion: 3` (K2): every line a current
+ * entry writes carries it, {@link EvolutionService} refuses a v1, a v2, an
+ * unversioned or a mixed ledger at load, naming the line and the version it saw,
+ * and every write door — the append funnel and the experiment start — refuses a
+ * record declaring anything else before a byte changes. There is no dual-format
+ * reader, no online migration and no fallback helper: an older ledger is archived
+ * by the operator and a new one started (the persistence contract's own deployment
+ * step), never migrated or read beside v3 lines.
  *
  * PROMOTE takes effect through `evolution_apply` (W16): the candidate's
  * `SKILL.md` is copied from the sandbox into production — decided → applied →
@@ -41,6 +41,27 @@
  * granted through the native approval seam (done by the tools, not here). L4
  * proposals and every non-skill target type never apply: the ledger records
  * their suggestions without granting an executor in this build.
+ *
+ * A production write is one **commit** (K2), and the commit is durable before it
+ * is effective: an `apply`/`rollback` persists a `commit_intent` line binding the
+ * proposal, the direction, the human grant, the absolute target, the content
+ * identity production must hold before and after, and a recoverable byte source
+ * under the ledger root; then the target is replaced atomically (a same-directory
+ * temp file, fsynced and renamed over it — never truncated); then, once the
+ * rename has been read back and verified, the completion line
+ * (`applied`/`rolledback`, carrying the same `intentId`) closes the intent at the
+ * fold. A completion with no matching open intent is refused, so the intent
+ * cannot be skipped, and a crash between any two of those writes leaves exactly
+ * one open intent for {@link EvolutionService.reconcile} — the explicit startup
+ * or resume entry — to settle: the same operation is redone when production still
+ * holds the pre-commit state, only the completion is recorded when production
+ * already holds the committed content, and anything else (a source that is gone,
+ * a target a third party rewrote or removed) stops by name with the intent left
+ * open and nothing overwritten. Reconciliations and fresh commits share one
+ * serial queue inside the service (single-process deployment: no distributed
+ * lock, no background retry queue), and {@link EvolutionService.openIntentTargets}
+ * is the pure read a loader or admission gate uses to see which production
+ * targets a commit still has open.
  *
  * Single-file skill candidates additionally carry a content identity (P2):
  * prepare records the SHA-256 of the exact bytes of the materialized
@@ -84,7 +105,7 @@
  * and whose cost is known whenever the frozen budget declares a ceiling. All of
  * it is reads, and every condition is a named refusal.
  *
- * What a skill promotion promotes is one file: `writeProduction` writes the
+ * What a skill promotion promotes is one file: the commit writes the
  * candidate's `SKILL.md`, so a candidate whose sandbox directory carries
  * anything else — a `SKILL.contract.json`, a `references/` or `scripts/` tree,
  * any other entry — is refused by name at the same precheck. That is a stated
@@ -98,7 +119,6 @@
 
 import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { createHash } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -123,6 +143,8 @@ import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
 import type { SkillContentIdentity } from './replay.ts'
 import { canonicalJson, modelSelectionOf } from './replay.ts'
 import type { ModelSelection } from './replay.ts'
+import type { CommitHost, CommitRequest, CommitStage, ReconcileOutcome } from './commit.ts'
+import { commitIntent, reconcileIntent, sha256Hex } from './commit.ts'
 import type {
   ExperimentKey,
   ExperimentResult,
@@ -244,15 +266,15 @@ export interface GateAnswers {
 }
 
 /**
- * One immutable ledger line, `formatVersion: 2` throughout (S4-E 收尾). A state
+ * One immutable ledger line, `formatVersion: 3` throughout (K2). A state
  * migration appends a new record; nothing is ever rewritten in place. The
  * version is the whole ledger's, not one line's: a line declaring anything but
- * 2 — or declaring nothing — makes the ledger refuse to load, and no entry here
+ * 3 — or declaring nothing — makes the ledger refuse to load, and no entry here
  * writes one.
  */
 export type EvolutionRecord =
   | {
-      formatVersion: 2
+      formatVersion: 3
       kind: 'proposed'
       proposalId: string
       targetType: ProposalTargetType
@@ -265,7 +287,7 @@ export type EvolutionRecord =
       at: string
     }
   | {
-      formatVersion: 2
+      formatVersion: 3
       kind: 'candidate'
       proposalId: string
       /** Complete version set the candidate aligns to (branch-model bookkeeping; this build creates no real branch). */
@@ -284,7 +306,7 @@ export type EvolutionRecord =
       at: string
     }
   | {
-      formatVersion: 2
+      formatVersion: 3
       kind: 'prepared'
       proposalId: string
       /**
@@ -316,9 +338,9 @@ export type EvolutionRecord =
       actor: string
       at: string
     }
-  | { formatVersion: 2; kind: 'gated'; proposalId: string; gate: GateAnswers; actor: string; at: string }
+  | { formatVersion: 3; kind: 'gated'; proposalId: string; gate: GateAnswers; actor: string; at: string }
   | {
-      formatVersion: 2
+      formatVersion: 3
       kind: 'decided'
       proposalId: string
       decision: EvolutionDecision
@@ -334,37 +356,104 @@ export type EvolutionRecord =
       at: string
     }
   | {
-      formatVersion: 2
+      formatVersion: 3
       kind: 'applied'
       proposalId: string
       /** Production write targets, for audit (absolute paths). */
       targets: string[]
       /** Human-review evidence: the approval call id of the evolution_apply request that granted this write. */
       approvalRef: string
+      /**
+       * The open commit intent this completion closes (K2): the
+       * `commit_intent` line persisted before the write. Required — the fold
+       * refuses a completion with no matching open intent.
+       */
+      intentId: string
       actor: string
       at: string
     }
   | {
-      formatVersion: 2
+      formatVersion: 3
       kind: 'rolledback'
       proposalId: string
       /** Production write targets of the rollback (restored champion or deleted product), for audit. */
       targets: string[]
       /** Human-review evidence: the approval call id of the evolution_rollback request that granted this write. */
       approvalRef: string
+      /** The open commit intent this completion closes (K2) — see `applied`. */
+      intentId: string
       actor: string
       at: string
     }
+  /** The commit intent (K2) — see {@link CommitIntentRecord}. */
+  | CommitIntentRecord
   /**
    * The experiment family (S4-E §F.2): the two-sided skill evaluation's frozen
    * identity and its per-sample runs. These lines are not lifecycle transitions
    * — an experiment does not move a proposal's status — so the proposal fold
    * leaves them alone and {@link foldExperiments} folds them. Their records
-   * carry the ledger's own `formatVersion: 2` as well; the experiment *report*
+   * carry the ledger's own `formatVersion: 3` as well; the experiment *report*
    * at `experiment-report.json` has its own, separate version field.
    */
   | ExperimentStartedRecord
   | ExperimentSampleRecord
+
+/** Which way one commit moves a production target. */
+export type CommitDirection = 'apply' | 'rollback'
+
+/**
+ * One `commit_intent` ledger line (K2): the durable "this apply/rollback is now
+ * underway" record, written before production changes and closed by the
+ * completion line that names the same `intentId`.
+ *
+ * It carries everything a recovery needs without trusting memory: which
+ * proposal and direction, which human grant, the absolute production target, the
+ * digest production must hold before the write (`baselineSha256`) and the digest
+ * it must hold after (`contentSha256`), and the bytes to write again as a path
+ * relative to the ledger root (`source`) — the candidate file for an apply, the
+ * champion snapshot for a rollback. The id is derived, not chosen:
+ * `<proposalId>/<direction>`.
+ *
+ * The line is not a lifecycle transition: it does not move the proposal's
+ * status, so the proposal fold records it as {@link EvolutionProposal.openIntent}
+ * and leaves the state machine alone. A proposal has at most one open intent,
+ * and only one of them can close it (see the fold's admission rules).
+ */
+export interface CommitIntentRecord {
+  /** The `proposals.jsonl` format version — the ledger is one format, `formatVersion: 3` (K2). */
+  formatVersion: 3
+  kind: 'commit_intent'
+  /** `<proposalId>/<direction>` — the derived id the completion line must repeat. */
+  intentId: string
+  proposalId: string
+  direction: CommitDirection
+  /** The human grant that authorised this commit (`approval:<callId>`), recorded on the completion as well. */
+  approvalRef: string
+  /** The absolute production path this commit replaces. */
+  target: string
+  /** The digest production must hold before the write — the state a reconciliation redoes the write from. */
+  baselineSha256: string
+  /** The digest production must hold after the write. */
+  contentSha256: string
+  /** The recoverable bytes, relative to the ledger root. */
+  source: string
+  actor: string
+  at: string
+}
+
+/** Folded view of one open `commit_intent` record, as {@link EvolutionProposal} exposes it. */
+export interface CommitIntentView {
+  intentId: string
+  proposalId: string
+  direction: CommitDirection
+  approvalRef: string
+  target: string
+  baselineSha256: string
+  contentSha256: string
+  source: string
+  actor: string
+  at: string
+}
 
 /** Folded view of one `applied` or `rolledback` record. */
 export interface ApplyView {
@@ -377,13 +466,25 @@ export interface ApplyOutcome {
   proposal: EvolutionProposal
   targets: string[]
   /**
+   * Set only when this call found a commit intent already open for the proposal
+   * and settled it instead of starting a new commit (K2): `redone` — production
+   * still held the pre-commit state, so the same operation was carried out;
+   * `written` — production already held the committed content (the write had
+   * landed, its completion had not), so only the completion was recorded.
+   * Absent on a fresh commit, and on a proposal with nothing open.
+   */
+  recovered?: 'redone' | 'written'
+  /**
    * What the promotion check validated about the providers this apply put in
    * place ({@link PromotionCheck.providers}): the candidate skill of a skill
    * apply, with the role it may be counted as, so a knowledge or guidance
    * provider is reported as such rather than presented as the execution
    * provider it is not. Empty when the target carries no provider. Not
    * persisted: the ledger's `applied` record keeps its shape, and a run's own
-   * binding is where a selected role is recorded for real.
+   * binding is where a selected role is recorded for real. Absent when this
+   * call settled an open intent: a recovery does not re-run the promotion gate
+   * (the approval and the evidence it already rested on are on the ledger), so
+   * it reports what it did and not a second provider verdict.
    */
   providers?: readonly PromotionProvider[]
 }
@@ -469,6 +570,14 @@ export interface EvolutionProposal {
   decisionApprovalRef?: string
   applied?: ApplyView
   rolledback?: ApplyView
+  /**
+   * The commit intent this proposal has open (K2): a production write is
+   * underway and its completion line has not been recorded. At most one at a
+   * time. It does not move {@link status} — an interrupted apply is still
+   * `decided`, an interrupted rollback still `applied` — which is exactly why a
+   * retry can tell "nothing was committed yet" from "everything was".
+   */
+  openIntent?: CommitIntentView
   /** One entry per ledger record, oldest first — derived, never stored. */
   history: { status: EvolutionStatus; actor: string; at: string }[]
 }
@@ -538,6 +647,17 @@ export interface Config {
    * selection is never parsed back out of a display string.
    */
   modelSelection?: () => ModelSelection | undefined
+  /**
+   * The typed test seam of the commit path (K2): it fires at each durable stage
+   * of one commit — after the `commit_intent` line is on disk, after the new
+   * bytes are staged and fsynced beside the production target but before the
+   * rename, and after the rename has been read back and verified. Throwing from
+   * it aborts the commit exactly where it stands: the intent stays open and no
+   * later stage runs, which is how a process exit between two durable writes is
+   * simulated. A production deployment never sets it; there is no other way to
+   * observe or interrupt a commit.
+   */
+  commitProbe?: (stage: CommitStage) => void
 }
 
 function nonEmpty(value: unknown, field: string): string {
@@ -577,24 +697,26 @@ function resolveWithin(base: string, rel: string): string {
   return abs
 }
 
-/** Lowercase SHA-256 hex over exact bytes — the content identity primitive (P2). */
-function sha256Hex(bytes: Buffer): string {
-  return createHash('sha256').update(bytes).digest('hex')
-}
-
 /**
  * The production skill target as it stands right now (P3): null when nothing
  * is there, otherwise the exact bytes plus their SHA-256. Read through the same
  * component walk as the ledger root (`walkVerified`, shared with the skill
  * sidecar loader in task-runtime), so a production path that became a
  * directory, or that is a symbolic link (the file itself or an ancestor), is a
- * conflict the caller refuses — never a silent follow.
+ * conflict the caller refuses — never a silent follow. `relative` is the target
+ * as a path under the skill root (`<name>/SKILL.md`); a commit's own target is
+ * reduced to that shape before it is read here.
  */
-async function readProductionSkill(skillRoot: string, name: string): Promise<{ bytes: Buffer; sha256: string } | null> {
-  const walked = await walkVerified(skillRoot, join(name, 'SKILL.md'))
+async function readProductionSkill(skillRoot: string, relative: string): Promise<{ bytes: Buffer; sha256: string } | null> {
+  const walked = await walkVerified(skillRoot, relative)
   if (walked.missing) return null
   const bytes = await readFile(walked.abs)
   return { bytes, sha256: sha256Hex(bytes) }
+}
+
+/** The production path of one skill's single file, as the executor writes and reads it. */
+function productionSkillRelative(name: string): string {
+  return join(name, 'SKILL.md')
 }
 
 /**
@@ -748,27 +870,81 @@ async function unsupportedCandidateEntries(directory: string): Promise<string[]>
 }
 
 /**
- * One format, one check (S4-E 收尾): every line this ledger reads, folds or
- * writes declares `formatVersion: 2`, and nothing else — no v1, no missing
+ * One format, one check (K2): every line this ledger reads, folds or writes
+ * declares `formatVersion: 3`, and nothing else — no v1, no v2, no missing
  * version, no mix. The same refusal guards all three doors the record type
  * cannot guard on its own: the load (per line, naming the file and the line),
- * the {@link EvolutionService.append} funnel every lifecycle and sample write
- * goes through, and {@link EvolutionService.recordExperimentStart}, which
+ * the {@link EvolutionService.append} funnel every lifecycle, commit and sample
+ * write goes through, and {@link EvolutionService.recordExperimentStart}, which
  * appends beside that funnel. A record that declares anything else is refused
  * before it is folded or written, and the caller's step is the persistence
  * contract's: archive the old ledger and start a new one.
+ *
+ * The version moved with the commit mechanism: a v2 ledger has no
+ * `commit_intent` lines and its completions carry no `intentId`, so a write to
+ * such a ledger could not be reconciled — reading one is refused instead of
+ * appending beside it.
  *
  * `position` names the line or the record in the operator's own vocabulary
  * (e.g. `ledger line 3 in /…/proposals.jsonl`), so the message points at the
  * bytes that are wrong rather than at the entry that noticed them.
  */
 function assertLedgerFormatVersion(record: { formatVersion?: unknown }, position: string): void {
-  if (record.formatVersion === 2) return
+  if (record.formatVersion === 3) return
   throw new Error(
     `evolution: ${position} declares formatVersion ${JSON.stringify(record.formatVersion ?? null)} — ` +
-    'this build reads and writes formatVersion 2 only, so a v1, unversioned or mixed ledger is refused before any new record ' +
-    'is appended (archive the old ledger and start a new one; no migration or dual-format read is offered)',
+    'this build reads and writes formatVersion 3 only, so a v1, a v2, an unversioned or a mixed ledger is refused before any new ' +
+    'record is appended (archive the old ledger and start a new one; no migration, no dual-format read and no older-record reader ' +
+    'is offered, because a v2 ledger carries no commit intent for a production write to be reconciled against)',
   )
+}
+
+/**
+ * Commit-intent payload validation, shared by the write path ({@link
+ * EvolutionService.apply} / {@link EvolutionService.rollback} through
+ * `commit.ts`) and the fold: every field a recovery needs is present, both
+ * content identities are real SHA-256 hex, and the direction is one of the two
+ * the commit path has. A hand-forged line fails exactly as a live append would.
+ */
+function validateCommitIntent(record: CommitIntentRecord): void {
+  const nonEmptyFields = [
+    ['proposalId', record.proposalId],
+    ['intentId', record.intentId],
+    ['approvalRef', record.approvalRef],
+    ['target', record.target],
+    ['source', record.source],
+    ['actor', record.actor],
+    ['at', record.at],
+  ] as const
+  for (const [field, value] of nonEmptyFields) {
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      throw new Error(
+        `evolution: commit_intent record for proposal "${String(record.proposalId)}" has no ${field} — an intent names the proposal, ` +
+        'the direction, the human approval, the production target, both content identities, the bytes to write again and its actor, ' +
+        'so a line missing any of them cannot be reconciled',
+      )
+    }
+  }
+  if (record.direction !== 'apply' && record.direction !== 'rollback') {
+    throw new Error(
+      `evolution: commit_intent record for proposal "${record.proposalId}" declares direction ${JSON.stringify(record.direction ?? null)} ` +
+      '— a commit intent is "apply" or "rollback"',
+    )
+  }
+  for (const [field, value] of [['baselineSha256', record.baselineSha256], ['contentSha256', record.contentSha256]] as const) {
+    if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) {
+      throw new Error(
+        `evolution: commit_intent record for proposal "${record.proposalId}" has no valid ${field} (${JSON.stringify(value ?? null)}) — ` +
+        'an intent binds the exact bytes production must hold before the write and the exact bytes it must hold after',
+      )
+    }
+  }
+  if (record.target !== resolve(record.target)) {
+    throw new Error(
+      `evolution: commit_intent record for proposal "${record.proposalId}" names target "${record.target}" — an intent names the ` +
+      'absolute production path it commits',
+    )
+  }
 }
 
 /**
@@ -788,21 +964,28 @@ export class EvolutionService extends Service {
   readonly repoRoot: string
   /** The injected model-selection resolver, if the assembly wired one (see {@link Config.modelSelection}). */
   private readonly resolveModelSelection?: () => ModelSelection | undefined
+  /** The commit path's typed test seam, if this instance was built with one (see {@link Config.commitProbe}). */
+  private readonly commitProbe?: (stage: CommitStage) => void
   private records: EvolutionRecord[] = []
   private readonly loaded: Promise<void>
   private writes: Promise<void> = Promise.resolve()
+  private commits: Promise<void> = Promise.resolve()
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'evolution')
     // Explicitly configured, never derived here: see Config.repoRoot.
     this.repoRoot = config.repoRoot ?? process.cwd()
     this.resolveModelSelection = config.modelSelection
+    this.commitProbe = config.commitProbe
     const dshHome = process.env.DSH_HOME ?? join(this.repoRoot, '.dsh')
     this.root = resolve(config.root ?? join(dshHome, 'evolution'))
     this.skillRoot = resolve(config.skillRoot ?? join(dshHome, 'skills'))
     this.loaded = this.load()
     ctx.effect(
       () => async () => {
+        // Commits first: each one's appends are already queued behind them, so
+        // draining the write chain afterwards is what makes the ledger complete.
+        await this.commits
         await this.writes
       },
       'evolution: drain writes',
@@ -850,7 +1033,7 @@ export class EvolutionService extends Service {
 
   async propose(input: ProposeInput, actor: string): Promise<EvolutionProposal> {
     const record: EvolutionRecord = {
-      formatVersion: 2,
+      formatVersion: 3,
       kind: 'proposed',
       proposalId: nonEmpty(input.proposalId, 'proposalId'),
       targetType: input.targetType,
@@ -903,7 +1086,7 @@ export class EvolutionService extends Service {
     validateVersionSet(versionSet)
     validateMutation(current.targetType, mutation)
     await this.append({
-      formatVersion: 2,
+      formatVersion: 3,
       kind: 'candidate',
       proposalId,
       versionSet: { ...versionSet },
@@ -946,7 +1129,7 @@ export class EvolutionService extends Service {
     // production path that is a symlink or not a regular file fails here
     // instead of being followed, and a missing target is refused by name
     // rather than prepared against nothing.
-    const production = await readProductionSkill(this.skillRoot, name)
+    const production = await readProductionSkill(this.skillRoot, productionSkillRelative(name))
     if (production === null) {
       throw new Error(
         `evolution: the production skill "${join(this.skillRoot, name, 'SKILL.md')}" does not exist, so proposal ` +
@@ -962,7 +1145,7 @@ export class EvolutionService extends Service {
       sha256: sha256Hex(await readVerifiedFile(this.root, `${sandbox}/skills/${name}/SKILL.md`)),
     }
     await this.append({
-      formatVersion: 2,
+      formatVersion: 3,
       kind: 'prepared',
       proposalId,
       sandbox,
@@ -1031,7 +1214,7 @@ export class EvolutionService extends Service {
       }
     }
     await this.append({
-      formatVersion: 2,
+      formatVersion: 3,
       kind: 'gated',
       proposalId,
       gate: { ...answers, regressionEvidenceRefs: [...answers.regressionEvidenceRefs] },
@@ -1058,7 +1241,7 @@ export class EvolutionService extends Service {
     if (note !== undefined) nonEmpty(note, 'note')
     if (decision === 'PROMOTE') await this.checkPromotion(proposalId)
     await this.append({
-      formatVersion: 2,
+      formatVersion: 3,
       kind: 'decided',
       proposalId,
       decision,
@@ -1072,43 +1255,68 @@ export class EvolutionService extends Service {
 
   /**
    * Move decided → applied: copy the sandbox materialization into production
-   * (W16). Reachable only for a PROMOTE decision on a materialized skill
-   * mutation at L1–L3 (the state machine itself refuses anything else — every
-   * other target type has no executor in this build); the caller (the
+   * (W16), as one commit. Reachable only for a PROMOTE decision on a materialized
+   * skill mutation at L1–L3 (the state machine itself refuses anything else —
+   * every other target type has no executor in this build); the caller (the
    * evolution_apply tool) must hold a human grant from `ctx.approval.request`
-   * first, exactly as for decide. The production write runs BEFORE the ledger
-   * append, so a failed write leaves the proposal decided and retryable: the
-   * sandbox `SKILL.md` replaces the production one (the champion snapshot
-   * covers that file only, so the write is file-level, never a directory
-   * delete).
+   * first, exactly as for decide. The sandbox `SKILL.md` replaces the production
+   * one (the champion snapshot covers that file only, so the write is
+   * file-level, never a directory delete).
+   *
+   * The commit order is the recovery rule (K2): the `commit_intent` line is
+   * persisted first — proposal, direction, this approval, the absolute target,
+   * the content identity production must hold before (`prepared.skillBaseline`
+   * P3) and after (`prepared.skillContent` P2), and the sandbox candidate as the
+   * recoverable source — then the target is replaced atomically, then the
+   * `applied` record closes the intent. A failure at any stage leaves the intent
+   * open and nothing half-written: the production file is one complete version or
+   * the other, and {@link reconcile} (or a retry of this call) settles the intent
+   * from what production actually holds. Nothing here trusts a promise or a
+   * caller-supplied "approved".
    *
    * A skill apply re-verifies the production baseline (P3) after the human
-   * grant and immediately before the write: the production target must still be
+   * grant and before the intent is recorded: the production target must still be
    * the one prepare recorded. A direct service call therefore cannot bypass the
    * check the tool already ran before asking for approval.
    *
-   * The promotion check (S1-C item 3) runs here too, immediately before the
-   * write and after the grant: a candidate whose provider role changed while the
-   * human was deciding (a sidecar that appeared in the sandbox, a verifier that
-   * was unregistered) is refused here, so no entry can write something a later
+   * The promotion check (S1-C item 3) runs here too, before the intent is
+   * recorded: a candidate whose provider role changed while the human was
+   * deciding (a sidecar that appeared in the sandbox, a verifier that was
+   * unregistered) is refused here, so no entry can write something a later
    * admission would have refused.
+   *
+   * When this proposal already has an open intent — the process died before the
+   * completion landed — this call does not ask for another approval and does not
+   * re-run the promotion gate: the recorded intent already binds the grant and
+   * the content it was approved against, and the only question left is what
+   * production holds. It settles that intent ({@link reconcile}, one intent) and
+   * reports it as {@link ApplyOutcome.recovered}.
    */
   async apply(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome> {
-    const current = await this.assertNext(proposalId, 'applied')
+    await this.assertNext(proposalId, 'applied')
     nonEmpty(approvalRef, 'approvalRef')
-    const promotion = await this.checkPromotion(proposalId)
-    await this.checkProductionBaseline(proposalId)
-    const outcome = await this.writeProduction(current, 'apply')
-    await this.append({
-      formatVersion: 2,
-      kind: 'applied',
-      proposalId,
-      targets: outcome.targets,
-      approvalRef,
-      actor,
-      at: new Date().toISOString(),
+    return this.commitExclusive(async () => {
+      const proposal = await this.get(proposalId)
+      const open = proposal.openIntent
+      if (open !== undefined) {
+        if (open.direction !== 'apply') {
+          throw new Error(
+            `evolution: proposal "${proposalId}" has an open rollback commit intent ("${open.intentId}") — apply cannot complete a ` +
+            'rollback; settle that intent (reconcile, or evolution_rollback) before applying anything',
+          )
+        }
+        const recovered = await this.settleOpenIntent(open)
+        return { targets: [open.target], recovered, proposal: await this.get(proposalId) }
+      }
+      const promotion = await this.checkPromotion(proposalId)
+      await this.checkProductionBaseline(proposalId)
+      // P2: read the candidate once, verify the digest prepare recorded, and
+      // commit exactly those verified bytes. A source replaced mid-apply cannot
+      // reach production unverified — the whole commit refuses instead.
+      const bytes = await this.readVerifiedSkillCandidate(proposal)
+      await commitIntent(this.commitHost(), this.commitRequest(proposal, 'apply', actor, approvalRef), bytes)
+      return { targets: [this.commitTarget(proposal)], providers: promotion.providers, proposal: await this.get(proposalId) }
     })
-    return { ...outcome, providers: promotion.providers, proposal: await this.get(proposalId) }
   }
 
   /**
@@ -1209,7 +1417,7 @@ export class EvolutionService extends Service {
    * promotion would write — plus the executor boundary this promotion cannot
    * cross.
    *
-   * The boundary: `writeProduction` promotes a **single `SKILL.md`**, so a
+   * The boundary: the commit promotes a **single `SKILL.md`**, so a
    * candidate whose directory carries anything else (`SKILL.contract.json`, a
    * `references/` or `scripts/` tree, any other file) is refused here by name.
    * The executor is not being extended to multi-file candidates; what is being
@@ -1351,7 +1559,7 @@ export class EvolutionService extends Service {
       'an apply never overwrites a production skill it cannot verify'
     let current: { bytes: Buffer; sha256: string } | null
     try {
-      current = await readProductionSkill(this.skillRoot, name)
+      current = await readProductionSkill(this.skillRoot, productionSkillRelative(name))
     } catch (error) {
       throw new Error(
         `evolution: the production skill "${target}" is no longer a readable regular file ` +
@@ -1407,65 +1615,252 @@ export class EvolutionService extends Service {
 
   /**
    * Move applied → rolledback: undo the apply by restoring the champion
-   * `SKILL.md` snapshot taken at prepare. A record of another target type has no
-   * executor here: this build writes and restores a single `SKILL.md` only, and
-   * an applied capability row or preset directory is refused by name rather than
+   * `SKILL.md` snapshot taken at prepare, as one commit — the same intent →
+   * atomic write → completion order as apply, so an interrupted rollback is
+   * recoverable the same way. A record of another target type has no executor
+   * here: this build writes and restores a single `SKILL.md` only, and an
+   * applied capability row or preset directory is refused by name rather than
    * touched. Same approval discipline as apply: the tool asks a human first, the
    * service only executes and records.
+   *
+   * A rollback restores *this* proposal's baseline and nothing else, so both
+   * ends are re-verified before the intent is recorded: production must still
+   * carry exactly the content this proposal applied (`prepared.skillContent`,
+   * P2), and the champion snapshot must still hash to the baseline prepare
+   * recorded (`prepared.skillBaseline`, P3). A target a later proposal — or any
+   * other writer — changed since is refused by name with nothing written, and so
+   * is a snapshot that can no longer reproduce the bytes it captured: neither
+   * may be papered over by restoring an old version on top of a newer one.
+   *
+   * As in {@link apply}, an open intent of this proposal is settled rather than
+   * duplicated, and the result reports the recovery.
    */
   async rollback(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome> {
-    const current = await this.assertNext(proposalId, 'rolledback')
+    await this.assertNext(proposalId, 'rolledback')
     nonEmpty(approvalRef, 'approvalRef')
-    const outcome = await this.writeProduction(current, 'rollback')
-    await this.append({
-      formatVersion: 2,
-      kind: 'rolledback',
-      proposalId,
-      targets: outcome.targets,
-      approvalRef,
-      actor,
-      at: new Date().toISOString(),
+    return this.commitExclusive(async () => {
+      const proposal = await this.get(proposalId)
+      const open = proposal.openIntent
+      if (open !== undefined) {
+        if (open.direction !== 'rollback') {
+          throw new Error(
+            `evolution: proposal "${proposalId}" has an open apply commit intent ("${open.intentId}") — rollback cannot complete an ` +
+            'apply; settle that intent (reconcile, or evolution_apply) before rolling anything back',
+          )
+        }
+        const recovered = await this.settleOpenIntent(open)
+        return { targets: [open.target], recovered, proposal: await this.get(proposalId) }
+      }
+      const request = this.commitRequest(proposal, 'rollback', actor, approvalRef)
+      const prepared = proposal.prepared!
+      const identity = prepared.skillContent!
+      const current = await readProductionSkill(this.skillRoot, productionSkillRelative((proposal.mutation as SkillMutation).name))
+      if (current === null || current.sha256 !== identity.sha256) {
+        throw new Error(
+          `evolution: the production skill "${request.target}" does not hold the content proposal "${proposalId}" applied ` +
+          `(sha256 ${current?.sha256 ?? 'missing'} != ${identity.sha256}) — a rollback restores the baseline of the version this ` +
+          'proposal applied, and a target another writer (or a later proposal) changed is left exactly as it is: nothing was written ' +
+          'and no commit intent was recorded',
+        )
+      }
+      const champion = await readVerifiedFile(this.root, request.source)
+      const digest = sha256Hex(champion)
+      if (digest !== prepared.skillBaseline!.sha256) {
+        throw new Error(
+          `evolution: the champion snapshot "${request.source}" of proposal "${proposalId}" no longer hashes to the production ` +
+          `baseline recorded at prepare (sha256 ${digest} != ${prepared.skillBaseline!.sha256}) — the snapshot cannot restore the ` +
+          'bytes it captured: nothing was written and no commit intent was recorded',
+        )
+      }
+      await commitIntent(this.commitHost(), request, champion)
+      return { targets: [request.target], proposal: await this.get(proposalId) }
     })
-    return { ...outcome, proposal: await this.get(proposalId) }
   }
 
   /**
-   * The production write behind apply/rollback: one `SKILL.md` at the candidate
-   * name under the production skill root. `apply` writes the verified candidate
-   * bytes, `rollback` the champion snapshot. Every path goes through
-   * `resolveWithin`, so a write can never leave the production root it targets.
+   * Settle every open commit intent, in ledger order (K2) — the explicit startup
+   * and resume entry. Nothing calls this implicitly: no read path, no `get` /
+   * `list`, and no tool call reconciles as a side effect, so a query stays a
+   * query and a deployment decides when a recovery is due.
+   *
+   * Each intent is settled by {@link settleOpenIntent} under the same serial
+   * queue a fresh commit takes, and each outcome is reported by name:
+   * `completed-redone` (production still held the pre-commit state, so the same
+   * write was carried out), `completed-written` (production already held the
+   * committed content, so only the completion was recorded) or `blocked` (a
+   * source that is gone or changed, a target that holds neither state — the
+   * intent stays open and nothing is overwritten). A blocked intent does not
+   * throw: the rest of the batch is still settled, and the caller decides what a
+   * human does about it. A real I/O failure of a redo write is not a blocked
+   * commit and does throw.
+   *
+   * Repeating it is free: a settled intent has no open intent left, so the fold
+   * refuses a second completion and this call reports nothing for it.
    */
-  private async writeProduction(proposal: EvolutionProposal, direction: 'apply' | 'rollback'): Promise<Omit<ApplyOutcome, 'proposal'>> {
+  async reconcile(): Promise<ReconcileOutcome[]> {
+    await this.loaded
+    const outcomes: ReconcileOutcome[] = []
+    for (const intent of this.openIntents(this.fold(this.records))) {
+      const outcome = await this.commitExclusive(async () => {
+        const open = this.fold(this.records).get(intent.proposalId)?.openIntent
+        if (open === undefined || open.intentId !== intent.intentId) return undefined
+        return reconcileIntent(this.commitHost(), open)
+      })
+      if (outcome !== undefined) outcomes.push(outcome)
+    }
+    return outcomes
+  }
+
+  /**
+   * The production targets a commit has left open (K2), in ledger order — the
+   * pure read an admission gate or a loader uses to see what must not be loaded
+   * until a reconciliation settled it. It writes nothing, and it never
+   * reconciles: settling is {@link reconcile}'s call to make, at the moment the
+   * deployment decides recovery is due.
+   */
+  async openIntentTargets(): Promise<readonly string[]> {
+    await this.loaded
+    return this.openIntents(this.fold(this.records)).map(intent => intent.target)
+  }
+
+  /** Every commit intent still open, in ledger order — one per proposal at most, validated by the fold. */
+  private openIntents(proposals: ReadonlyMap<string, EvolutionProposal>): CommitIntentView[] {
+    const open: CommitIntentView[] = []
+    const seen = new Set<string>()
+    for (const record of this.records) {
+      if (record.kind !== 'commit_intent') continue
+      const intent = proposals.get(record.proposalId)?.openIntent
+      if (intent === undefined || intent.intentId !== record.intentId || seen.has(intent.intentId)) continue
+      seen.add(intent.intentId)
+      open.push(intent)
+    }
+    return open
+  }
+
+  /**
+   * Settle one open intent for a caller that named it (an apply/rollback retry),
+   * where a blocked commit is the caller's answer and not a batch's footnote:
+   * the named stop is thrown with the reason intact.
+   */
+  private async settleOpenIntent(intent: CommitIntentView): Promise<'redone' | 'written'> {
+    const outcome = await reconcileIntent(this.commitHost(), intent)
+    if (outcome.result === 'blocked') {
+      throw new Error(outcome.detail ?? `evolution: commit intent "${intent.intentId}" cannot be settled`)
+    }
+    return outcome.result === 'completed-redone' ? 'redone' : 'written'
+  }
+
+  /**
+   * The commit request one apply/rollback binds, read off the prepared record
+   * the proposal already carries: the absolute target (the same path
+   * {@link applyTargets} names to the human), the content identity production
+   * must hold before and after, and the recoverable source under the ledger
+   * root. `apply` commits the candidate over the recorded baseline; `rollback`
+   * commits the champion snapshot over the content the apply installed — the two
+   * digests swap, and nothing else about the two directions differs.
+   */
+  private commitRequest(
+    proposal: EvolutionProposal,
+    direction: CommitDirection,
+    actor: string,
+    approvalRef: string,
+  ): CommitRequest {
     if (proposal.targetType !== 'skill') {
       throw new Error(
         `evolution: proposal "${proposal.proposalId}" targets "${proposal.targetType}" — this build writes and restores a single ` +
         `SKILL.md only, so there is no executor to ${direction} an applied ${proposal.targetType} record`,
       )
     }
-    const sandbox = proposal.prepared?.sandbox
-    const champion = proposal.prepared?.champion
-    if (sandbox == null || champion !== 'captured' || proposal.mutation === undefined) {
+    const prepared = proposal.prepared
+    const content = prepared?.skillContent
+    const baseline = prepared?.skillBaseline
+    if (prepared?.sandbox == null || prepared.champion !== 'captured' || proposal.mutation === undefined
+      || content === undefined || baseline === undefined) {
       // The fold admits only a materialized skill prepare (sandbox, champion
-      // snapshot, mutation all present), so this is the belt that narrows the
-      // view for the write below rather than a reachable state.
+      // snapshot, mutation and both identities present), so this is the belt
+      // that narrows the view for the commit below rather than a reachable state.
       throw new Error(`evolution: proposal "${proposal.proposalId}" has no materialized sandbox; nothing to ${direction}`)
     }
     const { name } = proposal.mutation as unknown as SkillMutation
-    const dst = resolveWithin(this.skillRoot, join(name, 'SKILL.md'))
-    if (direction === 'apply') {
-      // P2: read the candidate once, verify the digest prepare recorded, and
-      // write exactly those verified bytes. The path is never re-read after the
-      // check, so a source replaced mid-apply cannot reach production unverified
-      // — the whole apply refuses instead.
-      const bytes = await this.readVerifiedSkillCandidate(proposal)
-      await mkdir(dirname(dst), { recursive: true })
-      await writeFile(dst, bytes)
-      return { targets: [dst] }
+    if (content.name !== name || baseline.name !== name) {
+      throw new Error(
+        `evolution: proposal "${proposal.proposalId}" records content identities for skill "${content.name}/${baseline.name}" but its ` +
+        `mutation names "${name}" — the commit cannot write one skill's verified bytes onto another skill's target`,
+      )
     }
-    const content = await readVerifiedFile(this.root, `${sandbox}/champion/skills/${name}/SKILL.md`)
-    await mkdir(dirname(dst), { recursive: true })
-    await writeFile(dst, content)
-    return { targets: [dst] }
+    return direction === 'apply'
+      ? {
+          proposalId: proposal.proposalId,
+          direction,
+          approvalRef,
+          target: this.commitTarget(proposal),
+          baselineSha256: baseline.sha256,
+          contentSha256: content.sha256,
+          source: `${prepared.sandbox}/skills/${name}/SKILL.md`,
+          actor,
+        }
+      : {
+          proposalId: proposal.proposalId,
+          direction,
+          approvalRef,
+          target: this.commitTarget(proposal),
+          baselineSha256: content.sha256,
+          contentSha256: baseline.sha256,
+          source: `${prepared.sandbox}/champion/skills/${name}/SKILL.md`,
+          actor,
+        }
+  }
+
+  /** The one production path a commit of this proposal may write: `<skillRoot>/<name>/SKILL.md`, confined to the skill root. */
+  private commitTarget(proposal: EvolutionProposal): string {
+    return resolveWithin(this.skillRoot, productionSkillRelative((proposal.mutation as SkillMutation).name))
+  }
+
+  /**
+   * The narrow host the commit path runs on (see `commit.ts`): the roots a
+   * target and a source resolve against, the service's own verified reads — P2
+   * for a candidate, the walk-verified production read, the ledger-root read for
+   * a snapshot — the append funnel every line goes through (format check, staged
+   * fold, serialized write), and the probe seam. The commit path owns the order;
+   * the service owns what may be read and what a line must say.
+   */
+  private commitHost(): CommitHost {
+    return {
+      root: this.root,
+      skillRoot: this.skillRoot,
+      append: record => this.append(record),
+      readSource: async (source, sha256) => {
+        const bytes = await readVerifiedFile(this.root, source)
+        const digest = sha256Hex(bytes)
+        if (digest !== sha256) {
+          throw new Error(
+            `the recorded source "${source}" no longer holds the committed bytes (sha256 ${digest} != ${sha256}); recorded ` +
+            'identities are never re-digested',
+          )
+        }
+        return bytes
+      },
+      readProduction: relative => readProductionSkill(this.skillRoot, relative),
+      probe: stage => this.commitProbe?.(stage),
+    }
+  }
+
+  /**
+   * Serialize one commit — its intent, its production write and its completion —
+   * behind every commit already running or queued, and behind every write the
+   * ledger funnel has not appended yet. Two proposals competing for one target
+   * therefore never interleave a read-back with another commit's rename: the
+   * second sees the first's result and refuses on its own baseline check. This
+   * is a single-process queue, not a cross-process lock: the deployment's
+   * one-writer constraint still stands, and a second process is not excluded.
+   */
+  private async commitExclusive<T>(run: () => Promise<T>): Promise<T> {
+    const chained = this.commits.then(run)
+    this.commits = chained.then(
+      () => undefined,
+      () => undefined,
+    )
+    return chained
   }
 
   /** Folded view of one proposal, or throws on an unknown id. */
@@ -1550,6 +1945,17 @@ export class EvolutionService extends Service {
    * approval that granted it. A line missing any of them is refused here,
    * before any later entry can act on the state it would have folded to.
    *
+   * Commit intents (K2) fold here too, because they are the one place where a
+   * ledger line is judged against the *other* lines around it: a `commit_intent`
+   * is admitted only for a proposal in the state its direction commits (`apply`
+   * from decided, `rollback` from applied), only with the derived id
+   * `<proposalId>/<direction>`, and only when the proposal has no other open
+   * intent; an `applied`/`rolledback` completion is admitted only when it closes
+   * the open intent of its own direction — same id, same approval, that exact
+   * target — and it closes it. So a completion cannot be recorded without its
+   * intent, cannot borrow another approval or another target, and cannot be
+   * recorded twice: the second line has nothing left to close.
+   *
    * The experiment family is not a lifecycle transition and is skipped here;
    * {@link foldLedger} folds it beside this fold.
    */
@@ -1557,6 +1963,44 @@ export class EvolutionService extends Service {
     const proposals = new Map<string, EvolutionProposal>()
     for (const record of records) {
       if (isExperimentRecord(record)) continue
+      if (record.kind === 'commit_intent') {
+        const current = proposals.get(record.proposalId)
+        if (current === undefined) throw new Error(`evolution: unknown proposal "${record.proposalId}"`)
+        validateCommitIntent(record)
+        const intent: CommitIntentView = {
+          intentId: record.intentId,
+          proposalId: record.proposalId,
+          direction: record.direction,
+          approvalRef: record.approvalRef,
+          target: record.target,
+          baselineSha256: record.baselineSha256,
+          contentSha256: record.contentSha256,
+          source: record.source,
+          actor: record.actor,
+          at: record.at,
+        }
+        if (record.intentId !== `${record.proposalId}/${record.direction}`) {
+          throw new Error(
+            `evolution: commit_intent record for "${record.proposalId}" names intentId "${record.intentId}" — an intent's id is ` +
+            `"<proposalId>/<direction>", so this one is "${record.proposalId}/${record.direction}"`,
+          )
+        }
+        if (current.openIntent !== undefined) {
+          throw new Error(
+            `evolution: proposal "${record.proposalId}" already has the open commit intent "${current.openIntent.intentId}" — one ` +
+            `commit at a time: the intent for "${record.intentId}" is refused until that one is completed or settled`,
+          )
+        }
+        const requiredStatus: EvolutionStatus = record.direction === 'apply' ? 'decided' : 'applied'
+        if (current.status !== requiredStatus) {
+          throw new Error(
+            `evolution: commit_intent record "${record.intentId}" needs proposal "${record.proposalId}" to be ${requiredStatus} ` +
+            `(it is ${current.status}) — an apply commits a decided proposal and a rollback an applied one`,
+          )
+        }
+        current.openIntent = intent
+        continue
+      }
       const current = proposals.get(record.proposalId)
       if (record.kind === 'proposed') {
         if (current !== undefined) throw new Error(`evolution: proposal "${record.proposalId}" already exists`)
@@ -1667,7 +2111,48 @@ export class EvolutionService extends Service {
           if (typeof record.approvalRef !== 'string' || record.approvalRef.length === 0) {
             throw new Error(`evolution: ${record.kind} record for "${record.proposalId}" has no human-approval evidence ref`)
           }
+          // K2: the completion closes the open intent of its own direction, and
+          // only that one. Everything it claims — the intent id, the approval,
+          // the exact target — must be the intent's, so a completion can never
+          // describe a grant or a path the recorded commit never named.
+          if (typeof record.intentId !== 'string' || record.intentId.length === 0) {
+            throw new Error(
+              `evolution: ${record.kind} record for "${record.proposalId}" names no commit intent — every completion this build ` +
+              'writes closes the `commit_intent` line its commit persisted before the write, and carries that intentId',
+            )
+          }
+          const open = current.openIntent
+          const expectedDirection: CommitDirection = record.kind === 'applied' ? 'apply' : 'rollback'
+          if (open === undefined) {
+            throw new Error(
+              `evolution: ${record.kind} record for "${record.proposalId}" closes no open commit intent — a production write is ` +
+              `recorded as one commit (commit_intent first, the atomic write, then ${record.kind}), so a completion with no matching ` +
+              'open intent is refused',
+            )
+          }
+          if (open.direction !== expectedDirection || open.intentId !== record.intentId) {
+            throw new Error(
+              `evolution: ${record.kind} record for "${record.proposalId}" names commit intent "${record.intentId}", but the open ` +
+              `intent of that proposal is "${open.intentId}" (${open.direction}) — a ${expectedDirection} completion closes its own ` +
+              `${expectedDirection} intent and nothing else`,
+            )
+          }
+          if (record.approvalRef !== open.approvalRef) {
+            throw new Error(
+              `evolution: ${record.kind} record for "${record.proposalId}" carries approval ${JSON.stringify(record.approvalRef)}, not ` +
+              `the approval the open intent "${open.intentId}" recorded (${JSON.stringify(open.approvalRef)}) — the completion is ` +
+              'written for the grant the commit was authorised by, never a second one',
+            )
+          }
+          if (record.targets.length !== 1 || record.targets[0] !== open.target) {
+            throw new Error(
+              `evolution: ${record.kind} record for "${record.proposalId}" names targets ${JSON.stringify(record.targets)}, but the ` +
+              `open intent "${open.intentId}" commits ${JSON.stringify([open.target])} — a completion records the exact target its ` +
+              'intent committed',
+            )
+          }
           current[record.kind] = { targets: [...record.targets], approvalRef: record.approvalRef }
+          current.openIntent = undefined
           break
         }
       }
@@ -1692,11 +2177,11 @@ export class EvolutionService extends Service {
         throw new Error(`evolution: corrupt ledger line ${index + 1} in ${this.file}`)
       }
     })
-    // One format, one check (S4-E 收尾): the ledger is `formatVersion: 2`, and
-    // every line must say so. A v1, unversioned or mixed ledger is refused here
-    // — at load, before any entry can append — naming the line and the version
-    // it saw. There is no dual-format read, no online migration and no fallback
-    // helper.
+    // One format, one check (K2): the ledger is `formatVersion: 3`, and every
+    // line must say so. A v1, a v2, an unversioned or a mixed ledger is refused
+    // here — at load, before any entry can append — naming the line and the
+    // version it saw. There is no dual-format read, no online migration and no
+    // fallback helper.
     for (const [index, record] of records.entries()) {
       assertLedgerFormatVersion(record, `ledger line ${index + 1} in ${this.file}`)
     }

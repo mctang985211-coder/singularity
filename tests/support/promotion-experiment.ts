@@ -278,7 +278,7 @@ export async function recordPromotionExperiment(
   const reportPath = experimentReportPath(proposalId, experimentId)
   const at = new Date().toISOString()
   await svc.recordExperimentStart({
-    formatVersion: 2,
+    formatVersion: 3,
     kind: 'experiment_started',
     proposalId,
     experimentId,
@@ -356,7 +356,7 @@ export async function recordPromotionExperiment(
         }, 'tester')
       }
       const record: ExperimentSampleRecord = {
-        formatVersion: 2,
+        formatVersion: 3,
         kind: 'experiment_sample',
         proposalId,
         experimentId,
