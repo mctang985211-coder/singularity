@@ -174,6 +174,11 @@ describe('S4-E: the execution binding of a replayed run (real loop)', () => {
               },
             },
             { text: 'worker: the batch is the runtime\u2019s now' },
+            // The batch end wakes this worker's own next turn (K1 §2): with the
+            // child judged, the sub-execution's worker hands its result in, and
+            // only that submission starts the replayed run's acceptance.
+            { tool: 'task_submit_result', args: { summary: 'the child is done and the sub-execution holds' } },
+            { text: 'worker: handed in' },
           ]
           : [
             { tool: 'task_submit_result', args: { summary: 'the child is done' } },

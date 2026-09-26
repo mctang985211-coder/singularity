@@ -52,9 +52,10 @@ import {
  * A case that runs a batch to its end asserts the whole chain: the proposal's
  * record (status, decision, consumption, the events behind them), the batch
  * (its children ran, how many workers were spawned, what the store holds), each
- * child's own verdict, and the parent's composite acceptance — which the runtime
- * submits on the batch's behalf, so a batch that settles is a parent that is
- * verified or rejected by its own criteria, never left running.
+ * child's own verdict, and the parent's composite acceptance — which the
+ * **parent's own** submission starts (K1 §2: a batch end hands the run back
+ * `active` and submits nothing on its behalf), so a case that reads a terminal
+ * parent hands the root's result in through {@link handInRoot} first.
  */
 
 const ROOT = 's-root' as SessionId
@@ -187,6 +188,23 @@ async function spawned(h: ScriptedLoop, count: number): Promise<void> {
 
 
 /**
+ * The root's own hand-in (K1 §2). A batch end gives the run back its execution
+ * and submits nothing on its behalf, so the parent's acceptance is started by
+ * the parent's own submission — the entry `task_submit_result` adapts — and this
+ * is where a case whose subject is the review policy states that step. The
+ * handback is asserted first: the run really is back at work with no verdict, or
+ * the submission would be a call the protocol had not admitted yet.
+ */
+async function handInRoot(h: ScriptedLoop, root: { storeId: string; taskId: string; runId: string }): Promise<string> {
+  const handedBack = await h.task.runIn(root.storeId, root.runId)
+  expect(handedBack.executionPhase).toBe('active')
+  expect(handedBack.submission).toBeUndefined()
+  const settled = await h.runtime.submitResult(ROOT, { summary: 'the root hands in the result its batch produced' })
+  return settled.status
+}
+
+
+/**
  * The root contract every case in this file runs under (A0 §1.2): one goal, one
  * criterion a command settles. The intake is the real one — a root exists only
  * because a contract passed it — so the contract is stated here explicitly rather
@@ -228,8 +246,9 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(events.filter(event => event.kind === 'TaskProposalDecided')).toHaveLength(0)
     expect(events.filter(event => event.kind === 'TaskProposalPhaseChanged')).toHaveLength(0)
     // The child did the work and was verified, and the parent's own composite
-    // acceptance — the batch protocol's closing rule — passed with it.
+    // acceptance — started by its own submission, not by the batch — passed with it.
     expect((await h.task.taskIn(root.storeId, outcomes[0]!.taskId)).status).toBe('verified')
+    expect(await handInRoot(h, root)).toBe('verified')
     expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('verified')
   })
 
@@ -300,8 +319,10 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(new Set(after.tasks.map(task => task.taskId)))
       .toEqual(new Set([root.taskId, ...admitted.consumption!.childTaskIds]))
     // The approved batch is the batch that ran: its child verified, and the
-    // parent's own acceptance settled on the children's verdicts.
+    // parent's own acceptance — started by its own submission — settled on the
+    // children's verdicts.
     expect((await h.task.taskIn(root.storeId, outcomes[0]!.taskId)).status).toBe('verified')
+    expect(await handInRoot(h, root)).toBe('verified')
     expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('verified')
   })
 
@@ -464,6 +485,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(after.proposals!.byId[revisionId]!.status).toBe('admitted')
     expect(after.tasks.map(task => task.taskId)).toEqual([root.taskId, ...after.proposals!.byId[revisionId]!.consumption!.childTaskIds])
     expect((await h.task.taskIn(root.storeId, outcomes[0]!.taskId)).status).toBe('verified')
+    expect(await handInRoot(h, root)).toBe('verified')
     expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('verified')
     expect(h.review.batchAsks).toHaveLength(2)
   })
@@ -494,6 +516,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     expect((await proposalOf(h, root.storeId, proposalId)).status).toBe('admitted')
     expect((await h.task.taskIn(root.storeId, outcomes[0]!.taskId)).status).toBe('verified')
+    expect(await handInRoot(h, root)).toBe('verified')
     expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('verified')
   })
 
@@ -606,6 +629,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
     const gateOutcomes = await h.runtime.awaitBatch(root.storeId, await rootBatchId(h))
     expect(gateOutcomes.map(outcome => outcome.status)).toEqual(['verified'])
     expect((await h.task.taskIn(root.storeId, gateOutcomes[0]!.taskId)).status).toBe('verified')
+    expect(await handInRoot(h, root)).toBe('verified')
     expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('verified')
     const worker = h.agent(h.spawns[0]!.sessionId)
 
@@ -685,6 +709,7 @@ describe('the review policy on the real loop (T2 §5)', () => {
     const outcomes = await h.runtime.awaitBatch(root.storeId, batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     expect((await h.task.taskIn(root.storeId, outcomes[0]!.taskId)).status).toBe('verified')
+    expect(await handInRoot(h, root)).toBe('verified')
     expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('verified')
   })
 

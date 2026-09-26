@@ -524,6 +524,9 @@ describe('replay provider pre-check (S1-C)', () => {
       children: [child('champion work', [])],
     })
     await h.runtime.awaitBatch(root.storeId, batchId)
+    // The batch end judged nobody (K1 §2): the champion is terminal because its
+    // own submission ran its acceptance over the child that verified.
+    await h.runtime.submitResult(ROOT_SESSION, { summary: 'the champion hands in its result' })
     expect((await h.task.taskIn(STORE, root.taskId)).status).toBe('verified')
     return root
   }

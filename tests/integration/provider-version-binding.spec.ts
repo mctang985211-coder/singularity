@@ -93,6 +93,10 @@ async function runOne(h: RunStack, sessionId: SessionId = ROOT_A, capability = R
   })
   const outcomes = await h.runtime.awaitBatch(root.storeId, batch.batchId)
   expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
+  // The batch end hands the root back its own execution and its own hold on the
+  // checkout (K1 §2): the tree is settled — and the checkout handed on to the
+  // next tree — by the root's own submission, not by the batch.
+  await h.runtime.submitResult(sessionId, { summary: 'the tree hands in the result its batch produced' })
   return { storeId: root.storeId, taskId: outcomes[0]!.taskId, runId: outcomes[0]!.runId! }
 }
 

@@ -315,6 +315,20 @@ const workerScript = (summary: string): readonly ScriptEntry[] => [
   { text: 'worker: handed in' },
 ]
 
+/**
+ * The root's own hand-in (K1 §2): a batch end gives the run back `active` and
+ * submits nothing on its behalf, so the root's acceptance — including the
+ * criterion that judges the delivered artifact — is started by the root's own
+ * submission, the entry `task_submit_result` adapts. The handback is asserted
+ * first: a submission is only legal once the batch it opened has closed.
+ */
+async function handInRoot(h: ScriptedLoop, storeId: string, runId: string, sessionId: string = ROOT): Promise<void> {
+  const handedBack = await h.task.runIn(storeId, runId)
+  expect(handedBack.executionPhase).toBe('active')
+  expect(handedBack.submission).toBeUndefined()
+  await h.runtime.submitResult(sessionId, { summary: 'the root hands in the result its batch produced' })
+}
+
 describe('the root contract intake on the real loop (A0 §1–§4)', () => {
   it('keeps the graph name out of the goal: the not-activated view, then the user\'s own objective as the root', async () => {
     // Two root sessions, so "the root proposal names the session that carried the
@@ -467,6 +481,9 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
     // check of what was actually delivered.
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     expect((await h.task.taskIn(root.storeId, outcomes[0]!.taskId)).status).toBe('verified')
+    // The batch end handed the root back `active` and judged nothing (K1 §2):
+    // its own submission is what runs the goal's own check.
+    await handInRoot(h, root.storeId, root.runId)
     expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('failed')
     expect(payloadOf(h, root.storeId, 'TaskFailed', root.taskId)?.reason).toContain('root-artifact')
 
@@ -497,7 +514,9 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
     const outcomes = await h.runtime.awaitBatch(root.storeId, await batchIdOf(h, ROOT))
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     // Both halves of the root's own acceptance: the artifact the command judged,
-    // and the conjunction of the children that ran.
+    // and the conjunction of the children that ran — judged by the root's own
+    // submission (K1 §2), not by the batch ending.
+    await handInRoot(h, root.storeId, root.runId)
     expect((await h.task.taskIn(root.storeId, outcomes[0]!.taskId)).status).toBe('verified')
     expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('verified')
     const verdicts = evidenceFor(h, root.storeId, root.runId).flatMap(bundle => bundle.verifierResults)
@@ -534,9 +553,11 @@ describe('the root contract intake on the real loop (A0 §1–§4)', () => {
 
     const outcomes = await h.runtime.awaitBatch(root.storeId, await batchIdOf(h, ROOT))
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
-    // The child verified and the goal is still refused: the criterion that
-    // protects it fails by name, with the bytes it was admitted against and the
+    // The child verified and the goal is still refused — by the root's own
+    // submission's judgement, which is where the protected input is re-read: the
+    // criterion fails by name, with the bytes it was admitted against and the
     // bytes that stand there now.
+    await handInRoot(h, root.storeId, root.runId)
     expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('failed')
     expect(payloadOf(h, root.storeId, 'TaskFailed', root.taskId)?.reason).toContain('root-artifact')
     const verdict = evidenceFor(h, root.storeId, root.runId).flatMap(bundle => bundle.verifierResults)

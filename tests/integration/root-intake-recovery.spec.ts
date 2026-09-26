@@ -761,6 +761,9 @@ describe('root intake recovery from the real session log (A0 §1.4, §3 stage B)
     const outcomes = await b.runtime.awaitBatch(STORE, admitted.batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     expect((await b.task.taskIn(STORE, admitted.childTaskIds[0]!)).status).toBe('verified')
+    // The old root's own conjunction closes it — through the root's own
+    // submission (K1 §2), which is the only thing that starts its acceptance.
+    await b.runtime.submitResult(ROOT, { summary: 'the legacy root hands in its result' })
     expect((await b.task.taskIn(STORE, seeded.taskId)).status).toBe('verified')
     expect(b.spawns).toHaveLength(1)
     await b.dispose()

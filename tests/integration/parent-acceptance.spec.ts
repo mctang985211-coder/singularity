@@ -275,6 +275,20 @@ async function activateRoot(h: Harness): Promise<{ taskId: string; runId: string
   return { taskId: activated.taskId, runId: activated.runId }
 }
 
+/**
+ * The parent's own handback and decision (K1 §2): a batch that ended hands the
+ * run back `active` and submits nothing on its behalf — the run is still
+ * unsubmitted, with no verdict of its own — and only the parent's own
+ * `task_submit_result` starts the acceptance these cases assert on.
+ */
+async function handInParentResult(h: Harness, runId: string): Promise<void> {
+  const handedBack = await h.task.runIn(STORE, runId)
+  expect(handedBack.status).toBe('running')
+  expect(handedBack.executionPhase).toBe('active')
+  expect(handedBack.submission).toBeUndefined()
+  await h.runtime.submitResult(ROOT_SESSION, { summary: 'the parent hands in the result its batch produced' })
+}
+
 describe('parent acceptance and evidence identity, end to end (P4)', () => {
   it.each([false, true])('parent mapping preserves child heuristic classification (heuristic=%s)', async heuristic => {
     const h = await harness()
@@ -290,6 +304,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
       ] }],
     })
     await h.runtime.awaitBatch(STORE, batchId)
+    await handInParentResult(h, runId)
     expect((await h.task.runMembersIn(STORE, runId))[0]!.status).toBe('verified')
     expect((await h.task.taskIn(STORE, taskId)).status).toBe(heuristic ? 'failed' : 'verified')
     if (heuristic) {
@@ -329,6 +344,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
       children: [{ objective: 'child', acceptanceCriteria: [{ description: 'works', command: 'true' }] }],
     })
     await h.runtime.awaitBatch(STORE, batchId)
+    await handInParentResult(h, runId)
     expect((await h.task.taskIn(STORE, taskId)).status).toBe(validMap && customPass ? 'verified' : 'failed')
     expect(calls).toBe(validMap ? 1 : 0)
     if (!validMap) expect(evidenceFor(h, runId)[0]!.verifierResults[0]!.details).toContain('missing-criterion')
@@ -395,6 +411,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
       ],
     })
     const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
+    await handInParentResult(h, runId)
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
     expect((await h.task.taskIn(STORE, taskId)).status).toBe('verified')
@@ -439,6 +456,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
       ],
     })
     const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
+    await handInParentResult(h, runId)
 
     // The conjunction half passed; the independent parent-level check is what refused.
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
@@ -468,6 +486,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
       ],
     })
     const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
+    await handInParentResult(h, runId)
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified', 'verified'])
     expect((await h.task.taskIn(STORE, taskId)).status).toBe('failed')
@@ -489,6 +508,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
       }],
     })
     const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
+    await handInParentResult(h, rootRunId)
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['blocked'])
     expect(h.spawned).toHaveLength(0)
@@ -514,6 +534,7 @@ describe('parent acceptance and evidence identity, end to end (P4)', () => {
       }],
     })
     const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
+    await handInParentResult(h, rootRunId)
 
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     expect(h.spawned).toHaveLength(1)

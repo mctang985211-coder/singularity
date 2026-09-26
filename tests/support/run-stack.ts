@@ -130,10 +130,12 @@ export interface RunStackOptions {
    * completion, and a run that never submits is stopped under the no-progress
    * budget. `false` is the un-submitted path — the run stays `active` where a
    * submission was due — and is for the specs that are about idle meaning no
-   * completion. A worker whose body decomposed is skipped either way: its run is
-   * `waiting_children` when the body returns and only comes back to `active` when
-   * the batch ends, and nothing is submitted on its behalf — the submission is
-   * the run's own to make.
+   * completion. A worker whose body decomposed is skipped by the `false` path
+   * either way: its run is `waiting_children` and only comes back to `active`
+   * when the batch ends, and nothing is submitted on its behalf — the submission
+   * is the run's own to make. Under the default, such a worker waits for its own
+   * batch to end (that handback is the wake its next turn would read) and then
+   * hands its result in.
    */
   readonly submit?: boolean
 }
@@ -510,10 +512,15 @@ class RunStackImpl implements RunStack {
    * One scripted worker turn: the spec's body with the agent marked as running,
    * then the submission a live worker owes — the run is handed in before the
    * agent is idle again, so the runtime's `whenIdle` observation already sees a
-   * terminal run and never marks a no-progress round. A body that decomposed
-   * leaves the run `waiting_children`, so this turn submits nothing: the batch
-   * ends on its own and hands the run back `active`, and a submission from the
-   * fixture then would be the run's own to make rather than the batch's.
+   * terminal run and never marks a no-progress round.
+   *
+   * A body that decomposed leaves its run `waiting_children`, and a parent may
+   * not submit while its children run (K1 §2): the batch has to end and hand the
+   * run back `active` first. That handback is exactly the wake a live worker's
+   * next turn reads, so the fixture follows it — it waits for the batch this run
+   * opened to settle, then hands the result in. The submission is still the run's
+   * own, made at the point the protocol allows it, instead of the runtime closing
+   * the parent on the children's behalf.
    */
   private async runWorkerTurn(sessionId: SessionId, agent: Agent): Promise<void> {
     const record = agent as unknown as { status?: string }
@@ -524,8 +531,12 @@ class RunStackImpl implements RunStack {
       record.status = 'idle'
     }
     if (this.options.submit === false) return
-    const { run } = await this.runtime.runForSession(sessionId)
-    if (run.status !== 'running' || run.executionPhase !== 'active') return
+    const { storeId, run } = await this.runtime.runForSession(sessionId)
+    if (run.status === 'running' && run.executionPhase === 'waiting_children' && run.batchId !== undefined) {
+      await this.runtime.awaitBatch(storeId, run.batchId)
+    }
+    const current = (await this.runtime.runForSession(sessionId)).run
+    if (current.status !== 'running' || current.executionPhase !== 'active') return
     await this.runtime.submitResult(sessionId, { summary: 'worker finished (fixture auto-submit)' })
   }
 

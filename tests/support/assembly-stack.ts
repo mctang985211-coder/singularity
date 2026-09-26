@@ -338,7 +338,18 @@ export class AssemblyStack {
     return agent
   }
 
-  /** One scripted worker turn: the spec's body, then the submission a live worker owes. */
+  /**
+   * One scripted worker turn: the spec's body, then the submission a live worker
+   * owes — the run is handed in before the agent is idle again, so the runtime's
+   * `whenIdle` observation already sees a terminal run.
+   *
+   * A body that decomposed leaves its run `waiting_children`, and a parent may
+   * not submit while its children run (K1 §2): the batch has to end and hand the
+   * run back `active` first. That handback is the wake a live worker's next turn
+   * reads, so the fixture follows it — it waits for the batch this run opened to
+   * settle, then hands the result in. The submission is still the run's own,
+   * made at the point the protocol allows it.
+   */
   private async runWorkerTurn(sessionId: string): Promise<void> {
     const agent = this.live.get(sessionId) as unknown as { status?: string } | undefined
     if (agent !== undefined) agent.status = 'running'
@@ -348,7 +359,12 @@ export class AssemblyStack {
       if (agent !== undefined) agent.status = 'idle'
     }
     const bound = await this.runtime.runForSession(sessionId).catch(() => undefined)
-    if (bound === undefined || bound.run.status !== 'running' || bound.run.executionPhase !== 'active') return
+    if (bound === undefined) return
+    if (bound.run.status === 'running' && bound.run.executionPhase === 'waiting_children' && bound.run.batchId !== undefined) {
+      await this.runtime.awaitBatch(bound.storeId, bound.run.batchId)
+    }
+    const current = await this.runtime.runForSession(sessionId).catch(() => undefined)
+    if (current === undefined || current.run.status !== 'running' || current.run.executionPhase !== 'active') return
     await this.runtime.submitResult(sessionId, { summary: 'worker finished (fixture auto-submit)' })
   }
 

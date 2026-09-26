@@ -209,6 +209,9 @@ describe('review record metrics and dimensions, end to end', () => {
     })
     const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
+    // The batch end does not judge the parent (K1 §2): its own review is recorded
+    // when its own submission is, so the parent hands its result in here.
+    await h.runtime.submitResult(ROOT_SESSION, { summary: 'the root hands in the result its batch produced' })
 
     // The record is read back from the store's own session log, not from the writer's arguments.
     const reviews = persistedReviews(h.log.get(STORE))

@@ -13,7 +13,9 @@ import SessionStore, { SESSION_FORMAT_VERSION, SessionId } from '../../../../thi
 import type { SessionEvent, SessionHeader } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ROOT_PROPOSAL_TASK_ID, rootTaskStoreId, TaskService } from '../../task/src/index.ts'
-import type { TaskEvent, TaskProposal, TaskSnapshot } from '../../task/src/index.ts'
+import type { TaskEvent, TaskInstance, TaskProposal, TaskSnapshot } from '../../task/src/index.ts'
+import { batchIdFor } from '../../task/src/proposal.ts'
+import { batchFixture } from '../../task/tests/support/batch.ts'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
 import { defineTaskReadTool } from '../../agent-singularity/src/tools/task-read.ts'
@@ -67,7 +69,9 @@ import { OTHER_TOOLS, ROOT_TOOLS } from '../support/scripted-loop.ts'
  * Every case asserts proposal records, batch membership, child ids, run
  * identities and the events behind them — the facts a restart must keep — and a
  * case whose batch runs to its end also asserts the parent's own composite
- * acceptance, which the runtime submits on the batch's behalf.
+ * acceptance, which the parent's own submission starts (K1 §2: a batch end hands
+ * the run back `active` and submits nothing on its behalf), so such a case hands
+ * the root's result in through {@link handInRoot}.
  */
 
 const ROOT = 's-root'
@@ -453,8 +457,23 @@ function runOf(snapshot: TaskSnapshot, taskId: string): TaskSnapshot['runs'][num
   return run
 }
 
-/** A batch id is `b-<parentTaskId>`; the parent id is what a case drives. */
-const batchOf = (parentTaskId: string): string => `b-${parentTaskId}`
+/** A batch's identity is the pair it derives from: `b-<parentRunId>-<proposalId>` (K1 §1). */
+const batchIdOf = (parentRunId: string, proposalId: string): string => batchIdFor(parentRunId, proposalId)
+
+/**
+ * The root's own hand-in (K1 §2): the batch end gives the run back `active` and
+ * submits nothing on its behalf, so the tree's acceptance is started by the
+ * root's own submission — the entry `task_submit_result` adapts — and this is
+ * where a case that reads the root's verdict states that step. The handback is
+ * asserted first: a submission is only legal once the batch it opened has
+ * closed.
+ */
+async function handInRoot(boot: Boot, sessionId: string = ROOT): Promise<void> {
+  const { run } = await boot.runtime.runForSession(sessionId)
+  expect(run.executionPhase).toBe('active')
+  expect(run.submission).toBeUndefined()
+  await boot.runtime.submitResult(sessionId, { summary: 'the root hands in the result its batch produced' })
+}
 
 /**
  * Wait for a boot to have spawned `count` workers. The window is generous on
@@ -554,15 +573,17 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     // A decision on the record is what admits the batch, and it runs to the end.
     const decided = await b.runtime.decideProposal(STORE, proposalId, { outcome: 'approved' }, `approval:${ROOT}`)
     expect(decided.status).toBe('admitted')
-    const outcomes = await b.runtime.awaitBatch(STORE, batchOf(root.taskId))
+    const outcomes = await b.runtime.awaitBatch(STORE, batchIdOf(root.runId, proposalId))
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     expect(b.spawns).toHaveLength(1)
     const after = await b.snapshot()
     expect(after.proposals!.byId[proposalId]!.status).toBe('admitted')
     expect(after.proposals!.byId[proposalId]!.consumption!.childTaskIds).toEqual(outcomes.map(outcome => outcome.taskId))
     // The batch the recovery admitted is the batch that ran: its child verified,
-    // and the parent's own acceptance settled on that verdict.
+    // and the parent's own acceptance — started by the root's own submission —
+    // settled on that verdict.
     expect((await b.task.taskIn(STORE, outcomes[0]!.taskId)).status).toBe('verified')
+    await handInRoot(b)
     expect((await b.task.taskIn(STORE, root.taskId)).status).toBe('verified')
     await b.dispose()
   })
@@ -602,11 +623,14 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     const admitted = await statusOf(b, proposalId, 'admitted')
     const consumption = admitted.consumption!
     expect(consumption.childTaskIds).toHaveLength(1)
-    expect(consumption.batchId).toBe(batchOf(root.taskId))
+    // The identity the store derived for the batch is the pair it belongs to:
+    // this run and this proposal, never a task's name (K1 §1).
+    expect(consumption.batchId).toBe(batchIdOf(root.runId, proposalId))
     const outcomes = await b.runtime.awaitBatch(STORE, consumption.batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     expect(outcomes.map(outcome => outcome.taskId)).toEqual(consumption.childTaskIds)
     expect((await b.task.taskIn(STORE, outcomes[0]!.taskId)).status).toBe('verified')
+    await handInRoot(b)
     expect((await b.task.taskIn(STORE, root.taskId)).status).toBe('verified')
 
     // The re-check is on the record, and the whole log holds one admission, one
@@ -664,6 +688,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     expect(outcomes.map(outcome => outcome.taskId)).toEqual(consumption.childTaskIds)
     expect((await b.task.taskIn(STORE, outcomes[0]!.taskId)).status).toBe('verified')
+    await handInRoot(b)
     expect((await b.task.taskIn(STORE, root.taskId)).status).toBe('verified')
     expect(batchProposalEvents(taskEvents(await b.events())).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
     expect((await b.snapshot()).tasks).toHaveLength(2)
@@ -705,6 +730,7 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     expect(batchProposalEvents(events).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
     expect(events.filter(event => event.kind === 'TaskStarted' && event.taskId === consumption.childTaskIds[0])).toHaveLength(1)
     expect((await b.task.taskIn(STORE, consumption.childTaskIds[0]!)).status).toBe('verified')
+    await handInRoot(b)
     expect((await b.task.taskIn(STORE, root.taskId)).status).toBe('verified')
     await b.dispose()
   })
@@ -736,13 +762,15 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     expect(review?.outcome).toBe('cancelled')
     expect(review?.anomalies.join(' ')).toContain('was in flight when this store was reopened and never submitted')
     // The parent was judged on that settlement, not left running: a child that
-    // did not verify cannot be accepted.
+    // did not verify cannot be accepted — the judgement is the root's own
+    // submission's (K1 §2), which is what this case states.
     expect((await b.task.taskIn(STORE, admitted.childTaskIds[0]!)).status).toBe('cancelled')
+    await handInRoot(b)
     expect((await b.task.taskIn(STORE, root.taskId)).status).toBe('failed')
     await b.dispose()
   })
 
-  it('answers a repeated request from the record, in the first process and after a restart', async () => {
+  it('answers a repeated request from the record in both processes, and refuses a second batch beside the one it holds', async () => {
     const dir = workspace()
     const a = await boot(dir)
     const root = await activateRoot(a)
@@ -755,16 +783,23 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     expect(repeat.proposalId).toBe(first.proposalId)
     expect(((await a.snapshot()).proposals!.all).filter(proposal => proposal.kind !== 'root')).toHaveLength(1)
     expect((await a.snapshot()).tasks).toHaveLength(1)
-    // A different batch under the same calling context is a different proposal,
-    // and a revision is a different request.
-    const other = await a.runtime.submitDecompositionProposal(STORE, root.taskId, root.runId, ROOT, specOf('a different child'))
-    expect(other.proposalId).not.toBe(first.proposalId)
-    expect((await a.snapshot()).proposals!.all.filter(proposal => proposal.kind !== 'root')).toHaveLength(2)
+    // A different batch under the same calling context is refused by name while
+    // one proposal is on the run (K1 §3): a run holds at most one batch proposal
+    // at a time, and a second one is never built beside the first — nothing is
+    // recorded, so no proposal id comes back to cite.
+    const other = await a.runtime
+      .submitDecompositionProposal(STORE, root.taskId, root.runId, ROOT, specOf('a different child'))
+      .then(() => undefined, (error: unknown) => error)
+    expect(other).toBeInstanceOf(Error)
+    expect((other as Error).message).toContain('already has a proposal in flight')
+    expect((other as Error).message).toContain(first.proposalId)
+    expect((await a.snapshot()).proposals!.all.filter(proposal => proposal.kind !== 'root')).toHaveLength(1)
     const continued = await a.runtime.continueProposal(STORE, first.proposalId, ROOT)
     expect(continued.status).toBe('admitted')
-    const outcomes = await a.runtime.awaitBatch(STORE, batchOf(root.taskId))
+    const outcomes = await a.runtime.awaitBatch(STORE, batchIdOf(root.runId, first.proposalId))
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     expect((await a.task.taskIn(STORE, outcomes[0]!.taskId)).status).toBe('verified')
+    await handInRoot(a)
     expect((await a.task.taskIn(STORE, root.taskId)).status).toBe('verified')
     expect(a.spawns).toHaveLength(1)
     await a.crash()
@@ -775,14 +810,13 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     expect(again.proposalId).toBe(first.proposalId)
     expect(again.status).toBe('admitted')
     const after = await b.snapshot()
-    expect(after.proposals!.all.filter(proposal => proposal.kind !== 'root')).toHaveLength(2)
+    // The record the second process reads is the first process's: one batch
+    // proposal, the batch it consumed, and — because no second proposal was ever
+    // written — nothing beside it to invalidate.
+    expect(after.proposals!.all.filter(proposal => proposal.kind !== 'root')).toHaveLength(1)
     expect(after.tasks).toHaveLength(2)
     expect(after.runs).toHaveLength(2)
     expect(b.spawns).toHaveLength(0)
-    // The proposal that was never continued could not become the parent's batch:
-    // the parent already has one, so the recovery pass marks it stale instead of
-    // admitting a second batch beside the first.
-    expect(after.proposals!.byId[other.proposalId]!.status).toBe('stale')
     expect(after.proposals!.byId[first.proposalId]!.consumption!.childTaskIds).toEqual(outcomes.map(outcome => outcome.taskId))
     await b.dispose()
   })
@@ -828,77 +862,107 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
     const events = taskEvents(await b.events())
     expect(events.filter(event => event.kind === 'TaskStarted' && event.taskId === admitted.childTaskIds[0])).toHaveLength(1)
     expect(events.filter(event => event.kind === 'TaskStarted' && event.taskId === admitted.childTaskIds[1])).toHaveLength(1)
-    // And the parent was judged on those two verdicts: one child that did not
-    // verify is a parent its own criteria refuse.
+    // And the parent was judged on those two verdicts — by its own submission
+    // (K1 §2): one child that did not verify is a parent its own criteria refuse.
+    await handInRoot(b)
     expect((await b.task.taskIn(STORE, root.taskId)).status).toBe('failed')
     expect(b.spawns).toHaveLength(0)
     await b.dispose()
   })
 
-  it('admits one of two proposals competing for the same parent, and names the loser', async () => {
+  it('refuses a competing batch for a run that already holds a proposal, and runs the one on the record', async () => {
     const dir = workspace()
     const a = await boot(dir, { generatedTaskReview: 'all' })
     const root = await activateRoot(a)
     const first = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, specOf('first batch child'))
-    const second = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, specOf('second batch child'))
-    if (first.status !== 'pending_review' || second.status !== 'pending_review') throw new Error('unreachable')
-    expect(a.review.asks).toHaveLength(2)
+    if (first.status !== 'pending_review') throw new Error('unreachable')
+    // K1 §3: one run holds at most one batch proposal at a time, so the second
+    // batch never becomes a competing record — the call that asks for it is
+    // refused by name, naming the proposal that holds the run, and nothing is
+    // written: no second proposal, no second child, and the person is asked once.
+    const refused = await a.runtime
+      .decomposeAndRun(STORE, root.taskId, root.runId, ROOT, specOf('second batch child'))
+      .then(() => undefined, (error: unknown) => error)
+    expect(refused).toBeInstanceOf(Error)
+    expect((refused as Error).message).toContain('already has a proposal in flight')
+    expect((refused as Error).message).toContain(first.proposalId)
+    expect(a.review.asks).toHaveLength(1)
+    const waiting = await a.snapshot()
+    expect(waiting.proposals!.all.filter(proposal => proposal.kind !== 'root')).toHaveLength(1)
+    expect(waiting.tasks).toHaveLength(1)
+    expect(a.spawns).toHaveLength(0)
 
-    const winner = await a.runtime.decideProposal(STORE, second.proposalId, { outcome: 'approved' }, `approval:${ROOT}`)
-    expect(winner.status).toBe('admitted')
+    const admitted = await a.runtime.decideProposal(STORE, first.proposalId, { outcome: 'approved' }, `approval:${ROOT}`)
+    expect(admitted.status).toBe('admitted')
     await spawned(a, 1)
-    // The other approval arrives when the parent's run has left the phase that
-    // could dispatch it — the registration cannot be transferred to the batch a
-    // competitor already took, so it is recorded as the invalidation it is.
-    const loser = await a.runtime.decideProposal(STORE, first.proposalId, { outcome: 'approved' }, `approval:${ROOT}`)
-    expect(loser.outcome).toBe('expired')
-    expect(loser.status).toBe('expired')
-    expect(loser.reason ?? loser.detail).toContain('the approval arrived after the batch could be dispatched')
-    const lost = await proposalOf(a, first.proposalId)
-    expect(lost.status).toBe('expired')
-    expect(lost.consumption).toBeUndefined()
-
-    const outcomes = await a.runtime.awaitBatch(STORE, batchOf(root.taskId))
+    const outcomes = await a.runtime.awaitBatch(STORE, batchIdOf(root.runId, first.proposalId))
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     const after = await a.snapshot()
-    expect(after.proposals!.byId[second.proposalId]!.status).toBe('admitted')
+    expect(after.proposals!.byId[first.proposalId]!.status).toBe('admitted')
     expect(after.tasks).toHaveLength(2)
     expect(batchProposalEvents(taskEvents(await a.events())).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
-    // The child that ran is the winner's, and the loser's batch never existed.
+    // The child that ran is the batch's own, and no other batch ever existed.
     const childTask = after.tasks.find(task => task.parentTaskId === root.taskId)!
-    expect(childTask.contract!.objective).toBe('second batch child')
+    expect(childTask.contract!.objective).toBe('first batch child')
     expect((await a.task.taskIn(STORE, outcomes[0]!.taskId)).status).toBe('verified')
+    await handInRoot(a)
     expect((await a.task.taskIn(STORE, root.taskId)).status).toBe('verified')
     expect(a.spawns).toHaveLength(1)
     await a.dispose()
   })
 
-  it('marks a competing proposal stale when it is continued after the parent already decomposed', async () => {
+  it('marks a proposal stale when it is continued while its run already waits on a batch', async () => {
     const dir = workspace()
     const a = await boot(dir)
     const root = await activateRoot(a)
-    // Two un-reviewed batches for one parent, both `ready`: whichever is
-    // continued second finds the parent already decomposed, and a task
-    // decomposes once.
+    // The state a continuation has to answer for: a proposal recorded for a run
+    // that meanwhile waits on a batch it admitted. The runtime's own entry refuses
+    // a second batch proposal while one is in flight (K1 §3), so this record is the
+    // shape an older build's log leaves behind — written through the store's own
+    // door, which is the writer whose records a continuation reads.
     const first = await a.runtime.submitDecompositionProposal(STORE, root.taskId, root.runId, ROOT, specOf('first batch child'))
-    const second = await a.runtime.submitDecompositionProposal(STORE, root.taskId, root.runId, ROOT, specOf('second batch child'))
-    expect((await a.runtime.continueProposal(STORE, second.proposalId, ROOT)).status).toBe('admitted')
+    expect((await a.runtime.continueProposal(STORE, first.proposalId, ROOT)).status).toBe('admitted')
+    const rival = batchFixture({
+      storeId: STORE,
+      parentTaskId: root.taskId,
+      parentRunId: root.runId,
+      callerSessionId: ROOT,
+      requestKey: 'k-rival',
+      reason: 'the other batch',
+      children: [{
+        taskId: 't-rival-child',
+        definitionRef: { taskType: 'subtask', version: 1 },
+        parentTaskId: root.taskId,
+        objective: 'second batch child',
+        depth: 1,
+        acceptanceCriteria: [{ description: 'the second batch child works', command: 'true' }],
+        requestedCapabilities: [],
+        decompositionStatus: 'leaf',
+        status: 'created',
+        runIds: [],
+        childTaskIds: [],
+      }],
+    })
+    await a.task.submitProposalIn(STORE, rival.proposal, 'tester')
 
-    const loser = await a.runtime.continueProposal(STORE, first.proposalId, ROOT)
+    const loser = await a.runtime.continueProposal(STORE, rival.proposal.proposalId, ROOT)
     expect(loser.status).toBe('stale')
-    expect(loser.reason).toContain('already has a batch')
+    expect(loser.reason).toContain('already waiting on batch')
     expect(loser.reason).toContain('the approval is not transferred to another batch')
-    expect((await proposalOf(a, first.proposalId)).status).toBe('stale')
-    expect((await proposalOf(a, first.proposalId)).consumption).toBeUndefined()
+    expect((await proposalOf(a, rival.proposal.proposalId)).status).toBe('stale')
+    expect((await proposalOf(a, rival.proposal.proposalId)).consumption).toBeUndefined()
 
-    const outcomes = await a.runtime.awaitBatch(STORE, batchOf(root.taskId))
+    const outcomes = await a.runtime.awaitBatch(STORE, batchIdOf(root.runId, first.proposalId))
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     const after = await a.snapshot()
-    expect(after.proposals!.byId[second.proposalId]!.status).toBe('admitted')
+    // The batch that ran is the one the run holds, and the invalidated proposal
+    // never became a second batch: no child of its own, one admission, one spawn.
+    expect(after.proposals!.byId[first.proposalId]!.status).toBe('admitted')
     expect(after.tasks).toHaveLength(2)
-    expect(after.tasks.find(task => task.parentTaskId === root.taskId)!.contract!.objective).toBe('second batch child')
+    expect(after.tasks.find(task => task.parentTaskId === root.taskId)!.contract!.objective).toBe('first batch child')
     expect(batchProposalEvents(taskEvents(await a.events())).filter(event => event.kind === 'TaskProposalAdmitted')).toHaveLength(1)
     expect((await a.task.taskIn(STORE, outcomes[0]!.taskId)).status).toBe('verified')
+    await handInRoot(a)
     expect((await a.task.taskIn(STORE, root.taskId)).status).toBe('verified')
     expect(a.spawns).toHaveLength(1)
     await a.dispose()
@@ -936,12 +1000,17 @@ describe('proposal recovery from the real session log (T3 §6)', () => {
 
     const decided = await b.runtime.decideProposal(STORE, submission.proposalId, { outcome: 'approved' }, `approval:${ROOT}`)
     expect(decided.status).toBe('admitted')
-    const outcomes = await b.runtime.awaitBatch(STORE, batchOf(root.taskId))
+    const admittedBatchId = (await proposalOf(b, submission.proposalId)).consumption!.batchId
+    expect(admittedBatchId).toBe(batchIdOf(root.runId, submission.proposalId))
+    const outcomes = await b.runtime.awaitBatch(STORE, admittedBatchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     const after = await b.snapshot()
     expect(after.proposals!.byId[submission.proposalId]!.policy).toBe('off')
     expect(after.proposals!.byId[submission.proposalId]!.decision!.decidedBy).toBe(`approval:${ROOT}`)
     expect((await b.task.taskIn(STORE, outcomes[0]!.taskId)).status).toBe('verified')
+    // The tightened approval admitted the batch; the tree settles on the root's
+    // own submission (K1 §2), made from the second process.
+    await handInRoot(b)
     expect((await b.task.taskIn(STORE, root.taskId)).status).toBe('verified')
     await b.dispose()
   })

@@ -303,6 +303,10 @@ describe('workspace ownership across entries (A3)', () => {
     // The child's own run was charged too, and every run of the store counts.
     const after = await h.snapshot(first.storeId)
     expect(after.runs).toHaveLength(4)
+    // A batch ending hands the root back `active` and judges nothing (K1 §2): the
+    // root's own submission is what settles its task.
+    expect((await h.task.runIn(first.storeId, first.runId)).executionPhase).toBe('active')
+    await h.runtime.submitResult(ROOT1, { summary: 'the first tree hands in its result' })
     expect((await h.task.taskIn(first.storeId, first.taskId)).status).toBe('verified')
   })
 

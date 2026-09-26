@@ -317,6 +317,10 @@ async function refusalOfRuntime(h: Generation, spec: Record<string, unknown>, ro
 
 /** The store's own record of one created task, plus the event it was created with. */
 async function expectCreatedTask(h: Generation, root: Root, objective: string, criterionId: string): Promise<TaskInstance> {
+  // The batch ending judged nobody (K1 §2): the root's own submission is what
+  // runs its independent criterion and its conjunction over the children, so
+  // every case that reads a terminal root hands the result in here first.
+  await h.runtime.submitResult(root.session, { summary: 'the root hands in the result its batch produced' })
   const snapshot = await h.task.snapshotIn(root.storeId)
   const child = taskWithObjective(snapshot, objective)
   expect(child.parentTaskId).toBe(root.taskId)
@@ -360,7 +364,7 @@ describe('T1-A: a task is created without any template', () => {
     // returns at admission (A3 §3.1), so the text names the batch rather than
     // outcomes nobody has produced yet; the batch id is read back from the
     // store's own record rather than parsed out of the text.
-    expect(feedback).toMatch(/^decomposed t-[0-9a-f-]+ into 1 children \(batch b-t-[0-9a-f-]+\):/)
+    expect(feedback).toMatch(/^decomposed t-[0-9a-f-]+ into 1 children \(batch b-r-[0-9a-f-]+-p-[0-9a-f]{64}\):/)
     expect(feedback).toContain('does not wait for the batch')
     const toolBatchId = (await h.task.runIn(viaTool.storeId, viaTool.runId)).batchId!
     await h.runtime.awaitBatch(viaTool.storeId, toolBatchId)
@@ -689,6 +693,9 @@ describe('T1-D: the contract that is persisted is the one the batch declared', (
     const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
 
+    // The batch end gave the legacy parent back its own execution (K1 §2): its
+    // verdict is its own submission's, and the missing contract is still missing.
+    await h.runtime.submitResult(ROOT_SESSION, { summary: 'the legacy root hands in its result' })
     const snapshot = await h.task.snapshotIn(STORE)
     const legacy = snapshot.tasks.find(item => item.taskId === legacyTaskId)!
     expect(legacy.status).toBe('verified')
@@ -766,7 +773,9 @@ describe('T1-E: a declared field cannot widen the admission context or touch the
     }))
 
     // The batch is the only thing that changed on the parent: its objective,
-    // its criteria and its contract are the ones it was admitted with.
+    // its criteria and its contract are the ones it was admitted with — and its
+    // verdict is its own submission's (K1 §2), never the batch's.
+    await h.runtime.submitResult(root.session, { summary: 'the root hands in the result its batch produced' })
     const parentAfter = await h.task.taskIn(root.storeId, root.taskId)
     expect(parentAfter.objective).toBe(parentBefore.objective)
     expect(parentAfter.acceptanceCriteria).toEqual(parentBefore.acceptanceCriteria)

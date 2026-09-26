@@ -58,14 +58,21 @@ const children = (objective: string): DecomposeSpec['children'] => [{
   acceptanceCriteria: [{ description: `${objective} works`, command: 'true' }],
 }]
 
-/** The batch id the store recorded on the root run — the admission's own fact, waited for. */
+/**
+ * The batch id the store recorded on the root run — the admission's own fact,
+ * waited for. Read from the run's accumulated batches as well as its current
+ * one: `run.batchId` is the *unfinished* batch, cleared by the batch end that
+ * hands the run back `active` (K1 §1–§2), so a case whose batch settles quickly
+ * still reads the identity it admitted rather than racing the handback.
+ */
 async function batchIdOf(h: ScriptedLoop): Promise<string> {
+  let found: string | undefined
   await vi.waitFor(async () => {
     const { run } = await h.runForSession(ROOT)
-    expect(run.batchId).toBeDefined()
+    found = run.batches?.[0]?.batchId ?? run.batchId
+    expect(found).toBeDefined()
   })
-  const { run } = await h.runForSession(ROOT)
-  return run.batchId!
+  return found!
 }
 
 /** The child session the runtime spawned, in spawn order. */
@@ -144,24 +151,38 @@ describe('the coordination protocol on the real loop (A3)', () => {
     release.resolve()
     const outcomes = await h.runtime.awaitBatch(root.storeId, batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
-    // The child submitted for itself and was verified; the runtime then submitted
-    // the parent on its behalf and the parent's own composite acceptance passed.
+    // The child submitted for itself and was verified. The batch end then handed
+    // the root back its own execution and judged nothing (K1 §2): the run reads
+    // `active` with no submission of its own, and the task is not settled.
     expect((await h.task.runIn(root.storeId, inFlight.run.runId)).executionPhase).toBe('submitted')
+    const handedBack = await h.task.runIn(root.storeId, root.runId)
+    expect(handedBack.executionPhase).toBe('active')
+    expect(handedBack.submission).toBeUndefined()
+    expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('running')
+
+    // The owner is told, in a new turn of its own loop: the batch-end message
+    // under the identity the batch derives, carrying the children's terminal
+    // states and the fact that nothing was submitted on the root's behalf. The
+    // turn is found by what it carries rather than by its position — the intake's
+    // own activation notice is another turn of the same session, and counting
+    // turns would make this assertion depend on it.
+    const endMessageId = `m-batchend-${batchId}`
+    await vi.waitFor(() => expect(h.eventsOf(ROOT).some(event => event.type === 'user/message' && event.data.id === endMessageId)).toBe(true))
+    const notice = h.requestsOf(ROOT).find(request => request.texts.join('\n').includes(`[task-batch-end ${batchId}]`))!
+    expect(notice.texts.join('\n')).toContain('nothing was submitted on your behalf')
+    expect(notice.texts.join('\n')).toContain('1 verified')
+    // The wake is a relayed message in the runtime's own name, not a person's.
+    const last = notice.options.messages[notice.options.messages.length - 1]!
+    expect(last.id).toBe(endMessageId)
+    expect(last.source).toMatchObject({ kind: 'agent-message', form: 'relay', senderSessionId: String(ROOT) })
+
+    // …and only the root's own submission starts its acceptance (K1 §2).
+    const settled = await h.runtime.submitResult(ROOT, { summary: 'the root hands in the result its batch produced' })
+    expect(settled.status).toBe('verified')
     expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('verified')
     const parentRun = await h.task.runIn(root.storeId, root.runId)
     expect(parentRun.executionPhase).toBe('submitted')
-    expect(parentRun.submission?.origin).toBe('runtime')
-
-    // The owner is told, in a new turn of its own loop: a plugin-sourced notice
-    // carrying the batch summary and the parent's verdict. The turn is found by
-    // what it carries rather than by its position — the intake's own activation
-    // notice is another turn of the same session, and counting turns would make
-    // this assertion depend on it.
-    await vi.waitFor(() => expect(h.requestsOf(ROOT).some(request => request.texts.join('\n').includes(`batch ${batchId} settled`))).toBe(true))
-    const notice = h.requestsOf(ROOT).find(request => request.texts.join('\n').includes(`batch ${batchId} settled`))!
-    expect(notice.texts.join('\n')).toContain('is verified')
-    const last = notice.options.messages[notice.options.messages.length - 1]!
-    expect(last.source).toMatchObject({ kind: 'plugin', plugin: 'task-runtime', form: 'notice' })
+    expect(parentRun.submission?.origin).toBe('worker')
   })
 
   it('stops a worker that goes idle without submitting, after exactly one reminder', async () => {
@@ -285,6 +306,10 @@ describe('the coordination protocol on the real loop (A3)', () => {
     // A denied call is not an in-flight write: nothing is left to drain for that
     // session, which is why the batch could settle without a convergence failure.
     expect(h.runtime.gate.inFlightWrites(child)).toEqual([])
+    // The batch end gave the root back its execution and judged nothing (K1 §2);
+    // the root's own submission is what settles the tree's acceptance.
+    expect((await h.task.runIn(root.storeId, root.runId)).executionPhase).toBe('active')
+    await h.runtime.submitResult(ROOT, { summary: 'the root hands in the result its batch produced' })
     expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('verified')
   })
 

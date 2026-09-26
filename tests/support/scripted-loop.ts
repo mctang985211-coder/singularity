@@ -185,6 +185,13 @@ export interface ScriptedLoopOptions {
   /** The per-run budget this deployment enforces (`Config.budget`) — the deadline a spec drives a blocked wait into. */
   readonly budget?: Readonly<{ maxToolCalls?: number; tokens?: number; wallTimeMs?: number; attempts?: number }>
   /**
+   * The tree-wide root budget this deployment enforces (`Config.rootBudget`):
+   * the run count and the deadline a store's whole tree is measured against
+   * (K1 §2's "Run、批次增加不会重置预算"). A case that drives a second batch past
+   * the ceiling names this.
+   */
+  readonly rootBudget?: Readonly<{ wallTimeMs?: number; maxRuns?: number; maxConcurrentWrites?: number }>
+  /**
    * The provider routes the scripted adapter serves. Defaults to `['mock']`, the
    * route the deployment's default selection names. A case that freezes a model
    * route of its own (a replay's `agentOptions`) names it here: the loop routes
@@ -809,6 +816,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
       ...(this.options.verifyTimeoutMs === undefined ? {} : { verifyTimeoutMs: this.options.verifyTimeoutMs }),
       ...(this.options.writeDrainTimeoutMs === undefined ? {} : { writeDrainTimeoutMs: this.options.writeDrainTimeoutMs }),
       ...(this.options.budget === undefined ? {} : { budget: { ...this.options.budget } }),
+      ...(this.options.rootBudget === undefined ? {} : { rootBudget: { ...this.options.rootBudget } }),
       ...(this.options.generatedTaskReview === undefined ? {} : { generatedTaskReview: this.options.generatedTaskReview }),
       runBindingRoot: join(this.home, 'singularity', 'run-bindings'),
     } as Config)

@@ -289,6 +289,10 @@ async function decomposeToChild(h: Harness, criteria: readonly CriterionSpec[]):
     children: [{ objective: 'produce the product the acceptance check reads', acceptanceCriteria: [...criteria] }],
   })
   await h.runtime.awaitBatch(STORE, batchId)
+  // The batch end handed the root back its own execution and judged nothing
+  // (K1 §2): the root's own submission is what runs the tree's acceptance, so a
+  // case that reads the parent's verdict submits here first.
+  await h.runtime.submitResult(ROOT_SESSION, { summary: 'the root hands in the result its batch produced' })
   return { parentTaskId: root.taskId, childTaskId: onlyChild(h, root.taskId) }
 }
 
@@ -566,8 +570,13 @@ describe('V2-1/V2-2: the executable selftest gate at the real registry', () => {
     expect(claimFor(evidence, 'double-passes')).not.toHaveProperty('verifierVersion')
     // The pinned judge was dispatched into this very run, not merely registered.
     expect((await stat(join(h.verifier.evidenceRoot, STORE, runId, 'pinned-passes.ran'))).isFile()).toBe(true)
-    // Only the double's registration warned; the gated judge went through silently.
-    expect(h.warnings).toHaveLength(1)
-    expect(h.warnings[0]).toContain('declared-double')
+    // Only the double's registration warned; the gated judge went through
+    // silently. (Warnings from other services are a different subject: this
+    // harness mounts no message relay, so the runtime names that once when a
+    // batch end cannot deliver its result — the registration warnings are what
+    // this case is about.)
+    const registrationWarnings = h.warnings.filter(message => message.includes('registered as a test double'))
+    expect(registrationWarnings).toHaveLength(1)
+    expect(registrationWarnings[0]).toContain('declared-double')
   })
 })

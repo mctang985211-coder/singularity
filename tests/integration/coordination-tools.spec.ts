@@ -107,12 +107,18 @@ describe('the coordination tools (A3)', () => {
     release.resolve()
     const outcomes = await h.runtime.awaitBatch(root.storeId, batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
-    // The runtime submits the parent on the children's behalf once they are all
-    // terminal, and the parent's own acceptance settles it.
+    // The batch end hands the parent back its own execution and submits nothing
+    // on its behalf (K1 §2): the run is `active` again with no verdict yet.
+    const handedBack = await h.task.runIn(root.storeId, root.runId)
+    expect(handedBack.executionPhase).toBe('active')
+    expect(handedBack.submission).toBeUndefined()
+    // …and only the parent's own submission starts its acceptance.
+    const submitted = await h.runtime.submitResult(ROOT, { summary: 'the root hands in the batch result' })
+    expect(submitted.status).toBe('verified')
     expect((await h.task.taskIn(root.storeId, root.taskId)).status).toBe('verified')
     const parent = await h.task.runIn(root.storeId, root.runId)
     expect(parent.executionPhase).toBe('submitted')
-    expect(parent.submission?.origin).toBe('runtime')
+    expect(parent.submission?.origin).toBe('worker')
   })
 
   it('lets a worker hand its run in through the real task_submit_result tool', async () => {

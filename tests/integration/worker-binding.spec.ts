@@ -291,6 +291,10 @@ async function runOne(h: Harness, objective = 'align the ball', capabilities: re
   })
   const outcomes = await h.runtime.awaitBatch(STORE, batch.batchId)
   expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
+  // The batch end hands the root back `active` and judges nothing (K1 §2): the
+  // root's own submission settles it, and with it the hold this store's run has
+  // on the checkout — the fact a second store in the same deployment waits for.
+  await h.runtime.submitResult(ROOT_SESSION, { summary: 'the tree hands in the result its batch produced' })
   const childTaskId = outcomes[0]!.taskId
   const childRunId = outcomes[0]!.runId!
   return { taskId: childTaskId, runId: childRunId }
