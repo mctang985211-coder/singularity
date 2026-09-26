@@ -1,6 +1,6 @@
 # K1：子批次结束后继续探索
 
-你是本票实现主代理。工作区 `/home/ROXY/code/bb_work/harness/packages/singularity`，外层 `/home/ROXY/code/bb_work/harness`。执行[公共合同](README.md)，修改前保存 Git 基线。本文件是 K1 的完整合同；只读主 guide 当前状态、唯一计划当前排期及相关源码，不通读历史。前置：第 12 项的既有交付已在当前基线。
+你是本票实现主代理。派发子代理完成以下所有工作。工作区 `/home/ROXY/code/bb_work/harness/packages/singularity`，外层 `/home/ROXY/code/bb_work/harness`。执行[公共合同](README.md)，修改前保存 Git 基线。本文件是 K1 的完整合同；只读主 guide 当前状态、唯一计划当前排期及相关源码，不通读历史。前置：第 12 项的既有交付已在当前基线。
 
 ## 交付与归属
 

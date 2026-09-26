@@ -1,6 +1,6 @@
 # VRTC-KISS 建设计划
 
-更新：2026-09-26。保留原文件名作为稳定入口；原临时计划在 [历史快照](history/2026-09-21-vrtc-plan-snapshot.md)。
+更新：2026-09-27。保留原文件名作为稳定入口；原临时计划在 [历史快照](history/2026-09-21-vrtc-plan-snapshot.md)。
 方向与实现事实以 [工作指南](singularity-harness-guide.md)为准；本文仅描述建设顺序、代码落点与可验收结果。
 本轮架构修正前基线：Singularity `eeac427`，外层 harness `600d169`。旧建设基线见历史执行记录。
 
@@ -10,7 +10,7 @@
 
 下表是唯一当前顺序，也供填写进度。已完成票的逐轮证据见[历史执行记录](history/2026-09-24-vrtc-execution-records.md)；其中的“下一项”只描述当时，不覆盖本表。只有明确反例才重开已验收票；`待填` 不表示通过。
 
-进度审核使用[指挥 prompt](execution-prompts/progress-review-and-dispatch.md)，单票按[派发模板](execution-prompts/task-dispatch-template.md)填写，子代理按[公共派发粒度](execution-prompts/README.md#子代理派发粒度)拆分；主代理负责整票集成与验收。
+进度审核使用[指挥 prompt](execution-prompts/progress-review-and-dispatch.md)，单票按[派发模板](execution-prompts/task-dispatch-template.md)填写，子代理按[公共派发粒度](execution-prompts/README.md#子代理派发粒度)拆分；整票集成与验收同样派子代理执行，主代理负责派发、汇总与提交。
 
 | 次序 | 一次派发的范围 | 状态 | 负责人/任务 | 交付记录 | 进入下一项的条件 |
 |---|---|---|---|---|---|
@@ -27,14 +27,14 @@
 | 10 | A1 原独立排位 | 并入第 9 项，不单独派发 | — | 保留编号供历史引用 | 第 9 项整组验收后直接进入第 11 项 |
 | 11 | A4：父子澄清 | **已验收（2026-09-26）**：恢复期唤醒移到屏障 ready 后，A4-1～A4-5 闭合 | 实现主代理 | 本文 E/F.1、[返工交付](history/2026-09-26-a4-rework-record.md)、[唤醒收尾](history/2026-09-26-a4-barrier-wake-record.md)、[最终审核](history/2026-09-26-a4-final-review.md) | 下一项为第 12 项 S4-E |
 | 12 | S4-E：评估基础 | 原范围已验收；生产提交崩溃缺口由 K2 定向修复，完整 Skill 改进单位由 K3 修正 | 实现主代理 | 本文 F.2、[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md) | 保留原证据，不能据原验收宣称应用崩溃已闭合 |
-| 12a | K1：子批次结束后继续探索 | **待派发，当前唯一下一票** | 待填 | [完整合同 prompt](execution-prompts/12a-k1-exploration.md) | K1-1～K1-5：多批、父主动提交、问答/取消/恢复与唯一 driver |
+| 12a | K1：子批次结束后继续探索 | **待验收（2026-09-27）**：K1-1～K1-5 与公共检查全绿，待进度审核 | 实现主代理 + 子代理 | [完整合同 prompt](execution-prompts/12a-k1-exploration.md)、[交付记录](history/2026-09-27-k1-delivery-record.md) | K1-1～K1-5：多批、父主动提交、问答/取消/恢复与唯一 driver；进度审核通过后才派 K2 |
 | 12b | K2：应用与回滚可恢复 | 待 K1 验收 | 待填 | [完整合同 prompt](execution-prompts/12b-k2-evolution-commit.md) | K2-1～K2-5：意图、原子替换、对账与真实准入阻断 |
 | 12c | K3：完整 Skill 改进单位 | 待 K2 验收 | 待填 | [完整合同 prompt](execution-prompts/12c-k3-skill-unit.md) | K3-1～K3-5：已有执行型 Skill 同名更新、双侧评估与整组回滚 |
 | 12d | K4：复盘与执行预算分离 | 待 K3 验收 | 待填 | [完整合同 prompt](execution-prompts/12d-k4-review-budget.md) | K4-1～K4-5：过期任务可复盘，人审扩额、不重置累计用量 |
 | 13 | A5 + S2-E：诊断与缺口交接 | 待 K1～K4 验收；未实施 | 待填 | 本文 F.3、[派发 prompt](execution-prompts/13-a5-s2-e-diagnosis.md) | REV-1～REV-5；消费 K4 预算规则，不重复实现 |
 | 14 | A6 + S2-R + S3：自主改进与恢复 | 待 A5 验收；未实施 | 待填 | 本文 F.4 | EVO-1～EVO-5；复用 K1 批次、K2/K3 提交与 K4 有效预算 |
 
-K1～K4 修正已确认的架构反例，均未实施；不是全仓整理或提前开放一个残缺版本。四份 prompt 是各票唯一详细合同，本文不复制它们的施工步骤。顺序为 K1 → K2 → K3 → K4 → A5 → A6，每票独立审核后再派下一票。只有 K2 → K3 有直接提交协议依赖，其余串行用于避免共享 runtime/工具合同同时迁移。历史已验收记录不改写，受影响保证按这四票重新验证。
+K1～K4 修正已确认的架构反例；K1 已交付待验收，K2～K4 均未实施；不是全仓整理或提前开放一个残缺版本。四份 prompt 是各票唯一详细合同，本文不复制它们的施工步骤。顺序为 K1 → K2 → K3 → K4 → A5 → A6，每票独立审核后再派下一票。只有 K2 → K3 有直接提交协议依赖，其余串行用于避免共享 runtime/工具合同同时迁移。历史已验收记录不改写，受影响保证按这四票重新验证。
 
 ### 五问复核：保留领域差异，直接用现成底座
 
@@ -88,7 +88,7 @@ K1～K4 修正已确认的架构反例，均未实施；不是全仓整理或提
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。当前只派 [K1](execution-prompts/12a-k1-exploration.md)。K2/K3/K4 合同已备好，前置未验收不能启动；A5 暂不派发。历史验收证据保持原样。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。K1 已交付待验收（交付记录见文首表），审核通过后才派 K2；K2/K3/K4 合同已备好，前置未验收不能启动；A5 暂不派发。历史验收证据保持原样。
 
 ## 当前施工合同（D/E/F）
 
@@ -213,7 +213,7 @@ S4-E 按 D 节整体迁移现有 Evolution 生命周期与工具消费者；不�
 
 ### F. 后续交付组的冻结合同（2026-09-24）
 
-本节保留 A4/S4-E 基础保证并定义 A5/A6；整体复盘后的修正见文首 K1～K4 合同，均未实施。原验收记录保留，不豁免新发现的反例。唯一顺序见文首；私有实现由工程 agent 决定。
+本节保留 A4/S4-E 基础保证并定义 A5/A6；整体复盘后的修正见文首 K1～K4 合同（K1 已交付待验收，K2～K4 未实施）。原验收记录保留，不豁免新发现的反例。唯一顺序见文首；私有实现由工程 agent 决定。
 
 #### F.1 A4：有持久来源的直属父子问答
 
@@ -225,7 +225,7 @@ replay 的 parentRunId 仅是实验血缘：parentless replay Task 调 ask 必�
 
 顺序固定为：持久正文来源 → Task 原子提交问题/阻塞或答案/解除 → agent-runtime 按同 messageId 投递 DSH inbox → flush 收件 Session 后报告 delivered。ask/answer 不等对方 loop 或回复。Task 意图后崩溃由显式恢复补投递；目标 inbox/history 已有同 id 就不重复入箱。无 inbox 条目不表示已消费：claim 在 pre-step 前可能已移除；context 从未处理问答事实重投影来源，只有实际模型 step 输入才能证明看过，工具领域效果仍以 Task 记录判定。回答已解除阻塞而尚未被模型读取时，下一请求必须包含该回答引用/正文后才能执行；不得仅因 answered 就从上下文删除。没有消费证明就保留引用，不另建 consumed 账本或第二套通信库。
 
-agent-runtime 复用 live Agent.steer/followup、agents.resume 与 Session flush，持有唯一 handle；不使用要求 continuable activation 的 subagents.sendMessage，也不挂载会带来另一套 roster/Task board 的实验性 Agent Team mailbox。暂不可达记 unavailable，保留意图，恢复入口重试；不自动造替代父。active 有阻塞时停止受阻写入/分解/提交与无进展提醒，允许协调输入；waiting_children 的 batchId/写闸始终保持，所有阻塞解除也不能改为 active。K1 改为批次结束后交还父执行权；父主动提交仍须等未处理协调项完成。问答继续受已有 Run wallTime、根截止和无进展停止规则约束；不新增 `maxQuestionsPerRun`、问答重试预算或独立计费账。终态取消未答项，迟到答案只留审计、不解除终态闸。
+agent-runtime 复用 live Agent.steer/followup、agents.resume 与 Session flush，持有唯一 handle；不使用要求 continuable activation 的 subagents.sendMessage，也不挂载会带来另一套 roster/Task board 的实验性 Agent Team mailbox。暂不可达记 unavailable，保留意图，恢复入口重试；不自动造替代父。active 有阻塞时停止受阻写入/分解/提交与无进展提醒，允许协调输入；waiting_children 的批次写闸始终保持，问答不直接改相位。K1 已落地（待验收）：批次结束持久化父回 active、写闸解除，未决阻塞问答仍单独阻塞写入与提交；父主动提交才启动验收。问答继续受已有 Run wallTime、根截止和无进展停止规则约束；不新增 `maxQuestionsPerRun`、问答重试预算或独立计费账。终态取消未答项，迟到答案只留审计、不解除终态闸。
 
 已知问答等待的 worker 重启后恢复同一 Session/Run，并从持久问答重建阻塞；不能沿用“所有在途未提交 Run 均取消”的旧恢复分支。先对账受管理写入/进程，无法安全接管就具名失败，不能重复不明外部副作用。归拢只限问答触及的普通/replay/恢复结算规则，不要求先重写全部 orchestrate。
 
@@ -295,7 +295,7 @@ Diagnosis.targetType 为非空开放字符串，执行转换仍由 evolution 拒
 
 EVO-1 的真实运行证据是第 14 项整组已验收的必要条件，不是可省略的效果附件。派发时须填写本次实验授权和预算，未授权则先完成机制与确定性验证，并将整组保留待验收、列明所缺实跑条件；不能擅自收费运行，也不能填已验收后另排“以后验证自进化”。一组成功仅证明这些冻结案例，不宣称泛化成功率。
 
-内部交接严格串行：①在 K2/K3 上增加 capability 行与新 Skill 的候选/overlay/提交；②缺能力基线评估及证据闸；③复用 K1/K4 的新 Run 执行，补原 AC 绑定与证据复用；④交接消费/supervisor 工具接线；⑤独立端到端验收。主代理保留公共合同/持久化兼容/集成；每个子代理只领一个已固定子目标，不能一次要求其实现完整自进化。整组完成前不开放自主执行开关；任何已承诺路径不以“下票补齐”通过。
+内部交接严格串行：①在 K2/K3 上增加 capability 行与新 Skill 的候选/overlay/提交；②缺能力基线评估及证据闸；③复用 K1/K4 的新 Run 执行，补原 AC 绑定与证据复用；④交接消费/supervisor 工具接线；⑤独立端到端验收。公共合同/持久化兼容/集成都按接口派子代理执行；每个子代理只领一个已固定子目标，不能一次要求其实现完整自进化。整组完成前不开放自主执行开关；任何已承诺路径不以“下票补齐”通过。
 
 ## 历史执行与验收记录
 
