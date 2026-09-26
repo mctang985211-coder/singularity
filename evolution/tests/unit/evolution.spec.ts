@@ -882,6 +882,18 @@ describe('EvolutionService sandbox materialization', () => {
     expect(await readFile(join(root, 'sandbox', 's1', 'champion', 'skills', 'verify', 'SKILL.md'), 'utf8')).toBe('old skill text')
   })
 
+  it('snapshots the exact production bytes used for the baseline digest', async () => {
+    const { svc, root, skillRoot } = await serviceWithRoots()
+    const bytes = Buffer.from([0x23, 0x20, 0xff, 0x0a])
+    await mkdir(join(skillRoot, 'verify'), { recursive: true })
+    await writeFile(join(skillRoot, 'verify', 'SKILL.md'), bytes)
+    await svc.propose(skillProposal, 'root-1')
+    await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('new') })
+    const prepared = await svc.prepare('s1', 'root-1')
+    expect(prepared.prepared?.skillBaseline?.sha256).toBe(createHash('sha256').update(bytes).digest('hex'))
+    expect(await readFile(join(root, 'sandbox', 's1', 'champion', 'skills', 'verify', 'SKILL.md'))).toEqual(bytes)
+  })
+
   it('refuses a prepare whose production skill does not exist, writing nothing', async () => {
     const { svc, root } = await serviceWithRoots()
     await svc.propose(skillProposal, 'root-1')
@@ -1062,6 +1074,8 @@ describe('evolution_prepare tool', () => {
     const result = (await defineEvolutionPrepareTool(ctx).execute({ proposalId: 's1' }, exec('root-1'))) as string
     expect(result).toContain('evolution_prepare rejected:')
     expect(result).toContain('does not exist')
+    expect(result).toContain('a new skill cannot be evaluated or promoted by this path')
+    expect(result).not.toContain('create the skill in production')
     // No sandbox and no ledger line: the refusal lands before the first write.
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(before)
     expect(existsSync(join(root, 'sandbox'))).toBe(false)

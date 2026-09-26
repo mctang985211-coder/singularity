@@ -3752,15 +3752,6 @@ declare class TaskRuntime extends Service {
    */
   private assertClosedRootBudget;
   /**
-   * Refuse a replay option this build does not read, before anything else runs.
-   * The option set is closed — the experiment clock this build deleted
-   * (`wallTimeMs`/`durationMs`) above all: a replay places no clock of its own,
-   * because a run's time is the deployment's (`rootBudget.wallTimeMs`,
-   * `Config.budget.wallTimeMs`). An option named here and quietly dropped would
-   * let the caller hold a promise this deployment never keeps.
-   */
-  private assertReplayOptions;
-  /**
    * Refuse a review policy this build does not implement. The configuration
    * schema types the member, but a deployment that constructs the runtime
    * directly (a test, an embedding process) bypasses the schema, and a policy

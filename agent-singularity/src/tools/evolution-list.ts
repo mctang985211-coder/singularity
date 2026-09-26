@@ -45,19 +45,12 @@ export function defineEvolutionListTool(ctx: Context) {
         }
         if (proposal.prepared !== undefined) {
           const view = proposal.prepared
-          if (view.sandbox === null) {
-            // Belt for the view's own optional field: the fold admits no prepare
-            // without a materialized sandbox, so no entry here writes one.
-            lines.push('  prepared: no sandbox recorded')
-          } else {
-            // The fold admits one prepared shape: a materialized skill prepare
-            // whose champion snapshot was captured.
-            // P2: a skill candidate shows the content identity later stages verify against.
-            const contentText = view.skillContent === undefined ? '' : `, candidate content ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}…`
-            // P3: the production baseline the apply compares against.
-            const baselineText = view.skillBaseline === undefined ? '' : `, production baseline ${view.skillBaseline.name} sha256:${view.skillBaseline.sha256.slice(0, 12)}…`
-            lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, champion snapshot captured${contentText}${baselineText})`)
-          }
+          // The fold admits only a materialized skill prepare with both identities.
+          lines.push(
+            `  sandbox: ${ctx.evolution.root}/${view.sandbox!} (${view.files.length} files, champion snapshot captured, ` +
+            `candidate content ${view.skillContent!.name} sha256:${view.skillContent!.sha256.slice(0, 12)}…, ` +
+            `production baseline ${view.skillBaseline!.name} sha256:${view.skillBaseline!.sha256.slice(0, 12)}…)`,
+          )
         }
         if (proposal.gate !== undefined) {
           lines.push(`  gate regression evidence: [${proposal.gate.regressionEvidenceRefs.join(', ')}]`)

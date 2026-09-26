@@ -26,8 +26,8 @@
 | 9 | A2 + A1：Agent 状态上下文（一个交付组） | **已验收（2026-09-25）**：Q1–Q4、A2-1～A2-6 与公共检查通过 | 实现主代理 + 子代理 | 本文 D/E 节；[交付记录](history/2026-09-25-a2-a1-delivery-record.md)、[进度审核及复审](history/2026-09-25-a2-a1-progress-review.md)、[返工记录](history/2026-09-25-a2-a1-rework-record.md)、[Q3 收尾记录](history/2026-09-25-a2-a1-q3-closure-record.md) | 已按 D 节的单事件引用实现有界续读（上限 50000 字节、字节窗口与省略措辞复用 `@deepseek-ai/dsh-output-retention`）；进度审核通过；下一项为第 11 项 A4 |
 | 10 | A1 原独立排位 | 并入第 9 项，不单独派发 | — | 保留编号供历史引用 | 第 9 项整组验收后直接进入第 11 项 |
 | 11 | A4：父子澄清 | **已验收（2026-09-26）**：恢复期唤醒移到屏障 ready 后，A4-1～A4-5 闭合 | 实现主代理 | 本文 E/F.1、[返工交付](history/2026-09-26-a4-rework-record.md)、[唤醒收尾](history/2026-09-26-a4-barrier-wake-record.md)、[最终审核](history/2026-09-26-a4-final-review.md) | 下一项为第 12 项 S4-E |
-| 12 | S4-E：评估基础（S4 内的子票） | **待验收**（2026-09-26 定点返工交付）：写边界版本闸、fold 当前形状、candidate 必填 mutation、prepare 写前拒缺生产 Skill、replayTask options 闭集、九工具文案一致，七条反例全闭合 | 实现主代理 + 子代理 | 本文 F.2、[独立审核与红证据](history/2026-09-26-s4-e-final-closure-review.md)、[定点返工交付](history/2026-09-26-s4-e-final-closure-rework-record.md)、[原收尾交付](history/2026-09-26-s4-e-final-closure-record.md)、[持久化说明](persistence-changes/2026-09-26-s4-e-experiment-ledger.md) | 独立复审通过后才进入第 13 项；EVAL-1～EVAL-5 以返工交付记录的重跑证据为准 |
-| 13 | A5 + S2-E：诊断与缺口交接（一个交付组） | 待前置；合同已定、未实施 | 待填 | 本文 F.3、深入架构 §8 | agent-singularity/review 按源身份触发只读复盘并保存交接；runtime 结算不等 reviewer；缺口可见与诊断失败恢复完整 |
+| 12 | S4-E：评估基础（S4 内的子票） | **已验收（2026-09-26）**：七条反例闭合；独立复审修正缺生产 Skill 的误导文本及 champion 快照字节损失 | 实现主代理 + 子代理 | 本文 F.2、[定点返工交付](history/2026-09-26-s4-e-final-closure-rework-record.md)、[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md)、[持久化说明](persistence-changes/2026-09-26-s4-e-experiment-ledger.md) | EVAL-1～EVAL-5 按最终复审关闭；下一项为第 13 项 |
+| 13 | A5 + S2-E：诊断与缺口交接（一个交付组） | **待派发**；前置 S4-E 已验收 | 实现主代理 + 窄子目标 | 本文 F.3、深入架构 §8、[当前派发 prompt](execution-prompts/13-a5-s2-e-diagnosis.md) | agent-singularity/review 按源身份触发只读复盘并保存交接；runtime 结算不等 reviewer；缺口可见与诊断失败恢复完整 |
 | 14 | A6 + S2-R + S3：自主改进与恢复（一个交付组） | 待前置；合同已定、未实施 | 待填 | 本文 F.4 | evolution 组织有限候选路径，task-runtime 重检并恢复原图；L1/L2、能力/产物缺口、拒绝/重启/回滚均验收 |
 
 ### 五问复核：保留领域差异，直接用现成底座
@@ -82,7 +82,7 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 9 项 A2+A1 和第 11 项 A4 已验收。第 12 项 S4-E 的[收尾交付](history/2026-09-26-s4-e-final-closure-record.md)经[独立审核](history/2026-09-26-s4-e-final-closure-review.md)判返工；当前只派[定点返工](execution-prompts/12-s4-e-final-closure.md)，复审通过前不派第 13 项。历史补救、R1 和 R3 的逐轮证据见[执行与验收记录](history/2026-09-24-vrtc-execution-records.md)。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 9 项 A2+A1、第 11 项 A4 和第 12 项 S4-E 已验收；当前只派[第 13 项 A5 + S2-E](execution-prompts/13-a5-s2-e-diagnosis.md)。S4-E 证据见[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md)；历史补救、R1 和 R3 的逐轮证据见[执行与验收记录](history/2026-09-24-vrtc-execution-records.md)。
 
 ## 当前施工合同（D/E/F）
 
@@ -207,7 +207,7 @@ S4-E 按 D 节整体迁移现有 Evolution 生命周期与工具消费者；不�
 
 ### F. 后续交付组的冻结合同（2026-09-24）
 
-本节与 D 的读取合同、E 的显式恢复合同共同作为派发依据。A4 已[最终验收](history/2026-09-26-a4-final-review.md)；**S4-E 已实施、审核返工**（[Q1～Q4](history/2026-09-26-s4-e-progress-review.md)）；A5/A6 合同已定、代码未实施。不改变文首唯一顺序。这里固定对外行为、所有者和失败处置，私有文件布局与等价 helper 实现由工程 agent 决定。
+本节与 D 的读取合同、E 的显式恢复合同共同作为派发依据。A4 已[最终验收](history/2026-09-26-a4-final-review.md)，S4-E 已[最终复审验收](history/2026-09-26-s4-e-final-closure-rework-review.md)；A5/A6 合同已定、代码未实施。不改变文首唯一顺序。这里固定对外行为、所有者和失败处置，私有文件布局由工程 agent 决定。
 
 #### F.1 A4：有持久来源的直属父子问答
 
@@ -237,7 +237,7 @@ agent-runtime 复用 live Agent.steer/followup、agents.resume 与 Session flush
 
 实验幂等键使用 proposal、prepared 内容身份、样本、baseline/candidate、重复序号；已结算 Run 复用其证据，在途实验按 runtime 恢复结果记录 interrupted/failed，不偷偷补跑或覆写。明确的新实验才能再计预算运行。decide/apply 两次既有人审保留，报告/候选/生产基线在应用前复检；取消和失败仍保存已发生实验与成本。
 
-2026-09-26 [返工复审](history/2026-09-26-s4-e-rework-review.md)记录了原合同下的绝对截止、gate 成本、无 ref 裁判和旧实验账四处问题。**KISS 裁决**：删除实验级 `wallTimeMs` 及只为它增设的 replay 截止传播；配置了 `rootBudget.wallTimeMs` 时仍按现有规则限制 Run；`gate` 只记录六项回答和证据引用，失败或超额实验可以留下 gated 审计事实，`decide(PROMOTE)` 与 `apply` 仍在写前复检。root prompt、九个 Evolution 工具 schema/说明/返回文案、服务直调和生产调用方必须同批清除非 Skill v1 replay 及旧候选执行路径。Evolution ledger 新写统一用 **formatVersion 2**；旧 formatVersion 1 在任何新写入前具名拒绝，不做双格式 reader、在线迁移或回退 helper。切换真实账本前先核对最终状态、原字节归档，再用空的新账启动；如有未回滚 applied，先由旧版本处置并停止切换，不自动改写用户数据。[收尾交付](history/2026-09-26-s4-e-final-closure-record.md)已删除 v1 replay 主体、实验时限并补显式裁判；[独立审核](history/2026-09-26-s4-e-final-closure-review.md)证实公开写入口仍可混入 v1、模型可见说明仍引向旧链、无可执行后续的 candidate/prepare 可成功落账、底层旧选项被忽略。[定点返工交付](history/2026-09-26-s4-e-final-closure-rework-record.md)已闭合：写边界（含幂等返回前）与 load 同一版本判据；fold 只接当前可写形状；candidate 服务与工具 schema 均必填 mutation；prepare 写前拒缺生产 SKILL.md；replayTask options 闭集具名拒绝；九工具说明/成功/拒绝返回与终态一致。历史审核记录不改写；当前状态待独立复审。
+2026-09-26 [返工复审](history/2026-09-26-s4-e-rework-review.md)记录了原合同下的绝对截止、gate 成本、无 ref 裁判和旧实验账四处问题。**KISS 裁决**：删除实验级 `wallTimeMs` 及只为它增设的 replay 截止传播；配置了 `rootBudget.wallTimeMs` 时仍按现有规则限制 Run；`gate` 只记录六项回答和证据引用，失败或超额实验可以留下 gated 审计事实，`decide(PROMOTE)` 与 `apply` 仍在写前复检。root prompt、九个 Evolution 工具 schema/说明/返回文案、服务直调和生产调用方必须同批清除非 Skill v1 replay 及旧候选执行路径。Evolution ledger 新写统一用 **formatVersion 2**；旧 formatVersion 1 在任何新写入前具名拒绝，不做双格式 reader、在线迁移或回退 helper。切换真实账本前先核对最终状态、原字节归档，再用空的新账启动；如有未回滚 applied，先由旧版本处置并停止切换，不自动改写用户数据。[收尾交付](history/2026-09-26-s4-e-final-closure-record.md)已删除 v1 replay 主体、实验时限并补显式裁判；[独立审核](history/2026-09-26-s4-e-final-closure-review.md)证实公开写入口仍可混入 v1、模型可见说明仍引向旧链、无可执行后续的 candidate/prepare 可成功落账、底层旧选项被忽略。[定点返工交付](history/2026-09-26-s4-e-final-closure-rework-record.md)已闭合：写边界（含幂等返回前）与 load 同一版本判据；fold 只接当前可写形状；candidate 服务与工具 schema 均必填 mutation；prepare 写前拒缺生产 SKILL.md；replayTask options 闭集具名拒绝；九工具说明/成功/拒绝返回与终态一致。历史审核记录不改写；[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md)补正模型可见拒绝文案和 champion 快照字节一致性后，整票已验收。
 
 验收 EVAL-1：双侧真实 runtime/verifier 执行且互不污染，报告可回溯所有身份。EVAL-2：历史基线冒充、输入/裁判/模型漂移、伪造证据、双侧同失败、回归/holdout 退化在 PROMOTE/apply 拒绝且无应用副作用；gate 可记录失败证据但不等于晋升通过；合法修复允许进入原人审；实验无显式版本化裁判在首个持久写前拒绝。EVAL-3：重复调用、取消/重启不重计已完成样本、不替换失败记录；内容/报告/生产基线变化拒绝应用；旧调用传实验级 wallTimeMs 立即拒绝，根运行时限仍有效。EVAL-4：新包真实接管全部现行工具消费者；formatVersion 2 当前账可重开且其 applied 可回滚，formatVersion 1 旧账在写前具名拒绝，不混写或自动迁移；非 Skill 旧请求直调零副作用。EVAL-5（迁移闭合）：`evolution` 是候选、实验、决定、应用与回滚的唯一实现；模型可见 root prompt、九个工具 schema/说明/成功返回只引导当前 Skill 路径，旧 Evolution v1 replay 的生产导出、调用方、状态分支和报告/fixture 删除，`agent-singularity` 仅保留薄工具适配；以真实调用链核对，不以搬走的行数判定。验收在 fixture 中完成，不作模型效果声明。
 

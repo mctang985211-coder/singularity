@@ -1346,7 +1346,6 @@ function sessionId$18(exec) {
 function manualGuidance(proposal) {
 	if (proposal.level === "L4") return "L4 harness evolution has no executor in evolution_apply: supervisor implementation and validation must precede human review through the harness change workflow";
 	if (!APPLYABLE_TARGET_TYPES.includes(proposal.targetType)) return `this build writes a single SKILL.md only, so a decided "${proposal.targetType}" proposal has no executor here — its ledger record stays readable and nothing writes it; the capability evaluation such a proposal would need belongs to A6, not to this build`;
-	if (proposal.prepared?.sandbox == null) return "this candidate carried no structured mutation, so nothing was materialized: create a new structured candidate, evaluate it, then request human review";
 	return null;
 }
 /** How fast an applied skill takes effect, stated honestly in the output. */
@@ -1716,12 +1715,7 @@ function defineEvolutionListTool(ctx) {
 				if (proposal.mutation !== void 0) lines.push(`  mutation: ${proposal.targetType} mutation recorded`);
 				if (proposal.prepared !== void 0) {
 					const view = proposal.prepared;
-					if (view.sandbox === null) lines.push("  prepared: no sandbox recorded");
-					else {
-						const contentText = view.skillContent === void 0 ? "" : `, candidate content ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}…`;
-						const baselineText = view.skillBaseline === void 0 ? "" : `, production baseline ${view.skillBaseline.name} sha256:${view.skillBaseline.sha256.slice(0, 12)}…`;
-						lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, champion snapshot captured${contentText}${baselineText})`);
-					}
+					lines.push(`  sandbox: ${ctx.evolution.root}/${view.sandbox} (${view.files.length} files, champion snapshot captured, candidate content ${view.skillContent.name} sha256:${view.skillContent.sha256.slice(0, 12)}…, production baseline ${view.skillBaseline.name} sha256:${view.skillBaseline.sha256.slice(0, 12)}…)`);
 				}
 				if (proposal.gate !== void 0) lines.push(`  gate regression evidence: [${proposal.gate.regressionEvidenceRefs.join(", ")}]`);
 				if (proposal.applied !== void 0) lines.push(`  applied: [${proposal.applied.targets.join(", ")}] (approval ${proposal.applied.approvalRef})`);

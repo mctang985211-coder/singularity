@@ -1,6 +1,6 @@
 # Singularity 构建任务派发入口
 
-当前（2026-09-26）：第 9 项 A2+A1 与第 11 项 A4 已验收；第 12 项 S4-E 的[定点返工](../history/2026-09-26-s4-e-final-closure-rework-record.md)已交付，七条反例全闭合，**待独立复审**。第 13 项尚无前置。状态以计划文首唯一表为准；本目录较早的 S4-E prompt 仅作历史证据。
+当前（2026-09-26）：第 9 项 A2+A1、第 11 项 A4 和第 12 项 S4-E 已验收，见[S4-E 最终复审](../history/2026-09-26-s4-e-final-closure-rework-review.md)。当前只派[第 13 项 A5 + S2-E](13-a5-s2-e-diagnosis.md)；第 14 项尚无前置。状态以计划文首唯一表为准；S4-E prompt 只作历史证据。
 
 进度核实和下一票材料由[进度审核指挥 prompt](progress-review-and-dispatch.md)处理；已派发票尚未验收时不启动下一票。后续单票从[派发模板](task-dispatch-template.md)填写，直接引用计划 D/E/F，不复制旧方案或重新选型。P1–P4 的原始 prompt 保留在本目录供历史回归，不作为当前任务入口。子代理只读获派子目标的相关合同片段。
 

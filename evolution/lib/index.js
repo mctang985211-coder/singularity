@@ -2055,7 +2055,7 @@ function nextStates(proposal) {
 /** The one transition check shared by live appends and replay, so an illegal migration reads identically in both. */
 function assertTransition(current, kind) {
 	if (nextStates(current).includes(kind)) return;
-	const hint = current.status === "candidate" ? " — record \"prepared\" first (evolution_prepare), the sandbox materialization this candidate's mutation needs" : current.status === "decided" && kind === "applied" ? current.decision !== "PROMOTE" ? ` — the recorded decision is ${current.decision}; only a PROMOTE decision can be applied` : " — only a materialized skill mutation at L1–L3 applies; anything else stays a manual human edit" : "";
+	const hint = current.status === "candidate" ? " — record \"prepared\" first (evolution_prepare), the sandbox materialization this candidate's mutation needs" : current.status === "decided" && kind === "applied" ? current.decision !== "PROMOTE" ? ` — the recorded decision is ${current.decision}; only a PROMOTE decision can be applied` : " — only a materialized skill mutation at L1–L3 applies in this build" : "";
 	throw new Error(`evolution: proposal "${current.proposalId}" is ${current.status}; cannot record "${kind}"${hint}`);
 }
 /**
@@ -2235,7 +2235,7 @@ var EvolutionService = class extends Service {
 		assertSegment(proposalId, "proposalId");
 		const { name } = mutation;
 		const production = await readProductionSkill(this.skillRoot, name);
-		if (production === null) throw new Error(`evolution: the production skill "${join(this.skillRoot, name, "SKILL.md")}" does not exist, so proposal "${proposalId}" has nothing to replace — this build prepares and promotes a replacement of an existing single-file SKILL.md only, and a brand-new skill is not what its evidence could show; create the skill in production and propose a replacement of it`);
+		if (production === null) throw new Error(`evolution: the production skill "${join(this.skillRoot, name, "SKILL.md")}" does not exist, so proposal "${proposalId}" has nothing to replace — this build prepares and promotes a replacement of an existing single-file SKILL.md only; a new skill cannot be evaluated or promoted by this path`);
 		const dir = join(this.root, "sandbox", proposalId);
 		const written = await this.materialize(dir, mutation, production);
 		const sandbox = `sandbox/${proposalId}`;
@@ -2686,12 +2686,12 @@ var EvolutionService = class extends Service {
 		const write = async (rel, content$1) => {
 			const abs = resolveWithin(dir, rel);
 			await mkdir(dirname(abs), { recursive: true });
-			await writeFile(abs, content$1, "utf8");
+			await writeFile(abs, content$1);
 			files.push(rel);
 		};
 		const { name, content } = mutation;
 		await write(`skills/${name}/SKILL.md`, content);
-		await write(`champion/skills/${name}/SKILL.md`, production.bytes.toString("utf8"));
+		await write(`champion/skills/${name}/SKILL.md`, production.bytes);
 		return {
 			files,
 			skillBaseline: {

@@ -24,9 +24,6 @@ function manualGuidance(proposal: EvolutionProposal): string | null {
   if (!APPLYABLE_TARGET_TYPES.includes(proposal.targetType)) {
     return `this build writes a single SKILL.md only, so a decided "${proposal.targetType}" proposal has no executor here — its ledger record stays readable and nothing writes it; the capability evaluation such a proposal would need belongs to A6, not to this build`
   }
-  if (proposal.prepared?.sandbox == null) {
-    return 'this candidate carried no structured mutation, so nothing was materialized: create a new structured candidate, evaluate it, then request human review'
-  }
   return null
 }
 

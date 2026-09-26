@@ -40,7 +40,7 @@
  * (optionally) rolledback — each transition only after its own human approval
  * granted through the native approval seam (done by the tools, not here). L4
  * proposals and every non-skill target type never apply: the ledger records
- * them and a human edits production by hand.
+ * their suggestions without granting an executor in this build.
  *
  * Single-file skill candidates additionally carry a content identity (P2):
  * prepare records the SHA-256 of the exact bytes of the materialized
@@ -708,7 +708,7 @@ function assertTransition(current: EvolutionProposal, kind: EvolutionStatus): vo
     : current.status === 'decided' && kind === 'applied'
       ? current.decision !== 'PROMOTE'
         ? ` — the recorded decision is ${current.decision}; only a PROMOTE decision can be applied`
-        : ' — only a materialized skill mutation at L1–L3 applies; anything else stays a manual human edit'
+        : ' — only a materialized skill mutation at L1–L3 applies in this build'
       : ''
   throw new Error(`evolution: proposal "${current.proposalId}" is ${current.status}; cannot record "${kind}"${hint}`)
 }
@@ -951,8 +951,7 @@ export class EvolutionService extends Service {
       throw new Error(
         `evolution: the production skill "${join(this.skillRoot, name, 'SKILL.md')}" does not exist, so proposal ` +
         `"${proposalId}" has nothing to replace — this build prepares and promotes a replacement of an existing single-file ` +
-        'SKILL.md only, and a brand-new skill is not what its evidence could show; create the skill in production and propose ' +
-        'a replacement of it',
+        'SKILL.md only; a new skill cannot be evaluated or promoted by this path',
       )
     }
     const dir = join(this.root, 'sandbox', proposalId)
@@ -1522,17 +1521,17 @@ export class EvolutionService extends Service {
     production: { bytes: Buffer; sha256: string },
   ): Promise<{ files: string[]; skillBaseline: SkillContentIdentity }> {
     const files: string[] = []
-    const write = async (rel: string, content: string): Promise<void> => {
+    const write = async (rel: string, content: string | Buffer): Promise<void> => {
       const abs = resolveWithin(dir, rel)
       await mkdir(dirname(abs), { recursive: true })
-      await writeFile(abs, content, 'utf8')
+      await writeFile(abs, content)
       files.push(rel)
     }
     // This build materializes a skill candidate and nothing else: `candidate`
     // admits no other target type, so there is no other arm to take.
     const { name, content } = mutation as unknown as SkillMutation
     await write(`skills/${name}/SKILL.md`, content)
-    await write(`champion/skills/${name}/SKILL.md`, production.bytes.toString('utf8'))
+    await write(`champion/skills/${name}/SKILL.md`, production.bytes)
     return { files, skillBaseline: { name, sha256: production.sha256 } }
   }
 

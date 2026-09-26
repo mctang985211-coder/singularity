@@ -1560,28 +1560,6 @@ export class TaskRuntime extends Service {
   }
 
   /**
-   * Refuse a replay option this build does not read, before anything else runs.
-   * The option set is closed — the experiment clock this build deleted
-   * (`wallTimeMs`/`durationMs`) above all: a replay places no clock of its own,
-   * because a run's time is the deployment's (`rootBudget.wallTimeMs`,
-   * `Config.budget.wallTimeMs`). An option named here and quietly dropped would
-   * let the caller hold a promise this deployment never keeps.
-   */
-  private assertReplayOptions(options: ReplayTaskOptions): void {
-    const known = new Set(['lineage', 'overlay', 'contract', 'spawn', 'workspace', 'agentOptions', 'signal'])
-    const unknown = Object.keys(options).filter(key => !known.has(key))
-    if (unknown.length === 0) return
-    const removed = unknown.filter(key => key === 'wallTimeMs' || key === 'durationMs')
-    throw new Error(
-      `task-runtime: replayTask options name [${unknown.join(', ')}], which this build does not read` +
-      (removed.length === 0
-        ? ''
-        : ` — the experiment clock ${removed.join('/')} was removed: a replay places no clock of its own, and a run's time is bounded by rootBudget.wallTimeMs and Config.budget.wallTimeMs`) +
-      '; the replay is refused rather than run under a promise nobody keeps',
-    )
-  }
-
-  /**
    * Refuse a review policy this build does not implement. The configuration
    * schema types the member, but a deployment that constructs the runtime
    * directly (a test, an embedding process) bypasses the schema, and a policy
@@ -4572,7 +4550,11 @@ export class TaskRuntime extends Service {
     options: ReplayTaskOptions,
     callerSessionId: string,
   ): Promise<ReplayRunOutcome> {
-    this.assertReplayOptions(options)
+    const known = new Set(['lineage', 'overlay', 'contract', 'spawn', 'workspace', 'agentOptions', 'signal'])
+    const unknown = Object.keys(options).filter(key => !known.has(key))
+    if (unknown.length > 0) {
+      throw new Error(`task-runtime: replayTask does not accept options [${unknown.join(', ')}]`)
+    }
     await this.assertRecoveryReady(storeId, 'a replay')
     const champion = await this.ctx.task.taskIn(storeId, championTaskId)
     if (champion.status !== 'verified' && champion.status !== 'failed') {
