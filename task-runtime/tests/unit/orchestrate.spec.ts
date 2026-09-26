@@ -24,6 +24,7 @@ import {
   TaskRuntime,
   VerifierUnavailableError,
   escalationHint,
+  owedBatchResults,
   workerBaseline,
 } from '../../src/index.ts'
 
@@ -3717,15 +3718,143 @@ describe('A3 coordination', () => {
     // The recovery pass's entry (K1 §2): the same message, re-derived from the
     // store after the batch ended. The target's own fold is the record — the
     // second attempt delivers nothing, and the text is the store's own account.
+    const before = await h.task.snapshotIn(STORE)
     expect(await h.runtime.redeliverBatchResult(STORE, batchId)).toBe('already-present')
     expect(h.relayed.filter(item => item.sessionId === ROOT_SESSION)).toHaveLength(1)
     expect(h.relayed[0]!.messageId).toBe(`m-batchend-${batchId}`)
     expect(h.relayed[0]!.text).toContain(batchId)
+    // A re-delivery is a message and nothing else: no proposal is consumed again,
+    // no run is started, no evidence is written and no submission is recorded —
+    // the store after the second attempt is the store after the first.
+    const after = await h.task.snapshotIn(STORE)
+    expect(after.runs).toEqual(before.runs)
+    expect(after.tasks).toEqual(before.tasks)
+    expect(after.proposals).toEqual(before.proposals)
+    expect(after.evidence).toEqual(before.evidence)
+    expect(after.reviews).toEqual(before.reviews)
+    expect(h.spawned).toHaveLength(1)
 
     // A batch no run records is refused by name rather than answered with
     // another batch's children.
     await expect(h.runtime.redeliverBatchResult(STORE, 'b-not-a-batch'))
       .rejects.toThrow(/is not recorded in store/)
+  })
+
+  test('derives the end-of-batch results a store still owes, and answers a terminal parent skipped', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+    await h.runtime.awaitBatch(STORE, batchId)
+
+    // The run holds its ended batch as history (the handback cleared its current
+    // batch), so the store owes that batch exactly one message — one candidate,
+    // with the identity and the members the batch derives them from.
+    const owed = owedBatchResults(await h.task.snapshotIn(STORE))
+    expect(owed).toEqual([{
+      taskId,
+      runId,
+      batchId,
+      sessionId: ROOT_SESSION,
+      memberTaskIds: [expect.any(String)],
+    }])
+
+    // The parents' own submission is what ends the run, and a run that ended owes
+    // nothing: the message's content is moot for it and a terminal run is not woken.
+    expect((await h.runtime.submitResult(ROOT_SESSION, { summary: 'the parent is done' })).status).toBe('verified')
+    expect(owedBatchResults(await h.task.snapshotIn(STORE))).toEqual([])
+    const relayedBefore = h.relayed.length
+    expect(await h.runtime.redeliverBatchResult(STORE, batchId)).toBe('skipped')
+    expect(h.relayed).toHaveLength(relayedBefore)
+  })
+
+  test('parks an end-of-batch delivery on the recovery barrier, and drops it when the barrier fails', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+    await h.runtime.awaitBatch(STORE, batchId)
+    // The crash between the batch's end and its wake: the run is `active` with the
+    // batch on its record, and the target's fold holds no copy of the message.
+    h.relayed.length = 0
+
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let armed = false
+    let unreadable = false
+    const realSnapshot = h.task.snapshotIn.bind(h.task)
+    // Hold the barrier's completion read — the one `initializeStoreGates` takes once
+    // the pass has returned: the store is provably still `recovering` while the case
+    // acts, and that read then fails or succeeds exactly as the case says.
+    const gateInit = h.runtime as unknown as { initializeStoreGates(storeId: string): Promise<void> }
+    const realInitialize = gateInit.initializeStoreGates.bind(h.runtime)
+    vi.spyOn(gateInit, 'initializeStoreGates').mockImplementation(async (...args: [string]) => {
+      armed = true
+      return await realInitialize(...args)
+    })
+    vi.spyOn(h.task, 'snapshotIn').mockImplementation(async (storeId: string) => {
+      const snapshot = await realSnapshot(storeId)
+      if (armed) {
+        armed = false
+        entered.resolve()
+        await release.promise
+        if (unreadable) throw new Error('the store log became unreadable')
+      }
+      return snapshot
+    })
+
+    const adopting = h.runtime.adoptRoot(STORE, ROOT_SESSION)
+    try {
+      await entered.promise
+      // The wake order (A4 §F.1's rule, applied to batches): a delivery into a store
+      // whose sessions' gates are not in place yet would be refused by the recovery
+      // door with nothing left to wake the Session, so it is parked instead.
+      expect(await h.runtime.redeliverBatchResult(STORE, batchId)).toBe('unavailable')
+      expect(h.relayed).toEqual([])
+      unreadable = true
+      release.resolve()
+      await expect(adopting).rejects.toThrow(/the store log became unreadable/)
+      // The failed barrier dropped it — and lost nothing: the facts are the store's,
+      // so the next delivery states the same message under the same identity.
+      expect(h.relayed).toEqual([])
+      expect(await h.runtime.redeliverBatchResult(STORE, batchId)).toBe('delivered')
+      expect(h.relayed.map(item => item.messageId)).toEqual([`m-batchend-${batchId}`])
+    } finally {
+      release.resolve()
+      await adopting.catch(() => undefined)
+      vi.restoreAllMocks()
+    }
+  })
+
+  test('stops a waiting parent whose batch the run\'s accumulation does not hold, by name', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+    // The old state, written through the store's own service: the run waits on the
+    // batch id the pre-K1 build derived from the task, with no consumption and no
+    // members — which the store's own reducer accepts (the field's shape is all it
+    // checks) and which this build must stop rather than guess an owner for.
+    const oldBatchId = `b-${taskId}`
+    await h.task.changeRunPhaseIn(STORE, taskId, runId, ROOT_SESSION, { phase: 'waiting_children', batchId: oldBatchId })
+    expect((await h.task.snapshotIn(STORE)).runs[0]?.executionPhase).toBe('waiting_children')
+
+    const report = await h.runtime.reconcileStore(STORE)
+    const after = await h.task.snapshotIn(STORE)
+    const run = after.runs[0]!
+    expect(run.status).toBe('cancelled')
+    expect(run.batches ?? []).toEqual([])
+    const review = after.reviews.find(item => item.runId === runId)!
+    expect(review.outcome).toBe('cancelled')
+    expect(review.anomalies.join(' ')).toContain(oldBatchId)
+    expect(review.anomalies.join(' ')).toContain('stopped old state')
+    // Nothing was driven and no membership was invented for it.
+    expect(h.spawned).toEqual([])
+    expect(report.questionResumes).toEqual([])
+    await expect(h.runtime.awaitBatch(STORE, oldBatchId)).rejects.toThrow(/is not recorded in store/)
+    await expect(h.runtime.redeliverBatchResult(STORE, oldBatchId)).rejects.toThrow(/is not recorded in store/)
   })
 
   test('a child whose writes cannot be confirmed stopped fails the parent by name and hands nothing back', async () => {
@@ -4318,6 +4447,74 @@ describe('A3 coordination', () => {
     expect(restarted.relayed.find(item => item.messageId === `m-batchend-${batchId}`)?.text).toContain('task_submit_result')
     expect((await restarted.runtime.submitResult(ROOT_SESSION, { summary: 'the parent reports what the batch delivered' })).status).toBe('verified')
     expect((await restarted.task.runIn(STORE, runId)).status).toBe('verified')
+  })
+
+  test('recovery: a child that got its own batch back is waited for, not cancelled as an abandoned worker', async () => {
+    const h = harness()
+    const { taskId, runId } = await createRoot(h)
+    // The child's own worker decomposes for real and stops there: the crash lands
+    // with the child `active` and its own batch on its record — a delegated parent
+    // the dead process could not finish telling (K1 §2, §5), not a worker that
+    // abandoned its work.
+    let childRunId = ''
+    h.setIdleBehavior(async sessionId => {
+      const bound = await h.runtime.runForSession(sessionId)
+      if (bound.task.depth !== 1) {
+        await h.runtime.submitResult(sessionId, { summary: 'grandchild work done' })
+        return
+      }
+      childRunId = bound.run.runId
+      await decomposeAndSettle(h, bound.storeId, bound.task.taskId, bound.run.runId, sessionId, {
+        reason: 'the work turned out not to be atomic',
+        children: [childSpec('grandchild work')],
+      })
+      // The worker never goes idle again: the crash lands with it holding the
+      // decision its own batch handed back, before the no-progress rule could read
+      // that as stagnation (a killed process observes nothing).
+      return await new Promise<void>(() => {})
+    })
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('child a', { decomposable: true })],
+    })
+    const childBatchId = await vi.waitFor(async () => {
+      const run = await h.task.runIn(STORE, childRunId)
+      expect(run.executionPhase).toBe('active')
+      expect(run.batches).toHaveLength(1)
+      return (run.batches ?? [])[0]!.batchId
+    })
+    expect(h.spawned).toHaveLength(2)
+
+    // The process dies, and the restart drives the parent's batch again.
+    const restarted = harness({}, h.sessions)
+    await restarted.task.openStore(STORE)
+    await restarted.runtime.reconcileStore(STORE)
+
+    // The child is handed back its own execution *and awaited*: the pass re-derives
+    // the message its batch owes it (the relay is asked for exactly that identity),
+    // and the parent's driver waits for the run instead of cancelling it — the
+    // "in flight when the batch resumed" diagnostic the old branch wrote must not
+    // appear.
+    const driverWait = restarted.runtime.awaitBatch(STORE, batchId)
+    const relay = (restarted.ctx as unknown as { agentRuntime: { ensureAgentMessageDelivered: ReturnType<typeof vi.fn> } }).agentRuntime.ensureAgentMessageDelivered
+    await vi.waitFor(() => expect(relay).toHaveBeenCalledWith(expect.objectContaining({ messageId: `m-batchend-${childBatchId}` })))
+    const held = await restarted.task.snapshotIn(STORE)
+    const child = held.runs.find(run => run.runId === childRunId)!
+    expect(child.status).toBe('running')
+    expect(child.batchId).toBeUndefined()
+    expect(held.reviews.some(review => review.runId === childRunId)).toBe(false)
+    expect((await restarted.task.runIn(STORE, runId)).executionPhase).toBe('waiting_children')
+
+    // The wait ends the way every other worker wait does — by the batch being
+    // cancelled — and the child's own cancellation is that one, not a recovery
+    // branch's: the message names the batch, never "was in flight when batch".
+    await restarted.runtime.cancelBatch(STORE, batchId, ROOT_SESSION)
+    expect((await driverWait).map(outcome => outcome.status)).toEqual(['cancelled'])
+    const cancelled = await restarted.task.snapshotIn(STORE)
+    expect(cancelled.runs.find(run => run.runId === childRunId)?.status).toBe('cancelled')
+    const review = cancelled.reviews.find(item => item.runId === childRunId)!
+    expect(review.anomalies.join(' ')).toContain('the batch was cancelled')
+    expect(review.anomalies.join(' ')).not.toContain('was in flight when batch')
   })
 
   test('recovery: a submitted run is verified, and a run without a phase is left exactly as it is', async () => {

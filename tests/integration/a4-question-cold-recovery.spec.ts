@@ -4,7 +4,9 @@
  * waiting on its parent's answer, killed, and booted again over the same
  * directory — and the *whole* exchange then completes: the same Sessions come
  * back, the parent's answer reaches the asking child's own model request, the
- * child submits, and the batch settles.
+ * child submits, and the batch ends by handing its parent back its own decision
+ * (K1 §2: the runtime submits for nobody, so each parent hands in its own
+ * result through the shipped tool when its turn comes).
  *
  * What is real in every case: `session-persistence-jsonl` and the bytes it
  * writes (the store the second boot reads is the first boot's artifact), the
@@ -37,6 +39,12 @@
  * `task_decompose` inside a replay task, whose children ask the replay); the
  * replay *driver's* own continuation across a restart stays out of this ticket
  * (A6/S2-R) and is named in that case.
+ *
+ * The last block is K1 §5's own subject on this same chain: the two crash windows
+ * around a batch's end — every child terminal and the handback not yet durable,
+ * and the handback durable with the parent not yet told — plus the replay half of
+ * the second, where the parent that has to come back is a resumed worker rather
+ * than the store's own root.
  */
 
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -269,6 +277,24 @@ class Boot {
       readonly rootBudget?: Readonly<{ wallTimeMs?: number; maxRuns?: number }>
       /** The review policy a root contract is intaken under; the default is this runtime's own. */
       readonly generatedTaskReview?: 'off' | 'all'
+      /**
+       * Park one session's write drain on a managed job that never confirms stopped
+       * (`a3-recovery.spec.ts`'s lever): the settlement behind it is frozen exactly
+       * where a killed process would leave it, with no timer deciding anything. The
+       * index is that session's own drain count, so a case can freeze the batch
+       * admission (the first) or the check the batch end makes of the parent (a
+       * later one) — the crash point "every child is terminal, the handback is not
+       * yet durable" (K1 §5's first window).
+       */
+      readonly parkDrain?: (sessionId: string, drainIndex: number) => boolean
+      /**
+       * Hold one relay delivery before it is made: the runtime has reached the wake
+       * and the message has not landed. A latch that never resolves is the crash
+       * point "the batch ended and the run is `active`, the parent was never told"
+       * (K1 §5's second window). The relay itself is the real one; only its return
+       * is held.
+       */
+      readonly gateDelivery?: (intent: { messageId: string; targetSessionId: string }) => Promise<void> | undefined
     },
   ): Promise<Boot> {
     mkdirSync(join(dir, 'env'), { recursive: true })
@@ -409,6 +435,40 @@ class Boot {
       standIn(name)
     }
     const agentRuntime = new AgentRuntime(ctx)
+    const holdDelivery = options.gateDelivery
+    if (holdDelivery !== undefined) {
+      // The relay stays the real one; only the return of the deliveries a case names
+      // is held. Everything the delivery would do — the fold it reads, the inbox it
+      // steers into, the flush it waits on — happens on the far side of the latch.
+      const realDeliver = agentRuntime.ensureAgentMessageDelivered.bind(agentRuntime)
+      const relay = agentRuntime as unknown as {
+        ensureAgentMessageDelivered: (intent: Parameters<typeof realDeliver>[0]) => ReturnType<typeof realDeliver>
+      }
+      relay.ensureAgentMessageDelivered = async intent => {
+        const held = holdDelivery({ messageId: String(intent.messageId), targetSessionId: String(intent.targetSessionId) })
+        if (held !== undefined) await held
+        return await realDeliver(intent)
+      }
+    }
+    const freezeDrain = options.parkDrain
+    if (freezeDrain !== undefined) {
+      // The drain's one awaited jobs call never returns, so the drain — and the
+      // settlement behind it — is frozen without a timer. `list` is synchronous by
+      // the seam's contract; the live entry it returns is what makes the drain call
+      // `wait`.
+      const drains = new Map<string, number>()
+      ctx.provide('jobs', {
+        list: (agent: { id?: string } | undefined) => {
+          const id = agent?.id
+          if (id === undefined) return []
+          const index = (drains.get(id) ?? 0) + 1
+          drains.set(id, index)
+          return freezeDrain(id, index) ? [{ id: `frozen-drain-${id}`, status: 'running' }] : []
+        },
+        kill: () => undefined,
+        wait: () => new Promise(() => {}),
+      } as never)
+    }
     const task = new TaskService(ctx)
     await ctx.plugin(VerifierRegistry, { evidenceRoot: join(dir, 'evidence') })
     await ctx.plugin(TaskRuntime, {
@@ -778,12 +838,21 @@ describe('a question relayed through a waiting middle across the restart (A4-1, 
             { waitFor: () => recovered.promise },
             { tool: 'task_answer', args: () => ({ questionId: relayQuestionId, requestKey: 'a-root', answer: 'my child decides under the frozen contract', resolves: true }) },
             { text: 'root: answered my child' },
+            // The root's own batch ends when the middle verifies, and the wake it
+            // gets for it (K1 §2) is the turn that carries this submission.
+            { tool: 'task_submit_result', args: { summary: 'root work delivered' } },
+            { text: 'root: submitted' },
           ]
         }
         if (sessionId === middleSession) {
           return [
             { tool: 'task_answer', args: () => ({ questionId: grandchildQuestionId, requestKey: 'a-mid', answer: 'the frozen contract holds, decided one level up', resolves: true }) },
             { text: 'middle: answered my grandchild' },
+            // Its own batch ends when the grandchild verifies: the parent is handed
+            // back its execution and told, and *its* submission is what its criteria
+            // judge — the runtime submits for nobody (K1 §2).
+            { tool: 'task_submit_result', args: { summary: 'middle work delivered' } },
+            { text: 'middle: submitted' },
           ]
         }
         if (sessionId === grandchildSession) {
@@ -820,8 +889,9 @@ describe('a question relayed through a waiting middle across the restart (A4-1, 
     expect(second.copiesOf(middleSession, rootAnswer.messageId)).toBe(1)
 
     // Level three: the middle answers its grandchild from a phase whose writes are
-    // closed, and the grandchild's next request carries it — then the child
-    // submits and both batches settle by their own rules.
+    // closed, and the grandchild's next request carries it — then the child submits,
+    // both batches end, and each parent hands in its own result in the turn its
+    // batch-end message wakes (K1 §2).
     const middleAnswer = await vi.waitFor(async () => {
       const answer = (await second.snapshot()).questions?.byId[grandchildQuestionId]?.answers?.[0]
       expect(answer, `an answer to ${grandchildQuestionId}`).toBeDefined()
@@ -966,24 +1036,33 @@ describe('cold recovery closes the loop (A4 §F.1)', () => {
     expect(second.copiesOf(childSession, answered.messageId)).toBe(1)
     expect(second.runtime.gate.questionsBlocked(childSession)).toBe(false)
 
-    // The child's submission runs through the real chain: verification, the
-    // child's terminal state, the batch's own settlement, and the parent's
-    // acceptance — no manual cancellation anywhere in the case.
+    // The child's submission runs through the real chain: verification, the child's
+    // terminal state, and the batch end that hands the parent back its own decision
+    // — no manual cancellation anywhere in the case, and no submission made on the
+    // parent's behalf (K1 §2).
     const settled = await vi.waitFor(async () => {
       const snapshot = await second.snapshot()
       const childReview = snapshot.reviews.find(review => review.runId === childRun)
       expect(snapshot.runs.find(run => run.runId === childRun)?.status, JSON.stringify(childReview ?? null)).toBe('verified')
-      expect(snapshot.runs.find(run => run.taskId !== undefined && run.sessionId === ROOT)?.status).toBe('verified')
+      expect(snapshot.runs.find(run => run.sessionId === ROOT)?.executionPhase).toBe('active')
       return snapshot
     }, { timeout: 30_000 })
     expect(settled.runs).toHaveLength(2)
     expect(settled.questions?.all.map(question => question.questionId)).toEqual([questionId])
-    // Each settlement writes its own terminal review; the two land with the
-    // statuses the wait above already saw.
-    await vi.waitFor(async () => {
-      const snapshot = await second.snapshot()
-      expect(snapshot.reviews.filter(review => review.outcome === 'verified')).toHaveLength(2)
-    }, { timeout: 10_000 })
+    // The child's verification is the batch's own settlement and carries its one
+    // terminal review; the parent's acceptance has not run — it is the parent's own
+    // submission that starts it.
+    const rootRun = settled.runs.find(run => run.sessionId === ROOT)!
+    expect(rootRun.status).toBe('running')
+    expect(rootRun.batchId).toBeUndefined()
+    expect(settled.reviews.filter(review => review.outcome === 'verified')).toHaveLength(1)
+    expect(settled.reviews.some(review => review.runId === rootRun.runId)).toBe(false)
+    // The tell follows the phase change (the run is handed back first, then the
+    // message is delivered), so the copy is awaited rather than assumed.
+    await vi.waitFor(
+      () => expect(second.copiesOf(ROOT, `m-batchend-${rootRun.batches?.[0]?.batchId}`)).toBe(1),
+      { timeout: 20_000 },
+    )
     // One domain effect per identity: one question, one answer, one inbox entry
     // on each side — and the same messageId the first process recorded.
     expect(settled.questions?.byId[questionId]?.answers).toHaveLength(1)
@@ -1457,6 +1536,11 @@ describe('a question inside a replay tree across the restart (A4-3, replay half)
           { waitFor: () => recovered.promise },
           { tool: 'task_answer', args: () => ({ questionId, requestKey: 'a1', answer: 'the champion contract holds, decided by the replay', resolves: true }) },
           { text: 'replay: answered my child' },
+          // Its child's verification ends the replay's batch and hands the replay
+          // run back its execution: the turn that wake opens is the one that hands
+          // in the replay's own result (K1 §2).
+          { tool: 'task_submit_result', args: { summary: 'replay work delivered' } },
+          { text: 'replay: submitted' },
         ]
         if (sessionId === childSession) return [
           { tool: 'task_submit_result', args: { summary: 'replay child work delivered' } },
@@ -1489,7 +1573,8 @@ describe('a question inside a replay tree across the restart (A4-3, replay half)
     )
     expect(second.copiesOf(childSession, answered.messageId)).toBe(1)
     // The replayed tree settles by the ordinary rules: the child's submission,
-    // the replay's batch, and the replay run's own acceptance. The durable
+    // the replay's batch ending and handing the replay run its own decision, and
+    // the replay's own submission, which its verifier judges. The durable
     // experiment identity this case can read back is the replayed task's own
     // contract — its objective carries the lineage tag — while the review
     // record's anomaly is written by whichever process owns the settlement
@@ -1677,11 +1762,21 @@ describe('a recovery wake waits for the ready handle (A4 §F.1)', () => {
       const settled = await vi.waitFor(async () => {
         const snapshot = await second.snapshot()
         expect(snapshot.runs.find(run => run.runId === childRun)?.status).toBe('verified')
-        expect(snapshot.runs.find(run => run.sessionId === ROOT)?.status).toBe('verified')
+        // The child's verification ends the root's batch: the root is handed back
+        // its own execution and told, not judged (K1 §2).
+        expect(snapshot.runs.find(run => run.sessionId === ROOT)?.executionPhase).toBe('active')
         return snapshot
       }, { timeout: 30_000 })
       expect(settled.questions?.all.map(question => question.questionId)).toEqual([questionId])
       expect(settled.questions?.byId[questionId]?.answers).toHaveLength(1)
+      const rootRun = settled.runs.find(run => run.sessionId === ROOT)!
+      expect(rootRun.status).toBe('running')
+      expect(rootRun.batchId).toBeUndefined()
+      expect(settled.reviews.some(review => review.runId === rootRun.runId)).toBe(false)
+      await vi.waitFor(
+        () => expect(second.copiesOf(ROOT, `m-batchend-${rootRun.batches?.[0]?.batchId}`)).toBe(1),
+        { timeout: 20_000 },
+      )
       expect(second.copiesOf(ROOT, messageId)).toBe(1)
     } finally {
       hold.release()
@@ -1748,10 +1843,20 @@ describe('a recovery wake waits for the ready handle (A4 §F.1)', () => {
       const settled = await vi.waitFor(async () => {
         const snapshot = await second.snapshot()
         expect(snapshot.runs.find(run => run.runId === childRun)?.status).toBe('verified')
-        expect(snapshot.runs.find(run => run.sessionId === ROOT)?.status).toBe('verified')
+        // The batch ending hands the root back its execution and tells it so; the
+        // verdict is the root's own to ask for (K1 §2).
+        expect(snapshot.runs.find(run => run.sessionId === ROOT)?.executionPhase).toBe('active')
         return snapshot
       }, { timeout: 30_000 })
       expect(settled.questions?.byId[questionId]?.answers).toHaveLength(1)
+      const rootRun = settled.runs.find(run => run.sessionId === ROOT)!
+      expect(rootRun.status).toBe('running')
+      expect(rootRun.batchId).toBeUndefined()
+      expect(settled.reviews.some(review => review.runId === rootRun.runId)).toBe(false)
+      await vi.waitFor(
+        () => expect(second.copiesOf(ROOT, `m-batchend-${rootRun.batches?.[0]?.batchId}`)).toBe(1),
+        { timeout: 20_000 },
+      )
     } finally {
       hold.release()
       await adopting.catch(() => undefined)
@@ -1833,10 +1938,20 @@ describe('a recovery wake waits for the ready handle (A4 §F.1)', () => {
       const settled = await vi.waitFor(async () => {
         const snapshot = await second.snapshot()
         expect(snapshot.runs.find(run => run.runId === childRun)?.status).toBe('verified')
-        expect(snapshot.runs.find(run => run.sessionId === ROOT)?.status).toBe('verified')
+        expect(snapshot.runs.find(run => run.sessionId === ROOT)?.executionPhase).toBe('active')
         return snapshot
       }, { timeout: 30_000 })
       expect(settled.questions?.byId[questionId]?.answers).toHaveLength(1)
+      // The root's batch ended with its child, and the root has its own decision
+      // back — told once, and not judged (K1 §2).
+      const rootRun = settled.runs.find(run => run.sessionId === ROOT)!
+      expect(rootRun.status).toBe('running')
+      expect(rootRun.batchId).toBeUndefined()
+      expect(settled.reviews.some(review => review.runId === rootRun.runId)).toBe(false)
+      await vi.waitFor(
+        () => expect(second.copiesOf(ROOT, `m-batchend-${rootRun.batches?.[0]?.batchId}`)).toBe(1),
+        { timeout: 20_000 },
+      )
     } finally {
       hold.release()
       await adopting.catch(() => undefined)
@@ -1989,5 +2104,257 @@ describe('a recovery wake waits for the ready handle (A4 §F.1)', () => {
       vi.restoreAllMocks()
       await second.dispose()
     }
+  }, 90_000)
+})
+
+/**
+ * K1 §5's two crash windows, over this fixture's real sessions and its real store
+ * — the batch end is a fact about the store, and both windows are about the two
+ * sides of it:
+ *
+ * - **window one** — every child is terminal and the process dies *before* the
+ *   handback is durable. The restart drives the same batch to its end: the children
+ *   that are already terminal are adopted (never started again), and the parent is
+ *   handed back its execution and told the batch is over, once;
+ * - **window two** — the handback is durable (`waiting_children → active`) and the
+ *   process dies *before* the parent is told. The restart finds the same Run in the
+ *   state the first process left it — a delegated parent, not an abandoned worker —
+ *   brings the same Session back, and re-states the message under the identity the
+ *   batch derives, which the target's own fold answers at most once;
+ * - the same window inside a **replay tree**, where the parent that has to come
+ *   back is a resumed worker rather than the store's own root.
+ */
+describe('the batch end across the restart (K1 §5)', () => {
+  it('window one: ends the batch the crash interrupted before the handback, once, and hands the parent back', async () => {
+    const dir = workspace()
+    const childGo = Promise.withResolvers<void>()
+    // The parent's own drain inside the batch end is the step before the phase
+    // change (children drained, then the parent, then `waiting_children → active`):
+    // freezing it lands the crash with every child terminal and nothing handed back.
+    const first = await Boot.open(dir, {
+      parkDrain: (sessionId, index) => sessionId === ROOT && index === 2,
+      script: (_sessionId, index) => index === 0
+        ? [
+          { tool: 'task_decompose', args: { reason: 'split the release work', children: children('child work') } },
+          { text: 'root: the batch is the runtime\'s now' },
+        ]
+        : [
+          { waitFor: () => childGo.promise },
+          { tool: 'task_submit_result', args: { summary: 'child work delivered' } },
+          { text: 'child: submitted' },
+        ],
+    })
+    await first.begin()
+    await vi.waitFor(() => expect(first.spawns).toHaveLength(1), { timeout: 20_000 })
+    const childSession = first.spawns[0] as string
+    const childRun = (await first.runOf(childSession)).runId
+    const rootRun = (await first.runOf(ROOT)).runId
+    const batchId = (await first.runOf(ROOT)).batchId
+    if (batchId === undefined) throw new Error('the root opened no batch')
+    childGo.resolve()
+    await vi.waitFor(async () => {
+      const snapshot = await first.snapshot()
+      expect(snapshot.runs.find(run => run.runId === childRun)?.status).toBe('verified')
+      // The children are all terminal and the handback is frozen: the run still
+      // waits on its batch, and nobody was told anything.
+      expect(snapshot.runs.find(run => run.runId === rootRun)?.executionPhase).toBe('waiting_children')
+    }, { timeout: 30_000 })
+    expect(first.copiesOf(ROOT, `m-batchend-${batchId}`)).toBe(0)
+    await first.crash()
+
+    const second = await Boot.open(dir, {
+      graph: first.commits(),
+      script: () => [{ text: 'root: recovered, nothing to add' }],
+    })
+    await second.root()
+    await second.adopt()
+
+    const after = await vi.waitFor(async () => {
+      const snapshot = await second.snapshot()
+      expect(snapshot.runs.find(run => run.runId === rootRun)?.executionPhase).toBe('active')
+      return snapshot
+    }, { timeout: 30_000 })
+    // One batch, one execution: the child that was already terminal was adopted, not
+    // started again — no second spawn, no second run, one verdict.
+    expect(second.spawns).toEqual([])
+    const childTaskId = after.runs.find(run => run.runId === childRun)?.taskId
+    expect(after.runs.filter(run => run.taskId === childTaskId)).toHaveLength(1)
+    expect(after.runs.find(run => run.runId === childRun)?.status).toBe('verified')
+    expect(after.reviews.filter(review => review.runId === childRun)).toHaveLength(1)
+    // The parent got its own decision back: the same Run, active, the batch as
+    // history and no current batch, and no verdict of its own.
+    const parent = after.runs.find(run => run.runId === rootRun)!
+    expect(parent.status).toBe('running')
+    expect(parent.batchId).toBeUndefined()
+    expect(parent.batches?.map(batch => batch.batchId)).toEqual([batchId])
+    expect(after.reviews.some(review => review.runId === rootRun)).toBe(false)
+    // …and it was told exactly once, under the identity the batch derives.
+    expect(second.copiesOf(ROOT, `m-batchend-${batchId}`)).toBe(1)
+    expect(after.runs).toHaveLength(2)
+    await second.dispose()
+  }, 90_000)
+
+  it('window two: delivers the end-of-batch result the crash interrupted before its Session was told', async () => {
+    const dir = workspace()
+    const delivered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const first = await Boot.open(dir, {
+      // The handback is durable the moment this latch is reached — the run is
+      // `active` again — and the delivery that would tell the parent never returns:
+      // the crash point K1 §5 names. `release` is never resolved; the boot is dead.
+      gateDelivery: intent => intent.messageId.startsWith('m-batchend-') ? (delivered.resolve(), release.promise) : undefined,
+      script: (_sessionId, index) => index === 0
+        ? [
+          { tool: 'task_decompose', args: { reason: 'split the release work', children: children('child work') } },
+          { text: 'root: the batch is the runtime\'s now' },
+        ]
+        : [
+          { tool: 'task_submit_result', args: { summary: 'child work delivered' } },
+          { text: 'child: submitted' },
+        ],
+    })
+    await first.begin()
+    await vi.waitFor(() => expect(first.spawns).toHaveLength(1), { timeout: 20_000 })
+    const childSession = first.spawns[0] as string
+    const childRun = (await first.runOf(childSession)).runId
+    const rootRun = (await first.runOf(ROOT)).runId
+    await delivered.promise
+    // The batch is read from the run's own accumulation: the handback already
+    // happened (it is why the delivery is being made), so the run holds it as
+    // history rather than as its current batch.
+    const batchId = (await first.runOf(ROOT)).batches?.[0]?.batchId
+    if (batchId === undefined) throw new Error('the root admitted no batch')
+    const crashed = await first.snapshot()
+    const crashedParent = crashed.runs.find(run => run.runId === rootRun)!
+    expect(crashedParent.status).toBe('running')
+    expect(crashedParent.executionPhase).toBe('active')
+    expect(crashedParent.batchId).toBeUndefined()
+    expect(crashed.runs.find(run => run.runId === childRun)?.status).toBe('verified')
+    // The message never landed: the parent's own log holds no copy of it.
+    expect(first.copiesOf(ROOT, `m-batchend-${batchId}`)).toBe(0)
+    await first.crash()
+
+    const second = await Boot.open(dir, {
+      graph: first.commits(),
+      script: () => [{ text: 'root: recovered' }],
+    })
+    await second.root()
+    await second.adopt()
+
+    const after = await second.snapshot()
+    // The same Run, the same Session, the same batch: nothing was re-run and no
+    // verdict was invented for the parent.
+    const parent = after.runs.find(run => run.runId === rootRun)!
+    expect(parent.status).toBe('running')
+    expect(parent.executionPhase).toBe('active')
+    expect(parent.batches?.map(batch => batch.batchId)).toEqual([batchId])
+    expect(after.runs).toHaveLength(2)
+    expect(second.spawns).toEqual([])
+    expect(after.reviews.some(review => review.runId === rootRun)).toBe(false)
+    // The recovery pass re-derived the message and stated it once: the identity is
+    // the batch's own, and the copy is in the parent's Session log.
+    await vi.waitFor(() => expect(second.copiesOf(ROOT, `m-batchend-${batchId}`)).toBe(1), { timeout: 20_000 })
+    await vi.waitFor(
+      () => expect(second.adapter.textsOf(ROOT).some(text => text.includes(`[task-batch-end ${batchId}]`))).toBe(true),
+      { timeout: 20_000 },
+    )
+    // A second pass over the same store adds nothing: the fold decides, not a ledger.
+    await second.runtime.reconcileStore(STORE)
+    expect(second.copiesOf(ROOT, `m-batchend-${batchId}`)).toBe(1)
+    expect(second.spawns).toEqual([])
+    await second.dispose()
+  }, 90_000)
+
+  it('window two in a replay tree: brings the replay parent back and tells it its batch ended, once', async () => {
+    const dir = workspace()
+    const delivered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let replaySession = ''
+    let replayRun: RunId = '' as RunId
+    let replayBatchId: string | undefined
+
+    const first = await Boot.open(dir, {
+      gateDelivery: intent => intent.messageId.startsWith('m-batchend-') ? (delivered.resolve(), release.promise) : undefined,
+      script: (_sessionId, index) => {
+        if (index === 0) return [{ text: 'root: the replay is the runtime\'s' }]
+        // The replay's own worker: it decomposes for real, which makes the replay
+        // session a waiting parent with a batch of its own.
+        if (index === 1) {
+          return [
+            { tool: 'task_decompose', args: { reason: 'split the replayed work', children: children('replay child work') } },
+            { text: 'replay: the batch is the runtime\'s now' },
+          ]
+        }
+        return [
+          { tool: 'task_submit_result', args: { summary: 'replay child work delivered' } },
+          { text: 'child: submitted' },
+        ]
+      },
+    })
+    await first.begin()
+    const champion = await first.writeChampion()
+    const replaying = first.runtime.replayTask(STORE, champion, { lineage: 'evolution-replay:p1' }, ROOT)
+    replaying.catch(() => undefined)
+    await vi.waitFor(() => expect(first.spawns.length).toBeGreaterThanOrEqual(2), { timeout: 20_000 })
+    replaySession = first.spawns[0] as string
+    replayRun = (await first.runOf(replaySession)).runId
+    const childSession = first.spawns[1] as string
+    const childRun = (await first.runOf(childSession)).runId
+    await delivered.promise
+    // The batch is read from the run's own accumulation: the handback already
+    // happened (it is why the delivery is being made), so the run holds it as
+    // history rather than as its current batch.
+    replayBatchId = (await first.runOf(replaySession)).batches?.[0]?.batchId
+    if (replayBatchId === undefined) throw new Error('the replay admitted no batch')
+    const crashed = await first.snapshot()
+    const crashedParent = crashed.runs.find(run => run.runId === replayRun)!
+    expect(crashedParent.executionPhase).toBe('active')
+    expect(crashedParent.status).toBe('running')
+    expect(crashed.runs.find(run => run.runId === childRun)?.status).toBe('verified')
+    // Nothing was told: the delivery was held before the real relay ran, so the
+    // message never reached the replay Session's own log.
+    await first.crash()
+
+    const second = await Boot.open(dir, {
+      graph: first.commits(),
+      script: sessionId => sessionId === ROOT
+        ? [{ text: 'root: nothing but the replayed tree' }]
+        : [{ text: 'replay: my batch ended, I carry on' }],
+    })
+    await second.root()
+    await second.adopt()
+
+    // The replay parent is not the store's root: it is a delegated parent whose
+    // batches ended, so the pass brings the *same* Session back under its own
+    // identity — the branch that used to cancel every unsubmitted worker.
+    expect(second.ctx.agents.get(SessionId(replaySession)), 'the replay parent is live again').toBeDefined()
+    const after = await second.snapshot()
+    const parent = after.runs.find(run => run.runId === replayRun)!
+    expect(parent.taskId).toBe(crashedParent.taskId)
+    expect(parent.status).toBe('running')
+    expect(parent.executionPhase).toBe('active')
+    expect(parent.batches?.map(batch => batch.batchId)).toEqual([replayBatchId])
+    expect(after.runs.filter(run => run.runId === replayRun)).toHaveLength(1)
+    expect(second.spawns).toEqual([])
+    expect(after.reviews.some(review => review.runId === replayRun)).toBe(false)
+    // Told once, under the batch's own identity, and the replayed tree's own
+    // experiment identity is untouched by the delivery.
+    await vi.waitFor(() => expect(second.copiesOf(replaySession, `m-batchend-${replayBatchId}`)).toBe(1), { timeout: 20_000 })
+    await vi.waitFor(
+      () => expect(second.adapter.textsOf(replaySession).some(text => text.includes(`[task-batch-end ${replayBatchId}]`))).toBe(true),
+      { timeout: 20_000 },
+    )
+    const replayTask = after.tasks.find(task => task.taskId === parent.taskId)
+    expect(replayTask?.objective).toContain('[evolution-replay:p1]')
+    // What the resumed parent is *not* is an abandoned worker: nothing cancelled
+    // it and no verdict was made for it. A second pass over the same store has
+    // nothing left to resume — the run is this process's own live work now — which
+    // is the same rule a spawned worker lives under (the pass that brought it back
+    // was the adoption's, and its report is the adoption's own).
+    const report = await second.runtime.reconcileStore(STORE)
+    expect(report.questionResumes).toEqual([])
+    expect((await second.snapshot()).runs.find(run => run.runId === replayRun)?.status).toBe('running')
+    expect(second.copiesOf(replaySession, `m-batchend-${replayBatchId}`)).toBe(1)
+    await second.dispose()
   }, 90_000)
 })

@@ -17,7 +17,8 @@ import { toolCallResponse, textResponse } from '../../../../thirdparty/deepseek-
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { blockingQuestionsOf, rootTaskStoreId } from '../../task/src/index.ts'
 import { TaskService } from '../../task/src/index.ts'
-import type { CapabilityManifest, RunProviderBinding, TaskEvent, TaskRun, TaskSnapshot } from '../../task/src/index.ts'
+import type { CapabilityManifest, RunProviderBinding, TaskEvent, TaskInstance, TaskRun, TaskSnapshot } from '../../task/src/index.ts'
+import { admitBatchFixture } from '../../task/tests/support/batch.ts'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
@@ -418,8 +419,20 @@ afterEach(async () => {
   for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-/** The task record one boot seeds: a root task with a run, and one child with a run of its own. */
-async function seedParentChild(boot: Boot, options: { parentWaitingChildren?: boolean } = {}): Promise<{ parentRun: TaskRun; childRun: TaskRun }> {
+/**
+ * The task record one boot seeds: a root task with a run, and one child with a run
+ * of its own.
+ *
+ * `childInBatch` seeds the child as the root's **admitted batch** instead of as a
+ * lone child: since K1 a batch is identified by the pair (parent run, proposal),
+ * so the only writer that can produce one is the store's own admission door —
+ * `admitBatchFixture` records the proposal and its consumption exactly as the
+ * runtime does, and the id the recovery pass then reads back is derived from those
+ * two (`b-<parentRunId>-<proposalId>`). A hand-written `b-<taskId>` would be an old
+ * record, and the recovery pass stops such a run by name rather than guessing at
+ * its owner.
+ */
+async function seedParentChild(boot: Boot, options: { childInBatch?: boolean } = {}): Promise<{ parentRun: TaskRun; childRun: TaskRun; batchId?: string }> {
   await boot.task.createStore(STORE)
   await boot.task.createTaskIn(STORE, {
     taskId: 't-root',
@@ -428,12 +441,12 @@ async function seedParentChild(boot: Boot, options: { parentWaitingChildren?: bo
     depth: 0,
     acceptanceCriteria: CRITERIA,
     requestedCapabilities: [],
-    decompositionStatus: options.parentWaitingChildren === true ? 'decomposed' : 'leaf',
+    decompositionStatus: options.childInBatch === true ? 'decomposed' : 'leaf',
     status: 'created',
     runIds: [],
     childTaskIds: [],
   }, ACTOR)
-  await boot.task.admitTaskIn(STORE, 't-root', ACTOR, { decompositionStatus: options.parentWaitingChildren === true ? 'decomposed' : 'leaf', manifest: NO_CAPABILITIES })
+  await boot.task.admitTaskIn(STORE, 't-root', ACTOR, { decompositionStatus: options.childInBatch === true ? 'decomposed' : 'leaf', manifest: NO_CAPABILITIES })
   await boot.task.startRunIn(STORE, {
     runId: 'r-root',
     taskId: 't-root',
@@ -445,10 +458,7 @@ async function seedParentChild(boot: Boot, options: { parentWaitingChildren?: bo
     status: 'running',
     startedAt: new Date().toISOString(),
   }, ACTOR)
-  if (options.parentWaitingChildren === true) {
-    await boot.task.changeRunPhaseIn(STORE, 't-root', 'r-root', ACTOR, { phase: 'waiting_children', batchId: 'b-t-root' })
-  }
-  await boot.task.createTaskIn(STORE, {
+  const child: TaskInstance = {
     taskId: 't-child',
     definitionRef: { taskType: 'root', version: 1 },
     parentTaskId: 't-root',
@@ -460,8 +470,23 @@ async function seedParentChild(boot: Boot, options: { parentWaitingChildren?: bo
     status: 'created',
     runIds: [],
     childTaskIds: [],
-  }, ACTOR)
-  await boot.task.admitTaskIn(STORE, 't-child', ACTOR, { decompositionStatus: 'leaf', manifest: NO_CAPABILITIES })
+  }
+  let batchId: string | undefined
+  if (options.childInBatch === true) {
+    const consumption = await admitBatchFixture(boot.task, {
+      storeId: STORE,
+      parentTaskId: 't-root',
+      parentRunId: 'r-root',
+      callerSessionId: ROOT,
+      children: [child],
+      manifests: [NO_CAPABILITIES],
+      actor: ACTOR,
+    })
+    batchId = consumption.batchId
+  } else {
+    await boot.task.createTaskIn(STORE, child, ACTOR)
+    await boot.task.admitTaskIn(STORE, 't-child', ACTOR, { decompositionStatus: 'leaf', manifest: NO_CAPABILITIES })
+  }
   await boot.task.startRunIn(STORE, {
     runId: 'r-child',
     taskId: 't-child',
@@ -476,17 +501,23 @@ async function seedParentChild(boot: Boot, options: { parentWaitingChildren?: bo
   return {
     parentRun: await boot.task.runIn(STORE, 'r-root'),
     childRun: await boot.task.runIn(STORE, 'r-child'),
+    ...(batchId === undefined ? {} : { batchId }),
   }
 }
 
 /**
- * The task record a parent's own acceptance needs: a root, a **middle** task whose
+ * The task record a parent's own decision needs: a root, a **middle** task whose
  * run is `waiting_children` with a batch, one grandchild of that batch already
  * terminal, and a question the middle's run asked the root's run. Every write
  * goes through the store's own service — the shape a live tree reaches anyway —
  * so what the case asserts is the runtime's rule, not a fixture's invention.
+ *
+ * The middle's batch is admitted through `admitBatchFixture`, the store's own
+ * admission door: K1 identifies a batch by (parent run, proposal), so the
+ * accumulation the recovery pass reads back its members from can only be written
+ * by that door. The batch id is returned because a case cites it.
  */
-async function seedMiddleTree(boot: Boot): Promise<void> {
+async function seedMiddleTree(boot: Boot): Promise<string> {
   await boot.task.createStore(STORE)
   await boot.task.createTaskIn(STORE, {
     taskId: 't-root',
@@ -537,21 +568,30 @@ async function seedMiddleTree(boot: Boot): Promise<void> {
     status: 'running',
     startedAt: new Date().toISOString(),
   }, ACTOR)
-  await boot.task.changeRunPhaseIn(STORE, 't-middle', 'r-middle', ACTOR, { phase: 'waiting_children', batchId: 'b-t-middle' })
-  await boot.task.createTaskIn(STORE, {
-    taskId: 't-grand',
-    definitionRef: { taskType: 'root', version: 1 },
+  // The middle's one batch, admitted the way the runtime admits one: the
+  // grandchild is the batch's member, and the middle's run waits on the id the
+  // pair (parent run, proposal) derives.
+  const consumption = await admitBatchFixture(boot.task, {
+    storeId: STORE,
     parentTaskId: 't-middle',
-    objective: 'grandchild work',
-    depth: 2,
-    acceptanceCriteria: CRITERIA,
-    requestedCapabilities: [],
-    decompositionStatus: 'leaf',
-    status: 'created',
-    runIds: [],
-    childTaskIds: [],
-  }, ACTOR)
-  await boot.task.admitTaskIn(STORE, 't-grand', ACTOR, { decompositionStatus: 'leaf', manifest: NO_CAPABILITIES })
+    parentRunId: 'r-middle',
+    callerSessionId: MIDDLE,
+    children: [{
+      taskId: 't-grand',
+      definitionRef: { taskType: 'root', version: 1 },
+      parentTaskId: 't-middle',
+      objective: 'grandchild work',
+      depth: 2,
+      acceptanceCriteria: CRITERIA,
+      requestedCapabilities: [],
+      decompositionStatus: 'leaf',
+      status: 'created',
+      runIds: [],
+      childTaskIds: [],
+    }],
+    manifests: [NO_CAPABILITIES],
+    actor: ACTOR,
+  })
   await boot.task.startRunIn(STORE, {
     runId: 'r-grand',
     taskId: 't-grand',
@@ -564,19 +604,20 @@ async function seedMiddleTree(boot: Boot): Promise<void> {
     startedAt: new Date().toISOString(),
   }, ACTOR)
   // The batch's only child is terminal: nothing but the middle's own coordination
-  // stands between the batch's settlement and the middle's acceptance.
+  // stands between the batch's settlement and the middle's own decision about it.
   await boot.task.markRunStatusIn(STORE, 't-grand', 'r-grand', 'cancelled', ACTOR, { reason: 'fixture: the child of the batch is already terminal' })
+  return consumption.batchId
 }
 
 describe("the parent's own acceptance (A4 §F.1)", () => {
-  it('holds a settled batch back while the parent waits on its own answer, and submits it once that answer closes the last item', async () => {
+  it('ends the parent’s batch while its own question is open, and settles only the submission the answer unblocks', async () => {
     const dir = workspace()
     const answerNow = Promise.withResolvers<void>()
     let questionId = ''
     const a = await Boot.open(dir, sessionId => sessionId === MIDDLE
       ? [{ tool: 'task_ask_parent', args: { requestKey: 'k1', question: 'does the frozen contract still hold?' } }, { waitFor: () => answerNow.promise }]
       : [{ waitFor: () => answerNow.promise }, { tool: 'task_answer', args: { questionId, requestKey: 'a1', answer: 'it holds', resolves: true } }])
-    await seedMiddleTree(a)
+    const batchId = await seedMiddleTree(a)
     const middle = await a.create(MIDDLE, ROOT)
     a.begin(middle, 'the middle begins')
     await vi.waitFor(() => expect(calls.some(call => call.name === 'task_ask_parent' && call.sessionId === MIDDLE)).toBe(true))
@@ -586,45 +627,55 @@ describe("the parent's own acceptance (A4 §F.1)", () => {
     expect(asked.delivery.status).toBe('unavailable')
 
     // The root comes back (adoption), which also restarts the middle's batch
-    // driver: the batch's children are all terminal, and the parent's submission
-    // is exactly what the batch driver owns. It must not submit: the middle's own
-    // question is still open.
+    // driver: the batch's children are all terminal, so the batch ends. A batch
+    // ending hands the parent back its execution and answers *nothing* (K1 §2):
+    // the middle's own question is still open, its writes stay refused, and no
+    // submission is made on its behalf.
     const root = await a.create(ROOT)
     await a.runtime.adoptRoot(STORE, ROOT)
-    const outcomes = await a.runtime.awaitBatch(STORE, 'b-t-middle')
+    const outcomes = await a.runtime.awaitBatch(STORE, batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['cancelled'])
     const held = await a.snapshot()
-    expect(held.runs.find(run => run.runId === 'r-middle')?.executionPhase).toBe('waiting_children')
-    expect(held.runs.find(run => run.runId === 'r-middle')?.status).toBe('running')
-    expect(held.runs.find(run => run.runId === 'r-middle')?.submission).toBeUndefined()
+    const middleRun = held.runs.find(run => run.runId === 'r-middle')!
+    expect(middleRun.executionPhase).toBe('active')
+    expect(middleRun.status).toBe('running')
+    expect(middleRun.batchId).toBeUndefined()
+    expect(middleRun.batches?.map(batch => batch.batchId)).toEqual([batchId])
+    expect(middleRun.submission).toBeUndefined()
     expect(held.tasks.find(task => task.taskId === 't-middle')?.status).not.toBe('verified')
     expect(held.reviews.some(review => review.runId === 'r-middle')).toBe(false)
-    // The middle is blocked by its own question, and the answer it waits for was
-    // delivered to the root once it was live.
+    // The middle is blocked by its own question — the batch end is not a licence to
+    // write — and it was *told* the batch is over, once, in its own Session.
     expect(a.runtime.gate.questionsBlocked(MIDDLE)).toBe(true)
+    expect(a.runtime.gate.decide(MIDDLE, 'write').allow).toBe(false)
+    expect(a.copiesOf(MIDDLE, `m-batchend-${batchId}`)).toBe(1)
+    // The answer it waits for was delivered to the root once it was live.
     expect(a.copiesOf(ROOT, asked.question.messageId)).toBe(1)
 
-    // The answer closes the last coordination item: the driver that owns the
-    // parent's submission is re-entered and the parent is judged by its own
-    // criteria — the runtime submits on its behalf, exactly as it does for a
-    // batch whose children settled with no coordination left.
+    // The answer closes the last coordination item and unblocks the middle — and
+    // nothing submits for it: the middle's own `task_submit_result` is what starts
+    // its acceptance, exactly as for a batch whose children settled with no
+    // coordination left.
     answerNow.resolve()
     await vi.waitFor(() => expect(calls.some(call => call.name === 'task_answer' && call.sessionId === ROOT)).toBe(true))
     const answerCall = calls.find(call => call.name === 'task_answer' && call.sessionId === ROOT) as DispatchedCall
     const answered = await a.runtime.answerParentQuestion(ROOT, { callId: answerCall.callId, questionId, requestKey: 'a1', resolves: true })
     expect(answered.created).toBe(true)
-    const settled = await vi.waitFor(async () => {
-      const snapshot = await a.snapshot()
-      expect(snapshot.runs.find(run => run.runId === 'r-middle')?.status).toBe('verified')
-      return snapshot
-    })
+    const unblocked = await a.snapshot()
+    expect(unblocked.questions?.byId[questionId]?.answers?.map(answer => answer.resolves)).toEqual([true])
+    expect(a.runtime.gate.questionsBlocked(MIDDLE)).toBe(false)
+    expect(unblocked.runs.find(run => run.runId === 'r-middle')?.submission).toBeUndefined()
+    expect(unblocked.reviews.some(review => review.runId === 'r-middle')).toBe(false)
+
+    // The middle hands in its own result — the entry `task_submit_result` adapts —
+    // and that is what its own criteria judge.
+    expect((await a.runtime.submitResult(MIDDLE, { summary: 'the middle hands in its own result' })).status).toBe('verified')
+    const settled = await a.snapshot()
     expect(settled.tasks.find(task => task.taskId === 't-middle')?.status).toBe('verified')
     const review = settled.reviews.find(item => item.runId === 'r-middle')
     expect(review?.outcome).toBe('verified')
     const submitted = settled.runs.find(run => run.runId === 'r-middle')
-    expect(submitted?.submission?.origin).toBe('runtime')
-    expect(settled.questions?.byId[questionId]?.answers?.map(answer => answer.resolves)).toEqual([true])
-    expect(a.runtime.gate.questionsBlocked(MIDDLE)).toBe(false)
+    expect(submitted?.submission?.origin).toBe('worker')
     void root
     await a.dispose()
   }, 30_000)
@@ -736,13 +787,14 @@ describe('A4 recovery from the real session log', () => {
     await b.dispose()
   })
 
-  it('makes a resumed batch wait for the question-waiting child instead of cancelling it, and the parent settles by its own rules', async () => {
+  it('makes a resumed batch wait for the question-waiting child instead of cancelling it, and the parent gets its own execution back', async () => {
     const dir = workspace()
     const asked = Promise.withResolvers<void>()
     const a = await Boot.open(dir, sessionId => sessionId === CHILD
       ? [{ tool: 'task_ask_parent', args: { requestKey: 'k1', question: 'which contract holds?' } }, { waitFor: () => asked.promise }]
       : [{ waitFor: () => asked.promise }])
-    await seedParentChild(a, { parentWaitingChildren: true })
+    const { batchId } = await seedParentChild(a, { childInBatch: true })
+    if (batchId === undefined) throw new Error('the fixture admits a batch when the child is seeded in one')
     const child = await a.create(CHILD, ROOT)
     a.begin(child, 'begin the child work')
     await vi.waitFor(() => expect(calls.some(call => call.name === 'task_ask_parent' && call.sessionId === CHILD)).toBe(true))
@@ -782,11 +834,10 @@ describe('A4 recovery from the real session log', () => {
 
     // Now the child is stopped the way any other terminal write stops it (the
     // store's own service, by the actor that owns the run): the wait ends, the
-    // driver adopts the terminal child, and the batch settles by its own rules —
-    // the parent is submitted, drained and judged by the verifier, exactly as a
-    // batch whose children all reached a terminal state always was.
+    // driver adopts the terminal child, and the batch ends — handing the parent
+    // back its own execution and its own decision (K1 §2).
     await b.task.markRunStatusIn(STORE, 't-child', 'r-child', 'cancelled', ACTOR, { reason: 'test: the child was stopped by its owner' })
-    const outcomes = await b.runtime.awaitBatch(STORE, 'b-t-root')
+    const outcomes = await b.runtime.awaitBatch(STORE, batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['cancelled'])
     const after = await b.snapshot()
     const settled = after.runs.find(run => run.runId === 'r-child')
@@ -796,8 +847,20 @@ describe('A4 recovery from the real session log', () => {
     expect(cancellation).toHaveLength(1)
     expect(JSON.stringify(cancellation[0])).toContain('the child was stopped by its owner')
     expect(JSON.stringify(cancellation[0])).not.toContain('was in flight when batch')
-    expect(after.runs.find(run => run.runId === 'r-root')?.status).toBe('verified')
-    expect(after.reviews.find(review => review.runId === 'r-root')?.outcome).toBe('verified')
+    // The root is active again with the batch as history, it is told once, and no
+    // verdict was made on its behalf.
+    const parentRun = after.runs.find(run => run.runId === 'r-root')!
+    expect(parentRun.status).toBe('running')
+    expect(parentRun.executionPhase).toBe('active')
+    expect(parentRun.batchId).toBeUndefined()
+    expect(parentRun.batches?.map(batch => batch.batchId)).toEqual([batchId])
+    expect(after.reviews.some(review => review.runId === 'r-root')).toBe(false)
+    expect(b.copiesOf(ROOT, `m-batchend-${batchId}`)).toBe(1)
+    // The root's own criteria are what its own submission is judged by — and here
+    // they hold, so the submission verifies it.
+    expect((await b.runtime.submitResult(ROOT, { summary: 'the root hands in its own result' })).status).toBe('verified')
+    const accepted = await b.snapshot()
+    expect(accepted.reviews.find(review => review.runId === 'r-root')?.outcome).toBe('verified')
     await b.dispose()
   })
 

@@ -62,10 +62,17 @@ import { graphRegistry, mountContextReadCore } from '../support/context-plane.ts
  *
  * **Evidence that the recovery cases are decisive (2026-09-22).** With the batch
  * restart temporarily removed from `reconcileStore` (recovery settling what it can
- * and never restarting an admitted batch), cases (a) and (d) fail — the child of
- * case (a) is never started and the batch reports `['failed']` instead of
- * `['verified']`, and the parent of case (d) stays `running`. The temporary edit
- * was reverted immediately (md5 re-checked against a copy taken before it).
+ * and never restarting an admitted batch), the cases that restart one fail — the
+ * child of the first case is never started and the batch reports `['failed']`
+ * instead of `['verified']`, and the crash before the handback (the case whose
+ * parent's own drain is frozen) never reaches the `active` phase. The temporary
+ * edit was reverted immediately (md5 re-checked against a copy taken before it).
+ *
+ * What the cases assert *after* the batch restarts is K1 §2's rule, not the old
+ * automatic parent acceptance: a batch end hands the parent back its execution and
+ * tells it so, and only the parent's own `task_submit_result` starts its
+ * acceptance. Every case that used to assert a parent `verified` therefore submits
+ * for it explicitly, through the same runtime entry the tool adapts.
  */
 
 const ROOT = 's-root'
@@ -165,6 +172,22 @@ interface BootOptions {
   readonly capabilities?: Readonly<Record<string, CapabilityConfig>>
   /** The tree-wide root budget this deployment runs under (`Config.rootBudget`); absent means it sets none. */
   readonly rootBudget?: Readonly<{ wallTimeMs?: number; maxRuns?: number; maxConcurrentWrites?: number }>
+  /**
+   * The relay every batch-end message goes through (K1 §2). The stub agents have
+   * no `steer`, so the real relay would answer each delivery `refused` and a case
+   * would be asserting the stub rather than the runtime's rule; this records what
+   * the runtime stated instead. A latch that never resolves parks one delivery
+   * exactly where a process dies between "the batch ended and the run is active
+   * again" and "the parent was told" — the window K1 §5 names.
+   */
+  readonly relay?: (intent: RelayRecord, callIndex: number) => Promise<void> | void
+}
+
+/** One batch-end message the runtime stated through the relay, in order. */
+interface RelayRecord {
+  readonly messageId: string
+  readonly targetSessionId: string
+  readonly text: string
 }
 
 interface Boot {
@@ -180,6 +203,8 @@ interface Boot {
    * that is absent never ran.
    */
   readonly ranTools: readonly string[]
+  /** Every batch-end message this boot's runtime stated through the relay, in order. */
+  readonly relayed: readonly RelayRecord[]
   /** The store's snapshot as the store itself holds it. */
   snapshot(storeId?: string): Promise<TaskSnapshot>
   /** The store's own event log, read back from the JSONL backend as a reader. */
@@ -385,6 +410,32 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
 
   const spawns: SpawnRecord[] = []
   const agentRuntime = new AgentRuntime(ctx)
+  // The relay the runtime states every batch-end message through (K1 §2): the
+  // stub agents have no `steer`, so the real relay would answer `refused`, and a
+  // case could only assert the stub. The replacement records the intent and lets
+  // the case decide when (or whether) the delivery comes back — which is what
+  // makes the crash window between the batch's end and the parent's wake
+  // expressible.
+  const relayed: RelayRecord[] = []
+  // The identities this boot's Sessions already hold — the stand-in for the fold
+  // the real relay reads out of the target's log. A stub session has no log to fold,
+  // so the double keeps the one fact the runtime's idempotence needs: an identity
+  // once accepted is answered `already-present` and is never stated twice, which is
+  // exactly what a second delivery attempt over the same batch gets.
+  const accepted = new Set<string>()
+  let relayCalls = 0
+  const relay = agentRuntime as unknown as {
+    ensureAgentMessageDelivered?: (intent: { messageId: string; targetSessionId: string; text: string }) => Promise<{ status: string }>
+  }
+  relay.ensureAgentMessageDelivered = async intent => {
+    const record: RelayRecord = { messageId: String(intent.messageId), targetSessionId: String(intent.targetSessionId), text: String(intent.text) }
+    if (accepted.has(record.messageId)) return { status: 'already-present' }
+    relayed.push(record)
+    const gate = options.relay?.(record, relayCalls++)
+    if (gate !== undefined) await gate
+    accepted.add(record.messageId)
+    return { status: 'delivered' }
+  }
   const runtime = await mountRuntime(ctx, options)
   // The read core and its prompt assembly (A2), mounted where the deployment's
   // bundle mounts them: the read side of every case below goes through it.
@@ -447,6 +498,7 @@ async function boot(dir: string, options: BootOptions = {}): Promise<Boot> {
     runtime,
     spawns,
     ranTools,
+    relayed,
     snapshot: async (storeId = STORE) => await task.snapshotIn(storeId),
     events: async (storeId = STORE) => {
       const handle = await (persistence as unknown as { open: (id: SessionId, access: 'read') => Promise<{ read: () => Promise<{ events: readonly SessionEvent[] }>; close: () => Promise<void> }> }).open(SessionId(storeId), 'read')
@@ -571,8 +623,9 @@ describe('A3 recovery from the real session log', () => {
     expect(adopted).toMatchObject({ adopted: true, taskId: root.taskId, runId: root.runId })
 
     // The batch is driven to its end by the second process: one child, started
-    // exactly once (the first process never started it), verified by the real
-    // verifier, and the parent accepted by its composite criterion.
+    // exactly once (the first process never started it) and verified by the real
+    // verifier — and the batch ending hands the parent back its own execution
+    // instead of judging it (K1 §2).
     const outcomes = await b.runtime.awaitBatch(STORE, batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
     expect(b.spawns).toHaveLength(1)
@@ -583,13 +636,36 @@ describe('A3 recovery from the real session log', () => {
     expect(child.status).toBe('verified')
     expect(child.executionPhase).toBe('submitted')
     expect(after.tasks.find(task => task.taskId === childTaskIds[0])!.status).toBe('verified')
-    expect(after.tasks.find(task => task.taskId === root.taskId)!.status).toBe('verified')
+    // The parent is not verified by anybody but itself: the run that admitted the
+    // batch is `active` again, holds the batch as history and no current batch, and
+    // carries no verdict.
+    const parent = after.runs.find(run => run.runId === root.runId)!
+    expect(parent.status).toBe('running')
+    expect(parent.executionPhase).toBe('active')
+    expect(parent.batchId).toBeUndefined()
+    expect(parent.batches).toEqual([{ batchId, proposalId: expect.any(String), memberTaskIds: [childTaskIds[0]] }])
+    expect(after.tasks.find(task => task.taskId === root.taskId)!.status).not.toBe('verified')
+    expect(after.reviews.some(review => review.runId === root.runId)).toBe(false)
+    // …and it is told so, once, under the identity the batch derives, in the
+    // Session that waited for it.
+    const told = b.relayed.filter(item => item.messageId === `m-batchend-${batchId}`)
+    expect(told).toHaveLength(1)
+    expect(told[0]!.targetSessionId).toBe(ROOT)
+    expect(told[0]!.text).toContain(`[task-batch-end ${batchId}]`)
     // The root run was started once, in the first process: the budget is not
     // refunded by a restart, and no second root run appears.
     expect(after.runs.filter(run => run.taskId === root.taskId)).toHaveLength(1)
     const events = taskEvents(await b.events())
     expect(events.filter(event => event.kind === 'TaskStarted' && event.taskId === root.taskId)).toHaveLength(1)
     expect(events.filter(event => event.kind === 'TaskStarted' && event.taskId === childTaskIds[0])).toHaveLength(1)
+
+    // Only the parent's own submission starts its acceptance (K1 §2): the batch
+    // ended, the parent was told, and it hands in its own result — which is what
+    // puts its composite criterion in front of the real verifier.
+    expect((await b.runtime.submitResult(ROOT, { summary: 'the parent hands in its own result' })).status).toBe('verified')
+    const accepted = await b.snapshot()
+    expect(accepted.tasks.find(task => task.taskId === root.taskId)!.status).toBe('verified')
+    expect(accepted.reviews.find(review => review.runId === root.runId)?.outcome).toBe('verified')
     await b.dispose()
   })
 
@@ -612,8 +688,9 @@ describe('A3 recovery from the real session log', () => {
     await b.runtime.adoptRoot(STORE, ROOT)
 
     // The in-flight worker is cancelled by name — nothing can confirm the writes
-    // it may already have made — and the batch is settled by its own rules: a
-    // child that did not verify cannot be accepted.
+    // it may already have made — and the batch ends on its terminal state. The
+    // parent is *told*, not judged: a child that did not verify is the parent's
+    // fact to read, and only the parent's own submission can fail it (K1 §2).
     const outcomes = await b.runtime.awaitBatch(STORE, batchId)
     expect(outcomes.map(outcome => outcome.status)).toEqual(['cancelled'])
     const after = await b.snapshot()
@@ -624,12 +701,20 @@ describe('A3 recovery from the real session log', () => {
     expect(cancelledReview.outcome).toBe('cancelled')
     expect(cancelledReview.anomalies.join(' ')).toContain('was in flight when this store was reopened and never submitted')
     expect(after.tasks.find(task => task.taskId === childTaskIds[0])!.status).toBe('cancelled')
-    // The parent is judged, not silently accepted: its composite criterion needs
-    // a verified child, and this one is not.
     const parent = await b.task.runIn(STORE, root.runId)
-    expect(parent.status).toBe('failed')
-    expect(after.reviews.find(review => review.runId === root.runId)?.outcome).toBe('failed')
-    expect(after.tasks.find(task => task.taskId === root.taskId)!.status).toBe('failed')
+    expect(parent.status).toBe('running')
+    expect(parent.executionPhase).toBe('active')
+    expect(parent.batchId).toBeUndefined()
+    expect(after.reviews.some(review => review.runId === root.runId)).toBe(false)
+    expect(b.relayed.filter(item => item.messageId === `m-batchend-${batchId}`)).toHaveLength(1)
+
+    // The parent may then hand in its own result, and its composite criterion
+    // needs a verified child — this one is cancelled, so the verdict is a failure
+    // the *parent's* submission produced.
+    expect((await b.runtime.submitResult(ROOT, { summary: 'the parent hands in its own result' })).status).toBe('failed')
+    const judged = await b.snapshot()
+    expect(judged.reviews.find(review => review.runId === root.runId)?.outcome).toBe('failed')
+    expect(judged.tasks.find(task => task.taskId === root.taskId)!.status).toBe('failed')
     // Recovery started nothing: the child that existed is the child that was
     // settled, and no second run was charged to the tree.
     expect(b.spawns).toHaveLength(0)
@@ -792,20 +877,28 @@ describe('A3 recovery from the real session log', () => {
     expect(after.runs).toHaveLength(2)
     expect(after.runs.filter(run => run.taskId === childTaskIds[0])).toHaveLength(1)
     expect(after.evidence.filter(item => item.taskRunId === crashed.runId)).toHaveLength(1)
-    expect(after.tasks.find(task => task.taskId === root.taskId)!.status).toBe('verified')
     expect(b.spawns).toHaveLength(0)
+    // The verified child ends the batch: the parent takes its execution back and
+    // is told the outcome instead of being accepted on its behalf (K1 §2).
+    const parent = after.runs.find(run => run.runId === root.runId)!
+    expect(parent.status).toBe('running')
+    expect(parent.executionPhase).toBe('active')
+    expect(after.tasks.find(task => task.taskId === root.taskId)!.status).not.toBe('verified')
+    expect(after.reviews.some(review => review.runId === root.runId)).toBe(false)
+    expect(b.relayed.filter(item => item.messageId === `m-batchend-${batchId}`)).toHaveLength(1)
     const events = taskEvents(await b.events())
     expect(events.filter(event => event.kind === 'RunPhaseChanged' && event.runId === crashed.runId && event.payload.phase === 'submitted')).toHaveLength(1)
     expect(events.filter(event => event.kind === 'TaskStarted' && event.taskId === childTaskIds[0])).toHaveLength(1)
     await b.dispose()
   })
 
-  it('accepts a parent whose children are all terminal when the crash interrupted its own acceptance', async () => {
+  it('ends a batch whose children are all terminal when the crash interrupted the handback, and leaves the verdict to the parent', async () => {
     const dir = workspace()
-    // The root's first drain is its batch's admission; the second is the
-    // settlement drain its acceptance runs behind. Freezing there lands the crash
-    // exactly between "every child is terminal" and the parent's verdict, with the
-    // children's own verifications untouched.
+    // The root's first drain is its batch's admission; the second is the parent's
+    // own drain inside the batch end (K1 §2's order: the children's convergence is
+    // confirmed, then the parent's). Freezing there lands the crash exactly between
+    // "every child is terminal" and the phase change that hands the parent back its
+    // execution, with the children's own verifications untouched.
     const a = await boot(dir, { parkDrain: (sessionId, index) => sessionId === ROOT && index === 2 })
     const root = await seedLegacyRoot(a, 'ship the release')
     const { batchId, childTaskIds } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
@@ -815,33 +908,176 @@ describe('A3 recovery from the real session log', () => {
     await vi.waitFor(async () => {
       const snapshot = await a.snapshot()
       expect(snapshot.runs.find(run => run.taskId === childTaskIds[0])?.status).toBe('verified')
-      // The parent's own settlement drain is frozen, so its acceptance has not
-      // run: the children are all terminal and the parent run is still waiting.
+      // The parent's own drain is frozen, so the handback has not been persisted:
+      // the children are all terminal and the parent run is still waiting.
       expect(snapshot.runs.find(run => run.runId === root.runId)?.executionPhase).toBe('waiting_children')
     })
     const crashed = await a.snapshot()
     expect(crashed.runs.find(run => run.runId === root.runId)!.status).toBe('running')
     expect(crashed.runs.find(run => run.runId === root.runId)!.executionPhase).toBe('waiting_children')
     expect(crashed.reviews.filter(review => review.runId === root.runId)).toHaveLength(0)
+    expect(a.relayed).toHaveLength(0)
     await a.crash()
 
     const b = await boot(dir)
     await b.runtime.adoptRoot(STORE, ROOT)
 
-    // The restarted batch adopts its terminal children and runs the parent's
-    // acceptance: it is judged by the real verifier, with no new run and no new
-    // spawn, and the batch identity is the one the first process admitted.
+    // The restarted batch adopts its terminal children, ends, and hands the parent
+    // back its own decision — no new run, no new spawn, the batch identity the
+    // first process admitted, and a parent that is told, not judged.
     expect((await b.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['verified'])
     const after = await b.snapshot()
-    expect(after.runs.find(run => run.runId === root.runId)!.status).toBe('verified')
-    expect(after.tasks.find(task => task.taskId === root.taskId)!.status).toBe('verified')
-    const review = after.reviews.find(item => item.runId === root.runId)!
+    const parent = after.runs.find(run => run.runId === root.runId)!
+    expect(parent.status).toBe('running')
+    expect(parent.executionPhase).toBe('active')
+    expect(parent.batchId).toBeUndefined()
+    expect(parent.batches).toEqual([{ batchId, proposalId: expect.any(String), memberTaskIds: [childTaskIds[0]] }])
+    expect(after.tasks.find(task => task.taskId === root.taskId)!.status).not.toBe('verified')
+    expect(after.reviews.some(review => review.runId === root.runId)).toBe(false)
+    expect(b.relayed.filter(item => item.messageId === `m-batchend-${batchId}`)).toHaveLength(1)
+    expect(after.runs).toHaveLength(2)
+    expect(b.spawns).toHaveLength(0)
+
+    // The parent's own submission is what its composite criterion judges, and by
+    // then the verified child is on the run's own membership: the verdict passes.
+    expect((await b.runtime.submitResult(ROOT, { summary: 'the parent hands in its own result' })).status).toBe('verified')
+    const accepted = await b.snapshot()
+    expect(accepted.runs.find(run => run.runId === root.runId)!.status).toBe('verified')
+    expect(accepted.tasks.find(task => task.taskId === root.taskId)!.status).toBe('verified')
+    const review = accepted.reviews.find(item => item.runId === root.runId)!
     expect(review.outcome).toBe('verified')
     expect(review.criteria?.every(criterion => criterion.verdict === 'pass')).toBe(true)
-    expect(after.runs).toHaveLength(2)
-    expect(after.runs.find(run => run.runId === root.runId)!.batchId).toBe(batchId)
-    expect(b.spawns).toHaveLength(0)
     await b.dispose()
+  })
+
+  it('redelivers the end-of-batch result after a restart that landed between the handback and the parent being told', async () => {
+    const dir = workspace()
+    const parked = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    // K1 §5's second window: the batch ended, the parent's run is `active` again and
+    // that fact is durable — and the process dies *inside* the delivery that would
+    // have told the parent. `release` is never resolved: the first boot is dead.
+    const a = await boot(dir, {
+      relay: () => {
+        parked.resolve()
+        return release.promise
+      },
+    })
+    const root = await seedLegacyRoot(a, 'ship the release')
+    const { batchId, childTaskIds } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
+      reason: 'split the work',
+      children: children('terminal child'),
+    })
+    await parked.promise
+    const crashed = await a.snapshot()
+    const crashedParent = crashed.runs.find(run => run.runId === root.runId)!
+    expect(crashedParent.executionPhase).toBe('active')
+    expect(crashedParent.batchId).toBeUndefined()
+    expect(crashed.tasks.find(task => task.taskId === childTaskIds[0])!.status).toBe('verified')
+    // The message was stated — and never came back, which is exactly what a process
+    // death inside the relay leaves behind.
+    expect(a.relayed.filter(item => item.messageId === `m-batchend-${batchId}`)).toHaveLength(1)
+    await a.crash()
+
+    const b = await boot(dir)
+    await b.runtime.adoptRoot(STORE, ROOT)
+
+    // The recovery pass finds the same Run in the state the first process left it:
+    // it is a delegated parent, not an abandoned worker, so it comes back as the
+    // same Session and is told the batch is over — no new run, no new spawn.
+    const after = await b.snapshot()
+    const parent = after.runs.find(run => run.runId === root.runId)!
+    expect(parent.status).toBe('running')
+    expect(parent.executionPhase).toBe('active')
+    expect(parent.batches?.map(batch => batch.batchId)).toEqual([batchId])
+    expect(after.runs).toHaveLength(2)
+    expect(b.spawns).toHaveLength(0)
+    expect(after.reviews.some(review => review.runId === root.runId)).toBe(false)
+    const told = b.relayed.filter(item => item.messageId === `m-batchend-${batchId}`)
+    expect(told).toHaveLength(1)
+    expect(told[0]!.targetSessionId).toBe(ROOT)
+    expect(told[0]!.text).toContain('nothing was submitted on your behalf')
+    // The same pass re-derives the same message for the same batch: the delivery is
+    // idempotent by identity, so a second activation adds nothing.
+    await b.runtime.reconcileStore(STORE)
+    expect(b.relayed.filter(item => item.messageId === `m-batchend-${batchId}`)).toHaveLength(1)
+    await b.dispose()
+  })
+
+  it('stops a waiting parent whose batch was admitted before batches were identified, by name', async () => {
+    const dir = workspace()
+    const a = await boot(dir)
+    const root = await seedLegacyRoot(a, 'ship the release')
+    // An old record: the parent waits on the batch id the pre-K1 build derived from
+    // the task (`b-<taskId>`), no proposal consumption, no run accumulation. Nothing
+    // in the store says which run or which proposal admitted it.
+    await a.task.createTaskIn(STORE, {
+      taskId: 't-old-child',
+      definitionRef: { taskType: 'subtask', version: 1 },
+      parentTaskId: root.taskId,
+      objective: 'the old batch child',
+      depth: 1,
+      acceptanceCriteria: [{ criterionId: 'ac1-1', description: 'it holds', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
+      requestedCapabilities: [],
+      decompositionStatus: 'leaf',
+      status: 'created',
+      runIds: [],
+      childTaskIds: [],
+    }, ROOT)
+    await a.task.admitTaskIn(STORE, 't-old-child', ROOT, { decompositionStatus: 'leaf' })
+    const oldBatchId = `b-${root.taskId}`
+    await a.task.changeRunPhaseIn(STORE, root.taskId, root.runId, ROOT, { phase: 'waiting_children', batchId: oldBatchId })
+    expect((await a.snapshot()).runs.find(run => run.runId === root.runId)!.executionPhase).toBe('waiting_children')
+    await a.crash()
+
+    const b = await boot(dir)
+    await b.runtime.adoptRoot(STORE, ROOT)
+
+    // The stop is named: the run is settled cancelled with the old state recorded,
+    // nothing is restarted, and no batch is attributed to a run or a proposal the
+    // store does not name.
+    const after = await b.snapshot()
+    const parent = after.runs.find(run => run.runId === root.runId)!
+    expect(parent.status).toBe('cancelled')
+    expect(parent.batches ?? []).toEqual([])
+    const review = after.reviews.find(item => item.runId === root.runId)!
+    expect(review.outcome).toBe('cancelled')
+    expect(review.anomalies.join(' ')).toContain(oldBatchId)
+    expect(review.anomalies.join(' ')).toContain('stopped old state')
+    // Nothing was started under the old id, and the child the old admission created
+    // is left exactly as it is — which of its children belonged to that batch is the
+    // very thing this build cannot read.
+    expect(b.spawns).toHaveLength(0)
+    expect(after.runs).toHaveLength(1)
+    expect(after.tasks.find(task => task.taskId === 't-old-child')!.status).toBe('admitted')
+    await expect(b.runtime.awaitBatch(STORE, oldBatchId)).rejects.toThrow(/is not recorded in store/)
+    await b.dispose()
+  })
+
+  it('does not wake a terminal parent with a late batch notification or a re-delivery', async () => {
+    const dir = workspace()
+    const a = await boot(dir)
+    const root = await seedLegacyRoot(a, 'ship the release')
+    const { batchId } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
+      reason: 'split the work',
+      children: children('terminal child'),
+    })
+    await a.runtime.awaitBatch(STORE, batchId)
+    // The parent hands in its own result, is verified, and is terminal from here on.
+    expect((await a.runtime.submitResult(ROOT, { summary: 'the parent hands in its own result' })).status).toBe('verified')
+    expect((await a.snapshot()).runs.find(run => run.runId === root.runId)!.status).toBe('verified')
+    const before = a.relayed.length
+
+    // A re-delivery of the batch's message is skipped, not stated: the run cannot
+    // act on it, and a terminal run is never woken (K1 §2). A recovery pass over the
+    // store states nothing either — the batch is not owed to a settled run.
+    expect(await a.runtime.redeliverBatchResult(STORE, batchId)).toBe('skipped')
+    expect(a.relayed).toHaveLength(before)
+    const report = await a.runtime.reconcileStore(STORE)
+    expect(report.questionDeliveries).toEqual([])
+    expect(a.relayed).toHaveLength(before)
+    expect((await a.snapshot()).runs.find(run => run.runId === root.runId)!.status).toBe('verified')
+    await a.dispose()
   })
 
   it('leaves a run that predates coordination phases exactly as it is, and refuses to build on it', async () => {
@@ -1000,9 +1236,18 @@ describe('A3 recovery from the real session log', () => {
     expect(review.localizedCause).toContain("recovery re-check rejected this run's content binding")
     expect(review.localizedCause).toContain('cannot be read')
     // Nothing fell back to the production skill path: the run was not verified,
-    // no evidence was recorded for it, and the parent could not accept it.
+    // and no evidence was recorded for it.
     expect(after.evidence.filter(item => item.taskRunId === crashed.runId)).toHaveLength(0)
-    expect(after.tasks.find(task => task.taskId === root.taskId)!.status).toBe('failed')
+    // The failed child ends the batch: the parent takes its execution back and is
+    // told what happened instead of being accepted on its behalf (K1 §2) — and its
+    // own submission is what its composite criterion then judges.
+    const parent = after.runs.find(run => run.runId === root.runId)!
+    expect(parent.status).toBe('running')
+    expect(parent.executionPhase).toBe('active')
+    expect(after.reviews.some(review => review.runId === root.runId)).toBe(false)
+    expect(b.relayed.filter(item => item.messageId === `m-batchend-${batchId}`)).toHaveLength(1)
+    expect((await b.runtime.submitResult(ROOT, { summary: 'the parent hands in its own result' })).status).toBe('failed')
+    expect((await b.snapshot()).tasks.find(task => task.taskId === root.taskId)!.status).toBe('failed')
     expect(b.spawns).toHaveLength(0)
     await b.dispose()
   })
@@ -1064,14 +1309,23 @@ describe('A3 recovery: a crash inside the verification call', () => {
   it('completes a parent acceptance whose verification was interrupted after the verifying mark', async () => {
     const dir = workspace()
     // The child verifies normally (the first call); the parent's own acceptance is
-    // the second, and it never returns — the crash lands after every child is
-    // terminal and after the parent's own `TaskVerifying`.
+    // the second and it never returns. The parent reaches that acceptance the only
+    // way there is (K1 §2): the batch ends and hands the run back, and the parent
+    // submits its own result — so the crash lands after the handback, after the
+    // parent's `submitted` phase and after its own `TaskVerifying`.
     const a = await boot(dir, { gateVerification: callIndex => (callIndex === 1 ? never() : undefined) })
     const root = await seedLegacyRoot(a, 'ship the release')
     const { batchId, childTaskIds } = await a.runtime.decomposeAndRun(STORE, root.taskId, root.runId, ROOT, {
       reason: 'split the work',
       children: children('interrupted parent'),
     })
+    await vi.waitFor(async () => {
+      expect((await a.snapshot()).runs.find(run => run.runId === root.runId)?.executionPhase).toBe('active')
+    })
+    // The submission settles through the verifier that never returns, so the call
+    // is not awaited: the store's own state is what this case reads.
+    const submitting = a.runtime.submitResult(ROOT, { summary: 'the parent hands in its own result' })
+    submitting.catch(() => {})
     await vi.waitFor(async () => {
       const snapshot = await a.snapshot()
       expect(snapshot.tasks.find(task => task.taskId === root.taskId)?.status).toBe('verifying')
@@ -1096,10 +1350,13 @@ describe('A3 recovery: a crash inside the verification call', () => {
     expect(review.outcome).toBe('verified')
     expect(review.criteria?.every(criterion => criterion.verdict === 'pass')).toBe(true)
     // The same run and the same batch, accepted once: no new run, no new spawn, and
-    // the verifying mark stays written once for the parent.
+    // the verifying mark stays written once for the parent. The batch is history on
+    // the run — the handback cleared the current batch id, and the accumulation
+    // keeps the identity the first process admitted.
     expect(b.spawns).toHaveLength(0)
     expect(after.runs).toHaveLength(2)
-    expect(after.runs.find(run => run.runId === root.runId)!.batchId).toBe(batchId)
+    expect(after.runs.find(run => run.runId === root.runId)!.batchId).toBeUndefined()
+    expect(after.runs.find(run => run.runId === root.runId)!.batches?.map(batch => batch.batchId)).toEqual([batchId])
     expect((await b.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['verified'])
     const events = taskEvents(await b.events())
     expect(events.filter(event => event.kind === 'TaskVerifying' && event.taskId === root.taskId)).toHaveLength(1)
@@ -1528,12 +1785,16 @@ describe('A2: the explicit recovery barrier', () => {
     // The next explicit activation is the retry: the driver is re-registered
     // from the persistent record, released by the barrier, and the batch
     // completes by its own rules (the child the first pass cancelled keeps
-    // its committed settlement).
+    // its committed settlement) — handing the parent back its own decision,
+    // which is told, not judged (K1 §2).
     const adopted = await b.runtime.adoptRoot(STORE, ROOT)
     expect(adopted).toMatchObject({ adopted: true, taskId: root.taskId, runId: root.runId })
     expect((await b.runtime.awaitBatch(STORE, batchId)).map(outcome => outcome.status)).toEqual(['cancelled'])
     const settled = await b.task.runIn(STORE, root.runId)
-    expect(['failed', 'cancelled']).toContain(settled.status)
+    expect(settled.status).toBe('running')
+    expect(settled.executionPhase).toBe('active')
+    expect(settled.batchId).toBeUndefined()
+    expect(b.relayed.filter(item => item.messageId === `m-batchend-${batchId}`)).toHaveLength(1)
     await b.dispose()
   })
 })

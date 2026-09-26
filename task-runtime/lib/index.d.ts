@@ -1565,8 +1565,15 @@ interface BatchResultMessage {
   readonly messageId: string;
   readonly text: string;
 }
-/** What one end-of-batch delivery settled as. `unavailable` and `refused` are reported, never fatal. */
-type BatchResultDeliveryStatus = 'delivered' | 'already-present' | 'unavailable' | 'refused';
+/**
+ * What one end-of-batch delivery settled as. `unavailable` and `refused` are
+ * reported, never fatal; `skipped` is a delivery that was deliberately not
+ * attempted — the run the message addressed is no longer running, and a terminal
+ * run is not woken (K1 §2: 绝不唤活终态). A skipped delivery has zero side
+ * effects, and unlike `unavailable` it is not retried: the fact it would point
+ * at is moot for a run that already settled.
+ */
+type BatchResultDeliveryStatus = 'delivered' | 'already-present' | 'unavailable' | 'refused' | 'skipped';
 interface SpawnChildRequest {
   sessionId: string;
   name: string;
@@ -2044,6 +2051,37 @@ declare function batchEndMessageId(batchId: string): string;
  * `task_submit_result` starts its acceptance.
  */
 declare function batchEndMessageText(batchId: string, outcomes: readonly ChildOutcome[]): string;
+/**
+ * One batch a run has ended and been told about — or still has to be told about
+ * ({@link owedBatchResults}): the batch, the run whose wait it ends, the Session
+ * the message goes to, and the members whose terminal states the body renders.
+ */
+interface OwedBatchResult {
+  readonly taskId: TaskId;
+  readonly runId: RunId;
+  readonly batchId: string;
+  /** The parent's own Session: the target of the message and the Session it is sent from. */
+  readonly sessionId: string;
+  readonly memberTaskIds: readonly TaskId[];
+}
+/**
+ * The end-of-batch results one store's own facts still owe (K1 §2, §5).
+ *
+ * A run that is `active` has no unfinished batch — `waiting_children → active`
+ * clears `batchId` — so every entry of its accumulated `batches` names a batch
+ * that ended, and each ended batch owes its Session the one message under
+ * `m-batchend-<batchId>` ({@link batchEndMessageId}), whether the process that
+ * ended it delivered it or died before it could. The store's own accumulation is
+ * the whole derivation: nothing is guessed from a task's children, a batch no run
+ * records is not a candidate, and a run that is still `waiting_children`,
+ * `submitted` or terminal owes nothing here (its batch end is not durable yet, its
+ * acceptance is what is in flight, or it is past being told).
+ *
+ * Being owed is a candidate, not a verdict: the target's own fold decides whether
+ * the message is still missing when the delivery is attempted, so a second pass
+ * over the same store re-derives the same list and delivers nothing twice.
+ */
+declare function owedBatchResults(snapshot: TaskSnapshot): OwedBatchResult[];
 /**
  * Drive one admitted batch to settlement (A3 §3.1): reentrant, store-driven,
  * and owned by the runtime rather than by the tool call that admitted it.
@@ -3668,11 +3706,13 @@ interface ReconcileReport {
    */
   readonly questionDeliveries: readonly QuestionReconcileReport[];
   /**
-   * What the pass's own recovery of question-waiting workers settled as (A4
-   * §F.1), one record per run it tried to bring back — `live` for a Session that
-   * is now reachable, `retry` for one another owner still holds, `refused` for an
+   * What the pass's own recovery of workers settled as (A4 §F.1, widened by K1
+   * §5), one record per run it tried to bring back — `live` for a Session that is
+   * now reachable, `retry` for one another owner still holds, `refused` for an
    * identity that could not be established (and whose run the pass then settled
-   * terminal). Empty means the pass found no question-waiting worker to recover.
+   * terminal). A run comes back for one of two reasons and the record says which:
+   * it waits on coordination of its own, or it is a delegated parent whose batches
+   * ended and which has to be told so. Empty means the pass found neither.
    */
   readonly questionResumes: readonly QuestionResumeReport[];
 }
@@ -4855,19 +4895,44 @@ declare class TaskRuntime extends Service {
    */
   private failBatchFromRuntime;
   /**
-   * The batch one id names, as the store itself records it: the run whose current
-   * unfinished batch it is, or a run whose accumulated batches hold it, together
-   * with the parent task that run works on. `undefined` when no run of the store
-   * records the id.
+   * The batch one id names, as the store itself records it: the run whose
+   * **accumulated batches** hold it, together with the parent task that run works
+   * on. `undefined` when no run of the store records the id that way.
    *
-   * A batch id is the pair (parent run, proposal) and is never parsed back into a
-   * task: a parent admits more than one batch, so `b-…` carries no task, and the
-   * one honest source for "whose batch is this" is the accumulation the reducer
-   * derived. A read that fails answers `undefined` rather than guessing — every
-   * caller here reports by name instead of writing a settlement for a batch it
-   * cannot name.
+   * The accumulation is the record, not the run's current `batchId`: a batch a
+   * build before K1 admitted wrote only `b-<parentTaskId>` onto the run, with no
+   * proposal and no members, so a run that *waits* on an id its accumulation does
+   * not hold is exactly the stopped old state the persistence decision names. This
+   * read answers `undefined` for it rather than handing a caller the task's
+   * children — the members of a batch nobody can name are not the batch's members —
+   * and a settlement path that cannot name a batch reports instead of guessing.
    */
   private batchRecordIn;
+  /**
+   * Whether one run's own accumulation holds the batch it waits on — the binding a
+   * restart needs before it drives a batch (K1 §5).
+   *
+   * A batch is identified by the pair (parent run, proposal), and the run that
+   * admitted it is the only record that can say which members belong to it. A
+   * `waiting_children` run whose `batches` holds no such entry carries a batch from
+   * before batches were identified that way: nothing in the store says which run,
+   * which proposal, or which members a second batch of that parent would have.
+   */
+  private batchHeldByRun;
+  /**
+   * Stop a `waiting_children` run whose batch this build cannot name (K1 §5, and
+   * the persistence decision that fixes it: an in-flight batch admitted before
+   * `(parentRunId, proposalId)` identified one is a **stopped old state**).
+   *
+   * The stop is by name and by nothing else: the run is settled `cancelled` with
+   * the fact recorded — no driver is registered, no child is started, and no batch
+   * is attributed to a run or a proposal the store does not name. The children the
+   * old admission created are left exactly as they are: which of them belonged to
+   * that batch is the very thing this build cannot read, so blocking them would be
+   * the guess this stop exists to avoid. The run's Session is reconciled like any
+   * other settlement's, and the warn is the operator's half of the refusal.
+   */
+  private stopUnidentifiedBatch;
   /**
    * The narrow capabilities one runtime-level settlement holds — the store, the
    * actor, the notification seam and the gate/workspace bookkeeping — for the one
@@ -5111,8 +5176,12 @@ declare class TaskRuntime extends Service {
    * has to see — the first because the run keeps waiting on an owner that is not
    * this process, the second because the run is about to be settled terminal for
    * it. The report is the machine-readable half; this is the one adoption drops.
+   *
+   * `fact` names what makes the Session one the pass has to reach — an unresolved
+   * blocking question (A4 §F.1), or a batch that ended and whose result the run has
+   * not been told about (K1 §2, §5) — so a warn says which wait it is about.
    */
-  private recordQuestionResume;
+  private recordWorkerResume;
   /**
    * Wake a Session that was brought back with coordination input its own inbox
    * still holds unread (A4 §F.1's wake contract).
@@ -5137,6 +5206,20 @@ declare class TaskRuntime extends Service {
    * propagated: the deliveries themselves were decided.
    */
   private wakeUnclaimedQuestionMessages;
+  /**
+   * Wake a Session that was brought back with an end-of-batch result its own inbox
+   * still holds unread — {@link wakeUnclaimedQuestionMessages}' rule applied to the
+   * batch messages (K1 §2, §5), and for the same reason.
+   *
+   * A batch end delivered before a crash is durable in the target's log but may
+   * never have been claimed (spliced and flushed, then the process died), so the
+   * pass's re-delivery answers `already-present` **without steering** — right,
+   * because a second copy would be a duplicate — and a resumed parent with the
+   * message sitting in its restored inbox would otherwise stay idle until its
+   * deadline. The check is the same live-inbox read, and the wake is the same
+   * runtime-voice notice: never a second copy of the message.
+   */
+  private wakeUnclaimedBatchResults;
   /**
    * Whether one live session's own inbox still holds a message identity — the
    * public pending read of a DSH Agent (`inbox.nextTurn` / `inbox.nextStep`),
@@ -5410,6 +5493,14 @@ declare class TaskRuntime extends Service {
    * the store's and the message is the wake that points at them, so a relay that
    * is absent, refuses or has no live Session changes nothing about the batch —
    * it is named once for the operator, and the next activation retries.
+   *
+   * The run the message addresses is re-read here, and it is the one guard every
+   * path shares — the live batch end, a delivery a barrier deferred, the recovery
+   * pass and a re-delivery a caller asked for. The message's whole content is "you
+   * are active again"; a run that settled while the delivery was on its way (a
+   * cancellation or a deadline that arrived first, a verdict somebody else made)
+   * must not be woken by it, so a run that is no longer `running` is answered
+   * `skipped` with zero side effects (K1 §2: 绝不唤活终态).
    */
   private deliverBatchResultNow;
   /**
@@ -5424,7 +5515,9 @@ declare class TaskRuntime extends Service {
    * terminal states and evidence, and the target's own fold decides whether the
    * message is already there (`already-present`, nothing delivered twice). A
    * batch no run of the store records is refused by name — a batch id names a
-   * pair, and one nothing records cannot be guessed at.
+   * pair, and one nothing records cannot be guessed at. A batch whose parent run
+   * already settled is `skipped`: the message's content is moot for a run that
+   * cannot act on it, and a terminal run is not woken.
    */
   redeliverBatchResult(storeId: string, batchId: string): Promise<BatchResultDeliveryStatus>;
   /**
@@ -5614,4 +5707,4 @@ declare class TaskRuntime extends Service {
   private agentOrUndefined;
 }
 //#endregion
-export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AdoptedWorkerResume, type AdoptedWorkerResumeRequest, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BatchResultDeliveryStatus, type BatchResultMessage, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, QuestionResumeReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AdoptedWorkerResume, type AdoptedWorkerResumeRequest, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BatchResultDeliveryStatus, type BatchResultMessage, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type OwedBatchResult, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, QuestionResumeReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

@@ -84,6 +84,7 @@ import {
   blockUnstartedChildren,
   deriveChildOutcomes,
   driveBatch,
+  owedBatchResults,
   resumeAdoptedWorker,
   runReplayTask,
   settleRunFromRuntime,
@@ -258,6 +259,7 @@ export type {
   BudgetConfig,
   ChildOutcome,
   OrchestrateEnv,
+  OwedBatchResult,
   ReplayOverlay,
   ReplayRunInit,
   ReplayRunOutcome,
@@ -272,6 +274,7 @@ export {
   blockUnstartedChildren,
   deriveChildOutcomes,
   driveBatch,
+  owedBatchResults,
   resumeAdoptedWorker,
   runReplayTask,
   settleRunFromRuntime,
@@ -1033,8 +1036,8 @@ interface StoreRecoveryState {
    * `recovering` is refused by the recovery door with nothing to wake it again.
    * The ready handle runs it once — when the gates are in place and the status
    * is `ready` — and a failed or invalidated barrier drops it; the persistent
-   * question intents are all the pass needs, so the next explicit activation
-   * decides the same deliveries again from the record.
+   * question intents and the runs' accumulated batches are all the pass needs, so
+   * the next explicit activation decides the same deliveries again from the record.
    */
   pendingQuestionDelivery?: () => Promise<void>
   /**
@@ -1341,11 +1344,13 @@ export interface ReconcileReport {
    */
   readonly questionDeliveries: readonly QuestionReconcileReport[]
   /**
-   * What the pass's own recovery of question-waiting workers settled as (A4
-   * §F.1), one record per run it tried to bring back — `live` for a Session that
-   * is now reachable, `retry` for one another owner still holds, `refused` for an
+   * What the pass's own recovery of workers settled as (A4 §F.1, widened by K1
+   * §5), one record per run it tried to bring back — `live` for a Session that is
+   * now reachable, `retry` for one another owner still holds, `refused` for an
    * identity that could not be established (and whose run the pass then settled
-   * terminal). Empty means the pass found no question-waiting worker to recover.
+   * terminal). A run comes back for one of two reasons and the record says which:
+   * it waits on coordination of its own, or it is a delegated parent whose batches
+   * ended and which has to be told so. Empty means the pass found neither.
    */
   readonly questionResumes: readonly QuestionResumeReport[]
 }
@@ -4967,17 +4972,17 @@ export class TaskRuntime extends Service {
   }
 
   /**
-   * The batch one id names, as the store itself records it: the run whose current
-   * unfinished batch it is, or a run whose accumulated batches hold it, together
-   * with the parent task that run works on. `undefined` when no run of the store
-   * records the id.
+   * The batch one id names, as the store itself records it: the run whose
+   * **accumulated batches** hold it, together with the parent task that run works
+   * on. `undefined` when no run of the store records the id that way.
    *
-   * A batch id is the pair (parent run, proposal) and is never parsed back into a
-   * task: a parent admits more than one batch, so `b-…` carries no task, and the
-   * one honest source for "whose batch is this" is the accumulation the reducer
-   * derived. A read that fails answers `undefined` rather than guessing — every
-   * caller here reports by name instead of writing a settlement for a batch it
-   * cannot name.
+   * The accumulation is the record, not the run's current `batchId`: a batch a
+   * build before K1 admitted wrote only `b-<parentTaskId>` onto the run, with no
+   * proposal and no members, so a run that *waits* on an id its accumulation does
+   * not hold is exactly the stopped old state the persistence decision names. This
+   * read answers `undefined` for it rather than handing a caller the task's
+   * children — the members of a batch nobody can name are not the batch's members —
+   * and a settlement path that cannot name a batch reports instead of guessing.
    */
   private async batchRecordIn(storeId: string, batchId: string): Promise<{ taskId: TaskId; run: TaskRun } | undefined> {
     let snapshot: TaskSnapshot
@@ -4987,9 +4992,47 @@ export class TaskRuntime extends Service {
       return undefined
     }
     const records = (run: TaskRun): boolean =>
-      run.batchId === batchId || run.batches?.some(batch => batch.batchId === batchId) === true
+      run.batches?.some(batch => batch.batchId === batchId) === true
     const run = [...snapshot.runs].reverse().find(records)
     return run === undefined ? undefined : { taskId: run.taskId, run }
+  }
+
+  /**
+   * Whether one run's own accumulation holds the batch it waits on — the binding a
+   * restart needs before it drives a batch (K1 §5).
+   *
+   * A batch is identified by the pair (parent run, proposal), and the run that
+   * admitted it is the only record that can say which members belong to it. A
+   * `waiting_children` run whose `batches` holds no such entry carries a batch from
+   * before batches were identified that way: nothing in the store says which run,
+   * which proposal, or which members a second batch of that parent would have.
+   */
+  private batchHeldByRun(run: TaskRun, batchId: string): boolean {
+    return run.batches?.some(batch => batch.batchId === batchId) === true
+  }
+
+  /**
+   * Stop a `waiting_children` run whose batch this build cannot name (K1 §5, and
+   * the persistence decision that fixes it: an in-flight batch admitted before
+   * `(parentRunId, proposalId)` identified one is a **stopped old state**).
+   *
+   * The stop is by name and by nothing else: the run is settled `cancelled` with
+   * the fact recorded — no driver is registered, no child is started, and no batch
+   * is attributed to a run or a proposal the store does not name. The children the
+   * old admission created are left exactly as they are: which of them belonged to
+   * that batch is the very thing this build cannot read, so blocking them would be
+   * the guess this stop exists to avoid. The run's Session is reconciled like any
+   * other settlement's, and the warn is the operator's half of the refusal.
+   */
+  private async stopUnidentifiedBatch(env: OrchestrateEnv, storeId: string, run: TaskRun): Promise<void> {
+    const reason = run.batchId === undefined
+      ? `recovery: run "${run.runId}" waits on its children but records no batch id, and a batch this build cannot name is not restarted`
+      : `recovery: run "${run.runId}" waits on batch "${run.batchId}", which the run's own accumulation does not hold. ` +
+        'A batch admitted before batches were identified by (parent run, proposal) is a stopped old state: this build cannot tell which run or which ' +
+        'proposal admitted it, so it is not restarted and its ownership is not guessed at — the run is settled cancelled'
+    this.warn(`store ${storeId}: ${reason}`)
+    await settleRunFromRuntime(env, storeId, run, 'cancelled', reason)
+    await this.reconcileSessionJobs(run.sessionId)
   }
 
   /**
@@ -5539,16 +5582,14 @@ export class TaskRuntime extends Service {
     }
     const entry = this.drivers.get(`${storeId}/${batchId}`)
     if (entry !== undefined) return await entry.promise
-    const snapshot = await this.ctx.task.snapshotIn(storeId)
-    const parentRun = [...snapshot.runs].reverse().find(run =>
-      run.batchId === batchId || run.batches?.some(batch => batch.batchId === batchId) === true)
-    if (parentRun === undefined) {
+    const found = await this.batchRecordIn(storeId, batchId)
+    if (found === undefined) {
       throw new Error(
         `task-runtime: batch "${batchId}" is not recorded in store "${storeId}"; a batch is read from the run that admitted it, never derived from its id`,
       )
     }
-    const members = parentRun.batches?.find(batch => batch.batchId === batchId)?.memberTaskIds
-    return await deriveChildOutcomes(this.ctx.task, storeId, parentRun.taskId, members)
+    const members = found.run.batches?.find(batch => batch.batchId === batchId)?.memberTaskIds
+    return await deriveChildOutcomes(this.ctx.task, storeId, found.taskId, members)
   }
 
   /**
@@ -5603,6 +5644,8 @@ export class TaskRuntime extends Service {
       .sort((left, right) => depthOf(right.taskId) - depthOf(left.taskId))
     const env = await this.orchestrateEnv(this.recoverySessionFor(snapshot, storeId), `recovery:${storeId}`)
     const waiting: TaskRun[] = []
+    /** The delegated parents whose batches ended before the crash (K1 §2, §5): `active` non-root runs holding accumulated batches. */
+    const returnedParents: TaskRun[] = []
     const questionResumes: QuestionResumeReport[] = []
 
     for (const run of ordered) {
@@ -5644,7 +5687,20 @@ export class TaskRuntime extends Service {
         continue
       }
       if (run.executionPhase === 'waiting_children') {
-        waiting.push(run)
+        // K1 §5: the batch a restart may drive is the one the run's own
+        // accumulation names. A batch admitted by this build wrote the pair
+        // (`b-<parentRunId>-<proposalId>`) onto the run that admitted it, so the
+        // run's `batches` is the binding a restart reads — and a `waiting_children`
+        // run whose record holds no such batch carries one from before batches were
+        // identified that way. That state is *stopped*: its ownership cannot be
+        // reconstructed (which run, which proposal, which members a second batch
+        // would have), so it is settled by name instead of being restarted under an
+        // id this build cannot attribute, and no reader guesses at it.
+        if (run.batchId !== undefined && this.batchHeldByRun(run, run.batchId)) {
+          waiting.push(run)
+          continue
+        }
+        await this.stopUnidentifiedBatch(env, storeId, run)
         continue
       }
       // The one run recovery leaves alone is the store's own root run: its session
@@ -5654,6 +5710,20 @@ export class TaskRuntime extends Service {
       // historical tree) — so the store's own naming is what decides
       // (`rootTaskStoreId`, the mapping the store was opened under).
       if (rootTaskStoreId(run.sessionId) === storeId) continue
+      // A **delegated parent** that got its execution back (K1 §2, §5): the run is
+      // `active` and its accumulated batches are all ended, which is exactly the
+      // state `waiting_children → active` persists — and the parent is non-root, so
+      // the cancelled-everything branch below is *not* for it. That branch cancels
+      // an abandoned in-flight worker; this run is not abandoned, it is a parent the
+      // dead process could not finish telling. It comes back as the same Run and the
+      // same Session, through the same resume door a question-waiting worker uses,
+      // and its batch results are re-delivered by this pass's own delivery step. The
+      // workspace it will write into has to be ours first, so the resume happens in
+      // the workspace-gated block below rather than here.
+      if ((run.batches?.length ?? 0) > 0) {
+        returnedParents.push(run)
+        continue
+      }
       // The known question wait (A4 §F.1): a run whose unresolved blocking
       // question is on the record is not an abandoned in-flight run, it is one
       // parked exactly where the protocol told it to park — and the question is
@@ -5675,7 +5745,7 @@ export class TaskRuntime extends Service {
       const owed = owedQuestionMessagesTo(snapshot, run.sessionId)
       if (pendingQuestions.length > 0 || owed.length > 0) {
         const attempt = await resumeAdoptedWorker(env, storeId, run)
-        this.recordQuestionResume(storeId, run, attempt, questionResumes)
+        this.recordWorkerResume(storeId, run, attempt, questionResumes, 'an unresolved blocking question')
         if (attempt.status === 'refused') {
           // A run in flight that nobody can bring back is a dead wait: it is
           // settled terminal with the refusal named, never left `running`.
@@ -5705,10 +5775,14 @@ export class TaskRuntime extends Service {
       await this.reconcileSessionJobs(run.sessionId)
     }
 
-    if (waiting.length > 0) {
+    if (waiting.length > 0 || returnedParents.length > 0) {
       // Before a single child is started again, the checkout must be this
       // process's to write into (§3.4): a marker a live process holds refuses the
       // restart, and the parents fail naming that holder rather than racing it.
+      // A delegated parent needs the same gate for the same reason: bringing its
+      // Session back under its own identity hands it a checkout it is entitled to
+      // write into, and an owner this process cannot take the workspace from must
+      // stop it by name rather than race that owner.
       const sessionId = this.recoverySessionFor(snapshot, storeId)
       const workspace = await this.workspacePathForSession(sessionId)
       let adoptable = true
@@ -5720,12 +5794,48 @@ export class TaskRuntime extends Service {
           for (const run of waiting) {
             await settleRunFromRuntime(env, storeId, run, 'failed', `the workspace cannot be taken over for recovery: ${adoption.reason}`)
           }
+          for (const run of returnedParents) {
+            await settleRunFromRuntime(
+              env,
+              storeId,
+              run,
+              'failed',
+              `recovery refused to bring run "${run.runId}" back into its checkout: its child batches ended and it has to be told so, ` +
+              `but the workspace cannot be taken over for recovery: ${adoption.reason}`,
+            )
+            await this.reconcileSessionJobs(run.sessionId)
+          }
           adoptable = false
         } else {
           await this.rebuildWorkspaceOwnership(storeId)
         }
       }
       if (adoptable) {
+        // The delegated parents whose batches ended before the crash come first
+        // (K1 §2, §5): each is the same Run and the same Session, brought back
+        // through the same resume door a question-waiting worker uses, so the
+        // message this pass re-derives can reach it. What it is *told* is not
+        // decided here — the pass's delivery step re-derives every owed batch
+        // result from the run's own accumulation once the store is ready, which
+        // is also why a parent that comes back is not told twice. A parent that
+        // cannot come back is settled terminal with the refusal named: there is no
+        // owner left for the decision the batch handed back.
+        for (const run of returnedParents) {
+          const attempt = await resumeAdoptedWorker(env, storeId, run)
+          const batches = (run.batches ?? []).map(batch => batch.batchId).join(', ')
+          this.recordWorkerResume(storeId, run, attempt, questionResumes, `ended child batches it has not been told about (${batches})`)
+          if (attempt.status === 'refused') {
+            await settleRunFromRuntime(
+              env,
+              storeId,
+              run,
+              'failed',
+              `recovery refused to continue run "${run.runId}": its child batches ended (${batches}) and its Session ` +
+              `"${run.sessionId}" could not be brought back under its own identity: ${attempt.reason}`,
+            )
+            await this.reconcileSessionJobs(run.sessionId)
+          }
+        }
         // A waiting parent that participates in questions is a Session the
         // answer it owes — or the answer it waits for — has to reach, so it comes
         // back the same way a question-waiting worker does (A4 §F.1), before any
@@ -5739,7 +5849,7 @@ export class TaskRuntime extends Service {
             || owedQuestionMessagesTo(snapshot, run.sessionId).length > 0
           if (!participating) continue
           const attempt = await resumeAdoptedWorker(env, storeId, run)
-          this.recordQuestionResume(storeId, run, attempt, questionResumes)
+          this.recordWorkerResume(storeId, run, attempt, questionResumes, 'coordination its own batch is waiting on')
           if (attempt.status === 'refused') {
             await settleRunFromRuntime(
               env,
@@ -5801,15 +5911,59 @@ export class TaskRuntime extends Service {
         return []
       }
     }
+    // The end-of-batch results this store still owes (K1 §2, §5) — the second
+    // delivery the pass makes, and the one a crash in the window between a batch's
+    // end and its wake leaves behind. The candidates are re-derived from the store
+    // *here*, after the runs above were settled and resumed, so a parent this pass
+    // brought back is among them: a run that is `active` holds no unfinished batch,
+    // every entry of its accumulation is a batch that ended, and each ended batch
+    // owes its Session exactly one message. Delivery is `redeliverBatchResult`,
+    // which re-states the identity and the body from the record and lets the
+    // target's own fold decide — so a batch whose message is already there adds
+    // nothing, and a parent told before a restart is not told again.
+    //
+    // The wake order is the question pass's: this is a `steer` plus, for a target
+    // whose inbox still holds an unread copy, a notice — both are model turns, so
+    // the block cannot run inside the barrier. Nothing here can fail the pass: the
+    // facts are the store's, and the next activation re-derives the same list.
+    const deliverBatches = async (): Promise<void> => {
+      let current: TaskSnapshot
+      try {
+        current = await this.ctx.task.snapshotIn(storeId)
+      } catch (error) {
+        this.warn(
+          `store ${storeId}: the batches it may still owe its Sessions could not be read back ` +
+          `(${error instanceof Error ? error.message : String(error)}); the runs' own records hold the fact, and the next activation retries`,
+        )
+        return
+      }
+      const owed = owedBatchResults(current)
+      if (owed.length === 0) return
+      const unread: { sessionId: string; messageId: string }[] = []
+      for (const entry of owed) {
+        try {
+          const status = await this.redeliverBatchResult(storeId, entry.batchId)
+          if (status === 'already-present') unread.push({ sessionId: entry.sessionId, messageId: batchEndMessageId(entry.batchId) })
+        } catch (error) {
+          this.warn(
+            `store ${storeId}: the end-of-batch message for "${entry.batchId}" could not be re-derived ` +
+            `(${error instanceof Error ? error.message : String(error)}); the batch's facts stand and the next activation retries`,
+          )
+        }
+      }
+      this.wakeUnclaimedBatchResults(unread)
+    }
     const barrier = this.storeRecovery.get(storeId)
     let questionDeliveries: QuestionReconcileReport[] = []
     if (barrier === undefined || barrier.status !== 'recovering') {
       questionDeliveries = await deliverQuestions()
+      await deliverBatches()
     } else if (barrier.cancelled !== true) {
       // A second pass inside one barrier re-decides the same deliveries; the later
       // decision is the one the ready handle runs, and the record is what both read.
       barrier.pendingQuestionDelivery = async () => {
         await deliverQuestions()
+        await deliverBatches()
       }
     }
     // The proposal pass comes last (T2/T3 §5–§6): a batch it admits is driven by
@@ -5839,20 +5993,30 @@ export class TaskRuntime extends Service {
    * has to see — the first because the run keeps waiting on an owner that is not
    * this process, the second because the run is about to be settled terminal for
    * it. The report is the machine-readable half; this is the one adoption drops.
+   *
+   * `fact` names what makes the Session one the pass has to reach — an unresolved
+   * blocking question (A4 §F.1), or a batch that ended and whose result the run has
+   * not been told about (K1 §2, §5) — so a warn says which wait it is about.
    */
-  private recordQuestionResume(storeId: string, run: TaskRun, attempt: AdoptedWorkerResume, into: QuestionResumeReport[]): void {
+  private recordWorkerResume(
+    storeId: string,
+    run: TaskRun,
+    attempt: AdoptedWorkerResume,
+    into: QuestionResumeReport[],
+    fact: string,
+  ): void {
     const subject = `run "${run.runId}" (session "${run.sessionId}")`
     into.push(attempt.status === 'live' ? { subject, status: 'live' } : { subject, status: attempt.status, reason: attempt.reason })
     if (attempt.status === 'retry') {
       this.warn(
-        `store ${storeId}: ${subject} is waiting on an unresolved blocking question, but its Session is held by another owner ` +
+        `store ${storeId}: ${subject} has to be reachable for ${fact}, but its Session is held by another owner ` +
         `(${attempt.reason}); nothing is taken over and the next activation retries`,
       )
     }
     if (attempt.status === 'refused') {
       this.warn(
-        `store ${storeId}: ${subject} is waiting on an unresolved blocking question and its Session could not be brought back ` +
-        `under its own identity (${attempt.reason}); the run is settled failed rather than left running with a wait nobody can end`,
+        `store ${storeId}: ${subject} has to be reachable for ${fact} and its Session could not be brought back ` +
+        `under its own identity (${attempt.reason}); the run is settled failed rather than left running with that fact unreported`,
       )
     }
   }
@@ -5903,6 +6067,30 @@ export class TaskRuntime extends Service {
         sessionId,
         `task-runtime: this session was brought back after a restart with coordination input it has not read (message "${messageId}" is still ` +
         'pending in its inbox); read it and act on it — the framework will not send a second copy',
+      )
+    }
+  }
+
+  /**
+   * Wake a Session that was brought back with an end-of-batch result its own inbox
+   * still holds unread — {@link wakeUnclaimedQuestionMessages}' rule applied to the
+   * batch messages (K1 §2, §5), and for the same reason.
+   *
+   * A batch end delivered before a crash is durable in the target's log but may
+   * never have been claimed (spliced and flushed, then the process died), so the
+   * pass's re-delivery answers `already-present` **without steering** — right,
+   * because a second copy would be a duplicate — and a resumed parent with the
+   * message sitting in its restored inbox would otherwise stay idle until its
+   * deadline. The check is the same live-inbox read, and the wake is the same
+   * runtime-voice notice: never a second copy of the message.
+   */
+  private wakeUnclaimedBatchResults(unread: readonly { sessionId: string; messageId: string }[]): void {
+    for (const { sessionId, messageId } of unread) {
+      if (!this.sessionHoldsPendingMessage(sessionId, messageId)) continue
+      this.notify(
+        sessionId,
+        `task-runtime: this session was brought back after a restart with the result of a child batch it has not read (message "${messageId}" ` +
+        'is still pending in its inbox); read it and act on it — the framework will not send a second copy',
       )
     }
   }
@@ -6599,8 +6787,27 @@ export class TaskRuntime extends Service {
    * the store's and the message is the wake that points at them, so a relay that
    * is absent, refuses or has no live Session changes nothing about the batch —
    * it is named once for the operator, and the next activation retries.
+   *
+   * The run the message addresses is re-read here, and it is the one guard every
+   * path shares — the live batch end, a delivery a barrier deferred, the recovery
+   * pass and a re-delivery a caller asked for. The message's whole content is "you
+   * are active again"; a run that settled while the delivery was on its way (a
+   * cancellation or a deadline that arrived first, a verdict somebody else made)
+   * must not be woken by it, so a run that is no longer `running` is answered
+   * `skipped` with zero side effects (K1 §2: 绝不唤活终态).
    */
   private async deliverBatchResultNow(message: BatchResultMessage): Promise<BatchResultDeliveryStatus> {
+    let run: TaskRun
+    try {
+      run = await this.ctx.task.runIn(message.storeId, message.runId)
+    } catch (error) {
+      this.warn(
+        `store ${message.storeId}: whether run "${message.runId}" is still running could not be read before the end-of-batch message for ` +
+        `"${message.batchId}" was delivered (${error instanceof Error ? error.message : String(error)}); nothing was delivered and the next activation retries`,
+      )
+      return 'unavailable'
+    }
+    if (run.status !== 'running') return 'skipped'
     // Read structurally: a deployment (or a test context) may mount no relay at
     // all, which is a deployment that cannot deliver — not a defect of the batch.
     const relay = this.ctx.agentRuntime as unknown as
@@ -6638,7 +6845,9 @@ export class TaskRuntime extends Service {
    * terminal states and evidence, and the target's own fold decides whether the
    * message is already there (`already-present`, nothing delivered twice). A
    * batch no run of the store records is refused by name — a batch id names a
-   * pair, and one nothing records cannot be guessed at.
+   * pair, and one nothing records cannot be guessed at. A batch whose parent run
+   * already settled is `skipped`: the message's content is moot for a run that
+   * cannot act on it, and a terminal run is not woken.
    */
   async redeliverBatchResult(storeId: string, batchId: string): Promise<BatchResultDeliveryStatus> {
     const found = await this.batchRecordIn(storeId, batchId)

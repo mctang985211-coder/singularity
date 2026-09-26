@@ -82,8 +82,15 @@ export interface BatchResultMessage {
   readonly text: string
 }
 
-/** What one end-of-batch delivery settled as. `unavailable` and `refused` are reported, never fatal. */
-export type BatchResultDeliveryStatus = 'delivered' | 'already-present' | 'unavailable' | 'refused'
+/**
+ * What one end-of-batch delivery settled as. `unavailable` and `refused` are
+ * reported, never fatal; `skipped` is a delivery that was deliberately not
+ * attempted — the run the message addressed is no longer running, and a terminal
+ * run is not woken (K1 §2: 绝不唤活终态). A skipped delivery has zero side
+ * effects, and unlike `unavailable` it is not retried: the fact it would point
+ * at is moot for a run that already settled.
+ */
+export type BatchResultDeliveryStatus = 'delivered' | 'already-present' | 'unavailable' | 'refused' | 'skipped'
 
 export interface SpawnChildRequest {
   sessionId: string
@@ -2219,9 +2226,19 @@ async function driveRounds(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
       // would throw away what the exchange produced).
       const questionWait = started.executionPhase === 'active'
         && (blockingQuestionsOf(snapshot, started.runId).length > 0 || owedQuestionMessagesTo(snapshot, started.sessionId).length > 0)
-      if (questionWait) {
+      // The other wait that must not become a cancellation (K1 §2, §5): the child
+      // **got its own batch back**. A run that is `active` and accumulated batches
+      // has ended every one of them — `waiting_children → active` clears the current
+      // batch id and keeps the history — so it is a delegated parent the dead
+      // process could not finish telling, not a worker that abandoned its work. The
+      // recovery pass brings that same Session back and re-derives its batch-end
+      // message; cancelling it here would throw away the decision the batch just
+      // handed it, which is exactly the rule "an unsubmitted worker is cancelled"
+      // is not for.
+      const returnedParent = started.executionPhase === 'active' && (started.batches?.length ?? 0) > 0
+      if (questionWait || returnedParent) {
         const dependencyTaskIds = item.dependsOn.map(dependency => (items[dependency] as BatchItem).taskId)
-        await awaitAdoptedQuestionWait(env, batch, item, started, dependencyTaskIds)
+        await awaitAdoptedWorkerWait(env, batch, item, started, dependencyTaskIds)
         continue
       }
       if (started.executionPhase === 'active') {
@@ -2252,18 +2269,26 @@ async function driveRounds(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
 }
 
 /**
- * Bring one adopted, question-waiting child back and wait for its settlement
- * (A4 §F.1) — the batch driver's half of the worker recovery.
+ * Bring one adopted worker back and wait for its settlement — the batch driver's
+ * half of the worker recovery (A4 §F.1, K1 §5).
  *
- * The child this runs for is a run the driver did **not** start: a process that
- * died left it in flight with an unresolved blocking question on the record.
+ * The child this runs for is a run the driver did **not** start, and one of two
+ * durable facts makes it a *wait* rather than an abandoned worker:
+ *
+ * - it has an unresolved blocking question of its own (or an answer it is still
+ *   owed), which is where the protocol parked it (A4 §F.1);
+ * - it is a delegated parent whose own batches all ended — `active` with an
+ *   accumulated `batches` — so the decision the batch handed back is what it is
+ *   waiting on, and the recovery pass is telling it so (K1 §2, §5).
+ *
  * Its Run identity is untouched; what the dead process could not leave behind is
  * its Session, so the runtime's resume door ({@link OrchestrateEnv.resumeWorkerSession})
  * is asked to bring it back under that same identity. Three answers are
  * possible, and each has a different consequence:
  *
  * - `live` — the Session is reachable again, so what the child waits for (its
- *   parent's answer) can be delivered to it and the wait can be observed;
+ *   parent's answer, or the news that its batch ended) can be delivered to it and
+ *   the wait can be observed;
  * - `retry` — another owner holds the Session. Nothing is taken over and the run
  *   keeps its identity; the wait continues (bounded by the deadline) and the
  *   next activation retries;
@@ -2281,7 +2306,7 @@ async function driveRounds(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
  * question's derived effects with it: a settled asking run owes no delivery, so
  * a late answer is audit rather than a revival.
  */
-async function awaitAdoptedQuestionWait(
+async function awaitAdoptedWorkerWait(
   env: OrchestrateEnv,
   batch: BatchContext,
   item: BatchItem,
@@ -2413,6 +2438,54 @@ function batchMembers(run: TaskRun, batchId: string): TaskId[] | undefined {
 /** {@link batchMembers} for a caller holding the run; the task's children remain the fallback for an old record. */
 function membersOf(run: TaskRun, batchId: string): TaskId[] | undefined {
   return batchMembers(run, batchId)
+}
+
+/**
+ * One batch a run has ended and been told about — or still has to be told about
+ * ({@link owedBatchResults}): the batch, the run whose wait it ends, the Session
+ * the message goes to, and the members whose terminal states the body renders.
+ */
+export interface OwedBatchResult {
+  readonly taskId: TaskId
+  readonly runId: RunId
+  readonly batchId: string
+  /** The parent's own Session: the target of the message and the Session it is sent from. */
+  readonly sessionId: string
+  readonly memberTaskIds: readonly TaskId[]
+}
+
+/**
+ * The end-of-batch results one store's own facts still owe (K1 §2, §5).
+ *
+ * A run that is `active` has no unfinished batch — `waiting_children → active`
+ * clears `batchId` — so every entry of its accumulated `batches` names a batch
+ * that ended, and each ended batch owes its Session the one message under
+ * `m-batchend-<batchId>` ({@link batchEndMessageId}), whether the process that
+ * ended it delivered it or died before it could. The store's own accumulation is
+ * the whole derivation: nothing is guessed from a task's children, a batch no run
+ * records is not a candidate, and a run that is still `waiting_children`,
+ * `submitted` or terminal owes nothing here (its batch end is not durable yet, its
+ * acceptance is what is in flight, or it is past being told).
+ *
+ * Being owed is a candidate, not a verdict: the target's own fold decides whether
+ * the message is still missing when the delivery is attempted, so a second pass
+ * over the same store re-derives the same list and delivers nothing twice.
+ */
+export function owedBatchResults(snapshot: TaskSnapshot): OwedBatchResult[] {
+  const owed: OwedBatchResult[] = []
+  for (const run of snapshot.runs) {
+    if (run.status !== 'running' || run.executionPhase !== 'active') continue
+    for (const batch of run.batches ?? []) {
+      owed.push({
+        taskId: run.taskId,
+        runId: run.runId,
+        batchId: batch.batchId,
+        sessionId: run.sessionId,
+        memberTaskIds: [...batch.memberTaskIds],
+      })
+    }
+  }
+  return owed
 }
 
 /**
@@ -2586,7 +2659,11 @@ async function finishBatch(env: OrchestrateEnv, batch: BatchContext, items: read
     messageId: batchEndMessageId(batch.batchId),
     text: message,
   })
-  if (delivery !== 'delivered' && delivery !== 'already-present') {
+  // A `skipped` delivery is not an undelivered one: the parent run ended before
+  // it could be told (a cancellation that won the race, a deadline), and the
+  // fallback notice would be a wake addressed to a terminal run — the very thing
+  // K1 §2 forbids. Its own terminal transition already told its owner.
+  if (delivery !== 'delivered' && delivery !== 'already-present' && delivery !== 'skipped') {
     notifyOwner(env, batch.callerSessionId, `task-runtime: ${batchSummary(batch.batchId, outcomes)}; ${message} (delivery: ${delivery})`)
   }
   return outcomes

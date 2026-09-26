@@ -5426,8 +5426,10 @@ async function driveRounds(env, batch) {
 		const item = ready[0];
 		const started = latestRun(snapshot, item.taskId);
 		if (started !== void 0) {
-			if (started.executionPhase === "active" && (blockingQuestionsOf(snapshot, started.runId).length > 0 || owedQuestionMessagesTo(snapshot, started.sessionId).length > 0)) {
-				await awaitAdoptedQuestionWait(env, batch, item, started, item.dependsOn.map((dependency) => items[dependency].taskId));
+			const questionWait = started.executionPhase === "active" && (blockingQuestionsOf(snapshot, started.runId).length > 0 || owedQuestionMessagesTo(snapshot, started.sessionId).length > 0);
+			const returnedParent = started.executionPhase === "active" && (started.batches?.length ?? 0) > 0;
+			if (questionWait || returnedParent) {
+				await awaitAdoptedWorkerWait(env, batch, item, started, item.dependsOn.map((dependency) => items[dependency].taskId));
 				continue;
 			}
 			if (started.executionPhase === "active") {
@@ -5454,18 +5456,26 @@ async function driveRounds(env, batch) {
 	}
 }
 /**
-* Bring one adopted, question-waiting child back and wait for its settlement
-* (A4 §F.1) — the batch driver's half of the worker recovery.
+* Bring one adopted worker back and wait for its settlement — the batch driver's
+* half of the worker recovery (A4 §F.1, K1 §5).
 *
-* The child this runs for is a run the driver did **not** start: a process that
-* died left it in flight with an unresolved blocking question on the record.
+* The child this runs for is a run the driver did **not** start, and one of two
+* durable facts makes it a *wait* rather than an abandoned worker:
+*
+* - it has an unresolved blocking question of its own (or an answer it is still
+*   owed), which is where the protocol parked it (A4 §F.1);
+* - it is a delegated parent whose own batches all ended — `active` with an
+*   accumulated `batches` — so the decision the batch handed back is what it is
+*   waiting on, and the recovery pass is telling it so (K1 §2, §5).
+*
 * Its Run identity is untouched; what the dead process could not leave behind is
 * its Session, so the runtime's resume door ({@link OrchestrateEnv.resumeWorkerSession})
 * is asked to bring it back under that same identity. Three answers are
 * possible, and each has a different consequence:
 *
 * - `live` — the Session is reachable again, so what the child waits for (its
-*   parent's answer) can be delivered to it and the wait can be observed;
+*   parent's answer, or the news that its batch ended) can be delivered to it and
+*   the wait can be observed;
 * - `retry` — another owner holds the Session. Nothing is taken over and the run
 *   keeps its identity; the wait continues (bounded by the deadline) and the
 *   next activation retries;
@@ -5483,7 +5493,7 @@ async function driveRounds(env, batch) {
 * question's derived effects with it: a settled asking run owes no delivery, so
 * a late answer is audit rather than a revival.
 */
-async function awaitAdoptedQuestionWait(env, batch, item, run, dependencyTaskIds) {
+async function awaitAdoptedWorkerWait(env, batch, item, run, dependencyTaskIds) {
 	const resumed = await resumeAdoptedWorker(env, batch.storeId, run);
 	if (resumed.status === "refused") {
 		const reason = `recovery refused to continue this run: the Session "${run.sessionId}" could not be brought back (${resumed.reason})`;
@@ -5601,6 +5611,37 @@ function batchMembers(run, batchId) {
 /** {@link batchMembers} for a caller holding the run; the task's children remain the fallback for an old record. */
 function membersOf(run, batchId) {
 	return batchMembers(run, batchId);
+}
+/**
+* The end-of-batch results one store's own facts still owe (K1 §2, §5).
+*
+* A run that is `active` has no unfinished batch — `waiting_children → active`
+* clears `batchId` — so every entry of its accumulated `batches` names a batch
+* that ended, and each ended batch owes its Session the one message under
+* `m-batchend-<batchId>` ({@link batchEndMessageId}), whether the process that
+* ended it delivered it or died before it could. The store's own accumulation is
+* the whole derivation: nothing is guessed from a task's children, a batch no run
+* records is not a candidate, and a run that is still `waiting_children`,
+* `submitted` or terminal owes nothing here (its batch end is not durable yet, its
+* acceptance is what is in flight, or it is past being told).
+*
+* Being owed is a candidate, not a verdict: the target's own fold decides whether
+* the message is still missing when the delivery is attempted, so a second pass
+* over the same store re-derives the same list and delivers nothing twice.
+*/
+function owedBatchResults(snapshot) {
+	const owed = [];
+	for (const run of snapshot.runs) {
+		if (run.status !== "running" || run.executionPhase !== "active") continue;
+		for (const batch of run.batches ?? []) owed.push({
+			taskId: run.taskId,
+			runId: run.runId,
+			batchId: batch.batchId,
+			sessionId: run.sessionId,
+			memberTaskIds: [...batch.memberTaskIds]
+		});
+	}
+	return owed;
 }
 /**
 * Deliver one batch's end-of-batch message and report what the attempt settled
@@ -5743,7 +5784,7 @@ async function finishBatch(env, batch, items) {
 		messageId: batchEndMessageId(batch.batchId),
 		text: message$8
 	});
-	if (delivery !== "delivered" && delivery !== "already-present") notifyOwner(env, batch.callerSessionId, `task-runtime: ${batchSummary(batch.batchId, outcomes)}; ${message$8} (delivery: ${delivery})`);
+	if (delivery !== "delivered" && delivery !== "already-present" && delivery !== "skipped") notifyOwner(env, batch.callerSessionId, `task-runtime: ${batchSummary(batch.batchId, outcomes)}; ${message$8} (delivery: ${delivery})`);
 	return outcomes;
 }
 /**
@@ -9297,17 +9338,17 @@ var TaskRuntime = class TaskRuntime extends Service {
 		}
 	}
 	/**
-	* The batch one id names, as the store itself records it: the run whose current
-	* unfinished batch it is, or a run whose accumulated batches hold it, together
-	* with the parent task that run works on. `undefined` when no run of the store
-	* records the id.
+	* The batch one id names, as the store itself records it: the run whose
+	* **accumulated batches** hold it, together with the parent task that run works
+	* on. `undefined` when no run of the store records the id that way.
 	*
-	* A batch id is the pair (parent run, proposal) and is never parsed back into a
-	* task: a parent admits more than one batch, so `b-…` carries no task, and the
-	* one honest source for "whose batch is this" is the accumulation the reducer
-	* derived. A read that fails answers `undefined` rather than guessing — every
-	* caller here reports by name instead of writing a settlement for a batch it
-	* cannot name.
+	* The accumulation is the record, not the run's current `batchId`: a batch a
+	* build before K1 admitted wrote only `b-<parentTaskId>` onto the run, with no
+	* proposal and no members, so a run that *waits* on an id its accumulation does
+	* not hold is exactly the stopped old state the persistence decision names. This
+	* read answers `undefined` for it rather than handing a caller the task's
+	* children — the members of a batch nobody can name are not the batch's members —
+	* and a settlement path that cannot name a batch reports instead of guessing.
 	*/
 	async batchRecordIn(storeId, batchId) {
 		let snapshot;
@@ -9316,12 +9357,44 @@ var TaskRuntime = class TaskRuntime extends Service {
 		} catch {
 			return;
 		}
-		const records = (run$1) => run$1.batchId === batchId || run$1.batches?.some((batch) => batch.batchId === batchId) === true;
+		const records = (run$1) => run$1.batches?.some((batch) => batch.batchId === batchId) === true;
 		const run = [...snapshot.runs].reverse().find(records);
 		return run === void 0 ? void 0 : {
 			taskId: run.taskId,
 			run
 		};
+	}
+	/**
+	* Whether one run's own accumulation holds the batch it waits on — the binding a
+	* restart needs before it drives a batch (K1 §5).
+	*
+	* A batch is identified by the pair (parent run, proposal), and the run that
+	* admitted it is the only record that can say which members belong to it. A
+	* `waiting_children` run whose `batches` holds no such entry carries a batch from
+	* before batches were identified that way: nothing in the store says which run,
+	* which proposal, or which members a second batch of that parent would have.
+	*/
+	batchHeldByRun(run, batchId) {
+		return run.batches?.some((batch) => batch.batchId === batchId) === true;
+	}
+	/**
+	* Stop a `waiting_children` run whose batch this build cannot name (K1 §5, and
+	* the persistence decision that fixes it: an in-flight batch admitted before
+	* `(parentRunId, proposalId)` identified one is a **stopped old state**).
+	*
+	* The stop is by name and by nothing else: the run is settled `cancelled` with
+	* the fact recorded — no driver is registered, no child is started, and no batch
+	* is attributed to a run or a proposal the store does not name. The children the
+	* old admission created are left exactly as they are: which of them belonged to
+	* that batch is the very thing this build cannot read, so blocking them would be
+	* the guess this stop exists to avoid. The run's Session is reconciled like any
+	* other settlement's, and the warn is the operator's half of the refusal.
+	*/
+	async stopUnidentifiedBatch(env, storeId, run) {
+		const reason = run.batchId === void 0 ? `recovery: run "${run.runId}" waits on its children but records no batch id, and a batch this build cannot name is not restarted` : `recovery: run "${run.runId}" waits on batch "${run.batchId}", which the run's own accumulation does not hold. A batch admitted before batches were identified by (parent run, proposal) is a stopped old state: this build cannot tell which run or which proposal admitted it, so it is not restarted and its ownership is not guessed at — the run is settled cancelled`;
+		this.warn(`store ${storeId}: ${reason}`);
+		await settleRunFromRuntime(env, storeId, run, "cancelled", reason);
+		await this.reconcileSessionJobs(run.sessionId);
 	}
 	/**
 	* The narrow capabilities one runtime-level settlement holds — the store, the
@@ -9714,10 +9787,10 @@ var TaskRuntime = class TaskRuntime extends Service {
 		if (!batchId.startsWith("b-")) throw new Error(`task-runtime: "${batchId}" is not a batch id (a batch id is "b-<parentRunId>-<proposalId>")`);
 		const entry = this.drivers.get(`${storeId}/${batchId}`);
 		if (entry !== void 0) return await entry.promise;
-		const parentRun = [...(await this.ctx.task.snapshotIn(storeId)).runs].reverse().find((run) => run.batchId === batchId || run.batches?.some((batch) => batch.batchId === batchId) === true);
-		if (parentRun === void 0) throw new Error(`task-runtime: batch "${batchId}" is not recorded in store "${storeId}"; a batch is read from the run that admitted it, never derived from its id`);
-		const members = parentRun.batches?.find((batch) => batch.batchId === batchId)?.memberTaskIds;
-		return await deriveChildOutcomes(this.ctx.task, storeId, parentRun.taskId, members);
+		const found = await this.batchRecordIn(storeId, batchId);
+		if (found === void 0) throw new Error(`task-runtime: batch "${batchId}" is not recorded in store "${storeId}"; a batch is read from the run that admitted it, never derived from its id`);
+		const members = found.run.batches?.find((batch) => batch.batchId === batchId)?.memberTaskIds;
+		return await deriveChildOutcomes(this.ctx.task, storeId, found.taskId, members);
 	}
 	/**
 	* The recovery entry (A3 §3.6): settle or restart what a store left in flight.
@@ -9773,6 +9846,8 @@ var TaskRuntime = class TaskRuntime extends Service {
 		const ordered = snapshot.runs.filter((run) => run.status === "running").sort((left, right) => depthOf(right.taskId) - depthOf(left.taskId));
 		const env = await this.orchestrateEnv(this.recoverySessionFor(snapshot, storeId), `recovery:${storeId}`);
 		const waiting = [];
+		/** The delegated parents whose batches ended before the crash (K1 §2, §5): `active` non-root runs holding accumulated batches. */
+		const returnedParents = [];
 		const questionResumes = [];
 		for (const run of ordered) {
 			if (rootTaskStoreId(run.sessionId) !== storeId && this.startedSessions.has(run.sessionId)) continue;
@@ -9791,15 +9866,23 @@ var TaskRuntime = class TaskRuntime extends Service {
 				continue;
 			}
 			if (run.executionPhase === "waiting_children") {
-				waiting.push(run);
+				if (run.batchId !== void 0 && this.batchHeldByRun(run, run.batchId)) {
+					waiting.push(run);
+					continue;
+				}
+				await this.stopUnidentifiedBatch(env, storeId, run);
 				continue;
 			}
 			if (rootTaskStoreId(run.sessionId) === storeId) continue;
+			if ((run.batches?.length ?? 0) > 0) {
+				returnedParents.push(run);
+				continue;
+			}
 			const pendingQuestions = blockingQuestionsOf(snapshot, run.runId);
 			const owed = owedQuestionMessagesTo(snapshot, run.sessionId);
 			if (pendingQuestions.length > 0 || owed.length > 0) {
 				const attempt = await resumeAdoptedWorker(env, storeId, run);
-				this.recordQuestionResume(storeId, run, attempt, questionResumes);
+				this.recordWorkerResume(storeId, run, attempt, questionResumes, "an unresolved blocking question");
 				if (attempt.status === "refused") {
 					await settleRunFromRuntime(env, storeId, run, "failed", `recovery refused to continue run "${run.runId}": it was waiting on ${pendingQuestions.length === 1 ? "an unresolved blocking question" : `${pendingQuestions.length} unresolved blocking questions`} (${pendingQuestions.map((question) => question.questionId).join(", ")})${owed.length === 0 ? "" : ` and is owed ${owed.length} question message${owed.length === 1 ? "" : "s"} it has not been given`}, but its Session "${run.sessionId}" could not be brought back under its own identity: ${attempt.reason}`);
 					await this.reconcileSessionJobs(run.sessionId);
@@ -9809,7 +9892,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 			await settleRunFromRuntime(env, storeId, run, "cancelled", `recovery: run "${run.runId}" was in flight when this store was reopened and never submitted; the writes it may already have made cannot be confirmed, so it is settled cancelled and its managed jobs are reconciled`);
 			await this.reconcileSessionJobs(run.sessionId);
 		}
-		if (waiting.length > 0) {
+		if (waiting.length > 0 || returnedParents.length > 0) {
 			const sessionId = this.recoverySessionFor(snapshot, storeId);
 			const workspace = await this.workspacePathForSession(sessionId);
 			let adoptable = true;
@@ -9817,16 +9900,29 @@ var TaskRuntime = class TaskRuntime extends Service {
 				const adoption = await this.workspaces.ownerOf(workspace) === void 0 ? await this.workspaces.reconcileAdopt(workspace) : { adopted: true };
 				if (!adoption.adopted) {
 					for (const run of waiting) await settleRunFromRuntime(env, storeId, run, "failed", `the workspace cannot be taken over for recovery: ${adoption.reason}`);
+					for (const run of returnedParents) {
+						await settleRunFromRuntime(env, storeId, run, "failed", `recovery refused to bring run "${run.runId}" back into its checkout: its child batches ended and it has to be told so, but the workspace cannot be taken over for recovery: ${adoption.reason}`);
+						await this.reconcileSessionJobs(run.sessionId);
+					}
 					adoptable = false;
 				} else await this.rebuildWorkspaceOwnership(storeId);
 			}
 			if (adoptable) {
+				for (const run of returnedParents) {
+					const attempt = await resumeAdoptedWorker(env, storeId, run);
+					const batches = (run.batches ?? []).map((batch) => batch.batchId).join(", ");
+					this.recordWorkerResume(storeId, run, attempt, questionResumes, `ended child batches it has not been told about (${batches})`);
+					if (attempt.status === "refused") {
+						await settleRunFromRuntime(env, storeId, run, "failed", `recovery refused to continue run "${run.runId}": its child batches ended (${batches}) and its Session "${run.sessionId}" could not be brought back under its own identity: ${attempt.reason}`);
+						await this.reconcileSessionJobs(run.sessionId);
+					}
+				}
 				const settled = /* @__PURE__ */ new Set();
 				for (const run of waiting) {
 					if (rootTaskStoreId(run.sessionId) === storeId) continue;
 					if (!(pendingCoordinationOf(snapshot, run.runId).length > 0 || owedQuestionMessagesTo(snapshot, run.sessionId).length > 0)) continue;
 					const attempt = await resumeAdoptedWorker(env, storeId, run);
-					this.recordQuestionResume(storeId, run, attempt, questionResumes);
+					this.recordWorkerResume(storeId, run, attempt, questionResumes, "coordination its own batch is waiting on");
 					if (attempt.status === "refused") {
 						await settleRunFromRuntime(env, storeId, run, "failed", `recovery refused to continue run "${run.runId}": it is a waiting parent with open coordination, but its Session "${run.sessionId}" could not be brought back under its own identity: ${attempt.reason}`);
 						await this.reconcileSessionJobs(run.sessionId);
@@ -9858,11 +9954,35 @@ var TaskRuntime = class TaskRuntime extends Service {
 				return [];
 			}
 		};
+		const deliverBatches = async () => {
+			let current;
+			try {
+				current = await this.ctx.task.snapshotIn(storeId);
+			} catch (error) {
+				this.warn(`store ${storeId}: the batches it may still owe its Sessions could not be read back (${error instanceof Error ? error.message : String(error)}); the runs' own records hold the fact, and the next activation retries`);
+				return;
+			}
+			const owed = owedBatchResults(current);
+			if (owed.length === 0) return;
+			const unread = [];
+			for (const entry of owed) try {
+				if (await this.redeliverBatchResult(storeId, entry.batchId) === "already-present") unread.push({
+					sessionId: entry.sessionId,
+					messageId: batchEndMessageId(entry.batchId)
+				});
+			} catch (error) {
+				this.warn(`store ${storeId}: the end-of-batch message for "${entry.batchId}" could not be re-derived (${error instanceof Error ? error.message : String(error)}); the batch's facts stand and the next activation retries`);
+			}
+			this.wakeUnclaimedBatchResults(unread);
+		};
 		const barrier = this.storeRecovery.get(storeId);
 		let questionDeliveries = [];
-		if (barrier === void 0 || barrier.status !== "recovering") questionDeliveries = await deliverQuestions();
-		else if (barrier.cancelled !== true) barrier.pendingQuestionDelivery = async () => {
+		if (barrier === void 0 || barrier.status !== "recovering") {
+			questionDeliveries = await deliverQuestions();
+			await deliverBatches();
+		} else if (barrier.cancelled !== true) barrier.pendingQuestionDelivery = async () => {
 			await deliverQuestions();
+			await deliverBatches();
 		};
 		return {
 			unresolvedProposals: await this.reconcileProposals(storeId),
@@ -9889,8 +10009,12 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* has to see — the first because the run keeps waiting on an owner that is not
 	* this process, the second because the run is about to be settled terminal for
 	* it. The report is the machine-readable half; this is the one adoption drops.
+	*
+	* `fact` names what makes the Session one the pass has to reach — an unresolved
+	* blocking question (A4 §F.1), or a batch that ended and whose result the run has
+	* not been told about (K1 §2, §5) — so a warn says which wait it is about.
 	*/
-	recordQuestionResume(storeId, run, attempt, into) {
+	recordWorkerResume(storeId, run, attempt, into, fact) {
 		const subject = `run "${run.runId}" (session "${run.sessionId}")`;
 		into.push(attempt.status === "live" ? {
 			subject,
@@ -9900,8 +10024,8 @@ var TaskRuntime = class TaskRuntime extends Service {
 			status: attempt.status,
 			reason: attempt.reason
 		});
-		if (attempt.status === "retry") this.warn(`store ${storeId}: ${subject} is waiting on an unresolved blocking question, but its Session is held by another owner (${attempt.reason}); nothing is taken over and the next activation retries`);
-		if (attempt.status === "refused") this.warn(`store ${storeId}: ${subject} is waiting on an unresolved blocking question and its Session could not be brought back under its own identity (${attempt.reason}); the run is settled failed rather than left running with a wait nobody can end`);
+		if (attempt.status === "retry") this.warn(`store ${storeId}: ${subject} has to be reachable for ${fact}, but its Session is held by another owner (${attempt.reason}); nothing is taken over and the next activation retries`);
+		if (attempt.status === "refused") this.warn(`store ${storeId}: ${subject} has to be reachable for ${fact} and its Session could not be brought back under its own identity (${attempt.reason}); the run is settled failed rather than left running with that fact unreported`);
 	}
 	/**
 	* Wake a Session that was brought back with coordination input its own inbox
@@ -9941,6 +10065,25 @@ var TaskRuntime = class TaskRuntime extends Service {
 		for (const [sessionId, messageId] of targets) {
 			if (!this.sessionHoldsPendingMessage(sessionId, messageId)) continue;
 			this.notify(sessionId, `task-runtime: this session was brought back after a restart with coordination input it has not read (message "${messageId}" is still pending in its inbox); read it and act on it — the framework will not send a second copy`);
+		}
+	}
+	/**
+	* Wake a Session that was brought back with an end-of-batch result its own inbox
+	* still holds unread — {@link wakeUnclaimedQuestionMessages}' rule applied to the
+	* batch messages (K1 §2, §5), and for the same reason.
+	*
+	* A batch end delivered before a crash is durable in the target's log but may
+	* never have been claimed (spliced and flushed, then the process died), so the
+	* pass's re-delivery answers `already-present` **without steering** — right,
+	* because a second copy would be a duplicate — and a resumed parent with the
+	* message sitting in its restored inbox would otherwise stay idle until its
+	* deadline. The check is the same live-inbox read, and the wake is the same
+	* runtime-voice notice: never a second copy of the message.
+	*/
+	wakeUnclaimedBatchResults(unread) {
+		for (const { sessionId, messageId } of unread) {
+			if (!this.sessionHoldsPendingMessage(sessionId, messageId)) continue;
+			this.notify(sessionId, `task-runtime: this session was brought back after a restart with the result of a child batch it has not read (message "${messageId}" is still pending in its inbox); read it and act on it — the framework will not send a second copy`);
 		}
 	}
 	/**
@@ -10569,8 +10712,24 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* the store's and the message is the wake that points at them, so a relay that
 	* is absent, refuses or has no live Session changes nothing about the batch —
 	* it is named once for the operator, and the next activation retries.
+	*
+	* The run the message addresses is re-read here, and it is the one guard every
+	* path shares — the live batch end, a delivery a barrier deferred, the recovery
+	* pass and a re-delivery a caller asked for. The message's whole content is "you
+	* are active again"; a run that settled while the delivery was on its way (a
+	* cancellation or a deadline that arrived first, a verdict somebody else made)
+	* must not be woken by it, so a run that is no longer `running` is answered
+	* `skipped` with zero side effects (K1 §2: 绝不唤活终态).
 	*/
 	async deliverBatchResultNow(message$8) {
+		let run;
+		try {
+			run = await this.ctx.task.runIn(message$8.storeId, message$8.runId);
+		} catch (error) {
+			this.warn(`store ${message$8.storeId}: whether run "${message$8.runId}" is still running could not be read before the end-of-batch message for "${message$8.batchId}" was delivered (${error instanceof Error ? error.message : String(error)}); nothing was delivered and the next activation retries`);
+			return "unavailable";
+		}
+		if (run.status !== "running") return "skipped";
 		const relay = this.ctx.agentRuntime;
 		if (typeof relay?.ensureAgentMessageDelivered !== "function") {
 			this.warn(`store ${message$8.storeId}: batch "${message$8.batchId}" ended with no message relay in this deployment; run "${message$8.runId}" was handed back active and its Session was not told`);
@@ -10603,7 +10762,9 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* terminal states and evidence, and the target's own fold decides whether the
 	* message is already there (`already-present`, nothing delivered twice). A
 	* batch no run of the store records is refused by name — a batch id names a
-	* pair, and one nothing records cannot be guessed at.
+	* pair, and one nothing records cannot be guessed at. A batch whose parent run
+	* already settled is `skipped`: the message's content is moot for a run that
+	* cannot act on it, and a terminal run is not woken.
 	*/
 	async redeliverBatchResult(storeId, batchId) {
 		const found = await this.batchRecordIn(storeId, batchId);
@@ -11062,4 +11223,4 @@ var TaskRuntime = class TaskRuntime extends Service {
 var src_default = TaskRuntime;
 
 //#endregion
-export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, PROPOSAL_REQUEST_KEY_PREFIX, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, PROPOSAL_REQUEST_KEY_PREFIX, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
