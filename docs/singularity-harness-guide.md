@@ -1,6 +1,6 @@
 # Singularity Harness 工作指南
 
-当前进度（2026-09-26）：R1、R2、R3、第 9 项 A2+A1 与**第 11 项 A4 已验收**。第 12 项 **S4-E 审核返工**：`evolution` 包迁移、旧账回滚和双侧新 Run 基本路径已接线，但成本、成功回归保持、实际执行身份冻结与快照隔离存在四组阻断，见[进度审核](history/2026-09-26-s4-e-progress-review.md)及 §5.17。当前只派[定向返工](execution-prompts/12-s4-e-review-rework.md)，通过前不派第 13 项。施工合同以[建设计划 D/E/F](2026-09-20-vrtc-code-change-plan.md)为准。
+当前进度（2026-09-26）：R1、R2、R3、第 9 项 A2+A1 与**第 11 项 A4 已验收**。第 12 项 **S4-E 返工已交付、待复审**：Q1 成本兑现、Q2 成功回归保持、Q3 执行身份冻结约束、Q4 快照隔离四组阻断已逐项关闭（另顺带修掉一处批次受理的截止结算竞态），证据见[返工记录](history/2026-09-26-s4-e-rework-record.md)及 §5.17；进度审核复审通过前不派第 13 项。施工合同以[建设计划 D/E/F](2026-09-20-vrtc-code-change-plan.md)为准。
 
 本文负责方向、职责与当前事实；[术语表](../CONTEXT.md)定义概念。[历史指南](history/2026-09-21-harness-guide-snapshot.md)保留旧编号和操作经验。深入实施参考：[Task 契约与可选人审](task-contract-construction-guide.md)、[有目标的探索/自进化架构](exploration-evolution-architecture.md)、[角色与 System Prompt 合同](agent-prompt-contracts.md)。[开源机制调研](2026-09-21-open-source-agent-patterns.md)记录一手来源。
 
@@ -414,17 +414,18 @@ A3 已交付非阻塞批次、执行相位、工作区写入归属、显式提�
 - **顺带修复**：replay 工作区层补 taskId，使 replay 内真实 `task_decompose` 及「replay 中真实 Task 父子问答」正例走通（前置 A3 缺陷，红绿证据见交付记录）。
 - **已知边界**：replay driver 自身的跨重启续跑属 A6/S2-R（replay 树内真实父子的问答恢复已覆盖）；全体 worker 的热恢复不泛化（S2-R）；阻塞确立时已放行的同 step 在途写仍按 A3 相位语义处理；A4-3 点2「入箱未 flush」以移除 artifact 尾部字节模拟（真实 append-through 后端无法自造该状态）；审批渠道在恢复中重发问后由人/渠道记录的决策若在 store ready 前到达仍被具名拒绝、提案保留 `pending_review`（人/渠道自己的写入口，非 runtime 唤醒，见收尾记录）。屏障内提前唤醒已由[收尾返工](history/2026-09-26-a4-barrier-wake-record.md)关闭并[验收](history/2026-09-26-a4-final-review.md)。屏障取消前的延迟动作会丢弃；ready 后已开始的投递与普通取消并发时，业务闸仍负责拒绝取消后的写入。
 
-### 5.17 S4-E：单文件 Skill 的真实双侧评估（2026-09-26 审核返工）
+### 5.17 S4-E：单文件 Skill 的真实双侧评估（2026-09-26 返工交付，待复审）
 
-[进度审核](history/2026-09-26-s4-e-progress-review.md)确认 Q1 成本超限仍晋升、Q2 历史成功样本本次同败仍晋升、Q3 冻结身份未完整约束实际执行、Q4 链接导致两侧共享可写输入。下列为接线事实，不代表 EVAL-1～EVAL-5 通过；按[返工 prompt](execution-prompts/12-s4-e-review-rework.md)关闭后再审核。
+[进度审核](history/2026-09-26-s4-e-progress-review.md)判出的 Q1 成本超限仍晋升、Q2 历史成功样本本次同败仍晋升、Q3 冻结身份未约束实际执行、Q4 链接破坏输入隔离，已由[返工](history/2026-09-26-s4-e-rework-record.md)逐项关闭（含一处顺带修掉的批次受理结算竞态）；下列为当前事实，EVAL-1～EVAL-5 重验结论待进度审核复审。
 
 `evolution` 包（`packages/singularity/evolution`）是候选、实验、决定、应用、回滚及 ledger 的**唯一行为所有者**；`agent-singularity` 只装配服务和保留九个 `evolution_*` 薄工具适配（schema/调用身份/人审/呈现）。迁移删除旧主体与同名转发（`agent-singularity/src/{evolution,replay,config-edit}.ts` 及 `src/index.ts` 旧再导出），`repoRoot` 改为显式注入。依赖方向保持 `agent-singularity → evolution → task-runtime/task`，task-runtime 零导入 evolution（仅注释提及）。
 
-- **双侧实验接线**：`evolution_replay` → `EvolutionService.runExperiment` → `replayTask(workspace)`，样本角色读取历史终态，两侧各创建新 Run。`experiment_started` 记录冻结块，`experiment_sample` 记录逐侧身份/结果；report v2 含 Run/Review/Evidence、判决版本、工作区摘要及 reported/unknown 成本。已完成样本有复用及重开测试。当前模型/预算字段没有完整约束实际执行，裁判版本未在运行前冻结，symlink 可破坏隔离；对应 Q1/Q3/Q4，不能仅凭记录形状声明可比性已成立。
-- **晋升闸接线**：报告字节重算、store 证据回读、内容和当前配置检查已实现，`fixed` 才放行，两次 DSH 人审及 apply 重检保留。但成本上限未数值比较，历史成功样本本次同败仍可能得到 fixed（Q1/Q2）。无评估器类型（capability/preset/task_definition/config-edit）新 PROMOTE 拒绝，历史可读、旧 applied 可回滚；v1 报告和无生产基线的新 Skill 不获新晋升资格。
-- **兼容**：ledger formatVersion 仍 1，旧 8 种 kind 校验逐字不变；新 kind 只追加，旧读者 fold 新账会失败（同库单读者，已记录于[持久化说明](persistence-changes/2026-09-26-s4-e-experiment-ledger.md)）；活体旧账 21 行的字节存档回归在 `evolution/tests/unit/ledger-roots.spec.ts`。
-- **测试锚**：`tests/integration/evolution-replay-experiment.spec.ts`（工具入口双侧+端到端晋升链+幂等+非 skill 旧路径）、`tests/integration/experiment-runner.spec.ts`、`replay-workspace.spec.ts`、`evolution/tests/unit/{skill-promotion-gate,experiment,experiment-orchestrator,ledger-roots}.spec.ts`。
-- **边界**：确定性 fixture 证明协议，不声称统计效果；分层指标/自动 Retro/多目标打分未建；真实模型效果实验需另有授权与预算（不属本票）；`replayLineage` 进程内 Map 与 replay driver 跨重启续跑维持 A6/S2-R 边界。
+- **双侧实验接线**：`evolution_replay` → `EvolutionService.runExperiment` → `replayTask(workspace, agentOptions, wallTimeMs)`，样本角色读取历史终态，两侧各创建新 Run。`experiment_started` 记录冻结块（样本/契约/受保护输入/快照 digest、结构化模型选择、裁判版本、provider 基线、预算、比较器版本），`experiment_sample` 逐侧记录 run/review/evidence、工作区与初始快照 digest、真实耗时与成本（reported/unknown，不填 0）。每侧 spawn 携带冻结的 agentOptions（子执行同绑），冻结后改部署默认不再影响在跑实验；快照经链接策略遍历（逃逸/循环/不可读具名拒绝，根内链接物化为每侧私有副本），摘要覆盖实际内容。
+- **预算兑现**：冻结预算的 maxTokens/wallTimeMs 是整个实验的上限——编排器逐侧启动前按 ledger 累计判定（耗尽不启动下一侧），实验截止经 per-run 墙钟在途取消；重启/重复调用不重置已发生消耗。闸比较实际数值与上限（token 四桶口径同 runtime `budgetBreaches`；时间为 `report.at − experiment_started.at`），仅 toolCalls 不证明 token 已知，`==` 上限放行，超支留记录并拒绝；未声明约束时 unknown 仅可观察不可推断。
+- **晋升闸接线**：报告字节重算、store 证据回读、内容/生产基线检查保留；新增：历史 verified 样本本次基线必须复现通过（否则 inconclusive，同败不再是 maintained）、裁判按冻结版本核对、模型按每侧实际 Session 请求头核对（非自报字符串）、工具/provider 绑定两侧唯一允许差异是候选 Skill 内容；仅 `fixed` 放行，两次 DSH 人审及 apply 重检保留。无评估器类型（capability/preset/task_definition/config-edit）新 PROMOTE 拒绝，历史可读、旧 applied 可回滚；v1 报告和无生产基线的新 Skill 不获新晋升资格。
+- **兼容**：ledger formatVersion 仍 1，旧 8 种 kind 校验逐字不变；实验族新 kind 只追加，旧读者 fold 新账会失败（同库单读者）；`experiment_sample.durationMs` 为可选新字段（声明 wallTimeMs 时闸强制要求）；比较器 `experiment-comparer@2`，@1 报告具名「cannot re-derive」拒绝；活体旧账 21 行的字节存档回归在 `evolution/tests/unit/ledger-roots.spec.ts`。详见[持久化说明](persistence-changes/2026-09-26-s4-e-experiment-ledger.md)。
+- **测试锚**：`tests/integration/evolution-replay-experiment.spec.ts`（工具入口双侧+端到端晋升链+幂等+非 skill 旧路径）、`experiment-runner.spec.ts`、`replay-workspace.spec.ts`、`replay-execution-binding.spec.ts`、`s4e-q3-freeze-binding.spec.ts`、`evolution/tests/unit/{skill-promotion-gate,experiment,experiment-orchestrator,ledger-roots}.spec.ts`。
+- **边界**：确定性 fixture 证明协议，不声称统计效果；分层指标/自动 Retro/多目标打分未建；真实模型效果实验需另有授权与预算（不属本票）；agentOptions/工作区的会话级传播是进程内机制，崩溃续跑不持有绑定（同 `replayLineage`，A6/S2-R）——闸的每侧实际请求核对是兜底；worker 自己 `task_submit_result` 与截止同刻落地由 store 先写者裁定（返工记录已注明）。
 
 ## 6. 文档维护
 

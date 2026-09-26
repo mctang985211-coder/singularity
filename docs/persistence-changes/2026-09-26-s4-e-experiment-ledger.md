@@ -14,7 +14,18 @@ is `reported` with the run's metrics or `unknown` with a reason — never 0).
 records written before this field stay loadable, required by the promotion
 gate, which refuses an experiment that records no task store.
 Ledger formatVersion remains 1; the eight older kinds and their validation
-are byte-identical, and new lines are append-only.
+are byte-identical, and new lines are append-only. The 2026-09-26 rework adds
+three compatible deltas: `experiment_sample` carries an optional
+`durationMs` (the run's real duration; optional at fold time, required by the
+promotion gate whenever the frozen budget declares `wallTimeMs`);
+`experiment_started.frozen.model` is the structured selection
+`{provider, model, reasoningEffort?, maxTokens?, label}` (a bare string is
+refused by record validation); and the frozen snapshot digest covers
+symlink-resolved bytes (link names/text are no longer digest inputs — trees
+without links are bit-identical to before). The comparer is
+`experiment-comparer@2`: reports written under `@1` are refused by name
+("cannot re-derive"), because a historical verified sample whose baseline
+fails this time is now `inconclusive`, never `maintained`.
 
 A skill proposal no longer takes a `replayed` record: its evaluation is the
 experiment, and the report is `sandbox/<proposalId>/exp-<experimentId>/experiment-report.json`

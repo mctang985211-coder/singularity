@@ -26,7 +26,7 @@
 | 9 | A2 + A1：Agent 状态上下文（一个交付组） | **已验收（2026-09-25）**：Q1–Q4、A2-1～A2-6 与公共检查通过 | 实现主代理 + 子代理 | 本文 D/E 节；[交付记录](history/2026-09-25-a2-a1-delivery-record.md)、[进度审核及复审](history/2026-09-25-a2-a1-progress-review.md)、[返工记录](history/2026-09-25-a2-a1-rework-record.md)、[Q3 收尾记录](history/2026-09-25-a2-a1-q3-closure-record.md) | 已按 D 节的单事件引用实现有界续读（上限 50000 字节、字节窗口与省略措辞复用 `@deepseek-ai/dsh-output-retention`）；进度审核通过；下一项为第 11 项 A4 |
 | 10 | A1 原独立排位 | 并入第 9 项，不单独派发 | — | 保留编号供历史引用 | 第 9 项整组验收后直接进入第 11 项 |
 | 11 | A4：父子澄清 | **已验收（2026-09-26）**：恢复期唤醒移到屏障 ready 后，A4-1～A4-5 闭合 | 实现主代理 | 本文 E/F.1、[返工交付](history/2026-09-26-a4-rework-record.md)、[唤醒收尾](history/2026-09-26-a4-barrier-wake-record.md)、[最终审核](history/2026-09-26-a4-final-review.md) | 下一项为第 12 项 S4-E |
-| 12 | S4-E：评估基础（S4 内的子票） | **返工（2026-09-26 审核）**：成本、成功回归保持、执行身份冻结、快照隔离四组阻断 | 实现主代理 + 子代理 | 本文 F.2、[原交付](history/2026-09-26-s4-e-delivery-record.md)、[进度审核](history/2026-09-26-s4-e-progress-review.md)、[返工 prompt](execution-prompts/12-s4-e-review-rework.md) | Q1～Q4 关闭，EVAL-1～EVAL-5 重验通过后才进入第 13 项；现有迁移及旧账回滚保留 |
+| 12 | S4-E：评估基础（S4 内的子票） | **待验收**（2026-09-26 返工交付）：Q1～Q4 已逐项关闭，EVAL-1～EVAL-5 重验证据已提交 | 实现主代理 + 子代理 | 本文 F.2、[原交付](history/2026-09-26-s4-e-delivery-record.md)、[进度审核](history/2026-09-26-s4-e-progress-review.md)、[返工记录](history/2026-09-26-s4-e-rework-record.md)、[持久化说明](persistence-changes/2026-09-26-s4-e-experiment-ledger.md) | 进度审核复审确认 Q1～Q4 关闭且 EVAL-1～EVAL-5 重验通过后进入第 13 项；现有迁移及旧账回滚保留 |
 | 13 | A5 + S2-E：诊断与缺口交接（一个交付组） | 待前置；合同已定、未实施 | 待填 | 本文 F.3、深入架构 §8 | agent-singularity/review 按源身份触发只读复盘并保存交接；runtime 结算不等 reviewer；缺口可见与诊断失败恢复完整 |
 | 14 | A6 + S2-R + S3：自主改进与恢复（一个交付组） | 待前置；合同已定、未实施 | 待填 | 本文 F.4 | evolution 组织有限候选路径，task-runtime 重检并恢复原图；L1/L2、能力/产物缺口、拒绝/重启/回滚均验收 |
 
@@ -82,7 +82,7 @@
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 9 项 A2+A1 和第 11 项 A4 已验收。第 12 项 S4-E 经[进度审核](history/2026-09-26-s4-e-progress-review.md)判**返工**，当前只派 Q1～Q4 的[定向返工](execution-prompts/12-s4-e-review-rework.md)，通过前不派第 13 项。历史补救、R1 和 R3 的逐轮证据见[执行与验收记录](history/2026-09-24-vrtc-execution-records.md)。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。第 9 项 A2+A1 和第 11 项 A4 已验收。第 12 项 S4-E 的 Q1～Q4 [返工](execution-prompts/12-s4-e-review-rework.md)已交付（[返工记录](history/2026-09-26-s4-e-rework-record.md)），**待进度审核复审**，通过前不派第 13 项。历史补救、R1 和 R3 的逐轮证据见[执行与验收记录](history/2026-09-24-vrtc-execution-records.md)。
 
 ## 当前施工合同（D/E/F）
 
