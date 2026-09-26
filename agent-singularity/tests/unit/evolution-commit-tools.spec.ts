@@ -8,7 +8,10 @@
  * the sandbox and production `SKILL.md` files, the atomic write and its
  * read-back, and the two tools the plugin registers. The rollback cases open
  * their intent through a *real* interrupted commit (`Config.commitProbe`, the
- * typed seam that stands for a process exiting between two durable writes); the
+ * typed seam that stops a commit at a durable stage with an ordinary in-process
+ * throw — a window-injection seam, not a process exit: the real exit is proven
+ * by the nested-child cases in `tests/integration/k2-evolution-commit.spec.ts`);
+ * the
  * apply cases forge the `commit_intent` line instead, because a fresh apply on a
  * decided proposal must walk the full experiment evidence gate, and what these
  * cases are about is the tool's own decision — an open intent is settled, not
@@ -253,16 +256,18 @@ describe('evolution_apply against an open commit intent', () => {
 
 describe('evolution_rollback against an open commit intent', () => {
   it('settles the intent a real interrupted rollback left open, and reports the redo', async () => {
-    // The real crash window: the rollback's own commit writes its intent, then the
-    // process is gone — production still holds the applied version.
+    // The interrupted commit: the rollback's own commit writes its intent, then the
+    // probe throws in-process at that window — production still holds the applied
+    // version, and the throw has no effect on any other commit (a process exit,
+    // which this is not, is proven by the nested-child integration cases).
     const crashed = await fixture({
       lines: [...decidedLines(), intentLine('apply', 'approval:decide'), completionLine('apply', 'approval:decide')],
       production: CANDIDATE,
       probe: seen => {
-        if (seen === 'intent-recorded') throw new Error('simulated process exit after intent-recorded')
+        if (seen === 'intent-recorded') throw new Error('in-process probe throw after intent-recorded — a throw, not a process exit')
       },
     })
-    await expect(crashed.svc.rollback(PROPOSAL_ID, 'root-1', 'approval:call-3')).rejects.toThrow(/simulated process exit/)
+    await expect(crashed.svc.rollback(PROPOSAL_ID, 'root-1', 'approval:call-3')).rejects.toThrow(/in-process probe throw after/)
     expect((await crashed.svc.get(PROPOSAL_ID)).openIntent?.intentId).toBe(`${PROPOSAL_ID}/rollback`)
     expect(await readFile(TARGET(crashed.skillRoot), 'utf8')).toBe(CANDIDATE)
 
@@ -285,10 +290,10 @@ describe('evolution_rollback against an open commit intent', () => {
       lines: [...decidedLines(), intentLine('apply', 'approval:decide'), completionLine('apply', 'approval:decide')],
       production: CANDIDATE,
       probe: seen => {
-        if (seen === 'write-renamed') throw new Error('simulated process exit after write-renamed')
+        if (seen === 'write-renamed') throw new Error('in-process probe throw after write-renamed — a throw, not a process exit')
       },
     })
-    await expect(crashed.svc.rollback(PROPOSAL_ID, 'root-1', 'approval:call-3')).rejects.toThrow(/simulated process exit/)
+    await expect(crashed.svc.rollback(PROPOSAL_ID, 'root-1', 'approval:call-3')).rejects.toThrow(/in-process probe throw after/)
     // The rename landed: production already holds the champion snapshot, and only
     // the completion is missing.
     expect(await readFile(TARGET(crashed.skillRoot), 'utf8')).toBe(BASELINE)
@@ -306,10 +311,10 @@ describe('evolution_rollback against an open commit intent', () => {
       lines: [...decidedLines(), intentLine('apply', 'approval:decide'), completionLine('apply', 'approval:decide')],
       production: CANDIDATE,
       probe: seen => {
-        if (seen === 'intent-recorded') throw new Error('simulated process exit after intent-recorded')
+        if (seen === 'intent-recorded') throw new Error('in-process probe throw after intent-recorded — a throw, not a process exit')
       },
     })
-    await expect(crashed.svc.rollback(PROPOSAL_ID, 'root-1', 'approval:call-3')).rejects.toThrow(/simulated process exit/)
+    await expect(crashed.svc.rollback(PROPOSAL_ID, 'root-1', 'approval:call-3')).rejects.toThrow(/in-process probe throw after/)
 
     // A later writer replaces production before the retry: the intent's own
     // baseline no longer stands there, and the recovery must not overwrite it.

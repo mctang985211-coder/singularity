@@ -13,13 +13,27 @@
  * where a case is about the tool layer.
  *
  * What is scripted, and why: the model loop (the stack's agent factory), and the
- * crash itself — {@link crashProbe} throws from the service's typed
- * `commitProbe` at one durable stage, which is exactly what a process exiting
- * there leaves behind. The two-sided experiment each candidate is promoted from
- * is the recorded-report fixture (`tests/support/promotion-experiment.ts`); the
- * real orchestration of that experiment is proven in
- * `tests/integration/evolution-replay-experiment.spec.ts` and
- * `tests/integration/experiment-runner.spec.ts`.
+ * two ways a commit is interrupted. The two-sided experiment each candidate is
+ * promoted from is the recorded-report fixture
+ * (`tests/support/promotion-experiment.ts`); the real orchestration of that
+ * experiment is proven in `tests/integration/evolution-replay-experiment.spec.ts`
+ * and `tests/integration/experiment-runner.spec.ts`.
+ *
+ * **The two interruptions are different things, and this spec keeps them apart.**
+ * {@link throwingProbe} is the *in-process* seam: it throws from the service's
+ * typed `commitProbe` at one durable stage. That is a catchable exception — it
+ * unwinds through this process's own `catch`/`finally` (so {@link writeFileAtomic}
+ * removes the staging file it had written) and the process that threw keeps
+ * running, with its service, its memory and its next call. The *real* exit is
+ * {@link spawnCommitChild}: a nested run of this very spec, started over the same
+ * directory, whose `commitProbe` calls `process.kill(process.pid, 'SIGKILL')` — no
+ * `catch`, no `finally`, no cleanup, no next call, and the parent observes the
+ * signal and a pid that is gone. Only the real exit can leave what a killed
+ * deployment leaves (at `write-staged`, the staging file the dead writer had
+ * fsynced beside the target), and only the real exit proves that a *second*
+ * process image is what settles it. The throw cases are kept anyway: they are the
+ * cheaper seam for the stages themselves, and the "a throw is not an exit" case
+ * states the difference in assertions.
  *
  * **The reopen.** A second {@link startRunStack} over the *same* workspace is a
  * second process image: its own `Context`, its own services, its own store, its
@@ -34,21 +48,32 @@
  * refusal an admission or a tool actually produced.
  */
 
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { rootTaskStoreId } from '../../task/src/index.ts'
 import type { CapabilityConfig, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
-import { EvolutionService } from '../../evolution/src/index.ts'
+import { EvolutionService, type CommitDirection } from '../../evolution/src/index.ts'
 import type { CommitStage } from '../../evolution/src/commit.ts'
 import { deploymentModelSelection } from '../../agent-singularity/src/index.ts'
 import { defineEvolutionListTool } from '../../agent-singularity/src/tools/evolution-list.ts'
 import { defineEvolutionRollbackTool } from '../../agent-singularity/src/tools/evolution-rollback.ts'
 import { promotionExperimentContext, recordPromotionExperiment } from '../support/promotion-experiment.ts'
-import { disposeRunStacks, sha256Of, skillText, startRunStack, writeGuidanceSkill, type RunStack } from '../support/run-stack.ts'
+import {
+  disposeRunStacks,
+  exportSessionLogs,
+  replaySessionLogs,
+  sha256Of,
+  skillText,
+  startRunStack,
+  writeGuidanceSkill,
+  type RunStack,
+} from '../support/run-stack.ts'
 
 /** The capability the interrupted commit's target is granted through. */
 const ROW = 'k2-commit-row'
@@ -68,6 +93,40 @@ const V1 = 'K2 VERSION ONE BODY'
 const V2 = 'K2 VERSION TWO BODY'
 /** The version a third party writes while a commit intent is open. */
 const THIRD_PARTY = 'K2 A VERSION NO COMMIT OF THIS LEDGER WROTE'
+
+/**
+ * The env a nested child is started with: the one durable window it dies at, the
+ * direction it commits in, and the workspace both processes share. A run that sets
+ * none of them is a parent — the child case below is skipped and nothing here kills
+ * anything; a run whose parent set all three *is* the child.
+ */
+const EXIT_WINDOW = process.env.K2_REAL_EXIT_WINDOW as CommitStage | undefined
+const EXIT_DIRECTION = (process.env.K2_REAL_EXIT_DIRECTION ?? 'apply') as CommitDirection
+const EXIT_WORKSPACE = process.env.K2_REAL_EXIT_WORKSPACE
+
+/** The file a child writes its own pid into, before its commit — the parent's proof of which process image died. */
+const EXIT_MARKER = 'k2-child-exit.json'
+
+/**
+ * The store {@link walkToDecided} records its experiment in — and the store `apply`
+ * re-reads that evidence from (S4-E §Q3).
+ */
+const PROMOTION_STORE = 's-k2-promotion-fixture'
+
+/**
+ * The file the boot's own session logs travel in when a nested child has to
+ * re-read them (see {@link handOverSessions}).
+ */
+const SESSION_HANDOVER = 'k2-child-sessions.json'
+
+/** The one case a nested run is filtered to; no other case of this spec runs there. */
+const CHILD_CASE = 'the child process dies by SIGKILL at its armed window'
+
+/** The repo root a nested run starts from — the same `pnpm vitest` the outer run is, without the wrapper. */
+const REPO_ROOT = fileURLToPath(new URL('../../../../', import.meta.url))
+
+/** This spec's own file — the one file a nested run collects, where the outer run's file is. */
+const SPEC_PATH = fileURLToPath(import.meta.url)
 
 /** The capability table both boots of a case admit against. */
 const TABLE: Readonly<Record<string, CapabilityConfig>> = {
@@ -116,11 +175,17 @@ function evolutionOf(h: RunStack, commitProbe?: (stage: CommitStage) => void): E
 }
 
 /**
- * The typed crash seam: `arm` names the one durable stage this process dies
- * after, and the probe throws there — the intent stays open and no later stage
- * of that commit runs.
+ * The in-process seam, and nothing more than that: `arm` names the one durable
+ * stage the probe throws at, so the intent stays open and no later stage of that
+ * commit runs. The throw is *not* a process exit: it unwinds through this
+ * process's own stack, `writeFileAtomic`'s `catch` removes the staging file it
+ * had written, and the instance that threw is still there to be used again — see
+ * the "a throw is not an exit" case below. The real exit is the other thing:
+ * {@link spawnCommitChild} kills a nested process image with SIGKILL and
+ * {@link forcedExit} asserts that signal, the dead pid and what only a real death
+ * can leave on disk.
  */
-function crashProbe(): { probe: (stage: CommitStage) => void; arm: (stage: CommitStage) => void; stages: CommitStage[] } {
+function throwingProbe(): { probe: (stage: CommitStage) => void; arm: (stage: CommitStage) => void; stages: CommitStage[] } {
   const stages: CommitStage[] = []
   let armed: CommitStage | undefined
   return {
@@ -130,9 +195,130 @@ function crashProbe(): { probe: (stage: CommitStage) => void; arm: (stage: Commi
       stages.push(stage)
       if (stage !== armed) return
       armed = undefined
-      throw new Error(`k2 fixture: simulated process exit after "${stage}"`)
+      throw new Error(`k2 fixture: the in-process probe threw after "${stage}" — a throw, not a process exit`)
     },
   }
+}
+
+/**
+ * The real forced exit: a nested run of this very spec, told by env which window to
+ * die at. Nothing in that run is scripted beyond the exit itself — it boots the same
+ * stack over the same directory, builds the same service and calls the same
+ * `apply`/`rollback` — and its probe answers the armed window with
+ * `process.kill(process.pid, 'SIGKILL')`, so the process image the commit runs in
+ * ends between two durable writes the way a killed deployment does: no `catch`, no
+ * `finally`, no cleanup of the stage it died in. `--pool=threads` is what makes the
+ * signal the parent observes the case body's own: the body then runs in the process
+ * `spawnSync` started, not in a worker beside it, and `-t` keeps every other case of
+ * this spec — this spawner included — out of the nested run. The timeout bounds a
+ * child that hangs, so the outer case fails loudly instead of stalling.
+ */
+function spawnCommitChild(window: CommitStage, direction: CommitDirection, workspace: string): SpawnSyncReturns<string> {
+  const args = [
+    join(REPO_ROOT, 'node_modules/vitest/vitest.mjs'),
+    'run',
+    '--project', 'integration',
+    '--pool=threads',
+    SPEC_PATH,
+    '-t', CHILD_CASE,
+  ]
+  return spawnSync(process.execPath, args, {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    timeout: 120_000,
+    env: {
+      ...process.env,
+      K2_REAL_EXIT_WINDOW: window,
+      K2_REAL_EXIT_DIRECTION: direction,
+      K2_REAL_EXIT_WORKSPACE: workspace,
+    },
+  })
+}
+
+/** What the parent proves about the child process image that performed the commit. */
+interface ForcedExit {
+  /** The window the child was told to die at, as the child itself recorded it. */
+  readonly window: CommitStage
+  /** The direction the child committed in. */
+  readonly direction: CommitDirection
+  /** The child's own pid — the process image the commit ran in, and the one that is gone. */
+  readonly pid: number
+}
+
+/**
+ * The forced exit itself, asserted before anything about the durable state: the
+ * nested run answered a *signal* (so there is no exit code and no normal unwind),
+ * the marker it wrote before its commit names the pid `spawnSync` started and not
+ * this process's, and that pid is dead. Nothing about {@link throwingProbe} looks
+ * like this — a throw is caught by this live process, its `finally` blocks run, and
+ * the instance that threw can be used again.
+ */
+async function forcedExit(directory: string, child: SpawnSyncReturns<string>): Promise<ForcedExit> {
+  const transcript = `nested run status ${String(child.status)}, signal ${String(child.signal)}, error ${String(child.error)}\n${child.stdout}\n${child.stderr}`
+  expect(child.signal, `the nested run exited instead of being killed by its own commit — ${transcript}`).toBe('SIGKILL')
+  expect(child.status, `a killed process has no exit code — ${transcript}`).toBeNull()
+  const marker = JSON.parse(await readFile(join(directory, EXIT_MARKER), 'utf8')) as ForcedExit
+  expect(marker.pid, 'the marker must name the process image that performed the commit, not the reader').not.toBe(process.pid)
+  expect(marker.pid).toBe(child.pid)
+  expect(pidProbe(marker.pid)).toBe('ESRCH')
+  return marker
+}
+
+/** What the null probe to a pid answered: `undefined` when it exists, `ESRCH` when it is gone. */
+function pidProbe(pid: number): string | undefined {
+  try {
+    process.kill(pid, 0)
+    return undefined
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code
+  }
+}
+
+/**
+ * Hand the child the session plane it cannot mint for itself. The promotion re-check
+ * `apply` performs re-reads the task store its experiment names *and* each side run's
+ * own session log (S4-E §Q3), and this fixture's sessions live in the boot's
+ * *memory* — the log the real `TaskService` and the real session plane append to —
+ * which a second process image cannot see. The logs travel as one file and are
+ * replayed verbatim by the child: exactly what a deployment's on-disk logs give its
+ * next process for nothing.
+ */
+async function handOverSessions(h: RunStack, directory: string): Promise<void> {
+  await writeFile(join(directory, SESSION_HANDOVER), await exportSessionLogs(h), 'utf8')
+}
+
+/**
+ * The settlement of one intent, after the host's own recovery entry ran: the
+ * completion line that carries the intent's own grant and target, no open target
+ * left, and a second reconciliation that is free — "重试可读", "无人工补账".
+ */
+async function settledBy(
+  h: RunStack,
+  reopened: EvolutionService,
+  args: {
+    readonly proposalId: string
+    readonly direction: CommitDirection
+    readonly target: string
+    readonly intent: Record<string, unknown>
+    readonly walked: readonly string[]
+  },
+): Promise<void> {
+  const kind = args.direction === 'apply' ? 'applied' : 'rolledback'
+  const settled = await ledgerLines(h)
+  expect(kindsOf(settled)).toEqual([...args.walked, 'commit_intent', kind])
+  expect(settled.filter(line => line.kind === kind)).toHaveLength(1)
+  expect(settled.at(-1)).toMatchObject({
+    kind,
+    proposalId: args.proposalId,
+    intentId: args.intent.intentId,
+    targets: [args.target],
+    approvalRef: args.intent.approvalRef,
+  })
+  expect(await reopened.openIntentTargets()).toEqual([])
+  expect((await reopened.get(args.proposalId)).status).toBe(kind)
+  const stable = await ledgerBytes(h)
+  expect(await reopened.reconcile()).toEqual([])
+  expect(await ledgerBytes(h)).toBe(stable)
 }
 
 /** The ledger's own lines, read from the file — never from a service's memory. */
@@ -172,7 +358,7 @@ async function walkToDecided(
   proposalId: string,
   name: string,
   content: string,
-  fixtureStore = 's-k2-promotion-fixture',
+  fixtureStore = PROMOTION_STORE,
 ): Promise<void> {
   await svc.propose({
     proposalId,
@@ -302,7 +488,7 @@ describe('K2-2: a commit interrupted between two durable writes is settled by th
     const target = productionPath(h1)
 
     // One proposal, walked to the state a commit starts from, over the real tool-less path.
-    const crash = crashProbe()
+    const crash = throwingProbe()
     const first = evolutionOf(h1, crash.probe)
     await walkToDecided(h1, first, P1, SKILL, skillText(V1, SKILL))
     const walked = kindsOf(await ledgerLines(h1))
@@ -311,7 +497,7 @@ describe('K2-2: a commit interrupted between two durable writes is settled by th
 
     // The process dies inside the commit, at the stage the probe was armed for.
     crash.arm(stage)
-    await expect(first.apply(P1, ROOT_A, 'approval:k2-apply')).rejects.toThrow(/simulated process exit after/)
+    await expect(first.apply(P1, ROOT_A, 'approval:k2-apply')).rejects.toThrow(/in-process probe threw after/)
     // The process died at the stage the probe was armed for: every earlier stage ran,
     // the armed one threw, and no later stage of that commit did.
     expect(crash.stages.at(-1)).toBe(stage)
@@ -393,7 +579,7 @@ describe('K2-2: a commit interrupted between two durable writes is settled by th
     await writeGuidanceSkill(join(h1.home, 'skills'), SKILL, V0)
     const target = productionPath(h1)
 
-    const crash = crashProbe()
+    const crash = throwingProbe()
     const first = evolutionOf(h1, crash.probe)
     await walkToDecided(h1, first, P1, SKILL, skillText(V1, SKILL))
     // A complete apply first: the state a rollback starts from, and the state it
@@ -404,7 +590,7 @@ describe('K2-2: a commit interrupted between two durable writes is settled by th
     expect(applied.slice(-2)).toEqual(['commit_intent', 'applied'])
 
     crash.arm(stage)
-    await expect(first.rollback(P1, ROOT_A, 'approval:k2-rollback')).rejects.toThrow(/simulated process exit after/)
+    await expect(first.rollback(P1, ROOT_A, 'approval:k2-rollback')).rejects.toThrow(/in-process probe threw after/)
     // The process died at the stage the probe was armed for: every earlier stage ran,
     // the armed one threw, and no later stage of that commit did.
     expect(crash.stages.at(-1)).toBe(stage)
@@ -467,6 +653,272 @@ describe('K2-2: a commit interrupted between two durable writes is settled by th
   }, 120_000)
 })
 
+/**
+ * The real exit, at every durable window of both directions. The subject is the
+ * commit mechanism `apply` and `rollback` share, so both run all three windows: a
+ * mirror that tested fewer would leave the rollback's own staging leftover and its
+ * "only the completion was missing" recovery unproven.
+ *
+ * Each case is a whole world. The parent sets it up (production `V0`, one proposal
+ * decided, and — for a rollback — a real apply already landed by its own ledger),
+ * spawns the nested child that performs the commit and dies inside it, reads what
+ * that death left, reopens the same directory, refuses admission, runs the host's
+ * recovery entry and checks the settlement. An exception from {@link throwingProbe}
+ * cannot stand in for any of it: the two are kept apart by the assertions themselves
+ * (the signal and the dead pid below; the "a throw is not an exit" case after them).
+ *
+ * The describe is skipped whenever the env names a window, i.e. inside the nested run
+ * itself: the case that kills a process and the case that spawns one are never the
+ * same process, so no child of a child can exist.
+ */
+describe.skipIf(EXIT_WINDOW !== undefined)('K2-2 (real exit): the process that commits is killed, and the host that reopens the directory settles it', () => {
+  it.each(CRASH_STAGES)('settles an apply a killed process left interrupted after %s, redoing or completing it', async window => {
+    const directory = await sharedDirectory()
+    const h1 = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
+    await writeGuidanceSkill(join(h1.home, 'skills'), SKILL, V0)
+    const target = productionPath(h1)
+    const first = evolutionOf(h1)
+    await walkToDecided(h1, first, P1, SKILL, skillText(V1, SKILL))
+    const walked = kindsOf(await ledgerLines(h1))
+    expect(walked.at(-1)).toBe('decided')
+    expect(await productionBytes(h1)).toBe(skillText(V0, SKILL))
+
+    // A process image of its own performs the commit and is killed inside it: the
+    // parent's own stack never ran this commit and never saw an exception from it.
+    // The promotion store the child re-reads travels with the workspace, as the
+    // session plane the dead child's own boot would have seen: the child replays it
+    // before `apply` re-checks that evidence (S4-E §Q3).
+    await handOverSessions(h1, directory)
+    const child = await forcedExit(directory, spawnCommitChild(window, 'apply', directory))
+    expect(child.window).toBe(window)
+    expect(child.direction).toBe('apply')
+
+    // What the death left on disk, read straight off the ledger file and the
+    // production bytes: the intent line of this very commit, and no completion.
+    const interrupted = await ledgerLines(h1)
+    expect(kindsOf(interrupted)).toEqual([...walked, 'commit_intent'])
+    const intent = interrupted.at(-1)!
+    expect(intent).toMatchObject({
+      kind: 'commit_intent',
+      intentId: `${P1}/apply`,
+      proposalId: P1,
+      direction: 'apply',
+      approvalRef: 'approval:k2-apply',
+      target,
+      baselineSha256: sha256Of(skillText(V0, SKILL)),
+      contentSha256: sha256Of(skillText(V1, SKILL)),
+      source: `sandbox/${P1}/skills/${SKILL}/SKILL.md`,
+    })
+    // Production is one of the two complete versions the intent names — never a
+    // third, half-written state — and which one is the window: the old version until
+    // the rename ran, the new one after it.
+    expect(await productionBytes(h1)).toBe(window === 'write-renamed' ? skillText(V1, SKILL) : skillText(V0, SKILL))
+    expect([sha256Of(skillText(V0, SKILL)), sha256Of(skillText(V1, SKILL))])
+      .toContain(sha256Of(await productionBytes(h1)))
+    // The staging file is a real death's signature: at `write-staged` the temp the
+    // killed writer had fsynced beside the target is still there, named for the pid
+    // that is gone, because no `catch` and no `finally` ever ran. At the other
+    // windows no temp was written at all. (An in-process throw at `write-staged`
+    // removes its own — see the case after these.)
+    const staging = await stagingFiles(h1)
+    if (window === 'write-staged') {
+      expect(staging).toHaveLength(1)
+      expect(staging[0]!.startsWith(`.SKILL.md.tmp-${child.pid}-`)).toBe(true)
+    } else expect(staging).toEqual([])
+
+    // The reopen: a second process image over the same directory, reading the ledger
+    // and the production bytes off disk and nothing else. The open intent is what it
+    // sees, and the gated capability is refused by name before any recovery ran (the
+    // deep version of that gate is the K2-3 case). The refusal is asked of a *second*
+    // root session, so the store the barrier below takes over is still unopened.
+    const h2 = await startRunStack({ workspace: directory, roots: [ROOT_A, ROOT_B], capabilities: { ...TABLE }, tools: true })
+    const reopened = evolutionOf(h2)
+    expect(await reopened.openIntentTargets()).toEqual([target])
+    await expect(h2.root(ROOT_B, rootContract('ship the killed release', [ROW]))).rejects.toThrow(/commit-intent-open/)
+    expect(await reopened.openIntentTargets()).toEqual([target])
+    expect(await productionBytes(h2)).toBe(window === 'write-renamed' ? skillText(V1, SKILL) : skillText(V0, SKILL))
+    expect(h2.spawns).toHaveLength(0)
+
+    // The host's own recovery entry: the barrier a restart runs before it takes a
+    // store over.
+    const before = window === 'write-renamed' ? await stat(target) : undefined
+    const adoptedStore = rootTaskStoreId(ROOT_A)
+    await h2.task.createStore(adoptedStore)
+    const adoption = await h2.runtime.adoptRoot(adoptedStore, ROOT_A)
+    expect(adoption.adopted).toBe(false)
+
+    if (window === 'write-renamed') {
+      // 仅补账: production already carried the committed content, so the host only
+      // recorded the completion — the file the dead process's own rename left is not
+      // touched: same inode, same mtime, same bytes.
+      const after = await stat(target)
+      expect({ ino: after.ino, mtimeMs: after.mtimeMs, size: after.size })
+        .toEqual({ ino: before!.ino, mtimeMs: before!.mtimeMs, size: before!.size })
+      expect(await productionBytes(h2)).toBe(skillText(V1, SKILL))
+    } else {
+      // 补做: production still held the version before the commit, so the host redid
+      // the write — production now holds the intent's own content identity, whole …
+      expect(await productionBytes(h2)).toBe(skillText(V1, SKILL))
+      expect(sha256Of(await productionBytes(h2))).toBe(intent.contentSha256)
+    }
+    // … and the staging file the real death left beside the target is gone: the
+    // settlement swept the stale leftover of the target it was installing over.
+    expect(await stagingFiles(h2)).toEqual([])
+
+    await settledBy(h2, reopened, { proposalId: P1, direction: 'apply', target, intent, walked })
+  }, 120_000)
+
+  it.each(CRASH_STAGES)('settles a rollback a killed process left interrupted after %s, redoing or completing it', async window => {
+    const directory = await sharedDirectory()
+    const h1 = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
+    await writeGuidanceSkill(join(h1.home, 'skills'), SKILL, V0)
+    const target = productionPath(h1)
+    const first = evolutionOf(h1)
+    // The world a rollback starts from: `V1` applied by this ledger, through the real
+    // commit path in this very process, nothing interrupted.
+    await walkToDecided(h1, first, P1, SKILL, skillText(V1, SKILL))
+    await first.apply(P1, ROOT_A, 'approval:k2-apply')
+    expect(await productionBytes(h1)).toBe(skillText(V1, SKILL))
+    const landed = kindsOf(await ledgerLines(h1))
+    expect(landed.slice(-2)).toEqual(['commit_intent', 'applied'])
+
+    // The promotion store travels with the workspace for both directions, as the
+    // session plane the dead child's own boot would have seen: the child replays it
+    // before it commits (`apply` is the direction whose re-check re-reads it).
+    await handOverSessions(h1, directory)
+    const child = await forcedExit(directory, spawnCommitChild(window, 'rollback', directory))
+    expect(child.window).toBe(window)
+    expect(child.direction).toBe('rollback')
+
+    const interrupted = await ledgerLines(h1)
+    expect(kindsOf(interrupted)).toEqual([...landed, 'commit_intent'])
+    const intent = interrupted.at(-1)!
+    expect(intent).toMatchObject({
+      kind: 'commit_intent',
+      intentId: `${P1}/rollback`,
+      proposalId: P1,
+      direction: 'rollback',
+      approvalRef: 'approval:k2-rollback',
+      target,
+      baselineSha256: sha256Of(skillText(V1, SKILL)),
+      contentSha256: sha256Of(skillText(V0, SKILL)),
+      source: `sandbox/${P1}/champion/skills/${SKILL}/SKILL.md`,
+    })
+    expect(await productionBytes(h1)).toBe(window === 'write-renamed' ? skillText(V0, SKILL) : skillText(V1, SKILL))
+    expect([sha256Of(skillText(V1, SKILL)), sha256Of(skillText(V0, SKILL))])
+      .toContain(sha256Of(await productionBytes(h1)))
+    const staging = await stagingFiles(h1)
+    if (window === 'write-staged') {
+      expect(staging).toHaveLength(1)
+      expect(staging[0]!.startsWith(`.SKILL.md.tmp-${child.pid}-`)).toBe(true)
+    } else expect(staging).toEqual([])
+
+    // The reopen and the gate, as in the apply case: the open intent is visible and
+    // the target it names is refused to admission before anything settled it — from a
+    // second root session, so the store the barrier takes over is still unopened.
+    const h2 = await startRunStack({ workspace: directory, roots: [ROOT_A, ROOT_B], capabilities: { ...TABLE }, tools: true })
+    const reopened = evolutionOf(h2)
+    expect(await reopened.openIntentTargets()).toEqual([target])
+    await expect(h2.root(ROOT_B, rootContract('ship the killed release', [ROW]))).rejects.toThrow(/commit-intent-open/)
+    expect(await reopened.openIntentTargets()).toEqual([target])
+    expect(await productionBytes(h2)).toBe(window === 'write-renamed' ? skillText(V0, SKILL) : skillText(V1, SKILL))
+
+    const before = window === 'write-renamed' ? await stat(target) : undefined
+    const adoptedStore = rootTaskStoreId(ROOT_A)
+    await h2.task.createStore(adoptedStore)
+    const adoption = await h2.runtime.adoptRoot(adoptedStore, ROOT_A)
+    expect(adoption.adopted).toBe(false)
+
+    if (window === 'write-renamed') {
+      // 仅补账: the rename had landed, so only the completion was missing and the
+      // restored file the dead process wrote stays exactly as it is.
+      const after = await stat(target)
+      expect({ ino: after.ino, mtimeMs: after.mtimeMs, size: after.size })
+        .toEqual({ ino: before!.ino, mtimeMs: before!.mtimeMs, size: before!.size })
+      expect(await productionBytes(h2)).toBe(skillText(V0, SKILL))
+    } else {
+      // 补做: production still held the applied version, so the rollback was redone
+      // and the baseline it names is what production holds now.
+      expect(await productionBytes(h2)).toBe(skillText(V0, SKILL))
+      expect(sha256Of(await productionBytes(h2))).toBe(intent.contentSha256)
+    }
+    expect(await stagingFiles(h2)).toEqual([])
+
+    await settledBy(h2, reopened, { proposalId: P1, direction: 'rollback', target, intent, walked: landed })
+  }, 120_000)
+
+  it('keeps an in-process throw apart from that real exit: its staging file is removed and the same instance settles the intent', async () => {
+    const directory = await sharedDirectory()
+    const h = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
+    await writeGuidanceSkill(join(h.home, 'skills'), SKILL, V0)
+    const crash = throwingProbe()
+    const svc = evolutionOf(h, crash.probe)
+    await walkToDecided(h, svc, P1, SKILL, skillText(V1, SKILL))
+
+    // The throw is caught by this very process, and that is the whole difference from
+    // the cases above: `writeFileAtomic`'s `catch` runs, so the staging file of a
+    // `write-staged` throw is already gone where the real death leaves it behind.
+    crash.arm('write-staged')
+    await expect(svc.apply(P1, ROOT_A, 'approval:k2-apply')).rejects.toThrow(/in-process probe threw after/)
+    expect(await stagingFiles(h)).toEqual([])
+    expect(await productionBytes(h)).toBe(skillText(V0, SKILL))
+
+    // …and the process that threw is still here with its instance: it settles its own
+    // open intent in this same process — production still held the version before the
+    // commit, so the write is redone and the completion recorded. A real exit has no
+    // such next step: nothing in the killed process can run again, and only the
+    // reopened image above can settle what it left.
+    const outcomes = await svc.reconcile()
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]).toMatchObject({
+      intentId: `${P1}/apply`,
+      proposalId: P1,
+      direction: 'apply',
+      target: productionPath(h),
+      result: 'completed-redone',
+    })
+    expect(await productionBytes(h)).toBe(skillText(V1, SKILL))
+    expect(kindsOf(await ledgerLines(h)).slice(-2)).toEqual(['commit_intent', 'applied'])
+    expect(await svc.openIntentTargets()).toEqual([])
+  }, 120_000)
+})
+
+/**
+ * The killed half, and the one case a nested run executes. It exists only under the
+ * env {@link spawnCommitChild} sets: without it the whole describe — and with it the
+ * only `process.kill` in this file — is skipped, so an ordinary suite can never kill
+ * a process, no matter what it runs.
+ */
+describe.skipIf(EXIT_WINDOW === undefined)('K2-2 (nested child): the process image that dies inside the commit', () => {
+  it(CHILD_CASE, async () => {
+    const window = EXIT_WINDOW!
+    const workspace = EXIT_WORKSPACE
+    if (workspace === undefined) throw new Error('the child case runs only under the env its parent sets: K2_REAL_EXIT_WORKSPACE is missing')
+
+    // A process image of its own over the parent's directory: it reads the decided
+    // proposal off the ledger, reads the production bytes, and its probe exits the
+    // process at the armed window by SIGKILL — no `catch`, no `finally`, no cleanup
+    // of the stage it died in, which is exactly what a killed deployment does.
+    const h = await startRunStack({ workspace })
+    // The session plane the parent handed over, replayed into this boot's memory
+    // before anything re-reads it: `apply` re-checks the promotion against the store
+    // and the side runs' own logs (S4-E §Q3).
+    await replaySessionLogs(h, await readFile(join(workspace, SESSION_HANDOVER), 'utf8'))
+    const svc = evolutionOf(h, stage => {
+      if (stage === window) process.kill(process.pid, 'SIGKILL')
+    })
+    // Written before that call: this pid is the parent's proof of which process image
+    // performed the commit. Everything below the call is dead code.
+    await writeFile(
+      join(workspace, EXIT_MARKER),
+      `${JSON.stringify({ window, direction: EXIT_DIRECTION, pid: process.pid }, null, 2)}\n`,
+      'utf8',
+    )
+    if (EXIT_DIRECTION === 'rollback') await svc.rollback(P1, ROOT_A, 'approval:k2-rollback')
+    else await svc.apply(P1, ROOT_A, 'approval:k2-apply')
+  }, 120_000)
+})
+
 describe('K2-3: an open commit intent blocks the real admission until a reconciliation settles it', () => {
   it('refuses the gated capability by name with no evolution tool registered, and admits it again after the host reconciled', async () => {
     const directory = await sharedDirectory()
@@ -477,11 +929,11 @@ describe('K2-3: an open commit intent blocks the real admission until a reconcil
 
     // A commit interrupted after the rename: production already carries the new
     // version and the ledger says its completion was never recorded.
-    const crash = crashProbe()
+    const crash = throwingProbe()
     const first = evolutionOf(h1, crash.probe)
     await walkToDecided(h1, first, P1, SKILL, skillText(V1, SKILL))
     crash.arm('write-renamed')
-    await expect(first.apply(P1, ROOT_A, 'approval:k2-apply')).rejects.toThrow(/simulated process exit after/)
+    await expect(first.apply(P1, ROOT_A, 'approval:k2-apply')).rejects.toThrow(/in-process probe threw after/)
     expect(await productionBytes(h1)).toBe(skillText(V1, SKILL))
 
     // The reopened deployment: a new process image, the ledger read from disk, and
@@ -566,11 +1018,11 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
     await writeGuidanceSkill(join(h1.home, 'skills'), SKILL, V0)
     const target = productionPath(h1)
 
-    const crash = crashProbe()
+    const crash = throwingProbe()
     const first = evolutionOf(h1, crash.probe)
     await walkToDecided(h1, first, P1, SKILL, skillText(V1, SKILL))
     crash.arm('intent-recorded')
-    await expect(first.apply(P1, ROOT_A, 'approval:k2-apply')).rejects.toThrow(/simulated process exit after/)
+    await expect(first.apply(P1, ROOT_A, 'approval:k2-apply')).rejects.toThrow(/in-process probe threw after/)
     expect(await productionBytes(h1)).toBe(skillText(V0, SKILL))
     const interrupted = await ledgerBytes(h1)
 

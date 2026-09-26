@@ -50,7 +50,14 @@
  * temp file, fsynced and renamed over it — never truncated); then, once the
  * rename has been read back and verified, the completion line
  * (`applied`/`rolledback`, carrying the same `intentId`) closes the intent at the
- * fold. A completion with no matching open intent is refused, so the intent
+ * fold. Each of those facts is durable before the next one depends on it: the
+ * source is confined to the ledger root, re-verified and fsynced (the file and
+ * the directory holding it) *before* the intent that names it is appended, and
+ * every ledger line — the intent, the completion and every lifecycle record —
+ * goes through the service's one durable append (write, `fsync` the file,
+ * `fsync` the directories that hold it), because a line that can be lost while
+ * the write it justified survives is exactly the ledger a recovery cannot
+ * reconcile. A completion with no matching open intent is refused, so the intent
  * cannot be skipped, and a crash between any two of those writes leaves exactly
  * one open intent for {@link EvolutionService.reconcile} — the explicit startup
  * or resume entry — to settle: the same operation is redone when production still
@@ -117,7 +124,8 @@
  * @module dsh-singularity-evolution
  */
 
-import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, writeFile } from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -144,7 +152,7 @@ import type { SkillContentIdentity } from './replay.ts'
 import { canonicalJson, modelSelectionOf } from './replay.ts'
 import type { ModelSelection } from './replay.ts'
 import type { CommitHost, CommitRequest, CommitStage, ReconcileOutcome } from './commit.ts'
-import { commitIntent, reconcileIntent, sha256Hex } from './commit.ts'
+import { commitIntent, reconcileIntent, sha256Hex, syncDirectory } from './commit.ts'
 import type {
   ExperimentKey,
   ExperimentResult,
@@ -653,9 +661,13 @@ export interface Config {
    * bytes are staged and fsynced beside the production target but before the
    * rename, and after the rename has been read back and verified. Throwing from
    * it aborts the commit exactly where it stands: the intent stays open and no
-   * later stage runs, which is how a process exit between two durable writes is
-   * simulated. A production deployment never sets it; there is no other way to
-   * observe or interrupt a commit.
+   * later stage runs. That throw is an ordinary in-process exception, **not** a
+   * process exit — `writeFileAtomic`'s own `catch` still removes the staging file
+   * and the process keeps running — so it is a window-injection seam, and the
+   * real exit (a killed process at one of those stages) is proven by the
+   * nested-child cases in `tests/integration/k2-evolution-commit.spec.ts`. A
+   * production deployment never sets it; there is no other way to observe or
+   * interrupt a commit.
    */
   commitProbe?: (stage: CommitStage) => void
 }
@@ -695,6 +707,27 @@ function resolveWithin(base: string, rel: string): string {
     throw new Error(`evolution: sandbox path "${rel}" escapes ${base}`)
   }
   return abs
+}
+
+/**
+ * The directories a durable ledger append must fsync, in the order it fsyncs
+ * them: the ledger root (the file's own entry), and — when the recursive `mkdir`
+ * created directories — every directory between the root and the outermost one
+ * it created, plus the parent that names that outermost directory. `mkdir` with
+ * `recursive: true` returns exactly that outermost created directory (or
+ * `undefined` when nothing was created), so walking up from the root always
+ * reaches it: without this chain a power cut can take a freshly created ledger
+ * directory, or a freshly created ledger file, while the write that referenced
+ * it survives.
+ */
+function ledgerDirectories(root: string, created: string | undefined): readonly string[] {
+  if (created === undefined) return [root]
+  const directories: string[] = []
+  for (let directory = root; ; directory = dirname(directory)) {
+    directories.push(directory)
+    if (directory === created) break
+  }
+  return [...directories, dirname(created)]
 }
 
 /**
@@ -876,7 +909,8 @@ async function unsupportedCandidateEntries(directory: string): Promise<string[]>
  * cannot guard on its own: the load (per line, naming the file and the line),
  * the {@link EvolutionService.append} funnel every lifecycle, commit and sample
  * write goes through, and {@link EvolutionService.recordExperimentStart}, which
- * appends beside that funnel. A record that declares anything else is refused
+ * folds the experiment family first and then appends through the same durable
+ * append that funnel uses. A record that declares anything else is refused
  * before it is folded or written, and the caller's step is the persistence
  * contract's: archive the old ledger and start a new one.
  *
@@ -951,9 +985,11 @@ function validateCommitIntent(record: CommitIntentRecord): void {
  * The Evolution plane ledger (plane separation: this store is independent of
  * the task store and refers to it by id only). Folding and appending share one
  * fold, so a corrupt or out-of-order log fails loudly instead of silently
- * drifting. Writes are serialized; the file is opened per append, so closing
- * the service is just draining the write queue. Sandbox materialization is the
- * only other write, confined to `<root>/sandbox/<proposalId>/`.
+ * drifting. Writes are serialized, and every line is appended durably — the file
+ * is opened for append, written, fsynced and closed per line, and the
+ * directories that hold it are fsynced too — so closing the service is just
+ * draining the write queue. Sandbox materialization is the only other write,
+ * confined to `<root>/sandbox/<proposalId>/`.
  */
 export class EvolutionService extends Service {
   /** Absolute ledger directory resolved at construction. */
@@ -2202,26 +2238,142 @@ export class EvolutionService extends Service {
   }
 
   /**
-   * Validate the staged fold first; memory commits only after the line is on
-   * disk. The format check runs before the fold, so a record declaring another
-   * version is refused before it can be folded — and, because nothing is
-   * written until the fold has accepted the staged ledger, before a byte
-   * changes on disk.
+   * Validate the staged fold first; memory commits only once the line's bytes
+   * have reached the file. The format check runs before the fold, so a record
+   * declaring another version is refused before it can be folded — and, because
+   * nothing is written until the fold has accepted the staged ledger, before a
+   * byte changes on disk. The line itself goes through
+   * {@link appendLedgerLine}, the ledger's one durable append.
    */
   private async append(record: EvolutionRecord): Promise<void> {
     await this.loaded
     const run = this.writes.then(async () => {
       assertLedgerFormatVersion(record, `the ${record.kind} record for proposal "${record.proposalId}"`)
       this.foldLedger([...this.records, record])
-      await mkdir(this.root, { recursive: true })
-      await appendFile(this.file, `${JSON.stringify(record)}\n`, 'utf8')
-      this.records = [...this.records, record]
+      await this.appendLedgerLine(record, () => {
+        this.records = [...this.records, record]
+      })
     })
     this.writes = run.then(
       () => undefined,
       () => undefined,
     )
     await run
+  }
+
+  /**
+   * The ledger's one durable write path: append one whole line and make it
+   * durable before returning — `open` for append, write the entire line, `fsync`
+   * the file, close, and then `fsync` the ledger root together with every
+   * directory the recursive `mkdir` just created (plus the parent that names the
+   * outermost of them), so neither a freshly created ledger file nor a freshly
+   * created ledger directory can be lost by a power cut while the write that
+   * referenced it survives. {@link append} and {@link recordExperimentStart} both
+   * come through here, so nothing writes the ledger beside this method — the
+   * funnel every lifecycle, commit and sample line takes is also the funnel that
+   * makes it durable.
+   *
+   * The line goes out through `writeFile`, not a single `write`: `writeFile`
+   * writes the whole payload in as many calls as that takes (the behaviour
+   * `appendFile` had), so a filesystem that accepts only part of the payload in
+   * one call cannot leave a truncated JSON line behind — a fragment would be
+   * fsynced as if it were the record, and the ledger would no longer load.
+   *
+   * `adopt` runs exactly once, immediately after the whole line reaches the
+   * file: from that moment the caller's in-memory ledger holds the record the
+   * file holds, so a later call in this process sees the line it is really
+   * looking at instead of appending a second one.
+   *
+   * What a failure leaves behind, step by step:
+   *
+   * - the directory could not be created or the file could not be opened —
+   *   nothing was written: the file is byte-identical to what it held and memory
+   *   is untouched;
+   * - the write failed — a mid-write failure (a full disk, an I/O error) can have
+   *   put part of the line in the file before it reported, so the file is
+   *   truncated back to the size it had before this call: a fragment is never
+   *   left for the next load to refuse the whole ledger over, and memory stays
+   *   untouched. If even that truncate fails, the error says so and says the
+   *   ledger may hold a partial line — it never pretends the file is clean;
+   * - the file's or a directory's fsync failed — the *whole* line is in the file
+   *   (and adopted in memory) but is not durable: a named error naming the ledger
+   *   path and the failed step, because the caller must not continue as if the
+   *   write the line would justify had happened.
+   */
+  private async appendLedgerLine(record: EvolutionRecord, adopt: () => void): Promise<void> {
+    const line = `${JSON.stringify(record)}\n`
+    const step = `the ${record.kind} record for proposal "${record.proposalId}"`
+    const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+    let created: string | undefined
+    try {
+      created = await mkdir(this.root, { recursive: true })
+    } catch (error) {
+      throw new Error(
+        `evolution: the ledger directory ${this.root} could not be created (${reason(error)}) — ${step} is not written and not ` +
+        'durable, so nothing may depend on it',
+      )
+    }
+    let handle: FileHandle | undefined
+    try {
+      try {
+        handle = await open(this.file, 'a')
+      } catch (error) {
+        throw new Error(
+          `evolution: the ledger file ${this.file} could not be opened for append (${reason(error)}) — ${step} is not written: the line ` +
+          'is not durable and nothing may depend on it',
+        )
+      }
+      // The length this append starts from: a write that fails part-way is rolled
+      // back to it, so a fragment never survives into the ledger.
+      let length: number
+      try {
+        length = (await handle.stat()).size
+      } catch (error) {
+        throw new Error(
+          `evolution: the ledger file ${this.file} could not be measured before appending ${step} (${reason(error)}) — the line is not ` +
+          'written and nothing may depend on it',
+        )
+      }
+      try {
+        await handle.writeFile(line, 'utf8')
+        adopt()
+      } catch (error) {
+        try {
+          await handle.truncate(length)
+        } catch (restore) {
+          throw new Error(
+            `evolution: ${step} could not be written to the ledger ${this.file} (${reason(error)}) and the file could not be truncated ` +
+            `back to the ${length} bytes it held before this call (${reason(restore)}) — the ledger may hold a partial line no record ` +
+            'explains; the line is not durable, so nothing may depend on it and no write it would have justified may proceed',
+          )
+        }
+        throw new Error(
+          `evolution: ${step} could not be written to the ledger ${this.file} (${reason(error)}) — the ledger is back to the ${length} ` +
+          'bytes it held before this call, so no fragment was left behind; the line is not durable and nothing may depend on it, so no ' +
+          'write it would have justified may proceed',
+        )
+      }
+      try {
+        await handle.sync()
+      } catch (error) {
+        throw new Error(
+          `evolution: ${step} was written to the ledger ${this.file} but could not be fsynced (${reason(error)}) — the line is not ` +
+          'durable, so nothing may depend on it and no write it would have justified may proceed',
+        )
+      }
+    } finally {
+      await handle?.close().catch(() => {})
+    }
+    for (const directory of ledgerDirectories(this.root, created)) {
+      try {
+        await syncDirectory(directory)
+      } catch (error) {
+        throw new Error(
+          `evolution: the ledger directory ${directory} could not be fsynced after appending ${step} to ${this.file} ` +
+          `(${reason(error)}) — whether the line survives a power cut is unknown, so it must not be treated as durable`,
+        )
+      }
+    }
   }
 
   /* ------------------------------------------------------------------------ *
@@ -2294,9 +2446,11 @@ export class EvolutionService extends Service {
       }
       const staged = [...this.records, record]
       foldExperiments(staged, this.fold(staged))
-      await mkdir(this.root, { recursive: true })
-      await appendFile(this.file, `${JSON.stringify(record)}\n`, 'utf8')
-      this.records = staged
+      // The same durable append the lifecycle funnel uses: this is the ledger's
+      // second (and only other) write door, and it writes through the one path.
+      await this.appendLedgerLine(record, () => {
+        this.records = staged
+      })
     })
     this.writes = run.then(
       () => undefined,

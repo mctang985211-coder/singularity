@@ -2303,7 +2303,7 @@ describe('skill candidate content binding (P2)', () => {
     await expect(svc.readSkillCandidate('s1')).rejects.toThrow('is a symbolic link')
   })
 
-  it('P2-D: apply writes exactly the verified bytes when the source is replaced mid-read', async () => {
+  it('P2-D: a commit stops by name when the source is replaced after the write\'s own read', async () => {
     const { svc, root, skillRoot } = await serviceWithProduction()
     await mkdir(join(skillRoot, 'verify'), { recursive: true })
     await writeFile(join(skillRoot, 'verify', 'SKILL.md'), '# old verify skill\n')
@@ -2322,21 +2322,30 @@ describe('skill candidate content binding (P2)', () => {
       // apply reads the candidate three times — checkPromotion's identity read,
       // the promotion's provider check (S1-C item 3), and the write's own read.
       // The source is replaced only after that last read completes,
-      // deterministically, with no sleep-based race.
+      // deterministically, with no sleep-based race; the commit's own re-read of
+      // the source it is about to name in the intent is a fourth read, and that
+      // is the one the replacement is caught by.
       if (reads === 3) {
         fired += 1
         await writeFile(candidate, replacement)
       }
     }
+    let message: string
     try {
-      await svc.apply('s1', 'root-1', 'approval:call-1')
+      message = await refusalOf(svc.apply('s1', 'root-1', 'approval:call-1'))
     } finally {
       candidateReadHooks.onCandidateRead = undefined
     }
     expect(fired).toBe(1)
-    // production carries the verified bytes; the replacement never reached it
-    expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'))).toEqual(Buffer.from(SKILL_CANDIDATE, 'utf8'))
+    // The source an intent names must be re-verifiable *before* the intent is
+    // recorded: a source that changed after the caller's own verified read stops
+    // the commit by name, so nothing is written and no line is recorded.
+    expect(message).toMatch(/does not hold the bytes its commit recorded/)
+    expect(message).toMatch(/no line is recorded/)
+    expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe('# old verify skill\n')
     expect(await readFile(candidate, 'utf8')).toBe(replacement)
+    expect(await ledgerKinds(root)).not.toContain('commit_intent')
+    expect((await svc.get('s1')).openIntent).toBeUndefined()
     // and the replaced source can no longer verify for any later stage
     const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root, skillRoot })
     await expect(reopened.checkPromotion('s1')).rejects.toThrow('no longer matches the content identity')
@@ -3363,10 +3372,14 @@ describe('skill candidate provider pre-check (S1-C item 3)', () => {
 /* ------------------------------------------------------------------ */
 /* K2: one commit per production write — the intent is persisted first, */
 /* the target is replaced atomically, and the completion closes the      */
-/* intent. A crash between any two of those leaves exactly one open      */
-/* intent, and `reconcile` settles it from what production actually      */
+/* intent. An interruption between any two of those leaves exactly one   */
+/* open intent, and `reconcile` settles it from what production actually */
 /* holds. These cases run over real files, a real ledger and a real      */
-/* service; the only injected seam is Config.commitProbe.               */
+/* service; the only injected seam is Config.commitProbe — an in-process */
+/* throw *at* a durable stage, not a process exit. The durable-operation */
+/* seam (which fs call is issued when, and what a failing one does) is   */
+/* `commit-durability.spec.ts`; the process-exit evidence is the         */
+/* real-SIGKILL cases of `tests/integration/k2-evolution-commit.spec.ts`. */
 /* ------------------------------------------------------------------ */
 
 /** The production file every commit fixture writes. */
@@ -3376,24 +3389,30 @@ const CHAMPION_SOURCE = 'sandbox/s1/champion/skills/verify/SKILL.md'
 
 /**
  * The service config that stops one commit at `stage` — the typed test seam, and
- * only that: the throw stands for the process exiting between two durable
- * writes, so no later stage of the commit runs.
+ * only that: the probe throws an ordinary in-process error, which aborts the
+ * commit exactly where it stands (no later stage of the commit runs). It is a
+ * window-injection seam, **not** a process exit, and it proves nothing about
+ * process exits: `writeFileAtomic`'s own `catch` still runs here and removes the
+ * staging file it had written. The process-exit evidence is the real-SIGKILL
+ * cases of `tests/integration/k2-evolution-commit.spec.ts`; what a durable
+ * operation does when it fails is `commit-durability.spec.ts`.
  */
 function crashAt(stage: CommitStage): Pick<Config, 'commitProbe'> {
   return {
     commitProbe: seen => {
-      if (seen === stage) throw new Error(`simulated process exit after ${seen}`)
+      if (seen === stage) throw new Error(`in-process probe throw after ${seen} — a throw, not a process exit`)
     },
   }
 }
 
-/** The commit stages a crash window is opened at, and the state production is left in for each. */
+/** The commit stages an interrupt window is opened at, and the state production is left in for each. */
 const INTERRUPTED_STAGES = ['intent-recorded', 'write-staged', 'write-renamed'] as const
 
 /**
  * A production fixture walked to decided(PROMOTE): production holds the
  * champion, the sandbox holds the candidate, its champion snapshot and a
- * completed experiment. `probe` opens a crash window on that service.
+ * completed experiment. `probe` opens an interrupt window on that service — an
+ * in-process throw at one stage, not a process exit (see {@link crashAt}).
  */
 async function decidedSkillFixture(candidate: string = SKILL_CANDIDATE, probe?: CommitStage) {
   const dir = await mkdtemp(join(tmpdir(), 'evolution-commit-'))
@@ -3410,7 +3429,7 @@ async function decidedSkillFixture(candidate: string = SKILL_CANDIDATE, probe?: 
   return { svc, dir, root, skillRoot }
 }
 
-/** A second service over the same ledger, store rows and roots, with a crash window of its own. */
+/** A second service over the same ledger, store rows and roots, with an interrupt window of its own. */
 function reopenWithProbe(svc: EvolutionService, roots: { root: string; skillRoot: string }, probe?: CommitStage): EvolutionService {
   return reopenLike(svc, {
     modelSelection: () => FIXTURE_SELECTION,
@@ -3701,8 +3720,8 @@ describe('K2: the commit — intent, atomic write, completion', () => {
   })
 })
 
-describe('K2: recovery — a crash between two durable writes leaves one open intent', () => {
-  /** Walk one direction to the state a commit starts from, crash it at `stage`, and reopen. */
+describe('K2: recovery — an interruption between two durable writes leaves one open intent', () => {
+  /** Walk one direction to the state a commit starts from, throw inside it at `stage`, and reopen. */
   async function interrupted(direction: 'apply' | 'rollback', stage: CommitStage) {
     const fixture = await decidedSkillFixture()
     if (direction === 'rollback') await fixture.svc.apply('s1', 'root-1', 'approval:call-1')
@@ -3711,7 +3730,7 @@ describe('K2: recovery — a crash between two durable writes leaves one open in
     const message = await refusalOf(
       direction === 'apply' ? crashing.apply('s1', 'root-1', approval) : crashing.rollback('s1', 'root-1', approval),
     )
-    expect(message).toContain(`simulated process exit after ${stage}`)
+    expect(message).toContain(`in-process probe throw after ${stage}`)
     const reopened = reopenWithProbe(fixture.svc, fixture)
     return { ...fixture, reopened, approval }
   }

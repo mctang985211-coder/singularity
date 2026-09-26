@@ -739,3 +739,39 @@ export async function writeWithin(directory: string, relative: string, contents:
   await writeFile(file, contents, 'utf8')
   return file
 }
+
+/**
+ * Every session log this boot holds, serialized — each header and its events, in
+ * order, verbatim. This fixture's persistence is memory, so a second boot over the
+ * same workspace starts empty; a spec that hands a session — the task store a
+ * promotion re-reads included — to a *second process* (the nested run a real process
+ * exit needs, in the K2 commit spec) carries the logs across with this and
+ * {@link replaySessionLogs}. A deployment gets the same thing for free: its session
+ * logs are the files its next process opens. Nothing about a session is transformed
+ * on the way.
+ */
+export async function exportSessionLogs(h: RunStack): Promise<string> {
+  const persistence = sessionPersistenceOf(h)
+  const sessions: { header: unknown; events: readonly unknown[] }[] = []
+  for (const entry of await persistence.list()) {
+    const { events } = await (await persistence.open(String(entry.header.id))).read()
+    sessions.push({ header: entry.header, events })
+  }
+  return `${JSON.stringify({ sessions }, null, 2)}\n`
+}
+
+/** Replay every log {@link exportSessionLogs} carried, so this boot reads the same sessions the writer's did. */
+export async function replaySessionLogs(h: RunStack, carried: string): Promise<void> {
+  const handed = JSON.parse(carried) as { sessions: readonly { header: unknown; events: readonly unknown[] }[] }
+  const persistence = sessionPersistenceOf(h)
+  for (const session of handed.sessions) await (await persistence.create(session.header)).append(session.events)
+}
+
+/** The fixture's own persistence handle, as the deployment's providers mount it (`ctx.provide('sessionPersistence', ...)`). */
+function sessionPersistenceOf(h: RunStack): {
+  list(): Promise<{ header: { id: unknown } }[]>
+  create(header: unknown): Promise<{ append(events: readonly unknown[]): Promise<void> }>
+  open(id: string): Promise<{ read(): Promise<{ events: readonly unknown[] }> }>
+} {
+  return (h.ctx as unknown as { get(name: string): never }).get('sessionPersistence')
+}

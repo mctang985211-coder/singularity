@@ -497,8 +497,12 @@ declare function assertExperimentReport(report: unknown): asserts report is Expe
 //#region src/commit.d.ts
 /**
  * The durable stages of one commit. A deployment only ever observes them through
- * {@link CommitHost.probe}, the typed test seam that simulates a process exiting
- * at that point.
+ * {@link CommitHost.probe}, the typed test seam: what it does at a stage is the
+ * caller's business, and a test that answers with an ordinary throw interrupts
+ * the commit there without being a process exit (a throw is caught, its `catch`
+ * and `finally` run, and the process lives on). A *real* exit at one of these
+ * stages is a killed process, which no throw can stand in for — see the real-exit
+ * cases in `tests/integration/k2-evolution-commit.spec.ts`.
  */
 type CommitStage = 'intent-recorded' | 'write-staged' | 'write-renamed';
 /** What one reconciliation of an open intent settled to. */
@@ -1274,9 +1278,13 @@ interface Config {
    * bytes are staged and fsynced beside the production target but before the
    * rename, and after the rename has been read back and verified. Throwing from
    * it aborts the commit exactly where it stands: the intent stays open and no
-   * later stage runs, which is how a process exit between two durable writes is
-   * simulated. A production deployment never sets it; there is no other way to
-   * observe or interrupt a commit.
+   * later stage runs. That throw is an ordinary in-process exception, **not** a
+   * process exit — `writeFileAtomic`'s own `catch` still removes the staging file
+   * and the process keeps running — so it is a window-injection seam, and the
+   * real exit (a killed process at one of those stages) is proven by the
+   * nested-child cases in `tests/integration/k2-evolution-commit.spec.ts`. A
+   * production deployment never sets it; there is no other way to observe or
+   * interrupt a commit.
    */
   commitProbe?: (stage: CommitStage) => void;
 }
@@ -1293,9 +1301,11 @@ declare function applyTargets(proposal: EvolutionProposal, roots: {
  * The Evolution plane ledger (plane separation: this store is independent of
  * the task store and refers to it by id only). Folding and appending share one
  * fold, so a corrupt or out-of-order log fails loudly instead of silently
- * drifting. Writes are serialized; the file is opened per append, so closing
- * the service is just draining the write queue. Sandbox materialization is the
- * only other write, confined to `<root>/sandbox/<proposalId>/`.
+ * drifting. Writes are serialized, and every line is appended durably — the file
+ * is opened for append, written, fsynced and closed per line, and the
+ * directories that hold it are fsynced too — so closing the service is just
+ * draining the write queue. Sandbox materialization is the only other write,
+ * confined to `<root>/sandbox/<proposalId>/`.
  */
 declare class EvolutionService extends Service {
   /** Absolute ledger directory resolved at construction. */
@@ -1697,13 +1707,54 @@ declare class EvolutionService extends Service {
    */
   private foldLedger;
   /**
-   * Validate the staged fold first; memory commits only after the line is on
-   * disk. The format check runs before the fold, so a record declaring another
-   * version is refused before it can be folded — and, because nothing is
-   * written until the fold has accepted the staged ledger, before a byte
-   * changes on disk.
+   * Validate the staged fold first; memory commits only once the line's bytes
+   * have reached the file. The format check runs before the fold, so a record
+   * declaring another version is refused before it can be folded — and, because
+   * nothing is written until the fold has accepted the staged ledger, before a
+   * byte changes on disk. The line itself goes through
+   * {@link appendLedgerLine}, the ledger's one durable append.
    */
   private append;
+  /**
+   * The ledger's one durable write path: append one whole line and make it
+   * durable before returning — `open` for append, write the entire line, `fsync`
+   * the file, close, and then `fsync` the ledger root together with every
+   * directory the recursive `mkdir` just created (plus the parent that names the
+   * outermost of them), so neither a freshly created ledger file nor a freshly
+   * created ledger directory can be lost by a power cut while the write that
+   * referenced it survives. {@link append} and {@link recordExperimentStart} both
+   * come through here, so nothing writes the ledger beside this method — the
+   * funnel every lifecycle, commit and sample line takes is also the funnel that
+   * makes it durable.
+   *
+   * The line goes out through `writeFile`, not a single `write`: `writeFile`
+   * writes the whole payload in as many calls as that takes (the behaviour
+   * `appendFile` had), so a filesystem that accepts only part of the payload in
+   * one call cannot leave a truncated JSON line behind — a fragment would be
+   * fsynced as if it were the record, and the ledger would no longer load.
+   *
+   * `adopt` runs exactly once, immediately after the whole line reaches the
+   * file: from that moment the caller's in-memory ledger holds the record the
+   * file holds, so a later call in this process sees the line it is really
+   * looking at instead of appending a second one.
+   *
+   * What a failure leaves behind, step by step:
+   *
+   * - the directory could not be created or the file could not be opened —
+   *   nothing was written: the file is byte-identical to what it held and memory
+   *   is untouched;
+   * - the write failed — a mid-write failure (a full disk, an I/O error) can have
+   *   put part of the line in the file before it reported, so the file is
+   *   truncated back to the size it had before this call: a fragment is never
+   *   left for the next load to refuse the whole ledger over, and memory stays
+   *   untouched. If even that truncate fails, the error says so and says the
+   *   ledger may hold a partial line — it never pretends the file is clean;
+   * - the file's or a directory's fsync failed — the *whole* line is in the file
+   *   (and adopted in memory) but is not durable: a named error naming the ledger
+   *   path and the failed step, because the caller must not continue as if the
+   *   write the line would justify had happened.
+   */
+  private appendLedgerLine;
   /** The folded views of every experiment, one per id — the ledger's experiment family, validated. */
   private experimentViews;
   /**
