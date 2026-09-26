@@ -2000,26 +2000,28 @@ interface BatchContext {
  * `failed` — the batch is over, so a still-running child is a defect of the
  * settlement, never evidence of work in progress.
  *
- * `memberTaskIds` names the batch whose outcomes are asked for, when the caller
- * knows it. A run admits more than one batch (K1), and the task's children are
- * *every* batch's members, so a driver that read them would report a second
- * batch as its first batch's children. Absent, the task's own children are the
- * answer — the single-batch reading this entry always had.
+ * `memberTaskIds` names the batch whose outcomes are asked for, and is the only
+ * thing that decides whose outcomes are read. A run admits more than one batch
+ * (K1) and the task's children are *every* batch's, so there is no default here:
+ * a caller either holds the batch's recorded members or it cannot ask this
+ * question.
  */
-declare function deriveChildOutcomes(task: TaskService, storeId: string, parentTaskId: TaskId, memberTaskIds?: readonly TaskId[]): Promise<ChildOutcome[]>;
+declare function deriveChildOutcomes(task: TaskService, storeId: string, parentTaskId: TaskId, memberTaskIds: readonly TaskId[]): Promise<ChildOutcome[]>;
 /**
- * Block every child of one parent task that never started, naming one reason —
- * the runtime-level entry for the paths that settle a batch without a driver
+ * Block every child of one batch that never started, naming one reason — the
+ * runtime-level entry for the paths that settle a batch without a driver
  * (`failBatch`, and the fallback for a driver that rejected before it settled
  * anything).
  *
- * It is {@link blockUnstarted} over the batch the store itself implies
- * (`batchItems`) rather than over a `BatchContext` the caller no longer holds,
- * so the *rule* — a child with no run and no terminal state is blocked, one that
- * already ran is left to its own settlement — stays in one place and the
- * runtime's failure seams share it with the driver.
+ * It is {@link blockUnstarted} over the members the caller read from the batch's
+ * own record rather than over a `BatchContext` the caller no longer holds, so the
+ * *rule* — a child with no run and no terminal state is blocked, one that already
+ * ran is left to its own settlement — stays in one place and the runtime's failure
+ * seams share it with the driver. The batch's members are passed in, never
+ * re-derived from the parent task: a parent task's children are every batch it
+ * ever admitted, and this call ends one batch.
  */
-declare function blockUnstartedChildren(env: RuntimeSettlementEnv, storeId: string, parentTaskId: TaskId, reason: string): Promise<ChildOutcome[]>;
+declare function blockUnstartedChildren(env: RuntimeSettlementEnv, storeId: string, memberTaskIds: readonly TaskId[], reason: string): Promise<ChildOutcome[]>;
 /**
  * The `m-` identity one ended batch's result message carries: derived from the
  * batch id, never minted — the same derivation `questionMessageIdOf` makes for a
@@ -2087,9 +2089,13 @@ declare function owedBatchResults(snapshot: TaskSnapshot): OwedBatchResult[];
  * own `task_decompose` registers its own driver, and this loop only waits for
  * the child's run to settle.
  *
- * Nothing here throws at its caller: a driver failure is a parent failed with
- * the cause named, recorded and notified (§3.1's "no fire-and-forget"), and the
- * promise the runtime registered always resolves.
+ * A driver failure is a parent failed with the cause named, recorded and notified
+ * (§3.1's "no fire-and-forget") — but never a batch reported as ended on facts the
+ * store did not give: when the batch's members cannot be read (the parent run is
+ * unreadable, or its record does not hold this batch), this promise rejects by
+ * name instead of resolving with an outcome list derived from another batch's
+ * members or from the task's whole child history. The runtime's own belt settles
+ * the batch such a rejection names (`registerDriver` → `failBatchFromRuntime`).
  */
 declare function driveBatch(env: OrchestrateEnv, batch: BatchContext): Promise<ChildOutcome[]>;
 /**
@@ -4886,7 +4892,8 @@ declare class TaskRuntime extends Service {
   /**
    * The batch one id names, as the store itself records it: the run whose
    * **accumulated batches** hold it, together with the parent task that run works
-   * on. `undefined` when no run of the store records the id that way.
+   * on and the members that entry records. `undefined` when no run of the store
+   * records the id that way.
    *
    * The accumulation is the record, not the run's current `batchId`: a batch a
    * build before K1 admitted wrote only `b-<parentTaskId>` onto the run, with no
@@ -4895,6 +4902,12 @@ declare class TaskRuntime extends Service {
    * read answers `undefined` for it rather than handing a caller the task's
    * children — the members of a batch nobody can name are not the batch's members —
    * and a settlement path that cannot name a batch reports instead of guessing.
+   *
+   * The members are returned with the entry because this read is the only place
+   * that knows the batch exists: the callers that ask for them would otherwise
+   * re-find the entry and be able to pass an absent member list down. A store read
+   * that *failed* is not a batch that is not recorded, so it is not caught here:
+   * the failure is reported as itself.
    */
   private batchRecordIn;
   /**

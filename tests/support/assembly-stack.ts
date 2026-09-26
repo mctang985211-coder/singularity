@@ -42,7 +42,7 @@ import type { TaskEvent, TaskSnapshot } from '../../task/src/index.ts'
 import { rootTaskStoreId, TaskService } from '../../task/src/index.ts'
 import { SessionNotInGraphError } from '../../graphs/src/index.ts'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
-import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
+import type { AgentMessageIntent, SpawnRequest } from '../../agent-runtime/src/index.ts'
 import { SingularityAgent } from '../../agent-singularity/src/index.ts'
 import type { Config } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
@@ -97,6 +97,15 @@ export interface StackCallResult {
   readonly text: string
 }
 
+/** One message the runtime stated through the relay, and what the real delivery settled as. */
+export interface RelayedIntent {
+  readonly messageId: string
+  readonly targetSessionId: string
+  readonly text: string
+  /** The real delivery's status, or the refusal it threw with. */
+  readonly status: string
+}
+
 export class AssemblyStack {
   readonly ctx: Context
   readonly task: TaskService
@@ -109,6 +118,17 @@ export class AssemblyStack {
   readonly roots: readonly string[]
   /** Every spawn the runtime asked the agent runtime for, in order. */
   readonly spawns: SpawnRequest[] = []
+  /**
+   * Every message the runtime stated through the real relay, in order: the
+   * intent it carried and what the real delivery settled as. The relay is
+   * *observed*, never replaced — the deployment's own
+   * `ensureAgentMessageDelivered` decides every one — so a case can say what a
+   * Session was told (and what it was not) without a stand-in that would decide
+   * it instead. A stand-in loop cannot witness a delivered message in the
+   * target's own log (a spawned worker holds no durable log here), which is why
+   * the statement itself is what this records.
+   */
+  readonly relayed: RelayedIntent[] = []
   /** The graph store's own `spawn` edges this process committed, in order: what a restart would re-read. */
   private readonly committedEdges: { kind: string; from: string; to: string }[] = []
   /** The approval door, counted: a read or an assembly must never reach it (A2-4). */
@@ -304,6 +324,22 @@ export class AssemblyStack {
       this.spawns.push(request)
       this.membership.set(String(request.sessionId), this.membership.get(String(parent.id)) ?? this.graphs[0]!.id)
       return await originalSpawn(parent, request)
+    }
+    const originalDeliver = this.agentRuntime.ensureAgentMessageDelivered.bind(this.agentRuntime)
+    this.agentRuntime.ensureAgentMessageDelivered = async (intent: AgentMessageIntent) => {
+      const record = {
+        messageId: String(intent.messageId),
+        targetSessionId: String(intent.targetSessionId),
+        text: String(intent.text),
+      }
+      try {
+        const delivery = await originalDeliver(intent)
+        this.relayed.push({ ...record, status: delivery.status })
+        return delivery
+      } catch (error) {
+        this.relayed.push({ ...record, status: `refused: ${error instanceof Error ? error.message : String(error)}` })
+        throw error
+      }
     }
     for (const root of this.roots) {
       await this.agentRuntime.createRoot({
@@ -520,9 +556,14 @@ export class AssemblyStack {
 
   /**
    * Close every handle this process holds, the way a dying process releases its
-   * descriptors — the durable bytes stay, the in-memory services do not.
+   * descriptors — the durability barrier first (a live Session's appends are
+   * batched, and the bytes a next process reads have to be the bytes this one
+   * really wrote), then the descriptors, so the durable bytes stay while the
+   * in-memory services do not.
    */
   async crash(): Promise<void> {
+    const backend = this.persistence as unknown as { flush?: () => Promise<void> }
+    if (typeof backend.flush === 'function') await backend.flush()
     for (const handle of this.handles.splice(0)) await handle.close().catch(() => undefined)
   }
 

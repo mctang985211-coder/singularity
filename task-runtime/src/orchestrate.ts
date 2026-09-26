@@ -1164,14 +1164,19 @@ type WaitingObservation =
   | { kind: 'budget-exhausted' }
 
 /**
- * The children of one parent, in the parent's own order, with each child's
- * dependencies mapped from task ids back to batch positions: the store is the
- * only source of the batch's shape, so a driver that re-reads it every round
- * (a resumed batch included) reads the same list the admission wrote.
+ * One batch's children in the batch's own order, with each child's dependencies
+ * mapped from task ids back to batch positions: the store is the only source of
+ * the batch's shape, so a driver that re-reads it every round (a resumed batch
+ * included) reads the same list the admission wrote.
+ *
+ * The members are the batch's own ({@link batchMembers}), never the parent
+ * task's children: a task's children are every batch it ever admitted, and a
+ * second batch must be driven as its own batch — positions it names are its own
+ * (§4's batch-local index).
  */
-function batchItems(parentTask: TaskInstance, edges: readonly DependencyEdge[]): BatchItem[] {
-  const position = new Map(parentTask.childTaskIds.map((taskId, index) => [taskId, index] as const))
-  return parentTask.childTaskIds.map((taskId, index) => ({
+function batchItems(memberTaskIds: readonly TaskId[], edges: readonly DependencyEdge[]): BatchItem[] {
+  const position = new Map(memberTaskIds.map((taskId, index) => [taskId, index] as const))
+  return memberTaskIds.map((taskId, index) => ({
     index,
     taskId,
     dependsOn: edges
@@ -1197,23 +1202,22 @@ function taskOf(snapshot: TaskSnapshot, taskId: TaskId): TaskInstance | undefine
  * `failed` — the batch is over, so a still-running child is a defect of the
  * settlement, never evidence of work in progress.
  *
- * `memberTaskIds` names the batch whose outcomes are asked for, when the caller
- * knows it. A run admits more than one batch (K1), and the task's children are
- * *every* batch's members, so a driver that read them would report a second
- * batch as its first batch's children. Absent, the task's own children are the
- * answer — the single-batch reading this entry always had.
+ * `memberTaskIds` names the batch whose outcomes are asked for, and is the only
+ * thing that decides whose outcomes are read. A run admits more than one batch
+ * (K1) and the task's children are *every* batch's, so there is no default here:
+ * a caller either holds the batch's recorded members or it cannot ask this
+ * question.
  */
 export async function deriveChildOutcomes(
   task: TaskService,
   storeId: string,
   parentTaskId: TaskId,
-  memberTaskIds?: readonly TaskId[],
+  memberTaskIds: readonly TaskId[],
 ): Promise<ChildOutcome[]> {
   const snapshot = await task.snapshotIn(storeId)
   const parent = taskOf(snapshot, parentTaskId)
   if (parent === undefined) return []
-  const members = memberTaskIds ?? parent.childTaskIds
-  return members.map(taskId => {
+  return memberTaskIds.map(taskId => {
     const instance = taskOf(snapshot, taskId)
     const run = latestRun(snapshot, taskId)
     const status = instance?.status
@@ -1921,27 +1925,27 @@ async function blockUnstarted(
 }
 
 /**
- * Block every child of one parent task that never started, naming one reason —
- * the runtime-level entry for the paths that settle a batch without a driver
+ * Block every child of one batch that never started, naming one reason — the
+ * runtime-level entry for the paths that settle a batch without a driver
  * (`failBatch`, and the fallback for a driver that rejected before it settled
  * anything).
  *
- * It is {@link blockUnstarted} over the batch the store itself implies
- * (`batchItems`) rather than over a `BatchContext` the caller no longer holds,
- * so the *rule* — a child with no run and no terminal state is blocked, one that
- * already ran is left to its own settlement — stays in one place and the
- * runtime's failure seams share it with the driver.
+ * It is {@link blockUnstarted} over the members the caller read from the batch's
+ * own record rather than over a `BatchContext` the caller no longer holds, so the
+ * *rule* — a child with no run and no terminal state is blocked, one that already
+ * ran is left to its own settlement — stays in one place and the runtime's failure
+ * seams share it with the driver. The batch's members are passed in, never
+ * re-derived from the parent task: a parent task's children are every batch it
+ * ever admitted, and this call ends one batch.
  */
 export async function blockUnstartedChildren(
   env: RuntimeSettlementEnv,
   storeId: string,
-  parentTaskId: TaskId,
+  memberTaskIds: readonly TaskId[],
   reason: string,
 ): Promise<ChildOutcome[]> {
   const snapshot = await env.task.snapshotIn(storeId)
-  const parentTask = taskOf(snapshot, parentTaskId)
-  if (parentTask === undefined) return []
-  return await blockUnstarted(env, storeId, snapshot, batchItems(parentTask, snapshot.edges), () => ({ reason, blockers: [] }))
+  return await blockUnstarted(env, storeId, snapshot, batchItems(memberTaskIds, snapshot.edges), () => ({ reason, blockers: [] }))
 }
 
 /**
@@ -2145,29 +2149,33 @@ async function driveRounds(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
     const snapshot = await env.task.snapshotIn(batch.storeId)
     const parentTask = await env.task.taskIn(batch.storeId, batch.parentTaskId)
     const parentRun = await env.task.runIn(batch.storeId, batch.parentRunId)
+    // The batch's own members, read from the run's accumulation on every round: the
+    // parent task's children are every batch it ever admitted, so a second batch
+    // drives (and reports, and blocks) its own children only.
+    const members = batchMembers(parentRun, batch.batchId)
     // A parent whose run already settled was settled by somebody else — a
     // cancellation, a batch failure seam, or the driver above this one. The
     // driver stops, and before it does it blocks the children that never started:
     // "the store holds the outcomes" is only true of the children that had a run,
     // and an admitted child with no run would otherwise stay non-terminal forever.
     if (parentRun.status !== 'running') {
-      const items = batchItems(parentTask, snapshot.edges)
+      const items = batchItems(members, snapshot.edges)
       await blockUnstarted(env, batch.storeId, snapshot, items, () => ({
         reason: CANCELLED_BEFORE_START,
         blockers: startedBlocker(snapshot, items),
       }))
-      return await deriveChildOutcomes(env.task, batch.storeId, batch.parentTaskId, membersOf(parentRun, batch.batchId))
+      return await deriveChildOutcomes(env.task, batch.storeId, batch.parentTaskId, members)
     }
-    const items = batchItems(parentTask, snapshot.edges)
+    const items = batchItems(members, snapshot.edges)
     const pending = items.filter(item => {
       const task = taskOf(snapshot, item.taskId)
       return task !== undefined && !TERMINAL_TASK_STATUSES.has(task.status)
     })
-    if (pending.length === 0) return await finishBatch(env, batch, items)
+    if (pending.length === 0) return await finishBatch(env, batch)
 
     if (batch.signal.aborted) {
       await blockUnstarted(env, batch.storeId, snapshot, items, () => ({ reason: CANCELLED_BEFORE_START, blockers: startedBlocker(snapshot, items) }))
-      return await finishBatch(env, batch, items)
+      return await finishBatch(env, batch)
     }
 
     const verified = new Set(items.filter(item => taskOf(snapshot, item.taskId)?.status === 'verified').map(item => item.index))
@@ -2184,7 +2192,7 @@ async function driveRounds(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
             return { taskId, outcome: taskOf(snapshot, taskId)?.status ?? 'blocked' }
           }),
       }))
-      return await finishBatch(env, batch, items)
+      return await finishBatch(env, batch)
     }
 
     const item = ready[0] as BatchItem
@@ -2418,15 +2426,21 @@ export function batchEndMessageText(batchId: string, outcomes: readonly ChildOut
   ].join('\n')
 }
 
-/** The member task ids of one batch, as the run's own accumulated batches record them; `undefined` when the run holds no such batch. */
-function batchMembers(run: TaskRun, batchId: string): TaskId[] | undefined {
+/**
+ * The member task ids of one batch, as the run's own accumulated batches record
+ * them. A run that records no such batch cannot be asked about it: the members of
+ * a batch nobody names are not another batch's and not the task's children, so
+ * the read fails by name instead of answering for a batch it cannot identify.
+ */
+function batchMembers(run: TaskRun, batchId: string): TaskId[] {
   const batch = run.batches?.find(candidate => candidate.batchId === batchId)
-  return batch === undefined ? undefined : [...batch.memberTaskIds]
-}
-
-/** {@link batchMembers} for a caller holding the run; the task's children remain the fallback for an old record. */
-function membersOf(run: TaskRun, batchId: string): TaskId[] | undefined {
-  return batchMembers(run, batchId)
+  if (batch === undefined) {
+    throw new Error(
+      `task-runtime: run "${run.runId}" records no batch "${batchId}", so the store does not name its members; ` +
+      'a batch is read from the run that admitted it, never derived from the task\'s children',
+    )
+  }
+  return [...batch.memberTaskIds]
 }
 
 /**
@@ -2498,18 +2512,20 @@ async function deliverBatchResult(env: OrchestrateEnv, result: BatchResultMessag
  *
  * The order is the promise the parent is given:
  *
- * 1. the batch's workspace layer comes off, so the parent's own hold is on top
- *    again (§3.4) — the checkout is handed back before anybody is told anything;
- * 2. **every child's write convergence is confirmed** — the one thing a batch end
+ * 1. **every child's write convergence is confirmed** — the one thing a batch end
  *    must not assume. A child that submitted has been drained by its own
  *    settlement, but a child that settled `blocked` or was settled by a
  *    cancellation may still hold writers or managed jobs, so each member run's
  *    Session is drained with the same primitive the admission and submission
  *    paths use. A convergence that cannot be confirmed is a parent failed by
- *    name: the phase is not persisted, the gate is not opened, and no parent is
- *    told it may write into a checkout somebody else may still be writing to;
- * 3. the parent's own writes are drained, by the same rule and the same refusal
+ *    name: the workspace is not handed back, the phase is not persisted, the gate
+ *    is not opened, and no parent is told it may write into a checkout somebody
+ *    else may still be writing to;
+ * 2. the parent's own writes are drained, by the same rule and the same refusal
  *    (§3.3);
+ * 3. the batch's workspace layer comes off, so the parent's own hold is on top
+ *    again (§3.4) — confirmed stops first, the handback after them: the batch
+ *    holds the checkout until every writer inside it is confirmed stopped (§2);
  * 4. `waiting_children → active` is persisted with the batch it closes, and the
  *    Session's gate follows into `active` — the *question* block is recomputed
  *    from the store in the same step, because an unresolved blocking question
@@ -2526,24 +2542,35 @@ async function deliverBatchResult(env: OrchestrateEnv, result: BatchResultMessag
  *
  * Two gates can still end the batch without judging it, both budget stops rather
  * than verdicts: a cancellation (§3.6) and the parent's own deadline (§3.5).
- * A parent whose run already settled was settled by somebody else, and its batch
- * end is the store's record alone.
+ * Their release is the terminal cleanup it always was, taken before the run is
+ * settled: a stopped run is not revived by its children's drains, and its own
+ * checkout is still handed back. A parent whose run already settled was settled
+ * by somebody else, and its batch end is the store's record alone.
  */
-async function finishBatch(env: OrchestrateEnv, batch: BatchContext, items: readonly BatchItem[]): Promise<ChildOutcome[]> {
+async function finishBatch(env: OrchestrateEnv, batch: BatchContext): Promise<ChildOutcome[]> {
   const snapshot = await env.task.snapshotIn(batch.storeId)
   const parentRun = await env.task.runIn(batch.storeId, batch.parentRunId)
   // The batch's own members, read from the run's accumulated batches: the task's
   // children are every batch's, and a second batch must report (and drain) its
-  // own children rather than repeat the first batch's.
-  const members = batchMembers(parentRun, batch.batchId) ?? items.map(item => item.taskId)
+  // own children rather than repeat the first batch's. A run that does not record
+  // this batch has no members to report, and the read says so by name.
+  const members = batchMembers(parentRun, batch.batchId)
   const outcomes = await deriveChildOutcomes(env.task, batch.storeId, batch.parentTaskId, members)
-  // The batch handed the workspace to its children one at a time; with every
-  // child settled the parent's own hold is what remains (§3.4).
-  await releaseWorkspaceLayer(env, batchOwner(batch.storeId, batch.parentTaskId, batch.batchId), batch.callerSessionId)
-  if (parentRun.status !== 'running') return outcomes
+  // A parent whose run already settled was settled by somebody else, and its batch
+  // end is the store's record alone: the layer the batch took at admission — and
+  // every child handed back as it settled — comes off here, the same release the
+  // ordinary handback performs further down (§3.4).
+  if (parentRun.status !== 'running') {
+    await releaseWorkspaceLayer(env, batchOwner(batch.storeId, batch.parentTaskId, batch.batchId), batch.callerSessionId)
+    return outcomes
+  }
   const childTaskIds = [...members]
 
   if (batch.signal.aborted) {
+    // The cancellation is the batch's terminal cleanup, taken as it always was:
+    // the run ends `cancelled` — never failed by a drain it was stopped before —
+    // and the workspace it was holding goes back with that settlement.
+    await releaseWorkspaceLayer(env, batchOwner(batch.storeId, batch.parentTaskId, batch.batchId), batch.callerSessionId)
     const reason = `cancelled by the caller while the batch settled: ${batch.reason}`
     await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, 'cancelled', env.actor, { reason })
     await recordTerminalReview(env, batch.storeId, batch.parentTaskId, 'cancelled', { run: parentRun, anomalies: [reason], relatedTaskIds: childTaskIds })
@@ -2565,6 +2592,10 @@ async function finishBatch(env: OrchestrateEnv, batch: BatchContext, items: read
   const rootBudget = resolveRootBudget(snapshot, env.rootBudget ?? {})
   const rootDeadline = rootBudget.ok ? rootBudget.deadlineAt : undefined
   if (remainingRunMs(env, parentRun, rootDeadline, Date.now()) <= 0) {
+    // The deadline is the other terminal cleanup, released exactly as the
+    // cancellation's is: the clock stopped this run, and its checkout goes back
+    // with the settlement rather than waiting on a drain nobody will confirm.
+    await releaseWorkspaceLayer(env, batchOwner(batch.storeId, batch.parentTaskId, batch.batchId), batch.callerSessionId)
     const reason = parentDeadlinePassedReason(env, rootDeadline)
     await env.task.markRunStatusIn(batch.storeId, batch.parentTaskId, batch.parentRunId, 'cancelled', env.actor, { reason })
     await recordTerminalReview(env, batch.storeId, batch.parentTaskId, 'cancelled', { run: parentRun, anomalies: [reason], relatedTaskIds: childTaskIds })
@@ -2624,9 +2655,17 @@ async function finishBatch(env: OrchestrateEnv, batch: BatchContext, items: read
     return outcomes
   }
 
-  // The handback (§1.3): one phase event says the run waits on nothing and
-  // closes the batch it names, so a reader of the store sees the same fact the
-  // gate is told next. The write gate and the question block are separate
+  // The handback (§2): both drains are confirmed, so the batch's layer comes off
+  // and the parent's own hold is on top again (§3.4) — confirmed stops first, then
+  // the checkout. The two unconfirmed paths above returned before this point, and
+  // that is the whole order: a parent failed for a convergence nobody could
+  // confirm keeps the batch's layer exactly where it was, while a parent that is
+  // handed its checkout back has one already.
+  await releaseWorkspaceLayer(env, batchOwner(batch.storeId, batch.parentTaskId, batch.batchId), batch.callerSessionId)
+
+  // The store's half of the handback (§1.3): one phase event says the run waits on
+  // nothing and closes the batch it names, so a reader of the store sees the same
+  // fact the gate is told next. The write gate and the question block are separate
   // questions: `active` is the phase the batch gave back, and whether an
   // unresolved blocking question still refuses this run's writes is recomputed
   // from the store here rather than assumed from what this process remembers.
@@ -2674,18 +2713,21 @@ async function finishBatch(env: OrchestrateEnv, batch: BatchContext, items: read
  * own `task_decompose` registers its own driver, and this loop only waits for
  * the child's run to settle.
  *
- * Nothing here throws at its caller: a driver failure is a parent failed with
- * the cause named, recorded and notified (§3.1's "no fire-and-forget"), and the
- * promise the runtime registered always resolves.
+ * A driver failure is a parent failed with the cause named, recorded and notified
+ * (§3.1's "no fire-and-forget") — but never a batch reported as ended on facts the
+ * store did not give: when the batch's members cannot be read (the parent run is
+ * unreadable, or its record does not hold this batch), this promise rejects by
+ * name instead of resolving with an outcome list derived from another batch's
+ * members or from the task's whole child history. The runtime's own belt settles
+ * the batch such a rejection names (`registerDriver` → `failBatchFromRuntime`).
  */
 export async function driveBatch(env: OrchestrateEnv, batch: BatchContext): Promise<ChildOutcome[]> {
-  const members = async (): Promise<TaskId[] | undefined> => {
-    try {
-      return membersOf(await env.task.runIn(batch.storeId, batch.parentRunId), batch.batchId)
-    } catch {
-      return undefined
-    }
-  }
+  // The batch's own members, read from the run the store records as its parent
+  // ({@link batchMembers}): the fallback this used to have — the parent task's
+  // children, every batch's — is exactly what would report a second batch as its
+  // first batch's children.
+  const members = async (): Promise<TaskId[]> =>
+    batchMembers(await env.task.runIn(batch.storeId, batch.parentRunId), batch.batchId)
   try {
     const admitted = await convergeAdmission(env, batch)
     if (!admitted) return await deriveChildOutcomes(env.task, batch.storeId, batch.parentTaskId, await members())
@@ -2693,7 +2735,7 @@ export async function driveBatch(env: OrchestrateEnv, batch: BatchContext): Prom
   } catch (error) {
     const reason = `the batch driver failed: ${message(error)}`
     await failParentRun(env, batch, reason)
-    return await deriveChildOutcomes(env.task, batch.storeId, batch.parentTaskId, await members()).catch(() => [])
+    return await deriveChildOutcomes(env.task, batch.storeId, batch.parentTaskId, await members())
   }
 }
 
@@ -2708,8 +2750,8 @@ async function convergeAdmission(env: OrchestrateEnv, batch: BatchContext): Prom
   if (drained.confirmed) return true
   const reason = `write convergence could not be confirmed: ${drained.pending.join('; ')}`
   const snapshot = await env.task.snapshotIn(batch.storeId)
-  const parentTask = await env.task.taskIn(batch.storeId, batch.parentTaskId)
-  await blockUnstarted(env, batch.storeId, snapshot, batchItems(parentTask, snapshot.edges), () => ({
+  const parentRun = await env.task.runIn(batch.storeId, batch.parentRunId)
+  await blockUnstarted(env, batch.storeId, snapshot, batchItems(batchMembers(parentRun, batch.batchId), snapshot.edges), () => ({
     reason: `the batch never started: ${reason}`,
     blockers: [],
   }))
@@ -2729,7 +2771,9 @@ async function failParentRun(env: OrchestrateEnv, batch: BatchContext, reason: s
     await recordTerminalReview(env, batch.storeId, batch.parentTaskId, 'failed', {
       run: parentRun,
       localizedCause: reason,
-      relatedTaskIds: parentTask.childTaskIds,
+      // The batch this failure ends names its own members, never the parent task's
+      // children — those are every batch this parent ever admitted.
+      relatedTaskIds: batchMembers(parentRun, batch.batchId),
     })
     env.onRunSettled?.(batch.storeId, batch.parentTaskId, batch.parentRunId, 'failed')
     notifyOwner(env, batch.callerSessionId, `task-runtime: batch ${batch.batchId} failed: ${reason}`)

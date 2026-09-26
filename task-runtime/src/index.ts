@@ -4962,7 +4962,7 @@ export class TaskRuntime extends Service {
     try {
       const found = await this.batchRecordIn(storeId, batchId)
       if (found === undefined) return
-      await blockUnstartedChildren(parts, storeId, found.taskId, reason)
+      await blockUnstartedChildren(parts, storeId, found.memberTaskIds, reason)
       const parentRun = await this.ctx.task.runIn(storeId, found.run.runId).catch(() => undefined)
       if (parentRun === undefined || parentRun.status !== 'running') return
       await settleRunFromRuntime(parts, storeId, parentRun, outcome, `batch ${batchId} ${outcome}: ${reason}`)
@@ -4974,7 +4974,8 @@ export class TaskRuntime extends Service {
   /**
    * The batch one id names, as the store itself records it: the run whose
    * **accumulated batches** hold it, together with the parent task that run works
-   * on. `undefined` when no run of the store records the id that way.
+   * on and the members that entry records. `undefined` when no run of the store
+   * records the id that way.
    *
    * The accumulation is the record, not the run's current `batchId`: a batch a
    * build before K1 admitted wrote only `b-<parentTaskId>` onto the run, with no
@@ -4983,18 +4984,24 @@ export class TaskRuntime extends Service {
    * read answers `undefined` for it rather than handing a caller the task's
    * children — the members of a batch nobody can name are not the batch's members —
    * and a settlement path that cannot name a batch reports instead of guessing.
+   *
+   * The members are returned with the entry because this read is the only place
+   * that knows the batch exists: the callers that ask for them would otherwise
+   * re-find the entry and be able to pass an absent member list down. A store read
+   * that *failed* is not a batch that is not recorded, so it is not caught here:
+   * the failure is reported as itself.
    */
-  private async batchRecordIn(storeId: string, batchId: string): Promise<{ taskId: TaskId; run: TaskRun } | undefined> {
-    let snapshot: TaskSnapshot
-    try {
-      snapshot = await this.ctx.task.snapshotIn(storeId)
-    } catch {
-      return undefined
-    }
-    const records = (run: TaskRun): boolean =>
-      run.batches?.some(batch => batch.batchId === batchId) === true
-    const run = [...snapshot.runs].reverse().find(records)
-    return run === undefined ? undefined : { taskId: run.taskId, run }
+  private async batchRecordIn(
+    storeId: string,
+    batchId: string,
+  ): Promise<{ taskId: TaskId; run: TaskRun; memberTaskIds: readonly TaskId[] } | undefined> {
+    const snapshot = await this.ctx.task.snapshotIn(storeId)
+    const found = [...snapshot.runs].reverse()
+      .flatMap(run => (run.batches ?? []).map(batch => ({ run, batch })))
+      .find(entry => entry.batch.batchId === batchId)
+    return found === undefined
+      ? undefined
+      : { taskId: found.run.taskId, run: found.run, memberTaskIds: [...found.batch.memberTaskIds] }
   }
 
   /**
@@ -5583,8 +5590,7 @@ export class TaskRuntime extends Service {
         `task-runtime: batch "${batchId}" is not recorded in store "${storeId}"; a batch is read from the run that admitted it, never derived from its id`,
       )
     }
-    const members = found.run.batches?.find(batch => batch.batchId === batchId)?.memberTaskIds
-    return await deriveChildOutcomes(this.ctx.task, storeId, found.taskId, members)
+    return await deriveChildOutcomes(this.ctx.task, storeId, found.taskId, found.memberTaskIds)
   }
 
   /**
@@ -6336,7 +6342,7 @@ export class TaskRuntime extends Service {
     const entry = this.drivers.get(`${storeId}/${batchId}`)
     entry?.controller.abort()
     const env = await this.orchestrateEnv(await this.sessionForStore(storeId), `fail-batch:${storeId}`)
-    await blockUnstartedChildren(env, storeId, found.taskId, reason)
+    await blockUnstartedChildren(env, storeId, found.memberTaskIds, reason)
     const snapshot = await this.ctx.task.snapshotIn(storeId)
     const parentRun = snapshot.runs.find(run => run.runId === found.run.runId)
     if (parentRun === undefined || parentRun.status !== 'running') return
@@ -6851,8 +6857,7 @@ export class TaskRuntime extends Service {
         `task-runtime: batch "${batchId}" is not recorded in store "${storeId}"; there is nothing to re-deliver`,
       )
     }
-    const members = found.run.batches?.find(batch => batch.batchId === batchId)?.memberTaskIds
-    const outcomes = await deriveChildOutcomes(this.ctx.task, storeId, found.taskId, members)
+    const outcomes = await deriveChildOutcomes(this.ctx.task, storeId, found.taskId, found.memberTaskIds)
     return await this.deliverBatchResult({
       storeId,
       runId: found.run.runId,
