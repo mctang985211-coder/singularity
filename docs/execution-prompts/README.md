@@ -1,6 +1,6 @@
 # Singularity 构建任务派发入口
 
-当前（2026-09-26）：第 9 项 A2+A1 与第 11 项 A4 已验收；第 12 项 S4-E 的[返工复审](../history/2026-09-26-s4-e-rework-review.md)未通过，只派[当前收尾](12-s4-e-final-closure.md)：同批清除模型可见旧请求、v1 replay 生产路径、实验时限，并拒无锚裁判。第 13 项尚无前置。状态以计划文首唯一表为准；本目录较早的 S4-E prompt 仅作历史证据。
+当前（2026-09-26）：第 9 项 A2+A1 与第 11 项 A4 已验收；第 12 项 S4-E 的[当前收尾](12-s4-e-final-closure.md)已交付（[收尾返工记录](../history/2026-09-26-s4-e-final-closure-record.md)），待进度审核复审：模型可见旧请求、v1 replay 生产路径、实验时限已同批清除，无锚裁判冻结前拒绝，ledger 新写 formatVersion 2。第 13 项尚无前置。状态以计划文首唯一表为准；本目录较早的 S4-E prompt 仅作历史证据。
 
 进度核实和下一票材料由[进度审核指挥 prompt](progress-review-and-dispatch.md)处理；已派发票尚未验收时不启动下一票。后续单票从[派发模板](task-dispatch-template.md)填写，直接引用计划 D/E/F，不复制旧方案或重新选型。P1–P4 的原始 prompt 保留在本目录供历史回归，不作为当前任务入口。子代理只读获派子目标的相关合同片段。
 

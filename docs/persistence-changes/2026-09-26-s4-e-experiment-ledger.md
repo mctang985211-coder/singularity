@@ -2,7 +2,7 @@
 
 kind: persistence-change
 
-当前代码仍写 `formatVersion: 1`；以下是[第 12 项收尾](../execution-prompts/12-s4-e-final-closure.md)的**待实现合同**，不把文档修改算作数据切换完成。Evolution 外部账本 `proposals.jsonl` 的新记录统一用 `formatVersion: 2`。一个 reader/writer 只处理此版本；遇到 v1、无版本或混合记录，须在任何新写入前具名抛错，不做双格式 fold、在线迁移或忽略未知行。
+Evolution 外部账本 `proposals.jsonl` 的新记录统一用 `formatVersion: 2`（2026-09-26 收尾返工已实现，见[收尾返工记录](../history/2026-09-26-s4-e-final-closure-record.md)）。一个 reader/writer 只处理此版本；遇到 v1、无版本或混合记录，加载时即在任何新写入前具名抛错（行号+所见版本），不做双格式 fold、在线迁移或忽略未知行。
 
 新格式的可执行候选只保留单文件 Skill 替换；其他改进方向仍可记录为建议，但不能进入旧候选执行链。`experiment_started` 固定样本角色和观测结果、输入快照、候选与生产基线内容身份、模型选择、可选总 `maxTokens`、裁判版本、比较器版本和 `frozenDigest`；`experiment_sample` 逐样本、侧与重复次数记录真实 task/run/review/evidence、工作区快照、结果、裁判身份和 reported/unknown 成本。Skill 实验报告为 `experiment-report.json` 的 `formatVersion: 2`；此报告版本与 ledger 版本是两个字段。旧 v1 replay 报告不能晋升，`replayed` 状态/记录不再新写，仅服务该报告的生产实现和测试删除。实验级 `wallTimeMs`/`durationMs` 不进入新账；普通 Review 的 `durationMs` 与根运行时限不受影响。当前仍在使用的 `SKILL.contract.json` v1 侧车也不受此切换影响。
 
