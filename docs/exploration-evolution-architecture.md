@@ -152,7 +152,7 @@ scoped system section 只放可信 runtime 生成的结构与合同。引用的�
 
 ## 7. 父子澄清协议与非阻塞执行
 
-2026-09-26 修正方向：K1 尚未实施，当前的一次性分解/父自动提交不能满足自由探索。后续按 [K1 合同](execution-prompts/12a-k1-exploration.md)实现 Run 内多批次、工作区交还与父主动提交；下面的 A3/A4 落地说明是基线事实。
+2026-09-26 修正方向已落地（K1）：原先的一次性分解/父自动提交不能满足自由探索，已按 [K1 合同](execution-prompts/12a-k1-exploration.md)改为 Run 内多批次（同一 Run 同时至多一个未结束批次）、批次结束交还执行权与父主动提交；下面的 A3/A4 落地说明是基线事实。
 
 ### 7.1 必须先解除循环等待
 
@@ -174,7 +174,7 @@ A3 统一模块职责：Task runtime 对分解、提交、取消和恢复负责�
 
 保留 Task 的结果状态；Run 主相位为 active、waiting_children、submitted，问答等待从单一问答事件事实派生。active 且有阻塞问题时，对外显示 waiting_answer；waiting_children 同时可有阻塞问题，不能覆盖原 batchId 或把主相位改成 active。waiting 不是 PASS/FAIL，也不重用 capability blocked 原因。事件与 reducer 变更需按持久化规则记录。（A3 已落地 2026-09-22：`executionPhase` 三相位与 `batchId`/`submission`/`noProgress` 已持久化；`pendingQuestionIds`/`blockingQuestionIds` 作为 A4 挂载点字段已预留但无非空生产写入。现行计划 F.1 决定不启用这两份索引，新事件不写入，旧空字段保持可读。）
 
-新增提交验收动作（工作名 task_submit_result）：worker 提交 artifact refs 与证据引用，runtime 进入 submitted→verifying，verifier 决定结果。task_verify 仍只是自检。session idle 无提交时只能是等待或异常停顿，不能直接做“完成”证据；祖先 waiting_children 的 idle 不触发父验收。子全部终态之后仍必须执行独立父 AC。（A3 已落地 2026-09-22：`task_submit_result` 工具 + `submitResult`（身份/相位重检 → RunPhaseChanged(submitted) 落库 → drainSession 排空 → verifier 排他执行）；idle 无提交经 RunProgressMarked 相位机提醒一次后到限停止；原实现子全终态后由 runtime 自动提交父，这是 K1 要替换的路径；修正后批次结束只交还执行权，父主动提交才做独立验收。）
+新增提交验收动作（工作名 task_submit_result）：worker 提交 artifact refs 与证据引用，runtime 进入 submitted→verifying，verifier 决定结果。task_verify 仍只是自检。session idle 无提交时只能是等待或异常停顿，不能直接做“完成”证据；祖先 waiting_children 的 idle 不触发父验收。子全部终态之后仍必须执行独立父 AC。（A3 已落地 2026-09-22：`task_submit_result` 工具 + `submitResult`（身份/相位重检 → RunPhaseChanged(submitted) 落库 → drainSession 排空 → verifier 排他执行）；idle 无提交经 RunProgressMarked 相位机提醒一次后到限停止；原实现子全终态后由 runtime 自动提交父，该路径已由 K1 删除；修正后批次结束只交还执行权，父主动提交才做独立验收。）
 
 上游 agent/turn-stopping、pre-step 和原生 inbox 用于抑制空转/接收唤醒，不修改 agent-loop。当前 DSH 在 pre-step hook 之前已 claim 并持久化移除 inbox 项；不得用“正在等待”一律 reject，否则会吞掉尚未交给模型的问答。有效协调输入必须放行；claim 后 reject/crash 时从未处理领域记录重新投影或恢复投递，保留相同消息身份。首版 active idle 无提交且无阻塞问题时保持非终态并记录可观察的未提交诊断；允许一次配置内提醒，后续无进展走预算停止，不能无限唤醒。旧终态记录原样读取，不把旧 session idle 重新解释为新提交事件。
 

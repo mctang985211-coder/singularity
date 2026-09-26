@@ -35,9 +35,10 @@ function decisionLines(proposal: TaskProposal): string[] {
 function consumptionLines(proposal: TaskProposal): string[] {
   const consumption = proposal.consumption
   if (consumption === undefined) return []
-  // Two kinds, two vocabularies (A0 §2): a batch is consumed as `b-<parent>`
-  // plus its children, a root contract as the one root task and run it became.
-  // The record says which it is, so nothing here has to infer it.
+  // Two kinds, two vocabularies (A0 §2): a batch is consumed as
+  // `b-<parentRunId>-<proposalId>` plus its members, a root contract as the one
+  // root task and run it became. The record says which it is, so nothing here
+  // has to infer it.
   if (consumption.kind === 'root') {
     return [
       `consumed as root task ${consumption.rootTaskId} with run ${consumption.rootRunId} at ${consumption.admittedAt}:`,

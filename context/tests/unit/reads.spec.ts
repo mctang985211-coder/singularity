@@ -999,8 +999,11 @@ describe('the not-activated view', () => {
  * from the old spawn prompt's conditional rules): the decomposable block when
  * the task was admitted to split, the runtime-split rule when the deployment
  * admits a run's own decomposition, the review-wait rule behind either, and
- * never any of it for a replay or a reviewer. The unconditional rules are the
- * agent runtime's worker policy section — the projection does not repeat them.
+ * never any of it for a replay or a reviewer. K1 §2 changed what the guidance may
+ * claim: one unfinished batch at a time instead of a once-per-task limit, and a
+ * batch end that hands the task back rather than submitting for it. The
+ * unconditional rules are the agent runtime's worker policy section — the
+ * projection does not repeat them.
  */
 describe('the decomposition guidance in the contract projection', () => {
   test('a decomposable task reads its own block and the review rule, without the runtime-split door when the switch is off', async () => {
@@ -1024,7 +1027,11 @@ describe('the decomposition guidance in the contract projection', () => {
     expect(text).toContain('was admitted as decomposable')
     expect(text).toContain('`task_decompose`')
     expect(text).toContain('RFC §36')
-    expect(text).toContain('the nested verification settles this task')
+    expect(text).toContain('The batch end hands this task back to you')
+    expect(text).toContain('hand this task in yourself with `task_submit_result`')
+    // K1 §2: nothing is submitted on a parent's behalf, so no guidance block may
+    // claim the nested verification would settle this task.
+    expect(text).not.toContain('the nested verification settles this task')
     expect(text).toContain('waiting for a human review')
     expect(text).toContain('`task_proposal_read`')
     expect(text).toContain('a revision is a new proposal')
@@ -1040,7 +1047,11 @@ describe('the decomposition guidance in the contract projection', () => {
     expect(on).toContain('## If the work turns out not to be atomic')
     expect(on).toContain('admits a task\'s own decomposition')
     expect(on).toContain('a refusal names the rule that blocked it')
-    expect(on).toContain('a task may split only once')
+    expect(on).toContain('one batch at a time is the rule')
+    expect(on).toContain('may split again once its own batch ends')
+    // K1 §2: the once-per-task decomposition limit is gone; the guidance must not
+    // carry it forward.
+    expect(on).not.toContain('split only once')
     expect(on).toContain('waiting for a human review')
     expect(on).not.toContain('## This task is decomposable')
 

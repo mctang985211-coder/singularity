@@ -2,10 +2,11 @@
  * The narrow recovery entry for a spawned worker's Session (A4 §F.1).
  *
  * §F.1 fixes one thing the old recovery branch got wrong: a worker whose Run is
- * still in flight — known question waiting, waiting_children parent, an
- * interrupted turn — is not an abandoned Run to cancel. It must come back as
- * **the same Session and the same Run**, so this module exists to make exactly
- * that possible and nothing wider:
+ * still in flight — known question waiting, waiting_children parent, a delegated
+ * parent whose execution was handed back (active again with the batches it ended
+ * on the run's record), an interrupted turn — is not an abandoned Run to cancel.
+ * It must come back as **the same Session and the same Run**, so this module
+ * exists to make exactly that possible and nothing wider:
  *
  * - **The Session is resumed, never recreated.** The identity is persisted, the
  *   log is the artifact, and `ctx.agents.resume` is the only door taken; a

@@ -34,8 +34,9 @@ function renderContinuation(continuation: ProposalContinuation): string {
       `proposal ${continuation.proposalId} was admitted as batch ${continuation.batchId}:`,
       ...continuation.childTaskIds.map((taskId, index) => `- child ${index + 1}: ${taskId}`),
       '',
-      'The runtime owns the batch now: it starts the children one at a time in dependency order and settles this task when they',
-      'are all terminal. This call returns at admission and does not wait for the batch.',
+      'The runtime owns the batch now: it starts the children one at a time in dependency order and drives the batch to its end.',
+      'The batch end hands this task\'s execution back — nothing is submitted on its behalf — and this call returns at admission,',
+      'so it does not wait for the batch.',
     ].join('\n')
   }
   if (continuation.status === 'activated') {

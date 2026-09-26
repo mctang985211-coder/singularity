@@ -573,8 +573,13 @@ declare function notActivatedLines(graph: CallerGraph, storeId: string, snapshot
 /**
  * The phase, batch, submission and no-progress facts of one run, appended to a
  * run line: where this run sits in the protocol, in that order, with the batch
- * id only where a batch exists to name. A phase change and a progress marking
- * rewrite these fields, so this is the run's current position, never a history.
+ * id only where a batch is still open — `run.batchId` is the current unfinished
+ * batch, cleared by the batch end that returned the run to `active`, so a run
+ * back at work reads without one. The batches a run ended are its history rather
+ * than its position: they are read from the run's own record (`run.batches`,
+ * printed with it by {@link runRecordText}), not folded into every line. A phase
+ * change and a progress marking rewrite these fields, so this is the run's
+ * current position, never a history.
  *
  * `snapshot` is where the one derived word comes from: an `active` run with an
  * open blocking question reads `waiting_answer` (see {@link displayPhase}).

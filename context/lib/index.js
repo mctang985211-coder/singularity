@@ -776,13 +776,14 @@ function submissionClause(submission) {
 	return `submitted by ${submission.origin} at ${submission.submittedAt}: "${submission.summary}"${evidence}${notes}`;
 }
 /**
-* The phase one run's line shows (A4 §7.2): a run whose stored phase is `active`
-* while a blocking question it asked is still open reads `waiting_answer`. The
-* derivation is the store's own question facts
-* ({@link blockingQuestionsOf}) — never the gate, and never a phase written
-* back: `waiting_children` keeps its own phase and its batch id beside any open
-* question, and a run whose snapshot is not at hand (or carries no question
-* index) shows the phase it has on record.
+* The phase one run's line shows (A4 §7.2, K1 §2): a run whose stored phase is
+* `active` while a blocking question it asked is still open reads
+* `waiting_answer` — a batch ending never answers that question, so the block
+* outlives the batch and shows here either way. The derivation is the store's own
+* question facts ({@link blockingQuestionsOf}) — never the gate, and never a
+* phase written back: `waiting_children` keeps its own phase and the batch id it
+* is waiting on beside any open question, and a run whose snapshot is not at hand
+* (or carries no question index) shows the phase it has on record.
 */
 function displayPhase(run, snapshot) {
 	const phase = run.executionPhase;
@@ -796,8 +797,13 @@ function blockedByQuestion(run, snapshot) {
 /**
 * The phase, batch, submission and no-progress facts of one run, appended to a
 * run line: where this run sits in the protocol, in that order, with the batch
-* id only where a batch exists to name. A phase change and a progress marking
-* rewrite these fields, so this is the run's current position, never a history.
+* id only where a batch is still open — `run.batchId` is the current unfinished
+* batch, cleared by the batch end that returned the run to `active`, so a run
+* back at work reads without one. The batches a run ended are its history rather
+* than its position: they are read from the run's own record (`run.batches`,
+* printed with it by {@link runRecordText}), not folded into every line. A phase
+* change and a progress marking rewrite these fields, so this is the run's
+* current position, never a history.
 *
 * `snapshot` is where the one derived word comes from: an `active` run with an
 * open blocking question reads `waiting_answer` (see {@link displayPhase}).
@@ -981,7 +987,7 @@ function taskRecordText(task) {
 		if (criterion.requiresArtifact !== void 0 && criterion.requiresArtifact.length > 0) extras.push(`  requires artifact: ${criterion.requiresArtifact.join(", ")}`);
 		if (criterion.acceptsArtifact !== void 0 && criterion.acceptsArtifact.length > 0) extras.push(`  accepts artifact: ${criterion.acceptsArtifact.join(", ")}`);
 		if (criterion.verifierRef !== void 0) extras.push(`  verifier: ${criterion.verifierRef}`);
-		for (const child of criterion.childEvidence ?? []) extras.push(`  child evidence: batch child #${child.childIndex}${child.criterionId === void 0 ? "" : ` criterion ${child.criterionId}`}${child.evidenceRef === void 0 ? "" : ` ref ${child.evidenceRef}`}`);
+		for (const child of criterion.childEvidence ?? []) extras.push(`  child evidence: run member #${child.childIndex}${child.criterionId === void 0 ? "" : ` criterion ${child.criterionId}`}${child.evidenceRef === void 0 ? "" : ` ref ${child.evidenceRef}`}`);
 		extras.push(...protectedInputsDetail(criterion));
 		if (extras.length > 0) lines.push(...extras);
 	}
@@ -1218,8 +1224,8 @@ function workerDecompositionLines(taskRuntime, task) {
 	const runtimeSplit = taskRuntime.allowsRuntimeDecomposition();
 	if (!decomposable && !runtimeSplit) return [];
 	const lines = [];
-	if (decomposable) lines.push("## This task is decomposable", "", "- Do not carry the work to completion yourself: this task was admitted as decomposable.", "- Call `task_decompose` instead, with a `reason` and the child task list; every child needs an acceptance criterion a verifier can judge on its own.", "- Decompose only when RFC §36 atomicity holds — independently verifiable acceptance dimensions, clear artifact boundaries, capabilities that match or gaps you can handle; otherwise do the work here.", "- Once you decompose, the nested verification settles this task; you still never declare completion yourself.");
-	if (runtimeSplit) lines.push(...lines.length === 0 ? [] : [""], "## If the work turns out not to be atomic", "", "- Call `task_decompose` yourself: this deployment admits a task's own decomposition, so your parent did not have to predict it. The call still has to clear admission — structure, acyclic dependencies, a command on every executable criterion, capability coverage, depth and batch-size limits — and a task may split only once; a refusal names the rule that blocked it, and that reason is what you act on. Split only into pieces a verifier can judge on its own; otherwise do the work here.");
+	if (decomposable) lines.push("## This task is decomposable", "", "- Do not carry the work to completion yourself: this task was admitted as decomposable.", "- Call `task_decompose` instead, with a `reason` and the child task list; every child needs an acceptance criterion a verifier can judge on its own.", "- Decompose only when RFC §36 atomicity holds — independently verifiable acceptance dimensions, clear artifact boundaries, capabilities that match or gaps you can handle; otherwise do the work here.", "- The batch end hands this task back to you: nothing is submitted on your behalf, so read the children's results and hand this task in yourself with `task_submit_result`. You never declare completion yourself.");
+	if (runtimeSplit) lines.push(...lines.length === 0 ? [] : [""], "## If the work turns out not to be atomic", "", "- Call `task_decompose` yourself: this deployment admits a task's own decomposition, so your parent did not have to predict it. The call still has to clear admission — structure, acyclic dependencies, a command on every executable criterion, capability coverage, depth and batch-size limits — and one batch at a time is the rule, so a task may split again once its own batch ends; a refusal names the rule that blocked it, and that reason is what you act on. Split only into pieces a verifier can judge on its own; otherwise do the work here.");
 	lines.push("", "- A decomposition can come back waiting for a human review: it answers with a proposal id and admits nothing, so no child exists and nothing is spawned until the review decides. Read the batch as it was recorded with `task_proposal_read`; do not re-submit the same batch while it waits, because the same request is answered with the same proposal. If the review refuses it, revise the batch from the reason on the record and decompose again — a revision is a new proposal, never a re-run of the refused one.");
 	return lines;
 }

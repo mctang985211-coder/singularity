@@ -306,7 +306,7 @@ function workerDecompositionLines(taskRuntime: ReadOnlyTaskRuntime, task: TaskIn
       '- Do not carry the work to completion yourself: this task was admitted as decomposable.',
       '- Call `task_decompose` instead, with a `reason` and the child task list; every child needs an acceptance criterion a verifier can judge on its own.',
       '- Decompose only when RFC §36 atomicity holds — independently verifiable acceptance dimensions, clear artifact boundaries, capabilities that match or gaps you can handle; otherwise do the work here.',
-      '- Once you decompose, the nested verification settles this task; you still never declare completion yourself.',
+      '- The batch end hands this task back to you: nothing is submitted on your behalf, so read the children\'s results and hand this task in yourself with `task_submit_result`. You never declare completion yourself.',
     )
   }
   if (runtimeSplit) {
@@ -316,8 +316,9 @@ function workerDecompositionLines(taskRuntime: ReadOnlyTaskRuntime, task: TaskIn
       '',
       '- Call `task_decompose` yourself: this deployment admits a task\'s own decomposition, so your parent did not have to predict it. ' +
         'The call still has to clear admission — structure, acyclic dependencies, a command on every executable criterion, capability ' +
-        'coverage, depth and batch-size limits — and a task may split only once; a refusal names the rule that blocked it, and that reason ' +
-        'is what you act on. Split only into pieces a verifier can judge on its own; otherwise do the work here.',
+        'coverage, depth and batch-size limits — and one batch at a time is the rule, so a task may split again once its own batch ends; ' +
+        'a refusal names the rule that blocked it, and that reason is what you act on. Split only into pieces a verifier can judge on ' +
+        'its own; otherwise do the work here.',
     )
   }
   lines.push(

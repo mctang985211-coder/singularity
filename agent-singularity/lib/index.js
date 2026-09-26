@@ -320,7 +320,7 @@ function requirementParts(criterion) {
 	if (criterion.requiredEvidence.length > 0) parts.push(`required evidence: ${criterion.requiredEvidence.join(", ")}`);
 	if ((criterion.requiresArtifact ?? []).length > 0) parts.push(`requires verified artifact: ${criterion.requiresArtifact.join(", ")}`);
 	if ((criterion.acceptsArtifact ?? []).length > 0) parts.push(`accepts artifact: ${criterion.acceptsArtifact.join(", ")}`);
-	if (criterion.childEvidence !== void 0 && criterion.childEvidence.length > 0) parts.push(`child evidence: ${criterion.childEvidence.map((item) => `child ${item.childIndex}${item.criterionId === void 0 ? "" : `:${item.criterionId}`}${item.evidenceRef === void 0 ? "" : `#${item.evidenceRef}`}`).join(", ")}`);
+	if (criterion.childEvidence !== void 0 && criterion.childEvidence.length > 0) parts.push(`child evidence: ${criterion.childEvidence.map((item) => `run member ${item.childIndex}${item.criterionId === void 0 ? "" : `:${item.criterionId}`}${item.evidenceRef === void 0 ? "" : `#${item.evidenceRef}`}`).join(", ")}`);
 	return parts;
 }
 /**
@@ -2412,7 +2412,7 @@ function askedText(outcome) {
 	const lines = [`task_ask_parent: question ${question.questionId} recorded for your direct parent (run ${question.parentRunId}); ${deliveryText(outcome.delivery)}.`];
 	if (!outcome.created) lines.push("This is the question the same request key already recorded, word for word: nothing was written a second time and the same identity stands. Do not re-send it under a new key.");
 	if (question.blocking) {
-		lines.push("This run is now blocked on that answer: writes, shell commands, another decomposition and `task_submit_result` are refused until an answer with `resolves: true` is recorded. Stop the work that would write and end this step — an idle run waiting on this question is not counted as no progress, while the run's own deadline still applies.");
+		lines.push("This run is now blocked on that answer: writes, shell commands, another decomposition and `task_submit_result` are refused until an answer with `resolves: true` is recorded — a child batch of this run ending does not lift the block, because nothing answers a question on your behalf. Stop the work that would write and end this step — an idle run waiting on this question is not counted as no progress, while the run's own deadline still applies.");
 		lines.push("The answer arrives as a message in this session and in your context, where the question stays while it is open; read it before you continue, and keep to what it says.");
 	} else lines.push("This run is not blocked: it may carry on working while the answer is pending, so it may pass you later in this session or in your context — do not treat the silence as an answer.");
 	return lines.join("\n");
@@ -2420,7 +2420,7 @@ function askedText(outcome) {
 function defineTaskAskParentTool(ctx) {
 	return defineTool({
 		name: "task_ask_parent",
-		description: "Ask your direct parent one question and stop guessing. The addressee is fixed by your own run — its task's direct parent — and you cannot name one: there is no recipient parameter, and a call carrying an undeclared one is refused. By default the question blocks this run (`blocking` defaults to `true`): writes, shell commands, another decomposition and `task_submit_result` are refused until the parent answers with `resolves: true`, and the answer then reaches you as a message and in your context. Pass `blocking: false` for a question you can work without. Ask when the contract, the scope or the acceptance is genuinely undecidable from what you were given — not for facts `task_read`/`task_status`/`context_read` already answer, and not to hand back work you could decide yourself. `requestKey` is your stable key for this question: resend the identical question under the same key after a failure instead of inventing a new one, and it comes back as the question already recorded.",
+		description: "Ask your direct parent one question and stop guessing. The addressee is fixed by your own run — its task's direct parent — and you cannot name one: there is no recipient parameter, and a call carrying an undeclared one is refused. By default the question blocks this run (`blocking` defaults to `true`): writes, shell commands, another decomposition and `task_submit_result` are refused until the parent answers with `resolves: true` — a batch of yours ending does not lift that block, because nothing answers a question on your behalf — and the answer then reaches you as a message and in your context. Pass `blocking: false` for a question you can work without. Ask when the contract, the scope or the acceptance is genuinely undecidable from what you were given — not for facts `task_read`/`task_status`/`context_read` already answer, and not to hand back work you could decide yourself. `requestKey` is your stable key for this question: resend the identical question under the same key after a failure instead of inventing a new one, and it comes back as the question already recorded.",
 		parameters: {
 			requestKey: {
 				type: "string",
@@ -2434,7 +2434,7 @@ function defineTaskAskParentTool(ctx) {
 			},
 			blocking: {
 				type: "boolean",
-				description: "Whether this run waits for the answer: true (the default) closes writes, shell commands, another decomposition and submission until an answer resolves it; false leaves this run deciding its own work while the answer is pending"
+				description: "Whether this run waits for the answer: true (the default) closes writes, shell commands, another decomposition and submission until an answer resolves it, and a batch of yours ending does not resolve it; false leaves this run deciding its own work while the answer is pending"
 			}
 		},
 		output: {
@@ -2479,7 +2479,7 @@ function renderOutcome(outcome) {
 function defineTaskCancelTool(ctx) {
 	return defineTool({
 		name: "task_cancel",
-		description: "Cancel the batch of child tasks this run is waiting on. The children still in flight are cancelled, the ones that never started are blocked before start, and this run is cancelled with them — a batch that cannot finish is ended here, never left hanging. Only the run whose own batch it is may cancel it, and only while the batch is in flight; a run with no batch open is told so and nothing changes. To end work that is not a batch of yours, remove the graph instead.",
+		description: "Cancel the batch of child tasks this run is waiting on. The children still in flight are cancelled, the ones that never started are blocked before start, and this run is cancelled with them — a batch that cannot finish is ended here, never left hanging. Only the run whose own batch it is may cancel it, and only while the batch is in flight: a run that already got its execution back holds no batch to cancel, and a run with no batch open is told so and nothing changes. To end work that is not a batch of yours, remove the graph instead.",
 		parameters: { reason: {
 			type: "string",
 			description: "Why the batch is being cancelled; the settlement answer echoes it back to you"
@@ -2608,7 +2608,7 @@ function defineTaskDecomposeTool(ctx) {
 									},
 									childEvidence: {
 										type: "array",
-										description: "Parent-level evidence map (composite mode only): which child of this decomposition batch — by 0-based position — this criterion rests on, optionally narrowed to a child criterion and an evidence reference. Judged at parent-acceptance time; an incomplete mapping fails the parent naming the missing items",
+										description: "Parent-level evidence map (composite mode only): which member of this run — by 0-based position in the run's accumulated members, every batch it admits in admission order — this criterion rests on, optionally narrowed to a child criterion and an evidence reference. Judged at parent-acceptance time; an incomplete mapping fails the parent naming the missing items",
 										items: {
 											type: "object",
 											additionalProperties: false,
@@ -2616,7 +2616,7 @@ function defineTaskDecomposeTool(ctx) {
 												childIndex: {
 													type: "integer",
 													required: true,
-													description: "0-based position of the child in this decomposition batch"
+													description: "0-based position of the member in the run's accumulated members: the batches this run admits, concatenated in admission order, so a later batch appends and never moves an earlier member"
 												},
 												criterionId: {
 													type: "string",
@@ -2725,9 +2725,9 @@ function admittedText(taskId, batchId, childTaskIds) {
 		`decomposed ${taskId} into ${childTaskIds.length} children (batch ${batchId}):`,
 		...childTaskIds.map((childTaskId, index) => `- child ${index + 1}: ${childTaskId}`),
 		"",
-		`The runtime owns batch ${batchId} now: it starts the children one at a time in dependency order and settles this task when they are all terminal. This call returns at admission and does not wait for the batch.`,
+		`The runtime owns batch ${batchId} now: it starts the children one at a time in dependency order and drives the batch to its end. This call returns at admission and does not wait for the batch.`,
 		"You are in phase waiting_children: read and query with `task_read`/`task_status` (and diagnose or inspect), or end the batch with `task_cancel`. Writes, shell commands, another decomposition and a submission of your own are refused while the children run — do not start work that would collide with theirs in the shared checkout.",
-		"You are notified when the batch settles; the runtime then submits this task for verification on your behalf, so an idle session is not a completion and needs no submission from you."
+		"The batch end reaches you as a message naming each child's terminal state and evidence, and it hands your execution back: nothing is submitted on your behalf. Back in phase active you continue your own work, admit another batch with `task_decompose`, or hand this task in yourself with `task_submit_result` — only that submission starts its acceptance."
 	].join("\n");
 }
 /**
@@ -3204,7 +3204,8 @@ function activatedText(rootSessionId, result) {
 		"- The root task carries exactly this contract: `task_read` shows its objective, criteria, assumptions and constraints, and the",
 		"  graph's tree grows from it.",
 		"- `task_decompose` works on the root task from here on: that call was refused before this intake because no root task existed.",
-		"- The runtime submits the root task for verification when its batch settles; nothing here claims the goal is met."
+		"- Nothing here claims the goal is met: the runtime submits nothing on your behalf. Delegate as many batches as the work needs,",
+		"  and when the goal is delivered hand the root task in yourself with `task_submit_result` — only that submission starts its acceptance."
 	].join("\n");
 }
 /**
@@ -3349,8 +3350,9 @@ function renderContinuation(continuation) {
 		`proposal ${continuation.proposalId} was admitted as batch ${continuation.batchId}:`,
 		...continuation.childTaskIds.map((taskId, index) => `- child ${index + 1}: ${taskId}`),
 		"",
-		"The runtime owns the batch now: it starts the children one at a time in dependency order and settles this task when they",
-		"are all terminal. This call returns at admission and does not wait for the batch."
+		"The runtime owns the batch now: it starts the children one at a time in dependency order and drives the batch to its end.",
+		"The batch end hands this task's execution back — nothing is submitted on its behalf — and this call returns at admission,",
+		"so it does not wait for the batch."
 	].join("\n");
 	if (continuation.status === "activated") return [
 		`proposal ${continuation.proposalId} was activated as root task ${continuation.taskId} with run ${continuation.runId}:`,
@@ -3528,7 +3530,7 @@ const text$5 = (value) => [{
 function defineTaskReadTool(ctx) {
 	return defineTool({
 		name: "task_read",
-		description: "Read the caller's task contract. The root session sees the root task, its acceptance criteria, and child task statuses — or, before any root contract has been accepted, the named not-activated state together with whatever proposal is still open (the graph's name is never shown as an objective). A worker sees its own task and run. A reviewer sees the task it was delegated to review, marked review-only. A run line carries the coordination phase this run is in — and its batch id, its submission and any no-progress marking when it has them; a run with no phase is an old record and is shown as needs-recovery. This is the same read the worker's assembled context is projected from, so the two cannot disagree.",
+		description: "Read the caller's task contract. The root session sees the root task, its acceptance criteria, and child task statuses — or, before any root contract has been accepted, the named not-activated state together with whatever proposal is still open (the graph's name is never shown as an objective). A worker sees its own task and run. A reviewer sees the task it was delegated to review, marked review-only. A run line carries the coordination phase this run is in — and the id of the batch it is still waiting on, its submission and any no-progress marking when it has them; a run that returned to active waits on no batch, though its record keeps every batch it ended. A run with no phase is an old record and is shown as needs-recovery. This is the same read the worker's assembled context is projected from, so the two cannot disagree.",
 		parameters: {},
 		output: {
 			schema: { type: "string" },
@@ -4065,7 +4067,7 @@ function sessionId$1(exec) {
 function defineTaskSubmitResultTool(ctx) {
 	return defineTool({
 		name: "task_submit_result",
-		description: "Hand in this run's result for acceptance. This is the explicit submission the coordination protocol is built on: it records what was delivered (summary, plus the evidence/artifact references you produced), closes admission for this run — no further write, command or decomposition is admitted — drains the calls still in flight, and hands the run to the verifier. The call returns the verdict. An idle session is not a completion: a worker that goes idle without submitting gets one reminder and is stopped by the no-progress budget if it still has not submitted. A run waiting on its own child batch cannot submit — the batch submits for it when the children are terminal.",
+		description: "Hand in this run's result for acceptance. This is the explicit submission the coordination protocol is built on: it records what was delivered (summary, plus the evidence/artifact references you produced), closes admission for this run — no further write, command or decomposition is admitted — drains the calls still in flight, and hands the run to the verifier. The call returns the verdict. An idle session is not a completion: a worker that goes idle without submitting gets one reminder and is stopped by the no-progress budget if it still has not submitted. A run waiting on its own child batch cannot submit; the batch end hands the run back to `active` with nothing submitted for it, and that submission is then yours to make.",
 		parameters: {
 			summary: {
 				type: "string",

@@ -7,7 +7,7 @@
 
 后续 [探索与自进化架构](exploration-evolution-architecture.md)细化上下文、非阻塞批次、问父与 supervisor。T1–T3 只建设子任务契约/审核，均已交付；根 intake 属 A0（A0 + R0 已交付，来源/恢复返工 2026-09-23 关闭）。当前唯一顺序以建设计划为准（截至 2026-09-26：第 9 项 A2+A1 已验收、第 11 项 A4 返工交付待验收，下一项 S4-E）；context 职责及完整消费设计见主 guide §1.4 与计划 D/E 节，不将上下文主体继续放进 task。
 
-后续恢复合同已固定在计划 F.4，尚未实现：task_recover 为失败原目标创建新 Run/Session，本次 task_decompose 依据持久恢复关联进入按 Run 的新批次准入；复用证据通过本次成员绑定解析，原 AC、旧已消费提案和旧终态不改。下文“一父一批”仍描述当前 T2/T3 行为，不能据此把 A6 写成重新消费旧 proposal，也不能在 A6 前放宽当前闸。
+后续恢复合同已固定在计划 F.4，尚未实现：task_recover 为失败原目标创建新 Run/Session，本次 task_decompose 依据持久恢复关联进入按 Run 的新批次准入；复用证据通过本次成员绑定解析，原 AC、旧已消费提案和旧终态不改。下文“一父一批”已不再描述当前行为（K1 已落地：同一父 Run 同时至多一个未结束批次，批次结束交还执行权后父可追加新批次，runtime 不替父提交）；不能据此把 A6 写成重新消费旧 proposal，也不能在 A6 前放宽当前闸。
 
 ## 1. 要解决的问题
 
@@ -124,7 +124,7 @@ ready -> 重检父状态、权限、预算、能力、verifier 与契约
 2. 校验阶段与提交阶段分开：纯预检返回诊断，不重复登记 Obligation；提交时按既有机制记录事实。非法输入与无审批时均不得 spawn、创建可执行子任务或将父标为 decomposed。
 3. 机器准入仍拒绝不满足当前规则的能力缺口；T2 不顺手实现 blocked 恢复。不接受以修改 mandatory、移除父 AC 或把确定性降为 heuristic 自动修正拒绝。
 4. 审批绑定提案摘要、父契约/Run 身份与展示的准入上下文指纹。批准之后、正式提交之前重新检查。能力实现、有效预算或 verifier 选择变化，首版保守标 stale，重新生成并审核，不把旧批准转移给新上下文。
-5. 单进程同一父 Run 的重检、提案消费及子任务绑定串行。K1 改为同 Run 同时一个未结束批次，结束后可提新批次；重复提案不重复消费，晚批准重新核对当前 Run/提案。一次性分解是基线限制，不是后续建设要求；完整身份和证据索引见 [K1](execution-prompts/12a-k1-exploration.md)。
+5. 单进程同一父 Run 的重检、提案消费及子任务绑定串行。K1 已落地：同 Run 同时至多一个未结束批次，批次结束后可提新批次；重复提案不重复消费，晚批准重新核对当前 Run/提案。一次性分解与「一父一批」均已由 K1 移除，不再是当前限制；完整身份和证据索引见 [K1](execution-prompts/12a-k1-exploration.md)。
 6. 服务入口执行所有检查；工具层只是显示与发起请求。直接调用 decomposeAndRun 不能绕过 all。低层事件 store 是受信基础设施，不向模型授予原始写事件能力。
 7. pending_review 时不长持 Task/store 写锁；审批提供者不可用保持待审并返回原因，不能转 approved。显式取消为 cancelled，拒绝为 rejected。
 8. 复用 DSH approval 渠道，通过已有 root/owner 路由展示审核。不要为递归 worker 增加平台管理/HITL 工具权限。模型不能自行生成可信 approvalRef。
@@ -135,7 +135,7 @@ ready -> 重检父状态、权限、预算、能力、verifier 与契约
 
 `task_decompose` 是当前正式入口，内部先提出提案，再按策略推进，不另设兼容别名。新增查询/继续入口以 proposalId 操作已保存内容，不接受“approved: true”或任意外部审批凭据。具体工具命名沿用仓库习惯，规范固定的是行为。
 
-**落地事实（2026-09-23 T2/T3，原范围已验收）**：当时规则 1–8 已实现；上文 K1 多批次修正尚未实施。入口与测试锚见主 guide §5.10 与历史执行记录 T2+T3 记录。store 侧：四个提案事件 `TaskProposalSubmitted`（携带整批规范化契约内容 `batch`，不只是摘要）、`TaskProposalDecided`（绑定 `proposalDigest` + `admissionContextDigest` + 批准必须的 `reviewContextDigest`）、`TaskProposalPhaseChanged`（`ready → pending_review` 收紧、`approved → ready` 重检通过、`ready|approved → stale`）、`TaskProposalAdmitted`（消费与子任务、依赖边、父相位同一提交），加上 `TaskSnapshot.proposals` 的 byId/byRequestKey/byParentTask 索引，持久化记录见 `docs/persistence-changes/2026-09-22-task-proposal-review.md`。工具面：`task_decompose` 组合「提交 + 续跑」，另有 `task_proposal_read`/`task_proposal_continue`/`task_proposal_cancel`；渠道 `ProposalReviewService` 挂在 service 装配处，不在任何 agent 工具面。规则 3（T2 不顺手实现 blocked 恢复）与规则 8（不下发平台管理/HITL 工具给递归 worker）在集成测试中被直接断言。
+**落地事实（2026-09-23 T2/T3，原范围已验收）**：当时规则 1–8 已实现（上文 K1 多批次修正随后已落地，见规则 5）。入口与测试锚见主 guide §5.10 与历史执行记录 T2+T3 记录。store 侧：四个提案事件 `TaskProposalSubmitted`（携带整批规范化契约内容 `batch`，不只是摘要）、`TaskProposalDecided`（绑定 `proposalDigest` + `admissionContextDigest` + 批准必须的 `reviewContextDigest`）、`TaskProposalPhaseChanged`（`ready → pending_review` 收紧、`approved → ready` 重检通过、`ready|approved → stale`）、`TaskProposalAdmitted`（消费与子任务、依赖边、父相位同一提交），加上 `TaskSnapshot.proposals` 的 byId/byRequestKey/byParentTask 索引，持久化记录见 `docs/persistence-changes/2026-09-22-task-proposal-review.md`。工具面：`task_decompose` 组合「提交 + 续跑」，另有 `task_proposal_read`/`task_proposal_continue`/`task_proposal_cancel`；渠道 `ProposalReviewService` 挂在 service 装配处，不在任何 agent 工具面。规则 3（T2 不顺手实现 blocked 恢复）与规则 8（不下发平台管理/HITL 工具给递归 worker）在集成测试中被直接断言。
 
 ### 重启和幂等
 
@@ -147,7 +147,7 @@ T2/T3 在同一交付组中保证持久化待审、未批准零执行副作用�
 - admitted 后、首个 spawn 前崩溃，应能继续派发同一批子任务。已知 run/session 则重连或检查其终态，不再新建；状态不可判明时保持待处置并返回原因，禁止宣称 exactly-once。
 - 本票保证单进程提交及重启恢复；多进程同时写 store、工具外部副作用恰好一次不在范围。不同于 S2-R 的能力/产物 blocked 恢复，不借此重跑已通过兄弟。
 
-**T2/T3 原恢复矩阵（历史证据）**：A4 已扩大问答恢复，K1 将替换一次性分解及委派父 active 的旧处理；此段不作为保留旧分支的施工要求。① 待审崩溃 → 重开后仍 `pending_review`、零副作用；恢复遍重发审核请求，材料取自store 里保存的批次事实，只有落账决定推进。② 批准已保存未准入崩溃 → 恢复遍重检并续跑准入，同一批只产生 1 条消费、子任务 ids 稳定，不创建第二批。③ 准入已提交未 spawn 崩溃 → 由 A3 的批次恢复驱动同一批（消费里的子任务 ids 与批次一致）。④ run/session 已建立 → 重连并结算终态（在途 run 记 cancelled + 诊断，不重跑），不新建 run/任务。身份不明的旧记录（无协调相位）派生 needs-recovery，唯一合法动作是取消，不擅自再执行。相同 requestKey + 同内容在进程内与重启后都答原提案（不同内容才新提案）；两个获批提案竞争同一父只有一批准入，落败方具名 `stale`（续跑路径：父任务已分解）或 `expired`（批准路径：父 run 已离开可派发相位）。测试锚：`tests/integration/proposal-recovery.spec.ts`（12 项）。
+**T2/T3 原恢复矩阵（历史证据）**：A4 已扩大问答恢复；K1 已替换一次性分解及委派父 active 的旧处理（见规则 5 与 [K1](execution-prompts/12a-k1-exploration.md)）；此段不作为保留旧分支的施工要求。① 待审崩溃 → 重开后仍 `pending_review`、零副作用；恢复遍重发审核请求，材料取自store 里保存的批次事实，只有落账决定推进。② 批准已保存未准入崩溃 → 恢复遍重检并续跑准入，同一批只产生 1 条消费、子任务 ids 稳定，不创建第二批。③ 准入已提交未 spawn 崩溃 → 由 A3 的批次恢复驱动同一批（消费里的子任务 ids 与批次一致）。④ run/session 已建立 → 重连并结算终态（在途 run 记 cancelled + 诊断，不重跑），不新建 run/任务。身份不明的旧记录（无协调相位）派生 needs-recovery，唯一合法动作是取消，不擅自再执行。相同 requestKey + 同内容在进程内与重启后都答原提案（不同内容才新提案）；两个获批提案竞争同一父只有一批准入，落败方具名 `stale`（续跑路径：父 Run 已有未结束批次或不再可派发）或 `expired`（批准路径：父 run 已离开可派发相位）。测试锚：`tests/integration/proposal-recovery.spec.ts`（12 项）。
 
 ## 7. 持久化与模块落点
 

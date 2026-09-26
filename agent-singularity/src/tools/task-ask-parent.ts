@@ -96,7 +96,8 @@ function askedText(outcome: AskedQuestionOutcome): string {
   if (question.blocking) {
     lines.push(
       'This run is now blocked on that answer: writes, shell commands, another decomposition and `task_submit_result` are ' +
-      'refused until an answer with `resolves: true` is recorded. Stop the work that would write and end this step — an idle ' +
+      'refused until an answer with `resolves: true` is recorded — a child batch of this run ending does not lift the block, ' +
+      'because nothing answers a question on your behalf. Stop the work that would write and end this step — an idle ' +
       'run waiting on this question is not counted as no progress, while the run\'s own deadline still applies.',
     )
     lines.push(
@@ -119,7 +120,8 @@ export function defineTaskAskParentTool(ctx: Context) {
       'Ask your direct parent one question and stop guessing. The addressee is fixed by your own run — its task\'s direct ' +
       'parent — and you cannot name one: there is no recipient parameter, and a call carrying an undeclared one is refused. ' +
       'By default the question blocks this run (`blocking` defaults to `true`): writes, shell commands, another decomposition ' +
-      'and `task_submit_result` are refused until the parent answers with `resolves: true`, and the answer then reaches you as ' +
+      'and `task_submit_result` are refused until the parent answers with `resolves: true` — a batch of yours ending does not lift ' +
+      'that block, because nothing answers a question on your behalf — and the answer then reaches you as ' +
       'a message and in your context. Pass `blocking: false` for a question you can work without. Ask when the contract, the ' +
       'scope or the acceptance is genuinely undecidable from what you were given — not for facts `task_read`/`task_status`/' +
       '`context_read` already answer, and not to hand back work you could decide yourself. `requestKey` is your stable key for ' +
@@ -138,7 +140,7 @@ export function defineTaskAskParentTool(ctx: Context) {
       },
       blocking: {
         type: 'boolean',
-        description: 'Whether this run waits for the answer: true (the default) closes writes, shell commands, another decomposition and submission until an answer resolves it; false leaves this run deciding its own work while the answer is pending',
+        description: 'Whether this run waits for the answer: true (the default) closes writes, shell commands, another decomposition and submission until an answer resolves it, and a batch of yours ending does not resolve it; false leaves this run deciding its own work while the answer is pending',
       },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },

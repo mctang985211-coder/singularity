@@ -72,12 +72,13 @@ Run 记录本次尝试。你可以选择方法、检索指导和提出合适的�
 来使验收命令退出 0。发现判据本身错误，提交裁判问题与反例。
 task_verify 只产生自检证据，不证明任务状态已成功。
 
-[显式提交协议（A3 已部署：worker 合同块见 task-runtime/src/handoff.ts）]
+[显式提交协议（A3 已部署：worker 规则见 agent-runtime/src/prompts/worker.prompts.ts，
+worker 合同块投影见 context/src/projections.ts）]
 完成实现后用 task_submit_result 提交产物及引用，由运行时验收。
 说明仍未满足的条件；不要把会话结束或最终回复等同于 Task PASS。
 
 [生成任务审核已部署（T2/T3：root prompt 见 agent-runtime/src/prompts/root.prompts.ts，
-worker 合同块见 task-runtime/src/handoff.ts 的 reviewRule）]
+worker 合同块见 context/src/projections.ts 的 workerDecompositionLines 审核段）]
 task_decompose 可能不立即执行：部署开启契约人审时，它回答一个 proposalId 并说明批次
 在等审核，此时没有子任务、没有 worker、当前任务也未分解。用 task_proposal_read 读回
 批次与记录；不要重复提交同一内容（同请求答同一提案）。审核拒绝时按记录中的理由修订
@@ -97,11 +98,14 @@ task_decompose 可能不立即执行：部署开启契约人审时，它回答�
 允许节点选择方法并提出合理分解；不要求它按固定领域工序逐步创建任务。
 依赖只表达实际输入/证据关系。协调责任不转移你对父目标的验收义务。
 
-[非阻塞批次协议（A3 已部署：agent-runtime/src/prompts/root.prompts.ts）]
+[非阻塞批次协议（A3 已部署，K1 已落地：agent-runtime/src/prompts/root.prompts.ts）]
 提交分解后保存 batchId。批次受 runtime 管理；无需保持一个同步等待工具。
+同一 Run 同时至多一个未结束批次（只有 active 能分解）；批次结束可再提新批次。
 子运行期间只做协调与读取，不与子节点同时修改共享产物。
 需要终止本批次时用 task_cancel（只取消自己派发的批次）；waiting_children
 期间的写、shell 与再次分解由运行时闸拒绝，不只靠本提示词约束。
+批次结束把父 Run 交还 active，并以 m-batchend-<batchId> 通知父 session 各子
+终态与证据摘要；未解决的 blocking 问答仍单独阻塞，批次结束不代答。
 
 [父子问答协议已接线，A4 冷恢复返工已闭合（2026-09-26），此段为当前合同]
 收到子节点问题时先检查 questionId 对应契约与相关决定，给出有来源的回答。
@@ -123,9 +127,9 @@ task_answer 的 resolves 只表示你是否认为当前问题已解决；未知�
 
 子任务自然语言“完成”只是摘要；父结果必须依赖实际 evidence 与自己的判据。
 不得重复消费已落库提案，也不得重跑已通过兄弟来掩盖恢复缺口。
-[K1 部署后]
+[K1 已落地：批次结束交还执行权]
 子批次结束会交还执行权；依据结果继续工作或提出下一批，最后主动提交父验收。
-不要把批次结束等同于父目标完成，也不要为普通调整方法启动 Evolution。
+runtime 不替父提交；不要把批次结束等同于父目标完成，也不要为普通调整方法启动 Evolution。
 [K4 部署后]
 原目标过期仍可在 reviewer 额度内复盘。继续业务需要额度时，根会话可用
 task_budget_extend 申请经人审追加总上限；它不恢复终态、不自动执行、不清空旧账。
@@ -204,7 +208,7 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 | “向父节点询问并等待” | A3 已落地非阻塞父循环与协调相位；A4 已接线（2026-09-25 冷恢复返工）：消息/送达/恢复主体为 agent-runtime + DSH（`messages.ts`），context 展示问题和回答，task-runtime 仅仲裁执行阻塞。通信正文与队列未加进 task |
 | “提交后由 verifier 判定” | A3 已落地：task_submit_result → RunPhaseChanged(submitted) 落库后 drainSession 排空在途写，再转 verifier 排他执行；idle 不作完成证据 |
 | “只做协调” | A3 已落地：waiting_children 期间运行时闸（tools/pre-execute waterfall，在途调用同样登记检查）只放行读/状态/诊断/task_cancel 等协调动作，不只靠提示词防并发写 |
-| “分解可能待审，批准后系统自动续跑”（T2/T3 **已落地**） | 配置 `Config.generatedTaskReview: off/all`（默认 `off`）与真实档案：`all` 下 `task_decompose` 只提交提案（`submitDecompositionProposal` → `pending_review`）并返回 proposalId；渠道 `ProposalReviewService`（`ctx.proposalReviewChannel`，service 装配处）经 `ctx.approval.request` 提问并写 `decidedBy=approval:<ownerSessionId>`；批准由 runtime 重检后继续（`continueProposal`），工具层没有任何决定参数或 approvalRef；prompt 文本真实落点为 `agent-runtime/src/prompts/root.prompts.ts` 与 `task-runtime/src/handoff.ts` 的审核段；三个提案工具`task_proposal_read/continue/cancel` 在 root allow-list 与 worker baseline |
+| “分解可能待审，批准后系统自动续跑”（T2/T3 **已落地**） | 配置 `Config.generatedTaskReview: off/all`（默认 `off`）与真实档案：`all` 下 `task_decompose` 只提交提案（`submitDecompositionProposal` → `pending_review`）并返回 proposalId；渠道 `ProposalReviewService`（`ctx.proposalReviewChannel`，service 装配处）经 `ctx.approval.request` 提问并写 `decidedBy=approval:<ownerSessionId>`；批准由 runtime 重检后继续（`continueProposal`），工具层没有任何决定参数或 approvalRef；prompt 文本真实落点为 `agent-runtime/src/prompts/root.prompts.ts` 与 `context/src/projections.ts` 的审核段；三个提案工具`task_proposal_read/continue/cancel` 在 root allow-list 与 worker baseline |
 | “主管只读诊断” | 实际工具 allow-list 不含写/shell/spawn/晋升；按需下钻仍有读取域限制 |
 | “产物满足目标” | 独立 verifier、来源与版本检查；prompt 不能保证语义正确 |
 
@@ -212,7 +216,7 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 
 ## 7. Prompt 验收矩阵
 
-每票只检查本票修改或实际依赖的角色及其恢复/压缩场景，使用实际 assembled prompt 和实际可调用工具集合。root setup/execution、leaf、decomposable、waiting_children、reviewer 属已有场景；waiting_answer 已随 A4 实现（问答投影与阻塞派生，`a4-question-*` 系列 spec），自动 candidate builder 仍随相应票实现后检查，不要求每票为未来角色建 fixture。
+每票只检查本票修改或实际依赖的角色及其恢复/压缩场景，使用实际 assembled prompt 和实际可调用工具集合。root setup/execution、leaf、decomposable、waiting_children、批次结束回 active 的委派父、reviewer 属已有场景；waiting_answer 已随 A4 实现（问答投影与阻塞派生，`a4-question-*` 系列 spec），自动 candidate builder 仍随相应票实现后检查，不要求每票为未来角色建 fixture。
 
 验收分三层，证据不能互相替代：装配层检查事实来源、角色泄漏、未挂载工具与未启用协议；运行时行为层检查权限、等待、恢复和副作用；真实模型层测任务完成与有效澄清。以下是按风险选取的反例库，不是每票全部重复的清单；协议反例放对应集成测试，不用匹配 prompt 字符串证明状态机正确。
 
@@ -222,7 +226,7 @@ Supervisor orchestrator 使用上述两种角色的产物和既有 Evolution 工
 
 根入口与默认运行面相关反例（R0 已有证据保留；A0 Q2/Q3 返工已关闭，2026-09-23）：`off` 组合的 root prompt 出现任何 `evolution_*` 名或晋升协议段（应为不注册也不提示）；`on` 组合缺少九个工具或漏掉协议段；prompt 与 allow-list 取自两个不同事实（本组由同一布尔派生，回归锚 `agent-runtime/tests/unit/agent-runtime.spec.ts`）；intake 段要求模型“自行接受/批准”契约或暗示可以绕过审核（部署的 intake 段明确“没有任何工具或参数能批准”）；未激活时提示模型 `task_decompose`（工具会具名拒绝，`task_read` 也报未激活）；worker 提示词/工具面出现 `task_intake`（它是 root 的路径，回归锚 `tests/integration/root-intake.spec.ts` 的 worker 工具面用例）。**A0 返工（Q2/Q3，2026-09-23 关闭）新增的根来源/恢复反例**：本运行时自己的提示词被记成人类输入（`spawn` 的委派任务与 `prompt` 的 setup 文本必须带 `runtime-prompt`，只有本人的消息是 `user`；回归锚 `agent-runtime/tests/unit/agent-runtime.spec.ts`）；仅凭部署自己的 setup 文本的会话可经工具与直调双入口激活契约（应具名拒绝，零 store/零提案/零 ask）；委派子会话的 store 可建根（应按顶层会话规则具名拒绝）；没有本人消息（含日志不可读/无 reader）仍能激活或续跑（应具名拒绝、零落库）；崩溃点恢复绕开公共入口（恢复用例的 `reopen` 只经 `adoptRoot`，`openStore` + `reconcileStore` 的显式调用在 `root-intake-recovery.spec.ts` 已不存在）。核对方法：真实装配后的 prompt 文本与工具面（`agent-runtime` 单测按 composition 逐名断言 allow-list、`assembly.spec.ts` 断言注册面），不用匹配自然语言句子证明状态机。
 
-协调组合态必须覆盖：waiting_children 同时有向祖先提出的阻塞问题；仅收到部分答案或 unresolved；有效问答在 inbox claim 后遇到 pre-step reject/崩溃。恢复后模型仍能读到未处理事实，主相位、batch 与写权限不因消息重放改变。waiting_children 的写拒绝以运行时闸在真实 tools waterfall 上的实际 deny 为证据（A3 起），不能只看 assembled prompt 未挂载。
+协调组合态必须覆盖：waiting_children 同时有向祖先提出的阻塞问题；批次结束把父 Run 交还 active 而该阻塞问题仍未解决（写仍被拒、不代答）；仅收到部分答案或 unresolved；有效问答在 inbox claim 后遇到 pre-step reject/崩溃。恢复后模型仍能读到未处理事实，主相位、batch（当前未结束批次与 run.batches 历史）与写权限不因消息重放改变。waiting_children 的写拒绝以运行时闸在真实 tools waterfall 上的实际 deny 为证据（A3 起），不能只看 assembled prompt 未挂载。
 
 相同事实连续装配不产生不断增长的重复提示或写事件；输入变化有可追溯的模型可见事件。复用 DSH context snapshot，异步 assemble 钩子遵守 scope/取消；无 agent 的诊断组装不得串入项目事实。不要通过删除核心契约满足上限，也不要每步注入全图时间戳使缓存失效。
 

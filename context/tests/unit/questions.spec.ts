@@ -197,11 +197,11 @@ describe('waiting_answer is derived from the question facts, never written', () 
   test('a waiting_children run keeps its own phase and its batch beside an open question', async () => {
     const { stack } = await chainStack()
     await stack.ask({ childRunId: 'r-c1', requestKey: 'k1' })
-    await stack.runFacts({ taskId: 't-c1', runId: 'r-c1', sessionId: 's-c1', phase: 'waiting_children', batchId: 'b-1' })
+    await stack.runFacts({ taskId: 't-c1', runId: 'r-c1', sessionId: 's-c1', phase: 'waiting_children', batchId: 'b-r-c1-p-1' })
 
     const read = expectOk(await stack.service.taskRead('s-c1'))
     expect(read.text).toContain('phase waiting_children')
-    expect(read.text).toContain('batch b-1')
+    expect(read.text).toContain('batch b-r-c1-p-1')
     expect(read.text).not.toContain('waiting_answer')
     expect(expectOk(await stack.service.dynamicProjection('s-c1')).text).toContain('phase waiting_children')
   })

@@ -489,9 +489,24 @@ describe('task_read', () => {
   })
 
   it('renders the batch a waiting run is waiting on', async () => {
-    const { ctx } = await workerRunFixture({ executionPhase: 'waiting_children', batchId: 'b-t-worker' })
+    const { ctx } = await workerRunFixture({ executionPhase: 'waiting_children', batchId: 'b-r-worker-p-1' })
     const result = (await defineTaskReadTool(ctx as never).execute({}, exec('s-worker'))) as string
-    expect(result).toContain('run r-worker [running] — phase waiting_children; batch b-t-worker started')
+    expect(result).toContain('run r-worker [running] — phase waiting_children; batch b-r-worker-p-1 started')
+  })
+
+  it('names no batch on a run that got its execution back, however many batches it ended', async () => {
+    // K1 §2: `run.batchId` is the *current unfinished* batch. A run that returned
+    // to `active` after a batch end shows the phase it is in and no batch id, even
+    // though its own record still accumulates the batches it admitted — the history
+    // stays the run record's own fact, read by reference (`context_read`), never a
+    // guess this line makes.
+    const { ctx } = await workerRunFixture({
+      executionPhase: 'active',
+      batches: [{ batchId: 'b-r-worker-p-1', proposalId: 'p-1', memberTaskIds: ['t-child-1'] }],
+    })
+    const result = (await defineTaskReadTool(ctx as never).execute({}, exec('s-worker'))) as string
+    expect(result).toContain('run r-worker [running] — phase active started')
+    expect(result).not.toContain('batch b-r-worker-p-1')
   })
 
   it('renders what a submitted run handed in, with the evidence it named', async () => {
@@ -531,7 +546,7 @@ describe('task_read', () => {
   it('renders each child run line of the root view with its own phase', async () => {
     const { ctx, store } = await fixture()
     store.patchTask('t-child-1', { status: 'running' })
-    store.patchRun('r-child-1', { status: 'running', executionPhase: 'waiting_children', batchId: 'b-t-child-1' })
+    store.patchRun('r-child-1', { status: 'running', executionPhase: 'waiting_children', batchId: 'b-r-child-1-p-1' })
     const result = (await defineTaskReadTool(ctx as never).execute({}, exec('root-1'))) as string
     // The child's own line carries the phase its run is in, and the batch id it
     // waits on is the run record's own fact (read by reference, `context_read`):
@@ -540,7 +555,7 @@ describe('task_read', () => {
     // The root's own line is still its own run's: the child's phase is the
     // child's, and one line never borrows another run's phase.
     expect(result).toMatch(/run r-root \[running\] — phase active/)
-    expect((store.snapshot.runs.find(run => run.runId === 'r-child-1'))?.batchId).toBe('b-t-child-1')
+    expect((store.snapshot.runs.find(run => run.runId === 'r-child-1'))?.batchId).toBe('b-r-child-1-p-1')
   })
 })
 
@@ -569,9 +584,9 @@ describe('task_decompose', () => {
     ctx.taskRuntime.continueProposal.mockResolvedValue({
       proposalId: 'p-1',
       status: 'admitted',
-      batchId: 'b-t-root',
+      batchId: 'b-r-root-p-1',
       childTaskIds: ['t-child-1', 't-child-2'],
-      detail: 'admitted as batch b-t-root',
+      detail: 'admitted as batch b-r-root-p-1',
     })
     const tool = defineTaskDecomposeTool(ctx as never)
     const result = (await tool.execute({ reason: 'split the work', children }, { agent: { id: 'root-1' }, signal } as never)) as string
@@ -589,7 +604,7 @@ describe('task_decompose', () => {
     expect(ctx.taskRuntime.continueProposal).toHaveBeenCalledExactlyOnceWith('sg-t-root-1', 'p-1', 'root-1', {})
     // The tool returns at admission (A3 §3.1) and says so: it reports the batch
     // that was admitted, not outcomes nobody has produced yet.
-    expect(result).toContain('decomposed t-root into 2 children (batch b-t-root):')
+    expect(result).toContain('decomposed t-root into 2 children (batch b-r-root-p-1):')
     expect(result).toContain('- child 1: t-child-1')
     expect(result).toContain('- child 2: t-child-2')
     expect(result).toContain('does not wait for the batch')
@@ -601,21 +616,28 @@ describe('task_decompose', () => {
     ctx.taskRuntime.continueProposal.mockResolvedValue({
       proposalId: 'p-1',
       status: 'admitted',
-      batchId: 'b-t-root',
+      batchId: 'b-r-root-p-1',
       childTaskIds: ['t-child-1'],
-      detail: 'admitted as batch b-t-root',
+      detail: 'admitted as batch b-r-root-p-1',
     })
     const tool = defineTaskDecomposeTool(ctx as never)
     const result = (await tool.execute({ reason: 'split the work', children }, exec('root-1'))) as string
 
-    // The model-visible behaviour contract (§3.8): the batch id, the phase the
-    // caller is now in, what is still allowed, and that settlement is announced
-    // — everything the caller needs to not write into the children's checkout.
-    expect(result).toContain('The runtime owns batch b-t-root now')
+    // The model-visible behaviour contract (§3.8, K1 §2): the batch id, the phase
+    // the caller is now in, what is still allowed, and that the batch end hands
+    // execution back without submitting anything — everything the caller needs to
+    // not write into the children's checkout and to know the submission is its own.
+    expect(result).toContain('The runtime owns batch b-r-root-p-1 now')
     expect(result).toContain('You are in phase waiting_children')
     expect(result).toContain('`task_cancel`')
     expect(result).toContain('Writes, shell commands, another decomposition and a submission of your own are refused')
-    expect(result).toContain('You are notified when the batch settles')
+    expect(result).toContain('The batch end reaches you as a message')
+    expect(result).toContain('nothing is submitted on your behalf')
+    expect(result).toContain('hand this task in yourself with `task_submit_result`')
+    // The replaced guidance is gone: the runtime never submits on the caller's
+    // behalf, so the caller is never told to leave the submission to it.
+    expect(result).not.toContain('submits this task for verification')
+    expect(result).not.toContain('needs no submission from you')
   })
 
   it('registers the call id so the batch drain does not wait for the asking call', async () => {
@@ -625,9 +647,9 @@ describe('task_decompose', () => {
     ctx.taskRuntime.continueProposal.mockResolvedValue({
       proposalId: 'p-1',
       status: 'admitted',
-      batchId: 'b-t-root',
+      batchId: 'b-r-root-p-1',
       childTaskIds: ['t-child-1'],
-      detail: 'admitted as batch b-t-root',
+      detail: 'admitted as batch b-r-root-p-1',
     })
     const tool = defineTaskDecomposeTool(ctx as never)
     await tool.execute({ reason: 'split the work', children }, { agent: { id: 'root-1' }, signal, callId: 'call-7' } as never)
@@ -689,9 +711,9 @@ describe('task_decompose', () => {
     ctx.taskRuntime.continueProposal.mockResolvedValue({
       proposalId: 'p-1',
       status: 'admitted',
-      batchId: 'b-t-root',
+      batchId: 'b-r-root-p-1',
       childTaskIds: ['t-child-1'],
-      detail: 'admitted as batch b-t-root',
+      detail: 'admitted as batch b-r-root-p-1',
     })
     const tool = defineTaskDecomposeTool(ctx as never)
     await tool.execute({ reason: 'split the work', children }, exec('root-1'))
@@ -751,9 +773,9 @@ describe('task_decompose', () => {
     ctx.taskRuntime.continueProposal.mockResolvedValue({
       proposalId: 'p-1',
       status: 'admitted',
-      batchId: 'b-t-root',
+      batchId: 'b-r-root-p-1',
       childTaskIds: ['t-child-1'],
-      detail: 'admitted as batch b-t-root',
+      detail: 'admitted as batch b-r-root-p-1',
     })
     const declared = [
       {
@@ -781,9 +803,9 @@ describe('task_decompose', () => {
     ctx.taskRuntime.continueProposal.mockResolvedValue({
       proposalId: 'p-1',
       status: 'admitted',
-      batchId: 'b-t-root',
+      batchId: 'b-r-root-p-1',
       childTaskIds: ['t-child-1'],
-      detail: 'admitted as batch b-t-root',
+      detail: 'admitted as batch b-r-root-p-1',
     })
     const tool = defineTaskDecomposeTool(ctx as never)
 
@@ -1488,7 +1510,7 @@ describe('task_submit_result', () => {
   it('returns the protocol refusal as text instead of throwing', async () => {
     const { ctx } = await fixture()
     ctx.taskRuntime.submitResult = vi.fn(async () => {
-      throw new Error('task-runtime: run "r-worker" is waiting on its child batch (b-t-worker); a parent cannot submit while its children are still running')
+      throw new Error('task-runtime: run "r-worker" is waiting on its child batch (b-r-worker-p-1); a parent cannot submit while its children are still running')
     }) as never
     const tool = defineTaskSubmitResultTool(ctx as never)
     const result = (await tool.execute(submission, exec('s-worker'))) as string
@@ -1504,7 +1526,7 @@ describe('task_cancel', () => {
     ctx.taskRuntime.runForSession.mockImplementation(async () => ({
       storeId: 'sg-t-root-1',
       task: workerTask,
-      run: { ...workerRun, executionPhase: 'waiting_children', batchId: 'b-t-worker' },
+      run: { ...workerRun, executionPhase: 'waiting_children', batchId: 'b-r-worker-p-1' },
     }) as never)
     return { ctx }
   }
@@ -1519,8 +1541,8 @@ describe('task_cancel', () => {
     const tool = defineTaskCancelTool(ctx as never)
     const result = (await tool.execute({ reason: 'the plan changed' }, exec('s-worker'))) as string
 
-    expect(cancelBatch).toHaveBeenCalledExactlyOnceWith('sg-t-root-1', 'b-t-worker', 's-worker')
-    expect(result).toContain('cancelled batch b-t-worker (the plan changed):')
+    expect(cancelBatch).toHaveBeenCalledExactlyOnceWith('sg-t-root-1', 'b-r-worker-p-1', 's-worker')
+    expect(result).toContain('cancelled batch b-r-worker-p-1 (the plan changed):')
     expect(result).toContain('- t-child-1: cancelled run r-child-1')
     expect(result).toContain('- t-child-2: blocked')
   })
@@ -1541,7 +1563,7 @@ describe('task_cancel', () => {
   it('returns the runtime refusal as text instead of throwing', async () => {
     const { ctx } = await waitingRun()
     ctx.taskRuntime.cancelBatch = vi.fn(async () => {
-      throw new Error('task-runtime: batch "b-t-worker" is not being driven by this process')
+      throw new Error('task-runtime: batch "b-r-worker-p-1" is not being driven by this process')
     }) as never
     const tool = defineTaskCancelTool(ctx as never)
     const result = (await tool.execute({}, exec('s-worker'))) as string

@@ -131,7 +131,9 @@ export interface RunStackOptions {
    * budget. `false` is the un-submitted path — the run stays `active` where a
    * submission was due — and is for the specs that are about idle meaning no
    * completion. A worker whose body decomposed is skipped either way: its run is
-   * `waiting_children`, and its batch submits for it.
+   * `waiting_children` when the body returns and only comes back to `active` when
+   * the batch ends, and nothing is submitted on its behalf — the submission is
+   * the run's own to make.
    */
   readonly submit?: boolean
 }
@@ -509,8 +511,9 @@ class RunStackImpl implements RunStack {
    * then the submission a live worker owes — the run is handed in before the
    * agent is idle again, so the runtime's `whenIdle` observation already sees a
    * terminal run and never marks a no-progress round. A body that decomposed
-   * leaves the run `waiting_children`: its batch submits for it, and a second
-   * submission from the worker would be refused by the protocol anyway.
+   * leaves the run `waiting_children`, so this turn submits nothing: the batch
+   * ends on its own and hands the run back `active`, and a submission from the
+   * fixture then would be the run's own to make rather than the batch's.
    */
   private async runWorkerTurn(sessionId: SessionId, agent: Agent): Promise<void> {
     const record = agent as unknown as { status?: string }

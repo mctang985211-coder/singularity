@@ -93,12 +93,12 @@ export function defineTaskDecomposeTool(ctx: Context) {
                   },
                   childEvidence: {
                     type: 'array',
-                    description: 'Parent-level evidence map (composite mode only): which child of this decomposition batch — by 0-based position — this criterion rests on, optionally narrowed to a child criterion and an evidence reference. Judged at parent-acceptance time; an incomplete mapping fails the parent naming the missing items',
+                    description: 'Parent-level evidence map (composite mode only): which member of this run — by 0-based position in the run\'s accumulated members, every batch it admits in admission order — this criterion rests on, optionally narrowed to a child criterion and an evidence reference. Judged at parent-acceptance time; an incomplete mapping fails the parent naming the missing items',
                     items: {
                       type: 'object',
                       additionalProperties: false,
                       properties: {
-                        childIndex: { type: 'integer', required: true, description: '0-based position of the child in this decomposition batch' },
+                        childIndex: { type: 'integer', required: true, description: '0-based position of the member in the run\'s accumulated members: the batches this run admits, concatenated in admission order, so a later batch appends and never moves an earlier member' },
                         criterionId: { type: 'string', description: 'The child criterion whose passing verdict is required' },
                         evidenceRef: { type: 'string', description: 'The evidence id, artifact kind, or artifact id that must exist in the child\'s verified run evidence' },
                       },
@@ -250,13 +250,14 @@ function admittedText(taskId: string, batchId: string, childTaskIds: readonly st
     `decomposed ${taskId} into ${childTaskIds.length} children (batch ${batchId}):`,
     ...childTaskIds.map((childTaskId, index) => `- child ${index + 1}: ${childTaskId}`),
     '',
-    `The runtime owns batch ${batchId} now: it starts the children one at a time in dependency order and settles this ` +
-    'task when they are all terminal. This call returns at admission and does not wait for the batch.',
+    `The runtime owns batch ${batchId} now: it starts the children one at a time in dependency order and drives the batch to ` +
+    'its end. This call returns at admission and does not wait for the batch.',
     `You are in phase waiting_children: read and query with \`task_read\`/\`task_status\` (and diagnose or inspect), or end the ` +
     'batch with `task_cancel`. Writes, shell commands, another decomposition and a submission of your own are refused while the ' +
     'children run — do not start work that would collide with theirs in the shared checkout.',
-    'You are notified when the batch settles; the runtime then submits this task for verification on your behalf, so an idle ' +
-    'session is not a completion and needs no submission from you.',
+    'The batch end reaches you as a message naming each child\'s terminal state and evidence, and it hands your execution back: ' +
+    'nothing is submitted on your behalf. Back in phase active you continue your own work, admit another batch with ' +
+    '`task_decompose`, or hand this task in yourself with `task_submit_result` — only that submission starts its acceptance.',
   ].join('\n')
 }
 

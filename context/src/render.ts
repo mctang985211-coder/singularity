@@ -51,13 +51,14 @@ function submissionClause(submission: SubmissionRecord): string {
 }
 
 /**
- * The phase one run's line shows (A4 §7.2): a run whose stored phase is `active`
- * while a blocking question it asked is still open reads `waiting_answer`. The
- * derivation is the store's own question facts
- * ({@link blockingQuestionsOf}) — never the gate, and never a phase written
- * back: `waiting_children` keeps its own phase and its batch id beside any open
- * question, and a run whose snapshot is not at hand (or carries no question
- * index) shows the phase it has on record.
+ * The phase one run's line shows (A4 §7.2, K1 §2): a run whose stored phase is
+ * `active` while a blocking question it asked is still open reads
+ * `waiting_answer` — a batch ending never answers that question, so the block
+ * outlives the batch and shows here either way. The derivation is the store's own
+ * question facts ({@link blockingQuestionsOf}) — never the gate, and never a
+ * phase written back: `waiting_children` keeps its own phase and the batch id it
+ * is waiting on beside any open question, and a run whose snapshot is not at hand
+ * (or carries no question index) shows the phase it has on record.
  */
 function displayPhase(run: TaskRun, snapshot: TaskSnapshot | undefined): string {
   const phase = run.executionPhase as string
@@ -73,8 +74,13 @@ function blockedByQuestion(run: TaskRun, snapshot: TaskSnapshot | undefined): bo
 /**
  * The phase, batch, submission and no-progress facts of one run, appended to a
  * run line: where this run sits in the protocol, in that order, with the batch
- * id only where a batch exists to name. A phase change and a progress marking
- * rewrite these fields, so this is the run's current position, never a history.
+ * id only where a batch is still open — `run.batchId` is the current unfinished
+ * batch, cleared by the batch end that returned the run to `active`, so a run
+ * back at work reads without one. The batches a run ended are its history rather
+ * than its position: they are read from the run's own record (`run.batches`,
+ * printed with it by {@link runRecordText}), not folded into every line. A phase
+ * change and a progress marking rewrite these fields, so this is the run's
+ * current position, never a history.
  *
  * `snapshot` is where the one derived word comes from: an `active` run with an
  * open blocking question reads `waiting_answer` (see {@link displayPhase}).
@@ -282,7 +288,7 @@ export function taskRecordText(task: TaskInstance): string {
     if (criterion.verifierRef !== undefined) extras.push(`  verifier: ${criterion.verifierRef}`)
     for (const child of criterion.childEvidence ?? []) {
       extras.push(
-        `  child evidence: batch child #${child.childIndex}` +
+        `  child evidence: run member #${child.childIndex}` +
           `${child.criterionId === undefined ? '' : ` criterion ${child.criterionId}`}` +
           `${child.evidenceRef === undefined ? '' : ` ref ${child.evidenceRef}`}`,
       )

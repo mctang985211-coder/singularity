@@ -144,7 +144,7 @@ function requirementParts(criterion: AcceptanceCriterion): string[] {
   if ((criterion.acceptsArtifact ?? []).length > 0) parts.push(`accepts artifact: ${criterion.acceptsArtifact!.join(', ')}`)
   if (criterion.childEvidence !== undefined && criterion.childEvidence.length > 0) {
     parts.push(`child evidence: ${criterion.childEvidence.map(item =>
-      `child ${item.childIndex}${item.criterionId === undefined ? '' : `:${item.criterionId}`}${item.evidenceRef === undefined ? '' : `#${item.evidenceRef}`}`).join(', ')}`)
+      `run member ${item.childIndex}${item.criterionId === undefined ? '' : `:${item.criterionId}`}${item.evidenceRef === undefined ? '' : `#${item.evidenceRef}`}`).join(', ')}`)
   }
   return parts
 }

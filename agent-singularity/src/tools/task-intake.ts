@@ -351,7 +351,8 @@ function activatedText(rootSessionId: string, result: Extract<RootIntakeResult, 
     '- The root task carries exactly this contract: `task_read` shows its objective, criteria, assumptions and constraints, and the',
     '  graph\'s tree grows from it.',
     '- `task_decompose` works on the root task from here on: that call was refused before this intake because no root task existed.',
-    '- The runtime submits the root task for verification when its batch settles; nothing here claims the goal is met.',
+    '- Nothing here claims the goal is met: the runtime submits nothing on your behalf. Delegate as many batches as the work needs,',
+    '  and when the goal is delivered hand the root task in yourself with `task_submit_result` — only that submission starts its acceptance.',
   ].join('\n')
 }
 

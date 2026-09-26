@@ -98,9 +98,9 @@ function fixture() {
       continueProposal: vi.fn(async () => ({
         proposalId: 'p-7',
         status: 'admitted' as const,
-        batchId: 'b-t-root',
+        batchId: 'b-r-root-p-7',
         childTaskIds: ['t-child-1', 't-child-2'],
-        detail: 'admitted as batch b-t-root',
+        detail: 'admitted as batch b-r-root-p-7',
       })),
       cancelProposal: vi.fn(async () => ({
         proposalId: 'p-7',
@@ -135,7 +135,7 @@ describe('task_proposal_read', () => {
         proposalId: 'p-7',
         proposalDigest: 'b'.repeat(64),
         reviewContextDigest: 'e'.repeat(64),
-        batchId: 'b-t-root',
+        batchId: 'b-r-root-p-7',
         childTaskIds: ['t-child-1', 't-child-2'],
         admittedAt: '2026-09-23T00:05:00.000Z',
       },
@@ -153,7 +153,7 @@ describe('task_proposal_read', () => {
     expect(result).toContain('c'.repeat(64))
     expect(result).toContain('e'.repeat(64))
     expect(result).toContain('decision: approved by approval:root-1')
-    expect(result).toContain('consumed as batch b-t-root')
+    expect(result).toContain('consumed as batch b-r-root-p-7')
     expect(result).toContain('- child 2: t-child-2')
     // The record is the only source: nothing here can claim a different status.
     expect(ctx.taskRuntime.continueProposal).not.toHaveBeenCalled()
@@ -224,9 +224,13 @@ describe('task_proposal_continue', () => {
     const result = (await tool.execute({ proposalId: 'p-7' }, exec('root-1'))) as string
 
     expect(ctx.taskRuntime.continueProposal).toHaveBeenCalledExactlyOnceWith('sg-t-root-1', 'p-7', 'root-1', {})
-    expect(result).toContain('was admitted as batch b-t-root')
+    expect(result).toContain('was admitted as batch b-r-root-p-7')
     expect(result).toContain('- child 1: t-child-1')
     expect(result).toContain('- child 2: t-child-2')
+    // K1 §2: the batch end hands the task's execution back and submits nothing, so
+    // the continuation never promises a verification the runtime would start.
+    expect(result).toContain('nothing is submitted on its behalf')
+    expect(result).not.toContain('settles this task')
   })
 
   it('registers the call id so the batch drain does not wait for the asking call', async () => {
