@@ -230,8 +230,14 @@ async function fixture(options: {
   leaveDefaultMoved?: boolean
   /** Change the capability row after the first side settled — the "provider plane moved" arm. */
   moveProviderBetweenSides?: boolean
-  /** A judge id the samples pin, so the case can re-register it with another version. */
+  /**
+   * The judge the sample criteria pin (S4-E §Q3). Default: the deployment's own
+   * registered `command` verifier. A case that needs to re-register the judge on
+   * a new version names a test double of its own.
+   */
   judge?: { id: string; version: string }
+  /** Leave the sample criteria mode-only (no `verifierRef`) — the unpinned-judge arm. */
+  unpinnedSample?: boolean
   /**
    * Re-register the pinned judge at this version on the first `replayTask` call —
    * after the experiment froze (it records the version the registry declared
@@ -270,6 +276,9 @@ async function fixture(options: {
   // registry every deployment mounts): without it a spawn that was bound to
   // content refuses, and the runs would never reach a request.
   await h.ctx.plugin(SkillRegistry, {})
+  // The judge the samples pin: the deployment's own `command` verifier unless a
+  // case names a test double of its own (only then is one registered).
+  const judge = options.judge ?? { id: 'command', version: '1' }
   let offJudge: (() => void) | undefined
   if (options.judge !== undefined) offJudge = await h.verifier.register(testJudge(options.judge.id, options.judge.version), { testDouble: true })
 
@@ -307,14 +316,14 @@ async function fixture(options: {
     taskId: FAIL_SAMPLE,
     runId: 'r-fix-history',
     objective: 'the answer file is produced',
-    acceptance: criterion('ac-fix', 'test -f fix.txt', options.judge?.id),
+    acceptance: criterion('ac-fix', 'test -f fix.txt', options.unpinnedSample === true ? undefined : judge.id),
     outcome: 'failed',
   })
   await writeSample(h, root.storeId, {
     taskId: HOLDOUT_SAMPLE,
     runId: 'r-holdout-history',
     objective: 'the held-out answer file is produced',
-    acceptance: criterion('ac-holdout', 'test -f holdout.txt', options.judge?.id),
+    acceptance: criterion('ac-holdout', 'test -f holdout.txt', options.unpinnedSample === true ? undefined : judge.id),
     outcome: 'verified',
   })
 
@@ -338,7 +347,7 @@ async function fixture(options: {
   }
   const reregister = async (version: string): Promise<void> => {
     offJudge?.()
-    offJudge = await h.verifier.register(testJudge(options.judge!.id, version), { testDouble: true })
+    offJudge = await h.verifier.register(testJudge(judge.id, version), { testDouble: true })
   }
 
   return {
@@ -520,6 +529,26 @@ describe('S4-E §Q3: the frozen identity constrains the runs that really happen'
     ) as string
     expect(answer).toContain('evolution_replay rejected:')
     expect(answer).toContain('cannot name the model selection its runs share')
+    expect(f.h.spawns).toHaveLength(0)
+    expect(await f.evolution.experiments(PROPOSAL)).toHaveLength(0)
+    const after = await f.snapshot()
+    expect(after.tasks).toHaveLength(before.tasks.length)
+    expect(after.runs).toHaveLength(before.runs.length)
+  })
+
+  it('refuses an experiment whose sample pins no verifierRef, before the first run or ledger line', async () => {
+    // The rework's Q3 counterexample at the real entry: a criterion that names
+    // only a mode would let the registry pick the judge after the freeze, so the
+    // freeze refuses it — before a spawn, a run or an `experiment_started` line.
+    const f = await fixture({ unpinnedSample: true })
+    const before = await f.snapshot()
+    const tool = defineEvolutionReplayTool(f.h.ctx)
+    const answer = await tool.execute(
+      { proposalId: PROPOSAL, taskIds: [FAIL_SAMPLE], holdoutTaskIds: [HOLDOUT_SAMPLE] },
+      { agent: { id: ROOT }, signal: new AbortController().signal } as never,
+    ) as string
+    expect(answer).toContain('evolution_replay rejected:')
+    expect(answer).toContain(`sample "${FAIL_SAMPLE}" criterion "ac-fix" pins no verifierRef`)
     expect(f.h.spawns).toHaveLength(0)
     expect(await f.evolution.experiments(PROPOSAL)).toHaveLength(0)
     const after = await f.snapshot()

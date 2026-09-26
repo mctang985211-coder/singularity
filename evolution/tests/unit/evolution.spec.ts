@@ -42,6 +42,8 @@ const FIXTURE_SELECTION = modelSelectionOf({ provider: 'p', model: 'm' })!
 const FIXTURE_MODEL = FIXTURE_SELECTION.label
 /** The registry revision the fixture's production configuration resolves to (frozen and bound alike). */
 const FIXTURE_REGISTRY_REVISION = 'r'.repeat(64)
+/** The judge every sample criterion of a frozen experiment pins, as the fixture's registry declares it. */
+const FIXTURE_JUDGE = { ref: 'command', version: '1' } as const
 
 /** The provider identity the fixture's production configuration resolves to (no rows, no skills). */
 function fixtureProviderIdentity(): FrozenProviderIdentity {
@@ -1302,7 +1304,7 @@ async function preparedSkillExperiment(options: { candidate?: string; production
       runId,
       status: outcome,
       durationMs: 3,
-      criteria: [{ criterionId, verdict: outcome === 'verified' ? 'pass' as const : 'fail' as const, verifierId: 'command' }],
+      criteria: [{ criterionId, verdict: outcome === 'verified' ? 'pass' as const : 'fail' as const, verifierId: FIXTURE_JUDGE.ref, verifierVersion: FIXTURE_JUDGE.version }],
     }
   })
   const ctx = {
@@ -1320,7 +1322,11 @@ async function preparedSkillExperiment(options: { candidate?: string; production
       workspacePathFor: vi.fn(async () => workspace),
     },
     task: { openStore: vi.fn(async () => store.snapshot()) },
-    verifier: { ready: async () => {}, verifierIds: () => [...VERIFIER_VOCABULARY] },
+    verifier: {
+      ready: async () => {},
+      verifierIds: () => [...VERIFIER_VOCABULARY],
+      verifierVersions: () => Object.fromEntries(VERIFIER_VOCABULARY.map(id => [id, FIXTURE_JUDGE.version])),
+    },
     sessionQuery: {
       readSession: async (sessionId: string) => {
         const events = store.sessions.get(sessionId)
@@ -1398,7 +1404,15 @@ function sampleCase(taskId: string, runId: string, criterionId: string, outcome:
       parentTaskId: 't-parent',
       objective: `${taskId} objective`,
       depth: 1,
-      acceptanceCriteria: [{ criterionId, description: 'works', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: 'true' }],
+      acceptanceCriteria: [{
+        criterionId,
+        description: 'works',
+        verificationMode: 'deterministic',
+        requiredEvidence: [],
+        mandatory: true,
+        command: 'true',
+        verifierRef: FIXTURE_JUDGE.ref,
+      }],
       requestedCapabilities: [],
       decompositionStatus: 'leaf',
       status: outcome,
@@ -1414,7 +1428,12 @@ function sampleCase(taskId: string, runId: string, criterionId: string, outcome:
       evidenceRefs: [`ev-${taskId}`],
       anomalies: [],
       ...(outcome === 'failed' ? { localizedCause: 'the fixture case failed' } : {}),
-      criteria: [{ criterionId, verdict: outcome === 'verified' ? 'pass' : 'fail', verifierId: 'command' }],
+      criteria: [{
+        criterionId,
+        verdict: outcome === 'verified' ? 'pass' : 'fail',
+        verifierId: FIXTURE_JUDGE.ref,
+        verifierVersion: FIXTURE_JUDGE.version,
+      }],
     },
   }
 }
@@ -1730,7 +1749,15 @@ async function recordSkillExperiment(
   await writeFile(join(workspace, 'input.txt'), 'the frozen input\n')
   const samples: FrozenSample[] = []
   const sample = (taskId: string, role: FrozenSample['role'], criterionId: string, command: string, outcome: 'verified' | 'failed') => {
-    const acceptanceCriteria = [{ criterionId, description: 'works', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command }]
+    const acceptanceCriteria = [{
+      criterionId,
+      description: 'works',
+      verificationMode: 'deterministic',
+      requiredEvidence: [],
+      mandatory: true,
+      command,
+      verifierRef: FIXTURE_JUDGE.ref,
+    }]
     rows.tasks.push({
       taskId,
       definitionRef: { taskType: 'subtask', version: 1 },
@@ -1753,8 +1780,9 @@ async function recordSkillExperiment(
         verificationMode: 'deterministic',
         command,
         protectedInputsDigest: protectedInputsDigest([]),
-        verifierRef: null,
-        verifierAnchor: 'the fixture criterion pins no verifierRef; the registry dispatches by mode',
+        verifierRef: FIXTURE_JUDGE.ref,
+        verifierVersion: FIXTURE_JUDGE.version,
+        verifierAnchor: `registered verifier "${FIXTURE_JUDGE.ref}" declares version "${FIXTURE_JUDGE.version}"`,
       }],
       observed: { outcome, runId: `r-history-${taskId}` },
       provider: fixtureProviderIdentity(),
@@ -1801,7 +1829,12 @@ async function recordSkillExperiment(
       const taskId = `t-${entry.taskId}-${side}`
       const runId = `r-${entry.taskId}-${side}`
       const verdict: 'pass' | 'fail' | 'inconclusive' = settlement === 'verified' ? 'pass' : settlement === 'failed' ? 'fail' : 'inconclusive'
-      const criteria = [{ criterionId: entry.criteria[0]!.criterionId, verdict, verifierId: 'command', verifierVersion: '1' }]
+      const criteria = [{
+        criterionId: entry.criteria[0]!.criterionId,
+        verdict,
+        verifierId: FIXTURE_JUDGE.ref,
+        verifierVersion: FIXTURE_JUDGE.version,
+      }]
       rows.tasks.push({
         taskId,
         definitionRef: { taskType: 'subtask', version: 1 },

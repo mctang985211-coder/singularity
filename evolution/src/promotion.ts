@@ -417,14 +417,14 @@ async function assertProtectedInputIntact(
  * judge the frozen block fixed *before* the run (S4-E §Q3), and whether that
  * judge is still the registered instance it was.
  *
- * The frozen half: a criterion that pinned a `verifierRef` at freeze must have
- * been decided by that ref — and, when the registry declared a version then, at
- * exactly that version — so re-registering a same-named judge with a new version
- * after the freeze is a refusal that names the frozen value. A criterion that
- * pinned nothing was dispatched by mode, which the frozen block says; there the
- * run's own verdicts name the judge, and the registry half below re-checks it.
- * Fail-closed: a deployment that cannot list its verifier vocabulary refuses
- * rather than assuming the judge is there.
+ * The frozen half: a criterion was frozen with a registered, versioned
+ * `verifierRef` — the freeze refuses anything else — so the verdict must name
+ * that ref, at exactly the frozen version. Re-registering a same-named judge
+ * with a new version after the freeze is a refusal that names the frozen value.
+ * The registry half then re-checks that the judge the verdict names is still
+ * registered at the version it judged with. Fail-closed: a deployment that
+ * cannot list its verifier vocabulary refuses rather than assuming the judge is
+ * there.
  */
 function assertJudgeUnchanged(
   sample: FrozenSample,
@@ -447,19 +447,19 @@ function assertJudgeUnchanged(
         'decided it — a verdict nobody can be recalled against is not evidence a promotion may read',
       )
     }
-    if (frozen.verifierRef !== null && criterion.verifierId !== frozen.verifierRef) {
+    if (criterion.verifierId !== frozen.verifierRef) {
       throw new Error(
         `evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" decided by verifier ` +
         `"${criterion.verifierId}", but the frozen block pinned "${frozen.verifierRef}" (${frozen.verifierAnchor}) — the verdicts a ` +
         'promotion reads must be the ones the frozen judge produced',
       )
     }
-    if (frozen.verifierRef !== null && criterion.verifierVersion !== frozen.verifierVersion) {
+    if (criterion.verifierVersion !== frozen.verifierVersion) {
       throw new Error(
         `evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" decided by "${frozen.verifierRef}" ` +
         `at version ${criterion.verifierVersion === undefined ? '(none declared)' : criterion.verifierVersion}, but the block froze it ` +
-        `at ${frozen.verifierVersion === undefined ? '(no version declared)' : frozen.verifierVersion} (${frozen.verifierAnchor}) — ` +
-        'a verdict belongs to the instance that judged, so a judge that moved since the freeze invalidates the evidence',
+        `at ${frozen.verifierVersion} (${frozen.verifierAnchor}) — a verdict belongs to the instance that judged, so a judge that ` +
+        'moved since the freeze invalidates the evidence',
       )
     }
     if (!vocabulary.ids.includes(criterion.verifierId)) {

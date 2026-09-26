@@ -94,6 +94,9 @@ export interface PromotionExperimentOptions {
 /** The registry revision this fixture's production configuration resolves to (frozen and bound alike). */
 const FIXTURE_REGISTRY_REVISION = 'r'.repeat(64)
 
+/** The judge every sample criterion pins, as the deployment's own registry declares it. */
+const FIXTURE_JUDGE = { ref: 'command', version: '1' } as const
+
 /** The provider identity this fixture's production configuration resolves to (no rows, no skills). */
 function fixtureProviderIdentity(): FrozenProviderIdentity {
   return { capabilities: [], registryRevision: FIXTURE_REGISTRY_REVISION, mcpServers: [], preset: null, skills: [] }
@@ -180,6 +183,7 @@ export async function recordPromotionExperiment(
       requiredEvidence: [],
       mandatory: true,
       command: input.command,
+      verifierRef: FIXTURE_JUDGE.ref,
       ...(protectedInput === undefined || input.role !== 'observed-failure'
         ? {}
         : { protectedInputs: [{ path: protectedInput.path, sha256: createHash('sha256').update(protectedInput.bytes).digest('hex') }] }),
@@ -242,8 +246,9 @@ export async function recordPromotionExperiment(
         verificationMode: 'deterministic',
         command: input.command,
         protectedInputsDigest: protectedInputsDigest(acceptance.protectedInputs ?? []),
-        verifierRef: null,
-        verifierAnchor: 'the fixture criterion pins no verifierRef; the registry dispatches by mode',
+        verifierRef: FIXTURE_JUDGE.ref,
+        verifierVersion: FIXTURE_JUDGE.version,
+        verifierAnchor: `registered verifier "${FIXTURE_JUDGE.ref}" declares version "${FIXTURE_JUDGE.version}"`,
       }],
       observed: { outcome: input.outcome, runId },
       provider: fixtureProviderIdentity(),
@@ -296,7 +301,12 @@ export async function recordPromotionExperiment(
       const runId = `r-${sample.taskId}-${side}`
       const criterionId = sample.criteria[0]!.criterionId
       const verdict = settlement === 'verified' ? 'pass' : settlement === 'failed' ? 'fail' : 'inconclusive'
-      const criteria = [{ criterionId, verdict, verifierId: 'command', verifierVersion: '1' }] as const
+      const criteria = [{
+        criterionId,
+        verdict,
+        verifierId: FIXTURE_JUDGE.ref,
+        verifierVersion: FIXTURE_JUDGE.version,
+      }] as const
       await context.task.createTaskIn(storeId, {
         taskId,
         definitionRef: { taskType: 'root', version: 1 },

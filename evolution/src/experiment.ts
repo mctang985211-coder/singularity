@@ -45,7 +45,11 @@
  *   preset and every resolved skill). The candidate side is compared against it
  *   with the promoted skill's own content substituted — the one difference the
  *   overlay is there to produce — and each side's criterion judge is frozen with
- *   its `verifierRef` and the version the registry declared then;
+ *   its `verifierRef` and the version the registry declared then. A criterion
+ *   that pins no ref, names one the registry does not hold, or pins one whose
+ *   version the registry does not declare is refused here, before a ledger line
+ *   and before a run: ordinary tasks keep mode dispatch, an experiment's judge
+ *   must be nameable before it starts;
  * - `frozen.comparerVersion` and `frozen.overlay` — how the verdicts are
  *   computed and what each side ran under.
  * `frozenDigest` covers the block, and the experiment id derives from it: a
@@ -334,9 +338,9 @@ export interface ExperimentSources {
   }
   /**
    * The registered judge vocabulary at freeze time (S4-E §Q3), or `undefined`
-   * when the deployment cannot list it — which is a named refusal for a
-   * criterion that pins a `verifierRef`, and is read through the same helper
-   * every provider check uses.
+   * when the deployment cannot list it — which is a named refusal for every
+   * criterion, since a frozen criterion has to pin a registered versioned
+   * verifier. Read through the same helper every provider check uses.
    */
   verifierVocabulary?(): Promise<VerifierVocabularyView | undefined>
 }
@@ -580,15 +584,12 @@ export interface VerifierVocabularyView {
  * One criterion's frozen judge identity (S4-E §Q3), read from the criterion's
  * own declaration and the registry as it stands *before* the first run.
  *
- * A pinned ref (`AcceptanceCriterion.verifierRef`) is exactly recallable: the
- * registry names the instance, and when that instance declares a version the
- * version is frozen beside it. A pinned judge that declares no version is
- * anchored by its registration id, named here. A criterion that pins no ref
- * lets the registry dispatch by `verificationMode`, which this plane cannot
- * resolve into one instance without re-implementing dispatch — so the anchor
- * says exactly that, and the gate requires the deciding judge's id and version
- * (read from the run's own verdicts) to still be registered at the version it
- * judged with.
+ * An experiment's judge must be nameable before it runs, so every criterion
+ * must pin a `verifierRef` the registry holds *and* declares a version for:
+ * the registered instance is what the verdicts are recalled against, and a
+ * criterion that leaves the choice to mode dispatch — or names a judge nobody
+ * can find or version — is refused here, before the ledger and before any run.
+ * Ordinary tasks keep mode dispatch; this rule is the experiment freeze's own.
  */
 function frozenCriterionOf(criterion: AcceptanceCriterion, where: string, vocabulary: VerifierVocabularyView | undefined): FrozenCriterion {
   const inputs = criterion.protectedInputs ?? []
@@ -601,39 +602,41 @@ function frozenCriterionOf(criterion: AcceptanceCriterion, where: string, vocabu
     }
   }
   const ref = criterion.verifierRef
-  let verifierVersion: string | undefined
-  let verifierAnchor: string
   if (ref === undefined) {
-    verifierAnchor =
-      `the criterion pins no verifierRef; the registry dispatches mode "${criterion.verificationMode}" to a registered judge, and the ` +
-      'deciding judge\'s id and version are read from the run\'s verdicts and re-checked against the registry'
-  } else if (vocabulary === undefined) {
     throw new Error(
-      `${where} pins verifier "${ref}" but this deployment cannot list its verifier registry (verifierIds()/verifierVersions() are ` +
-      'unavailable), so the judge identity cannot be frozen — an experiment whose judge nobody can name is refused before it runs',
+      `${where} criterion "${criterion.criterionId}" pins no verifierRef — the judge a verdict belongs to is fixed before the first ` +
+      'run, so a criterion that lets the registry choose by mode cannot be frozen; pin the registered, versioned verifier that decides it',
     )
-  } else if (!vocabulary.ids.includes(ref)) {
+  }
+  if (vocabulary === undefined) {
     throw new Error(
-      `${where} pins verifier "${ref}", which the registry does not hold (registered: ${vocabulary.ids.length === 0 ? 'none' : vocabulary.ids.join(', ')}) — ` +
-      'the criterion would be judged inconclusive by a judge that does not exist; name a registered verifier before freezing the experiment',
+      `${where} criterion "${criterion.criterionId}" pins verifier "${ref}" but this deployment cannot list its verifier registry ` +
+      '(verifierIds()/verifierVersions() are unavailable), so the judge identity cannot be frozen — an experiment whose judge nobody ' +
+      'can name is refused before it runs',
     )
-  } else {
-    const declared = vocabulary.versions[ref]
-    if (declared === undefined) {
-      verifierAnchor = `registered verifier "${ref}" declares no version; its registration id is the anchor the gate re-checks`
-    } else {
-      verifierVersion = declared
-      verifierAnchor = `registered verifier "${ref}" declares version "${declared}"`
-    }
+  }
+  if (!vocabulary.ids.includes(ref)) {
+    throw new Error(
+      `${where} criterion "${criterion.criterionId}" pins verifier "${ref}", which the registry does not hold ` +
+      `(registered: ${vocabulary.ids.length === 0 ? 'none' : vocabulary.ids.join(', ')}) — the criterion would be judged inconclusive ` +
+      'by a judge that does not exist; name a registered verifier before freezing the experiment',
+    )
+  }
+  const declared = vocabulary.versions[ref]
+  if (declared === undefined) {
+    throw new Error(
+      `${where} criterion "${criterion.criterionId}" pins verifier "${ref}", which the registry holds but declares no version for — ` +
+      'a verdict belongs to the instance that judged it, so a judge nobody can recall by version is refused before the experiment runs',
+    )
   }
   return {
     criterionId: criterion.criterionId,
     verificationMode: criterion.verificationMode,
     ...(criterion.command === undefined ? {} : { command: criterion.command }),
     protectedInputsDigest: protectedInputsDigest(inputs),
-    verifierRef: ref ?? null,
-    ...(verifierVersion === undefined ? {} : { verifierVersion }),
-    verifierAnchor,
+    verifierRef: ref,
+    verifierVersion: declared,
+    verifierAnchor: `registered verifier "${ref}" declares version "${declared}"`,
   }
 }
 
@@ -1129,8 +1132,9 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
   const { sandbox, candidate, proposal } = await experimentCandidate(sources, spec.proposalId)
   const { storeId, snapshot } = await experimentStore(sources, caller)
   // The judge vocabulary the criteria are frozen against, read before anything
-  // is written: a pinned verifierRef the registry does not hold is a refusal
-  // here, not an inconclusive verdict after a run.
+  // is written: a criterion that pins no ref, an unregistered one, or one the
+  // registry declares no version for is a refusal here, not an inconclusive
+  // verdict after a run.
   const vocabulary = await sources.verifierVocabulary?.()
   const samples = []
   for (const sample of spec.samples) {

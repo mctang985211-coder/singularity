@@ -70,7 +70,6 @@ export interface ReplaySideSummary {
   taskId: string
   runId?: string
   outcome: 'verified' | 'failed' | 'cancelled'
-  durationMs?: number
   criteria: ReplayCriterionSummary[]
 }
 
@@ -374,25 +373,21 @@ export interface FrozenCriterion {
   /** SHA-256 over the criterion's protected input identities (`<path>\0<sha256>` lines, sorted); the empty list hashes too. */
   protectedInputsDigest: string
   /**
-   * The judge the criterion pins (`AcceptanceCriterion.verifierRef`), or `null`
-   * when it pins none and the registry's mode dispatch chooses. A pinned ref is
-   * the only case whose *version* can be frozen before the run: the freeze reads
-   * it from the same registry the runs are judged by.
+   * The judge the criterion pins (`AcceptanceCriterion.verifierRef`), which the
+   * registry held at freeze: the freeze refuses a criterion that pins no ref or
+   * names one the registry does not hold, so this is never absent.
    */
-  verifierRef: string | null
+  verifierRef: string
   /**
-   * The pinned judge's registered version at freeze, when the registry declared
-   * one then. Absent for a judge that declares no version, and for a criterion
-   * that pins none — `verifierAnchor` says what stands in for it.
+   * The pinned judge's registered version at freeze: the freeze refuses a judge
+   * whose version the registry does not declare, so a frozen verdict is always
+   * recallable against the instance that produced it.
    */
-  verifierVersion?: string
+  verifierVersion: string
   /**
    * How this criterion's judge identity is anchored, named at freeze so a later
-   * reader never has to guess: the registered version for a pinned, versioned
-   * judge; the registration id for a pinned judge that declares no version; and
-   * for an unpinned criterion, the dispatch mode plus the rule that the deciding
-   * judge's id and version are read from the run's verdicts and re-checked
-   * against the registry.
+   * reader never has to guess: the registration id of the pinned judge and the
+   * version the registry declared for it then.
    */
   verifierAnchor: string
 }
@@ -812,14 +807,17 @@ function assertFrozenSample(value: unknown, field: string, seen: Set<string>): a
       || (criterion.command !== undefined && typeof criterion.command !== 'string') || !isHex64(criterion.protectedInputsDigest)) {
       throw new Error(`evolution: experiment report ${field} has an invalid or duplicate frozen criterion`)
     }
-    if (criterion.verifierRef !== null && (typeof criterion.verifierRef !== 'string' || criterion.verifierRef.length === 0)) {
+    if (typeof criterion.verifierRef !== 'string' || criterion.verifierRef.length === 0) {
       throw new Error(
         `evolution: experiment report ${field} criterion "${criterion.criterionId}" must pin the judge it was frozen with — ` +
-        'a criterion that names neither a ref nor "no ref" cannot be recalled against the judge that decides it',
+        'a criterion whose judge nobody can name cannot be recalled against the instance that decides it',
       )
     }
-    if (criterion.verifierVersion !== undefined && (typeof criterion.verifierVersion !== 'string' || criterion.verifierVersion.length === 0)) {
-      throw new Error(`evolution: experiment report ${field} criterion "${criterion.criterionId}" has a malformed frozen verifier version`)
+    if (typeof criterion.verifierVersion !== 'string' || criterion.verifierVersion.length === 0) {
+      throw new Error(
+        `evolution: experiment report ${field} criterion "${criterion.criterionId}" must carry the version of the pinned judge it ` +
+        'was frozen with — a verdict belongs to the instance that judged it',
+      )
     }
     if (typeof criterion.verifierAnchor !== 'string' || criterion.verifierAnchor.length === 0) {
       throw new Error(`evolution: experiment report ${field} criterion "${criterion.criterionId}" must name how its judge identity is anchored`)

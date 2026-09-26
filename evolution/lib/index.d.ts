@@ -40,7 +40,6 @@ interface ReplaySideSummary {
   taskId: string;
   runId?: string;
   outcome: 'verified' | 'failed' | 'cancelled';
-  durationMs?: number;
   criteria: ReplayCriterionSummary[];
 }
 /** One criterion whose verdict differs between the sides (absent side = the criterion exists only on the other). */
@@ -278,25 +277,21 @@ interface FrozenCriterion {
   /** SHA-256 over the criterion's protected input identities (`<path>\0<sha256>` lines, sorted); the empty list hashes too. */
   protectedInputsDigest: string;
   /**
-   * The judge the criterion pins (`AcceptanceCriterion.verifierRef`), or `null`
-   * when it pins none and the registry's mode dispatch chooses. A pinned ref is
-   * the only case whose *version* can be frozen before the run: the freeze reads
-   * it from the same registry the runs are judged by.
+   * The judge the criterion pins (`AcceptanceCriterion.verifierRef`), which the
+   * registry held at freeze: the freeze refuses a criterion that pins no ref or
+   * names one the registry does not hold, so this is never absent.
    */
-  verifierRef: string | null;
+  verifierRef: string;
   /**
-   * The pinned judge's registered version at freeze, when the registry declared
-   * one then. Absent for a judge that declares no version, and for a criterion
-   * that pins none — `verifierAnchor` says what stands in for it.
+   * The pinned judge's registered version at freeze: the freeze refuses a judge
+   * whose version the registry does not declare, so a frozen verdict is always
+   * recallable against the instance that produced it.
    */
-  verifierVersion?: string;
+  verifierVersion: string;
   /**
    * How this criterion's judge identity is anchored, named at freeze so a later
-   * reader never has to guess: the registered version for a pinned, versioned
-   * judge; the registration id for a pinned judge that declares no version; and
-   * for an unpinned criterion, the dispatch mode plus the rule that the deciding
-   * judge's id and version are read from the run's verdicts and re-checked
-   * against the registry.
+   * reader never has to guess: the registration id of the pinned judge and the
+   * version the registry declared for it then.
    */
   verifierAnchor: string;
 }
@@ -712,9 +707,9 @@ interface ExperimentSources {
   };
   /**
    * The registered judge vocabulary at freeze time (S4-E §Q3), or `undefined`
-   * when the deployment cannot list it — which is a named refusal for a
-   * criterion that pins a `verifierRef`, and is read through the same helper
-   * every provider check uses.
+   * when the deployment cannot list it — which is a named refusal for every
+   * criterion, since a frozen criterion has to pin a registered versioned
+   * verifier. Read through the same helper every provider check uses.
    */
   verifierVocabulary?(): Promise<VerifierVocabularyView | undefined>;
 }

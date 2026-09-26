@@ -126,9 +126,9 @@ interface FixtureOptions {
   /** Leave the `storeId` off the experiment record (an older line). */
   omitStoreId?: boolean
   /**
-   * Pin the samples' judge in the frozen block (S4-E §Q3): the criteria then
-   * carry this `verifierRef`, and the frozen version is read from the registry
-   * the fixture reports at freeze.
+   * The judge the frozen block pins (S4-E §Q3). Default: the registry's own
+   * `command@1` — every criterion of an experiment is frozen with a registered,
+   * versioned ref, so a fixture has to name one.
    */
   frozenJudge?: { ref: string; version?: string }
   /** The version the sides' own verdicts carry (default: the frozen one) — the re-registered-judge arm. */
@@ -198,6 +198,9 @@ async function fixture(options: FixtureOptions = {}) {
   const prepared = await svc.prepare(PROPOSAL, 'root-1')
 
   // --- the samples, as the store holds their historical contracts -----------
+  // The judge every criterion is frozen with (S4-E §Q3): the registered
+  // `command` verifier at the version this deployment declares.
+  const judge = { ref: options.frozenJudge?.ref ?? 'command', version: options.frozenJudge?.version ?? VERIFIER_VERSION }
   const samples: FrozenSample[] = []
   const addSample = (input: { taskId: string; role: FrozenSample['role']; criterionId: string; command: string; outcome: 'verified' | 'failed'; protectedInputs?: { path: string; sha256: string }[] }) => {
     const acceptanceCriteria = [{
@@ -207,6 +210,7 @@ async function fixture(options: FixtureOptions = {}) {
       requiredEvidence: [],
       mandatory: true,
       command: input.command,
+      verifierRef: judge.ref,
       ...(input.protectedInputs === undefined ? {} : { protectedInputs: input.protectedInputs }),
     }]
     rows.tasks.push({
@@ -239,11 +243,9 @@ async function fixture(options: FixtureOptions = {}) {
         verificationMode: 'deterministic',
         command: input.command,
         protectedInputsDigest: protectedInputsDigest(input.protectedInputs ?? []),
-        verifierRef: options.frozenJudge?.ref ?? null,
-        ...(options.frozenJudge?.version === undefined ? {} : { verifierVersion: options.frozenJudge.version }),
-        verifierAnchor: options.frozenJudge === undefined
-          ? 'the fixture criterion pins no verifierRef; the registry dispatches by mode'
-          : `registered verifier "${options.frozenJudge.ref}" declares version "${String(options.frozenJudge.version)}"`,
+        verifierRef: judge.ref,
+        verifierVersion: judge.version,
+        verifierAnchor: `registered verifier "${judge.ref}" declares version "${judge.version}"`,
       }],
       observed: { outcome: input.outcome, runId: `r-history-${input.taskId}` },
       provider: providerIdentity(),
@@ -326,8 +328,8 @@ async function fixture(options: FixtureOptions = {}) {
       criteria: [{
         criterionId,
         verdict,
-        verifierId: options.frozenJudge?.ref ?? 'command',
-        verifierVersion: options.sideJudgeVersion ?? options.frozenJudge?.version ?? VERIFIER_VERSION,
+        verifierId: judge.ref,
+        verifierVersion: options.sideJudgeVersion ?? judge.version,
       }],
     })
     const record: ExperimentSampleRecord = {
@@ -347,8 +349,8 @@ async function fixture(options: FixtureOptions = {}) {
       criteria: [{
         criterionId,
         verdict,
-        verifierId: options.frozenJudge?.ref ?? 'command',
-        verifierVersion: options.sideJudgeVersion ?? options.frozenJudge?.version ?? VERIFIER_VERSION,
+        verifierId: judge.ref,
+        verifierVersion: options.sideJudgeVersion ?? judge.version,
       }],
       workspace: join(root, 'sandbox', PROPOSAL, `exp-${experimentId}`, sample.taskId, side),
       initialDigest: frozen.snapshot.digest,

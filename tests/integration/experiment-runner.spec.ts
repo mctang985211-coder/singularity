@@ -134,9 +134,17 @@ function rootContract(objective: string) {
   }
 }
 
-/** One command-settled criterion, as a champion task carries it. */
+/** One command-settled criterion, as a champion task carries it — pinned to the registered judge an experiment freezes with (S4-E §Q3). */
 function criterion(criterionId: string, command: string): AcceptanceCriterion {
-  return { criterionId, description: 'it holds', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command }
+  return {
+    criterionId,
+    description: 'it holds',
+    verificationMode: 'deterministic',
+    requiredEvidence: [],
+    mandatory: true,
+    command,
+    verifierRef: 'command',
+  }
 }
 
 /**

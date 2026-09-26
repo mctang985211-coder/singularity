@@ -304,8 +304,8 @@ function assertFrozenSample(value, field, seen) {
 	const criterionIds = /* @__PURE__ */ new Set();
 	for (const criterion of value.criteria) {
 		if (!isRecord$1(criterion) || typeof criterion.criterionId !== "string" || criterion.criterionId.length === 0 || criterionIds.has(criterion.criterionId) || typeof criterion.verificationMode !== "string" || criterion.verificationMode.length === 0 || criterion.command !== void 0 && typeof criterion.command !== "string" || !isHex64$1(criterion.protectedInputsDigest)) throw new Error(`evolution: experiment report ${field} has an invalid or duplicate frozen criterion`);
-		if (criterion.verifierRef !== null && (typeof criterion.verifierRef !== "string" || criterion.verifierRef.length === 0)) throw new Error(`evolution: experiment report ${field} criterion "${criterion.criterionId}" must pin the judge it was frozen with — a criterion that names neither a ref nor "no ref" cannot be recalled against the judge that decides it`);
-		if (criterion.verifierVersion !== void 0 && (typeof criterion.verifierVersion !== "string" || criterion.verifierVersion.length === 0)) throw new Error(`evolution: experiment report ${field} criterion "${criterion.criterionId}" has a malformed frozen verifier version`);
+		if (typeof criterion.verifierRef !== "string" || criterion.verifierRef.length === 0) throw new Error(`evolution: experiment report ${field} criterion "${criterion.criterionId}" must pin the judge it was frozen with — a criterion whose judge nobody can name cannot be recalled against the instance that decides it`);
+		if (typeof criterion.verifierVersion !== "string" || criterion.verifierVersion.length === 0) throw new Error(`evolution: experiment report ${field} criterion "${criterion.criterionId}" must carry the version of the pinned judge it was frozen with — a verdict belongs to the instance that judged it`);
 		if (typeof criterion.verifierAnchor !== "string" || criterion.verifierAnchor.length === 0) throw new Error(`evolution: experiment report ${field} criterion "${criterion.criterionId}" must name how its judge identity is anchored`);
 		criterionIds.add(criterion.criterionId);
 	}
@@ -696,41 +696,30 @@ function assertSampleRole(sample, task, review) {
 * One criterion's frozen judge identity (S4-E §Q3), read from the criterion's
 * own declaration and the registry as it stands *before* the first run.
 *
-* A pinned ref (`AcceptanceCriterion.verifierRef`) is exactly recallable: the
-* registry names the instance, and when that instance declares a version the
-* version is frozen beside it. A pinned judge that declares no version is
-* anchored by its registration id, named here. A criterion that pins no ref
-* lets the registry dispatch by `verificationMode`, which this plane cannot
-* resolve into one instance without re-implementing dispatch — so the anchor
-* says exactly that, and the gate requires the deciding judge's id and version
-* (read from the run's own verdicts) to still be registered at the version it
-* judged with.
+* An experiment's judge must be nameable before it runs, so every criterion
+* must pin a `verifierRef` the registry holds *and* declares a version for:
+* the registered instance is what the verdicts are recalled against, and a
+* criterion that leaves the choice to mode dispatch — or names a judge nobody
+* can find or version — is refused here, before the ledger and before any run.
+* Ordinary tasks keep mode dispatch; this rule is the experiment freeze's own.
 */
 function frozenCriterionOf(criterion, where, vocabulary) {
 	const inputs = criterion.protectedInputs ?? [];
 	for (const input of inputs) if (typeof input?.path !== "string" || input.path.length === 0 || !isHex64(input?.sha256)) throw new Error(`the sample's criterion "${criterion.criterionId}" carries a protected input that was never fixed to { path, sha256 } — an acceptance input nobody fixed is not a frozen input`);
 	const ref = criterion.verifierRef;
-	let verifierVersion;
-	let verifierAnchor;
-	if (ref === void 0) verifierAnchor = `the criterion pins no verifierRef; the registry dispatches mode "${criterion.verificationMode}" to a registered judge, and the deciding judge's id and version are read from the run's verdicts and re-checked against the registry`;
-	else if (vocabulary === void 0) throw new Error(`${where} pins verifier "${ref}" but this deployment cannot list its verifier registry (verifierIds()/verifierVersions() are unavailable), so the judge identity cannot be frozen — an experiment whose judge nobody can name is refused before it runs`);
-	else if (!vocabulary.ids.includes(ref)) throw new Error(`${where} pins verifier "${ref}", which the registry does not hold (registered: ${vocabulary.ids.length === 0 ? "none" : vocabulary.ids.join(", ")}) — the criterion would be judged inconclusive by a judge that does not exist; name a registered verifier before freezing the experiment`);
-	else {
-		const declared = vocabulary.versions[ref];
-		if (declared === void 0) verifierAnchor = `registered verifier "${ref}" declares no version; its registration id is the anchor the gate re-checks`;
-		else {
-			verifierVersion = declared;
-			verifierAnchor = `registered verifier "${ref}" declares version "${declared}"`;
-		}
-	}
+	if (ref === void 0) throw new Error(`${where} criterion "${criterion.criterionId}" pins no verifierRef — the judge a verdict belongs to is fixed before the first run, so a criterion that lets the registry choose by mode cannot be frozen; pin the registered, versioned verifier that decides it`);
+	if (vocabulary === void 0) throw new Error(`${where} criterion "${criterion.criterionId}" pins verifier "${ref}" but this deployment cannot list its verifier registry (verifierIds()/verifierVersions() are unavailable), so the judge identity cannot be frozen — an experiment whose judge nobody can name is refused before it runs`);
+	if (!vocabulary.ids.includes(ref)) throw new Error(`${where} criterion "${criterion.criterionId}" pins verifier "${ref}", which the registry does not hold (registered: ${vocabulary.ids.length === 0 ? "none" : vocabulary.ids.join(", ")}) — the criterion would be judged inconclusive by a judge that does not exist; name a registered verifier before freezing the experiment`);
+	const declared = vocabulary.versions[ref];
+	if (declared === void 0) throw new Error(`${where} criterion "${criterion.criterionId}" pins verifier "${ref}", which the registry holds but declares no version for — a verdict belongs to the instance that judged it, so a judge nobody can recall by version is refused before the experiment runs`);
 	return {
 		criterionId: criterion.criterionId,
 		verificationMode: criterion.verificationMode,
 		...criterion.command === void 0 ? {} : { command: criterion.command },
 		protectedInputsDigest: protectedInputsDigest(inputs),
-		verifierRef: ref ?? null,
-		...verifierVersion === void 0 ? {} : { verifierVersion },
-		verifierAnchor
+		verifierRef: ref,
+		verifierVersion: declared,
+		verifierAnchor: `registered verifier "${ref}" declares version "${declared}"`
 	};
 }
 /**
@@ -1541,14 +1530,14 @@ async function assertProtectedInputIntact(taskId, input, productionWorkspace) {
 * judge the frozen block fixed *before* the run (S4-E §Q3), and whether that
 * judge is still the registered instance it was.
 *
-* The frozen half: a criterion that pinned a `verifierRef` at freeze must have
-* been decided by that ref — and, when the registry declared a version then, at
-* exactly that version — so re-registering a same-named judge with a new version
-* after the freeze is a refusal that names the frozen value. A criterion that
-* pinned nothing was dispatched by mode, which the frozen block says; there the
-* run's own verdicts name the judge, and the registry half below re-checks it.
-* Fail-closed: a deployment that cannot list its verifier vocabulary refuses
-* rather than assuming the judge is there.
+* The frozen half: a criterion was frozen with a registered, versioned
+* `verifierRef` — the freeze refuses anything else — so the verdict must name
+* that ref, at exactly the frozen version. Re-registering a same-named judge
+* with a new version after the freeze is a refusal that names the frozen value.
+* The registry half then re-checks that the judge the verdict names is still
+* registered at the version it judged with. Fail-closed: a deployment that
+* cannot list its verifier vocabulary refuses rather than assuming the judge is
+* there.
 */
 function assertJudgeUnchanged(sample, detail, where, vocabulary) {
 	const frozenById = new Map(sample.criteria.map((criterion) => [criterion.criterionId, criterion]));
@@ -1556,8 +1545,8 @@ function assertJudgeUnchanged(sample, detail, where, vocabulary) {
 		const frozen = frozenById.get(criterion.criterionId);
 		if (frozen === void 0) throw new Error(`evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" of sample "${sample.taskId}", which the frozen block does not carry — a verdict outside the frozen acceptance is not evidence this promotion may read`);
 		if (criterion.verifierId === void 0) throw new Error(`evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" without the verifier that decided it — a verdict nobody can be recalled against is not evidence a promotion may read`);
-		if (frozen.verifierRef !== null && criterion.verifierId !== frozen.verifierRef) throw new Error(`evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" decided by verifier "${criterion.verifierId}", but the frozen block pinned "${frozen.verifierRef}" (${frozen.verifierAnchor}) — the verdicts a promotion reads must be the ones the frozen judge produced`);
-		if (frozen.verifierRef !== null && criterion.verifierVersion !== frozen.verifierVersion) throw new Error(`evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" decided by "${frozen.verifierRef}" at version ${criterion.verifierVersion === void 0 ? "(none declared)" : criterion.verifierVersion}, but the block froze it at ${frozen.verifierVersion === void 0 ? "(no version declared)" : frozen.verifierVersion} (${frozen.verifierAnchor}) — a verdict belongs to the instance that judged, so a judge that moved since the freeze invalidates the evidence`);
+		if (criterion.verifierId !== frozen.verifierRef) throw new Error(`evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" decided by verifier "${criterion.verifierId}", but the frozen block pinned "${frozen.verifierRef}" (${frozen.verifierAnchor}) — the verdicts a promotion reads must be the ones the frozen judge produced`);
+		if (criterion.verifierVersion !== frozen.verifierVersion) throw new Error(`evolution: the experiment report's ${where} reports criterion "${criterion.criterionId}" decided by "${frozen.verifierRef}" at version ${criterion.verifierVersion === void 0 ? "(none declared)" : criterion.verifierVersion}, but the block froze it at ${frozen.verifierVersion} (${frozen.verifierAnchor}) — a verdict belongs to the instance that judged, so a judge that moved since the freeze invalidates the evidence`);
 		if (!vocabulary.ids.includes(criterion.verifierId)) throw new Error(`evolution: the experiment report's ${where} was decided by verifier "${criterion.verifierId}", which is no longer registered (registered: ${vocabulary.ids.length === 0 ? "none" : vocabulary.ids.join(", ")}) — the judge moved, so the verdicts on record cannot be reproduced`);
 		const current = vocabulary.versions[criterion.verifierId];
 		if (criterion.verifierVersion !== current) throw new Error(`evolution: the experiment report's ${where} was decided by verifier "${criterion.verifierId}" at version ${criterion.verifierVersion === void 0 ? "(none declared)" : criterion.verifierVersion}, but the registered instance declares ${current === void 0 ? "(none)" : current} now — a verdict belongs to the instance that judged, so a re-registered version invalidates the evidence`);

@@ -55,7 +55,13 @@ interface ScriptedOutcome {
 }
 
 /** A little world: one prepared skill proposal, one store, one scripted runtime, one ledger. */
-async function world(options: { outcomes?: ScriptedOutcome[] } = {}) {
+async function world(options: {
+  outcomes?: ScriptedOutcome[]
+  /** The judge the sample criteria pin (S4-E §Q3). Default `command`; `null` leaves them mode-only. */
+  sampleJudge?: string | null
+  /** The judge vocabulary the freeze reads. Default `command@1`; `null` for a deployment that cannot list its registry. */
+  vocabulary?: { ids: string[]; versions: Record<string, string> } | null
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), 'experiment-orchestrator-'))
   const snapshotDir = join(root, 'snapshot')
   await mkdir(join(snapshotDir, 'nested'), { recursive: true })
@@ -114,6 +120,7 @@ async function world(options: { outcomes?: ScriptedOutcome[] } = {}) {
         requiredEvidence: [],
         mandatory: true,
         command: input.command,
+        ...(options.sampleJudge === null ? {} : { verifierRef: options.sampleJudge ?? 'command' }),
       }],
       requestedCapabilities: [],
       decompositionStatus: 'leaf',
@@ -185,6 +192,9 @@ async function world(options: { outcomes?: ScriptedOutcome[] } = {}) {
     evolution: ledger,
     graphs: { graphForSession: async () => ({ rootSessionId: 's-root' as never }) },
     task: { openStore: async () => snapshot() },
+    verifierVocabulary: async () => (options.vocabulary === null
+      ? undefined
+      : options.vocabulary ?? { ids: ['command'], versions: { command: '1' } }),
     taskRuntime: {
       capabilityProviderReport: async () => ({ capabilities: [], revision: 'stub-revision' }),
       listCapabilities: () => ({}),
@@ -615,6 +625,42 @@ describe('the two-sided orchestrator', () => {
       actor: 'root-1',
     }))
     expect(message).toContain('unknown key "maxRuns"')
+    expect(w.records).toHaveLength(0)
+    expect(w.calls).toHaveLength(0)
+    await rm(w.root, { recursive: true, force: true })
+  })
+
+  it('refuses a sample criterion that pins no verifierRef, before any ledger line or run', async () => {
+    // The rework's Q3 counterexample, as a persistent rule: a criterion that
+    // only names a mode lets the registry choose the judge *after* the freeze,
+    // so the freeze — not the promotion gate — has to refuse it.
+    const w = await world({ sampleJudge: null })
+    const message = await refusal(runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' }))
+    expect(message).toContain('sample "t-fix" criterion "ac-fix" pins no verifierRef')
+    expect(w.records).toHaveLength(0)
+    expect(w.calls).toHaveLength(0)
+    expect(w.tasks.filter(task => task.taskId.startsWith('t-replay-'))).toHaveLength(0)
+    await rm(w.root, { recursive: true, force: true })
+  })
+
+  it('refuses a pinned verifier the registry does not hold, before any ledger line or run', async () => {
+    const w = await world({ sampleJudge: 'ghost-verifier' })
+    const message = await refusal(runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' }))
+    expect(message).toContain('sample "t-fix" criterion "ac-fix" pins verifier "ghost-verifier"')
+    expect(message).toContain('the registry does not hold')
+    expect(message).toContain('registered: command')
+    expect(w.records).toHaveLength(0)
+    expect(w.calls).toHaveLength(0)
+    await rm(w.root, { recursive: true, force: true })
+  })
+
+  it('refuses a pinned verifier the registry declares no version for, before any ledger line or run', async () => {
+    // Registered but version-less: the verdict it produces cannot be recalled
+    // against an instance, so the experiment is refused before it runs too.
+    const w = await world({ vocabulary: { ids: ['command'], versions: {} } })
+    const message = await refusal(runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' }))
+    expect(message).toContain('sample "t-fix" criterion "ac-fix" pins verifier "command"')
+    expect(message).toContain('declares no version')
     expect(w.records).toHaveLength(0)
     expect(w.calls).toHaveLength(0)
     await rm(w.root, { recursive: true, force: true })
