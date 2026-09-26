@@ -20,7 +20,7 @@
 ## 验证
 
 - 被审版复跑：全量 unit 57 文件、1719 条通过；全量 integration 54 文件、407 条通过。复审前还定向复跑 unit 176、integration 21 条通过。
-- 复审修正后：`pnpm build`、全量 unit 57 文件、1720 条、`verify-persistence`、`agent-singularity` 的 `tsc --noEmit`、定向 integration 3 文件、21 条通过；`git diff --check` 通过。
-- 复审修正后全量 integration 两次重跑均在与本次改动无关的 `worker-contract` 等用例上异常缓慢，主动终止；**不把中断的运行记为通过**。本轮修改仅影响错误文案、原字节快照、replay options 就地校验和两个工具的不可达分支；改动后的相关 integration 3 文件、21 条通过。全量 407 条通过的证据来自修正前的被审版，不能冒充修正后的全量结果。
+- 复审修正后：`pnpm build`、全量 unit 57 文件、1720 条、全量 integration 54 文件、407 条、`verify-persistence`、`agent-singularity` 的 `tsc --noEmit`、`git diff --check` 均通过。
+- 最初两次 integration 重跑异常缓慢后主动终止；第三次完成 406/407，唯一失败在未改动的 A4 三层冷恢复测试：子任务可能已提交，测试仍要求父节点处于 `waiting_children`。单项可复现。测试现于检查该相位前暂缓子任务提交，再放行并检查消息送达和最终结算；同一全量命令重跑 407/407 通过。此修正只控制测试时序，没有修改 A4 运行时代码。
 
 Evolution 真实旧账仍是 v1，未部署或改写；切换时继续执行[持久化说明](../persistence-changes/2026-09-26-s4-e-experiment-ledger.md)的核对、原字节归档和空 v2 账启动步骤。第 13 项的唯一派发入口为[当前 prompt](../execution-prompts/13-a5-s2-e-diagnosis.md)。

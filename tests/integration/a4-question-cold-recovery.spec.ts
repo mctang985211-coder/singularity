@@ -710,6 +710,7 @@ describe('a question relayed through a waiting middle across the restart (A4-1, 
     const grandchildDown = Promise.withResolvers<void>()
     const grandchildAsked = Promise.withResolvers<void>()
     const recovered = Promise.withResolvers<void>()
+    const grandchildCanSubmit = Promise.withResolvers<void>()
     let middleSession = ''
     let grandchildSession = ''
     let middleRun: RunId = '' as RunId
@@ -787,6 +788,7 @@ describe('a question relayed through a waiting middle across the restart (A4-1, 
         }
         if (sessionId === grandchildSession) {
           return [
+            { waitFor: () => grandchildCanSubmit.promise },
             { tool: 'task_submit_result', args: { summary: 'grandchild work delivered' } },
             { text: 'grandchild: submitted' },
           ]
@@ -829,11 +831,12 @@ describe('a question relayed through a waiting middle across the restart (A4-1, 
       () => expect(second.adapter.textsOf(grandchildSession).some(text => text.includes(answerMessageText(middleAnswer.answerId, grandchildQuestionId, 'the frozen contract holds, decided one level up')))).toBe(true),
       { timeout: 20_000 },
     )
-    expect(second.copiesOf(grandchildSession, middleAnswer.messageId)).toBe(1)
     expect(second.copiesOf(ROOT, relayed!.messageId)).toBe(1)
     // The middle answered from a phase whose writes are closed and stayed there:
     // an answer releases a question, never the parent's write gate (A4 §F.1).
     expect(second.runtime.gate.phaseOf(middleSession)).toBe('waiting_children')
+    grandchildCanSubmit.resolve()
+    await vi.waitFor(() => expect(second.copiesOf(grandchildSession, middleAnswer.messageId)).toBe(1), { timeout: 20_000 })
 
     const settled = await vi.waitFor(async () => {
       const snapshot = await second.snapshot()
@@ -843,8 +846,8 @@ describe('a question relayed through a waiting middle across the restart (A4-1, 
       return snapshot
     }, { timeout: 30_000 })
     // Identity by identity: two questions, two answers, one inbox entry each, and
-    // the middle never left `waiting_children` — an answer releases a question,
-    // never the parent's write gate (A4 §F.1).
+    // the middle stayed in `waiting_children` until its child could submit:
+    // an answer releases a question, never the parent's write gate (A4 §F.1).
     expect(settled.questions?.all.map(question => question.questionId).sort()).toEqual([relayQuestionId, grandchildQuestionId].sort())
     expect(second.runtime.gate.questionsBlocked(grandchildSession)).toBe(false)
     expect(second.runtime.gate.questionsBlocked(middleSession)).toBe(false)
