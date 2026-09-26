@@ -1,0 +1,98 @@
+--- a/evolution/tests/unit/experiment.spec.ts
++++ b/evolution/tests/unit/experiment.spec.ts
+@@ -858,3 +858,78 @@
+       .not.toBe(experimentSampleKey(key))
+   })
+ })
++
++// Temporary independent review counterexamples; no production files are changed.
++import { defineEvolutionProposeTool } from '../../../agent-singularity/src/tools/evolution-propose.ts'
++
++it('review audit: direct experiment start cannot append an old version', async () => {
++  const {svc, root} = await service()
++  try {
++    const before = await readFile(svc.file, 'utf8')
++    const err = await svc.recordExperimentStart({...startedRecord(frozenFixture()), formatVersion: 1} as never).then(() => undefined, e => e)
++    expect.soft(err, 'old-version start must throw before append').toBeInstanceOf(Error)
++    expect.soft(await readFile(svc.file, 'utf8'), 'ledger bytes must stay unchanged').toBe(before)
++    await expect.soft(new EvolutionService(fixtureCtx(), {root}).list(), 'freshly written ledger must remain readable').resolves.toBeDefined()
++  } finally { await rm(root, {recursive:true, force:true}) }
++})
++
++it('review audit: direct experiment sample cannot append an old version', async () => {
++  const {svc, root} = await service()
++  try {
++    const frozen=frozenFixture(), started=startedRecord(frozen)
++    await svc.recordExperimentStart(started)
++    const before=await readFile(svc.file, 'utf8')
++    const err=await svc.recordExperimentSample({
++      formatVersion:1, kind:'experiment_sample', proposalId:'p1', experimentId:started.experimentId,
++      preparedContentDigest:frozen.candidate.sha256, sampleTaskId:'t-failure', side:'baseline', repetition:0,
++      taskId:'t-replay', runId:'r-replay', outcome:'failed', reviewRef:'t-replay#r-replay', evidenceRefs:['e-1'],
++      criteria:[{criterionId:'ac1',verdict:'fail'}],workspace:'/tmp/ws',initialDigest:frozen.snapshot.digest,
++      cost:{status:'unknown',reason:'review fixture'}, actor:'root-1',at:'2026-09-26T00:00:00.000Z'
++    } as never).then(()=>undefined,e=>e)
++    expect.soft(err).toBeInstanceOf(Error)
++    expect.soft(await readFile(svc.file,'utf8')).toBe(before)
++    await expect.soft(new EvolutionService(fixtureCtx(),{root}).list()).resolves.toBeDefined()
++  } finally { await rm(root,{recursive:true,force:true}) }
++})
++
++it('review audit: suggestion-only propose must not direct the agent into candidate', async () => {
++  const {svc,root}=await service()
++  try {
++    const tool=defineEvolutionProposeTool({evolution:svc} as never)
++    const result=await tool.execute({proposalId:'cap-suggestion',targetType:'capability',targetId:'research',baseVersion:'1',level:'L2',rationale:'record a suggestion',sourceRefs:['diagnosis:d1']},{agent:{id:'root-1'},signal:new AbortController().signal} as never)
++    expect(result).not.toContain('next: evolution_candidate')
++  } finally { await rm(root,{recursive:true,force:true}) }
++})
++
++it('review audit: v2 fold must reject a non-skill candidate', async () => {
++  const root=await mkdtemp(join(tmpdir(),'s4e-review-fold-'))
++  try {
++    const common={formatVersion:2,proposalId:'p-cap',actor:'root-1',at:'2026-09-26T00:00:00.000Z'}
++    await writeFile(join(root,'proposals.jsonl'),[
++      {...common,kind:'proposed',targetType:'capability',targetId:'research',baseVersion:'1',level:'L2',rationale:'record only',sourceRefs:['d1']},
++      {...common,kind:'candidate',versionSet:{capability:'1'}},
++    ].map(x=>JSON.stringify(x)).join('\n')+'\n')
++    await expect(new EvolutionService(fixtureCtx(),{root}).list()).rejects.toThrow()
++  } finally { await rm(root,{recursive:true,force:true}) }
++})
++
++it('review audit: an unexecutable mutation-less candidate must be refused', async () => {
++  const {svc,root}=await service()
++  try {
++    await expect(svc.candidate('p1',{skill:'1'},'root-1')).rejects.toThrow()
++  } finally { await rm(root,{recursive:true,force:true}) }
++})
++
++it('review audit: prepare must refuse a missing production Skill before writing sandbox', async () => {
++  const root=await mkdtemp(join(tmpdir(),'s4e-review-prepare-'))
++  const svc=new EvolutionService(fixtureCtx(),{root,skillRoot:join(root,'production')})
++  try {
++    await svc.propose({proposalId:'p1',targetType:'skill',targetId:'fixture-skill',baseVersion:'1',level:'L2',rationale:'replace existing',sourceRefs:['d1']},'root-1')
++    await svc.candidate('p1',{skill:'1'},'root-1',{name:'fixture-skill',content:'candidate'})
++    const before=await readFile(svc.file,'utf8')
++    const err=await svc.prepare('p1','root-1').then(()=>undefined,e=>e)
++    expect.soft(err).toBeInstanceOf(Error)
++    expect.soft(await readFile(svc.file,'utf8')).toBe(before)
++    expect.soft(await readdir(root)).not.toContain('sandbox')
++  } finally { await rm(root,{recursive:true,force:true}) }
++})
+--- a/tests/integration/replay-execution-binding.spec.ts
++++ b/tests/integration/replay-execution-binding.spec.ts
+@@ -226,3 +226,14 @@
+     expect((await replaying).status).toBe('verified')
+   })
+ })
++
++it('review audit: replayTask rejects the deleted wallTimeMs option before a Run', async () => {
++  const h=await startScriptedLoop({providers:['mock'],script:(_id,index):readonly ScriptEntry[]=>index===0?[{text:'root active'}]:[{tool:'task_submit_result',args:{summary:'done'}},{text:'worker done'}]})
++  const root=await h.begin(ROOT_CONTRACT)
++  const champion=await writeChampion(h,root.storeId,championCriterion('true'))
++  const before=await h.snapshot(root.storeId)
++  const err=await h.runtime.replayTask(root.storeId,champion.taskId,{lineage:'review-old-budget',wallTimeMs:1} as never,ROOT).then(()=>undefined,e=>e)
++  expect.soft(err,'old option must not be silently ignored').toBeInstanceOf(Error)
++  expect.soft(h.spawns).toHaveLength(0)
++  expect.soft((await h.snapshot(root.storeId)).runs).toHaveLength(before.runs.length)
++})
