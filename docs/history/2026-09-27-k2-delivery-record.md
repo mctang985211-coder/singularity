@@ -4,7 +4,8 @@
 - 基线：Singularity `274cb30`（K1 已验收）、外层 `d39f44c5d3`；开工前两仓工作树干净（外层 thirdparty/deepseek-harness 未跟踪变更保留未动）。
 - 交付：Singularity `c0c1393`（代码+测试）、`5b503d8`（guide/计划/持久化记录/本记录）及文档收口提交（见 git log）；外层指针 `b1ebb2b` 及收口指针提交（见 git log）。日期 2026-09-27。无真实模型费用、无推送、无部署。
 - 返工（2026-09-27 同日，独立审查定位四处缺口）：基线 Singularity `9ef0441`（上一交付）、外层 `5b12e0f`；返工交付 Singularity `5cba90f`（代码+测试+lib 产物）与本记录所在的文档提交（见 git log）；外层指针提交见外层 git log。触发、行为变更、红绿证据、真实进程退出机制与模拟边界见下文"返工"段。无真实模型费用、无推送、无部署。
-- 执行：实现主代理 + 三个 coder 子代理（分工见文末）。
+- 复审返工（2026-09-27 第二轮，独立复核确认的合同缺陷）：基线 Singularity `f264dc8`（上一交付）、外层 `0f50e6d`；复审返工交付 Singularity `48168ed`（代码+测试+lib 产物）与本记录所在的文档提交（见 git log）；外层指针提交见外层 git log。触发、行为变更、红绿与变异证据、独立复核结论与边界见下文"复审返工"段。无真实模型费用、无推送、无部署。
+- 执行：实现主代理 + 三个 coder 子代理（分工见文末）；复审返工为两个 coder 子代理 + 一个独立复核子代理 + 主代理。
 
 ## 新行为一句话
 
@@ -17,7 +18,7 @@
 | K2-1 | 工具 `evolution_apply`/`evolution_rollback` → `EvolutionService.apply/rollback`（evolution/src/evolution.ts:1295/1638）→ commit.ts `commitIntent` | 恰好一次：单元 evolution.spec.ts K2 段（恢复后再 apply 被状态机拒绝且账本行数不变；新鲜提交行序 `commit_intent→applied`）；工具单元 agent-singularity/tests/unit/evolution-commit-tools.spec.ts（10 例：开放意图零审批对账、无意图仍先人审、拒绝零写零账）；P3 漂移/P2 候选漂移在提交路径零写拒绝（evolution.spec.ts 既有段+K2 段）。unit 59 文件 1823 例全绿 |
 | K2-2 | `Config.commitProbe` 三窗口注入（intent-recorded/write-staged/write-renamed）+ 同目录新实例重开 → `reconcile()`；**返工后追加真实子进程 SIGKILL 证据** | 单元 evolution.spec.ts：3 窗口×{apply,rollback} 注入中断后重开对账得 completed-redone/completed-written、恰一条完成行、approvalRef 取自意图、再 reconcile 为空、tmp 残留不视为已应用；完成后重开无动作；普通异常区分用例（chmod 0555 真实写失败→无完成行、意图开放、恢复权限后 redone）。单元 commit-durability.spec.ts（返工新增 21 例：来源→意图→rename 的持久化操作顺序、来源目录链与账本目录链各自 fsync、账本/生产目录/来源/来源链 fsync 失败与来源漂移/越界/目标越界各自具名零写、staging 残留清理（提交与"仅补账"结算两处）、写失败截回与"截回也失败"具名、短写不落半行）。集成 k2-evolution-commit.spec.ts（原十例 + 返工七例：**六个真实 SIGKILL 子进程用例**（apply/rollback × 三窗口，父测试断言 signal/死 pid/意图唯一/生产完整版本/残留/补做与仅补账/恰好一条完成行）+ 一例"异常不是退出"对照 + 一例 env 门控嵌套子进程用例）。integration 57 文件 451 例全绿 + 1 例（子进程用例，普通运行跳过） |
 | K2-3 | task-runtime `precheckProviders`（checkRootContract/checkDerivedBatch/replayTask 三准入点共用）软读 `openIntentTargets`；`SingularityAgent` 启动与 `adoptRootThroughBarrier` 先对账 | 集成用例 7：意图开放时 root intake 与 decomposeAndRun 均具名拒绝 `commit-intent-open`、零新 run，同 stack 未注册任何 evolution 工具（off 不旁路），无关 skill 照常准入；屏障对账后同一入口放行；evolution_list/openIntentTargets/list 查询后账本逐字节不变。单元 provider-precheck.spec.ts +7、startup-reconcile.spec.ts 4 例（off 也启动对账）、proposal-lifecycle.spec.ts +3。已绑定 Run 版本不变：provider-version-binding.spec.ts 5 例（含不热换反例）回归全绿 |
-| K2-4 | `reconcileIntent` 第三态分支；rollback 意图前生产==已应用内容检查（evolution.ts:1657-1665） | 集成用例 8：外部篡改后屏障 warn 具名、reconcile blocked、生产原样、账本不变、意图保留、准入仍拒；用例 9：s1 applied→s2 applied→rollback s1 零写具名拒绝（生产仍 s2）→rollback s2 恢复 s1 内容。单元 evolution.spec.ts K2 段同覆盖（篡改/来源丢失/生产缺失 blocked 三态） |
+| K2-4 | `reconcileIntent` 第三态分支；rollback 意图前生产==已应用内容检查（evolution.ts `rollback` :1705-1717）；复审返工加新提交的按目标闸 `assertTargetUncommitted`（evolution.ts:1886） | 集成用例 8：外部篡改后屏障 warn 具名、reconcile blocked、生产原样、账本不变、意图保留、准入仍拒；用例 9：s1 applied→s2 applied→rollback s1 零写具名拒绝（生产仍 s2）→rollback s2 恢复 s1 内容；复审返工补两例（`tests/integration/k2-evolution-commit.spec.ts` 尾部）：同目标另一 proposal 未结意图下 apply 与 rollback 均具名拒绝（真实 `evolution_apply` 工具入口同拒绝、零行零写）、目标不同的 `Q1` 照常提交、`reconcile()` 结算后同目标恢复提交（`P3` 落盘）而陈旧者 `P2` 仍被基线拒绝。单元 evolution.spec.ts K2 段同覆盖（篡改/来源丢失/生产缺失 blocked 三态；复审返工两例同轨迹：同基线第二提案被拒、结算后恢复提交、rollback 方向同拒绝） |
 | K2-5 | formatVersion 3 load/append 版本闸；九工具+服务唯一提交入口 | 集成用例 10：v3 账重开后真工具 rollback 全链路有效；单元 ledger-version.spec.ts（v1/v2/无版本/混合具名拒绝零写）；evolution-replay-experiment.spec.ts 端到端行序含 commit_intent 且完成行 intentId/approvalRef 与意图一致。grep：`writeProduction` 无命中；生产写仅 commit.ts staging+rename。构建与公共回归见下 |
 
 ## 返工（2026-09-27 同日，独立审查定位）
@@ -55,6 +56,36 @@
 - 变异测试（复核者执行，逐项复原并校验哈希）：删账本文件 fsync / 删来源 fsync / 删 staging 清理 / 删"仅补账"目录 fsync / rename 后 fsync 退回 best-effort / 子进程改抛异常 / 清理前缀放宽为任意 `.tmp-` / 整行写改单次 `write` / 去掉子进程会话交接 / 来源链只留文件自身目录 / 删截回 / 删结算清理 / 去掉提前 confine——每一项都被对应用例变红，无存活变异。
 - 复核给出的未覆盖项记入下文"未覆盖项"。
 
+## 复审返工（2026-09-27 第二轮，独立复核确认）
+
+触发：交付后由复审确认一个合同缺陷（K2 固定行为 3/4）：`apply`/`rollback` 只检查**本 proposal** 的未结意图，进程内串行并不阻止第二个 proposal 覆盖第一个未结提交。可达轨迹：P1/P2 同目标、同 V0 基线、均已 decided；P1 的 `commit_intent` 落盘后在 `intent-recorded` 中断，生产仍是 V0；同进程 P2 自己的基线检查照样通过，写 V2 并记完成；P1 的意图随后既非旧也非新，只能 `blocked`，目标被准入长期拒绝。本票只修这一处（"新提交在写入前按生产目标检查其他 proposal 的开放意图"），未改验收、未写成边界。
+
+### 行为变更
+
+| # | 变更 | 落点 |
+|---|---|---|
+| 1 | 新提交（apply 与 rollback）在同一进程串行队列内、写入任何行或字节之前，按**生产目标**扫描其他 proposal 的未结 `commit_intent`；命中即具名拒绝（点名目标、对方意图 id、归属 proposal 与方向，写明不覆盖他人未结意图、先结算该意图，并以 `nothing was written and no commit intent was recorded` 收尾），零行零写 | `evolution/src/evolution.ts` 新增私有 `assertTargetUncommitted`（:1886），`apply`（:1357）与 `rollback`（:1703）各调用一次 |
+| 2 | 目标不同的不误挡：闸以 `commitTarget(proposal)` 与 `resolve(intent.target)` 逐目标比较；无法命名目标的 proposal（非 skill / 无 materialization）直接放行，保留其原有具名拒绝 | 同上 |
+| 3 | 陈旧注释按事实改写：`commitExclusive` 原"第二个提交会因自己的基线检查而拒绝"的说法被删（那正是本缺陷），改为"串行只在进程内 + 由按目标闸阻止第二个提交移动他人未结目标"；模块头与 apply/rollback JSDoc 同步 | `evolution/src/evolution.ts:67-74`、`:1321-1327`、`:1684-1686`、`:1930-1941`、`:1869-1885` |
+
+未新增文件、锁框架、后台队列、兼容分支或转发层；`commit.ts`、工具层、task-runtime 与 `CommitHost` 接口均未改；持久化格式未变。
+
+### 红绿证据（未修源码先复现）
+
+- 单元（`evolution/tests/unit/evolution.spec.ts` 两例；先写测试、源码未改时运行）：`2 failed | 169 skipped`，两处均为 `expected '' to contain 'another proposal\'s unsettled intent'`（`:3745`、`:3796`）——`''` 是"调用正常返回"分支，即第二个提交**没有被拒绝**、照常写入。实现后同两例通过；以最终测试字节回退源码（`git stash push -- evolution/src/evolution.ts`）复跑仍 `2 failed`，pop 后文件与整树 diff 哈希复原。
+- 集成（`tests/integration/k2-evolution-commit.spec.ts` 两例；真实服务 + 真实账本文件 + 真实生产文件 + `throwingProbe` 断点注入）：源码未改时 `2 failed | 18 skipped`，失败形态同为"第二次提交未拒绝"（`:1156`、`:1258` 收到 `''`）；实现后本文件 `19 passed | 1 skipped`（跳过的是 env 门控嵌套子进程用例）。两例覆盖：第二个 proposal 的 apply 被具名拒绝（零行零写、候选未被消费）、真实 `evolution_apply` 工具入口给出同一拒绝、不同目标（`CLEAN_SKILL` 上的 `Q1`）照常提交、`reconcile()` 结算后同目标恢复可提交（`P3` 落盘）、陈旧者（`P2`）仍被基线检查拒绝；以及 rollback 方向在他人未结 apply 意图下被拒绝、结算后旧 rollback 仍不得覆盖后续版本、`P2` 自己的 rollback 恢复其记录基线。
+- 变异（复核者执行，逐项复原并校验哈希）：闸短路为直接 `return` → 上述四例全部变红（失败形态与未修源码一致）；闸改为无条件抛错 → 既有非竞争用例变红（`applies through one commit…`、`rolls back through one commit…`、`keeps an in-process throw apart from that real exit…`、`rolls back over a formatVersion 3 ledger…`），证明它是按目标而非全局阻断。
+
+### 独立复核结论（第二轮）
+
+复核者与实现分离，自跑并复原；收工 `git status --short` 与整树 `git diff | sha256sum`（`b669123e…86cd91`）与开工一致、`git stash list` 为空（其后主代理只按复核意见改了注释措辞）：
+
+- **并发反例**：同进程 `Promise.allSettled` 让 P1（探针在 `intent-recorded` 中断）与 P2 同时提交：P2 被闸具名拒绝，生产不变、账本只多一行意图、`reconcile → ["completed-redone"]`；三个窗口（intent-recorded/write-staged/write-renamed）逐一同样被拒。未修源码下同一并发留下**两个未结意图**（`openIntentTargets` 对同一目标返回两次，`reconcile → ["completed-redone","blocked"]`），`write-renamed` 窗口下 P2 甚至真的移动了目标——即被修掉的交错。
+- **写路径审计**：`writeFileAtomic` 唯一生产调用者是 `commit.ts:473`（`commitIntent`），其调用者只有 `evolution.ts` 的 apply/rollback，九工具只经这两个服务入口；`evolution/src`+`agent-singularity/src`+`task-runtime/src` 无第二条生产 `SKILL.md` 写路径。
+- **单实例审计**：生产装配 `new EvolutionService` 只有一处（`agent-singularity/src/index.ts:199`，bundle 装配 id 唯一），闸的"进程内 fold"前提与既有单写者约束一致；注释明写不含跨进程排除。
+- **主张审计**：复核者指出两处过度声明（"settleable by nothing / permanently blocked"、"no commit moves…"），已收窄为"没有提交路径可结算该意图"与"新提交不会移动他人未结目标"（`evolution.ts:1869-1885`、`:67-74`），边界同时记入 guide §5.19。
+- 复核给出的未覆盖项记入下文"未覆盖项"。
+
 ## 删除位置
 
 - `evolution/src/evolution.ts`：`writeProduction` 方法（原 :1438-1469，两处裸 `writeFile` 写生产）整体删除；模块头与 apply/rollback JSDoc 中「生产写先于账本 append」旧陈述重写为意图先落盘规则。
@@ -88,11 +119,21 @@ ledger 单版本切换 `formatVersion: 3`（新增 `commit_intent`；`applied`/`
 - `agent-singularity` 与 `evolution` `tsc --noEmit`：exit 0；`task-runtime` tsc 仍为 8 个既有基线错误（未新增）。
 - 独立复核自跑并复原：变异测试 13 项逐一被对应用例变红（清单见"独立复核结论"），无存活变异；复核结束复核者以 `git diff | sha256sum` 与备份 `cmp` 证明工作树与其开工时逐字节一致。
 
+复审返工（`48168ed`，全部在主代理集成后重跑；复核意见已并入，工作树含本轮三份文档改动）：
+
+- `pnpm build`（packages/singularity）：exit 0；跟踪产物仅 `evolution/lib/index.{js,d.ts}` 变化（即本票触及包），其余包 lib 逐字节不变、无新增未跟踪文件。
+- `pnpm vitest run --project unit packages/singularity`（外层根）：60 文件 / 1846 例全过（返工基线 60/1844；+2 为复审返工单元例，集成与工具/准入相关用例同批回归）。
+- `pnpm vitest run --project integration packages/singularity`：57 文件 / 453 例全过 + 1 例跳过（跳过的是 env 门控嵌套子进程用例；返工基线 57/451；+2 为复审返工集成例）。
+- `pnpm run verify-persistence`：OK，4 事件根匹配；`git diff --check`（子模块与外层）：干净。
+- `agent-singularity` 与 `evolution` `tsc --noEmit`：exit 0；`task-runtime` tsc 仍为 8 个既有基线错误（错误文件与本票无关：`task-runtime/src/index.ts`、其两个单测与 `task/src/index.ts`，未新增）。
+- 独立复核自跑并复原：并发反例（三窗口 × 同目标）、双向变异（闸短路 / 闸无条件抛错）、写路径与单实例审计、修复前旧账碰撞边界、注释主张审计；以 `git status --short` 与整树 `git diff | sha256sum` 证明工作树逐字节复原（`git stash list` 为空）。
+
 ## 未覆盖项 / 已知边界
 
 - 合同明确排除：多文件与非 skill 候选的执行器（K3 范围，仍具名拒绝）；分布式锁（单进程部署约束保留）；真实模型效果实验（本票不授权）。
 - 故障证据的边界（不是行为缺口）：真实进程退出证明"崩溃点落在正确顺序上"，**死亡瞬间**由磁盘状态与子进程 pid marker 界定，没有独立 trace；断电/页缓存/存储重排用确定性 fs 操作注入断言"发了哪些持久化操作、顺序、失败处置"（只替换 `node:fs/promises` 调用，服务/账本/fold/驱动真实），它不模拟真实断电——真实 EIO 无法稳定制造。真实进程退出与 fs 注入都真正执行被测代码，未被任何 mock 替代。
 - 仍未被注入的分支（低危，均已具名抛错、其正向路径由用例覆盖）：账本 root 目录自身的 fsync 失败、账本追加前 `handle.stat()` 失败（注入层把 `stat` 直通真实实现）；"写失败后的截回"与"截回也失败"两条分支都已有用例。
+- 复审返工的边界：闸是**按目标、进程内、单写者前提**下的判定（生产装配中 `new EvolutionService` 只有一处），不含跨进程排除——与既有单写者部署约束一致，不是新增缺口。**修复前已写入**的"同一目标两个未结意图"账本仍被 fold 接受并按序对账（先者按生产状态 redone/written，后者具名 `blocked` 并保留意图；第三方恢复写前字节后可再 redone）：本票只阻止新提交造成该状态，未改旧账读入规则。工具层不在人审前另设第二闸——`evolution_apply`/`evolution_rollback` 仍先问人审，拒绝由服务在提交门口给出（工具答案文本带 `rejected:`），期间零写零行；"人审先于服务拒绝"是有意保留的现状，不是行为缺口。
 - 其余：无。
 
 ## 子代理分工
@@ -109,6 +150,13 @@ ledger 单版本切换 `formatVersion: 3`（新增 `commit_intent`；`applied`/`
 - coder B（同一子代理续跑）：真实子进程退出证据——env 门控嵌套子进程用例与机制、六个 SIGKILL 端到端用例、异常/退出对照用例、`throwingProbe` 改名与集成 spec 头部改写、`run-stack.ts` 会话交接夹具。
 - 独立审查子代理（与实现分离）：返工前定位 F1～F7（含来源目录链、写入=进程退出的措辞残留、过度声明、目标 confine 时序、结算不清理），返工后逐条复核并追加 13 项变异测试，证明每项修复都有对应用例变红、工作树复原。
 - 主代理：接口拆分与派发、自身复核（两份 review finding 由主代理定位后回派）、集成、全部公共检查、guide/计划/持久化记录/本记录同步、提交与提交信息。
+
+复审返工（2026-09-27 第二轮）：
+
+- coder A：按目标闸实现与会话内注释按事实改写、单元两例（先红后绿，含以最终测试字节回退源码复跑）；范围限定为 `evolution/src/evolution.ts` 与 `evolution/tests/unit/evolution.spec.ts`，未动集成 spec 与文档。
+- coder B：集成两例（真实服务/账本文件/生产文件 + 探针，含真实 `evolution_apply` 工具入口、不同目标不误挡、结算后恢复提交与陈旧拒绝）与集成级红证据（回退源码复跑）。
+- 独立复核子代理（与实现分离）：并发反例（三窗口 + 双目标对照）、双向变异、写路径与单实例审计、修复前旧账碰撞的边界证据、注释主张审计（指出两处过度声明），并证明工作树逐字节复原。
+- 主代理：合同与落点判定、按复核意见收窄注释措辞、公共检查、guide/计划/本记录同步、提交与提交信息、外层指针。
 
 ## 移交后续票
 

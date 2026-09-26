@@ -23,3 +23,12 @@ Evolution 外部账本 `proposals.jsonl` 的记录统一用 `formatVersion: 3`�
 - 真实进程死亡（SIGKILL，不是被捕获的异常）会在生产目录留下 `.SKILL.md.tmp-<pid>-<hex>`；提交/补做在开自己的 staging 之前清理**同一目标、同一前缀**的残留（同目录、跳过目录项、失败具名停止），其他目标的文件与第三方文件不动。
 
 验收（确定性测试，临时 fixture，零模型费用）：v1/v2/混合账零新写且加载具名拒绝（`evolution/tests/unit/ledger-version.spec.ts`）；无意图/不匹配完成行、重复开放意图 fold 具名拒绝（`evolution/tests/unit/evolution.spec.ts` K2 段）；持久化操作顺序（含来源目录链与账本新建目录链）、各 fsync 失败与来源漂移/越界/目标越界的具名零写、staging 残留清理（提交与"仅补账"结算两处）、写失败截回与截回失败具名、短写不留半行（`evolution/tests/unit/commit-durability.spec.ts`，21 例；fs 操作注入只替换 `node:fs/promises` 调用，服务/账本/fold/驱动都是真的）；新账重开、应用、回滚与崩溃窗口对账全链路（`tests/integration/k2-evolution-commit.spec.ts`，含嵌套子进程被 SIGKILL 后由新实例对账的真实进程退出用例）。
+
+## 同目标未结意图的唯一性（2026-09-27 复审返工；无格式变化）
+
+行形状不变（字段与 kind 同前），也没有新 schema 文件；本段记录的是新提交在**写前**的准入规则，由提交门而非 fold 执行：
+
+- 新提交（`apply`/`rollback`）在同一进程串行队列内、写入任何行或字节之前，按**生产目标**扫描其他 proposal 的开放 `commit_intent`；命中即具名拒绝（点名目标、对方意图 id、归属 proposal 与方向，并声明零行零写）。第二个 proposal 因此不能在第一个未结提交之上写自己的意图/生产内容——否则第一个意图的 `baselineSha256`/`contentSha256` 都不再匹配，只能 `blocked`，目标被准入长期拒绝。目标不同的不误挡；对账结算后同一目标恢复可提交。
+- fold 的既有规则不变：**同一 proposal** 同时最多一个开放意图；跨 proposal 的同目标唯一性由提交门保证（fold 只逐 proposal 折叠，不看其他 proposal 的目标）。
+- 边界（如实记录）：**修复前**写入的账本若已含"同一目标两个开放意图"，仍被 fold 接受并按序对账——先者按生产状态 redone/written，后者具名 `blocked` 并保留意图（第三方恢复写前字节后仍可 redone）。本规则只阻止新提交造成该状态，不改旧账读入。
+- 验收：`evolution/tests/unit/evolution.spec.ts` 与 `tests/integration/k2-evolution-commit.spec.ts` 各两例（同目标第二提案 apply/rollback 具名拒绝、零行零写、结算后恢复提交、陈旧者仍被基线拒绝；真实工具入口同拒绝）。
