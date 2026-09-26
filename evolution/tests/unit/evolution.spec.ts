@@ -3718,6 +3718,92 @@ describe('K2: the commit — intent, atomic write, completion', () => {
     expect(await ledgerKinds(root)).not.toContain('commit_intent')
     expect(await svc.openIntentTargets()).toEqual([])
   })
+
+  it('refuses a second apply on a target another proposal\'s open intent names, and admits one once that intent is settled', async () => {
+    const fixture = await decidedSkillFixture(P3_CANDIDATE_A)
+    const { svc, root, skillRoot } = fixture
+    const target = COMMIT_TARGET(skillRoot)
+    // s2 is prepared against the bytes s1 recorded as the baseline: its own
+    // baseline check cannot see s1's unfinished commit, only the open intent can.
+    await walkSkillToDecided(svc, 's2', P3_CANDIDATE_B)
+    const baselineSha256 = sha256Of(P3_BASELINE)
+    expect((await svc.get('s1')).prepared!.skillBaseline!.sha256).toBe(baselineSha256)
+    expect((await svc.get('s2')).prepared!.skillBaseline!.sha256).toBe(baselineSha256)
+
+    const crashing = reopenWithProbe(svc, fixture, 'intent-recorded')
+    expect(await refusalOf(crashing.apply('s1', 'root-1', 'approval:call-1')))
+      .toContain('in-process probe throw after intent-recorded')
+    const reopened = reopenWithProbe(svc, fixture)
+    const interrupted = await readFile(join(root, 'proposals.jsonl'), 'utf8')
+    expect(await readFile(target)).toEqual(Buffer.from(P3_BASELINE, 'utf8'))
+    expect((await ledgerKinds(root)).at(-1)).toBe('commit_intent')
+    expect(await reopened.openIntentTargets()).toEqual([target])
+    expect((await reopened.get('s1')).openIntent?.intentId).toBe('s1/apply')
+
+    // The second commit is refused by name, before it reads or moves anything.
+    const refusal = await refusalOf(reopened.apply('s2', 'root-1', 'approval:call-2'))
+    expect(refusal).toContain('another proposal\'s unsettled intent')
+    expect(refusal).toContain(target)
+    expect(refusal).toContain('s1/apply')
+    expect(refusal).toContain('"s1"')
+    expect(refusal).toContain('nothing was written and no commit intent was recorded')
+    expect(await readFile(target)).toEqual(Buffer.from(P3_BASELINE, 'utf8'))
+    expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(interrupted)
+    expect((await reopened.get('s2')).status).toBe('decided')
+    expect((await reopened.get('s2')).openIntent).toBeUndefined()
+    expect((await reopened.get('s1')).openIntent?.intentId).toBe('s1/apply')
+
+    // Settling s1's intent from what production holds admits commits again.
+    expect((await reopened.reconcile()).map(outcome => outcome.result)).toEqual(['completed-redone'])
+    expect(await readFile(target)).toEqual(Buffer.from(P3_CANDIDATE_A, 'utf8'))
+    expect((await reopened.get('s1')).status).toBe('applied')
+    expect(await reopened.openIntentTargets()).toEqual([])
+
+    // s2's baseline is the pre-commit bytes: the ordinary check still refuses it.
+    const settled = await readFile(join(root, 'proposals.jsonl'), 'utf8')
+    expect(await refusalOf(reopened.apply('s2', 'root-1', 'approval:call-2'))).toContain('changed since prepare')
+    expect(await readFile(target)).toEqual(Buffer.from(P3_CANDIDATE_A, 'utf8'))
+    expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(settled)
+
+    // A proposal prepared against the recovered production commits normally.
+    await walkSkillToDecided(reopened, 's3', P3_CANDIDATE_B)
+    const outcome = await reopened.apply('s3', 'root-1', 'approval:call-3')
+    expect(outcome.targets).toEqual([target])
+    expect(await readFile(target)).toEqual(Buffer.from(P3_CANDIDATE_B, 'utf8'))
+    expect((await reopened.get('s3')).status).toBe('applied')
+  })
+
+  it('refuses a rollback on a target another proposal\'s open intent names, leaving production and the ledger untouched', async () => {
+    const fixture = await decidedSkillFixture(P3_CANDIDATE_A)
+    const { svc, root, skillRoot } = fixture
+    const target = COMMIT_TARGET(skillRoot)
+    await svc.apply('s1', 'root-1', 'approval:call-1')
+    expect(await readFile(target)).toEqual(Buffer.from(P3_CANDIDATE_A, 'utf8'))
+    // s2 is prepared against what s1 applied; its unfinished apply is what stands
+    // between s1's rollback and the target.
+    await walkSkillToDecided(svc, 's2', P3_CANDIDATE_B)
+
+    const crashing = reopenWithProbe(svc, fixture, 'intent-recorded')
+    expect(await refusalOf(crashing.apply('s2', 'root-1', 'approval:call-2')))
+      .toContain('in-process probe throw after intent-recorded')
+    const reopened = reopenWithProbe(svc, fixture)
+    const interrupted = await readFile(join(root, 'proposals.jsonl'), 'utf8')
+    expect(await readFile(target)).toEqual(Buffer.from(P3_CANDIDATE_A, 'utf8'))
+    expect((await reopened.get('s2')).openIntent?.intentId).toBe('s2/apply')
+    expect(await reopened.openIntentTargets()).toEqual([target])
+
+    const refusal = await refusalOf(reopened.rollback('s1', 'root-1', 'approval:call-3'))
+    expect(refusal).toContain('another proposal\'s unsettled intent')
+    expect(refusal).toContain(target)
+    expect(refusal).toContain('s2/apply')
+    expect(refusal).toContain('"s2"')
+    expect(refusal).toContain('direction "apply"')
+    expect(refusal).toContain('nothing was written and no commit intent was recorded')
+    expect(await readFile(target)).toEqual(Buffer.from(P3_CANDIDATE_A, 'utf8'))
+    expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(interrupted)
+    expect((await reopened.get('s1')).status).toBe('applied')
+    expect((await reopened.get('s1')).openIntent).toBeUndefined()
+  })
 })
 
 describe('K2: recovery — an interruption between two durable writes leaves one open intent', () => {

@@ -2784,6 +2784,13 @@ var EvolutionService = class extends Service {
 	* the one prepare recorded. A direct service call therefore cannot bypass the
 	* check the tool already ran before asking for approval.
 	*
+	* A fresh commit also refuses, before that baseline check, a production target
+	* another proposal's open commit intent names
+	* ({@link assertTargetUncommitted}): the serial queue spans one process, and
+	* without the per-target gate the second of two proposals prepared against the
+	* same bytes would read the version the first is still committing over, pass
+	* its own baseline check and move the target.
+	*
 	* The promotion check (S1-C item 3) runs here too, before the intent is
 	* recorded: a candidate whose provider role changed while the human was
 	* deciding (a sidecar that appeared in the sandbox, a verifier that was
@@ -2812,6 +2819,7 @@ var EvolutionService = class extends Service {
 					proposal: await this.get(proposalId)
 				};
 			}
+			this.assertTargetUncommitted(proposal);
 			const promotion = await this.checkPromotion(proposalId);
 			await this.checkProductionBaseline(proposalId);
 			const bytes = await this.readVerifiedSkillCandidate(proposal);
@@ -3066,7 +3074,9 @@ var EvolutionService = class extends Service {
 	* may be papered over by restoring an old version on top of a newer one.
 	*
 	* As in {@link apply}, an open intent of this proposal is settled rather than
-	* duplicated, and the result reports the recovery.
+	* duplicated, and the result reports the recovery; an open intent of another
+	* proposal that names the same target refuses this rollback by name before
+	* anything is read or written ({@link assertTargetUncommitted}).
 	*/
 	async rollback(proposalId, actor, approvalRef) {
 		await this.assertNext(proposalId, "rolledback");
@@ -3083,6 +3093,7 @@ var EvolutionService = class extends Service {
 					proposal: await this.get(proposalId)
 				};
 			}
+			this.assertTargetUncommitted(proposal);
 			const request = this.commitRequest(proposal, "rollback", actor, approvalRef);
 			const prepared = proposal.prepared;
 			const identity = prepared.skillContent;
@@ -3207,6 +3218,33 @@ var EvolutionService = class extends Service {
 		return resolveWithin(this.skillRoot, productionSkillRelative(proposal.mutation.name));
 	}
 	/**
+	* A fresh commit of `proposal` refuses, by name, a production target another
+	* proposal's open commit intent names. {@link commitExclusive} serializes one
+	* process's commits and nothing else, so a second commit queued behind an
+	* unfinished first one would read the pre-commit bytes, pass its own baseline
+	* check and move the target, leaving the first intent with no commit path left
+	* to settle it: `blocked` by name, its target refused by admission until
+	* something restores the bytes that intent names as its baseline. The
+	* per-target gate is what stops that. It is in-process, per production target
+	* and under the deployment's existing single-writer constraint — not a
+	* distributed lock, not a queue and not a retry loop; the intent is settled
+	* first, by {@link reconcile} or by a retry of the proposal that owns it.
+	*
+	* Only a materialized skill mutation has a commit target this build may write:
+	* every other proposal keeps the named refusal its own entry produces
+	* ({@link checkPromotion}, {@link commitRequest}).
+	*/
+	assertTargetUncommitted(proposal) {
+		if (proposal.targetType !== "skill" || proposal.mutation === void 0) return;
+		const target = this.commitTarget(proposal);
+		for (const other of this.fold(this.records).values()) {
+			const intent = other.openIntent;
+			if (intent === void 0 || other.proposalId === proposal.proposalId) continue;
+			if (resolve(intent.target) !== target) continue;
+			throw new Error(`evolution: the open commit intent "${intent.intentId}" of proposal "${other.proposalId}" (direction "${intent.direction}") names the production target "${target}" — proposal "${proposal.proposalId}" does not commit over another proposal's unsettled intent; settle that intent first (reconcile, or a retry of the proposal that owns it): nothing was written and no commit intent was recorded`);
+		}
+	}
+	/**
 	* The narrow host the commit path runs on (see `commit.ts`): the roots a
 	* target and a source resolve against, the service's own verified reads — P2
 	* for a candidate, the walk-verified production read, the ledger-root read for
@@ -3232,11 +3270,13 @@ var EvolutionService = class extends Service {
 	/**
 	* Serialize one commit — its intent, its production write and its completion —
 	* behind every commit already running or queued, and behind every write the
-	* ledger funnel has not appended yet. Two proposals competing for one target
-	* therefore never interleave a read-back with another commit's rename: the
-	* second sees the first's result and refuses on its own baseline check. This
-	* is a single-process queue, not a cross-process lock: the deployment's
-	* one-writer constraint still stands, and a second process is not excluded.
+	* ledger funnel has not appended yet. This is a single-process queue, not a
+	* cross-process lock: the deployment's one-writer constraint still stands, and
+	* a second process is not excluded. Serialization is not what keeps two
+	* proposals on one target apart — a queued second commit would read the
+	* pre-commit bytes and refuse only if its own baseline check happened to
+	* disagree — so a fresh commit also refuses a target another proposal's open
+	* intent names ({@link assertTargetUncommitted}).
 	*/
 	async commitExclusive(run) {
 		const chained = this.commits.then(run);

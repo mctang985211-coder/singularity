@@ -1416,6 +1416,13 @@ declare class EvolutionService extends Service {
    * the one prepare recorded. A direct service call therefore cannot bypass the
    * check the tool already ran before asking for approval.
    *
+   * A fresh commit also refuses, before that baseline check, a production target
+   * another proposal's open commit intent names
+   * ({@link assertTargetUncommitted}): the serial queue spans one process, and
+   * without the per-target gate the second of two proposals prepared against the
+   * same bytes would read the version the first is still committing over, pass
+   * its own baseline check and move the target.
+   *
    * The promotion check (S1-C item 3) runs here too, before the intent is
    * recorded: a candidate whose provider role changed while the human was
    * deciding (a sidecar that appeared in the sandbox, a verifier that was
@@ -1575,7 +1582,9 @@ declare class EvolutionService extends Service {
    * may be papered over by restoring an old version on top of a newer one.
    *
    * As in {@link apply}, an open intent of this proposal is settled rather than
-   * duplicated, and the result reports the recovery.
+   * duplicated, and the result reports the recovery; an open intent of another
+   * proposal that names the same target refuses this rollback by name before
+   * anything is read or written ({@link assertTargetUncommitted}).
    */
   rollback(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome>;
   /**
@@ -1628,6 +1637,24 @@ declare class EvolutionService extends Service {
   /** The one production path a commit of this proposal may write: `<skillRoot>/<name>/SKILL.md`, confined to the skill root. */
   private commitTarget;
   /**
+   * A fresh commit of `proposal` refuses, by name, a production target another
+   * proposal's open commit intent names. {@link commitExclusive} serializes one
+   * process's commits and nothing else, so a second commit queued behind an
+   * unfinished first one would read the pre-commit bytes, pass its own baseline
+   * check and move the target, leaving the first intent with no commit path left
+   * to settle it: `blocked` by name, its target refused by admission until
+   * something restores the bytes that intent names as its baseline. The
+   * per-target gate is what stops that. It is in-process, per production target
+   * and under the deployment's existing single-writer constraint — not a
+   * distributed lock, not a queue and not a retry loop; the intent is settled
+   * first, by {@link reconcile} or by a retry of the proposal that owns it.
+   *
+   * Only a materialized skill mutation has a commit target this build may write:
+   * every other proposal keeps the named refusal its own entry produces
+   * ({@link checkPromotion}, {@link commitRequest}).
+   */
+  private assertTargetUncommitted;
+  /**
    * The narrow host the commit path runs on (see `commit.ts`): the roots a
    * target and a source resolve against, the service's own verified reads — P2
    * for a candidate, the walk-verified production read, the ledger-root read for
@@ -1639,11 +1666,13 @@ declare class EvolutionService extends Service {
   /**
    * Serialize one commit — its intent, its production write and its completion —
    * behind every commit already running or queued, and behind every write the
-   * ledger funnel has not appended yet. Two proposals competing for one target
-   * therefore never interleave a read-back with another commit's rename: the
-   * second sees the first's result and refuses on its own baseline check. This
-   * is a single-process queue, not a cross-process lock: the deployment's
-   * one-writer constraint still stands, and a second process is not excluded.
+   * ledger funnel has not appended yet. This is a single-process queue, not a
+   * cross-process lock: the deployment's one-writer constraint still stands, and
+   * a second process is not excluded. Serialization is not what keeps two
+   * proposals on one target apart — a queued second commit would read the
+   * pre-commit bytes and refuse only if its own baseline check happened to
+   * disagree — so a fresh commit also refuses a target another proposal's open
+   * intent names ({@link assertTargetUncommitted}).
    */
   private commitExclusive;
   /** Folded view of one proposal, or throws on an unknown id. */

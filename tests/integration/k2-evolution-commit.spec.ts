@@ -61,6 +61,7 @@ import type { CapabilityConfig, DecomposeSpec, RootContractSpec } from '../../ta
 import { EvolutionService, type CommitDirection } from '../../evolution/src/index.ts'
 import type { CommitStage } from '../../evolution/src/commit.ts'
 import { deploymentModelSelection } from '../../agent-singularity/src/index.ts'
+import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
 import { defineEvolutionListTool } from '../../agent-singularity/src/tools/evolution-list.ts'
 import { defineEvolutionRollbackTool } from '../../agent-singularity/src/tools/evolution-rollback.ts'
 import { promotionExperimentContext, recordPromotionExperiment } from '../support/promotion-experiment.ts'
@@ -87,6 +88,9 @@ const ROOT_B = 's-k2-root-b' as SessionId
 const ROOT_C = 's-k2-root-c' as SessionId
 const P1 = 'k2-p1'
 const P2 = 'k2-p2'
+const P3 = 'k2-p3'
+/** A further proposal, on the second fixture skill: never the target two proposals compete for. */
+const Q1 = 'k2-q1'
 /** The three production versions this spec moves between; each is compared byte for byte. */
 const V0 = 'K2 VERSION ZERO BODY'
 const V1 = 'K2 VERSION ONE BODY'
@@ -1110,6 +1114,189 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
     expect(lines.filter(line => line.kind === 'rolledback').map(line => line.proposalId)).toEqual([P2])
     expect(lines.filter(line => line.kind === 'applied').map(line => line.proposalId)).toEqual([P1, P2])
     expect((await svc.get(P1)).status).toBe('applied')
+    expect(await svc.openIntentTargets()).toEqual([])
+  }, 120_000)
+
+  it('refuses a fresh apply the target another proposal left open, and admits commits again once that intent is settled', async () => {
+    const directory = await sharedDirectory()
+    const h = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
+    await writeGuidanceSkill(join(h.home, 'skills'), SKILL, V0)
+    await writeGuidanceSkill(join(h.home, 'skills'), CLEAN_SKILL, V0)
+    const target = productionPath(h)
+
+    // The world the failure needs: two proposals prepared against the same
+    // production bytes — each with a promotion store of its own — and both decided
+    // while production still holds `V0`. Their recorded baselines are therefore one
+    // and the same digest, which is why P2's own baseline check cannot keep its
+    // commit off a target P1's unfinished commit also names.
+    const crash = throwingProbe()
+    const svc = evolutionOf(h, crash.probe)
+    await walkToDecided(h, svc, P1, SKILL, skillText(V1, SKILL), 's-k2-fixture-p1')
+    await walkToDecided(h, svc, P2, SKILL, skillText(V2, SKILL), 's-k2-fixture-p2')
+    expect(await productionBytes(h)).toBe(skillText(V0, SKILL))
+    expect((await svc.get(P1)).prepared!.skillBaseline!.sha256).toBe(sha256Of(skillText(V0, SKILL)))
+    expect((await svc.get(P2)).prepared!.skillBaseline!.sha256).toBe(sha256Of(skillText(V0, SKILL)))
+
+    // P1 records its intent and the process dies inside the commit: production is
+    // still `V0` and that intent is the line the commit left open.
+    crash.arm('intent-recorded')
+    await expect(svc.apply(P1, ROOT_A, 'approval:k2-apply')).rejects.toThrow(/in-process probe threw after/)
+    expect(await productionBytes(h)).toBe(skillText(V0, SKILL))
+    const interrupted = await ledgerBytes(h)
+    expect(kindsOf(await ledgerLines(h)).at(-1)).toBe('commit_intent')
+    expect(await svc.openIntentTargets()).toEqual([target])
+    expect((await svc.get(P1)).openIntent?.intentId).toBe(`${P1}/apply`)
+    expect((await svc.get(P2)).status).toBe('decided')
+    expect((await svc.get(P2)).openIntent).toBeUndefined()
+
+    // P2's commit is refused by name before it can move the target: a byte and a
+    // line of its own are what it would otherwise add while P1's intent stands.
+    const refusal = await svc.apply(P2, ROOT_A, 'approval:k2-apply')
+      .then(() => '', (error: unknown) => (error instanceof Error ? error.message : String(error)))
+    expect(refusal).toContain(target)
+    expect(refusal).toContain(`${P1}/apply`)
+    expect(refusal).toContain(`proposal "${P1}"`)
+    expect(refusal).toContain("another proposal's unsettled intent")
+    expect(refusal).toContain('nothing was written and no commit intent was recorded')
+    expect(await productionBytes(h)).toBe(skillText(V0, SKILL))
+    expect(await ledgerBytes(h)).toBe(interrupted)
+    expect(await stagingFiles(h)).toEqual([])
+    expect((await svc.get(P2)).status).toBe('decided')
+    expect((await svc.get(P2)).openIntent).toBeUndefined()
+    expect((await svc.get(P1)).openIntent?.intentId).toBe(`${P1}/apply`)
+
+    // The real entry a root agent calls answers with the same refusal: the tool
+    // returns the service's own text, not a commit — production and the ledger
+    // stand exactly as the interrupted commit left them.
+    h.rootAgent(ROOT_A).ctx.tools.register(defineEvolutionApplyTool(h.ctx))
+    const answered = await h.call(h.rootAgent(ROOT_A), 'evolution_apply', { proposalId: P2 })
+    expect(answered.isError, answered.text).toBe(false)
+    expect(answered.text).toContain('evolution_apply rejected:')
+    expect(answered.text).toContain(target)
+    expect(answered.text).toContain(`${P1}/apply`)
+    expect(answered.text).toContain("another proposal's unsettled intent")
+    expect(answered.text).toContain('nothing was written and no commit intent was recorded')
+    expect(await productionBytes(h)).toBe(skillText(V0, SKILL))
+    expect(await ledgerBytes(h)).toBe(interrupted)
+    expect(await svc.openIntentTargets()).toEqual([target])
+
+    // A target no open intent names is not blocked by the intent of another: the
+    // clean skill commits while P1's intent stays open.
+    await walkToDecided(h, svc, Q1, CLEAN_SKILL, skillText(V1, CLEAN_SKILL), 's-k2-fixture-clean')
+    await svc.apply(Q1, ROOT_A, 'approval:k2-apply')
+    expect(await productionBytes(h, CLEAN_SKILL)).toBe(skillText(V1, CLEAN_SKILL))
+    expect(await productionBytes(h)).toBe(skillText(V0, SKILL))
+    expect(await svc.openIntentTargets()).toEqual([target])
+
+    // The host's recovery entry settles the intent — production still held the
+    // version before the commit, so the write is redone — and the target it names
+    // takes commits again.
+    const outcomes = await svc.reconcile()
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]).toMatchObject({
+      intentId: `${P1}/apply`,
+      proposalId: P1,
+      direction: 'apply',
+      target,
+      result: 'completed-redone',
+    })
+    expect(await productionBytes(h)).toBe(skillText(V1, SKILL))
+    expect((await svc.get(P1)).status).toBe('applied')
+    expect(await svc.openIntentTargets()).toEqual([])
+
+    // With nothing open the stale second proposal is refused by the pre-existing
+    // rule the gate was standing on: it was evaluated against `V0`, which
+    // production no longer holds. Zero write, zero line.
+    const recovered = await ledgerBytes(h)
+    const stale = await svc.apply(P2, ROOT_A, 'approval:k2-apply')
+      .then(() => '', (error: unknown) => (error instanceof Error ? error.message : String(error)))
+    expect(stale).toContain('changed since prepare')
+    expect(await productionBytes(h)).toBe(skillText(V1, SKILL))
+    expect(await ledgerBytes(h)).toBe(recovered)
+
+    // A legal commit lands: a proposal prepared against the recovered production.
+    await walkToDecided(h, svc, P3, SKILL, skillText(V2, SKILL), 's-k2-fixture-p3')
+    await svc.apply(P3, ROOT_A, 'approval:k2-apply')
+    expect(await productionBytes(h)).toBe(skillText(V2, SKILL))
+    expect((await svc.get(P3)).status).toBe('applied')
+    expect(kindsOf(await ledgerLines(h)).slice(-2)).toEqual(['commit_intent', 'applied'])
+    expect(await svc.openIntentTargets()).toEqual([])
+  }, 120_000)
+
+  it('refuses a rollback the target another proposal left open, and restores it once that intent is settled', async () => {
+    const directory = await sharedDirectory()
+    const h = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
+    await writeGuidanceSkill(join(h.home, 'skills'), SKILL, V0)
+    const target = productionPath(h)
+    const crash = throwingProbe()
+    const svc = evolutionOf(h, crash.probe)
+
+    // `V1` lands through the real commit path, and the second proposal is prepared
+    // against what that apply left in production.
+    await walkToDecided(h, svc, P1, SKILL, skillText(V1, SKILL), 's-k2-fixture-p1')
+    await svc.apply(P1, ROOT_A, 'approval:k2-apply')
+    expect(await productionBytes(h)).toBe(skillText(V1, SKILL))
+    await walkToDecided(h, svc, P2, SKILL, skillText(V2, SKILL), 's-k2-fixture-p2')
+    expect((await svc.get(P2)).prepared!.skillBaseline!.sha256).toBe(sha256Of(skillText(V1, SKILL)))
+
+    // The later proposal's own commit records its intent and dies inside it:
+    // production still holds `V1`, the version the earlier proposal installed and
+    // the one its rollback would restore.
+    crash.arm('intent-recorded')
+    await expect(svc.apply(P2, ROOT_A, 'approval:k2-apply')).rejects.toThrow(/in-process probe threw after/)
+    expect(await productionBytes(h)).toBe(skillText(V1, SKILL))
+    const interrupted = await ledgerBytes(h)
+    expect(kindsOf(await ledgerLines(h)).at(-1)).toBe('commit_intent')
+    expect(await svc.openIntentTargets()).toEqual([target])
+    expect((await svc.get(P2)).openIntent?.intentId).toBe(`${P2}/apply`)
+
+    // The earlier proposal's rollback would restore `V0` out from under the later
+    // proposal's unsettled intent — the direction that must not read those bytes as
+    // its own to overwrite. Refused by name, no byte, no line.
+    const refusal = await svc.rollback(P1, ROOT_A, 'approval:k2-rollback')
+      .then(() => '', (error: unknown) => (error instanceof Error ? error.message : String(error)))
+    expect(refusal).toContain(target)
+    expect(refusal).toContain(`${P2}/apply`)
+    expect(refusal).toContain(`proposal "${P2}"`)
+    expect(refusal).toContain("another proposal's unsettled intent")
+    expect(refusal).toContain('nothing was written and no commit intent was recorded')
+    expect(await productionBytes(h)).toBe(skillText(V1, SKILL))
+    expect(await ledgerBytes(h)).toBe(interrupted)
+    expect(await stagingFiles(h)).toEqual([])
+    expect((await svc.get(P1)).status).toBe('applied')
+    expect((await svc.get(P1)).openIntent).toBeUndefined()
+
+    // The host settles the intent — the write the dead commit had not made is
+    // redone — and the target takes commits again.
+    const outcomes = await svc.reconcile()
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]).toMatchObject({
+      intentId: `${P2}/apply`,
+      proposalId: P2,
+      direction: 'apply',
+      target,
+      result: 'completed-redone',
+    })
+    expect(await productionBytes(h)).toBe(skillText(V2, SKILL))
+    expect((await svc.get(P2)).status).toBe('applied')
+
+    // The pre-existing rule still stands with nothing open: the earlier rollback
+    // may not overwrite the version a later proposal installed.
+    const recovered = await ledgerBytes(h)
+    const late = await svc.rollback(P1, ROOT_A, 'approval:k2-rollback')
+      .then(() => '', (error: unknown) => (error instanceof Error ? error.message : String(error)))
+    expect(late).toContain(`does not hold the content proposal "${P1}" applied`)
+    expect(late).toContain('nothing was written and no commit intent was recorded')
+    expect(await productionBytes(h)).toBe(skillText(V2, SKILL))
+    expect(await ledgerBytes(h)).toBe(recovered)
+
+    // The later proposal's own rollback restores the baseline it recorded — the
+    // earlier proposal's version.
+    const outcome = await svc.rollback(P2, ROOT_A, 'approval:k2-rollback')
+    expect(outcome.proposal.status).toBe('rolledback')
+    expect(outcome.targets).toEqual([target])
+    expect(await productionBytes(h)).toBe(skillText(V1, SKILL))
+    expect((await svc.get(P2)).status).toBe('rolledback')
     expect(await svc.openIntentTargets()).toEqual([])
   }, 120_000)
 })
