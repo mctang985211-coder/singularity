@@ -1,6 +1,6 @@
 # K1 返工记录：交还顺序、批次成员事实与两条真实入口证据（2026-09-27，待验收）
 
-合同：[K1](../execution-prompts/12a-k1-exploration.md)、[公共合同](../execution-prompts/README.md)。返工前基线：Singularity `1bf89a0`（标签 `baseline-k1-rework-20260927`）、外层 harness `bf000ae37b`。返工交付：`d86c9fd`（源码/测试/lib）+ 本记录与 guide/计划同步提交；外层 harness 子模块指针为同批提交。原[交付记录](2026-09-27-k1-delivery-record.md)保持原样；本记录取代其中“未覆盖项”1、3。
+合同：[K1](../execution-prompts/12a-k1-exploration.md)、[公共合同](../execution-prompts/README.md)。返工前基线：Singularity `1bf89a0`（标签 `baseline-k1-rework-20260927`）、外层 harness `bf000ae37b`。返工交付：`d86c9fd`（源码/测试/lib）→ `f9589e9`（本记录与 guide/计划同步）→ `b2c12b6`（测试 jobs 回调显式类型，消除新增 tsc 隐式 any；task-runtime 既有基线错误数保持 8）；外层 harness 子模块指针为同批提交。原[交付记录](2026-09-27-k1-delivery-record.md)保持原样；本记录取代其中“未覆盖项”1、3。
 
 ## 逐条复现 → 修改 → 修后结果
 
