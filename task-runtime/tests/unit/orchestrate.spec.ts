@@ -3937,7 +3937,7 @@ describe('A3 coordination', () => {
     // of that same session is the first one that can meet the job.
     let armedSession: string | undefined
     h.ctx.jobs = {
-      list: agent => (armedSession !== undefined && (agent as { id?: string } | undefined)?.id === armedSession
+      list: (agent: unknown) => (armedSession !== undefined && (agent as { id?: string } | undefined)?.id === armedSession
         ? [{ id: 'job-child', status: 'running' }]
         : []),
       kill: () => {},
@@ -4033,7 +4033,7 @@ describe('A3 coordination', () => {
     // *unconfirmed batch end* withholds the handback (K1 §2).
     let armedSession: string | undefined
     h.ctx.jobs = {
-      list: agent => (armedSession !== undefined && (agent as { id?: string } | undefined)?.id === armedSession
+      list: (agent: unknown) => (armedSession !== undefined && (agent as { id?: string } | undefined)?.id === armedSession
         ? [{ id: 'job-child', status: 'running' }]
         : []),
       kill: () => {},
