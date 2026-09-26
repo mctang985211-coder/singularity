@@ -27,7 +27,7 @@
 | 10 | A1 原独立排位 | 并入第 9 项，不单独派发 | — | 保留编号供历史引用 | 第 9 项整组验收后直接进入第 11 项 |
 | 11 | A4：父子澄清 | **已验收（2026-09-26）**：恢复期唤醒移到屏障 ready 后，A4-1～A4-5 闭合 | 实现主代理 | 本文 E/F.1、[返工交付](history/2026-09-26-a4-rework-record.md)、[唤醒收尾](history/2026-09-26-a4-barrier-wake-record.md)、[最终审核](history/2026-09-26-a4-final-review.md) | 下一项为第 12 项 S4-E |
 | 12 | S4-E：评估基础（S4 内的子票） | **已验收（2026-09-26）**：七条反例闭合；独立复审修正缺生产 Skill 的误导文本及 champion 快照字节损失 | 实现主代理 + 子代理 | 本文 F.2、[定点返工交付](history/2026-09-26-s4-e-final-closure-rework-record.md)、[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md)、[持久化说明](persistence-changes/2026-09-26-s4-e-experiment-ledger.md) | EVAL-1～EVAL-5 按最终复审关闭；下一项为第 13 项 |
-| 13 | A5 + S2-E：诊断与缺口交接（一个交付组） | **待派发**；前置 S4-E 已验收 | 实现主代理 + 窄子目标 | 本文 F.3、深入架构 §8、[当前派发 prompt](execution-prompts/13-a5-s2-e-diagnosis.md) | agent-singularity/review 按源身份触发只读复盘并保存交接；runtime 结算不等 reviewer；缺口可见与诊断失败恢复完整 |
+| 13 | A5 + S2-E：诊断与缺口交接（一个交付组） | **待派发**；前置 S4-E 已验收，合同已修订 | 实现主代理 + 窄子目标 | 本文 F.3、深入架构 §8、[当前派发 prompt](execution-prompts/13-a5-s2-e-diagnosis.md) | 失败自动、成功按需，共用精确源/尝试身份与诊断链；runtime 结算不等 reviewer；允许无改进结论，成功源不恢复 |
 | 14 | A6 + S2-R + S3：自主改进与恢复（一个交付组） | 待前置；合同已定、未实施 | 待填 | 本文 F.4 | evolution 组织有限候选路径，task-runtime 重检并恢复原图；L1/L2、能力/产物缺口、拒绝/重启/回滚均验收 |
 
 ### 五问复核：保留领域差异，直接用现成底座
@@ -40,7 +40,7 @@
 | 第 9 项 D/E：可信项目上下文与显式恢复 | 让模型读到当前契约和同 graph 证据，同时不让读取触发恢复；已存在两个真实消费者 | DSH 已有 prompt waterfall、Session query/reference、compaction；其原始查询仅按 cwd 授权，缺 graph 域 | 保留 context 的绑定/授权/投影和 runtime 的业务恢复闸；删除任何第二日志、索引、压缩器或会话恢复器；Q3 只补有界事件正文适配 |
 | 第 11 项 A4：直属父子澄清 | 子节点不确定时能问等待中的父，回答仅解除对应业务阻塞；否则递归执行会卡住或猜测 | DSH inbox、steer/followup、resume 可用；实验性 Agent Team 有 mailbox，但绑定它的 Lead/roster/task board 与现有 graph/Task 双轨，且不支持此处的独立业务 Run | 只保留 Task 问答身份/阻塞事实和最窄投递对账；复用 DSH inbox，不建通用 mailbox、聊天日志或 Team task board；删单独的提问次数预算 |
 | 第 12 项 S4-E：候选的可比验证 | 晋升 Skill 前证明确实修复且不破坏已通过任务；没有它人审缺证据 | DSH 没有 Task/Run/verifier 对照评估；GEPA 提供候选优化接口，但不直接执行本项目 Skill、权限闸和回滚 | 保留 Skill 双侧 Run 证据及现有 Task replay 执行底座；删除 Evolution v1 replay 的模型入口与生产路径，不建通用实验服务、优化器或第二套 replay runtime |
-| 第 13 项 A5：失败后自主诊断 | 让 supervisor 从失败 Review 启动、取证并交接一个有来源的改进建议 | DSH 已有 Session 查询/指标来源和 Agent 生命周期，没有 Review/Diagnosis/source 去重；OpenHands condenser 不替代领域诊断 | 保留唯一失败源、已有 reviewer ledger 的最小 claim 与 Diagnosis；直接读 DSH 观测，不强制迁出一个通用 Session 观测模块；不建 incident/分类器 |
+| 第 13 项 A5：自动及按需复盘 | 失败自动调查；成功也能由 Agent 或用户按需复盘并留下有来源的结论 | DSH 已有 Session 查询/指标来源和 Agent 生命周期，没有 Review/Diagnosis/source 去重；OpenHands condenser 不替代领域诊断 | 两类触发共用 Review 源、reviewer ledger 与 Diagnosis；直接读 DSH，不建成功价值分类器或第二条复盘链 |
 | 第 14 项 A6：能力生长与原目标再尝试 | L1/L2 缺口要由 Agent 产出候选、经独立验证和人审后恢复原目标；是自进化闭环 | DSH Skill loader/approval 可直接用；LangGraph/AutoGen/OpenHands 的状态或通信不能代替本项目 TaskRun、证据、应用/回滚账 | 保留有限 capability/Skill 候选、现有 Evolution 闸和 task-runtime 新 Run；复用原准入/执行/验证路径，不复制 scheduler、事务平台或任意对象执行器 |
 
 其他开源项目的机制可借鉴，但目前没有经接口、持久身份和权限验证后能**直接替换整票**的实现；不能因相似名称把未知兼容性记成“已复用”。若施工时发现同版本 DSH 的公开接口已完整覆盖某个拟建行为，删掉该拟建实现及验收中的内部步骤，保留外部结果与 Singularity 的领域检查。没有当前消费者的功能、配置和状态不预建。
@@ -243,21 +243,35 @@ agent-runtime 复用 live Agent.steer/followup、agents.resume 与 Session flush
 
 内部交接顺序：旧请求入口及 v1 replay 消费者清理 → 实验预算/裁判合同收紧 → 新账版本及切换拒绝 → 独立组合验收。主代理承担模型可见入口与服务直调的集成，不让单个子代理接整票。
 
-#### F.3 A5 + S2-E：按终态事实启动诊断
+#### F.3 A5 + S2-E：失败自动、成功按需，共用诊断链
 
-唯一自动触发源选 **ReviewRecord.outcome=failed**，包括没有 Run 的 blocked Task 的既有失败 Review；不另设 capability 事件触发器。能力/产物缺口继续由实际拒绝处自动持久化现有 CapabilityGapDetected/ObligationRecorded，并进入该 Review 的诊断引用，模型未响应也可读。review 模块在提交后及 graph 显式激活后扫描尚未处理的失败 Review；终态提交只发布事实，绝不 await reviewer。源键固定为 `(rootStoreId, taskId, runId 或 no-run)`，符合已有每 Run/无 Run 唯一 Review，不用 latest-review 代替指定源。
+**2026-09-26 施工合同修订，A5 尚未实施。** 自动触发只看 **ReviewRecord.outcome=failed**，包括无 Run 的 blocked Task 既有失败 Review；所有符合该条件的源进入受预算约束的诊断受理，不再叠加 `computeEscalation.required` 分类。成功 Review 不自动 spawn。Agent 可按需调用 `task_review_agent` 复盘成功或失败；用户经已有 graph 根会话提出复盘要求，由根 Agent 调同一工具，不另建用户复盘 API。两种触发共用授权、源读取、ledger、reviewer 与 Diagnosis；不预设“哪些成功值得优化”的规则。
 
-自动与手动 `task_review_agent` 共用现有 reviewer ledger、授权/升级判定与每 store 预算（默认 1）；自动只处理当前既有规则允许的失败，未获触发资格或预算不足保留源并在查询中显示 suppressed 原因，不无限重试或暗加额度。诊断本身消费根截止与可用资源；没有业务 Run 的 reviewer 不造假 Run。A5 扩展 ledger 的最小 claim/completion/interrupted 事实：单 writer 下按 store 串行检查预算与 sourceRef，持久 claim 预分配 sessionId 后才 spawn，同一 sourceRef 只能一个 claim。A2 的 beforePrompt 确认该绑定已发布且一致；旧 started 行仍按旧方式计预算。崩溃后只恢复同一 session 或记录 interrupted，不自动重铸 reviewer；明确的后续尝试仍扣原预算。此扩展不宣称跨进程原子调度。
+工具合同固定为 `task_review_agent({taskId, runId, reason?, requestKey?})`：runId 必填，字符串指明一次 Run，null 指无 Run Review；reason 是非空自由文本的可选复盘关注点，不是权限或类别。工具从可信调用会话推导 rootStoreId，源键固定为 `(rootStoreId, taskId, runId 或 no-run)`，不用 latest-review 代替指定源。用户自然语言请求由根 Agent 先查来源再选定该引用，首个 reviewer 请求包含真实源 outcome、关注点及引用。终态后的根会话仍允许此协调工具，不能重开业务 Run 或获得生产写权限；跨 graph、源不存在或 run 不匹配在 claim/spawn 前拒绝。
 
-reviewer 经 context 自主取证、写 Diagnosis（targetType 为非空开放字符串）并给出一个有来源的实验/候选建议；未知原因如实未知，不强迫输出补丁。已有 Diagnosis 关联源 Review 即交接身份，没有 Diagnosis 的 interrupted 不伪装待执行候选。未启用 A6 时交接显示 pending，查询是真实消费者，不发布无实现的执行命令。不开新 incident、分类器或策略 DSL；根因搜索顺序由 Agent 决定。通用 Session 事实直接取自 DSH，基础 Review 派生和唯一终态写入仍由 runtime 持有。
+现有 `task-runtime/src/gate.ts` 的协调清单尚无 task_review_agent，A5 须同批补这一个受限入口并验证终态实际调用；角色工具 grant、源授权、预算仍由各自所有者检查，不开放通用 spawn/shell。`task_review_pack({taskId,runId})` 同批采用必填精确源，模型 schema、现有调用方与 reviewer 消费一起更新；缺 runId 直接拒绝，不保留 latest 别名。历史 Review 列表仍可从 context 查询。
 
-验收 REV-1：一次实际失败持久化后、模型零响应时缺口与 Review 可见；自动/手动重复触发及重启仅一个 claim/session，旧账计数保留，预算耗尽明确 suppressed。REV-2：reviewer 在实际第一请求收到源身份，并能主动读取关联兄弟/证据/历史；跨 graph 拒绝，未知结论能保存。REV-3：claim 前后、spawn 前后及 Diagnosis 落库前后崩溃不重复副作用；诊断失败/模块未装配不阻止原 Run 结算。REV-4：未知 targetType 可持久读回，但 evolution_propose.fromDiagnosis 拒绝不支持的执行目标且零 ledger 写；旧记录/回滚兼容限制有记录，未开启 A6 的交接保持 pending。REV-5（观测与终态分工）：本票涉及的通用 Session 历史与指标继续使用 DSH 查询/投影，runtime 保留基础 Review 派生与唯一 `ReviewRecord` 提交，review 模块只负责事后解释和协调；没有第二次全日志扫描、第二份终态写入或因可选 review 未装配而卡住原 Run 的路径。只有两个实际消费者确需相同领域提取时才抽一个窄的只读函数，不把文件迁移本身作为验收。以真实调用方和 REV-1～REV-4 回归核对。
+能力/产物缺口继续由实际拒绝处持久化既有 CapabilityGapDetected/ObligationRecorded，并进入失败 Review 的引用；模型零响应时也可读。review 在提交后及 graph 显式激活后扫描失败源，终态提交不 await reviewer。`computeEscalation` 的旧阈值与六维判断不得再控制诊断准入；review pack 中有用的原始观测保留，删除失去消费者的 required/suppressed 推导及其工具指引，不保留第二套触发策略。
 
-内部交接顺序：指定源读取/ledger 去重 → reviewer 协调与 DSH 读取接线 → Diagnosis/交接查询 → 独立恢复验收。只在此组开始自动诊断，不提前启动候选写入。
+**去重不等于永久禁止再复盘。** 无 requestKey 时，自动扫描和显式调用共享该源的默认尝试，重复/重启返回同一 claim/session/结果，不重扣预算；reason 不同不能偷偷改正在执行或已完成请求的关注点，须具名说明冲突。同源任一尝试尚在途时，新 requestKey 返回既有在途身份，不并行另起。已有尝试终结后，调用者可显式给新的非空 requestKey 发起新复盘，连同来源/关注点一起持久化；同键不同内容拒绝，同键重试只返回原身份，自动扫描绝不生成新键。单 writer 下按 store 串行受理，先持久 claim 和预分配 sessionId，再 spawn，A2 beforePrompt 确认绑定；崩溃后只恢复同一 session 或记 interrupted。旧 started 行仍按原规则计数，不凭缺失字段猜 source/run 或去重键。
+
+自动扫描遇到该源已有尝试即只读取，不拿空 reason 覆盖显式关注点或反复报冲突。新键在已有在途时只返回其身份并明确新请求未受理，不持久化另一个排队任务；以后确需再复盘由调用者重新请求。去重查询先于新启动的预算检查，额度用尽仍可返回已完成结果。
+
+共用既有每 store 预算（默认 1）、根截止和可用资源；显式请求也不豁免、不重置预算。预算不足/截止/未装配显示具名未启动原因，不写占额度的 claim 或假 Diagnosis。默认 1 是可配置成本上限，不是一生只准复盘一次的规则；需要更多次数时由部署方显式调整已有额度，历史已用量不清零。没有业务 Run 的 reviewer 不造假 Run；不建独立预算账或成功复盘专属配额。
+
+reviewer 经 context/DSH 自主取证，按需要查看相关任务和 Session，不能限定“pack and nothing else”。Diagnosis 允许有据的改进建议、无需改进、证据不足三类自然语言结论，不为这三类新增 enum；proposals 可为空，六维 judgements 可省略，不强制逐项凑解释。既有 `observedFailure` 是持久化文本槽，成功复盘填真实观察/诉求，工具与 prompt 称“复盘观察”，不伪造失败或改 Review.outcome；本票不为改字段名重写历史账本。超时、取消、解析失败记录 interrupted/具名错误，不冒充 Agent 主动得出的 unknown Diagnosis。成功复盘也不自动获得候选权限。
+
+Diagnosis.targetType 为非空开放字符串，执行转换仍由 evolution 拒绝不支持目标且零写。只有含建议的 Diagnosis 才是 A6 交接候选，未启用 A6 时显示 pending；无建议的正常完成仅展示结论，interrupted 不伪装 pending。查询复用 `task_review_pack` 呈现指定源及 ledger 状态，通过 `context_read` 读取 Diagnosis；不建 incident/分类器/策略 DSL。Review 原终态和唯一写入仍归 runtime。
+
+验收 **REV-1**：一次真实失败持久化后、模型零响应时 Gap/Review 可读并自动受理；成功零自动 spawn，但 Agent 显式调用及用户经终态根会话请求均可调用同一链，且不依赖 escalation 阈值。预算耗尽明确未启动，零 claim/spawn，旧计数保留。**REV-2**：首请求有指定源 outcome/关注点并可主动读关联兄弟/证据/历史；跨 graph、错 run 和缺 Review 零 claim/spawn；成功源不造假失败，空建议、证据不足和按需 judgements 可保存。**REV-3**：默认自动/手动竞争、同键重复及重启仅一个 claim/session；新键同源在途不另起，终结后新键在有额度时启动，同键改内容拒绝；claim/spawn/Diagnosis 写前后崩溃不重复副作用，超时或坏输出不造假 Diagnosis。**REV-4**：未知 targetType 可重开读回而 Evolution 转换零写；无建议结论不产生 pending，含建议且 A6 关闭才显示 pending；成功原 Task/Run/Review 均不变。**REV-5**：DSH 观测与 runtime 唯一终态提交保持，reviewer 失败/未装配不阻止原结算；无第二次全日志扫描或终态写入。只有两个实际消费者确需相同领域提取才抽窄只读函数；持久字段变化及旧账限制按公共规则记录。
+
+内部交接顺序：精确源与尝试身份/ledger → 两种触发与首请求接线 → Diagnosis/交接查询 → 组合与恢复验收。只在此组开始自动诊断，不提前实现候选写入或成功优化评估器。
 
 #### F.4 A6 + S2-R + S3：候选闭环与原目标的新尝试
 
 本组保持能力缺口、产物缺口和 L1/L2 的原验收，不把目标偷换成“只改善一个已存在 Skill”。先消费 F.3 的 pending Diagnosis/源 Review，由 evolution 以该交接身份幂等启动 supervisor；绑定复用可信委派 ledger，标明协调角色及有限工具集，无业务 Run 不冒充 root。关闭 evolution 时不启动；预算不足、未知执行目标或需新增权限时保留交接并具名停止。Agent 决定组合/实现方法，人类只审证据与晋升。
+
+**复盘与恢复分离**：同一 Review 可有不同尝试产出的 Diagnosis，A6 用具体 diagnosisId 交接，不以源任务覆盖后来的结论。空建议不启动候选；成功来源的建议可被读取与分析，但不能调用 task_recover、伪造 failed 基线或改旧成功结论。S4-E 当前证明的是失败修复与不退化，不证明“成功但更快/更省”；这类目标在缺少适用的冻结指标/比较器时保留建议并具名说明评估不支持，不进入可晋升候选。A5 不顺带扩评估平台，A6 不把所有 Diagnosis 当作恢复命令；未来确有优化案例时再在 evolution 定义其最小可验证比较合同。EVO-2/3 同时验收成功源调用恢复零新 Run、未支持的优化目标零应用。
 
 **候选支持范围固定**：在 S4-E 单文件 Skill 替换之外，按当前 Evolution 格式新增一条 capability 双侧评估路径，支持恰好一条 capability 整行变更，可附一个新 Skill 目录，仅含 SKILL.md 和现有 v1 SKILL.contract.json。L1 使用已有授权工具/Skill 配置这一行；L2 由 Agent 生成附带的执行型 Skill。sidecar 必须引用已注册且独立的 verifier、resources=[]、摘要匹配，requiredTools 不超出现有授权，capabilities 包含该行。指导型 Skill 不能充执行 provider；新工具、verifier 实现、preset/runtime policy 修改和任意资源包不在本次执行范围，具名拒绝，不要求人补写。声明同名生产 Skill 已存在时拒绝新增，替换既有单文件 Skill 沿 S4-E。不扩展或复活已删除的旧 mutation/v1 replay 路径。
 

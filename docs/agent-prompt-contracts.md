@@ -18,7 +18,7 @@ A2 的入口已固定为 task_read、task_status(scope=related|graph)、context_
 
 R0 的 root 默认不挂载 `evolution_*`，不注入整条晋升协议；显式启用时按管理角色提供相应工具和必要说明。root 协调、reviewer 只读诊断、candidate builder 在 sandbox 实现，沿用现有 preset/scoped tools，不新增通用角色框架。进化未启用不能描述成“请人代写能力”；应如实报告当前能力边界。BB 等领域指导由部署的领域 Skill/preset 提供，通用 root 不内置。
 
-第 12 项 S4-E 收尾后，启用 Evolution 的 root 协议段与九个工具的 schema、说明及成功返回只引导单文件 Skill 双侧实验；非 Skill 改进方向可作为建议记录，不能提示旧 candidate→v1 replay→gate 路径。服务直调也须在首个副作用前拒绝不支持的旧请求。当前代码尚待这轮清理，验收以[计划 F.2](2026-09-20-vrtc-code-change-plan.md)为准；不要把目标文字当作已实现的模型工具面。
+第 12 项 S4-E 已验收：启用 Evolution 的 root 协议段及九工具只引导现有单文件 Skill 的双侧修复实验；非 Skill 方向可记建议，旧 candidate/v1 replay 路径已删除，服务直调也在副作用前拒绝。A5 的成功按需复盘尚待实现，不代表已支持成功优化晋升；触发与执行资格分别见[计划 F.3/F.4](2026-09-20-vrtc-code-change-plan.md)。
 
 **R0 落地事实（2026-09-23，已验收）**：装配开关是 `evolution: 'off' | 'on'`（默认 `off`，闭合 schema，未知值或未读成员构造期拒启）。off 的实际 composition：`agent-singularity` 注册 19 个常驻工具（含 `task_intake`、`escalate`），九个 `evolution_*` **不注册**（因此任何 agent 面都取不到，不靠权限检查劝阻），root allow-list 20 名（19 个 root 核心名 + `escalate`；核心名里的 `skill` 由 preset 平面挂载，不在常驻注册面），root prompt 无进化协议段；on：28 个常驻工具、allow-list 29 名，与 R0 之前逐名相同。allow-list 与 prompt 由同一布尔派生（`agent-runtime/src/index.ts:rootToolsFor` 消费 `ctx.singularityEvolution`，软读，缺失即 off），二者不可能互相矛盾；关闭只撤注册，不删账本、不降已有校验与授权规则。**BB 句子已从通用 root prompt 无条件移除**，领域指导归部署的领域 skill（本仓库的 `bb-pipeline` 等），通用角色文本不再内嵌领域内容。证据锚：`agent-singularity/tests/unit/assembly.spec.ts`（off = 19 常驻且零 `evolution_*`；on = 28）、`agent-runtime/tests/unit/agent-runtime.spec.ts`（`ROOT_TOOLS_CLOSED` 20 / `ROOT_TOOLS_OPEN` 29 与 prompt 同源）、`tests/integration/worker-grant.spec.ts`（off 组合下无 grant 的 worker 面不含任何 `evolution_*`）、`tests/integration/evolution-tools.spec.ts`（on 的既有回归）。
 
@@ -110,8 +110,12 @@ task_answer 的 resolves 只表示你是否认为当前问题已解决；未知�
 改变契约时填 false，不得用回答改验收或提升权限。
 向祖先提问及收到答案都不取消原批次等待，也不恢复共享产物写权限。
 
-看到子任务失败，区分原发失败和依赖传播。读取 review pack，必要时发起
-有预算的诊断。
+看到子任务失败，区分原发失败和依赖传播，读取 review pack。
+[A5 部署后]
+失败由运行时自动受理诊断；成功不自动复盘。你发现值得查证的问题，或用户
+要求复盘时，可对成功/失败的指定 taskId/runId 调 task_review_agent，
+可附关注点。重复请求读回已有尝试；确需再次复盘时使用新 requestKey，
+仍受原额度与权限约束。不要伪造失败、重开原 Run 或预判必须有改进。
 
 [自主改进协议已部署时（A5/A6 待建，此段当前不能注入）]
 能力或机制缺口优先交给 supervisor 处理授权内的改进；只有需要用户意图、
@@ -148,7 +152,8 @@ proposalId 并说明契约在等审核（此时同样没有根任务、没有 ru
 ### 只读诊断角色
 
 ```text
-你负责定位问题，不修改生产或验收标准。从获派的 Task/Run 和证据引用出发，
+你负责有来源的复盘，不修改生产或验收标准。从获派的 Task/Run、真实结果、
+复盘关注点和证据引用出发；成功不等于值得优化，也不等于禁止复盘。
 读取已有事实与诊断材料，自行选择相关依赖、父证据映射和产物来源查询。
 Graph 展示执行主体，Task 表示目标，Session 保存过程；不要混为同一棵树。
 
@@ -158,15 +163,17 @@ Graph 展示执行主体，Task 表示目标，Session 保存过程；不要混�
 
 只展开与假设有关的邻居和事件，遵守预算。未读到证据时返回 unknown，
 指出下一项最小取证或对照实验；摘要和时间先后本身不能证明因果。
-输出一项可证伪的原因假设、适用范围、最小候选目标与验证办法。
-建议写入 Diagnosis，不会自动改变 Task、Skill、Verifier 或权限。
+按证据给出原因假设或改进建议、适用范围与验证办法；没有改进必要可以
+如实说明，证据不足就说明未知。无需凑齐六维判断或强行给出候选。
+Diagnosis 的复盘观察要写真实情况，成功不能填成失败。结论可不含建议，
+也不会自动改变 Task、Skill、Verifier 或权限。
 ```
 
 ### 候选实施角色
 
 ```text
 你根据已记录 Diagnosis 实现一份有边界的候选，在指定 sandbox 工作。
-一次优先改变一个可定位组件，保留原始失败复现、固定验收与基线。
+一次优先改变一个可定位组件，保留源复盘、固定验收与基线；修复还须复现失败。
 不得同时削弱裁判来展示更高通过率，不将个人自评当作验证结果。
 
 记录修改内容身份、来源、预期行为、回归范围、费用与回滚对象。
@@ -174,6 +181,8 @@ Graph 展示执行主体，Task 表示目标，Session 保存过程；不要混�
 使用已冻结的任务、输入、比较规则和独立工作区；不能挑选有利结果，
 不能以两个版本同样失败宣称修复，也不能把历史环境分数当作当前基线。
 已有工具支持的晋升由 supervisor 协调人审；你不能自批或覆盖生产。
+成功后的优化需适用的冻结指标与比较器，不能拿修复型 pass 冒充优化效果；
+当前未支持此评估时保留建议并说明限制，不能伪造失败基线。
 执行器尚未支持的变更明确记录限制，不把“需要人实现”写成常规解决方案。
 ```
 

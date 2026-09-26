@@ -4,6 +4,8 @@
 
 限制的是无依据的扩展、反复选型和重复劳动，不要求 agent 少理解代码或隐瞒缺陷。Prompt 不能保证工程质量，最终仍检查实际 diff、调用方、验收与停止条件。
 
+审查触发规则时区分“何时自动启动”和“何时允许显式调用”；去重区分来源与一次请求，完成不强制产生后续动作。不要把自动策略写成能力白名单，或把诊断建议直接当作执行/晋升/恢复授权。仅在当前票有实际消费者时落实这些区分，不为此新增策略平台。
+
 派发第 11–14 项时先按[计划文首五问复核](../2026-09-20-vrtc-code-change-plan.md#五问复核保留领域差异直接用现成底座)删去无消费者、非必要或 DSH 已提供的通用机制；实现只负责剩余 Singularity 领域差异。A4 不加提问次数预算或第二 mailbox，A5 不为搬移 Session 观测新建模块。第三方相似机制若不能直接满足本项目 Task/Run/权限与持久身份，不以复制源码代替适配证明。
 
 ## 直接派发入口
@@ -47,7 +49,7 @@ docs/execution-prompts/README.md 的公共合同，以及本模板的实施约�
 | A2 + A1（已验收，历史对照） | D：读取/绑定与迁移；E：显式恢复 | Q1–Q4、A2-1–A2-6；当前见 `09-a2-a1-q3-closure.md` |
 | A4 | F.1；[已填写派发 prompt](11-a4-parent-child-clarification.md) | A4-1–A4-5，含结算归属 |
 | S4-E（已验收，历史对照） | F.2；[最终复审](../history/2026-09-26-s4-e-final-closure-rework-review.md) | EVAL-1–EVAL-5 |
-| A5 + S2-E | F.3；[当前派发 prompt](13-a5-s2-e-diagnosis.md)；E 的 DSH 观测复用及 Diagnosis 职责 | REV-1–REV-5，含观测与终态分工 |
+| A5 + S2-E | F.3；[当前派发 prompt](13-a5-s2-e-diagnosis.md)；E 的 DSH 观测复用及 Diagnosis 职责 | 修订后的 REV-1–REV-5，含失败自动/成功按需、再复盘去重、空建议与终态分工 |
 | A6 + S2-R + S3 | F.4 | EVO-1–EVO-5；EVO-1 真实 Agent 运行是整组验收条件 |
 
 ## 可填写 Prompt

@@ -41,7 +41,7 @@
 | Task 可用性 | context 组织可读事实，runtime 给出绑定、准入诊断与执行限制 | prompt 不自行猜状态；任务列表不是任意领取队列，投影不替代真实动作校验 |
 | Supervisor | 按事件启动、有预算的诊断与候选会话；只读诊断和写候选分角色 | 无每节点常驻主管；最终决定不由候选作者自批 |
 | 事实来源 | Task/Run/Evidence、Graph、DSH Session 分别拥有事实，按 id 联接 | 不将三棵图合成一棵，不复制 DSH Team task board |
-| 进化单位 | 一项已定位失败、一份候选、一组固定评估、明确回滚 | 不在一次批次同时改 Skill、裁判、阈值再宣布通过 |
+| 进化单位 | 一项有来源的改进目标、一份候选、一组适用评估、明确回滚 | 允许从成功经验提出改进；缺适用比较合同就保留建议，不伪造失败或同时改裁判 |
 
 概念流程（目标设计）：
 
@@ -55,12 +55,14 @@ flowchart TD
   Q --> R
   R --> V[独立验收与证据]
   V --> G
-  V --> D[review 触发 Agent 自主取证诊断]
-  D --> S[Supervisor 实施候选]
+  V -->|失败自动| D[review 共用诊断链]
+  V -->|成功由 Agent 或用户按需请求| D
+  D --> Z[无建议则记录结论并结束]
+  D -->|有建议且可评估| S[Supervisor 实施候选]
   S --> E[evolution 独立评估候选]
   E --> H[人审改进]
-  H --> P[应用并重新检查受阻任务]
-  P --> R
+  H --> P[应用改进]
+  P -->|失败原目标需恢复| R
 ```
 
 这不是固定任务 workflow：节点决定具体工作路径，图只规定信息、授权和结果怎样进入可信状态。
@@ -238,23 +240,23 @@ A5 的主体为 `agent-singularity/src/review/` 中的事后读包与 reviewer �
 
 ### 8.3 触发与角色
 
-固定选择 ReviewRecord.outcome=failed 为唯一自动触发源，包括无 Run 的 blocked Task 失败记录，能力/产物缺口作为引用，不再增加第二套触发器。review 按 `(store, task, run 或 no-run)` 认领，提交后及显式激活后扫描；终态不等待诊断。沿现有 reviewer ledger 串行持久 claim，预分配同一 session，自动/手动共用既有升级判定和每 store 预算。具体恢复与 REV-1–4 见计划 F.3。不建 incident 平台、failureKind/revision 词表或语义聚类；因果同源由 Agent 判断，不能与源记录去重混为一谈。
+失败自动受理，成功允许 Agent 或用户按需发起复盘。自动只扫描 ReviewRecord.outcome=failed（含无 Run 的 blocked Task 失败记录）；显式入口复用 task_review_agent，指定 task/run、可选关注点与请求键，用户经原根会话进入同一链。终态不等待诊断，成功不自动 spawn，不再用旧 escalation 阈值决定是否“值得复盘”。授权、预算、ledger、首请求与 Diagnosis 均复用，不建 incident 平台、成功价值分类器或第二套成功复盘服务。
 
 保留现有 reviewer 只读工具集。它产生 Diagnosis/实验建议，不写生产、不修改其正在评价的判据。Supervisor orchestrator 消费 Diagnosis，给一个有范围的候选实现节点分配 sandbox 写权限；候选构建者、验证执行器、人类晋升决定分别有记录。逻辑角色可复用 preset/工具组合，不要求新增三个常驻服务或三种模型。
 
-当前 `task_review_agent` 有一次/每 store 默认预算及 escalation 判定，不等于持续 debug 服务。A5 保持默认 1，旧账照计，预算不足或既有升级规则不允许时显示 suppressed；claim 后崩溃恢复同 session 或记录 interrupted，不另起无限重试。reviewer 可沿 context 授权引用深入，不能只靠预拼 pack 下结论；Diagnosis 是交接身份，未启用 A6 时显示 pending，不假称已修复。
+当前代码仍有每 store 默认 1 的预算、escalation 判定和强制六维输出，A5 按[计划 F.3](2026-09-20-vrtc-code-change-plan.md)修订。默认自动/显式调用去重到同一来源尝试；已有尝试终结后可用新 requestKey 再复盘，同源在途不另起。保留配置额度、根截止和旧账计数，新键不能重置预算。reviewer 自主查证，允许无需改进、证据不足或空建议；执行失败/超时只记 interrupted，不制造 unknown Diagnosis。只有含建议的 Diagnosis 在 A6 关闭时显示 pending，正常空建议结论已完成。
 
 ### 8.4 从建议到可用改进
 
-实际失败/缺口 → Agent 诊断和候选 → sandbox → 独立评估 → 人审 → apply → 依赖重检/恢复，是交付关系，不是必须铸出一串新对象。已有 Task、Diagnosis、EvolutionProposal、Run/Evidence 足够时直接引用，不新建同义 Incident 平台。Agent 选择实现策略，框架验证契约、权限、预算与晋升证据。拒绝保留历史，修订形成新候选，不改旧摘要。
+失败/缺口自动复盘或成功按需复盘 → 有来源的结论 → 有需要且可评估的候选 → sandbox → 独立评估 → 人审 → apply。仅失败原目标需要恢复，成功任务保持终态；复盘无需产出候选。已有 Task、Diagnosis、EvolutionProposal、Run/Evidence 足够时直接引用。Agent 选择方法，框架验证契约、权限、预算与晋升证据；去重源身份不合并不同复盘的结论。
 
-S4-E 已将 `agent-singularity/src/evolution.ts` 及其评估/晋升/回滚主体迁入独立 `evolution` 包，九个工具为适配；收尾还须删除 Evolution v1 replay 的模型可见入口和生产路径。执行 Run 的普通 Task replay/取消/恢复仍在 task-runtime，晋升闸不与执行写闸混用。Evolution ledger 将切到单一新格式，旧账在新写前拒绝；新格式已应用对象回滚同批验收。
+S4-E 已验收：评估/晋升/回滚主体归 evolution，九工具为适配，v1 replay 入口和主体已删除。普通 Task replay/取消/恢复仍在 task-runtime。Evolution ledger 只读写 v2，旧账写前拒绝；新格式重开回滚已验证。当前评估证明失败修复与不退化，尚不能证明成功但更快/更省；此类建议可记录，但缺适用冻结指标和比较器时不得晋升。A5 不扩评估平台，后续有真实优化案例再定最小比较合同。
 
 A6 使用 T1/S1-C/P2/P3，但不能把 S4-E 的单文件 Skill 替换当成新建执行能力。计划 F.4 固定在 A6 同组按当前 Evolution 格式加入 capability 双侧评估，可附 SKILL.md + 现有执行型 sidecar、零 resources、已有 verifier/授权工具；联合 overlay、评估、应用/registry 更新、恢复与回滚全部验收，不复活旧 mutation/v1 replay。新工具、verifier、任务模板及 runtime policy 尚不支持执行，具名拒绝；不能接受半成品后要求人补写。
 
 评估集分为失败复现集、既有回归集、开发验证集和未参与选择的最终保留集。不断查看并优化同一 holdout 就使其成为开发验证集；对未见泛化的宣称需新保留集。Skill 看目标修复+不退化+成本；Verifier 看负样本漏检和变异检出；Task 模板不能通过降低难度/删 AC 获得改进。
 
-S4-E 在主管自动候选执行前完成：冻结任务/输入快照、裁判版本、模型/工具配置、预算、重复次数和比较规则，基线与候选在独立工作区从相同初始内容重新执行。当前 replay 以历史 champion 对比新候选的机制只提供历史参考，不能作为环境变化后的因果改进证据。报告必须关联真实 Run/Evidence，不只校验字段自洽；不可比、证据不足或未知费用保留明确状态。修复晋升要求声明的改善成立并满足回归闸，两侧同失败不算修复。具体验收以建设计划 S4-E 为准。
+S4-E 已在主管自动候选执行前完成：冻结任务/输入快照、裁判版本、模型/工具配置、预算、重复次数和比较规则，基线与候选在独立工作区从相同初始内容重新执行。历史 champion 只提供参考，不能替代当前双侧运行。报告关联真实 Run/Evidence；不可比、证据不足或未知费用保留明确状态。修复晋升要求声明的改善成立并满足回归闸，两侧同失败不算修复；成本上限通过不等于成本改善。具体验收以建设计划 F.2 为准。
 
 任务内决定只影响有来源的当前上下文，不自动晋升为共享 Skill。共享候选需明确适用条件，并在原失败输入之外验证；保留失败候选与成本，不只记录赢家。S1-C 保证 Run 实际加载固定内容；apply 不热替换在途 Run。S2-R 改用新能力时创建有 lineage 的新 Run；已成功兄弟仅在输入与证据仍适用时复用，失效后保留历史并显式重新执行受影响部分。
 
@@ -283,7 +285,7 @@ R0 按角色与实际启用能力收敛工具面，部署未启用 Evolution 时
 | A3 非阻塞批次与协调相位（已交付，2026-09-22；验收见历史执行记录「A3 执行与验收记录」，落地事实已回写 §7.1/§7.2/§7.4） | T1、S1-V 切片 2、S1-C；Task runtime/reducer、agent-runtime | 分解立即返回且父可继续；waiting idle 不验收；显式提交/父独立验收；依赖串行、取消/恢复/卸载完整；提交/派发去重；迟到写入、跨批次/跨根工作区冲突被阻挡；普通/replay 同守状态规则；根预算不因新 Run/重启重置，无进展停止 |
 | A4 父子问题/回答 | A2/A1、A3；agent-runtime + DSH 通信，context 呈现，runtime 执行阻塞 | 父子/三层问答无同步死锁；batch/写闸保留，一个答案不清空其他阻塞；未答不算同意，迟到不复活 Run；入箱及 claim 后 crash 可恢复，不重复领域副作用；正文不在 task 再存一份 |
 | S4-E 评估基础 | A4 后；evolution 包承接已有生命周期 | 先验单文件 Skill 的真实双侧实验/独立判据；模型可见旧请求及 v1 replay 生产路径同批删除，新格式账可重开/回滚，旧账在写前拒绝；不建全候选评估平台 |
-| A5 + S2-E 诊断与交接 | A2/A1、A4、S4-E；agent-singularity/review 消费 context | 对实际失败幂等触发 reviewer，Agent 选择取证与实验、交接候选；缺证据不冒称因果；运行终态不依赖事后诊断成功，重启不重复副作用 |
+| A5 + S2-E 诊断与交接 | A2/A1、A4、S4-E；agent-singularity/review 消费 context | 失败自动、成功按需，共用精确源与尝试身份；Agent 自主取证，可无建议；终态不依赖诊断，重启不重复副作用 |
 | A6 + S2-R + S3 自主改进和恢复 | A5/S2-E、S4-E；evolution + task-runtime 各守职责 | Agent 对真实缺口提出并实现候选，独立验证、人审应用后原分支恢复；坏候选拒绝、旧 Run 不热换能力；预算、拒绝/重启/回滚闭合，零人工补写 Skill；不预制未知失败的处理目录 |
 
 所有前置按建设计划完成闸检查，交付组以其唯一表为准。新增问答等后续能力未完成时不暴露其工具或假装可用，已交付的执行/取消/恢复不能依赖未来工具。模块可分内部提交，不能把半成品标成完成；基础执行验证不等于自主进化完成。
