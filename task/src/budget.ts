@@ -66,10 +66,11 @@ export interface BudgetExtensionProposal {
 
 /**
  * One extension as it is submitted: the proposal, plus whose request it is and
- * under which approval it was granted. `approvalRef` is the trusted channel's
- * own fact (the `approval:<callId>` family the other human gates use) and is
- * never derived here: an empty one is refused by the reducer, so a record that
- * stands is a record a channel stood behind.
+ * under which approval it was granted. `approvalRef` is the reference the
+ * runtime read back out of the approval channel's own record of the ask (that
+ * channel's `ApprovalRequestId`, as `approval:<id>`) and is never derived here:
+ * an empty one is refused by the reducer, so a record that stands is a record a
+ * channel stood behind.
  */
 export interface TaskBudgetExtensionClaim extends BudgetExtensionProposal {
   readonly approvalRef: string

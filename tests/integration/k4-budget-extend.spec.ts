@@ -112,6 +112,10 @@ async function stopTreeAtItsDeadline(
   } as Mutable
   const h = await startScriptedLoop({
     rootBudget: { ...ROOT_BUDGET },
+    // The real approval service: what makes this an extension is the record its
+    // ask and decision leave on the root session's log, so these cases ask the
+    // person through the deployment's own channel, not a stand-in.
+    approvalService: 'native',
     ...(options.probes === undefined ? {} : { probes: [...options.probes] }),
     script: (_sessionId, index): readonly ScriptEntry[] => index === 0
       ? [
@@ -242,7 +246,19 @@ describe('a tree stopped at its budget can still be extended by a person (K4)', 
     expect(first.result?.text).not.toContain('late call')
     expect(first.result?.text).toContain(`approved and recorded on store "${storeId}"`)
     expect(first.result?.text).toContain('- maxRuns: 2 → 4')
-    expect(first.result?.text).toMatch(/approval on the record: approval:call-/)
+
+    // The approval the record stands on is the channel's own: the ask and its
+    // decision on the root session's log, the same `ApprovalRequestId`, and the
+    // card — the ask's reason — carrying the binding the runtime recomputed.
+    const audit = h.eventsOf(ROOT).filter(event => event.type === 'approval/asked' || event.type === 'approval/decided')
+      .map(event => event.data as { id: string; toolName?: string; callId?: string; reason?: string; outcome?: string })
+    const asked = audit.find(entry => entry.toolName === 'task_budget_extend')
+    const decided = audit.find(entry => entry.outcome !== undefined)
+    expect(asked?.callId).toBe(first.callId)
+    expect(asked?.reason).toContain('approval binding: ')
+    expect(decided).toEqual({ id: asked?.id, outcome: 'allowed-once' })
+    expect(first.result?.text).toContain(`approval on the record: approval:${String(asked?.id)}`)
+    expect(first.result?.text).not.toContain(`approval:${String(first.callId)}`)
 
     // The durable fact is the store's: one extension, one event, the channel's
     // own reference, the root session that asked, and the raises as approved.
@@ -253,7 +269,7 @@ describe('a tree stopped at its budget can still be extended by a person (K4)', 
       maxRuns: { previous: TREE_RUNS, next: 4 },
       requestedBy: String(ROOT),
     })
-    expect(granted.budgetExtensions?.byRequestKey['k-more-runs']?.approvalRef).toMatch(/^approval:call-/)
+    expect(granted.budgetExtensions?.byRequestKey['k-more-runs']?.approvalRef).toBe(`approval:${String(asked?.id)}`)
     // The ceiling every admission, driver and watchdog path resolves is now the
     // approved total — read through the deployment's own resolver.
     const resolution = resolveRootBudget(granted, ROOT_BUDGET)

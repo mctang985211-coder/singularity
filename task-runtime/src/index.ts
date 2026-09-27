@@ -59,6 +59,7 @@ import {
   batchIdFor,
   budgetExtensionRequestDigest,
   canonicalBudgetInstant,
+  canonicalize,
   describeBudgetExtension,
   blockingQuestionsOf,
   contractDigest,
@@ -68,6 +69,7 @@ import {
   rootProposalId,
   rootTaskStoreId,
   runMemberTaskIds,
+  sha256Hex,
   taskProposalId,
 } from '@dangosys/dsh-singularity-task'
 import { resolveCapabilities, capabilitySnapshot, resolvePreset, type CapabilityConfig, type PermissionSpec } from './capability.ts'
@@ -1540,6 +1542,15 @@ export interface RootBudgetExtensionDraft {
   /** The runs the store already holds — the count a run ceiling is measured against, never reset by a raise. */
   readonly runsUsed: number
   readonly outcome: RootBudgetExtensionOutcome
+  /**
+   * The binding this request has to be approved under
+   * ({@link budgetExtensionApprovalBinding} over this store and the proposal's
+   * own identity), and the exact token the card has to carry for
+   * {@link TaskRuntime.extendRootBudget} to read an approval back: present
+   * exactly when the outcome is a proposal, because a refused or already
+   * recorded request is never asked about and has no approval to bind.
+   */
+  readonly approvalBinding?: string
 }
 
 /**
@@ -1563,18 +1574,21 @@ export type RootBudgetExtensionOutcome =
 
 /**
  * What a committing call is given: the request, the reading it was approved
- * against, and the approval channel's own fact.
+ * against, and the identity of the tool call a person was asked about.
  *
- * `approvalRef` is the reference the channel hands back (`approval:<callId>`,
- * the family every human gate in this workspace records) and it is the *only*
- * thing that makes a commit a grant: an empty one is refused, the service
- * records the reference verbatim and never invents, derives or upgrades one. The
- * model-facing tool is what asks a person and what holds the reference; this
- * entry is where the reference becomes a durable fact.
+ * `callId` is not an approval and cannot be one: it is the identity the caller
+ * believes the question was put under, and the entry looks that identity up in
+ * the caller's own session log, where the approval channel recorded the ask and
+ * its outcome. `allowed-once` for this call, carrying this request's
+ * {@link RootBudgetExtensionDraft.approvalBinding}, is the only thing that makes
+ * a commit a grant — the reference the record keeps is the channel's own
+ * `ApprovalRequestId`, minted by the channel, read back from its record and
+ * never taken from the caller.
  */
 export interface RootBudgetExtensionCommit extends RootBudgetExtensionRequest {
   readonly baseline: RootBudgetExtensionBaseline
-  readonly approvalRef: string
+  /** The tool call whose approval the channel recorded in the caller's session (`ApprovalRequestId`'s `callId`). */
+  readonly callId: string
 }
 
 /** What the admission half of one pre-checked batch is given: the proposal, the batch and the run it belongs to. */
@@ -1598,6 +1612,22 @@ function ceilingsOf(budget: ResolvedRootBudget): RootBudgetCeilings {
     ...(budget.maxRuns === undefined ? {} : { maxRuns: budget.maxRuns }),
     ...(budget.deadlineAt === undefined ? {} : { deadlineAt: budget.deadlineAt }),
   }
+}
+
+/**
+ * The binding one raise is approved under: a digest over the store the raise is
+ * about and the request's own identity (its key and its totals).
+ *
+ * It is what ties a person's answer to exactly one question. The asking tool
+ * writes the token into the approval card — so the person's decision is a
+ * decision about these totals on this store — and the committing entry recomputes
+ * it and reads the same token back out of the channel's record of the ask. An
+ * approval of another store, of another request under the same call, or of
+ * another tool's question therefore cannot be presented as this one's: the token
+ * is not the caller's to choose.
+ */
+export function budgetExtensionApprovalBinding(storeId: string, requestDigest: string): string {
+  return sha256Hex(canonicalize({ storeId, requestDigest }))
 }
 
 export class TaskRuntime extends Service {
@@ -2794,6 +2824,7 @@ export class TaskRuntime extends Service {
     const existing = requestKey.length === 0
       ? undefined
       : this.budgetExtensionIndex(snapshot).byRequestKey[requestKey]
+    const outcome = this.judgeBudgetExtension(request, ceilingsOf(budget), budget, existing)
     return {
       storeId,
       rootTaskId: budget.rootTaskId,
@@ -2801,7 +2832,10 @@ export class TaskRuntime extends Service {
       configured: budget.configured,
       effective: ceilingsOf(budget),
       runsUsed: snapshot.runs.length,
-      outcome: this.judgeBudgetExtension(request, ceilingsOf(budget), budget, existing),
+      outcome,
+      ...(outcome.kind === 'proposed'
+        ? { approvalBinding: budgetExtensionApprovalBinding(storeId, outcome.proposal.requestDigest) }
+        : {}),
     }
   }
 
@@ -2809,13 +2843,20 @@ export class TaskRuntime extends Service {
    * Records one approved budget extension (K4) and answers with the record the
    * store holds.
    *
-   * **What makes it a grant is the reference, not the request.** The caller
-   * hands back the reading the query reported ({@link RootBudgetExtensionCommit.baseline})
-   * and the approval channel's own fact (`approvalRef`); an empty reference is
-   * refused, and nothing here can tell a person's decision from a model's
-   * summary of one — that is why the entry takes the reference and never a
-   * boolean, a reason or an `approved` flag, and why the record keeps it for a
-   * reader that later asks who approved a raise.
+   * **What makes it a grant is the channel's own record, not the caller's
+   * word.** The caller hands back the reading the query reported
+   * ({@link RootBudgetExtensionCommit.baseline}) and the tool call it believes a
+   * person was asked about (`callId`); the entry then reads that call's ask and
+   * decision out of the caller session's own log — the pair the DSH approval
+   * channel appends when it really puts a question to a person. Two facts have
+   * to hold there for the commit to be a grant: the ask names this tool and this
+   * call and carries this request's approval binding (the person read that
+   * binding on the card they decided), and its decision is `allowed-once`. A
+   * caller that hands back a string the channel never wrote — a made-up id, a
+   * call of its own naming, an approval of another store, another request or
+   * another tool — is refused here, and nothing reaches the store. The reference
+   * the record keeps is the channel's own `ApprovalRequestId`, read back from
+   * that record.
    *
    * **Where the serialization is.** The rules are judged once here, against the
    * reading handed back, and then again by the store's reducer, inside its single
@@ -2836,12 +2877,6 @@ export class TaskRuntime extends Service {
    */
   async extendRootBudget(sessionId: string, commit: RootBudgetExtensionCommit): Promise<TaskBudgetExtension> {
     const { storeId, snapshot, budget } = await this.budgetExtensionContext(sessionId)
-    if (typeof commit?.approvalRef !== 'string' || commit.approvalRef.length === 0) {
-      throw new Error(
-        `task-runtime: the budget of session "${sessionId}" was not extended: the commit carries no approval reference ` +
-        '(a non-empty `approval:<callId>` from the channel that asked the person); this service records a grant, it never makes one',
-      )
-    }
     const requestKey = typeof commit?.requestKey === 'string' ? commit.requestKey : ''
     const existing = requestKey.length === 0
       ? undefined
@@ -2852,9 +2887,16 @@ export class TaskRuntime extends Service {
       throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: ${outcome.reason}`)
     }
     if (outcome.kind === 'recorded') return outcome.record
+    if (typeof commit?.callId !== 'string' || commit.callId.length === 0) {
+      throw new Error(
+        `task-runtime: the budget of session "${sessionId}" was not extended: the commit names no tool call ` +
+        '(a non-empty `callId`, the call the approval channel was asked about); this service records a decision the channel made, it never makes one',
+      )
+    }
+    const approvalRef = await this.budgetApproval(sessionId, storeId, commit.callId, outcome.proposal.requestDigest)
     const claim: TaskBudgetExtensionClaim = {
       ...outcome.proposal,
-      approvalRef: commit.approvalRef,
+      approvalRef,
       requestedBy: sessionId,
     }
     await this.ctx.task.recordBudgetExtensionIn(storeId, budget.rootTaskId, claim, sessionId)
@@ -2866,6 +2908,65 @@ export class TaskRuntime extends Service {
       )
     }
     return stored
+  }
+
+  /**
+   * The approval one commit stands on, read back out of the caller session's own
+   * log — the `approval/asked` + `approval/decided` pair the DSH approval service
+   * writes when it puts a question to a person, and writes nowhere else.
+   *
+   * The ask has to name this tool, this call and this request's binding (the
+   * token the draft handed the asking tool, which is what the person read on the
+   * card), and the decision that pairs with it has to be `allowed-once`; anything
+   * else — no ask, an ask for another call, another store's or another request's
+   * binding, a separate tool's approval, a rejection, a cancellation, an
+   * unanswered question — is refused by name. The log is read through the
+   * session-query service in its live-preferred form (the same read the review
+   * evidence uses), so a caller session this process holds answers from its own
+   * live log; a deployment without the reader, a session with no log and a log
+   * the reader refuses all end in the same refusal, because an approval that
+   * cannot be read is not one this entry may assume.
+   * @param sessionId - the caller session whose log the channel recorded the ask in.
+   * @param storeId - the store the raise is about, as this session derives it.
+   * @param callId - the tool call the caller says the person was asked about.
+   * @param requestDigest - the request identity the committer is about to record.
+   * @returns the channel's own reference for the approval (`approval:<ApprovalRequestId>`).
+   * @throws when the caller's log holds no such allowed ask.
+   */
+  private async budgetApproval(sessionId: string, storeId: string, callId: string, requestDigest: string): Promise<string> {
+    const binding = budgetExtensionApprovalBinding(storeId, requestDigest)
+    const events = await this.sessionEvents(sessionId)
+    if (events === undefined) {
+      throw new Error(
+        `task-runtime: the budget of session "${sessionId}" was not extended: the approval channel's record of this session cannot be read ` +
+        '(this deployment mounts no session-query reader, or the session has no readable log), so whether a person approved this request cannot be established',
+      )
+    }
+    const asks = new Set<string>()
+    for (const event of events) {
+      if (event.type !== 'approval/asked') continue
+      const asked = event.data as { id?: unknown; toolName?: unknown; callId?: unknown; reason?: unknown }
+      if (asked.toolName !== 'task_budget_extend') continue
+      if (typeof asked.callId !== 'string' || asked.callId !== callId) continue
+      if (typeof asked.reason !== 'string' || !asked.reason.includes(binding)) continue
+      if (typeof asked.id !== 'string' || asked.id.length === 0) continue
+      asks.add(asked.id)
+    }
+    if (asks.size === 0) {
+      throw new Error(
+        `task-runtime: the budget of session "${sessionId}" was not extended: the approval channel's record holds no ask of task_budget_extend ` +
+        `for call "${callId}" carrying this request's binding (${binding}); only an approval the channel itself recorded — this store, this request, this call — raises a ceiling`,
+      )
+    }
+    for (const event of events) {
+      if (event.type !== 'approval/decided') continue
+      if (typeof event.data.id !== 'string' || !asks.has(event.data.id)) continue
+      if (event.data.outcome === 'allowed-once') return `approval:${event.data.id}`
+    }
+    throw new Error(
+      `task-runtime: the budget of session "${sessionId}" was not extended: the approval channel recorded no allowed decision for call "${callId}" ` +
+      `(the question carrying this request's binding is unanswered, cancelled or refused); this service records a grant, it never makes one`,
+    )
   }
 
   /**

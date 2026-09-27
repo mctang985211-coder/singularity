@@ -1,10 +1,11 @@
+import { randomUUID } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { rootTaskStoreId } from '../../task/src/index.ts'
-import type { Config, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
+import type { Config, DecomposeSpec, RootBudgetExtensionDraft, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { resolveRootBudget } from '../../task-runtime/src/index.ts'
 import {
   disposeRunStacks,
@@ -111,6 +112,40 @@ async function runFirstBatch(h: RunStack, root: { taskId: string; runId: string 
   return first.childTaskIds[0]!
 }
 
+/**
+ * One person's decision, recorded the way the deployment's approval service
+ * records it — a fresh service-issued `ApprovalRequestId`, the `approval/asked`
+ * naming the tool call with the card as its reason, and the `approval/decided`
+ * that pairs with it — written into the root session's own log, which is where
+ * the committing entry reads a grant back out of.
+ *
+ * This fixture replaces the human seam with a stand-in that answers without
+ * recording anything, so a case whose subject is what an approval *means* across
+ * a reopen writes the record here, in the service's own shape. The real service,
+ * the real tool and the real ask run end to end in `k4-budget-extend.spec.ts`.
+ * What matters here is that the record travels with the session log the next
+ * process replays, because that is what a person's decision is.
+ * @param h - the stack whose root session log is the record's surface.
+ * @param reading - the draft the decision is about, whose binding it must carry.
+ * @returns the tool-call identity the commit has to present.
+ */
+async function personApproves(h: RunStack, reading: RootBudgetExtensionDraft, callId: string): Promise<string> {
+  const persistence = h.ctx.get('sessionPersistence') as unknown as {
+    open(id: SessionId): Promise<{ append(events: readonly unknown[]): Promise<void> }>
+  }
+  const id = randomUUID()
+  const handle = await persistence.open(ROOT)
+  await handle.append([
+    {
+      type: 'approval/asked',
+      time: Date.now(),
+      data: { id, toolName: 'task_budget_extend', callId, reason: `Budget extension of the tree in store "${reading.storeId}" — approval binding: ${String(reading.approvalBinding)}` },
+    },
+    { type: 'approval/decided', time: Date.now(), data: { id, outcome: 'allowed-once' } },
+  ])
+  return callId
+}
+
 describe('K4-3: the approved ceiling is the store’s fact, across a reopen', () => {
   it('commits a request read before the restart, answers the retry from the record, and moves neither usage nor the clock', async () => {
     const limits: Config['rootBudget'] = { wallTimeMs: 60_000, maxRuns: 4 }
@@ -131,7 +166,9 @@ describe('K4-3: the approved ceiling is the store’s fact, across a reopen', ()
     expect(await h1.snapshot(STORE)).toEqual(openedWith)
 
     // The process ends after the person's answer: the approval travels as the
-    // reading the store reports, and the request is still the same request.
+    // decision the channel recorded on the session's own log, and the request is
+    // still the same request.
+    await personApproves(h1, reading, 'call-k4-reopen')
     const { h: h2, opened: reopened } = await reopen(h1, directory, limits)
     expect(reopened.budgetExtensions?.all).toEqual([])
     expect(reopened.runs.map(run => run.runId)).toEqual(openedWith.runs.map(run => run.runId))
@@ -139,7 +176,7 @@ describe('K4-3: the approved ceiling is the store’s fact, across a reopen', ()
     const record = await h2.runtime.extendRootBudget(String(ROOT), {
       ...approved,
       baseline: reading.effective,
-      approvalRef: 'approval:call-k4-reopen',
+      callId: 'call-k4-reopen',
     })
     expect(record.maxRuns).toEqual({ previous: 4, next: 6 })
     expect(record.deadlineAt).toEqual({ previous: reading.effective.deadlineAt, next: approved.deadlineAt })
@@ -164,7 +201,7 @@ describe('K4-3: the approved ceiling is the store’s fact, across a reopen', ()
     const retried = await h3.runtime.extendRootBudget(String(ROOT), {
       ...approved,
       baseline: reading.effective,
-      approvalRef: 'approval:call-k4-reopen',
+      callId: 'call-k4-reopen',
     })
     expect(retried).toEqual(record)
     expect(eventKinds(h3)).toEqual(eventsBeforeRetry)
@@ -199,11 +236,12 @@ describe('K4-3: the approved ceiling is the store’s fact, across a reopen', ()
     // The person raises the total, and then the process image ends.
     const reading = await h1.runtime.budgetExtensionDraft(String(ROOT), { requestKey: 'k-replay-room', maxRuns: 4 })
     expect(reading.effective).toEqual({ maxRuns: 2 })
+    await personApproves(h1, reading, 'call-k4-replay')
     await h1.runtime.extendRootBudget(String(ROOT), {
       requestKey: 'k-replay-room',
       maxRuns: 4,
       baseline: reading.effective,
-      approvalRef: 'approval:call-k4-replay',
+      callId: 'call-k4-replay',
     })
     const { h: h2, opened } = await reopen(h1, directory, limits)
 

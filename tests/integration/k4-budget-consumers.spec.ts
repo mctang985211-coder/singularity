@@ -1,8 +1,9 @@
+import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { EvidenceBundle, TaskSnapshot, VerificationResult } from '../../task/src/index.ts'
 import { ROOT_PROPOSAL_TASK_ID, rootTaskStoreId } from '../../task/src/index.ts'
-import type { Config, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
+import type { Config, DecomposeSpec, RootBudgetExtensionDraft, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { resolveRootBudget } from '../../task-runtime/src/index.ts'
 import { disposeRunStacks, startRunStack, type RunStack } from '../support/run-stack.ts'
 
@@ -88,6 +89,41 @@ function runOf(snapshot: TaskSnapshot, runId: string) {
   return run
 }
 
+/** The intended target the deployment's own tool renders, in the one thing the committing entry reads back out of it: the binding. */
+function cardOf(reading: RootBudgetExtensionDraft): string {
+  return `Budget extension of the tree in store "${reading.storeId}" — approval binding: ${String(reading.approvalBinding)}`
+}
+
+/**
+ * One person's decision, recorded the way the deployment's approval service
+ * records it: a fresh service-issued `ApprovalRequestId`, the `approval/asked`
+ * naming the tool call with the card as its reason, and the `approval/decided`
+ * that pairs with it — written into the root session's own log, which is what
+ * the committing entry reads a grant back out of.
+ *
+ * This fixture replaces the human seam with a stand-in (its `approval.request`
+ * answers `allowed-once` without recording anything), so a case whose subject is
+ * a *consumer* of an approved ceiling writes the record here, in the service's
+ * own shape, instead of asking through a service that no longer exists to
+ * record it. The real service, the real tool and the real ask run end to end in
+ * `k4-budget-extend.spec.ts`; what these cases are about starts after that.
+ * @param h - the stack whose root session log is the record's surface.
+ * @param reading - the draft the decision is about, whose binding it must carry.
+ * @returns the tool-call identity the commit has to present.
+ */
+async function personApproves(h: RunStack, reading: RootBudgetExtensionDraft, callId: string): Promise<string> {
+  const persistence = h.ctx.get('sessionPersistence') as unknown as {
+    open(id: SessionId): Promise<{ append(events: readonly unknown[]): Promise<void> }>
+  }
+  const id = randomUUID()
+  const handle = await persistence.open(ROOT)
+  await handle.append([
+    { type: 'approval/asked', time: Date.now(), data: { id, toolName: 'task_budget_extend', callId, reason: cardOf(reading) } },
+    { type: 'approval/decided', time: Date.now(), data: { id, outcome: 'allowed-once' } },
+  ])
+  return callId
+}
+
 describe('K4-2/K4-4: an expired tree’s entries read the ceiling a person approved', () => {
   it('refuses the replay past the deadline, starts it once a person raises it, and runs it along the champion’s own verifier', async () => {
     const limits = budget({ wallTimeMs: 800, maxRuns: 6 })
@@ -117,7 +153,7 @@ describe('K4-2/K4-4: an expired tree’s entries read the ceiling a person appro
     expect(await h.snapshot(STORE)).toEqual(before)
     expect(eventKinds(h)).toEqual(beforeEvents)
 
-    // The person's approval, over the real entries: the query reports both
+    // The person's approval, recorded by the channel: the query reports both
     // ceilings and writes nothing, and the commit records the raise it was asked.
     const extended = new Date(Date.now() + 30_000).toISOString()
     const reading = await h.runtime.budgetExtensionDraft(String(ROOT), { requestKey: 'k-more-time', deadlineAt: extended })
@@ -128,11 +164,12 @@ describe('K4-2/K4-4: an expired tree’s entries read the ceiling a person appro
 
     const commitBefore = await h.snapshot(STORE)
     const commitEvents = eventKinds(h)
+    await personApproves(h, reading, 'call-k4-deadline')
     const record = await h.runtime.extendRootBudget(String(ROOT), {
       requestKey: 'k-more-time',
       deadlineAt: extended,
       baseline: reading.effective,
-      approvalRef: 'approval:call-k4-deadline',
+      callId: 'call-k4-deadline',
     })
     expect(record.deadlineAt).toEqual({ previous: reading.configured.deadlineAt, next: extended })
     // The commit is one event and one ceiling: nothing the tree already held
@@ -221,11 +258,12 @@ describe('K4-2/K4-4: an expired tree’s entries read the ceiling a person appro
     expect(reading.effective).toEqual({ maxRuns: 2 })
     expect(reading.configured).toEqual({ maxRuns: 2 })
     expect(reading.runsUsed).toBe(2)
+    await personApproves(h, reading, 'call-k4-runs')
     await h.runtime.extendRootBudget(String(ROOT), {
       requestKey: 'k-two-more',
       maxRuns: 4,
       baseline: reading.effective,
-      approvalRef: 'approval:call-k4-runs',
+      callId: 'call-k4-runs',
     })
     expect(effectiveCeiling(await h.snapshot(STORE), limits).maxRuns).toBe(4)
 
@@ -275,14 +313,18 @@ describe('K4-2/K4-4: an expired tree’s entries read the ceiling a person appro
     const h = await startRunStack({ roots: [ROOT], rootBudget: limits })
     await h.root(ROOT, ROOT_CONTRACT)
     // Two requests, one reading: the shape of two people deciding about the same
-    // tree, or one retry racing another caller. Both name the same baseline.
+    // tree, or one retry racing another caller. Both name the same baseline, and
+    // both were approved by a person on their own call.
     const reading = await h.runtime.budgetExtensionDraft(String(ROOT), { requestKey: 'k-a', maxRuns: 8 })
     expect(reading.effective).toEqual({ maxRuns: 4 })
+    const other = await h.runtime.budgetExtensionDraft(String(ROOT), { requestKey: 'k-b', maxRuns: 10 })
+    await personApproves(h, reading, 'call-a')
+    await personApproves(h, other, 'call-b')
     const before = await h.snapshot(STORE)
     const beforeEvents = eventKinds(h)
     const grants = await Promise.allSettled([
-      h.runtime.extendRootBudget(String(ROOT), { requestKey: 'k-a', maxRuns: 8, baseline: reading.effective, approvalRef: 'approval:call-a' }),
-      h.runtime.extendRootBudget(String(ROOT), { requestKey: 'k-b', maxRuns: 10, baseline: reading.effective, approvalRef: 'approval:call-b' }),
+      h.runtime.extendRootBudget(String(ROOT), { requestKey: 'k-a', maxRuns: 8, baseline: reading.effective, callId: 'call-a' }),
+      h.runtime.extendRootBudget(String(ROOT), { requestKey: 'k-b', maxRuns: 10, baseline: other.effective, callId: 'call-b' }),
     ])
     const fulfilled = grants.filter(settled => settled.status === 'fulfilled')
     const rejected = grants.filter(settled => settled.status === 'rejected')

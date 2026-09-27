@@ -1,9 +1,10 @@
+import { randomUUID } from 'node:crypto'
 import { describe, expect, test, vi } from 'vitest'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { TaskInstance, TaskRun, TaskSnapshot } from '../../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../../task/src/index.ts'
 import type { Config, RootBudgetExtensionDraft } from '../../src/index.ts'
-import { TaskRuntime, resolveRootBudget } from '../../src/index.ts'
+import { TaskRuntime, budgetExtensionApprovalBinding, resolveRootBudget } from '../../src/index.ts'
 
 const NOW = '2026-09-16T00:00:00.000Z'
 const ROOT_SESSION = 'root-session'
@@ -80,11 +81,67 @@ function harness(options: {
     on: () => {},
     sessionPersistence: persistence,
     graphs,
+    // The read view of one session's own log (`sessionQuery.readSession`), which
+    // is where the committing entry looks for the approval channel's record.
+    sessionQuery: {
+      readSession: async (id: SessionId) => ({ session: { id }, inheritedEventCount: 0, events: sessions.get(String(id))?.events ?? [] }),
+    },
   }
   const task = new TaskService(ctx as never)
   ctx.task = task
   const runtime = new TaskRuntime(ctx as never, options.config as Config | undefined)
   return { ctx, task, runtime, sessions, disposers, graphs }
+}
+
+/** The stored log of one session, created on first use — the surface the channel's record lands on. */
+function logOf(h: ReturnType<typeof harness>, sessionId: string): SessionEvent[] {
+  const existing = h.sessions.get(sessionId)
+  if (existing !== undefined) return existing.events
+  const stored: StoredSession = { header: { id: sessionId } as SessionHeader, events: [] }
+  h.sessions.set(sessionId, stored)
+  return stored.events
+}
+
+/**
+ * One decision, recorded the way the approval service records it: a fresh
+ * `ApprovalRequestId` (its own, service-issued), the `approval/asked` naming the
+ * tool and the call with the asker's own words as its reason, and the
+ * `approval/decided` that pairs with it.
+ *
+ * This is what the committing entry reads an approval back out of — the whole
+ * point of the check, so a spec that wants a grant records the decision for the
+ * exact binding the runtime will commit, and a spec that wants a refusal records
+ * one that is not it (another store, another request, another tool, or no
+ * allowed decision at all). The request id is a `randomUUID` because the
+ * channel's is: nothing a caller could guess or choose.
+ * @returns the `ApprovalRequestId` the record carries.
+ */
+function recordDecision(
+  h: ReturnType<typeof harness>,
+  sessionId: string,
+  decision: { readonly callId: string; readonly reason: string; readonly outcome?: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'; readonly toolName?: string },
+): string {
+  const id = randomUUID()
+  const log = logOf(h, sessionId)
+  log.push({ type: 'approval/asked', seq: log.length, time: Date.now(), data: { id, toolName: decision.toolName ?? 'task_budget_extend', callId: decision.callId, reason: decision.reason } } as unknown as SessionEvent)
+  log.push({ type: 'approval/decided', seq: log.length, time: Date.now(), data: { id, outcome: decision.outcome ?? 'allowed-once' } } as unknown as SessionEvent)
+  return id
+}
+
+/** The binding one draft would be approved under — the token the asking tool renders onto the card. */
+function bindingOf(draft: RootBudgetExtensionDraft): string {
+  if (draft.approvalBinding === undefined) throw new Error('the draft carries no approval binding')
+  return draft.approvalBinding
+}
+
+/** The one thing the committing entry reads back out of the asker's card: the binding it is approved under. */
+function cardOf(draft: RootBudgetExtensionDraft): string {
+  return `Budget extension of store "${draft.storeId}" — approval binding: ${bindingOf(draft)}`
+}
+
+/** What one draft's own store-derived identity is, for a spec that wants to record a decision for another one. */
+function anotherStoresCard(proposal: { requestDigest: string }): string {
+  return `Budget extension of store "sg-t-somebody-else" — approval binding: ${budgetExtensionApprovalBinding('sg-t-somebody-else', proposal.requestDigest)}`
 }
 
 function rootTask(): TaskInstance {
@@ -187,11 +244,12 @@ describe('budgetExtensionDraft', () => {
     const h = harness({ config: { rootBudget: ROOT_BUDGET } })
     await storeWithRoot(h)
     const first = await draft(h, { requestKey: 'k-1', maxRuns: 20 })
+    recordDecision(h, ROOT_SESSION, { callId: 'call-1', reason: cardOf(first) })
     await h.runtime.extendRootBudget(ROOT_SESSION, {
       requestKey: 'k-1',
       maxRuns: 20,
       baseline: { maxRuns: 10 },
-      approvalRef: 'approval:call-1',
+      callId: 'call-1',
     })
 
     const repeat = await draft(h, { requestKey: 'k-1', maxRuns: 20 })
@@ -281,15 +339,18 @@ describe('extendRootBudget', () => {
     await storeWithRoot(h, 3)
     const before = await h.task.snapshotIn(STORE)
     const reading = await draft(h, { requestKey: 'k-more-time', deadlineAt: APPROVED_DEADLINE })
+    const approved = recordDecision(h, ROOT_SESSION, { callId: 'call-9', reason: cardOf(reading) })
 
     const record = await h.runtime.extendRootBudget(ROOT_SESSION, {
       requestKey: 'k-more-time',
       deadlineAt: APPROVED_DEADLINE,
       baseline: reading.effective,
-      approvalRef: 'approval:call-9',
+      callId: 'call-9',
     })
     expect(record.deadlineAt).toEqual({ previous: CONFIGURED_DEADLINE, next: APPROVED_DEADLINE })
-    expect(record.approvalRef).toBe('approval:call-9')
+    // The record keeps the channel's own identity, read back out of its record of
+    // the ask — never the call id the caller handed over.
+    expect(record.approvalRef).toBe(`approval:${approved}`)
     expect(record.requestedBy).toBe(ROOT_SESSION)
     expect(record.recordedAt).toBeDefined()
 
@@ -309,11 +370,104 @@ describe('extendRootBudget', () => {
     expect(resolution.maxRuns).toBe(10)
   })
 
+  test('refuses every approval the channel did not record for this store, this request and this call, writing nothing', async () => {
+    const h = harness({ config: { rootBudget: ROOT_BUDGET } })
+    await storeWithRoot(h, 3)
+    const before = await h.task.snapshotIn(STORE)
+    const persisted = events(h).filter(event => event.type === 'task/event').length
+    const reading = await draft(h, { requestKey: 'k-forged', maxRuns: 20 })
+    const refuse = async (callId: string): Promise<string> => {
+      try {
+        await h.runtime.extendRootBudget(ROOT_SESSION, {
+          requestKey: 'k-forged',
+          maxRuns: 20,
+          baseline: reading.effective,
+          callId,
+        })
+        throw new Error(`the commit was accepted for call "${callId}"`)
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error)
+      }
+    }
+
+    // A public caller can name any call it likes. Nothing the channel recorded
+    // under that name is a grant — and the entry decides that itself, before the
+    // store is written.
+    expect(await refuse('made-up')).toContain('holds no ask of task_budget_extend')
+
+    // An approval of *another store*: the binding covers the store the caller's
+    // own session derives, so an ask about somebody else's tree is not this one.
+    recordDecision(h, ROOT_SESSION, { callId: 'call-other-store', reason: anotherStoresCard(proposed(reading.outcome)) })
+    expect(await refuse('call-other-store')).toContain('holds no ask of task_budget_extend')
+
+    // An approval of *another request*: same call name, the request key or the
+    // totals differ, so the binding the person read is not this request's.
+    const otherRequest = await draft(h, { requestKey: 'k-forged', maxRuns: 30 })
+    recordDecision(h, ROOT_SESSION, { callId: 'call-other-request', reason: cardOf(otherRequest) })
+    expect(await refuse('call-other-request')).toContain('holds no ask of task_budget_extend')
+
+    // An approval *another tool* asked for: the tool the ask names is part of
+    // what the entry requires, so one gate's decision cannot open another's.
+    recordDecision(h, ROOT_SESSION, { callId: 'call-other-tool', toolName: 'hitl_approve', reason: cardOf(reading) })
+    expect(await refuse('call-other-tool')).toContain('holds no ask of task_budget_extend')
+
+    // The question was asked for exactly this request and call, and the person
+    // refused it (or it was cancelled, or nobody answered).
+    for (const outcome of ['rejected', 'cancelled', 'unavailable'] as const) {
+      const callId = `call-${outcome}`
+      recordDecision(h, ROOT_SESSION, { callId, reason: cardOf(reading), outcome })
+      expect(await refuse(callId)).toContain('recorded no allowed decision')
+    }
+
+    // And an approval recorded in somebody else's session is not this session's:
+    // the entry reads the caller's own log.
+    recordDecision(h, WORKER_SESSION, { callId: 'call-elsewhere', reason: cardOf(reading) })
+    expect(await refuse('call-elsewhere')).toContain('holds no ask of task_budget_extend')
+
+    expect(events(h).filter(event => event.type === 'task/event').length).toBe(persisted)
+    expect(await h.task.snapshotIn(STORE)).toEqual(before)
+  })
+
+  test('refuses a commit that names no call, and a log the deployment cannot read, writing nothing', async () => {
+    const h = harness({ config: { rootBudget: ROOT_BUDGET } })
+    await storeWithRoot(h, 3)
+    const before = await h.task.snapshotIn(STORE)
+
+    // The identity of the call is what the entry looks up; without one there is
+    // nothing to look up, and no grant.
+    await expect(h.runtime.extendRootBudget(ROOT_SESSION, {
+      requestKey: 'k-empty',
+      maxRuns: 20,
+      baseline: { maxRuns: 10 },
+      callId: '',
+    })).rejects.toThrow(/names no tool call/)
+
+    // A deployment whose approval record cannot be read at all refuses the same
+    // way: an approval nobody can verify is not one this entry may assume.
+    const blind = harness({ config: { rootBudget: ROOT_BUDGET } })
+    delete (blind.ctx as { sessionQuery?: unknown }).sessionQuery
+    await storeWithRoot(blind, 2)
+    const blindBefore = await blind.task.snapshotIn(STORE)
+    const reading = await draft(blind, { requestKey: 'k-blind', maxRuns: 20 })
+    recordDecision(blind, ROOT_SESSION, { callId: 'call-blind', reason: cardOf(reading) })
+    await expect(blind.runtime.extendRootBudget(ROOT_SESSION, {
+      requestKey: 'k-blind',
+      maxRuns: 20,
+      baseline: reading.effective,
+      callId: 'call-blind',
+    })).rejects.toThrow(/cannot be read/)
+
+    expect(await h.task.snapshotIn(STORE)).toEqual(before)
+    expect(await blind.task.snapshotIn(STORE)).toEqual(blindBefore)
+    expect((await blind.task.snapshotIn(STORE)).budgetExtensions?.all).toEqual([])
+  })
+
   test('a repeat of the same commit returns the stored record and appends nothing', async () => {
     const h = harness({ config: { rootBudget: ROOT_BUDGET } })
     await storeWithRoot(h, 2)
     const reading = await draft(h, { requestKey: 'k-runs', maxRuns: 20 })
-    const commit = { requestKey: 'k-runs', maxRuns: 20, baseline: { maxRuns: reading.effective.maxRuns as number }, approvalRef: 'approval:call-1' }
+    const approved = recordDecision(h, ROOT_SESSION, { callId: 'call-1', reason: cardOf(reading) })
+    const commit = { requestKey: 'k-runs', maxRuns: 20, baseline: { maxRuns: reading.effective.maxRuns as number }, callId: 'call-1' }
     const first = await h.runtime.extendRootBudget(ROOT_SESSION, commit)
     const persisted = events(h).length
 
@@ -327,13 +481,13 @@ describe('extendRootBudget', () => {
       requestKey: 'k-runs',
       requestDigest: first.requestDigest,
       maxRuns: { previous: 10, next: 20 },
-      approvalRef: 'approval:call-1',
+      approvalRef: `approval:${approved}`,
       requestedBy: ROOT_SESSION,
     }, ROOT_SESSION)
     expect(events(h).length).toBe(persisted)
   })
 
-  test('refuses a commit with no approval, a stale reading, a non-raise or an unlimited dimension, writing nothing', async () => {
+  test('refuses a commit with a stale reading, a non-raise or an unlimited dimension, writing nothing', async () => {
     const h = harness({ config: { rootBudget: ROOT_BUDGET } })
     await storeWithRoot(h, 3)
     const persisted = events(h).length
@@ -346,16 +500,13 @@ describe('extendRootBudget', () => {
       }
     }
 
-    // The channel's fact is the one thing a grant cannot be made without.
-    expect(await refuse({ requestKey: 'k-1', maxRuns: 20, baseline: { maxRuns: 10 }, approvalRef: '' }))
-      .toContain('carries no approval reference')
     // The reading the person approved against has to be the reading in force.
-    expect(await refuse({ requestKey: 'k-2', maxRuns: 20, baseline: { maxRuns: 4 }, approvalRef: 'approval:call-1' }))
+    expect(await refuse({ requestKey: 'k-2', maxRuns: 20, baseline: { maxRuns: 4 }, callId: 'call-1' }))
       .toContain('maxRuns moved since this request was read')
     // The baseline has to name the dimension the request raises.
-    expect(await refuse({ requestKey: 'k-3', maxRuns: 20, baseline: {}, approvalRef: 'approval:call-1' }))
+    expect(await refuse({ requestKey: 'k-3', maxRuns: 20, baseline: {}, callId: 'call-1' }))
       .toContain('does not say what maxRuns was when it was read')
-    expect(await refuse({ requestKey: 'k-4', maxRuns: 9, baseline: { maxRuns: 10 }, approvalRef: 'approval:call-1' }))
+    expect(await refuse({ requestKey: 'k-4', maxRuns: 9, baseline: { maxRuns: 10 }, callId: 'call-1' }))
       .toContain('does not raise the 10 in force')
     // The unlimited dimension of a different budget: refused by name, never granted.
     const unlimited = harness({ config: { rootBudget: { maxRuns: 10 } } })
@@ -364,7 +515,7 @@ describe('extendRootBudget', () => {
       requestKey: 'k-6',
       deadlineAt: APPROVED_DEADLINE,
       baseline: {},
-      approvalRef: 'approval:call-1',
+      callId: 'call-1',
     })).rejects.toThrow(/sets no deadlineAt ceiling/)
 
     expect(events(h).length).toBe(persisted)
@@ -375,9 +526,14 @@ describe('extendRootBudget', () => {
     const h = harness({ config: { rootBudget: ROOT_BUDGET } })
     await storeWithRoot(h, 3)
     // Both requests were read at the same ceiling (10) — the shape a person
-    // approves twice, or a retry that raced another caller.
-    const first = { requestKey: 'k-a', maxRuns: 20, baseline: { maxRuns: 10 }, approvalRef: 'approval:call-a' }
-    const second = { requestKey: 'k-b', maxRuns: 25, baseline: { maxRuns: 10 }, approvalRef: 'approval:call-b' }
+    // approves twice, or a retry that raced another caller — and the channel
+    // recorded a decision for each of them.
+    const firstReading = await draft(h, { requestKey: 'k-a', maxRuns: 20 })
+    const secondReading = await draft(h, { requestKey: 'k-b', maxRuns: 25 })
+    recordDecision(h, ROOT_SESSION, { callId: 'call-a', reason: cardOf(firstReading) })
+    recordDecision(h, ROOT_SESSION, { callId: 'call-b', reason: cardOf(secondReading) })
+    const first = { requestKey: 'k-a', maxRuns: 20, baseline: { maxRuns: 10 }, callId: 'call-a' }
+    const second = { requestKey: 'k-b', maxRuns: 25, baseline: { maxRuns: 10 }, callId: 'call-b' }
     await h.runtime.extendRootBudget(ROOT_SESSION, first)
     await expect(h.runtime.extendRootBudget(ROOT_SESSION, second))
       .rejects.toThrow(/maxRuns moved since this request was read: it was read at 10 and it is 20 in force now/)
@@ -394,11 +550,13 @@ describe('extendRootBudget', () => {
   test('a raise survives a reopen of the store, and the deadline is not recomputed from the restart', async () => {
     const first = harness({ config: { rootBudget: ROOT_BUDGET } })
     await storeWithRoot(first, 2)
+    const reading = await draft(first, { requestKey: 'k-more-time', deadlineAt: APPROVED_DEADLINE })
+    recordDecision(first, ROOT_SESSION, { callId: 'call-1', reason: cardOf(reading) })
     await first.runtime.extendRootBudget(ROOT_SESSION, {
       requestKey: 'k-more-time',
       deadlineAt: APPROVED_DEADLINE,
       baseline: { deadlineAt: CONFIGURED_DEADLINE },
-      approvalRef: 'approval:call-1',
+      callId: 'call-1',
     })
     const before = await first.task.snapshotIn(STORE)
     await Promise.all(first.disposers.map(dispose => dispose()))

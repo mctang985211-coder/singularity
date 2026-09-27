@@ -18,7 +18,12 @@
  *   assembly) and asks through an answerer the spec drives: {@link
  *   ScriptedLoopOptions.approvalAnswer} decides each ask, or holds it until the
  *   spec answers it ({@link ScriptedLoop.review}). What the review *does* with
- *   an answer is the deployment's own code, never a fixture shortcut.
+ *   an answer is the deployment's own code, never a fixture shortcut. The seam
+ *   itself is the fixture's stand-in by default; a spec whose subject is the
+ *   *record* an answer leaves — the channel's own request id and its
+ *   `approval/asked` + `approval/decided` pair — mounts the deployment's real
+ *   `ApprovalService` instead ({@link ScriptedLoopOptions.approvalService}),
+ *   with the same desk as its answerer.
  *
  * Everything else is the deployment's own: `LlmRuntime`, `SessionStore`,
  * `SessionProjectionRegistry`, `SystemPrompt`, `ToolRuntime`, `AgentRegistry`,
@@ -52,6 +57,7 @@ import ToolRuntime from '../../../../thirdparty/deepseek-harness/packages/core/t
 import { AgentRegistry } from '../../../../thirdparty/deepseek-harness/packages/core/agent/lib/index.js'
 import AgentLoop from '../../../../thirdparty/deepseek-harness/packages/core/agent-loop/lib/index.js'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
+import { ApprovalService } from '../../../../thirdparty/deepseek-harness/packages/interaction/user-approval/lib/index.js'
 import type { Agent, ToolDefinition } from '@deepseek-ai/dsh-agent'
 import type { TaskInstance, TaskRun } from '../../task/src/types.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
@@ -251,6 +257,17 @@ export interface ScriptedLoopOptions {
    * (`rejected`, `cancelled`, `unavailable`).
    */
   readonly approvalAnswer?: (ask: ScriptedReviewAsk, index: number) => ApprovalOutcome | undefined | Promise<ApprovalOutcome | undefined>
+  /**
+   * Which approval seam this deployment runs with: `'stand-in'` (the default) is
+   * a plain object answering through the desk below, and `'native'` is DSH's own
+   * `ApprovalService`, mounted with the desk as its answerer. A spec whose
+   * subject is what an approval *leaves behind* — the channel's
+   * `ApprovalRequestId` and its `approval/asked` + `approval/decided` pair on the
+   * asking session's log, which is what a grant is read back out of — names
+   * `'native'`; every other spec keeps the stand-in, whose answer costs nothing
+   * and needs no open turn.
+   */
+  readonly approvalService?: 'stand-in' | 'native'
   /**
    * The script of one session: index 0 is the primary root, 1..n the sessions
    * the runtime spawned, in spawn order. Entries are consumed one request at a
@@ -704,7 +721,15 @@ class ScriptedLoopImpl implements ScriptedLoop {
     ctx.provide('permissionPresets', { set: vi.fn(), resolve: () => ({}) })
     // The human seam, driven by the spec: the channel below asks through it, and
     // a spec that cares about *whether* a person was asked asserts on `review`.
-    ctx.provide('approval', { request: (request: { toolName?: string; reason?: string; agent?: { id?: string } }) => this.review.request(request) })
+    // The native half is DSH's own service — mounted here, with the desk as the
+    // answerer it reaches through `approval/request` — for a spec whose subject
+    // is the record an answer leaves on the asking session's log.
+    if (this.options.approvalService === 'native') {
+      ctx.on('approval/request', (request: { toolName?: string; reason?: string; agent?: { id?: string } }) => this.review.request(request))
+      await ctx.plugin(ApprovalService, {})
+    } else {
+      ctx.provide('approval', { request: (request: { toolName?: string; reason?: string; agent?: { id?: string } }) => this.review.request(request) })
+    }
     ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) })
     ctx.provide('layout', { setIn: async () => {} })
     const graphState = {
