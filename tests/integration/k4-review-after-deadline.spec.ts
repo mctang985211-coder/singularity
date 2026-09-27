@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { REVIEWER_BASELINE } from '../../agent-singularity/src/tools/review-agent.ts'
-import { admitReviewAgent, readReviewerDelegation } from '../../agent-singularity/src/review-agent-ledger.ts'
+import { countReviewAgentRuns, admitReviewAgent, readReviewAgentAttempts, readReviewerDelegation } from '../../agent-singularity/src/review-agent-ledger.ts'
+import { installReviewAgentAutoTrigger } from '../../agent-singularity/src/review-agent-scan.ts'
 import { disposeScriptedLoops, startScriptedLoop, type ScriptEntry, type ScriptedLoop } from '../support/scripted-loop.ts'
 
 /**
@@ -35,6 +36,11 @@ import { disposeScriptedLoops, startScriptedLoop, type ScriptEntry, type Scripte
  *    nothing and says why.
  * 4. **The chain is the root's, not any run's.** A worker's own surface never
  *    carries it, whatever the phase the execution gate would judge.
+ * 5. **The deadline-stopped tree is accepted automatically (REV-1).** With the
+ *    deployment's own triggers armed, the failed review the stopped child leaves
+ *    is accepted by the scan with no model call and no tool call at all: one
+ *    reviewer, one default attempt, one Diagnosis — and the tree stays as stopped
+ *    as it was.
  *
  * Everything but the model's answers is the deployment's own: the real
  * `TaskRuntime` (`ctx.plugin` is what registers its gate on the tool waterfall),
@@ -74,9 +80,12 @@ const ROOT_CONTRACT = {
 const TREE_WALL_TIME_MS = 1_500
 const TREE_RUNS = 2
 
-/** The reviewer's answer: one dimension settled from the pack, the rest unknown — a judgement, never a score. */
+/** The reviewer's answer: the observation and conclusion it reached, plus the one dimension it judged. */
 const REVIEW_REPLY = '```json\n'
-  + '{"judgements":[{"dimension":"task_specification","verdict":"inadequate","evidenceRefs":["e-1"],'
+  + '{"observation":"the child run was stopped by the tree wall clock",'
+  + '"conclusion":"the objective did not name the environment the work had to run in",'
+  + '"confidence":"medium",'
+  + '"judgements":[{"dimension":"task_specification","verdict":"inadequate","evidenceRefs":["e-1"],'
   + '"rationale":"the objective did not name the environment the work had to run in"}]}'
   + '\n```'
 
@@ -94,6 +103,11 @@ interface StoppedTree {
 }
 
 type Mutable = { -readonly [K in keyof StoppedTree]: StoppedTree[K] }
+
+/** The reviewer spawns of one loop, in order — the automatic postmortem's own nodes. */
+function reviewerSpawns(h: ScriptedLoop): readonly { sessionId: string; name: string }[] {
+  return h.spawns.filter(spawn => spawn.name.startsWith('review '))
+}
 
 beforeEach(() => {
   // The deployment's own ledger (`$DSH_HOME/review-agents`) and its default cap:
@@ -120,7 +134,15 @@ afterEach(async () => {
  */
 async function stopTreeAtItsDeadline(
   tail: (state: StoppedTree) => readonly ScriptEntry[],
-  options: { readonly probes?: readonly string[] } = {},
+  options: {
+    readonly probes?: readonly string[]
+    readonly reviewer?: readonly ScriptEntry[]
+    /**
+     * Run once the loop exists and before the tree starts — where a case arms the
+     * deployment's own triggers, so what they see is the tree as it settles.
+     */
+    readonly arm?: (h: ScriptedLoop) => void
+  } = {},
 ): Promise<StoppedTree> {
   const parked = Promise.withResolvers<void>()
   const state = {
@@ -143,8 +165,9 @@ async function stopTreeAtItsDeadline(
       ]
       // The child never finishes on its own: the tree's own deadline is what
       // stops its run, exactly as a real worker that outlives the budget.
-      : index === 1 ? [{ hang: true }] : [{ text: REVIEW_REPLY }],
+      : index === 1 ? [{ hang: true }] : [...(options.reviewer ?? [{ text: REVIEW_REPLY }])],
   })
+  options.arm?.(h)
   const root = await h.begin(ROOT_CONTRACT)
   state.h = h
   state.storeId = root.storeId
@@ -182,8 +205,8 @@ async function stopTreeAtItsDeadline(
 describe('a tree stopped at its budget still takes a read-only postmortem (K4)', () => {
   it('runs the real review chain from the terminal root, and spawns no business Run for it', async () => {
     const stop = await stopTreeAtItsDeadline(state => [
-      { tool: 'task_review_pack', args: () => ({ taskId: state.childTaskId }) },
-      { tool: 'task_review_agent', args: () => ({ taskId: state.childTaskId }) },
+      { tool: 'task_review_pack', args: () => ({ taskId: state.childTaskId, runId: state.childRunId }) },
+      { tool: 'task_review_agent', args: () => ({ taskId: state.childTaskId, runId: state.childRunId }) },
       // A write the root's own composition offers, in the same phase: the entry
       // the review travels through is narrow, not an open gate.
       { tool: 'graph_spawn', args: { reason: 'spin up another node' } },
@@ -200,12 +223,15 @@ describe('a tree stopped at its budget still takes a read-only postmortem (K4)',
       { timeout: 30_000, interval: 25 },
     )
 
-    // The pack answered from the stopped store with the escalation the review
-    // agent exists for — the chain is the deployment's, not a fixture's.
+    // The pack answered from the stopped store with the facts the review agent
+    // exists for — the chain is the deployment's, not a fixture's. (A5 deleted
+    // the escalation decision from the pack: what a review agent runs for is a
+    // failed review and an explicit call, never a threshold.)
     const pack = h.calls.find(call => call.name === 'task_review_pack')!
     expect(pack.result?.isError).toBe(false)
-    expect(pack.result?.text).toContain('escalation: required')
+    expect(pack.result?.text).toContain(`source: review ${stop.childTaskId}#${stop.childRunId} [failed]`)
     expect(pack.result?.text).toContain(stop.childTaskId)
+    expect(pack.result?.text).not.toContain('escalation')
 
     // The review agent itself ran: allowed (not the late call a closed phase
     // gives a write), one reviewer spawned, judgement on the record.
@@ -258,9 +284,98 @@ describe('a tree stopped at its budget still takes a read-only postmortem (K4)',
     expect(h.executed.some(name => name.startsWith('graph_spawn'))).toBe(false)
   }, 60_000)
 
+  /**
+   * A5 §3, on the real store: the reviewer is the only writer of a Diagnosis,
+   * and a reviewer that never answers writes none. Silence is never turned into
+   * six `unknown` judgements — the attempt is settled `interrupted` with the
+   * reason named, and the source does not read as reviewed.
+   */
+  it('records an interrupted attempt and no Diagnosis when the reviewer never answers', async () => {
+    const stop = await stopTreeAtItsDeadline(state => [
+      { tool: 'task_review_agent', args: () => ({ taskId: state.childTaskId, runId: state.childRunId, timeoutMs: 5 }) },
+      { text: 'root: the review was asked for' },
+    ], { reviewer: [{ hang: true }] })
+    const before = await stop.h.snapshot(stop.storeId)
+
+    stop.resumeRoot()
+    await vi.waitFor(
+      () => expect(stop.h.calls.find(call => call.name === 'task_review_agent')?.result).toBeDefined(),
+      { timeout: 30_000, interval: 25 },
+    )
+
+    const review = stop.h.calls.find(call => call.name === 'task_review_agent')!
+    expect(review.result?.isError).toBe(false)
+    expect(review.result?.text).toContain('timed out')
+    expect(review.result?.text).toContain('no diagnosis')
+
+    // The store holds exactly the diagnoses it held before: the reviewer never
+    // reached one, so none is invented for it.
+    expect((await stop.h.snapshot(stop.storeId)).diagnoses).toEqual(before.diagnoses)
+    // The attempt is terminal, with the reason on the fact.
+    const attempts = await readReviewAgentAttempts(stop.storeId)
+    expect(attempts).toHaveLength(1)
+    expect(attempts[0]!.settlement?.status).toBe('interrupted')
+    expect(String(attempts[0]!.settlement?.note)).toContain('timed out')
+  }, 60_000)
+
+  it('accepts the failed source on its own after the deadline stopped the tree: no tool call, one reviewer, one attempt (REV-1)', async () => {
+    const lines: string[] = []
+    const stop = await stopTreeAtItsDeadline(() => [{ text: 'root: nothing to add' }], {
+      reviewer: [{ text: REVIEW_REPLY }],
+      // The deployment's own two triggers, armed before the tree runs: the
+      // terminal review of the stopped child is what wakes the scan.
+      arm: h => installReviewAgentAutoTrigger(h.ctx, { log: line => lines.push(line) }),
+    })
+    const { h, storeId } = stop
+    const runsBefore = (await h.snapshot(storeId)).runs.length
+
+    // No model call and no tool call asked for this: the failed review was
+    // accepted under the store's own allowance the moment it was recorded.
+    await vi.waitFor(() => expect(reviewerSpawns(h)).toHaveLength(1), { timeout: 30_000, interval: 25 })
+    const reviewer = String(reviewerSpawns(h)[0]!.sessionId)
+    expect(reviewerSpawns(h)[0]!.name).toBe(`review ${stop.childTaskId}`)
+
+    // The source's one default attempt: claimed, started, and attributed to the
+    // graph's own root — the parent a reviewer is spawned from.
+    const attempt = await vi.waitFor(async () => {
+      const found = await readReviewAgentAttempts(storeId)
+      expect(found).toHaveLength(1)
+      return found[0]!
+    }, { timeout: 30_000, interval: 25 })
+    expect(attempt).toMatchObject({
+      source: { taskId: stop.childTaskId, runId: stop.childRunId },
+      requestKey: null,
+      reason: null,
+      actor: String(ROOT),
+      sessionId: reviewer,
+      started: true,
+    })
+    expect(await countReviewAgentRuns(storeId)).toBe(1)
+    // The delegation the assembly would read is durable before the reviewer's
+    // first request, exactly as an explicit call's is.
+    expect(await readReviewerDelegation(reviewer)).toMatchObject({ rootStoreId: storeId, taskId: stop.childTaskId })
+
+    // The judgement landed in the store, attributed to that reviewer.
+    await vi.waitFor(async () => {
+      const after = await h.snapshot(storeId)
+      expect(after.diagnoses.some(item => String(item.producedBy.sessionId) === reviewer)).toBe(true)
+    }, { timeout: 30_000, interval: 25 })
+    const diagnosis = (await h.snapshot(storeId)).diagnoses.find(item => String(item.producedBy.sessionId) === reviewer)!
+    expect(diagnosis.taskId).toBe(stop.childTaskId)
+
+    // The stopped tree is exactly as stopped as it was: the automatic postmortem
+    // took no second business Run and left the root's phase terminal.
+    const after = await h.snapshot(storeId)
+    expect(after.runs).toHaveLength(runsBefore)
+    expect(h.runtime.gate.phaseOf(ROOT)).toBe('terminal')
+    expect(lines.join('\n')).toContain(stop.childTaskId)
+
+    stop.resumeRoot()
+  }, 60_000)
+
   it('spawns no reviewer once the store\'s review allowance is spent, and says so in the same phase', async () => {
     const stop = await stopTreeAtItsDeadline(state => [
-      { tool: 'task_review_agent', args: () => ({ taskId: state.childTaskId }) },
+      { tool: 'task_review_agent', args: () => ({ taskId: state.childTaskId, runId: state.childRunId }) },
       { text: 'root: the review was refused' },
     ])
     // The ledger the deployment reads, spent: one review agent already started
@@ -283,7 +398,7 @@ describe('a tree stopped at its budget still takes a read-only postmortem (K4)',
     // own budget is what refuses it, by name.
     expect(review.result?.isError).toBe(false)
     expect(review.result?.text).toContain('budget exhausted')
-    expect(review.result?.text).toContain('no review agent spawned')
+    expect(review.result?.text).toContain('no review agent started')
     expect(stop.h.spawns).toHaveLength(spawnsBefore)
     expect(stop.h.graphCommits).toHaveLength(graphBefore)
     expect((await stop.h.snapshot(stop.storeId)).diagnoses).toEqual([])

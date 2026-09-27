@@ -4703,6 +4703,10 @@ async function failedLogTail(env, unmet, results) {
 * the run cascade and the replay runner share. The dimensions and effort
 * metrics are derived alongside (§2.7.3) on a best-effort basis — see
 * {@link reviewEnrichment} — and never gate the record itself.
+*
+* The record is durable before anything is told about it: the deployment's
+* listener (A5's review-agent trigger) is handed the fact afterwards and is
+* never awaited, so no settlement waits on a reviewer.
 */
 async function recordTerminalReview(env, storeId, taskId, outcome, options = {}) {
 	const enrichment = await reviewEnrichment(env, storeId, taskId, outcome, options.run, options.criteria);
@@ -4725,6 +4729,12 @@ async function recordTerminalReview(env, storeId, taskId, outcome, options = {})
 		...enrichment.dimensions === void 0 ? {} : { dimensions: enrichment.dimensions },
 		...enrichment.metrics === void 0 ? {} : { metrics: enrichment.metrics }
 	}, env.actor);
+	env.onTerminalReview?.({
+		storeId,
+		taskId,
+		runId: options.run?.runId ?? null,
+		outcome
+	});
 }
 /**
 * Refuse a dangling preset before the spawn attempt: when the deployment
@@ -6923,6 +6933,14 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* refuses new requests by name rather than assume a decision it never took.
 	*/
 	rootBudgetApproval;
+	/**
+	* Who the deployment wants told when a terminal review became durable (A5),
+	* installed through {@link registerTerminalReviewListener}. A list, and
+	* not a single slot: this is an observation door with no decision attached,
+	* so one deployment may watch the same fact for more than one reason without
+	* the second registration replacing the first.
+	*/
+	terminalReviewListeners = /* @__PURE__ */ new Set();
 	constructor(ctx, config) {
 		super(ctx, "taskRuntime");
 		const rootBudget = config?.rootBudget === void 0 ? void 0 : { ...config.rootBudget };
@@ -7797,6 +7815,52 @@ var TaskRuntime = class TaskRuntime extends Service {
 		return () => {
 			if (this.rootBudgetApproval === approval) this.rootBudgetApproval = void 0;
 		};
+	}
+	/**
+	* Install one listener the runtime tells when a terminal review became
+	* durable (A5) — the fact the review-agent trigger scans the store for.
+	*
+	* **What this door is not.** It carries no decision and no permission: the
+	* listener is told *what was recorded* and is never awaited, so nothing it
+	* does can hold a settlement, change a record or decide a phase. That is the
+	* whole reason it exists as an observation rather than as a second verb on the
+	* settle path: a deployment that installs none settles exactly as one that
+	* installs a hundred, and a listener whose own work fails (an unwritable
+	* ledger, a reviewer that cannot start) is reported and dropped by the
+	* runtime rather than propagated into the run it was told about.
+	*
+	* The listener is called once per review record, with the store, the task, the
+	* run under review (`null` for a review that carries none) and the outcome —
+	* never with "the latest review", so it cannot mistake one source for another.
+	* @param listener - the callback, called after the record is durable.
+	* @returns a disposer that removes exactly this listener.
+	*/
+	registerTerminalReviewListener(listener) {
+		if (typeof listener !== "function") throw new Error("task-runtime: a terminal-review listener must be a function");
+		this.terminalReviewListeners.add(listener);
+		return () => {
+			this.terminalReviewListeners.delete(listener);
+		};
+	}
+	/**
+	* Hand one recorded review to the listeners, fire-and-forget.
+	*
+	* Every listener is called and every answer is dropped: a promise one returns
+	* is left to settle on its own and a rejection is warned about, because a
+	* listener that fails has failed at *its* work (starting a reviewer), not at
+	* recording the review. A throwing listener is caught here for the same
+	* reason — the settlement path must come out of this function exactly as it
+	* went in.
+	*/
+	notifyTerminalReview(fact) {
+		for (const listener of this.terminalReviewListeners) try {
+			const answer = listener(fact);
+			if (answer !== void 0 && typeof answer.then === "function") answer.catch((error) => {
+				this.warn(`store ${fact.storeId}: a terminal-review listener failed after review ${fact.taskId}${fact.runId === null ? "" : `#${fact.runId}`} [${fact.outcome}] (${error instanceof Error ? error.message : String(error)})`);
+			});
+		} catch (error) {
+			this.warn(`store ${fact.storeId}: a terminal-review listener failed after review ${fact.taskId}${fact.runId === null ? "" : `#${fact.runId}`} [${fact.outcome}] (${error instanceof Error ? error.message : String(error)})`);
+		}
 	}
 	/**
 	* One budget extension, asked and recorded (K4): the whole entry, in one
@@ -10035,6 +10099,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 			onRunSettled: (storeId, taskId, runId, status) => {
 				this.runSettledFromRuntime(storeId, taskId, runId, status);
 			},
+			onTerminalReview: (fact) => this.notifyTerminalReview(fact),
 			gate: this.executionGate
 		};
 	}
@@ -11582,6 +11647,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 			},
 			readLogTail: async (logRef) => this.runVerifier()?.logTail?.(logRef),
 			observeSession: async (sessionId) => this.observeSession(sessionId),
+			onTerminalReview: (fact) => this.notifyTerminalReview(fact),
 			onRunBound: (sessionId, binding$1) => {
 				this.sessions.set(sessionId, binding$1);
 				this.startedSessions.add(sessionId);

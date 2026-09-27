@@ -33,6 +33,7 @@ import { TaskService } from '../../../task/src/index.ts'
 import type {
   AcceptanceCriterion,
   ArtifactRef,
+  Diagnosis,
   EvidenceBundle,
   QuestionAnswerRecord,
   QuestionRecord,
@@ -534,20 +535,32 @@ export class FixtureStack {
     await this.task.recordReviewIn(storeId, review, spec.sessionId)
   }
 
-  /** Record one diagnosis on a task. */
-  async diagnose(spec: { readonly taskId: string; readonly diagnosisId: string; readonly sessionId: string; readonly evidenceRefs: readonly string[] }): Promise<void> {
+  /** Record one diagnosis on a task; the prose and the suggestions are the caller's, the fixture's only when it names none. */
+  async diagnose(spec: {
+    readonly taskId: string
+    readonly diagnosisId: string
+    readonly sessionId: string
+    readonly evidenceRefs: readonly string[]
+    /** A postmortem observation other than the fixture's, when the case is about what the slot holds. */
+    readonly observedFailure?: string
+    /** Suggestions other than none — a target type outside the nine included (A5). */
+    readonly proposals?: Diagnosis['proposals']
+    /** Judge nothing by leaving it out: the reviewer's answer need not carry judgements. */
+    readonly judgements?: Diagnosis['judgements']
+  }): Promise<void> {
     await this.task.recordDiagnosisIn(
       rootTaskStoreId(this.rootOf(spec.sessionId)),
       {
         diagnosisId: spec.diagnosisId,
         taskId: spec.taskId,
-        observedFailure: 'fixture failure',
+        observedFailure: spec.observedFailure ?? 'fixture failure',
         scope: 'this task',
         localizedCause: 'a fixture cause',
         evidenceRefs: [...spec.evidenceRefs],
         reviewRefs: [],
         confidence: 'medium',
-        proposals: [],
+        proposals: spec.proposals === undefined ? [] : [...spec.proposals],
+        ...(spec.judgements === undefined ? {} : { judgements: [...spec.judgements] }),
       },
       spec.sessionId,
     )

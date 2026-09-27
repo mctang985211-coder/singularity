@@ -259,7 +259,26 @@ describe('reading a sibling dependency by reference', () => {
     expect(run.text).toContain('session: s-c2')
     const diagnosis = expectOk(await stack.service.contextRead('s-g1', { kind: 'diagnosis', ref: 'd-c2' }))
     expect(diagnosis.text).toContain('diagnosis d-c2 of task t-c2')
+    // The persisted `observedFailure` slot is read as the postmortem observation
+    // it is (A5): a diagnosis is what was observed, whether or not it failed.
+    expect(diagnosis.text).toContain('postmortem observation: fixture failure')
     expect(diagnosis.text).toContain('a fixture cause')
+
+    // A diagnosis read back as the record holds it (A5 §3): no judgements when
+    // the reviewer made none, and a suggestion whose target type is outside the
+    // nine the store used to freeze.
+    await stack.diagnose({
+      taskId: 't-c2',
+      diagnosisId: 'd-open',
+      sessionId: 's-c2',
+      evidenceRefs: ['e-c2'],
+      observedFailure: 'the run passed every mandatory criterion',
+      proposals: [{ targetType: 'prompt_template', targetId: 'reviewer', rationale: 'name the empty-input case' }],
+    })
+    const open = expectOk(await stack.service.contextRead('s-g1', { kind: 'diagnosis', ref: 'd-open' }))
+    expect(open.text).toContain('the run passed every mandatory criterion')
+    expect(open.text).toContain('"targetType": "prompt_template"')
+    expect(open.text).not.toContain('judgements')
   })
 
   test('a review of a task that blocked before any run is read by its pair with runId null', async () => {

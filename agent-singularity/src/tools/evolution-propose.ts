@@ -9,6 +9,13 @@ import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
+/**
+ * The mutation surfaces this build records for Evolution — its own vocabulary,
+ * not the diagnosis's (A5): a `DiagnosisProposal.targetType` is an open name,
+ * and this is where a suggestion is checked before it is transcribed into a
+ * proposal. What can actually be *executed* is narrower still
+ * (`APPLYABLE_TARGET_TYPES` in the evolution package).
+ */
 const TARGET_TYPES: readonly ProposalTargetType[] = [
   'skill', 'tool', 'capability', 'task_definition', 'decomposition_policy',
   'agent_preset', 'workflow_policy', 'verifier', 'runtime_policy',
@@ -65,7 +72,9 @@ export function defineEvolutionProposeTool(ctx: Context) {
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
       const caller = sessionId(exec)
-      let targetType = args.targetType
+      // A transcription carries whatever the diagnosis recorded — an open name
+      // — so the local is the open type and the check below narrows it.
+      let targetType: string | undefined = args.targetType
       let targetId = args.targetId
       let rationale = args.rationale
       const sourceRefs = [...(args.sourceRefs ?? [])]
@@ -84,6 +93,17 @@ export function defineEvolutionProposeTool(ctx: Context) {
         targetType = proposal.targetType
         targetId = proposal.targetId
         rationale = proposal.rationale
+        // The diagnosis's own target type is an open name (A5): this entry is
+        // where it is checked against the surfaces *this* build records, and a
+        // suggestion it cannot execute is refused before anything is written —
+        // never transcribed into a proposal no executor can take up.
+        if (!isProposalTargetType(targetType)) {
+          throw new Error(
+            `evolution_propose: diagnosis "${diagnosis.diagnosisId}" proposal #${args.fromDiagnosis.proposalIndex} names ` +
+            `targetType "${String(targetType)}", which this build cannot execute; it stays a recorded suggestion ` +
+            `(recorded target types: ${TARGET_TYPES.join(' / ')})`,
+          )
+        }
         sourceRefs.unshift(`diagnosis:${diagnosis.diagnosisId}`)
       } else if (targetType === undefined || targetId === undefined || rationale === undefined) {
         throw new Error('evolution_propose: targetType, targetId and rationale are required without fromDiagnosis')

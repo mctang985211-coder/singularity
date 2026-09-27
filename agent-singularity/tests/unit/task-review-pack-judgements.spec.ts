@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -36,7 +36,7 @@ const snapshot = {
   version: 1 as const,
   id: 'sg-t-root-1',
   tasks: [rootTask, childTask],
-  runs: [],
+  runs: [{ runId: 'r-child-1', taskId: 't-child-1', status: 'failed' as const }],
   edges: [],
   evidence: [],
   handoffs: [],
@@ -102,21 +102,95 @@ afterEach(() => {
   rmSync(ledgerDir, { recursive: true, force: true })
 })
 
-describe('task_review_pack escalation and judgements', () => {
-  it('prints the session each review came from, the escalation decision, and the judged dimensions', async () => {
+describe('task_review_pack as a fact sheet, without a trigger decision', () => {
+  it('prints the session each review came from, the judged dimensions, and no escalation decision', async () => {
     const tool = defineTaskReviewPackTool(fixture(failingSnapshot()) as never)
-    const pack = (await tool.execute({ taskId: 't-child-1' }, exec as never)) as string
+    const pack = (await tool.execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec as never)) as string
 
     expect(pack).toContain('review t-child-1#r-child-1 [failed] evidence: [ev-1] session s-child')
-    expect(pack).toContain('escalation: required E1 (budget 0/1)')
     expect(pack).toContain('needs judgement (agent): task_specification, acceptance, decomposition, skill_fit, tool_fit, context_efficiency')
     expect(pack).toContain('not mechanically observable from the fact table')
+    // A5 deleted the escalation derivation: whether a review agent runs is
+    // decided by the triggers (a failed review, an explicit call) and the
+    // store's own allowance — never by a threshold the pack re-derives. The pack
+    // keeps the observations (the outcome, the criteria, the log tail, the
+    // dimensions); it prints no trigger decision at all.
+    expect(pack).not.toContain('escalation')
+    expect(pack).not.toContain('required')
+    expect(pack).not.toContain('suppressed')
   })
 
-  it('says not required for a clean review', async () => {
+  it('prints the same facts for a clean review: no decision, and nothing invented for it', async () => {
     const tool = defineTaskReviewPackTool(fixture(cleanSnapshot()) as never)
-    const pack = (await tool.execute({ taskId: 't-child-1' }, exec as never)) as string
-    expect(pack).toContain('escalation: not required (budget 0/1)')
+    const pack = (await tool.execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec as never)) as string
+    expect(pack).toContain('source: review t-child-1#r-child-1 [verified]')
+    expect(pack).not.toContain('escalation')
+    expect(pack).not.toContain('required')
+  })
+
+  /**
+   * The handoff mark (A5 §3, F.3): a Diagnosis that carries proposals is A6's
+   * handoff candidate, and with no A6 candidate loop enabled in this build it
+   * is **pending** — recorded, addressed to nobody yet. A conclusion without
+   * proposals is not a handoff and says nothing about one; an interrupted
+   * attempt has no Diagnosis at all, so it cannot be shown as pending either.
+   */
+  it('marks a diagnosis that carries proposals as a pending handoff, and only that one', async () => {
+    const full = failingSnapshot()
+    full.diagnoses = [
+      {
+        diagnosisId: 'd-with-suggestion', taskId: 't-child-1', observedFailure: 'ac1-1 fails on the fixtures',
+        scope: 'task t-child-1', localizedCause: 'the fixtures never feed empty input',
+        evidenceRefs: ['ev-1'], reviewRefs: ['t-child-1#r-child-1'], confidence: 'medium' as never,
+        proposals: [{ targetType: 'prompt_template', targetId: 'reviewer', rationale: 'name the empty-input case' }],
+        producedBy: { kind: 'agent' as never, sessionId: 's-rev-1' },
+      },
+      {
+        diagnosisId: 'd-no-suggestion', taskId: 't-child-1', observedFailure: 'the run verified on its first attempt',
+        scope: 'task t-child-1', localizedCause: 'no improvement needed',
+        evidenceRefs: ['ev-1'], reviewRefs: ['t-child-1#r-child-1'], confidence: 'high' as never,
+        proposals: [], producedBy: { kind: 'agent' as never, sessionId: 's-rev-2' },
+      },
+    ] as never
+    const pack = (await defineTaskReviewPackTool(fixture(full) as never)
+      .execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec as never)) as string
+
+    expect(pack).toContain('proposal prompt_template reviewer: name the empty-input case')
+    expect(pack).toContain('handoff: pending')
+    // One pending handoff, not two: the conclusion without proposals is a
+    // conclusion, and nothing waiting is invented for it.
+    expect(pack.match(/handoff: pending/g)).toHaveLength(1)
+    expect(pack).toContain('- d-no-suggestion [high] no improvement needed [agent s-rev-2]')
+    expect(pack.slice(pack.indexOf('- d-no-suggestion'))).not.toContain('handoff')
+  })
+
+  it('shows an interrupted attempt as interrupted, with no pending handoff invented for it', async () => {
+    const full = failingSnapshot()
+    // The reviewer ran and produced nothing: the ledger holds the claim and the
+    // interrupted fact, and the store holds no diagnosis for it.
+    writeFileSync(join(ledgerDir, 'agents.jsonl'), [
+      JSON.stringify({
+        formatVersion: 2, kind: 'claim', rootStoreId: 'sg-t-root-1', taskId: 't-child-1', runId: 'r-child-1',
+        requestKey: null, reason: null, sessionId: 's-reviewer', actor: 'root-1', at: '2026-09-27T00:00:00.000Z',
+      }),
+      JSON.stringify({
+        formatVersion: 2, kind: 'started', rootStoreId: 'sg-t-root-1', taskId: 't-child-1',
+        sessionId: 's-reviewer', actor: 'root-1', at: '2026-09-27T00:00:01.000Z',
+      }),
+      JSON.stringify({
+        formatVersion: 2, kind: 'settled', rootStoreId: 'sg-t-root-1', taskId: 't-child-1', sessionId: 's-reviewer',
+        status: 'interrupted', note: 'the reviewer timed out after 5ms with no diagnosis', at: '2026-09-27T00:00:02.000Z',
+      }),
+      '',
+    ].join('\n'))
+    full.diagnoses = []
+    const pack = (await defineTaskReviewPackTool(fixture(full) as never)
+      .execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec as never)) as string
+
+    expect(pack).toContain('review attempts (1):')
+    expect(pack).toContain('default attempt s-reviewer [interrupted] — the reviewer timed out after 5ms with no diagnosis')
+    expect(pack).toContain('diagnoses (0):')
+    expect(pack).not.toContain('handoff: pending')
   })
 
   it('renders agent judgements apart from the mechanical fact lines', async () => {
@@ -138,7 +212,7 @@ describe('task_review_pack escalation and judgements', () => {
       ],
     }]
     const tool = defineTaskReviewPackTool(fixture(full) as never)
-    const pack = (await tool.execute({ taskId: 't-child-1' }, exec as never)) as string
+    const pack = (await tool.execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec as never)) as string
 
     expect(pack).toContain('diagnoses (1):')
     expect(pack).toContain('- review-agent-s-rev-1 [medium] agent review of t-child-1: inadequate [skill_fit]; unknown [acceptance] [agent s-rev-1]')

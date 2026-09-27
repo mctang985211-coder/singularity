@@ -656,7 +656,13 @@ declare function evidenceRecordText(snapshot: TaskSnapshot, evidence: EvidenceBu
  * of printing an invented run id.
  */
 declare function reviewRecordText(review: ReviewRecord): string;
-/** The complete rendering of one diagnosis record. */
+/**
+ * The complete rendering of one diagnosis record.
+ *
+ * The persisted `observedFailure` slot is read here as what A5 made it: the
+ * postmortem observation, not a claim that something failed — a postmortem of a
+ * source that succeeded fills the same slot with what was really observed.
+ */
 declare function diagnosisRecordText(diagnosis: Diagnosis): string;
 /**
  * The one-line identity of one task, in the shape both status reads use: status,

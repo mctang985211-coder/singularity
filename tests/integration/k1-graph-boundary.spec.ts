@@ -441,13 +441,19 @@ describe('K1-4: a returned parent whose checkout cannot be taken over is stopped
     // from: the run's accumulation names it, and nothing cleared it.
     expect(runOf(after, middleTaskId).batches!.map(batch => batch.batchId)).toEqual([middleBatchId])
 
-    // Nothing woke the failed run and nothing was spawned for it: the deployment
-    // never asked the model loop to bring the middle's session back, the recovery
-    // process stated no batch-end message to it at all — the statement the first
-    // process made is the one that stands — and the re-delivery the runtime can
-    // re-derive from the store answers `skipped` (a terminal run is not woken).
+    // Nothing woke the failed run and no *task worker* was spawned for it: the
+    // deployment never asked the model loop to bring the middle's session back,
+    // the recovery process stated no batch-end message to it at all — the
+    // statement the first process made is the one that stands — and the
+    // re-delivery the runtime can re-derive from the store answers `skipped` (a
+    // terminal run is not woken). The failed review this recovery wrote is
+    // accepted for diagnosis on its own (A5), which publishes one read-only
+    // review node and reaches no run of the store — the two spawns this list
+    // holds are the reviewer's, never a worker's, and the middle's session was
+    // never resumed.
     expect(second.mintedAgent(middleSession)).toBeUndefined()
-    expect(second.spawns).toEqual([])
+    expect(second.spawns.filter(spawn => spawn.taskWorker === true)).toEqual([])
+    for (const spawn of second.spawns) expect(spawn.agentPreset).toBe('singularity-reviewer')
     expect(second.relayed.filter(intent => intent.messageId === endMessageId)).toEqual([])
     expect(second.relayed.filter(intent => intent.targetSessionId === middleSession)).toEqual([])
     await expect(second.runtime.redeliverBatchResult(storeId, middleBatchId)).resolves.toBe('skipped')
@@ -456,13 +462,15 @@ describe('K1-4: a returned parent whose checkout cannot be taken over is stopped
     // changes nothing, starts nothing, and leaves the same run failed — the
     // delegation is not retried and no second run of that task appears.
     const startEventsBefore = (await second.events(storeId)).filter(event => event.kind === 'TaskStarted').length
+    const reviewSpawnsBefore = second.spawns.filter(spawn => spawn.agentPreset === 'singularity-reviewer').length
     await second.runtime.reconcileStore(storeId)
     const settledAgain = await second.snapshot(storeId)
     expect(settledAgain.runs.filter(run => run.taskId === middleTaskId)).toHaveLength(1)
     expect(runOf(settledAgain, middleTaskId).runId).toBe(middle.runId)
     expect(runOf(settledAgain, middleTaskId).status).toBe('failed')
     expect((await second.events(storeId)).filter(event => event.kind === 'TaskStarted')).toHaveLength(startEventsBefore)
-    expect(second.spawns).toEqual([])
+    expect(second.spawns.filter(spawn => spawn.taskWorker === true)).toEqual([])
+    expect(second.spawns.filter(spawn => spawn.agentPreset === 'singularity-reviewer')).toHaveLength(reviewSpawnsBefore)
     expect(second.mintedAgent(middleSession)).toBeUndefined()
     expect(second.relayed.filter(intent => intent.targetSessionId === middleSession)).toEqual([])
     // The run's own Session still resolves to that one failed run — no second run
@@ -514,9 +522,12 @@ describe('K1-4: a returned parent whose checkout cannot be taken over is stopped
     expect(middleReview.localizedCause).toContain(`the marker names pid ${holder}, which is alive`)
     expect(middleReview.localizedCause).toContain('a live owner is never taken over')
 
-    // The same three facts as the case above: no wake, no worker, no resurrection.
+    // The same three facts as the case above: no wake, no worker, no
+    // resurrection — the failed review's own node is the only thing published,
+    // and the middle's session is never resumed.
     expect(second.mintedAgent(middleSession)).toBeUndefined()
-    expect(second.spawns).toEqual([])
+    expect(second.spawns.filter(spawn => spawn.taskWorker === true)).toEqual([])
+    for (const spawn of second.spawns) expect(spawn.agentPreset).toBe('singularity-reviewer')
     expect(second.relayed.filter(intent => intent.targetSessionId === middleSession)).toEqual([])
     await second.runtime.reconcileStore(storeId)
     expect(runOf(await second.snapshot(storeId), middleTaskId).status).toBe('failed')

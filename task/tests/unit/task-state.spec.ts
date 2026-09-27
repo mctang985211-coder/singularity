@@ -567,19 +567,41 @@ describe('TaskState diagnoses', () => {
     expect(() => state.apply(ev('DiagnosisRecorded', { diagnosis: diagnosis({ evidenceRefs: [''] }) }))).toThrow('non-empty strings')
   })
 
-  test('proposals name one of the nine frozen target types and carry id and rationale', () => {
+  test('a proposal names any non-empty target type, and carries id and rationale', () => {
     const state = verifiedState()
     expect(() => state.apply(ev('DiagnosisRecorded', {
-      diagnosis: diagnosis({ proposals: [{ targetType: 'production' as Diagnosis['proposals'][number]['targetType'], targetId: 'x', rationale: 'y' }] }),
+      diagnosis: diagnosis({ proposals: [{ targetType: '', targetId: 'x', rationale: 'y' }] }),
     }))).toThrow('target type')
     expect(() => state.apply(ev('DiagnosisRecorded', {
       diagnosis: diagnosis({ proposals: [{ targetType: 'skill', targetId: '', rationale: 'y' }] }),
     }))).toThrow('target id and a rationale')
+    expect(() => state.apply(ev('DiagnosisRecorded', {
+      diagnosis: diagnosis({ proposals: [{ targetType: 41 as never, targetId: 'x', rationale: 'y' }] }),
+    }))).toThrow('target type')
+    // The vocabulary is not the diagnosis's to freeze (A5): a target type the
+    // store has never seen is a recorded suggestion, and whether anything can
+    // execute it is decided at the conversion entry that would execute it.
     state.apply(ev('DiagnosisRecorded', {
-      diagnosis: diagnosis({ proposals: [{ targetType: 'verifier', targetId: 'command', rationale: 'the criterion command misses the empty-input case' }] }),
+      diagnosis: diagnosis({ proposals: [
+        { targetType: 'prompt_template', targetId: 'reviewer', rationale: 'the reviewer prompt never names the empty-input case' },
+        { targetType: 'verifier', targetId: 'command', rationale: 'the criterion command misses the empty-input case' },
+      ] }),
     }))
     expect(state.snapshot().diagnoses[0]?.proposals).toEqual([
+      { targetType: 'prompt_template', targetId: 'reviewer', rationale: 'the reviewer prompt never names the empty-input case' },
       { targetType: 'verifier', targetId: 'command', rationale: 'the criterion command misses the empty-input case' },
+    ])
+  })
+
+  test('a diagnosis written under the old nine-type vocabulary still replays and reads back', () => {
+    // The shape a build before A5 wrote: `targetType` was a nine-member union.
+    // The declaration opened; the records did not move.
+    const state = verifiedState()
+    state.apply(ev('DiagnosisRecorded', {
+      diagnosis: diagnosis({ proposals: [{ targetType: 'runtime_policy', targetId: 'watchdog', rationale: 'the watchdog is too short for this workload' }] }),
+    }))
+    expect(state.snapshot().diagnoses[0]?.proposals).toEqual([
+      { targetType: 'runtime_policy', targetId: 'watchdog', rationale: 'the watchdog is too short for this workload' },
     ])
   })
 

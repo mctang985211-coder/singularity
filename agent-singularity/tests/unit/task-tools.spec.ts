@@ -1225,14 +1225,14 @@ describe('task_review_pack', () => {
     ctx.task.openStore.mockResolvedValue(nestedSnapshot())
     const tool = defineTaskReviewPackTool(ctx as never)
 
-    const rootPack = (await tool.execute({ taskId: 't-root' }, exec('root-1'))) as string
+    const rootPack = (await tool.execute({ taskId: 't-root', runId: 'r-root' }, exec('root-1'))) as string
     expect(rootPack).toContain('review pack for task t-root [verified] depth 0')
     expect(rootPack).toContain('review t-root#r-root [verified]')
     expect(rootPack).toContain('- t-child-1 [failed]: review t-child-1#r-child-1: failed — mandatory criteria not satisfied: ac1-1 fail')
     expect(rootPack).toContain('- t-child-2 [blocked]: review t-child-2#no-run: blocked — dependencies [t-child-1] did not verify')
     expect(rootPack).toContain('diagnoses (0)')
 
-    const childPack = (await tool.execute({ taskId: 't-child-1' }, exec('root-1'))) as string
+    const childPack = (await tool.execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec('root-1'))) as string
     expect(childPack).toContain('review t-child-1#r-child-1 [failed] duration 42ms evidence: [ev-1]')
     expect(childPack).toContain('cause: mandatory criteria not satisfied: ac1-1 fail')
     expect(childPack).toContain('criterion ac1-1: fail exit 1 — $ pnpm test log sg-t-root-1/r-child-1/ac1-1.log')
@@ -1244,7 +1244,7 @@ describe('task_review_pack', () => {
     expect(childPack).toContain('parent t-root [verified]: review t-root#r-root: verified')
     expect(childPack).toContain('dependencies: must verify first []; blocks [t-child-2]')
 
-    const blockedPack = (await tool.execute({ taskId: 't-child-2' }, exec('root-1'))) as string
+    const blockedPack = (await tool.execute({ taskId: 't-child-2', runId: null }, exec('root-1'))) as string
     expect(blockedPack).toContain('review t-child-2#no-run [blocked]')
     expect(blockedPack).toContain('blockedBy t-child-1 [failed]')
     expect(blockedPack).toContain('dependencies: must verify first [t-child-1]; blocks []')
@@ -1287,14 +1287,14 @@ describe('task_review_pack', () => {
     ctx.task.openStore.mockResolvedValue(bound)
     const tool = defineTaskReviewPackTool(ctx as never)
 
-    const rootPack = (await tool.execute({ taskId: 't-root' }, exec('root-1'))) as string
+    const rootPack = (await tool.execute({ taskId: 't-root', runId: 'r-root' }, exec('root-1'))) as string
     expect(rootPack).toContain(
       `- run r-root [verified] bound registry ${'a'.repeat(12)}: ball-align [knowledge] content ${'c'.repeat(12)} contract ${'b'.repeat(12)}; mcp bbdev; snapshot /dsh/singularity/run-bindings/sg-t-root-1/r-root/skills`,
     )
 
     // The child's run carries no binding: its review line and the pack around it
     // are exactly what they were before the field existed.
-    const childPack = (await tool.execute({ taskId: 't-child-1' }, exec('root-1'))) as string
+    const childPack = (await tool.execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec('root-1'))) as string
     expect(childPack).not.toContain('bound registry')
   })
 
@@ -1327,7 +1327,7 @@ describe('task_review_pack', () => {
     })
     ctx.task.openStore.mockResolvedValue(full)
     const tool = defineTaskReviewPackTool(ctx as never)
-    const pack = (await tool.execute({ taskId: 't-child-1' }, exec('root-1'))) as string
+    const pack = (await tool.execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec('root-1'))) as string
 
     expect(pack).toContain(
       'metrics: tokens in 1000/out 200/cache 50+10 (session-cumulative) — toolCalls 5 (1 failed) — '
@@ -1346,7 +1346,7 @@ describe('task_review_pack', () => {
   it('rejects an unknown task id', async () => {
     const { ctx } = await fixture()
     const tool = defineTaskReviewPackTool(ctx as never)
-    await expect(tool.execute({ taskId: 'ghost' }, exec('root-1'))).rejects.toThrow('unknown task "ghost"')
+    await expect(tool.execute({ taskId: 'ghost', runId: 'r-ghost' }, exec('root-1'))).rejects.toThrow('unknown task "ghost"')
   })
 
   it('shows the deciding judge and its version on the criterion line', async () => {
@@ -1362,7 +1362,7 @@ describe('task_review_pack', () => {
     })
     ctx.task.openStore.mockResolvedValue(full)
     const tool = defineTaskReviewPackTool(ctx as never)
-    const pack = (await tool.execute({ taskId: 't-child-1' }, exec('root-1'))) as string
+    const pack = (await tool.execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec('root-1'))) as string
 
     expect(pack).toContain('criterion ac1-1: fail [command@1] exit 1 — $ pnpm test')
     expect(pack).toContain('criterion ac1-2: inconclusive [review]')
@@ -1405,7 +1405,7 @@ describe('task_diagnose', () => {
     })
     const result = (await defineTaskDiagnoseTool(ctx as never).execute(args, exec('root-1'))) as string
     expect(result).toContain('diagnosis d1 recorded')
-    const pack = (await defineTaskReviewPackTool(ctx as never).execute({ taskId: 't-child-1' }, exec('root-1'))) as string
+    const pack = (await defineTaskReviewPackTool(ctx as never).execute({ taskId: 't-child-1', runId: 'r-child-1' }, exec('root-1'))) as string
     expect(pack).toContain('diagnoses (1):')
     expect(pack).toContain('- d1 [medium] the fixtures never feed empty input')
     const status = (await defineTaskStatusTool(ctx as never).execute({}, exec('root-1'))) as string
@@ -1421,15 +1421,42 @@ describe('task_diagnose', () => {
     expect(result).toBe('task_diagnose rejected: task: diagnosis "d1" already exists')
   })
 
-  it('rejects a proposal targetType outside the frozen vocabulary and persists nothing', async () => {
+  it('records a proposal whose targetType the old vocabulary never held, and refuses an empty one', async () => {
     const { ctx } = await fixture()
     const tool = defineTaskDiagnoseTool(ctx as never)
+    // The diagnosis does not freeze a target-type vocabulary (A5): a suggestion
+    // that names a surface this build has no executor for is a recorded
+    // suggestion, and whether anything can execute it is decided where it would
+    // be executed (evolution_propose/fromDiagnosis), not here.
+    const recorded = (await tool.execute(
+      { ...args, proposals: [{ targetType: 'prompt_template', targetId: 'reviewer', rationale: 'name the empty-input case' }] },
+      exec('root-1'),
+    )) as string
+    expect(recorded).toContain('- prompt_template reviewer: name the empty-input case')
+    expect(ctx.task.recordDiagnosisIn).toHaveBeenCalledOnce()
+
+    ctx.task.recordDiagnosisIn.mockClear()
     const rejected = (await tool.execute(
-      { ...args, proposals: [{ targetType: 'prompt', targetId: 'x', rationale: 'y' }] },
+      { ...args, proposals: [{ targetType: '  ', targetId: 'x', rationale: 'y' }] },
       exec('root-1'),
     ).catch((error: Error) => String(error))) as string
     expect(rejected).toContain('targetType')
     expect(ctx.task.recordDiagnosisIn).not.toHaveBeenCalled()
+  })
+
+  it('names the observedFailure slot the postmortem observation, in the schema and in the description', async () => {
+    const { ctx } = await fixture()
+    const tool = defineTaskDiagnoseTool(ctx as never)
+    const parameters = (tool.parameters as {
+      properties: Record<string, { type?: unknown; description?: string; items?: { properties?: Record<string, Record<string, unknown>> } }>
+    }).properties
+
+    expect(tool.description).toContain('postmortem observation')
+    expect(parameters.observedFailure?.description).toContain('postmortem observation')
+    // The proposal target type is an open string on the model-facing schema: no
+    // enum, because the vocabulary is not this tool's to freeze (A5).
+    expect(parameters.proposals?.items?.properties?.targetType).toMatchObject({ type: 'string' })
+    expect(parameters.proposals?.items?.properties?.targetType).not.toHaveProperty('enum')
   })
 
   it('rejects a proposals payload that is not an array of proposal objects and persists nothing', async () => {
@@ -1588,7 +1615,7 @@ describe('missing agent identity', () => {
     ['task_submit_result', async () => defineTaskSubmitResultTool((await fixture()).ctx as never), { summary: 'done' }],
     ['task_cancel', async () => defineTaskCancelTool((await fixture()).ctx as never), {}],
     ['task_verify', async () => defineTaskVerifyTool((await fixture()).ctx as never), {}],
-    ['task_review_pack', async () => defineTaskReviewPackTool((await fixture()).ctx as never), { taskId: 't-child-1' }],
+    ['task_review_pack', async () => defineTaskReviewPackTool((await fixture()).ctx as never), { taskId: 't-child-1', runId: 'r-child-1' }],
     ['task_ask_parent', async () => defineTaskAskParentTool((await fixture()).ctx as never), { requestKey: 'k1', question: 'which contract holds?' }],
     ['task_answer', async () => defineTaskAnswerTool((await fixture()).ctx as never), { questionId: 'q-1', requestKey: 'a1', answer: 'this one', resolves: true }],
     ['task_diagnose', async () => defineTaskDiagnoseTool((await fixture()).ctx as never), {

@@ -17,7 +17,6 @@ import {
   REVIEWER_BASELINE,
   REVIEWER_PRESET,
   defineTaskReviewAgentTool,
-  normalizeJudgements,
   reviewerGrant,
 } from '../../src/tools/review-agent.ts'
 
@@ -36,6 +35,10 @@ const ledgerFs = vi.hoisted(() => {
     markWritten: () => void
     done: Promise<void>
     failure: Error | undefined
+    /** Signalled when the append is reached, before anything is written. */
+    entered?: () => void
+    /** When armed, the append waits for this before its bytes are written. */
+    before?: Promise<void>
   }
   let armedAppend: ArmedAppend | undefined
   let readSignal: (() => void) | undefined
@@ -51,6 +54,25 @@ const ledgerFs = vi.hoisted(() => {
         failure: undefined,
       }
       return { written: written.promise, release: () => released.resolve() }
+    },
+    /**
+     * The next append waits *before* its bytes are written: the window between
+     * "the writer decided to record this fact" and "the row is on the file" —
+     * where the writer's own process state and the file disagree — is the test's
+     * to hold open.
+     */
+    holdNextAppendBeforeWrite() {
+      const entered = Promise.withResolvers<void>()
+      const released = Promise.withResolvers<void>()
+      armedAppend = {
+        written: Promise.resolve(),
+        markWritten: () => {},
+        done: Promise.resolve(),
+        failure: undefined,
+        entered: () => entered.resolve(),
+        before: released.promise,
+      }
+      return { entered: entered.promise, release: () => released.resolve() }
     },
     /** The next append fails without writing, the way an unwritable ledger directory does. */
     failNextAppend(error: Error) {
@@ -87,6 +109,8 @@ vi.mock('node:fs/promises', async importOriginal => {
     appendFile: async (...args: Parameters<typeof actual.appendFile>) => {
       const armed = ledgerFs.takeArmedAppend()
       if (armed === undefined) return actual.appendFile(...args)
+      armed.entered?.()
+      if (armed.before !== undefined) await armed.before
       if (armed.failure !== undefined) throw armed.failure
       await actual.appendFile(...args)
       armed.markWritten()
@@ -116,7 +140,7 @@ const store = {
     runIds: ['r1'],
     childTaskIds: [],
   }],
-  runs: [],
+  runs: [{ runId: 'r1', taskId: 't1', status: 'failed' as const }],
   edges: [],
   evidence: [],
   handoffs: [],
@@ -198,42 +222,6 @@ describe('reviewer grant', () => {
   })
 })
 
-describe('normalizeJudgements', () => {
-  test('fills every judged dimension exactly once, unknown when the reviewer said nothing', () => {
-    const judgements = normalizeJudgements(undefined, 't1#r1', 'no judgement returned')
-    expect(judgements.map(item => item.dimension)).toEqual([
-      'task_specification', 'acceptance', 'decomposition', 'skill_fit', 'tool_fit', 'context_efficiency',
-    ])
-    expect(judgements.every(item => item.verdict === 'unknown')).toBe(true)
-    expect(judgements.every(item => item.evidenceRefs.length > 0)).toBe(true)
-  })
-
-  test('a verdict without evidence refs is downgraded to unknown', () => {
-    const judgements = normalizeJudgements(
-      [{ dimension: 'skill_fit', verdict: 'adequate', evidenceRefs: [], rationale: 'looks fine' }],
-      't1#r1',
-      'missing',
-    )
-    const skill = judgements.find(item => item.dimension === 'skill_fit')!
-    expect(skill.verdict).toBe('unknown')
-    expect(skill.evidenceRefs).toEqual(['t1#r1'])
-    expect(skill.rationale).toContain('downgraded to unknown')
-  })
-
-  test('an out-of-vocabulary verdict becomes unknown and an unknown dimension is ignored', () => {
-    const judgements = normalizeJudgements(
-      [
-        { dimension: 'skill_fit', verdict: 'scored-9', evidenceRefs: ['ev-1'], rationale: 'x' },
-        { dimension: 'outcome_correctness', verdict: 'adequate', evidenceRefs: ['ev-1'], rationale: 'x' },
-      ],
-      't1#r1',
-      'missing',
-    )
-    expect(judgements.find(item => item.dimension === 'skill_fit')!.verdict).toBe('unknown')
-    expect(judgements.some(item => String(item.dimension) === 'outcome_correctness')).toBe(false)
-  })
-})
-
 function handle(reply: string | undefined, options: { hang?: boolean } = {}) {
   const cancel = vi.fn()
   const events = reply === undefined
@@ -303,6 +291,11 @@ function ledgerRows(): Record<string, unknown>[] {
     .map(line => JSON.parse(line) as Record<string, unknown>)
 }
 
+/** The ledger's rows of one kind (A5: claim / started / settled). */
+function rowsOfKind(kind: string): Record<string, unknown>[] {
+  return ledgerRows().filter(row => row.kind === kind)
+}
+
 let ledgerDir: string
 let previousLedger: string | undefined
 let previousBudget: string | undefined
@@ -324,8 +317,23 @@ afterEach(() => {
   rmSync(ledgerDir, { recursive: true, force: true })
 })
 
+/**
+ * A reviewer's answer in the shape A5 asks for: the observation, the
+ * conclusion, the confidence, and only the judgement it really made. The six
+ * dimensions are a vocabulary for the judgements a reviewer chooses to make,
+ * not a form to fill in.
+ */
 const REPLY = '```json\n'
-  + '{"judgements":[{"dimension":"skill_fit","verdict":"inadequate","evidenceRefs":["ev-1"],"rationale":"the skill was never loaded"}]}'
+  + '{"observation":"the run failed its mandatory criterion c1",'
+  + '"conclusion":"the acceptance command never feeds empty input",'
+  + '"confidence":"medium",'
+  + '"judgements":[{"dimension":"skill_fit","verdict":"inadequate","evidenceRefs":["ev-1"],"rationale":"the skill was never loaded"}]}'
+  + '\n```'
+
+/** The same answer with no judgement and no proposal: "no improvement needed" is a conclusion. */
+const NO_SUGGESTION_REPLY = '```json\n'
+  + '{"observation":"the run passed every mandatory criterion on its first attempt",'
+  + '"conclusion":"no improvement needed","confidence":"high"}'
   + '\n```'
 
 describe('the ledger as the reviewer binding source (A2)', () => {
@@ -534,16 +542,49 @@ describe('the review-agent admission (K4-1)', () => {
 
     const rows = ledgerRows()
     expect(rows).toHaveLength(1)
-    expect(Object.keys(rows[0]!).sort()).toEqual(['actor', 'at', 'formatVersion', 'rootStoreId', 'sessionId', 'taskId'])
-    expect(rows[0]).toMatchObject({ formatVersion: 1, rootStoreId: ROOT_STORE, taskId: 't1', sessionId: 's-delegated', actor: 'root-1' })
+    expect(Object.keys(rows[0]!).sort()).toEqual(['actor', 'at', 'formatVersion', 'kind', 'rootStoreId', 'sessionId', 'taskId'])
+    expect(rows[0]).toMatchObject({ formatVersion: 2, kind: 'started', rootStoreId: ROOT_STORE, taskId: 't1', sessionId: 's-delegated', actor: 'root-1' })
     expect(Date.parse(String(rows[0]!.at))).not.toBeNaN()
+  })
+
+  test('a started row is written once per attempt, however many times it is asked for', async () => {
+    // "An attempt that has started is not re-recorded": the door is idempotent by
+    // the attempt's own session, so a second call — in the same region or in a
+    // later one — neither appends a row nor charges the store twice.
+    const once = await admitReviewAgent(ROOT_STORE, async admission => {
+      await admission.start(row('s-once'))
+      await admission.start(row('s-once'))
+      return admission.started
+    })
+    expect(once).toBe(0)
+    expect(ledgerRows()).toHaveLength(1)
+
+    const again = await admitReviewAgent(ROOT_STORE, async admission => {
+      await admission.start(row('s-once'))
+      return admission.started
+    })
+    expect(again).toBe(1)
+    expect(ledgerRows()).toHaveLength(1)
+    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
+
+    // A different attempt is a different spend: the door is idle for one
+    // session, not for the store.
+    const other = await admitReviewAgent(ROOT_STORE, async admission => {
+      await admission.start(row('s-other'))
+      return admission.started
+    })
+    expect(other).toBe(1)
+    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(2)
   })
 })
 
 describe('task_review_agent', () => {
-  test('spawns one preset-constrained reviewer and records its judgement as a diagnosis', async () => {
+  /** The source every call in this block names: task `t1` and its one run. */
+  const RUN = 'r1'
+
+  test('spawns one preset-constrained reviewer for the named source and records its diagnosis', async () => {
     const { ctx, spawn, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(REPLY))
-    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1' }, exec as never)) as string
+    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)) as string
 
     expect(spawn).toHaveBeenCalledOnce()
     const request = spawn.mock.calls[0]![1] as Record<string, unknown>
@@ -554,25 +595,145 @@ describe('task_review_agent', () => {
     // The grant actually restricts: resolve the exact grant the tool passed.
     const allow = resolveGrant(grantHarness().ctx, worker(), request.grant as never).allow
     for (const name of FORBIDDEN) expect(allow).not.toContain(name)
+    // The reviewer's own request names the source it was asked to review.
+    expect((request.prompt as { text: string }[])[0]!.text).toContain('review t1#r1 [failed]')
 
     // The delegation was written to the ledger through the spawn's beforePrompt
     // — durable before any model input, so the context assembly can verify it.
     const delegation = await readReviewerDelegation(request.sessionId as string)
     expect(delegation).toMatchObject({ rootStoreId: 'sg-t-root-1', taskId: 't1', actor: 'root-1' })
-    expect(ledgerRows()).toHaveLength(1)
+    // One attempt: its claim, its started row, its settled fact.
+    expect(rowsOfKind('claim')).toHaveLength(1)
+    expect(rowsOfKind('started')).toHaveLength(1)
+    expect(rowsOfKind('settled')).toHaveLength(1)
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'recorded', sessionId: request.sessionId })
+    expect(rowsOfKind('claim')[0]).toMatchObject({ taskId: 't1', runId: RUN, requestKey: null, sessionId: request.sessionId })
 
     expect(recordDiagnosisIn).toHaveBeenCalledOnce()
     const [storeId, diagnosis] = recordDiagnosisIn.mock.calls[0] as [string, Record<string, unknown>]
     expect(storeId).toBe('sg-t-root-1')
     expect(diagnosis.producedBy).toEqual({ kind: 'agent', sessionId: request.sessionId })
     const judgements = diagnosis.judgements as { dimension: string; verdict: string; evidenceRefs: string[] }[]
-    expect(judgements).toHaveLength(6)
+    expect(judgements).toHaveLength(1)
     expect(judgements.find(item => item.dimension === 'skill_fit')!.verdict).toBe('inadequate')
-    expect(judgements.filter(item => item.verdict === 'unknown')).toHaveLength(5)
+    // The reviewer's own words are the diagnosis: the observation it recorded
+    // and the conclusion it reached, never a mechanical restatement.
+    expect(diagnosis.observedFailure).toBe('the run failed its mandatory criterion c1')
+    expect(diagnosis.localizedCause).toBe('the acceptance command never feeds empty input')
+    expect(diagnosis.confidence).toBe('medium')
 
     expect(result).toContain('judgements (agent')
     expect(result).toContain('skill_fit: inadequate — the skill was never loaded refs [ev-1]')
     expect(result).toContain('recorded')
+  })
+
+  /**
+   * The first request, as the reviewer's own model really receives it (A5 §3):
+   * the pack is what the reviewer starts from, not a fence around it — it may
+   * read the source itself through `context_read`, `task_read` and
+   * `task_status` — and the six dimensions are a vocabulary it may use, not a
+   * form it must fill in. Both readings the deleted implementation imposed are
+   * asserted absent, and the vocabulary it does need is asserted present.
+   */
+  test('the first request neither confines the reviewer to the pack nor demands six judgements', async () => {
+    const { ctx, spawn } = fixtureWithBeforePrompt(handle(REPLY))
+    await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)
+
+    const prompt = ((spawn.mock.calls[0]![1] as { prompt: { text: string }[] }).prompt[0]!.text)
+    // The pack-only restriction is gone, and the door out of it is named.
+    expect(prompt).not.toContain('nothing else')
+    expect(prompt).not.toContain('from the review pack')
+    expect(prompt).toContain('context_read')
+    // The forced six-dimension judgement is gone: judgements are optional and
+    // only the ones the reviewer can settle belong in the reply.
+    expect(prompt).not.toContain('Include all six dimensions')
+    expect(prompt).not.toContain('exactly once')
+    expect(prompt).toContain('judgements (optional)')
+    // …so a reply that carries none is accepted, and the vocabulary it may use
+    // comes from the pack's own dimension line.
+    expect(prompt).toContain('needs judgement (agent):')
+    expect(prompt).toContain('task_specification')
+    // The observation is named the way the persisted slot is read (A5 §4).
+    expect(prompt).toContain('postmortem observation')
+    // The pack itself is still the starting point: the reviewer reads it first.
+    expect(prompt).toContain('--- review pack ---')
+    expect(prompt).toContain('source: review t1#r1 [failed]')
+  })
+
+  test('a conclusion with no judgements and no proposals is recorded as it stands', async () => {
+    const { ctx, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(NO_SUGGESTION_REPLY))
+    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)) as string
+
+    expect(recordDiagnosisIn).toHaveBeenCalledOnce()
+    const diagnosis = recordDiagnosisIn.mock.calls[0]![1] as Record<string, unknown>
+    expect(diagnosis.observedFailure).toBe('the run passed every mandatory criterion on its first attempt')
+    expect(diagnosis.localizedCause).toBe('no improvement needed')
+    expect(diagnosis.confidence).toBe('high')
+    expect(diagnosis.proposals).toEqual([])
+    // Absent, not padded: the reviewer made no judgement, so none is stored.
+    expect(diagnosis.judgements).toBeUndefined()
+    expect(result).toContain('no improvement needed')
+    expect(result).toContain('proposals: none')
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'recorded' })
+  })
+
+  test('a proposal the reviewer grounds in evidence is recorded, vocabulary or not', async () => {
+    const reply = '```json\n'
+      + '{"observation":"the reviewer never saw the empty-input case",'
+      + '"conclusion":"the prompt should name it",'
+      + '"confidence":"low",'
+      + '"proposals":[{"targetType":"prompt_template","targetId":"reviewer","rationale":"name the empty-input case in the request"}]}'
+      + '\n```'
+    const { ctx, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(reply))
+    await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)
+
+    const diagnosis = recordDiagnosisIn.mock.calls[0]![1] as Record<string, unknown>
+    expect(diagnosis.proposals).toEqual([
+      { targetType: 'prompt_template', targetId: 'reviewer', rationale: 'name the empty-input case in the request' },
+    ])
+    expect(diagnosis.judgements).toBeUndefined()
+  })
+
+  test('a reply that is not a diagnosis is an interrupted attempt, never an invented one', async () => {
+    const { ctx, recordDiagnosisIn } = fixtureWithBeforePrompt(handle('I could not decide anything.'))
+    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)) as string
+
+    expect(recordDiagnosisIn).not.toHaveBeenCalled()
+    expect(result).toContain('no diagnosis')
+    const settled = rowsOfKind('settled')
+    expect(settled).toHaveLength(1)
+    expect(settled[0]).toMatchObject({ status: 'interrupted' })
+    expect(String(settled[0]!.note)).toContain('no parseable json object')
+  })
+
+  test('a judgement that cites nothing is refused by name, not downgraded to unknown', async () => {
+    const reply = '```json\n'
+      + '{"observation":"the skill was never loaded","conclusion":"the grant missed it",'
+      + '"confidence":"low",'
+      + '"judgements":[{"dimension":"skill_fit","verdict":"adequate","evidenceRefs":[],"rationale":"looks fine"}]}'
+      + '\n```'
+    const { ctx, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(reply))
+    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)) as string
+
+    expect(recordDiagnosisIn).not.toHaveBeenCalled()
+    expect(result).toContain('no diagnosis')
+    expect(result).toContain('skill_fit')
+    expect(String(rowsOfKind('settled')[0]!.note)).toContain('evidence')
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted' })
+  })
+
+  test('a verdict outside the vocabulary is refused by name, not stored as unknown', async () => {
+    const reply = '```json\n'
+      + '{"observation":"the skill was never loaded","conclusion":"the grant missed it",'
+      + '"confidence":"low",'
+      + '"judgements":[{"dimension":"skill_fit","verdict":"scored-9","evidenceRefs":["ev-1"],"rationale":"bad"}]}'
+      + '\n```'
+    const { ctx, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(reply))
+    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)) as string
+
+    expect(recordDiagnosisIn).not.toHaveBeenCalled()
+    expect(result).toContain('scored-9')
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted' })
   })
 
   test('the reviewer baseline carries context_read instead of the sealed raw session tools', () => {
@@ -584,45 +745,66 @@ describe('task_review_agent', () => {
     }
   })
 
-  test('a beforePrompt failure (the ledger cannot be confirmed) fails the spawn with zero model input and records nothing', async () => {
-    // An unwritable ledger directory: the count still answers (missing file
-    // counts zero), but the append inside beforePrompt fails, and the runtime's
-    // contract turns that into a failed spawn before any model input.
+  test('a ledger that cannot take the claim fails the call before any spawn or claim', async () => {
+    // An unwritable ledger directory: no claim can be durable, so no attempt may
+    // exist — the call fails instead of spawning a reviewer it cannot key.
     chmodSync(ledgerDir, 0o500)
     const { ctx, spawn, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(REPLY))
-    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1' }, exec as never)) as string
-
-    expect(spawn).toHaveBeenCalledOnce()
-    expect(result).toContain('spawn failed')
+    await expect(defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)).rejects.toThrow(/EACCES/)
+    expect(spawn).not.toHaveBeenCalled()
     expect(recordDiagnosisIn).not.toHaveBeenCalled()
     expect(ledgerText()).toBe('')
   })
 
-  test('a timed-out reviewer is cancelled and its judgement recorded unknown', async () => {
+  test('a started row that cannot be written fails the spawn with zero model input, and the attempt is interrupted', async () => {
+    // The claim lands; the append inside beforePrompt does not. The runtime's
+    // contract turns that into a failed spawn before any model input, and the
+    // attempt is over: no spend, and no attempt left looking in flight.
+    const { ctx, recordDiagnosisIn } = fixture(handle(REPLY), async (...args: unknown[]) => {
+      ledgerFs.failNextAppend(new Error('EACCES: permission denied, open agents.jsonl'))
+      await (args[1] as { beforePrompt?: () => Promise<void> }).beforePrompt?.()
+      return handle(REPLY)
+    })
+    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)) as string
+
+    expect(result).toContain('spawn failed')
+    expect(recordDiagnosisIn).not.toHaveBeenCalled()
+    expect(rowsOfKind('claim')).toHaveLength(1)
+    expect(rowsOfKind('started')).toHaveLength(0)
+    expect(rowsOfKind('settled')).toHaveLength(1)
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted' })
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(0)
+  })
+
+  /**
+   * A reviewer that produced nothing is an **interrupted attempt with a named
+   * reason** — never a Diagnosis. The deleted implementation turned silence
+   * into six `unknown` judgements, which reads as something the agent concluded
+   * and is exactly the kind of invented record A5 forbids.
+   */
+  test('a timed-out reviewer is cancelled, and the attempt is interrupted with no diagnosis', async () => {
     const { ctx, spawn, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(undefined, { hang: true }))
-    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', timeoutMs: 5 }, exec as never)) as string
+    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN, timeoutMs: 5 }, exec as never)) as string
 
     expect(spawn).toHaveBeenCalledOnce()
-    expect(recordDiagnosisIn).toHaveBeenCalledOnce()
-    const diagnosis = recordDiagnosisIn.mock.calls[0]![1] as { judgements: { verdict: string }[]; confidence: string }
-    expect(diagnosis.judgements).toHaveLength(6)
-    expect(diagnosis.judgements.every(item => item.verdict === 'unknown')).toBe(true)
-    expect(diagnosis.confidence).toBe('low')
+    expect(recordDiagnosisIn).not.toHaveBeenCalled()
     expect(result).toContain('timed out')
-    expect(result).toContain('All six dimensions recorded unknown')
+    expect(result).toContain('no diagnosis')
+    // The attempt is settled, and the timeout is named on the fact.
+    expect(rowsOfKind('settled')).toHaveLength(1)
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted' })
+    expect(String(rowsOfKind('settled')[0]!.note)).toContain('timed out')
   })
 
-  test('a reviewer that returns no parseable JSON records six unknowns rather than failing', async () => {
+  test('a reviewer that returns no parseable answer leaves an interrupted attempt, not a Diagnosis', async () => {
     const { ctx, recordDiagnosisIn } = fixtureWithBeforePrompt(handle('I could not decide anything.'))
-    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1' }, exec as never)) as string
-    expect(recordDiagnosisIn).toHaveBeenCalledOnce()
-    const diagnosis = recordDiagnosisIn.mock.calls[0]![1] as { judgements: { verdict: string }[]; confidence: string }
-    expect(diagnosis.judgements.every(item => item.verdict === 'unknown')).toBe(true)
-    expect(diagnosis.confidence).toBe('low')
-    expect(result).toContain('recorded')
+    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)) as string
+    expect(recordDiagnosisIn).not.toHaveBeenCalled()
+    expect(result).toContain('no diagnosis')
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted' })
   })
 
-  test('does not spawn when escalation is not required', async () => {
+  test('an explicit call is not gated by the escalation threshold: a verified source is reviewed on request', async () => {
     const clean = structuredClone(store)
     clean.tasks[0]!.status = 'verified' as never
     clean.reviews = [{
@@ -634,7 +816,7 @@ describe('task_review_agent', () => {
       anomalies: [],
       criteria: [{ criterionId: 'c1', verdict: 'pass' as never }],
     }]
-    const spawn = vi.fn()
+    const spawn = vi.fn(async () => handle(REPLY))
     const ctx = {
       graphs: { graphForSession: async () => graph },
       task: {
@@ -644,154 +826,82 @@ describe('task_review_agent', () => {
       },
       agentRuntime: { spawn },
     } as unknown as Context
-    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1' }, exec as never)) as string
-    expect(spawn).not.toHaveBeenCalled()
-    expect(result).toContain('escalation is not required')
-    expect(ledgerText()).toBe('')
+    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)) as string
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(result).toContain('judged task t1')
+    expect(result).toContain('source t1#r1')
   })
 
-  test('does not spawn when the per-store budget is spent', async () => {
+  test('the store\'s allowance stops a new source, with zero claim and zero spawn', async () => {
     // A row an earlier call (this process's or another's) wrote is the whole count.
     await admitReviewAgent(ROOT_STORE, admission => admission.start(row('s-old')))
     const { ctx, spawn } = fixture(handle(REPLY))
-    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1' }, exec as never)) as string
+    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)) as string
     expect(spawn).not.toHaveBeenCalled()
     expect(result).toContain('budget exhausted')
     expect(result).toContain('1/1')
-    expect(ledgerRows()).toHaveLength(1)
+    expect(rowsOfKind('claim')).toHaveLength(0)
+    expect(rowsOfKind('started')).toHaveLength(1)
   })
 
-  test('does not spawn for a task with no review record', async () => {
-    const empty = structuredClone(store)
-    empty.reviews = []
-    const spawn = vi.fn()
-    const ctx = {
-      graphs: { graphForSession: async () => graph },
-      task: { openStore: async () => structuredClone(empty), snapshotIn: async () => structuredClone(empty), recordDiagnosisIn: vi.fn() },
-      agentRuntime: { spawn },
-    } as unknown as Context
-    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1' }, exec as never)) as string
+  test('a run that is not the task\'s own is refused before any claim', async () => {
+    const { ctx, spawn } = fixture(handle(REPLY))
+    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: 'r-nope' }, exec as never)) as string
+    expect(result).toContain('run "r-nope" is not a run of task "t1"')
+    expect(result).toContain('no review agent started')
     expect(spawn).not.toHaveBeenCalled()
-    expect(result).toContain('no review record')
+    expect(ledgerText()).toBe('')
   })
 
-  test('a spawn failure is reported without recording a diagnosis', async () => {
+  test('a spawn failure is reported without recording a diagnosis, and leaves the attempt interrupted', async () => {
     const { ctx, recordDiagnosisIn } = fixture(undefined, async () => {
       throw new Error('agent-presets: preset "singularity-reviewer" not found')
     })
-    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1' }, exec as never)) as string
+    const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1', runId: RUN }, exec as never)) as string
     expect(recordDiagnosisIn).not.toHaveBeenCalled()
     expect(result).toContain('spawn failed')
     expect(result).toContain('singularity-reviewer')
+    expect(rowsOfKind('claim')).toHaveLength(1)
+    expect(rowsOfKind('started')).toHaveLength(0)
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'interrupted' })
   })
 
   /**
-   * The durable row is the whole admission (K4-1 rework).
+   * The durable started row is the whole spend (K4-1 rework).
    *
-   * The count is the rows the file holds, read inside the store's serial region
-   * and written inside the same one: two executions cannot interleave their
-   * count-and-write, so exactly one reviewer is admitted per allowance. Nothing
-   * refunds a run: a spawn that never wrote a row spent nothing, and one that
-   * failed — or timed out — after its row was written spent exactly one.
+   * The count is the started rows the file holds, read inside the store's serial
+   * region and written inside the same one. Nothing refunds a run: a spawn that
+   * never reached its started row spent nothing, and one that failed after it
+   * spent exactly one — and the source stays at that attempt, which is what
+   * keeps one source from burning the store's allowance twice.
    */
-  test('two concurrent executions with one allowance admit exactly one reviewer (K4-1)', async () => {
-    const { ctx, spawn, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(REPLY))
-    const tool = defineTaskReviewAgentTool(ctx)
-    const call = () => tool.execute({ taskId: 't1' }, exec as never) as Promise<string>
-    const results = await Promise.all([call(), call()])
-
-    expect(spawn).toHaveBeenCalledOnce()
-    expect(recordDiagnosisIn).toHaveBeenCalledOnce()
-    const refused = results.filter(result => result.includes('budget exhausted'))
-    expect(refused).toHaveLength(1)
-    expect(refused[0]).toContain('no review agent spawned')
-    expect(refused[0]).toContain('1/1')
-    expect(refused[0]).toContain('sg-t-root-1')
-    expect(results.filter(result => result.includes('judged task'))).toHaveLength(1)
-    // One started run, read back from the file on disk.
-    expect(ledgerRows()).toHaveLength(1)
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
-  })
-
-  test('two allowances admit two reviewers and refuse the third', async () => {
-    process.env.SINGULARITY_REVIEW_AGENT_BUDGET = '2'
-    const { ctx, spawn, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(REPLY))
-    const tool = defineTaskReviewAgentTool(ctx)
-    const call = () => tool.execute({ taskId: 't1' }, exec as never) as Promise<string>
-    const results = await Promise.all([call(), call(), call()])
-
-    expect(spawn).toHaveBeenCalledTimes(2)
-    expect(recordDiagnosisIn).toHaveBeenCalledTimes(2)
-    const refused = results.filter(result => result.includes('budget exhausted'))
-    expect(refused).toHaveLength(1)
-    expect(refused[0]).toContain('no review agent spawned')
-    expect(refused[0]).toContain('2/2')
-    expect(ledgerRows()).toHaveLength(2)
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(2)
-  })
-
-  test('a spawn that fails before its row was written spends nothing', async () => {
-    let attempts = 0
-    const { ctx, recordDiagnosisIn } = fixture(handle(REPLY), async (...args: unknown[]) => {
-      attempts += 1
-      if (attempts === 1) throw new Error('agent-presets: preset "singularity-reviewer" not found')
-      await (args[1] as { beforePrompt?: () => Promise<void> }).beforePrompt?.()
-      return handle(REPLY)
-    })
-    const tool = defineTaskReviewAgentTool(ctx)
-
-    const first = (await tool.execute({ taskId: 't1' }, exec as never)) as string
-    expect(first).toContain('spawn failed')
-    expect(ledgerText()).toBe('')
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(0)
-
-    // The store's one allowance is untouched: a later call still starts a reviewer.
-    const second = (await tool.execute({ taskId: 't1' }, exec as never)) as string
-    expect(second).toContain('judged task')
-    expect(recordDiagnosisIn).toHaveBeenCalledOnce()
-    expect(ledgerRows()).toHaveLength(1)
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
-  })
-
-  test('a spawn whose ledger append failed leaves the store usable for the next call', async () => {
-    chmodSync(ledgerDir, 0o500)
-    const { ctx } = fixtureWithBeforePrompt(handle(REPLY))
-    const tool = defineTaskReviewAgentTool(ctx)
-
-    const first = (await tool.execute({ taskId: 't1' }, exec as never)) as string
-    expect(first).toContain('spawn failed')
-    expect(ledgerText()).toBe('')
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(0)
-
-    chmodSync(ledgerDir, 0o700)
-    const second = (await tool.execute({ taskId: 't1' }, exec as never)) as string
-    expect(second).toContain('judged task')
-    expect(ledgerRows()).toHaveLength(1)
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
-  })
-
-  test('a spawn that fails after its row was written spends exactly one run', async () => {
+  test('a spawn that fails after its started row spends exactly one run, and the source stays at that attempt', async () => {
     const { ctx, spawn, recordDiagnosisIn } = fixture(handle(REPLY), async (...args: unknown[]) => {
       await (args[1] as { beforePrompt?: () => Promise<void> }).beforePrompt?.()
       throw new Error('agent-runtime: the reviewer node failed to publish')
     })
     const tool = defineTaskReviewAgentTool(ctx)
 
-    const first = (await tool.execute({ taskId: 't1' }, exec as never)) as string
+    const first = (await tool.execute({ taskId: 't1', runId: RUN }, exec as never)) as string
     expect(first).toContain('spawn failed')
     expect(recordDiagnosisIn).not.toHaveBeenCalled()
     // The row is durable, so the run is spent — and nothing refunds it.
-    expect(ledgerRows()).toHaveLength(1)
+    expect(rowsOfKind('started')).toHaveLength(1)
     expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
 
-    const second = (await tool.execute({ taskId: 't1' }, exec as never)) as string
-    expect(second).toContain('budget exhausted')
-    expect(second).toContain('1/1')
+    // The source is not re-spawned, and the spent run is not re-charged either:
+    // the repeat is answered from the attempt the ledger already holds.
+    const second = (await tool.execute({ taskId: 't1', runId: RUN }, exec as never)) as string
+    expect(second).toContain('already has this attempt')
+    expect(second).toContain('interrupted')
+    expect(second).not.toContain('budget exhausted')
     expect(spawn).toHaveBeenCalledOnce()
-    expect(ledgerRows()).toHaveLength(1)
+    expect(rowsOfKind('claim')).toHaveLength(1)
+    expect(rowsOfKind('started')).toHaveLength(1)
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
   })
 
-  test('a reviewer that timed out spends one run and refunds nothing', async () => {
+  test('a reviewer that timed out spends one run, and nothing refunds or restarts it', async () => {
     let attempts = 0
     const { ctx, spawn } = fixture(handle(REPLY), async (...args: unknown[]) => {
       attempts += 1
@@ -800,14 +910,116 @@ describe('task_review_agent', () => {
     })
     const tool = defineTaskReviewAgentTool(ctx)
 
-    const first = (await tool.execute({ taskId: 't1', timeoutMs: 5 }, exec as never)) as string
+    const first = (await tool.execute({ taskId: 't1', runId: RUN, timeoutMs: 5 }, exec as never)) as string
     expect(first).toContain('timed out')
-    expect(ledgerRows()).toHaveLength(1)
+    expect(rowsOfKind('started')).toHaveLength(1)
 
-    const second = (await tool.execute({ taskId: 't1' }, exec as never)) as string
-    expect(second).toContain('budget exhausted')
-    expect(second).toContain('1/1')
+    const second = (await tool.execute({ taskId: 't1', runId: RUN }, exec as never)) as string
+    expect(second).toContain('already has this attempt')
     expect(spawn).toHaveBeenCalledOnce()
-    expect(ledgerRows()).toHaveLength(1)
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
+  })
+
+  /**
+   * O1: the window between "this attempt's execution is over" and "its terminal
+   * row is on the file". While the append is in flight the attempt is still this
+   * process's, so a second admission meets it as *in flight* — it may not read a
+   * finished attempt as a dead one, may not append a second terminal row for it,
+   * and may not start the new key before the attempt's own fact has landed.
+   */
+  test('an attempt whose terminal row is still on its way stays live: one terminal fact, and no early start', async () => {
+    process.env.SINGULARITY_REVIEW_AGENT_BUDGET = '2'
+    const parked = Promise.withResolvers<void>()
+    const reviewer = handle(REPLY)
+    const { ctx, spawn } = fixture(undefined, async (...args: unknown[]) => {
+      await (args[1] as { beforePrompt?: () => Promise<void> }).beforePrompt?.()
+      return { agent: { ...reviewer.agent, whenIdle: () => parked.promise } }
+    })
+    const tool = defineTaskReviewAgentTool(ctx)
+
+    const running = tool.execute({ taskId: 't1', runId: RUN }, exec as never) as Promise<string>
+    await vi.waitFor(() => expect(rowsOfKind('started')).toHaveLength(1))
+    const owner = String(rowsOfKind('claim')[0]!.sessionId)
+
+    // The reviewer answers and the attempt's terminal fact is on its way: the
+    // append is held before its bytes land, which is exactly the window.
+    const held = ledgerFs.holdNextAppendBeforeWrite()
+    parked.resolve()
+    await held.entered
+
+    const early = (await tool.execute(
+      { taskId: 't1', runId: RUN, requestKey: 'k1', reason: 'a second look while the first finishes' },
+      exec as never,
+    )) as string
+    // The attempt is still this process's, so the second admission may not have
+    // been accepted: one reviewer, one claim, and no second terminal fact.
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(rowsOfKind('claim')).toHaveLength(1)
+    expect(rowsOfKind('settled')).toEqual([])
+    expect(early).toContain('already has an attempt in flight')
+    expect(early).toContain('the new request was not accepted')
+    expect(early).toContain(owner)
+
+    // The attempt's own fact lands once, and the source is left at it.
+    held.release()
+    expect(await running).toContain('judged task t1')
+    await vi.waitFor(() => expect(rowsOfKind('settled')).toHaveLength(1))
+    expect(rowsOfKind('settled')[0]).toMatchObject({ status: 'recorded', sessionId: owner })
+    expect(rowsOfKind('claim')).toHaveLength(1)
+    expect(rowsOfKind('started')).toHaveLength(1)
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
+
+    // Once the fact is on the file the attempt is over, and the new key is what
+    // starts next — the attempt is not re-run and not re-charged.
+    const after = (await tool.execute(
+      { taskId: 't1', runId: RUN, requestKey: 'k1', reason: 'a second look while the first finishes' },
+      exec as never,
+    )) as string
+    expect(after).toContain('judged task t1')
+    expect(spawn).toHaveBeenCalledTimes(2)
+    expect(rowsOfKind('claim')).toHaveLength(2)
+    expect(rowsOfKind('started')).toHaveLength(2)
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(2)
+  })
+
+  test('a terminal row that cannot be written still ends the attempt for this process', async () => {
+    // The append fails, so the file keeps the attempt open — but this process is
+    // not running it any more, and the marker must not leak. The next call finds
+    // the finished attempt (its diagnosis is on the store) and settles it
+    // `recorded`: no second reviewer, no second run, no invented interruption.
+    const state = { snapshot: structuredClone(store) }
+    const spawn = vi.fn(async (...args: unknown[]) => {
+      await (args[1] as { beforePrompt?: () => Promise<void> }).beforePrompt?.()
+      // The started row is on the file; the terminal fact this attempt is about
+      // to write is the one that fails.
+      ledgerFs.failNextAppend(new Error('EACCES: permission denied, open agents.jsonl'))
+      return handle(REPLY)
+    })
+    const ctx = {
+      graphs: { graphForSession: async () => graph },
+      task: {
+        openStore: async () => structuredClone(state.snapshot),
+        snapshotIn: async () => structuredClone(state.snapshot),
+        recordDiagnosisIn: async (_storeId: string, diagnosis: never) => {
+          state.snapshot.diagnoses.push(structuredClone(diagnosis))
+        },
+      },
+      agentRuntime: { spawn },
+    } as unknown as Context
+    const tool = defineTaskReviewAgentTool(ctx)
+
+    const first = (await tool.execute({ taskId: 't1', runId: RUN }, exec as never)) as string
+    expect(first).toContain('judged task t1')
+    expect(rowsOfKind('settled')).toEqual([])
+    expect(rowsOfKind('started')).toHaveLength(1)
+
+    const second = (await tool.execute({ taskId: 't1', runId: RUN }, exec as never)) as string
+    expect(second).toContain('already has this attempt')
+    expect(second).not.toContain('in flight')
+    expect(spawn).toHaveBeenCalledOnce()
+    const settled = rowsOfKind('settled')
+    expect(settled).toHaveLength(1)
+    expect(settled[0]).toMatchObject({ status: 'recorded', sessionId: rowsOfKind('claim')[0]!.sessionId })
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
   })
 })

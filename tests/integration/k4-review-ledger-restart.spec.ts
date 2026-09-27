@@ -1,15 +1,20 @@
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { countReviewAgentRuns, readReviewerDelegation } from '../../agent-singularity/src/review-agent-ledger.ts'
 import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stack.ts'
 
 /**
- * K4: the reviewer's allowance is a fact of the ledger, not of the process.
+ * K4 + A5: the reviewer's allowance and its attempts are facts of the ledger,
+ * not of the process.
  *
- * The review chain's only bound is the per-root-store count of review agents
- * already started (`review-agent-ledger.ts`, `$DSH_HOME/review-agents/
- * agents.jsonl`). That file is the reason a *restart* does not hand the tree a
- * fresh allowance: the count is read from the log on every call, so the review a
- * process started before it died still spends the store's allowance afterwards.
+ * `review-agent-ledger.ts` (`$DSH_HOME/review-agents/agents.jsonl`) holds one
+ * attempt per review source — the claim, the started row that spends one run of
+ * the per-root-store allowance, the settled fact — and that file is the reason a
+ * *restart* neither hands the tree a fresh allowance nor starts a second
+ * reviewer for a source it already reviewed: both the attempts and the count are
+ * read from the log on every call, so what a process started before it died is
+ * still there afterwards.
  *
  * The fixture is the deployment's own durable plane — the real
  * `JsonlSessionPersistence` and the real `TaskService`/`TaskRuntime`/`AgentRuntime`
@@ -55,7 +60,7 @@ const criterion = (command: string) => ({ description: `the command ${command} e
  * spawned for — through the deployment's own entries: the root contract is
  * accepted, one child is admitted and run, and its criterion fails.
  */
-async function failedTask(stack: AssemblyStack): Promise<{ storeId: string; taskId: string }> {
+async function failedTask(stack: AssemblyStack): Promise<{ storeId: string; taskId: string; runId: string }> {
   const storeId = stack.storeIdOf(ROOT_SESSION)
   await stack.seedLog(ROOT_SESSION, ['ship the release'])
   const root = await stack.runtime.intakeRootContract(storeId, ROOT_SESSION, {
@@ -68,14 +73,14 @@ async function failedTask(stack: AssemblyStack): Promise<{ storeId: string; task
   } as never)
   const outcomes = await stack.runtime.awaitBatch(storeId, batch.batchId)
   expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
-  return { storeId, taskId: outcomes[0]!.taskId }
+  return { storeId, taskId: outcomes[0]!.taskId, runId: String(outcomes[0]!.runId) }
 }
 
 describe('the review allowance survives a restart (K4)', () => {
-  it('refuses a second review in a process that only reads the ledger the first one wrote', async () => {
+  it('answers the repeated source from the ledger the first process wrote, and still refuses a new source', async () => {
     const first = await boot({ worker: async () => {} })
     const failed = await failedTask(first)
-    const answer = await first.call(ROOT_SESSION, 'task_review_agent', { taskId: failed.taskId })
+    const answer = await first.call(ROOT_SESSION, 'task_review_agent', { taskId: failed.taskId, runId: failed.runId })
     expect(answer.text).not.toContain('spawn failed')
     const reviewer = String(first.spawns.at(-1)!.sessionId)
     // The row the allowance is counted from, read back off the file the
@@ -90,15 +95,92 @@ describe('the review allowance survives a restart (K4)', () => {
     const second = await boot({ dir: first.dir, worker: async () => {} })
     expect(second.spawns).toEqual([])
 
-    const again = await second.call(ROOT_SESSION, 'task_review_agent', { taskId: failed.taskId })
-    // Refused by the *store's* allowance, read from the ledger the previous
-    // process wrote: the fresh process does not start counting at zero.
+    // The same source: the attempt the previous process's ledger holds is the
+    // attempt this process returns — one claim, one started row, no new spawn.
+    const again = await second.call(ROOT_SESSION, 'task_review_agent', { taskId: failed.taskId, runId: failed.runId })
     expect(again.isError).toBe(false)
-    expect(again.text).toContain('budget exhausted')
-    expect(again.text).toContain('1/1')
-    expect(again.text).toContain(failed.storeId)
-    expect(again.text).toContain('no review agent spawned')
+    expect(again.text).toContain('already has this attempt')
+    expect(again.text).toContain(reviewer)
+    expect(again.text).toContain('no review agent started')
     expect(second.spawns).toEqual([])
     expect(await countReviewAgentRuns(failed.storeId)).toBe(1)
+
+    // A further review of the same source is a *new* attempt, and the store's
+    // allowance — read from the ledger the previous process wrote — has no room
+    // for it: the fresh process does not start counting at zero.
+    const other = await second.call(ROOT_SESSION, 'task_review_agent', {
+      taskId: failed.taskId, runId: failed.runId, requestKey: 'k1', reason: 'a second look after the restart',
+    })
+    expect(other.isError).toBe(false)
+    expect(other.text).toContain('budget exhausted')
+    expect(other.text).toContain('1/1')
+    expect(other.text).toContain(failed.storeId)
+    expect(other.text).toContain('no review agent started')
+    expect(second.spawns).toEqual([])
+    expect(await countReviewAgentRuns(failed.storeId)).toBe(1)
+  }, 60_000)
+
+  it('recovers a started attempt the previous process left, and accepts a new key within the allowance', async () => {
+    const first = await boot({ worker: async () => {} })
+    const failed = await failedTask(first)
+    const ledger = join(first.home, 'review-agents', 'agents.jsonl')
+    mkdirSync(dirname(ledger), { recursive: true })
+    // The process died with its reviewer still out: the claim and the started row
+    // it had already written are on the file, the terminal fact is not, and no
+    // process is running that session any more.
+    writeFileSync(ledger, [
+      JSON.stringify({
+        formatVersion: 2, kind: 'claim', rootStoreId: failed.storeId, taskId: failed.taskId, runId: failed.runId,
+        requestKey: null, reason: null, sessionId: 's-orphaned', actor: ROOT_SESSION, at: '2026-09-27T00:00:00.000Z',
+      }),
+      JSON.stringify({
+        formatVersion: 2, kind: 'started', rootStoreId: failed.storeId, taskId: failed.taskId,
+        sessionId: 's-orphaned', actor: ROOT_SESSION, at: '2026-09-27T00:00:01.000Z',
+      }),
+      '',
+    ].join('\n'), 'utf8')
+    expect(await countReviewAgentRuns(failed.storeId)).toBe(1)
+
+    await first.crash()
+    await first.dispose({ remove: false })
+    // One more run of the allowance, so the new process's explicit request is not
+    // refused for a reason of its own: this case is about the dead attempt.
+    vi.stubEnv('SINGULARITY_REVIEW_AGENT_BUDGET', '2')
+    const second = await boot({ dir: first.dir, worker: async () => {} })
+
+    // The new key is accepted: the attempt nobody is running is recovered, and
+    // the attempt this call names is the one that starts.
+    const fresh = await second.call(ROOT_SESSION, 'task_review_agent', {
+      taskId: failed.taskId, runId: failed.runId, requestKey: 'k1', reason: 'a fresh look after the crash',
+    })
+    expect(fresh.text).not.toContain('in flight')
+    expect(fresh.text).not.toContain('the new request was not accepted')
+    const reviewers = second.spawns.filter(spawn => String(spawn.name ?? '').startsWith('review '))
+    expect(reviewers).toHaveLength(1)
+
+    // The dead attempt is one terminal fact, and its spent run is not refunded:
+    // two started rows, two spent runs, one of them the crash's own — and the new
+    // key's attempt is a claim of its own, not a reuse of the dead one.
+    const rows = readFileSync(ledger, 'utf8').split('\n').filter(line => line.trim().length > 0).map(line => JSON.parse(line) as Record<string, unknown>)
+    const settled = rows.filter(row => row.kind === 'settled' && row.sessionId === 's-orphaned')
+    expect(settled).toHaveLength(1)
+    expect(settled[0]).toMatchObject({ status: 'interrupted' })
+    expect(String(settled[0]!.note)).toContain('is gone')
+    const claims = rows.filter(row => row.kind === 'claim')
+    expect(claims).toHaveLength(2)
+    expect(claims[1]).toMatchObject({ requestKey: 'k1', reason: 'a fresh look after the crash', taskId: failed.taskId, runId: failed.runId })
+    expect(rows.filter(row => row.kind === 'started')).toHaveLength(2)
+    expect(await countReviewAgentRuns(failed.storeId)).toBe(2)
+
+    // The source's default attempt reads back as the interrupted attempt it is —
+    // not as something in flight, and not as a second reviewer either.
+    const readback = await second.call(ROOT_SESSION, 'task_review_agent', { taskId: failed.taskId, runId: failed.runId })
+    expect(readback.isError).toBe(false)
+    expect(readback.text).toContain('s-orphaned')
+    expect(readback.text).toContain('interrupted')
+    expect(readback.text).not.toContain('in flight')
+    expect(readback.text).toContain('no review agent started')
+    expect(second.spawns.filter(spawn => String(spawn.name ?? '').startsWith('review '))).toHaveLength(1)
+    expect(await countReviewAgentRuns(failed.storeId)).toBe(2)
   }, 60_000)
 })

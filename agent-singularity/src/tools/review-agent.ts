@@ -1,197 +1,229 @@
 /**
- * `task_review_agent`: spawn one read-only review agent for a task whose review
- * facts are not enough, take its structured judgement of the six dimensions no
- * parser can settle, and persist it as a `Diagnosis`.
+ * `task_review_agent`: spawn one read-only review agent for one exact review
+ * source — a task and a run, or the no-run case — take the diagnosis it
+ * produces (an observation, a conclusion, and whatever judgements and
+ * proposals it chose to add), and persist it as a `Diagnosis`.
  *
  * Why an agent and not a parser (§2.7.3, and the owner's ruling): extracting
  * "was this specification adequate" from a complex context is not a parsing
- * problem, it is a judgement problem, and a review agent is the tool for it.
- * Why not a resident reviewer (§2.7.2): one agent per task would multiply
- * sessions and storage, so this tool only runs when `task_review_pack`'s
- * escalation criterion fires and the per-root-store budget still has room.
+ * problem, it is a judgement problem, and a review agent is the tool for it. Why
+ * not a resident reviewer (§2.7.2): one agent per task would multiply sessions
+ * and storage. Why not "the latest review" (A5): a review reviews the run the
+ * caller names, so the caller names it — a source the ledger can key on, dedupe
+ * on and hand to a later reader. Why the judgements are optional (A5 §3): the
+ * conclusion is the diagnosis, "no improvement needed" and "the evidence does
+ * not settle this" are conclusions too, and a dimension nobody could settle is
+ * left out rather than padded with `unknown`.
  *
- * Isolation is the tool plane, not the permission preset: the child is granted
- * exactly {@link REVIEWER_BASELINE} (`keepPresetTools: false`, so the mounted
- * preset contributes nothing), which carries no shell, no write, no nested
- * spawn, and no evolution tool. The permission preset is left at the spawn
- * default — deliberately NOT `read-only`, whose `approval: ask` would hang an
- * unattended reviewer on a human decision (base bundle `cordis.patch.yml:230`)
- * — because with nothing policy-gated there is nothing to approve.
+ * One source has at most one default attempt (the call with no `requestKey`),
+ * which an automatic scan and an explicit call share; a repeat returns the same
+ * claim, session and result and never re-charges the budget. A new review after
+ * that attempt settled is an explicit act and names a non-empty `requestKey`, so
+ * two different postmortems of one source are two identifiable attempts rather
+ * than one overwritten one; the same key with a different focus is refused by
+ * name, and a new key while an attempt is open returns that attempt's identity
+ * instead of starting a second one in parallel.
  *
- * The judgement is not a score: each dimension settles `adequate` /
- * `inadequate` / `unknown`, cites the refs it rests on, and explains itself.
- * Evidence that does not settle a dimension becomes `unknown`, never a guess.
+ * An attempt the process holding it died with is not "in flight" for this door:
+ * the ledger settles it (recorded when the store already holds its diagnosis,
+ * interrupted otherwise) before the request is decided, so a source whose
+ * reviewer died can be reviewed again with an explicit key — while the spent run
+ * stays spent.
+ *
+ * This module is the *explicit* door: it validates what a model call names and
+ * renders the answer for the model. The attempt itself — the admission, the
+ * claim, the pack, the spawn, the watchdog, the diagnosis, the terminal fact —
+ * lives in `review-agent-run.ts`, which the automatic scan (A5) runs too, so the
+ * two doors cannot drift. Nothing here decides whether a review *should* happen:
+ * a failed review and an explicit call are the two triggers, and no threshold
+ * gates either of them.
  * @module @dangosys/dsh-singularity-agent/tools/review-agent
  */
 
-import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@dangosys/dsh-singularity-graphs'
-import type { WorkerGrant } from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-task'
-import type { Diagnosis, DiagnosisConfidence, JudgementVerdict, ReviewJudgement, TaskId, TaskSnapshot } from '@dangosys/dsh-singularity-task'
-import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, rootTaskStoreId } from '@dangosys/dsh-singularity-task'
-import { admitReviewAgent, readReviewerDelegation, reviewAgentBudget } from '../review-agent-ledger.ts'
-import { computeEscalation } from './review-escalation.ts'
-import { buildReviewPack, latestReview, reviewRef } from './task-review-pack.ts'
+import type { ReviewRecord, TaskSnapshot } from '@dangosys/dsh-singularity-task'
+import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
+import type { ReviewAgentAttempt, ReviewAgentPlan, ReviewAgentSource } from '../review-agent-ledger.ts'
+import {
+  REVIEW_AGENT_TIMEOUT_MS,
+  recordedDiagnosis,
+  renderJudgements,
+  runReviewAgentAttempt,
+  sourceRef,
+} from '../review-agent-run.ts'
+import type { ReviewAttemptOutcome } from '../review-agent-run.ts'
+import { reviewForSource } from './task-review-pack.ts'
+
+export {
+  REVIEW_AGENT_TIMEOUT_MS,
+  REVIEWER_BASELINE,
+  REVIEWER_PRESET,
+  recordedDiagnosis,
+  renderJudgements,
+  reviewerGrant,
+} from '../review-agent-run.ts'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
-
-/** The preset the review agent mounts (`$DSH_HOME/.agent-presets/singularity-reviewer/`). */
-export const REVIEWER_PRESET = 'singularity-reviewer'
-
-/**
- * The review agent's whole tool surface. Read-only by construction: the grant
- * allow-list is this list intersected with what the composition offers, so
- * `bash`, `write`, `edit`, `jobs`, `subagent`, `graph_spawn`, `hitl_*` and
- * `evolution_*` are absent however the deployment is composed. Session history
- * is read with `context_read` — the one reference reader, authorized by the
- * reviewer's delegated graph domain; the raw cross-session tools it replaced
- * are sealed on every runtime-owned agent (`agent-runtime`'s execution guard).
- */
-export const REVIEWER_BASELINE: readonly string[] = [
-  'task_review_pack',
-  'task_read',
-  'task_status',
-  'context_read',
-  'capability_list',
-  'read',
-  'glob',
-  'grep',
-  'skill',
-]
-
-/** The capability grant one review agent is spawned with. */
-export function reviewerGrant(): WorkerGrant {
-  return { capabilities: [], baseline: REVIEWER_BASELINE, keepPresetTools: false }
-}
-
-/** Default watchdog deadline for one review agent (10 minutes). */
-export const REVIEW_AGENT_TIMEOUT_MS = 600_000
-
-/** One raw judgement object as the reviewer wrote it, before validation. */
-interface RawJudgement {
-  dimension?: unknown
-  verdict?: unknown
-  evidenceRefs?: unknown
-  rationale?: unknown
-}
 
 function sessionId(exec: ToolRunContext): SessionId {
   const id = exec.agent?.id
   if (typeof id !== 'string' || id.length === 0) throw new Error('task_review_agent: missing agent id')
-  return id
+  return SessionId(id)
 }
 
-/** The last top-level brace-balanced object in the text, if any (fallback when no fence parses). */
-function lastBalancedObject(source: string): string | undefined {
-  let depth = 0
-  let start = -1
-  let last: string | undefined
-  for (let index = 0; index < source.length; index += 1) {
-    const char = source[index]
-    if (char === '{') {
-      if (depth === 0) start = index
-      depth += 1
-    } else if (char === '}') {
-      depth -= 1
-      if (depth === 0 && start >= 0) last = source.slice(start, index + 1)
-    }
-  }
-  return last
+/** A free-text argument, or `null` when the caller gave none: empty and whitespace-only read as none. */
+function optionalText(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value : null
+}
+
+/** How one attempt is named in a result, in the words the source's caller uses. */
+function attemptLabel(attempt: ReviewAgentAttempt): string {
+  return attempt.requestKey === null ? 'default attempt' : `requestKey "${attempt.requestKey}"`
 }
 
 /**
- * Pull the judgement list out of the reviewer's reply. The last fenced block
- * wins, then the last balanced object; a reply with neither parses as nothing,
- * which the caller turns into six `unknown` judgements rather than a failure.
+ * What one attempt the caller asked for already is: its identity, how it ended,
+ * and — when it recorded a judgement — the same lines the attempt's own call
+ * returned. A repeat is answered from the ledger and the store; nothing is
+ * spawned and nothing is written (beyond the recovery note the admission may
+ * have just appended for an attempt that never reached model input).
  */
-function parseReviewerJudgements(reply: string | undefined): RawJudgement[] | undefined {
-  if (reply === undefined) return undefined
-  const fenced = [...reply.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map(match => match[1])
-  const candidates = [fenced[fenced.length - 1], lastBalancedObject(reply)].filter((value): value is string => value !== undefined)
-  for (const candidate of candidates) {
-    try {
-      const parsed: unknown = JSON.parse(candidate)
-      const list = Array.isArray(parsed) ? parsed : (parsed as { judgements?: unknown } | null)?.judgements
-      if (Array.isArray(list)) return list as RawJudgement[]
-    } catch {
-      // try the next candidate shape
-    }
+function renderExistingAttempt(attempt: ReviewAgentAttempt, snapshot: TaskSnapshot): string {
+  const diagnosis = recordedDiagnosis(snapshot, attempt.sessionId)
+  const status = attempt.settlement?.status ?? (diagnosis === undefined ? 'started' : 'recorded')
+  const head = `task_review_agent: source ${sourceRef(attempt.source)} already has this attempt ` +
+    `(${attemptLabel(attempt)}, session ${attempt.sessionId}, ${status}` +
+    `${attempt.settlement?.note === undefined ? '' : `: ${attempt.settlement.note}`}) — returning it; no review agent started`
+  if (diagnosis === undefined) {
+    return status === 'interrupted'
+      ? `${head}; a new review for this source needs an explicit requestKey`
+      : `${head}; its diagnosis is not in the store`
   }
-  return undefined
+  const lines = [
+    head,
+    `observation: ${diagnosis.observedFailure}`,
+    `conclusion: ${diagnosis.localizedCause}`,
+  ]
+  if (diagnosis.judgements !== undefined && diagnosis.judgements.length > 0) {
+    lines.push(`judgements (agent ${attempt.sessionId}):`, ...renderJudgements(diagnosis.judgements))
+  }
+  lines.push(`diagnosis ${diagnosis.diagnosisId} recorded [${diagnosis.confidence}]`)
+  if (diagnosis.proposals.length === 0) lines.push('proposals: none — the conclusion carries no suggestion')
+  else for (const proposal of diagnosis.proposals) lines.push(`proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`)
+  return lines.join('\n')
+}
+
+/** What one refusal says, by name, before any claim or spawn exists. */
+function renderRefusal(plan: Extract<ReviewAgentPlan, { kind: 'refused' }>, source: ReviewAgentSource, storeId: string): string {
+  const label = plan.attempt === undefined ? '' : attemptLabel(plan.attempt)
+  if (plan.code === 'request-key-conflict') {
+    const named = plan.attempt!.requestKey === null
+      ? `source ${sourceRef(source)} already has a ${label}`
+      : `${label} already names an attempt for source ${sourceRef(source)}`
+    return `task_review_agent: ${named} with a different reason ` +
+      `(${JSON.stringify(plan.attempt?.reason ?? null)}); refusing — a key names one review focus and cannot be changed ` +
+      `(session ${plan.attempt?.sessionId}); no review agent started`
+  }
+  if (plan.code === 'request-key-required') {
+    const held = plan.attempts.map(attempt => `${attemptLabel(attempt)} ${attempt.sessionId}`).join(', ')
+    return `task_review_agent: source ${sourceRef(source)} was already reviewed (${held}) and this request names no key; ` +
+      'a new review for a reviewed source needs an explicit requestKey — no review agent started'
+  }
+  return `task_review_agent: budget exhausted (${plan.budget.used}/${plan.budget.max}) for store ${storeId} — no review agent started`
 }
 
 /**
- * Normalize a reviewer reply into exactly one judgement per judged dimension.
- * Missing dimensions become `unknown`; a verdict outside the vocabulary becomes
- * `unknown`; and a judgement with no evidence ref is downgraded to `unknown`
- * with the review ref cited, because evidence that settles nothing must not
- * read as a conclusion.
+ * What one request that arrived while an attempt was open is answered with.
+ *
+ * Only one state reaches this text: an attempt this process is really running
+ * right now. An attempt a dead process left is recovered inside the admission's
+ * region before the request is decided, so it can never be reported here as
+ * something in flight — and never written off for being slow, either.
  */
-export function normalizeJudgements(
-  raw: RawJudgement[] | undefined,
-  fallbackRef: string,
-  missingRationale: string,
-): ReviewJudgement[] {
-  return JUDGED_DIMENSIONS.map(dimension => {
-    const entry = [...(raw ?? [])].reverse().find(item => item.dimension === dimension)
-    if (entry === undefined) {
-      return { dimension, verdict: 'unknown', evidenceRefs: [fallbackRef], rationale: missingRationale }
-    }
-    const refs = Array.isArray(entry.evidenceRefs)
-      ? entry.evidenceRefs.filter((value): value is string => typeof value === 'string' && value.length > 0)
-      : []
-    const rationale = typeof entry.rationale === 'string' && entry.rationale.length > 0 ? entry.rationale : 'no rationale provided'
-    const verdict: JudgementVerdict = JUDGEMENT_VERDICTS.includes(entry.verdict as JudgementVerdict)
-      ? (entry.verdict as JudgementVerdict)
-      : 'unknown'
-    if (refs.length === 0) {
-      return { dimension, verdict: 'unknown', evidenceRefs: [fallbackRef], rationale: `${rationale} (evidenceRefs empty — downgraded to unknown)` }
-    }
-    return { dimension, verdict, evidenceRefs: refs, rationale }
-  })
+function renderOpenAttempt(attempt: ReviewAgentAttempt): string {
+  return `task_review_agent: source ${sourceRef(attempt.source)} already has an attempt in flight ` +
+    `(${attemptLabel(attempt)}, session ${attempt.sessionId}, run by this process right now) — the new request was not accepted; ` +
+    'attempts of one source never run in parallel; no review agent started'
 }
 
-/** A mechanical restatement of the judgements — what was concluded, not an invented cause. */
-function renderCause(taskId: TaskId, judgements: readonly ReviewJudgement[]): string {
-  const by = (verdict: JudgementVerdict) => judgements.filter(item => item.verdict === verdict).map(item => item.dimension)
-  const parts: string[] = []
-  for (const verdict of ['inadequate', 'unknown', 'adequate'] as const) {
-    const dimensions = by(verdict)
-    if (dimensions.length > 0) parts.push(`${verdict} [${dimensions.join(', ')}]`)
+/** The answer one attempt ended with, rendered for its caller. */
+function renderOutcome(outcome: ReviewAttemptOutcome, source: ReviewAgentSource, storeId: string, snapshot: TaskSnapshot, review: ReviewRecord): string {
+  switch (outcome.kind) {
+    case 'refused':
+      return renderRefusal(outcome.plan, source, storeId)
+    case 'reuse':
+      return renderExistingAttempt(outcome.attempt, snapshot)
+    case 'in-flight':
+      return renderOpenAttempt(outcome.attempt)
+    case 'spawn-failed':
+      return `task_review_agent: spawn failed: ${outcome.failure} ` +
+        `(source ${sourceRef(source)}, attempt ${outcome.sessionId} recorded interrupted); no review agent started`
+    case 'unrecorded':
+      return `task_review_agent: diagnosis produced but not recorded: ${outcome.failure}`
+    case 'no-diagnosis':
+      return `task_review_agent: review agent ${outcome.sessionId} ended without a diagnosis — ${outcome.failure} ` +
+        `(source ${sourceRef(source)}, attempt ${outcome.sessionId} recorded interrupted); no diagnosis was recorded ` +
+        'and nothing was invented from its silence'
+    case 'recorded':
+      return [
+        `task_review_agent: review agent ${outcome.sessionId} judged task ${source.taskId} ` +
+          `(source ${sourceRef(source)}; the review it read settled ${review.outcome})`,
+        `observation: ${outcome.observation}`,
+        `conclusion: ${outcome.conclusion}`,
+        ...(outcome.judgements.length === 0
+          ? []
+          : [`judgements (agent ${outcome.sessionId}):`, ...renderJudgements(outcome.judgements)]),
+        `diagnosis ${outcome.diagnosisId} recorded [${outcome.confidence}]`,
+        ...(outcome.proposals.length === 0
+          ? ['proposals: none — the conclusion carries no suggestion']
+          : [
+            `proposals (${outcome.proposals.length}, suggestions only — none auto-executes):`,
+            ...outcome.proposals.map(item => `- ${item.targetType} ${item.targetId}: ${item.rationale}`),
+          ]),
+      ].join('\n')
   }
-  return `agent review of ${taskId}: ${parts.join('; ')}`
-}
-
-/** The judged dimensions rendered as report lines (agent judgements, kept apart from the fact lines). */
-export function renderJudgements(judgements: readonly ReviewJudgement[]): string[] {
-  return judgements.map(item => `  ${item.dimension}: ${item.verdict} — ${item.rationale} refs [${item.evidenceRefs.join(', ')}]`)
-}
-
-function lastAssistantText(events: readonly { type: string; data?: unknown }[]): string | undefined {
-  const event = [...events].reverse().find(item => item.type === 'assistant/message')
-  if (event === undefined) return undefined
-  const message = (event.data as { message?: { content?: readonly { type: string; text?: string }[] } } | undefined)?.message
-  const content = (message?.content ?? []).filter(block => block.type === 'text').map(block => block.text ?? '').join('\n')
-  return content.length === 0 ? undefined : content
 }
 
 export function defineTaskReviewAgentTool(ctx: Context) {
   return defineTool({
     name: 'task_review_agent',
     description:
-      'Spawn ONE read-only review agent for a task, take its structured judgement of the six dimensions the fact ' +
-      'table cannot settle (task_specification, acceptance, decomposition, skill_fit, tool_fit, context_efficiency), ' +
-      'and persist that judgement as a Diagnosis. Each dimension returns verdict adequate|inadequate|unknown, required ' +
-      'evidence refs, and a rationale — never a score; evidence that does not settle a dimension must be unknown. ' +
-      'The reviewer has no write, shell, spawn, or evolution tool. It runs only when task_review_pack\'s escalation ' +
-      'criterion fires, is capped per root store (default 1), and is cancelled by a watchdog if it overruns.',
+      'Spawn ONE read-only review agent for one exact review source — a task and the run under review, or runId ' +
+      'null for a review that carries no run (a task blocked before it started) — take the diagnosis it produces, ' +
+      'and persist it as a Diagnosis. The reviewer reads the review pack and, beyond it, whatever settles the ' +
+      'question through its own context reads. What it returns is an observation (the postmortem observation — what ' +
+      'really happened, for a successful source as much as a failed one), a conclusion in its own words ("no ' +
+      'improvement needed" and "the evidence does not settle this" are conclusions), a confidence, and — only when it ' +
+      'made them — judgements and proposals. A judgement names one of the dimensions no parser settles ' +
+      '(task_specification, acceptance, decomposition, skill_fit, tool_fit, context_efficiency) with verdict ' +
+      'adequate|inadequate|unknown, the refs it rests on and a rationale; judgements are optional and never padded, ' +
+      'and a judgement that cites nothing is refused rather than downgraded. A proposal is a suggestion only: it ' +
+      'names a target type the diagnosis does not freeze, and nothing here executes it. reason names what the review ' +
+      'should focus on. A reviewer that times out, is cancelled, or answers without a diagnosis leaves an ' +
+      'interrupted attempt with the reason named and records no Diagnosis. One source has one default ' +
+      'attempt: a repeat of the same call (an automatic scan and an explicit call share it) returns that attempt and ' +
+      'its result instead of starting another, and never spends the budget again. Reviewing the same source again ' +
+      'after that attempt ended is an explicit act: pass a new non-empty requestKey, which is persisted with the ' +
+      'source and the focus; the same key with a different reason is refused. While an attempt of the source is in ' +
+      'flight the call returns its identity and starts nothing. The reviewer has no write, shell, spawn, or ' +
+      'evolution tool, is capped per root store (default 1), and is cancelled by a watchdog if it overruns.',
     parameters: {
       taskId: { type: 'string', required: true, description: 'Task whose review needs judgement' },
+      runId: {
+        oneOf: [{ type: 'string' }, { type: 'null' }],
+        required: true,
+        description: 'The Run under review, exactly as its review record names it; null selects a review with no run',
+      },
+      reason: { type: 'string', description: 'Optional non-empty free text: what this review should focus on' },
+      requestKey: {
+        type: 'string',
+        description: 'Optional non-empty key for an explicit further review of the same source; omit for the source\'s default attempt',
+      },
       timeoutMs: { type: 'number', description: `Watchdog deadline in milliseconds; defaults to ${REVIEW_AGENT_TIMEOUT_MS}` },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
@@ -199,145 +231,34 @@ export function defineTaskReviewAgentTool(ctx: Context) {
       const caller = sessionId(exec)
       const graph = await ctx.graphs.graphForSession(caller)
       const storeId = rootTaskStoreId(graph.rootSessionId)
+      const source: ReviewAgentSource = { taskId: args.taskId, runId: args.runId }
       const snapshot: TaskSnapshot = await ctx.task.openStore(storeId)
       const task = snapshot.tasks.find(item => item.taskId === args.taskId)
-      if (task === undefined) return `task_review_agent: unknown task "${args.taskId}"`
-      const review = latestReview(snapshot, args.taskId)
+      if (task === undefined) {
+        return `task_review_agent: unknown task "${args.taskId}" in store ${storeId} (the caller's graph root); no review agent started`
+      }
+      if (args.runId !== null && !snapshot.runs.some(run => run.runId === args.runId && run.taskId === args.taskId)) {
+        return `task_review_agent: run "${args.runId}" is not a run of task "${args.taskId}"; no review agent started`
+      }
+      const review = reviewForSource(snapshot, source)
       if (review === undefined) {
-        return `task_review_agent: task ${args.taskId} has no review record; nothing to judge`
+        return `task_review_agent: no review record for source ${sourceRef(source)} in store ${storeId}; no review agent started`
       }
-      // The whole admission decision — the durable count, the trigger judged on
-      // the state that count belongs to, and the run's row — happens inside the
-      // store's serial region (K4-1). Two executions cannot interleave their
-      // count-and-write, so the second one reads what the first left behind;
-      // the row is durable before the handle leaves the region. Nothing that
-      // waits for the reviewer is in the region.
-      const outcome = await admitReviewAgent(storeId, async admission => {
-        const used = admission.started
-        const max = reviewAgentBudget()
-        const current: TaskSnapshot = await ctx.task.snapshotIn(storeId)
-        const escalation = computeEscalation(current, args.taskId, { used, max })
-        if (used >= max) {
-          const withheld = escalation.suppressed.length > 0 ? `; suppressed ${escalation.suppressed.join(', ')}` : ''
-          return { kind: 'refused' as const, text: `task_review_agent: budget exhausted (${used}/${max}) for store ${storeId}${withheld} — no review agent spawned` }
-        }
-        if (!escalation.required) {
-          return { kind: 'refused' as const, text: `task_review_agent: escalation is not required for task ${args.taskId} (budget ${used}/${max}); no review agent spawned` }
-        }
-        const timeoutMs = Number.isFinite(args.timeoutMs) && (args.timeoutMs as number) > 0
-          ? Math.floor(args.timeoutMs as number)
-          : REVIEW_AGENT_TIMEOUT_MS
-        const ref = reviewRef(review)
-        const pack = buildReviewPack(current, args.taskId, escalation)
-        const prompt = [
-          'You are a Singularity review agent. Judge six dimensions of the task below from the review pack, and nothing else.',
-          'Do not score. Do not modify anything. Cite only refs printed in the pack (evidence ids, review refs like `task#run`, or session ids).',
-          'When the pack does not settle a dimension, return verdict "unknown" — never guess.',
-          'Return EXACTLY one fenced json block, no prose around it:',
-          '```json',
-          '{"judgements":[{"dimension":"task_specification","verdict":"adequate|inadequate|unknown","evidenceRefs":["..."],"rationale":"..."}]}',
-          '```',
-          `Include all six dimensions exactly once: ${JUDGED_DIMENSIONS.join(', ')}.`,
-          '',
-          '--- review pack ---',
-          pack,
-        ].join('\n')
-
-        const reviewerSessionId = SessionId(randomUUID())
-        let spawnFailure: string | undefined
-        const handle = await ctx.agentRuntime.spawn(exec.agent!, {
-          sessionId: reviewerSessionId,
-          name: `review ${args.taskId}`,
-          prompt: [{ type: 'text', text: prompt }],
-          agentPreset: REVIEWER_PRESET,
-          grant: reviewerGrant(),
-          // The delegation ledger is written between "the reviewer is a published
-          // graph member" and "its first model input" (A2 §D): the context
-          // assembly verifies the delegation from this ledger, so it must be
-          // durable — written AND read back — before any model request exists. A
-          // failure here fails the spawn: the handle is disposed, the node is
-          // marked failed, and the reviewer got zero model input.
-          beforePrompt: async () => {
-            await admission.start({ taskId: args.taskId, sessionId: reviewerSessionId, actor: caller })
-            // The row is durable, so this run is spent whether or not the spawn
-            // survives the read-back below — and whether or not the reviewer
-            // ever answers.
-            const back = await readReviewerDelegation(reviewerSessionId)
-            if (back === undefined || back.rootStoreId !== storeId || back.taskId !== args.taskId) {
-              throw new Error(
-                `task_review_agent: the delegation of reviewer session "${reviewerSessionId}" could not be read back from the ledger ` +
-                `(expected task ${args.taskId} in ${storeId}); no model input was sent`,
-              )
-            }
-          },
-          signal: exec.signal,
-        }).catch((error: unknown) => {
-          spawnFailure = error instanceof Error ? error.message : String(error)
-          return undefined
-        })
-        if (handle === undefined) {
-          // A spawn that failed before its row was written wrote no row and
-          // spent nothing; one that failed after it spent exactly that one row.
-          return { kind: 'refused' as const, text: `task_review_agent: spawn failed: ${spawnFailure ?? 'unknown error'}` }
-        }
-        return { kind: 'spawned' as const, handle, escalation, ref, timeoutMs, reviewerSessionId }
+      const outcome = await runReviewAgentAttempt({
+        ctx,
+        storeId,
+        source,
+        review,
+        // The caller's own agent is the parent: the review node is published as
+        // this session's child, exactly as any other spawn of it would be.
+        parent: exec.agent!,
+        actor: caller,
+        requestKey: optionalText(args.requestKey),
+        reason: optionalText(args.reason),
+        ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs }),
+        signal: exec.signal,
       })
-      if (outcome.kind === 'refused') return outcome.text
-      const { handle, escalation, ref, timeoutMs, reviewerSessionId } = outcome
-
-      const cancel = () => handle.agent.cancel({ kind: 'parent' })
-      exec.signal.addEventListener('abort', cancel, { once: true })
-      let timer: ReturnType<typeof setTimeout> | undefined
-      let timedOut = false
-      const deadline = new Promise<'timeout'>(resolve => {
-        timer = setTimeout(() => {
-          timedOut = true
-          resolve('timeout')
-        }, timeoutMs)
-      })
-      // A rejecting `whenIdle` is treated like a silent reviewer: the reply is
-      // read (likely absent) and the judgement degrades to `unknown` rather
-      // than throwing out of the tool.
-      const idle = handle.agent.whenIdle().then(() => 'idle' as const).catch(() => 'failed' as const)
-      const reviewOutcome = await Promise.race([idle, deadline])
-      if (timer !== undefined) clearTimeout(timer)
-      exec.signal.removeEventListener('abort', cancel)
-      if (reviewOutcome === 'timeout') handle.agent.cancel({ kind: 'parent' })
-
-      const reply = timedOut ? undefined : lastAssistantText(handle.agent.session.snapshotEvents())
-      const parsed = timedOut ? undefined : parseReviewerJudgements(reply)
-      const missingRationale = timedOut
-        ? `review agent timed out after ${timeoutMs}ms with no judgement`
-        : 'no judgement returned for this dimension'
-      const judgements = normalizeJudgements(parsed, ref, missingRationale)
-      const confidence: DiagnosisConfidence = timedOut || parsed === undefined ? 'low' : judgements.some(item => item.verdict === 'unknown') ? 'medium' : 'high'
-      const diagnosis: Diagnosis = {
-        diagnosisId: `review-agent-${reviewerSessionId}`,
-        taskId: args.taskId,
-        observedFailure: review.localizedCause ?? review.anomalies[0] ?? `escalation ${escalation.reasons.join(', ')} fired with no terminal failure text`,
-        scope: `task ${args.taskId}`,
-        localizedCause: renderCause(args.taskId, judgements),
-        evidenceRefs: review.evidenceRefs,
-        reviewRefs: [ref],
-        confidence,
-        proposals: [],
-        producedBy: { kind: 'agent', sessionId: reviewerSessionId },
-        judgements,
-      }
-      try {
-        await ctx.task.recordDiagnosisIn(storeId, diagnosis, caller)
-      } catch (error) {
-        return `task_review_agent: judgement produced but not recorded: ${error instanceof Error ? error.message : String(error)}`
-      }
-      const head = timedOut
-        ? `task_review_agent: review agent ${reviewerSessionId} timed out after ${timeoutMs}ms; cancelled. All six dimensions recorded unknown.`
-        : `task_review_agent: review agent ${reviewerSessionId} judged task ${args.taskId} (escalation ${escalation.reasons.join(', ') || 'none'})`
-      return [
-        head,
-        `judgements (agent ${reviewerSessionId}):`,
-        ...renderJudgements(judgements),
-        `diagnosis ${diagnosis.diagnosisId} recorded [${confidence}]`,
-      ].join('\n')
+      return renderOutcome(outcome, source, storeId, snapshot, review)
     },
   })
 }

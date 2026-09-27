@@ -1048,11 +1048,17 @@ function reviewRecordText(review) {
 		...jsonBlock(review)
 	].join("\n");
 }
-/** The complete rendering of one diagnosis record. */
+/**
+* The complete rendering of one diagnosis record.
+*
+* The persisted `observedFailure` slot is read here as what A5 made it: the
+* postmortem observation, not a claim that something failed — a postmortem of a
+* source that succeeded fills the same slot with what was really observed.
+*/
 function diagnosisRecordText(diagnosis) {
 	return [
 		`diagnosis ${diagnosis.diagnosisId} of task ${diagnosis.taskId} [confidence ${diagnosis.confidence}]`,
-		`observed failure: ${diagnosis.observedFailure}`,
+		`postmortem observation: ${diagnosis.observedFailure}`,
 		`localized cause: ${diagnosis.localizedCause}`,
 		"",
 		...jsonBlock(diagnosis)

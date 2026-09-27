@@ -18,6 +18,7 @@ import { HitlService } from './hitl.ts'
 import { EscalationService } from './escalation.ts'
 import { ProposalReviewService } from './proposal-review.ts'
 import { reviewerBindingSource } from './review-agent-ledger.ts'
+import { installReviewAgentAutoTrigger } from './review-agent-scan.ts'
 import { defineApproveTool } from './tools/approve.ts'
 import { defineAskTool } from './tools/ask.ts'
 import { defineRootBudgetApproval, defineTaskBudgetExtendTool } from './tools/budget-extend.ts'
@@ -216,6 +217,17 @@ export class SingularityAgent extends Service {
     ctx.effect(
       () => ctx.singularityContext.registerReviewerBindingSource(reviewerBindingSource()),
       'singularityAgent: reviewer binding source',
+    )
+    // The automatic trigger of the review chain (A5): a review that settled
+    // `failed` is accepted for diagnosis on its own — when the record becomes
+    // durable and when a graph is explicitly activated, the two moments that
+    // scan the store. Installed here rather than inside the tool: a trigger that
+    // only exists when a model calls something is not a trigger. It observes and
+    // never decides: nothing it does is awaited by a settlement, and a reviewer
+    // that cannot start changes nothing about the run it was told about.
+    ctx.effect(
+      () => installReviewAgentAutoTrigger(ctx),
+      'singularityAgent: review agent auto trigger',
     )
     // The one approval a budget extension can be granted through (K4): the
     // runtime asks it alone — for the one request that is not already recorded —

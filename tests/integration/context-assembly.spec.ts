@@ -28,8 +28,8 @@ import { startAssemblyStack, type AssemblyStack } from '../support/assembly-stac
  *     and with no `spawn` call at all.
  * (d) A replay's briefing is its own objective, never the champion root's.
  * (e) A reviewer reads the delegated contract, marked review-only, once its
- *     ledger row is durable; a reviewer whose ledger cannot be written gets zero
- *     model input.
+ *     ledger row is durable; a reviewer whose ledger cannot take its claim is
+ *     never spawned at all.
  * (f) Neither a read nor a repeated assembly is a side effect: the store's event
  *     count, the gate's phase and the deployment's counters are unchanged, and an
  *     unchanged projection assembles byte for byte the same text.
@@ -130,7 +130,7 @@ function appendLedgerRow(stack: AssemblyStack, row: Record<string, unknown>): vo
 }
 
 /** One store whose task settled `failed` — the escalation signal a reviewer is spawned for. */
-async function failedTask(stack: AssemblyStack, rootSession: string): Promise<{ storeId: string; taskId: string }> {
+async function failedTask(stack: AssemblyStack, rootSession: string): Promise<{ storeId: string; taskId: string; runId: string }> {
   const storeId = stack.storeIdOf(rootSession)
   await stack.seedLog(rootSession, ['ship the release'])
   const root = await stack.runtime.intakeRootContract(storeId, rootSession, rootContract('ship the release'))
@@ -140,7 +140,8 @@ async function failedTask(stack: AssemblyStack, rootSession: string): Promise<{ 
   } as never)
   const outcomes = await stack.runtime.awaitBatch(storeId, batch.batchId)
   expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
-  return { storeId, taskId: outcomes[0]!.taskId }
+  // The source a review call names is the run the review record carries.
+  return { storeId, taskId: outcomes[0]!.taskId, runId: String(outcomes[0]!.runId) }
 }
 
 /** One ledger row, rewritten in place: what a delegation that contradicts itself (or another graph) looks like. */
@@ -453,7 +454,7 @@ describe('a reviewer with no business run (A2-2)', () => {
   it('reads the delegated contract, marked review-only, once its ledger row is durable', async () => {
     const stack = await boot({ worker: async () => {} })
     const failed = await failedTask(stack, 's-root')
-    const answer = await stack.call('s-root', 'task_review_agent', { taskId: failed.taskId })
+    const answer = await stack.call('s-root', 'task_review_agent', { taskId: failed.taskId, runId: failed.runId })
     expect(answer.text).not.toContain('spawn failed')
     const reviewer = stack.spawns.at(-1)!
     expect(reviewer.beforePrompt).toBeDefined()
@@ -476,31 +477,23 @@ describe('a reviewer with no business run (A2-2)', () => {
     }
   })
 
-  it('spawns no reviewer whose ledger cannot be written: zero model input', async () => {
+  it('spawns no reviewer at all whose ledger cannot take the claim', async () => {
     const stack = await boot({ worker: async () => {} })
     const failed = await failedTask(stack, 's-root')
+    const spawnsBefore = stack.spawns.length
     // The ledger's home is a symlink to nothing: reading it answers "no ledger
-    // yet" (so the escalation check passes), while writing the delegation the
-    // spawn owes before its first request fails.
+    // yet", while writing the claim the attempt owes before it may spawn fails.
+    // An attempt that cannot be recorded is not an attempt: the call fails where
+    // the claim failed, before any reviewer exists — so the delegation the
+    // assembly would read is absent, and the request the deployment never sent
+    // has no contract. The ledger is the authority (A5: claim before spawn).
     symlinkSync(join(stack.dir, 'no-such-ledger-target'), join(stack.dir, 'ledger-link'))
     vi.stubEnv('SINGULARITY_REVIEW_LEDGER_DIR', join(stack.dir, 'ledger-link'))
 
-    const answer = await stack.call('s-root', 'task_review_agent', { taskId: failed.taskId })
-    expect(answer.text).toContain('spawn failed')
+    const answer = await stack.call('s-root', 'task_review_agent', { taskId: failed.taskId, runId: failed.runId })
+    expect(answer.isError, 'the call fails where the claim failed').toBe(true)
     expect(answer.text).toContain('ENOENT')
-    const reviewer = stack.spawns.at(-1)!
-    const sessionId = String(reviewer.sessionId)
-    expect(stack.agent(sessionId) === undefined, 'the reviewer is no live agent').toBe(true)
-    // Publication happened (the ledger is written after the node is a published
-    // member), and the first model input is exactly what never happened: the
-    // agent's own queue is empty.
-    const followup = (stack.mintedAgent(sessionId) as unknown as { followup: { mock: { calls: unknown[] } } }).followup
-    expect(followup.mock.calls.length, 'no model input').toBe(0)
-    // The delegation the assembly would read is absent, so the request the
-    // deployment never sent also has no contract: the ledger is the authority.
-    const unbound = await stack.prompt(sessionId)
-    expect(unbound.includes('review-only'), 'no delegation, no review-only contract').toBe(false)
-    expect(unbound.includes(failed.taskId), 'and no delegated task either').toBe(false)
+    expect(stack.spawns.length, 'no reviewer was ever published').toBe(spawnsBefore)
     void failed.storeId
   })
 })
@@ -690,7 +683,7 @@ describe('a binding that cannot be read refuses the request (Q1)', () => {
   it('refuses an already-running reviewer whose ledger cannot be read, and lets no delegated contract through', async () => {
     const stack = await boot({ worker: async () => {} })
     const failed = await failedTask(stack, 's-root')
-    const answer = await stack.call('s-root', 'task_review_agent', { taskId: failed.taskId })
+    const answer = await stack.call('s-root', 'task_review_agent', { taskId: failed.taskId, runId: failed.runId })
     expect(answer.text).not.toContain('spawn failed')
     const reviewer = stack.spawns.at(-1)!
     const sessionId = String(reviewer.sessionId)
@@ -713,12 +706,15 @@ describe('a binding that cannot be read refuses the request (Q1)', () => {
   it('refuses a reviewer whose ledger contradicts itself, on both doors', async () => {
     const stack = await boot({ worker: async () => {} })
     const failed = await failedTask(stack, 's-root')
-    await stack.call('s-root', 'task_review_agent', { taskId: failed.taskId })
+    await stack.call('s-root', 'task_review_agent', { taskId: failed.taskId, runId: failed.runId })
     const sessionId = String(stack.spawns.at(-1)!.sessionId)
-    const [row] = readFileSync(reviewerLedgerFile(stack), 'utf8')
+    // The started row is the delegation: the claim beside it is an intent, not a
+    // read domain (A5), so the contradiction is written on the started fact.
+    const row = readFileSync(reviewerLedgerFile(stack), 'utf8')
       .split('\n')
       .filter(line => line.trim().length > 0)
       .map(line => JSON.parse(line) as Record<string, unknown>)
+      .find(entry => entry.kind === 'started')!
 
     // A second row for the same reviewer session that disagrees with the first:
     // the read domain cannot be chosen by file order, so nothing is assembled
@@ -749,7 +745,7 @@ describe('a delegation is only believed from the graph it delegated into (Q2)', 
       worker: async () => {},
     })
     const failed = await failedTask(stack, 's-root')
-    await stack.call('s-root', 'task_review_agent', { taskId: failed.taskId })
+    await stack.call('s-root', 'task_review_agent', { taskId: failed.taskId, runId: failed.runId })
     const sessionId = String(stack.spawns.at(-1)!.sessionId)
     expect(await stack.prompt(sessionId)).toContain('review-only')
 

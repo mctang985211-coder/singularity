@@ -937,8 +937,12 @@ export interface ReviewRecord {
 export type DiagnosisConfidence = 'high' | 'medium' | 'low'
 
 /**
- * The nine mutation surfaces a proposal may point at (§2.7.6). Frozen now
- * because the P5 Evolution registry consumes this exact vocabulary.
+ * The mutation surfaces the Evolution ledger records a proposal under
+ * (§2.7.6). This is Evolution's own vocabulary — what it can *execute* is
+ * narrower still (`APPLYABLE_TARGET_TYPES` in the evolution package) — and it
+ * is deliberately not the diagnosis's: a `DiagnosisProposal.targetType` is an
+ * open name, and the conversion entry that would execute it is where the name
+ * is checked against what can really run.
  */
 export type ProposalTargetType =
   | 'skill' | 'tool' | 'capability' | 'task_definition' | 'decomposition_policy'
@@ -950,7 +954,13 @@ export type ProposalTargetType =
  * for a human or a later Evolution step.
  */
 export interface DiagnosisProposal {
-  targetType: ProposalTargetType
+  /**
+   * The mutation surface the suggestion points at, as a non-empty open name
+   * (A5): a diagnosis explains, and the store does not freeze what a
+   * suggestion may name — a target type no executor exists for is a recorded
+   * suggestion, refused by name at the entry that would convert it (A6).
+   */
+  targetType: string
   targetId: string
   rationale: string
 }

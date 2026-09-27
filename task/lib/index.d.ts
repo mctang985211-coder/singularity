@@ -1927,8 +1927,12 @@ interface ReviewRecord {
  */
 type DiagnosisConfidence = 'high' | 'medium' | 'low';
 /**
- * The nine mutation surfaces a proposal may point at (§2.7.6). Frozen now
- * because the P5 Evolution registry consumes this exact vocabulary.
+ * The mutation surfaces the Evolution ledger records a proposal under
+ * (§2.7.6). This is Evolution's own vocabulary — what it can *execute* is
+ * narrower still (`APPLYABLE_TARGET_TYPES` in the evolution package) — and it
+ * is deliberately not the diagnosis's: a `DiagnosisProposal.targetType` is an
+ * open name, and the conversion entry that would execute it is where the name
+ * is checked against what can really run.
  */
 type ProposalTargetType = 'skill' | 'tool' | 'capability' | 'task_definition' | 'decomposition_policy' | 'agent_preset' | 'workflow_policy' | 'verifier' | 'runtime_policy';
 /**
@@ -1937,7 +1941,13 @@ type ProposalTargetType = 'skill' | 'tool' | 'capability' | 'task_definition' | 
  * for a human or a later Evolution step.
  */
 interface DiagnosisProposal {
-  targetType: ProposalTargetType;
+  /**
+   * The mutation surface the suggestion points at, as a non-empty open name
+   * (A5): a diagnosis explains, and the store does not freeze what a
+   * suggestion may name — a target type no executor exists for is a recorded
+   * suggestion, refused by name at the entry that would convert it (A6).
+   */
+  targetType: string;
   targetId: string;
   rationale: string;
 }
@@ -2641,7 +2651,10 @@ declare class TaskState {
    * enforces is integrity, not timing — the id is unique across the store
    * (a repeat write is a bug, not an update), every field is present and
    * well-formed, the diagnosis rests on at least one evidence or review ref,
-   * and every proposal names one of the nine frozen target types (§2.7.6).
+   * and every proposal names a non-empty target type. That name is open on
+   * purpose (A5): a diagnosis explains, and a suggestion whose target type no
+   * executor exists for is a recorded suggestion — refused by name at the
+   * entry that would convert it into an executable proposal, not here.
    *
    * The two optional additions are checked the same way: `producedBy` must name
    * a known producer kind (and a non-empty session when it carries one), and

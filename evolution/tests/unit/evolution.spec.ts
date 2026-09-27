@@ -442,6 +442,19 @@ function toolCtx(svc: EvolutionService, approvalOutcome: string = 'allowed-once'
             confidence: 'medium',
             proposals: [{ targetType: 'task_definition', targetId: 'build:1', rationale: 'add empty-input fixture' }],
           },
+          {
+            // A diagnosis written after A5 opened the target-type vocabulary:
+            // a suggestion Evolution has no executor (and no vocabulary) for.
+            diagnosisId: 'd-unknown',
+            taskId: 't1',
+            observedFailure: 'the reviewer prompt never names the empty-input case',
+            scope: 'this task',
+            localizedCause: 'the request is underspecified',
+            evidenceRefs: ['ev-1'],
+            reviewRefs: ['t1#r1'],
+            confidence: 'low',
+            proposals: [{ targetType: 'prompt_template', targetId: 'reviewer', rationale: 'name the empty-input case' }],
+          },
         ],
         evidence: [{ evidenceId: 'ev-1' }],
       })),
@@ -527,6 +540,33 @@ describe('evolution tools', () => {
       exec('root-1'),
     ).catch((error: Error) => String(error))) as string
     expect(missing).toContain('required without fromDiagnosis')
+  })
+
+  /**
+   * The other half of A5's open vocabulary: a diagnosis may carry any target
+   * type, and Evolution — which owns the mutation surfaces it can execute —
+   * re-validates at the conversion entry. A transcription it cannot execute is
+   * refused by name, before the ledger is touched, so a suggestion no executor
+   * can take up never becomes an EvolutionProposal.
+   */
+  it('evolution_propose refuses a diagnosis proposal whose target type it cannot execute, with zero ledger writes', async () => {
+    const svc = await service()
+    const { ctx } = toolCtx(svc)
+    const tool = defineEvolutionProposeTool(ctx)
+    expect(existsSync(join(svc.root, 'proposals.jsonl'))).toBe(false)
+
+    const rejected = (await tool.execute(
+      { proposalId: 'p-unsupported', level: 'L2', baseVersion: 'v3', fromDiagnosis: { diagnosisId: 'd-unknown', proposalIndex: 0 } },
+      exec('root-1'),
+    ).catch((error: Error) => String(error))) as string
+    expect(rejected).toContain('prompt_template')
+    expect(rejected).toContain('d-unknown')
+    expect(rejected).toContain('targetType')
+
+    // Nothing was recorded: no proposal, no ledger line, no sandbox.
+    expect(await svc.list()).toEqual([])
+    expect(existsSync(join(svc.root, 'proposals.jsonl'))).toBe(false)
+    expect(existsSync(join(svc.root, 'sandbox'))).toBe(false)
   })
 
   it('evolution_propose rejects a targetType outside the frozen vocabulary', async () => {

@@ -486,17 +486,6 @@ const EXECUTION_PHASES = [
 	"waiting_children",
 	"submitted"
 ];
-const PROPOSAL_TARGET_TYPES = [
-	"skill",
-	"tool",
-	"capability",
-	"task_definition",
-	"decomposition_policy",
-	"agent_preset",
-	"workflow_policy",
-	"verifier",
-	"runtime_policy"
-];
 /**
 * The statuses each decision may be taken from — the one thing a decision's
 * legality is checked against. `approved` and `rejected` require a proposal
@@ -1354,7 +1343,10 @@ var TaskState = class TaskState {
 	* enforces is integrity, not timing — the id is unique across the store
 	* (a repeat write is a bug, not an update), every field is present and
 	* well-formed, the diagnosis rests on at least one evidence or review ref,
-	* and every proposal names one of the nine frozen target types (§2.7.6).
+	* and every proposal names a non-empty target type. That name is open on
+	* purpose (A5): a diagnosis explains, and a suggestion whose target type no
+	* executor exists for is a recorded suggestion — refused by name at the
+	* entry that would convert it into an executable proposal, not here.
 	*
 	* The two optional additions are checked the same way: `producedBy` must name
 	* a known producer kind (and a non-empty session when it carries one), and
@@ -1380,7 +1372,7 @@ var TaskState = class TaskState {
 		if (diagnosis.evidenceRefs.length + diagnosis.reviewRefs.length === 0) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" must rest on at least one evidence or review ref`);
 		if (!Array.isArray(diagnosis.proposals)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" proposals must be an array`);
 		for (const proposal of diagnosis.proposals) {
-			if (!PROPOSAL_TARGET_TYPES.includes(proposal.targetType)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" proposal target type must be one of ${PROPOSAL_TARGET_TYPES.join(", ")}`);
+			if (!nonEmpty(proposal.targetType)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" proposal target type must be a non-empty string`);
 			if (!nonEmpty(proposal.targetId) || !nonEmpty(proposal.rationale)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" proposal requires a target id and a rationale`);
 		}
 		if (diagnosis.producedBy !== void 0) {

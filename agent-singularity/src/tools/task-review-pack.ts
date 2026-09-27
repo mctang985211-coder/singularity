@@ -6,8 +6,9 @@ import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task'
 import type { Diagnosis, ReviewDimensions, ReviewMetrics, ReviewRecord, TaskId, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
-import { countReviewAgentRuns, reviewAgentBudget } from '../review-agent-ledger.ts'
-import { computeEscalation, renderEscalation, renderJudgementDimensions, type Escalation } from './review-escalation.ts'
+import { readReviewAgentAttempts } from '../review-agent-ledger.ts'
+import type { ReviewAgentAttempt, ReviewAgentSource } from '../review-agent-ledger.ts'
+import { renderJudgementDimensions } from './review-escalation.ts'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
 
@@ -17,14 +18,45 @@ function sessionId(exec: ToolRunContext): SessionId {
   return id
 }
 
-/** The ref a diagnosis uses in `reviewRefs` to name one review record. */
-export function reviewRef(review: ReviewRecord): string {
+/** The ref a diagnosis uses in `reviewRefs` to name one review record, and a pack uses to name its source. */
+export function reviewRef(review: { readonly taskId: TaskId; readonly runId?: string | null }): string {
   return `${review.taskId}#${review.runId ?? 'no-run'}`
 }
 
-/** The task's most recent review, or nothing when it never settled one. */
-export function latestReview(snapshot: TaskSnapshot, taskId: TaskId): ReviewRecord | undefined {
+/**
+ * The review record of one exact source, or nothing when the store holds none.
+ * The source is named, never inferred: a review is of the run it recorded, and
+ * a task with several runs has several reviews.
+ */
+export function reviewForSource(snapshot: TaskSnapshot, source: ReviewAgentSource): ReviewRecord | undefined {
+  return snapshot.reviews.find(review => review.taskId === source.taskId && (review.runId ?? null) === source.runId)
+}
+
+/** The task's most recent review, or nothing when it never settled one (a summary of a neighbour, never a source). */
+function latestReview(snapshot: TaskSnapshot, taskId: TaskId): ReviewRecord | undefined {
   return [...snapshot.reviews].reverse().find(item => item.taskId === taskId)
+}
+
+/**
+ * The ledger state of one source: every attempt the store holds for it, in the
+ * order they were claimed — the default attempt (`null` key) and each explicit
+ * one — with how each ended. This is what a reader checks before asking for a
+ * review: an attempt that is still open is the one a new call would return
+ * instead of starting another, and a new review of an already-reviewed source
+ * needs an explicit `requestKey`.
+ */
+function renderAttempts(attempts: readonly ReviewAgentAttempt[], source: ReviewAgentSource): string[] {
+  const mine = attempts.filter(attempt => attempt.source.taskId === source.taskId && attempt.source.runId === source.runId)
+  if (mine.length === 0) {
+    return ['review attempts (0): none — no review agent has been started for this source']
+  }
+  return [`review attempts (${mine.length}):`, ...mine.map(attempt => {
+    const label = attempt.requestKey === null ? 'default attempt' : `requestKey "${attempt.requestKey}"`
+    const status = attempt.settlement?.status ?? 'in-flight'
+    const note = attempt.settlement?.note === undefined ? '' : ` — ${attempt.settlement.note}`
+    const reason = attempt.reason === null ? '' : ` reason ${JSON.stringify(attempt.reason)}`
+    return `- ${label} ${attempt.sessionId} [${status}]${reason}${note}`
+  })]
 }
 
 function reviewSummary(snapshot: TaskSnapshot, taskId: TaskId): string {
@@ -145,6 +177,26 @@ function renderReview(review: ReviewRecord): string[] {
 }
 
 /**
+ * How far one diagnosis's suggestions have been taken up (A5 §3, plan F.3): a
+ * diagnosis that carries **proposals** is the A6 handoff candidate, and no A6
+ * candidate loop is assembled in this build — so the pack reports it as
+ * **pending**: recorded, addressed to nobody yet, and not an open candidate.
+ *
+ * The mark follows from the record alone, which is why it is written here and
+ * not derived from a switch: nothing in this build consumes a handoff, so
+ * there is no second state to report. A conclusion *without* proposals is not a
+ * handoff and gets no mark (a normal completion stays a conclusion), and an
+ * interrupted attempt has no diagnosis at all, so it can never reach this line.
+ * When an A6 consumer is assembled, this is the line it replaces with what it
+ * really did with the candidate.
+ */
+function handoffMark(diagnosis: Diagnosis): string | undefined {
+  if (diagnosis.proposals.length === 0) return undefined
+  return 'pending — this diagnosis carries suggestions and no A6 candidate loop is enabled in this build: ' +
+    'nothing has been opened for it, and reading it here takes nothing up'
+}
+
+/**
  * One diagnosis, with its agent judgements kept visually apart from the
  * mechanical facts above: the facts say what was observed, a judgement says
  * what an agent concluded, and the header names the session so the two are
@@ -167,6 +219,8 @@ function renderDiagnosis(diagnosis: Diagnosis): string[] {
     }
   }
   for (const proposal of diagnosis.proposals) lines.push(`  proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`)
+  const handoff = handoffMark(diagnosis)
+  if (handoff !== undefined) lines.push(`  handoff: ${handoff}`)
   return lines
 }
 
@@ -204,15 +258,35 @@ function renderBindings(snapshot: TaskSnapshot, taskId: TaskId): string[] {
   return lines
 }
 
+/** Everything one pack renders from, all read by its caller for one exact source. */
+export interface ReviewPackInput {
+  readonly snapshot: TaskSnapshot
+  /** The review source the pack is for: the task and its run, or the no-run case. */
+  readonly source: ReviewAgentSource
+  /** The store's review attempts, as the ledger holds them (`readReviewAgentAttempts`). */
+  readonly attempts: readonly ReviewAgentAttempt[]
+}
+
 /**
- * The pack for one task: the facts first (reviews, dependency edges,
- * parent/child summaries), then the escalation decision, then the judgement
- * dimensions the facts cannot settle, then the diagnoses that explain them.
- * @throws when `taskId` is not in the snapshot.
+ * The pack for one source of one task: the source itself first, then the facts
+ * (reviews, dependency edges, parent/child summaries), the ledger state of that
+ * source, the judgement dimensions the facts cannot settle, and the diagnoses
+ * that explain them.
+ *
+ * No trigger decision is printed (A5): whether a review agent runs is decided by
+ * the two triggers — a **failed** review, or an explicit call — under the
+ * store's own allowance, and the fact table a pack carries says nothing about
+ * either beyond the observations it already prints (the outcome, the criteria,
+ * the log tail, the capability coverage). A reader that needs the allowance
+ * gets it from the attempt list and from `task_review_agent`'s own refusal.
+ * @throws when the source's task is not in the snapshot.
  */
-export function buildReviewPack(snapshot: TaskSnapshot, taskId: TaskId, escalation: Escalation): string {
+export function buildReviewPack(input: ReviewPackInput): string {
+  const { snapshot, source, attempts } = input
+  const { taskId } = source
   const task = snapshot.tasks.find(item => item.taskId === taskId)
   if (task === undefined) throw new Error(`task_review_pack: unknown task "${taskId}"`)
+  const review = reviewForSource(snapshot, source)
   const reviews = snapshot.reviews.filter(item => item.taskId === task.taskId)
   const parent = task.parentTaskId === undefined
     ? undefined
@@ -222,9 +296,10 @@ export function buildReviewPack(snapshot: TaskSnapshot, taskId: TaskId, escalati
   const diagnoses = snapshot.diagnoses.filter(item => item.taskId === task.taskId)
   const lines = [
     `review pack for task ${task.taskId} [${task.status}] depth ${task.depth}`,
+    `source: review ${reviewRef(source)}${review === undefined ? ' (not on the record)' : ` [${review.outcome}]`}`,
     `objective: ${task.objective}`,
     `dependencies: must verify first [${incoming.join(', ')}]; blocks [${outgoing.join(', ')}]`,
-    renderEscalation(escalation),
+    ...renderAttempts(attempts, source),
     renderJudgementDimensions(),
     `reviews (${reviews.length}):`,
     ...reviews.flatMap(renderReview),
@@ -246,23 +321,41 @@ export function defineTaskReviewPackTool(ctx: Context) {
   return defineTool({
     name: 'task_review_pack',
     description:
-      'Read-only. Assemble the diagnosis input pack for one task: the task itself, all its review records in full ' +
-      '(criteria, log tail, blockers, the session each review came from), the machine escalation decision, the six ' +
-      'dimensions whose conclusion the fact table does not carry, one-line review summaries of its children and parent, ' +
-      'the dependency edges touching it, and its diagnoses with any agent judgements. ' +
+      'Read-only. Assemble the diagnosis input pack for ONE exact review source — a task and the run under review, ' +
+      'or runId null for a review that carries no run (a task blocked before it started). The pack names the task ' +
+      'itself, all its review records in full (criteria, log tail, blockers, the session each review came from), the ' +
+      'review attempts the ledger holds for this source and how each ended, the dimensions whose conclusion the ' +
+      'fact table does not carry, one-line review summaries of its children and parent, the dependency edges touching ' +
+      'it, and its diagnoses with any agent judgements — each diagnosis that carries suggestions marked as a handoff ' +
+      'nothing has taken up yet. It reports the facts only: whether a review agent runs is ' +
+      'decided elsewhere (a failed review is accepted on its own; an explicit call names its source). ' +
       'Local evidence plus parent/children summaries — no ancestry replay (guide §2.7.5). Feed this to task_diagnose, or ' +
-      'to task_review_agent when escalation requires a judgement.',
+      'to task_review_agent when a judgement is needed.',
     parameters: {
       taskId: { type: 'string', required: true, description: 'Task to assemble the pack for' },
+      runId: {
+        oneOf: [{ type: 'string' }, { type: 'null' }],
+        required: true,
+        description: 'The Run whose review the pack is for, exactly as its review record names it; null for a review with no run',
+      },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },
     execute: async (args, exec) => {
       const graph = await ctx.graphs.graphForSession(sessionId(exec))
       const storeId = rootTaskStoreId(graph.rootSessionId)
+      const source: ReviewAgentSource = { taskId: args.taskId, runId: args.runId }
       const snapshot = await ctx.task.openStore(storeId)
-      const used = await countReviewAgentRuns(storeId)
-      const escalation = computeEscalation(snapshot, args.taskId, { used, max: reviewAgentBudget() })
-      return buildReviewPack(snapshot, args.taskId, escalation)
+      if (!snapshot.tasks.some(task => task.taskId === args.taskId)) {
+        throw new Error(`task_review_pack: unknown task "${args.taskId}" in store ${storeId}`)
+      }
+      if (args.runId !== null && !snapshot.runs.some(run => run.runId === args.runId && run.taskId === args.taskId)) {
+        return `task_review_pack: run "${args.runId}" is not a run of task "${args.taskId}"; nothing to pack`
+      }
+      if (reviewForSource(snapshot, source) === undefined) {
+        return `task_review_pack: no review record for source ${reviewRef(source)} in store ${storeId}; nothing to pack`
+      }
+      const attempts = await readReviewAgentAttempts(storeId)
+      return buildReviewPack({ snapshot, source, attempts })
     },
   })
 }

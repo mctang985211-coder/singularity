@@ -78,11 +78,15 @@ function stub(name: string, value: object) {
  * Mounts the plugin on a real context: the dependencies it injects are siblings
  * of its own, and the tool registry is the deployment's (here, a map that keeps
  * what the plugin registered). `taskRuntime` is the one dependency this
- * composition registers a callback on at construction — the root-budget approval
- * (K4) — so its default here accepts and forgets one, and a case that cares
+ * composition registers callbacks on at construction — the root-budget approval
+ * (K4) and the terminal-review listener the automatic review trigger rides
+ * (A5) — so its default here accepts and forgets one each, and a case that cares
  * about the installation passes its own recorder.
  */
-async function mount(config?: Config, taskRuntime: object = { registerRootBudgetApproval: () => () => {} }) {
+async function mount(
+  config?: Config,
+  taskRuntime: object = { registerRootBudgetApproval: () => () => {}, registerTerminalReviewListener: () => () => {} },
+) {
   const home = await mkdtemp(join(tmpdir(), 'singularity-assembly-'))
   vi.stubEnv('DSH_HOME', home)
   const tools = new Map<string, { name: string }>()
@@ -175,6 +179,9 @@ describe('SingularityAgent assembly', () => {
         installed = approval
         return () => { if (installed === approval) installed = undefined }
       },
+      // The other door this composition installs on the runtime (A5): the
+      // terminal-review listener the automatic review trigger rides.
+      registerTerminalReviewListener: () => () => {},
     })
 
     expect(registered).toHaveLength(1)

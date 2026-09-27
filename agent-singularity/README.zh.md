@@ -32,8 +32,8 @@
 16. task_proposal_cancel：在批次准入前撤回本会话提交过的提案；只有提交它的会话可以，且记录保留。
 17. task_status：打印任务树，带 run / 相位 / 证据 / review / diagnosis 摘要。
 18. task_verify：worker 自检——重跑 verifier、记录证据，绝不改变任务状态。
-19. task_review_pack：只读证据包（本任务 reviews 全文、父/子摘要、依赖边、升级判定行）。
-20. task_review_agent：当 pack 的升级判据（E1–E4）命中且每 store 预算有余时，spawn 一个只读评审 agent，把六维判读落为一条 Diagnosis。
+19. task_review_pack：面向一个精确 review 源（taskId + 待复盘的 run，或 runId=null 表示无 Run 的 Review）的只读证据包：本任务 reviews 全文、父/子摘要、依赖边、该源在 ledger 中的复盘尝试。只报事实——是否启动 reviewer 由别处决定（失败 Review 自动受理；成功源只有显式调用才会被复盘）。
+20. task_review_agent：为一个精确 review 源（taskId、runId、可选 reason 与 requestKey）spawn 一个只读评审 agent；同一源只有一个默认尝试，重复调用返回该尝试而不是再起一个，尝试终结后再次复盘必须给出新的 requestKey，新尝试受每 store 额度约束；reviewer 自己落一条 Diagnosis——复盘观察、结论（有据建议/无需改进/证据不足）与置信度，judgements 与 proposals 均可省；超时或不可解析的答复把尝试记为 interrupted，不伪造 Diagnosis。终态为 `failed` 的 Review 会被自动受理（插件在记录落盘时和 graph 激活时扫描 store），成功源只有显式调用才会被复盘。
 21. task_diagnose：持久化一条 Diagnosis（proposals 只是建议，绝不自动执行）。
 22. task_budget_extend：经原生人审（卡片展示 store、当前生效上限、已计用量与拟改后的总上限）申请提高一个已配置的根上限——新的 `maxRuns` 总额和/或绝对 UTC 的 `deadlineAt`，以 `requestKey` 为键；落一条 `TaskBudgetExtended` 事实，同键重试直接读回已有记录不再发问；不唤活任何终态、不自行启动任何工作、已计用量继续累计。
 23. evolution_propose：登记一条 evolution 提案（可从 Diagnosis 转录）。

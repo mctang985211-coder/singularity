@@ -513,7 +513,38 @@ describe('TaskService diagnoses', () => {
       .rejects.toThrow('at least one evidence or review ref')
     await expect(service.recordDiagnosisIn(STORE, diagnosis({ confidence: '0.9' as Diagnosis['confidence'] }), 'tester'))
       .rejects.toThrow('confidence')
+    await expect(service.recordDiagnosisIn(STORE, diagnosis({ proposals: [{ targetType: '', targetId: 'x', rationale: 'y' }] }), 'tester'))
+      .rejects.toThrow('target type')
     expect(persistedKinds(h)).toEqual(['TaskCreated', 'TaskAdmitted'])
+  })
+
+  test('a proposal target type the vocabulary never held reopens and reads back, and so does an old nine-type one', async () => {
+    const h = harness()
+    const service = new TaskService(h.ctx as never)
+    await service.createStore(STORE)
+    await service.createTaskIn(STORE, task(), 'tester')
+    await service.admitTaskIn(STORE, 't1', 'tester')
+
+    // One diagnosis of each kind: a target type this build has no vocabulary
+    // for, and one written under the nine-type union an earlier build froze.
+    await service.recordDiagnosisIn(STORE, diagnosis(), 'tester')
+    await service.recordDiagnosisIn(STORE, diagnosis({
+      diagnosisId: 'd-unknown',
+      proposals: [{ targetType: 'prompt_template', targetId: 'reviewer', rationale: 'the reviewer prompt never names the empty-input case' }],
+    }), 'tester')
+    const before = await service.snapshotIn(STORE)
+
+    // A fresh process over the same session log: the store is replayed, not
+    // handed over in memory.
+    const reopened = new TaskService(h.ctx as never)
+    const snapshot = await reopened.openStore(STORE)
+    expect(snapshot.diagnoses).toEqual(before.diagnoses)
+    expect(snapshot.diagnoses.find(item => item.diagnosisId === 'd-unknown')?.proposals).toEqual([
+      { targetType: 'prompt_template', targetId: 'reviewer', rationale: 'the reviewer prompt never names the empty-input case' },
+    ])
+    expect(snapshot.diagnoses.find(item => item.diagnosisId === 'd1')?.proposals).toEqual([
+      { targetType: 'task_definition', targetId: 'build:1', rationale: 'the acceptance command never feeds empty input' },
+    ])
   })
 })
 

@@ -470,6 +470,23 @@ export async function resumeAdoptedWorker(env: OrchestrateEnv, storeId: string, 
 }
 
 /**
+ * One terminal review that just became durable, as {@link
+ * RuntimeSettlementEnv.onTerminalReview} hands it to the deployment.
+ *
+ * The source is named exactly the way a review attempt names one: the task and
+ * the run under review, or `null` for a review that carries no run (a task
+ * blocked before it ever started). Deriving it from "the latest review" would
+ * name a different source the moment a task has two runs, so the fact carries
+ * the run the record was written for.
+ */
+export interface TerminalReviewFact {
+  readonly storeId: string
+  readonly taskId: TaskId
+  readonly runId: string | null
+  readonly outcome: ReviewOutcome
+}
+
+/**
  * What a *runtime-level* settlement holds — the slice of {@link OrchestrateEnv}
  * that a terminal record, a notification and a workspace release actually read.
  *
@@ -500,6 +517,19 @@ export interface RuntimeSettlementEnv {
   workspacePath?: string
   /** Called once per terminal transition: the runtime closes the gate here and releases the run's layer. */
   onRunSettled?(storeId: string, taskId: TaskId, runId: RunId, status: RunStatus): void
+  /**
+   * Called once per recorded terminal review (A5), *after* the record is durable
+   * and never awaited: a settlement hands the fact over and carries on, because
+   * what a listener does with it (the review-agent trigger scans the store and
+   * may start a reviewer) is not part of settling the run. A listener that fails
+   * or was never installed changes nothing about the settlement.
+   *
+   * The store's `task/change` event would answer a similar question, but it
+   * reports every mutation and says nothing about *which* fact arrived; this
+   * door names the review that was just recorded, so the trigger does not have
+   * to diff snapshots to find it.
+   */
+  onTerminalReview?(fact: TerminalReviewFact): void
   /**
    * The live process's execution gate, when this settlement has one (A4 §F.1).
    * A settled run ends the *questions addressed to it* — an open question needs
@@ -1033,6 +1063,10 @@ interface TerminalReviewOptions {
  * the run cascade and the replay runner share. The dimensions and effort
  * metrics are derived alongside (§2.7.3) on a best-effort basis — see
  * {@link reviewEnrichment} — and never gate the record itself.
+ *
+ * The record is durable before anything is told about it: the deployment's
+ * listener (A5's review-agent trigger) is handed the fact afterwards and is
+ * never awaited, so no settlement waits on a reviewer.
  */
 async function recordTerminalReview(
   env: RuntimeSettlementEnv,
@@ -1060,6 +1094,16 @@ async function recordTerminalReview(
     ...(enrichment.dimensions === undefined ? {} : { dimensions: enrichment.dimensions }),
     ...(enrichment.metrics === undefined ? {} : { metrics: enrichment.metrics }),
   }, env.actor)
+  // The record is durable: the deployment may now be told about it. Handing the
+  // fact over is not waiting for what it does with it (A5) — a listener runs the
+  // review agent, a watchdog and a diagnosis on its own time, and none of it is
+  // this settlement's business.
+  env.onTerminalReview?.({
+    storeId,
+    taskId,
+    runId: options.run?.runId ?? null,
+    outcome,
+  })
 }
 
 /**

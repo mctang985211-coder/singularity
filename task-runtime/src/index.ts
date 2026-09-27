@@ -111,6 +111,7 @@ import {
   type ReplayRunOutcome,
   type RuntimeSettlementEnv,
   type SessionObservation,
+  type TerminalReviewFact,
   type VerifyRunOptions,
 } from './orchestrate.ts'
 import {
@@ -287,8 +288,10 @@ export type {
   ReplayRunInit,
   ReplayRunOutcome,
   ReplayRunSignals,
+  RuntimeSettlementEnv,
   SessionObservation,
   SpawnChildRequest,
+  TerminalReviewFact,
   VerifyRunOptions,
 } from './orchestrate.ts'
 export {
@@ -1696,6 +1699,14 @@ export class TaskRuntime extends Service {
    * refuses new requests by name rather than assume a decision it never took.
    */
   private rootBudgetApproval?: RootBudgetApproval
+  /**
+   * Who the deployment wants told when a terminal review became durable (A5),
+   * installed through {@link registerTerminalReviewListener}. A list, and
+   * not a single slot: this is an observation door with no decision attached,
+   * so one deployment may watch the same fact for more than one reason without
+   * the second registration replacing the first.
+   */
+  private readonly terminalReviewListeners = new Set<(fact: TerminalReviewFact) => void | Promise<void>>()
 
   constructor(ctx: Context, config?: Config) {
     super(ctx, 'taskRuntime')
@@ -2789,6 +2800,66 @@ export class TaskRuntime extends Service {
     this.rootBudgetApproval = approval
     return () => {
       if (this.rootBudgetApproval === approval) this.rootBudgetApproval = undefined
+    }
+  }
+
+  /**
+   * Install one listener the runtime tells when a terminal review became
+   * durable (A5) — the fact the review-agent trigger scans the store for.
+   *
+   * **What this door is not.** It carries no decision and no permission: the
+   * listener is told *what was recorded* and is never awaited, so nothing it
+   * does can hold a settlement, change a record or decide a phase. That is the
+   * whole reason it exists as an observation rather than as a second verb on the
+   * settle path: a deployment that installs none settles exactly as one that
+   * installs a hundred, and a listener whose own work fails (an unwritable
+   * ledger, a reviewer that cannot start) is reported and dropped by the
+   * runtime rather than propagated into the run it was told about.
+   *
+   * The listener is called once per review record, with the store, the task, the
+   * run under review (`null` for a review that carries none) and the outcome —
+   * never with "the latest review", so it cannot mistake one source for another.
+   * @param listener - the callback, called after the record is durable.
+   * @returns a disposer that removes exactly this listener.
+   */
+  registerTerminalReviewListener(listener: (fact: TerminalReviewFact) => void | Promise<void>): () => void {
+    if (typeof listener !== 'function') {
+      throw new Error('task-runtime: a terminal-review listener must be a function')
+    }
+    this.terminalReviewListeners.add(listener)
+    return () => {
+      this.terminalReviewListeners.delete(listener)
+    }
+  }
+
+  /**
+   * Hand one recorded review to the listeners, fire-and-forget.
+   *
+   * Every listener is called and every answer is dropped: a promise one returns
+   * is left to settle on its own and a rejection is warned about, because a
+   * listener that fails has failed at *its* work (starting a reviewer), not at
+   * recording the review. A throwing listener is caught here for the same
+   * reason — the settlement path must come out of this function exactly as it
+   * went in.
+   */
+  private notifyTerminalReview(fact: TerminalReviewFact): void {
+    for (const listener of this.terminalReviewListeners) {
+      try {
+        const answer = listener(fact)
+        if (answer !== undefined && typeof (answer as Promise<void>).then === 'function') {
+          void (answer as Promise<void>).catch(error => {
+            this.warn(
+              `store ${fact.storeId}: a terminal-review listener failed after review ${fact.taskId}` +
+              `${fact.runId === null ? '' : `#${fact.runId}`} [${fact.outcome}] (${error instanceof Error ? error.message : String(error)})`,
+            )
+          })
+        }
+      } catch (error) {
+        this.warn(
+          `store ${fact.storeId}: a terminal-review listener failed after review ${fact.taskId}` +
+          `${fact.runId === null ? '' : `#${fact.runId}`} [${fact.outcome}] (${error instanceof Error ? error.message : String(error)})`,
+        )
+      }
     }
   }
 
@@ -5675,6 +5746,7 @@ export class TaskRuntime extends Service {
       onRunSettled: (storeId, taskId, runId, status) => {
         this.runSettledFromRuntime(storeId, taskId, runId, status)
       },
+      onTerminalReview: fact => this.notifyTerminalReview(fact),
       gate: this.executionGate,
     }
   }
@@ -7727,6 +7799,7 @@ export class TaskRuntime extends Service {
       },
       readLogTail: async logRef => this.runVerifier()?.logTail?.(logRef),
       observeSession: async sessionId => this.observeSession(sessionId),
+      onTerminalReview: fact => this.notifyTerminalReview(fact),
       onRunBound: (sessionId, binding) => {
         this.sessions.set(sessionId, binding)
         this.startedSessions.add(sessionId)

@@ -8,8 +8,8 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
 import { CONTEXT_OUTPUT_LIMIT_BYTES, ReviewerBindingError, openRootProposals } from "@dangosys/dsh-singularity-context";
-import { defineTool } from "@deepseek-ai/dsh-tools";
 import { SessionId } from "@deepseek-ai/dsh-session";
+import { defineTool } from "@deepseek-ai/dsh-tools";
 
 //#region src/hitl.ts
 /**
@@ -265,7 +265,7 @@ var EscalationService = class extends Service {
 //#endregion
 //#region src/proposal-review.ts
 /** The prefix `rootTaskStoreId` writes; see {@link ownerSessionOfStore} for why it is re-checked rather than trusted. */
-const STORE_PREFIX = "sg-t-";
+const STORE_PREFIX$1 = "sg-t-";
 /** The tool name a batch review's question is about: the decomposition the batch would become (audit and presentation). */
 const BATCH_REVIEW_TOOL_NAME = "task_decompose";
 /**
@@ -285,7 +285,7 @@ const ROOT_REVIEW_TOOL_NAME = "task_intake";
 * a store (which would route a review into a stranger's conversation).
 */
 function ownerSessionOfStore(storeId) {
-	if (!storeId.startsWith(STORE_PREFIX)) return void 0;
+	if (!storeId.startsWith(STORE_PREFIX$1)) return void 0;
 	const sessionId$21 = storeId.slice(5);
 	return sessionId$21.length > 0 && rootTaskStoreId(sessionId$21) === storeId ? sessionId$21 : void 0;
 }
@@ -724,69 +724,14 @@ function message$1(error) {
 //#region src/tools/review-escalation.ts
 /** How many review agents one root store may start before the guardrail holds. */
 const REVIEW_AGENT_BUDGET_DEFAULT = 1;
-function latestReview$2(snapshot, taskId) {
-	return [...snapshot.reviews].reverse().find((item) => item.taskId === taskId);
-}
-/**
-* The capability coverage of one task, read from the review's dimension facts
-* when present and from the stored admission manifest otherwise. Both describe
-* the same resolution; the review's copy is the one a reader sees, the stored
-* manifest is what exists for a runless or dimension-less record.
-*/
-function capabilityGap(snapshot, taskId, review) {
-	const coverage = review?.dimensions?.capabilityCoverage;
-	if (coverage !== void 0) return coverage.closure === "gap" || coverage.missing.length > 0;
-	const manifest = snapshot.capabilities[taskId];
-	if (manifest === void 0) return false;
-	return manifest.closure === "gap" || manifest.missing.length > 0;
-}
-/**
-* Compute the escalation decision for one task against a store snapshot.
-* @param snapshot - the root task store snapshot.
-* @param taskId - the task whose review is under consideration.
-* @param budget - review agents already started, and the cap (defaults to
-*   `used: 0, max: REVIEW_AGENT_BUDGET_DEFAULT`).
-* @returns the signals that hold, whether to escalate, and the budget state.
-*/
-function computeEscalation(snapshot, taskId, budget = {}) {
-	const resolved = {
-		used: Math.max(0, budget.used ?? 0),
-		max: Math.max(1, budget.max ?? REVIEW_AGENT_BUDGET_DEFAULT)
-	};
-	const review = latestReview$2(snapshot, taskId);
-	const reasons = [];
-	if (review?.outcome === "failed") {
-		reasons.push("E1");
-		if (review.logTail === void 0 && review.evidenceRefs.length === 0) reasons.push("E2");
-	}
-	if ((review?.criteria ?? []).some((criterion) => criterion.verdict === "inconclusive")) reasons.push("E3");
-	if (capabilityGap(snapshot, taskId, review)) reasons.push("E4");
-	const exhausted = reasons.length > 0 && resolved.used >= resolved.max;
-	return {
-		reasons,
-		required: reasons.length > 0 && !exhausted,
-		budget: resolved,
-		suppressed: exhausted ? reasons : []
-	};
-}
-/**
-* The machine-readable escalation line `task_review_pack` prints. Three shapes:
-* required with signals, not required, and not required because the guardrail
-* spent the budget (which still names what it withheld — a suppressed signal is
-* a fact, not a silence).
-*/
-function renderEscalation(escalation) {
-	const budget = `${escalation.budget.used}/${escalation.budget.max}`;
-	if (escalation.required) return `escalation: required ${escalation.reasons.join(", ")} (budget ${budget})`;
-	if (escalation.suppressed.length > 0) return `escalation: not required (budget ${budget}) — suppressed ${escalation.suppressed.join(", ")}: budget exhausted`;
-	return `escalation: not required (budget ${budget})`;
-}
 /**
 * The judgement line: the six dimensions whose conclusion the fact table does
-* not carry, named so a reader cannot mistake the facts for a verdict.
+* not carry, named so a reader cannot mistake the facts for a verdict. It names
+* what needs judgement, never whether one will run — that is the triggers' and
+* the store's allowance decision.
 */
 function renderJudgementDimensions() {
-	return `needs judgement (agent): ${JUDGED_DIMENSIONS.join(", ")} (not mechanically observable from the fact table; task_review_agent concludes these)`;
+	return `needs judgement (agent): ${JUDGED_DIMENSIONS.join(", ")} (not mechanically observable from the fact table; a review agent may conclude them)`;
 }
 
 //#endregion
@@ -809,16 +754,25 @@ function reviewAgentBudget() {
 	const parsed = raw === void 0 || raw.length === 0 ? NaN : Number(raw);
 	return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : REVIEW_AGENT_BUDGET_DEFAULT;
 }
+/** One parsed row. An unrecognized row throws by name rather than being read as something it is not. */
+function asLedgerRow(parsed, line) {
+	const row = parsed;
+	if (row.formatVersion === 1) return row;
+	if (row.formatVersion === 2 && (row.kind === "claim" || row.kind === "started" || row.kind === "settled")) return row;
+	throw new Error(`review-agent-ledger: unrecognized row ${line} in ${reviewAgentLedgerFile()}`);
+}
 /** The rows one ledger file holds, as its non-empty lines. A corrupt line throws by name rather than undercounting. */
 function parseLedgerRows(text$31) {
 	const rows = [];
 	text$31.split("\n").forEach((line, index) => {
 		if (line.trim().length === 0) return;
+		let parsed;
 		try {
-			rows.push(JSON.parse(line));
+			parsed = JSON.parse(line);
 		} catch {
 			throw new Error(`review-agent-ledger: corrupt line ${index + 1} in ${reviewAgentLedgerFile()}`);
 		}
+		rows.push(asLedgerRow(parsed, index + 1));
 	});
 	return rows;
 }
@@ -833,17 +787,112 @@ async function readLedgerRows() {
 	}
 	return parseLedgerRows(text$31);
 }
+/** A started fact, whatever version wrote it: the spend and the delegation. */
+function isStartedRow(row) {
+	return row.formatVersion === 1 || row.kind === "started";
+}
+/** One store's rows of a kind the caller needs. */
+function storeRows(rows, rootStoreId, match) {
+	return rows.filter((row) => row.rootStoreId === rootStoreId).filter(match);
+}
+/** The store's started rows — the durable count, and the delegation rows. */
+function startedRowsOf(rows, rootStoreId) {
+	return storeRows(rows, rootStoreId, isStartedRow);
+}
 /**
-* How many review agents this root store has already started, as the file reads
-* right now. A missing file reads as zero; a corrupt line throws rather than
-* silently undercounting.
-*
-* A display query only: it caches nothing, so it can never be the count an
-* admission decides on — that one is read inside the store's serial region
-* ({@link admitReviewAgent}) together with the row it writes.
+* The attempts one store's rows hold, in the order they were claimed: each
+* claim row is an attempt, its identity is the reviewer session it names, and
+* the started/settled rows that name the same session are its facts. A settled
+* row that lands twice is the same fact written twice, so the first one holds.
 */
-async function countReviewAgentRuns(rootStoreId) {
-	return (await readLedgerRows() ?? []).filter((row) => row.rootStoreId === rootStoreId).length;
+function attemptsOf(rows, rootStoreId) {
+	const startedSessions = new Set(startedRowsOf(rows, rootStoreId).map((row) => row.sessionId));
+	const settled = /* @__PURE__ */ new Map();
+	for (const row of storeRows(rows, rootStoreId, (candidate) => candidate.formatVersion === 2 && candidate.kind === "settled")) if (!settled.has(row.sessionId)) settled.set(row.sessionId, {
+		status: row.status,
+		...row.note === void 0 ? {} : { note: row.note },
+		at: row.at
+	});
+	return storeRows(rows, rootStoreId, (candidate) => candidate.formatVersion === 2 && candidate.kind === "claim").map((row) => ({
+		source: {
+			taskId: row.taskId,
+			runId: row.runId
+		},
+		requestKey: row.requestKey,
+		reason: row.reason,
+		sessionId: row.sessionId,
+		actor: row.actor,
+		at: row.at,
+		started: startedSessions.has(row.sessionId),
+		settlement: settled.get(row.sessionId)
+	}));
+}
+/** Whether two sources are the same source. */
+function sameSource$1(left, right) {
+	return left.taskId === right.taskId && left.runId === right.runId;
+}
+/**
+* Decide one request against one store's attempts. Pure, so every branch is
+* testable and the admission's order is the order written here:
+*
+* 1. the request's own attempt (same source, same key) — a repeat returns the
+*    same identity and never re-charges the budget, and a repeat with a
+*    different focus is a conflict, not a silent re-focus;
+* 2. any other attempt of the source that is not settled — the request is not
+*    accepted, because one source never runs two attempts at once;
+* 3. a request with no key for a source that was already reviewed: the default
+*    attempt is a source's first attempt, so a later one names its key;
+* 4. the budget, read only here: an exhausted store refuses a *new* attempt and
+*    still answers (1) and (2).
+*/
+function planReviewAttempt(input) {
+	const { request, budget } = input;
+	const mine = input.attempts.filter((attempt) => sameSource$1(attempt.source, request.source));
+	const same = mine.find((attempt) => attempt.requestKey === request.requestKey);
+	if (same !== void 0) {
+		if (same.reason !== request.reason) return {
+			kind: "refused",
+			code: "request-key-conflict",
+			attempt: same,
+			attempts: mine,
+			budget
+		};
+		return {
+			kind: "reuse",
+			attempt: same
+		};
+	}
+	const open = mine.find((attempt) => attempt.settlement === void 0);
+	if (open !== void 0) return {
+		kind: "in-flight",
+		attempt: open
+	};
+	if (mine.length > 0 && request.requestKey === null) return {
+		kind: "refused",
+		code: "request-key-required",
+		attempt: mine.at(-1),
+		attempts: mine,
+		budget
+	};
+	if (budget.used >= budget.max) return {
+		kind: "refused",
+		code: "budget-exhausted",
+		attempt: void 0,
+		attempts: mine,
+		budget
+	};
+	return {
+		kind: "start",
+		budget
+	};
+}
+/**
+* Every attempt this root store's ledger holds, for a reader that renders the
+* state rather than deciding on it (`task_review_pack`). A display query: the
+* decision is always made inside the admission's serial region.
+*/
+async function readReviewAgentAttempts(rootStoreId) {
+	return attemptsOf(await readLedgerRows() ?? [], rootStoreId);
 }
 /** The budget one admission belongs to: a ledger file and a root store. */
 function budgetKey(rootStoreId) {
@@ -851,56 +900,201 @@ function budgetKey(rootStoreId) {
 }
 /**
 * The serial regions, one promise chain per budget key. A region is the only
-* place a row is counted, decided on, or written, so the count an admission
-* decides with and the row it writes cannot have another admission in between
-* them (K4-1). The chain's tail is settled either way, so a failed region
-* cannot wedge the key's next admission.
+* place an attempt is decided on and claimed, so the attempts an admission sees
+* and the claim it writes cannot have another admission in between them (K4-1).
+* The chain's tail is settled either way, so a failed region cannot wedge the
+* key's next admission.
 */
 const regions = /* @__PURE__ */ new Map();
-/** Append one started review agent's row. Only {@link admitReviewAgent} writes, and only inside its region. */
-async function appendStartedRow(rootStoreId, record) {
+/** Append one row, creating the ledger directory if needed. Only the doors below write. */
+async function appendRow(row) {
 	const file = reviewAgentLedgerFile();
 	await mkdir(dirname(file), { recursive: true });
-	const line = {
-		formatVersion: 1,
+	await appendFile(file, `${JSON.stringify(row)}\n`, "utf8");
+}
+/** The claim row one request becomes. */
+function claimRow(rootStoreId, request) {
+	return {
+		formatVersion: 2,
+		kind: "claim",
 		rootStoreId,
-		taskId: record.taskId,
-		sessionId: record.sessionId,
-		actor: record.actor,
+		taskId: request.source.taskId,
+		runId: request.source.runId,
+		requestKey: request.requestKey,
+		reason: request.reason,
+		sessionId: request.sessionId,
+		actor: request.actor,
 		at: (/* @__PURE__ */ new Date()).toISOString()
 	};
-	await appendFile(file, `${JSON.stringify(line)}\n`, "utf8");
 }
+/**
+* Record one attempt's terminal fact. Append-only and outside the serial region
+* on purpose: the caller writes it after it observed the outcome, which is
+* always after the region that started the attempt has ended (A5: waiting for
+* the reviewer's output never runs inside the region). Two writers of the same
+* fact produce the same fact twice, which reads as one.
+*
+* Writing this fact — and only writing it — ends *this process's* ownership of
+* the attempt (see {@link liveAttempts}): until the row is durably on the file,
+* the attempt counts as one this process is still running, so no admission
+* meeting it in that window may read it as a dead process's attempt and record a
+* second terminal fact for it. The marker is dropped once the append has landed,
+* and also when the append throws — the attempt is over here either way, and a
+* marker that outlived its attempt would pin the source in flight. A terminal
+* fact nobody could write is recovered from the store's own record on the next
+* decision.
+*/
+async function settleReviewAgentAttempt(settlement) {
+	try {
+		await appendRow({
+			formatVersion: 2,
+			kind: "settled",
+			rootStoreId: settlement.rootStoreId,
+			taskId: settlement.taskId,
+			sessionId: settlement.sessionId,
+			status: settlement.status,
+			...settlement.note === void 0 ? {} : { note: settlement.note },
+			at: (/* @__PURE__ */ new Date()).toISOString()
+		});
+	} finally {
+		liveAttempts.delete(settlement.sessionId);
+	}
+}
+/** What a claim without a started row says about how the attempt ended. */
+const CLAIM_NEVER_STARTED = "the attempt was claimed but its process never reached model input";
+/** What a started attempt no process is running any more says about how it ended. */
+const STARTED_OWNER_GONE = "the process that started this attempt is gone and no result was recorded";
+/** What an attempt whose diagnosis the store already holds says about how it ended. */
+const DIAGNOSIS_ALREADY_RECORDED = "the diagnosis was already recorded; the ledger is read back from the store";
+/**
+* The attempts this process started and has not settled, by the reviewer session
+* each was claimed under.
+*
+* The file cannot hold this fact: a started row says a run was spent, not that
+* anybody is still working on it. This set is the one thing that tells a *live*
+* attempt from one a dead process left behind — a row that is open and not in
+* here belongs to no running process, so it can be recorded as interrupted. It
+* is not a count, not a cache and not a reservation: the count stays the started
+* rows, the attempts stay the claim rows, and no decision reads this for
+* anything but "is that attempt still being run here?".
+*
+* A deployment that runs two processes over one ledger home would have each of
+* them see the other's live attempts as dead; the ledger is a single writer's by
+* design (`admitReviewAgent`'s serial region).
+*/
+const liveAttempts = /* @__PURE__ */ new Set();
 /**
 * Run one review-agent admission inside the ledger's serial region for a store.
 *
 * One region per (ledger file, root store): inside it the whole ledger file is
-* read and this store's rows counted, then `work` runs with that count and a
-* `start` that appends this run's row to the same file — the durable started
-* fact — and the region ends when `work` returns or throws. Nothing else is
-* serialized: waiting for the reviewer's output, its watchdog, and recording
-* its Diagnosis happen after `work` returned, outside the region, in the
-* caller.
+* read, this store's attempts and its started count are derived, and `work` runs
+* with the decision door (`plan`), the claim door and the started door. The
+* region ends when `work` returns or throws. Nothing else is serialized: waiting
+* for the reviewer's output, its watchdog, and recording its Diagnosis happen
+* after `work` returned, outside the region, in the caller.
 *
 * The consequence to rely on: two admissions for one store cannot interleave
-* their count-and-write, so the second one reads the count the first left
-* behind instead of a file that has not caught up yet. A `start` that fails
-* writes no row and spends nothing, and the failed region does not wedge the
-* key.
+* their read-and-claim, so the second one reads what the first left behind
+* instead of a file that has not caught up yet — one attempt per source, and
+* one started row per allowance. A claim that fails writes no row and spends
+* nothing, and the failed region does not wedge the key.
+*
+* The one recovery {@link ReviewAgentAdmission.plan} performs: an open attempt
+* that no process is running — one that never reached model input, or one that
+* was started but is not in this process's {@link liveAttempts} — is recorded
+* with the terminal fact it never got: `interrupted`, or `recorded` when the
+* caller's own read finds its diagnosis on the store. The same identity, no
+* second claim, no second started row, no re-charge — and after it the request
+* is decided as if the attempt were settled, which is what lets a source whose
+* reviewer died be reviewed again. An attempt this process is really running is
+* left untouched and answered as in flight.
 *
 * `work` must not await another admission for the same store (that region waits
-* for this one) and must await every `start` it calls before returning.
+* for this one) and must await every `claim`/`start` it calls before returning.
 *
 * @param rootStoreId - the root task store the budget belongs to.
-* @param work - the admission decision and the spawn, given the store's count and its write door.
+* @param work - the admission decision and the spawn, given the store's count and its write doors.
 * @returns whatever `work` returned, once the region has ended.
 */
 async function admitReviewAgent(rootStoreId, work) {
 	const key = budgetKey(rootStoreId);
 	const result = (regions.get(key) ?? Promise.resolve()).then(async () => {
+		const rows = await readLedgerRows() ?? [];
+		const started = startedRowsOf(rows, rootStoreId).length;
+		let used = started;
+		const attempts = attemptsOf(rows, rootStoreId);
+		/** The attempt identities this store has already spent a run on, as this region read them. */
+		const startedSessions = new Set(startedRowsOf(rows, rootStoreId).map((row) => row.sessionId));
+		/** The attempts this very region claimed: its own work in progress, never a dead one. */
+		const claimedHere = /* @__PURE__ */ new Set();
 		return work({
-			started: (await readLedgerRows() ?? []).filter((row) => row.rootStoreId === rootStoreId).length,
-			start: (record) => appendStartedRow(rootStoreId, record)
+			started,
+			plan: async (request, hooks) => {
+				const recovered = [];
+				for (const attempt of attempts) {
+					if (!sameSource$1(attempt.source, request.source)) continue;
+					if (attempt.settlement !== void 0) continue;
+					if (liveAttempts.has(attempt.sessionId) || claimedHere.has(attempt.sessionId)) continue;
+					const recorded = await hooks?.recorded?.(attempt) === true;
+					const status = recorded ? "recorded" : "interrupted";
+					const note = recorded ? DIAGNOSIS_ALREADY_RECORDED : attempt.started ? STARTED_OWNER_GONE : CLAIM_NEVER_STARTED;
+					await settleReviewAgentAttempt({
+						rootStoreId,
+						taskId: attempt.source.taskId,
+						sessionId: attempt.sessionId,
+						status,
+						note
+					});
+					const settlement = {
+						status,
+						note,
+						at: (/* @__PURE__ */ new Date()).toISOString()
+					};
+					Object.assign(attempt, { settlement });
+					recovered.push(attempt);
+				}
+				return {
+					plan: planReviewAttempt({
+						attempts,
+						request,
+						budget: {
+							used,
+							max: reviewAgentBudget()
+						}
+					}),
+					recovered
+				};
+			},
+			claim: async (request) => {
+				await appendRow(claimRow(rootStoreId, request));
+				claimedHere.add(request.sessionId);
+				attempts.push({
+					source: request.source,
+					requestKey: request.requestKey,
+					reason: request.reason,
+					sessionId: request.sessionId,
+					actor: request.actor,
+					at: (/* @__PURE__ */ new Date()).toISOString(),
+					started: false,
+					settlement: void 0
+				});
+			},
+			start: async (record) => {
+				if (startedSessions.has(record.sessionId)) return;
+				await appendRow({
+					formatVersion: 2,
+					kind: "started",
+					rootStoreId,
+					taskId: record.taskId,
+					sessionId: record.sessionId,
+					actor: record.actor,
+					at: (/* @__PURE__ */ new Date()).toISOString()
+				});
+				startedSessions.add(record.sessionId);
+				used += 1;
+				liveAttempts.add(record.sessionId);
+				for (const attempt of attempts) if (attempt.sessionId === record.sessionId) Object.assign(attempt, { started: true });
+			}
 		});
 	});
 	const tail = result.then(() => void 0, () => void 0);
@@ -912,14 +1106,18 @@ async function admitReviewAgent(rootStoreId, work) {
 }
 /**
 * The one delegation a session is recorded under, as the context package's
-* reviewer binding source reads it (A2 §D): the ledger's `sessionId` is the
-* review agent's own session, so the rows naming it are its delegation. One
-* row is the record; several rows that disagree are a conflict the reader may
-* not pick between (a read domain chosen by file order is not an
-* authorization), and a ledger this process cannot read is `unreadable` —
-* both raised as the context package's {@link ReviewerBindingError}, never
-* softened into "no delegation". Identical duplicate rows are one delegation
-* written twice, not a conflict.
+* reviewer binding source reads it (A2 §D): the started row's `sessionId` is the
+* review agent's own session, so the started rows naming it are its delegation.
+* A claim alone is not a delegation — the claim is an intent, and a session that
+* never reached model input was never delegated a read domain — so only rows
+* that record a start are read here.
+*
+* One row is the record; several rows that disagree are a conflict the reader
+* may not pick between (a read domain chosen by file order is not an
+* authorization), and a ledger this process cannot read is `unreadable` — both
+* raised as the context package's {@link ReviewerBindingError}, never softened
+* into "no delegation". Identical duplicate rows are one delegation written
+* twice, not a conflict.
 */
 async function readReviewerDelegation(sessionId$21) {
 	let rows;
@@ -928,7 +1126,7 @@ async function readReviewerDelegation(sessionId$21) {
 	} catch (error) {
 		throw new ReviewerBindingError("unreadable", `the reviewer ledger cannot be read: ${error instanceof Error ? error.message : String(error)}`);
 	}
-	const matches = (rows ?? []).filter((row) => row.sessionId === sessionId$21);
+	const matches = (rows ?? []).filter(isStartedRow).filter((row) => row.sessionId === sessionId$21);
 	if (matches.length === 0) return void 0;
 	const first = matches[0];
 	const record = {
@@ -946,8 +1144,914 @@ function reviewerBindingSource() {
 }
 
 //#endregion
-//#region src/tools/approve.ts
+//#region src/tools/task-review-pack.ts
 const text$30 = (value) => [{
+	type: "text",
+	text: value
+}];
+function sessionId$20(exec) {
+	const id = exec.agent?.id;
+	if (typeof id !== "string" || id.length === 0) throw new Error("task_review_pack: missing agent id");
+	return id;
+}
+/** The ref a diagnosis uses in `reviewRefs` to name one review record, and a pack uses to name its source. */
+function reviewRef(review) {
+	return `${review.taskId}#${review.runId ?? "no-run"}`;
+}
+/**
+* The review record of one exact source, or nothing when the store holds none.
+* The source is named, never inferred: a review is of the run it recorded, and
+* a task with several runs has several reviews.
+*/
+function reviewForSource(snapshot, source) {
+	return snapshot.reviews.find((review) => review.taskId === source.taskId && (review.runId ?? null) === source.runId);
+}
+/** The task's most recent review, or nothing when it never settled one (a summary of a neighbour, never a source). */
+function latestReview$1(snapshot, taskId) {
+	return [...snapshot.reviews].reverse().find((item) => item.taskId === taskId);
+}
+/**
+* The ledger state of one source: every attempt the store holds for it, in the
+* order they were claimed — the default attempt (`null` key) and each explicit
+* one — with how each ended. This is what a reader checks before asking for a
+* review: an attempt that is still open is the one a new call would return
+* instead of starting another, and a new review of an already-reviewed source
+* needs an explicit `requestKey`.
+*/
+function renderAttempts(attempts, source) {
+	const mine = attempts.filter((attempt) => attempt.source.taskId === source.taskId && attempt.source.runId === source.runId);
+	if (mine.length === 0) return ["review attempts (0): none — no review agent has been started for this source"];
+	return [`review attempts (${mine.length}):`, ...mine.map((attempt) => {
+		const label = attempt.requestKey === null ? "default attempt" : `requestKey "${attempt.requestKey}"`;
+		const status = attempt.settlement?.status ?? "in-flight";
+		const note = attempt.settlement?.note === void 0 ? "" : ` — ${attempt.settlement.note}`;
+		const reason = attempt.reason === null ? "" : ` reason ${JSON.stringify(attempt.reason)}`;
+		return `- ${label} ${attempt.sessionId} [${status}]${reason}${note}`;
+	})];
+}
+function reviewSummary(snapshot, taskId) {
+	const review = latestReview$1(snapshot, taskId);
+	if (review === void 0) return "no review";
+	const detail = review.localizedCause ?? review.anomalies[0];
+	return `review ${reviewRef(review)}: ${review.outcome}${detail === void 0 ? "" : ` — ${detail}`}`;
+}
+/**
+* The effort line: one clause per counter that exists, and nothing for the ones
+* that do not — an absent field means "not observed" (see `ReviewMetrics`), so
+* printing 0 for it would invent a measurement. The two counters whose scope is
+* easy to misread (`tokens`, `humanInterventions`) and the one that is
+* structurally constant (`retries`) carry their caveat inline.
+*/
+function renderMetrics(metrics) {
+	const parts = [];
+	if (metrics.tokens !== void 0) parts.push(`tokens in ${metrics.tokens.uncachedInputTokens}/out ${metrics.tokens.outputTokens}/cache ${metrics.tokens.cacheReadTokens}+${metrics.tokens.cacheWriteTokens} (session-cumulative)`);
+	if (metrics.toolCalls !== void 0) parts.push(`toolCalls ${metrics.toolCalls.calls} (${metrics.toolCalls.failures} failed)`);
+	if (metrics.humanInterventions !== void 0) parts.push(`humanInterventions ${metrics.humanInterventions} (session-scoped)`);
+	if (metrics.retries !== void 0) parts.push(`retries ${metrics.retries} (no retry branch exists yet; always 0)`);
+	if (metrics.evidenceLogs !== void 0) parts.push(`evidenceLogs ${metrics.evidenceLogs}`);
+	return parts.join(" — ");
+}
+/**
+* One line per dimension that the record actually carries: the observed facts,
+* copied out, never rated and never narrated. Anything a dimension omits is
+* omitted here too, so the pack stays a fact sheet — the explanation lives in
+* the diagnoses below it.
+*/
+function renderDimensions(dimensions) {
+	const lines = [];
+	const outcome = dimensions.outcomeCorrectness;
+	if (outcome !== void 0) lines.push(`  dim outcome correctness: ${outcome.outcome}, criteria ${outcome.criteriaCount}, unmet [${outcome.unmetCriterionIds.join(", ")}]`);
+	const specification = dimensions.taskSpecification;
+	if (specification !== void 0) lines.push(`  dim task specification: objective ${specification.objectivePresent ? "present" : "empty"}, criteria ${specification.criteriaCount}, with command ${specification.criteriaWithCommand}`);
+	const acceptance = dimensions.acceptance;
+	if (acceptance !== void 0) {
+		const criteria = acceptance.criteria.map((item) => `${item.criterionId} ${item.mode}${item.hasCommand ? " +command" : ""}${item.mandatory ? "" : " optional"}`);
+		lines.push(`  dim acceptance: ${criteria.join("; ")}`);
+	}
+	const decomposition = dimensions.decomposition;
+	if (decomposition !== void 0) lines.push(`  dim decomposition: depth ${decomposition.depth}, ${decomposition.decompositionStatus}, children ${decomposition.childCount}, edges in/out ${decomposition.incomingEdges}/${decomposition.outgoingEdges}`);
+	const coverage = dimensions.capabilityCoverage;
+	if (coverage !== void 0) lines.push(`  dim capability coverage: ${coverage.closure}, granted [${coverage.granted.join(", ")}], missing [${coverage.missing.join(", ")}]`);
+	const skill = dimensions.skillFit;
+	if (skill !== void 0) {
+		const loaded = skill.loaded === void 0 || skill.loadedOutsideGrant === void 0 ? "" : `, loaded [${skill.loaded.join(", ")}], outside grant [${skill.loadedOutsideGrant.join(", ")}]`;
+		lines.push(`  dim skill fit: granted [${skill.granted.join(", ")}]${loaded}`);
+	}
+	const tools = dimensions.toolFit;
+	if (tools !== void 0) {
+		const called = tools.called === void 0 || tools.calledOutsideGrant === void 0 ? "" : `, called [${tools.called.map((item) => `${item.name} x${item.count}`).join(", ")}], outside grant [${tools.calledOutsideGrant.join(", ")}]`;
+		lines.push(`  dim tool fit: granted [${tools.granted.join(", ")}]${called}`);
+	}
+	const context = dimensions.contextEfficiency;
+	if (context !== void 0) {
+		const tokens = context.tokens === void 0 ? "" : ` tokens in/out ${context.tokens.uncachedInputTokens}/${context.tokens.outputTokens}`;
+		const compactions = context.compactions === void 0 ? "" : ` compactions ${context.compactions}`;
+		lines.push(`  dim context efficiency:${tokens}${compactions}`);
+	}
+	return lines;
+}
+/**
+* One review line, with the session id a reader drills into. Printing it here
+* is what lets a diagnosis point `session_trace` at the session the review came
+* from without a second lookup (§2.7.5).
+*/
+function renderReview(review) {
+	const duration = review.durationMs === void 0 ? "" : ` duration ${review.durationMs}ms`;
+	const session = review.sessionId === void 0 ? "" : ` session ${review.sessionId}`;
+	const lines = [`- review ${reviewRef(review)} [${review.outcome}]${duration} evidence: [${review.evidenceRefs.join(", ")}]${session}`];
+	if (review.localizedCause !== void 0) lines.push(`  cause: ${review.localizedCause}`);
+	for (const anomaly of review.anomalies) lines.push(`  anomaly: ${anomaly}`);
+	for (const criterion of review.criteria ?? []) {
+		const judge = criterion.verifierId === void 0 ? "" : criterion.verifierVersion === void 0 ? ` [${criterion.verifierId}]` : ` [${criterion.verifierId}@${criterion.verifierVersion}]`;
+		const command = criterion.command === void 0 ? "" : ` — $ ${criterion.command}`;
+		const exit = criterion.exitCode === void 0 ? "" : ` exit ${criterion.exitCode}`;
+		const log = criterion.logRef === void 0 ? "" : ` log ${criterion.logRef}`;
+		lines.push(`  criterion ${criterion.criterionId}: ${criterion.verdict}${judge}${exit}${command}${log}`);
+	}
+	for (const blocker of review.blockedBy ?? []) lines.push(`  blockedBy ${blocker.taskId} [${blocker.outcome}]`);
+	if (review.metrics !== void 0) {
+		const metrics = renderMetrics(review.metrics);
+		if (metrics.length > 0) lines.push(`  metrics: ${metrics}`);
+	}
+	if (review.dimensions !== void 0) lines.push(...renderDimensions(review.dimensions));
+	if (review.logTail !== void 0) lines.push("  logTail:", ...review.logTail.split("\n").map((line) => `    ${line}`));
+	return lines;
+}
+/**
+* How far one diagnosis's suggestions have been taken up (A5 §3, plan F.3): a
+* diagnosis that carries **proposals** is the A6 handoff candidate, and no A6
+* candidate loop is assembled in this build — so the pack reports it as
+* **pending**: recorded, addressed to nobody yet, and not an open candidate.
+*
+* The mark follows from the record alone, which is why it is written here and
+* not derived from a switch: nothing in this build consumes a handoff, so
+* there is no second state to report. A conclusion *without* proposals is not a
+* handoff and gets no mark (a normal completion stays a conclusion), and an
+* interrupted attempt has no diagnosis at all, so it can never reach this line.
+* When an A6 consumer is assembled, this is the line it replaces with what it
+* really did with the candidate.
+*/
+function handoffMark(diagnosis) {
+	if (diagnosis.proposals.length === 0) return void 0;
+	return "pending — this diagnosis carries suggestions and no A6 candidate loop is enabled in this build: nothing has been opened for it, and reading it here takes nothing up";
+}
+/**
+* One diagnosis, with its agent judgements kept visually apart from the
+* mechanical facts above: the facts say what was observed, a judgement says
+* what an agent concluded, and the header names the session so the two are
+* never read as one table.
+*/
+function renderDiagnosis(diagnosis) {
+	const producer = diagnosis.producedBy === void 0 ? "" : diagnosis.producedBy.kind === "agent" && diagnosis.producedBy.sessionId !== void 0 ? ` [agent ${diagnosis.producedBy.sessionId}]` : ` [${diagnosis.producedBy.kind}]`;
+	const lines = [`- ${diagnosis.diagnosisId} [${diagnosis.confidence}] ${diagnosis.localizedCause}${producer}`];
+	if (diagnosis.judgements !== void 0 && diagnosis.judgements.length > 0) {
+		const header = diagnosis.producedBy?.kind === "agent" && diagnosis.producedBy.sessionId !== void 0 ? `judgements (agent ${diagnosis.producedBy.sessionId})` : "judgements";
+		lines.push(`  ${header}:`);
+		for (const judgement of diagnosis.judgements) lines.push(`    ${judgement.dimension}: ${judgement.verdict} — ${judgement.rationale} refs [${judgement.evidenceRefs.join(", ")}]`);
+	}
+	for (const proposal of diagnosis.proposals) lines.push(`  proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`);
+	const handoff = handoffMark(diagnosis);
+	if (handoff !== void 0) lines.push(`  handoff: ${handoff}`);
+	return lines;
+}
+/**
+* What each of the task's runs was bound to and loaded (S1-C item 4): one line
+* per run that recorded a binding, naming the registry revision, the providers
+* (skill, role, short content digest) and the granted MCP servers. This is what
+* makes "which version did this execution run against?" answerable from the
+* pack, next to the run ids the reviews above already cite.
+*
+* The pack reports the record; it does not re-read the snapshots. It is the
+* facts sheet a reviewer starts from, and the bytes are re-checked by the
+* entries that act on them (`task_read`, a run re-entry) — a line here says what
+* the run was bound to, never that the content is still on disk. A run that
+* carries no binding (one written before the field existed, or one whose caller
+* assembled its plan without a pre-check) contributes no line, and nothing is
+* invented for it.
+*/
+function renderBindings(snapshot, taskId) {
+	const lines = [];
+	for (const run of snapshot.runs.filter((item) => item.taskId === taskId)) {
+		const binding = run.providerBinding;
+		if (binding === void 0) continue;
+		const skills = binding.skills.length === 0 ? "no provider skill" : binding.skills.map((skill) => `${skill.name} [${skill.role}] content ${skill.contentDigest.slice(0, 12)}${skill.contractDigest === null ? "" : ` contract ${skill.contractDigest.slice(0, 12)}`}`).join("; ");
+		const servers = binding.mcpServers.length === 0 ? "" : `; mcp ${binding.mcpServers.map((server) => server.serverName).join(", ")}`;
+		const snapshotRoot = binding.snapshotRoot === void 0 ? "" : `; snapshot ${binding.snapshotRoot}`;
+		lines.push(`- run ${run.runId} [${run.status}] bound registry ${binding.registryRevision.slice(0, 12)}: ${skills}${servers}${snapshotRoot}`);
+	}
+	return lines;
+}
+/**
+* The pack for one source of one task: the source itself first, then the facts
+* (reviews, dependency edges, parent/child summaries), the ledger state of that
+* source, the judgement dimensions the facts cannot settle, and the diagnoses
+* that explain them.
+*
+* No trigger decision is printed (A5): whether a review agent runs is decided by
+* the two triggers — a **failed** review, or an explicit call — under the
+* store's own allowance, and the fact table a pack carries says nothing about
+* either beyond the observations it already prints (the outcome, the criteria,
+* the log tail, the capability coverage). A reader that needs the allowance
+* gets it from the attempt list and from `task_review_agent`'s own refusal.
+* @throws when the source's task is not in the snapshot.
+*/
+function buildReviewPack(input) {
+	const { snapshot, source, attempts } = input;
+	const { taskId } = source;
+	const task = snapshot.tasks.find((item) => item.taskId === taskId);
+	if (task === void 0) throw new Error(`task_review_pack: unknown task "${taskId}"`);
+	const review = reviewForSource(snapshot, source);
+	const reviews = snapshot.reviews.filter((item) => item.taskId === task.taskId);
+	const parent = task.parentTaskId === void 0 ? void 0 : snapshot.tasks.find((item) => item.taskId === task.parentTaskId);
+	const incoming = snapshot.edges.filter((edge) => edge.to === task.taskId).map((edge) => edge.from);
+	const outgoing = snapshot.edges.filter((edge) => edge.from === task.taskId).map((edge) => edge.to);
+	const diagnoses = snapshot.diagnoses.filter((item) => item.taskId === task.taskId);
+	const lines = [
+		`review pack for task ${task.taskId} [${task.status}] depth ${task.depth}`,
+		`source: review ${reviewRef(source)}${review === void 0 ? " (not on the record)" : ` [${review.outcome}]`}`,
+		`objective: ${task.objective}`,
+		`dependencies: must verify first [${incoming.join(", ")}]; blocks [${outgoing.join(", ")}]`,
+		...renderAttempts(attempts, source),
+		renderJudgementDimensions(),
+		`reviews (${reviews.length}):`,
+		...reviews.flatMap(renderReview),
+		...renderBindings(snapshot, task.taskId)
+	];
+	if (parent !== void 0) lines.push(`parent ${parent.taskId} [${parent.status}]: ${reviewSummary(snapshot, parent.taskId)}`);
+	lines.push(`children (${task.childTaskIds.length}):`);
+	for (const childId of task.childTaskIds) {
+		const child = snapshot.tasks.find((item) => item.taskId === childId);
+		if (child === void 0) continue;
+		lines.push(`- ${child.taskId} [${child.status}]: ${reviewSummary(snapshot, child.taskId)}`);
+	}
+	lines.push(`diagnoses (${diagnoses.length}):`);
+	for (const diagnosis of diagnoses) lines.push(...renderDiagnosis(diagnosis));
+	return lines.join("\n");
+}
+function defineTaskReviewPackTool(ctx) {
+	return defineTool({
+		name: "task_review_pack",
+		description: "Read-only. Assemble the diagnosis input pack for ONE exact review source — a task and the run under review, or runId null for a review that carries no run (a task blocked before it started). The pack names the task itself, all its review records in full (criteria, log tail, blockers, the session each review came from), the review attempts the ledger holds for this source and how each ended, the dimensions whose conclusion the fact table does not carry, one-line review summaries of its children and parent, the dependency edges touching it, and its diagnoses with any agent judgements — each diagnosis that carries suggestions marked as a handoff nothing has taken up yet. It reports the facts only: whether a review agent runs is decided elsewhere (a failed review is accepted on its own; an explicit call names its source). Local evidence plus parent/children summaries — no ancestry replay (guide §2.7.5). Feed this to task_diagnose, or to task_review_agent when a judgement is needed.",
+		parameters: {
+			taskId: {
+				type: "string",
+				required: true,
+				description: "Task to assemble the pack for"
+			},
+			runId: {
+				oneOf: [{ type: "string" }, { type: "null" }],
+				required: true,
+				description: "The Run whose review the pack is for, exactly as its review record names it; null for a review with no run"
+			}
+		},
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text$30(v)
+		},
+		execute: async (args, exec) => {
+			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(sessionId$20(exec))).rootSessionId);
+			const source = {
+				taskId: args.taskId,
+				runId: args.runId
+			};
+			const snapshot = await ctx.task.openStore(storeId);
+			if (!snapshot.tasks.some((task) => task.taskId === args.taskId)) throw new Error(`task_review_pack: unknown task "${args.taskId}" in store ${storeId}`);
+			if (args.runId !== null && !snapshot.runs.some((run) => run.runId === args.runId && run.taskId === args.taskId)) return `task_review_pack: run "${args.runId}" is not a run of task "${args.taskId}"; nothing to pack`;
+			if (reviewForSource(snapshot, source) === void 0) return `task_review_pack: no review record for source ${reviewRef(source)} in store ${storeId}; nothing to pack`;
+			return buildReviewPack({
+				snapshot,
+				source,
+				attempts: await readReviewAgentAttempts(storeId)
+			});
+		}
+	});
+}
+
+//#endregion
+//#region src/review-agent-run.ts
+/** The preset the review agent mounts (`$DSH_HOME/.agent-presets/singularity-reviewer/`). */
+const REVIEWER_PRESET = "singularity-reviewer";
+/**
+* The review agent's whole tool surface. Read-only by construction: the grant
+* allow-list is this list intersected with what the composition offers, so
+* `bash`, `write`, `edit`, `jobs`, `subagent`, `graph_spawn`, `hitl_*` and
+* `evolution_*` are absent however the deployment is composed. Session history
+* is read with `context_read` — the one reference reader, authorized by the
+* reviewer's delegated graph domain; the raw cross-session tools it replaced
+* are sealed on every runtime-owned agent (`agent-runtime`'s execution guard).
+*/
+const REVIEWER_BASELINE = [
+	"task_review_pack",
+	"task_read",
+	"task_status",
+	"context_read",
+	"capability_list",
+	"read",
+	"glob",
+	"grep",
+	"skill"
+];
+/** The capability grant one review agent is spawned with. */
+function reviewerGrant() {
+	return {
+		capabilities: [],
+		baseline: REVIEWER_BASELINE,
+		keepPresetTools: false
+	};
+}
+/** Default watchdog deadline for one review agent (10 minutes). */
+const REVIEW_AGENT_TIMEOUT_MS = 6e5;
+/** The source one attempt reviews, as a ref a reader reads back (`t1#r1`, `t2#no-run`). */
+function sourceRef(source) {
+	return reviewRef({
+		taskId: source.taskId,
+		runId: source.runId
+	});
+}
+/** The last top-level brace-balanced object in the text, if any (fallback when no fence parses). */
+function lastBalancedObject(source) {
+	let depth = 0;
+	let start = -1;
+	let last;
+	for (let index = 0; index < source.length; index += 1) {
+		const char = source[index];
+		if (char === "{") {
+			if (depth === 0) start = index;
+			depth += 1;
+		} else if (char === "}") {
+			depth -= 1;
+			if (depth === 0 && start >= 0) last = source.slice(start, index + 1);
+		}
+	}
+	return last;
+}
+/**
+* The parsed reply object out of the reviewer's answer: the last fenced block
+* wins, then the last balanced object. A reply with neither parses as nothing.
+*/
+function parseReviewerObject(reply) {
+	if (reply === void 0) return void 0;
+	const fenced = [...reply.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((match) => match[1]);
+	const candidates = [fenced[fenced.length - 1], lastBalancedObject(reply)].filter((value) => value !== void 0);
+	for (const candidate of candidates) try {
+		const parsed = JSON.parse(candidate);
+		if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+	} catch {}
+}
+/** A non-empty string out of the reply, or nothing. */
+function textOf(value) {
+	return typeof value === "string" && value.trim().length > 0 ? value : void 0;
+}
+/**
+* Validate the judgements the reviewer chose to make. Each one has to name a
+* judged dimension and a verdict from the fixed vocabulary, cite at least one
+* non-empty ref and carry a rationale — this is the store's own rule, checked
+* here so the attempt fails by name instead of being refused later. A verdict
+* outside the vocabulary is **not** softened into `unknown`: a conclusion the
+* reviewer never made is not one this module may write down.
+*/
+function judgementsOf(value) {
+	if (value === void 0) return [];
+	if (!Array.isArray(value)) throw new Error("the \"judgements\" field is not an array");
+	return value.map((item, index) => {
+		const entry = item ?? {};
+		const dimension = entry.dimension;
+		if (!JUDGED_DIMENSIONS.includes(dimension)) throw new Error(`judgement ${index} names dimension "${String(dimension)}", which is not one of ${JUDGED_DIMENSIONS.join(", ")}`);
+		const verdict = entry.verdict;
+		if (!JUDGEMENT_VERDICTS.includes(verdict)) throw new Error(`judgement ${index} (${String(dimension)}) has verdict "${String(verdict)}", which is not adequate/inadequate/unknown`);
+		const refs = Array.isArray(entry.evidenceRefs) ? entry.evidenceRefs.filter((ref) => typeof ref === "string" && ref.length > 0) : [];
+		if (refs.length === 0) throw new Error(`judgement ${index} (${String(dimension)}) cites no evidence — a conclusion that rests on nothing is not recorded`);
+		const rationale = textOf(entry.rationale);
+		if (rationale === void 0) throw new Error(`judgement ${index} (${String(dimension)}) carries no rationale`);
+		return {
+			dimension,
+			verdict,
+			evidenceRefs: refs,
+			rationale
+		};
+	});
+}
+/** Validate the proposals the reviewer chose to make: a target name, an id and a reason, each grounded in what it wrote. */
+function proposalsOf(value) {
+	if (value === void 0) return [];
+	if (!Array.isArray(value)) throw new Error("the \"proposals\" field is not an array");
+	return value.map((item, index) => {
+		const entry = item ?? {};
+		const targetType = textOf(entry.targetType);
+		const targetId = textOf(entry.targetId);
+		const rationale = textOf(entry.rationale);
+		if (targetType === void 0 || targetId === void 0 || rationale === void 0) throw new Error(`proposal ${index} needs a non-empty targetType, targetId and rationale`);
+		return {
+			targetType,
+			targetId,
+			rationale
+		};
+	});
+}
+/**
+* The diagnosis the reviewer's reply carries, or a named reason it carries
+* none. What is required is what a Diagnosis is: the **observation** (the
+* persisted `observedFailure` slot, read as the postmortem observation — a
+* successful postmortem fills in what really happened, never an invented
+* failure), the **conclusion** in the reviewer's own words, and a confidence.
+* What is optional is what a conclusion need not carry: judgements (only the
+* dimensions the reviewer can settle) and proposals (an empty list is the
+* normal answer for "no improvement needed").
+*/
+function parseReviewerDiagnosis(reply) {
+	if (reply === void 0) return {
+		ok: false,
+		refusal: "the reviewer returned no output"
+	};
+	const parsed = parseReviewerObject(reply);
+	if (parsed === void 0) return {
+		ok: false,
+		refusal: "the reviewer returned no parseable json object"
+	};
+	const observation = textOf(parsed.observation);
+	if (observation === void 0) return {
+		ok: false,
+		refusal: "the reply carries no observation (the postmortem observation is required)"
+	};
+	const conclusion = textOf(parsed.conclusion);
+	if (conclusion === void 0) return {
+		ok: false,
+		refusal: "the reply carries no conclusion"
+	};
+	const confidence = parsed.confidence;
+	if (confidence !== "high" && confidence !== "medium" && confidence !== "low") return {
+		ok: false,
+		refusal: `the reply's confidence "${String(confidence)}" is not high/medium/low`
+	};
+	try {
+		return {
+			ok: true,
+			diagnosis: {
+				observation,
+				conclusion,
+				confidence,
+				judgements: judgementsOf(parsed.judgements),
+				proposals: proposalsOf(parsed.proposals)
+			}
+		};
+	} catch (error) {
+		return {
+			ok: false,
+			refusal: `the reply's judgements or proposals are malformed: ${error instanceof Error ? error.message : String(error)}`
+		};
+	}
+}
+/** The judged dimensions rendered as report lines (agent judgements, kept apart from the fact lines). */
+function renderJudgements(judgements) {
+	return judgements.map((item) => `  ${item.dimension}: ${item.verdict} — ${item.rationale} refs [${item.evidenceRefs.join(", ")}]`);
+}
+function lastAssistantText(events) {
+	const event = [...events].reverse().find((item) => item.type === "assistant/message");
+	if (event === void 0) return void 0;
+	const content = ((event.data?.message)?.content ?? []).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n");
+	return content.length === 0 ? void 0 : content;
+}
+/** The diagnosis one attempt recorded, as the store holds it (the id is the attempt's session). */
+function recordedDiagnosis(snapshot, sessionId$21) {
+	return snapshot.diagnoses.find((diagnosis) => diagnosis.diagnosisId === `review-agent-${sessionId$21}`);
+}
+/**
+* Run one review attempt for one source: the admission's serial region (plan,
+* claim, spawn) and then, outside it, the reviewer's own time — its watchdog,
+* its reply, the diagnosis it carries and the one terminal fact.
+*
+* Waiting for the reviewer never runs inside the region: only the decision, the
+* claim and the spawn do, so the claim is durable before any handle exists and a
+* second admission for the same store cannot slip a claim in between the read
+* and the write. The caller's caller (a tool call, a scan) is free to do
+* anything else while the reviewer works.
+*/
+async function runReviewAgentAttempt(input) {
+	const { ctx, storeId, source, review, parent, actor } = input;
+	const reviewerSessionId = SessionId(randomUUID());
+	const request = {
+		source,
+		requestKey: input.requestKey,
+		reason: input.reason,
+		actor,
+		sessionId: reviewerSessionId
+	};
+	const timeoutMs = Number.isFinite(input.timeoutMs) && input.timeoutMs > 0 ? Math.floor(input.timeoutMs) : REVIEW_AGENT_TIMEOUT_MS;
+	const outcome = await admitReviewAgent(storeId, async (admission) => {
+		const current = await ctx.task.snapshotIn(storeId);
+		const { plan, recovered } = await admission.plan(request, { recorded: (attempt) => recordedDiagnosis(current, attempt.sessionId) !== void 0 });
+		if (plan.kind === "refused") return {
+			kind: "refused",
+			plan,
+			recovered
+		};
+		if (plan.kind === "reuse") return {
+			kind: "reuse",
+			attempt: plan.attempt,
+			recovered
+		};
+		if (plan.kind === "in-flight") return {
+			kind: "in-flight",
+			attempt: plan.attempt,
+			recovered
+		};
+		await admission.claim(request);
+		const pack = buildReviewPack({
+			snapshot: current,
+			source,
+			attempts: await readReviewAgentAttempts(storeId)
+		});
+		const prompt = [
+			"You are a Singularity review agent. Explain the review source below: what happened, why, and what — if anything — should change.",
+			"Read what you are authorized to read: the pack below, and beyond it whatever settles the question — task_read, task_status and context_read reach the sibling tasks, their sessions and their evidence. Cite what you rest on.",
+			"Do not score, and do not modify anything.",
+			"Return EXACTLY one fenced json block, no prose around it:",
+			"```json",
+			"{\"observation\":\"...\",\"conclusion\":\"...\",\"confidence\":\"high|medium|low\",\"judgements\":[{\"dimension\":\"...\",\"verdict\":\"adequate|inadequate|unknown\",\"evidenceRefs\":[\"...\"],\"rationale\":\"...\"}],\"proposals\":[{\"targetType\":\"...\",\"targetId\":\"...\",\"rationale\":\"...\"}]}",
+			"```",
+			"- observation (required): the postmortem observation (复盘观察) — what was actually observed in the source, whether it failed or succeeded.",
+			"- conclusion (required): the explanation in your own words. \"no improvement needed\" and \"the evidence does not settle this\" are legitimate conclusions.",
+			"- confidence (required): high, medium or low.",
+			"- judgements (optional): only the dimensions you can settle from the evidence, each citing the refs it rests on. Omit the ones you cannot settle; never pad them with \"unknown\".",
+			`  The dimensions no parser settles: ${JUDGED_DIMENSIONS.join(", ")}.`,
+			"- proposals (optional): suggestions only, each grounded in the evidence. An empty list is a normal answer, and nothing here executes by itself.",
+			"A reply without an observation, a conclusion or a confidence is not a diagnosis: the attempt is recorded interrupted and nothing is stored.",
+			"",
+			`--- source under review ---`,
+			`review ${sourceRef(source)} [${review.outcome}]${request.reason === null ? "" : ` — focus: ${request.reason}`}`,
+			"",
+			"--- review pack ---",
+			pack
+		].join("\n");
+		let spawnFailure;
+		const handle$1 = await ctx.agentRuntime.spawn(parent, {
+			sessionId: reviewerSessionId,
+			name: `review ${source.taskId}`,
+			prompt: [{
+				type: "text",
+				text: prompt
+			}],
+			agentPreset: REVIEWER_PRESET,
+			grant: reviewerGrant(),
+			beforePrompt: async () => {
+				await admission.start({
+					taskId: source.taskId,
+					sessionId: reviewerSessionId,
+					actor
+				});
+				const back = await readReviewerDelegation(reviewerSessionId);
+				if (back === void 0 || back.rootStoreId !== storeId || back.taskId !== source.taskId) throw new Error(`task_review_agent: the delegation of reviewer session "${reviewerSessionId}" could not be read back from the ledger (expected task ${source.taskId} in ${storeId}); no model input was sent`);
+			},
+			signal: input.signal
+		}).catch((error) => {
+			spawnFailure = error instanceof Error ? error.message : String(error);
+		});
+		if (handle$1 === void 0) {
+			await settleReviewAgentAttempt({
+				rootStoreId: storeId,
+				taskId: source.taskId,
+				sessionId: reviewerSessionId,
+				status: "interrupted",
+				note: `spawn failed: ${spawnFailure ?? "unknown error"}`
+			}).catch(() => void 0);
+			return {
+				kind: "spawn-failed",
+				failure: spawnFailure ?? "unknown error",
+				sessionId: reviewerSessionId
+			};
+		}
+		return {
+			kind: "spawned",
+			handle: handle$1
+		};
+	});
+	if (outcome.kind === "refused" || outcome.kind === "reuse" || outcome.kind === "in-flight" || outcome.kind === "spawn-failed") return outcome;
+	const { handle } = outcome;
+	/**
+	* The one exit an attempt has: every path that ends this execution records
+	* its terminal fact, so no failure of this entry leaves the source looking
+	* in flight forever. A ledger that cannot take the fact is best-effort
+	* here — an attempt that recorded its diagnosis is found again by the
+	* store's own record of it.
+	*/
+	const settleAttempt = async (status, note) => {
+		await settleReviewAgentAttempt({
+			rootStoreId: storeId,
+			taskId: source.taskId,
+			sessionId: reviewerSessionId,
+			status,
+			...note === void 0 ? {} : { note }
+		}).catch(() => void 0);
+	};
+	const cancel = () => handle.agent.cancel({ kind: "parent" });
+	input.signal?.addEventListener("abort", cancel, { once: true });
+	let timer;
+	try {
+		let timedOut = false;
+		const deadline = new Promise((resolve$1) => {
+			timer = setTimeout(() => {
+				timedOut = true;
+				resolve$1("timeout");
+			}, timeoutMs);
+		});
+		const idle = handle.agent.whenIdle().then(() => "idle").catch(() => "failed");
+		const reviewOutcome = await Promise.race([idle, deadline]);
+		if (timer !== void 0) clearTimeout(timer);
+		input.signal?.removeEventListener("abort", cancel);
+		if (reviewOutcome === "timeout") handle.agent.cancel({ kind: "parent" });
+		const cancelled = input.signal?.aborted === true;
+		const reply = timedOut ? void 0 : lastAssistantText(handle.agent.session.snapshotEvents());
+		const parsed = timedOut || cancelled ? {
+			ok: false,
+			refusal: timedOut ? `the reviewer timed out after ${timeoutMs}ms with no diagnosis` : "the attempt was cancelled before the reviewer produced a diagnosis"
+		} : parseReviewerDiagnosis(reply);
+		if (!parsed.ok) {
+			await settleAttempt("interrupted", parsed.refusal);
+			return {
+				kind: "no-diagnosis",
+				sessionId: reviewerSessionId,
+				failure: parsed.refusal
+			};
+		}
+		const { observation, conclusion, confidence, judgements, proposals } = parsed.diagnosis;
+		const diagnosis = {
+			diagnosisId: `review-agent-${reviewerSessionId}`,
+			taskId: source.taskId,
+			observedFailure: observation,
+			scope: `task ${source.taskId}`,
+			localizedCause: conclusion,
+			evidenceRefs: review.evidenceRefs,
+			reviewRefs: [sourceRef(source)],
+			confidence,
+			proposals,
+			producedBy: {
+				kind: "agent",
+				sessionId: reviewerSessionId
+			},
+			...judgements.length === 0 ? {} : { judgements }
+		};
+		try {
+			await ctx.task.recordDiagnosisIn(storeId, diagnosis, actor);
+		} catch (error) {
+			await settleAttempt("interrupted", `the diagnosis could not be recorded: ${error instanceof Error ? error.message : String(error)}`);
+			return {
+				kind: "unrecorded",
+				sessionId: reviewerSessionId,
+				failure: error instanceof Error ? error.message : String(error)
+			};
+		}
+		await settleAttempt("recorded");
+		return {
+			kind: "recorded",
+			sessionId: reviewerSessionId,
+			diagnosisId: diagnosis.diagnosisId,
+			confidence,
+			observation,
+			conclusion,
+			judgements,
+			proposals
+		};
+	} catch (error) {
+		if (timer !== void 0) clearTimeout(timer);
+		input.signal?.removeEventListener("abort", cancel);
+		await settleAttempt("interrupted", `the review attempt failed: ${error instanceof Error ? error.message : String(error)}`);
+		throw error;
+	}
+}
+
+//#endregion
+//#region src/review-agent-scan.ts
+/** The prefix `rootTaskStoreId` writes; see {@link rootSessionOfStore}. */
+const STORE_PREFIX = "sg-t-";
+/**
+* The graph root session one root task store belongs to, read back from the
+* store id `rootTaskStoreId` derives it from — or nothing when the id was not
+* derived that way. It is re-checked rather than trusted: an id this scan cannot
+* read back is a store it must not spawn a reviewer for.
+*/
+function rootSessionOfStore(storeId) {
+	if (!storeId.startsWith(STORE_PREFIX)) return void 0;
+	const rootSessionId = storeId.slice(5);
+	return rootSessionId.length === 0 ? void 0 : rootSessionId;
+}
+/** Whether two sources are the same source. */
+function sameSource(left, right) {
+	return left.taskId === right.taskId && left.runId === right.runId;
+}
+/**
+* Every source of the store whose review settled `failed`, in the order the
+* records were written — the exact source a review agent exists for, derived
+* from the record's own run (`null` for a review that carries none) and never
+* from "the latest review".
+*/
+function failedSourcesOf(snapshot) {
+	return snapshot.reviews.filter((review) => review.outcome === "failed").map((review) => ({
+		taskId: review.taskId,
+		runId: review.runId ?? null
+	}));
+}
+/** The relay of the store's root session, when this process holds it live. */
+function rootAgentOf(ctx, storeId) {
+	const sessionId$21 = rootSessionOfStore(storeId);
+	if (sessionId$21 === void 0) return void 0;
+	const agent = optionalService(ctx, "agents")?.get(sessionId$21);
+	return agent === void 0 ? void 0 : {
+		sessionId: sessionId$21,
+		agent
+	};
+}
+/**
+* Scan one root task store for failed review sources and accept each under the
+* store's allowance (see the module header for the order).
+*
+* Never throws for the work it does: a store it cannot read, a source it cannot
+* accept and a reviewer that failed all come back as entries (and as log lines
+* when a `log` is given), because every caller of this scan is a trigger — a
+* settlement or an activation — that must not take a store down with a review.
+*/
+async function scanFailedReviewSources(ctx, storeId, options = {}) {
+	const { log } = options;
+	const entries = [];
+	const report = () => ({
+		storeId,
+		entries
+	});
+	let snapshot;
+	try {
+		snapshot = await ctx.task.snapshotIn(storeId);
+	} catch (error) {
+		log?.(`review agent: store ${storeId} could not be read (${error instanceof Error ? error.message : String(error)}); nothing was scanned`);
+		return report();
+	}
+	const failed = failedSourcesOf(snapshot);
+	const targets = options.source === void 0 ? failed : failed.filter((source) => sameSource(source, options.source));
+	if (targets.length === 0) return report();
+	const root = rootAgentOf(ctx, storeId);
+	const attempts = await readReviewAgentAttempts(storeId);
+	for (const source of targets) {
+		const existing = attempts.find((attempt) => sameSource(attempt.source, source));
+		if (existing !== void 0 && existing.settlement !== void 0) {
+			entries.push({
+				source,
+				result: "existing",
+				sessionId: existing.sessionId
+			});
+			log?.(`review agent: source ${sourceRef(source)} already has an attempt (session ${existing.sessionId}, ${existing.settlement.status}) — read, nothing started`);
+			continue;
+		}
+		if (root === void 0) {
+			const reason = `the graph's root session for store ${storeId} is not live, so no reviewer could be started`;
+			entries.push({
+				source,
+				result: "skipped",
+				reason
+			});
+			log?.(`review agent: source ${sourceRef(source)} skipped — ${reason}; no claim, no reviewer`);
+			continue;
+		}
+		const review = reviewForSource(snapshot, source);
+		if (review === void 0) {
+			const reason = "the review record could not be read back";
+			entries.push({
+				source,
+				result: "skipped",
+				reason
+			});
+			log?.(`review agent: source ${sourceRef(source)} skipped — ${reason}; no claim, no reviewer`);
+			continue;
+		}
+		let outcome;
+		try {
+			outcome = await runReviewAgentAttempt({
+				ctx,
+				storeId,
+				source,
+				review,
+				parent: root.agent,
+				actor: root.sessionId,
+				requestKey: null,
+				reason: null
+			});
+		} catch (error) {
+			const reason = `the review attempt failed: ${error instanceof Error ? error.message : String(error)}`;
+			entries.push({
+				source,
+				result: "failed",
+				reason
+			});
+			log?.(`review agent: source ${sourceRef(source)} failed — ${reason}`);
+			continue;
+		}
+		switch (outcome.kind) {
+			case "recorded":
+				entries.push({
+					source,
+					result: "started",
+					sessionId: outcome.sessionId
+				});
+				log?.(`review agent: source ${sourceRef(source)} accepted — reviewer session ${outcome.sessionId} started`);
+				break;
+			case "reuse":
+			case "in-flight": {
+				const reason = recoveryReason(outcome.recovered);
+				entries.push({
+					source,
+					result: "existing",
+					sessionId: outcome.attempt.sessionId,
+					...reason === void 0 ? {} : { reason }
+				});
+				log?.(reason === void 0 ? `review agent: source ${sourceRef(source)} is claimed already (session ${outcome.attempt.sessionId}) — read, nothing started` : `review agent: source ${sourceRef(source)} — ${reason} (session ${outcome.attempt.sessionId}); nothing started`);
+				break;
+			}
+			case "refused": {
+				const reason = refusalReason(outcome.plan.code, outcome.plan.budget);
+				const recovered = recoveryReason(outcome.recovered);
+				entries.push({
+					source,
+					result: "skipped",
+					reason: recovered === void 0 ? reason : `${reason} — ${recovered}`
+				});
+				log?.(`review agent: source ${sourceRef(source)} skipped — ${reason}; no claim, no reviewer${recovered === void 0 ? "" : ` (${recovered})`}`);
+				break;
+			}
+			case "spawn-failed":
+			case "unrecorded":
+			case "no-diagnosis":
+				entries.push({
+					source,
+					result: "failed",
+					sessionId: outcome.sessionId,
+					reason: outcome.failure
+				});
+				log?.(`review agent: source ${sourceRef(source)} accepted, but the reviewer did not finish — ${outcome.failure} (session ${outcome.sessionId})`);
+				break;
+		}
+	}
+	return report();
+}
+/** How one refusal reads in the scan's line, named the way the ledger refused. */
+function refusalReason(code, budget) {
+	if (code === "budget-exhausted") return `budget exhausted: the store's review allowance is spent (${budget.used}/${budget.max})`;
+	if (code === "request-key-required") return "the source was already reviewed and this scan names no key";
+	return "the source already has an attempt with a different focus";
+}
+/**
+* How the recovery one decision performed reads in the scan's own words — the
+* dead attempt the ledger settled on this call — or nothing when this decision
+* recovered none. A recovery is a fact an operator reading the scan has to see:
+* without it, a source whose reviewer died looks like one that was reviewed.
+*/
+function recoveryReason(recovered) {
+	const attempt = recovered[0];
+	if (attempt === void 0) return void 0;
+	const status = attempt.settlement?.status ?? "interrupted";
+	const note = attempt.settlement?.note === void 0 ? "" : `: ${attempt.settlement.note}`;
+	return `the attempt found open with no process running it (session ${attempt.sessionId}) was recorded ${status}${note}`;
+}
+/** The warning channel the plugin has, when the deployment mounted a logger. */
+function softWarn(ctx) {
+	const logger = ctx.logger;
+	return (line) => logger?.("singularity-agent").warn(line);
+}
+/**
+* Install the two triggers of the automatic scan on this deployment's context:
+* the runtime's terminal-review door (a review that settled `failed`) and the
+* graph registry's activation event (a store scanned on explicit activation).
+*
+* The listeners do their work off the caller's path: both start the scan and
+* return immediately, and a scan that fails is reported on the log rather than
+* thrown into the settlement or the activation that woke it.
+* @param ctx - the deployment's context, with the runtime and the graph registry.
+* @param options - where the scan's lines go; the plugin's own logger by default.
+* @returns a disposer that removes both listeners.
+*/
+function installReviewAgentAutoTrigger(ctx, options = {}) {
+	const log = options.log ?? softWarn(ctx);
+	const background = (work) => {
+		work().catch((error) => {
+			log(`review agent: the scan could not run (${error instanceof Error ? error.message : String(error)})`);
+		});
+	};
+	const disposers = [ctx.taskRuntime.registerTerminalReviewListener((fact) => {
+		if (fact.outcome !== "failed") return;
+		background(() => scanFailedReviewSources(ctx, fact.storeId, {
+			source: {
+				taskId: fact.taskId,
+				runId: fact.runId
+			},
+			log
+		}));
+	}), ctx.on("graphs/selected", (graph) => {
+		background(() => scanFailedReviewSources(ctx, rootTaskStoreId(graph.rootSessionId), { log }));
+	})];
+	return () => {
+		for (const dispose of disposers) dispose();
+	};
+}
+
+//#endregion
+//#region src/tools/approve.ts
+const text$29 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -962,7 +2066,7 @@ function defineApproveTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$30(v)
+			render: (_a, v) => text$29(v)
 		},
 		execute: async (args, exec) => {
 			if (args.prompt.trim().length === 0) throw new Error("hitl_approve: prompt is empty");
@@ -986,7 +2090,7 @@ function defineApproveTool(ctx) {
 
 //#endregion
 //#region src/tools/ask.ts
-const text$29 = (value) => [{
+const text$28 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -1002,7 +2106,7 @@ function defineAskTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$29(v)
+			render: (_a, v) => text$28(v)
 		},
 		execute: async (args, exec) => {
 			if (args.prompt.trim().length === 0) throw new Error("hitl_ask: prompt is empty");
@@ -1058,7 +2162,7 @@ function undeclaredParameters(args, declared, toolName) {
 
 //#endregion
 //#region src/tools/budget-extend.ts
-const text$28 = (value) => [{
+const text$27 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -1069,7 +2173,7 @@ const DECLARED_PARAMETERS = [
 	"deadlineAt"
 ];
 const DIMENSIONS = ["maxRuns", "deadlineAt"];
-function sessionId$20(exec) {
+function sessionId$19(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_budget_extend: missing agent id");
 	return id;
@@ -1148,12 +2252,12 @@ function defineTaskBudgetExtendTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$28(v)
+			render: (_a, v) => text$27(v)
 		},
 		execute: async (args, exec) => {
 			const undeclared$3 = undeclaredParameters(args, DECLARED_PARAMETERS, "task_budget_extend");
 			if (undeclared$3 !== void 0) return undeclared$3;
-			const caller = sessionId$20(exec);
+			const caller = sessionId$19(exec);
 			let result;
 			try {
 				result = await ctx.taskRuntime.extendRootBudget(caller, {
@@ -1227,7 +2331,7 @@ function defineRootBudgetApproval(ctx) {
 
 //#endregion
 //#region src/tools/capability-list.ts
-const text$27 = (value) => [{
+const text$26 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -1286,7 +2390,7 @@ function defineCapabilityListTool(ctx) {
 		parameters: {},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$27(v)
+			render: (_a, v) => text$26(v)
 		},
 		execute: async (_args, exec) => {
 			const capabilities = ctx.taskRuntime.listCapabilities();
@@ -1349,7 +2453,7 @@ function adaptRead(tool, result) {
 
 //#endregion
 //#region src/tools/context-read.ts
-const text$26 = (value) => [{
+const text$25 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -1426,7 +2530,7 @@ function defineContextReadTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$26(v)
+			render: (_a, v) => text$25(v)
 		},
 		execute: async (args, exec) => {
 			const refused = undeclared$2(args);
@@ -1444,11 +2548,11 @@ function defineContextReadTool(ctx) {
 
 //#endregion
 //#region src/tools/escalate.ts
-const text$25 = (value) => [{
+const text$24 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$19(exec) {
+function sessionId$18(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("escalate: missing agent id");
 	return id;
@@ -1470,7 +2574,7 @@ function cardLines(card) {
 		...card.sourceRefs === void 0 || card.sourceRefs.length === 0 ? [] : [`sourceRefs: [${card.sourceRefs.join(", ")}]`]
 	];
 }
-function renderEscalation$1(escalation) {
+function renderEscalation(escalation) {
 	return [
 		`- ${escalation.escalationId} [${escalation.status}] ${escalation.trigger} — what: ${escalation.what}`,
 		`  tried: ${escalation.tried}`,
@@ -1521,15 +2625,15 @@ function defineEscalateTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$25(v)
+			render: (_a, v) => text$24(v)
 		},
 		execute: async (args, exec) => {
 			if (args.list === true) {
 				const escalations = await ctx.escalation.list();
 				if (escalations.length === 0) return "escalations: none recorded";
-				return [`escalations (${escalations.length}):`, ...escalations.map(renderEscalation$1)].join("\n");
+				return [`escalations (${escalations.length}):`, ...escalations.map(renderEscalation)].join("\n");
 			}
-			const caller = sessionId$19(exec);
+			const caller = sessionId$18(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("escalate: missing agent");
 			const missing = ELEMENTS.filter((element) => {
@@ -1606,11 +2710,11 @@ function recoveryNote(recovered) {
 
 //#endregion
 //#region src/tools/evolution-apply.ts
-const text$24 = (value) => [{
+const text$23 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$18(exec) {
+function sessionId$17(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_apply: missing agent id");
 	return id;
@@ -1639,10 +2743,10 @@ function defineEvolutionApplyTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$24(v)
+			render: (_a, v) => text$23(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$18(exec);
+			const caller = sessionId$17(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("evolution_apply: missing agent");
 			let proposal;
@@ -1712,11 +2816,11 @@ function defineEvolutionApplyTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-candidate.ts
-const text$23 = (value) => [{
+const text$22 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$17(exec) {
+function sessionId$16(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_candidate: missing agent id");
 	return id;
@@ -1746,10 +2850,10 @@ function defineEvolutionCandidateTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$23(v)
+			render: (_a, v) => text$22(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$17(exec);
+			const caller = sessionId$16(exec);
 			const versions = args.versionSet;
 			try {
 				const proposal = await ctx.evolution.candidate(args.proposalId, versions, caller, args.mutation);
@@ -1764,11 +2868,11 @@ function defineEvolutionCandidateTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-decide.ts
-const text$22 = (value) => [{
+const text$21 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$16(exec) {
+function sessionId$15(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_decide: missing agent id");
 	return id;
@@ -1796,10 +2900,10 @@ function defineEvolutionDecideTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$22(v)
+			render: (_a, v) => text$21(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$16(exec);
+			const caller = sessionId$15(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("evolution_decide: missing agent");
 			let proposal;
@@ -1849,11 +2953,11 @@ function defineEvolutionDecideTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-gate.ts
-const text$21 = (value) => [{
+const text$20 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$15(exec) {
+function sessionId$14(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_gate: missing agent id");
 	return id;
@@ -1907,10 +3011,10 @@ function defineEvolutionGateTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$21(v)
+			render: (_a, v) => text$20(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$15(exec);
+			const caller = sessionId$14(exec);
 			let evidenceIds = /* @__PURE__ */ new Set();
 			try {
 				const graph = await ctx.graphs.graphForSession(caller);
@@ -1939,11 +3043,11 @@ function defineEvolutionGateTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-list.ts
-const text$20 = (value) => [{
+const text$19 = (value) => [{
 	type: "text",
 	text: value
 }];
-const TARGET_TYPES$2 = [
+const TARGET_TYPES$1 = [
 	"skill",
 	"tool",
 	"capability",
@@ -1974,7 +3078,7 @@ function defineEvolutionListTool(ctx) {
 			},
 			targetType: {
 				type: "string",
-				enum: TARGET_TYPES$2,
+				enum: TARGET_TYPES$1,
 				description: "Only proposals pointing at this mutation surface"
 			},
 			targetId: {
@@ -1984,7 +3088,7 @@ function defineEvolutionListTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$20(v)
+			render: (_a, v) => text$19(v)
 		},
 		execute: async (args) => {
 			const proposals = await ctx.evolution.list({
@@ -2022,11 +3126,11 @@ function defineEvolutionListTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-prepare.ts
-const text$19 = (value) => [{
+const text$18 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$14(exec) {
+function sessionId$13(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_prepare: missing agent id");
 	return id;
@@ -2042,10 +3146,10 @@ function defineEvolutionPrepareTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$19(v)
+			render: (_a, v) => text$18(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$14(exec);
+			const caller = sessionId$13(exec);
 			try {
 				const prepared = await ctx.evolution.prepare(args.proposalId, caller);
 				const view = prepared.prepared;
@@ -2067,11 +3171,18 @@ function defineEvolutionPrepareTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-propose.ts
-const text$18 = (value) => [{
+const text$17 = (value) => [{
 	type: "text",
 	text: value
 }];
-const TARGET_TYPES$1 = [
+/**
+* The mutation surfaces this build records for Evolution — its own vocabulary,
+* not the diagnosis's (A5): a `DiagnosisProposal.targetType` is an open name,
+* and this is where a suggestion is checked before it is transcribed into a
+* proposal. What can actually be *executed* is narrower still
+* (`APPLYABLE_TARGET_TYPES` in the evolution package).
+*/
+const TARGET_TYPES = [
 	"skill",
 	"tool",
 	"capability",
@@ -2082,11 +3193,11 @@ const TARGET_TYPES$1 = [
 	"verifier",
 	"runtime_policy"
 ];
-const TARGET_TYPE_SET$1 = new Set(TARGET_TYPES$1);
-function isProposalTargetType$1(value) {
-	return typeof value === "string" && TARGET_TYPE_SET$1.has(value);
+const TARGET_TYPE_SET = new Set(TARGET_TYPES);
+function isProposalTargetType(value) {
+	return typeof value === "string" && TARGET_TYPE_SET.has(value);
 }
-function sessionId$13(exec) {
+function sessionId$12(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_propose: missing agent id");
 	return id;
@@ -2119,7 +3230,7 @@ function defineEvolutionProposeTool(ctx) {
 			},
 			targetType: {
 				type: "string",
-				enum: TARGET_TYPES$1,
+				enum: TARGET_TYPES,
 				description: "The mutation surface the proposal points at (required unless fromDiagnosis)"
 			},
 			targetId: {
@@ -2155,10 +3266,10 @@ function defineEvolutionProposeTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$18(v)
+			render: (_a, v) => text$17(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$13(exec);
+			const caller = sessionId$12(exec);
 			let targetType = args.targetType;
 			let targetId = args.targetId;
 			let rationale = args.rationale;
@@ -2173,9 +3284,10 @@ function defineEvolutionProposeTool(ctx) {
 				targetType = proposal.targetType;
 				targetId = proposal.targetId;
 				rationale = proposal.rationale;
+				if (!isProposalTargetType(targetType)) throw new Error(`evolution_propose: diagnosis "${diagnosis.diagnosisId}" proposal #${args.fromDiagnosis.proposalIndex} names targetType "${String(targetType)}", which this build cannot execute; it stays a recorded suggestion (recorded target types: ${TARGET_TYPES.join(" / ")})`);
 				sourceRefs.unshift(`diagnosis:${diagnosis.diagnosisId}`);
 			} else if (targetType === void 0 || targetId === void 0 || rationale === void 0) throw new Error("evolution_propose: targetType, targetId and rationale are required without fromDiagnosis");
-			if (!isProposalTargetType$1(targetType)) throw new Error(`evolution_propose: targetType must be one of ${TARGET_TYPES$1.join(" / ")}, got "${String(targetType)}"`);
+			if (!isProposalTargetType(targetType)) throw new Error(`evolution_propose: targetType must be one of ${TARGET_TYPES.join(" / ")}, got "${String(targetType)}"`);
 			try {
 				const proposal = await ctx.evolution.propose({
 					proposalId: args.proposalId,
@@ -2203,11 +3315,11 @@ function defineEvolutionProposeTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-replay.ts
-const text$17 = (value) => [{
+const text$16 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$12(exec) {
+function sessionId$11(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_replay: missing agent id");
 	return id;
@@ -2237,7 +3349,7 @@ async function callerWorkspace(ctx, caller) {
 	return path;
 }
 /** The task's latest review record — the record a sample's role is read from. */
-function latestReview$1(snapshot, task) {
+function latestReview(snapshot, task) {
 	const runId = task.runIds[task.runIds.length - 1];
 	return snapshot.reviews.find((item) => item.runId === runId);
 }
@@ -2251,7 +3363,7 @@ function roleOf(snapshot, taskId) {
 	const task = snapshot.tasks.find((item) => item.taskId === taskId);
 	if (task === void 0) throw new Error(`unknown task "${taskId}" in this graph's task store`);
 	if (task.status !== "verified" && task.status !== "failed") throw new Error(`task "${taskId}" is ${task.status}; only a terminal (verified or failed) task carries the history a role is read from`);
-	const review = latestReview$1(snapshot, task);
+	const review = latestReview(snapshot, task);
 	if (review === void 0) throw new Error(`task "${taskId}" has no review record on its latest run; there is no case to reproduce`);
 	if (review.outcome === "failed") return "observed-failure";
 	if (review.outcome === "verified") return "observed-regression";
@@ -2374,10 +3486,10 @@ function defineEvolutionReplayTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$17(v)
+			render: (_a, v) => text$16(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$12(exec);
+			const caller = sessionId$11(exec);
 			const taskIds = args.taskIds.map((id) => String(id));
 			const holdoutTaskIds = (args.holdoutTaskIds ?? []).map((id) => String(id));
 			try {
@@ -2399,11 +3511,11 @@ function defineEvolutionReplayTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-rollback.ts
-const text$16 = (value) => [{
+const text$15 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$11(exec) {
+function sessionId$10(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_rollback: missing agent id");
 	return id;
@@ -2428,10 +3540,10 @@ function defineEvolutionRollbackTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$16(v)
+			render: (_a, v) => text$15(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$11(exec);
+			const caller = sessionId$10(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("evolution_rollback: missing agent");
 			let proposal;
@@ -2488,7 +3600,7 @@ function defineEvolutionRollbackTool(ctx) {
 
 //#endregion
 //#region src/tools/mark-ready.ts
-const text$15 = (value) => [{
+const text$14 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2499,7 +3611,7 @@ function defineMarkReadyTool(ctx) {
 		parameters: {},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$15(v)
+			render: (_a, v) => text$14(v)
 		},
 		execute: async (_args, exec) => {
 			const sessionId$21 = exec.agent?.id;
@@ -2589,7 +3701,7 @@ function questionCall(exec, tool) {
 
 //#endregion
 //#region src/tools/task-answer.ts
-const text$14 = (value) => [{
+const text$13 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2660,7 +3772,7 @@ function defineTaskAnswerTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$14(v)
+			render: (_a, v) => text$13(v)
 		},
 		execute: async (args, exec) => {
 			const refused = undeclared$1(args);
@@ -2684,7 +3796,7 @@ function defineTaskAnswerTool(ctx) {
 
 //#endregion
 //#region src/tools/task-ask-parent.ts
-const text$13 = (value) => [{
+const text$12 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2755,7 +3867,7 @@ function defineTaskAskParentTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$13(v)
+			render: (_a, v) => text$12(v)
 		},
 		execute: async (args, exec) => {
 			const refused = undeclared(args);
@@ -2778,16 +3890,16 @@ function defineTaskAskParentTool(ctx) {
 
 //#endregion
 //#region src/tools/task-cancel.ts
-const text$12 = (value) => [{
+const text$11 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$10(exec) {
+function sessionId$9(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_cancel: missing agent id");
 	return id;
 }
-function renderOutcome(outcome) {
+function renderOutcome$1(outcome) {
 	const run = outcome.runId === void 0 ? "" : ` run ${outcome.runId}`;
 	const evidence = outcome.evidenceId === void 0 ? "" : ` evidence ${outcome.evidenceId}`;
 	return `- ${outcome.taskId}: ${outcome.status}${run}${evidence}`;
@@ -2802,10 +3914,10 @@ function defineTaskCancelTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$12(v)
+			render: (_a, v) => text$11(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$10(exec);
+			const caller = sessionId$9(exec);
 			const { storeId, run } = await ctx.taskRuntime.runForSession(caller);
 			if (run.executionPhase !== "waiting_children" || run.batchId === void 0) return `task_cancel: no batch is in flight for run "${run.runId}" (${run.status}${run.executionPhase === void 0 ? ", no coordination phase recorded" : `, phase ${run.executionPhase}`}); nothing was changed`;
 			const batchId = run.batchId;
@@ -2815,18 +3927,18 @@ function defineTaskCancelTool(ctx) {
 			} catch (error) {
 				return `task_cancel rejected: ${error instanceof Error ? error.message : String(error)}`;
 			}
-			return [`cancelled batch ${batchId}${args.reason === void 0 ? "" : ` (${args.reason})`}:`, ...outcomes.map(renderOutcome)].join("\n");
+			return [`cancelled batch ${batchId}${args.reason === void 0 ? "" : ` (${args.reason})`}:`, ...outcomes.map(renderOutcome$1)].join("\n");
 		}
 	});
 }
 
 //#endregion
 //#region src/tools/task-decompose.ts
-const text$11 = (value) => [{
+const text$10 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$9(exec) {
+function sessionId$8(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_decompose: missing agent id");
 	return id;
@@ -2991,10 +4103,10 @@ function defineTaskDecomposeTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$11(v)
+			render: (_a, v) => text$10(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$9(exec);
+			const caller = sessionId$8(exec);
 			const { storeId, task, run } = await ctx.taskRuntime.runForSession(caller);
 			const { requestKey, supersedes,...spec } = args;
 			const callId = typeof exec.callId === "string" && exec.callId.length > 0 ? String(exec.callId) : void 0;
@@ -3077,40 +4189,32 @@ async function pendingText$1(ctx, storeId, taskId, proposalId, detail) {
 
 //#endregion
 //#region src/tools/task-diagnose.ts
-const text$10 = (value) => [{
+const text$9 = (value) => [{
 	type: "text",
 	text: value
 }];
-const TARGET_TYPES = [
-	"skill",
-	"tool",
-	"capability",
-	"task_definition",
-	"decomposition_policy",
-	"agent_preset",
-	"workflow_policy",
-	"verifier",
-	"runtime_policy"
-];
-const TARGET_TYPE_SET = new Set(TARGET_TYPES);
-function isProposalTargetType(value) {
-	return typeof value === "string" && TARGET_TYPE_SET.has(value);
-}
 function isRecord(value) {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
+/** A non-empty name: what a target type has to be, with no vocabulary to be in. */
+function isTargetTypeName(value) {
+	return typeof value === "string" && value.trim().length > 0;
+}
 /**
-* Validate the model-supplied proposals into the recorded shape. The tool
-* schema rejects an out-of-vocabulary targetType at the arguments boundary;
-* this check is what keeps the recorded `DiagnosisProposal` typed without
-* asserting the model's string into the enum.
+* Validate the model-supplied proposals into the recorded shape. The target
+* type is an **open, non-empty name** (A5): the diagnosis does not own a
+* vocabulary, so a suggestion that names a surface no executor exists for is
+* recorded like any other — the entry that would convert it into an
+* executable proposal is where that name is checked
+* (`evolution_propose`'s fromDiagnosis, which refuses what it cannot execute
+* with zero ledger writes).
 */
 function toProposals(value) {
 	if (value === void 0) return [];
 	if (!Array.isArray(value)) throw new Error("task_diagnose: proposals must be an array");
 	return value.map((item, index) => {
 		if (!isRecord(item)) throw new Error(`task_diagnose: proposals[${index}] must be an object`);
-		if (!isProposalTargetType(item.targetType)) throw new Error(`task_diagnose: proposals[${index}].targetType must be one of ${TARGET_TYPES.join(" / ")}, got "${String(item.targetType)}"`);
+		if (!isTargetTypeName(item.targetType)) throw new Error(`task_diagnose: proposals[${index}].targetType must be a non-empty string, got "${String(item.targetType)}"`);
 		if (typeof item.targetId !== "string") throw new Error(`task_diagnose: proposals[${index}].targetId must be a string`);
 		if (typeof item.rationale !== "string") throw new Error(`task_diagnose: proposals[${index}].rationale must be a string`);
 		return {
@@ -3120,7 +4224,7 @@ function toProposals(value) {
 		};
 	});
 }
-function sessionId$8(exec) {
+function sessionId$7(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_diagnose: missing agent id");
 	return id;
@@ -3128,7 +4232,7 @@ function sessionId$8(exec) {
 function defineTaskDiagnoseTool(ctx) {
 	return defineTool({
 		name: "task_diagnose",
-		description: "Record a diagnosis for a task: an explanation of what its reviews show (observed failure, scope, localized cause, confidence), not a score. Call task_review_pack first and ground every diagnosis in its output — evidenceRefs and reviewRefs must name real evidence ids and the review refs the pack prints; at least one ref is required. proposals are structured suggestions only: they are stored as data and never execute automatically. Written once per diagnosisId and immutable afterwards.",
+		description: "Record a diagnosis for a task: an explanation of what its reviews show (the postmortem observation, scope, localized cause, confidence), not a score. A diagnosis may conclude that something should improve, that nothing should, or that the evidence does not settle it — the conclusion is recorded as written. Call task_review_pack first and ground every diagnosis in its output — evidenceRefs and reviewRefs must name real evidence ids and the review refs the pack prints; at least one ref is required. proposals are structured suggestions only: they are stored as data and never execute automatically, and their targetType is an open name — nothing here executes a suggestion, and the entry that converts one refuses what it cannot run. Written once per diagnosisId and immutable afterwards.",
 		parameters: {
 			taskId: {
 				type: "string",
@@ -3143,7 +4247,7 @@ function defineTaskDiagnoseTool(ctx) {
 			observedFailure: {
 				type: "string",
 				required: true,
-				description: "The failure or anomaly under explanation, as observed"
+				description: "The postmortem observation (复盘观察): what was actually observed, whether the review failed or succeeded"
 			},
 			scope: {
 				type: "string",
@@ -3185,8 +4289,7 @@ function defineTaskDiagnoseTool(ctx) {
 						targetType: {
 							type: "string",
 							required: true,
-							enum: TARGET_TYPES,
-							description: "The mutation surface the proposal points at"
+							description: "The mutation surface the proposal points at, as a name; only the entry that would execute it judges that name"
 						},
 						targetId: {
 							type: "string",
@@ -3209,10 +4312,10 @@ function defineTaskDiagnoseTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$10(v)
+			render: (_a, v) => text$9(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$8(exec);
+			const caller = sessionId$7(exec);
 			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(caller)).rootSessionId);
 			const diagnosis = {
 				diagnosisId: args.diagnosisId,
@@ -3243,11 +4346,11 @@ function defineTaskDiagnoseTool(ctx) {
 
 //#endregion
 //#region src/tools/task-intake.ts
-const text$9 = (value) => [{
+const text$8 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$7(exec) {
+function sessionId$6(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_intake: missing agent id");
 	return id;
@@ -3475,10 +4578,10 @@ function defineTaskIntakeTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$9(v)
+			render: (_a, v) => text$8(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$7(exec);
+			const caller = sessionId$6(exec);
 			const resolution = await ctx.singularityContext.resolveCaller(caller);
 			if (resolution.kind === "unbound") return [`task_intake rejected: ${resolution.detail}`, "Nothing was read and nothing was written."].join("\n");
 			if (resolution.kind !== "root") return [
@@ -3555,11 +4658,11 @@ async function pendingText(ctx, storeId, proposalId, detail) {
 
 //#endregion
 //#region src/tools/task-proposal-cancel.ts
-const text$8 = (value) => [{
+const text$7 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$6(exec) {
+function sessionId$5(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_proposal_cancel: missing agent id");
 	return id;
@@ -3575,12 +4678,12 @@ function defineTaskProposalCancelTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$8(v)
+			render: (_a, v) => text$7(v)
 		},
 		execute: async (args, exec) => {
 			const undeclared$3 = undeclaredParameters(args, ["proposalId"], "task_proposal_cancel");
 			if (undeclared$3 !== void 0) return undeclared$3;
-			const caller = sessionId$6(exec);
+			const caller = sessionId$5(exec);
 			const { storeId } = await ctx.taskRuntime.runForSession(caller);
 			try {
 				return [`${(await ctx.taskRuntime.cancelProposal(storeId, args.proposalId, caller)).detail}`, "The record is kept: a cancelled proposal is a fact, and a revision is a new proposal with its own request key."].join("\n");
@@ -3602,11 +4705,11 @@ async function proposalStoreFor(ctx, sessionId$21) {
 
 //#endregion
 //#region src/tools/task-proposal-continue.ts
-const text$7 = (value) => [{
+const text$6 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$5(exec) {
+function sessionId$4(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_proposal_continue: missing agent id");
 	return id;
@@ -3663,12 +4766,12 @@ function defineTaskProposalContinueTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$7(v)
+			render: (_a, v) => text$6(v)
 		},
 		execute: async (args, exec) => {
 			const undeclared$3 = undeclaredParameters(args, ["proposalId"], "task_proposal_continue");
 			if (undeclared$3 !== void 0) return undeclared$3;
-			const caller = sessionId$5(exec);
+			const caller = sessionId$4(exec);
 			let continuation;
 			try {
 				const storeId = await proposalStoreFor(ctx, caller);
@@ -3683,11 +4786,11 @@ function defineTaskProposalContinueTool(ctx) {
 
 //#endregion
 //#region src/tools/task-proposal-read.ts
-const text$6 = (value) => [{
+const text$5 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$4(exec) {
+function sessionId$3(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_proposal_read: missing agent id");
 	return id;
@@ -3784,12 +4887,12 @@ function defineTaskProposalReadTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$6(v)
+			render: (_a, v) => text$5(v)
 		},
 		execute: async (args, exec) => {
 			const undeclared$3 = undeclaredParameters(args, ["proposalId"], "task_proposal_read");
 			if (undeclared$3 !== void 0) return undeclared$3;
-			const caller = sessionId$4(exec);
+			const caller = sessionId$3(exec);
 			try {
 				const storeId = await proposalStoreFor(ctx, caller);
 				return renderProposal(await ctx.taskRuntime.proposalIn(storeId, args.proposalId));
@@ -3802,7 +4905,7 @@ function defineTaskProposalReadTool(ctx) {
 
 //#endregion
 //#region src/tools/task-read.ts
-const text$5 = (value) => [{
+const text$4 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3813,223 +4916,11 @@ function defineTaskReadTool(ctx) {
 		parameters: {},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$5(v)
+			render: (_a, v) => text$4(v)
 		},
 		execute: async (_args, exec) => {
 			const caller = callerSessionId(exec, "task_read");
 			return adaptRead("task_read", await ctx.singularityContext.taskRead(caller, exec.signal));
-		}
-	});
-}
-
-//#endregion
-//#region src/tools/task-review-pack.ts
-const text$4 = (value) => [{
-	type: "text",
-	text: value
-}];
-function sessionId$3(exec) {
-	const id = exec.agent?.id;
-	if (typeof id !== "string" || id.length === 0) throw new Error("task_review_pack: missing agent id");
-	return id;
-}
-/** The ref a diagnosis uses in `reviewRefs` to name one review record. */
-function reviewRef(review) {
-	return `${review.taskId}#${review.runId ?? "no-run"}`;
-}
-/** The task's most recent review, or nothing when it never settled one. */
-function latestReview(snapshot, taskId) {
-	return [...snapshot.reviews].reverse().find((item) => item.taskId === taskId);
-}
-function reviewSummary(snapshot, taskId) {
-	const review = latestReview(snapshot, taskId);
-	if (review === void 0) return "no review";
-	const detail = review.localizedCause ?? review.anomalies[0];
-	return `review ${reviewRef(review)}: ${review.outcome}${detail === void 0 ? "" : ` — ${detail}`}`;
-}
-/**
-* The effort line: one clause per counter that exists, and nothing for the ones
-* that do not — an absent field means "not observed" (see `ReviewMetrics`), so
-* printing 0 for it would invent a measurement. The two counters whose scope is
-* easy to misread (`tokens`, `humanInterventions`) and the one that is
-* structurally constant (`retries`) carry their caveat inline.
-*/
-function renderMetrics(metrics) {
-	const parts = [];
-	if (metrics.tokens !== void 0) parts.push(`tokens in ${metrics.tokens.uncachedInputTokens}/out ${metrics.tokens.outputTokens}/cache ${metrics.tokens.cacheReadTokens}+${metrics.tokens.cacheWriteTokens} (session-cumulative)`);
-	if (metrics.toolCalls !== void 0) parts.push(`toolCalls ${metrics.toolCalls.calls} (${metrics.toolCalls.failures} failed)`);
-	if (metrics.humanInterventions !== void 0) parts.push(`humanInterventions ${metrics.humanInterventions} (session-scoped)`);
-	if (metrics.retries !== void 0) parts.push(`retries ${metrics.retries} (no retry branch exists yet; always 0)`);
-	if (metrics.evidenceLogs !== void 0) parts.push(`evidenceLogs ${metrics.evidenceLogs}`);
-	return parts.join(" — ");
-}
-/**
-* One line per dimension that the record actually carries: the observed facts,
-* copied out, never rated and never narrated. Anything a dimension omits is
-* omitted here too, so the pack stays a fact sheet — the explanation lives in
-* the diagnoses below it.
-*/
-function renderDimensions(dimensions) {
-	const lines = [];
-	const outcome = dimensions.outcomeCorrectness;
-	if (outcome !== void 0) lines.push(`  dim outcome correctness: ${outcome.outcome}, criteria ${outcome.criteriaCount}, unmet [${outcome.unmetCriterionIds.join(", ")}]`);
-	const specification = dimensions.taskSpecification;
-	if (specification !== void 0) lines.push(`  dim task specification: objective ${specification.objectivePresent ? "present" : "empty"}, criteria ${specification.criteriaCount}, with command ${specification.criteriaWithCommand}`);
-	const acceptance = dimensions.acceptance;
-	if (acceptance !== void 0) {
-		const criteria = acceptance.criteria.map((item) => `${item.criterionId} ${item.mode}${item.hasCommand ? " +command" : ""}${item.mandatory ? "" : " optional"}`);
-		lines.push(`  dim acceptance: ${criteria.join("; ")}`);
-	}
-	const decomposition = dimensions.decomposition;
-	if (decomposition !== void 0) lines.push(`  dim decomposition: depth ${decomposition.depth}, ${decomposition.decompositionStatus}, children ${decomposition.childCount}, edges in/out ${decomposition.incomingEdges}/${decomposition.outgoingEdges}`);
-	const coverage = dimensions.capabilityCoverage;
-	if (coverage !== void 0) lines.push(`  dim capability coverage: ${coverage.closure}, granted [${coverage.granted.join(", ")}], missing [${coverage.missing.join(", ")}]`);
-	const skill = dimensions.skillFit;
-	if (skill !== void 0) {
-		const loaded = skill.loaded === void 0 || skill.loadedOutsideGrant === void 0 ? "" : `, loaded [${skill.loaded.join(", ")}], outside grant [${skill.loadedOutsideGrant.join(", ")}]`;
-		lines.push(`  dim skill fit: granted [${skill.granted.join(", ")}]${loaded}`);
-	}
-	const tools = dimensions.toolFit;
-	if (tools !== void 0) {
-		const called = tools.called === void 0 || tools.calledOutsideGrant === void 0 ? "" : `, called [${tools.called.map((item) => `${item.name} x${item.count}`).join(", ")}], outside grant [${tools.calledOutsideGrant.join(", ")}]`;
-		lines.push(`  dim tool fit: granted [${tools.granted.join(", ")}]${called}`);
-	}
-	const context = dimensions.contextEfficiency;
-	if (context !== void 0) {
-		const tokens = context.tokens === void 0 ? "" : ` tokens in/out ${context.tokens.uncachedInputTokens}/${context.tokens.outputTokens}`;
-		const compactions = context.compactions === void 0 ? "" : ` compactions ${context.compactions}`;
-		lines.push(`  dim context efficiency:${tokens}${compactions}`);
-	}
-	return lines;
-}
-/**
-* One review line, with the session id a reader drills into. Printing it here
-* is what lets a diagnosis point `session_trace` at the session the review came
-* from without a second lookup (§2.7.5).
-*/
-function renderReview(review) {
-	const duration = review.durationMs === void 0 ? "" : ` duration ${review.durationMs}ms`;
-	const session = review.sessionId === void 0 ? "" : ` session ${review.sessionId}`;
-	const lines = [`- review ${reviewRef(review)} [${review.outcome}]${duration} evidence: [${review.evidenceRefs.join(", ")}]${session}`];
-	if (review.localizedCause !== void 0) lines.push(`  cause: ${review.localizedCause}`);
-	for (const anomaly of review.anomalies) lines.push(`  anomaly: ${anomaly}`);
-	for (const criterion of review.criteria ?? []) {
-		const judge = criterion.verifierId === void 0 ? "" : criterion.verifierVersion === void 0 ? ` [${criterion.verifierId}]` : ` [${criterion.verifierId}@${criterion.verifierVersion}]`;
-		const command = criterion.command === void 0 ? "" : ` — $ ${criterion.command}`;
-		const exit = criterion.exitCode === void 0 ? "" : ` exit ${criterion.exitCode}`;
-		const log = criterion.logRef === void 0 ? "" : ` log ${criterion.logRef}`;
-		lines.push(`  criterion ${criterion.criterionId}: ${criterion.verdict}${judge}${exit}${command}${log}`);
-	}
-	for (const blocker of review.blockedBy ?? []) lines.push(`  blockedBy ${blocker.taskId} [${blocker.outcome}]`);
-	if (review.metrics !== void 0) {
-		const metrics = renderMetrics(review.metrics);
-		if (metrics.length > 0) lines.push(`  metrics: ${metrics}`);
-	}
-	if (review.dimensions !== void 0) lines.push(...renderDimensions(review.dimensions));
-	if (review.logTail !== void 0) lines.push("  logTail:", ...review.logTail.split("\n").map((line) => `    ${line}`));
-	return lines;
-}
-/**
-* One diagnosis, with its agent judgements kept visually apart from the
-* mechanical facts above: the facts say what was observed, a judgement says
-* what an agent concluded, and the header names the session so the two are
-* never read as one table.
-*/
-function renderDiagnosis(diagnosis) {
-	const producer = diagnosis.producedBy === void 0 ? "" : diagnosis.producedBy.kind === "agent" && diagnosis.producedBy.sessionId !== void 0 ? ` [agent ${diagnosis.producedBy.sessionId}]` : ` [${diagnosis.producedBy.kind}]`;
-	const lines = [`- ${diagnosis.diagnosisId} [${diagnosis.confidence}] ${diagnosis.localizedCause}${producer}`];
-	if (diagnosis.judgements !== void 0 && diagnosis.judgements.length > 0) {
-		const header = diagnosis.producedBy?.kind === "agent" && diagnosis.producedBy.sessionId !== void 0 ? `judgements (agent ${diagnosis.producedBy.sessionId})` : "judgements";
-		lines.push(`  ${header}:`);
-		for (const judgement of diagnosis.judgements) lines.push(`    ${judgement.dimension}: ${judgement.verdict} — ${judgement.rationale} refs [${judgement.evidenceRefs.join(", ")}]`);
-	}
-	for (const proposal of diagnosis.proposals) lines.push(`  proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`);
-	return lines;
-}
-/**
-* What each of the task's runs was bound to and loaded (S1-C item 4): one line
-* per run that recorded a binding, naming the registry revision, the providers
-* (skill, role, short content digest) and the granted MCP servers. This is what
-* makes "which version did this execution run against?" answerable from the
-* pack, next to the run ids the reviews above already cite.
-*
-* The pack reports the record; it does not re-read the snapshots. It is the
-* facts sheet a reviewer starts from, and the bytes are re-checked by the
-* entries that act on them (`task_read`, a run re-entry) — a line here says what
-* the run was bound to, never that the content is still on disk. A run that
-* carries no binding (one written before the field existed, or one whose caller
-* assembled its plan without a pre-check) contributes no line, and nothing is
-* invented for it.
-*/
-function renderBindings(snapshot, taskId) {
-	const lines = [];
-	for (const run of snapshot.runs.filter((item) => item.taskId === taskId)) {
-		const binding = run.providerBinding;
-		if (binding === void 0) continue;
-		const skills = binding.skills.length === 0 ? "no provider skill" : binding.skills.map((skill) => `${skill.name} [${skill.role}] content ${skill.contentDigest.slice(0, 12)}${skill.contractDigest === null ? "" : ` contract ${skill.contractDigest.slice(0, 12)}`}`).join("; ");
-		const servers = binding.mcpServers.length === 0 ? "" : `; mcp ${binding.mcpServers.map((server) => server.serverName).join(", ")}`;
-		const snapshotRoot = binding.snapshotRoot === void 0 ? "" : `; snapshot ${binding.snapshotRoot}`;
-		lines.push(`- run ${run.runId} [${run.status}] bound registry ${binding.registryRevision.slice(0, 12)}: ${skills}${servers}${snapshotRoot}`);
-	}
-	return lines;
-}
-/**
-* The pack for one task: the facts first (reviews, dependency edges,
-* parent/child summaries), then the escalation decision, then the judgement
-* dimensions the facts cannot settle, then the diagnoses that explain them.
-* @throws when `taskId` is not in the snapshot.
-*/
-function buildReviewPack(snapshot, taskId, escalation) {
-	const task = snapshot.tasks.find((item) => item.taskId === taskId);
-	if (task === void 0) throw new Error(`task_review_pack: unknown task "${taskId}"`);
-	const reviews = snapshot.reviews.filter((item) => item.taskId === task.taskId);
-	const parent = task.parentTaskId === void 0 ? void 0 : snapshot.tasks.find((item) => item.taskId === task.parentTaskId);
-	const incoming = snapshot.edges.filter((edge) => edge.to === task.taskId).map((edge) => edge.from);
-	const outgoing = snapshot.edges.filter((edge) => edge.from === task.taskId).map((edge) => edge.to);
-	const diagnoses = snapshot.diagnoses.filter((item) => item.taskId === task.taskId);
-	const lines = [
-		`review pack for task ${task.taskId} [${task.status}] depth ${task.depth}`,
-		`objective: ${task.objective}`,
-		`dependencies: must verify first [${incoming.join(", ")}]; blocks [${outgoing.join(", ")}]`,
-		renderEscalation(escalation),
-		renderJudgementDimensions(),
-		`reviews (${reviews.length}):`,
-		...reviews.flatMap(renderReview),
-		...renderBindings(snapshot, task.taskId)
-	];
-	if (parent !== void 0) lines.push(`parent ${parent.taskId} [${parent.status}]: ${reviewSummary(snapshot, parent.taskId)}`);
-	lines.push(`children (${task.childTaskIds.length}):`);
-	for (const childId of task.childTaskIds) {
-		const child = snapshot.tasks.find((item) => item.taskId === childId);
-		if (child === void 0) continue;
-		lines.push(`- ${child.taskId} [${child.status}]: ${reviewSummary(snapshot, child.taskId)}`);
-	}
-	lines.push(`diagnoses (${diagnoses.length}):`);
-	for (const diagnosis of diagnoses) lines.push(...renderDiagnosis(diagnosis));
-	return lines.join("\n");
-}
-function defineTaskReviewPackTool(ctx) {
-	return defineTool({
-		name: "task_review_pack",
-		description: "Read-only. Assemble the diagnosis input pack for one task: the task itself, all its review records in full (criteria, log tail, blockers, the session each review came from), the machine escalation decision, the six dimensions whose conclusion the fact table does not carry, one-line review summaries of its children and parent, the dependency edges touching it, and its diagnoses with any agent judgements. Local evidence plus parent/children summaries — no ancestry replay (guide §2.7.5). Feed this to task_diagnose, or to task_review_agent when escalation requires a judgement.",
-		parameters: { taskId: {
-			type: "string",
-			required: true,
-			description: "Task to assemble the pack for"
-		} },
-		output: {
-			schema: { type: "string" },
-			render: (_a, v) => text$4(v)
-		},
-		execute: async (args, exec) => {
-			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(sessionId$3(exec))).rootSessionId);
-			const snapshot = await ctx.task.openStore(storeId);
-			const used = await countReviewAgentRuns(storeId);
-			const escalation = computeEscalation(snapshot, args.taskId, {
-				used,
-				max: reviewAgentBudget()
-			});
-			return buildReviewPack(snapshot, args.taskId, escalation);
 		}
 	});
 }
@@ -4040,141 +4931,104 @@ const text$3 = (value) => [{
 	type: "text",
 	text: value
 }];
-/** The preset the review agent mounts (`$DSH_HOME/.agent-presets/singularity-reviewer/`). */
-const REVIEWER_PRESET = "singularity-reviewer";
-/**
-* The review agent's whole tool surface. Read-only by construction: the grant
-* allow-list is this list intersected with what the composition offers, so
-* `bash`, `write`, `edit`, `jobs`, `subagent`, `graph_spawn`, `hitl_*` and
-* `evolution_*` are absent however the deployment is composed. Session history
-* is read with `context_read` — the one reference reader, authorized by the
-* reviewer's delegated graph domain; the raw cross-session tools it replaced
-* are sealed on every runtime-owned agent (`agent-runtime`'s execution guard).
-*/
-const REVIEWER_BASELINE = [
-	"task_review_pack",
-	"task_read",
-	"task_status",
-	"context_read",
-	"capability_list",
-	"read",
-	"glob",
-	"grep",
-	"skill"
-];
-/** The capability grant one review agent is spawned with. */
-function reviewerGrant() {
-	return {
-		capabilities: [],
-		baseline: REVIEWER_BASELINE,
-		keepPresetTools: false
-	};
-}
-/** Default watchdog deadline for one review agent (10 minutes). */
-const REVIEW_AGENT_TIMEOUT_MS = 6e5;
 function sessionId$2(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_review_agent: missing agent id");
-	return id;
+	return SessionId(id);
 }
-/** The last top-level brace-balanced object in the text, if any (fallback when no fence parses). */
-function lastBalancedObject(source) {
-	let depth = 0;
-	let start = -1;
-	let last;
-	for (let index = 0; index < source.length; index += 1) {
-		const char = source[index];
-		if (char === "{") {
-			if (depth === 0) start = index;
-			depth += 1;
-		} else if (char === "}") {
-			depth -= 1;
-			if (depth === 0 && start >= 0) last = source.slice(start, index + 1);
-		}
-	}
-	return last;
+/** A free-text argument, or `null` when the caller gave none: empty and whitespace-only read as none. */
+function optionalText(value) {
+	return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+/** How one attempt is named in a result, in the words the source's caller uses. */
+function attemptLabel(attempt) {
+	return attempt.requestKey === null ? "default attempt" : `requestKey "${attempt.requestKey}"`;
 }
 /**
-* Pull the judgement list out of the reviewer's reply. The last fenced block
-* wins, then the last balanced object; a reply with neither parses as nothing,
-* which the caller turns into six `unknown` judgements rather than a failure.
+* What one attempt the caller asked for already is: its identity, how it ended,
+* and — when it recorded a judgement — the same lines the attempt's own call
+* returned. A repeat is answered from the ledger and the store; nothing is
+* spawned and nothing is written (beyond the recovery note the admission may
+* have just appended for an attempt that never reached model input).
 */
-function parseReviewerJudgements(reply) {
-	if (reply === void 0) return void 0;
-	const fenced = [...reply.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((match) => match[1]);
-	const candidates = [fenced[fenced.length - 1], lastBalancedObject(reply)].filter((value) => value !== void 0);
-	for (const candidate of candidates) try {
-		const parsed = JSON.parse(candidate);
-		const list = Array.isArray(parsed) ? parsed : parsed?.judgements;
-		if (Array.isArray(list)) return list;
-	} catch {}
+function renderExistingAttempt(attempt, snapshot) {
+	const diagnosis = recordedDiagnosis(snapshot, attempt.sessionId);
+	const status = attempt.settlement?.status ?? (diagnosis === void 0 ? "started" : "recorded");
+	const head = `task_review_agent: source ${sourceRef(attempt.source)} already has this attempt (${attemptLabel(attempt)}, session ${attempt.sessionId}, ${status}${attempt.settlement?.note === void 0 ? "" : `: ${attempt.settlement.note}`}) — returning it; no review agent started`;
+	if (diagnosis === void 0) return status === "interrupted" ? `${head}; a new review for this source needs an explicit requestKey` : `${head}; its diagnosis is not in the store`;
+	const lines = [
+		head,
+		`observation: ${diagnosis.observedFailure}`,
+		`conclusion: ${diagnosis.localizedCause}`
+	];
+	if (diagnosis.judgements !== void 0 && diagnosis.judgements.length > 0) lines.push(`judgements (agent ${attempt.sessionId}):`, ...renderJudgements(diagnosis.judgements));
+	lines.push(`diagnosis ${diagnosis.diagnosisId} recorded [${diagnosis.confidence}]`);
+	if (diagnosis.proposals.length === 0) lines.push("proposals: none — the conclusion carries no suggestion");
+	else for (const proposal of diagnosis.proposals) lines.push(`proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`);
+	return lines.join("\n");
+}
+/** What one refusal says, by name, before any claim or spawn exists. */
+function renderRefusal(plan, source, storeId) {
+	const label = plan.attempt === void 0 ? "" : attemptLabel(plan.attempt);
+	if (plan.code === "request-key-conflict") return `task_review_agent: ${plan.attempt.requestKey === null ? `source ${sourceRef(source)} already has a ${label}` : `${label} already names an attempt for source ${sourceRef(source)}`} with a different reason (${JSON.stringify(plan.attempt?.reason ?? null)}); refusing — a key names one review focus and cannot be changed (session ${plan.attempt?.sessionId}); no review agent started`;
+	if (plan.code === "request-key-required") {
+		const held = plan.attempts.map((attempt) => `${attemptLabel(attempt)} ${attempt.sessionId}`).join(", ");
+		return `task_review_agent: source ${sourceRef(source)} was already reviewed (${held}) and this request names no key; a new review for a reviewed source needs an explicit requestKey — no review agent started`;
+	}
+	return `task_review_agent: budget exhausted (${plan.budget.used}/${plan.budget.max}) for store ${storeId} — no review agent started`;
 }
 /**
-* Normalize a reviewer reply into exactly one judgement per judged dimension.
-* Missing dimensions become `unknown`; a verdict outside the vocabulary becomes
-* `unknown`; and a judgement with no evidence ref is downgraded to `unknown`
-* with the review ref cited, because evidence that settles nothing must not
-* read as a conclusion.
+* What one request that arrived while an attempt was open is answered with.
+*
+* Only one state reaches this text: an attempt this process is really running
+* right now. An attempt a dead process left is recovered inside the admission's
+* region before the request is decided, so it can never be reported here as
+* something in flight — and never written off for being slow, either.
 */
-function normalizeJudgements(raw, fallbackRef, missingRationale) {
-	return JUDGED_DIMENSIONS.map((dimension) => {
-		const entry = [...raw ?? []].reverse().find((item) => item.dimension === dimension);
-		if (entry === void 0) return {
-			dimension,
-			verdict: "unknown",
-			evidenceRefs: [fallbackRef],
-			rationale: missingRationale
-		};
-		const refs = Array.isArray(entry.evidenceRefs) ? entry.evidenceRefs.filter((value) => typeof value === "string" && value.length > 0) : [];
-		const rationale = typeof entry.rationale === "string" && entry.rationale.length > 0 ? entry.rationale : "no rationale provided";
-		const verdict = JUDGEMENT_VERDICTS.includes(entry.verdict) ? entry.verdict : "unknown";
-		if (refs.length === 0) return {
-			dimension,
-			verdict: "unknown",
-			evidenceRefs: [fallbackRef],
-			rationale: `${rationale} (evidenceRefs empty — downgraded to unknown)`
-		};
-		return {
-			dimension,
-			verdict,
-			evidenceRefs: refs,
-			rationale
-		};
-	});
+function renderOpenAttempt(attempt) {
+	return `task_review_agent: source ${sourceRef(attempt.source)} already has an attempt in flight (${attemptLabel(attempt)}, session ${attempt.sessionId}, run by this process right now) — the new request was not accepted; attempts of one source never run in parallel; no review agent started`;
 }
-/** A mechanical restatement of the judgements — what was concluded, not an invented cause. */
-function renderCause(taskId, judgements) {
-	const by = (verdict) => judgements.filter((item) => item.verdict === verdict).map((item) => item.dimension);
-	const parts = [];
-	for (const verdict of [
-		"inadequate",
-		"unknown",
-		"adequate"
-	]) {
-		const dimensions = by(verdict);
-		if (dimensions.length > 0) parts.push(`${verdict} [${dimensions.join(", ")}]`);
+/** The answer one attempt ended with, rendered for its caller. */
+function renderOutcome(outcome, source, storeId, snapshot, review) {
+	switch (outcome.kind) {
+		case "refused": return renderRefusal(outcome.plan, source, storeId);
+		case "reuse": return renderExistingAttempt(outcome.attempt, snapshot);
+		case "in-flight": return renderOpenAttempt(outcome.attempt);
+		case "spawn-failed": return `task_review_agent: spawn failed: ${outcome.failure} (source ${sourceRef(source)}, attempt ${outcome.sessionId} recorded interrupted); no review agent started`;
+		case "unrecorded": return `task_review_agent: diagnosis produced but not recorded: ${outcome.failure}`;
+		case "no-diagnosis": return `task_review_agent: review agent ${outcome.sessionId} ended without a diagnosis — ${outcome.failure} (source ${sourceRef(source)}, attempt ${outcome.sessionId} recorded interrupted); no diagnosis was recorded and nothing was invented from its silence`;
+		case "recorded": return [
+			`task_review_agent: review agent ${outcome.sessionId} judged task ${source.taskId} (source ${sourceRef(source)}; the review it read settled ${review.outcome})`,
+			`observation: ${outcome.observation}`,
+			`conclusion: ${outcome.conclusion}`,
+			...outcome.judgements.length === 0 ? [] : [`judgements (agent ${outcome.sessionId}):`, ...renderJudgements(outcome.judgements)],
+			`diagnosis ${outcome.diagnosisId} recorded [${outcome.confidence}]`,
+			...outcome.proposals.length === 0 ? ["proposals: none — the conclusion carries no suggestion"] : [`proposals (${outcome.proposals.length}, suggestions only — none auto-executes):`, ...outcome.proposals.map((item) => `- ${item.targetType} ${item.targetId}: ${item.rationale}`)]
+		].join("\n");
 	}
-	return `agent review of ${taskId}: ${parts.join("; ")}`;
-}
-/** The judged dimensions rendered as report lines (agent judgements, kept apart from the fact lines). */
-function renderJudgements(judgements) {
-	return judgements.map((item) => `  ${item.dimension}: ${item.verdict} — ${item.rationale} refs [${item.evidenceRefs.join(", ")}]`);
-}
-function lastAssistantText(events) {
-	const event = [...events].reverse().find((item) => item.type === "assistant/message");
-	if (event === void 0) return void 0;
-	const content = ((event.data?.message)?.content ?? []).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n");
-	return content.length === 0 ? void 0 : content;
 }
 function defineTaskReviewAgentTool(ctx) {
 	return defineTool({
 		name: "task_review_agent",
-		description: "Spawn ONE read-only review agent for a task, take its structured judgement of the six dimensions the fact table cannot settle (task_specification, acceptance, decomposition, skill_fit, tool_fit, context_efficiency), and persist that judgement as a Diagnosis. Each dimension returns verdict adequate|inadequate|unknown, required evidence refs, and a rationale — never a score; evidence that does not settle a dimension must be unknown. The reviewer has no write, shell, spawn, or evolution tool. It runs only when task_review_pack's escalation criterion fires, is capped per root store (default 1), and is cancelled by a watchdog if it overruns.",
+		description: "Spawn ONE read-only review agent for one exact review source — a task and the run under review, or runId null for a review that carries no run (a task blocked before it started) — take the diagnosis it produces, and persist it as a Diagnosis. The reviewer reads the review pack and, beyond it, whatever settles the question through its own context reads. What it returns is an observation (the postmortem observation — what really happened, for a successful source as much as a failed one), a conclusion in its own words (\"no improvement needed\" and \"the evidence does not settle this\" are conclusions), a confidence, and — only when it made them — judgements and proposals. A judgement names one of the dimensions no parser settles (task_specification, acceptance, decomposition, skill_fit, tool_fit, context_efficiency) with verdict adequate|inadequate|unknown, the refs it rests on and a rationale; judgements are optional and never padded, and a judgement that cites nothing is refused rather than downgraded. A proposal is a suggestion only: it names a target type the diagnosis does not freeze, and nothing here executes it. reason names what the review should focus on. A reviewer that times out, is cancelled, or answers without a diagnosis leaves an interrupted attempt with the reason named and records no Diagnosis. One source has one default attempt: a repeat of the same call (an automatic scan and an explicit call share it) returns that attempt and its result instead of starting another, and never spends the budget again. Reviewing the same source again after that attempt ended is an explicit act: pass a new non-empty requestKey, which is persisted with the source and the focus; the same key with a different reason is refused. While an attempt of the source is in flight the call returns its identity and starts nothing. The reviewer has no write, shell, spawn, or evolution tool, is capped per root store (default 1), and is cancelled by a watchdog if it overruns.",
 		parameters: {
 			taskId: {
 				type: "string",
 				required: true,
 				description: "Task whose review needs judgement"
+			},
+			runId: {
+				oneOf: [{ type: "string" }, { type: "null" }],
+				required: true,
+				description: "The Run under review, exactly as its review record names it; null selects a review with no run"
+			},
+			reason: {
+				type: "string",
+				description: "Optional non-empty free text: what this review should focus on"
+			},
+			requestKey: {
+				type: "string",
+				description: "Optional non-empty key for an explicit further review of the same source; omit for the source's default attempt"
 			},
 			timeoutMs: {
 				type: "number",
@@ -4188,127 +5042,27 @@ function defineTaskReviewAgentTool(ctx) {
 		execute: async (args, exec) => {
 			const caller = sessionId$2(exec);
 			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(caller)).rootSessionId);
-			const snapshot = await ctx.task.openStore(storeId);
-			if (snapshot.tasks.find((item) => item.taskId === args.taskId) === void 0) return `task_review_agent: unknown task "${args.taskId}"`;
-			const review = latestReview(snapshot, args.taskId);
-			if (review === void 0) return `task_review_agent: task ${args.taskId} has no review record; nothing to judge`;
-			const outcome = await admitReviewAgent(storeId, async (admission) => {
-				const used = admission.started;
-				const max = reviewAgentBudget();
-				const current = await ctx.task.snapshotIn(storeId);
-				const escalation$1 = computeEscalation(current, args.taskId, {
-					used,
-					max
-				});
-				if (used >= max) return {
-					kind: "refused",
-					text: `task_review_agent: budget exhausted (${used}/${max}) for store ${storeId}${escalation$1.suppressed.length > 0 ? `; suppressed ${escalation$1.suppressed.join(", ")}` : ""} — no review agent spawned`
-				};
-				if (!escalation$1.required) return {
-					kind: "refused",
-					text: `task_review_agent: escalation is not required for task ${args.taskId} (budget ${used}/${max}); no review agent spawned`
-				};
-				const timeoutMs$1 = Number.isFinite(args.timeoutMs) && args.timeoutMs > 0 ? Math.floor(args.timeoutMs) : REVIEW_AGENT_TIMEOUT_MS;
-				const ref$1 = reviewRef(review);
-				const pack = buildReviewPack(current, args.taskId, escalation$1);
-				const prompt = [
-					"You are a Singularity review agent. Judge six dimensions of the task below from the review pack, and nothing else.",
-					"Do not score. Do not modify anything. Cite only refs printed in the pack (evidence ids, review refs like `task#run`, or session ids).",
-					"When the pack does not settle a dimension, return verdict \"unknown\" — never guess.",
-					"Return EXACTLY one fenced json block, no prose around it:",
-					"```json",
-					"{\"judgements\":[{\"dimension\":\"task_specification\",\"verdict\":\"adequate|inadequate|unknown\",\"evidenceRefs\":[\"...\"],\"rationale\":\"...\"}]}",
-					"```",
-					`Include all six dimensions exactly once: ${JUDGED_DIMENSIONS.join(", ")}.`,
-					"",
-					"--- review pack ---",
-					pack
-				].join("\n");
-				const reviewerSessionId$1 = SessionId(randomUUID());
-				let spawnFailure;
-				const handle$1 = await ctx.agentRuntime.spawn(exec.agent, {
-					sessionId: reviewerSessionId$1,
-					name: `review ${args.taskId}`,
-					prompt: [{
-						type: "text",
-						text: prompt
-					}],
-					agentPreset: REVIEWER_PRESET,
-					grant: reviewerGrant(),
-					beforePrompt: async () => {
-						await admission.start({
-							taskId: args.taskId,
-							sessionId: reviewerSessionId$1,
-							actor: caller
-						});
-						const back = await readReviewerDelegation(reviewerSessionId$1);
-						if (back === void 0 || back.rootStoreId !== storeId || back.taskId !== args.taskId) throw new Error(`task_review_agent: the delegation of reviewer session "${reviewerSessionId$1}" could not be read back from the ledger (expected task ${args.taskId} in ${storeId}); no model input was sent`);
-					},
-					signal: exec.signal
-				}).catch((error) => {
-					spawnFailure = error instanceof Error ? error.message : String(error);
-				});
-				if (handle$1 === void 0) return {
-					kind: "refused",
-					text: `task_review_agent: spawn failed: ${spawnFailure ?? "unknown error"}`
-				};
-				return {
-					kind: "spawned",
-					handle: handle$1,
-					escalation: escalation$1,
-					ref: ref$1,
-					timeoutMs: timeoutMs$1,
-					reviewerSessionId: reviewerSessionId$1
-				};
-			});
-			if (outcome.kind === "refused") return outcome.text;
-			const { handle, escalation, ref, timeoutMs, reviewerSessionId } = outcome;
-			const cancel = () => handle.agent.cancel({ kind: "parent" });
-			exec.signal.addEventListener("abort", cancel, { once: true });
-			let timer;
-			let timedOut = false;
-			const deadline = new Promise((resolve$1) => {
-				timer = setTimeout(() => {
-					timedOut = true;
-					resolve$1("timeout");
-				}, timeoutMs);
-			});
-			const idle = handle.agent.whenIdle().then(() => "idle").catch(() => "failed");
-			const reviewOutcome = await Promise.race([idle, deadline]);
-			if (timer !== void 0) clearTimeout(timer);
-			exec.signal.removeEventListener("abort", cancel);
-			if (reviewOutcome === "timeout") handle.agent.cancel({ kind: "parent" });
-			const reply = timedOut ? void 0 : lastAssistantText(handle.agent.session.snapshotEvents());
-			const parsed = timedOut ? void 0 : parseReviewerJudgements(reply);
-			const judgements = normalizeJudgements(parsed, ref, timedOut ? `review agent timed out after ${timeoutMs}ms with no judgement` : "no judgement returned for this dimension");
-			const confidence = timedOut || parsed === void 0 ? "low" : judgements.some((item) => item.verdict === "unknown") ? "medium" : "high";
-			const diagnosis = {
-				diagnosisId: `review-agent-${reviewerSessionId}`,
+			const source = {
 				taskId: args.taskId,
-				observedFailure: review.localizedCause ?? review.anomalies[0] ?? `escalation ${escalation.reasons.join(", ")} fired with no terminal failure text`,
-				scope: `task ${args.taskId}`,
-				localizedCause: renderCause(args.taskId, judgements),
-				evidenceRefs: review.evidenceRefs,
-				reviewRefs: [ref],
-				confidence,
-				proposals: [],
-				producedBy: {
-					kind: "agent",
-					sessionId: reviewerSessionId
-				},
-				judgements
+				runId: args.runId
 			};
-			try {
-				await ctx.task.recordDiagnosisIn(storeId, diagnosis, caller);
-			} catch (error) {
-				return `task_review_agent: judgement produced but not recorded: ${error instanceof Error ? error.message : String(error)}`;
-			}
-			return [
-				timedOut ? `task_review_agent: review agent ${reviewerSessionId} timed out after ${timeoutMs}ms; cancelled. All six dimensions recorded unknown.` : `task_review_agent: review agent ${reviewerSessionId} judged task ${args.taskId} (escalation ${escalation.reasons.join(", ") || "none"})`,
-				`judgements (agent ${reviewerSessionId}):`,
-				...renderJudgements(judgements),
-				`diagnosis ${diagnosis.diagnosisId} recorded [${confidence}]`
-			].join("\n");
+			const snapshot = await ctx.task.openStore(storeId);
+			if (snapshot.tasks.find((item) => item.taskId === args.taskId) === void 0) return `task_review_agent: unknown task "${args.taskId}" in store ${storeId} (the caller's graph root); no review agent started`;
+			if (args.runId !== null && !snapshot.runs.some((run) => run.runId === args.runId && run.taskId === args.taskId)) return `task_review_agent: run "${args.runId}" is not a run of task "${args.taskId}"; no review agent started`;
+			const review = reviewForSource(snapshot, source);
+			if (review === void 0) return `task_review_agent: no review record for source ${sourceRef(source)} in store ${storeId}; no review agent started`;
+			return renderOutcome(await runReviewAgentAttempt({
+				ctx,
+				storeId,
+				source,
+				review,
+				parent: exec.agent,
+				actor: caller,
+				requestKey: optionalText(args.requestKey),
+				reason: optionalText(args.reason),
+				...args.timeoutMs === void 0 ? {} : { timeoutMs: args.timeoutMs },
+				signal: exec.signal
+			}), source, storeId, snapshot, review);
 		}
 	});
 }
@@ -4556,6 +5310,7 @@ var SingularityAgent = class extends Service {
 		new ProposalReviewService(ctx);
 		new EvolutionExposure(ctx, evolution === "on");
 		ctx.effect(() => ctx.singularityContext.registerReviewerBindingSource(reviewerBindingSource()), "singularityAgent: reviewer binding source");
+		ctx.effect(() => installReviewAgentAutoTrigger(ctx), "singularityAgent: review agent auto trigger");
 		ctx.effect(() => ctx.taskRuntime.registerRootBudgetApproval(defineRootBudgetApproval(ctx)), "singularityAgent: root budget approval");
 		ctx.tools.register(defineMarkReadyTool(ctx));
 		ctx.tools.register(defineSpawnTool(ctx));

@@ -51,7 +51,6 @@ import type {
   Diagnosis,
   ExecutionPhase,
   Obligation,
-  ProposalTargetType,
   ReviewRecord,
   RunId,
   RunProviderBinding,
@@ -73,11 +72,6 @@ function copy<T>(value: T): T {
 const ADMITTED_OR_LATER: readonly TaskStatus[] = ['admitted', 'ready', 'running', 'verifying', 'verified', 'failed']
 
 const EXECUTION_PHASES: readonly ExecutionPhase[] = ['active', 'waiting_children', 'submitted']
-
-const PROPOSAL_TARGET_TYPES: readonly ProposalTargetType[] = [
-  'skill', 'tool', 'capability', 'task_definition', 'decomposition_policy',
-  'agent_preset', 'workflow_policy', 'verifier', 'runtime_policy',
-]
 
 /**
  * The statuses each decision may be taken from — the one thing a decision's
@@ -1037,7 +1031,10 @@ export class TaskState {
    * enforces is integrity, not timing — the id is unique across the store
    * (a repeat write is a bug, not an update), every field is present and
    * well-formed, the diagnosis rests on at least one evidence or review ref,
-   * and every proposal names one of the nine frozen target types (§2.7.6).
+   * and every proposal names a non-empty target type. That name is open on
+   * purpose (A5): a diagnosis explains, and a suggestion whose target type no
+   * executor exists for is a recorded suggestion — refused by name at the
+   * entry that would convert it into an executable proposal, not here.
    *
    * The two optional additions are checked the same way: `producedBy` must name
    * a known producer kind (and a non-empty session when it carries one), and
@@ -1068,8 +1065,8 @@ export class TaskState {
     }
     if (!Array.isArray(diagnosis.proposals)) throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" proposals must be an array`)
     for (const proposal of diagnosis.proposals) {
-      if (!PROPOSAL_TARGET_TYPES.includes(proposal.targetType)) {
-        throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" proposal target type must be one of ${PROPOSAL_TARGET_TYPES.join(', ')}`)
+      if (!nonEmpty(proposal.targetType)) {
+        throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" proposal target type must be a non-empty string`)
       }
       if (!nonEmpty(proposal.targetId) || !nonEmpty(proposal.rationale)) {
         throw new Error(`task: diagnosis "${diagnosis.diagnosisId}" proposal requires a target id and a rationale`)
