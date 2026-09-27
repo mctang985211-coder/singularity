@@ -31,7 +31,7 @@
 | 12b | K2：应用与回滚可恢复 | **已验收（2026-09-27 交付，同日返工与复审返工闭合，独立审核通过）**：K2-1～K2-5 与公共检查全绿；ledger 单版本切换 formatVersion 3（commit_intent 意图 + 完成行 intentId），意图与可恢复来源经唯一 durable append/fsync 先于生产替换，原子替换与启动/恢复对账，准入阻断开放意图目标；现场 v1 旧账按原字节归档；返工补齐：来源在意图前重验并 fsync、rename 后目录 fsync 失败具名且不记完成、真实死亡遗留的 staging 残留被清理、真实子进程 SIGKILL（三窗口 ×apply/rollback）端到端恢复证据；复审返工补：新 apply/rollback 在写入前按生产目标阻断其他 proposal 的未结意图（配合旧 rollback 覆盖保护，两个 proposal 竞争同一目标时只有匹配当前基线者可写） | 实现主代理 + 子代理 | [完整合同 prompt](execution-prompts/12b-k2-evolution-commit.md)、[交付记录](history/2026-09-27-k2-delivery-record.md)、[独立审核](history/2026-09-27-k2-review.md) | K2-1～K2-5：意图、原子替换、对账与真实准入阻断；进度审核通过后才派 K3 |
 | 12c | K3：完整 Skill 改进单位 | **已验收（2026-09-27，含审查返工）**：K3-1～K3-5 与公共检查全绿；改进单位=完整对象（指导型仅 SKILL.md；执行型 SKILL.md+SKILL.contract.json 两固定文件、resources=[]），候选 sidecar 由生产派生只重算 content.skillMdSha256、不借内容更新提权；commit_intent 携带固定文件集、逐文件原子写、记完成前完整对象可加载复检；准入闸按目录阻断开放意图；ledger formatVersion 4、实验报告 formatVersion 3；独立复核发现的一处真实缺陷（恢复屏障告警读已删字段）与两处覆盖缺口已同票闭合；**返工**闭合两项可达缺陷——指导型生产目录的未声明文件/词表外条目在 prepare 具名拒绝零写；提交前新增整对象写前闸（1 文件用 loader 判定角色与未声明资源、2 文件要求目录条目恰为对象自身文件，混合态放行；新鲜提交零行零写、恢复 blocked 批次不中断），rollback 与恢复重试不再"先写后验" | 实现主代理 + 子代理 | [完整合同 prompt](execution-prompts/12c-k3-skill-unit.md)、[交付记录](history/2026-09-27-k3-delivery-record.md)、[返工记录](history/2026-09-27-k3-rework-record.md)、[独立审核](history/2026-09-27-k3-review.md) | K3-1～K3-5：已有执行型 Skill 同名更新、双侧评估与整组回滚；进度审核通过后才派 K4 |
 | 12d | K4：复盘与执行预算分离 | **已验收（2026-09-27，含精简重做及定向返工）**：`f670e83` 复审未通过、`25af727` 为未验收中止现场；本轮删除审批日志/摘要授权与公开 commit 接力，改为同一次调用内直接审批（runtime 自冻整份读数 + 装配期装入的 DSH 审批回调），reviewer 只读持久 started、同 store 串行受理、不留计数缓存/预留账。冻结行为及删除清单只维护在本票合同；原交付见重做记录；本轮交付删除重复文本并从 src 重建 `task-runtime/lib`，使返工行为进入产物；K4-3 反例已闭合并经定向红→绿与独立审核验证：同键同内容的两问审被混合批复时，拒绝路径按同键重读一次持久记录，返回已有记录（零追加）或无记录仍具名拒绝零写；A5 入口顺序归 A5，同进程装配替换不属模型面越权，详见审核范围纠正 | 实现主代理 + 子代理 | [完整合同 prompt](execution-prompts/12d-k4-review-budget.md)、[独立审核](history/2026-09-27-k4-review.md)、[重做交付记录](history/2026-09-27-k4-rework-delivery-record.md) | K4-1～K4-5，含审批基线交错、文本注入、同键并发与持久计数交错；全部验收后才派 A5 |
-| 13 | A5 + S2-E：诊断与缺口交接 | K1～K4 已验收；待派发，未实施 | 待填 | 本文 F.3、[派发 prompt](execution-prompts/13-a5-s2-e-diagnosis.md) | REV-1～REV-5；消费 K4 预算规则，不重复实现 |
+| 13 | A5 + S2-E：诊断与缺口交接 | **待验收（2026-09-27 交付）**：REV-1～REV-5 独立审核 PASS（首判 REV-3 started 孤儿恢复一项 FAIL，同票返工闭合并复审通过；另收紧 settle 窗口竞态）；公共检查全绿（integration 含 1 例既有 flake 复跑通过） | 实现主代理 + 子代理 | 本文 F.3、[派发 prompt](execution-prompts/13-a5-s2-e-diagnosis.md)、[交付记录](history/2026-09-27-a5-delivery-record.md)、[持久化记录](persistence-changes/2026-09-27-a5-diagnosis-open-target.md) | REV-1～REV-5；消费 K4 预算规则，不重复实现 |
 | 14 | A6 + S2-R + S3：自主改进与恢复 | 待 A5 验收；未实施 | 待填 | 本文 F.4 | EVO-1～EVO-5；复用 K1 批次、K2/K3 提交与 K4 有效预算 |
 
 K1～K4 修正已确认的架构反例；K1 已验收，K2 已验收（含 2026-09-27 同日返工与复审返工，见 12b 行），K3 已验收（见 12c 行），K4 已验收（见 12d 行）；不是全仓整理或提前开放一个残缺版本。四份 prompt 是各票唯一详细合同，本文不复制它们的施工步骤。顺序为 K1 → K2 → K3 → K4 → A5 → A6，每票独立审核后再派下一票。只有 K2 → K3 有直接提交协议依赖，其余串行用于避免共享 runtime/工具合同同时迁移。历史已验收记录不改写，受影响保证按这四票重新验证。
@@ -88,7 +88,7 @@ K1～K4 修正已确认的架构反例；K1 已验收，K2 已验收（含 2026-
 
 S1-V 切片 2 不冒充 C3 自然语言完整证明；S4-E 不冒充所有改进对象的执行器。明确不支持的扩展与已支持路径的缺陷要分开记录。真实模型效果实验使用已完成模块和冻结评估入口，记录授权、预算及效果结果；确定性协议测试不能替代效果证据，实验也不能豁免本表完成闸。
 
-派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。K1 已验收（交付记录见文首表），K2 已验收（[交付记录](history/2026-09-27-k2-delivery-record.md)；同日返工与复审返工均已闭合，见 12b 行），K3 已验收（[交付记录](history/2026-09-27-k3-delivery-record.md)，见 12c 行），K4 已验收（[重做交付记录](history/2026-09-27-k4-rework-delivery-record.md)与[最终审核](history/2026-09-27-k4-review.md)，见 12d 行）；下一票为 A5。历史验收证据保持原样。
+派发入口：[执行 prompt 与公共合同](execution-prompts/README.md)。K1 已验收（交付记录见文首表），K2 已验收（[交付记录](history/2026-09-27-k2-delivery-record.md)；同日返工与复审返工均已闭合，见 12b 行），K3 已验收（[交付记录](history/2026-09-27-k3-delivery-record.md)，见 12c 行），K4 已验收（[重做交付记录](history/2026-09-27-k4-rework-delivery-record.md)与[最终审核](history/2026-09-27-k4-review.md)，见 12d 行）；A5 已交付待验收（[交付记录](history/2026-09-27-a5-delivery-record.md)，见 13 行），A6 待 A5 验收后派发。历史验收证据保持原样。
 
 ## 当前施工合同（D/E/F）
 
@@ -251,7 +251,7 @@ S4-E 的[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md)�
 
 #### F.3 A5 + S2-E：失败自动、成功按需，共用诊断链
 
-**2026-09-26 施工合同修订，A5 尚未实施。** 自动触发只看 **ReviewRecord.outcome=failed**，包括无 Run 的 blocked Task 既有失败 Review；所有符合该条件的源进入受预算约束的诊断受理，不再叠加 `computeEscalation.required` 分类。成功 Review 不自动 spawn。Agent 可按需调用 `task_review_agent` 复盘成功或失败；用户经已有 graph 根会话提出复盘要求，由根 Agent 调同一工具，不另建用户复盘 API。两种触发共用授权、源读取、ledger、reviewer 与 Diagnosis；不预设“哪些成功值得优化”的规则。
+**2026-09-26 施工合同修订；2026-09-27 已按本合同交付，待验收（交付记录见文首表第 13 行链接）。** 自动触发只看 **ReviewRecord.outcome=failed**，包括无 Run 的 blocked Task 既有失败 Review；所有符合该条件的源进入受预算约束的诊断受理，不再叠加 `computeEscalation.required` 分类。成功 Review 不自动 spawn。Agent 可按需调用 `task_review_agent` 复盘成功或失败；用户经已有 graph 根会话提出复盘要求，由根 Agent 调同一工具，不另建用户复盘 API。两种触发共用授权、源读取、ledger、reviewer 与 Diagnosis；不预设“哪些成功值得优化”的规则。
 
 工具合同固定为 `task_review_agent({taskId, runId, reason?, requestKey?})`：runId 必填，字符串指明一次 Run，null 指无 Run Review；reason 是非空自由文本的可选复盘关注点，不是权限或类别。工具从可信调用会话推导 rootStoreId，源键固定为 `(rootStoreId, taskId, runId 或 no-run)`，不用 latest-review 代替指定源。用户自然语言请求由根 Agent 先查来源再选定该引用，首个 reviewer 请求包含真实源 outcome、关注点及引用。终态后的根会话仍允许此协调工具，不能重开业务 Run 或获得生产写权限；跨 graph、源不存在或 run 不匹配在 claim/spawn 前拒绝。
 

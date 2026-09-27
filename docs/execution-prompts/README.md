@@ -1,6 +1,6 @@
 # Singularity 构建任务派发入口
 
-当前（2026-09-27）：K1～K4 已验收；K4 的[最终审核](../history/2026-09-27-k4-review.md)覆盖精简重做与定向返工。下一票 A5，A6 待 A5 验收。顺序及状态以[唯一计划](../2026-09-20-vrtc-code-change-plan.md)为准。
+当前（2026-09-27）：K1～K4 已验收；K4 的[最终审核](../history/2026-09-27-k4-review.md)覆盖精简重做与定向返工。A5 已交付待验收（[交付记录](../history/2026-09-27-a5-delivery-record.md)），A6 待 A5 验收。顺序及状态以[唯一计划](../2026-09-20-vrtc-code-change-plan.md)为准。
 
 | 顺序 | 可直接交给实现主代理的完整合同 |
 |---|---|
@@ -8,7 +8,7 @@
 | K2 | [应用与回滚可恢复](12b-k2-evolution-commit.md) |
 | K3 | [完整 Skill 改进单位](12c-k3-skill-unit.md) |
 | K4 | [复盘与执行预算分离](12d-k4-review-budget.md) |
-| A5 | [自动及按需诊断](13-a5-s2-e-diagnosis.md)，待 K4 验收 |
+| A5 | [自动及按需诊断](13-a5-s2-e-diagnosis.md)，已交付待验收（REV-1～REV-5 独立审核 PASS） |
 | A6 | 待 A5 验收后按计划 F.4 填派发材料 |
 
 K1～K4 的详细合同只维护在各自文件，主 guide/计划记录方向与状态；原 A3/S4-E 施工 prompt 只作历史回归依据。不要同时派四份，也不把前置票工作转交下一票。

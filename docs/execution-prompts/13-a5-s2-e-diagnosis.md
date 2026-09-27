@@ -1,6 +1,6 @@
 # 第 13 项 A5 + S2-E：失败自动、成功按需，共用诊断链
 
-你是本票实现主代理。派发子代理完成以下所有工作。工作区 `/home/ROXY/code/bb_work/harness/packages/singularity`，外层 `/home/ROXY/code/bb_work/harness`。**当前待前置：K1～K4 全部验收后才可派发。** 核对实际 HEAD、工作树及[公共执行合同](README.md)，修改前保存 Git 基线。只读[唯一计划 F.3](../2026-09-20-vrtc-code-change-plan.md)、主 guide 当前状态/§1.4–1.5 和相关源码。不提前并入 A6，不重做 K4。
+你是本票实现主代理。派发子代理完成以下所有工作。工作区 `/home/ROXY/code/bb_work/harness/packages/singularity`，外层 `/home/ROXY/code/bb_work/harness`。**状态（2026-09-27）：已按本合同交付，待验收；REV-1～REV-5 独立审核 PASS，交付记录见 `docs/history/2026-09-27-a5-delivery-record.md`。** 核对实际 HEAD、工作树及[公共执行合同](README.md)，修改前保存 Git 基线。只读[唯一计划 F.3](../2026-09-20-vrtc-code-change-plan.md)、主 guide 当前状态/§1.4–1.5 和相关源码。不提前并入 A6，不重做 K4。
 
 ## 本票交付
 
