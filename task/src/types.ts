@@ -1,4 +1,5 @@
 import type { DecompositionAdmission, TaskContract } from './contract.ts'
+import type { TaskBudgetExtensionClaim, TaskBudgetExtensionIndex } from './budget.ts'
 import type {
   TaskProposal,
   TaskProposalConsumption,
@@ -1111,6 +1112,22 @@ export interface TaskSnapshot {
    * not read it as "no questions": see {@link TaskQuestionIndex}.
    */
   readonly questions?: TaskQuestionIndex
+  /**
+   * The ceilings a person raised on this tree's own budget (K4), in the order
+   * they were recorded and by request key. This is the *only* durable record of
+   * an approved raise: the deployment's own ceilings come from the configuration
+   * and are re-derived from the root's start on every read, while an approved
+   * one is an absolute value that survives a restart, a configuration change and
+   * a replay — which is why the resolver reads it instead of timing anything
+   * again.
+   *
+   * Optional at the type level for the same reason as {@link proposals}, and read
+   * the same way: a snapshot produced by this build's reducer always carries the
+   * index (empty members included), so an absent one means "this reader cannot
+   * see extensions", never "the store holds none". See
+   * {@link TaskBudgetExtensionIndex}.
+   */
+  readonly budgetExtensions?: TaskBudgetExtensionIndex
 }
 
 export interface TaskEventPayloads {
@@ -1273,6 +1290,29 @@ export interface TaskEventPayloads {
   DiagnosisRecorded: { diagnosis: Diagnosis }
   /** A structured "what is still missing" record raised by a failure, a block, or a capability gap; an Obligation is a question, never an action. */
   ObligationRecorded: { obligation: Obligation }
+  /**
+   * A person raised a ceiling of the tree's own budget (K4): the run count the
+   * tree may reach, the instant it must stop by, or both — each recorded as the
+   * pair (the ceiling in force when the request was read → the ceiling approved
+   * now), with the request's identity, the session that asked and the approving
+   * channel's reference.
+   *
+   * The reducer is the gate, and its subject is the *chain*: the envelope must
+   * name the store's own root session and its root task, every pair must be a
+   * raise on the canonical form of its dimension, the declared identity must be
+   * the identity of the content it accompanies, one request key is bound to one
+   * extension (the same key at the same content applies nothing a second time,
+   * at different content is a refusal by name), and a dimension that an earlier
+   * extension already moved must be asked for from *that* value — the value in
+   * force when this commit lands. That last check is what makes the entry's
+   * serial re-read meaningful: two grants approved against the same reading
+   * cannot both stand, and neither is silently re-based on the other's result.
+   *
+   * What it deliberately leaves alone: no run is started, resumed or un-settled,
+   * no task, child or candidate appears, no usage is zeroed, and no per-run
+   * wall time is restarted. An extension moves ceilings and nothing else.
+   */
+  TaskBudgetExtended: { extension: TaskBudgetExtensionClaim }
   /**
    * A proposal enters the store (T2/T3, construction guide §6; root contracts
    * A0 §2): one immutable submission with the policy it was born under, the

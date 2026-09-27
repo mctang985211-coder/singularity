@@ -942,8 +942,16 @@ type WorkerSettlement =
  * losing branch of the race keeps its handlers attached, so a worker that
  * settles after its budget already fired never surfaces an unhandled
  * rejection.
+ *
+ * The budget is a *reading*, not a number: `remaining` is called for the wait it
+ * arms and again whenever that wait elapses, so a timer set under a ceiling a
+ * person has since raised cannot cancel a worker the store still allows (K4).
+ * A timer that fires under a ceiling that did *not* move reads the same bound
+ * again, and that second reading is what cancels — one implementation, so the
+ * in-flight stop and the settled-run judgement can never disagree about which
+ * limit ran out.
  */
-async function awaitWorker(handle: AgentHandle, signal: AbortSignal | undefined, wallTimeMs: number | undefined): Promise<WorkerSettlement> {
+async function awaitWorker(handle: AgentHandle, signal: AbortSignal | undefined, remaining: () => Promise<number>): Promise<WorkerSettlement> {
   const cancel = () => handle.agent.cancel({ kind: 'parent' })
   signal?.addEventListener('abort', cancel, { once: true })
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -951,19 +959,32 @@ async function awaitWorker(handle: AgentHandle, signal: AbortSignal | undefined,
     const idle: Promise<WorkerSettlement> = handle.agent.whenIdle()
       .then((): WorkerSettlement => ({ kind: 'idle' }))
       .catch((error): WorkerSettlement => isAborted(signal) ? { kind: 'aborted' } : { kind: 'failed', reason: message(error) })
-    const branches: Promise<WorkerSettlement>[] = [idle]
-    if (wallTimeMs !== undefined) {
-      branches.push(new Promise<WorkerSettlement>(resolve => {
-        timer = setTimeout(() => resolve({ kind: 'budget-exhausted' }), wallTimeMs)
-        if (typeof timer.unref === 'function') timer.unref()
-      }))
+    for (;;) {
+      const budgetMs = await remaining()
+      if (Number.isFinite(budgetMs) && budgetMs <= 0) {
+        cancel()
+        return { kind: 'budget-exhausted' }
+      }
+      // `Infinity` is a budget with no bound in force at all: nothing can elapse,
+      // so the only two endings are the worker's own behaviour and the abort.
+      const branches: Promise<WorkerSettlement | { kind: 'wake' }>[] = [idle]
+      if (Number.isFinite(budgetMs)) {
+        branches.push(new Promise<{ kind: 'wake' }>(resolve => {
+          timer = setTimeout(() => resolve({ kind: 'wake' }), budgetMs)
+          if (typeof timer.unref === 'function') timer.unref()
+        }))
+      }
+      const settled = await Promise.race(branches)
+      if (timer !== undefined) {
+        clearTimeout(timer)
+        timer = undefined
+      }
+      if (settled.kind === 'wake') continue
+      // An abort that lands as the worker goes idle wins over the idle itself,
+      // as it did before the budget branch existed.
+      if (settled.kind === 'idle' && isAborted(signal)) return { kind: 'aborted' }
+      return settled
     }
-    const settled = await Promise.race(branches)
-    if (settled.kind === 'budget-exhausted') cancel()
-    // An abort that lands as the worker goes idle wins over the idle itself,
-    // as it did before the budget branch existed.
-    if (settled.kind === 'idle' && isAborted(signal)) return { kind: 'aborted' }
-    return settled
   } finally {
     if (timer !== undefined) clearTimeout(timer)
     signal?.removeEventListener('abort', cancel)
@@ -1506,11 +1527,15 @@ async function observeWorkerRun(
   // business (the store read), never an unhandled one.
   recorded.catch(() => {})
   const terminal = recorded.then((status): WaitingObservation => ({ kind: 'terminal', status }))
-  // The root's deadline is a store fact, not a per-round one: it is read once, and
-  // only this run's remaining window is recomputed as the wait goes on.
-  const rootDeadline = await rootDeadlineOf(env, storeId)
+  // The root's deadline is a store fact and is read *per judgement*, never once
+  // per wait (K4): a person who raises the tree's ceiling while this worker is
+  // parked must be seen by the very reading that would otherwise end the run, so
+  // every bound below comes from a resolution taken at the moment it is applied —
+  // and the run's own wall time, which no extension resets, is part of the same
+  // reading (`remainingRunMs`).
+  const remainingNow = (): Promise<number> => remainingRunMsFromStore(env, storeId, run)
   for (;;) {
-    const remaining = remainingRunMs(env, run, rootDeadline, Date.now())
+    const remaining = await remainingNow()
     if (remaining <= 0) {
       // The deadline had already passed when this wait began, so no waiter will
       // cancel the worker: this does, the same forced exit `awaitWorker` performs
@@ -1518,7 +1543,7 @@ async function observeWorkerRun(
       handle.agent.cancel({ kind: 'parent' })
       return { kind: 'budget-exhausted' }
     }
-    const settled = await Promise.race([terminal, awaitWorker(handle, signal, remaining)])
+    const settled = await Promise.race([terminal, awaitWorker(handle, signal, remainingNow)])
     if (settled.kind !== 'idle') return settled
     const current = await env.task.runIn(storeId, run.runId)
     if (isTerminalRun(current.status)) return { kind: 'terminal', status: current.status }
@@ -1530,7 +1555,7 @@ async function observeWorkerRun(
       // the active case is: the run's own deadline and the batch's abort both end
       // it (A3 §3.1's race), because a run that is waiting is still work the tree
       // has to be able to stop.
-      return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: 'parent' }), signal, rootDeadline, terminal)
+      return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: 'parent' }), signal, remainingNow, terminal)
     }
     if (agentIsRunning(handle)) continue
     const snapshot = await env.task.snapshotIn(storeId)
@@ -1557,7 +1582,7 @@ async function observeWorkerRun(
     const knownWait = openProposalOf(snapshot, task.taskId, run.runId) !== undefined
       || blockingQuestionsOf(snapshot, run.runId).length > 0
     if (knownWait) {
-      return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: 'parent' }), signal, rootDeadline, terminal)
+      return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: 'parent' }), signal, remainingNow, terminal)
     }
     const factCount = countSubtreeFacts(snapshot, task.taskId)
     const previous = current.noProgress
@@ -1601,13 +1626,25 @@ async function observeWorkerRun(
  * child out of a store has only the session id and asks the deployment to
  * resolve the agent (A4 §F.1 — the deadline ends a recovered wait exactly as it
  * ends a live one, so this is one implementation, not two).
+ *
+ * The deadline is a *reading* ({@link RemainingRun}, resolved from the store at
+ * the moment it is applied), and that is what a wait armed here has to keep:
+ * when the timer elapses the wait does not conclude that the budget ran out — it
+ * reads the ceilings again and only stops the run if the new reading is still
+ * exhausted (K4). A ceiling a person raised while the wait was parked therefore
+ * lengthens the wait instead of being overridden by a timer armed before it,
+ * while the run's own per-run wall time — part of the same reading, and never
+ * reset by an extension — ends it exactly as it did.
  */
+/** One run's remaining window, resolved afresh: what a judgement made now is based on. */
+type RemainingRun = () => Promise<number>
+
 async function awaitWaitingTerminal(
   env: OrchestrateEnv,
   run: TaskRun,
   cancel: (() => void) | undefined,
   signal: AbortSignal | undefined,
-  rootDeadline: string | undefined,
+  remainingRun: RemainingRun,
   terminal: Promise<WaitingObservation>,
 ): Promise<WaitingObservation> {
   const stop = (): void => {
@@ -1617,30 +1654,42 @@ async function awaitWaitingTerminal(
     stop()
     return { kind: 'aborted' }
   }
-  const remaining = remainingRunMs(env, run, rootDeadline, Date.now())
-  if (remaining <= 0) {
-    // The deadline had already passed when this wait began, so no waiter will
-    // cancel the worker: this does, exactly as the active branch does.
-    stop()
-    return { kind: 'budget-exhausted' }
-  }
   signal?.addEventListener('abort', stop, { once: true })
+  // The abort is one promise for the whole wait, not one per reading: the wait
+  // re-arms itself when a ceiling moves, and a listener per round would pile up
+  // against a signal that may never fire.
+  const aborted = signal === undefined
+    ? undefined
+    : new Promise<WaitingObservation>(resolve => {
+      signal.addEventListener('abort', () => resolve({ kind: 'aborted' }), { once: true })
+    })
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    const branches: Promise<WaitingObservation>[] = [terminal]
-    if (signal !== undefined) {
-      branches.push(new Promise<WaitingObservation>(resolve => {
-        signal.addEventListener('abort', () => resolve({ kind: 'aborted' }), { once: true })
-      }))
-    }
-    branches.push(new Promise<WaitingObservation>(resolve => {
-      timer = setTimeout(() => {
+    for (;;) {
+      const remaining = await remainingRun()
+      if (remaining <= 0) {
+        // The deadline had already passed when this judgement was made, so no
+        // waiter will cancel the worker: this does, exactly as the active branch
+        // does.
         stop()
-        resolve({ kind: 'budget-exhausted' })
-      }, remaining)
-      if (typeof timer.unref === 'function') timer.unref()
-    }))
-    return await Promise.race(branches)
+        return { kind: 'budget-exhausted' }
+      }
+      const branches: Promise<WaitingObservation | { kind: 'wake' }>[] = aborted === undefined ? [terminal] : [terminal, aborted]
+      if (Number.isFinite(remaining)) {
+        branches.push(new Promise<{ kind: 'wake' }>(resolve => {
+          timer = setTimeout(() => resolve({ kind: 'wake' }), remaining)
+          if (typeof timer.unref === 'function') timer.unref()
+        }))
+      }
+      const settled = await Promise.race(branches)
+      if (timer !== undefined) {
+        clearTimeout(timer)
+        timer = undefined
+      }
+      // A wake is not a verdict: the ceilings are read again at the top of the
+      // loop, and only that reading ends the wait.
+      if (settled.kind !== 'wake') return settled
+    }
   } finally {
     if (timer !== undefined) clearTimeout(timer)
     signal?.removeEventListener('abort', stop)
@@ -1663,7 +1712,17 @@ function cancelAgentOf(env: OrchestrateEnv, sessionId: string): (() => void) | u
   }
 }
 
-/** The root's own deadline for the store, when the budget resolves; a missing root start is a refusal to invent one. */
+/**
+ * The root's own deadline for the store, when the budget resolves; a missing
+ * root start is a refusal to invent one.
+ *
+ * Every call reads the store: the ceiling is what the store says *now*, and a
+ * caller that held one from earlier would keep enforcing a bound a person has
+ * since raised (K4). A resolution that fails answers "no deadline", which is the
+ * conservative reading for a ceiling nobody can measure — the paths that have to
+ * refuse over that case ask the resolver themselves
+ * ({@link resolveRootBudget}), rather than reading it out of a missing instant.
+ */
 async function rootDeadlineOf(env: OrchestrateEnv, storeId: string): Promise<string | undefined> {
   const snapshot = await env.task.snapshotIn(storeId)
   const resolved = resolveRootBudget(snapshot, env.rootBudget ?? {})
@@ -1674,11 +1733,22 @@ async function rootDeadlineOf(env: OrchestrateEnv, storeId: string): Promise<str
  * What is left of the tightest deadline that applies to one run of this
  * orchestration — the one call site of `runDeadlineMs` inside the orchestration,
  * so the rule reads the same everywhere a worker is awaited: the run's own
- * per-run wall time and what is left of the root's deadline. Either reaching
- * zero is the budget stop {@link observeWorkerRun} acts on.
+ * per-run wall time (measured from its persisted `startedAt`, never reset) and
+ * what is left of the root's deadline as the store holds it *now*. Either
+ * reaching zero is the budget stop {@link observeWorkerRun} acts on.
  */
 function remainingRunMs(env: OrchestrateEnv, run: TaskRun, rootDeadline: string | undefined, nowMs: number): number {
   return runDeadlineMs(run.startedAt, env.budget?.wallTimeMs, rootDeadline, nowMs)
+}
+
+/**
+ * The same window, resolved from the store at the moment of the question: the
+ * reading a wait arms itself with, and the reading it takes again when that wait
+ * elapses. One function, so "how long may this run still go" has one answer
+ * whether it is asked before a race, inside a parked wait, or when a timer fires.
+ */
+async function remainingRunMsFromStore(env: OrchestrateEnv, storeId: string, run: TaskRun): Promise<number> {
+  return remainingRunMs(env, run, await rootDeadlineOf(env, storeId), Date.now())
 }
 
 /**
@@ -1980,13 +2050,19 @@ async function startChildRound(
   // run count only grows — so it ends the batch instead of being retried. A
   // budget that cannot be resolved only refuses when this deployment configures
   // limits at all: with none, there is nothing to measure and nothing to refuse.
-  const budget = resolveRootBudget(snapshot, env.rootBudget ?? {})
+  //
+  // Both the ceilings and the count are read here rather than carried in from the
+  // round's own snapshot: a refusal here *blocks the child*, so it may not be
+  // made against a reading a person has since raised, and the reservation has to
+  // count what the store holds when the start is decided (K4).
+  const budgetSnapshot = await env.task.snapshotIn(batch.storeId)
+  const budget = resolveRootBudget(budgetSnapshot, env.rootBudget ?? {})
   if (!budget.ok) {
     if (hasRootLimits(env.rootBudget)) {
       return { kind: 'adopted', outcome: await blockChild(env, batch.storeId, item, { reason: `the root budget cannot be resolved: ${budget.reason}`, blockers: [] }, dependencyTaskIds) }
     }
   } else {
-    const verdict = checkRunStart(snapshot, budget)
+    const verdict = checkRunStart(budgetSnapshot, budget)
     if (!verdict.allowed) {
       return { kind: 'adopted', outcome: await blockChild(env, batch.storeId, item, { reason: verdict.reason, blockers: [] }, dependencyTaskIds) }
     }
@@ -2337,8 +2413,14 @@ async function awaitAdoptedWorkerWait(
   if (resumed.status === 'live' && env.gate.phaseOf(run.sessionId) === undefined) env.gate.setPhase(run.sessionId, 'active')
   const terminal = waitRunSettled(env, batch.storeId, run.runId, run.sessionId)
     .then((status): WaitingObservation => ({ kind: 'terminal', status }))
-  const rootDeadline = await rootDeadlineOf(env, batch.storeId)
-  const observation = await awaitWaitingTerminal(env, run, cancelAgentOf(env, run.sessionId), batch.signal, rootDeadline, terminal)
+  const observation = await awaitWaitingTerminal(
+    env,
+    run,
+    cancelAgentOf(env, run.sessionId),
+    batch.signal,
+    () => remainingRunMsFromStore(env, batch.storeId, run),
+    terminal,
+  )
   switch (observation.kind) {
     case 'terminal': {
       const snapshot = await env.task.snapshotIn(batch.storeId)
@@ -2588,9 +2670,11 @@ async function finishBatch(env: OrchestrateEnv, batch: BatchContext): Promise<Ch
   // exactly then: a sub-execution inherits the parent's instant, so the child failing
   // on the budget is what brings the batch here with the parent's clock already out.
   // A watched run's own wait stops it the same way (`observeWorkerRun`); this is that
-  // rule reaching the run whose settlement the batch performs.
-  const rootBudget = resolveRootBudget(snapshot, env.rootBudget ?? {})
-  const rootDeadline = rootBudget.ok ? rootBudget.deadlineAt : undefined
+  // rule reaching the run whose settlement the batch performs. The ceilings are
+  // read here, at the judgement itself and not from the settlement's earlier reads
+  // (K4): an acceptance refused over a ceiling a person raised while the batch
+  // drained would be a refusal the store no longer supports.
+  const rootDeadline = await rootDeadlineOf(env, batch.storeId)
   if (remainingRunMs(env, parentRun, rootDeadline, Date.now()) <= 0) {
     // The deadline is the other terminal cleanup, released exactly as the
     // cancellation's is: the clock stopped this run, and its checkout goes back

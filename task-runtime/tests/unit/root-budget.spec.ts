@@ -7,6 +7,7 @@ import type {
   EvidenceBundle,
   Obligation,
   ReviewRecord,
+  TaskBudgetExtension,
   TaskHandoff,
   TaskInstance,
   TaskRun,
@@ -168,6 +169,7 @@ describe('resolveRootBudget', () => {
       acceptedAt: '2026-09-22T00:00:00.000Z',
       deadlineAt: '2026-09-22T00:01:00.000Z',
       maxRuns: 8,
+      configured: { deadlineAt: '2026-09-22T00:01:00.000Z', maxRuns: 8 },
     })
   })
 
@@ -185,7 +187,7 @@ describe('resolveRootBudget', () => {
 
   test('leaves the deadline absent when no wall time is configured', () => {
     const resolved = resolveRootBudget(snapshot({ tasks: [task('root', undefined)], runs: [run('r-root', 'root', '2026-09-22T00:00:00.000Z', ROOT_SESSION)] }), {})
-    expect(resolved).toEqual({ ok: true, rootTaskId: 'root', acceptedAt: '2026-09-22T00:00:00.000Z' })
+    expect(resolved).toEqual({ ok: true, rootTaskId: 'root', acceptedAt: '2026-09-22T00:00:00.000Z', configured: {} })
   })
 
   test('refuses a store with no root, naming the store', () => {
@@ -265,6 +267,155 @@ describe('resolveRootBudget', () => {
   })
 })
 
+/** One approved raise of the run ceiling, as the store records it (`TaskBudgetExtension`). */
+function raisedMaxRuns(previous: number, next: number, requestKey = `k-maxRuns-${previous}-${next}`): TaskBudgetExtension {
+  return {
+    requestKey,
+    requestDigest: `digest-${requestKey}`,
+    maxRuns: { previous, next },
+    approvalRef: 'approval:call-1',
+    requestedBy: ROOT_SESSION,
+    recordedAt: '2026-09-22T00:05:00.000Z',
+  }
+}
+
+/** One approved raise of the tree's deadline, as the store records it. */
+function raisedDeadline(previous: string, next: string, requestKey = `k-deadline-${next}`): TaskBudgetExtension {
+  return {
+    requestKey,
+    requestDigest: `digest-${requestKey}`,
+    deadlineAt: { previous, next },
+    approvalRef: 'approval:call-1',
+    requestedBy: ROOT_SESSION,
+    recordedAt: '2026-09-22T00:05:00.000Z',
+  }
+}
+
+/** The root's simple tree with those extensions approved on it — the store's own facts, no configuration involved. */
+function withExtensions(tree: TaskSnapshot, ...extensions: TaskBudgetExtension[]): TaskSnapshot {
+  return {
+    ...tree,
+    budgetExtensions: {
+      all: extensions,
+      byRequestKey: Object.fromEntries(extensions.map(extension => [extension.requestKey, extension])),
+    },
+  }
+}
+
+describe('resolveRootBudget under approved extensions (K4)', () => {
+  const rootOnly = (): TaskSnapshot => rootTaskSnapshot()
+
+  test('an approved run ceiling is the one in force, and the configured value stays readable beside it', () => {
+    const tree = withExtensions(rootOnly(), raisedMaxRuns(8, 12))
+    const resolved = resolveRootBudget(tree, { wallTimeMs: 60_000, maxRuns: 8 })
+    expect(resolved.ok).toBe(true)
+    if (!resolved.ok) throw new Error('unreachable')
+    // The ceiling in force is the approved one …
+    expect(resolved.maxRuns).toBe(12)
+    // … while the deployment's own total — what a reader has to show beside it —
+    // is still the configured 8, resolved against the same root start.
+    expect(resolved.configured).toEqual({ deadlineAt: '2026-09-22T00:01:00.000Z', maxRuns: 8 })
+    expect(resolved.deadlineAt).toBe('2026-09-22T00:01:00.000Z')
+  })
+
+  test('only the dimension an extension moved changes: the other keeps its configured value', () => {
+    const tree = withExtensions(rootOnly(), raisedMaxRuns(4, 6))
+    const resolved = resolveRootBudget(tree, { wallTimeMs: 30_000, maxRuns: 4 })
+    expect(resolved.ok).toBe(true)
+    if (!resolved.ok) throw new Error('unreachable')
+    expect(resolved.maxRuns).toBe(6)
+    // Untouched by the extension: still the configured wall time from the run's own start.
+    expect(resolved.deadlineAt).toBe('2026-09-22T00:00:30.000Z')
+    expect(resolved.configured).toEqual({ deadlineAt: '2026-09-22T00:00:30.000Z', maxRuns: 4 })
+  })
+
+  test('an approved deadline is the stored absolute instant, not a window measured again', () => {
+    const extended = '2026-09-23T00:00:00.000Z'
+    const tree = withExtensions(rootOnly(), raisedDeadline('2026-09-22T00:01:00.000Z', extended))
+    const resolved = resolveRootBudget(tree, { wallTimeMs: 60_000 })
+    expect(resolved.ok).toBe(true)
+    if (!resolved.ok) throw new Error('unreachable')
+    expect(resolved.deadlineAt).toBe(extended)
+    expect(resolved.acceptedAt).toBe('2026-09-22T00:00:00.000Z')
+    // A deployment that stopped configuring the wall time does not revoke an
+    // approved deadline: the decision is a fact of the store, not of the config.
+    const reconfigured = resolveRootBudget(tree, {})
+    expect(reconfigured.ok).toBe(true)
+    if (!reconfigured.ok) throw new Error('unreachable')
+    expect(reconfigured.deadlineAt).toBe(extended)
+    expect(reconfigured.configured).toEqual({})
+  })
+
+  test('the last extension of a dimension is the one in force', () => {
+    const tree = withExtensions(rootOnly(), raisedMaxRuns(8, 12, 'k-1'), raisedMaxRuns(12, 20, 'k-2'))
+    const resolved = resolveRootBudget(tree, { maxRuns: 8 })
+    expect(resolved.ok).toBe(true)
+    if (!resolved.ok) throw new Error('unreachable')
+    expect(resolved.maxRuns).toBe(20)
+    expect(resolved.configured).toEqual({ maxRuns: 8 })
+  })
+
+  test('a store without extensions resolves exactly as it did before the ceiling existed', () => {
+    const resolved = resolveRootBudget(rootOnly(), { maxRuns: 3 })
+    expect(resolved.ok).toBe(true)
+    if (!resolved.ok) throw new Error('unreachable')
+    expect(resolved.maxRuns).toBe(3)
+    expect(resolved.configured.maxRuns).toBe(3)
+  })
+})
+
+describe('checkRunStart and checkBatchAdmission under an approved ceiling (K4)', () => {
+  test('a start refused by the configured total is allowed by the approved one, and the old count is not refunded', () => {
+    const now = Date.parse('2026-09-22T00:00:01.000Z')
+    // Five runs are already recorded and the deployment allows five: the tree
+    // without a grant is at its ceiling.
+    const plain = threeLevelTree()
+    const configured = resolveRootBudget(plain, { maxRuns: 5 })
+    expect(configured.ok).toBe(true)
+    if (!configured.ok) throw new Error('unreachable')
+    expect(checkRunStart(plain, configured, now).allowed).toBe(false)
+
+    // The same tree with one approved raise: the whole total is 7, so one more
+    // run starts — counted from the store's five, never from zero.
+    const tree = withExtensions(threeLevelTree(), raisedMaxRuns(5, 7))
+    const approved = resolveRootBudget(tree, { maxRuns: 5 })
+    expect(approved.ok).toBe(true)
+    if (!approved.ok) throw new Error('unreachable')
+    expect(approved.maxRuns).toBe(7)
+    expect(approved.configured.maxRuns).toBe(5)
+    expect(checkRunStart(tree, approved, now)).toEqual({ allowed: true })
+
+    // At seven recorded runs the approved total is spent, and the refusal counts
+    // what the store holds — a restart or a re-open refunds nothing.
+    const spent = withExtensions(
+      snapshot({
+        tasks: [task('root', undefined)],
+        runs: [1, 2, 3, 4, 5, 6, 7].map(index => run(`r-${index}`, 'root', '2026-09-22T00:00:00.000Z', ROOT_SESSION)),
+      }),
+      raisedMaxRuns(5, 7),
+    )
+    const verdict = checkRunStart(spent, approved, now)
+    expect(verdict.allowed).toBe(false)
+    if (verdict.allowed) throw new Error('unreachable')
+    expect(verdict.reason).toContain('allows 7 run(s)')
+    expect(verdict.reason).toContain('already holds 7')
+  })
+
+  test('a batch reserved against the approved total is refused whole only when it would exceed it', () => {
+    const tree = withExtensions(threeLevelTree(), raisedMaxRuns(5, 8))
+    const approved = resolveRootBudget(tree, { maxRuns: 5 })
+    expect(approved.ok).toBe(true)
+    if (!approved.ok) throw new Error('unreachable')
+    // 5 recorded + 3 children = 8, which the approved ceiling allows exactly.
+    expect(checkBatchAdmission(tree, approved, 3)).toEqual({ allowed: true })
+    const refused = checkBatchAdmission(tree, approved, 4)
+    expect(refused.allowed).toBe(false)
+    if (refused.allowed) throw new Error('unreachable')
+    expect(refused.reason).toContain('allows 8 run(s)')
+    expect(refused.reason).toContain('5 are already recorded')
+  })
+})
+
 describe('hasRootLimits', () => {
   test('a budget with no member in force enforces nothing, whatever its object presence says', () => {
     expect(hasRootLimits(undefined)).toBe(false)
@@ -279,7 +430,7 @@ describe('hasRootLimits', () => {
 })
 
 describe('checkRunStart', () => {
-  const budget: ResolvedRootBudget = { rootTaskId: 'root', acceptedAt: '2026-09-22T00:00:00.000Z', maxRuns: 5 }
+  const budget: ResolvedRootBudget = { rootTaskId: 'root', acceptedAt: '2026-09-22T00:00:00.000Z', maxRuns: 5, configured: { maxRuns: 5 } }
 
   test('refuses a start once the store holds maxRuns runs, and allows one below it', () => {
     const tree = threeLevelTree()
@@ -295,7 +446,12 @@ describe('checkRunStart', () => {
 
   test('refuses a start past the deadline, and allows one before it', () => {
     const tree = snapshot({ tasks: [task('root', undefined)], runs: [run('r-root', 'root')] })
-    const withDeadline: ResolvedRootBudget = { rootTaskId: 'root', acceptedAt: '2026-09-22T00:00:00.000Z', deadlineAt: '2026-09-22T00:01:00.000Z' }
+    const withDeadline: ResolvedRootBudget = {
+      rootTaskId: 'root',
+      acceptedAt: '2026-09-22T00:00:00.000Z',
+      deadlineAt: '2026-09-22T00:01:00.000Z',
+      configured: { deadlineAt: '2026-09-22T00:01:00.000Z' },
+    }
     expect(checkRunStart(tree, withDeadline, Date.parse('2026-09-22T00:00:59.999Z'))).toEqual({ allowed: true })
     const refused = checkRunStart(tree, withDeadline, Date.parse('2026-09-22T00:01:00.000Z'))
     expect(refused.allowed).toBe(false)
@@ -306,7 +462,7 @@ describe('checkRunStart', () => {
 
   test('never counts a start as free just because a restart happened: the count comes from the store', () => {
     const tree = threeLevelTree()
-    const tight: ResolvedRootBudget = { rootTaskId: 'root', acceptedAt: '2026-09-22T00:00:00.000Z', maxRuns: 1 }
+    const tight: ResolvedRootBudget = { rootTaskId: 'root', acceptedAt: '2026-09-22T00:00:00.000Z', maxRuns: 1, configured: { maxRuns: 1 } }
     expect(checkRunStart(tree, tight, Date.parse('2026-09-22T00:00:01.000Z')).allowed).toBe(false)
   })
 })
@@ -314,7 +470,7 @@ describe('checkRunStart', () => {
 describe('checkBatchAdmission', () => {
   test('reserves a run slot per child and refuses the whole batch when they do not fit', () => {
     const tree = threeLevelTree()
-    const budget: ResolvedRootBudget = { rootTaskId: 'root', acceptedAt: '2026-09-22T00:00:00.000Z', maxRuns: 7 }
+    const budget: ResolvedRootBudget = { rootTaskId: 'root', acceptedAt: '2026-09-22T00:00:00.000Z', maxRuns: 7, configured: { maxRuns: 7 } }
     // 5 runs + 2 children fit exactly.
     expect(checkBatchAdmission(tree, budget, 2)).toEqual({ allowed: true })
     const refused = checkBatchAdmission(tree, budget, 3)
@@ -327,7 +483,7 @@ describe('checkBatchAdmission', () => {
   })
 
   test('allows any batch when no run limit is configured', () => {
-    const budget: ResolvedRootBudget = { rootTaskId: 'root', acceptedAt: '2026-09-22T00:00:00.000Z' }
+    const budget: ResolvedRootBudget = { rootTaskId: 'root', acceptedAt: '2026-09-22T00:00:00.000Z', configured: {} }
     expect(checkBatchAdmission(threeLevelTree(), budget, 100)).toEqual({ allowed: true })
   })
 })
@@ -358,6 +514,15 @@ describe('runDeadlineMs', () => {
     expect(runDeadlineMs('2026-09-22T00:00:00.000Z', 60 * 60_000, '2026-09-22T00:10:00.000Z', now)).toBe(0)
     expect(runDeadlineMs('never', 60_000, undefined, now)).toBe(0)
     expect(runDeadlineMs('2026-09-22T00:00:00.000Z', 60_000, 'never', now)).toBe(0)
+  })
+
+  test('an approved raise moves the tree\u2019s bound and never resets a run\u2019s own clock', () => {
+    const now = Date.parse('2026-09-22T00:10:00.000Z')
+    const extendedTreeDeadline = '2026-09-23T00:00:00.000Z'
+    // The run keeps the window it started with: what is left of its own wall time.
+    expect(runDeadlineMs('2026-09-22T00:00:00.000Z', 15 * 60_000, extendedTreeDeadline, now)).toBe(5 * 60_000)
+    // And a run whose own time is up is not revived by any tree deadline.
+    expect(runDeadlineMs('2026-09-22T00:00:00.000Z', 5 * 60_000, extendedTreeDeadline, now)).toBe(0)
   })
 
   test('reports no bound at all when neither is configured', () => {

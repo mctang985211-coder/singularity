@@ -20,6 +20,7 @@ import { ProposalReviewService } from './proposal-review.ts'
 import { reviewerBindingSource } from './review-agent-ledger.ts'
 import { defineApproveTool } from './tools/approve.ts'
 import { defineAskTool } from './tools/ask.ts'
+import { defineTaskBudgetExtendTool } from './tools/budget-extend.ts'
 import { defineCapabilityListTool } from './tools/capability-list.ts'
 import { defineContextReadTool } from './tools/context-read.ts'
 import { defineEscalateTool } from './tools/escalate.ts'
@@ -245,6 +246,13 @@ export class SingularityAgent extends Service {
     ctx.tools.register(defineTaskVerifyTool(ctx))
     ctx.tools.register(defineTaskReviewPackTool(ctx))
     ctx.tools.register(defineTaskReviewAgentTool(ctx))
+    // Asking a person to raise this tree's ceilings (K4): registered like the
+    // rest of the task surface — who may reach it (a graph's root coordination
+    // session, derived from the session in the runtime) and what a call may say
+    // (the totals, never an approval — that is the channel's fact) are decided
+    // by the caller's binding, the store and the approval seam, not by a
+    // registration switch.
+    ctx.tools.register(defineTaskBudgetExtendTool(ctx))
     ctx.tools.register(defineTaskDiagnoseTool(ctx))
     // The evolution chain is the one part of this surface a deployment may
     // withhold (R0). Off, none of the nine is registered, so no agent surface

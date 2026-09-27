@@ -14,6 +14,16 @@
  * left of the root's)` measured from its own `startedAt`, never from the moment
  * it was resumed (§7.4 — restarts do not re-time).
  *
+ * Two sources of a ceiling, and only two: the deployment's `rootBudget`,
+ * resolved against that same root start, and the absolute values a person
+ * approved (K4, `TaskSnapshot.budgetExtensions`). An approved ceiling is a fact
+ * of the store like the run count is — never re-derived from "now", never reset
+ * by a restart or a configuration change, superseded only by another approved
+ * ceiling — and this module is the one place both are read, so every admission,
+ * driver, watchdog and replay path asks here instead of deriving a bound of its
+ * own. A dimension the store has no approved ceiling for keeps the deployment's
+ * configured value, and a dimension neither source sets is not limited.
+ *
  * Why a missing start refuses instead of being invented: an old store, or a root
  * whose run never recorded a start, has no honest instant to measure from.
  * Substituting "now" would silently grant a fresh full budget — exactly the
@@ -36,7 +46,7 @@
  */
 
 import type { RunId, TaskId, TaskInstance, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
-import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
+import { approvedBudgetCeilings, rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 
 /**
  * The root budget as configured (`Config.rootBudget`). Every member is optional:
@@ -56,16 +66,43 @@ export interface RootBudgetConfig {
   maxConcurrentWrites?: number
 }
 
-/** A resolved root budget: the tree it belongs to, the instant it started, and the limits in force. */
+/**
+ * The two ceilings a root budget is measured in. Every member is optional, and
+ * absent means the deployment sets no such limit — which is a statement about
+ * what is enforced and has to be read as one.
+ */
+export interface RootBudgetCeilings {
+  /** The run count the tree may reach. */
+  readonly maxRuns?: number
+  /** The instant the tree must stop by. */
+  readonly deadlineAt?: string
+}
+
+/**
+ * A resolved root budget: the tree it belongs to, the instant it started, and
+ * the limits in force — with the deployment's own ceilings kept beside them.
+ *
+ * Two ceilings per dimension, deliberately: `configured` is what this
+ * deployment's `rootBudget` resolves to against the root's start, and the
+ * top-level members are what is *in force*. They differ exactly when a person
+ * has raised a ceiling (K4, `TaskSnapshot.budgetExtensions`), and a reader that
+ * has to show "the total the deployment set" beside "the total now approved"
+ * needs both rather than one derived from the other.
+ */
 export interface ResolvedRootBudget {
   /** The store's root task (`parentTaskId === undefined`) — the tree the budget belongs to. */
   readonly rootTaskId: TaskId
   /** The root run's persisted start, read from the store: the instant the budget was accepted. */
   readonly acceptedAt: string
-  /** `acceptedAt + wallTimeMs`, when a wall time is configured. */
+  /**
+   * The deadline in force: the approved absolute deadline when the store holds
+   * one, else `acceptedAt + wallTimeMs` when a wall time is configured.
+   */
   readonly deadlineAt?: string
-  /** The run count the tree may reach, when one is configured. */
+  /** The run ceiling in force: the approved absolute count when the store holds one, else the configured count. */
   readonly maxRuns?: number
+  /** What the deployment itself configures, resolved against the same root start: the values before any approved raise. */
+  readonly configured: RootBudgetCeilings
 }
 
 export type RootBudgetResolution =
@@ -106,6 +143,16 @@ function instant(value: string | undefined): number | undefined {
  * funding-root reference); inventing one for it would hand every experiment a
  * fresh allowance. No run naming a root session of this store means no owner,
  * and the store keeps the honest recovery diagnostic rather than a guess.
+ *
+ * The ceilings that come back are the ones in force: per dimension, the value the
+ * last approved extension left when the store holds one (K4), and the configured
+ * value otherwise. An approved ceiling is *not* re-derived from the wall time the
+ * deployment configures today — a person's decision is not a function of the
+ * configuration file — and a deployment that stops configuring a dimension does
+ * not revoke one; what `configured` reports is what the deployment alone would
+ * allow, for a reader that has to show both numbers. The root's own
+ * `acceptedAt` is unchanged by any of this: an approved deadline is an absolute
+ * instant, never a longer window measured from a fresh "now".
  *
  * `reason` texts are recovery diagnostics: they say what is missing (no root,
  * no run bound to this store as its root, several such tasks, a root run with
@@ -158,13 +205,21 @@ export function resolveRootBudget(snapshot: TaskSnapshot, config: RootBudgetConf
         'so the tree has no honest start instant and is not given a fresh one',
     }
   }
-  const resolved: ResolvedRootBudget = {
-    rootTaskId: root.taskId,
-    acceptedAt: first.startedAt,
+  const configured: RootBudgetCeilings = {
     ...(config.wallTimeMs === undefined ? {} : { deadlineAt: new Date(acceptedAtMs + config.wallTimeMs).toISOString() }),
     ...(config.maxRuns === undefined ? {} : { maxRuns: config.maxRuns }),
   }
-  return { ok: true, ...resolved }
+  const approved = approvedBudgetCeilings(snapshot.budgetExtensions?.all ?? [])
+  const maxRuns = approved.maxRuns ?? configured.maxRuns
+  const deadlineAt = approved.deadlineAt ?? configured.deadlineAt
+  return {
+    ok: true,
+    rootTaskId: root.taskId,
+    acceptedAt: first.startedAt,
+    ...(deadlineAt === undefined ? {} : { deadlineAt }),
+    ...(maxRuns === undefined ? {} : { maxRuns }),
+    configured,
+  }
 }
 
 /** The run of `task` that is bound to `storeId` as a root run, or `undefined` when the task holds none. */

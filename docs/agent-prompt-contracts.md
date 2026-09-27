@@ -130,7 +130,8 @@ task_answer 的 resolves 只表示你是否认为当前问题已解决；未知�
 [K1 已落地：批次结束交还执行权]
 子批次结束会交还执行权；依据结果继续工作或提出下一批，最后主动提交父验收。
 runtime 不替父提交；不要把批次结束等同于父目标完成，也不要为普通调整方法启动 Evolution。
-[K4 部署后]
+[K4 已部署：root prompt 见 agent-runtime/src/prompts/root.prompts.ts 的预算扩额段；
+工具 agent-singularity/src/tools/budget-extend.ts，持久事实见 task/src/budget.ts（TaskBudgetExtended）]
 原目标过期仍可在 reviewer 额度内复盘。继续业务需要额度时，根会话可用
 task_budget_extend 申请经人审追加总上限；它不恢复终态、不自动执行、不清空旧账。
 

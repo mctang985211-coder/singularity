@@ -37,7 +37,7 @@ const EVOLUTION_TOOLS = [
   'evolution_list',
 ]
 
-/** The twenty-two tools every composition registers, whatever the switch says (`escalate` included). */
+/** The twenty-three tools every composition registers, whatever the switch says (`escalate` included). */
 const ALWAYS_TOOLS = [
   'graph_mark_ready',
   'graph_spawn',
@@ -60,6 +60,7 @@ const ALWAYS_TOOLS = [
   'task_review_pack',
   'task_review_agent',
   'task_diagnose',
+  'task_budget_extend',
   'escalate',
 ]
 

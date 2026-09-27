@@ -19,6 +19,8 @@ import type {} from '@dangosys/dsh-singularity-graphs'
 import type {
   AcceptanceCriterion,
   AdmissionContext,
+  BudgetExtensionProposal,
+  BudgetRaise,
   CapabilityManifest,
   ChildEvidenceRef,
   DependencyEdge,
@@ -31,6 +33,9 @@ import type {
   RunProviderBinding,
   RunStatus,
   SubmissionRecord,
+  TaskBudgetExtension,
+  TaskBudgetExtensionClaim,
+  TaskBudgetExtensionIndex,
   TaskContract,
   TaskEvent,
   TaskId,
@@ -52,6 +57,9 @@ import {
   TASK_CONTRACT_VERSION,
   admissionContextDigest,
   batchIdFor,
+  budgetExtensionRequestDigest,
+  canonicalBudgetInstant,
+  describeBudgetExtension,
   blockingQuestionsOf,
   contractDigest,
   questionOf,
@@ -68,7 +76,7 @@ import { ExecutionGate, type DrainResult, type JobsView } from './gate.ts'
 import { optionalService, precheckProviders, precheckReplacedCapabilityRow, providerContentIdentities, providerDefectLines, providerRefusals, registeredVerifierIds } from './provider-precheck.ts'
 import type { EvolutionCommitLedger, ProviderPrecheck, SkillDiscoveryView } from './provider-precheck.ts'
 import { assertRootBudgetConfig, checkBatchAdmission, checkRunStart, hasRootLimits, resolveRootBudget } from './root-budget.ts'
-import type { RootBudgetConfig } from './root-budget.ts'
+import type { ResolvedRootBudget, RootBudgetCeilings, RootBudgetConfig } from './root-budget.ts'
 import { bindRunProviders, defaultRunBindingRoot, readRunBinding } from './run-binding.ts'
 import type { RunBindingRead } from './run-binding.ts'
 import { normalizeDecomposition, normalizeRootContract, decompositionIdentity } from './normalize.ts'
@@ -160,7 +168,7 @@ export {
   resolveRootBudget,
   runDeadlineMs,
 } from './root-budget.ts'
-export type { BudgetVerdict, ResolvedRootBudget, RootBudgetConfig, RootBudgetResolution } from './root-budget.ts'
+export type { BudgetVerdict, ResolvedRootBudget, RootBudgetCeilings, RootBudgetConfig, RootBudgetResolution } from './root-budget.ts'
 export type { AdmissionChild, AdmissionParent, AdmissionVerdict } from './admission.ts'
 export { checkDecomposition, contractDefects, independentAcceptanceDefects, rootIndependenceDefects } from './admission.ts'
 export {
@@ -1477,6 +1485,98 @@ type ReviewSubject =
       manifests: readonly CapabilityManifest[]
     }
 
+/**
+ * What a budget extension is asked for (K4): the request key the answer is
+ * addressed by, and the totals wanted in force.
+ *
+ * The two totals are *absolute and final*, and there are deliberately no other
+ * shapes: `maxRuns` is the whole run count the tree may reach once approved
+ * (never "add five"), `deadlineAt` is the instant it must stop by (never "two
+ * more hours", never a window measured from now), and there is no token
+ * account, no per-run time and no `approved` flag — a request states what it
+ * wants, and the *approval* is a separate fact the committing call has to carry
+ * from the channel that took it.
+ *
+ * At least one of the two must be named. A dimension this deployment leaves
+ * unset is unlimited, so naming it is refused rather than granted: an unset
+ * ceiling is not a number to raise, and inventing one here would turn "no limit"
+ * into a limit nobody asked for.
+ */
+export interface RootBudgetExtensionRequest {
+  readonly requestKey: string
+  /** The run count asked for as the whole approved total: a positive whole number above the ceiling in force. */
+  readonly maxRuns?: number
+  /** The absolute instant asked for as the deadline, later than the one in force (an explicit zone, e.g. `2026-09-27T12:00:00.000Z`). */
+  readonly deadlineAt?: string
+}
+
+/**
+ * What the query reported as the reading a request stands on: each dimension's
+ * ceiling *as it was read*, which the committing call has to hand back verbatim.
+ *
+ * This is the one value that travels through the human decision, and it travels
+ * because the store's serial re-check needs it: the entry re-checks that each
+ * dimension is still at the value the person saw approved, so a grant approved
+ * against a reading that has since moved is refused instead of being silently
+ * re-based on somebody else's result. A committing call that recomputes this
+ * instead of passing it back is asking for a grant nobody approved.
+ */
+export interface RootBudgetExtensionBaseline {
+  readonly maxRuns?: number
+  readonly deadlineAt?: string
+}
+
+/** What one budget-extension query answers: the reading, the usage so far, and what committing the same request would do. */
+export interface RootBudgetExtensionDraft {
+  readonly storeId: string
+  /** The tree's root task — the subject of the extension, and the task its event names. */
+  readonly rootTaskId: TaskId
+  /** The root coordination session that asked (the store's own root session). */
+  readonly rootSessionId: string
+  /** What this deployment's configuration alone allows, resolved against the root's own start. */
+  readonly configured: RootBudgetCeilings
+  /** What is in force right now: per dimension, the approved ceiling when the store holds one, else the configured value. */
+  readonly effective: RootBudgetCeilings
+  /** The runs the store already holds — the count a run ceiling is measured against, never reset by a raise. */
+  readonly runsUsed: number
+  readonly outcome: RootBudgetExtensionOutcome
+}
+
+/**
+ * The three answers a query gives, all of them zero-write:
+ *
+ * - `recorded` — this request key already holds exactly this request (same key,
+ *   same totals); the record is the answer, and a repeat needs no new approval
+ *   and appends nothing;
+ * - `proposed` — what would be recorded if this request were approved now: each
+ *   dimension's raise as a pair (the ceiling in force → the total asked for),
+ *   which is what a person is asked to approve;
+ * - `refused` — the request cannot be granted, with the reason: an unknown or
+ *   unlimited dimension, a value that is not a positive whole number, an instant
+ *   that is not absolute, a total that is not a raise, a key already bound to
+ *   different content, or a reading that moved since it was taken.
+ */
+export type RootBudgetExtensionOutcome =
+  | { readonly kind: 'recorded'; readonly record: TaskBudgetExtension }
+  | { readonly kind: 'proposed'; readonly proposal: BudgetExtensionProposal }
+  | { readonly kind: 'refused'; readonly reason: string }
+
+/**
+ * What a committing call is given: the request, the reading it was approved
+ * against, and the approval channel's own fact.
+ *
+ * `approvalRef` is the reference the channel hands back (`approval:<callId>`,
+ * the family every human gate in this workspace records) and it is the *only*
+ * thing that makes a commit a grant: an empty one is refused, the service
+ * records the reference verbatim and never invents, derives or upgrades one. The
+ * model-facing tool is what asks a person and what holds the reference; this
+ * entry is where the reference becomes a durable fact.
+ */
+export interface RootBudgetExtensionCommit extends RootBudgetExtensionRequest {
+  readonly baseline: RootBudgetExtensionBaseline
+  readonly approvalRef: string
+}
+
 /** What the admission half of one pre-checked batch is given: the proposal, the batch and the run it belongs to. */
 interface AdmitBatchRequest {
   proposal: TaskProposalDecomposition
@@ -1490,6 +1590,14 @@ interface AdmitBatchRequest {
 
 function now(): string {
   return new Date().toISOString()
+}
+
+/** The ceilings one resolved root budget is under: what is in force, per dimension. */
+function ceilingsOf(budget: ResolvedRootBudget): RootBudgetCeilings {
+  return {
+    ...(budget.maxRuns === undefined ? {} : { maxRuns: budget.maxRuns }),
+    ...(budget.deadlineAt === undefined ? {} : { deadlineAt: budget.deadlineAt }),
+  }
 }
 
 export class TaskRuntime extends Service {
@@ -2651,6 +2759,320 @@ export class TaskRuntime extends Service {
   async proposalsForParent(storeId: string, parentTaskId: TaskId): Promise<TaskProposal[]> {
     const snapshot = await this.ctx.task.snapshotIn(storeId)
     return [...(snapshot.proposals?.byParentTask[parentTaskId] ?? [])]
+  }
+
+  /**
+   * What a budget extension would do, read and judged and never written (K4):
+   * the ceilings this deployment configures, the ceilings in force, the runs the
+   * store already holds, and — from the request — either the record this key
+   * already holds, the raise a commit would record, or the reason it cannot be
+   * granted.
+   *
+   * Why a query at all, and why it is zero-write: the decision this entry feeds
+   * is a *person's*, and §5's rule applies to it exactly as it applies to a
+   * batch proposal — nothing is asked about a request that could never run, and
+   * nothing is written before the person has answered. So every shape rule, every
+   * bound and every staleness check is applied here, against the store's own
+   * facts, and the committing call applies the same rules again inside the
+   * store's write queue; asking twice costs two reads and never a second grant.
+   *
+   * The caller has to be the store's root coordination session: the store is
+   * derived from the session (`rootTaskStoreId`), and the session's graph has to
+   * agree that this session is the one it created as its root. A delegated
+   * worker, and a session belonging to another graph's tree, are refused by name
+   * before anything is read — a tree's budget is raised by the person who owns
+   * the tree, never by the work it delegated.
+   *
+   * The store is opened if this process has not opened it yet (a read of its own
+   * log; nothing is created — a store that does not exist is a named refusal),
+   * which is what lets a later process answer the same question about the same
+   * store without any process-local state.
+   */
+  async budgetExtensionDraft(sessionId: string, request: RootBudgetExtensionRequest): Promise<RootBudgetExtensionDraft> {
+    const { storeId, snapshot, budget } = await this.budgetExtensionContext(sessionId)
+    const requestKey = typeof request?.requestKey === 'string' ? request.requestKey : ''
+    const existing = requestKey.length === 0
+      ? undefined
+      : this.budgetExtensionIndex(snapshot).byRequestKey[requestKey]
+    return {
+      storeId,
+      rootTaskId: budget.rootTaskId,
+      rootSessionId: sessionId,
+      configured: budget.configured,
+      effective: ceilingsOf(budget),
+      runsUsed: snapshot.runs.length,
+      outcome: this.judgeBudgetExtension(request, ceilingsOf(budget), budget, existing),
+    }
+  }
+
+  /**
+   * Records one approved budget extension (K4) and answers with the record the
+   * store holds.
+   *
+   * **What makes it a grant is the reference, not the request.** The caller
+   * hands back the reading the query reported ({@link RootBudgetExtensionCommit.baseline})
+   * and the approval channel's own fact (`approvalRef`); an empty reference is
+   * refused, and nothing here can tell a person's decision from a model's
+   * summary of one — that is why the entry takes the reference and never a
+   * boolean, a reason or an `approved` flag, and why the record keeps it for a
+   * reader that later asks who approved a raise.
+   *
+   * **Where the serialization is.** The rules are judged once here, against the
+   * reading handed back, and then again by the store's reducer, inside its single
+   * write queue: the dimension the request raises has to still be at the value
+   * the person saw. Two grants approved against the same reading therefore cannot
+   * both stand — the second is refused with nothing written, and its approver is
+   * told that the tree moved rather than that the grant was applied to a value
+   * nobody approved.
+   *
+   * **What an extension is not.** It is a record of a decision, not work: it
+   * starts no run, resumes none, un-settles none, creates no task, child or
+   * candidate, recovers no store and opens no gate — a tree whose recovery is
+   * still pending can be granted the budget it will need, and the grant changes
+   * nothing until the tree runs again. A running run keeps the wall clock it
+   * started with (its per-run time is not reset); what an extension lengthens is
+   * only the tree's own bound, which every admission, driver and watchdog path
+   * reads through {@link resolveRootBudget}.
+   */
+  async extendRootBudget(sessionId: string, commit: RootBudgetExtensionCommit): Promise<TaskBudgetExtension> {
+    const { storeId, snapshot, budget } = await this.budgetExtensionContext(sessionId)
+    if (typeof commit?.approvalRef !== 'string' || commit.approvalRef.length === 0) {
+      throw new Error(
+        `task-runtime: the budget of session "${sessionId}" was not extended: the commit carries no approval reference ` +
+        '(a non-empty `approval:<callId>` from the channel that asked the person); this service records a grant, it never makes one',
+      )
+    }
+    const requestKey = typeof commit?.requestKey === 'string' ? commit.requestKey : ''
+    const existing = requestKey.length === 0
+      ? undefined
+      : this.budgetExtensionIndex(snapshot).byRequestKey[requestKey]
+    const baseline: RootBudgetExtensionBaseline = typeof commit.baseline === 'object' && commit.baseline !== null ? commit.baseline : {}
+    const outcome = this.judgeBudgetExtension(commit, baseline, budget, existing)
+    if (outcome.kind === 'refused') {
+      throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: ${outcome.reason}`)
+    }
+    if (outcome.kind === 'recorded') return outcome.record
+    const claim: TaskBudgetExtensionClaim = {
+      ...outcome.proposal,
+      approvalRef: commit.approvalRef,
+      requestedBy: sessionId,
+    }
+    await this.ctx.task.recordBudgetExtensionIn(storeId, budget.rootTaskId, claim, sessionId)
+    const stored = this.budgetExtensionIndex(await this.ctx.task.snapshotIn(storeId)).byRequestKey[claim.requestKey]
+    if (stored === undefined) {
+      throw new Error(
+        `task-runtime: budget extension "${claim.requestKey}" was committed to store "${storeId}" but the store does not hold it; ` +
+        'a committed extension is a durable fact, and this is not one',
+      )
+    }
+    return stored
+  }
+
+  /**
+   * The store one budget-extension call works on, its root session established —
+   * the one place the two entries' trust and reading rules live.
+   *
+   * The session's graph answers first because "is this session a graph's root
+   * coordination session" is the graph's own fact, and the store id is derived
+   * from the session the graph names ({@link rootTaskStoreId}) rather than from
+   * the caller's string: a worker session, a session of another graph and a
+   * session whose graph cannot be resolved are one refusal family here, each
+   * named, and none of them opens a store.
+   *
+   * The budget has to resolve for an extension to mean anything: the tree's
+   * owner is the root task and the configured ceilings are measured from the root
+   * run's own start, so a store with no measurable root (no root task, no run for
+   * it, an unreadable start) refuses by the resolver's own words — the same
+   * refusal every admission path uses, at the same place, instead of a second
+   * reading of the store invented here.
+   */
+  private async budgetExtensionContext(sessionId: string): Promise<{ storeId: string; snapshot: TaskSnapshot; budget: ResolvedRootBudget }> {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      throw new Error('task-runtime: a budget extension needs the root session that asks: pass a non-empty session id')
+    }
+    let rootSessionId: string
+    try {
+      const graph = await this.ctx.graphs.graphForSession(SessionId(sessionId))
+      rootSessionId = graph.rootSessionId
+    } catch (error) {
+      throw new Error(
+        `task-runtime: the budget of session "${sessionId}" cannot be extended: its graph could not be resolved ` +
+        `(${error instanceof Error ? error.message : String(error)}), so whether it is a graph's root coordination session cannot be established`,
+      )
+    }
+    if (rootSessionId !== sessionId) {
+      throw new Error(
+        `task-runtime: session "${sessionId}" is not a root coordination session (its graph's root session is "${rootSessionId}"), so it cannot extend a tree's budget: ` +
+        'a raise is a decision about the tree the root session accepted, and it is refused by name for a delegated worker, for a session of another graph, ' +
+        'and for any session that is not the one its graph created',
+      )
+    }
+    const storeId = rootTaskStoreId(sessionId)
+    let snapshot: TaskSnapshot
+    try {
+      snapshot = await this.ctx.task.openStore(storeId)
+    } catch (error) {
+      throw new Error(
+        `task-runtime: the budget of session "${sessionId}" cannot be read: store "${storeId}" is unavailable ` +
+        `(${error instanceof Error ? error.message : String(error)})`,
+      )
+    }
+    const resolution = resolveRootBudget(snapshot, this.config.rootBudget ?? {})
+    if (!resolution.ok) {
+      throw new Error(`task-runtime: the budget of session "${sessionId}" cannot be extended: ${resolution.reason}`)
+    }
+    return { storeId, snapshot, budget: resolution }
+  }
+
+  /** The store's own extension index; a snapshot that carries none is a refusal, never "the store holds no extensions". */
+  private budgetExtensionIndex(snapshot: TaskSnapshot): TaskBudgetExtensionIndex {
+    const index = snapshot.budgetExtensions
+    if (index === undefined) {
+      throw new Error(`task-runtime: store "${snapshot.id}" carries no budget-extension index, so its approved ceilings cannot be read`)
+    }
+    return index
+  }
+
+  /**
+   * One extension request, judged against the ceilings in force and against what
+   * the store already holds — the whole refusal surface, applied identically by
+   * the query and by the committing call, and pure: it reads the values it is
+   * given and writes nothing.
+   *
+   * The order is deliberate. The request's own shape first (a key, at least one
+   * dimension, values that denote something), then the store's answer for the key
+   * — a repeat of a recorded request is *answered* from the record before any
+   * bound is judged, so a key whose totals were approved can be retried after the
+   * tree moved on and still be idempotent — and only then the bounds: the
+   * dimension has to be bounded at all, the reading handed back has to be the one
+   * in force, and the total has to be a raise.
+   */
+  private judgeBudgetExtension(
+    request: RootBudgetExtensionRequest,
+    baseline: RootBudgetExtensionBaseline,
+    budget: ResolvedRootBudget,
+    existing: TaskBudgetExtension | undefined,
+  ): RootBudgetExtensionOutcome {
+    if (typeof request !== 'object' || request === null) {
+      return { kind: 'refused', reason: 'the request is not an object with a request key and at least one of maxRuns, deadlineAt' }
+    }
+    const requestKey = request.requestKey
+    if (typeof requestKey !== 'string' || requestKey.length === 0) {
+      return { kind: 'refused', reason: 'the request needs a non-empty request key: it is how a retry after a restart is recognised as the same request' }
+    }
+    if (request.maxRuns === undefined && request.deadlineAt === undefined) {
+      return { kind: 'refused', reason: 'the request names neither maxRuns nor deadlineAt, and a raise that raises nothing is not an extension' }
+    }
+    const deadline = request.deadlineAt === undefined ? undefined : canonicalBudgetInstant(request.deadlineAt)
+    if (request.deadlineAt !== undefined && deadline === undefined) {
+      return {
+        kind: 'refused',
+        reason:
+          `deadlineAt ${JSON.stringify(request.deadlineAt)} is not an absolute instant: a deadline is the moment the tree stops at, written in UTC ` +
+          '(for example 2026-09-28T09:00:00.000Z) — a local time, a duration or an unreadable value is not one',
+      }
+    }
+    if (request.maxRuns !== undefined && (!Number.isInteger(request.maxRuns) || request.maxRuns <= 0)) {
+      return {
+        kind: 'refused',
+        reason: `maxRuns ${JSON.stringify(request.maxRuns)} is not a positive whole number of runs; the approved value is the tree\u2019s whole run count, never an increment`,
+      }
+    }
+    const proposalDigest = budgetExtensionRequestDigest({
+      requestKey,
+      ...(request.maxRuns === undefined ? {} : { maxRuns: request.maxRuns }),
+      ...(deadline === undefined ? {} : { deadlineAt: deadline }),
+    })
+    if (existing !== undefined) {
+      if (existing.requestDigest === proposalDigest) return { kind: 'recorded', record: existing }
+      return {
+        kind: 'refused',
+        reason:
+          `request key "${requestKey}" is already bound to ${describeBudgetExtension(existing)} (identity ${existing.requestDigest}); ` +
+          'one key names one request, and different totals under it are a new request under a new key',
+      }
+    }
+    const maxRuns = this.judgeBudgetRaise('maxRuns', request.maxRuns, budget.maxRuns, baseline.maxRuns)
+    if (!maxRuns.ok) return { kind: 'refused', reason: maxRuns.reason }
+    const deadlineAt = this.judgeBudgetRaise('deadlineAt', deadline, budget.deadlineAt, baseline.deadlineAt)
+    if (!deadlineAt.ok) return { kind: 'refused', reason: deadlineAt.reason }
+    return {
+      kind: 'proposed',
+      proposal: {
+        requestKey,
+        requestDigest: proposalDigest,
+        ...(maxRuns.raise === undefined ? {} : { maxRuns: maxRuns.raise }),
+        ...(deadlineAt.raise === undefined ? {} : { deadlineAt: deadlineAt.raise }),
+      },
+    }
+  }
+
+  /**
+   * One dimension's raise, or the reason there is none. `requested` is what the
+   * request asks for (already canonical for an instant), `inForce` is the ceiling
+   * the store is under now and `read` is what the request says was in force when
+   * it was read.
+   *
+   * The three refusals are the whole rule of K4's raise: a dimension nobody
+   * bounded is not raised (an unset ceiling is unlimited, and naming it would
+   * invent a limit), the reading has to be the value in force (so an approval
+   * cannot be re-based on a ceiling that moved under it), and the total asked for
+   * has to be above it (a ceiling is the whole approved total and only moves up).
+   */
+  private judgeBudgetRaise<T extends number | string>(
+    dimension: 'maxRuns' | 'deadlineAt',
+    requested: T | undefined,
+    inForce: T | undefined,
+    read: T | undefined,
+  ): { readonly ok: true; readonly raise?: BudgetRaise<T> } | { readonly ok: false; readonly reason: string } {
+    if (requested === undefined) return { ok: true }
+    if (inForce === undefined) {
+      return {
+        ok: false,
+        reason:
+          `this tree sets no ${dimension} ceiling (the deployment configures none, and no extension has raised one), so there is nothing to raise: ` +
+          'an unbounded dimension needs no grant, and a grant for it would turn an unlimited tree into a limited one',
+      }
+    }
+    if (read === undefined) {
+      return {
+        ok: false,
+        reason:
+          `the request does not say what ${dimension} was when it was read (the baseline the query reported), so it cannot be recognised as a raise ` +
+          'from a known value; read the ceilings again and hand the reading back verbatim',
+      }
+    }
+    if (read !== inForce) {
+      return {
+        ok: false,
+        reason:
+          `${dimension} moved since this request was read: it was read at ${String(read)} and it is ${String(inForce)} in force now, ` +
+          'so approving this request would re-base a person\u2019s decision on a value nobody approved; read the ceilings again and ask for the total you want',
+      }
+    }
+    if (typeof inForce === 'number' && typeof requested === 'number') {
+      if (requested <= inForce) {
+        return {
+          ok: false,
+          reason:
+            `maxRuns ${requested} does not raise the ${inForce} in force; an approved value is the whole total the tree may reach, ` +
+            'and it only ever moves up (the request states the total it wants, never an increment)',
+        }
+      }
+      return { ok: true, raise: { previous: inForce, next: requested } }
+    }
+    if (typeof inForce === 'string' && typeof requested === 'string') {
+      if (Date.parse(requested) <= Date.parse(inForce)) {
+        return {
+          ok: false,
+          reason:
+            `deadlineAt ${requested} is not later than the ${inForce} in force; an approved deadline is an absolute instant the tree stops at, ` +
+            'and it only ever moves later',
+        }
+      }
+      return { ok: true, raise: { previous: inForce, next: requested } }
+    }
+    return { ok: false, reason: `the request and the ${dimension} in force are not the same kind of value, so no raise can be read from them` }
   }
 
   /**

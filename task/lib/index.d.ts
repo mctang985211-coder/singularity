@@ -128,6 +128,144 @@ declare function contractDigest(contract: TaskContract): string;
 /** The whole-batch proposal identity: SHA-256 over {@link canonicalize} of the normalized proposal. */
 declare function decompositionDigest(identity: DecompositionIdentity): string;
 //#endregion
+//#region src/budget.d.ts
+/**
+ * Approved budget extensions (K4): the one durable fact that says a person
+ * raised a ceiling of the tree's own budget — which dimensions, from what to
+ * what, on whose request, under which approval — and nothing else.
+ *
+ * Why the record is a pair of ceilings and never an amount: "add two hours" or
+ * "add five runs" has to be applied to something, and whatever that something
+ * is, it moves. A pair (`previous` → `next`) states the two absolute values in
+ * force at either end, so a reader of the record alone can tell what was
+ * approved without recomputing anything from a configuration that may since
+ * have changed, and the reducer can refuse a record whose `previous` is not the
+ * value actually in force — which is what makes two grants approved against the
+ * same reading mutually exclusive instead of additive.
+ *
+ * Why the *previous* value is not an identity input: it is a reading, not a
+ * request. The identity of an extension is the key plus the totals it asks for
+ * ({@link budgetExtensionRequestDigest}), so a retry of the same request after a
+ * crash addresses the same record whatever it read before, and a second request
+ * under one key at different totals is new content — refused by name rather than
+ * silently added to the first.
+ *
+ * What the record deliberately does not hold: the approval's own payload (the
+ * channel's transcript, the person's words). It holds the channel's reference
+ * ({@link TaskBudgetExtensionClaim.approvalRef}), exactly as the other human
+ * gates in this workspace do — the reference is the durable fact, the transcript
+ * belongs to the tool that asked.
+ * @module @dangosys/dsh-singularity-task/budget
+ */
+/**
+ * What one caller asks for: the request key it will be answered under, and the
+ * totals it wants in force. The totals are absolute — the run count the tree may
+ * reach, the instant it must stop by — never an increment, a duration or a
+ * second account. A dimension left out is not asked for.
+ */
+interface BudgetExtensionRequest {
+  readonly requestKey: string;
+  /** The run count asked for as the whole approved total. */
+  readonly maxRuns?: number;
+  /** The absolute instant asked for as the ceiling the tree stops at. */
+  readonly deadlineAt?: string;
+}
+/** One dimension's raise as it is recorded: the ceiling in force before, and the ceiling approved now. */
+interface BudgetRaise<T> {
+  /** The ceiling in force when the request was read; the value the request was approved against. */
+  readonly previous: T;
+  /** The ceiling in force once this record stands: the whole approved total, never the difference. */
+  readonly next: T;
+}
+/**
+ * What a request becomes once it is judged: the raise each dimension moves, and
+ * the request's own identity. This is the form a review is shown — the two
+ * numbers a person is approving — and the form a recorded extension keeps.
+ */
+interface BudgetExtensionProposal {
+  readonly requestKey: string;
+  /** {@link budgetExtensionRequestDigest} of the key and the totals above. */
+  readonly requestDigest: string;
+  readonly maxRuns?: BudgetRaise<number>;
+  readonly deadlineAt?: BudgetRaise<string>;
+}
+/**
+ * One extension as it is submitted: the proposal, plus whose request it is and
+ * under which approval it was granted. `approvalRef` is the trusted channel's
+ * own fact (the `approval:<callId>` family the other human gates use) and is
+ * never derived here: an empty one is refused by the reducer, so a record that
+ * stands is a record a channel stood behind.
+ */
+interface TaskBudgetExtensionClaim extends BudgetExtensionProposal {
+  readonly approvalRef: string;
+  /** The root coordination session that asked — the store's own root session. */
+  readonly requestedBy: string;
+}
+/** One extension as the store holds it: the accepted claim, stamped with the event's own time. */
+interface TaskBudgetExtension extends TaskBudgetExtensionClaim {
+  /** The moment the store recorded it, taken from the event — never from the caller. */
+  readonly recordedAt: string;
+}
+/**
+ * The extensions a snapshot answers: all of them in the order they were
+ * recorded, and the one bound to a request key. Idempotency is the second view —
+ * one key names at most one extension, so a repeated request is answered from
+ * the record instead of being granted twice.
+ *
+ * Optional at the type level because a snapshot is also a shape other code
+ * builds by hand (a verifier's selftest store view, a test double), and those
+ * literals predate budget extensions. A snapshot produced by this build's
+ * reducer always carries it — empty members included — so an absent index means
+ * "this reader cannot see extensions", never "the store holds none".
+ */
+interface TaskBudgetExtensionIndex {
+  readonly all: readonly TaskBudgetExtension[];
+  /** `requestKey` → the extension bound to it. At most one, by construction. */
+  readonly byRequestKey: Readonly<Record<string, TaskBudgetExtension>>;
+}
+/** The closed field set of a submitted extension: an unread field must not enter the record. */
+declare const BUDGET_EXTENSION_CLAIM_FIELDS: readonly string[];
+/** One store's extension index with nothing in it; what a store without extensions answers. */
+declare function emptyBudgetExtensionIndex(): TaskBudgetExtensionIndex;
+/**
+ * The request identity: SHA-256 over the key and the totals asked for, each
+ * dimension in its canonical form (a deadline is the instant it denotes, not the
+ * spelling it was written in). Deliberately not over the `previous` values: two
+ * requests under one key at the same totals are one request, and a caller that
+ * re-reads the ceiling between them has not asked for anything else.
+ */
+declare function budgetExtensionRequestDigest(request: BudgetExtensionRequest): string;
+/**
+ * The canonical spelling (`new Date(ms).toISOString()`) of the absolute instant
+ * a deadline value denotes, or `undefined` when it denotes none: an unreadable
+ * string, a bare local time, a duration in words. Callers that *read* a value
+ * normalize through this one function, so a deadline may be written with any
+ * legal zone designator while what the store records — and what an identity is
+ * taken over — is one spelling per instant. A caller that requires the stored
+ * form compares the result to its input.
+ */
+declare function canonicalBudgetInstant(value: unknown): string | undefined;
+/** One extension's raises in one phrase, for a refusal that has to say what a request key already holds. */
+declare function describeBudgetExtension(extension: BudgetExtensionProposal): string;
+/** The ceilings the approved extensions of `extensions` leave in force, per dimension each one moved. */
+interface ApprovedBudgetCeilings {
+  /** The approved run count in force, or `undefined` when the store has no extension for that dimension. */
+  readonly maxRuns?: number;
+  /** The approved deadline in force, or `undefined` when the store has no extension for that dimension. */
+  readonly deadlineAt?: string;
+}
+/**
+ * Folds the store's extensions into the ceilings they leave in force: each
+ * dimension keeps the `next` of the *last* extension that moved it, and a
+ * dimension no extension names answers `undefined` — "the store has no approved
+ * ceiling here", which every caller reads as "the deployment's own value still
+ * stands" rather than as infinity. One implementation, so the resolver that
+ * enforces a ceiling, the reducer that chains the next one onto it and the
+ * service that judges a request all read the same numbers in the same order
+ * (`all` is the store's own record order).
+ */
+declare function approvedBudgetCeilings(extensions: readonly TaskBudgetExtension[]): ApprovedBudgetCeilings;
+//#endregion
 //#region src/proposal.d.ts
 
 /**
@@ -1890,6 +2028,22 @@ interface TaskSnapshot {
    * not read it as "no questions": see {@link TaskQuestionIndex}.
    */
   readonly questions?: TaskQuestionIndex;
+  /**
+   * The ceilings a person raised on this tree's own budget (K4), in the order
+   * they were recorded and by request key. This is the *only* durable record of
+   * an approved raise: the deployment's own ceilings come from the configuration
+   * and are re-derived from the root's start on every read, while an approved
+   * one is an absolute value that survives a restart, a configuration change and
+   * a replay — which is why the resolver reads it instead of timing anything
+   * again.
+   *
+   * Optional at the type level for the same reason as {@link proposals}, and read
+   * the same way: a snapshot produced by this build's reducer always carries the
+   * index (empty members included), so an absent one means "this reader cannot
+   * see extensions", never "the store holds none". See
+   * {@link TaskBudgetExtensionIndex}.
+   */
+  readonly budgetExtensions?: TaskBudgetExtensionIndex;
 }
 interface TaskEventPayloads {
   /** A task instance enters the store (created status, no runs or children attached). */
@@ -2088,6 +2242,31 @@ interface TaskEventPayloads {
   /** A structured "what is still missing" record raised by a failure, a block, or a capability gap; an Obligation is a question, never an action. */
   ObligationRecorded: {
     obligation: Obligation;
+  };
+  /**
+   * A person raised a ceiling of the tree's own budget (K4): the run count the
+   * tree may reach, the instant it must stop by, or both — each recorded as the
+   * pair (the ceiling in force when the request was read → the ceiling approved
+   * now), with the request's identity, the session that asked and the approving
+   * channel's reference.
+   *
+   * The reducer is the gate, and its subject is the *chain*: the envelope must
+   * name the store's own root session and its root task, every pair must be a
+   * raise on the canonical form of its dimension, the declared identity must be
+   * the identity of the content it accompanies, one request key is bound to one
+   * extension (the same key at the same content applies nothing a second time,
+   * at different content is a refusal by name), and a dimension that an earlier
+   * extension already moved must be asked for from *that* value — the value in
+   * force when this commit lands. That last check is what makes the entry's
+   * serial re-read meaningful: two grants approved against the same reading
+   * cannot both stand, and neither is silently re-based on the other's result.
+   *
+   * What it deliberately leaves alone: no run is started, resumed or un-settled,
+   * no task, child or candidate appears, no usage is zeroed, and no per-run
+   * wall time is restarted. An extension moves ceilings and nothing else.
+   */
+  TaskBudgetExtended: {
+    extension: TaskBudgetExtensionClaim;
   };
   /**
    * A proposal enters the store (T2/T3, construction guide §6; root contracts
@@ -2424,6 +2603,39 @@ declare class TaskState {
    */
   private recordObligation;
   /**
+   * A person raised one of the tree's own ceilings (K4). The reducer is the
+   * shape gate, the identity gate and — the part that matters — the *chain*
+   * gate, in that order, and it applies nothing at all when any of them refuses.
+   *
+   * Where the raise is rooted: the envelope must name the store's own root
+   * session (its `sessionId`, the session the store id derives from —
+   * `rootTaskStoreId`) and a parentless task of the store (the entry passes the
+   * root task `resolveRootBudget` resolves, and what the reducer refuses is a
+   * task with a parent). A
+   * delegated worker, another session's tree and a child task are each refused by
+   * name, so one store's budget is only ever moved by facts about that store.
+   *
+   * The chain: a dimension keeps the `next` of the last extension that moved it,
+   * and an extension that moves it again has to state *that* value as its
+   * `previous`. A record written against an older reading is refused rather than
+   * re-based on the newer one, so two grants approved against the same reading
+   * cannot both stand — the entry's serial re-read, inside the store's single
+   * write queue, is what decides between them.
+   *
+   * The first raise of a dimension states `previous` as the ceiling the
+   * deployment itself configures, which this reducer cannot recompute (the
+   * configuration is not in the store, and deliberately so: the initial ceilings
+   * stay derived from the root's start and the deployment's config). What it does
+   * instead is make the chain authoritative from that point on — no ceiling is
+   * ever derived from a grant, and a later grant can only continue what an
+   * earlier one left.
+   *
+   * Idempotency is by request key and content: a repeat of a recorded request
+   * applies nothing, and the same key at different content is refused by name
+   * instead of being added to the record.
+   */
+  private extendBudget;
+  /**
    * A proposal enters the store (T2/T3, §6; root contracts A0 §2). The reducer
    * is the shape gate and the integrity gate, in that order: the record must be
    * a well-formed proposal of its kind — the closed field set of its review
@@ -2500,6 +2712,16 @@ declare class TaskState {
    * (run, request key) identity.
    */
   private questions;
+  /**
+   * The budget-extension index of the snapshot this state replays on. Absent
+   * only when a foreign, hand-built snapshot (one from a reader that predates
+   * extensions) was replayed onto — never on this build's own value — and that is
+   * a refusal rather than an empty index, for the same reason as {@link index}: a
+   * reducer that cannot see the extensions would happily write a second one for
+   * the same request key, and would chain a new ceiling onto a value it cannot
+   * see.
+   */
+  private budgetExtensions;
   /**
    * Every proposal event is about one subject, and the envelope has to name it:
    * a decomposition proposal's events name the parent task whose batch it is; a
@@ -2864,6 +3086,26 @@ declare class TaskService extends Service {
   recordReviewIn(storeId: string, review: ReviewRecord, actor: string): Promise<void>;
   recordDiagnosisIn(storeId: string, diagnosis: Diagnosis, actor: string): Promise<void>;
   recordObligationIn(storeId: string, obligation: Obligation, actor: string): Promise<void>;
+  /**
+   * Records one approved budget extension (K4), and answers a repeat of a stored
+   * request from the record instead of appending a second fact.
+   *
+   * The envelope carries the tree's root task and the root session that asked,
+   * and the claim carries the raise itself, its identity and the approving
+   * channel's reference. The reducer is the gate for every rule — the root-session
+   * and root-task binding, the shape of each pair, the identity of the content,
+   * one key names one extension, and a dimension an earlier extension already
+   * moved has to be asked for from the value *that* extension left.
+   *
+   * The idempotency read here is the same shape every other entry keeps
+   * ({@link askParentQuestionIn}): the store's current state, taken after the
+   * write queue has drained, and a key+identity match answered from the record
+   * with nothing written. It is not the serialization point — the reducer's own
+   * check is, inside the commit — so a caller that lost a race may still reach
+   * the commit, where the second write applies nothing and the state stays
+   * exactly what the first one made it.
+   */
+  recordBudgetExtensionIn(storeId: string, rootTaskId: TaskId, claim: TaskBudgetExtensionClaim, actor: string): Promise<void>;
   recordHandoffIn(storeId: string, handoff: TaskHandoff, actor: string): Promise<void>;
   commitIn(storeId: string, events: readonly TaskEvent[]): Promise<void>;
   /**
@@ -2889,4 +3131,4 @@ declare class TaskService extends Service {
   private header;
 }
 //#endregion
-export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ArtifactRef, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, ExecutionPhase, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, NoProgressRecord, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ProtectedInputRef, QuestionAnswer, QuestionAnswerIdentity, QuestionAnswerRecord, QuestionAnswerResult, QuestionAsk, QuestionAskResult, QuestionIdentity, QuestionMessageRef, QuestionRecord, ROOT_PROPOSAL_TASK_ID, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootProposalIdentity, RunId, RunMcpServerBinding, RunProviderBinding, RunSkillBinding, RunStatus, SkillFitFacts, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskContract, TaskContractVersion, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskQuestionIndex, TaskRun, TaskRunBatch, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, admissionContextDigest, answerIdOf, batchIdFor, blockingQuestionsOf, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberTaskIds, sha256Hex, taskProposalId };
+export { AcceptanceCriterion, AcceptanceCriterionShape, AcceptanceFacts, AdmissionContext, ApprovedBudgetCeilings, ArtifactRef, BUDGET_EXTENSION_CLAIM_FIELDS, BudgetExtensionProposal, BudgetExtensionRequest, BudgetRaise, CapabilityCoverageFacts, CapabilityManifest, ChildEvidenceRef, ContextEfficiencyFacts, DecompositionAdmission, DecompositionChildIdentity, DecompositionFacts, DecompositionIdentity, DecompositionStatus, DependencyEdge, Diagnosis, DiagnosisConfidence, DiagnosisProposal, DiagnosisProvenance, EvidenceBundle, EvidenceClaim, ExecutionPhase, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, JudgedDimension, JudgementVerdict, NoProgressRecord, Obligation, OutcomeCorrectnessFacts, ProposalTargetType, ProtectedInputRef, QuestionAnswer, QuestionAnswerIdentity, QuestionAnswerRecord, QuestionAnswerResult, QuestionAsk, QuestionAskResult, QuestionIdentity, QuestionMessageRef, QuestionRecord, ROOT_PROPOSAL_TASK_ID, ReviewBlocker, ReviewCriterion, ReviewDimensions, ReviewJudgement, ReviewMetrics, ReviewOutcome, ReviewRecord, ReviewTokenUsage, ReviewToolCall, ReviewToolCallTotals, RootProposalIdentity, RunId, RunMcpServerBinding, RunProviderBinding, RunSkillBinding, RunStatus, SkillFitFacts, SubmissionRecord, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskBudgetExtension, TaskBudgetExtensionClaim, TaskBudgetExtensionIndex, TaskContract, TaskContractVersion, TaskEvent, TaskEventEnvelope, TaskEventKind, TaskEventPayloads, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalBase, TaskProposalBatchConsumption, TaskProposalChild, TaskProposalConsumption, TaskProposalDecisionClaim, TaskProposalDecisionOutcome, TaskProposalDecomposition, TaskProposalIndex, TaskProposalPhase, TaskProposalPhaseChange, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalRoot, TaskProposalRootConsumption, TaskProposalStatus, TaskProposalVerifierIdentity, TaskQuestionIndex, TaskRun, TaskRunBatch, TaskService, TaskService as default, TaskSnapshot, TaskSpecificationFacts, TaskState, TaskStatus, ToolFitFacts, VerificationMode, VerificationResult, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, describeBudgetExtension, emptyBudgetExtensionIndex, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberTaskIds, sha256Hex, taskProposalId };

@@ -39,12 +39,12 @@ var HitlService = class extends Service {
 		ctx.on("user-questions/request", async (request, next) => {
 			if (request.questions.length !== 1) return next();
 			const question = request.questions[0];
-			const text$30 = await this.enqueue(request.agent?.id ?? "unknown", "ask", question.question, request.signal);
-			if (text$30.kind !== "ask") throw new Error("hitl: expected ask answer");
+			const text$31 = await this.enqueue(request.agent?.id ?? "unknown", "ask", question.question, request.signal);
+			if (text$31.kind !== "ask") throw new Error("hitl: expected ask answer");
 			return { answers: [{
 				id: question.id,
 				selected: [],
-				custom: text$30.text
+				custom: text$31.text
 			}] };
 		}, { prepend: true });
 		ctx.on("approval/request", async (request) => {
@@ -68,16 +68,16 @@ var HitlService = class extends Service {
 		waiter.resolve(answer);
 		this.ctx.emit("hitl/change", this.list());
 	}
-	enqueue(sessionId$20, kind, prompt, callerSignal) {
+	enqueue(sessionId$21, kind, prompt, callerSignal) {
 		const signal = callerSignal === void 0 ? this.lifetime.signal : AbortSignal.any([callerSignal, this.lifetime.signal]);
 		signal.throwIfAborted();
-		if (typeof sessionId$20 !== "string" || sessionId$20.length === 0) throw new Error("hitl: missing session id");
+		if (typeof sessionId$21 !== "string" || sessionId$21.length === 0) throw new Error("hitl: missing session id");
 		const id = randomUUID();
 		const pending = {
 			id,
 			kind,
 			prompt,
-			sessionId: sessionId$20,
+			sessionId: sessionId$21,
 			createdAt: Date.now()
 		};
 		const abort = () => {
@@ -230,14 +230,14 @@ var EscalationService = class extends Service {
 		return escalations;
 	}
 	async load() {
-		let text$30;
+		let text$31;
 		try {
-			text$30 = await readFile(this.file, "utf8");
+			text$31 = await readFile(this.file, "utf8");
 		} catch (error) {
 			if (error.code === "ENOENT") return;
 			throw error;
 		}
-		const records = text$30.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
+		const records = text$31.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
 			try {
 				return JSON.parse(line);
 			} catch {
@@ -286,8 +286,8 @@ const ROOT_REVIEW_TOOL_NAME = "task_intake";
 */
 function ownerSessionOfStore(storeId) {
 	if (!storeId.startsWith(STORE_PREFIX)) return void 0;
-	const sessionId$20 = storeId.slice(5);
-	return sessionId$20.length > 0 && rootTaskStoreId(sessionId$20) === storeId ? sessionId$20 : void 0;
+	const sessionId$21 = storeId.slice(5);
+	return sessionId$21.length > 0 && rootTaskStoreId(sessionId$21) === storeId ? sessionId$21 : void 0;
 }
 /**
 * The decider identity the channel records: the approval surface of the owner
@@ -681,11 +681,11 @@ var ProposalReviewService = class extends Service {
 		}
 	}
 	/** The live agent behind one session, or `undefined` — an absent registry or a departed session is a state, not a throw. */
-	liveAgent(sessionId$20) {
+	liveAgent(sessionId$21) {
 		const holder = this.ctx;
 		const registry = (typeof holder.get === "function" ? holder.get("agents") : void 0) ?? holder.agents;
 		try {
-			return registry?.get?.(sessionId$20);
+			return registry?.get?.(sessionId$21);
 		} catch {
 			return;
 		}
@@ -814,15 +814,15 @@ function reviewAgentBudget() {
 * reads as zero; a corrupt line throws rather than silently undercounting.
 */
 async function countReviewAgentRuns(rootStoreId) {
-	let text$30;
+	let text$31;
 	try {
-		text$30 = await readFile(reviewAgentLedgerFile(), "utf8");
+		text$31 = await readFile(reviewAgentLedgerFile(), "utf8");
 	} catch (error) {
 		if (error.code === "ENOENT") return 0;
 		throw error;
 	}
 	let count = 0;
-	text$30.split("\n").forEach((line, index) => {
+	text$31.split("\n").forEach((line, index) => {
 		if (line.trim().length === 0) return;
 		let record;
 		try {
@@ -847,15 +847,15 @@ async function appendReviewAgentRun(record) {
 }
 /** Every ledger row, or `undefined` when the ledger has never been written (zero rows is a state, not a failure). */
 async function readLedgerRows() {
-	let text$30;
+	let text$31;
 	try {
-		text$30 = await readFile(reviewAgentLedgerFile(), "utf8");
+		text$31 = await readFile(reviewAgentLedgerFile(), "utf8");
 	} catch (error) {
 		if (error.code === "ENOENT") return void 0;
 		throw error;
 	}
 	const rows = [];
-	text$30.split("\n").forEach((line, index) => {
+	text$31.split("\n").forEach((line, index) => {
 		if (line.trim().length === 0) return;
 		try {
 			rows.push(JSON.parse(line));
@@ -876,14 +876,14 @@ async function readLedgerRows() {
 * softened into "no delegation". Identical duplicate rows are one delegation
 * written twice, not a conflict.
 */
-async function readReviewerDelegation(sessionId$20) {
+async function readReviewerDelegation(sessionId$21) {
 	let rows;
 	try {
 		rows = await readLedgerRows();
 	} catch (error) {
 		throw new ReviewerBindingError("unreadable", `the reviewer ledger cannot be read: ${error instanceof Error ? error.message : String(error)}`);
 	}
-	const matches = (rows ?? []).filter((row) => row.sessionId === sessionId$20);
+	const matches = (rows ?? []).filter((row) => row.sessionId === sessionId$21);
 	if (matches.length === 0) return void 0;
 	const first = matches[0];
 	const record = {
@@ -892,7 +892,7 @@ async function readReviewerDelegation(sessionId$20) {
 		actor: first.actor,
 		at: first.at
 	};
-	if (matches.some((row) => row.rootStoreId !== record.rootStoreId || row.taskId !== record.taskId || row.actor !== record.actor)) throw new ReviewerBindingError("binding-conflict", `session "${sessionId$20}" is recorded under more than one reviewer delegation: ` + matches.map((row) => `${row.taskId} in ${row.rootStoreId} (by ${row.actor})`).join("; "));
+	if (matches.some((row) => row.rootStoreId !== record.rootStoreId || row.taskId !== record.taskId || row.actor !== record.actor)) throw new ReviewerBindingError("binding-conflict", `session "${sessionId$21}" is recorded under more than one reviewer delegation: ` + matches.map((row) => `${row.taskId} in ${row.rootStoreId} (by ${row.actor})`).join("; "));
 	return record;
 }
 /** The binding source the plugin registers into the context service: this deployment's ledger, as the narrow read door above. */
@@ -902,7 +902,7 @@ function reviewerBindingSource() {
 
 //#endregion
 //#region src/tools/approve.ts
-const text$29 = (value) => [{
+const text$30 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -917,7 +917,7 @@ function defineApproveTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$29(v)
+			render: (_a, v) => text$30(v)
 		},
 		execute: async (args, exec) => {
 			if (args.prompt.trim().length === 0) throw new Error("hitl_approve: prompt is empty");
@@ -941,7 +941,7 @@ function defineApproveTool(ctx) {
 
 //#endregion
 //#region src/tools/ask.ts
-const text$28 = (value) => [{
+const text$29 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -957,7 +957,7 @@ function defineAskTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$28(v)
+			render: (_a, v) => text$29(v)
 		},
 		execute: async (args, exec) => {
 			if (args.prompt.trim().length === 0) throw new Error("hitl_ask: prompt is empty");
@@ -970,6 +970,181 @@ function defineAskTool(ctx) {
 				signal: exec.signal
 			})).answers.find((entry) => entry.id === QUESTION_ID);
 			return item?.custom ?? item?.selected.join(", ") ?? "";
+		}
+	});
+}
+
+//#endregion
+//#region src/tools/proposal-parameters.ts
+/**
+* The proposal tools' argument closure (T2/T3 stage C).
+*
+* A DSH tool's parameter map is an implicitly **open** object root
+* (`tools/schema.ts`: "The map itself is an implicit open object root"), so the
+* schema cannot refuse a key a tool does not declare — which is deliberate for
+* `task_decompose`, whose whole batch is handed to the runtime to refuse field
+* by field. The three proposal tools have the opposite need: their entire
+* contract is "a proposal id and nothing else", and in particular there is no
+* argument anywhere that could mean "approved". A caller that tries one — a
+* model inventing `approved: true`, or any other approval credential — must be
+* told *by name* that this tool has no such parameter, instead of having the
+* value silently ignored while the call runs as if it had been accepted.
+*
+* The check is the tool's own and runs before any service call, so a refused
+* call has no side effect at all (§6: 服务入口执行所有检查；工具层只是显示与发起请求).
+* @module dsh-singularity-agent/tools/proposal-parameters
+*/
+/**
+* Refuse a call that carries a key the tool does not declare.
+* @param args - the parsed arguments, as the model sent them.
+* @param declared - every parameter the tool declares.
+* @param toolName - the tool's own name, for the refusal text.
+* @returns the refusal text, or `undefined` when the call carries nothing undeclared.
+*/
+function undeclaredParameters(args, declared, toolName) {
+	const undeclared$3 = Object.keys(args).filter((key) => !declared.includes(key));
+	if (undeclared$3.length === 0) return void 0;
+	return [
+		`${toolName} rejected: undeclared parameter${undeclared$3.length === 1 ? "" : "s"} ${undeclared$3.map((key) => `"${key}"`).join(", ")} —`,
+		`this tool accepts ${declared.join(", ")} and has no argument that approves, decides, or stands in for a review;`,
+		"nothing was read and nothing was changed."
+	].join(" ");
+}
+
+//#endregion
+//#region src/tools/budget-extend.ts
+const text$28 = (value) => [{
+	type: "text",
+	text: value
+}];
+/** The whole argument surface: the request key and the two totals. There is deliberately no third member. */
+const DECLARED_PARAMETERS = [
+	"requestKey",
+	"maxRuns",
+	"deadlineAt"
+];
+const DIMENSIONS = ["maxRuns", "deadlineAt"];
+function sessionId$20(exec) {
+	const id = exec.agent?.id;
+	if (typeof id !== "string" || id.length === 0) throw new Error("task_budget_extend: missing agent id");
+	return id;
+}
+/**
+* The value one dimension is under, or the words that say there is none. An
+* absent ceiling is not zero and not infinity: this deployment sets no limit
+* there, and a card that printed a number would be inventing one.
+*/
+function inForce(value) {
+	return value === void 0 ? "none" : String(value);
+}
+/** The raise this request asks of one dimension, when it names that dimension at all. */
+function raiseOf(proposal, dimension) {
+	return dimension === "maxRuns" ? proposal.maxRuns : proposal.deadlineAt;
+}
+/** One dimension's raise as a line, in the order the dimensions are printed. */
+function raiseLines(proposal) {
+	return DIMENSIONS.flatMap((dimension) => {
+		const raise = raiseOf(proposal, dimension);
+		return raise === void 0 ? [] : [`- ${dimension}: ${String(raise.previous)} → ${String(raise.next)}`];
+	});
+}
+/**
+* The card a person decides from (K4): the store and the tree the raise belongs
+* to, the request's own identity, the runs the store already holds, each
+* ceiling as it stands now — the approved total in force and the deployment's
+* own configuration beside it — and, for the dimensions this request names, the
+* total that approving would put in place.
+*
+* The usage is on the card because the ceiling is what is being moved and the
+* count is what it is measured against: a raise from 10 to 20 when 18 runs exist
+* is two runs of headroom, and a person who is not told that is deciding blind.
+*/
+function renderAsk(draft, proposal) {
+	return [
+		`Budget extension of the tree in store "${draft.storeId}" — root task ${draft.rootTaskId}, asked by its root coordination session ${draft.rootSessionId}.`,
+		`request key "${proposal.requestKey}" (identity ${proposal.requestDigest})`,
+		`runs the store already holds: ${draft.runsUsed} — an approved total replaces the ceiling, never this count`,
+		"ceilings now (the approved total in force first, the ceiling this deployment configures in parentheses):",
+		...DIMENSIONS.map((dimension) => {
+			const raise = raiseOf(proposal, dimension);
+			const now = `${dimension}: ${inForce(draft.effective[dimension])} in force (deployment configures ${inForce(draft.configured[dimension])})`;
+			return raise === void 0 ? `- ${now} — this request does not name it` : `- ${now} → approves a total of ${String(raise.next)}`;
+		}),
+		"approving records ONE budget-extension event on this store: the tree keeps its runs, its tasks and its history, no run starts or resumes, nothing is re-opened, and the approved total becomes the ceiling every later admission reads.",
+		"rejecting or cancelling records nothing and changes no ceiling."
+	].join("\n");
+}
+/** The record as both the approved and the already-recorded answer print it: the raises, and who approved them. */
+function renderRecord(record) {
+	return [...raiseLines(record), `approval on the record: ${record.approvalRef} — asked by ${record.requestedBy} at ${record.recordedAt}`];
+}
+function defineTaskBudgetExtendTool(ctx) {
+	return defineTool({
+		name: "task_budget_extend",
+		description: "Ask a human to raise the ceiling(s) bounding this tree's execution, and record the raise they approve. State the total you want in force, never a difference: maxRuns is the WHOLE approved run count (a positive whole number, not \"add five\"), deadlineAt is the absolute instant the tree must stop by (for example 2026-09-28T09:00:00.000Z, never \"two more hours\"). At least one of the two is required; a dimension this deployment leaves unlimited is refused, as is any total that is not above the ceiling in force. The request is shown to a human with the store, both ceilings and the runs already used, and only their explicit approval records anything — a rejection, a cancellation or an unavailable answerer writes nothing. A request key already recorded with the same totals is answered from the record without asking again; the same key at different totals is refused. A raise starts no run, resumes none, re-opens nothing and does not clear the runs already counted — it moves ceilings only. There is no argument here that approves anything or stands in for somebody's approval, and the store is derived from your session: only a graph's root coordination session can call this, and it may do so after its tree stopped.",
+		parameters: {
+			requestKey: {
+				type: "string",
+				required: true,
+				description: "Stable key this request is answered under; a retry after a crash carries the same key and is answered from the recorded raise"
+			},
+			maxRuns: {
+				type: "number",
+				description: "The whole approved run count once the human approves — a positive whole number above the ceiling in force, never an increment"
+			},
+			deadlineAt: {
+				type: "string",
+				description: "The approved deadline as an absolute instant in UTC (e.g. 2026-09-28T09:00:00.000Z), later than the one in force — never a duration"
+			}
+		},
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text$28(v)
+		},
+		execute: async (args, exec) => {
+			const undeclared$3 = undeclaredParameters(args, DECLARED_PARAMETERS, "task_budget_extend");
+			if (undeclared$3 !== void 0) return undeclared$3;
+			const caller = sessionId$20(exec);
+			const agent = exec.agent;
+			if (agent === void 0) throw new Error("task_budget_extend: missing agent");
+			let draft;
+			try {
+				draft = await ctx.taskRuntime.budgetExtensionDraft(caller, {
+					requestKey: args.requestKey,
+					...args.maxRuns === void 0 ? {} : { maxRuns: args.maxRuns },
+					...args.deadlineAt === void 0 ? {} : { deadlineAt: args.deadlineAt }
+				});
+			} catch (error) {
+				return `task_budget_extend rejected: ${error instanceof Error ? error.message : String(error)}`;
+			}
+			if (draft.outcome.kind === "refused") return `task_budget_extend refused: ${draft.outcome.reason}; no human was asked and nothing was written`;
+			if (draft.outcome.kind === "recorded") return [`task_budget_extend: request key "${draft.outcome.record.requestKey}" is already recorded on store "${draft.storeId}" — answered from the record; no human was asked and nothing was appended.`, ...renderRecord(draft.outcome.record)].join("\n");
+			const proposal = draft.outcome.proposal;
+			const outcome = await ctx.approval.request({
+				agent,
+				toolName: "task_budget_extend",
+				callId: exec.callId,
+				reason: renderAsk(draft, proposal),
+				signal: exec.signal
+			});
+			if (outcome !== "allowed-once") return `task_budget_extend: no extension recorded — ${outcome === "rejected" ? "the human rejected it" : outcome === "cancelled" ? "the request was cancelled before the human decided" : "no approval answerer available"}; the ceilings are unchanged and no run started or resumed`;
+			try {
+				const record = await ctx.taskRuntime.extendRootBudget(caller, {
+					requestKey: proposal.requestKey,
+					...proposal.maxRuns === void 0 ? {} : { maxRuns: proposal.maxRuns.next },
+					...proposal.deadlineAt === void 0 ? {} : { deadlineAt: proposal.deadlineAt.next },
+					baseline: draft.effective,
+					approvalRef: `approval:${exec.callId}`
+				});
+				return [
+					`task_budget_extend: approved and recorded on store "${draft.storeId}" (root task ${draft.rootTaskId})`,
+					`request key "${record.requestKey}" (identity ${record.requestDigest})`,
+					...renderRecord(record),
+					"no run started, none resumed, no task changed and no terminal run re-opened; the runs already counted still count against the approved total."
+				].join("\n");
+			} catch (error) {
+				return `task_budget_extend rejected: ${error instanceof Error ? error.message : String(error)}`;
+			}
 		}
 	});
 }
@@ -2251,9 +2426,9 @@ function defineMarkReadyTool(ctx) {
 			render: (_a, v) => text$15(v)
 		},
 		execute: async (_args, exec) => {
-			const sessionId$20 = exec.agent?.id;
-			if (sessionId$20 === void 0) throw new Error("graph_mark_ready: missing agent id");
-			const graph = await ctx.graphs.graphForSession(sessionId$20);
+			const sessionId$21 = exec.agent?.id;
+			if (sessionId$21 === void 0) throw new Error("graph_mark_ready: missing agent id");
+			const graph = await ctx.graphs.graphForSession(sessionId$21);
 			await ctx.graphs.markReady(graph.id);
 			return `graph ${graph.id} ready`;
 		}
@@ -3303,43 +3478,6 @@ async function pendingText(ctx, storeId, proposalId, detail) {
 }
 
 //#endregion
-//#region src/tools/proposal-parameters.ts
-/**
-* The proposal tools' argument closure (T2/T3 stage C).
-*
-* A DSH tool's parameter map is an implicitly **open** object root
-* (`tools/schema.ts`: "The map itself is an implicit open object root"), so the
-* schema cannot refuse a key a tool does not declare — which is deliberate for
-* `task_decompose`, whose whole batch is handed to the runtime to refuse field
-* by field. The three proposal tools have the opposite need: their entire
-* contract is "a proposal id and nothing else", and in particular there is no
-* argument anywhere that could mean "approved". A caller that tries one — a
-* model inventing `approved: true`, or any other approval credential — must be
-* told *by name* that this tool has no such parameter, instead of having the
-* value silently ignored while the call runs as if it had been accepted.
-*
-* The check is the tool's own and runs before any service call, so a refused
-* call has no side effect at all (§6: 服务入口执行所有检查；工具层只是显示与发起请求).
-* @module dsh-singularity-agent/tools/proposal-parameters
-*/
-/**
-* Refuse a call that carries a key the tool does not declare.
-* @param args - the parsed arguments, as the model sent them.
-* @param declared - every parameter the tool declares.
-* @param toolName - the tool's own name, for the refusal text.
-* @returns the refusal text, or `undefined` when the call carries nothing undeclared.
-*/
-function undeclaredParameters(args, declared, toolName) {
-	const undeclared$3 = Object.keys(args).filter((key) => !declared.includes(key));
-	if (undeclared$3.length === 0) return void 0;
-	return [
-		`${toolName} rejected: undeclared parameter${undeclared$3.length === 1 ? "" : "s"} ${undeclared$3.map((key) => `"${key}"`).join(", ")} —`,
-		`this tool accepts ${declared.join(", ")} and has no argument that approves, decides, or stands in for a review;`,
-		"nothing was read and nothing was changed."
-	].join(" ");
-}
-
-//#endregion
 //#region src/tools/task-proposal-cancel.ts
 const text$8 = (value) => [{
 	type: "text",
@@ -3380,10 +3518,10 @@ function defineTaskProposalCancelTool(ctx) {
 //#endregion
 //#region src/tools/proposal-store.ts
 /** The store one proposal call belongs to; see the module doc. */
-async function proposalStoreFor(ctx, sessionId$20) {
-	const resolution = await ctx.singularityContext.resolveCaller(sessionId$20);
+async function proposalStoreFor(ctx, sessionId$21) {
+	const resolution = await ctx.singularityContext.resolveCaller(sessionId$21);
 	if (resolution.kind === "worker" || resolution.kind === "root") return resolution.storeId;
-	throw new Error(`task-runtime: no task run is bound to session "${sessionId$20}"`);
+	throw new Error(`task-runtime: no task run is bound to session "${sessionId$21}"`);
 }
 
 //#endregion
@@ -4341,6 +4479,7 @@ var SingularityAgent = class extends Service {
 		ctx.tools.register(defineTaskVerifyTool(ctx));
 		ctx.tools.register(defineTaskReviewPackTool(ctx));
 		ctx.tools.register(defineTaskReviewAgentTool(ctx));
+		ctx.tools.register(defineTaskBudgetExtendTool(ctx));
 		ctx.tools.register(defineTaskDiagnoseTool(ctx));
 		if (evolution === "on") {
 			ctx.tools.register(defineEvolutionProposeTool(ctx));

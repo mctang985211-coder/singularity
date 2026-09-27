@@ -117,7 +117,7 @@ Reducer 校验（`task/src/service/state.ts`）：
 
 闸内状态（单进程 runtime 拥有）：`sessionId → { phase, inFlight: Map<callId, {name, writes}> }`。相位由 runtime 在提交成功后同步更新。**在途登记一致性规则**：只有被放行（调用了 `next()`）的调用才登记；deny 的调用不登记（其 `tools/result` 到来时移除为 no-op）；`tools/result` 按 callId 出清。
 
-放行表（相位 ≠ active 时）：`task_read`、`task_status`、`capability_list`、`skill`、`session_search`、`session_event_read`、`session_trace`、`task_review_pack`、`task_diagnose`、`read`、`read_image`、`glob`、`grep`、`web_fetch`、`ask_user_question`、`hitl_ask`、`hitl_approve`、`task_cancel`。其余一律 deny（含 `task_decompose`、`task_submit_result`、`task_verify`、`write`、`edit`、`bash`、`job_*`、`graph_spawn`、`evolution_*`、`subagent_*`）。无 run 绑定的 session（env-clean、reviewer 等）不受闸约束。（2026-09-26 更正：现行放行表 20 项——A2+A1 起 `context_read` 在表、`session_search`/`session_event_read`/`session_trace` 已移出并封闭，A4 起增 `task_ask_parent`/`task_answer`；以 `task-runtime/src/gate.ts` 为准。）deny 返回 `{ kind: 'deny', reason }`（含相位与允许类别），不改动任何状态。
+放行表（相位 ≠ active 时）：`task_read`、`task_status`、`capability_list`、`skill`、`session_search`、`session_event_read`、`session_trace`、`task_review_pack`、`task_diagnose`、`read`、`read_image`、`glob`、`grep`、`web_fetch`、`ask_user_question`、`hitl_ask`、`hitl_approve`、`task_cancel`。其余一律 deny（含 `task_decompose`、`task_submit_result`、`task_verify`、`write`、`edit`、`bash`、`job_*`、`graph_spawn`、`evolution_*`、`subagent_*`）。无 run 绑定的 session（env-clean、reviewer 等）不受闸约束。（2026-09-26 更正：现行放行表 20 项——A2+A1 起 `context_read` 在表、`session_search`/`session_event_read`/`session_trace` 已移出并封闭，A4 起增 `task_ask_parent`/`task_answer`；K4 起增 `task_review_agent`（终态/非 active 相位可执行的复盘窄入口，其边界是 reviewer 自身额度与 watchdog，不是业务根截止）；以 `task-runtime/src/gate.ts` 为准。）deny 返回 `{ kind: 'deny', reason }`（含相位与允许类别），不改动任何状态。
 
 写入收敛（dispatch 与验收共用）：
 

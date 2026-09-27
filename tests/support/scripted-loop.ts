@@ -75,13 +75,16 @@ import { defineTaskStatusTool } from '../../agent-singularity/src/tools/task-sta
 import { defineTaskSubmitResultTool } from '../../agent-singularity/src/tools/task-submit-result.ts'
 import type { CapabilityConfig, Config, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
+import { defineTaskBudgetExtendTool } from '../../agent-singularity/src/tools/budget-extend.ts'
+import { defineTaskReviewAgentTool } from '../../agent-singularity/src/tools/review-agent.ts'
+import { defineTaskReviewPackTool } from '../../agent-singularity/src/tools/task-review-pack.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 import { graphRegistry, sessionQueryReads } from './context-plane.ts'
 
 /** The root agent's allow-list, exactly as `agent-runtime` composes it. Exported so a fixture that mounts no loop still composes the deployment's root surface. */
 export const ROOT_TOOLS = [
   'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve', 'task_read', 'capability_list', 'context_read', 'skill', 'task_intake', 'task_decompose',
-  'task_submit_result', 'task_answer', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'evolution_propose',
+  'task_submit_result', 'task_answer', 'task_cancel', 'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel', 'task_status', 'task_verify', 'task_review_pack', 'task_review_agent', 'task_diagnose', 'task_budget_extend', 'evolution_propose',
   'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
 ]
 
@@ -113,6 +116,12 @@ const REAL_TOOLS = [
   'task_read', 'task_status', 'context_read', 'capability_list', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel',
   'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel',
   'task_ask_parent', 'task_answer',
+  // The review pair (K4): a spec that has to show the review chain really running
+  // — the pack's escalation decision and the review agent's spawn — asks for the
+  // deployment's own tools, not a stand-in that would answer for them. The budget
+  // tool (K4) is real for the same reason: its subject is what a person's
+  // approval records, and a stand-in would answer for the tool that asks.
+  'task_review_pack', 'task_review_agent', 'task_budget_extend',
 ]
 
 /** The two question tools a spec can keep as stand-ins while it drives the runtime entries itself (`questionTools: 'stand-in'`). */
@@ -158,6 +167,12 @@ export interface ToolCallRecord {
   readonly args: unknown
   /** The settled answer, once the call reported a result — a deny is a result too. */
   result?: { readonly isError: boolean; readonly text: string }
+}
+
+/** One event the deployment committed to a graph store, in commit order. */
+export interface GraphCommit {
+  readonly storeId: string
+  readonly kind: string
 }
 
 /** One spawn the runtime asked the real `AgentRuntime` for. */
@@ -313,6 +328,12 @@ export interface ScriptedLoop {
   readonly checkout: string
   /** Every spawn request, in order. */
   readonly spawns: readonly ScriptedSpawn[]
+  /**
+   * Every event this deployment committed to a graph store, in order — the
+   * graph store's own record of what a spawn wrote, which is how a case shows
+   * that publishing a node is the *only* graph effect a spawn has.
+   */
+  readonly graphCommits: readonly GraphCommit[]
   /** Every tool call dispatched here, in order, deny included. */
   readonly calls: readonly ToolCallRecord[]
   /** Every stand-in body that actually ran, in order (`name`, or `name:{args}` for a probed tool) — a denied call never reaches one. */
@@ -604,6 +625,7 @@ class ScriptedLoopImpl implements ScriptedLoop {
   private readonly spawnRecords: ScriptedSpawn[] = []
   private readonly callRecords: ToolCallRecord[] = []
   private readonly executedNames: string[] = []
+  private readonly graphEvents: GraphCommit[] = []
   private readonly primary: SessionId
   private previousHome: string | undefined
   private callOrder = 0
@@ -695,14 +717,18 @@ class ScriptedLoopImpl implements ScriptedLoop {
     }
     ctx.provide('graph', {
       snapshotIn: async () => structuredClone(graphState),
-      commitIn: async (_storeId: string, events: readonly { kind: string; agent?: { id: string; name: string; status: string }; edge?: unknown }[]) => {
+      commitIn: async (storeId: string, events: readonly { kind: string; agent?: { id: string; name: string; status: string }; edge?: unknown }[]) => {
         for (const event of events) {
+          this.graphEvents.push({ storeId: String(storeId), kind: event.kind })
           if (event.kind === 'agent/add' && event.agent !== undefined) graphState.agents.push(event.agent as never)
           if (event.kind === 'edge/add' && event.edge !== undefined) graphState.edges.push(event.edge)
         }
       },
       setStatusIn: async () => {},
-      addAgentIn: async (_storeId: string, agent: { id: string; name: string; status: string }) => { graphState.agents.push(agent as never) },
+      addAgentIn: async (storeId: string, agent: { id: string; name: string; status: string }) => {
+        this.graphEvents.push({ storeId: String(storeId), kind: 'agent/add' })
+        graphState.agents.push(agent as never)
+      },
     } as never)
     ctx.provide('graphs', graphRegistry({
       graphForSession: async (sessionId: SessionId) => ({
@@ -778,6 +804,14 @@ class ScriptedLoopImpl implements ScriptedLoop {
       ctx.tools.register(defineTaskAskParentTool(ctx))
       ctx.tools.register(defineTaskAnswerTool(ctx))
     }
+    // The review pair (K4), registered for real: a review is a read plus one
+    // published read-only node, and the acceptance is that the *tool* decides it
+    // — a stand-in could not show a spawn, a ledger row or a recorded judgement.
+    ctx.tools.register(defineTaskReviewPackTool(ctx))
+    ctx.tools.register(defineTaskReviewAgentTool(ctx))
+    // The budget tool (K4) as well: what it appends is a person's decision and
+    // the store's own event, which only the real definition can produce.
+    ctx.tools.register(defineTaskBudgetExtendTool(ctx))
 
     // The dispatch record: every call the deployment ran through the registry,
     // deny included (a denied call reports a result too), in order.
@@ -879,6 +913,10 @@ class ScriptedLoopImpl implements ScriptedLoop {
 
   get spawns(): readonly ScriptedSpawn[] {
     return this.spawnRecords
+  }
+
+  get graphCommits(): readonly GraphCommit[] {
+    return this.graphEvents
   }
 
   get calls(): readonly ToolCallRecord[] {

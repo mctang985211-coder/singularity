@@ -305,7 +305,7 @@ describe('worker capability grants', () => {
     for (const kept of ['read', 'write', 'edit', 'bash', 'glob', 'grep', 'skill', 'task_decompose', 'capability_list']) {
       expect(names, kept).toContain(kept)
     }
-    for (const stripped of ['evolution_decide', 'evolution_propose', 'graph_spawn', 'hitl_ask', 'task_review_pack', 'session_search', 'web_fetch']) {
+    for (const stripped of ['evolution_decide', 'evolution_propose', 'graph_spawn', 'hitl_ask', 'task_review_pack', 'task_review_agent', 'task_budget_extend', 'session_search', 'web_fetch']) {
       expect(names, stripped).not.toContain(stripped)
     }
     // The four raw cross-session readers are off the surface (A2): the baseline
@@ -352,11 +352,17 @@ describe('worker capability grants', () => {
     }
     // Nodes grow by task_decompose through admission, never by reaching for the graph plane:
     // graph_spawn skips admission and returns the child's prose, and the platform surface
-    // (HITL, review/diagnosis, evolution) stays the root's.
+    // (HITL, review/diagnosis, evolution) stays the root's. The review *chain* is that
+    // surface's (K4): the gate admits `task_review_agent` in the phases a stopped tree's
+    // session is in, and what keeps a worker out of it is the grant — this baseline has no
+    // such name, and no capability label expands to one. `task_budget_extend` (K4) is the
+    // same fact one step further: the gate admits it in every phase because it raises a
+    // ceiling and does no work, and a worker — whose own budget a raise is not its to ask
+    // for — never carries it.
     for (const stripped of [
       'graph_spawn', 'graph_mark_ready', 'hitl_ask', 'hitl_approve',
       'evolution_propose', 'evolution_candidate', 'evolution_replay', 'evolution_gate', 'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list', 'escalate',
-      'task_review_pack', 'task_diagnose',
+      'task_review_pack', 'task_review_agent', 'task_diagnose', 'task_budget_extend',
       ...RAW_SESSION_READS,
     ]) {
       expect(names, stripped).not.toContain(stripped)

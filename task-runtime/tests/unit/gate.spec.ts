@@ -24,11 +24,13 @@ const CONTRACT_ALLOWED = [
   'skill',
   'task_answer',
   'task_ask_parent',
+  'task_budget_extend',
   'task_cancel',
   'task_diagnose',
   'task_proposal_cancel',
   'task_proposal_read',
   'task_read',
+  'task_review_agent',
   'task_review_pack',
   'task_status',
   'web_fetch',
@@ -130,6 +132,62 @@ describe('COORDINATION_ALLOWED', () => {
     if (late.allow) throw new Error('unreachable')
     expect(late.reason).toContain('late call')
     expect(gate.decide('s-1', 'task_read')).toEqual({ allow: true })
+  })
+
+  test('classifies the review agent with the reads it concludes from, not with the budget that stopped the tree', () => {
+    // K4: the review chain reads one task's facts, publishes one read-only
+    // reviewer and records its judgement as a Diagnosis — the same category
+    // `task_review_pack` and `task_diagnose` are in, one step further along. The
+    // bound on a review is the reviewer's own per-store allowance and watchdog
+    // (the tool's, `review-agent-ledger`), never the business budget that left
+    // the tree terminal — so the classification has to hold in exactly the
+    // phases a stopped tree's own session is in.
+    const gate = new ExecutionGate()
+    gate.setPhase('s-1', 'waiting_children')
+    expect(gate.decide('s-1', 'task_review_agent')).toEqual({ allow: true })
+    gate.setPhase('s-1', 'submitted')
+    expect(gate.decide('s-1', 'task_review_agent')).toEqual({ allow: true })
+    gate.setTerminal('s-1')
+    expect(gate.decide('s-1', 'task_review_agent')).toEqual({ allow: true })
+
+    // The entries around it stay where the contract put them: work is still a
+    // late call in the same phase, and the review is not work the drain waits
+    // for (its reviewer writes nothing to the checkout).
+    const write = gate.decide('s-1', 'task_decompose')
+    expect(write.allow).toBe(false)
+    if (write.allow) throw new Error('unreachable')
+    expect(write.reason).toContain('late call')
+    gate.trackAllowed('s-1', 'c-1', 'task_review_agent')
+    gate.trackAllowed('s-1', 'c-2', 'task_decompose')
+    expect(gate.inFlightWrites('s-1')).toEqual([{ callId: 'c-2', name: 'task_decompose' }])
+  })
+
+  test('admits the budget raise a person approved in every phase, and never the work it does not do', () => {
+    // K4: the one entry in this list that appends a store fact. It is coordination
+    // because of what it is not — the committing entry starts no run, resumes
+    // none, re-opens no task and touches no checkout — and because the caller is
+    // the root coordination session of a tree that may already have stopped: a
+    // spent tree is exactly the tree whose owner has to be able to ask for more
+    // ("终态亦可调用"). The fact itself is the person's, refused by the runtime
+    // when the channel's reference is empty.
+    const gate = new ExecutionGate()
+    for (const phase of ['active', 'waiting_children', 'submitted'] as const) {
+      gate.setPhase('s-1', phase)
+      expect(gate.decide('s-1', 'task_budget_extend'), phase).toEqual({ allow: true })
+    }
+    gate.setTerminal('s-1')
+    expect(gate.decide('s-1', 'task_budget_extend')).toEqual({ allow: true })
+
+    // The same phases still close work, and the question block does not lift a
+    // write: the entry is a narrow door, not an open gate.
+    gate.setQuestionsBlocked('s-1', true)
+    expect(gate.decide('s-1', 'task_decompose').allow).toBe(false)
+    expect(gate.decide('s-1', 'task_budget_extend')).toEqual({ allow: true })
+    // Nor is it a write the drain waits for: it holds no workspace and settles
+    // in one store commit.
+    gate.trackAllowed('s-1', 'c-1', 'task_budget_extend')
+    gate.trackAllowed('s-1', 'c-2', 'graph_spawn')
+    expect(gate.inFlightWrites('s-1')).toEqual([{ callId: 'c-2', name: 'graph_spawn' }])
   })
 })
 

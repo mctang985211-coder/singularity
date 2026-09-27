@@ -8,11 +8,11 @@ Package: `@dangosys/dsh-singularity-agent`
 
 Dependencies: graphs, tools
 
-config.yaml: `evolution` (`off` | `on`, default `off`) — whether this composition registers the nine `evolution_*` tools on the global layer. Off (the shipped default, `DEFAULT_EVOLUTION`) registers the other 22 of the tools below and none of the evolution chain: no agent surface can call one, including a spawned worker with no grant, which otherwise keeps the global layer. On registers all 31, with the chain's validation, approvals, history reads and rollback unchanged. A value this build does not implement, or a configuration member it does not read, refuses to start and names what it refused.
+config.yaml: `evolution` (`off` | `on`, default `off`) — whether this composition registers the nine `evolution_*` tools on the global layer. Off (the shipped default, `DEFAULT_EVOLUTION`) registers the other 23 of the tools below and none of the evolution chain: no agent surface can call one, including a spawned worker with no grant, which otherwise keeps the global layer. On registers all 32, with the chain's validation, approvals, history reads and rollback unchanged. A value this build does not implement, or a configuration member it does not read, refuses to start and names what it refused.
 
 ### Tools
 
-22 of the 31 are registered on the global layer in every composition; the nine `evolution_*` tools only when `evolution` is `on`, so a default deployment's global layer carries the 22 always-on tools (this whole list except the nine numbered 22–30) and a deployment that turned the chain on carries all 31. The root agent's allow-list (ROOT_TOOLS in `@dangosys/dsh-singularity-agent-runtime`) names these 22 minus `task_ask_parent` — a root has no parent to ask — plus the `skill` loader the mounted preset provides, and reads which of the nine exist from `ctx.singularityEvolution` — a root surface and this list that drift apart is what the switch is there to prevent.
+23 of the 32 are registered on the global layer in every composition; the nine `evolution_*` tools only when `evolution` is `on`, so a default deployment's global layer carries the 23 always-on tools (this whole list except the nine numbered 23–31) and a deployment that turned the chain on carries all 32. The root agent's allow-list (ROOT_TOOLS in `@dangosys/dsh-singularity-agent-runtime`) names these 23 minus `task_ask_parent` — a root has no parent to ask — plus the `skill` loader the mounted preset provides, and reads which of the nine exist from `ctx.singularityEvolution` — a root surface and this list that drift apart is what the switch is there to prevent.
 
 1. graph_spawn: create a worker node through Singularity runtime and wait for its response.
 2. graph_mark_ready: mark the calling agent's graph ready.
@@ -35,16 +35,17 @@ config.yaml: `evolution` (`off` | `on`, default `off`) — whether this composit
 19. task_review_pack: read-only evidence pack for one task (reviews, parent/child summaries, dependency edges, escalation verdict).
 20. task_review_agent: spawn ONE read-only review agent when the pack's escalation criterion (E1–E4) fires and the per-store budget has room; persists its six-dimension judgement as a Diagnosis.
 21. task_diagnose: persist a Diagnosis (proposals are suggestions only; nothing auto-executes).
-22. evolution_propose: register an evolution proposal (optionally transcribed from a Diagnosis).
-23. evolution_candidate: record the candidate's full version set and optional structured mutation.
-24. evolution_prepare: materialize a mechanical mutation into the proposal sandbox plus the champion snapshot.
-25. evolution_replay: replay the candidate against this graph's terminal historical tasks; writes the candidate-vs-champion report.
-26. evolution_gate: record the six gate answers (regression evidence refs must exist).
-27. evolution_decide: record PROMOTE / REJECT / KEEP_FOR_FURTHER_RESEARCH — only after a native human approval.
-28. evolution_apply: promote a decided PROMOTE (skill / agent_preset / capability, L1–L3, materialized) into production; second human approval, names every production path it writes.
-29. evolution_rollback: restore the champion snapshot (or delete the apply product when there was no champion); human approval again.
-30. evolution_list: read the ledger with filters and history.
-31. escalate: report an unsettlable gap/budget/UNKNOWN(verifier) to a human (L4) — shown through the native approval seam and recorded in the append-only ledger (`.dsh/escalations.jsonl`) only after an explicit approve; reject/cancel/unavailable records nothing.
+22. task_budget_extend: ask a human (native approval card showing the store, the ceiling in force, the runs already counted and the proposed new total) to raise one configured root ceiling — a new total `maxRuns` and/or an absolute-UTC `deadlineAt`, keyed by `requestKey`; records one `TaskBudgetExtended` fact, answers a same-key retry from the record without asking again, and reopens nothing, starts nothing, and the runs already counted go on counting.
+23. evolution_propose: register an evolution proposal (optionally transcribed from a Diagnosis).
+24. evolution_candidate: record the candidate's full version set and optional structured mutation.
+25. evolution_prepare: materialize a mechanical mutation into the proposal sandbox plus the champion snapshot.
+26. evolution_replay: replay the candidate against this graph's terminal historical tasks; writes the candidate-vs-champion report.
+27. evolution_gate: record the six gate answers (regression evidence refs must exist).
+28. evolution_decide: record PROMOTE / REJECT / KEEP_FOR_FURTHER_RESEARCH — only after a native human approval.
+29. evolution_apply: promote a decided PROMOTE (skill / agent_preset / capability, L1–L3, materialized) into production; second human approval, names every production path it writes.
+30. evolution_rollback: restore the champion snapshot (or delete the apply product when there was no champion); human approval again.
+31. evolution_list: read the ledger with filters and history.
+32. escalate: report an unsettlable gap/budget/UNKNOWN(verifier) to a human (L4) — shown through the native approval seam and recorded in the append-only ledger (`.dsh/escalations.jsonl`) only after an explicit approve; reject/cancel/unavailable records nothing.
 
 Graphs are created from New graph. Repository installs are done by the agent with bash (clone + build per repo docs), then `env_register_component`.
 
@@ -54,7 +55,7 @@ none
 
 ### Service state
 
-1. ctx.singularityAgent: tool registration host; this composition registers 22 tools whatever the switch says (31 once `evolution` is `on`); root agents receive 21 of them (30 with evolution) via the ROOT_TOOLS allow-list — `task_ask_parent` is deliberately excluded (a root has no parent to ask)
+1. ctx.singularityAgent: tool registration host; this composition registers 23 tools whatever the switch says (32 once `evolution` is `on`); root agents receive 22 of them (31 with evolution) via the ROOT_TOOLS allow-list — `task_ask_parent` is deliberately excluded (a root has no parent to ask)
 2. ctx.hitl: the canvas answerer on the native interaction seams — hitl_ask asks through ctx.userQuestions, hitl_approve through ctx.approval (native audit events + fail-closed); ctx.hitl only bridges those waterfalls to the pending cards the canvas answers over GET/POST /singularity/hitl, removed on answer, cancellation or service disposal
 3. ctx.proposalReviewChannel: the T2/T3 review channel mounted on this fiber — the task runtime resolves it softly and asks it when a proposal waits for a human (policy `all`): a decomposition batch, or a root contract, which it renders as the goal a root session would be admitted as (no parent section). It renders the saved subject (parent and every child, or the contract; limits, obligations, both context fingerprints), asks through the native approval seam on the store owner's session, and records the answer as a `TaskProposalDecided` through `taskRuntime.decideProposal` under its own decider identity (`approval:<owner session>`); no agent tool accepts an approval credential, and a proposal nobody can be asked about stays `pending_review` with the reason.
 4. ctx.evolution: the append-only evolution ledger (`proposals.jsonl` under `$DSH_HOME/evolution`) plus per-proposal sandboxes (`sandbox/<proposalId>/`) where evolution_prepare materializes a candidate's structured mutation and the champion snapshot, and where evolution_replay writes the candidate-vs-champion comparison report (`replay-report.json`) after running the candidate against the graph's terminal historical tasks; beyond ledger and sandbox, the only writes are evolution_apply / evolution_rollback promoting a PROMOTE-decided skill / agent_preset / capability into production (champion snapshot restored on rollback, apply product deleted when there was no champion) — each gated by its own native human approval, L4 and the bookkeeping-only types always refused; provided on the agent's own fiber, not by a child plugin, because the evolution_* tools read it through the context they were registered with. Constructed whatever `evolution` says — with the chain off it is simply unreachable (no tool to call it through, no automatic trigger anywhere in this deployment), because closing the exposure surface does not delete the ledger, its validation or its authorization rules

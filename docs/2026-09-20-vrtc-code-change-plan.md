@@ -30,11 +30,11 @@
 | 12a | K1：子批次结束后继续探索 | **已验收（2026-09-27，含同日返工与独立审核）**：K1-1～K1-5 与公共检查全绿；返工闭合交还顺序（先确认子停止再交还工作区）、批次成员缺记录/读失败具名失败，以及跨 graph 引用拒绝与写入接管失败的替代证据缺口 | 实现主代理 + 子代理 | [完整合同 prompt](execution-prompts/12a-k1-exploration.md)、[交付记录](history/2026-09-27-k1-delivery-record.md)、[返工记录](history/2026-09-27-k1-rework-record.md)、[独立审核](history/2026-09-27-k1-review.md) | K1-1～K1-5：多批、父主动提交、问答/取消/恢复与唯一 driver；进度审核通过后才派 K2 |
 | 12b | K2：应用与回滚可恢复 | **已验收（2026-09-27 交付，同日返工与复审返工闭合，独立审核通过）**：K2-1～K2-5 与公共检查全绿；ledger 单版本切换 formatVersion 3（commit_intent 意图 + 完成行 intentId），意图与可恢复来源经唯一 durable append/fsync 先于生产替换，原子替换与启动/恢复对账，准入阻断开放意图目标；现场 v1 旧账按原字节归档；返工补齐：来源在意图前重验并 fsync、rename 后目录 fsync 失败具名且不记完成、真实死亡遗留的 staging 残留被清理、真实子进程 SIGKILL（三窗口 ×apply/rollback）端到端恢复证据；复审返工补：新 apply/rollback 在写入前按生产目标阻断其他 proposal 的未结意图（配合旧 rollback 覆盖保护，两个 proposal 竞争同一目标时只有匹配当前基线者可写） | 实现主代理 + 子代理 | [完整合同 prompt](execution-prompts/12b-k2-evolution-commit.md)、[交付记录](history/2026-09-27-k2-delivery-record.md)、[独立审核](history/2026-09-27-k2-review.md) | K2-1～K2-5：意图、原子替换、对账与真实准入阻断；进度审核通过后才派 K3 |
 | 12c | K3：完整 Skill 改进单位 | **已验收（2026-09-27，含审查返工）**：K3-1～K3-5 与公共检查全绿；改进单位=完整对象（指导型仅 SKILL.md；执行型 SKILL.md+SKILL.contract.json 两固定文件、resources=[]），候选 sidecar 由生产派生只重算 content.skillMdSha256、不借内容更新提权；commit_intent 携带固定文件集、逐文件原子写、记完成前完整对象可加载复检；准入闸按目录阻断开放意图；ledger formatVersion 4、实验报告 formatVersion 3；独立复核发现的一处真实缺陷（恢复屏障告警读已删字段）与两处覆盖缺口已同票闭合；**返工**闭合两项可达缺陷——指导型生产目录的未声明文件/词表外条目在 prepare 具名拒绝零写；提交前新增整对象写前闸（1 文件用 loader 判定角色与未声明资源、2 文件要求目录条目恰为对象自身文件，混合态放行；新鲜提交零行零写、恢复 blocked 批次不中断），rollback 与恢复重试不再"先写后验" | 实现主代理 + 子代理 | [完整合同 prompt](execution-prompts/12c-k3-skill-unit.md)、[交付记录](history/2026-09-27-k3-delivery-record.md)、[返工记录](history/2026-09-27-k3-rework-record.md)、[独立审核](history/2026-09-27-k3-review.md) | K3-1～K3-5：已有执行型 Skill 同名更新、双侧评估与整组回滚；进度审核通过后才派 K4 |
-| 12d | K4：复盘与执行预算分离 | 待派发（K3 已验收） | 待填 | [完整合同 prompt](execution-prompts/12d-k4-review-budget.md) | K4-1～K4-5：过期任务可复盘，人审扩额、不重置累计用量 |
+| 12d | K4：复盘与执行预算分离 | **已交付，待验收（2026-09-27）**：K4-1～K4-5 与公共检查全绿；gate 协调清单补 `task_review_agent`/`task_budget_extend` 两个窄入口；Task store 新增 `TaskBudgetExtended` 持久事实（store+requestKey 幂等、异内容拒绝、串行重检基线，same-version）；`resolveRootBudget` 输出配置+有效双上限供准入/启动/replay/watchdog/收尾全路径消费；扩额经 DSH 人审只升已配置维度，旧用量不清零、不唤活终态 | 实现主代理 + 子代理 | [完整合同 prompt](execution-prompts/12d-k4-review-budget.md)、[交付记录](history/2026-09-27-k4-delivery-record.md) | K4-1～K4-5：过期任务可复盘，人审扩额、不重置累计用量；进度审核通过后才派 A5 |
 | 13 | A5 + S2-E：诊断与缺口交接 | 待 K1～K4 验收；未实施 | 待填 | 本文 F.3、[派发 prompt](execution-prompts/13-a5-s2-e-diagnosis.md) | REV-1～REV-5；消费 K4 预算规则，不重复实现 |
 | 14 | A6 + S2-R + S3：自主改进与恢复 | 待 A5 验收；未实施 | 待填 | 本文 F.4 | EVO-1～EVO-5；复用 K1 批次、K2/K3 提交与 K4 有效预算 |
 
-K1～K4 修正已确认的架构反例；K1 已验收，K2 已验收（含 2026-09-27 同日返工与复审返工，见 12b 行），K3 已验收（见 12c 行），K4 未实施；不是全仓整理或提前开放一个残缺版本。四份 prompt 是各票唯一详细合同，本文不复制它们的施工步骤。顺序为 K1 → K2 → K3 → K4 → A5 → A6，每票独立审核后再派下一票。只有 K2 → K3 有直接提交协议依赖，其余串行用于避免共享 runtime/工具合同同时迁移。历史已验收记录不改写，受影响保证按这四票重新验证。
+K1～K4 修正已确认的架构反例；K1 已验收，K2 已验收（含 2026-09-27 同日返工与复审返工，见 12b 行），K3 已验收（见 12c 行），K4 已交付待验收（见 12d 行）；不是全仓整理或提前开放一个残缺版本。四份 prompt 是各票唯一详细合同，本文不复制它们的施工步骤。顺序为 K1 → K2 → K3 → K4 → A5 → A6，每票独立审核后再派下一票。只有 K2 → K3 有直接提交协议依赖，其余串行用于避免共享 runtime/工具合同同时迁移。历史已验收记录不改写，受影响保证按这四票重新验证。
 
 ### 五问复核：保留领域差异，直接用现成底座
 
@@ -213,7 +213,7 @@ S4-E 按 D 节整体迁移现有 Evolution 生命周期与工具消费者；不�
 
 ### F. 后续交付组的冻结合同（2026-09-24）
 
-本节保留 A4/S4-E 基础保证并定义 A5/A6；整体复盘后的修正见文首 K1～K4 合同（K1 已验收，K2 已验收，K3～K4 未实施）。原验收记录保留，不豁免新发现的反例。唯一顺序见文首；私有实现由工程 agent 决定。
+本节保留 A4/S4-E 基础保证并定义 A5/A6；整体复盘后的修正见文首 K1～K4 合同（K1 已验收，K2 已验收，K3 已验收，K4 已交付待验收）。原验收记录保留，不豁免新发现的反例。唯一顺序见文首；私有实现由工程 agent 决定。
 
 #### F.1 A4：有持久来源的直属父子问答
 
@@ -255,7 +255,7 @@ S4-E 的[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md)�
 
 工具合同固定为 `task_review_agent({taskId, runId, reason?, requestKey?})`：runId 必填，字符串指明一次 Run，null 指无 Run Review；reason 是非空自由文本的可选复盘关注点，不是权限或类别。工具从可信调用会话推导 rootStoreId，源键固定为 `(rootStoreId, taskId, runId 或 no-run)`，不用 latest-review 代替指定源。用户自然语言请求由根 Agent 先查来源再选定该引用，首个 reviewer 请求包含真实源 outcome、关注点及引用。终态后的根会话仍允许此协调工具，不能重开业务 Run 或获得生产写权限；跨 graph、源不存在或 run 不匹配在 claim/spawn 前拒绝。
 
-现有 `task-runtime/src/gate.ts` 的协调清单尚无 task_review_agent，A5 须同批补这一个受限入口并验证终态实际调用；角色工具 grant、源授权、预算仍由各自所有者检查，不开放通用 spawn/shell。`task_review_pack({taskId,runId})` 同批采用必填精确源，模型 schema、现有调用方与 reviewer 消费一起更新；缺 runId 直接拒绝，不保留 latest 别名。历史 Review 列表仍可从 context 查询。
+`task-runtime/src/gate.ts` 的协调清单已由 K4 补入 `task_review_agent` 并验证终态实际调用（K4-1），A5 不重复建设该入口；角色工具 grant、源授权、预算仍由各自所有者检查，不开放通用 spawn/shell。`task_review_pack({taskId,runId})` 同批采用必填精确源，模型 schema、现有调用方与 reviewer 消费一起更新；缺 runId 直接拒绝，不保留 latest 别名。历史 Review 列表仍可从 context 查询。
 
 能力/产物缺口继续由实际拒绝处持久化既有 CapabilityGapDetected/ObligationRecorded，并进入失败 Review 的引用；模型零响应时也可读。review 在提交后及 graph 显式激活后扫描失败源，终态提交不 await reviewer。`computeEscalation` 的旧阈值与六维判断不得再控制诊断准入；review pack 中有用的原始观测保留，删除失去消费者的 required/suppressed 推导及其工具指引，不保留第二套触发策略。
 
@@ -263,7 +263,7 @@ S4-E 的[最终复审](history/2026-09-26-s4-e-final-closure-rework-review.md)�
 
 自动扫描遇到该源已有尝试即只读取，不拿空 reason 覆盖显式关注点或反复报冲突。新键在已有在途时只返回其身份并明确新请求未受理，不持久化另一个排队任务；以后确需再复盘由调用者重新请求。去重查询先于新启动的预算检查，额度用尽仍可返回已完成结果。
 
-复盘消费 K4 的既有每 store 次数额度（默认 1）和单次 watchdog，不继承业务根截止/maxRuns；显式请求不豁免自身限额。额度不足/未装配显示具名未启动原因，不写 claim 或假 Diagnosis。需要更多复盘次数时部署方调整已有额度，旧计数不清零。业务执行追加限额只走 K4 人审入口；不建成功专属配额或假业务 Run。
+复盘消费 K4 已交付的每 store 次数额度（默认 1）和单次 watchdog，不继承业务根截止/maxRuns；显式请求不豁免自身限额。额度不足/未装配显示具名未启动原因，不写 claim 或假 Diagnosis。需要更多复盘次数时部署方调整已有额度，旧计数不清零。业务执行追加限额只走 K4 人审入口；不建成功专属配额或假业务 Run。
 
 reviewer 经 context/DSH 自主取证，按需要查看相关任务和 Session，不能限定“pack and nothing else”。Diagnosis 允许有据的改进建议、无需改进、证据不足三类自然语言结论，不为这三类新增 enum；proposals 可为空，六维 judgements 可省略，不强制逐项凑解释。既有 `observedFailure` 是持久化文本槽，成功复盘填真实观察/诉求，工具与 prompt 称“复盘观察”，不伪造失败或改 Review.outcome；本票不为改字段名重写历史账本。超时、取消、解析失败记录 interrupted/具名错误，不冒充 Agent 主动得出的 unknown Diagnosis。成功复盘也不自动获得候选权限。
 
@@ -283,7 +283,7 @@ Diagnosis.targetType 为非空开放字符串，执行转换仍由 evolution 拒
 
 **评估/应用必须同组补齐**：复用 S4-E 成对运行器，候选同时挂 capabilityOverrides 与 extraSkillRoots。缺 provider 的基线可能在真实准入时拒绝：记录同一冻结契约的真实拒绝及 gap/proposal 来源，标明 not-admitted、无 Run；不得造 champion/失败 Run，也不得跳过基线预检。新增受限的冻结契约评估入口复用 runtime 原规范化/准入/执行链，不能绕过普通 `replayTask` 的终态要求来伪造已执行。候选必须真执行并通过同一独立判据、回归与 holdout，新增 capability 的单纯准入通过不算修复。prepared 固定 capability 行、文件组合身份及生产基线；联合应用复用 K2/K3 的唯一意图/提交/恢复入口，扩展该意图的 capability 行，不再造事务机制。全部对账、可加载检查及 registry 更新完成才记 applied；半成品不准入，第三方变化具名停止，rollback 不删除原来已存在的文件。只验收当前格式的读取/回滚，不恢复旧账兼容；不引入通用跨库事务平台。
 
-**恢复入口固定为 `task_recover({sourceDiagnosisId, requestKey})`**：仅向可信 supervisor 协调会话开放；工具及服务核对源归属、批准应用/解决证据、原契约、K4 有效预算及无在途恢复尝试。runtime 在同一 store 为失败原根 Task 创建新 Run/Session，旧终态不改、不重置累计用量。新 Run 使用 K1 的普通多批次执行与主动提交，不能再造恢复专属分解状态机或传 bypass 标志；无需分解时直接执行。根 graph 仍绑定原目标，最终由原不可变 AC 验收。成功源不得恢复，额度不足由 K4 人审追加上限，不默认豁免。
+**恢复入口固定为 `task_recover({sourceDiagnosisId, requestKey})`**：仅向可信 supervisor 协调会话开放；工具及服务核对源归属、批准应用/解决证据、原契约、K4 已交付的有效限额（持久批准上限）及无在途恢复尝试。runtime 在同一 store 为失败原根 Task 创建新 Run/Session，旧终态不改、不重置累计用量。新 Run 使用 K1 的普通多批次执行与主动提交，不能再造恢复专属分解状态机或传 bypass 标志；无需分解时直接执行。根 graph 仍绑定原目标，最终由原不可变 AC 验收。成功源不得恢复，额度不足由 K4 人审追加上限，不默认豁免。
 
 调用归属固定为工具适配 → evolution 的恢复协调入口 → task-runtime 的执行恢复入口。evolution 解析 Diagnosis/候选关联，核对可信协调者及自己持有的批准、applied/rollback 记录；runtime 核对本 store 的源 Task/Run、契约、当前 provider 内容、依赖证据、预算和恢复幂等，再提交新尝试。两层的直接调用入口各自重检所属规则，不把校验只放在工具函数中；runtime 不导入 evolution、不读取晋升账本、不接受模型传入的 approved 标志。宿主组合层负责两者接线，内部调用不能成为额外暴露的模型工具。
 

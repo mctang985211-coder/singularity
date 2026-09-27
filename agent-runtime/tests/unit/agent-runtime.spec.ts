@@ -12,12 +12,15 @@ function agent(value: string): Agent {
 type Spy = ReturnType<typeof vi.fn>
 
 /**
- * The twenty-one tools every root composition may call; the deployment's
+ * The twenty-two tools every root composition may call; the deployment's
  * evolution switch does not touch them. `context_read` is one of them (A2): the
  * root's reads name records by id, and the raw cross-session readers it replaced
  * were never on this surface — the execution seal covers them
  * (`./agent-runtime.spec.ts`, the guard cases). `task_answer` is one too (A4
  * §F.1): the root is a legal addressee for its children's questions.
+ * `task_budget_extend` is the last (K4): raising the tree's own ceiling is the
+ * root coordination session's call, and it is deliberately not on any worker's
+ * plane.
  */
 const ROOT_CORE_TOOLS = [
   'graph_spawn',
@@ -43,6 +46,7 @@ const ROOT_CORE_TOOLS = [
   'task_review_pack',
   'task_review_agent',
   'task_diagnose',
+  'task_budget_extend',
 ]
 
 /** The nine tools `ctx.singularityEvolution.enabled` gates: registered by the deployment, named here only when it is on. */
@@ -580,6 +584,16 @@ describe('AgentRuntime root lifecycle', () => {
     // criteria to a review that returned inconclusive).
     expect(prompt).toContain('The contract carries only what the user\'s own words and answers support')
     expect(prompt).toContain('do not make a mandatory criterion depend on a review that may never happen')
+    // The budget raise (K4) rides every root prompt — `task_budget_extend` is on
+    // every root's allow-list — and it states the facts the model has to act on:
+    // a tree that ran out is still reviewable on the reviewer's own allowance,
+    // and the ceiling moves only because a person moved it.
+    expect(prompt).toContain('call task_budget_extend (permitted even with your tree stopped)')
+    expect(prompt).toContain("that review still runs on the reviewer's own allowance")
+    expect(prompt).toContain('it re-opens no task, starts nothing by itself, and the runs already counted go on counting')
+    // A6's recovery entry is not built, so no root prompt may name it (prompt
+    // contracts §1: a tool that is not mounted must not appear in the prompt).
+    expect(prompt).not.toContain('task_recover')
   })
 
   test('resumes a root with the full allow-list and the evolution protocol when the deployment turned the chain on', async () => {

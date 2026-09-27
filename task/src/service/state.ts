@@ -8,6 +8,15 @@ import {
   type TaskContract,
 } from '../contract.ts'
 import {
+  BUDGET_EXTENSION_CLAIM_FIELDS,
+  approvedBudgetCeilings,
+  budgetExtensionRequestDigest,
+  canonicalBudgetInstant,
+  describeBudgetExtension,
+  emptyBudgetExtensionIndex,
+} from '../budget.ts'
+import type { TaskBudgetExtension, TaskBudgetExtensionClaim, TaskBudgetExtensionIndex } from '../budget.ts'
+import {
   ROOT_PROPOSAL_TASK_ID,
   TASK_PROPOSAL_DECISION_OUTCOMES,
   TASK_PROPOSAL_KINDS,
@@ -32,7 +41,7 @@ import {
   type TaskProposalRootConsumption,
   type TaskProposalStatus,
 } from '../proposal.ts'
-import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, reaches } from '../types.ts'
+import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, reaches, rootTaskStoreId } from '../types.ts'
 import { answerIdOf, questionIdOf } from '../question.ts'
 import type { QuestionAnswerRecord, QuestionMessageRef, QuestionRecord, TaskQuestionIndex } from '../question.ts'
 import type {
@@ -172,6 +181,7 @@ export class TaskState {
           capabilities: {},
           proposals: emptyProposalIndex(),
           questions: emptyQuestionIndex(),
+          budgetExtensions: emptyBudgetExtensionIndex(),
         }
       : copy(snapshot)
   }
@@ -209,6 +219,7 @@ export class TaskState {
       case 'ReviewRecorded': this.recordReview(event.taskId, event.runId, event.payload.review); return
       case 'DiagnosisRecorded': this.recordDiagnosis(event.taskId, event.payload.diagnosis); return
       case 'ObligationRecorded': this.recordObligation(event.payload.obligation); return
+      case 'TaskBudgetExtended': this.extendBudget(event.taskId, event.sessionId, event.payload.extension, event.timestamp); return
       case 'TaskProposalSubmitted': this.submitProposal(event.taskId, event.payload.proposal); return
       case 'TaskProposalDecided': this.decideProposal(event.taskId, event.payload, event.timestamp); return
       case 'TaskProposalPhaseChanged': this.changeProposalPhase(event.taskId, event.payload, event.timestamp); return
@@ -1112,6 +1123,149 @@ export class TaskState {
   }
 
   /**
+   * A person raised one of the tree's own ceilings (K4). The reducer is the
+   * shape gate, the identity gate and — the part that matters — the *chain*
+   * gate, in that order, and it applies nothing at all when any of them refuses.
+   *
+   * Where the raise is rooted: the envelope must name the store's own root
+   * session (its `sessionId`, the session the store id derives from —
+   * `rootTaskStoreId`) and a parentless task of the store (the entry passes the
+   * root task `resolveRootBudget` resolves, and what the reducer refuses is a
+   * task with a parent). A
+   * delegated worker, another session's tree and a child task are each refused by
+   * name, so one store's budget is only ever moved by facts about that store.
+   *
+   * The chain: a dimension keeps the `next` of the last extension that moved it,
+   * and an extension that moves it again has to state *that* value as its
+   * `previous`. A record written against an older reading is refused rather than
+   * re-based on the newer one, so two grants approved against the same reading
+   * cannot both stand — the entry's serial re-read, inside the store's single
+   * write queue, is what decides between them.
+   *
+   * The first raise of a dimension states `previous` as the ceiling the
+   * deployment itself configures, which this reducer cannot recompute (the
+   * configuration is not in the store, and deliberately so: the initial ceilings
+   * stay derived from the root's start and the deployment's config). What it does
+   * instead is make the chain authoritative from that point on — no ceiling is
+   * ever derived from a grant, and a later grant can only continue what an
+   * earlier one left.
+   *
+   * Idempotency is by request key and content: a repeat of a recorded request
+   * applies nothing, and the same key at different content is refused by name
+   * instead of being added to the record.
+   */
+  private extendBudget(taskId: TaskId, sessionId: string | undefined, claim: TaskBudgetExtensionClaim, timestamp: string): void {
+    if (!isRecord(claim)) throw new Error('task: a budget extension must be an object')
+    const requestKey = claim.requestKey
+    if (!nonEmpty(requestKey)) throw new Error('task: a budget extension request key must be a non-empty string')
+    for (const key of Object.keys(claim)) {
+      if (!BUDGET_EXTENSION_CLAIM_FIELDS.includes(key)) {
+        throw new Error(`task: budget extension "${requestKey}" carries "${key}", which is not part of an extension; an unread field must not enter the record`)
+      }
+    }
+    if (!nonEmpty(claim.approvalRef)) {
+      throw new Error(`task: budget extension "${requestKey}" requires a non-empty approval reference; a raise nobody approved is not recorded`)
+    }
+    if (!nonEmpty(claim.requestedBy)) throw new Error(`task: budget extension "${requestKey}" must name the session that asked`)
+    if (!nonEmpty(sessionId)) {
+      throw new Error(`task: budget extension "${requestKey}" must carry the asking session on its envelope (the event's sessionId)`)
+    }
+    if (claim.requestedBy !== sessionId) {
+      throw new Error(`task: budget extension "${requestKey}" was asked by session "${claim.requestedBy}" but its event names "${sessionId}"`)
+    }
+    if (rootTaskStoreId(claim.requestedBy) !== this.value.id) {
+      throw new Error(
+        `task: budget extension "${requestKey}" names session "${claim.requestedBy}", which is not the root session of store "${this.value.id}" ` +
+        `(rootTaskStoreId derives the store from its root session, and "sg-t-${claim.requestedBy}" is not this store); ` +
+        "the tree's budget belongs to the session that accepted it, and a worker never raises its own",
+      )
+    }
+    if (this.task(taskId).parentTaskId !== undefined) {
+      throw new Error(`task: budget extension "${requestKey}" names task "${taskId}", which is not the store's root task; the tree's budget is the root's`)
+    }
+    if (claim.maxRuns === undefined && claim.deadlineAt === undefined) {
+      throw new Error(`task: budget extension "${requestKey}" raises nothing: it must name maxRuns, deadlineAt, or both`)
+    }
+    if (claim.maxRuns !== undefined) {
+      const { previous, next } = claim.maxRuns
+      if (!Number.isInteger(previous) || previous < 1 || !Number.isInteger(next) || next < 1) {
+        throw new Error(`task: budget extension "${requestKey}" records maxRuns ${previous} → ${next}; a run ceiling is a positive whole number of runs`)
+      }
+      if (next <= previous) {
+        throw new Error(
+          `task: budget extension "${requestKey}" records maxRuns ${previous} → ${next}; a ceiling is the whole approved total and only ever moves up`,
+        )
+      }
+    }
+    if (claim.deadlineAt !== undefined) {
+      const previous = canonicalBudgetInstant(claim.deadlineAt.previous)
+      const next = canonicalBudgetInstant(claim.deadlineAt.next)
+      if (previous === undefined || previous !== claim.deadlineAt.previous || next === undefined || next !== claim.deadlineAt.next) {
+        throw new Error(
+          `task: budget extension "${requestKey}" records the deadline pair ${JSON.stringify(claim.deadlineAt)}; ` +
+          'both ends are absolute instants in canonical UTC form (`new Date(ms).toISOString()`), never local time or a duration',
+        )
+      }
+      if (Date.parse(next) <= Date.parse(previous)) {
+        throw new Error(`task: budget extension "${requestKey}" records deadline ${previous} → ${next}; a deadline only ever moves later`)
+      }
+    }
+    const digest = budgetExtensionRequestDigest({
+      requestKey,
+      ...(claim.maxRuns === undefined ? {} : { maxRuns: claim.maxRuns.next }),
+      ...(claim.deadlineAt === undefined ? {} : { deadlineAt: claim.deadlineAt.next }),
+    })
+    if (claim.requestDigest !== digest) {
+      throw new Error(
+        `task: budget extension "${requestKey}" declares identity ${JSON.stringify(claim.requestDigest)}, which is not the identity of the request it carries (${digest})`,
+      )
+    }
+    const index = this.budgetExtensions()
+    const existing = index.byRequestKey[requestKey]
+    if (existing !== undefined) {
+      // A repeat of a recorded request is answered from the record: no second
+      // fact, no second effect, whatever the ceilings have moved to since.
+      if (existing.requestDigest === claim.requestDigest) return
+      throw new Error(
+        `task: budget extension request key "${requestKey}" is already bound to ${describeBudgetExtension(existing)} (identity ${existing.requestDigest}); ` +
+        'one key names one request, and different content under it is a new key rather than a second grant',
+      )
+    }
+    const inForce = approvedBudgetCeilings(index.all)
+    if (claim.maxRuns !== undefined && inForce.maxRuns !== undefined && claim.maxRuns.previous !== inForce.maxRuns) {
+      throw new Error(
+        `task: budget extension "${requestKey}" was written against maxRuns ${claim.maxRuns.previous}, but the ceiling in force here is ${inForce.maxRuns}; ` +
+        "the tree's ceiling moved since this request was read, so committing it would re-base an approval on a value nobody approved — " +
+        'read the ceiling again and ask for the difference',
+      )
+    }
+    if (claim.deadlineAt !== undefined && inForce.deadlineAt !== undefined && claim.deadlineAt.previous !== inForce.deadlineAt) {
+      throw new Error(
+        `task: budget extension "${requestKey}" was written against deadline ${claim.deadlineAt.previous}, but the deadline in force here is ${inForce.deadlineAt}; ` +
+        "the tree's deadline moved since this request was read, so committing it would re-base an approval on a value nobody approved — " +
+        'read the deadline again and ask for the difference',
+      )
+    }
+    if (!nonEmpty(timestamp)) throw new Error(`task: budget extension "${requestKey}" has no recorded time on its event`)
+    const record: TaskBudgetExtension = {
+      requestKey,
+      requestDigest: claim.requestDigest,
+      ...(claim.maxRuns === undefined ? {} : { maxRuns: { previous: claim.maxRuns.previous, next: claim.maxRuns.next } }),
+      ...(claim.deadlineAt === undefined ? {} : { deadlineAt: { previous: claim.deadlineAt.previous, next: claim.deadlineAt.next } }),
+      approvalRef: claim.approvalRef,
+      requestedBy: claim.requestedBy,
+      recordedAt: timestamp,
+    }
+    this.value = {
+      ...this.value,
+      budgetExtensions: {
+        all: [...index.all, record],
+        byRequestKey: { ...index.byRequestKey, [requestKey]: record },
+      },
+    }
+  }
+
+  /**
    * A proposal enters the store (T2/T3, §6; root contracts A0 §2). The reducer
    * is the shape gate and the integrity gate, in that order: the record must be
    * a well-formed proposal of its kind — the closed field set of its review
@@ -1323,6 +1477,21 @@ export class TaskState {
   private questions(): TaskQuestionIndex {
     const index = this.value.questions
     if (index === undefined) throw new Error('task: snapshot carries no question index')
+    return index
+  }
+
+  /**
+   * The budget-extension index of the snapshot this state replays on. Absent
+   * only when a foreign, hand-built snapshot (one from a reader that predates
+   * extensions) was replayed onto — never on this build's own value — and that is
+   * a refusal rather than an empty index, for the same reason as {@link index}: a
+   * reducer that cannot see the extensions would happily write a second one for
+   * the same request key, and would chain a new ceiling onto a value it cannot
+   * see.
+   */
+  private budgetExtensions(): TaskBudgetExtensionIndex {
+    const index = this.value.budgetExtensions
+    if (index === undefined) throw new Error('task: snapshot carries no budget extension index')
     return index
   }
 

@@ -8,11 +8,11 @@
 
 依赖：graphs, tools
 
-依赖的config.yaml配置：`evolution`（`off` | `on`，默认 `off`）——本组合是否把九个 `evolution_*` 工具注册到全局层。关闭（出厂默认，`DEFAULT_EVOLUTION`）时只注册下面另外 22 个，进化链一个都不注册：任何 agent 面都调不到，包括无 grant 的 spawn worker（它否则会保留全局层）。开启时注册全部 31 个，进化链的校验、人审、历史读取与回滚语义不变。本构建不实现的值、或它不读取的配置字段，构造期具名拒启。
+依赖的config.yaml配置：`evolution`（`off` | `on`，默认 `off`）——本组合是否把九个 `evolution_*` 工具注册到全局层。关闭（出厂默认，`DEFAULT_EVOLUTION`）时只注册下面另外 23 个，进化链一个都不注册：任何 agent 面都调不到，包括无 grant 的 spawn worker（它否则会保留全局层）。开启时注册全部 32 个，进化链的校验、人审、历史读取与回滚语义不变。本构建不实现的值、或它不读取的配置字段，构造期具名拒启。
 
 ### 可调用Tools
 
-31 个里始终注册在全局层的是 22 个；九个 `evolution_*` 只在 `evolution: on` 时注册。默认部署的全局层携带这 22 个（即下面整份清单去掉 22–30 号），显式开启的部署携带全部 31 个。root agent 的 allow-list（`@dangosys/dsh-singularity-agent-runtime` 的 ROOT_TOOLS）就是这 22 个去掉 `task_ask_parent`（root 没有可问的父任务）外加挂载 preset 提供的 `skill` 加载器，并从 `ctx.singularityEvolution` 读取这九个是否真实存在——root 面与这份清单漂移正是该开关要防的事。
+32 个里始终注册在全局层的是 23 个；九个 `evolution_*` 只在 `evolution: on` 时注册。默认部署的全局层携带这 23 个（即下面整份清单去掉 23–31 号），显式开启的部署携带全部 32 个。root agent 的 allow-list（`@dangosys/dsh-singularity-agent-runtime` 的 ROOT_TOOLS）就是这 23 个去掉 `task_ask_parent`（root 没有可问的父任务）外加挂载 preset 提供的 `skill` 加载器，并从 `ctx.singularityEvolution` 读取这九个是否真实存在——root 面与这份清单漂移正是该开关要防的事。
 
 1. graph_spawn：通过 Singularity runtime 创建 worker 节点并等待其回复。
 2. graph_mark_ready：将调用 agent 所属的图标记为就绪。
@@ -35,16 +35,17 @@
 19. task_review_pack：只读证据包（本任务 reviews 全文、父/子摘要、依赖边、升级判定行）。
 20. task_review_agent：当 pack 的升级判据（E1–E4）命中且每 store 预算有余时，spawn 一个只读评审 agent，把六维判读落为一条 Diagnosis。
 21. task_diagnose：持久化一条 Diagnosis（proposals 只是建议，绝不自动执行）。
-22. evolution_propose：登记一条 evolution 提案（可从 Diagnosis 转录）。
-23. evolution_candidate：记录 candidate 的完整版本集合与可选的结构化 mutation。
-24. evolution_prepare：把机械型 mutation 物化到提案沙箱，并落 champion 快照。
-25. evolution_replay：对本图已终态的历史任务重放候选，写 candidate vs champion 对比报告。
-26. evolution_gate：记录 Gate 六问（regression 证据引用必须真实存在）。
-27. evolution_decide：记录 PROMOTE / REJECT / KEEP_FOR_FURTHER_RESEARCH——先过一次原生人审才落账。
-28. evolution_apply：把已 PROMOTE 的提案（skill / agent_preset / capability，限 L1–L3、已物化）写进生产；第二次人审，reason 列出全部生产写入路径。
-29. evolution_rollback：从 champion 快照恢复（无 champion 则删除 apply 产物）；同样先过人审。
-30. evolution_list：只读台账，带过滤与 history。
-31. escalate：把无法自行解决的问题上报给人（KISS §7 L4：能力缺口、预算耗尽、UNKNOWN(verifier) 判决）——卡片先经原生 approval seam 展示，显式批准后才记入只追加台账（`.dsh/escalations.jsonl`）；拒绝/取消/无人作答不落账。
+22. task_budget_extend：经原生人审（卡片展示 store、当前生效上限、已计用量与拟改后的总上限）申请提高一个已配置的根上限——新的 `maxRuns` 总额和/或绝对 UTC 的 `deadlineAt`，以 `requestKey` 为键；落一条 `TaskBudgetExtended` 事实，同键重试直接读回已有记录不再发问；不唤活任何终态、不自行启动任何工作、已计用量继续累计。
+23. evolution_propose：登记一条 evolution 提案（可从 Diagnosis 转录）。
+24. evolution_candidate：记录 candidate 的完整版本集合与可选的结构化 mutation。
+25. evolution_prepare：把机械型 mutation 物化到提案沙箱，并落 champion 快照。
+26. evolution_replay：对本图已终态的历史任务重放候选，写 candidate vs champion 对比报告。
+27. evolution_gate：记录 Gate 六问（regression 证据引用必须真实存在）。
+28. evolution_decide：记录 PROMOTE / REJECT / KEEP_FOR_FURTHER_RESEARCH——先过一次原生人审才落账。
+29. evolution_apply：把已 PROMOTE 的提案（skill / agent_preset / capability，限 L1–L3、已物化）写进生产；第二次人审，reason 列出全部生产写入路径。
+30. evolution_rollback：从 champion 快照恢复（无 champion 则删除 apply 产物）；同样先过人审。
+31. evolution_list：只读台账，带过滤与 history。
+32. escalate：把无法自行解决的问题上报给人（KISS §7 L4：能力缺口、预算耗尽、UNKNOWN(verifier) 判决）——卡片先经原生 approval seam 展示，显式批准后才记入只追加台账（`.dsh/escalations.jsonl`）；拒绝/取消/无人作答不落账。
 
 通过 New graph 创建图。仓库安装由 agent 用 bash（clone + 按仓库文档 build）完成，再调用 `env_register_component`。
 
@@ -54,7 +55,7 @@
 
 ### 维护的 Service 状态
 
-1. ctx.singularityAgent：注册上述 tools；本组合恒定注册 22 个（`evolution` 开启时 31 个）；root agent 经 ROOT_TOOLS allow-list 保留其中 21 个（开启时 30 个）——`task_ask_parent` 刻意不在 root 面（root 无父可问）
+1. ctx.singularityAgent：注册上述 tools；本组合恒定注册 23 个（`evolution` 开启时 32 个）；root agent 经 ROOT_TOOLS allow-list 保留其中 22 个（开启时 31 个）——`task_ask_parent` 刻意不在 root 面（root 无父可问）
 2. ctx.hitl：原生交互 seam 的画布 answerer——hitl_ask 走 ctx.userQuestions、hitl_approve 走 ctx.approval（审计事件与 fail-closed 由原生层负责）；ctx.hitl 只把这两条 waterfall 桥接成待处理卡片，由画布经 GET/POST /singularity/hitl 回答，回答、取消或服务卸载后移除
 3. ctx.proposalReviewChannel：本 fiber 上挂载的 T2/T3 审核渠道——task runtime 以软解析取得它，并在分解提案等待人工审核（策略 `all`）时请求它。它渲染已保存的批次（父任务、全部子任务、限额、未满足义务、两个上下文指纹），经原生 approval seam 在 store owner 会话上提问，并把回答经 `taskRuntime.decideProposal` 落为 `TaskProposalDecided`，decidedBy 用渠道自身身份（`approval:<owner session>`）；任何 agent 工具都不接受审批凭据，问不到人的提案保持 `pending_review` 并给出原因。
 4. ctx.evolution：只追加的 evolution 台账（`$DSH_HOME/evolution/proposals.jsonl`）外加每提案沙箱（`sandbox/<proposalId>/`）——evolution_prepare 把 candidate 携带的结构化 mutation 与 champion 快照物化到这里，evolution_replay 对图中已终态的历史任务重放候选后把 candidate vs champion 对比报告（`replay-report.json`）也写到这里；台账与沙箱之外唯一的写入是 evolution_apply / evolution_rollback 把 PROMOTE 决定的 skill / agent_preset / capability 落到生产（rollback 从 champion 快照恢复，champion 不存在则删除 apply 产物），每次各过一次原生人审，L4 与记账型永远拒绝；由 agent 自身 fiber 提供而非子插件——evolution_* 工具是通过注册时那个 context 读它的

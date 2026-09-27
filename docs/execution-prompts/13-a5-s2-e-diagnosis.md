@@ -10,8 +10,8 @@
 
 ## 施工顺序与完成闸
 
-1. **源与 ledger。** 落实 F.3 的 `task_review_agent({taskId,runId,reason?,requestKey?})` 精确源及默认/显式尝试规则，删除 latestReview 选源。同源默认尝试供自动/显式入口共同去重；已终结后新键可再复盘，同源在途不另起，同键改内容拒绝。复用 reviewer ledger，先持久 claim/预分配 sessionId，再 spawn；旧 started 只沿原规则计数，不猜 run 来源。消费 K4 的 reviewer 次数额度及 watchdog，不继承业务根截止/maxRuns，不重置旧计数。
-2. **两种触发与首请求。** 终态提交后及 graph 激活后扫描 failed Review；成功仅显式受理。computeEscalation.required 不再作为自动或显式准入，删除失去消费者的阈值判断，保留原始观测。终态根会话允许复盘但无生产写权限。beforePrompt 确认绑定；首请求包含指定源 outcome、关注点和引用，可通过 context 自主下钻。跨 graph/错 run/缺 Review/预算不足在 claim、spawn 前拒绝；不能只改 description 而保留服务拒绝成功的条件。
+1. **源与 ledger。** 落实 F.3 的 `task_review_agent({taskId,runId,reason?,requestKey?})` 精确源及默认/显式尝试规则，删除 latestReview 选源。同源默认尝试供自动/显式入口共同去重；已终结后新键可再复盘，同源在途不另起，同键改内容拒绝。复用 reviewer ledger，先持久 claim/预分配 sessionId，再 spawn；旧 started 只沿原规则计数，不猜 run 来源。reviewer 次数额度及 watchdog 已由 K4 交付并直接消费（终态根会话可调用、不继承业务根截止/maxRuns、不重置旧计数），本票不重建额度机制。
+2. **两种触发与首请求。** 终态提交后及 graph 激活后扫描 failed Review；成功仅显式受理。computeEscalation.required 不再作为自动或显式准入，删除失去消费者的阈值判断，保留原始观测。终态根会话复盘入口（gate 协调清单）与 `task_budget_extend` 人审扩额均由 K4 交付，本票只接两种触发，不重复建设；终态复盘无生产写权限。beforePrompt 确认绑定；首请求包含指定源 outcome、关注点和引用，可通过 context 自主下钻。跨 graph/错 run/缺 Review/预算不足在 claim、spawn 前拒绝；不能只改 description 而保留服务拒绝成功的条件。
 3. **Diagnosis 与交接。** 删除 pack-only 提示、强制六维和无输出自动填 unknown 的路径。judgements 按需、proposals 可空；成功观察和无需改进可正常记录，超时/解析失败只记 interrupted/具名错误。既有 observedFailure 文本槽在模型面解释为“复盘观察”，不填虚假失败、不为改名迁移全账。未知 targetType 可记录，执行转换仍拒绝不支持目标且零 ledger 写。task_review_pack 查询源与状态，context_read 读 Diagnosis；无建议结论不造 pending，不消费 A6 恢复入口。
 4. **组合验收后才填待验收。** 串行交接共享 ledger/绑定接口；每个子目标只处理一个接口及其定向测试。真实调用链的集成、公共检查与组合验收都由派发的子代理完成；主代理汇总证据、同步文档并提交。不得因内部一段成功先标整组完成。
 

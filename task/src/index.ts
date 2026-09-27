@@ -35,6 +35,8 @@ import type {
   TaskProposalPhaseChange,
   TaskProposalRootConsumption,
 } from './proposal.ts'
+import type { TaskBudgetExtensionClaim } from './budget.ts'
+import { describeBudgetExtension } from './budget.ts'
 import { answerIdOf, questionIdOf, questionOf } from './question.ts'
 import type {
   QuestionAnswer,
@@ -48,6 +50,7 @@ import { TaskState } from './service/state.ts'
 
 export * from './types.ts'
 export * from './contract.ts'
+export * from './budget.ts'
 export * from './proposal.ts'
 export * from './question.ts'
 export { TaskState } from './service/state.ts'
@@ -706,6 +709,49 @@ export class TaskService extends Service {
 
   async recordObligationIn(storeId: string, obligation: Obligation, actor: string): Promise<void> {
     await this.commitIn(storeId, [event('ObligationRecorded', { taskId: obligation.sourceTaskId, actor, payload: { obligation } })])
+  }
+
+  /**
+   * Records one approved budget extension (K4), and answers a repeat of a stored
+   * request from the record instead of appending a second fact.
+   *
+   * The envelope carries the tree's root task and the root session that asked,
+   * and the claim carries the raise itself, its identity and the approving
+   * channel's reference. The reducer is the gate for every rule — the root-session
+   * and root-task binding, the shape of each pair, the identity of the content,
+   * one key names one extension, and a dimension an earlier extension already
+   * moved has to be asked for from the value *that* extension left.
+   *
+   * The idempotency read here is the same shape every other entry keeps
+   * ({@link askParentQuestionIn}): the store's current state, taken after the
+   * write queue has drained, and a key+identity match answered from the record
+   * with nothing written. It is not the serialization point — the reducer's own
+   * check is, inside the commit — so a caller that lost a race may still reach
+   * the commit, where the second write applies nothing and the state stays
+   * exactly what the first one made it.
+   */
+  async recordBudgetExtensionIn(storeId: string, rootTaskId: TaskId, claim: TaskBudgetExtensionClaim, actor: string): Promise<void> {
+    const store = this.requireStore(storeId)
+    await store.ready
+    await store.writes
+    const stored = store.state.snapshot().budgetExtensions?.byRequestKey[claim.requestKey]
+    if (stored !== undefined) {
+      if (stored.requestDigest !== claim.requestDigest) {
+        throw new Error(
+          `task: budget extension request key "${claim.requestKey}" is already bound to ${describeBudgetExtension(stored)} (identity ${stored.requestDigest}); ` +
+          'one key names one request, and different content under it is a new key rather than a second grant',
+        )
+      }
+      return
+    }
+    await this.commitIn(storeId, [
+      event('TaskBudgetExtended', {
+        taskId: rootTaskId,
+        sessionId: claim.requestedBy,
+        actor,
+        payload: { extension: claim },
+      }),
+    ])
   }
 
   async recordHandoffIn(storeId: string, handoff: TaskHandoff, actor: string): Promise<void> {

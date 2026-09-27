@@ -4,7 +4,7 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import { boundContextSummary, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
-import { ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, admissionContextDigest, answerIdOf, batchIdFor, blockingQuestionsOf, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberTaskIds, sha256Hex, taskProposalId } from "@dangosys/dsh-singularity-task";
+import { ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, describeBudgetExtension, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberTaskIds, sha256Hex, taskProposalId } from "@dangosys/dsh-singularity-task";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { answerMessageText, findSkillFileIn, parseSkillFile, questionMessageText, skillRootsFor, toolCallRefIn } from "@dangosys/dsh-singularity-agent-runtime";
 import { homedir } from "node:os";
@@ -835,6 +835,34 @@ function checkDecomposition(parent, children, existingEdges) {
 * non-active phase — a run that has stopped deciding its own work does not get
 * to turn a proposal into tasks.
 *
+* `task_review_agent` (K4) belongs with `task_review_pack` and `task_diagnose`,
+* one step further than either: it reads one task's facts, publishes ONE
+* read-only reviewer node, and records the reviewer's judgement as a Diagnosis.
+* Nothing it does is work the stopped tree could be asked to justify — the
+* reviewer's grant is the read-only baseline (`reviewerGrant`: no shell, no
+* write, no spawn, no evolution tool), so the call cannot be the in-flight
+* checkout writer the drain exists to wait for either. What it must not become
+* is a *business* bound in disguise: a tree that stopped at its deadline, or
+* that has spent its run allowance, can still be looked at — the postmortem is
+* the reason the record exists, and the reviewer's own per-store allowance and
+* watchdog are the only bounds on it (`agent-singularity/review-agent-ledger`).
+* What still refuses in these phases is work: `task_decompose`, `graph_spawn`,
+* `task_submit_result`, and every other write, named as the late call it is.
+*
+* `task_budget_extend` (K4) is the one entry here that appends a store fact, and
+* that is deliberate: the fact it appends is a *person's* decision about the
+* tree's own ceiling, which only the approval channel produces (an empty
+* reference is refused by the committing entry, so the tool cannot invent one).
+* It belongs in this list for exactly the reason `task_review_pack` does — the
+* caller is the root coordination session of a tree that has stopped, and a tree
+* that spent its allowance is precisely the tree whose owner has to be able to
+* ask for more ("终态亦可调用"). What the gate protects is untouched by a
+* ceiling: the call starts no run, resumes none, un-settles nothing, creates no
+* task or child, opens no gate and touches no checkout — the runtime entry's own
+* contract — so it can neither be the in-flight writer the drain waits for nor a
+* second door into a stopped tree's work. Denying it here would leave K4's one
+* entry shut.
+*
 * The two question tools (A4 §F.1) are coordination in the plainest sense: a
 * child asking its direct parent is the one effect still admitted while its own
 * run is blocked on a question, and a parent answering a child is the one effect
@@ -849,7 +877,9 @@ const COORDINATION_ALLOWED = new Set([
 	"capability_list",
 	"skill",
 	"task_review_pack",
+	"task_review_agent",
 	"task_diagnose",
+	"task_budget_extend",
 	"read",
 	"read_image",
 	"glob",
@@ -2389,6 +2419,16 @@ function instant(value) {
 * fresh allowance. No run naming a root session of this store means no owner,
 * and the store keeps the honest recovery diagnostic rather than a guess.
 *
+* The ceilings that come back are the ones in force: per dimension, the value the
+* last approved extension left when the store holds one (K4), and the configured
+* value otherwise. An approved ceiling is *not* re-derived from the wall time the
+* deployment configures today — a person's decision is not a function of the
+* configuration file — and a deployment that stops configuring a dimension does
+* not revoke one; what `configured` reports is what the deployment alone would
+* allow, for a reader that has to show both numbers. The root's own
+* `acceptedAt` is unchanged by any of this: an approved deadline is an absolute
+* instant, never a longer window measured from a fresh "now".
+*
 * `reason` texts are recovery diagnostics: they say what is missing (no root,
 * no run bound to this store as its root, several such tasks, a root run with
 * no readable start) so an operator reading `task_status` knows why the tree
@@ -2430,12 +2470,20 @@ function resolveRootBudget(snapshot, config) {
 		ok: false,
 		reason: `root task ${root.taskId}'s first run ${first.runId} records no readable startedAt (${JSON.stringify(first.startedAt)}), so the tree has no honest start instant and is not given a fresh one`
 	};
+	const configured = {
+		...config.wallTimeMs === void 0 ? {} : { deadlineAt: new Date(acceptedAtMs + config.wallTimeMs).toISOString() },
+		...config.maxRuns === void 0 ? {} : { maxRuns: config.maxRuns }
+	};
+	const approved = approvedBudgetCeilings(snapshot.budgetExtensions?.all ?? []);
+	const maxRuns = approved.maxRuns ?? configured.maxRuns;
+	const deadlineAt = approved.deadlineAt ?? configured.deadlineAt;
 	return {
 		ok: true,
 		rootTaskId: root.taskId,
 		acceptedAt: first.startedAt,
-		...config.wallTimeMs === void 0 ? {} : { deadlineAt: new Date(acceptedAtMs + config.wallTimeMs).toISOString() },
-		...config.maxRuns === void 0 ? {} : { maxRuns: config.maxRuns }
+		...deadlineAt === void 0 ? {} : { deadlineAt },
+		...maxRuns === void 0 ? {} : { maxRuns },
+		configured
 	};
 }
 /** The run of `task` that is bound to `storeId` as a root run, or `undefined` when the task holds none. */
@@ -4585,24 +4633,44 @@ async function budgetBreaches(env, run) {
 * losing branch of the race keeps its handlers attached, so a worker that
 * settles after its budget already fired never surfaces an unhandled
 * rejection.
+*
+* The budget is a *reading*, not a number: `remaining` is called for the wait it
+* arms and again whenever that wait elapses, so a timer set under a ceiling a
+* person has since raised cannot cancel a worker the store still allows (K4).
+* A timer that fires under a ceiling that did *not* move reads the same bound
+* again, and that second reading is what cancels — one implementation, so the
+* in-flight stop and the settled-run judgement can never disagree about which
+* limit ran out.
 */
-async function awaitWorker(handle, signal, wallTimeMs) {
+async function awaitWorker(handle, signal, remaining) {
 	const cancel = () => handle.agent.cancel({ kind: "parent" });
 	signal?.addEventListener("abort", cancel, { once: true });
 	let timer;
 	try {
-		const branches = [handle.agent.whenIdle().then(() => ({ kind: "idle" })).catch((error) => isAborted(signal) ? { kind: "aborted" } : {
+		const idle = handle.agent.whenIdle().then(() => ({ kind: "idle" })).catch((error) => isAborted(signal) ? { kind: "aborted" } : {
 			kind: "failed",
 			reason: message(error)
-		})];
-		if (wallTimeMs !== void 0) branches.push(new Promise((resolve$1) => {
-			timer = setTimeout(() => resolve$1({ kind: "budget-exhausted" }), wallTimeMs);
-			if (typeof timer.unref === "function") timer.unref();
-		}));
-		const settled = await Promise.race(branches);
-		if (settled.kind === "budget-exhausted") cancel();
-		if (settled.kind === "idle" && isAborted(signal)) return { kind: "aborted" };
-		return settled;
+		});
+		for (;;) {
+			const budgetMs = await remaining();
+			if (Number.isFinite(budgetMs) && budgetMs <= 0) {
+				cancel();
+				return { kind: "budget-exhausted" };
+			}
+			const branches = [idle];
+			if (Number.isFinite(budgetMs)) branches.push(new Promise((resolve$1) => {
+				timer = setTimeout(() => resolve$1({ kind: "wake" }), budgetMs);
+				if (typeof timer.unref === "function") timer.unref();
+			}));
+			const settled = await Promise.race(branches);
+			if (timer !== void 0) {
+				clearTimeout(timer);
+				timer = void 0;
+			}
+			if (settled.kind === "wake") continue;
+			if (settled.kind === "idle" && isAborted(signal)) return { kind: "aborted" };
+			return settled;
+		}
 	} finally {
 		if (timer !== void 0) clearTimeout(timer);
 		signal?.removeEventListener("abort", cancel);
@@ -4970,14 +5038,13 @@ async function observeWorkerRun(env, storeId, task, run, handle, signal) {
 		kind: "terminal",
 		status
 	}));
-	const rootDeadline = await rootDeadlineOf(env, storeId);
+	const remainingNow = () => remainingRunMsFromStore(env, storeId, run);
 	for (;;) {
-		const remaining = remainingRunMs(env, run, rootDeadline, Date.now());
-		if (remaining <= 0) {
+		if (await remainingNow() <= 0) {
 			handle.agent.cancel({ kind: "parent" });
 			return { kind: "budget-exhausted" };
 		}
-		const settled = await Promise.race([terminal, awaitWorker(handle, signal, remaining)]);
+		const settled = await Promise.race([terminal, awaitWorker(handle, signal, remainingNow)]);
 		if (settled.kind !== "idle") return settled;
 		const current = await env.task.runIn(storeId, run.runId);
 		if (isTerminalRun(current.status)) return {
@@ -4985,10 +5052,10 @@ async function observeWorkerRun(env, storeId, task, run, handle, signal) {
 			status: current.status
 		};
 		const phase = current.executionPhase;
-		if (phase === "waiting_children" || phase === "submitted") return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: "parent" }), signal, rootDeadline, terminal);
+		if (phase === "waiting_children" || phase === "submitted") return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: "parent" }), signal, remainingNow, terminal);
 		if (agentIsRunning(handle)) continue;
 		const snapshot = await env.task.snapshotIn(storeId);
-		if (openProposalOf(snapshot, task.taskId, run.runId) !== void 0 || blockingQuestionsOf(snapshot, run.runId).length > 0) return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: "parent" }), signal, rootDeadline, terminal);
+		if (openProposalOf(snapshot, task.taskId, run.runId) !== void 0 || blockingQuestionsOf(snapshot, run.runId).length > 0) return await awaitWaitingTerminal(env, run, () => handle.agent.cancel({ kind: "parent" }), signal, remainingNow, terminal);
 		const factCount = countSubtreeFacts(snapshot, task.taskId);
 		const previous = current.noProgress;
 		const rounds = (previous?.factCount === factCount ? previous.rounds : 0) + 1;
@@ -5007,30 +5074,7 @@ async function observeWorkerRun(env, storeId, task, run, handle, signal) {
 		if (rounds === 1) notifyOwner(env, run.sessionId, idleReminderText(run, rounds, env.noProgressRounds));
 	}
 }
-/**
-* Wait for one run that is *waiting* — its own batch is running, or its
-* submission is inside verification — under the two bounds the active case also
-* runs under: the run's own deadline (`min` of its wall time, what is left of the
-* root's, and the instant a caller placed on it — all measured from its persisted
-* `startedAt`, {@link remainingRunMs}) and the batch's abort. Idle is the one
-* input that stops here, because an idle worker in these phases is expected
-* rather than progress: waiting on the store's terminal state is the only honest
-* observation left, and marking a round would count a legitimate wait as
-* stagnation.
-*
-* The abort is what a batch cancellation rides: a driver parked here without it
-* would leave `cancelBatch` waiting for a settlement nobody produces — the
-* children it never started stay unblocked and the workspace layer stays held —
-* and the unload path would hang behind the same promise.
-*
-* The cancellation is handed in as a callback rather than an `AgentHandle`
-* because the two callers hold different things: the round that started a
-* worker has its handle, while the batch driver adopting a question-waiting
-* child out of a store has only the session id and asks the deployment to
-* resolve the agent (A4 §F.1 — the deadline ends a recovered wait exactly as it
-* ends a live one, so this is one implementation, not two).
-*/
-async function awaitWaitingTerminal(env, run, cancel, signal, rootDeadline, terminal) {
+async function awaitWaitingTerminal(env, run, cancel, signal, remainingRun, terminal) {
 	const stop = () => {
 		cancel?.();
 	};
@@ -5038,26 +5082,30 @@ async function awaitWaitingTerminal(env, run, cancel, signal, rootDeadline, term
 		stop();
 		return { kind: "aborted" };
 	}
-	const remaining = remainingRunMs(env, run, rootDeadline, Date.now());
-	if (remaining <= 0) {
-		stop();
-		return { kind: "budget-exhausted" };
-	}
 	signal?.addEventListener("abort", stop, { once: true });
+	const aborted = signal === void 0 ? void 0 : new Promise((resolve$1) => {
+		signal.addEventListener("abort", () => resolve$1({ kind: "aborted" }), { once: true });
+	});
 	let timer;
 	try {
-		const branches = [terminal];
-		if (signal !== void 0) branches.push(new Promise((resolve$1) => {
-			signal.addEventListener("abort", () => resolve$1({ kind: "aborted" }), { once: true });
-		}));
-		branches.push(new Promise((resolve$1) => {
-			timer = setTimeout(() => {
+		for (;;) {
+			const remaining = await remainingRun();
+			if (remaining <= 0) {
 				stop();
-				resolve$1({ kind: "budget-exhausted" });
-			}, remaining);
-			if (typeof timer.unref === "function") timer.unref();
-		}));
-		return await Promise.race(branches);
+				return { kind: "budget-exhausted" };
+			}
+			const branches = aborted === void 0 ? [terminal] : [terminal, aborted];
+			if (Number.isFinite(remaining)) branches.push(new Promise((resolve$1) => {
+				timer = setTimeout(() => resolve$1({ kind: "wake" }), remaining);
+				if (typeof timer.unref === "function") timer.unref();
+			}));
+			const settled = await Promise.race(branches);
+			if (timer !== void 0) {
+				clearTimeout(timer);
+				timer = void 0;
+			}
+			if (settled.kind !== "wake") return settled;
+		}
 	} finally {
 		if (timer !== void 0) clearTimeout(timer);
 		signal?.removeEventListener("abort", stop);
@@ -5078,7 +5126,17 @@ function cancelAgentOf(env, sessionId) {
 		cancel.call(agent, { kind: "parent" });
 	};
 }
-/** The root's own deadline for the store, when the budget resolves; a missing root start is a refusal to invent one. */
+/**
+* The root's own deadline for the store, when the budget resolves; a missing
+* root start is a refusal to invent one.
+*
+* Every call reads the store: the ceiling is what the store says *now*, and a
+* caller that held one from earlier would keep enforcing a bound a person has
+* since raised (K4). A resolution that fails answers "no deadline", which is the
+* conservative reading for a ceiling nobody can measure — the paths that have to
+* refuse over that case ask the resolver themselves
+* ({@link resolveRootBudget}), rather than reading it out of a missing instant.
+*/
 async function rootDeadlineOf(env, storeId) {
 	const resolved = resolveRootBudget(await env.task.snapshotIn(storeId), env.rootBudget ?? {});
 	return resolved.ok ? resolved.deadlineAt : void 0;
@@ -5087,11 +5145,21 @@ async function rootDeadlineOf(env, storeId) {
 * What is left of the tightest deadline that applies to one run of this
 * orchestration — the one call site of `runDeadlineMs` inside the orchestration,
 * so the rule reads the same everywhere a worker is awaited: the run's own
-* per-run wall time and what is left of the root's deadline. Either reaching
-* zero is the budget stop {@link observeWorkerRun} acts on.
+* per-run wall time (measured from its persisted `startedAt`, never reset) and
+* what is left of the root's deadline as the store holds it *now*. Either
+* reaching zero is the budget stop {@link observeWorkerRun} acts on.
 */
 function remainingRunMs(env, run, rootDeadline, nowMs) {
 	return runDeadlineMs(run.startedAt, env.budget?.wallTimeMs, rootDeadline, nowMs);
+}
+/**
+* The same window, resolved from the store at the moment of the question: the
+* reading a wait arms itself with, and the reading it takes again when that wait
+* elapses. One function, so "how long may this run still go" has one answer
+* whether it is asked before a race, inside a parked wait, or when a timer fires.
+*/
+async function remainingRunMsFromStore(env, storeId, run) {
+	return remainingRunMs(env, run, await rootDeadlineOf(env, storeId), Date.now());
 }
 /**
 * The wall-clock bound(s) this orchestration's runs are under, as a terminal
@@ -5326,7 +5394,8 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 	if (task === void 0) throw new Error(`task-runtime: batch ${batch.batchId} names child "${item.taskId}", which the store does not hold`);
 	const dependencyTaskIds = item.dependsOn.map((dependency) => items[dependency].taskId);
 	const manifest = snapshot.capabilities[item.taskId];
-	const budget = resolveRootBudget(snapshot, env.rootBudget ?? {});
+	const budgetSnapshot = await env.task.snapshotIn(batch.storeId);
+	const budget = resolveRootBudget(budgetSnapshot, env.rootBudget ?? {});
 	if (!budget.ok) {
 		if (hasRootLimits(env.rootBudget)) return {
 			kind: "adopted",
@@ -5336,7 +5405,7 @@ async function startChildRound(env, batch, parentTask, parentRun, items, item, s
 			}, dependencyTaskIds)
 		};
 	} else {
-		const verdict = checkRunStart(snapshot, budget);
+		const verdict = checkRunStart(budgetSnapshot, budget);
 		if (!verdict.allowed) return {
 			kind: "adopted",
 			outcome: await blockChild(env, batch.storeId, item, {
@@ -5650,8 +5719,7 @@ async function awaitAdoptedWorkerWait(env, batch, item, run, dependencyTaskIds) 
 		kind: "terminal",
 		status
 	}));
-	const rootDeadline = await rootDeadlineOf(env, batch.storeId);
-	const observation = await awaitWaitingTerminal(env, run, cancelAgentOf(env, run.sessionId), batch.signal, rootDeadline, terminal);
+	const observation = await awaitWaitingTerminal(env, run, cancelAgentOf(env, run.sessionId), batch.signal, () => remainingRunMsFromStore(env, batch.storeId, run), terminal);
 	switch (observation.kind) {
 		case "terminal": {
 			const snapshot = await env.task.snapshotIn(batch.storeId);
@@ -5859,8 +5927,7 @@ async function finishBatch(env, batch) {
 		notifyOwner(env, batch.callerSessionId, `task-runtime: ${reason}. Children: ${batchSummary(batch.batchId, outcomes)}`);
 		return outcomes;
 	}
-	const rootBudget = resolveRootBudget(snapshot, env.rootBudget ?? {});
-	const rootDeadline = rootBudget.ok ? rootBudget.deadlineAt : void 0;
+	const rootDeadline = await rootDeadlineOf(env, batch.storeId);
 	if (remainingRunMs(env, parentRun, rootDeadline, Date.now()) <= 0) {
 		await releaseWorkspaceLayer(env, batchOwner(batch.storeId, batch.parentTaskId, batch.batchId), batch.callerSessionId);
 		const reason = parentDeadlinePassedReason(env, rootDeadline);
@@ -6729,6 +6796,13 @@ const ConfigSchema = z.object({
 });
 function now() {
 	return (/* @__PURE__ */ new Date()).toISOString();
+}
+/** The ceilings one resolved root budget is under: what is in force, per dimension. */
+function ceilingsOf(budget) {
+	return {
+		...budget.maxRuns === void 0 ? {} : { maxRuns: budget.maxRuns },
+		...budget.deadlineAt === void 0 ? {} : { deadlineAt: budget.deadlineAt }
+	};
 }
 var TaskRuntime = class TaskRuntime extends Service {
 	static inject = [
@@ -7675,6 +7749,272 @@ var TaskRuntime = class TaskRuntime extends Service {
 	/** Every proposal one parent task holds, in submission order — what a task's own view of its batches reads. */
 	async proposalsForParent(storeId, parentTaskId) {
 		return [...(await this.ctx.task.snapshotIn(storeId)).proposals?.byParentTask[parentTaskId] ?? []];
+	}
+	/**
+	* What a budget extension would do, read and judged and never written (K4):
+	* the ceilings this deployment configures, the ceilings in force, the runs the
+	* store already holds, and — from the request — either the record this key
+	* already holds, the raise a commit would record, or the reason it cannot be
+	* granted.
+	*
+	* Why a query at all, and why it is zero-write: the decision this entry feeds
+	* is a *person's*, and §5's rule applies to it exactly as it applies to a
+	* batch proposal — nothing is asked about a request that could never run, and
+	* nothing is written before the person has answered. So every shape rule, every
+	* bound and every staleness check is applied here, against the store's own
+	* facts, and the committing call applies the same rules again inside the
+	* store's write queue; asking twice costs two reads and never a second grant.
+	*
+	* The caller has to be the store's root coordination session: the store is
+	* derived from the session (`rootTaskStoreId`), and the session's graph has to
+	* agree that this session is the one it created as its root. A delegated
+	* worker, and a session belonging to another graph's tree, are refused by name
+	* before anything is read — a tree's budget is raised by the person who owns
+	* the tree, never by the work it delegated.
+	*
+	* The store is opened if this process has not opened it yet (a read of its own
+	* log; nothing is created — a store that does not exist is a named refusal),
+	* which is what lets a later process answer the same question about the same
+	* store without any process-local state.
+	*/
+	async budgetExtensionDraft(sessionId, request) {
+		const { storeId, snapshot, budget } = await this.budgetExtensionContext(sessionId);
+		const requestKey = typeof request?.requestKey === "string" ? request.requestKey : "";
+		const existing = requestKey.length === 0 ? void 0 : this.budgetExtensionIndex(snapshot).byRequestKey[requestKey];
+		return {
+			storeId,
+			rootTaskId: budget.rootTaskId,
+			rootSessionId: sessionId,
+			configured: budget.configured,
+			effective: ceilingsOf(budget),
+			runsUsed: snapshot.runs.length,
+			outcome: this.judgeBudgetExtension(request, ceilingsOf(budget), budget, existing)
+		};
+	}
+	/**
+	* Records one approved budget extension (K4) and answers with the record the
+	* store holds.
+	*
+	* **What makes it a grant is the reference, not the request.** The caller
+	* hands back the reading the query reported ({@link RootBudgetExtensionCommit.baseline})
+	* and the approval channel's own fact (`approvalRef`); an empty reference is
+	* refused, and nothing here can tell a person's decision from a model's
+	* summary of one — that is why the entry takes the reference and never a
+	* boolean, a reason or an `approved` flag, and why the record keeps it for a
+	* reader that later asks who approved a raise.
+	*
+	* **Where the serialization is.** The rules are judged once here, against the
+	* reading handed back, and then again by the store's reducer, inside its single
+	* write queue: the dimension the request raises has to still be at the value
+	* the person saw. Two grants approved against the same reading therefore cannot
+	* both stand — the second is refused with nothing written, and its approver is
+	* told that the tree moved rather than that the grant was applied to a value
+	* nobody approved.
+	*
+	* **What an extension is not.** It is a record of a decision, not work: it
+	* starts no run, resumes none, un-settles none, creates no task, child or
+	* candidate, recovers no store and opens no gate — a tree whose recovery is
+	* still pending can be granted the budget it will need, and the grant changes
+	* nothing until the tree runs again. A running run keeps the wall clock it
+	* started with (its per-run time is not reset); what an extension lengthens is
+	* only the tree's own bound, which every admission, driver and watchdog path
+	* reads through {@link resolveRootBudget}.
+	*/
+	async extendRootBudget(sessionId, commit) {
+		const { storeId, snapshot, budget } = await this.budgetExtensionContext(sessionId);
+		if (typeof commit?.approvalRef !== "string" || commit.approvalRef.length === 0) throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: the commit carries no approval reference (a non-empty \`approval:<callId>\` from the channel that asked the person); this service records a grant, it never makes one`);
+		const requestKey = typeof commit?.requestKey === "string" ? commit.requestKey : "";
+		const existing = requestKey.length === 0 ? void 0 : this.budgetExtensionIndex(snapshot).byRequestKey[requestKey];
+		const baseline = typeof commit.baseline === "object" && commit.baseline !== null ? commit.baseline : {};
+		const outcome = this.judgeBudgetExtension(commit, baseline, budget, existing);
+		if (outcome.kind === "refused") throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: ${outcome.reason}`);
+		if (outcome.kind === "recorded") return outcome.record;
+		const claim = {
+			...outcome.proposal,
+			approvalRef: commit.approvalRef,
+			requestedBy: sessionId
+		};
+		await this.ctx.task.recordBudgetExtensionIn(storeId, budget.rootTaskId, claim, sessionId);
+		const stored = this.budgetExtensionIndex(await this.ctx.task.snapshotIn(storeId)).byRequestKey[claim.requestKey];
+		if (stored === void 0) throw new Error(`task-runtime: budget extension "${claim.requestKey}" was committed to store "${storeId}" but the store does not hold it; a committed extension is a durable fact, and this is not one`);
+		return stored;
+	}
+	/**
+	* The store one budget-extension call works on, its root session established —
+	* the one place the two entries' trust and reading rules live.
+	*
+	* The session's graph answers first because "is this session a graph's root
+	* coordination session" is the graph's own fact, and the store id is derived
+	* from the session the graph names ({@link rootTaskStoreId}) rather than from
+	* the caller's string: a worker session, a session of another graph and a
+	* session whose graph cannot be resolved are one refusal family here, each
+	* named, and none of them opens a store.
+	*
+	* The budget has to resolve for an extension to mean anything: the tree's
+	* owner is the root task and the configured ceilings are measured from the root
+	* run's own start, so a store with no measurable root (no root task, no run for
+	* it, an unreadable start) refuses by the resolver's own words — the same
+	* refusal every admission path uses, at the same place, instead of a second
+	* reading of the store invented here.
+	*/
+	async budgetExtensionContext(sessionId) {
+		if (typeof sessionId !== "string" || sessionId.length === 0) throw new Error("task-runtime: a budget extension needs the root session that asks: pass a non-empty session id");
+		let rootSessionId;
+		try {
+			rootSessionId = (await this.ctx.graphs.graphForSession(SessionId(sessionId))).rootSessionId;
+		} catch (error) {
+			throw new Error(`task-runtime: the budget of session "${sessionId}" cannot be extended: its graph could not be resolved (${error instanceof Error ? error.message : String(error)}), so whether it is a graph's root coordination session cannot be established`);
+		}
+		if (rootSessionId !== sessionId) throw new Error(`task-runtime: session "${sessionId}" is not a root coordination session (its graph's root session is "${rootSessionId}"), so it cannot extend a tree's budget: a raise is a decision about the tree the root session accepted, and it is refused by name for a delegated worker, for a session of another graph, and for any session that is not the one its graph created`);
+		const storeId = rootTaskStoreId(sessionId);
+		let snapshot;
+		try {
+			snapshot = await this.ctx.task.openStore(storeId);
+		} catch (error) {
+			throw new Error(`task-runtime: the budget of session "${sessionId}" cannot be read: store "${storeId}" is unavailable (${error instanceof Error ? error.message : String(error)})`);
+		}
+		const resolution = resolveRootBudget(snapshot, this.config.rootBudget ?? {});
+		if (!resolution.ok) throw new Error(`task-runtime: the budget of session "${sessionId}" cannot be extended: ${resolution.reason}`);
+		return {
+			storeId,
+			snapshot,
+			budget: resolution
+		};
+	}
+	/** The store's own extension index; a snapshot that carries none is a refusal, never "the store holds no extensions". */
+	budgetExtensionIndex(snapshot) {
+		const index = snapshot.budgetExtensions;
+		if (index === void 0) throw new Error(`task-runtime: store "${snapshot.id}" carries no budget-extension index, so its approved ceilings cannot be read`);
+		return index;
+	}
+	/**
+	* One extension request, judged against the ceilings in force and against what
+	* the store already holds — the whole refusal surface, applied identically by
+	* the query and by the committing call, and pure: it reads the values it is
+	* given and writes nothing.
+	*
+	* The order is deliberate. The request's own shape first (a key, at least one
+	* dimension, values that denote something), then the store's answer for the key
+	* — a repeat of a recorded request is *answered* from the record before any
+	* bound is judged, so a key whose totals were approved can be retried after the
+	* tree moved on and still be idempotent — and only then the bounds: the
+	* dimension has to be bounded at all, the reading handed back has to be the one
+	* in force, and the total has to be a raise.
+	*/
+	judgeBudgetExtension(request, baseline, budget, existing) {
+		if (typeof request !== "object" || request === null) return {
+			kind: "refused",
+			reason: "the request is not an object with a request key and at least one of maxRuns, deadlineAt"
+		};
+		const requestKey = request.requestKey;
+		if (typeof requestKey !== "string" || requestKey.length === 0) return {
+			kind: "refused",
+			reason: "the request needs a non-empty request key: it is how a retry after a restart is recognised as the same request"
+		};
+		if (request.maxRuns === void 0 && request.deadlineAt === void 0) return {
+			kind: "refused",
+			reason: "the request names neither maxRuns nor deadlineAt, and a raise that raises nothing is not an extension"
+		};
+		const deadline = request.deadlineAt === void 0 ? void 0 : canonicalBudgetInstant(request.deadlineAt);
+		if (request.deadlineAt !== void 0 && deadline === void 0) return {
+			kind: "refused",
+			reason: `deadlineAt ${JSON.stringify(request.deadlineAt)} is not an absolute instant: a deadline is the moment the tree stops at, written in UTC (for example 2026-09-28T09:00:00.000Z) — a local time, a duration or an unreadable value is not one`
+		};
+		if (request.maxRuns !== void 0 && (!Number.isInteger(request.maxRuns) || request.maxRuns <= 0)) return {
+			kind: "refused",
+			reason: `maxRuns ${JSON.stringify(request.maxRuns)} is not a positive whole number of runs; the approved value is the tree\u2019s whole run count, never an increment`
+		};
+		const proposalDigest = budgetExtensionRequestDigest({
+			requestKey,
+			...request.maxRuns === void 0 ? {} : { maxRuns: request.maxRuns },
+			...deadline === void 0 ? {} : { deadlineAt: deadline }
+		});
+		if (existing !== void 0) {
+			if (existing.requestDigest === proposalDigest) return {
+				kind: "recorded",
+				record: existing
+			};
+			return {
+				kind: "refused",
+				reason: `request key "${requestKey}" is already bound to ${describeBudgetExtension(existing)} (identity ${existing.requestDigest}); one key names one request, and different totals under it are a new request under a new key`
+			};
+		}
+		const maxRuns = this.judgeBudgetRaise("maxRuns", request.maxRuns, budget.maxRuns, baseline.maxRuns);
+		if (!maxRuns.ok) return {
+			kind: "refused",
+			reason: maxRuns.reason
+		};
+		const deadlineAt = this.judgeBudgetRaise("deadlineAt", deadline, budget.deadlineAt, baseline.deadlineAt);
+		if (!deadlineAt.ok) return {
+			kind: "refused",
+			reason: deadlineAt.reason
+		};
+		return {
+			kind: "proposed",
+			proposal: {
+				requestKey,
+				requestDigest: proposalDigest,
+				...maxRuns.raise === void 0 ? {} : { maxRuns: maxRuns.raise },
+				...deadlineAt.raise === void 0 ? {} : { deadlineAt: deadlineAt.raise }
+			}
+		};
+	}
+	/**
+	* One dimension's raise, or the reason there is none. `requested` is what the
+	* request asks for (already canonical for an instant), `inForce` is the ceiling
+	* the store is under now and `read` is what the request says was in force when
+	* it was read.
+	*
+	* The three refusals are the whole rule of K4's raise: a dimension nobody
+	* bounded is not raised (an unset ceiling is unlimited, and naming it would
+	* invent a limit), the reading has to be the value in force (so an approval
+	* cannot be re-based on a ceiling that moved under it), and the total asked for
+	* has to be above it (a ceiling is the whole approved total and only moves up).
+	*/
+	judgeBudgetRaise(dimension, requested, inForce, read) {
+		if (requested === void 0) return { ok: true };
+		if (inForce === void 0) return {
+			ok: false,
+			reason: `this tree sets no ${dimension} ceiling (the deployment configures none, and no extension has raised one), so there is nothing to raise: an unbounded dimension needs no grant, and a grant for it would turn an unlimited tree into a limited one`
+		};
+		if (read === void 0) return {
+			ok: false,
+			reason: `the request does not say what ${dimension} was when it was read (the baseline the query reported), so it cannot be recognised as a raise from a known value; read the ceilings again and hand the reading back verbatim`
+		};
+		if (read !== inForce) return {
+			ok: false,
+			reason: `${dimension} moved since this request was read: it was read at ${String(read)} and it is ${String(inForce)} in force now, so approving this request would re-base a person’s decision on a value nobody approved; read the ceilings again and ask for the total you want`
+		};
+		if (typeof inForce === "number" && typeof requested === "number") {
+			if (requested <= inForce) return {
+				ok: false,
+				reason: `maxRuns ${requested} does not raise the ${inForce} in force; an approved value is the whole total the tree may reach, and it only ever moves up (the request states the total it wants, never an increment)`
+			};
+			return {
+				ok: true,
+				raise: {
+					previous: inForce,
+					next: requested
+				}
+			};
+		}
+		if (typeof inForce === "string" && typeof requested === "string") {
+			if (Date.parse(requested) <= Date.parse(inForce)) return {
+				ok: false,
+				reason: `deadlineAt ${requested} is not later than the ${inForce} in force; an approved deadline is an absolute instant the tree stops at, and it only ever moves later`
+			};
+			return {
+				ok: true,
+				raise: {
+					previous: inForce,
+					next: requested
+				}
+			};
+		}
+		return {
+			ok: false,
+			reason: `the request and the ${dimension} in force are not the same kind of value, so no raise can be read from them`
+		};
 	}
 	/**
 	* The first half of the pure pre-check (T2/T3 §2): the caller's declared

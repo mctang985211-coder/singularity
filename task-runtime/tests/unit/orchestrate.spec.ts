@@ -26,6 +26,7 @@ import {
   driveBatch,
   escalationHint,
   owedBatchResults,
+  resolveRootBudget,
   workerBaseline,
 } from '../../src/index.ts'
 
@@ -4209,6 +4210,181 @@ describe('A3 coordination', () => {
     // And the parent is not accepted after its own root deadline: the batch's
     // settlement cancels it with the budget named rather than judging it.
     expect((await h.task.runIn(STORE, runId)).status).toBe('cancelled')
+  })
+
+  test('a ceiling a person raised while a child waits keeps that child alive past the old deadline (K4)', async () => {
+    // The configured wall time is short enough that an unraised tree ends the
+    // child inside this test, and the grant lands *while the child is parked* —
+    // the window a timer armed before it would otherwise decide in. What the
+    // watchdog has to read is the store's ceiling at the moment it judges, not
+    // the number it armed itself with.
+    const h = harness({ config: { rootBudget: { wallTimeMs: 700 } } })
+    const { taskId, runId } = await createRoot(h)
+    let release: (() => void) | undefined
+    h.setIdleBehavior(async (sessionId) => {
+      await new Promise<void>(resolve => { release = resolve })
+      await h.runtime.submitResult(sessionId, { summary: 'done inside the extended window' })
+    })
+
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('task a')],
+    })
+    // The child's run is on the record: the watchdog is parked on it now.
+    await vi.waitFor(async () => {
+      const snapshot = await h.task.snapshotIn(STORE)
+      expect(snapshot.runs.filter(run => run.taskId !== taskId)).toHaveLength(1)
+    })
+
+    // The root coordination session's own grant, through the real entries.
+    const extended = new Date(Date.now() + 30_000).toISOString()
+    const reading = await h.runtime.budgetExtensionDraft(ROOT_SESSION, { requestKey: 'k-more-time', deadlineAt: extended })
+    if (reading.outcome.kind !== 'proposed') throw new Error(`the grant was not proposed: ${JSON.stringify(reading.outcome)}`)
+    await h.runtime.extendRootBudget(ROOT_SESSION, {
+      requestKey: 'k-more-time',
+      deadlineAt: extended,
+      baseline: reading.effective,
+      approvalRef: 'approval:test-grant',
+    })
+
+    // Let the *original* deadline pass with the worker still working: a one-shot
+    // timer would have cancelled it here.
+    await new Promise(resolve => setTimeout(resolve, 900))
+    const mid = await h.task.snapshotIn(STORE)
+    expect(mid.runs.find(run => run.taskId !== taskId)?.status).toBe('running')
+    expect(h.cancelled).toEqual([])
+
+    release?.()
+    const outcomes = await h.runtime.awaitBatch(STORE, batchId)
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
+    expect(h.cancelled).toEqual([])
+    // The run's own clocks are untouched by the grant: the run that started before
+    // it keeps the `startedAt` it started with.
+    expect((await h.task.runIn(STORE, runId)).startedAt).toBe((await h.task.snapshotIn(STORE)).runs[0]?.startedAt)
+  })
+
+  test('a ceiling a person raised while a worker waits for its own nested batch keeps that wait alive past the old deadline (K4)', async () => {
+    // The waiting branch reads the same ceilings the active branch does, and this
+    // is the case that shows it: a worker whose *own* batch is running is parked
+    // in `awaitWaitingTerminal`, so the timer that wait armed under the configured
+    // deadline must not be what decides it. The child splits its own work and then
+    // goes idle while that batch runs (the state the waiting branch exists for),
+    // and the grant lands before the configured deadline passes.
+    const h = harness({ config: { rootBudget: { wallTimeMs: 700 } } })
+    const { taskId, runId } = await createRoot(h)
+    let releaseNested: (() => void) | undefined
+    let childSession = ''
+    h.setIdleBehavior(async sessionId => {
+      const bound = await h.runtime.runForSession(sessionId)
+      if (bound.task.depth === 1) {
+        childSession = sessionId
+        // The split is admitted and the worker goes idle with it running: the
+        // runtime reads `waiting_children` and enters the waiting branch.
+        await h.runtime.decomposeAndRun(bound.storeId, bound.task.taskId, bound.run.runId, sessionId, {
+          reason: 'the work turned out not to be atomic',
+          children: [childSpec('the grandchild that takes its time')],
+        })
+        return
+      }
+      // The grandchild parks, so the nested batch stays open for as long as the
+      // case needs and no clock of the test's decides anything early.
+      await new Promise<void>(resolve => { releaseNested = resolve })
+      await h.runtime.submitResult(sessionId, { summary: 'the nested work is done' })
+    })
+
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('the child that splits again')],
+    })
+    // The child's run is waiting for its own batch, and the wait is parked on it.
+    await vi.waitFor(async () => {
+      const snapshot = await h.task.snapshotIn(STORE)
+      const child = snapshot.runs.find(item => item.taskId !== taskId)
+      expect(child?.executionPhase).toBe('waiting_children')
+    })
+
+    // The root coordination session's own grant, while the child waits.
+    const extended = new Date(Date.now() + 30_000).toISOString()
+    const reading = await h.runtime.budgetExtensionDraft(ROOT_SESSION, { requestKey: 'k-more-time', deadlineAt: extended })
+    if (reading.outcome.kind !== 'proposed') throw new Error(`the grant was not proposed: ${JSON.stringify(reading.outcome)}`)
+    await h.runtime.extendRootBudget(ROOT_SESSION, {
+      requestKey: 'k-more-time',
+      deadlineAt: extended,
+      baseline: reading.effective,
+      approvalRef: 'approval:test-grant',
+    })
+
+    // Let the *configured* deadline pass with the wait parked: a timer armed
+    // before the grant would have cancelled the child here.
+    await new Promise(resolve => setTimeout(resolve, 900))
+    const mid = await h.task.snapshotIn(STORE)
+    const waiting = mid.runs.find(item => item.taskId !== taskId)!
+    expect(waiting.status).toBe('running')
+    expect(waiting.executionPhase).toBe('waiting_children')
+    expect(h.cancelled).toEqual([])
+
+    // The nested batch ends, and the child's own submission — the wake a live
+    // worker's next turn would read — settles it. What returns is the terminal
+    // branch, not the old timer.
+    releaseNested?.()
+    await vi.waitFor(async () => expect((await h.task.runIn(STORE, waiting.runId)).executionPhase).toBe('active'))
+    await h.runtime.submitResult(childSession, { summary: 'the split ran; the work continues under the children' })
+    const outcomes = await h.runtime.awaitBatch(STORE, batchId)
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['verified'])
+    expect((await h.task.runIn(STORE, waiting.runId)).status).toBe('verified')
+    expect(h.cancelled).toEqual([])
+  })
+
+  test('a grant that lengthens the tree’s deadline does not lengthen a run’s own window (K4)', async () => {
+    // The other half of the same rule: what an extension may move is the tree's
+    // bound, never the clock a run started with. The tree's configured deadline
+    // is far away and the *per-run* wall time is the tight one, so the run is the
+    // only thing that can end it — and it still does after the tree's ceiling has
+    // been raised far past it.
+    const h = harness({ config: { budget: { wallTimeMs: 700 }, rootBudget: { wallTimeMs: 600_000 } } })
+    const { taskId, runId } = await createRoot(h)
+    h.setIdleBehavior(() => new Promise<void>(() => {}))
+
+    const { batchId } = await h.runtime.decomposeAndRun(STORE, taskId, runId, ROOT_SESSION, {
+      reason: 'split the work',
+      children: [childSpec('the child that outlives its own clock')],
+    })
+    const running = await vi.waitFor(async () => {
+      const snapshot = await h.task.snapshotIn(STORE)
+      const child = snapshot.runs.find(run => run.taskId !== taskId)
+      expect(child).toBeDefined()
+      return child!
+    })
+    const childRunId = running.runId
+    const childStartedAt = running.startedAt
+
+    // The person raises the tree's deadline — later than the one the deployment
+    // configures against the root's own start — while the child is still working.
+    const extended = new Date(Date.parse(childStartedAt) + 900_000).toISOString()
+    const granted = await h.runtime.budgetExtensionDraft(ROOT_SESSION, { requestKey: 'k-more-time', deadlineAt: extended })
+    if (granted.outcome.kind !== 'proposed') throw new Error(`the grant was not proposed: ${JSON.stringify(granted.outcome)}`)
+    await h.runtime.extendRootBudget(ROOT_SESSION, {
+      requestKey: 'k-more-time',
+      deadlineAt: extended,
+      baseline: granted.effective,
+      approvalRef: 'approval:test-grant',
+    })
+
+    // The child is stopped by its own wall time all the same, and its own review
+    // says which bound ran out.
+    const outcomes = await h.runtime.awaitBatch(STORE, batchId)
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['failed'])
+    const snapshot = await h.task.snapshotIn(STORE)
+    const childRun = snapshot.runs.find(run => run.runId === childRunId)!
+    expect(childRun.status).toBe('failed')
+    expect(snapshot.reviews.find(review => review.runId === childRunId)!.localizedCause).toContain('budget exhausted: wallTimeMs')
+    // …while the ceiling the person approved is the one in force, and the run kept
+    // the clock it started with: the grant moved the tree's bound, not the run's.
+    const resolved = resolveRootBudget(snapshot, { budget: { wallTimeMs: 700 }, rootBudget: { wallTimeMs: 600_000 } } as Config)
+    expect(resolved.ok).toBe(true)
+    if (!resolved.ok) throw new Error('unreachable')
+    expect(resolved.deadlineAt).toBe(extended)
+    expect(childRun.startedAt).toBe(childStartedAt)
   })
 
   test('a parent whose own wall clock ran out is not accepted by its batch: it is cancelled as the budget stop it is', async () => {

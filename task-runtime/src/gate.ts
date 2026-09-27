@@ -6,12 +6,12 @@
  * (admission closed, submission handed in), and a promise about the store is
  * worthless if the worker keeps writing into the checkout after it was made. The
  * gate is that promise's other half — from the instant the phase changes, a
- * session bound to the run may only read, ask, diagnose, or cancel; everything
- * else is denied with a reason that names the phase. The seam is DSH's global
- * `tools/pre-execute` hook (a decision per call, PTC sub-calls included) plus
- * `tools/result`, which fires exactly once per execution whether it succeeded,
- * failed or was aborted; the wiring lives in the runtime, this file is the state
- * machine it wires.
+ * session bound to the run may only read, ask, diagnose, review, cancel, or
+ * append the budget raise a person approved; everything else is denied with a
+ * reason that names the phase. The seam is DSH's global `tools/pre-execute` hook
+ * (a decision per call, PTC sub-calls included) plus `tools/result`, which fires
+ * exactly once per execution whether it succeeded, failed or was aborted; the
+ * wiring lives in the runtime, this file is the state machine it wires.
  *
  * Two rules give the gate its meaning, and each is a place a plausible shortcut
  * would be wrong:
@@ -81,6 +81,34 @@ import type { ExecutionPhase } from '@dangosys/dsh-singularity-task'
  * non-active phase — a run that has stopped deciding its own work does not get
  * to turn a proposal into tasks.
  *
+ * `task_review_agent` (K4) belongs with `task_review_pack` and `task_diagnose`,
+ * one step further than either: it reads one task's facts, publishes ONE
+ * read-only reviewer node, and records the reviewer's judgement as a Diagnosis.
+ * Nothing it does is work the stopped tree could be asked to justify — the
+ * reviewer's grant is the read-only baseline (`reviewerGrant`: no shell, no
+ * write, no spawn, no evolution tool), so the call cannot be the in-flight
+ * checkout writer the drain exists to wait for either. What it must not become
+ * is a *business* bound in disguise: a tree that stopped at its deadline, or
+ * that has spent its run allowance, can still be looked at — the postmortem is
+ * the reason the record exists, and the reviewer's own per-store allowance and
+ * watchdog are the only bounds on it (`agent-singularity/review-agent-ledger`).
+ * What still refuses in these phases is work: `task_decompose`, `graph_spawn`,
+ * `task_submit_result`, and every other write, named as the late call it is.
+ *
+ * `task_budget_extend` (K4) is the one entry here that appends a store fact, and
+ * that is deliberate: the fact it appends is a *person's* decision about the
+ * tree's own ceiling, which only the approval channel produces (an empty
+ * reference is refused by the committing entry, so the tool cannot invent one).
+ * It belongs in this list for exactly the reason `task_review_pack` does — the
+ * caller is the root coordination session of a tree that has stopped, and a tree
+ * that spent its allowance is precisely the tree whose owner has to be able to
+ * ask for more ("终态亦可调用"). What the gate protects is untouched by a
+ * ceiling: the call starts no run, resumes none, un-settles nothing, creates no
+ * task or child, opens no gate and touches no checkout — the runtime entry's own
+ * contract — so it can neither be the in-flight writer the drain waits for nor a
+ * second door into a stopped tree's work. Denying it here would leave K4's one
+ * entry shut.
+ *
  * The two question tools (A4 §F.1) are coordination in the plainest sense: a
  * child asking its direct parent is the one effect still admitted while its own
  * run is blocked on a question, and a parent answering a child is the one effect
@@ -95,7 +123,9 @@ export const COORDINATION_ALLOWED: ReadonlySet<string> = new Set([
   'capability_list',
   'skill',
   'task_review_pack',
+  'task_review_agent',
   'task_diagnose',
+  'task_budget_extend',
   'read',
   'read_image',
   'glob',

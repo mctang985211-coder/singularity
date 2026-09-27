@@ -89,6 +89,14 @@ const ROOT_CORE_TOOLS = [
   'task_review_pack',
   'task_review_agent',
   'task_diagnose',
+  // Asking a person to raise the tree's own ceilings is the root coordination
+  // session's call and nobody else's (K4): the store is derived from the session
+  // in the runtime, the tool is the single entry the whole grant admits, and it
+  // is deliberately here rather than in the worker baseline or the reviewer's
+  // read-only surface. Its presence also means the entry survives a *terminal*
+  // root run: a tree that spent its allowance is exactly the tree whose owner has
+  // to be able to ask for more, so the gate admits this one call in every phase.
+  'task_budget_extend',
 ]
 
 /** Structural view of the deployment's switch position (`ctx.singularityEvolution`), read softly so this package needs no dependency on the assembly that provides it. */
