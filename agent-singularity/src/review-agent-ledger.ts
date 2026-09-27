@@ -50,13 +50,8 @@ export interface ReviewAgentRunStart {
 
 /** What one review-agent admission is given inside its store's serial region. */
 export interface ReviewAgentAdmission {
-  /**
-   * The rows the ledger holds for this store as the file reads right now, taken
-   * inside this admission's serial region and re-read on every call — never a
-   * cache. Deferred to the call so an attempt a caller can already answer, with
-   * no new start, reads the ledger not at all (K4-5).
-   */
-  started(): Promise<number>
+  /** The rows the ledger holds for this store, read inside this admission's serial region. */
+  readonly started: number
   /** Persist this run's row — the durable started fact, written inside the same region. */
   start(record: ReviewAgentRunStart): Promise<void>
 }
@@ -115,10 +110,9 @@ async function readLedgerRows(): Promise<ReviewAgentLedgerRecord[] | undefined> 
  * right now. A missing file reads as zero; a corrupt line throws rather than
  * silently undercounting.
  *
- * The read door is shared: an admission takes its count through this function
- * from inside its store's serial region ({@link admitReviewAgent}), so what it
- * decides on is the file as that region reads it and never a cache — the region
- * is what keeps the read and the row the admission writes together.
+ * A display query only: it caches nothing, so it can never be the count an
+ * admission decides on — that one is read inside the store's serial region
+ * ({@link admitReviewAgent}) together with the row it writes.
  */
 export async function countReviewAgentRuns(rootStoreId: string): Promise<number> {
   const rows = await readLedgerRows()
@@ -157,15 +151,13 @@ async function appendStartedRow(rootStoreId: string, record: ReviewAgentRunStart
 /**
  * Run one review-agent admission inside the ledger's serial region for a store.
  *
- * One region per (ledger file, root store): `work` runs with a `started()` that
- * counts this store's rows — the file, read inside the region on each call — and
- * a `start` that appends this run's row to the same file, the durable started
- * fact — and the region ends when `work` returns or throws. The count is
- * deferred to `work` instead of read for it, so a caller that can answer an
- * attempt it already holds reads the ledger not at all (K4-5) while the count
- * itself stays durable and uncached. Nothing else is serialized: waiting for the
- * reviewer's output, its watchdog, and recording its Diagnosis happen after
- * `work` returned, outside the region, in the caller.
+ * One region per (ledger file, root store): inside it the whole ledger file is
+ * read and this store's rows counted, then `work` runs with that count and a
+ * `start` that appends this run's row to the same file — the durable started
+ * fact — and the region ends when `work` returns or throws. Nothing else is
+ * serialized: waiting for the reviewer's output, its watchdog, and recording
+ * its Diagnosis happen after `work` returned, outside the region, in the
+ * caller.
  *
  * The consequence to rely on: two admissions for one store cannot interleave
  * their count-and-write, so the second one reads the count the first left
@@ -177,7 +169,7 @@ async function appendStartedRow(rootStoreId: string, record: ReviewAgentRunStart
  * for this one) and must await every `start` it calls before returning.
  *
  * @param rootStoreId - the root task store the budget belongs to.
- * @param work - the admission decision and the spawn, given the store's count read and its write door.
+ * @param work - the admission decision and the spawn, given the store's count and its write door.
  * @returns whatever `work` returned, once the region has ended.
  */
 export async function admitReviewAgent<T>(
@@ -187,8 +179,10 @@ export async function admitReviewAgent<T>(
   const key = budgetKey(rootStoreId)
   const previous = regions.get(key) ?? Promise.resolve()
   const result = previous.then(async () => {
+    const rows = await readLedgerRows()
+    const started = (rows ?? []).filter(row => row.rootStoreId === rootStoreId).length
     const admission: ReviewAgentAdmission = {
-      started: () => countReviewAgentRuns(rootStoreId),
+      started,
       start: record => appendStartedRow(rootStoreId, record),
     }
     return work(admission)

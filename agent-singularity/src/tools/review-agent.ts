@@ -206,15 +206,14 @@ export function defineTaskReviewAgentTool(ctx: Context) {
       if (review === undefined) {
         return `task_review_agent: task ${args.taskId} has no review record; nothing to judge`
       }
-      // The whole admission decision — the durable count, read where the
-      // decision needs it, the trigger judged on the state that count belongs
-      // to, and the run's row — happens inside the store's serial region
-      // (K4-1). Two executions cannot interleave their count-and-write, so the
-      // second one reads what the first left behind; the row is durable before
-      // the handle leaves the region. Nothing that waits for the reviewer is in
-      // the region.
+      // The whole admission decision — the durable count, the trigger judged on
+      // the state that count belongs to, and the run's row — happens inside the
+      // store's serial region (K4-1). Two executions cannot interleave their
+      // count-and-write, so the second one reads what the first left behind;
+      // the row is durable before the handle leaves the region. Nothing that
+      // waits for the reviewer is in the region.
       const outcome = await admitReviewAgent(storeId, async admission => {
-        const used = await admission.started()
+        const used = admission.started
         const max = reviewAgentBudget()
         const current: TaskSnapshot = await ctx.task.snapshotIn(storeId)
         const escalation = computeEscalation(current, args.taskId, { used, max })

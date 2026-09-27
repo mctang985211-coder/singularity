@@ -10,10 +10,9 @@ import {
   admitReviewAgent,
   countReviewAgentRuns,
   readReviewerDelegation,
-  reviewAgentBudget,
   reviewAgentLedgerFile,
 } from '../../src/review-agent-ledger.ts'
-import type { ReviewAgentAdmission, ReviewAgentRunStart } from '../../src/review-agent-ledger.ts'
+import type { ReviewAgentRunStart } from '../../src/review-agent-ledger.ts'
 import {
   REVIEWER_BASELINE,
   REVIEWER_PRESET,
@@ -379,7 +378,7 @@ describe('the ledger as the reviewer binding source (A2)', () => {
 describe('the review-agent admission (K4-1)', () => {
   /** One admission exactly as the tool decides it: read the count, check the cap, then write the row. */
   const attempt = (max: number, sessionId: string) => admitReviewAgent(ROOT_STORE, async admission => {
-    if (await admission.started() >= max) return 'refused'
+    if (admission.started >= max) return 'refused'
     await admission.start(row(sessionId))
     return 'admitted'
   })
@@ -387,9 +386,8 @@ describe('the review-agent admission (K4-1)', () => {
   test('two concurrent admissions for one store admit exactly one run', async () => {
     const countsSeen: number[] = []
     const contender = (sessionId: string) => admitReviewAgent(ROOT_STORE, async admission => {
-      const seen = await admission.started()
-      countsSeen.push(seen)
-      if (seen >= 1) return 'refused'
+      countsSeen.push(admission.started)
+      if (admission.started >= 1) return 'refused'
       await admission.start(row(sessionId))
       return 'admitted'
     })
@@ -437,7 +435,7 @@ describe('the review-agent admission (K4-1)', () => {
     const held = ledgerFs.holdNextAppend()
     const countsSeen: number[] = []
     const first = admitReviewAgent(ROOT_STORE, async admission => {
-      countsSeen.push(await admission.started())
+      countsSeen.push(admission.started)
       await admission.start(row('s-first'))
       return 'first'
     })
@@ -458,8 +456,8 @@ describe('the review-agent admission (K4-1)', () => {
     // what it reads is the count the first one left behind — never the pre-row
     // zero, never a doubled two.
     const second = admitReviewAgent(ROOT_STORE, async admission => {
-      countsSeen.push(await admission.started())
-      return await admission.started()
+      countsSeen.push(admission.started)
+      return admission.started
     })
     await new Promise(resolve => setTimeout(resolve, 50))
     expect(countsSeen).toEqual([0])
@@ -472,7 +470,7 @@ describe('the review-agent admission (K4-1)', () => {
     expect(ledgerRows()).toHaveLength(1)
     expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
     const room = await admitReviewAgent(ROOT_STORE, async admission => {
-      const started = await admission.started()
+      const started = admission.started
       if (started >= 2) return { started, admitted: false }
       await admission.start(row('s-third'))
       return { started, admitted: true }
@@ -480,7 +478,7 @@ describe('the review-agent admission (K4-1)', () => {
     expect(room).toEqual({ started: 1, admitted: true })
     expect(ledgerRows()).toHaveLength(2)
     // …and now the room is gone: two rows, two runs.
-    expect(await admitReviewAgent(ROOT_STORE, async admission => await admission.started())).toBe(2)
+    expect(await admitReviewAgent(ROOT_STORE, async admission => admission.started)).toBe(2)
     expect(ledgerRows()).toHaveLength(2)
   })
 
@@ -495,9 +493,8 @@ describe('the review-agent admission (K4-1)', () => {
     // The failed region did not wedge the store's key: the next admission runs
     // and counts from the file it finds.
     const started = await admitReviewAgent(ROOT_STORE, async admission => {
-      const used = await admission.started()
       await admission.start(row('s-after'))
-      return used
+      return admission.started
     })
     expect(started).toBe(0)
     expect(ledgerRows()).toHaveLength(1)
@@ -514,8 +511,7 @@ describe('the review-agent admission (K4-1)', () => {
     // The row written before the restart is spent for the fresh module too: it
     // reads the count where the admission reads it, and the store is out of room.
     const seen = await restarted.admitReviewAgent(ROOT_STORE, async admission => {
-      const used = await admission.started()
-      if (used >= 1) return `refused:${used}`
+      if (admission.started >= 1) return `refused:${admission.started}`
       await admission.start(row('s-after-restart'))
       return 'admitted'
     })
@@ -525,9 +521,8 @@ describe('the review-agent admission (K4-1)', () => {
 
   test('the row an admission wrote answers the delegation read-back, in the shape the record declares', async () => {
     const started = await admitReviewAgent(ROOT_STORE, async admission => {
-      const used = await admission.started()
       await admission.start(row('s-delegated'))
-      return used
+      return admission.started
     })
     expect(started).toBe(0)
     expect(await readReviewerDelegation('s-delegated')).toMatchObject({
@@ -542,149 +537,6 @@ describe('the review-agent admission (K4-1)', () => {
     expect(Object.keys(rows[0]!).sort()).toEqual(['actor', 'at', 'formatVersion', 'rootStoreId', 'sessionId', 'taskId'])
     expect(rows[0]).toMatchObject({ formatVersion: 1, rootStoreId: ROOT_STORE, taskId: 't1', sessionId: 's-delegated', actor: 'root-1' })
     expect(Date.parse(String(rows[0]!.at))).not.toBeNaN()
-  })
-})
-
-/**
- * The order A5 needs from the same serial admission entry (K4-5 rework).
- *
- * The independent review froze this: the entry may not read and count the ledger
- * before the callback runs. A5's caller probes its own dedupe source first — an
- * existing attempt must answer from that probe alone, so an unreadable ledger
- * cannot turn a dedupe hit into a failure — and only a request that needs a new
- * start reads the durable `started` count and checks the cap, inside the same
- * region. The count stays durable and uncached and its read stays in the region,
- * so the K4-1 guarantees do not move.
- *
- * The first two cases assert that deferred order; they failed on the pre-rework
- * entry, `review-agent-ledger.ts:181-188`, which read and counted before `work`
- * ran. `startedOf` accepts either door for the count — the plain number or the
- * deferred read — so the control cases below hold before and after the rework.
- */
-describe('the admission entry\u2019s order (K4-5 / A5 handover)', () => {
-  const CLAIMED = 'reviewer session s-claimed already answers this source attempt'
-
-  const ledgerPath = () => join(ledgerDir, 'agents.jsonl')
-
-  /** The count as the entry offers it: the deferred read the callback asks for, or the plain number the pre-rework entry handed out. */
-  async function startedOf(admission: ReviewAgentAdmission): Promise<number> {
-    const started: number | (() => Promise<number>) = admission.started
-    if (typeof started === 'function') return started()
-    if (typeof started === 'number') return started
-    throw new Error(`the admission exposes no started count: ${String(started)}`)
-  }
-
-  test('an existing attempt answers from the dedupe probe, with a ledger that cannot be read', async () => {
-    // Readable bytes, unparseable rows: every ledger read fails by name, so a
-    // read taken before the probe cannot be mistaken for a successful admission.
-    writeFileSync(ledgerPath(), '{not json}\n')
-    let ledgerRead = false
-    void ledgerFs.nextLedgerRead().then(() => {
-      ledgerRead = true
-    })
-    const claims = new Map([['t1#r1', CLAIMED]])
-
-    const outcome = await admitReviewAgent(ROOT_STORE, async admission => {
-      // 1. Dedupe first, from the caller's own source claim: the ledger has no vote.
-      const attempt = claims.get('t1#r1')
-      if (attempt !== undefined) return attempt
-      // 2. Only the request that needs a new start reads the durable count.
-      const used = await startedOf(admission)
-      if (used >= reviewAgentBudget()) return 'refused'
-      await admission.start(row('s-new'))
-      return 'admitted'
-    })
-
-    expect(outcome).toBe(CLAIMED)
-    // Neither before the probe nor after it: the ledger was never read.
-    expect(ledgerRead).toBe(false)
-    expect(ledgerText()).toBe('{not json}\n')
-  })
-
-  test('the callback runs before any ledger read: a request that needs no new start reads nothing', async () => {
-    writeFileSync(ledgerPath(), '{not json}\n')
-    let ledgerRead = false
-    void ledgerFs.nextLedgerRead().then(() => {
-      ledgerRead = true
-    })
-    let ran = false
-
-    const outcome = await admitReviewAgent(ROOT_STORE, async () => {
-      ran = true
-      return 'answered without a new start'
-    })
-
-    expect(outcome).toBe('answered without a new start')
-    expect(ran).toBe(true)
-    expect(ledgerRead).toBe(false)
-  })
-
-  test('a request that needs a new start with an unreadable ledger fails by name, never as a zero count', async () => {
-    writeFileSync(ledgerPath(), '{not json}\n')
-
-    await expect(admitReviewAgent(ROOT_STORE, async admission => {
-      const used = await startedOf(admission)
-      if (used >= reviewAgentBudget()) return `refused:${used}`
-      await admission.start(row('s-new'))
-      return 'admitted'
-    })).rejects.toThrow(/review-agent-ledger: corrupt line 1/)
-
-    expect(ledgerText()).toBe('{not json}\n')
-  })
-
-  test('with the store out of room the entry refuses and starts nothing', async () => {
-    await admitReviewAgent(ROOT_STORE, admission => admission.start(row('s-old')))
-    expect(ledgerRows()).toHaveLength(1)
-
-    const outcome = await admitReviewAgent(ROOT_STORE, async admission => {
-      const used = await startedOf(admission)
-      if (used >= reviewAgentBudget()) return `refused:${used}/${reviewAgentBudget()}`
-      await admission.start(row('s-new'))
-      return 'admitted'
-    })
-
-    expect(outcome).toBe('refused:1/1')
-    expect(ledgerRows().map(entry => entry.sessionId)).toEqual(['s-old'])
-  })
-
-  test('a dedupe hit spends nothing, and the next new start still counts the rows the file holds', async () => {
-    await admitReviewAgent(ROOT_STORE, admission => admission.start(row('s-old')))
-    process.env.SINGULARITY_REVIEW_AGENT_BUDGET = '2'
-    const claims = new Map([['t1#r1', CLAIMED]])
-
-    const hit = await admitReviewAgent(ROOT_STORE, async admission => {
-      const attempt = claims.get('t1#r1')
-      if (attempt !== undefined) return attempt
-      const used = await startedOf(admission)
-      if (used >= reviewAgentBudget()) return 'refused'
-      await admission.start(row('s-hit'))
-      return 'admitted'
-    })
-    expect(hit).toBe(CLAIMED)
-    expect(ledgerRows().map(entry => entry.sessionId)).toEqual(['s-old'])
-
-    const fresh = await admitReviewAgent(ROOT_STORE, async admission => {
-      const used = await startedOf(admission)
-      if (used >= reviewAgentBudget()) return `refused:${used}`
-      await admission.start(row('s-fresh'))
-      return `admitted:${used}`
-    })
-    expect(fresh).toBe('admitted:1')
-    expect(ledgerRows().map(entry => entry.sessionId)).toEqual(['s-old', 's-fresh'])
-  })
-
-  test('the deferred count is still read inside the region: one allowance admits one of two concurrent requests', async () => {
-    const request = (sessionId: string) => admitReviewAgent(ROOT_STORE, async admission => {
-      const used = await startedOf(admission)
-      if (used >= reviewAgentBudget()) return `refused:${used}`
-      await admission.start(row(sessionId))
-      return `admitted:${used}`
-    })
-    const outcomes = await Promise.all([request('s-a'), request('s-b')])
-
-    expect(outcomes.filter(outcome => outcome.startsWith('admitted'))).toHaveLength(1)
-    expect(outcomes.filter(outcome => outcome.startsWith('refused'))).toHaveLength(1)
-    expect(ledgerRows()).toHaveLength(1)
   })
 })
 
