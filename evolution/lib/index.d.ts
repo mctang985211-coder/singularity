@@ -590,7 +590,8 @@ interface ReconcileOutcome {
    * writes were redone and the completion recorded. `completed-written`:
    * production already held the committed content in every file, so only the
    * completion was recorded. `blocked`: a file holds neither state (or a source
-   * is gone) — the intent stays open and nothing was written.
+   * is gone), or the directory holds an entry the intent does not name — the
+   * intent stays open and nothing was written.
    */
   result: 'completed-redone' | 'completed-written' | 'blocked';
   /** The named reason, present on `blocked`: what a human must settle before this commit can proceed. */
@@ -1482,7 +1483,12 @@ declare class EvolutionService extends Service {
    * from a directory nobody could describe would let a file disappear between
    * prepare and apply. A knowledge sidecar and an execution sidecar with
    * declared resources are refused too: this ticket's object is guidance or an
-   * execution provider with `resources: []`.
+   * execution provider with `resources: []`. A guidance directory has no
+   * declaration for the loader to hold it to, so the files the loader found
+   * beyond `SKILL.md` there — resources nobody declared, entries outside the
+   * supported vocabulary — are refused here by name for that same reason: the
+   * two identities below describe the fixed file set, and a directory holding
+   * more than that is not the object they would claim to be.
    *
    * What is materialized is the object's fixed file set. Guidance is the
    * candidate `SKILL.md` and the champion `SKILL.md`. An execution object also
@@ -1544,7 +1550,13 @@ declare class EvolutionService extends Service {
    * A skill apply re-verifies the production baseline (P3) after the human
    * grant and before the intent is recorded: the production object must still be
    * the one prepare recorded, both files. A direct service call therefore cannot
-   * bypass the check the tool already ran before asking for approval.
+   * bypass the check the tool already ran before asking for approval. The
+   * *directory* is checked as well, by the commit path, before the intent line:
+   * a file that arrived beside the baseline while the human was deciding — a
+   * resource nobody declared, a sidecar where the baseline had none — is refused
+   * by name with nothing written ({@link objectWriteRefusal}), because the digest
+   * checks describe the files this commit names and this one names two files at
+   * most.
    *
    * A fresh commit also refuses, before that baseline check, a production
    * **directory** another proposal's open commit intent touches
@@ -1728,7 +1740,13 @@ declare class EvolutionService extends Service {
    * a later proposal — or any other writer — changed since is refused by name
    * with nothing written, and so is a snapshot that can no longer reproduce the
    * bytes it captured: neither may be papered over by restoring an old version
-   * on top of a newer one.
+   * on top of a newer one. The *directory* is checked too, by the same
+   * pre-write read of the whole object a fresh commit and a recovery both run
+   * ({@link objectWriteRefusal}): a rollback of a guidance object whose
+   * directory grew a `SKILL.contract.json` or a file at a supported resource
+   * position is refused by name before the intent line, because writing the
+   * champion `SKILL.md` back would otherwise leave that entry standing — as a
+   * role the completion never claimed, or a file nothing declared.
    *
    * As in {@link apply}, an open intent of this proposal is settled rather than
    * duplicated, and the result reports the recovery; an open intent of another
@@ -1815,11 +1833,58 @@ declare class EvolutionService extends Service {
    */
   private assertTargetUncommitted;
   /**
+   * The named reason a commit intent must not write the directory its file set
+   * lives in, or `null` when that directory holds this object's own files and
+   * nothing else — the *pre-write* half of the whole-object rule (K3-4: a third
+   * party's change is never overwritten, and the object a completion claims is
+   * the object the directory really holds).
+   *
+   * The per-file digests an intent records describe the files it *names*, so an
+   * entry it does not name is exactly what they cannot see: a directory that grew
+   * one — a guidance skill wearing a declaration nobody wrote through this
+   * service, a resource no identity covers — passes every pre-write check, is
+   * written anyway, and only the whole-object verification *after* the write
+   * notices, with production already moved and the intent left open. This asks
+   * the same question of the same directory before a byte moves, and it is the
+   * only check that can answer it there.
+   *
+   * An execution object's fixed file set is two named files in one directory and
+   * its declaration names every file the object covers, so the directory must
+   * name exactly those two basenames back — plus each target's own staging
+   * leftovers (`.${basename}.tmp-`, non-directories: the same rule, in the same
+   * directory, the commit path's own sweep uses, so a recovery can still sweep
+   * the temp file a killed attempt left). Any other entry — an undeclared
+   * resource, a stranger's file, a directory under a supported resource name — is
+   * refused by name: an execution object that does not name every file in its
+   * directory is not the object its declaration describes. The loader's tolerance
+   * for entries outside the supported vocabulary does not apply here for the same
+   * reason: an execution declaration covers files, not a word list.
+   *
+   * A guidance object is one file with no declaration for a loader to hold the
+   * directory to, so the question is asked of the loader ({@link loadSkillSidecar}
+   * — the same read prepare, admission and the write-time verification use) and
+   * the directory is refused when it now carries a sidecar (guidance that turned
+   * into an execution object: the role this intent's committed file set does not
+   * describe), when it holds a file at a supported resource position (a file no
+   * identity covers, which a one-file commit would leave in place while claiming
+   * to have written the object), or when it is no longer a loadable object at all
+   * (`defects`). Entries the supported vocabulary does not cover (`uncovered`)
+   * are deliberately tolerated: the guidance verdict judges those no defect, and
+   * a guidance commit has always left them exactly where they are.
+   *
+   * A mixed pair — one file still at the baseline, the other already holding the
+   * committed content — passes, as it must: that is the window an interrupted
+   * two-file commit leaves for a recovery to finish, not a foreign change. This
+   * reads the directory and writes nothing.
+   */
+  private objectWriteRefusal;
+  /**
    * The narrow host the commit path runs on (see `commit.ts`): the roots a
    * target and a source resolve against, the service's own verified reads — P2
    * for a candidate, the walk-verified production read, the ledger-root read for
    * a snapshot — the append funnel every line goes through (format check, staged
-   * fold, serialized write), the whole-object verification that closes a commit,
+   * fold, serialized write), the whole-object checks that open and close a commit
+   * (what the directory must be before anything is written, what it is after),
    * and the probe seam. The commit path owns the order; the service owns what
    * may be read, what a line must say, and what "production is the object this
    * direction promised" means.
@@ -1854,7 +1919,11 @@ declare class EvolutionService extends Service {
    * A throw is a named refusal: the intent stays open, no completion is
    * recorded, and the caller and the next reconciliation both see the same
    * refusal rather than a settled commit a loader would not accept. It never
-   * writes: this check reads production as it stands.
+   * writes: this check reads production as it stands. Its counterpart is the
+   * *before* picture, {@link objectWriteRefusal}, asked of the same directory
+   * before the intent line and before any branch of a recovery writes — this one
+   * closes the window after the write, that one keeps a directory which is not
+   * the object from being written at all.
    */
   private verifyCommitted;
   /**

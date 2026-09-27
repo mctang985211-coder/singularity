@@ -51,7 +51,8 @@
  * intent, and {@link reconcileIntent} is what a startup or resume does with it:
  * every recoverable source is re-read and re-verified, every production file is
  * read again and classified as the pre-commit state, the committed state, absent
- * or something else, and then — every file still holds its baseline, so the
+ * or something else, the directory is checked to hold this object's own files
+ * and nothing else, and then — every file still holds its baseline, so the
  * operation never happened — the same writes are redone in order and the
  * completion appended; or every file already holds the committed content, so the
  * targets' staging leftovers are swept, their directories are fsynced, and only
@@ -62,9 +63,9 @@
  * their baseline are written and the ones already carrying the content have
  * their durability re-established, and the completion lands only after the whole
  * object verifies. Anything else — a source that is gone or changed, a file a
- * third party rewrote or removed — stops by name with the intent left open,
- * because overwriting a change this commit did not make is exactly what a
- * recovery must never do.
+ * third party rewrote or removed, an entry in the directory the intent does not
+ * name — stops by name with the intent left open, because overwriting a change
+ * this commit did not make is exactly what a recovery must never do.
  *
  * This module owns no policy: which candidate bytes a commit may write, what a
  * promotion gate checks, how a completion folds, and what "the object is
@@ -164,6 +165,25 @@ export interface CommitHost {
   /** The service's walk-verified production read: `null` when nothing is there, a throw for a symlink or a non-file. */
   readProduction(relative: string): Promise<{ bytes: Buffer; sha256: string } | null>
   /**
+   * The named reason this commit must not write the directory its file set lives
+   * in, or `null` when that directory holds this object's own files and nothing
+   * else. The files an intent names are not the whole object: a directory can
+   * grow an entry nobody declared — a guidance skill that gained an
+   * `SKILL.contract.json` beside it (a role change), a file at a supported
+   * resource position, a stray entry an execution declaration does not cover —
+   * while every file the intent names still holds exactly the digest it
+   * recorded, and the per-file digest checks are blind to it by construction.
+   * What this object's own files *are* is the service's to say (it owns the
+   * loader and the role rules), so the check lives there and both entry points
+   * — {@link commitIntent} before the intent line and before any write,
+   * {@link reconcileIntent} before any branch writes — ask the same question of
+   * the same implementation. A refusal never writes and is never a throw — a
+   * directory that cannot even be listed is one more reason to report, so the
+   * entry point that asked decides what it means (a stop before the intent line,
+   * one blocked intent in a recovery) in that entry point's own words.
+   */
+  objectWriteRefusal(intent: CommitIntentView): Promise<string | null>
+  /**
    * Called after every file has been written and read back, and before the
    * completion is recorded — in a fresh commit and in both reconciliation
    * branches alike. The production directory must be loadable as one complete
@@ -191,7 +211,8 @@ export interface ReconcileOutcome {
    * writes were redone and the completion recorded. `completed-written`:
    * production already held the committed content in every file, so only the
    * completion was recorded. `blocked`: a file holds neither state (or a source
-   * is gone) — the intent stays open and nothing was written.
+   * is gone), or the directory holds an entry the intent does not name — the
+   * intent stays open and nothing was written.
    */
   result: 'completed-redone' | 'completed-written' | 'blocked'
   /** The named reason, present on `blocked`: what a human must settle before this commit can proceed. */
@@ -295,14 +316,16 @@ async function sweepStaging(directory: string, target: string): Promise<void> {
 
 /**
  * Persist one commit and carry it out, in the order the recovery rule fixes:
- * every recoverable source is verified and made durable, then the intent line is
- * appended, then the atomic production writes with their read-back verification,
- * then the whole-object verification, then the completion that closes the
- * intent. `bytes` are the already-verified bytes the caller read through its own
- * identity checks (P2 for a candidate, the champion digests for a rollback), one
- * entry per file of the request and in the same order; each digest must be that
- * file's `contentSha256`, so what the intent promises and what the writes
- * install cannot disagree — for either file of a two-file object.
+ * every recoverable source is verified and made durable, the directory the
+ * commit would write is checked to be the object's own files and nothing else,
+ * then the intent line is appended, then the atomic production writes with their
+ * read-back verification, then the whole-object verification, then the
+ * completion that closes the intent. `bytes` are the already-verified bytes the
+ * caller read through its own identity checks (P2 for a candidate, the champion
+ * digests for a rollback), one entry per file of the request and in the same
+ * order; each digest must be that file's `contentSha256`, so what the intent
+ * promises and what the writes install cannot disagree — for either file of a
+ * two-file object.
  *
  * The sources come first because the intent *names* them as the bytes a recovery
  * would write again — a line naming a source that no longer holds those bytes is
@@ -311,11 +334,16 @@ async function sweepStaging(directory: string, target: string): Promise<void> {
  * {@link CommitHost.readSource} (which re-digests and refuses a source that is
  * gone, changed type or changed content), and fsynced together with the
  * directories that hold it. Any failure there is a named stop with no line
- * recorded and nothing written. Only then is the intent appended — through the
- * service's own durable append, so the line is on disk before production moves —
- * and only after every rename has been read back and verified, and the whole
- * object has passed {@link CommitHost.verifyCommitted}, is the completion
- * appended.
+ * recorded and nothing written. The object check comes next and also before the
+ * line: the digests above describe the files the intent names, and an entry the
+ * directory grew that nobody names is exactly what they cannot see — so
+ * {@link CommitHost.objectWriteRefusal} reads the *directory* first, and a
+ * refusal there is a named stop with no line recorded and nothing written,
+ * instead of a commit that lands and then discovers the directory was not the
+ * object it committed. Only then is the intent appended — through the service's
+ * own durable append, so the line is on disk before production moves — and only
+ * after every rename has been read back and verified, and the whole object has
+ * passed {@link CommitHost.verifyCommitted}, is the completion appended.
  *
  * A throw from any stage leaves the intent open and is the caller's to report:
  * the intent is the record of what was underway, and reconciliation — not a
@@ -374,6 +402,21 @@ export async function commitIntent(host: CommitHost, request: CommitRequest, byt
     actor: request.actor,
     at: new Date().toISOString(),
   }
+  // The last gate before the intent line, and the one no digest below can be:
+  // what this commit replaces is one whole *directory*. An entry the intent does
+  // not name — a guidance skill that grew a `SKILL.contract.json` beside it, a
+  // file at a supported resource position — leaves every per-file digest intact
+  // while making the directory something other than the object the intent
+  // commits, and asking after the write is asking too late: production has moved
+  // and only the intent is left to explain it.
+  const refusal = await host.objectWriteRefusal(intent)
+  if (refusal !== null) {
+    throw new Error(
+      `evolution: the ${request.direction} of proposal "${request.proposalId}" cannot write the skill object ` +
+      `"${dirname(intent.files[0]!.target)}" — ${refusal}; a commit replaces one complete object and nothing beside it, so the commit stops ` +
+      'by name: nothing was written and no commit intent was recorded',
+    )
+  }
   await host.append({ formatVersion: 4, kind: 'commit_intent', ...intent })
   host.probe('intent-recorded')
   await installAndVerify(host, intent, bytes, targets)
@@ -387,7 +430,10 @@ export async function commitIntent(host: CommitHost, request: CommitRequest, byt
  * one of the intent's own recoverable sources and verify it still hashes to what
  * the intent committed; read every production file again and classify it as the
  * pre-commit state (`old`), the committed content (`new`), absent or something
- * else; then
+ * else — a source that is gone or changed, or a file that is missing or foreign,
+ * stops by name right there, in that file's own words — and then ask
+ * {@link CommitHost.objectWriteRefusal} what the *directory* holds beyond the
+ * files the intent names. If nothing refused, then
  *
  * - every file still holds its `baselineSha256` — the commit never landed — so
  *   the same bytes are written atomically, in intent order, and the completion
@@ -404,7 +450,11 @@ export async function commitIntent(host: CommitHost, request: CommitRequest, byt
  *   with production's bytes left exactly as they are (`completed-written`);
  * - a missing file, a file holding neither digest, or a source that is gone or
  *   changed — a `blocked` outcome naming the intent, the file and what was
- *   actually found, with nothing written and the intent left open.
+ *   actually found, with nothing written and the intent left open;
+ * - the directory holding an entry the intent does not name — the object check
+ *   above — a `blocked` outcome naming the entry, with nothing written: a
+ *   recovery settles an intent over the object it commits, never over a
+ *   directory a third party turned into something else.
  *
  * The `completed-written` branch still fsyncs the production directories, even
  * though it writes no bytes: the completion is the claim that production holds
@@ -505,6 +555,26 @@ export async function reconcileIntent(host: CommitHost, intent: CommitIntentView
       `neither the state before the commit (sha256 ${file.baselineSha256}) nor the content it committed ` +
       `(sha256 ${file.contentSha256}) — a third party changed it, so the commit stops by name and the intent stays open; nothing is ` +
       'overwritten and the completion is never recorded',
+    )
+  }
+
+  // The same pre-write object check a fresh commit runs, asked before any branch
+  // below writes a byte: the files the intent names may all hold the states a
+  // recovery accepts while the *directory* is no longer the object the intent
+  // commits — a guidance object that grew a `SKILL.contract.json` (a role
+  // change), a resource nothing declares, a stranger's entry. A recovery that
+  // wrote its bytes anyway would settle the intent on a directory no loader
+  // accepts as this object, which is the state the completion must never claim.
+  // The per-file classification above stays first, so a file a third party
+  // changed or removed is still refused in that file's own words; this is what
+  // covers every entry the intent does not name.
+  const refusal = await host.objectWriteRefusal(intent)
+  if (refusal !== null) {
+    return outcome(
+      'blocked',
+      `evolution: the ${intent.direction} of proposal "${intent.proposalId}" cannot write the skill object ` +
+      `"${dirname(intent.files[0]!.target)}" of commit intent "${intent.intentId}" — ${refusal}; a commit replaces one complete object ` +
+      'and nothing beside it, so nothing is written and the intent stays open until a human settles what the directory holds',
     )
   }
 

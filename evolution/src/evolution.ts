@@ -1299,7 +1299,12 @@ export class EvolutionService extends Service {
    * from a directory nobody could describe would let a file disappear between
    * prepare and apply. A knowledge sidecar and an execution sidecar with
    * declared resources are refused too: this ticket's object is guidance or an
-   * execution provider with `resources: []`.
+   * execution provider with `resources: []`. A guidance directory has no
+   * declaration for the loader to hold it to, so the files the loader found
+   * beyond `SKILL.md` there — resources nobody declared, entries outside the
+   * supported vocabulary — are refused here by name for that same reason: the
+   * two identities below describe the fixed file set, and a directory holding
+   * more than that is not the object they would claim to be.
    *
    * What is materialized is the object's fixed file set. Guidance is the
    * candidate `SKILL.md` and the champion `SKILL.md`. An execution object also
@@ -1360,6 +1365,22 @@ export class EvolutionService extends Service {
         `evolution: the production skill "${directory}" declares ${loaded.sidecar.content.resources.length} resource(s) ` +
         `(${loaded.sidecar.content.resources.map(resource => JSON.stringify(resource.path)).join(', ')}), and this build promotes an ` +
         'object whose content identity covers SKILL.md alone — resources need an executor that writes them, so nothing was written',
+      )
+    }
+    // The other direction of the same rule, and the one place it can be missed:
+    // the loader reports every file the directory holds beyond the object's own
+    // files — a resource at a supported position nobody declared, and an entry
+    // the supported vocabulary does not cover at all. Guidance has no
+    // declaration to compare against, so a directory can hold files the frozen
+    // `SKILL.md` identity never mentions; preparing it would copy one file into
+    // the sandbox and record an identity that claims to be the whole object.
+    const undeclaredFiles = [...loaded.content.resources.map(resource => resource.path), ...loaded.uncovered]
+    if (undeclaredFiles.length > 0) {
+      throw new Error(
+        `evolution: the production skill "${directory}" holds ${undeclaredFiles.length} file(s) beyond the object this build freezes ` +
+        `(${undeclaredFiles.map(path => JSON.stringify(path)).join(', ')}), and the object is fixed — guidance is SKILL.md alone, and ` +
+        'an execution provider is SKILL.md plus the SKILL.contract.json beside it with no resources — so a directory carrying more is ' +
+        'not the object a candidate reproduces: nothing was written',
       )
     }
     // The bytes the object is frozen from: read once, through the same
@@ -1532,7 +1553,13 @@ export class EvolutionService extends Service {
    * A skill apply re-verifies the production baseline (P3) after the human
    * grant and before the intent is recorded: the production object must still be
    * the one prepare recorded, both files. A direct service call therefore cannot
-   * bypass the check the tool already ran before asking for approval.
+   * bypass the check the tool already ran before asking for approval. The
+   * *directory* is checked as well, by the commit path, before the intent line:
+   * a file that arrived beside the baseline while the human was deciding — a
+   * resource nobody declared, a sidecar where the baseline had none — is refused
+   * by name with nothing written ({@link objectWriteRefusal}), because the digest
+   * checks describe the files this commit names and this one names two files at
+   * most.
    *
    * A fresh commit also refuses, before that baseline check, a production
    * **directory** another proposal's open commit intent touches
@@ -2040,7 +2067,13 @@ export class EvolutionService extends Service {
    * a later proposal — or any other writer — changed since is refused by name
    * with nothing written, and so is a snapshot that can no longer reproduce the
    * bytes it captured: neither may be papered over by restoring an old version
-   * on top of a newer one.
+   * on top of a newer one. The *directory* is checked too, by the same
+   * pre-write read of the whole object a fresh commit and a recovery both run
+   * ({@link objectWriteRefusal}): a rollback of a guidance object whose
+   * directory grew a `SKILL.contract.json` or a file at a supported resource
+   * position is refused by name before the intent line, because writing the
+   * champion `SKILL.md` back would otherwise leave that entry standing — as a
+   * role the completion never claimed, or a file nothing declared.
    *
    * As in {@link apply}, an open intent of this proposal is settled rather than
    * duplicated, and the result reports the recovery; an open intent of another
@@ -2315,11 +2348,116 @@ export class EvolutionService extends Service {
   }
 
   /**
+   * The named reason a commit intent must not write the directory its file set
+   * lives in, or `null` when that directory holds this object's own files and
+   * nothing else — the *pre-write* half of the whole-object rule (K3-4: a third
+   * party's change is never overwritten, and the object a completion claims is
+   * the object the directory really holds).
+   *
+   * The per-file digests an intent records describe the files it *names*, so an
+   * entry it does not name is exactly what they cannot see: a directory that grew
+   * one — a guidance skill wearing a declaration nobody wrote through this
+   * service, a resource no identity covers — passes every pre-write check, is
+   * written anyway, and only the whole-object verification *after* the write
+   * notices, with production already moved and the intent left open. This asks
+   * the same question of the same directory before a byte moves, and it is the
+   * only check that can answer it there.
+   *
+   * An execution object's fixed file set is two named files in one directory and
+   * its declaration names every file the object covers, so the directory must
+   * name exactly those two basenames back — plus each target's own staging
+   * leftovers (`.${basename}.tmp-`, non-directories: the same rule, in the same
+   * directory, the commit path's own sweep uses, so a recovery can still sweep
+   * the temp file a killed attempt left). Any other entry — an undeclared
+   * resource, a stranger's file, a directory under a supported resource name — is
+   * refused by name: an execution object that does not name every file in its
+   * directory is not the object its declaration describes. The loader's tolerance
+   * for entries outside the supported vocabulary does not apply here for the same
+   * reason: an execution declaration covers files, not a word list.
+   *
+   * A guidance object is one file with no declaration for a loader to hold the
+   * directory to, so the question is asked of the loader ({@link loadSkillSidecar}
+   * — the same read prepare, admission and the write-time verification use) and
+   * the directory is refused when it now carries a sidecar (guidance that turned
+   * into an execution object: the role this intent's committed file set does not
+   * describe), when it holds a file at a supported resource position (a file no
+   * identity covers, which a one-file commit would leave in place while claiming
+   * to have written the object), or when it is no longer a loadable object at all
+   * (`defects`). Entries the supported vocabulary does not cover (`uncovered`)
+   * are deliberately tolerated: the guidance verdict judges those no defect, and
+   * a guidance commit has always left them exactly where they are.
+   *
+   * A mixed pair — one file still at the baseline, the other already holding the
+   * committed content — passes, as it must: that is the window an interrupted
+   * two-file commit leaves for a recovery to finish, not a foreign change. This
+   * reads the directory and writes nothing.
+   */
+  private async objectWriteRefusal(intent: CommitIntentView): Promise<string | null> {
+    const skillMd = intent.files[0]!
+    const directory = dirname(skillMd.target)
+    if (intent.files.length === 1) {
+      const loaded = await loadSkillSidecar(directory)
+      if (loaded.sidecar !== undefined) {
+        return (
+          `the guidance object this intent commits is the single file "${basename(skillMd.target)}", and the directory now carries a ` +
+          `${SKILL_SIDECAR_FILE} the intent does not name — it is an execution object the committed file set does not describe`
+        )
+      }
+      const resources = loaded.content?.resources.map(resource => resource.path) ?? []
+      if (resources.length > 0) {
+        return (
+          `the guidance object this intent commits is the single file "${basename(skillMd.target)}", and the directory now holds ` +
+          `${resources.length} file(s) at a supported resource position the intent does not name ` +
+          `(${resources.map(path => JSON.stringify(path)).join(', ')}) — nothing declares them and no commit of this build writes them`
+        )
+      }
+      if (loaded.defects.length > 0) {
+        return (
+          'the directory is not the loadable object its files claim — ' +
+          loaded.defects.map(item => `${item.code}: ${item.detail}`).join('; ')
+        )
+      }
+      return null
+    }
+    const own = new Set(intent.files.map(file => basename(file.target)))
+    const staging = [...own].map(name => `.${name}.tmp-`)
+    // A directory that cannot even be listed is a *reason*, not an exception:
+    // this method answers the same way whatever it finds, and the entry point
+    // that asked decides what a refusal means — the fresh path stops before the
+    // intent line, and a recovery reports one blocked intent and settles the rest
+    // of its batch. A throw here would abort that batch over one directory the
+    // caller could have been told about; the guidance branch above reports an
+    // unreadable directory the same way, as a defect in its reason.
+    let entries: Dirent[]
+    try {
+      entries = await readdir(directory, { withFileTypes: true })
+    } catch (error) {
+      return (
+        `the production directory "${directory}" cannot be read to check what it holds ` +
+        `(${error instanceof Error ? error.message : String(error)}) — an execution object's identity names every file in its ` +
+        'directory, so the entries this commit would leave beside its own are unknown'
+      )
+    }
+    const foreign = entries
+      .filter(entry => !own.has(entry.name) && !(staging.some(prefix => entry.name.startsWith(prefix)) && !entry.isDirectory()))
+      .map(entry => (entry.isDirectory() ? `${entry.name}/` : entry.name))
+      .sort()
+    if (foreign.length === 0) return null
+    return (
+      `an execution object's fixed file set names every file in its directory ` +
+      `(${[...own].sort().map(name => JSON.stringify(name)).join(', ')}), and the directory holds ` +
+      `${foreign.length} entr${foreign.length === 1 ? 'y' : 'ies'} the intent does not name ` +
+      `(${foreign.map(name => JSON.stringify(name)).join(', ')})`
+    )
+  }
+
+  /**
    * The narrow host the commit path runs on (see `commit.ts`): the roots a
    * target and a source resolve against, the service's own verified reads — P2
    * for a candidate, the walk-verified production read, the ledger-root read for
    * a snapshot — the append funnel every line goes through (format check, staged
-   * fold, serialized write), the whole-object verification that closes a commit,
+   * fold, serialized write), the whole-object checks that open and close a commit
+   * (what the directory must be before anything is written, what it is after),
    * and the probe seam. The commit path owns the order; the service owns what
    * may be read, what a line must say, and what "production is the object this
    * direction promised" means.
@@ -2341,6 +2479,7 @@ export class EvolutionService extends Service {
         return bytes
       },
       readProduction: relative => readProductionSkill(this.skillRoot, relative),
+      objectWriteRefusal: intent => this.objectWriteRefusal(intent),
       verifyCommitted: intent => this.verifyCommitted(intent),
       probe: (stage, target) => this.commitProbe?.(stage, target),
     }
@@ -2375,7 +2514,11 @@ export class EvolutionService extends Service {
    * A throw is a named refusal: the intent stays open, no completion is
    * recorded, and the caller and the next reconciliation both see the same
    * refusal rather than a settled commit a loader would not accept. It never
-   * writes: this check reads production as it stands.
+   * writes: this check reads production as it stands. Its counterpart is the
+   * *before* picture, {@link objectWriteRefusal}, asked of the same directory
+   * before the intent line and before any branch of a recovery writes — this one
+   * closes the window after the write, that one keeps a directory which is not
+   * the object from being written at all.
    */
   private async verifyCommitted(intent: CommitIntentView): Promise<void> {
     const skillMd = intent.files[0]!

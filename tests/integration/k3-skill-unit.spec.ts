@@ -57,7 +57,7 @@ import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -1211,6 +1211,41 @@ describe('K3-2: the refusals that come before any write', () => {
     expect(kindsOf(await ledgerLines(h))).toEqual(['proposed', 'candidate'])
   })
 
+  it.each([
+    { label: 'a file at a supported resource position', file: 'references/notes.md' },
+    { label: 'an entry outside the supported vocabulary', file: 'helper.sh' },
+  ])('refuses to prepare a guidance object that leaves a file undeclared — $label', async ({ file }) => {
+    const s = await boot({ quiet: true })
+    const h = s.h
+    // Guidance: no sidecar anywhere, so nothing declares this file and nothing
+    // covers it — the one shape where the loader has no declaration to compare
+    // against and the file would otherwise be left behind silently.
+    await writeSkillObject(join(h.home, 'skills'), {
+      body: skillBody(SKILL, ['keep.txt']),
+      resources: [{ path: file, bytes: 'a file nobody declared\n' }],
+    })
+    await s.call('evolution_propose', { proposalId: P1, level: 'L2', baseVersion: 'v1', targetType: 'skill', targetId: SKILL, rationale: 'improve it', sourceRefs: ['diagnosis:k3'] })
+    await s.call('evolution_candidate', { proposalId: P1, versionSet: { skill: 'v2' }, mutation: { name: SKILL, content: skillBody(SKILL, ['fix.txt', 'keep.txt']) } })
+
+    const refused = await s.call('evolution_prepare', { proposalId: P1 })
+    expect(refused.text).toContain('evolution_prepare rejected:')
+    expect(refused.text).toContain(file)
+    expect(refused.text).toContain('nothing was written')
+    expect(existsSync(join(ledgerRoot(h), 'sandbox'))).toBe(false)
+    expect(kindsOf(await ledgerLines(h))).toEqual(['proposed', 'candidate'])
+    expect((await s.svc.get(P1)).status).toBe('candidate')
+
+    // The service entry behind the tool refuses the same way, and still writes
+    // nothing: the refusal is prepare's own, not the tool's rendering of it.
+    const direct = await s.svc.prepare(P1, ROOT_A)
+      .then(() => '', (error: unknown) => (error instanceof Error ? error.message : String(error)))
+    expect(direct).toContain(file)
+    expect(direct).toContain('nothing was written')
+    expect(existsSync(join(ledgerRoot(h), 'sandbox'))).toBe(false)
+    expect(kindsOf(await ledgerLines(h))).toEqual(['proposed', 'candidate'])
+    expect((await s.svc.get(P1)).status).toBe('candidate')
+  })
+
   it('refuses a production declaration whose content digest is not the bytes it covers, before anything is frozen', async () => {
     const s = await boot({ quiet: true })
     const h = s.h
@@ -1929,6 +1964,332 @@ describe('K3-4: a two-file commit interrupted between two durable writes is sett
     expect(intentFiles(landed.filter(line => line.kind === 'commit_intent').at(-1)!).map(file => file.target)).toEqual(targets)
     expect(await world.s.svc.openIntentTargets()).toEqual([])
   }, 240_000)
+})
+
+/* ------------------------------------------------------------------------- *
+ * K3-4 — the directory a rollback writes
+ * ------------------------------------------------------------------------- */
+
+/**
+ * The declaration a third party drops beside a guidance object: a *valid*
+ * execution declaration (the row grants it, the registered `command` verifier
+ * judges it, it declares no resource) whose `content.skillMdSha256` is the digest
+ * of the body a rollback *will* restore. So on an unfixed path the rollback's
+ * whole-object check reads a valid verdict whose role is not the one the intent
+ * commits — and the write has already happened by then.
+ */
+function executionDriftDeclaration(championSha256: string): Record<string, unknown> {
+  return {
+    contractVersion: 1,
+    type: 'execution',
+    capabilities: [GUIDE_ROW],
+    precondition: 'a third party declared an execution provider while the object was applied',
+    inputs: [],
+    outputs: [],
+    requiredTools: [],
+    verifier: { ref: 'command' },
+    content: { skillMdSha256: championSha256, resources: [] },
+  }
+}
+
+/**
+ * The two shapes a third party leaves in the directory a guidance rollback would
+ * write: an execution declaration beside the object (a role drift, which an
+ * unfixed path only reports *after* the `SKILL.md` has been replaced) and a file
+ * at a supported resource position (which an unfixed path does not report at all
+ * — the guidance verdict tolerates it, the rollback succeeds, and the undeclared
+ * resource stays where it was).
+ */
+const DIRECTORY_DRIFT: readonly {
+  readonly label: string
+  /** The entry the refusal has to name. */
+  readonly entry: string
+  add(h: RunStack, championSha256: string): Promise<void>
+}[] = [
+  {
+    label: 'an execution declaration beside the guidance object',
+    entry: SKILL_SIDECAR_FILE,
+    add: async (h, championSha256) => {
+      await writeFile(productionSidecar(h, CLEAN_SKILL), serializeSkillSidecar(executionDriftDeclaration(championSha256) as never), 'utf8')
+    },
+  },
+  {
+    label: 'a file at a supported resource position',
+    entry: 'references/notes.md',
+    add: async h => {
+      await mkdir(join(productionDirectory(h, CLEAN_SKILL), 'references'), { recursive: true })
+      await writeFile(join(productionDirectory(h, CLEAN_SKILL), 'references', 'notes.md'), 'a reference the object never declared\n', 'utf8')
+    },
+  },
+]
+
+/**
+ * The world both cases below start from: one guidance object in production, one
+ * proposal walked to `applied` through the real tools, and production holding the
+ * candidate body — `guidance.skillMd` is the champion body a rollback restores.
+ */
+async function appliedGuidanceWorld(options: { commitProbe?: (stage: CommitStage, target?: string) => void } = {}): Promise<{
+  s: UnitStack
+  guidance: InstalledSkill
+  candidateBody: string
+}> {
+  const s = await boot({ ...options })
+  const h = s.h
+  const guidance = await writeSkillObject(join(h.home, 'skills'), { name: CLEAN_SKILL, body: skillBody(CLEAN_SKILL, ['keep.txt', 'holdout.txt']) })
+  const root = await h.root(ROOT_A, rootContract('evaluate the candidate guidance skill'))
+  await writeSample(h, root.storeId, { taskId: 't-fix', runId: 'r-fix-history', objective: 'the answer file is produced', acceptance: criterion('ac-fix', 'test -f fix.txt'), outcome: 'failed', capability: GUIDE_ROW })
+  await writeSample(h, root.storeId, { taskId: 't-holdout', runId: 'r-holdout-history', objective: 'the held-out answer file is produced', acceptance: criterion('ac-holdout', 'test -f holdout.txt'), outcome: 'verified', capability: GUIDE_ROW })
+  await mkdir(join(h.checkout, 'nested'), { recursive: true })
+  const candidateBody = skillBody(CLEAN_SKILL, ['fix.txt', 'holdout.txt'])
+  await walkToGated(s, { proposalId: P2, name: CLEAN_SKILL, content: candidateBody, samples: ['t-fix'], holdout: ['t-holdout'] })
+  await decideThroughTool(s, P2)
+  await applyThroughTool(s, P2)
+  return { s, guidance, candidateBody }
+}
+
+describe('K3-4: a rollback refuses a directory holding entries the committed object does not name, before anything is written', () => {
+  it.each(DIRECTORY_DRIFT)('refuses a fresh rollback of a directory that now holds $label, writing nothing', async ({ entry, add }) => {
+    const { s, guidance, candidateBody } = await appliedGuidanceWorld()
+    const h = s.h
+    const target = productionSkill(h, CLEAN_SKILL)
+    // The apply landed, whole: one guidance file, no declaration beside it.
+    expect(await productionObject(h, CLEAN_SKILL)).toEqual({ skillMd: candidateBody })
+
+    // A third party adds an entry the object the apply installed does not name —
+    // after the apply, so nothing that ran before this write saw it.
+    await add(h, guidance.skillMdSha256)
+
+    const before = await ledgerBytes(h)
+    const productionBefore = await productionObject(h, CLEAN_SKILL)
+    const driftedPath = join(productionDirectory(h, CLEAN_SKILL), entry)
+    const driftedBytes = await readFile(driftedPath, 'utf8')
+    const refused = await s.svc.rollback(P2, ROOT_A, 'approval:k3-rollback')
+      .then(() => '', (error: unknown) => (error instanceof Error ? error.message : String(error)))
+
+    // The refusal names the entry and happens *before* the write: nothing was
+    // written, no second intent was recorded, and the proposal is still applied.
+    // The message carries what production and the ledger hold instead, so a
+    // refusal that arrived after the write cannot read as a pass.
+    const afterRefusal = await productionObject(h, CLEAN_SKILL)
+    expect(
+      refused,
+      `the rollback must refuse before it writes anything — production now holds ${JSON.stringify(afterRefusal)} and the ledger ends with ` +
+      `${JSON.stringify(kindsOf(await ledgerLines(h)).slice(-2))}`,
+    ).toContain(entry)
+    expect(refused).toContain('nothing was written')
+    expect(await ledgerBytes(h)).toBe(before)
+    expect(kindsOf(await ledgerLines(h)).filter(kind => kind === 'commit_intent')).toHaveLength(1)
+    expect(await productionObject(h, CLEAN_SKILL)).toEqual(productionBefore)
+    // The entry the refusal is about — a file the object does not name, so not
+    // one the object identity above covers — stands exactly as it was left.
+    expect(await readFile(driftedPath, 'utf8')).toBe(driftedBytes)
+    expect(await stagingFiles(productionDirectory(h, CLEAN_SKILL))).toEqual([])
+    expect(await s.svc.openIntentTargets()).toEqual([])
+    expect((await s.svc.get(P2)).status).toBe('applied')
+    expect(await readFile(target, 'utf8')).toBe(candidateBody)
+  }, 180_000)
+
+  it('refuses the retry of an interrupted rollback and reports the directory blocked, returning production and the ledger unchanged', async () => {
+    const probe = windowProbe()
+    const { s, guidance, candidateBody } = await appliedGuidanceWorld({ commitProbe: probe.probe })
+    const h = s.h
+    const target = productionSkill(h, CLEAN_SKILL)
+
+    // The rollback is interrupted right after its intent line: the intent is open
+    // and production still holds exactly what the apply installed.
+    probe.arm('intent-recorded')
+    await expect(s.svc.rollback(P2, ROOT_A, 'approval:k3-rollback')).rejects.toThrow(/in-process probe threw after/)
+    const interrupted = await ledgerBytes(h)
+    expect(await productionObject(h, CLEAN_SKILL)).toEqual({ skillMd: candidateBody })
+    expect(await s.svc.openIntentTargets()).toEqual([target])
+    expect((await s.svc.get(P2)).openIntent?.intentId).toBe(`${P2}/rollback`)
+
+    // The third party's entry arrives while the intent is open.
+    await writeFile(productionSidecar(h, CLEAN_SKILL), serializeSkillSidecar(executionDriftDeclaration(guidance.skillMdSha256) as never), 'utf8')
+    const drifted = await productionObject(h, CLEAN_SKILL)
+
+    // The retry settles the open intent, and the settlement refuses by name
+    // before it writes: the recovery entry is a blocked outcome, not a write.
+    const retry = await s.svc.rollback(P2, ROOT_A, 'approval:k3-rollback')
+      .then(() => '', (error: unknown) => (error instanceof Error ? error.message : String(error)))
+    const afterRetry = await productionObject(h, CLEAN_SKILL)
+    expect(
+      retry,
+      `the retry must refuse the directory, not write it — production now holds ${JSON.stringify(afterRetry)}`,
+    ).toContain(SKILL_SIDECAR_FILE)
+    expect(retry).toContain('the intent stays open')
+    expect(retry).toContain('nothing is written')
+
+    const outcomes = await s.svc.reconcile()
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]).toMatchObject({ intentId: `${P2}/rollback`, result: 'blocked', targets: [target] })
+    expect(outcomes[0]!.detail).toContain(SKILL_SIDECAR_FILE)
+    expect(outcomes[0]!.detail).toContain('the intent stays open')
+    expect(outcomes[0]!.detail).toContain('nothing is written')
+
+    // Neither attempt moved a byte: the third party's entry stands, the ledger is
+    // byte-identical, the intent is still open and the proposal still applied.
+    expect(await productionObject(h, CLEAN_SKILL)).toEqual(drifted)
+    expect(await ledgerBytes(h)).toBe(interrupted)
+    expect(await stagingFiles(productionDirectory(h, CLEAN_SKILL))).toEqual([])
+    expect(await s.svc.openIntentTargets()).toEqual([target])
+    expect((await s.svc.get(P2)).status).toBe('applied')
+  }, 180_000)
+})
+
+/* ------------------------------------------------------------------------- *
+ * K3-4 — the directory a two-file commit writes
+ * ------------------------------------------------------------------------- */
+
+/**
+ * The entries a third party leaves in the directory an **execution** commit would
+ * write. An execution object's declaration names every file it covers, so its
+ * committed file set has to name every file in that directory back, and all three
+ * shapes below are refused by the file set that does not name them: a file at a
+ * supported resource position the declaration never listed, an entry the
+ * supported vocabulary does not cover at all, and a staging file whose prefix
+ * belongs to no target of this object. The last one is deliberate rather than an
+ * oversight: `.SKILL.md.tmp-…` is *this* target's leftover and passes (a killed
+ * attempt leaves one, and a recovery sweeps it), while `.other.md.tmp-…` could
+ * only come from a target that is not in this file set — and the whole-object
+ * verification after the write refuses such an entry too, so accepting it here
+ * would only move the same refusal past the write.
+ *
+ * `named` is the fragment the refusal has to carry. The check reads the skill
+ * directory's own entries, so the resource shape is named as the entry it is — the
+ * `references/` directory, with the trailing slash a directory entry gets — and
+ * not as the file inside it.
+ */
+const EXECUTION_DIRECTORY_DRIFT: readonly {
+  readonly label: string
+  readonly entry: string
+  readonly named: string
+  readonly note: string
+}[] = [
+  {
+    label: 'a file at a supported resource position the declaration never listed',
+    entry: 'references/notes.md',
+    named: 'references/',
+    note: 'a resource position, outside the two files the object declares',
+  },
+  {
+    label: 'an entry the supported vocabulary does not cover',
+    entry: 'helper.sh',
+    named: 'helper.sh',
+    note: 'a direct entry of the skill directory that is not SKILL.md, the sidecar or a resource directory',
+  },
+  {
+    label: 'a staging file of a target this object does not have',
+    entry: '.other.md.tmp-4242-deadbeef',
+    named: '.other.md.tmp-4242-deadbeef',
+    note: 'this object has no "other.md", so its prefix is nobody\'s leftover — the post-write verification refuses it too',
+  },
+]
+
+/** Write one externally added entry under the skill directory of a two-file world. */
+async function addExecutionEntry(h: RunStack, entry: string): Promise<void> {
+  const at = join(productionDirectory(h), entry)
+  await mkdir(dirname(at), { recursive: true })
+  await writeFile(at, `${entry} was added from outside this ledger\n`, 'utf8')
+}
+
+describe('K3-4: a two-file commit refuses a production directory holding entries the execution object does not name, before anything is written', () => {
+  it.each(EXECUTION_DIRECTORY_DRIFT)('refuses the apply when the directory holds $label, writing nothing', async ({ entry, named, note }) => {
+    const world = await decidedWorld(await sharedDirectory())
+    const h = world.s.h
+    const targets = commitTargets(h)
+    const production = sideState(world, 'production')
+    expect(await productionObject(h)).toEqual(production)
+    // Decided, with no commit of this direction recorded yet.
+    expect(kindsOf(await ledgerLines(h)).slice(-2)).toEqual(['gated', 'decided'])
+    expect(kindsOf(await ledgerLines(h)).filter(kind => kind === 'commit_intent')).toEqual([])
+
+    // The third party's entry arrives after the decision, while production still
+    // holds exactly what the proposal was prepared and decided against.
+    await addExecutionEntry(h, entry)
+    const entriesBefore = (await readdir(productionDirectory(h))).sort()
+
+    const before = await ledgerBytes(h)
+    const productionBefore = await productionObject(h)
+    const refused = await world.s.svc.apply(P1, ROOT_A, 'approval:k3-apply')
+      .then(() => '', (error: unknown) => (error instanceof Error ? error.message : String(error)))
+    const afterRefusal = await productionObject(h)
+    expect(
+      refused,
+      `the apply must refuse before it writes anything (${note}) — production now holds ${JSON.stringify(afterRefusal)} and the ledger ` +
+      `ends with ${JSON.stringify(kindsOf(await ledgerLines(h)).slice(-2))}`,
+    ).toContain(named)
+    expect(refused).toContain('nothing was written')
+
+    // Nothing moved: no intent line was recorded, both production files are the
+    // bytes they were, the directory holds exactly the entries it held (the
+    // stranger's file included — a refusal removes nothing), and the proposal is
+    // still decided.
+    expect(await ledgerBytes(h)).toBe(before)
+    expect(kindsOf(await ledgerLines(h)).filter(kind => kind === 'commit_intent')).toEqual([])
+    expect(await productionObject(h)).toEqual(productionBefore)
+    expect((await readdir(productionDirectory(h))).sort()).toEqual(entriesBefore)
+    expect(await world.s.svc.openIntentTargets()).toEqual([])
+    expect((await world.s.svc.get(P1)).status).toBe('decided')
+    // Both files of the object the proposal would have written are untouched.
+    expect(await readFile(targets[0], 'utf8')).toBe(production.skillMd)
+    expect(await readFile(targets[1], 'utf8')).toBe(production.sidecar)
+  }, 180_000)
+
+  it('refuses the rollback when the directory holds an entry the applied object does not name, writing nothing', async () => {
+    const world = await decidedWorld(await sharedDirectory())
+    const h = world.s.h
+    const targets = commitTargets(h)
+    // The world a rollback starts from: the apply that landed, whole.
+    await world.s.svc.apply(P1, ROOT_A, 'approval:k3-apply')
+    expect(await productionObject(h)).toEqual(sideState(world, 'candidate'))
+    expect(kindsOf(await ledgerLines(h)).slice(-2)).toEqual(['commit_intent', 'applied'])
+
+    await addExecutionEntry(h, 'references/notes.md')
+    const entriesBefore = (await readdir(productionDirectory(h))).sort()
+
+    const before = await ledgerBytes(h)
+    const productionBefore = await productionObject(h)
+    const refused = await world.s.svc.rollback(P1, ROOT_A, 'approval:k3-rollback')
+      .then(() => '', (error: unknown) => (error instanceof Error ? error.message : String(error)))
+    const afterRefusal = await productionObject(h)
+    expect(
+      refused,
+      `the rollback must refuse before it writes anything — production now holds ${JSON.stringify(afterRefusal)} and the ledger ends ` +
+      `with ${JSON.stringify(kindsOf(await ledgerLines(h)).slice(-2))}`,
+    ).toContain('references/')
+    expect(refused).toContain('nothing was written')
+
+    // The applied pair stands byte for byte, the directory still holds the
+    // stranger's entry and nothing else changed, no rollback intent was recorded,
+    // and the proposal is still applied.
+    expect(await ledgerBytes(h)).toBe(before)
+    expect(kindsOf(await ledgerLines(h)).filter(kind => kind === 'commit_intent')).toHaveLength(1)
+    expect(await productionObject(h)).toEqual(productionBefore)
+    expect((await readdir(productionDirectory(h))).sort()).toEqual(entriesBefore)
+    expect(await readFile(join(productionDirectory(h), 'references', 'notes.md'), 'utf8')).toBe('references/notes.md was added from outside this ledger\n')
+    expect(await world.s.svc.openIntentTargets()).toEqual([])
+    expect((await world.s.svc.get(P1)).status).toBe('applied')
+    expect(await readFile(targets[1], 'utf8')).toBe(world.derivedBytes)
+  }, 180_000)
+
+  it('lets the commit through when the only other entry is this object\u2019s own staging leftover, and sweeps it', async () => {
+    const world = await decidedWorld(await sharedDirectory())
+    const h = world.s.h
+    const stale = join(productionDirectory(h), '.SKILL.md.tmp-4242-deadbeef')
+    await writeFile(stale, '# a staging file a killed attempt of this very target left behind\n', 'utf8')
+
+    await world.s.svc.apply(P1, ROOT_A, 'approval:k3-apply')
+
+    // The leftover is this object's own, so it is not a foreign entry: the commit
+    // runs and the sweep removes it — the tolerated shape and the refused one are
+    // one character apart, which is what the cases above pin from the other side.
+    expect(existsSync(stale)).toBe(false)
+    expect(await productionObject(h)).toEqual(sideState(world, 'candidate'))
+    expect(await stagedNow(h)).toEqual([])
+    expect(kindsOf(await ledgerLines(h)).slice(-2)).toEqual(['commit_intent', 'applied'])
+    expect((await world.s.svc.get(P1)).status).toBe('applied')
+  }, 180_000)
 })
 
 /* ------------------------------------------------------------------------- *

@@ -42,7 +42,8 @@ export function defineEvolutionRollbackTool(ctx: Context) {
       'leaves one open intent and the skill directory closed to new admission rather than a half-commit. A rollback ' +
       'restores this proposal\'s own baseline and ' +
       'refuses by name, with nothing written, a target that a later proposal (or any other writer) has changed since this ' +
-      'version was applied (both files must still hold what this proposal applied), and a champion snapshot that no longer ' +
+      'version was applied (both files must still hold what this proposal applied, and the directory must hold that ' +
+      'object\'s own files with no entry the object does not name), and a champion snapshot that no longer ' +
       'hashes to the baseline recorded at prepare. Calling ' +
       'this tool again while an intent is open settles it instead of asking for a second approval: the answer reports the ' +
       'intent id and whether the write was redone or only its completion recorded.',

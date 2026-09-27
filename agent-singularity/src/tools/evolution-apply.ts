@@ -66,7 +66,8 @@ export function defineEvolutionApplyTool(ctx: Context) {
       'binds the grant it was authorised by, and the promotion gate is not re-run because the recorded intent already ' +
       'names the approved content), and the answer reports the intent id and whether the commit was redone (production ' +
       'still held the pre-commit state) or only completed (production already held the committed content). A source that ' +
-      'is gone or changed, or a target a third party rewrote, refuses by name with the intent left open. ' +
+      'is gone or changed, a target a third party rewrote, or a directory holding an entry the committed object does not ' +
+      'name, refuses by name with the intent left open. ' +
       'evolution_rollback restores the champion snapshot.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Decided (PROMOTE) proposal to apply to production' },

@@ -8,7 +8,7 @@ import type { CapabilityConfig, ReplayTaskOptions } from '@dangosys/dsh-singular
 import { SKILL_SIDECAR_FILE, registryRevision, serializeSkillSidecar, sidecarWithSkillMd, skillContentDigest, skillContractDigest } from '@dangosys/dsh-singularity-task-runtime'
 import { EvolutionService } from '../../src/evolution.ts'
 import type { Config, GateAnswers, ProposeInput } from '../../src/evolution.ts'
-import type { CommitStage } from '../../src/commit.ts'
+import type { CommitStage, ReconcileOutcome } from '../../src/commit.ts'
 import type { ExperimentSampleRecord } from '../../src/experiment.ts'
 import { buildExperimentReport, directoryDigest, experimentIdOf, experimentLineage, experimentReportPath } from '../../src/experiment.ts'
 import type { FrozenExperiment, FrozenProviderIdentity, FrozenSample, ModelSelection, SkillContentIdentity } from '../../src/replay.ts'
@@ -2156,18 +2156,18 @@ describe('EvolutionService apply/rollback production writes', () => {
     const { svc, skillRoot } = await serviceWithProduction()
     await mkdir(join(skillRoot, 'verify'), { recursive: true })
     await writeFile(join(skillRoot, 'verify', 'SKILL.md'), PRODUCTION_V1)
-    await writeFile(join(skillRoot, 'verify', 'reference.md'), '# aux file the snapshot never captured\n')
     await walkToDecided(svc, skillProposal, { name: 'verify', content: skillText('# new verify skill') })
 
     const applied = await svc.apply('s1', 'root-1', 'approval:call-1')
     expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe(skillText('# new verify skill'))
-    // file-level semantics: auxiliary files the champion snapshot never captured stay put
-    expect(await readFile(join(skillRoot, 'verify', 'reference.md'), 'utf8')).toBe('# aux file the snapshot never captured\n')
+    // The guidance object is one file, and the commit replaces exactly it. A
+    // directory holding a file the object does not cover no longer reaches
+    // apply: prepare refuses it by name (K3), so there is no auxiliary file for
+    // a write to leave beside the replaced one.
     expect(applied.targets).toEqual([join(skillRoot, 'verify', 'SKILL.md')])
 
     await svc.rollback('s1', 'root-1', 'approval:call-2')
     expect(await readFile(join(skillRoot, 'verify', 'SKILL.md'), 'utf8')).toBe(PRODUCTION_V1)
-    expect(await readFile(join(skillRoot, 'verify', 'reference.md'), 'utf8')).toBe('# aux file the snapshot never captured\n')
   })
 
   it('refuses a hand-written lifecycle of another target type at its first line', async () => {
@@ -4362,6 +4362,25 @@ describe('K3: prepare freezes the whole skill object', () => {
     expect(drifted).toContain('SKILL.md is not the declared content')
     expect(existsSync(join(root, 'sandbox'))).toBe(false)
   })
+
+  it('refuses a guidance production directory holding a file beyond SKILL.md, where no declaration exists to reject it', async () => {
+    const { svc, root, skillRoot } = await serviceWithProduction()
+    const directory = join(skillRoot, 'verify')
+    await mkdir(join(directory, 'references'), { recursive: true })
+    await writeFile(join(directory, 'references', 'notes.md'), 'a reference nobody declared\n')
+    await writeFile(join(directory, 'SKILL.md'), skillText('# production guidance skill'))
+    await svc.propose(skillProposal, 'root-1')
+    await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: skillText('# candidate') })
+
+    // No sidecar, so the loader has nothing to hold the directory to: the file
+    // is reported as a resource the identity does not cover, and prepare must
+    // refuse it rather than freeze the SKILL.md alone and call it the object.
+    const refusal = await refusalOf(svc.prepare('s1', 'root-1'))
+    expect(refusal).toContain('references/notes.md')
+    expect(refusal).toContain('nothing was written')
+    expect((await svc.get('s1')).status).toBe('candidate')
+    expect(existsSync(join(root, 'sandbox'))).toBe(false)
+  })
 })
 
 describe('K3: P2 and P3 hold the whole object', () => {
@@ -4755,6 +4774,84 @@ describe('K3: the two-file commit', () => {
     expect((await reopened.reconcile()).map(outcome => outcome.result)).toEqual(['completed-redone'])
     expect(await reopened.openIntentTargets()).toEqual([])
     expect(await refusalOf(reopened.apply('s2', 'root-1', 'approval:call-2'))).toContain('changed since prepare')
+  })
+
+  it('reports the blocked intent, instead of throwing, when the production directory cannot be listed', async () => {
+    const fixture = await executionDecidedFixture()
+    const { svc, root, skillRoot, production, productionSidecar } = fixture
+    const skillTarget = COMMIT_TARGET(skillRoot)
+    const sidecarTarget = SIDECAR_TARGET(skillRoot)
+    const directory = join(skillRoot, 'verify')
+    const crashing = reopenWithObjectProbe(svc, fixture, crashAtObject('intent-recorded'))
+    await refusalOf(crashing.apply('s1', 'root-1', 'approval:call-1'))
+
+    // One open intent, nothing written: both files still hold the baseline, and
+    // the intent names them.
+    const ledgerBefore = await readFile(join(root, 'proposals.jsonl'), 'utf8')
+    const entriesBefore = (await readdir(directory)).sort()
+    expect(await ledgerKinds(root)).toContain('commit_intent')
+    expect(await readFile(skillTarget, 'utf8')).toBe(production)
+    expect(await readFile(sidecarTarget, 'utf8')).toBe(productionSidecar)
+
+    // The window this pins: every file the intent names is still readable one by
+    // one (the directory keeps `x`), but the directory itself cannot be listed —
+    // so what else it holds is unknowable to the pre-write object check. That is
+    // a refusal to *report*, not an exception to throw: a recovery that threw
+    // here would abort the whole batch over one directory, and the caller would
+    // never see the named reason.
+    const reopened = reopenWithObjectProbe(svc, fixture)
+    await chmod(directory, 0o300)
+    let outcomes: ReconcileOutcome[] = []
+    try {
+      outcomes = await reopened.reconcile()
+    } catch (error) {
+      throw new Error(
+        `reconcile() threw instead of reporting a blocked intent: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    } finally {
+      await chmod(directory, 0o755)
+    }
+
+    expect(outcomes).toHaveLength(1)
+    const [outcome] = outcomes
+    expect(outcome!.result).toBe('blocked')
+    expect(outcome!.targets).toEqual([skillTarget, sidecarTarget])
+    expect(outcome!.detail).toContain('cannot be read to check what it holds')
+    expect(outcome!.detail).toContain(directory)
+    expect(outcome!.detail).toContain('the intent stays open')
+    expect(outcome!.detail).toContain('nothing is written')
+
+    // Zero writes: the same ledger bytes (no completion line was appended), the
+    // same two files, the same directory entries, and the intent still open.
+    expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(ledgerBefore)
+    expect((await ledgerKinds(root)).filter(kind => kind === 'applied' || kind === 'rolledback')).toEqual([])
+    expect(await readFile(skillTarget, 'utf8')).toBe(production)
+    expect(await readFile(sidecarTarget, 'utf8')).toBe(productionSidecar)
+    expect((await readdir(directory)).sort()).toEqual(entriesBefore)
+    expect((await reopened.get('s1')).openIntent?.intentId).toBe('s1/apply')
+    expect(await reopened.openIntentTargets()).toEqual([skillTarget, sidecarTarget])
+
+    // The fresh path over the same obstacle, on a world whose proposal has no
+    // open intent: the commit path turns the same reason into its own named stop
+    // before the intent line, so the refusal is the commit's words and not the
+    // directory read's.
+    const fresh = await executionDecidedFixture()
+    const freshDirectory = join(fresh.skillRoot, 'verify')
+    const freshBefore = await readFile(join(fresh.root, 'proposals.jsonl'), 'utf8')
+    await chmod(freshDirectory, 0o300)
+    let refusal: string
+    try {
+      refusal = await refusalOf(fresh.svc.apply('s1', 'root-1', 'approval:call-1'))
+    } finally {
+      await chmod(freshDirectory, 0o755)
+    }
+    expect(refusal).toContain('cannot be read to check what it holds')
+    expect(refusal).toContain(freshDirectory)
+    expect(refusal).toContain('nothing was written')
+    expect(await readFile(join(fresh.root, 'proposals.jsonl'), 'utf8')).toBe(freshBefore)
+    expect(await ledgerKinds(fresh.root)).not.toContain('commit_intent')
+    expect(await readFile(COMMIT_TARGET(fresh.skillRoot), 'utf8')).toBe(fresh.production)
+    expect((await fresh.svc.get('s1')).status).toBe('decided')
   })
 })
 
