@@ -9,6 +9,7 @@ import {
   readReviewAgentAttempts,
   reviewAgentLedgerFile,
 } from '../../src/review-agent-ledger.ts'
+import { runReviewAgentAttempt } from '../../src/review-agent-run.ts'
 import { installReviewAgentAutoTrigger, scanFailedReviewSources } from '../../src/review-agent-scan.ts'
 import type { TerminalReviewFact } from '@dangosys/dsh-singularity-task-runtime'
 
@@ -339,6 +340,139 @@ describe('the scan of a store\'s failed reviews', () => {
     expect(rowsOfKind('settled')).toHaveLength(1)
     expect(spawn).not.toHaveBeenCalled()
     expect(again.entries[0]).toMatchObject({ result: 'existing' })
+  })
+
+  it('reads the default attempt a live reviewer already holds, whatever focus it was named with', async () => {
+    // The source's default attempt, admitted explicitly with a focus of its own
+    // and really running in this process (claim + started, so the ledger holds it
+    // as live). The scan meets an attempt that exists — and must read it instead
+    // of asking for the same key with a focus of its own invention.
+    await admitReviewAgent(STORE, async admission => {
+      await admission.claim({
+        source: { taskId: 't1', runId: 'r1' },
+        requestKey: null,
+        reason: 'focus',
+        actor: ROOT,
+        sessionId: 's-focus' as never,
+      })
+      await admission.start({ taskId: 't1', sessionId: 's-focus' as never, actor: ROOT })
+    })
+    const { ctx, spawn } = fixture()
+    const lines: string[] = []
+
+    const report = await scanFailedReviewSources(ctx, STORE, { log: line => lines.push(line) })
+    expect(spawn).not.toHaveBeenCalled()
+    expect(report.entries).toEqual([
+      { source: { taskId: 't1', runId: 'r1' }, result: 'existing', sessionId: 's-focus' },
+    ])
+    expect(report.entries[0]).not.toHaveProperty('reason')
+    expect(rowsOfKind('claim')).toHaveLength(1)
+    expect(rowsOfKind('started')).toHaveLength(1)
+    expect(rowsOfKind('settled')).toHaveLength(0)
+    expect(await countReviewAgentRuns(STORE)).toBe(1)
+    // Named as the attempt it read, never as a source refused for a different
+    // focus — nothing was refused here and nothing was written.
+    expect(lines.join('\n')).toContain('s-focus')
+    expect(lines.join('\n')).not.toMatch(/different focus|conflict/i)
+  })
+
+  it('still refuses an explicit call that re-focuses an existing default attempt', async () => {
+    // The other half of the rule the scan now honours: the ledger's conflict
+    // check is untouched, so an explicit call naming the same key with another
+    // focus is refused by name — with no claim, no start and no spawn.
+    const { ctx, spawn } = fixture()
+    await admitReviewAgent(STORE, async admission => {
+      await admission.claim({
+        source: { taskId: 't1', runId: 'r1' },
+        requestKey: null,
+        reason: 'focus',
+        actor: ROOT,
+        sessionId: 's-focus' as never,
+      })
+      await admission.start({ taskId: 't1', sessionId: 's-focus' as never, actor: ROOT })
+    })
+    const rowsBefore = ledgerRows().length
+
+    const outcome = await runReviewAgentAttempt({
+      ctx,
+      storeId: STORE,
+      source: { taskId: 't1', runId: 'r1' },
+      review: baseSnapshot().reviews[0]! as never,
+      parent: (ctx as unknown as { agents: { get(id: string): unknown } }).agents.get(ROOT) as never,
+      actor: ROOT,
+      requestKey: null,
+      reason: 'other',
+    })
+    expect(outcome.kind).toBe('refused')
+    if (outcome.kind !== 'refused') throw new Error('unreachable')
+    expect(outcome.plan.code).toBe('request-key-conflict')
+    expect(spawn).not.toHaveBeenCalled()
+    expect(ledgerRows().length).toBe(rowsBefore)
+  })
+
+  it('follows the newest open attempt of a source, never the settled one that came before it', async () => {
+    // A process that died twice over one source: the default attempt was
+    // recorded earlier, and the explicit `k1` attempt after it was claimed and
+    // started and never settled. The scan has to accept the source on the open
+    // attempt it finds last — recovering that same identity — instead of reading
+    // the older settled one and leaving `k1` open forever.
+    writeFileSync(reviewAgentLedgerFile(), [
+      JSON.stringify({
+        formatVersion: 2, kind: 'claim', rootStoreId: STORE, taskId: 't1', runId: 'r1',
+        requestKey: null, reason: null, sessionId: 's-default', actor: ROOT, at: '2026-09-26T00:00:00.000Z',
+      }),
+      JSON.stringify({
+        formatVersion: 2, kind: 'started', rootStoreId: STORE, taskId: 't1', sessionId: 's-default', actor: ROOT, at: '2026-09-26T00:00:01.000Z',
+      }),
+      JSON.stringify({
+        formatVersion: 2, kind: 'settled', rootStoreId: STORE, taskId: 't1', sessionId: 's-default', status: 'recorded', at: '2026-09-26T00:00:02.000Z',
+      }),
+      JSON.stringify({
+        formatVersion: 2, kind: 'claim', rootStoreId: STORE, taskId: 't1', runId: 'r1',
+        requestKey: 'k1', reason: null, sessionId: 's-k1', actor: ROOT, at: '2026-09-26T00:00:03.000Z',
+      }),
+      JSON.stringify({
+        formatVersion: 2, kind: 'started', rootStoreId: STORE, taskId: 't1', sessionId: 's-k1', actor: ROOT, at: '2026-09-26T00:00:04.000Z',
+      }),
+      '',
+    ].join('\n'), 'utf8')
+    const { ctx, spawn } = fixture()
+    const lines: string[] = []
+
+    const report = await scanFailedReviewSources(ctx, STORE, { log: line => lines.push(line) })
+    expect(spawn).not.toHaveBeenCalled()
+    expect(rowsOfKind('claim')).toHaveLength(2)
+    // The spent run stays spent: the recovery of `k1` writes no started row.
+    expect(rowsOfKind('started')).toHaveLength(2)
+    const settled = rowsOfKind('settled')
+    expect(settled).toHaveLength(2)
+    expect(settled.filter(row => row.sessionId === 's-k1')).toEqual([
+      expect.objectContaining({ status: 'interrupted' }),
+    ])
+    expect(await countReviewAgentRuns(STORE)).toBe(2)
+    expect(report.entries).toEqual([
+      {
+        source: { taskId: 't1', runId: 'r1' },
+        result: 'existing',
+        sessionId: 's-k1',
+        reason: expect.stringMatching(/interrupted|is gone/),
+      },
+    ])
+    expect(lines.join('\n')).toContain('s-k1')
+    expect(lines.join('\n')).toContain('interrupted')
+
+    // The recovery is one terminal fact: the repeat scan reads `k1` settled, the
+    // ledger grows no further and the source is still never re-reviewed.
+    const rowsAfter = ledgerRows().length
+    const again = await scanFailedReviewSources(ctx, STORE, { log: () => undefined })
+    expect(spawn).not.toHaveBeenCalled()
+    expect(again.entries).toEqual([
+      { source: { taskId: 't1', runId: 'r1' }, result: 'existing', sessionId: 's-k1' },
+    ])
+    expect(rowsOfKind('claim')).toHaveLength(2)
+    expect(rowsOfKind('started')).toHaveLength(2)
+    expect(rowsOfKind('settled')).toHaveLength(2)
+    expect(ledgerRows().length).toBe(rowsAfter)
   })
 
   it('skips a source by name when the store\'s allowance is spent, and starts it once there is room', async () => {

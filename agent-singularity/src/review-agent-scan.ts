@@ -16,19 +16,25 @@
  *
  * The scan decides per source and in this order:
  *
- * 1. **Dedupe first.** A source that already has a *settled* attempt is only
- *    read. The automatic scan never invents a request key, so it never claims a
- *    second attempt for a source and never overwrites the focus an explicit call
- *    named. An attempt still open is not skipped here: the ledger may find it
- *    dead — a process that died holding it — and record the terminal fact it
- *    never got (A5's crash recovery), or answer with an identity that really is
- *    in flight. Either way the recovery is named in this scan's own line.
- * 2. **Then the allowance.** A new attempt goes through the ledger's own
- *    admission: the serial region decides, the claim lands before any reviewer
- *    exists, and the store's allowance is read only when an attempt would really
- *    start. An exhausted store is skipped *by name*, with zero claim and zero
- *    spawn — and a later scan may retry the same source once there is room,
- *    because nothing was written for it.
+ * 1. **Dedupe first.** A source that already has an attempt is read rather than
+ *    reviewed again, and the attempt it reads is the source's *newest* one: an
+ *    older settled attempt never hides a later open one — a key claimed and
+ *    started by a process that died is exactly what has to be recovered. The
+ *    automatic scan invents nothing: when the newest attempt is still open, the
+ *    request this scan issues *is* that attempt's own identity (its key and its
+ *    focus), so an attempt an explicit call named is answered with itself
+ *    instead of being refused for a focus this scan made up. Whether an open
+ *    attempt really is in flight, or one a process died holding, is the ledger's
+ *    decision and not this pre-read's: the admission records the terminal fact
+ *    such an attempt never got (A5's crash recovery), or answers with an identity
+ *    that really is running. Either way the recovery is named in this scan's own
+ *    line. A source whose every attempt settled is only read.
+ * 2. **Then the allowance.** A source with no attempt behind it goes through the
+ *    ledger's own admission: the serial region decides, the claim lands before
+ *    any reviewer exists, and the store's allowance is read only when an attempt
+ *    would really start. An exhausted store is skipped *by name*, with zero
+ *    claim and zero spawn — and a later scan may retry the same source once there
+ *    is room, because nothing was written for it.
  * 3. **Then the reviewer.** The attempt is one and the same as an explicit
  *    call's (`review-agent-run.ts`): the pack, the spawn, the watchdog and the
  *    one terminal fact. Its parent is the graph's root session — a review agent
@@ -150,15 +156,20 @@ export async function scanFailedReviewSources(
   const root = rootAgentOf(ctx, storeId)
   const attempts = await readReviewAgentAttempts(storeId)
   for (const source of targets) {
-    const existing: ReviewAgentAttempt | undefined = attempts.find(attempt => sameSource(attempt.source, source))
-    // A *settled* attempt is what the scan reads instead of reviewing again. An
-    // attempt still open is not a reason to skip: the ledger may find it dead
-    // (a process that died holding it) and record the terminal fact it never
-    // got, or answer with the identity that really is in flight — both decisions
-    // belong to the admission, not to this pre-read.
-    if (existing !== undefined && existing.settlement !== undefined) {
+    const mine = attempts.filter(attempt => sameSource(attempt.source, source))
+    // The attempt this scan answers with: the source's newest one still open,
+    // else its newest at all. An older settled attempt never hides a later open
+    // one — an open attempt whose row a dead process left behind is what the
+    // admission below has to recover.
+    const open = mine.filter(attempt => attempt.settlement === undefined).at(-1)
+    const existing = open ?? mine.at(-1)
+    // Every attempt of this source is settled: read the newest one and review
+    // nothing. An *open* attempt is not skipped here — whether it is dead (its
+    // process is gone) or really in flight is the ledger's decision, not this
+    // pre-read's.
+    if (existing !== undefined && open === undefined) {
       entries.push({ source, result: 'existing', sessionId: existing.sessionId })
-      log?.(`review agent: source ${sourceRef(source)} already has an attempt (session ${existing.sessionId}, ${existing.settlement.status}) — read, nothing started`)
+      log?.(`review agent: source ${sourceRef(source)} already has an attempt (session ${existing.sessionId}, ${existing.settlement!.status}) — read, nothing started`)
       continue
     }
     if (root === undefined) {
@@ -183,10 +194,13 @@ export async function scanFailedReviewSources(
         review,
         parent: root.agent,
         actor: root.sessionId,
-        // The automatic scan only ever issues the source's *default* attempt:
-        // no key is invented for it, and no focus is claimed on its behalf.
-        requestKey: null,
-        reason: null,
+        // The request this scan issues is the attempt's own identity when the
+        // source has one — its key and its focus — so the ledger answers with
+        // that attempt (or recovers it) instead of refusing a default this scan
+        // invented. Only a source with no attempt at all is asked for as the
+        // default: no key, no focus.
+        requestKey: existing === undefined ? null : existing.requestKey,
+        reason: existing === undefined ? null : existing.reason,
       })
     } catch (error) {
       const reason = `the review attempt failed: ${error instanceof Error ? error.message : String(error)}`

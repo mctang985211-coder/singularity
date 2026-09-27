@@ -1889,8 +1889,10 @@ async function scanFailedReviewSources(ctx, storeId, options = {}) {
 	const root = rootAgentOf(ctx, storeId);
 	const attempts = await readReviewAgentAttempts(storeId);
 	for (const source of targets) {
-		const existing = attempts.find((attempt) => sameSource(attempt.source, source));
-		if (existing !== void 0 && existing.settlement !== void 0) {
+		const mine = attempts.filter((attempt) => sameSource(attempt.source, source));
+		const open = mine.filter((attempt) => attempt.settlement === void 0).at(-1);
+		const existing = open ?? mine.at(-1);
+		if (existing !== void 0 && open === void 0) {
 			entries.push({
 				source,
 				result: "existing",
@@ -1929,8 +1931,8 @@ async function scanFailedReviewSources(ctx, storeId, options = {}) {
 				review,
 				parent: root.agent,
 				actor: root.sessionId,
-				requestKey: null,
-				reason: null
+				requestKey: existing === void 0 ? null : existing.requestKey,
+				reason: existing === void 0 ? null : existing.reason
 			});
 		} catch (error) {
 			const reason = `the review attempt failed: ${error instanceof Error ? error.message : String(error)}`;
