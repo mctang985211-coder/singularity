@@ -3,6 +3,7 @@
  * @module dsh-singularity-agent
  */
 
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -17,8 +18,9 @@ import type { ModelSelection } from '@dangosys/dsh-singularity-evolution'
 import { HitlService } from './hitl.ts'
 import { EscalationService } from './escalation.ts'
 import { ProposalReviewService } from './proposal-review.ts'
-import { reviewerBindingSource } from './review-agent-ledger.ts'
+import { reviewerBindingSource, supervisorDelegationSource } from './review-agent-ledger.ts'
 import { installReviewAgentAutoTrigger } from './review-agent-scan.ts'
+import { installSupervisorHandoffTrigger } from './evolution-handoff.ts'
 import { defineApproveTool } from './tools/approve.ts'
 import { defineAskTool } from './tools/ask.ts'
 import { defineRootBudgetApproval, defineTaskBudgetExtendTool } from './tools/budget-extend.ts'
@@ -46,6 +48,7 @@ import { defineTaskProposalCancelTool } from './tools/task-proposal-cancel.ts'
 import { defineTaskProposalContinueTool } from './tools/task-proposal-continue.ts'
 import { defineTaskProposalReadTool } from './tools/task-proposal-read.ts'
 import { defineTaskReadTool } from './tools/task-read.ts'
+import { defineTaskRecoverTool } from './tools/task-recover.ts'
 import { defineTaskReviewAgentTool } from './tools/review-agent.ts'
 import { defineTaskReviewPackTool } from './tools/task-review-pack.ts'
 import { defineTaskStatusTool } from './tools/task-status.ts'
@@ -198,7 +201,16 @@ export class SingularityAgent extends Service {
     // lifecycle itself is the evolution package's; this assembly says where the
     // harness root is and which model the deployment's runs share — the one
     // fact the package cannot derive from a process with no agent of its own.
-    this.evolution = new EvolutionService(ctx, { repoRoot: REPO_ROOT, modelSelection: () => deploymentModelSelection(ctx) })
+    this.evolution = new EvolutionService(ctx, {
+      repoRoot: REPO_ROOT,
+      modelSelection: () => deploymentModelSelection(ctx),
+      // The A6 seams, both owned elsewhere: the supervisor delegation is a row of
+      // the coordination ledger this plugin owns (the evolution plane must not
+      // import it back), and a capability commit writes the deployment's own
+      // `config.yml`, which is the file this assembly knows the location of.
+      supervisorDelegation: supervisorDelegationSource().read,
+      capabilityConfig: join(REPO_ROOT, 'config.yml'),
+    })
     // Same discipline for the escalation ledger: the `escalate` tool reads
     // `ctx.escalation` from this fiber, and the parent never injects it.
     new EscalationService(ctx)
@@ -228,6 +240,15 @@ export class SingularityAgent extends Service {
     ctx.effect(
       () => installReviewAgentAutoTrigger(ctx),
       'singularityAgent: review agent auto trigger',
+    )
+    // The hand-off trigger (A6): a graph that becomes active scans its store for
+    // pending hand-offs — the moment a process that booted over a store with a
+    // recorded Diagnosis-with-suggestions catches up. The other moment (the
+    // record becoming durable) is reported by the review attempt that wrote it,
+    // because no event exists for a store's diagnosis.
+    ctx.effect(
+      () => installSupervisorHandoffTrigger(ctx),
+      'singularityAgent: supervisor hand-off trigger',
     )
     // The one approval a budget extension can be granted through (K4): the
     // runtime asks it alone — for the one request that is not already recorded —
@@ -268,6 +289,12 @@ export class SingularityAgent extends Service {
     ctx.tools.register(defineTaskVerifyTool(ctx))
     ctx.tools.register(defineTaskReviewPackTool(ctx))
     ctx.tools.register(defineTaskReviewAgentTool(ctx))
+    // The recovery entry (A6): registered like the rest of the task surface —
+    // who may reach it is decided by the caller's own live session and the
+    // deployment's ledger (a trusted supervisor coordination session and nobody
+    // else), never by a registration switch. It is deliberately not on the root
+    // agent's allow-list (`ROOT_TOOLS`), so no root prompt names it.
+    ctx.tools.register(defineTaskRecoverTool(ctx))
     // Asking a person to raise this tree's ceilings (K4): registered like the
     // rest of the task surface — who may reach it (a graph's root coordination
     // session, derived from the session in the runtime) and what a call may say

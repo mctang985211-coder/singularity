@@ -198,6 +198,9 @@ async function world(options: {
     root: ledgerRoot,
     get: async () => proposal,
     readSkillCandidate: async () => ({ skillMd: Buffer.from(CANDIDATE_BYTES, 'utf8') }),
+    readCapabilityCandidate: async () => {
+      throw new Error('the fixture evaluates a skill candidate; no capability prepare exists in this ledger')
+    },
     experiment: async (experimentId: string) => {
       const view = folded().get(experimentId)
       if (view === undefined) throw new Error(`evolution: unknown experiment "${experimentId}"`)
@@ -716,19 +719,19 @@ describe('the two-sided orchestrator', () => {
     // really binds.
     const production = registryRevision(w.table, [{ name: SKILL, contractDigest: productionContract }])
     const candidateSide = registryRevision(w.table, [{ name: SKILL, contractDigest: candidateContract }])
-    expect(result.report.frozen.samples[0]!.provider.registryRevision).toBe(production)
-    expect(result.report.frozen.samples[0]!.provider.candidateRegistryRevision).toBe(candidateSide)
+    expect(result.report.frozen.samples[0]!.provider!.registryRevision).toBe(production)
+    expect(result.report.frozen.samples[0]!.provider!.candidateRegistryRevision).toBe(candidateSide)
     expect(candidateSide).not.toBe(production)
-    expect(result.report.frozen.samples[0]!.provider.candidateRegistryRevision).not.toBe(
-      result.report.frozen.samples[0]!.provider.registryRevision,
+    expect(result.report.frozen.samples[0]!.provider!.candidateRegistryRevision).not.toBe(
+      result.report.frozen.samples[0]!.provider!.registryRevision,
     )
     // Every sample carries it (the block is frozen per sample), and the ledger's
     // own record is what the report was recomputed from.
     for (const sample of result.report.frozen.samples) {
-      expect(sample.provider.candidateRegistryRevision).toBe(candidateSide)
+      expect(sample.provider!.candidateRegistryRevision).toBe(candidateSide)
     }
     const started = w.records.find(record => record.kind === 'experiment_started')
-    expect(started?.frozen.samples[0]!.provider.candidateRegistryRevision).toBe(candidateSide)
+    expect(started?.frozen.samples[0]!.provider!.candidateRegistryRevision).toBe(candidateSide)
     await rm(w.root, { recursive: true, force: true })
   })
 
@@ -736,7 +739,7 @@ describe('the two-sided orchestrator', () => {
     const w = await world()
     const result = await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
     for (const sample of result.report.frozen.samples) {
-      expect(sample.provider.candidateRegistryRevision).toBe(sample.provider.registryRevision)
+      expect(sample.provider!.candidateRegistryRevision).toBe(sample.provider!.registryRevision)
     }
     await rm(w.root, { recursive: true, force: true })
   })
@@ -791,7 +794,7 @@ describe('the two-sided orchestrator', () => {
     })
     const first = await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
     expect(w.calls).toHaveLength(4)
-    expect(first.report.frozen.candidate.contract!.contractDigest).toBe('1'.repeat(64))
+    expect(first.report.frozen.candidate!.contract!.contractDigest).toBe('1'.repeat(64))
 
     // The same proposal, the same specification — but the candidate now carries
     // a different sidecar, so it is another object: its own frozen experiment,
@@ -808,8 +811,8 @@ describe('the two-sided orchestrator', () => {
       record.kind === 'experiment_sample' && record.experimentId === second.experimentId)
     expect(records).toHaveLength(4)
     for (const record of records) {
-      expect(record.preparedContentDigest).toBe(digestOf(second.report.frozen.candidate))
-      expect(record.preparedContentDigest).not.toBe(second.report.frozen.candidate.sha256)
+      expect(record.preparedContentDigest).toBe(digestOf(second.report.frozen.candidate!))
+      expect(record.preparedContentDigest).not.toBe(second.report.frozen.candidate!.sha256)
     }
     await rm(w.root, { recursive: true, force: true })
   })

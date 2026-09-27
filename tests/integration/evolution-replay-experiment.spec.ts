@@ -619,7 +619,11 @@ describe('S4-E: evolution_replay evaluates a skill candidate as the two-sided ex
     // stays a record.
     expect(answer).toContain('evolution_replay rejected:')
     expect(answer).toContain(`"agent_preset"`)
-    expect(answer).toContain('this tool evaluates a prepared skill object candidate only')
+    // The two candidate kinds this build evaluates are named, and this is neither:
+    // a preset has no evaluator, so its proposal stays a record.
+    expect(answer).toContain('this tool evaluates a prepared **skill** candidate')
+    expect(answer).toContain('a prepared **capability** candidate')
+    expect(answer).toContain('No other target type has an evaluator in this build')
     expect((await f.evolution.get(PRESET_PROPOSAL)).status).toBe('proposed')
     // Nothing ran and nothing was written: no run, no spawn, no ledger line, no
     // experiment and no report.

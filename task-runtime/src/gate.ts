@@ -110,6 +110,19 @@ import type { ExecutionPhase } from '@dangosys/dsh-singularity-task'
  * second door into a stopped tree's work. Denying it here would leave K4's one
  * entry shut.
  *
+ * `task_recover` (A6) belongs here for the same reason, one step further: it is
+ * the entry that opens a failed tree's **new attempt**, and the session that may
+ * call it is the supervisor the hand-off was delegated to — a coordination
+ * session with no run of its own, so no phase ever gates it in the first place,
+ * and a tree that has stopped is exactly the tree a recovery exists for. What
+ * makes it safe in this list is what it is not: it is never on a root's
+ * allow-list (no root prompt names it), the caller is checked against the
+ * deployment's own delegation ledger, the capability a recovery depends on must
+ * already be approved and applied, and the runtime re-checks the store's facts,
+ * its ceilings and the attempt's idempotency before any run is written. It is
+ * not a second way into a stopped run's work: the old run stays terminal, and
+ * the one thing it creates is a *new* run the ordinary chain drives.
+ *
  * The two question tools (A4 §F.1) are coordination in the plainest sense: a
  * child asking its direct parent is the one effect still admitted while its own
  * run is blocked on a question, and a parent answering a child is the one effect
@@ -127,6 +140,7 @@ export const COORDINATION_ALLOWED: ReadonlySet<string> = new Set([
   'task_review_agent',
   'task_diagnose',
   'task_budget_extend',
+  'task_recover',
   'read',
   'read_image',
   'glob',

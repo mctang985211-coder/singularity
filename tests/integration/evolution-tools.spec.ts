@@ -249,7 +249,7 @@ it('resolves the interaction services the hitl tools ask through, from the same 
   }
 })
 
-it('refuses a non-skill candidate through the plugin: no candidate, no sandbox, no ledger write', async () => {
+it('refuses a capability mutation of the shape this build does not write, at the call: no candidate, no sandbox', async () => {
   const { tools, home } = await mountAgent()
   try {
     const propose = tools.get('evolution_propose')!
@@ -268,15 +268,17 @@ it('refuses a non-skill candidate through the plugin: no candidate, no sandbox, 
       sourceRefs: ['diagnosis:d1'],
     }, exec('root-1'))
 
-    // The model's own entry refuses the lifecycle this build no longer has: a
-    // capability suggestion stays a proposal, and nothing is written.
-    const candidateOut = await candidate.execute({
+    // A6 admits a capability candidate through the model surface — and only the
+    // one whole row its own lifecycle records: the schema names the two shapes
+    // ({ name, content } for a skill, { rows, skill? } for a capability), so the
+    // old `{ name, entry }` mutation is refused at the call, before the ledger is
+    // reached, and the proposal stays a suggestion with nothing written beside it.
+    await expect(candidate.execute({
       proposalId: 'p-cap-1',
       versionSet: { capabilityTable: 'config.yml#doc1' },
       mutation: { name: 'research', entry: { preset: 'standard', skills: ['verify'] } },
-    }, exec('root-1'))
-    expect(candidateOut).toContain('evolution_candidate rejected:')
-    expect(candidateOut).toContain('cannot become a candidate in this build')
+    }, exec('root-1'))).rejects.toThrow(/mutation.*must match exactly one oneOf branch/)
+    expect((await list.execute({}, exec('root-1'))) as string).toContain('p-cap-1 [proposed]')
 
     const prepared = await prepare.execute({ proposalId: 'p-cap-1' }, exec('root-1'))
     expect(prepared).toContain('evolution_prepare rejected:')

@@ -76,10 +76,12 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto'
-import { mkdir, open, readdir, rename, rm } from 'node:fs/promises'
+import { mkdir, open, readdir, rename, rm, rmdir } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import type { CommitDirection, CommitIntentView, EvolutionRecord } from './evolution.ts'
+import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
+import type { CommitCapability, CommitDirection, CommitIntentView, EvolutionRecord } from './evolution.ts'
+import { capabilityRowDigest } from './capability-candidate.ts'
 
 /** Lowercase SHA-256 hex over exact bytes — the content identity primitive the commit path reuses (P2/P3). */
 export function sha256Hex(bytes: Buffer): string {
@@ -111,16 +113,24 @@ export type CommitStage = 'intent-recorded' | 'write-staged' | 'write-renamed' |
  * execution sidecar — and the files are ordered: the `SKILL.md` first, so a
  * recovery that has to write the pair again writes the pair in the order a
  * loader would read it.
+ *
+ * `null` on either side is a *state*, not a missing value (A6): a file whose
+ * `baselineSha256` is `null` must not exist before this commit (it is a file the
+ * candidate creates), and a file whose `contentSha256` is `null` must not exist
+ * after it (it is a file the rollback removes, and there is nothing to write
+ * again, so it names no source). One direction may not remove a file the other
+ * created and restore it in the same commit: the two states are the two ends of
+ * one candidate version.
  */
 export interface CommitFile {
-  /** Absolute production path this commit replaces. */
+  /** Absolute production path this commit replaces, creates or removes. */
   readonly target: string
-  /** The digest this file must hold before the write — the state a reconciliation redoes the write from. */
-  readonly baselineSha256: string
-  /** The digest this file must hold after the write; always the digest of the bytes being committed. */
-  readonly contentSha256: string
-  /** The recoverable bytes for this file, relative to the ledger root. */
-  readonly source: string
+  /** The digest this file must hold before the write — the state a reconciliation redoes the write from; `null` when it must not exist. */
+  readonly baselineSha256: string | null
+  /** The digest this file must hold after the write; always the digest of the bytes being committed, `null` when the commit removes it. */
+  readonly contentSha256: string | null
+  /** The recoverable bytes for this file, relative to the ledger root; absent when this direction removes the file. */
+  readonly source?: string
 }
 
 /** One commit's request: what the intent line will say, and what the writes will do. */
@@ -129,10 +139,37 @@ export interface CommitRequest {
   readonly direction: CommitDirection
   /** The human grant behind this commit, recorded on the intent and on the completion that closes it. */
   readonly approvalRef: string
-  /** The object's fixed files, in commit order (`SKILL.md` first, the sidecar second when there is one); one or two entries. */
+  /** The object's fixed files, in commit order (`SKILL.md` first, the sidecar second when there is one); empty for a row-only capability commit. */
   readonly files: readonly CommitFile[]
+  /** The one capability row this commit also moves (A6); absent for a skill commit. */
+  readonly capability?: CommitCapability
   /** The actor the completion record is written for. */
   readonly actor: string
+}
+
+/**
+ * The capability-registry half of a commit host (A6): required exactly when a
+ * request carries a capability row, absent for a skill commit. It is a seam of
+ * its own — a nested object rather than two more members — so a host that knows
+ * nothing about capability rows cannot be asked to move one by accident, and the
+ * commit path refuses a row it cannot read or write by name.
+ */
+export interface CommitCapabilityHost {
+  /**
+   * The row the registry holds for `name` right now, or `null` when it holds
+   * none. The read both the pre-write baseline check and a classification are
+   * made from, so "the registry still reads as the intent recorded" is one
+   * question with one answer.
+   */
+  read(name: string): Promise<CapabilityConfig | null>
+  /**
+   * Install (`entry`) or remove (`null`) one capability row. Called inside the
+   * commit, after the skill files are written (apply) or before they are removed
+   * (rollback), and always before the completion is recorded: `intent` is the
+   * open line that owns this write, so an entry that must run its own admission
+   * pre-check can exempt this commit's own in-flight file set by name.
+   */
+  apply(intent: CommitIntentView, entry: CapabilityConfig | null): Promise<void>
 }
 
 /**
@@ -140,9 +177,10 @@ export interface CommitRequest {
  * a target and a source resolve against, the service's own verified reads (P2
  * for a candidate, the champion snapshot read, the walk-verified production
  * read), the append funnel every ledger line goes through, the whole-object
- * verification that closes the window before the completion, and the probe seam.
- * Passing these in — rather than reaching for the service — is what keeps this
- * module free of a runtime dependency on the service that owns the lifecycle.
+ * verification that closes the window before the completion, the capability-row
+ * seam, and the probe seam. Passing these in — rather than reaching for the
+ * service — is what keeps this module free of a runtime dependency on the
+ * service that owns the lifecycle.
  */
 export interface CommitHost {
   /** Absolute ledger root: `source` resolves against it and is confined to it. */
@@ -184,17 +222,22 @@ export interface CommitHost {
    */
   objectWriteRefusal(intent: CommitIntentView): Promise<string | null>
   /**
-   * Called after every file has been written and read back, and before the
-   * completion is recorded — in a fresh commit and in both reconciliation
-   * branches alike. The production directory must be loadable as one complete
-   * object and must carry the identity this direction promised; a throw refuses
-   * the commit by name and the intent stays open. This is what makes the
-   * completion claim more than "two files hold two digests": it claims the pair
-   * *is* an object a loader accepts, with exactly the declaration identity the
-   * proposal recorded for it, so the registry's view of the skill is already the
-   * new one when the completion lands. It never writes.
+   * Called after every file has been written and read back (and, for a
+   * capability commit, after the row is in place) and before the completion is
+   * recorded — in a fresh commit and in every reconciliation branch alike. The
+   * production directory must be loadable as one complete object and must carry
+   * the identity this direction promised, a file this direction removes must be
+   * gone, and the registry must read as the row this direction installed; a
+   * throw refuses the commit by name and the intent stays open. This is what
+   * makes the completion claim more than "two files hold two digests": it claims
+   * the pair *is* an object a loader accepts, with exactly the declaration
+   * identity the proposal recorded for it, and that the capability registry
+   * already reads the row this commit installed — so by the time the completion
+   * lands, the deployment's own registry view is the new one. It never writes.
    */
   verifyCommitted(intent: CommitIntentView): Promise<void>
+  /** The capability-registry seam; present exactly on a host that can move a row (A6). */
+  readonly capability?: CommitCapabilityHost
   /** The typed test seam ({@link Config.commitProbe}); a production deployment never sets one. */
   probe(stage: CommitStage, target?: string): void
 }
@@ -318,14 +361,15 @@ async function sweepStaging(directory: string, target: string): Promise<void> {
  * Persist one commit and carry it out, in the order the recovery rule fixes:
  * every recoverable source is verified and made durable, the directory the
  * commit would write is checked to be the object's own files and nothing else,
- * then the intent line is appended, then the atomic production writes with their
+ * then the intent line is appended, then the production writes with their
  * read-back verification, then the whole-object verification, then the
  * completion that closes the intent. `bytes` are the already-verified bytes the
  * caller read through its own identity checks (P2 for a candidate, the champion
  * digests for a rollback), one entry per file of the request and in the same
  * order; each digest must be that file's `contentSha256`, so what the intent
  * promises and what the writes install cannot disagree — for either file of a
- * two-file object.
+ * two-file object. A file the direction removes has no bytes to write again and
+ * takes `undefined` in that slot.
  *
  * The sources come first because the intent *names* them as the bytes a recovery
  * would write again — a line naming a source that no longer holds those bytes is
@@ -342,19 +386,33 @@ async function sweepStaging(directory: string, target: string): Promise<void> {
  * instead of a commit that lands and then discovers the directory was not the
  * object it committed. Only then is the intent appended — through the service's
  * own durable append, so the line is on disk before production moves — and only
- * after every rename has been read back and verified, and the whole object has
- * passed {@link CommitHost.verifyCommitted}, is the completion appended.
+ * after every write has been read back and verified, the capability row is in
+ * place (a capability commit, A6) and the whole object has passed
+ * {@link CommitHost.verifyCommitted}, is the completion appended.
+ *
+ * The order of the two halves is the direction's, and it is the one that leaves
+ * nothing usable half-made: an **apply** writes the files first and moves the
+ * registry row last, so a provider whose files were written but whose row never
+ * landed is granted by nothing; a **rollback** moves the row first (reverting or
+ * removing the grant) and removes the files after it, so a skill whose row is
+ * already gone is unreachable while its files are still being removed. Either
+ * interruption leaves the intent open and the deployment's registry untouched by
+ * any later stage — reconciliation settles it, never a second path.
  *
  * A throw from any stage leaves the intent open and is the caller's to report:
  * the intent is the record of what was underway, and reconciliation — not a
  * second guess — is what settles it.
  */
-export async function commitIntent(host: CommitHost, request: CommitRequest, bytes: readonly Buffer[]): Promise<void> {
-  if (request.files.length === 0) {
+export async function commitIntent(
+  host: CommitHost,
+  request: CommitRequest,
+  bytes: readonly (Buffer | undefined)[],
+): Promise<void> {
+  if (request.files.length === 0 && request.capability === undefined) {
     throw new Error(
-      `evolution: the ${request.direction} for proposal "${request.proposalId}" names no file to commit — a commit replaces the ` +
-      'fixed file set of one skill object (SKILL.md, and SKILL.contract.json when the object carries an execution sidecar), so a ' +
-      'request with nothing in it records nothing and writes nothing',
+      `evolution: the ${request.direction} for proposal "${request.proposalId}" names nothing to commit — a commit replaces the ` +
+      'fixed file set of one skill object (SKILL.md, and SKILL.contract.json when the object carries an execution sidecar) and/or ' +
+      'moves exactly one capability row, so a request with nothing in it records nothing and writes nothing',
     )
   }
   if (bytes.length !== request.files.length) {
@@ -365,11 +423,21 @@ export async function commitIntent(host: CommitHost, request: CommitRequest, byt
     )
   }
   request.files.forEach((file, index) => {
-    const digest = sha256Hex(bytes[index]!)
+    const provided = bytes[index]
+    if (file.contentSha256 === null) {
+      if (provided !== undefined) {
+        throw new Error(
+          `evolution: the ${request.direction} for proposal "${request.proposalId}" carries bytes for "${file.target}" while its intent ` +
+          'records that this direction removes the file — a removal writes nothing, so the bytes and the record disagree: nothing was written',
+        )
+      }
+      return
+    }
+    const digest = provided === undefined ? undefined : sha256Hex(provided)
     if (digest !== file.contentSha256) {
       throw new Error(
-        `evolution: the bytes this ${request.direction} would write to "${file.target}" hash to sha256 ${digest}, not the content ` +
-        `identity ${file.contentSha256} its commit records — nothing was written`,
+        `evolution: the bytes this ${request.direction} would write to "${file.target}" hash to sha256 ${digest ?? '(none provided)'}, ` +
+        `not the content identity ${file.contentSha256} its commit records — nothing was written`,
       )
     }
   })
@@ -378,10 +446,11 @@ export async function commitIntent(host: CommitHost, request: CommitRequest, byt
   // they build the request, but this function is exported — so the check lives
   // where the write happens, not only where the request is built.
   const targets = request.files.map(file => productionRelative(host, file.target))
-  const sources = request.files.map(file => ledgerRelative(host, request, file))
+  const sources = request.files.map(file => (file.source === undefined ? undefined : ledgerRelative(host, request, file.source)))
   for (const file of request.files) {
+    if (file.source === undefined) continue
     try {
-      await host.readSource(file.source, file.contentSha256)
+      await host.readSource(file.source, file.contentSha256!)
     } catch (error) {
       throw new Error(
         `evolution: the recoverable source "${file.source}" of the ${request.direction} for proposal "${request.proposalId}" does not ` +
@@ -390,8 +459,17 @@ export async function commitIntent(host: CommitHost, request: CommitRequest, byt
       )
     }
   }
+  // The same rule for the row's own recoverable bytes: a capability intent that
+  // names a source must be able to read the row it installs back from it.
+  if (request.capability !== undefined && request.capability.source !== undefined) {
+    await assertCapabilitySource(host, request, request.capability)
+  }
   for (const [index, file] of request.files.entries()) {
+    if (file.source === undefined) continue
     await syncSource(host, request, file, sources[index]!)
+  }
+  if (request.capability !== undefined && request.capability.source !== undefined) {
+    await syncSourceRelative(host, request, request.capability.source, `capability row "${request.capability.name}"`)
   }
   const intent: CommitIntentView = {
     intentId: `${request.proposalId}/${request.direction}`,
@@ -399,6 +477,7 @@ export async function commitIntent(host: CommitHost, request: CommitRequest, byt
     direction: request.direction,
     approvalRef: request.approvalRef,
     files: request.files.map(file => ({ ...file })),
+    ...(request.capability === undefined ? {} : { capability: { ...request.capability } }),
     actor: request.actor,
     at: new Date().toISOString(),
   }
@@ -419,38 +498,42 @@ export async function commitIntent(host: CommitHost, request: CommitRequest, byt
   }
   await host.append({ formatVersion: 4, kind: 'commit_intent', ...intent })
   host.probe('intent-recorded')
-  await installAndVerify(host, intent, bytes, targets)
+  await installDirection(host, intent, bytes, targets)
   await host.verifyCommitted(intent)
   host.probe('commit-verified')
   await appendCompletion(host, intent)
 }
 
 /**
- * Settle one open intent against the filesystem, or stop by name: re-read every
- * one of the intent's own recoverable sources and verify it still hashes to what
+ * Settle one open intent against the filesystem and the registry, or stop by
+ * name: re-read every one of the intent's own recoverable sources (every file's,
+ * and the capability row's when it has one) and verify it still hashes to what
  * the intent committed; read every production file again and classify it as the
- * pre-commit state (`old`), the committed content (`new`), absent or something
- * else — a source that is gone or changed, or a file that is missing or foreign,
- * stops by name right there, in that file's own words — and then ask
+ * pre-commit state, the committed content, absent or something else; read the
+ * registry row and classify it the same three ways — a source that is gone or
+ * changed, or a file or row that is missing or foreign, stops by name right
+ * there, in its own words — and then ask
  * {@link CommitHost.objectWriteRefusal} what the *directory* holds beyond the
  * files the intent names. If nothing refused, then
  *
- * - every file still holds its `baselineSha256` — the commit never landed — so
- *   the same bytes are written atomically, in intent order, and the completion
- *   recorded (`completed-redone`);
- * - the files are mixed (a process that died between the two renames): the files
- *   still holding their baseline are written, and the files already carrying the
- *   committed content have their own staging leftovers swept and their
- *   directories fsynced, so the earlier rename's durability is re-established
- *   too; the completion is recorded only once the whole object verifies
+ * - nothing has moved yet (every file still holds its baseline, the row its
+ *   baseline): the same operation is carried out — an apply writes the files and
+ *   then installs the row, a rollback reverts the row and then removes the files
+ *   — and the completion recorded (`completed-redone`);
+ * - the halves are mixed (a process that died between them): the side that did
+ *   not land is carried out, and the side that did has its durability
+ *   re-established; the completion is recorded only once
+ *   {@link CommitHost.verifyCommitted} confirms the whole state
  *   (`completed-redone`);
- * - every file already holds `contentSha256` — the writes landed but their
+ * - everything already holds `contentSha256` — the writes landed but their
  *   completion did not — so each target's staging leftovers are swept, each
  *   production directory is fsynced, and then only the completion is recorded,
- *   with production's bytes left exactly as they are (`completed-written`);
- * - a missing file, a file holding neither digest, or a source that is gone or
- *   changed — a `blocked` outcome naming the intent, the file and what was
- *   actually found, with nothing written and the intent left open;
+ *   with production's bytes and the registry's row left exactly as they are
+ *   (`completed-written`);
+ * - a file that is missing where the intent expects a state, a file or row
+ *   holding neither digest, or a source that is gone or changed — a `blocked`
+ *   outcome naming the intent, the target and what was actually found, with
+ *   nothing written and the intent left open;
  * - the directory holding an entry the intent does not name — the object check
  *   above — a `blocked` outcome naming the entry, with nothing written: a
  *   recovery settles an intent over the object it commits, never over a
@@ -458,24 +541,25 @@ export async function commitIntent(host: CommitHost, request: CommitRequest, byt
  *
  * The `completed-written` branch still fsyncs the production directories, even
  * though it writes no bytes: the completion is the claim that production holds
- * the committed content *durably*, and a rename is durable only once the
- * directory that holds it is fsynced. A rename whose directory fsync failed when
- * its commit ran (or a process that died before it) left production on the new
- * bytes with that durability unestablished — so recording the completion without
- * re-establishing it would be exactly the "completion recorded for a write that
- * may be lost" state the commit order exists to prevent, and nothing would ever
- * reconcile it again, because the completion closes the intent. The same branch
- * sweeps each target's own staging leftovers, so the invariant is total: settling
- * an intent leaves no staging file of that object behind, whichever branch
- * settled it. The deliberate consequence: on a filesystem whose production
- * directory cannot be fsynced, a recovery stops by name — the completion is not
- * recorded and the intent stays open — instead of recording a completion it
- * cannot stand behind.
+ * the committed content *durably*, and a rename (or a removal) is durable only
+ * once the directory that holds it is fsynced. A rename whose directory fsync
+ * failed when its commit ran (or a process that died before it) left production
+ * on the new bytes with that durability unestablished — so recording the
+ * completion without re-establishing it would be exactly the "completion
+ * recorded for a write that may be lost" state the commit order exists to
+ * prevent, and nothing would ever reconcile it again, because the completion
+ * closes the intent. The same branch sweeps each target's own staging leftovers,
+ * so the invariant is total: settling an intent leaves no staging file of that
+ * object behind, whichever branch settled it. The deliberate consequence: on a
+ * filesystem whose production directory cannot be fsynced, a recovery stops by
+ * name — the completion is not recorded and the intent stays open — instead of
+ * recording a completion it cannot stand behind.
  *
  * Every branch that records a completion calls
- * {@link CommitHost.verifyCommitted} first: a mixed pair a recovery finished
- * must load as one object carrying this direction's identity before the ledger
- * may say the commit is settled, exactly as a fresh commit must.
+ * {@link CommitHost.verifyCommitted} first: a state a recovery finished must load
+ * as one object carrying this direction's identity, and read as the row this
+ * direction installed, before the ledger may say the commit is settled, exactly
+ * as a fresh commit must.
  *
  * It never throws for a blocked commit: one batch of reconciliations reports
  * every intent it could not settle. A real I/O failure of a redo write, of a
@@ -496,10 +580,14 @@ export async function reconcileIntent(host: CommitHost, intent: CommitIntentView
     ...(detail === undefined ? {} : { detail }),
   })
 
-  const bytes: Buffer[] = []
+  const bytes: (Buffer | undefined)[] = []
   for (const file of intent.files) {
+    if (file.source === undefined) {
+      bytes.push(undefined)
+      continue
+    }
     try {
-      bytes.push(await host.readSource(file.source, file.contentSha256))
+      bytes.push(await host.readSource(file.source, file.contentSha256!))
     } catch (error) {
       return outcome(
         'blocked',
@@ -509,9 +597,52 @@ export async function reconcileIntent(host: CommitHost, intent: CommitIntentView
       )
     }
   }
+  // The capability row's own recoverable bytes, and the row the registry holds
+  // right now — the two reads its classification is made from.
+  let rowEntry: CapabilityConfig | null = null
+  if (intent.capability !== undefined && intent.capability.contentSha256 !== null) {
+    try {
+      rowEntry = await committedRow(host, intent.capability)
+    } catch (error) {
+      return outcome(
+        'blocked',
+        `evolution: the capability row "${intent.capability.name}" of commit intent "${intent.intentId}" cannot be re-read from its ` +
+        `recoverable bytes (${error instanceof Error ? error.message : String(error)}) — the row cannot be re-verified, so the commit ` +
+        'stops by name and the intent stays open; nothing was written',
+      )
+    }
+  }
+  let rowState: 'baseline' | 'content' | 'other' | 'unreadable' = intent.capability === undefined ? 'content' : 'baseline'
+  if (intent.capability !== undefined) {
+    const seen = await currentCapabilityRow(host, intent)
+    if (seen === undefined) {
+      rowState = 'unreadable'
+    } else {
+      rowState = seen.digest === intent.capability.baselineSha256
+        ? 'baseline'
+        : seen.digest === intent.capability.contentSha256 ? 'content' : 'other'
+    }
+  }
+  if (rowState === 'unreadable') {
+    return outcome(
+      'blocked',
+      `evolution: the capability registry cannot be read for the row "${intent.capability!.name}" of commit intent "${intent.intentId}" — ` +
+      'whether the row the intent records is in place cannot be established, so the commit stops by name and the intent stays open; ' +
+      'nothing was written',
+    )
+  }
+  if (rowState === 'other') {
+    return outcome(
+      'blocked',
+      `evolution: the capability registry row "${intent.capability!.name}" of commit intent "${intent.intentId}" reads as neither the row ` +
+      `recorded before the commit (sha256 ${intent.capability!.baselineSha256 ?? 'absent'}) nor the row it committed ` +
+      `(sha256 ${intent.capability!.contentSha256 ?? 'absent'}) — a third party changed it, so the commit stops by name and the intent ` +
+      'stays open; nothing is overwritten and the completion is never recorded',
+    )
+  }
 
   const relatives: string[] = []
-  const states: ('old' | 'new' | 'missing' | 'other')[] = []
+  const states: ('baseline' | 'content' | 'other')[] = []
   const digests: string[] = []
   for (const file of intent.files) {
     let relative: string
@@ -528,33 +659,23 @@ export async function reconcileIntent(host: CommitHost, intent: CommitIntentView
       )
     }
     relatives.push(relative)
-    digests.push(current?.sha256 ?? 'missing')
-    states.push(current === null
-      ? 'missing'
-      : current.sha256 === file.baselineSha256
-        ? 'old'
-        : current.sha256 === file.contentSha256 ? 'new' : 'other')
+    digests.push(current?.sha256 ?? 'absent')
+    const digest = current?.sha256 ?? null
+    states.push(digest === file.baselineSha256
+      ? 'baseline'
+      : digest === file.contentSha256 ? 'content' : 'other')
   }
 
-  const absent = intent.files.findIndex((_file, index) => states[index] === 'missing')
-  if (absent >= 0) {
-    const file = intent.files[absent]!
-    return outcome(
-      'blocked',
-      `evolution: the production file "${file.target}" of commit intent "${intent.intentId}" is missing — it holds neither the state ` +
-      `before the commit (sha256 ${file.baselineSha256}) nor the content it committed (sha256 ${file.contentSha256}); a third party ` +
-      'removed it, so the commit stops by name and the intent stays open (nothing is written, nothing is recreated)',
-    )
-  }
   const foreign = intent.files.findIndex((_file, index) => states[index] === 'other')
   if (foreign >= 0) {
     const file = intent.files[foreign]!
+    const absent = digests[foreign] === 'absent'
     return outcome(
       'blocked',
-      `evolution: the production file "${file.target}" of commit intent "${intent.intentId}" holds sha256 ${digests[foreign]}, which is ` +
-      `neither the state before the commit (sha256 ${file.baselineSha256}) nor the content it committed ` +
-      `(sha256 ${file.contentSha256}) — a third party changed it, so the commit stops by name and the intent stays open; nothing is ` +
-      'overwritten and the completion is never recorded',
+      `evolution: the production file "${file.target}" of commit intent "${intent.intentId}" ${absent ? 'is missing' : `holds sha256 ${digests[foreign]}`} — it holds ` +
+      `neither the state before the commit (${file.baselineSha256 === null ? 'absent' : `sha256 ${file.baselineSha256}`}) nor the state it committed ` +
+      `(${file.contentSha256 === null ? 'absent' : `sha256 ${file.contentSha256}`}); a third party ${absent ? 'removed' : 'changed'} it, so the commit stops by name and ` +
+      `the intent stays open; nothing is ${absent ? 'recreated' : 'overwritten'} and the completion is never recorded`,
     )
   }
 
@@ -568,64 +689,71 @@ export async function reconcileIntent(host: CommitHost, intent: CommitIntentView
   // The per-file classification above stays first, so a file a third party
   // changed or removed is still refused in that file's own words; this is what
   // covers every entry the intent does not name.
-  const refusal = await host.objectWriteRefusal(intent)
-  if (refusal !== null) {
-    return outcome(
-      'blocked',
-      `evolution: the ${intent.direction} of proposal "${intent.proposalId}" cannot write the skill object ` +
-      `"${dirname(intent.files[0]!.target)}" of commit intent "${intent.intentId}" — ${refusal}; a commit replaces one complete object ` +
-      'and nothing beside it, so nothing is written and the intent stays open until a human settles what the directory holds',
-    )
+  if (intent.files.length > 0) {
+    const refusal = await host.objectWriteRefusal(intent)
+    if (refusal !== null) {
+      return outcome(
+        'blocked',
+        `evolution: the ${intent.direction} of proposal "${intent.proposalId}" cannot write the skill object ` +
+        `"${dirname(intent.files[0]!.target)}" of commit intent "${intent.intentId}" — ${refusal}; a commit replaces one complete object ` +
+        'and nothing beside it, so nothing is written and the intent stays open until a human settles what the directory holds',
+      )
+    }
   }
 
-  if (states.every(state => state === 'new')) {
-    // This branch writes no bytes, but it still leaves no trace of its own
-    // targets: the staging leftovers a killed attempt left beside them are swept
-    // (the same prefixes, the same directories, nothing else touched), then the
-    // directories are fsynced — which is what makes the earlier renames durable
-    // *and* what makes the removals durable — and only then is the completion
-    // recorded. The sweep comes first on purpose: a settlement that cannot sweep
-    // stops by name while the intent is still open, so a later reconciliation
-    // retries it, rather than recording a completion over a leftover nothing is
-    // looking at any more.
-    for (const file of intent.files) {
-      await sweepStaging(dirname(file.target), file.target)
+  const settled = states.every(state => state === 'content') && rowState === 'content'
+  if (!settled) {
+    // The side that did not land is carried out in the direction's own order —
+    // an apply writes files first and installs the row last, a rollback reverts
+    // the row first and removes the files after it — so an interruption at any
+    // point of the redo leaves the provider unreachable, never half-granted.
+    const writeFiles = async (): Promise<void> => {
+      for (const [index, file] of intent.files.entries()) {
+        if (states[index] === 'content') continue
+        await installFile(host, intent, file, relatives[index]!, bytes[index])
+      }
     }
+    if (intent.direction === 'apply') {
+      await writeFiles()
+      if (intent.capability !== undefined && rowState !== 'content') await installCapability(host, intent, rowEntry)
+    } else {
+      if (intent.capability !== undefined && rowState !== 'content') await installCapability(host, intent, rowEntry)
+      await writeFiles()
+    }
+    // The side that already landed has its durability re-established (the
+    // removal's directory fsync, the rename's sweep and fsync) so the completion
+    // is never recorded over a write that may be lost.
     for (const file of intent.files) {
+      if (file.contentSha256 === null) continue
+      await sweepStaging(dirname(file.target), file.target)
       await syncTargetDirectory(host, intent, file.target)
     }
     await host.verifyCommitted(intent)
     host.probe('commit-verified')
     await appendCompletion(host, intent)
-    return outcome('completed-written')
+    return outcome('completed-redone')
   }
 
-  // Every file still holds its baseline, or the pair is mixed because the process
-  // died between the two renames. The files still holding their baseline are
-  // written in intent order; the ones already carrying the content have their
-  // staging swept and their directory fsynced (their rename may not be durable
-  // yet). The completion is recorded only after the whole object verifies.
-  for (const [index, file] of intent.files.entries()) {
-    if (states[index] === 'old') {
-      await writeFileAtomic(file.target, bytes[index]!, () => host.probe('write-staged', file.target))
-      const readback = await host.readProduction(relatives[index]!)
-      if (readback === null || readback.sha256 !== file.contentSha256) {
-        throw new Error(
-          `evolution: the production file "${file.target}" does not hold the committed content after the atomic replace ` +
-          `(sha256 ${readback?.sha256 ?? 'missing'} != ${file.contentSha256}) — the intent stays open and a reconciliation reports what ` +
-          'production actually carries by name',
-        )
-      }
-      host.probe('write-renamed', file.target)
-      continue
-    }
+  // This branch writes no bytes, but it still leaves no trace of its own
+  // targets: the staging leftovers a killed attempt left beside them are swept
+  // (the same prefixes, the same directories, nothing else touched), then the
+  // directories are fsynced — which is what makes the earlier renames durable
+  // *and* what makes the removals durable — and only then is the completion
+  // recorded. The sweep comes first on purpose: a settlement that cannot sweep
+  // stops by name while the intent is still open, so a later reconciliation
+  // retries it, rather than recording a completion over a leftover nothing is
+  // looking at any more.
+  for (const file of intent.files) {
+    if (file.contentSha256 === null) continue
     await sweepStaging(dirname(file.target), file.target)
+  }
+  for (const file of intent.files) {
     await syncTargetDirectory(host, intent, file.target)
   }
   await host.verifyCommitted(intent)
   host.probe('commit-verified')
   await appendCompletion(host, intent)
-  return outcome('completed-redone')
+  return outcome('completed-written')
 }
 
 /**
@@ -663,43 +791,248 @@ async function syncTargetDirectory(host: CommitHost, intent: CommitIntentView, t
 }
 
 /**
- * The write half of one commit, shared by a fresh commit and a redo: for every
- * file in intent order, atomic replace, read back, verify the target now carries
- * exactly the committed content, and only then report the rename stage.
- * `relativeTargets` are the targets' paths under the skill root, already
- * confined by the caller (a target that escapes the root is refused before this
- * runs, so nothing is ever staged outside it). The read-back is not a formality
- * — it is what makes "the rename happened" and "production carries this content"
- * the same fact, so a completion is never recorded over bytes the commit did not
- * install.
+ * Carry out one commit — a fresh one, or the half a redo found missing — in the
+ * direction's own order (see {@link commitIntent}): the **apply** direction
+ * writes the files and installs the capability row after them; the **rollback**
+ * direction moves the row first and removes or restores the files after it. The
+ * order is what makes any interruption leave nothing usable half-made: a
+ * provider whose files exist but whose row never landed is granted by nothing,
+ * and a skill whose row is already gone is unreachable while its files are still
+ * being removed.
+ *
+ * `relativeTargets` are the targets' paths under the skill root, already confined
+ * by the caller. `bytes` may carry an entry per file — `undefined` exactly for a
+ * file this direction removes, which is written as a removal rather than a
+ * rename.
  */
-async function installAndVerify(
+async function installDirection(
   host: CommitHost,
   intent: CommitIntentView,
-  bytes: readonly Buffer[],
+  bytes: readonly (Buffer | undefined)[],
   relativeTargets: readonly string[],
 ): Promise<void> {
-  for (const [index, file] of intent.files.entries()) {
-    await writeFileAtomic(file.target, bytes[index]!, () => host.probe('write-staged', file.target))
-    const readback = await host.readProduction(relativeTargets[index]!)
-    if (readback === null || readback.sha256 !== file.contentSha256) {
-      throw new Error(
-        `evolution: the production file "${file.target}" does not hold the committed content after the atomic replace ` +
-        `(sha256 ${readback?.sha256 ?? 'missing'} != ${file.contentSha256}) — the intent stays open and a reconciliation reports what ` +
-        'production actually carries by name',
-      )
+  const files = async (): Promise<void> => {
+    for (const [index, file] of intent.files.entries()) {
+      await installFile(host, intent, file, relativeTargets[index]!, bytes[index])
     }
-    host.probe('write-renamed', file.target)
+  }
+  const row = async (): Promise<void> => {
+    if (intent.capability === undefined) return
+    const entry = intent.capability.contentSha256 === null ? null : await committedRow(host, intent.capability)
+    await installCapability(host, intent, entry)
+  }
+  if (intent.direction === 'apply') {
+    await files()
+    await row()
+    return
+  }
+  await row()
+  await files()
+}
+
+/**
+ * One file of one commit: an atomic replace and its read-back when the direction
+ * writes it, a removal and its read-back when the direction ends without it. The
+ * read-back is not a formality — it is what makes "the write happened" and
+ * "production carries this state" the same fact, so a completion is never
+ * recorded over a state the commit did not install.
+ */
+async function installFile(
+  host: CommitHost,
+  intent: CommitIntentView,
+  file: CommitFile,
+  relativeTarget: string,
+  bytes: Buffer | undefined,
+): Promise<void> {
+  if (file.contentSha256 === null) {
+    await removeFile(host, intent, file.target)
+    return
+  }
+  if (bytes === undefined) {
+    throw new Error(
+      `evolution: the ${intent.direction} of proposal "${intent.proposalId}" reaches "${file.target}" with no bytes to install while its ` +
+      'intent records content — nothing was written',
+    )
+  }
+  await writeFileAtomic(file.target, bytes, () => host.probe('write-staged', file.target))
+  const readback = await host.readProduction(relativeTarget)
+  if (readback === null || readback.sha256 !== file.contentSha256) {
+    throw new Error(
+      `evolution: the production file "${file.target}" does not hold the committed content after the atomic replace ` +
+      `(sha256 ${readback?.sha256 ?? 'missing'} != ${file.contentSha256}) — the intent stays open and a reconciliation reports what ` +
+      'production actually carries by name',
+    )
+  }
+  host.probe('write-renamed', file.target)
+}
+
+/**
+ * Remove one production file this direction ends without — only ever a file the
+ * candidate itself created, because a file that existed before it is *replaced*
+ * by the apply and *restored* by the rollback, never deleted — together with the
+ * directory the candidate created for it when that directory is now empty: the
+ * baseline recorded nothing there, so production is left exactly as the baseline
+ * described it (a fresh skill object is a directory that does not exist). The
+ * directory fsync that follows is the removal's durability, and it lands on the
+ * skill root when the directory itself went with the file.
+ */
+async function removeFile(host: CommitHost, intent: CommitIntentView, target: string): Promise<void> {
+  const directory = dirname(target)
+  try {
+    await rm(target, { force: true })
+  } catch (error) {
+    throw new Error(
+      `evolution: the production file "${target}" could not be removed for the ${intent.direction} of commit intent ` +
+      `"${intent.intentId}" (${error instanceof Error ? error.message : String(error)}) — the intent stays open and the state must not be ` +
+      'treated as settled',
+    )
+  }
+  let directoryGone = false
+  if (directory !== host.skillRoot) {
+    directoryGone = await rmdir(directory).then(() => true, () => false)
+  }
+  try {
+    await syncDirectory(directoryGone ? dirname(directory) : directory)
+  } catch (error) {
+    throw new Error(
+      `evolution: the directory "${directoryGone ? dirname(directory) : directory}" could not be fsynced after removing "${target}" for the ` +
+      `${intent.direction} of commit intent "${intent.intentId}" (${error instanceof Error ? error.message : String(error)}) — the removal ` +
+      'may not be durable, so the completion is not recorded and the intent stays open',
+    )
+  }
+  const readback = await host.readProduction(productionRelative(host, target))
+  if (readback !== null) {
+    throw new Error(
+      `evolution: the production file "${target}" still holds sha256 ${readback.sha256} after the ${intent.direction} of commit intent ` +
+      `"${intent.intentId}" removed it — the intent stays open and a reconciliation reports what production actually carries by name`,
+    )
+  }
+}
+
+/**
+ * Install (or remove) the one capability row a commit carries, once the registry
+ * still reads as the intent recorded. The baseline check is the registry's own
+ * half of the object check a file commit gets from
+ * {@link CommitHost.objectWriteRefusal}: a row a third party moved between the
+ * decision and this write is refused by name with nothing written, and an intent
+ * whose row already sits at its content state is not written a second time.
+ */
+async function installCapability(host: CommitHost, intent: CommitIntentView, entry: CapabilityConfig | null): Promise<void> {
+  const capability = intent.capability!
+  const seam = host.capability
+  if (seam === undefined) {
+    throw new Error(
+      `evolution: the ${intent.direction} of proposal "${intent.proposalId}" carries capability row "${capability.name}" and this host ` +
+      'offers no registry seam to move it — the row cannot be installed, so the commit stops by name with nothing recorded as applied',
+    )
+  }
+  const seen = await currentCapabilityRow(host, intent)
+  if (seen === undefined) {
+    throw new Error(
+      `evolution: the capability registry cannot be read for the row "${capability.name}" of the ${intent.direction} of proposal ` +
+      `"${intent.proposalId}" — the row this commit would move cannot be compared against the one its intent recorded, so nothing was written`,
+    )
+  }
+  if (seen.digest !== capability.baselineSha256) {
+    throw new Error(
+      `evolution: the capability registry row "${capability.name}" of the ${intent.direction} of proposal "${intent.proposalId}" reads ` +
+      `${seen.digest === null ? 'no row at all' : `as ${seen.digest}`}, not the state before the commit ` +
+      `(${capability.baselineSha256 ?? 'no row'}) — a third party moved it, so nothing was written and no completion is recorded; create a ` +
+      'new candidate from the current registry state and re-evaluate it',
+    )
+  }
+  try {
+    await seam.apply(intent, entry)
+  } catch (error) {
+    throw new Error(
+      `evolution: the capability registry row "${capability.name}" of the ${intent.direction} of proposal "${intent.proposalId}" could not ` +
+      `be written (${error instanceof Error ? error.message : String(error)}) — nothing was recorded as applied and the commit intent stays ` +
+      'open, because the provider this commit installs is not the one the deployment would resolve',
+    )
+  }
+  const after = await currentCapabilityRow(host, intent)
+  if (after === undefined || after.digest !== capability.contentSha256) {
+    throw new Error(
+      `evolution: the capability registry row "${capability.name}" does not read as the row this ${intent.direction} committed after the ` +
+      `write (${after?.digest === undefined || after.digest === null ? 'no row' : after.digest} != ${capability.contentSha256 ?? 'no row'}) — ` +
+      'the completion is not recorded and the intent stays open',
+    )
+  }
+}
+
+/**
+ * The registry row a commit's own recoverable bytes hold, parsed and verified
+ * against the digest the intent recorded. Exported because the capability
+ * table's own text is written from the same read (A6,
+ * `EvolutionService.verifyCommitted`): one parse, one digest check, so the file
+ * and the registry can never disagree about what the commit installed.
+ */
+export async function committedRow(host: CommitHost, capability: CommitIntentView['capability']): Promise<CapabilityConfig> {
+  const source = capability!.source
+  if (source === undefined) {
+    throw new Error(
+      `the capability row "${capability!.name}" is recorded with content ${capability!.contentSha256} and no recoverable source — ` +
+      'the row cannot be read back, and an intent must name the bytes a recovery would write again',
+    )
+  }
+  const bytes = await host.readSource(source, capability!.contentSha256!)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(bytes.toString('utf8'))
+  } catch (error) {
+    throw new Error(
+      `the capability row source "${source}" is not readable JSON (${error instanceof Error ? error.message : String(error)})`,
+    )
+  }
+  const entry = parsed as CapabilityConfig
+  if (capabilityRowDigest(entry) !== capability!.contentSha256) {
+    throw new Error(
+      `the capability row source "${source}" holds a row that hashes to ${capabilityRowDigest(entry)}, not the ${capability!.contentSha256} ` +
+      'its commit recorded — a row whose bytes and identity disagree is not one this commit may install',
+    )
+  }
+  return entry
+}
+
+/** The registry row as it reads now, digested — `{ digest: null }` for a name the registry does not hold, `undefined` when it cannot be read. */
+async function currentCapabilityRow(
+  host: CommitHost,
+  intent: CommitIntentView,
+): Promise<{ digest: string | null } | undefined> {
+  const capability = intent.capability
+  if (capability === undefined) return undefined
+  const seam = host.capability
+  if (seam === undefined) return undefined
+  try {
+    const entry = await seam.read(capability.name)
+    return { digest: entry === null ? null : capabilityRowDigest(entry) }
+  } catch {
+    return undefined
+  }
+}
+
+/** Read and verify a capability row's recoverable bytes before the intent that names them is recorded. */
+async function assertCapabilitySource(host: CommitHost, request: CommitRequest, capability: CommitCapability): Promise<void> {
+  try {
+    await committedRow(host, capability)
+  } catch (error) {
+    throw new Error(
+      `evolution: the recoverable source "${capability.source}" of the capability row "${capability.name}" in the ${request.direction} for ` +
+      `proposal "${request.proposalId}" does not hold the row its commit recorded (${error instanceof Error ? error.message : String(error)}) — ` +
+      'the source an intent names must be re-verifiable before the intent is recorded, so the commit stops by name: no line is recorded and ' +
+      'nothing is written',
+    )
   }
 }
 
 /**
  * Close one intent: the completion line, written for the intent's own grant and
  * its whole file set — its `approvalRef`, every `target` the intent committed in
- * intent order, and its actor, so a completion can never describe a second
- * approval or a second path. The fold refuses a completion with no matching open
- * intent, which is what makes a repeat (a retry, a restart, a double
- * reconciliation) cost nothing: the second line has nothing to close.
+ * intent order (empty for a row-only capability commit, whose row is named by the
+ * intent line directly above it), and its actor, so a completion can never
+ * describe a second approval or a second path. The fold refuses a completion with
+ * no matching open intent, which is what makes a repeat (a retry, a restart, a
+ * double reconciliation) cost nothing: the second line has nothing to close.
  */
 async function appendCompletion(host: CommitHost, intent: CommitIntentView): Promise<void> {
   await host.append({
@@ -741,11 +1074,11 @@ function productionRelative(host: CommitHost, target: string): string {
  * what a reconciliation is allowed to read a source from, and a commit's
  * durability claim covers exactly those files.
  */
-function ledgerRelative(host: CommitHost, request: CommitRequest, file: CommitFile): string {
-  const rel = relative(host.root, resolve(host.root, file.source))
+function ledgerRelative(host: CommitHost, request: CommitRequest, source: string): string {
+  const rel = relative(host.root, resolve(host.root, source))
   if (rel.length === 0 || rel.startsWith('..') || isAbsolute(rel)) {
     throw new Error(
-      `evolution: the recoverable source "${file.source}" of the ${request.direction} for proposal "${request.proposalId}" is not ` +
+      `evolution: the recoverable source "${source}" of the ${request.direction} for proposal "${request.proposalId}" is not ` +
       `inside the ledger root ${host.root} — a commit names the bytes it could write again from under that root and nothing else, so ` +
       'it stops by name before the intent is recorded and nothing is written',
     )
@@ -773,6 +1106,20 @@ function ledgerRelative(host: CommitHost, request: CommitRequest, file: CommitFi
  * prevent.
  */
 async function syncSource(host: CommitHost, request: CommitRequest, file: CommitFile, sourceRelative: string): Promise<void> {
+  await syncSourceRelative(host, request, sourceRelative, `"${file.source}"`)
+}
+
+/**
+ * The same durability rule for any source a commit names — a file's bytes, or
+ * the capability row's bytes — so both halves of a capability commit are durable
+ * before the one line that names them.
+ */
+async function syncSourceRelative(
+  host: CommitHost,
+  request: CommitRequest,
+  sourceRelative: string,
+  label: string,
+): Promise<void> {
   const source = resolve(host.root, sourceRelative)
   let handle: FileHandle | undefined
   try {
@@ -780,7 +1127,7 @@ async function syncSource(host: CommitHost, request: CommitRequest, file: Commit
     await handle.sync()
   } catch (error) {
     throw new Error(
-      `evolution: the recoverable source "${file.source}" of the ${request.direction} for proposal "${request.proposalId}" could not ` +
+      `evolution: the recoverable source ${label} of the ${request.direction} for proposal "${request.proposalId}" could not ` +
       `be fsynced at "${source}" (${error instanceof Error ? error.message : String(error)}) — the source must be durable, bytes and path, ` +
       'before the intent that names it is recorded, so the commit stops by name: no line is recorded and nothing is written',
     )
@@ -792,7 +1139,7 @@ async function syncSource(host: CommitHost, request: CommitRequest, file: Commit
       await syncDirectory(directory)
     } catch (error) {
       throw new Error(
-        `evolution: the directory "${directory}" holding the recoverable source "${file.source}" of the ${request.direction} for ` +
+        `evolution: the directory "${directory}" holding the recoverable source ${label} of the ${request.direction} for ` +
         `proposal "${request.proposalId}" could not be fsynced (${error instanceof Error ? error.message : String(error)}) — the source ` +
         'must be durable, bytes and path, before the intent that names it is recorded, so the commit stops by name: no line is recorded ' +
         'and nothing is written',

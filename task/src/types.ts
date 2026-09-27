@@ -422,6 +422,95 @@ export interface TaskRunBatch {
   memberTaskIds: TaskId[]
 }
 
+/**
+ * One member slot of a recovery attempt's run that is filled by an **already
+ * verified sibling** instead of by a task this run admitted (A6, plan §F.4).
+ *
+ * Why it exists: a failed attempt's run may hold members that passed; re-running
+ * them to satisfy the same parent criterion would be work nobody needs. A new
+ * attempt therefore reads those members at their own positions — a member of
+ * this run, in the sequence `childIndex` names — while the *evidence* stays the
+ * one the sibling's own verified run produced. Nothing is copied: the entry
+ * cites the sibling task, the run that verified it and the bundle, and the
+ * composite judge's existing read (a member that is `verified`, judged by its
+ * own verified run's evidence) resolves exactly as it does for a member this run
+ * did produce.
+ *
+ * **The slots are the run's leading positions.** {@link childIndex} must be the
+ * entry's own position in {@link RunRecovery.reusedMembers}
+ * (`0, 1, … reusedMembers.length - 1`), so the sequence this run reads is the
+ * pinned siblings first, then the members its own batches admit, in admission
+ * order — a stable sequence with no unfilled slot inside it. An attempt that
+ * wants a created member *before* a reused one cannot be expressed and is
+ * refused by name rather than silently reordered.
+ */
+export interface RunMemberReuse {
+  /**
+   * The position in this run's member sequence the entry pins — the
+   * `childIndex` a parent criterion's `childEvidence` map names. Must equal the
+   * entry's own index in {@link RunRecovery.reusedMembers}.
+   */
+  childIndex: number
+  /** The already verified sibling task the slot reads as: a child task of this run's own task. */
+  taskId: TaskId
+  /**
+   * The sibling's own verified run — the one whose evidence is cited. Its task
+   * is {@link taskId} and it is `verified` in this store.
+   */
+  sourceRunId: RunId
+  /** The evidence bundle under {@link sourceRunId} the citation rests on. */
+  evidenceId: string
+  /**
+   * The criterion the sibling must have passed when the original acceptance map
+   * narrows this position to one: the cited bundle must carry a `pass` verdict
+   * for it and the sibling must declare it. Absent when the map names only the
+   * position.
+   */
+  criterionId?: string
+  /** Artifacts the citation names, by artifact id or kind, all present in the cited bundle. */
+  artifactRefs: string[]
+  /**
+   * Input references the citation names, from the sibling's own declared input
+   * vocabulary (`requiresArtifact`, `acceptsArtifact`, `protectedInputs`). Empty
+   * when the citation rests on the run/evidence/product identity alone.
+   */
+  inputRefs: string[]
+}
+
+/**
+ * The recovery attempt a run **is** (A6, plan §F.4): a failed root task's new
+ * attempt, opened by the runtime's recovery entry in the same store, with the
+ * diagnosis and request that asked for it and the sibling evidence it reads
+ * instead of re-running.
+ *
+ * Why the attempt is the run's own field and not a separate record: what makes
+ * an attempt idempotent is *which run it is* — the same key answered from the
+ * record, an attempt in flight while its run is not terminal, and a new key
+ * allowed only once it is. A second record keyed by the same attempt would be a
+ * second place where "is this in flight?" is answered, and the two could
+ * disagree; the run's own status is the one fact the store already keeps.
+ *
+ * The field is written once, with the run (`TaskStarted`), and never rewritten:
+ * the record says what the attempt was asked for, the run's status says how it
+ * went, and the reuse bindings say what it reads.
+ */
+export interface RunRecovery {
+  /** The diagnosis the attempt was requested for: the id of a `Diagnosis` record this store holds for this task. */
+  sourceDiagnosisId: string
+  /** The caller's request key. One key names one attempt of one diagnosis, and the same key answers with the same run. */
+  requestKey: string
+  /**
+   * The failed run the source task's previous attempt was, when it had one. A
+   * task that failed without a run (a rejected admission, a blocked task) names
+   * none, and nothing is invented for it.
+   */
+  sourceRunId?: RunId
+  /** When the attempt was opened. */
+  requestedAt: string
+  /** The already verified siblings this attempt reads at its leading positions, in position order. Empty when it re-runs everything. */
+  reusedMembers: RunMemberReuse[]
+}
+
 export interface TaskRun {                          // (§5.3)
   runId: RunId
   taskId: TaskId
@@ -464,7 +553,8 @@ export interface TaskRun {                          // (§5.3)
    * each created — the run's accumulative membership. The reducer appends one
    * entry per `TaskDecomposed` event that names this run, so members an earlier
    * batch contributed are never overwritten by a later one and
-   * {@link runMemberTaskIds} is the concatenation in that order.
+   * {@link runMemberTaskIds} is the concatenation in that order — behind the
+   * verified siblings a recovery attempt pins ({@link TaskRun.recovery}).
    *
    * Absent — not empty — on a run that admitted no batch of this shape, which
    * includes every run written before batches were identified by
@@ -473,6 +563,13 @@ export interface TaskRun {                          // (§5.3)
    * `docs/persistence-changes/2026-09-26-k1-multi-batch.md`).
    */
   batches?: TaskRunBatch[]
+  /**
+   * The recovery attempt this run *is* (A6). Absent on every run that is not
+   * one: a first attempt, a child, a replay — an ordinary run is not a recovery
+   * of anything, and nothing is inferred for it. Written only with the run's own
+   * start; see {@link RunRecovery}.
+   */
+  recovery?: RunRecovery
   /**
    * What this run handed in, written by the transition into `submitted`.
    * Absent on a run that has not submitted; its presence is what makes a
@@ -504,20 +601,28 @@ export interface TaskRun {                          // (§5.3)
 }
 
 /**
- * The member task ids one run has admitted altogether: the `memberTaskIds` of
- * its batches concatenated in admission order ({@link TaskRun.batches}). The
- * accumulation is append-only, so position `i` of the result is the stable
- * position a parent criterion's `childIndex` names, and a later batch never
- * moves an earlier member. One derivation, shared by the runtime read
+ * The member task ids one run reads, in the sequence a parent criterion's
+ * `childIndex` names: the verified siblings its {@link TaskRun.recovery} pins,
+ * in position order, and then the `memberTaskIds` of its batches concatenated in
+ * admission order ({@link TaskRun.batches}).
+ *
+ * The accumulation is append-only and the pinned slots are the leading
+ * positions, so position `i` of the result is stable: a later batch never moves
+ * an earlier member, and a reused sibling keeps the position the original
+ * acceptance map names for it. One derivation, shared by the runtime read
  * (`TaskService.runMembersIn`) and by any reader that needs the ids alone, so
  * "the run's members" cannot mean two different orders.
  *
- * A run with no batches has no members here — an empty list, never its task's
- * children: those belong to whichever batch admitted them, and a run that
- * admitted no batch of this shape is not given one by guessing.
+ * A run with no batches and no pinned members has no members here — an empty
+ * list, never its task's children: those belong to whichever batch admitted
+ * them, and a run that admitted no batch of this shape is not given one by
+ * guessing.
  */
 export function runMemberTaskIds(run: TaskRun): TaskId[] {
-  return (run.batches ?? []).flatMap(batch => batch.memberTaskIds)
+  return [
+    ...(run.recovery?.reusedMembers ?? []).map(member => member.taskId),
+    ...(run.batches ?? []).flatMap(batch => batch.memberTaskIds),
+  ]
 }
 
 export interface VerificationResult {

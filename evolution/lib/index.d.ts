@@ -1,10 +1,155 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
-import { CapabilityConfig, ReplayRunOutcome, ReplayTaskOptions } from "@dangosys/dsh-singularity-task-runtime";
 import { ProposalTargetType, ReviewCriterion, ReviewMetrics, ReviewRecord, TaskSnapshot } from "@dangosys/dsh-singularity-task";
+import { CapabilityConfig, ReplayRunOutcome, ReplayTaskOptions, RootRecoveryOutcome, SkillSidecar } from "@dangosys/dsh-singularity-task-runtime";
 
+//#region src/capability-candidate.d.ts
+
+/** The refusal of one rule, carrying its machine-readable code as the message's second word. */
+declare function capabilityRefusal(code: string, detail: string): Error;
+/** One whole capability row: its name and its entry, as the candidate submits them. */
+interface CapabilityRow {
+  name: string;
+  entry: CapabilityConfig;
+}
+/** The new execution skill a capability candidate may carry: the text, and the declaration that authorises it. */
+interface CapabilitySkill {
+  name: string;
+  /** The whole `SKILL.md` text (frontmatter included). */
+  content: string;
+  /** The `SKILL.contract.json` declaration this new object carries — authored, because there is no production object to derive it from. */
+  sidecar: SkillSidecar;
+}
+/** One validated capability mutation, normalized. */
+interface CapabilityCandidate {
+  row: CapabilityRow;
+  skill?: CapabilitySkill;
+}
+/**
+ * The frozen identity of one capability row: its name, the row itself, and the
+ * SHA-256 of its canonical serialization (`digestOf`). One digest basis, so the
+ * bytes a sandbox holds, the digest an intent records and the row a registry
+ * reports all compare as the same value.
+ */
+interface CapabilityRowIdentity {
+  name: string;
+  entry: CapabilityConfig;
+  digest: string;
+}
+/**
+ * The overlay a candidate-side evaluation mounts on this candidate (A6 interface
+ * ②, plan F.4 "候选同时挂 capabilityOverrides 与 extraSkillRoots"): the prepared
+ * row as a whole-row override, and the sandbox skill root in front of the
+ * production ones. `empty` for a row-only candidate, whose overlay is the row.
+ */
+interface CapabilityOverlay {
+  capabilityOverrides: Record<string, CapabilityConfig>;
+  extraSkillRoots: string[];
+}
+/** The canonical bytes of one row — what a sandbox freezes and an intent's source holds. */
+declare function capabilityRowBytes(entry: CapabilityConfig): string;
+/** SHA-256 of {@link capabilityRowBytes}: the identity a row is compared by, everywhere. */
+declare function capabilityRowDigest(entry: CapabilityConfig): string;
+/** The frozen identity of one row, as a prepared record and a commit intent name it. */
+declare function capabilityRowIdentity(row: CapabilityRow): CapabilityRowIdentity;
+/** The table a candidate would produce: the store's rows with this one row folded in. */
+declare function capabilityTableWith(table: Readonly<Record<string, CapabilityConfig>>, row: CapabilityRow): Record<string, CapabilityConfig>;
+/**
+ * Validate one capability row's shape and return it normalized — the whole row,
+ * with no field inherited from anywhere. `where` names the row in the refusal.
+ */
+declare function assertCapabilityRow(where: string, value: unknown): CapabilityConfig;
+/**
+ * Validate one whole capability mutation and return it normalized. The entry
+ * point of both the live write path (`EvolutionService.candidate`) and the fold,
+ * so a hand-forged ledger line fails exactly as a live append would.
+ */
+declare function validateCapabilityMutation(mutation: unknown): CapabilityCandidate;
+/** The real DSH tools and MCP servers a store's current capability table authorizes. */
+declare function authorizedToolPlane(table: Readonly<Record<string, CapabilityConfig>>): {
+  tools: Set<string>;
+  servers: Set<string>;
+};
+/**
+ * The store view the candidate's rules read: the effective capability table, the
+ * registered verifier vocabulary (fail-closed when it cannot be listed), the
+ * roots a worker's own discovery searches, and the production skill root this
+ * plane writes into.
+ */
+interface CapabilityStoreView {
+  readonly table: Readonly<Record<string, CapabilityConfig>>;
+  /** `undefined` when the deployment cannot list its verifiers — an execution provider is then refused rather than assumed registered. */
+  readonly verifierVocabulary?: {
+    readonly ids: readonly string[];
+    readonly versions: Readonly<Record<string, string>>;
+  };
+  /** Every root discovery searches, in order (the production root first when the caller has it). */
+  readonly skillRoots: readonly string[];
+  /** The production skill root a candidate's new directory would land in. */
+  readonly skillRoot: string;
+}
+/**
+ * Whether one candidate row may be written at all: no tool the store has not
+ * already authorized, and no preset / permission / MCP-server change against the
+ * row it replaces (a brand-new row declares none of them).
+ */
+declare function assertCapabilityRowAdmissible(store: CapabilityStoreView, row: CapabilityRow, baseline: CapabilityConfig | null): void;
+/**
+ * The `SKILL.md` discovery finds for one skill name under `roots`, or `undefined`
+ * when no root holds one — the same walk (`walkVerified`) and the same
+ * `<root>/<name>/SKILL.md` shape the store's own discovery searches, so "this
+ * name is free" is answered about the roots a worker would load from. A root
+ * that cannot be listed, or a path that is a symbolic link, contributes nothing.
+ */
+declare function discoverSkill(roots: readonly string[], name: string): Promise<string | undefined>;
+/**
+ * Every rule the capability candidate itself must satisfy against the store it
+ * would land in, in one place — the write path (prepare) and the promotion gate
+ * both call it, against the store as it stands at that moment, so a store that
+ * moved between the two is refused by the same words.
+ */
+declare function assertCapabilityCandidateAdmissible(store: CapabilityStoreView, candidate: CapabilityCandidate, baseline: CapabilityConfig | null): Promise<void>;
+/**
+ * The candidate-side overlay of one prepared capability proposal (A6 interface
+ * ②): the frozen row as a whole-row `capabilityOverrides` entry, and the sandbox
+ * skill root as an `extraSkillRoots` entry in front of the production roots.
+ * Read off the prepared record, so what an evaluation mounts is what the commit
+ * would install.
+ */
+declare function capabilityOverlay(proposal: EvolutionProposal, roots: {
+  root: string;
+}): CapabilityOverlay;
+/** The prepared candidate as its bytes: the row (and its baseline), the new skill, every file read and verified. */
+interface PreparedCapability {
+  /** The candidate row, read back from the sandbox and verified against `prepared.capabilityRow`. */
+  row: CapabilityRow;
+  rowBytes: Buffer;
+  /** The row the store held at prepare, with its frozen champion bytes — `undefined` when the store held none. */
+  baseline?: {
+    entry: CapabilityConfig;
+    bytes: Buffer;
+  };
+  /** The new skill, when the candidate carries one: the declaration and the exact bytes prepare froze. */
+  skill?: CapabilitySkill & {
+    skillMd: Buffer;
+    sidecarBytes: Buffer;
+  };
+  /** The sandbox root the new skill's directory lives under (`<sandbox>/skills`) — the extra discovery root a row pre-check mounts. */
+  skillRoot?: string;
+  /** The sandbox directory of the new skill, as a loader would read it (only when `skill` is present). */
+  skillDirectory?: string;
+}
+/**
+ * Read one prepared capability candidate back from its sandbox and verify it
+ * against the identities prepare recorded (P2 for the row and the new skill's
+ * files, P3's bytes for the champion row): the one read path the promotion gate
+ * and the apply write share, so what is promoted and what is committed are
+ * provably the same bytes. Every mismatch is a named refusal and never a
+ * re-digest.
+ */
+declare function readPreparedCapability(root: string, proposal: EvolutionProposal): Promise<PreparedCapability>;
+//#endregion
 //#region src/replay.d.ts
-
 /**
  * One candidate side's relation to its baseline, as {@link compareReplaySides}
  * answers it: a side that ranks above its baseline is `not-worse`, one that
@@ -62,7 +207,7 @@ interface SkillContentIdentity {
 interface ReplaySideSummary {
   taskId: string;
   runId?: string;
-  outcome: 'verified' | 'failed' | 'cancelled';
+  outcome: 'verified' | 'failed' | 'cancelled' | 'not-admitted';
   criteria: ReplayCriterionSummary[];
 }
 /** One criterion whose verdict differs between the sides (absent side = the criterion exists only on the other). */
@@ -117,9 +262,46 @@ declare const EXPERIMENT_SIDES: readonly ExperimentSide[];
  * run never reached a terminal state (a process that died mid-run, a run the
  * store no longer holds) — it says nothing about the candidate, so every
  * verdict over it is `inconclusive`.
+ *
+ * `not-admitted` is the one outcome that is **not** a run's settlement (A6,
+ * §F.4 "评估/应用必须同组补齐"): the runtime's own admission chain refused the
+ * side before a run existed — a capability sample's production baseline whose
+ * required row the effective table does not hold, or whose provider the
+ * pre-check refuses. Such a side has no Task, no Run, no Review and no
+ * evidence; its whole record is the refusal beside it
+ * ({@link ExperimentAdmissionRefusal}), and no champion and no failure run is
+ * ever invented in its place. Only a **baseline** side may be `not-admitted`:
+ * a candidate the runtime will not admit did not run, and cannot stand as a
+ * fix.
  */
-type ExperimentOutcome = 'verified' | 'failed' | 'cancelled' | 'interrupted';
+type ExperimentOutcome = 'verified' | 'failed' | 'cancelled' | 'interrupted' | 'not-admitted';
 declare const EXPERIMENT_OUTCOMES: readonly ExperimentOutcome[];
+/** Which admission rule of the runtime refused one side of a capability sample (A6). */
+type ExperimentAdmissionSource = 'capability-gap' | 'provider-refused';
+declare const EXPERIMENT_ADMISSION_SOURCES: readonly ExperimentAdmissionSource[];
+/**
+ * The runtime's own refusal of one side of a capability sample (A6): the side is
+ * `not-admitted`, and this is everything its record carries instead of a Run —
+ * which admission rule refused it, the proposal (and the gap/diagnosis it came
+ * from) the refusal belongs to, the rows the side had to resolve, the rows the
+ * table did not hold, and the runtime's own words.
+ *
+ * `reason` is the refusal text the runtime produced when the side was really
+ * attempted, never a description this plane writes for it.
+ */
+interface ExperimentAdmissionRefusal {
+  source: ExperimentAdmissionSource;
+  /** The proposal this refusal belongs to — the candidate whose gap the side stands for. */
+  proposalId: string;
+  /** The proposal's own source refs: the capability gap / diagnosis the candidate came from. */
+  sourceRefs: string[];
+  /** The sample's required capability rows this side's configuration had to resolve. */
+  required: string[];
+  /** The required rows that configuration did not hold; empty for a provider refusal. */
+  missing: string[];
+  /** The runtime's own refusal text, verbatim. */
+  reason: string;
+}
 /**
  * One sample's mechanical verdict (§F.2):
  * - `fixed` — the baseline reproduced the historical failure and the candidate
@@ -232,6 +414,12 @@ interface ExperimentSideDetail {
   cost: ExperimentCost;
   /** Why this side has no terminal run; required for `interrupted`, absent otherwise. */
   reason?: string;
+  /**
+   * The runtime's own admission refusal, for a side that is `not-admitted` (A6).
+   * Required there and absent otherwise: the side has no Task and no Run at all,
+   * so this record is what stands in their place.
+   */
+  admission?: ExperimentAdmissionRefusal;
 }
 /** One sample's comparison: both sides, and the mechanical verdict over them. */
 interface ExperimentSampleComparison {
@@ -382,11 +570,83 @@ interface FrozenProviderIdentity {
   skills: FrozenProviderSkill[];
 }
 /**
+ * One side's frozen provider identity of a **capability** sample (A6): the
+ * capability rows in play for the sample, the registry revision the runtime's own
+ * pre-check produces for them, the MCP servers and preset they declare, and every
+ * provider they resolved to. It is the shape {@link FrozenProviderIdentity}
+ * carries minus the production/candidate pair of revisions: a capability sample
+ * compares two *configurations* (production and the candidate overlay), each of
+ * which is one such identity, rather than one configuration with a substituted
+ * provider.
+ */
+interface FrozenCapabilitySide {
+  /** The capability rows in play, sorted (the sample's required capabilities the side's table resolves). */
+  capabilities: string[];
+  /** The registry revision the runtime's own pre-check produces over that side's table. */
+  registryRevision: string;
+  /** The MCP server names those rows grant, sorted. */
+  mcpServers: string[];
+  /** The preset those rows declare — one worker, one preset — or `null` when none declares one. */
+  preset: string | null;
+  /** Every skill the rows' providers resolved to, sorted by name. */
+  skills: FrozenProviderSkill[];
+}
+/**
+ * The production configuration's own refusal of one capability sample (A6),
+ * recorded *before* the first run: the sample's rows the table did not hold, or
+ * the providers the pre-check refused. It is what the baseline side's
+ * `not-admitted` record is checked against — a record whose refusal does not
+ * match the frozen one is not this experiment's evidence.
+ */
+interface FrozenSampleAdmission {
+  source: ExperimentAdmissionSource;
+  /** The sample's required capability rows. */
+  required: string[];
+  /** The required rows the production table did not hold; empty for a provider refusal. */
+  missing: string[];
+  /** How the freeze read the refusal (the runtime's own resolution/pre-check answer). */
+  reason: string;
+}
+/**
+ * The whole row one capability candidate installs (A6), frozen with the
+ * experiment: the row, and the SHA-256 of its canonical bytes. The gate compares
+ * it member by member against the row `prepare` recorded.
+ */
+interface FrozenCapabilityRow {
+  name: string;
+  entry: CapabilityConfig;
+  digest: string;
+}
+/**
+ * The capability candidate one experiment evaluates (A6): the row it installs,
+ * the row the registry held when it was prepared (`null` for a new row — the
+ * production baseline of a capability candidate is a registry state, not a skill
+ * object), and the proposal's own source refs, so a `not-admitted` record names
+ * the gap it came from.
+ */
+interface FrozenCapability {
+  row: FrozenCapabilityRow;
+  /** The row the registry held at prepare, or `null` when it held none. */
+  baseline: FrozenCapabilityRow | null;
+  /** The proposal's own source refs — the capability gap / diagnosis the candidate came from. */
+  sourceRefs: string[];
+}
+/**
  * One sample's frozen identity: the case it locates, and the acceptance
  * identity the replay will mirror into both sides. `observed` is the historical
  * record the sample was chosen for — it locates the case and is *not* a
- * baseline: every report side must cite a different run. `provider` is the
- * production configuration's provider identity for this sample, frozen with it.
+ * baseline: every report side must cite a different run.
+ *
+ * Which provider identity a sample carries is what kind of experiment it is
+ * (A6):
+ * - a **skill** experiment freezes `provider`: the production configuration's
+ *   identity, which the baseline side binds, with the candidate side's revision
+ *   recorded beside it (`FrozenProviderIdentity.candidateRegistryRevision`);
+ * - a **capability** experiment freezes `candidateProvider` — the overlay
+ *   configuration's identity the candidate side binds — and exactly one of
+ *   `provider` (production admits the sample, so its baseline really runs) or
+ *   `admission` (production refuses it, so the baseline side is `not-admitted`
+ *   and no run exists for it).
  */
 interface FrozenSample {
   taskId: string;
@@ -398,8 +658,12 @@ interface FrozenSample {
     outcome: 'verified' | 'failed';
     runId?: string;
   };
-  /** The provider identity the production-baseline side of this sample must bind (S4-E §Q3). */
-  provider: FrozenProviderIdentity;
+  /** The provider identity the production-baseline side of a skill sample must bind (S4-E §Q3). */
+  provider?: FrozenProviderIdentity;
+  /** A6: the production configuration's own refusal, when it cannot admit this sample at all. */
+  admission?: FrozenSampleAdmission;
+  /** A6: what the candidate (overlay) side of a capability sample must bind. */
+  candidateProvider?: FrozenCapabilitySide;
 }
 /**
  * The identity block fixed before the first run (§F.2). Everything a reader
@@ -419,10 +683,18 @@ interface FrozenExperiment {
    * which is what lets a sample be run again without ever overwriting a record.
    */
   repetition: number;
-  /** The candidate object's content identity the candidate side runs against (the prepared `SKILL.md`, plus the derived sidecar when the object has one). */
-  candidate: SkillContentIdentity;
+  /**
+   * The candidate object's content identity the candidate side runs against (the
+   * prepared `SKILL.md`, plus the derived sidecar when the object has one).
+   * Absent exactly for a capability candidate that installs a row and carries no
+   * new skill object (A6): a row-only candidate has no object identity to name,
+   * and {@link FrozenExperiment.capability} carries what it does have.
+   */
+  candidate?: SkillContentIdentity;
   /** The production baseline the candidate object replaces, when prepare captured one (a replacement, not a new skill). */
   productionBaseline?: SkillContentIdentity;
+  /** The capability candidate this experiment evaluates (A6); absent for a skill experiment. */
+  capability?: FrozenCapability;
   /**
    * The model selection every run of this experiment is placed under (S4-E
    * §Q3), frozen before the first side and passed to the runtime verbatim as
@@ -503,6 +775,15 @@ interface ExperimentSideComparison {
  * comparable at all — a baseline that did not pass reproduced nothing, so the
  * sample is `inconclusive` whatever the candidate did — and only then does the
  * candidate's relation answer `regressed` or `maintained`.
+ *
+ * A side the runtime refused at admission (A6, `not-admitted`) has no outcome to
+ * rank and no criteria to compare, so it is answered before the v1 rules rather
+ * than read through them: a baseline the production configuration could not
+ * admit is the gap itself — the candidate passing the same frozen acceptance is
+ * the `fixed` verdict, and the candidate failing beside it is `both-failed` —
+ * while a candidate that could not be admitted is never a fix. A regression or
+ * holdout sample needs a reproduced baseline to be comparable, so a refused
+ * baseline there leaves it `inconclusive`, never `maintained`.
  */
 declare function compareExperimentSides(role: ExperimentSampleRole, baseline: ExperimentSideComparison, candidate: ExperimentSideComparison): ExperimentSampleVerdict;
 /**
@@ -525,6 +806,8 @@ declare function overallExperimentVerdict(samples: readonly Pick<ExperimentSampl
  * checks a live run's record passes.
  */
 declare function assertFrozenExperiment(value: unknown): asserts value is FrozenExperiment;
+/** The runtime's own refusal, as the report carries it for a `not-admitted` side (A6). */
+declare function assertAdmissionRecord(value: unknown, field: string): asserts value is ExperimentAdmissionRefusal;
 /**
  * Validate a v3 report against itself — and further than a shape check: every
  * verdict the report carries must equal the one its own details recompute
@@ -567,16 +850,24 @@ type CommitStage = 'intent-recorded' | 'write-staged' | 'write-renamed' | 'commi
  * execution sidecar — and the files are ordered: the `SKILL.md` first, so a
  * recovery that has to write the pair again writes the pair in the order a
  * loader would read it.
+ *
+ * `null` on either side is a *state*, not a missing value (A6): a file whose
+ * `baselineSha256` is `null` must not exist before this commit (it is a file the
+ * candidate creates), and a file whose `contentSha256` is `null` must not exist
+ * after it (it is a file the rollback removes, and there is nothing to write
+ * again, so it names no source). One direction may not remove a file the other
+ * created and restore it in the same commit: the two states are the two ends of
+ * one candidate version.
  */
 interface CommitFile {
-  /** Absolute production path this commit replaces. */
+  /** Absolute production path this commit replaces, creates or removes. */
   readonly target: string;
-  /** The digest this file must hold before the write — the state a reconciliation redoes the write from. */
-  readonly baselineSha256: string;
-  /** The digest this file must hold after the write; always the digest of the bytes being committed. */
-  readonly contentSha256: string;
-  /** The recoverable bytes for this file, relative to the ledger root. */
-  readonly source: string;
+  /** The digest this file must hold before the write — the state a reconciliation redoes the write from; `null` when it must not exist. */
+  readonly baselineSha256: string | null;
+  /** The digest this file must hold after the write; always the digest of the bytes being committed, `null` when the commit removes it. */
+  readonly contentSha256: string | null;
+  /** The recoverable bytes for this file, relative to the ledger root; absent when this direction removes the file. */
+  readonly source?: string;
 }
 /** What one reconciliation of an open intent settled to. */
 interface ReconcileOutcome {
@@ -599,7 +890,6 @@ interface ReconcileOutcome {
 }
 //#endregion
 //#region src/experiment.d.ts
-
 /** One sample as the caller's specification names it. */
 interface ExperimentSampleSpec {
   taskId: string;
@@ -708,7 +998,7 @@ interface ExperimentSampleRecord {
   taskId?: string;
   /** The run this side created. Absent for a side whose run never reached the store. */
   runId?: string;
-  outcome: 'verified' | 'failed' | 'cancelled' | 'interrupted';
+  outcome: ExperimentSideDetail['outcome'];
   /** `<taskId>#<runId>` of the terminal ReviewRecord this side cites (the deployment's own review-ref shape). */
   reviewRef?: string;
   /** Evidence ids the run's review record (or, when it has none, the store's evidence bundles) carries. */
@@ -729,19 +1019,33 @@ interface ExperimentSampleRecord {
   cost: ExperimentCost;
   /** Why this side has no terminal run; required for `interrupted`. */
   reason?: string;
+  /**
+   * The runtime's own admission refusal, carried by a `not-admitted` side (A6):
+   * the side produced no Task and no Run, so this record stands in their place.
+   */
+  admission?: ExperimentAdmissionRefusal;
   actor: string;
   at: string;
 }
 type ExperimentRecord = ExperimentStartedRecord | ExperimentSampleRecord;
 /**
- * The idempotency key's content member (K3): the digest of the candidate's
+ * The idempotency key's content member (K3, A6): the digest of the candidate's
  * **complete** content identity — {@link digestOf} of the identity `prepare`
  * recorded, so the name, the `SKILL.md` bytes and, when the object has an
  * execution sidecar, the sidecar's exact bytes and canonical declaration are all
  * part of the key. Two candidates that differ in any of them are two objects,
  * and a key spent on one is never reused for the other.
+ *
+ * A capability candidate's identity is the **capability** block (the row it
+ * installs, the row it moves and the gap it came from) together with the new
+ * skill object when it carries one — the row alone would let two candidates
+ * that differ only in their skill bytes share a key, and the skill alone would
+ * let two rows share one.
  */
-declare function preparedContentDigestOf(candidate: SkillContentIdentity): string;
+declare function preparedContentDigestOf(frozen: {
+  candidate?: SkillContentIdentity;
+  capability?: FrozenCapability;
+}): string;
 /** True for a record of the experiment family — the lines the proposal fold must leave alone. */
 declare function isExperimentRecord(record: {
   kind: string;
@@ -779,6 +1083,14 @@ interface ExperimentLedger {
     skillMd: Buffer;
     sidecar?: Buffer;
   }>;
+  /**
+   * Read a prepared **capability** candidate back out of its sandbox and verify
+   * every byte against the identities prepare recorded (A6): the frozen row, the
+   * new skill's two files when it carries one, and the champion row when the
+   * registry held one. Throws otherwise. The evaluation freezes exactly these
+   * bytes, so what an experiment mounts is what a commit would install.
+   */
+  readCapabilityCandidate(proposalId: string): Promise<PreparedCapability>;
   /** One experiment's folded view; throws on an unknown id. */
   experiment(experimentId: string): Promise<ExperimentView>;
   /**
@@ -833,6 +1145,18 @@ interface ExperimentSources {
      * conclusion, never this plane's guess.
      */
     capabilityProviderReport(sessionId: string, capabilities?: readonly string[]): Promise<ProviderPrecheckView>;
+    /**
+     * The runtime's own pre-check over a capability table the experiment names
+     * (A6): the candidate overlay's table, with the sandbox skill root in front
+     * of discovery — the same function the replay's own admission runs, so what
+     * the freeze records as the candidate side's expectation is the runtime's
+     * own conclusion about the configuration that side will really run under.
+     */
+    precheckCapabilityTable?(request: {
+      capabilities: readonly string[];
+      table: Readonly<Record<string, CapabilityConfig>>;
+      extraRoots: readonly string[];
+    }): Promise<ProviderPrecheckView>;
     /** The effective capability table, as the runtime holds it — the rows a pre-check covered and the servers they grant. */
     listCapabilities?(): Readonly<Record<string, CapabilityConfig>>;
   };
@@ -959,10 +1283,12 @@ type EvolutionDecision = 'PROMOTE' | 'REJECT' | 'KEEP_FOR_FURTHER_RESEARCH';
 declare const EVOLUTION_LEVELS: readonly EvolutionLevel[];
 declare const EVOLUTION_DECISIONS: readonly EvolutionDecision[];
 /**
- * The one target type `evolution_apply` promotes mechanically (W16): the
- * sandbox copy lands on the production skill root. Every other type has no
- * executor in this build — a capability row, an agent_preset directory and a
- * task_definition were written by an older build and are not written here.
+ * The target types `evolution_apply`/`evolution_rollback` move mechanically: a
+ * skill candidate's sandbox copy lands on the production skill root, and — since
+ * A6 — a capability candidate's one row lands in the capability registry
+ * together with the new skill object its file set contains. Every other type has
+ * no executor in this build — an agent_preset directory and a task_definition
+ * were written by an older build and are not written here.
  */
 declare const APPLYABLE_TARGET_TYPES: readonly ProposalTargetType[];
 /**
@@ -977,15 +1303,17 @@ interface SkillMutation {
   content: string;
 }
 /**
- * The champion snapshot of one prepared proposal. `captured` is the only state
- * there is: this build replaces an existing production skill object, so a target
- * that is not there has nothing to prepare from and is refused before any
- * sandbox write, and every `prepared` record the fold admits carries the
- * snapshot's state. The bookkeeping-only prepare (`none` — nothing materialized,
- * no anchor) belonged to target types this build's candidate never admits and
- * has no producer or consumer left (S4-E 收尾).
+ * The champion state of one prepared proposal. `captured` is the state of a
+ * same-name skill update: this build replaces an existing production object, so
+ * the bytes it read became the champion snapshot. `absent` is the state of a
+ * capability candidate (A6): the skill its row grants is new, so production
+ * holds no object to capture and the recorded baseline is that absence — the
+ * preparation that may *add* an object, never replace one. The bookkeeping-only
+ * prepare (`none` — nothing materialized, no anchor) belonged to target types
+ * this build's candidate never admits and has no producer or consumer left
+ * (S4-E 收尾).
  */
-type ChampionState = 'captured';
+type ChampionState = 'captured' | 'absent';
 /** Folded view of one `prepared` record. */
 interface PreparedView {
   /** Sandbox dir relative to the ledger root (`sandbox/<proposalId>`); null when nothing was materialized. */
@@ -1005,9 +1333,23 @@ interface PreparedView {
    * prepare records it; a captured champion without it cannot prove its baseline
    * and refuses a new apply. Its `contract` presence matches `skillContent`'s:
    * the object's shape is fixed at prepare, and a record whose two halves
-   * disagree describes a role change no prepare performs.
+   * disagree describes a role change no prepare performs. `null` is the recorded
+   * absence a capability candidate's new skill object has (A6).
    */
-  skillBaseline?: SkillContentIdentity;
+  skillBaseline?: SkillContentIdentity | null;
+  /**
+   * The capability row a capability candidate fixes (A6): the whole row and the
+   * SHA-256 of its canonical bytes. Every capability prepare records it.
+   */
+  capabilityRow?: CapabilityRowIdentity;
+  /**
+   * The row the registry held at prepare (A6), with its frozen champion bytes
+   * under `champion/capability/`; `null` when the registry held no row of that
+   * name, so this candidate *adds* the row rather than replacing it. The fold
+   * refuses a capability prepare without this field, so "the row was there" and
+   * "the row is new" are always distinguished.
+   */
+  capabilityBaseline?: CapabilityRowIdentity | null;
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
   files: string[];
 }
@@ -1086,24 +1428,30 @@ type EvolutionRecord = {
    * line naming none is refused by name at the fold.
    */
   sandbox: string | null;
-  /** True on every prepare the fold admits: this build's candidate is a materialized skill mutation. */
+  /** True on every prepare the fold admits: this build's candidate is a materialized mutation. */
   mechanical: boolean;
-  /** Always `captured`: a prepare snapshots the production bytes it replaces. */
+  /** `captured` for a same-name skill update, `absent` for a capability candidate's new skill object (A6). */
   champion: ChampionState;
   /**
    * The content identity of the materialized candidate `SKILL.md` (P2) — the
-   * skill name plus the SHA-256 of the exact file bytes. Required: the fold
-   * refuses a prepare without it, so a candidate nothing can re-verify never
-   * becomes a flow.
+   * skill name plus the SHA-256 of the exact file bytes. Required for a skill
+   * candidate and for a capability candidate that carries a new skill; absent
+   * only for a capability candidate that changes a row and adds nothing.
    */
   skillContent?: SkillContentIdentity;
   /**
    * The content identity of the production `SKILL.md` as it stood at prepare
-   * (P3), from the same read that produced the champion snapshot. Required:
-   * the fold refuses a prepare without it, so a captured champion always
-   * names the baseline a later apply compares production against.
+   * (P3), from the same read that produced the champion snapshot; `null` is
+   * the recorded absence a capability candidate's new skill object has (A6).
+   * Required on every prepared record: a captured champion always names the
+   * baseline a later apply compares production against, and an added object
+   * always names the absence it must find.
    */
-  skillBaseline?: SkillContentIdentity;
+  skillBaseline?: SkillContentIdentity | null;
+  /** The capability row a capability candidate fixed, with the digest of its canonical bytes (A6). */
+  capabilityRow?: CapabilityRowIdentity;
+  /** The row the registry held at prepare, or `null` when it held none (A6); required on every capability prepare. */
+  capabilityBaseline?: CapabilityRowIdentity | null;
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
   files: string[];
   actor: string;
@@ -1171,18 +1519,20 @@ type EvolutionRecord = {
 /** Which way one commit moves a production target. */
 type CommitDirection = 'apply' | 'rollback';
 /**
- * One `commit_intent` ledger line (K2): the durable "this apply/rollback is now
- * underway" record, written before production changes and closed by the
- * completion line that names the same `intentId`.
+ * One `commit_intent` ledger line (K2, extended by A6): the durable "this
+ * apply/rollback is now underway" record, written before production changes and
+ * closed by the completion line that names the same `intentId`.
  *
  * It carries everything a recovery needs without trusting memory: which
- * proposal and direction, which human grant, and the object's **whole fixed file
- * set** ({@link CommitFile}, one or two entries, in commit order) — for every
- * file its absolute production target, the digest that file must hold before the
- * write (`baselineSha256`), the digest it must hold after (`contentSha256`), and
- * the bytes to write again as a path relative to the ledger root (`source`: the
- * candidate file for an apply, the champion snapshot for a rollback). The id is
- * derived, not chosen: `<proposalId>/<direction>`.
+ * proposal and direction, which human grant, the object's **whole fixed file
+ * set** ({@link CommitFile}, in commit order) — for every file its absolute
+ * production target, the digest that file must hold before the write
+ * (`baselineSha256`, `null` when it must not exist), the digest it must hold
+ * after (`contentSha256`, `null` when this direction removes it), and the bytes
+ * to write again as a path relative to the ledger root (`source`, absent for a
+ * removal) — and, for a capability commit, the one row this commit moves
+ * ({@link CommitCapabilityRecord}). The id is derived, not chosen:
+ * `<proposalId>/<direction>`.
  *
  * The line is not a lifecycle transition: it does not move the proposal's
  * status, so the proposal fold records it as {@link EvolutionProposal.openIntent}
@@ -1199,10 +1549,22 @@ interface CommitIntentRecord {
   direction: CommitDirection;
   /** The human grant that authorised this commit (`approval:<callId>`), recorded on the completion as well. */
   approvalRef: string;
-  /** The object's fixed files, in commit order — `SKILL.md` first, the `SKILL.contract.json` second when the object carries an execution sidecar. */
+  /** The object's fixed files, in commit order — `SKILL.md` first, the `SKILL.contract.json` second when the object carries an execution sidecar; empty for a row-only capability commit. */
   files: CommitFile[];
+  /** The one capability row this commit moves (A6); absent for a skill commit. */
+  capability?: CommitCapability;
   actor: string;
   at: string;
+}
+/** The one capability row a `commit_intent` carries (A6): what the registry must hold before and after, and the bytes a recovery installs. */
+interface CommitCapability {
+  name: string;
+  /** The row's canonical digest the registry must hold before the write; `null` when it must hold no row. */
+  baselineSha256: string | null;
+  /** The row's canonical digest this direction installs; `null` when this direction removes the row. */
+  contentSha256: string | null;
+  /** The recoverable row bytes, relative to the ledger root; absent when this direction removes the row. */
+  source?: string;
 }
 /** Folded view of one open `commit_intent` record, as {@link EvolutionProposal} exposes it. */
 interface CommitIntentView {
@@ -1210,8 +1572,10 @@ interface CommitIntentView {
   proposalId: string;
   direction: CommitDirection;
   approvalRef: string;
-  /** The object's fixed files, in commit order; one or two entries (see {@link CommitIntentRecord.files}). */
+  /** The object's fixed files, in commit order; one or two entries, empty for a row-only capability commit (see {@link CommitIntentRecord.files}). */
   files: CommitFile[];
+  /** The capability row this commit moves, when it carries one (A6). */
+  capability?: CommitCapability;
   actor: string;
   at: string;
 }
@@ -1397,27 +1761,138 @@ interface Config {
    * never sets it; there is no other way to observe or interrupt a commit.
    */
   commitProbe?: (stage: CommitStage, target?: string) => void;
+  /**
+   * Where this deployment reads the **supervisor delegation** of one hand-off
+   * from (A6): the ledger row that names the coordination session a Diagnosis
+   * with suggestions was delegated to.
+   *
+   * It is injected, not read here: the ledger belongs to the package that owns
+   * the coordination agents (`@dangosys/dsh-singularity-agent`'s review-agent
+   * ledger), and this package must not import it back — the assembly wires the
+   * two together, exactly as it wires the reviewer binding source into the
+   * context package. The entry that uses it is
+   * {@link EvolutionService.coordinateRecovery}, and a deployment without a
+   * source refuses a recovery by name: "this session is the hand-off's
+   * supervisor" is an authorization, and one nobody can prove is not granted.
+   */
+  supervisorDelegation?: (sessionId: string, diagnosisId: string) => Promise<SupervisorDelegation | undefined>;
+  /**
+   * The capability table's own file (A6): the deployment's `config.yml`, whose
+   * `capabilities:` row of the `task-runtime` entry is what a restart reads the
+   * registry from. A capability commit writes the row there — after the
+   * registry accepted it and before the completion line — so the in-process
+   * registry and the file a restart loads agree (see
+   * `capability-config.ts`).
+   *
+   * Absent means this deployment has no durable capability table to write, and a
+   * capability commit is then refused by name before it writes anything: a row
+   * that exists only in this process would be gone after a restart, and
+   * recording a completion for it would be a promise the deployment cannot keep.
+   * A skill commit is unaffected — its object is the file set under the skill
+   * root.
+   */
+  capabilityConfig?: string;
+  /**
+   * The typed test seam of the capability-config write (A6), the same shape
+   * `commitProbe` has for the file writes: it fires immediately before the
+   * config file is written and once the write has landed and been read back.
+   * Throwing from `before-write` aborts the write exactly where it stands — the
+   * commit intent stays open, production holds the row in the registry and not
+   * yet in the file, and the next reconciliation writes it. A production
+   * deployment never sets it.
+   */
+  capabilityConfigProbe?: (stage: 'before-write' | 'written', row: string) => void;
 }
 /**
  * The production write targets of an apply (and its matching rollback), for
  * the approval reason and the audit record — the human sees exactly what a
  * grant will touch. The object's fixed file set: the candidate's `SKILL.md`,
  * plus the `SKILL.contract.json` beside it when the prepared object carries an
- * execution sidecar — one or two paths, in commit order.
+ * execution sidecar — one or two paths, in commit order. A capability candidate
+ * (A6) names its new skill's files the same way, and a row-only candidate names
+ * none: its one write is the registry row, which the intent line carries.
  */
 declare function applyTargets(proposal: EvolutionProposal, roots: {
   skillRoot: string;
 }): string[];
 /**
- * The Evolution plane ledger (plane separation: this store is independent of
- * the task store and refers to it by id only). Folding and appending share one
- * fold, so a corrupt or out-of-order log fails loudly instead of silently
- * drifting. Writes are serialized, and every line is appended durably — the file
- * is opened for append, written, fsynced and closed per line, and the
- * directories that hold it are fsynced too — so closing the service is just
- * draining the write queue. Sandbox materialization is the only other write,
- * confined to `<root>/sandbox/<proposalId>/`.
+ * Every reason a coordination request cannot be a recovery request at all: an
+ * unknown field (a caller may not smuggle a decision in), or a missing identity.
+ * Structural only — whether the named diagnosis exists, whether the caller is the
+ * hand-off's supervisor and whether the source may be recovered are answered
+ * after this, each as its own named refusal.
  */
+declare function recoveryCoordinationDefects(request: unknown): string[];
+/**
+ * The failed run one diagnosis is about, as the store holds it: the run its own
+ * `reviewRefs` name (`<taskId>#<runId>`, or `<taskId>#no-run` for the failure
+ * that had none), else the source task's newest run that settled `failed`, else
+ * `null` when the task holds no run at all (a task blocked before it started).
+ *
+ * It mirrors the hand-off's own ref convention rather than reading it from the
+ * tool package, and it is only a *derivation*: the runtime answers the same
+ * question from its own store and refuses a run that is not that task's or not
+ * failed, so a wrong guess here can never become an attempt.
+ */
+declare function recoverySourceRunId(diagnosis: {
+  readonly reviewRefs: readonly string[];
+  readonly taskId: string;
+}, source: {
+  readonly taskId: string;
+  readonly runIds: readonly string[];
+}, snapshot: TaskSnapshot): string | null;
+/**
+ * One recorded supervisor delegation, as the ledger that owns it answers this
+ * plane (A6, see {@link Config.supervisorDelegation}): the store and source task
+ * the hand-off was delegated into, the coordination session that took it up, the
+ * session that started it, and when.
+ *
+ * It is what makes a recovery call attributable: "session X is the supervisor of
+ * diagnosis D in this store" is answered by the ledger row, never by the caller's
+ * word — the caller only names *itself*, and the entry compares that against this
+ * record.
+ */
+interface SupervisorDelegation {
+  readonly rootStoreId: string;
+  readonly taskId: string;
+  readonly diagnosisId: string;
+  readonly sessionId: string;
+  readonly actor: string;
+  readonly at: string;
+}
+/** One recovery-coordination request, as the tool adapter hands it over (plan §F.4's `task_recover` payload). */
+interface RecoveryCoordinationRequest {
+  /** The diagnosis the recovery is asked for; it must be a record of the caller's own store. */
+  sourceDiagnosisId: string;
+  /** The caller's key: one key names one attempt of one diagnosis. */
+  requestKey: string;
+}
+/**
+ * Who asks for a recovery: the **supervisor** session of that hand-off, as a live
+ * session of this deployment. The entry proves it against the ledger row
+ * ({@link Config.supervisorDelegation}) and against the caller's own graph; the
+ * runtime then requires a live agent for it, because the new attempt's Session is
+ * spawned from it.
+ */
+interface RecoveryCoordinationCaller {
+  readonly sessionId: string;
+  readonly signal?: AbortSignal;
+}
+/**
+ * What one coordination answered (A6): the runtime's own recovery outcome — the
+ * attempt, its run and session, its status and the siblings it reads — beside the
+ * hand-off facts this entry checked, so a caller can render both from one answer.
+ */
+interface RecoveryCoordinationOutcome extends RootRecoveryOutcome {
+  /** The supervisor delegation this call was authorized by. */
+  readonly handoff: {
+    readonly sessionId: string;
+    readonly actor: string;
+    readonly diagnosisId: string;
+  };
+  /** What this plane checked and found, in the caller's own words. */
+  readonly coordination: readonly string[];
+}
 declare class EvolutionService extends Service {
   /** Absolute ledger directory resolved at construction. */
   readonly root: string;
@@ -1429,6 +1904,12 @@ declare class EvolutionService extends Service {
   private readonly resolveModelSelection?;
   /** The commit path's typed test seam, if this instance was built with one (see {@link Config.commitProbe}). */
   private readonly commitProbe?;
+  /** The injected supervisor-delegation source, if the assembly wired one (see {@link Config.supervisorDelegation}). */
+  private readonly resolveSupervisorDelegation?;
+  /** The deployment's capability table file, when it named one (see {@link Config.capabilityConfig}). */
+  private readonly capabilityConfigPath?;
+  /** The capability-config write's typed test seam, when this instance was built with one (see {@link Config.capabilityConfigProbe}). */
+  private readonly capabilityConfigProbe?;
   private records;
   private readonly loaded;
   private writes;
@@ -1458,11 +1939,15 @@ declare class EvolutionService extends Service {
    * before the first candidate line is written. A proposal whose mutation does
    * not survive {@link validateMutation} stays exactly as it was.
    *
-   * **A skill candidate only** (§F.2): a capability, agent_preset,
-   * task_definition or bookkeeping-only proposal stays the recorded suggestion
-   * `evolution_propose` wrote and is refused here by name, before the first
-   * ledger line of the candidate lifecycle. Its proposal keeps its place in the
-   * ledger — a record is not a candidate.
+   * **A skill candidate or a capability candidate** (§F.2, A6): a capability
+   * mutation is exactly one whole row (`rows` holding one entry) plus an optional
+   * new execution skill, and every rule about what that row and that skill may
+   * say runs at prepare, against the store the candidate would land in — this
+   * step only refuses shapes. An agent_preset, task_definition or
+   * bookkeeping-only proposal stays the recorded suggestion `evolution_propose`
+   * wrote and is refused here by name, before the first ledger line of the
+   * candidate lifecycle. Its proposal keeps its place in the ledger — a record is
+   * not a candidate.
    */
   candidate(proposalId: string, versionSet: Record<string, string>, actor: string, mutation: unknown): Promise<EvolutionProposal>;
   /**
@@ -1507,12 +1992,66 @@ declare class EvolutionService extends Service {
    */
   prepare(proposalId: string, actor: string): Promise<EvolutionProposal>;
   /**
+   * Move candidate → prepared for a **capability candidate** (A6): freeze the one
+   * row it changes and the new execution skill it may add into
+   * `<root>/sandbox/<proposalId>/`, and record the identities a later promotion,
+   * commit and rollback re-prove.
+   *
+   * Every rule runs before the first byte is written, against the store as it
+   * stands right now: the row must grant no tool the store has not authorized,
+   * must not move the preset, permission or server plane, the new skill's
+   * verifier must be registered *and versioned*, its required tools must be
+   * inside the same authorized plane, its name must not be a production object
+   * this deployment discovers, and its bytes must not be a rename of one
+   * (`assertCapabilityCandidateAdmissible`). The row's own admission pre-check
+   * (`precheckReplacedCapabilityRow`) runs next, with the sandbox skill root in
+   * front of production discovery, so the skill is judged from the exact bytes
+   * this prepare just materialized — a refusal removes the sandbox and records
+   * nothing, which is what "refused with zero writes" means here.
+   *
+   * What is materialized is the candidate row's canonical bytes
+   * (`capability/<name>.json`), the champion row's bytes when the store held one
+   * (`champion/capability/<name>.json` — the anchor a rollback restores), and the
+   * new skill's two files under `skills/<name>/`. The recorded identity is the
+   * row (its data plus the digest of those bytes) and the store's row at prepare
+   * (`null` when it held none: this candidate adds the row), together with the
+   * new skill's whole-object content identity and the recorded *absence* of a
+   * production object for it — a capability candidate adds a skill, and
+   * improving an existing one is the same-name path.
+   */
+  private prepareCapability;
+  /**
+   * The store a capability candidate is judged against: the running registry
+   * (the table a restart re-reads from the deployment's configuration), the
+   * registered verifier vocabulary — fail-closed when it cannot be listed — and
+   * every root discovery searches, the production skill root first because this
+   * plane is its writer.
+   */
+  private capabilityStore;
+  /** Every root a worker's own discovery searches, the production skill root this plane writes first. */
+  private skillDiscoveryRoots;
+  /**
+   * The row as it would read after the write, judged by the admission pre-check
+   * itself (`precheckReplacedCapabilityRow`): every skill it declares must be a
+   * loadable provider, discovered from `sandboxSkillRoot` when the candidate
+   * carries a new one and from the deployment's own roots otherwise, and judged
+   * against the same verifier vocabulary and capability table admission uses.
+   * The deployment's evolution ledger is passed in, so a provider whose
+   * directory another proposal's commit left open is refused here too — asking
+   * admission's own question instead of restating it.
+   */
+  private capabilityRowRefusals;
+  /**
    * Move prepared → gated: all six Gate answers plus regression evidence refs.
    * Every ref must exist — a path on disk (relative to the repo root or
    * absolute) or an id the caller-side resolver knows (task-store evidence).
    * Existence only; nothing here executes anything. A **skill** proposal must
    * have a completed two-sided experiment and cite that experiment's report
-   * (§F.2); the six answers are recorded over it.
+   * (§F.2); the six answers are recorded over it. A **capability** proposal (A6)
+   * gates the same way — its two-sided experiment must be complete and its report
+   * cited, and the promotion evidence gate reads the same facts — except that a
+   * capability sample's baseline side may be the runtime's own `not-admitted`
+   * refusal, which no report of a skill experiment ever carries.
    */
   gate(proposalId: string, answers: GateAnswers, actor: string, refKnown?: (ref: string) => Promise<boolean>): Promise<EvolutionProposal>;
   /**
@@ -1527,13 +2066,23 @@ declare class EvolutionService extends Service {
   /**
    * Move decided → applied: copy the sandbox materialization into production
    * (W16), as one commit. Reachable only for a PROMOTE decision on a materialized
-   * skill mutation at L1–L3 (the state machine itself refuses anything else —
-   * every other target type has no executor in this build); the caller (the
-   * evolution_apply tool) must hold a human grant from `ctx.approval.request`
-   * first, exactly as for decide. The candidate object's fixed file set
-   * replaces production's — `SKILL.md` and, when the object carries an execution
-   * sidecar, the derived `SKILL.contract.json` (the champion snapshot covers
-   * those files only, so the write is file-level, never a directory delete).
+   * skill or capability mutation at L1–L3 (the state machine itself refuses
+   * anything else — every other target type has no executor in this build); the
+   * caller (the evolution_apply tool) must hold a human grant from
+   * `ctx.approval.request` first, exactly as for decide. The candidate object's
+   * fixed file set replaces production's — `SKILL.md` and, when the object
+   * carries an execution sidecar, the derived `SKILL.contract.json` (the
+   * champion snapshot covers those files only, so the write is file-level, never
+   * a directory delete).
+   *
+   * A **capability** apply (A6) writes the new skill's files where production
+   * holds nothing and installs the one row that grants them, as that same single
+   * commit: the row's two states ride on the same `commit_intent` line, the files
+   * are written first and the row last, and the `applied` record lands only once
+   * the object loads and the registry reads the row this direction installed.
+   * The registry check is the row's own baseline check — a row a third party
+   * moved, and a skill name that appeared where the candidate adds one, are both
+   * refused by name with nothing written.
    *
    * The commit order is the recovery rule (K2): the `commit_intent` line is
    * persisted first — proposal, direction, this approval, every target of the
@@ -1580,15 +2129,24 @@ declare class EvolutionService extends Service {
    */
   apply(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome>;
   /**
+   * The verified bytes one capability commit writes, in the request's file order:
+   * for an **apply** the new skill's two sandbox files (nothing to carry for a
+   * row-only candidate), for a **rollback** nothing at all — the files of a new
+   * object are removed, and a removal has no bytes to write again. Every byte is
+   * read through {@link readPreparedCapability}, so what is committed is what the
+   * prepared identity froze.
+   */
+  private capabilityBytes;
+  /**
    * Preflight for tools before asking for approval; mutation methods repeat the
    * check. Returns the providers the promotion would put in place, each with the
    * role it may be counted as, so the callers that already gate on this check
    * can report them.
    *
-   * Only a `skill` proposal is promotable in this build (EVAL-4/§F.2): every
-   * other target type is refused by name — a type with no evaluator gets no
-   * promotion, and a record of one is never upgraded into new evidence
-   * ({@link noEvaluatorRefusal}).
+   * A `skill` proposal and — since A6 — a `capability` proposal are promotable in
+   * this build; every other target type is refused by name, because a type with
+   * no evaluator gets no promotion and a record of one is never upgraded into new
+   * evidence ({@link noEvaluatorRefusal}).
    *
    * For a skill candidate three checks run here, in this order, all of them
    * shared with the service entry the tools ultimately call:
@@ -1608,8 +2166,43 @@ declare class EvolutionService extends Service {
    *    before asking a human, and decide(PROMOTE) / apply run it again on the
    *    service entry, so evidence that moved while the human was deciding is
    *    still refused.
+   *
+   * For a capability candidate the whole gate is
+   * `assertCapabilityPromotionEvidence` (see `promotion.ts`): the frozen row and
+   * the new skill re-read and re-verified against the identities prepare
+   * recorded, the registry row still reading as the baseline prepare captured,
+   * every candidate rule still holding against the store as it stands now, every
+   * provider the row declares loadable under the admission pre-check — and the
+   * two-sided capability experiment (§F.4 "评估/应用必须同组补齐"): the frozen
+   * identity, the report file, and each sample's sides re-read from the store, so
+   * a `not-admitted` baseline the runtime really refused and a candidate run that
+   * really passed are the only evidence a capability PROMOTE rests on.
    */
   checkPromotion(proposalId: string): Promise<PromotionCheck>;
+  /**
+   * The capability promotion gate, plus the one report a tool needs from it: the
+   * provider role of the new skill the candidate installs, judged from the
+   * sandbox directory against the table the row would produce — the same
+   * validator admission runs, with the row this commit installs already folded
+   * in, so the verdict is about the deployment the apply would create rather than
+   * the one before it.
+   */
+  private checkCapabilityPromotion;
+  /**
+   * The store and the row pre-check a capability promotion reads, resolved from
+   * this context: the effective registry, the registered verifier vocabulary and
+   * the roots discovery searches (all through {@link capabilityStore}), plus the
+   * same admission pre-check prepare ran — once more, against the store as it
+   * stands at the gate, with the candidate's sandbox skill root in front of
+   * production discovery.
+   *
+   * Since A6's evaluation interface the gate also reads the experiment evidence,
+   * so it resolves the same four services the skill gate does
+   * ({@link promotionSources}): the ledger's experiment family, the task store
+   * the runs live in, the live judge vocabulary, this deployment's selection and
+   * its session logs. One wiring, so the two gates cannot read different facts.
+   */
+  private capabilityPromotionSources;
   /**
    * The services the promotion gate re-reads from this context: the experiment
    * family of this same ledger, the task store the experiment names, the live
@@ -1675,14 +2268,22 @@ declare class EvolutionService extends Service {
    * as unreadable instead of as "granting nothing": an execution provider is then
    * refused (fail-closed), while knowledge and guidance — which make no tool
    * claim — are judged by the same validator as everywhere else.
+   *
+   * `table` is the table the candidate is judged against, and it is a parameter
+   * only because a capability candidate's new skill must be judged against the
+   * table *its own row would produce* (A6): the row is not in the deployment's
+   * registry yet — the commit that installs it is what this promotion check is a
+   * preflight for — so judging it against the table before the write would refuse
+   * every provider that closes the very gap the candidate exists for. Every other
+   * caller passes nothing and reads the deployment's own registry.
    */
   private providerVerdict;
   /**
-   * The capability table this service judges providers against: the running
-   * registry, which is the table a restart re-reads from `config.yml` and the one
-   * `evolution_prepare` snapshots the champion from. Absent (no task-runtime in
-   * this context) means the table cannot be read — reported as an unreadable
-   * grant rather than mistaken for an empty table.
+   * The capability table this service judges providers against: by default the
+   * running registry, which is the table a restart re-reads from `config.yml` and
+   * the one `evolution_prepare` snapshots the champion from. Absent (no
+   * task-runtime in this context) means the table cannot be read — reported as an
+   * unreadable grant rather than mistaken for an empty table.
    */
   private capabilityToolAnswer;
   /** The effective capability table, or `undefined` when this context cannot read one (no task-runtime service). */
@@ -1702,6 +2303,15 @@ declare class EvolutionService extends Service {
     sidecar?: Buffer;
   }>;
   /**
+   * Read a prepared **capability** candidate back out of its sandbox and verify
+   * every byte against the identities prepare recorded (A6): the frozen row, the
+   * champion row when the registry held one, and the new skill's two files when
+   * the candidate carries one. The one read path the experiment's freeze, the
+   * promotion gate and the apply write share, so what is evaluated, promoted and
+   * committed is provably the same bytes.
+   */
+  readCapabilityCandidate(proposalId: string): Promise<PreparedCapability>;
+  /**
    * The production-baseline check (P3), on the apply seams only: the
    * evolution_apply tool runs it before asking a human, and `apply` runs it
    * again immediately before the production write, so a baseline that moved
@@ -1716,21 +2326,37 @@ declare class EvolutionService extends Service {
    * (now a directory), or sits behind a symbolic link (the file itself or an
    * ancestor) is a conflict, and so is a sidecar that appeared beside a baseline
    * that had none: the shape production would be loaded in has changed, which is
-   * a third party's edit like any other. Only `targetType: skill` carries a
-   * baseline; every other targetType passes untouched.
+   * a third party's edit like any other.
+   *
+   * A **capability** candidate's baseline is the registry row it read at prepare
+   * (and the absence of a production object for its new skill, A6): the row must
+   * still read exactly as prepare recorded it — or still be absent, for a row this
+   * candidate adds — and the new skill's name must still be free. Either conflict
+   * refuses by name with nothing written; a target type this build has no
+   * executor for passes untouched.
    */
   checkProductionBaseline(proposalId: string): Promise<void>;
+  /**
+   * The capability candidate's production baseline (A6): the registry row this
+   * proposal read at prepare must still read exactly the same — a row a third
+   * party replaced, added or removed is a conflict, not a candidate — and the
+   * new skill's name must still be free where discovery looks. Nothing here
+   * writes or merges; a conflict only throws, before the commit intent exists.
+   */
+  private assertCapabilityBaseline;
   private assertProductionBaseline;
   private readVerifiedSkillCandidate;
   /**
    * Move applied → rolledback: undo the apply by restoring the champion snapshot
    * taken at prepare, as one commit — the same intent → atomic write →
    * completion order as apply, so an interrupted rollback is recoverable the
-   * same way, including between the two files of one object. A record of another
-   * target type has no executor here: this build writes and restores the fixed
-   * file set of one skill object only, and an applied capability row or preset
-   * directory is refused by name rather than touched. Same approval discipline
-   * as apply: the tool asks a human first, the service only executes and records.
+   * same way, including between the two files of one object. A **capability**
+   * apply is undone by the same entry (A6): the registry row goes back to the row
+   * prepare recorded — or is removed, when this candidate added it — and the new
+   * skill's files are removed, because they did not exist before this proposal. A
+   * record of another target type has no executor here: an applied preset
+   * directory is refused by name rather than touched. Same approval discipline as
+   * apply: the tool asks a human first, the service only executes and records.
    *
    * A rollback restores *this* proposal's baseline and nothing else, so both
    * ends are re-verified per file before the intent is recorded: every
@@ -1750,10 +2376,20 @@ declare class EvolutionService extends Service {
    *
    * As in {@link apply}, an open intent of this proposal is settled rather than
    * duplicated, and the result reports the recovery; an open intent of another
-   * proposal that commits the same skill directory refuses this rollback by name
-   * before anything is read or written ({@link assertTargetUncommitted}).
+   * proposal that commits the same skill directory — or moves the same capability
+   * row — refuses this rollback by name before anything is read or written
+   * ({@link assertTargetUncommitted}).
    */
   rollback(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome>;
+  /**
+   * What a capability rollback must still find before it may be recorded (A6):
+   * the registry row this proposal installed, and — when it installs a new skill
+   * — the files it applied. A row (or file) another writer or a later proposal
+   * changed since is refused by name with nothing written and no intent recorded;
+   * a rollback restores *this* proposal's baseline and never overwrites a newer
+   * state.
+   */
+  private assertCapabilityApplied;
   /**
    * Settle every open commit intent, in ledger order (K2) — the explicit startup
    * and resume entry. Nothing calls this implicitly: no read path, no `get` /
@@ -1804,10 +2440,24 @@ declare class EvolutionService extends Service {
    */
   private commitRequest;
   /**
-   * The production paths a commit of this proposal may write: the object's fixed
-   * file set under `<skillRoot>/<name>/` — `SKILL.md` always, and the
-   * `SKILL.contract.json` beside it when the prepared identity records an
-   * execution sidecar — each confined to the skill root, in commit order.
+   * The commit one capability candidate binds (A6): the one row it moves, and —
+   * when it carries a new skill — that skill's two files, as a create on apply
+   * (`baselineSha256: null`: the target must not exist) and a removal on rollback
+   * (`contentSha256: null`, no source: there are no bytes to write again). The
+   * row's two sides mirror the files': an apply installs the candidate row over
+   * the recorded baseline (or over the absence of any row), a rollback restores
+   * the baseline row — or removes the row this candidate added. The request is
+   * read off the prepared record only, so what the intent says is what prepare
+   * froze.
+   */
+  private capabilityCommitRequest;
+  /**
+   * The production paths a commit of this proposal may write: for a skill
+   * candidate the object's fixed file set under `<skillRoot>/<name>/` —
+   * `SKILL.md` always, and the `SKILL.contract.json` beside it when the prepared
+   * identity records an execution sidecar; for a capability candidate the new
+   * skill's two files, or none for a row-only candidate. Each path is confined to
+   * the skill root, in commit order.
    */
   private commitTargets;
   /**
@@ -1827,9 +2477,13 @@ declare class EvolutionService extends Service {
    * retry loop; the intent is settled first, by {@link reconcile} or by a retry
    * of the proposal that owns it.
    *
-   * Only a materialized skill mutation has commit targets this build may write:
-   * every other proposal keeps the named refusal its own entry produces
-   * ({@link checkPromotion}, {@link commitRequest}).
+   * Only a materialized skill or capability mutation has commit targets this
+   * build may write: every other proposal keeps the named refusal its own entry
+   * produces ({@link checkPromotion}, {@link commitRequest}). A capability
+   * candidate's row is a second object of the same kind: the same row moved by
+   * two proposals at once is refused here as well, before either intent exists,
+   * because the second would find the first's row where its own baseline check
+   * expects the state it read.
    */
   private assertTargetUncommitted;
   /**
@@ -1876,6 +2530,14 @@ declare class EvolutionService extends Service {
    * committed content — passes, as it must: that is the window an interrupted
    * two-file commit leaves for a recovery to finish, not a foreign change. This
    * reads the directory and writes nothing.
+   *
+   * Two more states come from A6, and both are answered about the *directory*
+   * rather than the files, for the same reason: a file set whose baseline is the
+   * **absence** of the object (an apply that creates a new skill) may only write
+   * where production holds nothing but this object's own staging leftovers, and a
+   * file set whose content is that absence (the rollback that removes it) may
+   * only remove files from a directory that holds exactly those files — anything
+   * else in either place is an entry this commit never created and must not touch.
    */
   private objectWriteRefusal;
   /**
@@ -1927,6 +2589,42 @@ declare class EvolutionService extends Service {
    */
   private verifyCommitted;
   /**
+   * The capability table's **own text** (A6): the durable half of a capability
+   * commit, written between the registry's row and the completion line — in a
+   * fresh commit and in every reconciliation branch alike, because
+   * {@link verifyCommitted} is the one place every path passes before it records
+   * one.
+   *
+   * Why it lives here and not beside the registry seam: an applied row whose file
+   * was not written is a row the next restart loses, and the completion line is
+   * the claim that it will not be lost. Both facts are re-established by writing
+   * the row (or removing it, for a rollback) and reading the file back before the
+   * completion; a crash in between leaves the intent open, and the next
+   * reconciliation repeats the same edit — it is idempotent, and the registry's
+   * row is already the one the intent records.
+   *
+   * A deployment that names no file refuses by name rather than recording a
+   * completion for a row that lives only in this process.
+   */
+  private persistCapabilityRowText;
+  /**
+   * The file half of {@link verifyCommitted}. A direction that ends with files
+   * **removed** (a capability rollback, A6) is verified as that: every file the
+   * intent named must be gone, and nothing is loaded — there is no object left to
+   * load. Every other direction is the whole-object verification described above.
+   */
+  private verifyCommittedFiles;
+  /**
+   * The capability half of {@link verifyCommitted} (A6): the registry must read as
+   * the row this direction installed — the row's canonical digest, or no row at
+   * all when the direction removes it. This is what makes the completion a
+   * statement about the registry rather than about the files: by the time the
+   * line is written, the deployment's own registry view is already the new one,
+   * and a completion is never recorded over a registry that still holds the
+   * state before the commit.
+   */
+  private verifyCommittedRow;
+  /**
    * Serialize one commit — its intent, its production write and its completion —
    * behind every commit already running or queued, and behind every write the
    * ledger funnel has not appended yet. This is a single-process queue, not a
@@ -1942,6 +2640,65 @@ declare class EvolutionService extends Service {
   get(proposalId: string): Promise<EvolutionProposal>;
   /** Folded views, newest proposal first, optionally filtered. */
   list(filter?: ListFilter): Promise<EvolutionProposal[]>;
+  /**
+   * The **recovery coordination** entry (A6, plan §F.4): take one recorded
+   * Diagnosis of a failed root task and — if everything this plane owns is in
+   * order — open the task's new attempt through the runtime's own entry.
+   *
+   * The call chain is fixed (plan §F.4: 工具适配 → evolution 的恢复协调入口 →
+   * task-runtime 的执行恢复入口) and each layer re-checks its own rules. What
+   * *this* layer owns, in order, before anything is started:
+   *
+   * 1. **the request's closed shape** — two non-empty ids and nothing else: no
+   *    authorization, no approval, no decision, no reuse list. A model cannot
+   *    smuggle a permission into a recovery because there is nowhere to put one.
+   * 2. **the caller's delegation** — the session must be the supervisor the
+   *    ledger recorded for *this* diagnosis (the injected
+   *    {@link Config.supervisorDelegation}), and the store the delegation names
+   *    must be the store of the caller's own graph. An ordinary root, a worker,
+   *    a reviewer, another graph's supervisor and an unknown session are all
+   *    refused by name here; nothing is derived from the ids the caller passed.
+   * 3. **the diagnosis and its source** — the store must hold the diagnosis, the
+   *    diagnosis must name a task of that store, that task must be the store's
+   *    own root, and it must be in a failing state: a `verified` source is
+   *    refused outright (a successful goal is not recovered, and this build has
+   *    no frozen metric or comparator that could judge "faster or cheaper" — its
+   *    suggestions stay records, with no promotion, no application and no new
+   *    run), and a source whose run is still live is refused rather than
+   *    hot-swapped.
+   * 4. **the candidate association** — the proposals this ledger holds for that
+   *    diagnosis (`sourceRefs` naming `diagnosis:<id>`). **Only a capability
+   *    change has to be in force**: every associated proposal that targets a
+   *    capability must read `applied` (approved by a person and committed) and
+   *    not rolled back, or the recovery is refused by name with nothing started
+   *    — the gap it stands for is still open. A pure artifact gap carries no
+   *    proposal at all and is *not* refused for that: what it needs is the
+   *    source and the capability the production really uses, so this layer
+   *    checks the source's required rows resolve in the deployment's current
+   *    table and leaves the rest to the runtime.
+   * 5. **the attempt's own identity** — a diagnosis with an attempt already in
+   *    flight is refused under a *different* key (one diagnosis never runs two
+   *    attempts at once); the same key is passed through, and the runtime
+   *    answers it from the record it wrote (this layer keeps no attempt table of
+   *    its own: the run's `recovery` field is the fact).
+   * 6. **the runtime call** — the host composition layer's own entry
+   *    (`TaskRuntime.recoverRootTask`), which re-checks the store's facts, the
+   *    contract, the providers, the ceilings and the idempotency before it
+   *    writes, and never reads this ledger.
+   *
+   * Nothing here writes: the decision is a read of the store, this ledger and the
+   * injected delegation, and the one write that happens is the runtime's.
+   */
+  coordinateRecovery(request: RecoveryCoordinationRequest, caller: RecoveryCoordinationCaller): Promise<RecoveryCoordinationOutcome>;
+  /**
+   * The one runtime call this entry makes, with the answer every path carries: the
+   * attempt the runtime opened or already had, and the hand-off facts this plane
+   * checked. A deployment without that entry refuses by name — a recovery cannot
+   * be opened by this plane, which owns no execution state.
+   */
+  private recoverThroughRuntime;
+  /** The root task store of one live session, derived from its own graph — never from an id the caller passed. */
+  private storeOfSession;
   private refExistsOnDisk;
   /**
    * Early state-machine check so a wrong-state call reports the transition
@@ -2110,4 +2867,4 @@ declare class EvolutionService extends Service {
   private experimentSources;
 }
 //#endregion
-export { APPLYABLE_TARGET_TYPES, ApplyOutcome, ApplyView, ChampionState, CommitDirection, CommitIntentRecord, CommitIntentView, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCriterion, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, GateAnswers, ListFilter, ModelSelection, PrecheckSkillVerdict, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, ProviderPrecheckView, ReplayCriterionDiff, ReplayCriterionSummary, ReplaySideSummary, SideRelation, SkillContentIdentity, SkillContractIdentity, SkillMutation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, overallExperimentVerdict, preparedContentDigestOf, protectedInputsDigest, renderProviderRoles, resumeExperiment, runExperiment };
+export { APPLYABLE_TARGET_TYPES, ApplyOutcome, ApplyView, CapabilityCandidate, CapabilityOverlay, CapabilityRow, CapabilityRowIdentity, CapabilitySkill, CapabilityStoreView, ChampionState, CommitCapability, CommitDirection, CommitIntentRecord, CommitIntentView, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_ADMISSION_SOURCES, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentAdmissionRefusal, ExperimentAdmissionSource, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCapability, FrozenCapabilityRow, FrozenCapabilitySide, FrozenCriterion, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, FrozenSampleAdmission, GateAnswers, ListFilter, ModelSelection, PrecheckSkillVerdict, PreparedCapability, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, ProviderPrecheckView, RecoveryCoordinationCaller, RecoveryCoordinationOutcome, RecoveryCoordinationRequest, ReplayCriterionDiff, ReplayCriterionSummary, ReplaySideSummary, SideRelation, SkillContentIdentity, SkillContractIdentity, SkillMutation, SupervisorDelegation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertAdmissionRecord, assertCapabilityCandidateAdmissible, assertCapabilityRow, assertCapabilityRowAdmissible, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, authorizedToolPlane, buildExperimentReport, canonicalJson, capabilityOverlay, capabilityRefusal, capabilityRowBytes, capabilityRowDigest, capabilityRowIdentity, capabilityTableWith, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, discoverSkill, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, overallExperimentVerdict, preparedContentDigestOf, protectedInputsDigest, readPreparedCapability, recoveryCoordinationDefects, recoverySourceRunId, renderProviderRoles, resumeExperiment, runExperiment, validateCapabilityMutation };

@@ -17,20 +17,25 @@ function reaches(edges, start, target) {
 	return false;
 }
 /**
-* The member task ids one run has admitted altogether: the `memberTaskIds` of
-* its batches concatenated in admission order ({@link TaskRun.batches}). The
-* accumulation is append-only, so position `i` of the result is the stable
-* position a parent criterion's `childIndex` names, and a later batch never
-* moves an earlier member. One derivation, shared by the runtime read
+* The member task ids one run reads, in the sequence a parent criterion's
+* `childIndex` names: the verified siblings its {@link TaskRun.recovery} pins,
+* in position order, and then the `memberTaskIds` of its batches concatenated in
+* admission order ({@link TaskRun.batches}).
+*
+* The accumulation is append-only and the pinned slots are the leading
+* positions, so position `i` of the result is stable: a later batch never moves
+* an earlier member, and a reused sibling keeps the position the original
+* acceptance map names for it. One derivation, shared by the runtime read
 * (`TaskService.runMembersIn`) and by any reader that needs the ids alone, so
 * "the run's members" cannot mean two different orders.
 *
-* A run with no batches has no members here — an empty list, never its task's
-* children: those belong to whichever batch admitted them, and a run that
-* admitted no batch of this shape is not given one by guessing.
+* A run with no batches and no pinned members has no members here — an empty
+* list, never its task's children: those belong to whichever batch admitted
+* them, and a run that admitted no batch of this shape is not given one by
+* guessing.
 */
 function runMemberTaskIds(run) {
-	return (run.batches ?? []).flatMap((batch) => batch.memberTaskIds);
+	return [...(run.recovery?.reusedMembers ?? []).map((member) => member.taskId), ...(run.batches ?? []).flatMap((batch) => batch.memberTaskIds)];
 }
 /** Every judged dimension, in the order a report reads them. */
 const JUDGED_DIMENSIONS = [
@@ -991,6 +996,7 @@ var TaskState = class TaskState {
 		if (run.status !== "running") throw new Error(`task: run "${run.runId}" must start in status "running"`);
 		if (typeof run.sessionId !== "string" || run.sessionId.length === 0) throw new Error(`task: run "${run.runId}" session id must be non-empty`);
 		if (run.providerBinding !== void 0) this.assertProviderBinding(run.runId, run.providerBinding);
+		if (run.recovery !== void 0) this.assertRunRecovery(taskId, run.recovery);
 		this.assertBirthPhase(run);
 		if (run.parentRunId !== void 0) this.run(run.parentRunId);
 		this.assertTransition(taskId, ["admitted", "ready"], "running");
@@ -1001,6 +1007,69 @@ var TaskState = class TaskState {
 		this.updateTask(taskId, {
 			status: "running",
 			runIds: [...this.task(taskId).runIds, run.runId]
+		});
+	}
+	/**
+	* The recovery attempt a run carries (A6, plan §F.4), judged by the reducer as
+	* the last gate — the entry re-checks the same facts against policy (the
+	* source's failure, the diagnosis, the limits, the capability rows), and this
+	* accepts only a record the *store* can hold: a root task's own new attempt,
+	* whose cited diagnosis this store already holds for that task, whose pinned
+	* siblings are its own verified children with the evidence they claim, and
+	* whose positions are the run's leading ones.
+	*
+	* Why the store re-checks what the entry already did: a run record is written
+	* by whoever calls `startRunIn`, and a record that *reads* as a reuse of
+	* evidence that does not exist would be believed by every later reader (the
+	* composite judge reads exactly this). The rules here are the ones the store's
+	* own snapshot can answer; the ones that need policy (was the source failing,
+	* was the capability applied, is a ceiling in the way) stay at the entry.
+	*/
+	assertRunRecovery(taskId, recovery) {
+		const where = `task: run recovery of "${taskId}"`;
+		for (const [name, value] of [
+			["source diagnosis id", recovery.sourceDiagnosisId],
+			["request key", recovery.requestKey],
+			["requested at", recovery.requestedAt]
+		]) if (typeof value !== "string" || value.trim().length === 0) throw new Error(`${where} requires a non-empty ${name}`);
+		if (recovery.sourceRunId !== void 0 && (typeof recovery.sourceRunId !== "string" || recovery.sourceRunId.length === 0)) throw new Error(`${where} source run id must be a non-empty string when present`);
+		if (this.task(taskId).parentTaskId !== void 0) throw new Error(`${where} names task "${taskId}", which has a parent; a recovery attempt is opened for the store's own root task`);
+		if (!this.value.diagnoses.some((diagnosis) => diagnosis.diagnosisId === recovery.sourceDiagnosisId && diagnosis.taskId === taskId)) throw new Error(`${where} cites diagnosis "${recovery.sourceDiagnosisId}", which this store holds no record of for task "${taskId}"; a recovery is asked for by a diagnosis of the failing task and by nothing else`);
+		if (recovery.sourceRunId !== void 0) {
+			const source = this.value.runs.find((run) => run.runId === recovery.sourceRunId);
+			if (source === void 0) throw new Error(`${where} cites unknown run "${recovery.sourceRunId}"`);
+			if (source.taskId !== taskId) throw new Error(`${where} cites run "${recovery.sourceRunId}", which belongs to task "${source.taskId}", not "${taskId}"`);
+		}
+		const reused = recovery.reusedMembers;
+		if (!Array.isArray(reused)) throw new Error(`${where} reused members must be an array`);
+		reused.forEach((member, position) => {
+			const at = `${where} reused member ${position}`;
+			if (!isRecord(member)) throw new Error(`${at} must be an object`);
+			if (member.childIndex !== position) throw new Error(`${at} declares childIndex ${JSON.stringify(member.childIndex)}; a reused member occupies its own position in the sequence (${position}), because the store reads the pinned siblings first and the admitted members after them`);
+			const sibling = this.value.tasks.find((candidate) => candidate.taskId === member.taskId);
+			if (sibling === void 0) throw new Error(`${at} cites unknown task "${String(member.taskId)}"`);
+			if (sibling.parentTaskId !== taskId) throw new Error(`${at} cites task "${sibling.taskId}", which is not a child of "${taskId}"; only a sibling of the failed attempt can be reused`);
+			if (sibling.status !== "verified") throw new Error(`${at} cites task "${sibling.taskId}", which is ${sibling.status}, not verified; only evidence of a passed sibling is reusable`);
+			const source = this.value.runs.find((run) => run.runId === member.sourceRunId);
+			if (source === void 0) throw new Error(`${at} cites unknown run "${String(member.sourceRunId)}"`);
+			if (source.taskId !== sibling.taskId) throw new Error(`${at} cites run "${source.runId}", which belongs to task "${source.taskId}", not "${sibling.taskId}"`);
+			if (source.status !== "verified") throw new Error(`${at} cites run "${source.runId}", which is ${source.status}; a reused member reads the evidence of a verified run`);
+			const bundle = this.value.evidence.find((item) => item.evidenceId === member.evidenceId);
+			if (bundle === void 0) throw new Error(`${at} cites unknown evidence "${String(member.evidenceId)}"`);
+			if (bundle.taskRunId !== source.runId || bundle.taskId !== sibling.taskId) throw new Error(`${at} cites evidence "${bundle.evidenceId}", which belongs to task "${bundle.taskId}"/run "${bundle.taskRunId}", not to "${sibling.taskId}"/"${source.runId}"`);
+			const named = new Set(bundle.artifacts.flatMap((artifact) => [artifact.artifactId, artifact.kind]));
+			for (const reference of member.artifactRefs ?? []) if (!named.has(reference)) throw new Error(`${at} cites artifact "${String(reference)}", which the evidence "${bundle.evidenceId}" does not hold (by artifact id or kind)`);
+			if (member.criterionId !== void 0) {
+				if (sibling.acceptanceCriteria.find((item) => item.criterionId === member.criterionId) === void 0) throw new Error(`${at} names criterion "${member.criterionId}", which the sibling "${sibling.taskId}" does not declare`);
+				const verdict = bundle.verifierResults.find((item) => item.criterionId === member.criterionId);
+				if (verdict?.status !== "pass") throw new Error(`${at} names criterion "${member.criterionId}" of sibling "${sibling.taskId}", whose verified evidence carries ${verdict === void 0 ? "no verdict" : `a "${verdict.status}" verdict`}; only a passing verdict is reusable`);
+			}
+			const declaredInputs = new Set(sibling.acceptanceCriteria.flatMap((criterion) => [
+				...criterion.requiresArtifact ?? [],
+				...criterion.acceptsArtifact ?? [],
+				...(criterion.protectedInputs ?? []).map((input) => input.path)
+			]));
+			for (const reference of member.inputRefs ?? []) if (!declaredInputs.has(reference)) throw new Error(`${at} cites input "${String(reference)}", which the sibling "${sibling.taskId}" does not declare (requiresArtifact, acceptsArtifact or protectedInputs)`);
 		});
 	}
 	block(taskId, runId) {
@@ -2493,7 +2562,19 @@ var TaskService = class extends Service {
 			payload: { edge }
 		})]);
 	}
-	async startRunIn(storeId, run, actor) {
+	/**
+	* One run starts on a task that may run — a first run, or a new attempt at a
+	* task that failed (`TaskRetried`, then `TaskStarted`, in one commit).
+	*
+	* `options.manifest` records the capability manifest the run starts under for
+	* its own task, in the same commit: a recovery attempt re-resolves its rows
+	* against what the deployment holds *now* (a capability applied after the
+	* first attempt failed is part of what the new attempt is for), and the store
+	* is where the resume path rebuilds a run's authorization from. Omitted — the
+	* ordinary case — the manifest the task was admitted with stands, which is the
+	* only manifest there was.
+	*/
+	async startRunIn(storeId, run, actor, options = {}) {
 		const store = this.requireStore(storeId);
 		await store.ready;
 		await store.writes;
@@ -2503,6 +2584,11 @@ var TaskService = class extends Service {
 			taskId: run.taskId,
 			actor,
 			payload: {}
+		}));
+		if (options.manifest !== void 0) events.push(event("CapabilityResolved", {
+			taskId: run.taskId,
+			actor,
+			payload: { manifest: options.manifest }
 		}));
 		events.push(event("TaskStarted", {
 			taskId: run.taskId,

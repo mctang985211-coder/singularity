@@ -1,7 +1,9 @@
 /**
- * The two-sided skill experiment (§F.2): the one evaluation this plane runs for
- * a candidate that replaces an existing skill object (`SKILL.md`, plus the
- * `SKILL.contract.json` beside it when the object carries an execution sidecar).
+ * The two-sided experiment (§F.2): the one evaluation this plane runs for a
+ * candidate that replaces an existing skill object (`SKILL.md`, plus the
+ * `SKILL.contract.json` beside it when the object carries an execution sidecar)
+ * — and, since A6, for a **capability candidate**: one whole capability row plus
+ * the new execution skill it may grant.
  *
  * The v1 replay compared a candidate against a historical record. This module
  * runs the comparison the plan actually asks for: for every frozen sample, one
@@ -65,10 +67,21 @@
  *
  * The runs go through the existing replay entry — `taskRuntime.replayTask` with
  * `options.workspace` naming the side's own directory (S4-E item 2), and the
- * candidate side's `overlay.extraSkillRoots` pointing at the prepared sandbox's
- * `skills/`. Nothing here executes a run, judges a criterion or writes
- * production: the baseline side carries no overlay at all, so it runs under the
- * production configuration, and the candidate side runs the prepared bytes.
+ * candidate side's overlay: `extraSkillRoots` pointing at the prepared sandbox's
+ * `skills/` for a skill candidate, and both `capabilityOverrides` and
+ * `extraSkillRoots` for a capability candidate (A6), so the candidate side runs
+ * on exactly the row and the bytes `prepare` froze. Nothing here executes a run,
+ * judges a criterion or writes production: the baseline side carries no overlay
+ * at all, so it runs under the production configuration.
+ *
+ * A capability sample's production baseline may not be admissible at all: the
+ * effective table does not hold a row the sample requires, or the pre-check
+ * refuses its provider. That is the gap the candidate is evaluated against, and
+ * the sample freezes it as an admission refusal — the baseline side is then
+ * really offered to the runtime, refused, and recorded as `not-admitted` with
+ * the runtime's own words, the gap and the proposal it belongs to. No Task, no
+ * Run, no champion and no failure run is ever invented in its place, and the
+ * candidate side still has to be a run that passed the frozen judge.
  *
  * Idempotency (§F.2). One sample side is keyed by `(proposalId,
  * preparedContentDigest, sampleTaskId, side, repetition)` — the content member
@@ -105,10 +118,17 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import type { AcceptanceCriterion, ReviewCriterion, ReviewRecord, TaskInstance, TaskSnapshot } from '@dangosys/dsh-singularity-task'
-import type { CapabilityConfig, ReplayRunOutcome, ReplayTaskOptions } from '@dangosys/dsh-singularity-task-runtime'
-import { registryRevision } from '@dangosys/dsh-singularity-task-runtime'
-import type { EvolutionProposal } from './evolution.ts'
 import type {
+  CapabilityConfig,
+  ReplayRunOutcome,
+  ReplayTaskOptions,
+} from '@dangosys/dsh-singularity-task-runtime'
+import { registryRevision, resolveCapabilities } from '@dangosys/dsh-singularity-task-runtime'
+import type { EvolutionProposal } from './evolution.ts'
+import type { PreparedCapability } from './capability-candidate.ts'
+import { capabilityOverlay, capabilityRowIdentity } from './capability-candidate.ts'
+import type {
+  ExperimentAdmissionRefusal,
   ExperimentBudget,
   ExperimentCost,
   ExperimentReport,
@@ -116,22 +136,27 @@ import type {
   ExperimentSampleRole,
   ExperimentSide,
   ExperimentSideDetail,
+  FrozenCapability,
+  FrozenCapabilitySide,
   FrozenCriterion,
   FrozenExperiment,
   FrozenProviderIdentity,
   FrozenProviderSkill,
   FrozenSample,
+  FrozenSampleAdmission,
   ModelSelection,
   SkillContentIdentity,
 } from './replay.ts'
 import {
   agentOptionsOf,
+  assertAdmissionRecord,
   assertExperimentReport,
   assertFrozenExperiment,
   canonicalJson,
   compareExperimentSides,
   digestOf,
   EXPERIMENT_COMPARER_VERSION,
+  EXPERIMENT_OUTCOMES,
   EXPERIMENT_SAMPLE_ROLES,
   EXPERIMENT_SIDES,
   frozenDigestOf,
@@ -251,7 +276,7 @@ export interface ExperimentSampleRecord {
   taskId?: string
   /** The run this side created. Absent for a side whose run never reached the store. */
   runId?: string
-  outcome: 'verified' | 'failed' | 'cancelled' | 'interrupted'
+  outcome: ExperimentSideDetail['outcome']
   /** `<taskId>#<runId>` of the terminal ReviewRecord this side cites (the deployment's own review-ref shape). */
   reviewRef?: string
   /** Evidence ids the run's review record (or, when it has none, the store's evidence bundles) carries. */
@@ -272,6 +297,11 @@ export interface ExperimentSampleRecord {
   cost: ExperimentCost
   /** Why this side has no terminal run; required for `interrupted`. */
   reason?: string
+  /**
+   * The runtime's own admission refusal, carried by a `not-admitted` side (A6):
+   * the side produced no Task and no Run, so this record stands in their place.
+   */
+  admission?: ExperimentAdmissionRefusal
   actor: string
   at: string
 }
@@ -279,15 +309,27 @@ export interface ExperimentSampleRecord {
 export type ExperimentRecord = ExperimentStartedRecord | ExperimentSampleRecord
 
 /**
- * The idempotency key's content member (K3): the digest of the candidate's
+ * The idempotency key's content member (K3, A6): the digest of the candidate's
  * **complete** content identity — {@link digestOf} of the identity `prepare`
  * recorded, so the name, the `SKILL.md` bytes and, when the object has an
  * execution sidecar, the sidecar's exact bytes and canonical declaration are all
  * part of the key. Two candidates that differ in any of them are two objects,
  * and a key spent on one is never reused for the other.
+ *
+ * A capability candidate's identity is the **capability** block (the row it
+ * installs, the row it moves and the gap it came from) together with the new
+ * skill object when it carries one — the row alone would let two candidates
+ * that differ only in their skill bytes share a key, and the skill alone would
+ * let two rows share one.
  */
-export function preparedContentDigestOf(candidate: SkillContentIdentity): string {
-  return digestOf(candidate)
+export function preparedContentDigestOf(frozen: { candidate?: SkillContentIdentity; capability?: FrozenCapability }): string {
+  if (frozen.capability !== undefined) {
+    return digestOf({ capability: frozen.capability, ...(frozen.candidate === undefined ? {} : { candidate: frozen.candidate }) })
+  }
+  if (frozen.candidate === undefined) {
+    throw new Error('experiment: a frozen block with neither a candidate object nor a capability candidate has no identity to key a sample by')
+  }
+  return digestOf(frozen.candidate)
 }
 
 /** True for a record of the experiment family — the lines the proposal fold must leave alone. */
@@ -326,6 +368,14 @@ export interface ExperimentLedger {
    * that identity (P2); throws otherwise.
    */
   readSkillCandidate(proposalId: string): Promise<{ skillMd: Buffer; sidecar?: Buffer }>
+  /**
+   * Read a prepared **capability** candidate back out of its sandbox and verify
+   * every byte against the identities prepare recorded (A6): the frozen row, the
+   * new skill's two files when it carries one, and the champion row when the
+   * registry held one. Throws otherwise. The evaluation freezes exactly these
+   * bytes, so what an experiment mounts is what a commit would install.
+   */
+  readCapabilityCandidate(proposalId: string): Promise<PreparedCapability>
   /** One experiment's folded view; throws on an unknown id. */
   experiment(experimentId: string): Promise<ExperimentView>
   /**
@@ -371,6 +421,18 @@ export interface ExperimentSources {
      * conclusion, never this plane's guess.
      */
     capabilityProviderReport(sessionId: string, capabilities?: readonly string[]): Promise<ProviderPrecheckView>
+    /**
+     * The runtime's own pre-check over a capability table the experiment names
+     * (A6): the candidate overlay's table, with the sandbox skill root in front
+     * of discovery — the same function the replay's own admission runs, so what
+     * the freeze records as the candidate side's expectation is the runtime's
+     * own conclusion about the configuration that side will really run under.
+     */
+    precheckCapabilityTable?(request: {
+      capabilities: readonly string[]
+      table: Readonly<Record<string, CapabilityConfig>>
+      extraRoots: readonly string[]
+    }): Promise<ProviderPrecheckView>
     /** The effective capability table, as the runtime holds it — the rows a pre-check covered and the servers they grant. */
     listCapabilities?(): Readonly<Record<string, CapabilityConfig>>
   }
@@ -527,21 +589,43 @@ function criterionDetail(criterion: ReviewCriterion): ExperimentSideDetail['crit
   }
 }
 
+/** What one experiment call evaluates: the proposal, its sandbox, and the identity it froze the candidate as. */
+interface ExperimentCandidate {
+  proposal: EvolutionProposal
+  sandbox: string
+  /** The skill object the candidate side runs (a skill candidate, or a capability candidate's new skill). */
+  candidate?: SkillContentIdentity
+  /** The capability candidate's frozen identity (A6); absent for a skill candidate. */
+  capability?: FrozenCapability
+  /** The candidate-side overlay of a capability candidate: the row override and the sandbox skill root. */
+  overlay?: { capabilityOverrides: Record<string, CapabilityConfig>; extraSkillRoots: string[] }
+}
+
 /**
- * The proposal this experiment may evaluate, and the candidate object it runs
- * against. A skill candidate only: this plane's two-sided experiment replaces an
- * existing skill object's bytes, and every other target type either has no such
- * evaluation (A6's capability candidates) or none at all. The candidate's files
- * are re-verified here (P2) before anything runs — the `SKILL.md` alone for
- * guidance, both files when the object carries an execution sidecar.
+ * The proposal this experiment may evaluate, and the candidate identity it runs
+ * against. Two candidate kinds have an evaluator in this build (A6):
+ *
+ * - a **skill** candidate replaces an existing skill object's bytes; the
+ *   candidate's files are re-verified here (P2) before anything runs — the
+ *   `SKILL.md` alone for guidance, both files when the object carries an
+ *   execution sidecar;
+ * - a **capability** candidate installs one whole capability row and may carry
+ *   one new execution skill; its frozen row, champion row and skill files are
+ *   re-read and re-verified the same way (`readPreparedCapability`), and the
+ *   overlay the candidate side runs under is read off that verified record
+ *   (`capabilityOverlay`), so the evaluation mounts exactly what a commit would
+ *   install.
+ *
+ * Every other target type has no evaluator: a record of one is never upgraded
+ * into evidence.
  */
-async function experimentCandidate(
-  sources: ExperimentSources,
-  proposalId: string,
-): Promise<{ proposal: EvolutionProposal; sandbox: string; candidate: SkillContentIdentity }> {
+async function experimentCandidate(sources: ExperimentSources, proposalId: string): Promise<ExperimentCandidate> {
   const proposal = await sources.evolution.get(proposalId)
-  if (proposal.targetType !== 'skill') {
-    throw new Error(`proposal ${proposalId} targets "${proposal.targetType}"; the two-sided experiment evaluates a skill candidate only`)
+  if (proposal.targetType !== 'skill' && proposal.targetType !== 'capability') {
+    throw new Error(
+      `proposal ${proposalId} targets "${proposal.targetType}"; the two-sided experiment evaluates a skill candidate or a ` +
+      'capability candidate (A6) only',
+    )
   }
   if (proposal.status !== 'prepared') {
     throw new Error(`proposal ${proposalId} is ${proposal.status}; only a prepared proposal can be evaluated`)
@@ -549,9 +633,49 @@ async function experimentCandidate(
   const prepared = proposal.prepared
   // The checks below narrow the view's optional fields; every one of them is
   // also enforced by the ledger fold, so a prepared proposal reached here is
-  // already a materialized skill prepare with both content identities.
+  // already a materialized prepare with its content identities.
   if (prepared === undefined || prepared.sandbox === null || !prepared.mechanical) {
     throw new Error(`proposal ${proposalId} has no materialized candidate; prepare it before evaluating it`)
+  }
+  if (proposal.targetType === 'capability') {
+    if (prepared.capabilityRow === undefined) {
+      throw new Error(
+        `proposal ${proposalId} carries no frozen capability row — a capability prepare records the row it installs and the row it ` +
+        'moves, so a proposal without them has nothing this experiment could compare',
+      )
+    }
+    // P2/P3 before anything runs: every byte is the one prepare recorded.
+    const verified = await sources.evolution.readCapabilityCandidate(proposalId)
+    const identity = capabilityRowIdentity(verified.row)
+    if (identity.digest !== prepared.capabilityRow.digest || identity.name !== prepared.capabilityRow.name) {
+      throw new Error(
+        `proposal ${proposalId} prepared capability row "${prepared.capabilityRow.name}" (${prepared.capabilityRow.digest}), but the ` +
+        `sandbox holds row "${identity.name}" (${identity.digest}) — the two must be the same row before anything runs`,
+      )
+    }
+    const baselineRow = verified.baseline === undefined
+      ? null
+      : capabilityRowIdentity({ name: prepared.capabilityRow.name, entry: verified.baseline.entry })
+    const recordedBaseline = prepared.capabilityBaseline ?? null
+    const baseline = recordedBaseline === null ? null : { name: recordedBaseline.name, entry: recordedBaseline.entry, digest: recordedBaseline.digest }
+    if ((baselineRow === null) !== (baseline === null)
+      || (baselineRow !== null && baseline !== null && baselineRow.digest !== baseline.digest)) {
+      throw new Error(
+        `proposal ${proposalId} records capability baseline ${baseline?.digest ?? 'no row'}, but the sandbox holds ` +
+        `${baselineRow?.digest ?? 'none'} — the row this candidate moves cannot be re-proved, so nothing runs under it`,
+      )
+    }
+    return {
+      proposal,
+      sandbox: prepared.sandbox,
+      capability: {
+        row: { name: prepared.capabilityRow.name, entry: verified.row.entry, digest: prepared.capabilityRow.digest },
+        baseline,
+        sourceRefs: [...proposal.sourceRefs],
+      },
+      ...(prepared.skillContent === undefined ? {} : { candidate: prepared.skillContent }),
+      overlay: capabilityOverlay(proposal, { root: sources.evolution.root }),
+    }
   }
   const candidate = prepared.skillContent
   if (candidate === undefined) {
@@ -780,6 +904,169 @@ async function frozenProviderIdentity(input: {
   }
 }
 
+/** One frozen side identity built from one pre-check's verdicts, refusing a deployment whose providers are unusable or whose roles are unknown. */
+function frozenCapabilitySideOf(input: {
+  precheck: ProviderPrecheckView
+  table: Readonly<Record<string, CapabilityConfig>>
+  rows: readonly string[]
+  where: string
+}): FrozenCapabilitySide {
+  const { precheck, table, rows, where } = input
+  const refused = refusedProviderLines(precheck)
+  if (refused.length > 0) {
+    throw new Error(`${where} resolves to providers the deployment cannot use:\n- ${refused.join('\n- ')}`)
+  }
+  const skills: FrozenProviderSkill[] = precheck.capabilities
+    .flatMap(row => row.skills)
+    .filter(skill => skill.valid)
+    .filter((skill, index, all) => all.findIndex(entry => entry.name === skill.name) === index)
+    .map((skill): FrozenProviderSkill => {
+      const role = skill.role
+      if (role !== 'execution-provider' && role !== 'knowledge' && role !== 'guidance') {
+        throw new Error(`${where} resolved skill "${skill.name}" to an unknown role "${String(role)}"; the provider identity cannot be frozen`)
+      }
+      if (typeof skill.contentDigest !== 'string' || skill.contentDigest.length === 0) {
+        throw new Error(`${where} resolved skill "${skill.name}" without a content digest; the provider identity cannot be frozen`)
+      }
+      return { name: skill.name, role, contractDigest: skill.contractDigest ?? null, contentDigest: skill.contentDigest }
+    })
+    .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
+  const declaredPresets = new Set(rows.flatMap(row => {
+    const preset = table[row]?.preset
+    return preset === undefined ? [] : [preset]
+  }))
+  if (declaredPresets.size > 1) {
+    throw new Error(
+      `${where}'s rows declare conflicting presets (${[...declaredPresets].sort().join(', ')}); one worker requires one preset, so the ` +
+      'runtime would refuse the replay — split the rows or align the presets before freezing the experiment',
+    )
+  }
+  return {
+    capabilities: [...rows],
+    registryRevision: precheck.revision,
+    mcpServers: [...new Set(rows.flatMap(row => table[row]?.mcpServers ?? []))].sort(),
+    preset: declaredPresets.size === 0 ? null : [...declaredPresets][0]!,
+    skills,
+  }
+}
+
+/** Every provider one pre-check refused, as a refusal line names it — the one rendering the freeze and the admission record share. */
+function refusedProviderLines(precheck: ProviderPrecheckView): string[] {
+  return precheck.capabilities.flatMap(row => row.skills.filter(skill => !skill.valid).map(skill =>
+    `${row.capability}: skill "${skill.name}" (${(skill.defects ?? []).map(defect => `${defect.code}: ${defect.detail}`).join('; ')})`))
+}
+
+/**
+ * What the two sides of one **capability** sample are frozen against (A6).
+ *
+ * The candidate side runs under the prepared overlay: the capability table the
+ * overlay produces (the effective table with the candidate's one row folded in)
+ * and the sandbox skill root in front of discovery. That configuration must
+ * admit every row the sample requires — a candidate that cannot run the sample
+ * it is supposed to fix is refused here, before the first run — and its provider
+ * identity is read through the runtime's own pre-check over exactly that table
+ * (`precheckCapabilityTable`), so the revision the side's run has to bind is the
+ * runtime's own conclusion, not a value this plane derives.
+ *
+ * The production side runs under the effective table as it stands. A row the
+ * table does not hold, or a provider the pre-check refuses, is **not** a refusal
+ * of the experiment: it is the gap the candidate is evaluated against, and it is
+ * recorded as that sample's frozen admission expectation
+ * ({@link FrozenSampleAdmission}) — the baseline side is `not-admitted`, no run
+ * exists for it and none is invented. A production side that resolves cleanly
+ * freezes the ordinary provider identity beside the overlay one.
+ */
+async function frozenCapabilitySample(input: {
+  sources: ExperimentSources
+  caller: SessionId
+  sampleTaskId: string
+  required: readonly string[]
+  overlay: { capabilityOverrides: Record<string, CapabilityConfig>; extraSkillRoots: string[] }
+}): Promise<{ provider?: FrozenProviderIdentity; admission?: FrozenSampleAdmission; candidateProvider: FrozenCapabilitySide }> {
+  const { sources, caller, overlay, sampleTaskId } = input
+  const where = `sample "${sampleTaskId}"`
+  const table = sources.taskRuntime.listCapabilities?.()
+  if (table === undefined) {
+    throw new Error(
+      `${where} cannot fix the provider identities a capability experiment compares: this deployment's task runtime exposes no ` +
+      'capability table (listCapabilities), so which rows, servers and skills each side resolves to is not knowable before it runs — ' +
+      'the experiment is refused rather than run under identities nobody can compare against',
+    )
+  }
+  const rows = [...new Set(input.required)].sort()
+  const overlayTable = { ...table, ...overlay.capabilityOverrides }
+  const overlayManifest = resolveCapabilities(rows, overlayTable)
+  if (overlayManifest.missing.length > 0) {
+    throw new Error(
+      `${where} requires ${overlayManifest.missing.length > 1 ? 'capabilities' : 'capability'} ` +
+      `[${overlayManifest.missing.join(', ')}], which the candidate overlay does not resolve — the candidate side could not run the case ` +
+      'the candidate is evaluated on, so the experiment is refused before it runs',
+    )
+  }
+  if (sources.taskRuntime.precheckCapabilityTable === undefined) {
+    throw new Error(
+      `${where} cannot fix the provider identity the candidate overlay produces: this deployment's task runtime exposes no capability ` +
+      'pre-check over a table the caller names, so what the candidate side would load cannot be frozen before it runs',
+    )
+  }
+  const candidateProvider = frozenCapabilitySideOf({
+    precheck: await sources.taskRuntime.precheckCapabilityTable({
+      capabilities: rows,
+      table: overlayTable,
+      extraRoots: [...overlay.extraSkillRoots],
+    }),
+    table: overlayTable,
+    rows,
+    where: `${where} candidate side`,
+  })
+  const manifest = resolveCapabilities(rows, table)
+  if (manifest.missing.length > 0) {
+    // The production configuration cannot resolve the sample's rows at all: the
+    // baseline refused admission, and that refusal — with the gap it stands for —
+    // is what the sample freezes for its baseline side.
+    return {
+      admission: {
+        source: 'capability-gap',
+        required: rows,
+        missing: [...manifest.missing].sort(),
+        reason:
+          `the effective capability table does not hold ${manifest.missing.map(name => JSON.stringify(name)).join(', ')}, so the ` +
+          `production configuration cannot admit this sample (the runtime's own resolution reports a closure gap)`,
+      },
+      candidateProvider,
+    }
+  }
+  const precheck = await sources.taskRuntime.capabilityProviderReport(caller, rows)
+  const refused = refusedProviderLines(precheck)
+  if (refused.length > 0) {
+    return {
+      admission: {
+        source: 'provider-refused',
+        required: rows,
+        missing: [],
+        reason: `the production configuration resolves providers this deployment cannot use:\n- ${refused.join('\n- ')}`,
+      },
+      candidateProvider,
+    }
+  }
+  const productionSide = frozenCapabilitySideOf({ precheck, table, rows, where: `${where} production side` })
+  return {
+    provider: {
+      capabilities: rows,
+      registryRevision: productionSide.registryRevision,
+      // A capability sample's candidate side is the overlay, frozen as
+      // `candidateProvider` above; this member repeats the production revision
+      // so a capability sample keeps the one side shape every sample uses, and
+      // no reader of a capability sample takes it for a substitution.
+      candidateRegistryRevision: productionSide.registryRevision,
+      mcpServers: productionSide.mcpServers,
+      preset: productionSide.preset,
+      skills: productionSide.skills,
+    },
+    candidateProvider,
+  }
+}
+
 /**
  * The registry revision the **candidate** side of one sample must bind (K3):
  * the runtime's own {@link registryRevision} over the same capability table and
@@ -823,12 +1110,15 @@ function candidateRegistryRevisionOf(input: {
   )
 }
 
-/** Freeze one sample from its store record: what the case is, the acceptance the replay mirrors into both sides, and the provider identity. */
+/** What one sample's two sides are frozen against: a skill sample's production identity, or a capability sample's production/overlay pair. */
+type SampleProviders = Pick<FrozenSample, 'provider' | 'admission' | 'candidateProvider'>
+
+/** Freeze one sample from its store record: what the case is, the acceptance the replay mirrors into both sides, and the provider identities. */
 function frozenSampleOf(
   sample: ExperimentSampleSpec,
   task: TaskInstance,
   review: ReviewRecord,
-  provider: FrozenProviderIdentity,
+  providers: SampleProviders,
   vocabulary: VerifierVocabularyView | undefined,
 ): FrozenSample {
   if (task.acceptanceCriteria.length === 0) {
@@ -848,7 +1138,7 @@ function frozenSampleOf(
       outcome: review.outcome === 'failed' ? 'failed' : 'verified',
       ...(review.runId === undefined ? {} : { runId: review.runId }),
     },
-    provider,
+    ...providers,
   }
 }
 
@@ -871,21 +1161,41 @@ function frozenIdentityOf(identity: SkillContentIdentity): SkillContentIdentity 
  * digest — so a promotion can compare the evidence's object with prepare's
  * member by member, and an object that changed shape cannot borrow the other
  * shape's diff.
+ *
+ * A capability candidate (A6) freezes what it really has: the one row it
+ * installs and the registry row it moves, the gap it came from, and — when it
+ * carries a new skill — that object's whole identity. A row-only candidate has
+ * no skill identity, which is why `candidate` is optional here and the schema
+ * requires exactly one of the two to name the candidate.
  */
 function freezeExperiment(input: {
   proposalId: string
   spec: ExperimentSpec
-  candidate: SkillContentIdentity
+  candidate?: SkillContentIdentity
   productionBaseline?: SkillContentIdentity
+  capability?: FrozenCapability
   sandbox: string
   snapshotDigest: string
   samples: FrozenSample[]
 }): FrozenExperiment {
+  const candidate = input.candidate
+  const capability = input.capability
   const frozen: FrozenExperiment = {
     proposalId: input.proposalId,
     repetition: input.spec.repetition,
-    candidate: frozenIdentityOf(input.candidate),
+    ...(candidate === undefined ? {} : { candidate: frozenIdentityOf(candidate) }),
     ...(input.productionBaseline === undefined ? {} : { productionBaseline: frozenIdentityOf(input.productionBaseline) }),
+    ...(capability === undefined
+      ? {}
+      : {
+        capability: {
+          row: { name: capability.row.name, entry: structuredClone(capability.row.entry), digest: capability.row.digest },
+          baseline: capability.baseline === null
+            ? null
+            : { name: capability.baseline.name, entry: structuredClone(capability.baseline.entry), digest: capability.baseline.digest },
+          sourceRefs: [...capability.sourceRefs],
+        },
+      }),
     model: {
       provider: input.spec.model.provider,
       model: input.spec.model.model,
@@ -899,12 +1209,17 @@ function freezeExperiment(input: {
     comparerVersion: EXPERIMENT_COMPARER_VERSION,
     overlay: {
       baseline: 'none — the baseline runs under the production configuration',
-      candidate:
-        `extraSkillRoots: [${input.sandbox}/skills] — the complete candidate object: ` +
-        `${input.candidate.contract === undefined
-          ? `the guidance object "${input.candidate.name}" (SKILL.md alone, no sidecar)`
-          : `the execution object "${input.candidate.name}" (SKILL.md plus the derived SKILL.contract.json)`}, ` +
-        'loaded whole through the runtime\'s own discovery',
+      candidate: capability === undefined
+        ? `extraSkillRoots: [${input.sandbox}/skills] — the complete candidate object: ` +
+          `${candidate!.contract === undefined
+            ? `the guidance object "${candidate!.name}" (SKILL.md alone, no sidecar)`
+            : `the execution object "${candidate!.name}" (SKILL.md plus the derived SKILL.contract.json)`}, ` +
+          'loaded whole through the runtime\'s own discovery'
+        : `capabilityOverrides: { "${capability.row.name}": the prepared row }` +
+          `${candidate === undefined
+            ? ' and no extra skill root — a row-only candidate adds no object'
+            : `, extraSkillRoots: [${input.sandbox}/skills] — the new execution object "${candidate.name}" ` +
+              '(SKILL.md plus the SKILL.contract.json beside it), loaded whole through the runtime\'s own discovery'}`,
     },
   }
   assertFrozenExperiment(frozen)
@@ -1010,6 +1325,8 @@ function sampleRecord(input: {
   initialDigest?: string
   cost: ExperimentCost
   reason?: string
+  /** The runtime's own admission refusal, for a side the runtime refused before a run existed (A6). */
+  admission?: ExperimentAdmissionRefusal
   actor: string
 }): ExperimentSampleRecord {
   return {
@@ -1017,7 +1334,7 @@ function sampleRecord(input: {
     kind: 'experiment_sample',
     proposalId: input.view.proposalId,
     experimentId: input.view.experimentId,
-    preparedContentDigest: preparedContentDigestOf(input.view.frozen.candidate),
+    preparedContentDigest: preparedContentDigestOf(input.view.frozen),
     sampleTaskId: input.sample.taskId,
     side: input.side,
     repetition: input.view.frozen.repetition,
@@ -1031,6 +1348,7 @@ function sampleRecord(input: {
     ...(input.initialDigest === undefined ? {} : { initialDigest: input.initialDigest }),
     cost: input.cost,
     ...(input.reason === undefined ? {} : { reason: input.reason }),
+    ...(input.admission === undefined ? {} : { admission: structuredClone(input.admission) }),
     actor: input.actor,
     at: new Date().toISOString(),
   }
@@ -1106,6 +1424,7 @@ function sideDetailOf(view: ExperimentView, sample: FrozenSample, side: Experime
     criteria: record.criteria.map(criterionDetail),
     cost: record.cost,
     ...(record.reason === undefined ? {} : { reason: record.reason }),
+    ...(record.admission === undefined ? {} : { admission: structuredClone(record.admission) }),
   }
 }
 
@@ -1113,7 +1432,7 @@ function sideDetailOf(view: ExperimentView, sample: FrozenSample, side: Experime
 export function experimentSampleKeyOf(view: Pick<ExperimentView, 'proposalId' | 'frozen'>, sampleTaskId: string, side: ExperimentSide): ExperimentKey {
   return {
     proposalId: view.proposalId,
-    preparedContentDigest: preparedContentDigestOf(view.frozen.candidate),
+    preparedContentDigest: preparedContentDigestOf(view.frozen),
     sampleTaskId,
     side,
     repetition: view.frozen.repetition,
@@ -1227,6 +1546,92 @@ function assertBudgetAllowsStart(input: {
 }
 
 /**
+ * Attempt one capability sample's baseline side for real, and return the
+ * runtime's own refusal text (A6).
+ *
+ * The frozen block already says the production configuration cannot admit this
+ * sample — the row is missing or its provider is refused — but *that* is not
+ * proof of anything at run time: the side is really offered to the runtime, its
+ * whole admission chain runs against the real table, and only a refusal that
+ * left nothing behind is recorded. What is checked around the attempt:
+ *
+ * - the replay must **refuse**, not run: an outcome here means the production
+ *   configuration admits the sample now, which contradicts the frozen block, so
+ *   the experiment stops by name instead of recording either story;
+ * - the store must hold **no task** of this side's lineage: anything persisted
+ *   is a run, and a run means this was not an admission refusal;
+ * - the runtime's own current answer must still say the same thing (the rows do
+ *   not resolve, or the pre-check refuses them) — an unrelated failure that
+ *   happened to precede a run is not an admission refusal of the frozen kind;
+ * - the refusal must be the runtime's own (`task-runtime: …`), never another
+ *   layer's error read as one.
+ */
+async function refusedBaselineRun(input: {
+  sources: ExperimentSources
+  storeId: string
+  sample: FrozenSample
+  lineage: string
+  workspace: string
+  agentOptions: ReplayTaskOptions['agentOptions']
+  caller: SessionId
+  signal?: AbortSignal
+}): Promise<string> {
+  const { sources, storeId, sample, lineage, workspace, caller } = input
+  const admission = sample.admission!
+  let refusal: string | undefined
+  let returned: ReplayRunOutcome | undefined
+  try {
+    returned = await sources.taskRuntime.replayTask(storeId, sample.taskId, {
+      lineage,
+      workspace: { path: workspace },
+      agentOptions: { ...input.agentOptions },
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
+    }, caller)
+  } catch (error) {
+    refusal = error instanceof Error ? error.message : String(error)
+  }
+  if (returned !== undefined) {
+    throw new Error(
+      `evolution: the production configuration admitted sample "${sample.taskId}" (replay settled ${returned.status}) although the ` +
+      `experiment froze its refusal at admission — the configuration moved since the experiment froze, so freeze a new experiment ` +
+      'rather than record either story for this side',
+    )
+  }
+  const after = await sources.task.openStore(storeId)
+  const persisted = after.tasks.find(item => item.objective.startsWith(`[${lineage}] `))
+  if (persisted !== undefined) {
+    throw new Error(
+      `evolution: the baseline side of sample "${sample.taskId}" was expected to be refused at admission, but the store holds task ` +
+      `"${persisted.taskId}" of this side's own lineage — a side that reached the store is a run, and a run is not an admission refusal`,
+    )
+  }
+  const message = refusal ?? 'the runtime refused this replay without a message'
+  if (!message.startsWith('task-runtime: ')) {
+    throw new Error(
+      `evolution: the baseline side of sample "${sample.taskId}" failed before its run for a reason that is not the runtime's own ` +
+      `admission refusal (${message}) — the side is not recorded as not-admitted`,
+    )
+  }
+  const table = sources.taskRuntime.listCapabilities?.()
+  if (table === undefined) {
+    throw new Error(
+      `evolution: the effective capability table cannot be read now, so the admission refusal of sample "${sample.taskId}" cannot be ` +
+      're-proved — nothing was recorded for this side',
+    )
+  }
+  const stillRefused = admission.source === 'capability-gap'
+    ? resolveCapabilities(admission.required, table).missing.length > 0
+    : refusedProviderLines(await sources.taskRuntime.capabilityProviderReport(caller, admission.required)).length > 0
+  if (!stillRefused) {
+    throw new Error(
+      `evolution: sample "${sample.taskId}" was frozen as refused at admission (${admission.source}), but the runtime no longer ` +
+      `refuses it — the configuration moved since the freeze; freeze a new experiment rather than record a refusal that no longer holds`,
+    )
+  }
+  return message
+}
+
+/**
  * Run — or continue — the frozen two-sided experiment, and return the report the
  * ledger records. Idempotent per sample key: a recorded side is reused, an
  * in-flight side is settled from the store and never re-run, and only a side
@@ -1242,14 +1647,14 @@ function assertBudgetAllowsStart(input: {
 export async function runExperiment(sources: ExperimentSources, request: ExperimentRequest): Promise<ExperimentResult> {
   const { spec, caller, actor } = request
   validateSpec(spec)
-  const { sandbox, candidate, proposal } = await experimentCandidate(sources, spec.proposalId)
+  const { sandbox, candidate, capability, overlay, proposal } = await experimentCandidate(sources, spec.proposalId)
   const { storeId, snapshot } = await experimentStore(sources, caller)
   // The judge vocabulary the criteria are frozen against, read before anything
   // is written: a criterion that pins no ref, an unregistered one, or one the
   // registry declares no version for is a refusal here, not an inconclusive
   // verdict after a run.
   const vocabulary = await sources.verifierVocabulary?.()
-  const samples = []
+  const samples: FrozenSample[] = []
   for (const sample of spec.samples) {
     const task = snapshot.tasks.find(item => item.taskId === sample.taskId)
     if (task === undefined) throw new Error(`unknown sample task "${sample.taskId}" in this graph's task store`)
@@ -1261,23 +1666,38 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
       throw new Error(`sample "${sample.taskId}" has no review record on its latest run; there is no case to reproduce`)
     }
     assertSampleRole(sample, task, review)
-    // Before anything runs: the provider identity the production baseline side
-    // of this sample must bind, read through the runtime's own pre-check.
-    const provider = await frozenProviderIdentity({
-      sources,
-      caller,
-      sampleTaskId: sample.taskId,
-      required: task.requestedCapabilities,
-      candidate,
-      where: `sample "${sample.taskId}"`,
-    })
-    samples.push(frozenSampleOf(sample, task, review, provider, vocabulary))
+    // Before anything runs: what each side of this sample must bind, read
+    // through the runtime's own pre-check. A skill sample freezes the
+    // production identity the baseline side binds; a capability sample (A6)
+    // freezes the overlay identity its candidate side binds, beside either the
+    // production identity (production admits the sample) or the production
+    // refusal that stands in the baseline side's place.
+    const providers: SampleProviders = capability === undefined
+      ? {
+        provider: await frozenProviderIdentity({
+          sources,
+          caller,
+          sampleTaskId: sample.taskId,
+          required: task.requestedCapabilities,
+          candidate: candidate!,
+          where: `sample "${sample.taskId}"`,
+        }),
+      }
+      : await frozenCapabilitySample({
+        sources,
+        caller,
+        sampleTaskId: sample.taskId,
+        required: task.requestedCapabilities,
+        overlay: overlay!,
+      })
+    samples.push(frozenSampleOf(sample, task, review, providers, vocabulary))
   }
   const frozen = freezeExperiment({
     proposalId: spec.proposalId,
     spec,
-    candidate,
-    ...(proposal.prepared?.skillBaseline === undefined ? {} : { productionBaseline: proposal.prepared.skillBaseline }),
+    ...(candidate === undefined ? {} : { candidate }),
+    ...(proposal.prepared?.skillBaseline == null ? {} : { productionBaseline: proposal.prepared.skillBaseline }),
+    ...(capability === undefined ? {} : { capability }),
     sandbox,
     snapshotDigest: await directoryDigest(spec.snapshot.sourceDir),
     samples,
@@ -1364,11 +1784,57 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
           where: `sample "${sample.taskId}" ${side} side`,
         })
         const real = await buildWorkspace(spec.snapshot.sourceDir, workspace, view.frozen.snapshot.digest)
+        // A6: the frozen production configuration refuses this sample, so its
+        // baseline side is really attempted — the runtime runs its own admission
+        // chain against the real table and refuses it — and the refusal is what
+        // gets recorded. No Run is created, none is invented, and a production
+        // configuration that admits the sample now is a drift this experiment
+        // cannot record: the block froze the refusal.
+        if (side === 'baseline' && sample.admission !== undefined) {
+          const refusal = await refusedBaselineRun({
+            sources,
+            storeId,
+            sample,
+            lineage,
+            workspace: real,
+            agentOptions,
+            caller,
+            ...(request.signal === undefined ? {} : { signal: request.signal }),
+          })
+          const admitted = sampleRecord({
+            view,
+            sample,
+            side,
+            outcome: 'not-admitted',
+            criteria: [],
+            evidenceRefs: [],
+            workspace: real,
+            cost: {
+              status: 'unknown',
+              reason: 'the runtime refused this side at admission, so no run exists and no cost was reported for it',
+            },
+            admission: {
+              source: sample.admission.source,
+              proposalId: view.proposalId,
+              sourceRefs: [...(view.frozen.capability?.sourceRefs ?? [])],
+              required: [...sample.admission.required],
+              missing: [...sample.admission.missing],
+              reason: refusal,
+            },
+            actor,
+          })
+          await sources.evolution.recordExperimentSample(admitted)
+          recorded.set(experimentSampleKey(key), admitted)
+          settledSides += 1
+          continue
+        }
         const outcome = await sources.taskRuntime.replayTask(storeId, sample.taskId, {
           lineage,
           workspace: { path: real },
           agentOptions: { ...agentOptions },
-          ...(side === 'candidate' ? { overlay: { extraSkillRoots: [resolve(sources.evolution.root, sandbox, 'skills')] } } : {}),
+          ...(side === 'candidate'
+            ? { overlay: overlay ?? { extraSkillRoots: [resolve(sources.evolution.root, sandbox, 'skills')] } }
+            : {}),
           ...(request.signal === undefined ? {} : { signal: request.signal }),
         }, caller)
         if (outcome.workspace !== undefined && outcome.workspace !== real) {
@@ -1556,7 +2022,7 @@ function assertExperimentSample(record: ExperimentSampleRecord, view: Experiment
     throw new Error(`evolution: ${field} names unknown experiment "${record.experimentId}"`)
   }
   if (view.proposalId !== record.proposalId) throw new Error(`evolution: ${field} names a different proposal than its experiment`)
-  if (record.preparedContentDigest !== preparedContentDigestOf(view.frozen.candidate)) {
+  if (record.preparedContentDigest !== preparedContentDigestOf(view.frozen)) {
     throw new Error(`evolution: ${field} names a candidate content identity that is not the experiment's own`)
   }
   if (record.repetition !== view.frozen.repetition) {
@@ -1568,7 +2034,7 @@ function assertExperimentSample(record: ExperimentSampleRecord, view: Experiment
   if (!EXPERIMENT_SIDES.includes(record.side)) {
     throw new Error(`evolution: ${field} has an unknown side "${String(record.side)}"`)
   }
-  if (!['verified', 'failed', 'cancelled', 'interrupted'].includes(record.outcome)) {
+  if (!EXPERIMENT_OUTCOMES.includes(record.outcome)) {
     throw new Error(`evolution: ${field} has an unknown outcome "${String(record.outcome)}"`)
   }
   for (const member of ['taskId', 'runId', 'reviewRef'] as const) {
@@ -1590,6 +2056,34 @@ function assertExperimentSample(record: ExperimentSampleRecord, view: Experiment
     }
   } else if (record.cost.status !== 'reported' || record.cost.metrics === null || typeof record.cost.metrics !== 'object') {
     throw new Error(`evolution: ${field} has a malformed cost report`)
+  }
+  if (record.outcome === 'not-admitted') {
+    // A6: the runtime refused this side at admission. The record is the
+    // refusal and nothing else — no run, no evidence, no criteria — and only a
+    // baseline side may carry it.
+    if (record.side !== 'baseline') {
+      throw new Error(
+        `evolution: ${field} records the candidate side as not-admitted — a candidate the runtime will not admit produced no run, so ` +
+        'it fixed nothing and cannot stand as a fix; only a baseline side may be not-admitted',
+      )
+    }
+    if (record.admission === undefined) {
+      throw new Error(`evolution: ${field} is not-admitted without the runtime's refusal — a side with no run must record why`)
+    }
+    assertAdmissionRecord(record.admission, field)
+    if (record.taskId !== undefined || record.runId !== undefined || record.reviewRef !== undefined) {
+      throw new Error(
+        `evolution: ${field} is not-admitted and cites a task, a run or a review — a refused side produced no run, and a failure run ` +
+        'invented in its place is not evidence',
+      )
+    }
+    if (record.evidenceRefs.length > 0 || record.criteria.length > 0) {
+      throw new Error(`evolution: ${field} is not-admitted and cites evidence or criteria — no run produced any`)
+    }
+    return
+  }
+  if (record.admission !== undefined) {
+    throw new Error(`evolution: ${field} carries an admission refusal but settled as "${String(record.outcome)}"`)
   }
   if (record.outcome === 'interrupted') {
     if (typeof record.reason !== 'string' || record.reason.length === 0) {

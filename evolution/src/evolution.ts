@@ -152,25 +152,61 @@
  * behind it: resources are outside this ticket, so an object that needs them is
  * refused before a human is asked rather than promoted with its resources
  * silently dropped.
+ *
+ * **The capability candidate (A6, §F.4 "候选支持范围固定").** Beside the same-name
+ * skill update, this build admits exactly one more candidate: **one capability
+ * row, whole**, with an optional **new execution skill** the row grants
+ * (`SKILL.md` plus the sidecar protocol this build already reads,
+ * `resources: []`). The vocabulary and the rules live in
+ * `capability-candidate.ts`; what the ledger records is their prepared identity:
+ * the frozen row (its data and the SHA-256 of its canonical bytes), the row the
+ * registry held at prepare (`null` when it held none — the row is then added,
+ * not replaced), the new skill's whole-object content identity (K3's shape), and
+ * the recorded **absence** of a production object for it (`skillBaseline: null`,
+ * `champion: 'absent'`): a capability candidate may add a skill, never replace
+ * one — improving an existing object is the same-name path, and a rename around
+ * it is refused. `capabilityOverlay` is what an evaluation runner mounts from
+ * that record (a whole-row `capabilityOverrides` entry plus the sandbox skill
+ * root), so the candidate side runs on exactly the bytes the commit would write.
+ *
+ * The row and the files are committed by **one** commit (K2/K3's own path, not a
+ * second transaction): the `commit_intent` line carries the row beside the file
+ * set — the digest the registry must hold before and after, and the recoverable
+ * row bytes under the ledger root — and each file's two sides may be `null` to
+ * mean "must not exist" (a file the candidate creates, or one its rollback
+ * removes). The order is the direction's, and it is the one that leaves nothing
+ * usable half-made: an **apply** writes the files and then installs the row, a
+ * **rollback** reverts the row and then removes the files, and the
+ * `applied`/`rolledback` line is written only after the whole object loads, the
+ * row reads as the one this direction installed, and every target's durability
+ * is re-established. A registry row a third party moved — or a skill name that
+ * appeared in production — between the decision and the apply is refused by name
+ * with nothing written, and an interrupted commit is settled by
+ * {@link EvolutionService.reconcile} from what production and the registry
+ * really hold.
  * @module dsh-singularity-evolution
  */
 
-import { mkdir, open, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { existsSync, type Dirent } from 'node:fs'
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
-import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
+import type { ProposalTargetType, TaskSnapshot } from '@dangosys/dsh-singularity-task'
+import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import {
   capabilityToolQuery,
   loadSkillSidecar,
   optionalService,
+  precheckProviders,
+  precheckReplacedCapabilityRow,
   readVerifiedFile,
   registeredVerifierIds,
   registeredVerifierVocabulary,
   serializeSkillSidecar,
   sidecarWithSkillMd,
+  skillSearchRoots,
   SKILL_SIDECAR_FILE,
   skillContractDigest,
   unlistableVerifierRefusal,
@@ -179,16 +215,34 @@ import {
 } from '@dangosys/dsh-singularity-task-runtime'
 import type {
   CapabilityToolQuery,
+  ReplayTaskOptions,
+  RootRecoveryCaller,
+  RootRecoveryOutcome,
+  RootRecoveryRequest,
   SkillProviderCandidate,
   SkillProviderVerdict,
   SkillSidecar,
 } from '@dangosys/dsh-singularity-task-runtime'
+import { inFlightRecoveryAttempt, recoveryAttemptWithKey } from '@dangosys/dsh-singularity-task-runtime'
 import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
+import type { CapabilityRow, CapabilityRowIdentity, CapabilityStoreView, PreparedCapability } from './capability-candidate.ts'
+import {
+  assertCapabilityCandidateAdmissible,
+  assertCapabilityRow,
+  capabilityRowBytes,
+  capabilityRowDigest,
+  capabilityRowIdentity,
+  capabilityTableWith,
+  discoverSkill,
+  readPreparedCapability,
+  validateCapabilityMutation,
+} from './capability-candidate.ts'
 import type { SkillContentIdentity } from './replay.ts'
 import { canonicalJson, modelSelectionOf } from './replay.ts'
 import type { ModelSelection } from './replay.ts'
 import type { CommitFile, CommitHost, CommitRequest, CommitStage, ReconcileOutcome } from './commit.ts'
-import { commitIntent, reconcileIntent, sha256Hex, syncDirectory } from './commit.ts'
+import { commitIntent, committedRow, reconcileIntent, sha256Hex, syncDirectory } from './commit.ts'
+import { writeCapabilityRowToConfig } from './capability-config.ts'
 
 import type {
   ExperimentKey,
@@ -207,8 +261,8 @@ import {
   resumeExperiment,
   runExperiment,
 } from './experiment.ts'
-import { assertSkillPromotionEvidence, noEvaluatorRefusal } from './promotion.ts'
-import type { SkillPromotionSources } from './promotion.ts'
+import { assertCapabilityPromotionEvidence, assertSkillPromotionEvidence, noEvaluatorRefusal } from './promotion.ts'
+import type { CapabilityPromotionSources, SkillPromotionSources } from './promotion.ts'
 
 export type EvolutionLevel = 'L1' | 'L2' | 'L3' | 'L4'
 export type EvolutionStatus = 'proposed' | 'candidate' | 'prepared' | 'gated' | 'decided' | 'applied' | 'rolledback'
@@ -219,12 +273,14 @@ export const EVOLUTION_LEVELS: readonly EvolutionLevel[] = ['L1', 'L2', 'L3', 'L
 export const EVOLUTION_DECISIONS: readonly EvolutionDecision[] = ['PROMOTE', 'REJECT', 'KEEP_FOR_FURTHER_RESEARCH']
 
 /**
- * The one target type `evolution_apply` promotes mechanically (W16): the
- * sandbox copy lands on the production skill root. Every other type has no
- * executor in this build — a capability row, an agent_preset directory and a
- * task_definition were written by an older build and are not written here.
+ * The target types `evolution_apply`/`evolution_rollback` move mechanically: a
+ * skill candidate's sandbox copy lands on the production skill root, and — since
+ * A6 — a capability candidate's one row lands in the capability registry
+ * together with the new skill object its file set contains. Every other type has
+ * no executor in this build — an agent_preset directory and a task_definition
+ * were written by an older build and are not written here.
  */
-export const APPLYABLE_TARGET_TYPES: readonly ProposalTargetType[] = ['skill']
+export const APPLYABLE_TARGET_TYPES: readonly ProposalTargetType[] = ['skill', 'capability']
 
 /**
  * Whether a decided proposal's `applied` record is admissible: the decision is
@@ -257,15 +313,17 @@ export interface SkillMutation {
 }
 
 /**
- * The champion snapshot of one prepared proposal. `captured` is the only state
- * there is: this build replaces an existing production skill object, so a target
- * that is not there has nothing to prepare from and is refused before any
- * sandbox write, and every `prepared` record the fold admits carries the
- * snapshot's state. The bookkeeping-only prepare (`none` — nothing materialized,
- * no anchor) belonged to target types this build's candidate never admits and
- * has no producer or consumer left (S4-E 收尾).
+ * The champion state of one prepared proposal. `captured` is the state of a
+ * same-name skill update: this build replaces an existing production object, so
+ * the bytes it read became the champion snapshot. `absent` is the state of a
+ * capability candidate (A6): the skill its row grants is new, so production
+ * holds no object to capture and the recorded baseline is that absence — the
+ * preparation that may *add* an object, never replace one. The bookkeeping-only
+ * prepare (`none` — nothing materialized, no anchor) belonged to target types
+ * this build's candidate never admits and has no producer or consumer left
+ * (S4-E 收尾).
  */
-export type ChampionState = 'captured'
+export type ChampionState = 'captured' | 'absent'
 
 /** Folded view of one `prepared` record. */
 export interface PreparedView {
@@ -286,9 +344,23 @@ export interface PreparedView {
    * prepare records it; a captured champion without it cannot prove its baseline
    * and refuses a new apply. Its `contract` presence matches `skillContent`'s:
    * the object's shape is fixed at prepare, and a record whose two halves
-   * disagree describes a role change no prepare performs.
+   * disagree describes a role change no prepare performs. `null` is the recorded
+   * absence a capability candidate's new skill object has (A6).
    */
-  skillBaseline?: SkillContentIdentity
+  skillBaseline?: SkillContentIdentity | null
+  /**
+   * The capability row a capability candidate fixes (A6): the whole row and the
+   * SHA-256 of its canonical bytes. Every capability prepare records it.
+   */
+  capabilityRow?: CapabilityRowIdentity
+  /**
+   * The row the registry held at prepare (A6), with its frozen champion bytes
+   * under `champion/capability/`; `null` when the registry held no row of that
+   * name, so this candidate *adds* the row rather than replacing it. The fold
+   * refuses a capability prepare without this field, so "the row was there" and
+   * "the row is new" are always distinguished.
+   */
+  capabilityBaseline?: CapabilityRowIdentity | null
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
   files: string[]
 }
@@ -372,24 +444,30 @@ export type EvolutionRecord =
        * line naming none is refused by name at the fold.
        */
       sandbox: string | null
-      /** True on every prepare the fold admits: this build's candidate is a materialized skill mutation. */
+      /** True on every prepare the fold admits: this build's candidate is a materialized mutation. */
       mechanical: boolean
-      /** Always `captured`: a prepare snapshots the production bytes it replaces. */
+      /** `captured` for a same-name skill update, `absent` for a capability candidate's new skill object (A6). */
       champion: ChampionState
       /**
        * The content identity of the materialized candidate `SKILL.md` (P2) — the
-       * skill name plus the SHA-256 of the exact file bytes. Required: the fold
-       * refuses a prepare without it, so a candidate nothing can re-verify never
-       * becomes a flow.
+       * skill name plus the SHA-256 of the exact file bytes. Required for a skill
+       * candidate and for a capability candidate that carries a new skill; absent
+       * only for a capability candidate that changes a row and adds nothing.
        */
       skillContent?: SkillContentIdentity
       /**
        * The content identity of the production `SKILL.md` as it stood at prepare
-       * (P3), from the same read that produced the champion snapshot. Required:
-       * the fold refuses a prepare without it, so a captured champion always
-       * names the baseline a later apply compares production against.
+       * (P3), from the same read that produced the champion snapshot; `null` is
+       * the recorded absence a capability candidate's new skill object has (A6).
+       * Required on every prepared record: a captured champion always names the
+       * baseline a later apply compares production against, and an added object
+       * always names the absence it must find.
        */
-      skillBaseline?: SkillContentIdentity
+      skillBaseline?: SkillContentIdentity | null
+      /** The capability row a capability candidate fixed, with the digest of its canonical bytes (A6). */
+      capabilityRow?: CapabilityRowIdentity
+      /** The row the registry held at prepare, or `null` when it held none (A6); required on every capability prepare. */
+      capabilityBaseline?: CapabilityRowIdentity | null
       /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
       files: string[]
       actor: string
@@ -459,18 +537,20 @@ export type EvolutionRecord =
 export type CommitDirection = 'apply' | 'rollback'
 
 /**
- * One `commit_intent` ledger line (K2): the durable "this apply/rollback is now
- * underway" record, written before production changes and closed by the
- * completion line that names the same `intentId`.
+ * One `commit_intent` ledger line (K2, extended by A6): the durable "this
+ * apply/rollback is now underway" record, written before production changes and
+ * closed by the completion line that names the same `intentId`.
  *
  * It carries everything a recovery needs without trusting memory: which
- * proposal and direction, which human grant, and the object's **whole fixed file
- * set** ({@link CommitFile}, one or two entries, in commit order) — for every
- * file its absolute production target, the digest that file must hold before the
- * write (`baselineSha256`), the digest it must hold after (`contentSha256`), and
- * the bytes to write again as a path relative to the ledger root (`source`: the
- * candidate file for an apply, the champion snapshot for a rollback). The id is
- * derived, not chosen: `<proposalId>/<direction>`.
+ * proposal and direction, which human grant, the object's **whole fixed file
+ * set** ({@link CommitFile}, in commit order) — for every file its absolute
+ * production target, the digest that file must hold before the write
+ * (`baselineSha256`, `null` when it must not exist), the digest it must hold
+ * after (`contentSha256`, `null` when this direction removes it), and the bytes
+ * to write again as a path relative to the ledger root (`source`, absent for a
+ * removal) — and, for a capability commit, the one row this commit moves
+ * ({@link CommitCapabilityRecord}). The id is derived, not chosen:
+ * `<proposalId>/<direction>`.
  *
  * The line is not a lifecycle transition: it does not move the proposal's
  * status, so the proposal fold records it as {@link EvolutionProposal.openIntent}
@@ -487,10 +567,23 @@ export interface CommitIntentRecord {
   direction: CommitDirection
   /** The human grant that authorised this commit (`approval:<callId>`), recorded on the completion as well. */
   approvalRef: string
-  /** The object's fixed files, in commit order — `SKILL.md` first, the `SKILL.contract.json` second when the object carries an execution sidecar. */
+  /** The object's fixed files, in commit order — `SKILL.md` first, the `SKILL.contract.json` second when the object carries an execution sidecar; empty for a row-only capability commit. */
   files: CommitFile[]
+  /** The one capability row this commit moves (A6); absent for a skill commit. */
+  capability?: CommitCapability
   actor: string
   at: string
+}
+
+/** The one capability row a `commit_intent` carries (A6): what the registry must hold before and after, and the bytes a recovery installs. */
+export interface CommitCapability {
+  name: string
+  /** The row's canonical digest the registry must hold before the write; `null` when it must hold no row. */
+  baselineSha256: string | null
+  /** The row's canonical digest this direction installs; `null` when this direction removes the row. */
+  contentSha256: string | null
+  /** The recoverable row bytes, relative to the ledger root; absent when this direction removes the row. */
+  source?: string
 }
 
 /** Folded view of one open `commit_intent` record, as {@link EvolutionProposal} exposes it. */
@@ -499,8 +592,10 @@ export interface CommitIntentView {
   proposalId: string
   direction: CommitDirection
   approvalRef: string
-  /** The object's fixed files, in commit order; one or two entries (see {@link CommitIntentRecord.files}). */
+  /** The object's fixed files, in commit order; one or two entries, empty for a row-only capability commit (see {@link CommitIntentRecord.files}). */
   files: CommitFile[]
+  /** The capability row this commit moves, when it carries one (A6). */
+  capability?: CommitCapability
   actor: string
   at: string
 }
@@ -574,6 +669,22 @@ export interface PromotionCheck {
 /** The task runtime as a promotion check reads it: the effective capability registry, resolved softly. */
 interface CapabilityRegistrySource {
   listCapabilities?(): Readonly<Record<string, CapabilityConfig>>
+}
+
+/**
+ * The task runtime as a *commit* reads and moves it (A6): the one entry that
+ * replaces a capability row in the effective registry (an in-process mirror of
+ * the deployment's configuration). Resolved softly, and both members are
+ * optional, so a deployment that mounts no runtime — or a runtime that offers no
+ * such seam — gets a named refusal rather than a row that silently stays put.
+ * `commitTargets` are the production files of the open commit intent this write
+ * belongs to, so the row's own admission pre-check can exempt the very files it
+ * is registering (see `TaskRuntime.applyCapabilityRow`); every other open intent
+ * still refuses the row.
+ */
+interface CapabilityRowWriter {
+  readCapabilityRow?(name: string): Promise<CapabilityConfig | null>
+  applyCapabilityRow?(name: string, entry: CapabilityConfig | null, options?: { commitTargets?: readonly string[] }): Promise<void>
 }
 
 /** One accepted verdict as a promotion report entry: the role, the content it was taken from, and the verifier ref only an execution provider has. */
@@ -717,6 +828,47 @@ export interface Config {
    * never sets it; there is no other way to observe or interrupt a commit.
    */
   commitProbe?: (stage: CommitStage, target?: string) => void
+  /**
+   * Where this deployment reads the **supervisor delegation** of one hand-off
+   * from (A6): the ledger row that names the coordination session a Diagnosis
+   * with suggestions was delegated to.
+   *
+   * It is injected, not read here: the ledger belongs to the package that owns
+   * the coordination agents (`@dangosys/dsh-singularity-agent`'s review-agent
+   * ledger), and this package must not import it back — the assembly wires the
+   * two together, exactly as it wires the reviewer binding source into the
+   * context package. The entry that uses it is
+   * {@link EvolutionService.coordinateRecovery}, and a deployment without a
+   * source refuses a recovery by name: "this session is the hand-off's
+   * supervisor" is an authorization, and one nobody can prove is not granted.
+   */
+  supervisorDelegation?: (sessionId: string, diagnosisId: string) => Promise<SupervisorDelegation | undefined>
+  /**
+   * The capability table's own file (A6): the deployment's `config.yml`, whose
+   * `capabilities:` row of the `task-runtime` entry is what a restart reads the
+   * registry from. A capability commit writes the row there — after the
+   * registry accepted it and before the completion line — so the in-process
+   * registry and the file a restart loads agree (see
+   * `capability-config.ts`).
+   *
+   * Absent means this deployment has no durable capability table to write, and a
+   * capability commit is then refused by name before it writes anything: a row
+   * that exists only in this process would be gone after a restart, and
+   * recording a completion for it would be a promise the deployment cannot keep.
+   * A skill commit is unaffected — its object is the file set under the skill
+   * root.
+   */
+  capabilityConfig?: string
+  /**
+   * The typed test seam of the capability-config write (A6), the same shape
+   * `commitProbe` has for the file writes: it fires immediately before the
+   * config file is written and once the write has landed and been read back.
+   * Throwing from `before-write` aborts the write exactly where it stands — the
+   * commit intent stays open, production holds the row in the registry and not
+   * yet in the file, and the next reconciliation writes it. A production
+   * deployment never sets it.
+   */
+  capabilityConfigProbe?: (stage: 'before-write' | 'written', row: string) => void
 }
 
 function nonEmpty(value: unknown, field: string): string {
@@ -839,27 +991,31 @@ function contractIdentityOf(bytes: Buffer): { sha256: string; contractDigest: st
 }
 
 /**
- * Validate a candidate's mutation. This build has exactly one candidate
- * mutation — the `SKILL.md` text replacing an existing skill object's own
- * (§F.2) — so the schema is the skill one and the only callers are the paths
- * that already admitted a skill candidate (the write path and the fold, which
- * refuses a candidate of any other target type first). A mutation of another
- * target type has no schema here, and is named rather than silently accepted:
- * the old schemas (agent_preset, capability, task_definition) and the
- * bookkeeping-only default belonged to a lifecycle this build no longer has.
- * The unknown key check is the "no sidecar patch" rule: the model submits
- * `{ name, content }` and nothing else, and a sidecar is derived at prepare
- * rather than accepted here.
+ * Validate a candidate's mutation. This build has exactly two candidate
+ * mutations — the `SKILL.md` text replacing an existing skill object's own
+ * (§F.2), and the capability candidate's one whole row plus an optional new
+ * execution skill (A6) — so the schema is chosen by the proposal's target type
+ * and nothing else. A mutation of another target type has no schema here, and is
+ * named rather than silently accepted: the old schemas (agent_preset,
+ * task_definition) and the bookkeeping-only default belonged to a lifecycle this
+ * build no longer has. The unknown key check is the "no sidecar patch" rule for
+ * a skill, and for a capability the one-whole-row rule
+ * ({@link validateCapabilityMutation}): the model submits the row and the new
+ * skill's declaration, never a field patch and never a second row.
  */
 function validateMutation(
   targetType: ProposalTargetType,
   mutation: unknown,
 ): asserts mutation is Record<string, unknown> {
   if (!isRecord(mutation)) throw new Error('evolution: mutation must be an object')
+  if (targetType === 'capability') {
+    validateCapabilityMutation(mutation)
+    return
+  }
   if (targetType !== 'skill') {
     throw new Error(
-      `evolution: a "${targetType}" mutation has no schema in this build — the only candidate lifecycle here is a ` +
-      'SKILL.md replacement of an existing skill object, and every other target type is a recorded proposal',
+      `evolution: a "${targetType}" mutation has no schema in this build — the candidate lifecycles here are a SKILL.md replacement of an ` +
+      'existing skill object and one whole capability row with an optional new execution skill, and every other target type is a recorded proposal',
     )
   }
   assertOnlyKeys(mutation, ['name', 'content'], 'skill mutation')
@@ -962,12 +1118,21 @@ function assertTransition(current: EvolutionProposal, kind: EvolutionStatus): vo
  * the approval reason and the audit record — the human sees exactly what a
  * grant will touch. The object's fixed file set: the candidate's `SKILL.md`,
  * plus the `SKILL.contract.json` beside it when the prepared object carries an
- * execution sidecar — one or two paths, in commit order.
+ * execution sidecar — one or two paths, in commit order. A capability candidate
+ * (A6) names its new skill's files the same way, and a row-only candidate names
+ * none: its one write is the registry row, which the intent line carries.
  */
 export function applyTargets(
   proposal: EvolutionProposal,
   roots: { skillRoot: string },
 ): string[] {
+  if (proposal.targetType === 'capability') {
+    const content = proposal.prepared?.skillContent
+    if (content === undefined) return []
+    const files = [join(roots.skillRoot, content.name, 'SKILL.md')]
+    if (content.contract !== undefined) files.push(join(roots.skillRoot, content.name, SKILL_SIDECAR_FILE))
+    return files
+  }
   if (proposal.targetType !== 'skill') return []
   const name = (proposal.mutation as SkillMutation).name
   const files = [join(roots.skillRoot, name, 'SKILL.md')]
@@ -1015,10 +1180,13 @@ function assertLedgerFormatVersion(record: { formatVersion?: unknown }, position
  * Commit-intent payload validation, shared by the write path ({@link
  * EvolutionService.apply} / {@link EvolutionService.rollback} through
  * `commit.ts`) and the fold: every field a recovery needs is present, the file
- * set has the fixed shape of one skill object (one or two entries, in commit
+ * set has the fixed shape of one skill object (up to two entries, in commit
  * order: `SKILL.md` first, the `SKILL.contract.json` of the same directory
- * second when there is one), every digest is real SHA-256 hex, every target is
- * absolute, and the direction is one of the two the commit path has. A
+ * second when there is one; empty for a row-only capability commit), every
+ * digest is real SHA-256 hex **or `null`** — `null` being the state "must not
+ * exist", which is how A6's create and removal commits say what they mean — and
+ * the one capability row a capability commit carries is well formed. Every
+ * target is absolute, and the direction is one of the two the commit path has. A
  * hand-forged line fails exactly as a live append would.
  */
 function validateCommitIntent(record: CommitIntentRecord): void {
@@ -1045,11 +1213,11 @@ function validateCommitIntent(record: CommitIntentRecord): void {
     )
   }
   const files = record.files
-  if (!Array.isArray(files) || files.length === 0 || files.length > 2) {
+  if (!Array.isArray(files) || files.length > 2 || (files.length === 0 && record.capability === undefined)) {
     throw new Error(
       `evolution: commit_intent record for proposal "${record.proposalId}" names ${Array.isArray(files) ? `${files.length} file(s)` : 'no file list'} ` +
-      '— one skill object is a fixed file set of one or two files: SKILL.md, and SKILL.contract.json when the object carries an ' +
-      'execution sidecar',
+      `and ${record.capability === undefined ? 'no capability row' : `capability row "${record.capability.name}"`} — a commit carries a fixed file ` +
+      'set of one or two files (SKILL.md, and SKILL.contract.json when the object carries an execution sidecar) and/or exactly one capability row',
     )
   }
   files.forEach((file, index) => {
@@ -1057,18 +1225,33 @@ function validateCommitIntent(record: CommitIntentRecord): void {
     if (!isRecord(file)) {
       throw new Error(`evolution: ${at} is not an object carrying target, baselineSha256, contentSha256, source`)
     }
-    for (const [field, value] of [['target', file.target], ['source', file.source]] as const) {
-      if (typeof value !== 'string' || value.trim().length === 0) {
-        throw new Error(`evolution: ${at} has no ${field} — every file names its absolute production path and its recoverable source`)
-      }
+    if (typeof file.target !== 'string' || file.target.trim().length === 0) {
+      throw new Error(`evolution: ${at} has no target — every file names the absolute production path it writes`)
     }
     for (const [field, value] of [['baselineSha256', file.baselineSha256], ['contentSha256', file.contentSha256]] as const) {
-      if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) {
+      if (value !== null && (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value))) {
         throw new Error(
           `evolution: ${at} has no valid ${field} (${JSON.stringify(value ?? null)}) — an intent binds, for every file, the exact ` +
-          'bytes production must hold before the write and the exact bytes it must hold after',
+          'bytes production must hold before the write and the exact bytes it must hold after, or `null` for the state "no file here"',
         )
       }
+    }
+    if (file.baselineSha256 === null && file.contentSha256 === null) {
+      throw new Error(
+        `evolution: ${at} records no file before the commit and no file after it — an intent that neither creates, replaces nor removes ` +
+        'anything names nothing',
+      )
+    }
+    if (file.contentSha256 !== null) {
+      if (typeof file.source !== 'string' || file.source.trim().length === 0) {
+        throw new Error(
+          `evolution: ${at} has no source — a file this commit writes must name the recoverable bytes a recovery would write again`,
+        )
+      }
+    } else if (file.source !== undefined) {
+      throw new Error(
+        `evolution: ${at} names the source ${JSON.stringify(file.source)} while it removes the file — a removal has no bytes to write again`,
+      )
     }
     if (file.target !== resolve(file.target)) {
       throw new Error(
@@ -1088,6 +1271,66 @@ function validateCommitIntent(record: CommitIntentRecord): void {
       )
     }
   })
+  const capability = record.capability
+  if (capability === undefined) return
+  const at = `commit_intent record for proposal "${record.proposalId}" capability row`
+  if (!isRecord(capability) || typeof capability.name !== 'string' || capability.name.trim().length === 0) {
+    throw new Error(
+      `evolution: ${at} names no row — a capability commit carries the one row it moves, by name`,
+    )
+  }
+  for (const [field, value] of [['baselineSha256', capability.baselineSha256], ['contentSha256', capability.contentSha256]] as const) {
+    if (value !== null && (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value))) {
+      throw new Error(
+        `evolution: ${at} "${capability.name}" has no valid ${field} (${JSON.stringify(value ?? null)}) — the row's two states are the ` +
+        'canonical digests the registry must hold before and after the write, or `null` for "no row of this name"',
+      )
+    }
+  }
+  if (capability.baselineSha256 === null && capability.contentSha256 === null) {
+    throw new Error(
+      `evolution: ${at} "${capability.name}" moves nothing — an intent that neither installs nor removes a row names a row it does not move`,
+    )
+  }
+  if (capability.contentSha256 !== null) {
+    if (typeof capability.source !== 'string' || capability.source.trim().length === 0) {
+      throw new Error(
+        `evolution: ${at} "${capability.name}" has no source — the row this commit installs must name the recoverable bytes a recovery ` +
+        'would write again',
+      )
+    }
+  } else if (capability.source !== undefined) {
+    throw new Error(
+      `evolution: ${at} "${capability.name}" names the source ${JSON.stringify(capability.source)} while it removes the row — a removal ` +
+      'has no bytes to write again',
+    )
+  }
+}
+
+/**
+ * The prepared record's frozen row identity, validated: the row's name, the row
+ * itself (re-checked with the live schema, so a hand-forged entry with an unknown
+ * field is refused at the fold exactly as `candidate` would refuse it), and the
+ * digest of its canonical bytes. `field` names the record's own member in the
+ * refusal, because the operator reads the line.
+ */
+function preparedRowIdentity(value: unknown, field: string, proposalId: string): CapabilityRowIdentity {
+  const at = `prepared record for "${proposalId}"`
+  if (!isRecord(value) || typeof value.name !== 'string' || value.name.length === 0
+    || typeof value.digest !== 'string' || !/^[a-f0-9]{64}$/.test(value.digest)) {
+    throw new Error(
+      `evolution: ${at} has no valid ${field} identity — every capability prepare records the row it fixes (or the row the registry ` +
+      'held) by name, by its data and by the SHA-256 of its canonical bytes',
+    )
+  }
+  const entry = assertCapabilityRow(`${at} ${field}`, value.entry)
+  if (capabilityRowDigest(entry) !== value.digest) {
+    throw new Error(
+      `evolution: ${at} ${field} "${value.name}" carries data hashing to ${capabilityRowDigest(entry)}, not the ${value.digest} it ` +
+      'records — a row whose data and identity disagree is not one this plane froze',
+    )
+  }
+  return { name: value.name, entry, digest: value.digest }
 }
 
 /**
@@ -1139,6 +1382,117 @@ function preparedIdentity(value: unknown, field: string, proposalId: string): Sk
  * draining the write queue. Sandbox materialization is the only other write,
  * confined to `<root>/sandbox/<proposalId>/`.
  */
+/** The fields a recovery-coordination request may carry: anything else is refused by name rather than ignored. */
+const RECOVERY_COORDINATION_FIELDS: readonly string[] = ['sourceDiagnosisId', 'requestKey']
+
+/**
+ * Every reason a coordination request cannot be a recovery request at all: an
+ * unknown field (a caller may not smuggle a decision in), or a missing identity.
+ * Structural only — whether the named diagnosis exists, whether the caller is the
+ * hand-off's supervisor and whether the source may be recovered are answered
+ * after this, each as its own named refusal.
+ */
+export function recoveryCoordinationDefects(request: unknown): string[] {
+  if (request === null || typeof request !== 'object' || Array.isArray(request)) {
+    return ['the request must be an object carrying sourceDiagnosisId and requestKey']
+  }
+  const defects: string[] = []
+  for (const key of Object.keys(request)) {
+    if (!RECOVERY_COORDINATION_FIELDS.includes(key)) {
+      defects.push(
+        `unknown field "${key}": a recovery request carries ${RECOVERY_COORDINATION_FIELDS.join(', ')} and nothing else — an approval, ` +
+        'a decision or a permission is never part of what a caller passes',
+      )
+    }
+  }
+  const fields = request as Record<string, unknown>
+  for (const name of RECOVERY_COORDINATION_FIELDS) {
+    const value = fields[name]
+    if (typeof value !== 'string' || value.trim().length === 0) defects.push(`${name} must be a non-empty string`)
+  }
+  return defects
+}
+
+/**
+ * The failed run one diagnosis is about, as the store holds it: the run its own
+ * `reviewRefs` name (`<taskId>#<runId>`, or `<taskId>#no-run` for the failure
+ * that had none), else the source task's newest run that settled `failed`, else
+ * `null` when the task holds no run at all (a task blocked before it started).
+ *
+ * It mirrors the hand-off's own ref convention rather than reading it from the
+ * tool package, and it is only a *derivation*: the runtime answers the same
+ * question from its own store and refuses a run that is not that task's or not
+ * failed, so a wrong guess here can never become an attempt.
+ */
+export function recoverySourceRunId(
+  diagnosis: { readonly reviewRefs: readonly string[]; readonly taskId: string },
+  source: { readonly taskId: string; readonly runIds: readonly string[] },
+  snapshot: TaskSnapshot,
+): string | null {
+  for (const ref of diagnosis.reviewRefs) {
+    const separator = ref.lastIndexOf('#')
+    if (separator < 0 || ref.slice(0, separator) !== diagnosis.taskId) continue
+    const runId = ref.slice(separator + 1)
+    if (runId === 'no-run') return null
+    const run = snapshot.runs.find(item => item.runId === runId && item.taskId === diagnosis.taskId)
+    if (run?.status === 'failed') return runId
+  }
+  const failed = [...snapshot.runs].reverse().find(run => run.taskId === source.taskId && run.status === 'failed')
+  return failed?.runId ?? null
+}
+
+/**
+ * One recorded supervisor delegation, as the ledger that owns it answers this
+ * plane (A6, see {@link Config.supervisorDelegation}): the store and source task
+ * the hand-off was delegated into, the coordination session that took it up, the
+ * session that started it, and when.
+ *
+ * It is what makes a recovery call attributable: "session X is the supervisor of
+ * diagnosis D in this store" is answered by the ledger row, never by the caller's
+ * word — the caller only names *itself*, and the entry compares that against this
+ * record.
+ */
+export interface SupervisorDelegation {
+  readonly rootStoreId: string
+  readonly taskId: string
+  readonly diagnosisId: string
+  readonly sessionId: string
+  readonly actor: string
+  readonly at: string
+}
+
+/** One recovery-coordination request, as the tool adapter hands it over (plan §F.4's `task_recover` payload). */
+export interface RecoveryCoordinationRequest {
+  /** The diagnosis the recovery is asked for; it must be a record of the caller's own store. */
+  sourceDiagnosisId: string
+  /** The caller's key: one key names one attempt of one diagnosis. */
+  requestKey: string
+}
+
+/**
+ * Who asks for a recovery: the **supervisor** session of that hand-off, as a live
+ * session of this deployment. The entry proves it against the ledger row
+ * ({@link Config.supervisorDelegation}) and against the caller's own graph; the
+ * runtime then requires a live agent for it, because the new attempt's Session is
+ * spawned from it.
+ */
+export interface RecoveryCoordinationCaller {
+  readonly sessionId: string
+  readonly signal?: AbortSignal
+}
+
+/**
+ * What one coordination answered (A6): the runtime's own recovery outcome — the
+ * attempt, its run and session, its status and the siblings it reads — beside the
+ * hand-off facts this entry checked, so a caller can render both from one answer.
+ */
+export interface RecoveryCoordinationOutcome extends RootRecoveryOutcome {
+  /** The supervisor delegation this call was authorized by. */
+  readonly handoff: { readonly sessionId: string; readonly actor: string; readonly diagnosisId: string }
+  /** What this plane checked and found, in the caller's own words. */
+  readonly coordination: readonly string[]
+}
+
 export class EvolutionService extends Service {
   /** Absolute ledger directory resolved at construction. */
   readonly root: string
@@ -1150,6 +1504,12 @@ export class EvolutionService extends Service {
   private readonly resolveModelSelection?: () => ModelSelection | undefined
   /** The commit path's typed test seam, if this instance was built with one (see {@link Config.commitProbe}). */
   private readonly commitProbe?: (stage: CommitStage, target?: string) => void
+  /** The injected supervisor-delegation source, if the assembly wired one (see {@link Config.supervisorDelegation}). */
+  private readonly resolveSupervisorDelegation?: (sessionId: string, diagnosisId: string) => Promise<SupervisorDelegation | undefined>
+  /** The deployment's capability table file, when it named one (see {@link Config.capabilityConfig}). */
+  private readonly capabilityConfigPath?: string
+  /** The capability-config write's typed test seam, when this instance was built with one (see {@link Config.capabilityConfigProbe}). */
+  private readonly capabilityConfigProbe?: (stage: 'before-write' | 'written', row: string) => void
   private records: EvolutionRecord[] = []
   private readonly loaded: Promise<void>
   private writes: Promise<void> = Promise.resolve()
@@ -1161,6 +1521,9 @@ export class EvolutionService extends Service {
     this.repoRoot = config.repoRoot ?? process.cwd()
     this.resolveModelSelection = config.modelSelection
     this.commitProbe = config.commitProbe
+    this.resolveSupervisorDelegation = config.supervisorDelegation
+    this.capabilityConfigPath = config.capabilityConfig === undefined ? undefined : resolve(config.capabilityConfig)
+    this.capabilityConfigProbe = config.capabilityConfigProbe
     const dshHome = process.env.DSH_HOME ?? join(this.repoRoot, '.dsh')
     this.root = resolve(config.root ?? join(dshHome, 'evolution'))
     this.skillRoot = resolve(config.skillRoot ?? join(dshHome, 'skills'))
@@ -1246,11 +1609,15 @@ export class EvolutionService extends Service {
    * before the first candidate line is written. A proposal whose mutation does
    * not survive {@link validateMutation} stays exactly as it was.
    *
-   * **A skill candidate only** (§F.2): a capability, agent_preset,
-   * task_definition or bookkeeping-only proposal stays the recorded suggestion
-   * `evolution_propose` wrote and is refused here by name, before the first
-   * ledger line of the candidate lifecycle. Its proposal keeps its place in the
-   * ledger — a record is not a candidate.
+   * **A skill candidate or a capability candidate** (§F.2, A6): a capability
+   * mutation is exactly one whole row (`rows` holding one entry) plus an optional
+   * new execution skill, and every rule about what that row and that skill may
+   * say runs at prepare, against the store the candidate would land in — this
+   * step only refuses shapes. An agent_preset, task_definition or
+   * bookkeeping-only proposal stays the recorded suggestion `evolution_propose`
+   * wrote and is refused here by name, before the first ledger line of the
+   * candidate lifecycle. Its proposal keeps its place in the ledger — a record is
+   * not a candidate.
    */
   async candidate(
     proposalId: string,
@@ -1259,12 +1626,12 @@ export class EvolutionService extends Service {
     mutation: unknown,
   ): Promise<EvolutionProposal> {
     const current = await this.assertNext(proposalId, 'candidate')
-    if (current.targetType !== 'skill') {
+    if (current.targetType !== 'skill' && current.targetType !== 'capability') {
       throw new Error(
         `evolution: proposal "${proposalId}" targets "${current.targetType}", which cannot become a candidate in this build — ` +
-        'the only candidate lifecycle here is a SKILL.md replacement of an existing skill object (evolution_prepare → the two-sided ' +
-        'experiment evolution_replay → evolution_gate → evolution_apply), and no other target type has an evaluator until A6 ' +
-        'introduces one, so its proposal stays a recorded proposal',
+        'the candidate lifecycles here are a SKILL.md replacement of an existing skill object (evolution_prepare → the two-sided ' +
+        'experiment evolution_replay → evolution_gate → evolution_apply) and one whole capability row with an optional new execution ' +
+        'skill (A6), so its proposal stays a recorded proposal',
       )
     }
     validateVersionSet(versionSet)
@@ -1330,6 +1697,10 @@ export class EvolutionService extends Service {
     const mutation = current.mutation
     validateMutation(current.targetType, mutation)
     assertSegment(proposalId, 'proposalId')
+    // The two candidate lifecycles materialize different objects and share
+    // nothing of this step: a capability candidate freezes a row and a new skill
+    // object (below), a skill candidate the replacement of an existing one.
+    if (current.targetType === 'capability') return this.prepareCapability(current, actor)
     const { name } = mutation as unknown as SkillMutation
     const directory = join(this.skillRoot, name)
     // P3: one verified read of the production object, before anything is
@@ -1435,12 +1806,179 @@ export class EvolutionService extends Service {
   }
 
   /**
+   * Move candidate → prepared for a **capability candidate** (A6): freeze the one
+   * row it changes and the new execution skill it may add into
+   * `<root>/sandbox/<proposalId>/`, and record the identities a later promotion,
+   * commit and rollback re-prove.
+   *
+   * Every rule runs before the first byte is written, against the store as it
+   * stands right now: the row must grant no tool the store has not authorized,
+   * must not move the preset, permission or server plane, the new skill's
+   * verifier must be registered *and versioned*, its required tools must be
+   * inside the same authorized plane, its name must not be a production object
+   * this deployment discovers, and its bytes must not be a rename of one
+   * (`assertCapabilityCandidateAdmissible`). The row's own admission pre-check
+   * (`precheckReplacedCapabilityRow`) runs next, with the sandbox skill root in
+   * front of production discovery, so the skill is judged from the exact bytes
+   * this prepare just materialized — a refusal removes the sandbox and records
+   * nothing, which is what "refused with zero writes" means here.
+   *
+   * What is materialized is the candidate row's canonical bytes
+   * (`capability/<name>.json`), the champion row's bytes when the store held one
+   * (`champion/capability/<name>.json` — the anchor a rollback restores), and the
+   * new skill's two files under `skills/<name>/`. The recorded identity is the
+   * row (its data plus the digest of those bytes) and the store's row at prepare
+   * (`null` when it held none: this candidate adds the row), together with the
+   * new skill's whole-object content identity and the recorded *absence* of a
+   * production object for it — a capability candidate adds a skill, and
+   * improving an existing one is the same-name path.
+   */
+  private async prepareCapability(current: EvolutionProposal, actor: string): Promise<EvolutionProposal> {
+    const proposalId = current.proposalId
+    const candidate = validateCapabilityMutation(current.mutation)
+    const store = await this.capabilityStore()
+    const baselineEntry = store.table[candidate.row.name] ?? null
+    await assertCapabilityCandidateAdmissible(store, candidate, baselineEntry)
+    const dir = join(this.root, 'sandbox', proposalId)
+    const sandbox = `sandbox/${proposalId}`
+    const rowRelative = `capability/${candidate.row.name}.json`
+    const championRelative = `champion/capability/${candidate.row.name}.json`
+    const files: string[] = []
+    const write = async (rel: string, content: string | Buffer): Promise<void> => {
+      const abs = resolveWithin(dir, rel)
+      await mkdir(dirname(abs), { recursive: true })
+      await writeFile(abs, content)
+      files.push(rel)
+    }
+    await write(rowRelative, capabilityRowBytes(candidate.row.entry))
+    if (baselineEntry !== null) await write(championRelative, capabilityRowBytes(baselineEntry))
+    if (candidate.skill !== undefined) {
+      await write(`skills/${candidate.skill.name}/SKILL.md`, Buffer.from(candidate.skill.content, 'utf8'))
+      await write(`skills/${candidate.skill.name}/${SKILL_SIDECAR_FILE}`, serializeSkillSidecar(candidate.skill.sidecar))
+    }
+    const refusals = await this.capabilityRowRefusals(
+      candidate.row,
+      candidate.skill === undefined ? undefined : join(dir, 'skills'),
+    ).catch(async (error: unknown) => {
+      // The pre-check itself could not run (an unreadable registry, a ledger
+      // this context cannot read): the sandbox does not survive a refusal, so
+      // nothing of this candidate is left for a later step to pick up.
+      await rm(dir, { recursive: true, force: true })
+      throw error
+    })
+    if (refusals.length > 0) {
+      await rm(dir, { recursive: true, force: true })
+      throw new Error(
+        `evolution: skill-candidate-invalid: capability candidate "${proposalId}" grants providers this deployment refuses — ` +
+        `${refusals.join('; ')}; the sandbox was removed and nothing was recorded`,
+      )
+    }
+    const rowBytes = await readVerifiedFile(this.root, `${sandbox}/${rowRelative}`)
+    const capabilityRow = capabilityRowIdentity({ name: candidate.row.name, entry: candidate.row.entry })
+    if (sha256Hex(rowBytes) !== capabilityRow.digest) {
+      throw new Error(
+        `evolution: the frozen row "${rowRelative}" of proposal "${proposalId}" does not hash to the identity just recorded ` +
+        `(sha256 ${sha256Hex(rowBytes)} != ${capabilityRow.digest}) — nothing this plane writes may be unreproducible`,
+      )
+    }
+    const capabilityBaseline = baselineEntry === null
+      ? null
+      : capabilityRowIdentity({ name: candidate.row.name, entry: baselineEntry })
+    let skillContent: SkillContentIdentity | undefined
+    if (candidate.skill !== undefined) {
+      const skillMd = await readVerifiedFile(this.root, `${sandbox}/skills/${candidate.skill.name}/SKILL.md`)
+      const sidecarBytes = await readVerifiedFile(this.root, `${sandbox}/skills/${candidate.skill.name}/${SKILL_SIDECAR_FILE}`)
+      skillContent = { name: candidate.skill.name, sha256: sha256Hex(skillMd), contract: contractIdentityOf(sidecarBytes) }
+    }
+    await this.append({
+      formatVersion: 4,
+      kind: 'prepared',
+      proposalId,
+      sandbox,
+      mechanical: true,
+      champion: 'absent',
+      ...(skillContent === undefined ? {} : { skillContent }),
+      ...(skillContent === undefined ? {} : { skillBaseline: null }),
+      capabilityRow,
+      capabilityBaseline,
+      files,
+      actor,
+      at: new Date().toISOString(),
+    })
+    return this.get(proposalId)
+  }
+
+  /**
+   * The store a capability candidate is judged against: the running registry
+   * (the table a restart re-reads from the deployment's configuration), the
+   * registered verifier vocabulary — fail-closed when it cannot be listed — and
+   * every root discovery searches, the production skill root first because this
+   * plane is its writer.
+   */
+  private async capabilityStore(): Promise<CapabilityStoreView> {
+    const table = this.effectiveCapabilities()
+    if (table === undefined) {
+      throw new Error(
+        'evolution: the effective capability registry cannot be read in this context (no task-runtime service, or its listCapabilities ' +
+        'failed), so a capability row cannot be prepared, promoted or written — the candidate would be judged against a table nobody can ' +
+        'read, and nothing was changed',
+      )
+    }
+    const vocabulary = await registeredVerifierVocabulary(this.ctx)
+    return {
+      table,
+      ...(vocabulary === undefined ? {} : { verifierVocabulary: { ids: vocabulary.ids, versions: vocabulary.versions } }),
+      skillRoots: await this.skillDiscoveryRoots(),
+      skillRoot: this.skillRoot,
+    }
+  }
+
+  /** Every root a worker's own discovery searches, the production skill root this plane writes first. */
+  private async skillDiscoveryRoots(): Promise<string[]> {
+    return [this.skillRoot, ...(await skillSearchRoots({ cwd: process.cwd() }))]
+  }
+
+  /**
+   * The row as it would read after the write, judged by the admission pre-check
+   * itself (`precheckReplacedCapabilityRow`): every skill it declares must be a
+   * loadable provider, discovered from `sandboxSkillRoot` when the candidate
+   * carries a new one and from the deployment's own roots otherwise, and judged
+   * against the same verifier vocabulary and capability table admission uses.
+   * The deployment's evolution ledger is passed in, so a provider whose
+   * directory another proposal's commit left open is refused here too — asking
+   * admission's own question instead of restating it.
+   */
+  private async capabilityRowRefusals(row: CapabilityRow, sandboxSkillRoot: string | undefined): Promise<readonly string[]> {
+    const table = this.effectiveCapabilities()
+    if (table === undefined) {
+      throw new Error(
+        'evolution: the effective capability registry cannot be read in this context, so the capability row cannot be pre-checked — ' +
+        'nothing was changed',
+      )
+    }
+    const verifierRefs = await registeredVerifierIds(this.ctx)
+    const { refusals } = await precheckReplacedCapabilityRow({
+      name: row.name,
+      entry: row.entry,
+      table,
+      view: { cwd: process.cwd(), ...(sandboxSkillRoot === undefined ? {} : { extraRoots: [sandboxSkillRoot] }) },
+      ...(verifierRefs === undefined ? {} : { verifierRefs }),
+      commitLedger: this,
+    })
+    return refusals
+  }
+
+  /**
    * Move prepared → gated: all six Gate answers plus regression evidence refs.
    * Every ref must exist — a path on disk (relative to the repo root or
    * absolute) or an id the caller-side resolver knows (task-store evidence).
    * Existence only; nothing here executes anything. A **skill** proposal must
    * have a completed two-sided experiment and cite that experiment's report
-   * (§F.2); the six answers are recorded over it.
+   * (§F.2); the six answers are recorded over it. A **capability** proposal (A6)
+   * gates the same way — its two-sided experiment must be complete and its report
+   * cited, and the promotion evidence gate reads the same facts — except that a
+   * capability sample's baseline side may be the runtime's own `not-admitted`
+   * refusal, which no report of a skill experiment ever carries.
    */
   async gate(
     proposalId: string,
@@ -1451,20 +1989,20 @@ export class EvolutionService extends Service {
     const current = await this.assertNext(proposalId, 'gated')
     validateGateAnswers(answers)
     let experimentReport: string | undefined
-    if (current.targetType === 'skill') {
+    if (current.targetType === 'skill' || current.targetType === 'capability') {
       const [experiment] = await this.experiments(proposalId)
       if (experiment === undefined) {
         throw new Error(
-          `evolution: skill proposal "${proposalId}" has no two-sided experiment — the gate answers must rest on both sides of ` +
-          'every frozen sample, so evaluate the candidate with evolution_replay before gating it',
+          `evolution: ${current.targetType} proposal "${proposalId}" has no two-sided experiment — the gate answers must rest on ` +
+          'both sides of every frozen sample, so evaluate the candidate with evolution_replay before gating it',
         )
       }
       try {
         buildExperimentReport(experiment)
       } catch (error) {
         throw new Error(
-          `${error instanceof Error ? error.message : String(error)} — a skill candidate gates on a completed experiment only; ` +
-          `resume experiment ${experiment.experimentId} (evolution_replay) before answering the gate`,
+          `${error instanceof Error ? error.message : String(error)} — a ${current.targetType} candidate gates on a completed ` +
+          `experiment only; resume experiment ${experiment.experimentId} (evolution_replay) before answering the gate`,
         )
       }
       experimentReport = experiment.report
@@ -1472,8 +2010,8 @@ export class EvolutionService extends Service {
     if (experimentReport !== undefined) {
       if (!answers.regressionEvidenceRefs.includes(experimentReport)) {
         throw new Error(
-          `evolution: a skill candidate's regression evidence must cite its experiment report "${experimentReport}" — the six ` +
-          'answers are answered over that experiment, and the gate records the evidence they rest on',
+          `evolution: a ${current.targetType} candidate's regression evidence must cite its experiment report "${experimentReport}" — ` +
+          'the six answers are answered over that experiment, and the gate records the evidence they rest on',
         )
       }
       if (!existsSync(resolveWithin(this.root, experimentReport))) {
@@ -1530,13 +2068,23 @@ export class EvolutionService extends Service {
   /**
    * Move decided → applied: copy the sandbox materialization into production
    * (W16), as one commit. Reachable only for a PROMOTE decision on a materialized
-   * skill mutation at L1–L3 (the state machine itself refuses anything else —
-   * every other target type has no executor in this build); the caller (the
-   * evolution_apply tool) must hold a human grant from `ctx.approval.request`
-   * first, exactly as for decide. The candidate object's fixed file set
-   * replaces production's — `SKILL.md` and, when the object carries an execution
-   * sidecar, the derived `SKILL.contract.json` (the champion snapshot covers
-   * those files only, so the write is file-level, never a directory delete).
+   * skill or capability mutation at L1–L3 (the state machine itself refuses
+   * anything else — every other target type has no executor in this build); the
+   * caller (the evolution_apply tool) must hold a human grant from
+   * `ctx.approval.request` first, exactly as for decide. The candidate object's
+   * fixed file set replaces production's — `SKILL.md` and, when the object
+   * carries an execution sidecar, the derived `SKILL.contract.json` (the
+   * champion snapshot covers those files only, so the write is file-level, never
+   * a directory delete).
+   *
+   * A **capability** apply (A6) writes the new skill's files where production
+   * holds nothing and installs the one row that grants them, as that same single
+   * commit: the row's two states ride on the same `commit_intent` line, the files
+   * are written first and the row last, and the `applied` record lands only once
+   * the object loads and the registry reads the row this direction installed.
+   * The registry check is the row's own baseline check — a row a third party
+   * moved, and a skill name that appeared where the candidate adds one, are both
+   * refused by name with nothing written.
    *
    * The commit order is the recovery rule (K2): the `commit_intent` line is
    * persisted first — proposal, direction, this approval, every target of the
@@ -1600,15 +2148,46 @@ export class EvolutionService extends Service {
       this.assertTargetUncommitted(proposal)
       const promotion = await this.checkPromotion(proposalId)
       await this.checkProductionBaseline(proposalId)
+      const request = this.commitRequest(proposal, 'apply', actor, approvalRef)
       // P2: read the candidate object once, verify every digest prepare
-      // recorded, and commit exactly those verified bytes. A source replaced
+      // recorded, and commit exactly those verified bytes — the skill's files,
+      // and for a capability candidate its frozen row as well. A source replaced
       // mid-apply cannot reach production unverified — the whole commit refuses
       // instead.
-      const candidate = await this.readVerifiedSkillCandidate(proposal)
-      const request = this.commitRequest(proposal, 'apply', actor, approvalRef)
-      await commitIntent(this.commitHost(), request, [candidate.skillMd, ...(candidate.sidecar === undefined ? [] : [candidate.sidecar])])
+      const bytes = proposal.targetType === 'capability'
+        ? await this.capabilityBytes(proposal, 'apply')
+        : await (async () => {
+            const candidate = await this.readVerifiedSkillCandidate(proposal)
+            return [candidate.skillMd, ...(candidate.sidecar === undefined ? [] : [candidate.sidecar])]
+          })()
+      await commitIntent(this.commitHost(), request, bytes)
       return { targets: request.files.map(file => file.target), providers: promotion.providers, proposal: await this.get(proposalId) }
     })
+  }
+
+  /**
+   * The verified bytes one capability commit writes, in the request's file order:
+   * for an **apply** the new skill's two sandbox files (nothing to carry for a
+   * row-only candidate), for a **rollback** nothing at all — the files of a new
+   * object are removed, and a removal has no bytes to write again. Every byte is
+   * read through {@link readPreparedCapability}, so what is committed is what the
+   * prepared identity froze.
+   */
+  private async capabilityBytes(
+    proposal: EvolutionProposal,
+    direction: CommitDirection,
+  ): Promise<(Buffer | undefined)[]> {
+    const content = proposal.prepared?.skillContent
+    if (content === undefined) return []
+    if (direction === 'rollback') return content.contract === undefined ? [undefined] : [undefined, undefined]
+    const prepared = await readPreparedCapability(this.root, proposal)
+    if (prepared.skill === undefined) {
+      throw new Error(
+        `evolution: capability proposal "${proposal.proposalId}" commits a file set but its prepared identity records no readable new ` +
+        'skill — the two cannot both be true, so nothing was written',
+      )
+    }
+    return [prepared.skill.skillMd, prepared.skill.sidecarBytes]
   }
 
   /**
@@ -1617,10 +2196,10 @@ export class EvolutionService extends Service {
    * role it may be counted as, so the callers that already gate on this check
    * can report them.
    *
-   * Only a `skill` proposal is promotable in this build (EVAL-4/§F.2): every
-   * other target type is refused by name — a type with no evaluator gets no
-   * promotion, and a record of one is never upgraded into new evidence
-   * ({@link noEvaluatorRefusal}).
+   * A `skill` proposal and — since A6 — a `capability` proposal are promotable in
+   * this build; every other target type is refused by name, because a type with
+   * no evaluator gets no promotion and a record of one is never upgraded into new
+   * evidence ({@link noEvaluatorRefusal}).
    *
    * For a skill candidate three checks run here, in this order, all of them
    * shared with the service entry the tools ultimately call:
@@ -1640,9 +2219,21 @@ export class EvolutionService extends Service {
    *    before asking a human, and decide(PROMOTE) / apply run it again on the
    *    service entry, so evidence that moved while the human was deciding is
    *    still refused.
+   *
+   * For a capability candidate the whole gate is
+   * `assertCapabilityPromotionEvidence` (see `promotion.ts`): the frozen row and
+   * the new skill re-read and re-verified against the identities prepare
+   * recorded, the registry row still reading as the baseline prepare captured,
+   * every candidate rule still holding against the store as it stands now, every
+   * provider the row declares loadable under the admission pre-check — and the
+   * two-sided capability experiment (§F.4 "评估/应用必须同组补齐"): the frozen
+   * identity, the report file, and each sample's sides re-read from the store, so
+   * a `not-admitted` baseline the runtime really refused and a candidate run that
+   * really passed are the only evidence a capability PROMOTE rests on.
    */
   async checkPromotion(proposalId: string): Promise<PromotionCheck> {
     const proposal = await this.get(proposalId)
+    if (proposal.targetType === 'capability') return this.checkCapabilityPromotion(proposal)
     if (proposal.targetType !== 'skill') throw noEvaluatorRefusal(proposal)
     if (proposal.prepared?.mechanical !== true || proposal.prepared.sandbox == null) {
       throw new Error(
@@ -1658,6 +2249,61 @@ export class EvolutionService extends Service {
     const providers = [await this.assertSkillCandidateProvider(proposal)]
     await assertSkillPromotionEvidence(this.promotionSources(), proposal)
     return { providers }
+  }
+
+  /**
+   * The capability promotion gate, plus the one report a tool needs from it: the
+   * provider role of the new skill the candidate installs, judged from the
+   * sandbox directory against the table the row would produce — the same
+   * validator admission runs, with the row this commit installs already folded
+   * in, so the verdict is about the deployment the apply would create rather than
+   * the one before it.
+   */
+  private async checkCapabilityPromotion(proposal: EvolutionProposal): Promise<PromotionCheck> {
+    await assertCapabilityPromotionEvidence(this.capabilityPromotionSources(), proposal)
+    const prepared = await readPreparedCapability(this.root, proposal)
+    if (prepared.skill === undefined || prepared.skillDirectory === undefined) return { providers: [] }
+    const table = this.effectiveCapabilities()
+    if (table === undefined) {
+      throw new Error(
+        `evolution: the effective capability registry cannot be read in this context, so the provider role of capability candidate ` +
+        `"${proposal.proposalId}" cannot be judged — nothing was promoted`,
+      )
+    }
+    const verdict = await this.providerVerdict(
+      { name: prepared.skill.name, directory: prepared.skillDirectory, sidecar: prepared.skill.sidecar },
+      capabilityTableWith(table, prepared.row),
+    )
+    if (!verdict.valid) {
+      throw new Error(
+        `evolution: the new skill "${prepared.skill.name}" of capability candidate "${proposal.proposalId}" is not a usable provider — ` +
+        `${verdict.defects.map(item => `${item.code}: ${item.detail}`).join('; ')}; a promotion installs only a provider a worker could ` +
+        'load and whose verifier and tools the deployment can grant',
+      )
+    }
+    return { providers: [promotionProviderOf(verdict)] }
+  }
+
+  /**
+   * The store and the row pre-check a capability promotion reads, resolved from
+   * this context: the effective registry, the registered verifier vocabulary and
+   * the roots discovery searches (all through {@link capabilityStore}), plus the
+   * same admission pre-check prepare ran — once more, against the store as it
+   * stands at the gate, with the candidate's sandbox skill root in front of
+   * production discovery.
+   *
+   * Since A6's evaluation interface the gate also reads the experiment evidence,
+   * so it resolves the same four services the skill gate does
+   * ({@link promotionSources}): the ledger's experiment family, the task store
+   * the runs live in, the live judge vocabulary, this deployment's selection and
+   * its session logs. One wiring, so the two gates cannot read different facts.
+   */
+  private capabilityPromotionSources(): CapabilityPromotionSources {
+    return {
+      ...this.promotionSources(),
+      store: () => this.capabilityStore(),
+      rowRefusals: (row, sandboxSkillRoot) => this.capabilityRowRefusals(row, sandboxSkillRoot),
+    }
   }
 
   /**
@@ -1840,8 +2486,19 @@ export class EvolutionService extends Service {
    * as unreadable instead of as "granting nothing": an execution provider is then
    * refused (fail-closed), while knowledge and guidance — which make no tool
    * claim — are judged by the same validator as everywhere else.
+   *
+   * `table` is the table the candidate is judged against, and it is a parameter
+   * only because a capability candidate's new skill must be judged against the
+   * table *its own row would produce* (A6): the row is not in the deployment's
+   * registry yet — the commit that installs it is what this promotion check is a
+   * preflight for — so judging it against the table before the write would refuse
+   * every provider that closes the very gap the candidate exists for. Every other
+   * caller passes nothing and reads the deployment's own registry.
    */
-  private async providerVerdict(candidate: SkillProviderCandidate): Promise<SkillProviderVerdict> {
+  private async providerVerdict(
+    candidate: SkillProviderCandidate,
+    table: Readonly<Record<string, CapabilityConfig>> | undefined = this.effectiveCapabilities(),
+  ): Promise<SkillProviderVerdict> {
     const verifierRefs = await registeredVerifierIds(this.ctx)
     if (verifierRefs === undefined && candidate.directory !== undefined) {
       const loaded = await loadSkillSidecar(candidate.directory)
@@ -1851,19 +2508,18 @@ export class EvolutionService extends Service {
     }
     return validateSkillProvider(candidate, {
       verifierRefs: verifierRefs === undefined ? [] : [...verifierRefs],
-      capabilityTools: this.capabilityToolAnswer(),
+      capabilityTools: this.capabilityToolAnswer(table),
     })
   }
 
   /**
-   * The capability table this service judges providers against: the running
-   * registry, which is the table a restart re-reads from `config.yml` and the one
-   * `evolution_prepare` snapshots the champion from. Absent (no task-runtime in
-   * this context) means the table cannot be read — reported as an unreadable
-   * grant rather than mistaken for an empty table.
+   * The capability table this service judges providers against: by default the
+   * running registry, which is the table a restart re-reads from `config.yml` and
+   * the one `evolution_prepare` snapshots the champion from. Absent (no
+   * task-runtime in this context) means the table cannot be read — reported as an
+   * unreadable grant rather than mistaken for an empty table.
    */
-  private capabilityToolAnswer(): CapabilityToolQuery {
-    const table = this.effectiveCapabilities()
+  private capabilityToolAnswer(table: Readonly<Record<string, CapabilityConfig>> | undefined = this.effectiveCapabilities()): CapabilityToolQuery {
     if (table !== undefined) return capabilityToolQuery(table)
     return () => ({
       known: false,
@@ -1898,6 +2554,18 @@ export class EvolutionService extends Service {
   }
 
   /**
+   * Read a prepared **capability** candidate back out of its sandbox and verify
+   * every byte against the identities prepare recorded (A6): the frozen row, the
+   * champion row when the registry held one, and the new skill's two files when
+   * the candidate carries one. The one read path the experiment's freeze, the
+   * promotion gate and the apply write share, so what is evaluated, promoted and
+   * committed is provably the same bytes.
+   */
+  async readCapabilityCandidate(proposalId: string): Promise<PreparedCapability> {
+    return readPreparedCapability(this.root, await this.get(proposalId))
+  }
+
+  /**
    * The production-baseline check (P3), on the apply seams only: the
    * evolution_apply tool runs it before asking a human, and `apply` runs it
    * again immediately before the production write, so a baseline that moved
@@ -1912,11 +2580,68 @@ export class EvolutionService extends Service {
    * (now a directory), or sits behind a symbolic link (the file itself or an
    * ancestor) is a conflict, and so is a sidecar that appeared beside a baseline
    * that had none: the shape production would be loaded in has changed, which is
-   * a third party's edit like any other. Only `targetType: skill` carries a
-   * baseline; every other targetType passes untouched.
+   * a third party's edit like any other.
+   *
+   * A **capability** candidate's baseline is the registry row it read at prepare
+   * (and the absence of a production object for its new skill, A6): the row must
+   * still read exactly as prepare recorded it — or still be absent, for a row this
+   * candidate adds — and the new skill's name must still be free. Either conflict
+   * refuses by name with nothing written; a target type this build has no
+   * executor for passes untouched.
    */
   async checkProductionBaseline(proposalId: string): Promise<void> {
-    await this.assertProductionBaseline(await this.get(proposalId))
+    const proposal = await this.get(proposalId)
+    if (proposal.targetType === 'capability') return this.assertCapabilityBaseline(proposal)
+    await this.assertProductionBaseline(proposal)
+  }
+
+  /**
+   * The capability candidate's production baseline (A6): the registry row this
+   * proposal read at prepare must still read exactly the same — a row a third
+   * party replaced, added or removed is a conflict, not a candidate — and the
+   * new skill's name must still be free where discovery looks. Nothing here
+   * writes or merges; a conflict only throws, before the commit intent exists.
+   */
+  private async assertCapabilityBaseline(proposal: EvolutionProposal): Promise<void> {
+    const prepared = proposal.prepared
+    if (prepared?.mechanical !== true || prepared.sandbox == null) return
+    const identity = prepared.capabilityRow
+    if (identity === undefined) {
+      // The fold requires the row identity on every capability prepare, so this
+      // branch is a belt for the view's optional field rather than a live state.
+      throw new Error(
+        `evolution: capability proposal "${proposal.proposalId}" records no frozen row identity — create a new candidate from the current ` +
+        'registry state and re-evaluate it',
+      )
+    }
+    const guidance = 'create a new candidate from the current registry state and re-evaluate it; an apply never overwrites a registry row it cannot verify'
+    const table = this.effectiveCapabilities()
+    if (table === undefined) {
+      throw new Error(
+        `evolution: capability-registry-unreadable: the effective capability registry cannot be read in this context, so the row ` +
+        `"${identity.name}" proposal "${proposal.proposalId}" was prepared against cannot be compared — nothing was written; ${guidance}`,
+      )
+    }
+    const currentEntry = table[identity.name] ?? null
+    const currentDigest = currentEntry === null ? null : capabilityRowDigest(currentEntry)
+    const baseline = prepared.capabilityBaseline ?? null
+    const preparedDigest = baseline === null ? null : baseline.digest
+    if (currentDigest !== preparedDigest) {
+      throw new Error(
+        `evolution: capability-registry-changed: the registry row "${identity.name}" reads ` +
+        `${currentDigest === null ? 'no row' : `sha256 ${currentDigest}`} since prepare (recorded: ${preparedDigest === null ? 'no row' : `sha256 ${preparedDigest}`}) — ` +
+        `a row a third party moved is a conflict, so nothing was written; ${guidance}`,
+      )
+    }
+    const skill = prepared.skillContent
+    if (skill === undefined) return
+    const found = await discoverSkill(await this.skillDiscoveryRoots(), skill.name)
+    if (found !== undefined) {
+      throw new Error(
+        `evolution: skill-baseline-changed: the production skill "${skill.name}" this candidate adds appeared at "${found}" since prepare — ` +
+        `this candidate installs a new object and never covers a same-name one, so nothing was written; ${guidance}`,
+      )
+    }
   }
 
   private async assertProductionBaseline(proposal: EvolutionProposal): Promise<void> {
@@ -1929,9 +2654,10 @@ export class EvolutionService extends Service {
       'create a new candidate from the current production state and re-evaluate it; ' +
       'an apply never overwrites a production skill it cannot verify'
     const identity = prepared.skillBaseline
-    if (identity === undefined) {
-      // The fold requires the baseline on every prepared record, so this branch
-      // is a belt for the view's optional field rather than a reachable state.
+    if (identity === undefined || identity === null) {
+      // The fold requires a non-null baseline on every skill prepare, so this
+      // branch is a belt for the view's optional field rather than a reachable
+      // state.
       throw new Error(
         `evolution: skill proposal "${proposal.proposalId}" records no production baseline identity — ${guidance}`,
       )
@@ -2053,11 +2779,13 @@ export class EvolutionService extends Service {
    * Move applied → rolledback: undo the apply by restoring the champion snapshot
    * taken at prepare, as one commit — the same intent → atomic write →
    * completion order as apply, so an interrupted rollback is recoverable the
-   * same way, including between the two files of one object. A record of another
-   * target type has no executor here: this build writes and restores the fixed
-   * file set of one skill object only, and an applied capability row or preset
-   * directory is refused by name rather than touched. Same approval discipline
-   * as apply: the tool asks a human first, the service only executes and records.
+   * same way, including between the two files of one object. A **capability**
+   * apply is undone by the same entry (A6): the registry row goes back to the row
+   * prepare recorded — or is removed, when this candidate added it — and the new
+   * skill's files are removed, because they did not exist before this proposal. A
+   * record of another target type has no executor here: an applied preset
+   * directory is refused by name rather than touched. Same approval discipline as
+   * apply: the tool asks a human first, the service only executes and records.
    *
    * A rollback restores *this* proposal's baseline and nothing else, so both
    * ends are re-verified per file before the intent is recorded: every
@@ -2077,8 +2805,9 @@ export class EvolutionService extends Service {
    *
    * As in {@link apply}, an open intent of this proposal is settled rather than
    * duplicated, and the result reports the recovery; an open intent of another
-   * proposal that commits the same skill directory refuses this rollback by name
-   * before anything is read or written ({@link assertTargetUncommitted}).
+   * proposal that commits the same skill directory — or moves the same capability
+   * row — refuses this rollback by name before anything is read or written
+   * ({@link assertTargetUncommitted}).
    */
   async rollback(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome> {
     await this.assertNext(proposalId, 'rolledback')
@@ -2098,6 +2827,11 @@ export class EvolutionService extends Service {
       }
       this.assertTargetUncommitted(proposal)
       const request = this.commitRequest(proposal, 'rollback', actor, approvalRef)
+      if (proposal.targetType === 'capability') {
+        await this.assertCapabilityApplied(proposal, request)
+        await commitIntent(this.commitHost(), request, await this.capabilityBytes(proposal, 'rollback'))
+        return { targets: request.files.map(file => file.target), proposal: await this.get(proposalId) }
+      }
       const prepared = proposal.prepared!
       const applied = prepared.skillContent!
       const name = (proposal.mutation as SkillMutation).name
@@ -2123,7 +2857,7 @@ export class EvolutionService extends Service {
       const championFiles: Buffer[] = []
       for (const [index, file] of request.files.entries()) {
         const expected = index === 0 ? prepared.skillBaseline!.sha256 : prepared.skillBaseline!.contract!.sha256
-        const snapshot = await readVerifiedFile(this.root, file.source)
+        const snapshot = await readVerifiedFile(this.root, file.source!)
         const digest = sha256Hex(snapshot)
         if (digest !== expected) {
           throw new Error(
@@ -2137,6 +2871,47 @@ export class EvolutionService extends Service {
       await commitIntent(this.commitHost(), request, championFiles)
       return { targets: request.files.map(file => file.target), proposal: await this.get(proposalId) }
     })
+  }
+
+  /**
+   * What a capability rollback must still find before it may be recorded (A6):
+   * the registry row this proposal installed, and — when it installs a new skill
+   * — the files it applied. A row (or file) another writer or a later proposal
+   * changed since is refused by name with nothing written and no intent recorded;
+   * a rollback restores *this* proposal's baseline and never overwrites a newer
+   * state.
+   */
+  private async assertCapabilityApplied(proposal: EvolutionProposal, request: CommitRequest): Promise<void> {
+    const prepared = proposal.prepared!
+    const identity = prepared.capabilityRow!
+    const table = this.effectiveCapabilities()
+    if (table === undefined) {
+      throw new Error(
+        `evolution: the effective capability registry cannot be read in this context, so the row proposal "${proposal.proposalId}" ` +
+        'applied cannot be compared — nothing was written and no commit intent was recorded',
+      )
+    }
+    const current = table[identity.name] ?? null
+    const digest = current === null ? null : capabilityRowDigest(current)
+    if (digest !== identity.digest) {
+      throw new Error(
+        `evolution: the registry row "${identity.name}" does not hold the row proposal "${proposal.proposalId}" applied ` +
+        `(${digest === null ? 'no row' : `sha256 ${digest}`} != sha256 ${identity.digest}) — a rollback restores the baseline of the ` +
+        'state this proposal installed, and a row another writer (or a later proposal) changed is left exactly as it is: nothing was ' +
+        'written and no commit intent was recorded',
+      )
+    }
+    for (const [index, file] of request.files.entries()) {
+      const expected = index === 0 ? prepared.skillContent!.sha256 : prepared.skillContent!.contract!.sha256
+      const currentFile = await readProductionSkill(this.skillRoot, relative(this.skillRoot, file.target))
+      if (currentFile === null || currentFile.sha256 !== expected) {
+        throw new Error(
+          `evolution: the production file "${file.target}" does not hold the content proposal "${proposal.proposalId}" applied ` +
+          `(sha256 ${currentFile?.sha256 ?? 'missing'} != ${expected}) — a file another writer (or a later proposal) changed is left ` +
+          'exactly as it is: nothing was written and no commit intent was recorded',
+        )
+      }
+    }
   }
 
   /**
@@ -2229,17 +3004,18 @@ export class EvolutionService extends Service {
     actor: string,
     approvalRef: string,
   ): CommitRequest {
+    if (proposal.targetType === 'capability') return this.capabilityCommitRequest(proposal, direction, actor, approvalRef)
     if (proposal.targetType !== 'skill') {
       throw new Error(
         `evolution: proposal "${proposal.proposalId}" targets "${proposal.targetType}" — this build writes and restores the fixed ` +
-        `file set of one skill object only, so there is no executor to ${direction} an applied ${proposal.targetType} record`,
+        `file set of one skill object and moves one capability row, so there is no executor to ${direction} an applied ${proposal.targetType} record`,
       )
     }
     const prepared = proposal.prepared
     const content = prepared?.skillContent
     const baseline = prepared?.skillBaseline
     if (prepared?.sandbox == null || prepared.champion !== 'captured' || proposal.mutation === undefined
-      || content === undefined || baseline === undefined) {
+      || content === undefined || baseline === undefined || baseline === null) {
       // The fold admits only a materialized skill prepare (sandbox, champion
       // snapshot, mutation and both identities present), so this is the belt
       // that narrows the view for the commit below rather than a reachable state.
@@ -2295,13 +3071,84 @@ export class EvolutionService extends Service {
   }
 
   /**
-   * The production paths a commit of this proposal may write: the object's fixed
-   * file set under `<skillRoot>/<name>/` — `SKILL.md` always, and the
-   * `SKILL.contract.json` beside it when the prepared identity records an
-   * execution sidecar — each confined to the skill root, in commit order.
+   * The commit one capability candidate binds (A6): the one row it moves, and —
+   * when it carries a new skill — that skill's two files, as a create on apply
+   * (`baselineSha256: null`: the target must not exist) and a removal on rollback
+   * (`contentSha256: null`, no source: there are no bytes to write again). The
+   * row's two sides mirror the files': an apply installs the candidate row over
+   * the recorded baseline (or over the absence of any row), a rollback restores
+   * the baseline row — or removes the row this candidate added. The request is
+   * read off the prepared record only, so what the intent says is what prepare
+   * froze.
+   */
+  private capabilityCommitRequest(
+    proposal: EvolutionProposal,
+    direction: CommitDirection,
+    actor: string,
+    approvalRef: string,
+  ): CommitRequest {
+    const prepared = proposal.prepared
+    const row = proposal.mutation === undefined ? undefined : validateCapabilityMutation(proposal.mutation).row
+    if (prepared?.sandbox == null || prepared.capabilityRow === undefined || row === undefined
+      || prepared.capabilityBaseline === undefined) {
+      throw new Error(
+        `evolution: capability proposal "${proposal.proposalId}" has no materialized candidate (its frozen row, its mutation and the ` +
+        `baseline it read are all required), so there is nothing to ${direction}`,
+      )
+    }
+    const sandbox = prepared.sandbox
+    const baseline = prepared.capabilityBaseline
+    const capability: CommitCapability = direction === 'apply'
+      ? {
+          name: prepared.capabilityRow.name,
+          baselineSha256: baseline === null ? null : baseline.digest,
+          contentSha256: prepared.capabilityRow.digest,
+          source: `${sandbox}/capability/${prepared.capabilityRow.name}.json`,
+        }
+      : {
+          name: prepared.capabilityRow.name,
+          baselineSha256: prepared.capabilityRow.digest,
+          contentSha256: baseline === null ? null : baseline.digest,
+          ...(baseline === null ? {} : { source: `${sandbox}/champion/capability/${prepared.capabilityRow.name}.json` }),
+        }
+    const files: CommitFile[] = []
+    const content = prepared.skillContent
+    if (content !== undefined) {
+      if (content.contract === undefined) {
+        throw new Error(
+          `evolution: capability proposal "${proposal.proposalId}" records a new skill without a declaration, and a capability candidate's ` +
+          'skill is an execution provider — the object prepare froze is not one this build writes',
+        )
+      }
+      const targets = this.commitTargets(proposal)
+      files.push(direction === 'apply'
+        ? { target: targets[0]!, baselineSha256: null, contentSha256: content.sha256, source: `${sandbox}/skills/${content.name}/SKILL.md` }
+        : { target: targets[0]!, baselineSha256: content.sha256, contentSha256: null })
+      files.push(direction === 'apply'
+        ? {
+            target: targets[1]!,
+            baselineSha256: null,
+            contentSha256: content.contract.sha256,
+            source: `${sandbox}/skills/${content.name}/${SKILL_SIDECAR_FILE}`,
+          }
+        : { target: targets[1]!, baselineSha256: content.contract.sha256, contentSha256: null })
+    }
+    return { proposalId: proposal.proposalId, direction, approvalRef, files, capability, actor }
+  }
+
+  /**
+   * The production paths a commit of this proposal may write: for a skill
+   * candidate the object's fixed file set under `<skillRoot>/<name>/` —
+   * `SKILL.md` always, and the `SKILL.contract.json` beside it when the prepared
+   * identity records an execution sidecar; for a capability candidate the new
+   * skill's two files, or none for a row-only candidate. Each path is confined to
+   * the skill root, in commit order.
    */
   private commitTargets(proposal: EvolutionProposal): string[] {
-    const name = (proposal.mutation as SkillMutation).name
+    const name = proposal.targetType === 'capability'
+      ? proposal.prepared?.skillContent?.name
+      : (proposal.mutation as SkillMutation).name
+    if (name === undefined) return []
     const targets = [resolveWithin(this.skillRoot, productionSkillRelative(name))]
     if (proposal.prepared?.skillContent?.contract !== undefined) {
       targets.push(resolveWithin(this.skillRoot, productionSidecarRelative(name)))
@@ -2326,24 +3173,38 @@ export class EvolutionService extends Service {
    * retry loop; the intent is settled first, by {@link reconcile} or by a retry
    * of the proposal that owns it.
    *
-   * Only a materialized skill mutation has commit targets this build may write:
-   * every other proposal keeps the named refusal its own entry produces
-   * ({@link checkPromotion}, {@link commitRequest}).
+   * Only a materialized skill or capability mutation has commit targets this
+   * build may write: every other proposal keeps the named refusal its own entry
+   * produces ({@link checkPromotion}, {@link commitRequest}). A capability
+   * candidate's row is a second object of the same kind: the same row moved by
+   * two proposals at once is refused here as well, before either intent exists,
+   * because the second would find the first's row where its own baseline check
+   * expects the state it read.
    */
   private assertTargetUncommitted(proposal: EvolutionProposal): void {
-    if (proposal.targetType !== 'skill' || proposal.mutation === undefined) return
+    if ((proposal.targetType !== 'skill' && proposal.targetType !== 'capability') || proposal.mutation === undefined) return
     const directories = new Set(this.commitTargets(proposal).map(target => dirname(target)))
+    const rowName = proposal.prepared?.capabilityRow?.name
     for (const other of this.fold(this.records).values()) {
       const intent = other.openIntent
       if (intent === undefined || other.proposalId === proposal.proposalId) continue
       const shared = intent.files.map(file => dirname(resolve(file.target))).find(directory => directories.has(directory))
-      if (shared === undefined) continue
-      throw new Error(
-        `evolution: the open commit intent "${intent.intentId}" of proposal "${other.proposalId}" (direction ` +
-        `"${intent.direction}") commits the production skill directory "${shared}" — proposal "${proposal.proposalId}" does not ` +
-        "commit over another proposal's unsettled intent; settle that intent first (reconcile, or a retry of the proposal that owns " +
-        'it): nothing was written and no commit intent was recorded',
-      )
+      if (shared !== undefined) {
+        throw new Error(
+          `evolution: the open commit intent "${intent.intentId}" of proposal "${other.proposalId}" (direction ` +
+          `"${intent.direction}") commits the production skill directory "${shared}" — proposal "${proposal.proposalId}" does not ` +
+          "commit over another proposal's unsettled intent; settle that intent first (reconcile, or a retry of the proposal that owns " +
+          'it): nothing was written and no commit intent was recorded',
+        )
+      }
+      if (rowName !== undefined && intent.capability?.name === rowName) {
+        throw new Error(
+          `evolution: the open commit intent "${intent.intentId}" of proposal "${other.proposalId}" (direction "${intent.direction}") ` +
+          `moves the capability row "${rowName}" — proposal "${proposal.proposalId}" does not move a row another proposal's unsettled ` +
+          "intent already owns; settle that intent first (reconcile, or a retry of the proposal that owns it): nothing was written and " +
+          'no commit intent was recorded',
+        )
+      }
     }
   }
 
@@ -2391,10 +3252,63 @@ export class EvolutionService extends Service {
    * committed content — passes, as it must: that is the window an interrupted
    * two-file commit leaves for a recovery to finish, not a foreign change. This
    * reads the directory and writes nothing.
+   *
+   * Two more states come from A6, and both are answered about the *directory*
+   * rather than the files, for the same reason: a file set whose baseline is the
+   * **absence** of the object (an apply that creates a new skill) may only write
+   * where production holds nothing but this object's own staging leftovers, and a
+   * file set whose content is that absence (the rollback that removes it) may
+   * only remove files from a directory that holds exactly those files — anything
+   * else in either place is an entry this commit never created and must not touch.
    */
   private async objectWriteRefusal(intent: CommitIntentView): Promise<string | null> {
+    if (intent.files.length === 0) return null
     const skillMd = intent.files[0]!
     const directory = dirname(skillMd.target)
+    const own = new Set(intent.files.map(file => basename(file.target)))
+    const staging = [...own].map(name => `.${name}.tmp-`)
+    const creates = intent.files.every(file => file.baselineSha256 === null)
+    const removes = intent.files.every(file => file.contentSha256 === null)
+    if (!creates && !removes && intent.files.some(file => file.baselineSha256 === null || file.contentSha256 === null)) {
+      return (
+        'the fixed file set of one skill object is created or removed whole, and this intent mixes a file with a production state and ' +
+        'a file without one'
+      )
+    }
+    const listDirectory = async (): Promise<Dirent[] | string> => {
+      try {
+        return await readdir(directory, { withFileTypes: true })
+      } catch (error) {
+        // The directory is not there: nothing to inspect, which is exactly the
+        // state a create needs and the state a removal has already reached.
+        return error instanceof Error && (error as NodeJS.ErrnoException).code === 'ENOENT'
+          ? []
+          : `the production directory "${directory}" cannot be read to check what it holds ` +
+            `(${error instanceof Error ? error.message : String(error)}) — the entries this commit would leave beside its own are unknown`
+      }
+    }
+    if (creates || removes) {
+      const entries = await listDirectory()
+      if (typeof entries === 'string') return entries
+      const foreign = entries
+        .filter(entry => !own.has(entry.name) && !(staging.some(prefix => entry.name.startsWith(prefix)) && !entry.isDirectory()))
+        .map(entry => (entry.isDirectory() ? `${entry.name}/` : entry.name))
+        .sort()
+      if (foreign.length === 0) return null
+      // The intent's own named files are allowed on both sides of a create or a
+      // removal: a partly written (or partly removed) set is the state a
+      // recovery finishes, not a foreign one.
+      return creates
+        ? `this commit creates the skill object "${directory}" where nothing was, and the directory already holds ` +
+          `${foreign.length} entr${foreign.length === 1 ? 'y' : 'ies'} ` +
+          `(${foreign.map(name => JSON.stringify(name)).join(', ')}) — a new object is written where production holds nothing, so a ` +
+          'directory carrying anything else is not the state this intent describes'
+        : `this commit removes the files of skill object "${directory}" ` +
+          `(${[...own].sort().map(name => JSON.stringify(name)).join(', ')}), and the directory holds ` +
+          `${foreign.length} entr${foreign.length === 1 ? 'y' : 'ies'} the intent does not name ` +
+          `(${foreign.map(name => JSON.stringify(name)).join(', ')}) — a removal takes back what this candidate created and leaves ` +
+          'everything else exactly where it is, so a directory holding more is not one this intent may empty'
+    }
     if (intent.files.length === 1) {
       const loaded = await loadSkillSidecar(directory)
       if (loaded.sidecar !== undefined) {
@@ -2419,8 +3333,6 @@ export class EvolutionService extends Service {
       }
       return null
     }
-    const own = new Set(intent.files.map(file => basename(file.target)))
-    const staging = [...own].map(name => `.${name}.tmp-`)
     // A directory that cannot even be listed is a *reason*, not an exception:
     // this method answers the same way whatever it finds, and the entry point
     // that asked decides what a refusal means — the fresh path stops before the
@@ -2428,16 +3340,8 @@ export class EvolutionService extends Service {
     // of its batch. A throw here would abort that batch over one directory the
     // caller could have been told about; the guidance branch above reports an
     // unreadable directory the same way, as a defect in its reason.
-    let entries: Dirent[]
-    try {
-      entries = await readdir(directory, { withFileTypes: true })
-    } catch (error) {
-      return (
-        `the production directory "${directory}" cannot be read to check what it holds ` +
-        `(${error instanceof Error ? error.message : String(error)}) — an execution object's identity names every file in its ` +
-        'directory, so the entries this commit would leave beside its own are unknown'
-      )
-    }
+    const entries = await listDirectory()
+    if (typeof entries === 'string') return entries
     const foreign = entries
       .filter(entry => !own.has(entry.name) && !(staging.some(prefix => entry.name.startsWith(prefix)) && !entry.isDirectory()))
       .map(entry => (entry.isDirectory() ? `${entry.name}/` : entry.name))
@@ -2481,6 +3385,30 @@ export class EvolutionService extends Service {
       readProduction: relative => readProductionSkill(this.skillRoot, relative),
       objectWriteRefusal: intent => this.objectWriteRefusal(intent),
       verifyCommitted: intent => this.verifyCommitted(intent),
+      capability: {
+        read: async name => {
+          const table = this.effectiveCapabilities()
+          if (table === undefined) {
+            throw new Error(
+              'the effective capability registry cannot be read in this context, so the row a commit would move cannot be compared ' +
+              'against the state it recorded',
+            )
+          }
+          return table[name] ?? null
+        },
+        apply: async (intent, entry) => {
+          const runtime = optionalService<CapabilityRowWriter>(this.ctx, 'taskRuntime')
+          if (runtime?.applyCapabilityRow === undefined) {
+            throw new Error(
+              'this deployment offers no capability-registry entry (taskRuntime.applyCapabilityRow), so the row this commit carries ' +
+              'cannot be installed',
+            )
+          }
+          await runtime.applyCapabilityRow(intent.capability!.name, entry, {
+            commitTargets: intent.files.map(file => file.target),
+          })
+        },
+      },
       probe: (stage, target) => this.commitProbe?.(stage, target),
     }
   }
@@ -2521,6 +3449,76 @@ export class EvolutionService extends Service {
    * the object from being written at all.
    */
   private async verifyCommitted(intent: CommitIntentView): Promise<void> {
+    await this.verifyCommittedFiles(intent)
+    await this.verifyCommittedRow(intent)
+    await this.persistCapabilityRowText(intent)
+  }
+
+  /**
+   * The capability table's **own text** (A6): the durable half of a capability
+   * commit, written between the registry's row and the completion line — in a
+   * fresh commit and in every reconciliation branch alike, because
+   * {@link verifyCommitted} is the one place every path passes before it records
+   * one.
+   *
+   * Why it lives here and not beside the registry seam: an applied row whose file
+   * was not written is a row the next restart loses, and the completion line is
+   * the claim that it will not be lost. Both facts are re-established by writing
+   * the row (or removing it, for a rollback) and reading the file back before the
+   * completion; a crash in between leaves the intent open, and the next
+   * reconciliation repeats the same edit — it is idempotent, and the registry's
+   * row is already the one the intent records.
+   *
+   * A deployment that names no file refuses by name rather than recording a
+   * completion for a row that lives only in this process.
+   */
+  private async persistCapabilityRowText(intent: CommitIntentView): Promise<void> {
+    const capability = intent.capability
+    if (capability === undefined) return
+    if (this.capabilityConfigPath === undefined) {
+      throw new Error(
+        `evolution: this deployment names no capability table file, so the row "${capability.name}" of the ${intent.direction} of ` +
+        `proposal "${intent.proposalId}" cannot be persisted — a row that exists only in this process is gone after a restart, and the ` +
+        'completion is not recorded for a row the deployment cannot keep; configure the capability table file (Config.capabilityConfig) ' +
+        'and retry, and the intent stays open in the meantime',
+      )
+    }
+    const entry = capability.contentSha256 === null ? null : await committedRow(this.commitHost(), capability)
+    const written = await writeCapabilityRowToConfig({
+      file: this.capabilityConfigPath,
+      name: capability.name,
+      entry,
+      ...(this.capabilityConfigProbe === undefined ? {} : { probe: this.capabilityConfigProbe }),
+    })
+    if (written.direction === 'written' && written.rowDigest !== capabilityRowDigest(entry!)) {
+      throw new Error(
+        `evolution: the capability row "${capability.name}" written into "${written.file}" reads back as ${written.rowDigest}, not as the ` +
+        `row this ${intent.direction} committed (sha256 ${capabilityRowDigest(entry!)}); nothing is recorded as settled and the intent ` +
+        'stays open',
+      )
+    }
+  }
+
+  /**
+   * The file half of {@link verifyCommitted}. A direction that ends with files
+   * **removed** (a capability rollback, A6) is verified as that: every file the
+   * intent named must be gone, and nothing is loaded — there is no object left to
+   * load. Every other direction is the whole-object verification described above.
+   */
+  private async verifyCommittedFiles(intent: CommitIntentView): Promise<void> {
+    if (intent.files.length === 0) return
+    if (intent.files.every(file => file.contentSha256 === null)) {
+      for (const file of intent.files) {
+        const current = await readProductionSkill(this.skillRoot, relative(this.skillRoot, file.target))
+        if (current !== null) {
+          throw new Error(
+            `evolution: the production file "${file.target}" still holds sha256 ${current.sha256} after the ${intent.direction} of ` +
+            `proposal "${intent.proposalId}" removed it — the commit intent stays open and no completion is recorded`,
+          )
+        }
+      }
+      return
+    }
     const skillMd = intent.files[0]!
     const directory = dirname(skillMd.target)
     const name = basename(directory)
@@ -2574,6 +3572,37 @@ export class EvolutionService extends Service {
   }
 
   /**
+   * The capability half of {@link verifyCommitted} (A6): the registry must read as
+   * the row this direction installed — the row's canonical digest, or no row at
+   * all when the direction removes it. This is what makes the completion a
+   * statement about the registry rather than about the files: by the time the
+   * line is written, the deployment's own registry view is already the new one,
+   * and a completion is never recorded over a registry that still holds the
+   * state before the commit.
+   */
+  private async verifyCommittedRow(intent: CommitIntentView): Promise<void> {
+    if (intent.capability === undefined) return
+    const table = this.effectiveCapabilities()
+    if (table === undefined) {
+      throw new Error(
+        `evolution: the effective capability registry cannot be read in this context after the ${intent.direction} of proposal ` +
+        `"${intent.proposalId}", so whether the row "${intent.capability.name}" is in place cannot be established — the commit intent ` +
+        'stays open and no completion is recorded',
+      )
+    }
+    const entry = table[intent.capability.name] ?? null
+    const digest = entry === null ? null : capabilityRowDigest(entry)
+    if (digest !== intent.capability.contentSha256) {
+      throw new Error(
+        `evolution: the capability registry row "${intent.capability.name}" reads ` +
+        `${digest === null ? 'no row' : `sha256 ${digest}`} after the ${intent.direction} of proposal "${intent.proposalId}", not the ` +
+        `${intent.capability.contentSha256 === null ? 'removed row' : `sha256 ${intent.capability.contentSha256}`} this direction ` +
+        'recorded — the commit intent stays open and no completion is recorded',
+      )
+    }
+  }
+
+  /**
    * Serialize one commit — its intent, its production write and its completion —
    * behind every commit already running or queued, and behind every write the
    * ledger funnel has not appended yet. This is a single-process queue, not a
@@ -2611,6 +3640,288 @@ export class EvolutionService extends Service {
         (filter.targetType === undefined || proposal.targetType === filter.targetType) &&
         (filter.targetId === undefined || proposal.targetId === filter.targetId),
     )
+  }
+
+  /**
+   * The **recovery coordination** entry (A6, plan §F.4): take one recorded
+   * Diagnosis of a failed root task and — if everything this plane owns is in
+   * order — open the task's new attempt through the runtime's own entry.
+   *
+   * The call chain is fixed (plan §F.4: 工具适配 → evolution 的恢复协调入口 →
+   * task-runtime 的执行恢复入口) and each layer re-checks its own rules. What
+   * *this* layer owns, in order, before anything is started:
+   *
+   * 1. **the request's closed shape** — two non-empty ids and nothing else: no
+   *    authorization, no approval, no decision, no reuse list. A model cannot
+   *    smuggle a permission into a recovery because there is nowhere to put one.
+   * 2. **the caller's delegation** — the session must be the supervisor the
+   *    ledger recorded for *this* diagnosis (the injected
+   *    {@link Config.supervisorDelegation}), and the store the delegation names
+   *    must be the store of the caller's own graph. An ordinary root, a worker,
+   *    a reviewer, another graph's supervisor and an unknown session are all
+   *    refused by name here; nothing is derived from the ids the caller passed.
+   * 3. **the diagnosis and its source** — the store must hold the diagnosis, the
+   *    diagnosis must name a task of that store, that task must be the store's
+   *    own root, and it must be in a failing state: a `verified` source is
+   *    refused outright (a successful goal is not recovered, and this build has
+   *    no frozen metric or comparator that could judge "faster or cheaper" — its
+   *    suggestions stay records, with no promotion, no application and no new
+   *    run), and a source whose run is still live is refused rather than
+   *    hot-swapped.
+   * 4. **the candidate association** — the proposals this ledger holds for that
+   *    diagnosis (`sourceRefs` naming `diagnosis:<id>`). **Only a capability
+   *    change has to be in force**: every associated proposal that targets a
+   *    capability must read `applied` (approved by a person and committed) and
+   *    not rolled back, or the recovery is refused by name with nothing started
+   *    — the gap it stands for is still open. A pure artifact gap carries no
+   *    proposal at all and is *not* refused for that: what it needs is the
+   *    source and the capability the production really uses, so this layer
+   *    checks the source's required rows resolve in the deployment's current
+   *    table and leaves the rest to the runtime.
+   * 5. **the attempt's own identity** — a diagnosis with an attempt already in
+   *    flight is refused under a *different* key (one diagnosis never runs two
+   *    attempts at once); the same key is passed through, and the runtime
+   *    answers it from the record it wrote (this layer keeps no attempt table of
+   *    its own: the run's `recovery` field is the fact).
+   * 6. **the runtime call** — the host composition layer's own entry
+   *    (`TaskRuntime.recoverRootTask`), which re-checks the store's facts, the
+   *    contract, the providers, the ceilings and the idempotency before it
+   *    writes, and never reads this ledger.
+   *
+   * Nothing here writes: the decision is a read of the store, this ledger and the
+   * injected delegation, and the one write that happens is the runtime's.
+   */
+  async coordinateRecovery(
+    request: RecoveryCoordinationRequest,
+    caller: RecoveryCoordinationCaller,
+  ): Promise<RecoveryCoordinationOutcome> {
+    const defects = recoveryCoordinationDefects(request)
+    if (defects.length > 0) {
+      throw new Error(`evolution: the recovery request was refused:\n- ${defects.join('\n- ')}`)
+    }
+    if (typeof caller?.sessionId !== 'string' || caller.sessionId.trim().length === 0) {
+      throw new Error(
+        'evolution: a recovery is asked for by the session that coordinates the hand-off: pass a non-empty caller session id',
+      )
+    }
+    if (this.resolveSupervisorDelegation === undefined) {
+      throw new Error(
+        'evolution: this deployment wires no supervisor-delegation source, so "this session coordinates the hand-off" cannot be ' +
+        'established; a recovery needs the ledger row that delegated the hand-off, and nothing was started',
+      )
+    }
+    const delegation = await this.resolveSupervisorDelegation(caller.sessionId, request.sourceDiagnosisId)
+    if (delegation === undefined) {
+      throw new Error(
+        `evolution: session "${caller.sessionId}" is not the supervisor of diagnosis "${request.sourceDiagnosisId}" — this deployment's ` +
+        'ledger records no started hand-off for that pair, and a recovery entry is open to the coordinator that hand-off was delegated ' +
+        'to and to no one else; nothing was started',
+      )
+    }
+    if (delegation.sessionId !== caller.sessionId || delegation.diagnosisId !== request.sourceDiagnosisId) {
+      throw new Error(
+        `evolution: the delegation read back for session "${caller.sessionId}" names session "${delegation.sessionId}" and diagnosis ` +
+        `"${delegation.diagnosisId}"; a delegation that does not answer the question it was asked is not an authorization, and nothing was started`,
+      )
+    }
+    const storeId = await this.storeOfSession(caller.sessionId)
+    if (storeId !== delegation.rootStoreId) {
+      throw new Error(
+        `evolution: session "${caller.sessionId}" belongs to store "${storeId}", while the hand-off it claims was delegated into ` +
+        `"${delegation.rootStoreId}" — a delegation never moves a session into another graph's store, and nothing was started`,
+      )
+    }
+    const task = optionalService<{ openStore(storeId: string): Promise<TaskSnapshot> }>(this.ctx, 'task')
+    if (task === undefined) {
+      throw new Error(
+        'evolution: this deployment offers no task store, so the diagnosis a recovery names cannot be read; nothing was started',
+      )
+    }
+    let snapshot: TaskSnapshot
+    try {
+      snapshot = await task.openStore(storeId)
+    } catch (error) {
+      throw new Error(
+        `evolution: the store "${storeId}" of the hand-off could not be read (${error instanceof Error ? error.message : String(error)}); ` +
+        'nothing was started',
+      )
+    }
+    const diagnosis = (snapshot.diagnoses ?? []).find(item => item.diagnosisId === request.sourceDiagnosisId)
+    if (diagnosis === undefined) {
+      throw new Error(
+        `evolution: store "${storeId}" holds no diagnosis "${request.sourceDiagnosisId}"; a recovery is asked for by a diagnosis of this ` +
+        'store, so this hand-off names no fact here and nothing was started',
+      )
+    }
+    const source = snapshot.tasks.find(item => item.taskId === diagnosis.taskId)
+    if (source === undefined) {
+      throw new Error(
+        `evolution: diagnosis "${diagnosis.diagnosisId}" names task "${diagnosis.taskId}", which store "${storeId}" does not hold; ` +
+        'nothing was started',
+      )
+    }
+    if (source.parentTaskId !== undefined) {
+      throw new Error(
+        `evolution: task "${source.taskId}" is a child of "${source.parentTaskId}"; a recovery attempt is opened for the store's own root task, ` +
+        'and a child is re-run by a batch of its parent — nothing was started',
+      )
+    }
+    if (source.status === 'verified') {
+      throw new Error(
+        `evolution: root task "${source.taskId}" is verified, and a successful source is not recovered: the goal was met and this build has no ` +
+        'frozen metric or comparator that could judge "faster or cheaper" against it, so the diagnosis\'s suggestions stay records — no promotion, ' +
+        'no application and no new run',
+      )
+    }
+    const coordination: string[] = [
+      `the hand-off was delegated by session "${delegation.actor}" into store "${delegation.rootStoreId}"`,
+      `the diagnosis names root task "${source.taskId}" [${source.status}]`,
+    ]
+    const sourceRunId = recoverySourceRunId(diagnosis, source, snapshot)
+    // A key that already names an attempt is *answered*, not re-decided: the run's
+    // own `recovery` field is the record (this plane keeps no attempt table), the
+    // runtime re-reads it and refuses a key bound to other content. Asking again
+    // is therefore not a second request for the same gap — and the checks below
+    // (the capability in force, the source's state) belong to opening one.
+    const answered = recoveryAttemptWithKey(snapshot, source.taskId, request.requestKey)
+    if (answered !== undefined) {
+      coordination.push(
+        `request key "${request.requestKey}" already names attempt "${answered.runId}" [${answered.status}]; it is answered from that record`,
+      )
+      return await this.recoverThroughRuntime(storeId, {
+        sourceTaskId: source.taskId,
+        sourceRunId,
+        sourceDiagnosisId: request.sourceDiagnosisId,
+        requestKey: request.requestKey,
+      }, caller, delegation, coordination)
+    }
+    if (source.status === 'running' || source.status === 'verifying') {
+      throw new Error(
+        `evolution: root task "${source.taskId}" is ${source.status}; a recovery opens a new attempt after the old one settled and never ` +
+        'hot-swaps a live run — nothing was started',
+      )
+    }
+    const associated = (await this.list()).filter(proposal => proposal.sourceRefs.includes(`diagnosis:${diagnosis.diagnosisId}`))
+    for (const proposal of associated.filter(item => item.targetType === 'capability')) {
+      if (proposal.status === 'applied' && proposal.applied !== undefined && proposal.rolledback === undefined) continue
+      const state = proposal.status === 'decided' && proposal.decision === 'PROMOTE'
+        ? 'PROMOTE-decided but not applied'
+        : proposal.status === 'rolledback'
+          ? 'rolled back'
+          : proposal.status
+      throw new Error(
+        `evolution: the capability change this hand-off depends on (proposal "${proposal.proposalId}" → row "${proposal.targetId}") is ` +
+        `${state}; a recovery whose gap is that capability is opened only after a person approves it and the apply commits it into the ` +
+        'registry — nothing was started, and no run was opened',
+      )
+    }
+    if (associated.length > 0) {
+      coordination.push(
+        `this ledger holds ${associated.length} proposal(s) for the diagnosis, ` +
+        `${associated.filter(item => item.targetType === 'capability').length} of them capability changes, all in force`,
+      )
+    } else {
+      // A pure artifact gap: no candidate in this ledger, so the only capability
+      // question this layer asks is whether the rows the source already uses
+      // resolve — an empty requirement has nothing to check, and the runtime
+      // re-reads the same table when it opens the attempt.
+      const requested = source.requestedCapabilities ?? []
+      if (requested.length === 0) {
+        coordination.push('this ledger holds no proposal for the diagnosis; the source requires no capability row of its own')
+      } else {
+        const query = optionalService<{ listCapabilities?(): Readonly<Record<string, CapabilityConfig>> }>(this.ctx, 'taskRuntime')
+        const table = (() => {
+          try {
+            return query?.listCapabilities?.()
+          } catch {
+            return undefined
+          }
+        })()
+        if (table === undefined) {
+          throw new Error(
+            `evolution: the recovery of "${source.taskId}" carries no candidate in this ledger, so it is a pure artifact gap — and the ` +
+            'capability table that gap\'s production needs cannot be read in this context; nothing was started rather than assuming the rows resolve',
+          )
+        }
+        const unresolved = requested.filter(name => !capabilityToolQuery(table)(name).known)
+        if (unresolved.length > 0) {
+          throw new Error(
+            `evolution: the recovery of "${source.taskId}" carries no candidate in this ledger and the capability the production needs is still ` +
+            `missing ([${unresolved.join(', ')}] resolve to no row in this deployment's table); a pure artifact gap is recoverable, a capability gap ` +
+            'is not — nothing was started',
+          )
+        }
+        coordination.push(
+          `this ledger holds no proposal for the diagnosis; the row(s) the source uses ([${requested.join(', ')}]) resolve in the current table`,
+        )
+      }
+    }
+    const inFlight = inFlightRecoveryAttempt(snapshot, source.taskId, request.sourceDiagnosisId)
+    if (inFlight !== undefined && inFlight.recovery?.requestKey !== request.requestKey) {
+      throw new Error(
+        `evolution: diagnosis "${request.sourceDiagnosisId}" already has a recovery attempt in flight (run "${inFlight.runId}", key ` +
+        `"${inFlight.recovery?.requestKey ?? 'unknown'}"); key "${request.requestKey}" starts nothing — an attempt ends when its run settles, and ` +
+        'a new key may be asked for after that',
+      )
+    }
+    return await this.recoverThroughRuntime(storeId, {
+      sourceTaskId: source.taskId,
+      sourceRunId,
+      sourceDiagnosisId: request.sourceDiagnosisId,
+      requestKey: request.requestKey,
+    }, caller, delegation, coordination)
+  }
+
+  /**
+   * The one runtime call this entry makes, with the answer every path carries: the
+   * attempt the runtime opened or already had, and the hand-off facts this plane
+   * checked. A deployment without that entry refuses by name — a recovery cannot
+   * be opened by this plane, which owns no execution state.
+   */
+  private async recoverThroughRuntime(
+    storeId: string,
+    recovery: RootRecoveryRequest,
+    caller: RecoveryCoordinationCaller,
+    delegation: SupervisorDelegation,
+    coordination: readonly string[],
+  ): Promise<RecoveryCoordinationOutcome> {
+    const runtime = optionalService<{
+      recoverRootTask(storeId: string, request: RootRecoveryRequest, caller: RootRecoveryCaller): Promise<RootRecoveryOutcome>
+    }>(this.ctx, 'taskRuntime')
+    if (runtime?.recoverRootTask === undefined) {
+      throw new Error(
+        'evolution: this deployment offers no execution-recovery entry (taskRuntime.recoverRootTask), so the new attempt cannot be opened; ' +
+        'nothing was started',
+      )
+    }
+    const outcome = await runtime.recoverRootTask(storeId, recovery, {
+      sessionId: caller.sessionId,
+      ...(caller.signal === undefined ? {} : { signal: caller.signal }),
+    })
+    return {
+      ...outcome,
+      handoff: { sessionId: delegation.sessionId, actor: delegation.actor, diagnosisId: delegation.diagnosisId },
+      coordination,
+    }
+  }
+
+  /** The root task store of one live session, derived from its own graph — never from an id the caller passed. */
+  private async storeOfSession(sessionId: string): Promise<string> {
+    const graphs = optionalService<{ graphForSession(session: SessionId): Promise<{ rootSessionId: unknown }> }>(this.ctx, 'graphs')
+    if (graphs === undefined) {
+      throw new Error(
+        `evolution: this deployment offers no graph registry, so the store of session "${sessionId}" cannot be read; nothing was started`,
+      )
+    }
+    try {
+      const graph = await graphs.graphForSession(SessionId(sessionId))
+      return rootTaskStoreId(String(graph.rootSessionId))
+    } catch (error) {
+      throw new Error(
+        `evolution: session "${sessionId}" has no graph in this deployment (${error instanceof Error ? error.message : String(error)}), so the ` +
+        'store a recovery would open cannot be established; nothing was started',
+      )
+    }
   }
 
   private refExistsOnDisk(ref: string): boolean {
@@ -2723,6 +4034,7 @@ export class EvolutionService extends Service {
           direction: record.direction,
           approvalRef: record.approvalRef,
           files: record.files.map(file => ({ ...file })),
+          ...(record.capability === undefined ? {} : { capability: { ...record.capability } }),
           actor: record.actor,
           at: record.at,
         }
@@ -2769,14 +4081,16 @@ export class EvolutionService extends Service {
       current.history.push({ status: record.kind, actor: record.actor, at: record.at })
       switch (record.kind) {
         case 'candidate': {
-          // One candidate lifecycle (S4-E 收尾): a skill candidate carrying the
-          // mutation this build materializes. A hand-forged line of another
-          // target type, or without a mutation, has no next state here, so it
-          // is refused where a live `candidate` call would refuse it.
-          if (current.targetType !== 'skill') {
+          // One candidate lifecycle per admissible target type (S4-E 收尾, A6): a
+          // skill candidate or a capability candidate carrying the mutation this
+          // build materializes. A hand-forged line of another target type, or
+          // without a mutation, has no next state here, so it is refused where a
+          // live `candidate` call would refuse it.
+          if (current.targetType !== 'skill' && current.targetType !== 'capability') {
             throw new Error(
               `evolution: candidate record for "${record.proposalId}" targets "${current.targetType}" — this build's candidate ` +
-              'lifecycle is a SKILL.md replacement of an existing skill object, and no other target type has an evaluator here',
+              'lifecycles are a SKILL.md replacement of an existing skill object and one whole capability row with an optional new ' +
+              'execution skill, and no other target type has an evaluator here',
             )
           }
           validateVersionSet(record.versionSet)
@@ -2786,20 +4100,80 @@ export class EvolutionService extends Service {
           break
         }
         case 'prepared': {
-          // One prepared shape (S4-E 收尾): the materialized skill prepare, with
-          // both content identities it captured. The bookkeeping-only prepare
-          // (mechanical: false, no sandbox, no champion) belonged to target
-          // types this build's candidate never admits, so it is refused here.
-          if (record.mechanical !== true || record.champion !== 'captured'
+          // One prepared shape per candidate lifecycle: the materialized skill
+          // prepare (champion `captured`, both content identities), or — since A6
+          // — the capability prepare (champion `absent`: the new skill object does
+          // not exist in production, and the row it fixes is recorded beside the
+          // row the registry held). The bookkeeping-only prepare
+          // (mechanical: false, no sandbox) belonged to target types this build's
+          // candidate never admits, so it is refused here.
+          const capabilityPrepare = current.targetType === 'capability'
+          const champion = capabilityPrepare ? 'absent' : 'captured'
+          if (record.mechanical !== true || record.champion !== champion
             || typeof record.sandbox !== 'string' || record.sandbox.length === 0) {
             throw new Error(
-              `evolution: prepared record for "${record.proposalId}" is not a materialized skill prepare ` +
+              `evolution: prepared record for "${record.proposalId}" is not a materialized prepare of its own candidate type ` +
               `(mechanical=${String(record.mechanical)}, champion=${JSON.stringify(record.champion ?? null)}, ` +
-              `sandbox=${JSON.stringify(record.sandbox ?? null)}) — this build prepares a replacement of one skill object only`,
+              `sandbox=${JSON.stringify(record.sandbox ?? null)}, targetType=${JSON.stringify(current.targetType)}) — this build prepares a ` +
+              'replacement of one existing skill object (champion "captured") or one capability row with an optional new skill object ' +
+              '(champion "absent", A6), and nothing else',
             )
           }
           if (!Array.isArray(record.files) || record.files.some(file => typeof file !== 'string')) {
             throw new Error(`evolution: prepared record for "${record.proposalId}" has a non-string file list`)
+          }
+          if (capabilityPrepare) {
+            // The capability half (A6): the frozen row is required, the row the
+            // registry held at prepare is required and may be `null` (a row this
+            // candidate adds), and the new skill's two halves agree — present with
+            // a recorded *absence* for a baseline, or absent together.
+            const capabilityRow = preparedRowIdentity(record.capabilityRow, 'capabilityRow', record.proposalId)
+            if (record.capabilityBaseline === undefined) {
+              throw new Error(
+                `evolution: prepared record for "${record.proposalId}" records no capabilityBaseline — every capability prepare records ` +
+                'the row the registry held, or `null` for the absence it read, so "this candidate adds the row" and "this candidate ' +
+                'replaces it" can never be confused',
+              )
+            }
+            const capabilityBaseline = record.capabilityBaseline === null
+              ? null
+              : preparedRowIdentity(record.capabilityBaseline, 'capabilityBaseline', record.proposalId)
+            const skillContent = record.skillContent === undefined
+              ? undefined
+              : preparedIdentity(record.skillContent, 'skillContent', record.proposalId)
+            if (skillContent === undefined) {
+              if (record.skillBaseline !== undefined) {
+                throw new Error(
+                  `evolution: prepared record for "${record.proposalId}" records a skill baseline without a candidate identity — a ` +
+                  'capability prepare that carries no new skill records neither half',
+                )
+              }
+            } else {
+              if (record.skillBaseline !== null) {
+                throw new Error(
+                  `evolution: prepared record for "${record.proposalId}" records a production skill baseline for a capability candidate's ` +
+                  'new object — a capability candidate adds a skill, so its baseline is the recorded absence (`null`); improving an ' +
+                  'existing object is the same-name path',
+                )
+              }
+              if (skillContent.contract === undefined) {
+                throw new Error(
+                  `evolution: prepared record for "${record.proposalId}" records a new skill without a declaration — a capability ` +
+                  'candidate\'s skill is an execution provider (SKILL.md plus SKILL.contract.json)',
+                )
+              }
+            }
+            current.prepared = {
+              sandbox: record.sandbox,
+              mechanical: true,
+              champion: 'absent',
+              ...(skillContent === undefined ? {} : { skillContent }),
+              ...(skillContent === undefined ? {} : { skillBaseline: null }),
+              capabilityRow,
+              capabilityBaseline,
+              files: [...record.files],
+            }
+            break
           }
           // P2/P3, required (S4-E 收尾): a prepare without the candidate's
           // content identity or without the production baseline it read is a
@@ -2852,8 +4226,12 @@ export class EvolutionService extends Service {
           break
         case 'applied':
         case 'rolledback': {
-          if (!Array.isArray(record.targets) || record.targets.length === 0 || record.targets.some(target => typeof target !== 'string' || target.length === 0)) {
-            throw new Error(`evolution: ${record.kind} record for "${record.proposalId}" has a malformed target list`)
+          if (!Array.isArray(record.targets) || record.targets.some(target => typeof target !== 'string' || target.length === 0)
+            || (record.targets.length === 0 && current.openIntent?.capability === undefined)) {
+            throw new Error(
+              `evolution: ${record.kind} record for "${record.proposalId}" has a malformed target list — a completion records the file set its ` +
+              'commit wrote, and only a row-only capability commit writes no file at all',
+            )
           }
           if (typeof record.approvalRef !== 'string' || record.approvalRef.length === 0) {
             throw new Error(`evolution: ${record.kind} record for "${record.proposalId}" has no human-approval evidence ref`)
@@ -3236,7 +4614,36 @@ export class EvolutionService extends Service {
       evolution: this,
       graphs,
       task,
-      taskRuntime,
+      taskRuntime: {
+        replayTask: (storeId: string, championTaskId: string, options: ReplayTaskOptions, callerSessionId: string) =>
+          taskRuntime.replayTask(storeId, championTaskId, options, callerSessionId),
+        capabilityProviderReport: (sessionId: string, capabilities?: readonly string[]) =>
+          taskRuntime.capabilityProviderReport(sessionId, capabilities),
+        ...(typeof (taskRuntime as { listCapabilities?: unknown }).listCapabilities === 'function'
+          ? { listCapabilities: () => (taskRuntime as { listCapabilities(): Readonly<Record<string, CapabilityConfig>> }).listCapabilities() }
+          : {}),
+        /**
+         * The runtime's own provider pre-check over the overlay table (A6):
+         * `precheckProviders` — the same function the runtime's admission runs —
+         * with the candidate's sandbox skill root in front of discovery and this
+         * plane's commit ledger, so a provider whose directory an unsettled
+         * commit owns is refused here exactly as admission would refuse it.
+         */
+        precheckCapabilityTable: async (request: {
+          capabilities: readonly string[]
+          table: Readonly<Record<string, CapabilityConfig>>
+          extraRoots: readonly string[]
+        }) => {
+          const verifierRefs = await registeredVerifierIds(this.ctx)
+          return precheckProviders({
+            capabilities: request.capabilities,
+            table: request.table,
+            view: { extraRoots: [...request.extraRoots] },
+            ...(verifierRefs === undefined ? {} : { verifierRefs }),
+            commitLedger: this,
+          })
+        },
+      },
       // Both freeze-time reads go through the same entries every other consumer
       // uses: the judge vocabulary the criteria pin, and the runtime's own
       // capability table the provider identity is read from. A context that

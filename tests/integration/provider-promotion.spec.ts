@@ -599,8 +599,10 @@ describe('one illegal provider, one defect code, every entry that still judges i
 
     // 3. A capability row's own provider is admitted where it still becomes
     //    effective — the runtime registry mirror, which runs the same admission
-    //    pre-check over the replacement. The evolution promotion entry no longer
-    //    judges it: a capability proposal cannot become a candidate in this build.
+    //    pre-check over the replacement. (A6 added the evolution side of that
+    //    same check: a capability *candidate* is judged by it in
+    //    `evolution/tests/unit/capability-candidate.spec.ts`, through the real
+    //    pre-check this entry shares.)
     await h.runtime.applyCapabilityRow(ROW, { skills: [SKILL], tools: ['filesystem', 'bash'] })
     expect(h.runtime.listCapabilities()[ROW]).toEqual({ skills: [SKILL], tools: ['filesystem', 'bash'] })
 

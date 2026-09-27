@@ -17,6 +17,24 @@
  * - `settled` (written when the attempt ends): `recorded` when its judgement
  *   reached the store, `interrupted` when the attempt ended without one.
  *
+ * **A second role rides the same file (A6).** The supervisor a pending
+ * Diagnosis/Review hand-off is delegated to is a coordination session of the same
+ * root store, so its delegation is a row of this same ledger — `role:
+ * 'supervisor'`, naming the hand-off's `diagnosisId` and the digest of the
+ * hand-off it was started for — and both roles are decided inside the same serial
+ * region, count against the same per-store allowance and are read back through
+ * the same readers. That is deliberate: the alternative is a second file with a
+ * second count, and two counts of "how many coordination agents this store has
+ * spent" can disagree (plan §F.4: 不新建第二本账). The two roles differ in what
+ * dedupes them — a reviewer by its exact source, a supervisor by the hand-off's
+ * diagnosis — and in what settles them: a reviewer's attempt ends when its
+ * diagnosis is recorded, while a supervisor's `started` row *is* the hand-off's
+ * terminal fact (the coordination session owns the hand-off from there), so a
+ * started supervisor row is never recovered as "a process that died holding it".
+ * A claim of either role that never reached model input is: the region records
+ * `interrupted` for it and the hand-off (or source) is free for a fresh attempt.
+ * Rows written before this role existed carry none and read as `reviewer`.
+ *
  * The count is durable — the rows the file holds — and it is taken inside
  * {@link admitReviewAgent}'s serial region, together with the claim the same
  * region writes, so two executions cannot both start an attempt for one source.
@@ -76,16 +94,26 @@ export interface ReviewAgentLedgerRecord {
  * The exact source of one review: the task, and the Run it reviews — or `null`
  * for a review that carries no Run (a task blocked before it ever started).
  * Never derived from "the latest review": the caller names it.
+ *
+ * A supervisor attempt carries the same shape: the source is the task and run
+ * the hand-off's Diagnosis is about (which is what its delegation has to name —
+ * the domain the coordinator may read), and its identity is the `diagnosisId`
+ * beside it.
  */
 export interface ReviewAgentSource {
   readonly taskId: string
   readonly runId: string | null
 }
 
-/** One attempt's claim, as it is persisted before the reviewer is spawned. */
+/** Which kind of coordination agent one row belongs to. Rows written before A6 carry none and read as `reviewer`. */
+export type ReviewAgentRole = 'reviewer' | 'supervisor'
+
+/** One attempt's claim, as it is persisted before the coordination agent is spawned. */
 export interface ReviewAgentClaimRecord {
   formatVersion: 2
   kind: 'claim'
+  /** Absent on rows written before the supervisor role existed (read as `reviewer`). */
+  role?: ReviewAgentRole
   rootStoreId: string
   taskId: string
   /** The Run this attempt reviews, or `null` for the no-run source. */
@@ -94,7 +122,16 @@ export interface ReviewAgentClaimRecord {
   requestKey: string | null
   /** The review focus the caller named, or `null` when it named none. */
   reason: string | null
-  /** The reviewer session this attempt pre-allocated — the attempt's identity. */
+  /** Supervisor rows only: the hand-off's Diagnosis, which is what dedupes them. */
+  diagnosisId?: string
+  /**
+   * Supervisor rows only: the digest of the hand-off this attempt was started
+   * for (its store, diagnosis, source and suggestions). A claim whose digest
+   * disagrees with a later request for the same diagnosis is a conflict by
+   * name — one hand-off is not two different requests.
+   */
+  handoffDigest?: string
+  /** The coordination session this attempt pre-allocated — the attempt's identity. */
   sessionId: string
   /** The session that asked for the attempt (the caller). */
   actor: string
@@ -163,23 +200,34 @@ export interface ReviewAgentSettlementRequest {
 
 /** One request for one source, as the admission is asked to decide it. */
 export interface ReviewAgentAttemptRequest {
+  /** `reviewer` (the default) for a review attempt, `supervisor` for a hand-off's coordinator. */
+  readonly role?: ReviewAgentRole
   readonly source: ReviewAgentSource
   /** `null` is the source's default attempt; an automatic scan never invents a key. */
   readonly requestKey: string | null
   /** The caller's review focus, or `null` when it named none. */
   readonly reason: string | null
+  /** Supervisor requests only: the hand-off's Diagnosis, which is what dedupes them. */
+  readonly diagnosisId?: string
+  /** Supervisor requests only: the hand-off's content digest, so the same diagnosis under another hand-off is a conflict. */
+  readonly handoffDigest?: string
   /** The session that asked (the caller). */
   readonly actor: string
-  /** The reviewer session a new attempt would take — the caller pre-allocates it. */
+  /** The coordination session a new attempt would take — the caller pre-allocates it. */
   readonly sessionId: string
 }
 
 /** One attempt as the ledger holds it. */
 export interface ReviewAgentAttempt {
+  readonly role: ReviewAgentRole
   readonly source: ReviewAgentSource
   readonly requestKey: string | null
   readonly reason: string | null
-  /** The attempt's identity: the pre-allocated reviewer session. */
+  /** Supervisor attempts only: the hand-off's Diagnosis. */
+  readonly diagnosisId?: string
+  /** Supervisor attempts only: the digest of the hand-off this attempt was started for. */
+  readonly handoffDigest?: string
+  /** The attempt's identity: the pre-allocated coordination session. */
   readonly sessionId: string
   readonly actor: string
   readonly at: string
@@ -339,9 +387,11 @@ function startedRowsOf(rows: readonly ReviewAgentLedgerRow[], rootStoreId: strin
 
 /**
  * The attempts one store's rows hold, in the order they were claimed: each
- * claim row is an attempt, its identity is the reviewer session it names, and
- * the started/settled rows that name the same session are its facts. A settled
+ * claim row is an attempt, its identity is the session it names, and the
+ * started/settled rows that name the same session are its facts. A settled
  * row that lands twice is the same fact written twice, so the first one holds.
+ * A row without a role is a reviewer's — the only kind this file held before
+ * the supervisor role was added.
  */
 function attemptsOf(rows: readonly ReviewAgentLedgerRow[], rootStoreId: string): ReviewAgentAttempt[] {
   const startedSessions = new Set(startedRowsOf(rows, rootStoreId).map(row => row.sessionId))
@@ -353,9 +403,12 @@ function attemptsOf(rows: readonly ReviewAgentLedgerRow[], rootStoreId: string):
   }
   return storeRows(rows, rootStoreId, (candidate): candidate is ReviewAgentClaimRecord => candidate.formatVersion === 2 && candidate.kind === 'claim')
     .map(row => ({
+      role: roleOf(row.role),
       source: { taskId: row.taskId, runId: row.runId },
       requestKey: row.requestKey,
       reason: row.reason,
+      ...(row.diagnosisId === undefined ? {} : { diagnosisId: row.diagnosisId }),
+      ...(row.handoffDigest === undefined ? {} : { handoffDigest: row.handoffDigest }),
       sessionId: row.sessionId,
       actor: row.actor,
       at: row.at,
@@ -369,9 +422,19 @@ function sameSource(left: ReviewAgentSource, right: ReviewAgentSource): boolean 
   return left.taskId === right.taskId && left.runId === right.runId
 }
 
+/** The role a row or a request belongs to: an older row carries none and is a reviewer's. */
+function roleOf(role: ReviewAgentRole | undefined): ReviewAgentRole {
+  return role === 'supervisor' ? 'supervisor' : 'reviewer'
+}
+
+/** The attempts of one role among a store's attempts — the two roles never dedupe against each other. */
+function attemptsOfRole(attempts: readonly ReviewAgentAttempt[], role: ReviewAgentRole): ReviewAgentAttempt[] {
+  return attempts.filter(attempt => attempt.role === role)
+}
+
 /**
- * Decide one request against one store's attempts. Pure, so every branch is
- * testable and the admission's order is the order written here:
+ * Decide one review request against one store's attempts. Pure, so every branch
+ * is testable and the admission's order is the order written here:
  *
  * 1. the request's own attempt (same source, same key) — a repeat returns the
  *    same identity and never re-charges the budget, and a repeat with a
@@ -382,6 +445,9 @@ function sameSource(left: ReviewAgentSource, right: ReviewAgentSource): boolean 
  *    attempt is a source's first attempt, so a later one names its key;
  * 4. the budget, read only here: an exhausted store refuses a *new* attempt and
  *    still answers (1) and (2).
+ *
+ * Only reviewer attempts take part: a supervisor row names a hand-off, not a
+ * review source, and one role's attempt never dedupes against the other's.
  */
 export function planReviewAttempt(input: {
   readonly attempts: readonly ReviewAgentAttempt[]
@@ -389,7 +455,7 @@ export function planReviewAttempt(input: {
   readonly budget: ReviewAgentBudget
 }): ReviewAgentPlan {
   const { request, budget } = input
-  const mine = input.attempts.filter(attempt => sameSource(attempt.source, request.source))
+  const mine = attemptsOfRole(input.attempts, 'reviewer').filter(attempt => sameSource(attempt.source, request.source))
   const same = mine.find(attempt => attempt.requestKey === request.requestKey)
   if (same !== undefined) {
     if (same.reason !== request.reason) return { kind: 'refused', code: 'request-key-conflict', attempt: same, attempts: mine, budget }
@@ -400,6 +466,49 @@ export function planReviewAttempt(input: {
   if (mine.length > 0 && request.requestKey === null) {
     return { kind: 'refused', code: 'request-key-required', attempt: mine.at(-1), attempts: mine, budget }
   }
+  if (budget.used >= budget.max) return { kind: 'refused', code: 'budget-exhausted', attempt: undefined, attempts: mine, budget }
+  return { kind: 'start', budget }
+}
+
+/**
+ * Decide one hand-off's supervisor request (A6) against one store's attempts.
+ *
+ * A hand-off is deduped by its **diagnosis**, not by a source and not by a
+ * caller's key: one diagnosis has at most one supervisor, and a repeat of the
+ * request is answered with that supervisor's identity however long ago it was
+ * started (plan §F.4: 重复消费/重启只返回同一 supervisor 身份). The order:
+ *
+ * 1. a claim of the same diagnosis under another hand-off digest is a conflict
+ *    by name, before anything is answered from it: the digest is what the
+ *    diagnosis promises about content, and an id carrying different suggestions
+ *    is not the hand-off this ledger took up;
+ * 2. an attempt that reached model input and is not settled **is** the hand-off's
+ *    supervisor: the request is that attempt, in this process and after a restart
+ *    alike — a coordination session is not a bounded job, and re-answering a
+ *    repeat with a *new* session would be a second coordinator for one hand-off;
+ * 3. an attempt that never reached model input — a claim the region settles
+ *    `interrupted` when no process here is running it — is not an identity, and
+ *    neither is a started attempt whose own terminal fact is `interrupted` (a
+ *    spawn that failed after its started row was written): the hand-off is free
+ *    for a fresh attempt, and the spend that did happen stays on the record;
+ * 4. the allowance, read only here: an exhausted store refuses a *new*
+ *    coordinator and still answers (2).
+ */
+export function planSupervisorAttempt(input: {
+  readonly attempts: readonly ReviewAgentAttempt[]
+  readonly request: ReviewAgentAttemptRequest
+  readonly budget: ReviewAgentBudget
+}): ReviewAgentPlan {
+  const { request, budget } = input
+  const mine = attemptsOfRole(input.attempts, 'supervisor').filter(attempt => attempt.diagnosisId === request.diagnosisId)
+  const conflicting = mine.find(attempt => attempt.handoffDigest !== request.handoffDigest)
+  if (conflicting !== undefined) {
+    return { kind: 'refused', code: 'request-key-conflict', attempt: conflicting, attempts: mine, budget }
+  }
+  const takenUp = mine.filter(attempt => attempt.started && attempt.settlement === undefined).at(-1)
+  if (takenUp !== undefined) return { kind: 'reuse', attempt: takenUp }
+  const open = mine.find(attempt => attempt.settlement === undefined)
+  if (open !== undefined) return { kind: 'in-flight', attempt: open }
   if (budget.used >= budget.max) return { kind: 'refused', code: 'budget-exhausted', attempt: undefined, attempts: mine, budget }
   return { kind: 'start', budget }
 }
@@ -422,10 +531,32 @@ export async function countReviewAgentRuns(rootStoreId: string): Promise<number>
  * Every attempt this root store's ledger holds, for a reader that renders the
  * state rather than deciding on it (`task_review_pack`). A display query: the
  * decision is always made inside the admission's serial region.
+ *
+ * Both roles are in the answer — the rows are one file — and a reader that
+ * means one of them filters by {@link ReviewAgentAttempt.role}.
  */
 export async function readReviewAgentAttempts(rootStoreId: string): Promise<ReviewAgentAttempt[]> {
   const rows = await readLedgerRows()
   return attemptsOf(rows ?? [], rootStoreId)
+}
+
+/**
+ * The supervisor one hand-off is delegated to, as the ledger holds it: the
+ * **started** attempt of role `supervisor` whose `diagnosisId` is this one, or
+ * `undefined` when the hand-off has no coordinator (nothing was started for it,
+ * or the only claims never reached model input).
+ *
+ * This is the read a hand-off's state and the recovery entry's identity check
+ * share: a started row that has not settled `interrupted` is what makes a session
+ * "the coordinator of this hand-off", and it is the ledger's own record, never a
+ * model's claim about which session it is.
+ */
+export async function readSupervisorHandoff(rootStoreId: string, diagnosisId: string): Promise<ReviewAgentAttempt | undefined> {
+  const attempts = await readReviewAgentAttempts(rootStoreId)
+  return attempts
+    .filter(attempt => attempt.role === 'supervisor' && attempt.diagnosisId === diagnosisId && attempt.started)
+    .filter(attempt => attempt.settlement === undefined)
+    .at(-1)
 }
 
 /** The budget one admission belongs to: a ledger file and a root store. */
@@ -451,14 +582,18 @@ async function appendRow(row: ReviewAgentLedgerRow): Promise<void> {
 
 /** The claim row one request becomes. */
 function claimRow(rootStoreId: string, request: ReviewAgentAttemptRequest): ReviewAgentClaimRecord {
+  const role = roleOf(request.role)
   return {
     formatVersion: 2,
     kind: 'claim',
+    ...(role === 'reviewer' ? {} : { role }),
     rootStoreId,
     taskId: request.source.taskId,
     runId: request.source.runId,
     requestKey: request.requestKey,
     reason: request.reason,
+    ...(request.diagnosisId === undefined ? {} : { diagnosisId: request.diagnosisId }),
+    ...(request.handoffDigest === undefined ? {} : { handoffDigest: request.handoffDigest }),
     sessionId: request.sessionId,
     actor: request.actor,
     at: new Date().toISOString(),
@@ -552,6 +687,13 @@ const liveAttempts = new Set<string>()
  * reviewer died be reviewed again. An attempt this process is really running is
  * left untouched and answered as in flight.
  *
+ * A **started supervisor** attempt is never recovered: its started row is the
+ * hand-off's terminal fact (the coordination session owns the hand-off from
+ * there, and a coordinator is not a bounded job whose result a later read could
+ * recover), so the recovery loop leaves it exactly as it is — after a restart
+ * included. Only a supervisor *claim* that never reached model input is settled
+ * `interrupted`, which is what frees a hand-off whose coordinator never started.
+ *
  * `work` must not await another admission for the same store (that region waits
  * for this one) and must await every `claim`/`start` it calls before returning.
  *
@@ -582,14 +724,24 @@ export async function admitReviewAgent<T>(
       started,
       plan: async (request, hooks) => {
         // The recovery, before anything is decided: every open attempt of this
-        // source that no process is running — one that never reached model input,
-        // or one started by a process that is gone — is dead, and the terminal
-        // fact it never got is written here, inside the region, so the decision
-        // below sees the attempt as the settled one it is. This is what keeps a
-        // crashed attempt from pinning its source in flight forever.
+        // request's subject that no process is running — one that never reached
+        // model input, or one started by a process that is gone — is dead, and
+        // the terminal fact it never got is written here, inside the region, so
+        // the decision below sees the attempt as the settled one it is. This is
+        // what keeps a crashed attempt from pinning its source (or its hand-off)
+        // in flight forever. A started supervisor attempt is not "dead" in this
+        // sense: its started row is the hand-off's terminal fact (see the module
+        // header), so it is never settled here however old it is.
+        const requestRole = roleOf(request.role)
         const recovered: ReviewAgentAttempt[] = []
         for (const attempt of attempts) {
-          if (!sameSource(attempt.source, request.source)) continue
+          if (attempt.role !== requestRole) continue
+          if (requestRole === 'reviewer') {
+            if (!sameSource(attempt.source, request.source)) continue
+          } else {
+            if (attempt.diagnosisId !== request.diagnosisId) continue
+            if (attempt.started) continue
+          }
           if (attempt.settlement !== undefined) continue
           if (liveAttempts.has(attempt.sessionId) || claimedHere.has(attempt.sessionId)) continue
           const recorded = (await hooks?.recorded?.(attempt)) === true
@@ -608,16 +760,21 @@ export async function admitReviewAgent<T>(
           Object.assign(attempt, { settlement })
           recovered.push(attempt)
         }
-        const plan = planReviewAttempt({ attempts, request, budget: { used, max: reviewAgentBudget() } })
+        const planner = requestRole === 'supervisor' ? planSupervisorAttempt : planReviewAttempt
+        const plan = planner({ attempts, request, budget: { used, max: reviewAgentBudget() } })
         return { plan, recovered }
       },
       claim: async request => {
         await appendRow(claimRow(rootStoreId, request))
         claimedHere.add(request.sessionId)
+        const role = roleOf(request.role)
         attempts.push({
+          role,
           source: request.source,
           requestKey: request.requestKey,
           reason: request.reason,
+          ...(request.diagnosisId === undefined ? {} : { diagnosisId: request.diagnosisId }),
+          ...(request.handoffDigest === undefined ? {} : { handoffDigest: request.handoffDigest }),
           sessionId: request.sessionId,
           actor: request.actor,
           at: new Date().toISOString(),
@@ -666,11 +823,15 @@ export async function admitReviewAgent<T>(
 /**
  * The one delegation a session is recorded under, as the context package's
  * reviewer binding source reads it (A2 §D): the started row's `sessionId` is the
- * review agent's own session, so the started rows naming it are its delegation.
- * A claim alone is not a delegation — the claim is an intent, and a session that
- * never reached model input was never delegated a read domain — so only rows
- * that record a start are read here.
+ * coordination agent's own session, so the started rows naming it are its
+ * delegation. A claim alone is not a delegation — the claim is an intent, and a
+ * session that never reached model input was never delegated a read domain — so
+ * only rows that record a start are read here.
  *
+ * Both roles answer this read, and that is the point: a supervisor is delegated
+ * into the same domain a reviewer is (the root store and the source task the
+ * hand-off's Diagnosis is about), so the same row shape carries either
+ * delegation. What tells them apart is the row's own field, not this reader.
  * One row is the record; several rows that disagree are a conflict the reader
  * may not pick between (a read domain chosen by file order is not an
  * authorization), and a ledger this process cannot read is `unreadable` — both
@@ -708,6 +869,75 @@ export async function readReviewerDelegation(sessionId: string): Promise<Reviewe
     )
   }
   return record
+}
+
+/**
+ * One recorded **supervisor** delegation (A6): the hand-off it was started for,
+ * beside the delegation fields every row carries. This is what the recovery
+ * entry's identity check reads — "session X is the coordinator of diagnosis D" —
+ * and it is answered from the ledger's own started rows, never from a caller's
+ * word about which session it is.
+ */
+export interface SupervisorDelegationRecord extends ReviewerBindingRecord {
+  /** The supervisor session the delegation names — the same id the reader asked about, repeated so a caller never re-derives it. */
+  readonly sessionId: string
+  /** The Diagnosis this supervisor was delegated for. */
+  readonly diagnosisId: string
+}
+
+/**
+ * The supervisor delegation of one (session, diagnosis) pair, as the ledger holds
+ * it, or `undefined` when no started row names both.
+ *
+ * The same discipline as {@link readReviewerDelegation}: only a started row is a
+ * delegation (a claim alone is an intent), several rows that disagree are a
+ * conflict the reader may not pick between, and a ledger this process cannot read
+ * is `unreadable` — a session is never told it is not a supervisor because the
+ * file holding the answer broke.
+ */
+export async function readSupervisorDelegation(sessionId: string, diagnosisId: string): Promise<SupervisorDelegationRecord | undefined> {
+  let rows: ReviewAgentLedgerRow[] | undefined
+  try {
+    rows = await readLedgerRows()
+  } catch (error) {
+    throw new ReviewerBindingError(
+      'unreadable',
+      `the supervisor ledger cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  const startedSessions = new Set((rows ?? []).filter(isStartedRow).map(row => row.sessionId))
+  const matches = (rows ?? [])
+    .filter((row): row is ReviewAgentClaimRecord => row.formatVersion === 2 && row.kind === 'claim')
+    .filter(row => row.role === 'supervisor' && row.diagnosisId === diagnosisId && row.sessionId === sessionId)
+    .filter(row => startedSessions.has(row.sessionId))
+  const first = matches[0]
+  if (first === undefined) return undefined
+  const record: SupervisorDelegationRecord = {
+    rootStoreId: first.rootStoreId,
+    taskId: first.taskId,
+    actor: first.actor,
+    at: first.at,
+    sessionId: first.sessionId,
+    diagnosisId,
+  }
+  const conflicting = matches.some(
+    row => row.rootStoreId !== record.rootStoreId || row.taskId !== record.taskId || row.actor !== record.actor,
+  )
+  if (conflicting) {
+    throw new ReviewerBindingError(
+      'binding-conflict',
+      `session "${sessionId}" is recorded under more than one supervisor delegation for diagnosis "${diagnosisId}": ` +
+        matches.map(row => `${row.taskId} in ${row.rootStoreId} (by ${row.actor})`).join('; '),
+    )
+  }
+  return record
+}
+
+/** The delegation source the assembly injects into the evolution plane (A6): this deployment's ledger, as the narrow read door above. */
+export function supervisorDelegationSource(): {
+  read(sessionId: string, diagnosisId: string): Promise<SupervisorDelegationRecord | undefined>
+} {
+  return { read: readSupervisorDelegation }
 }
 
 /** The binding source the plugin registers into the context service: this deployment's ledger, as the narrow read door above. */

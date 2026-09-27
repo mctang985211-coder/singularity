@@ -67,8 +67,10 @@ import type {
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS } from '@dangosys/dsh-singularity-task'
 import {
   admitReviewAgent,
+  countReviewAgentRuns,
   readReviewAgentAttempts,
   readReviewerDelegation,
+  reviewAgentBudget,
   settleReviewAgentAttempt,
   type ReviewAgentAttempt,
   type ReviewAgentAttemptRequest,
@@ -76,6 +78,8 @@ import {
   type ReviewAgentSettlementStatus,
   type ReviewAgentSource,
 } from './review-agent-ledger.ts'
+import { consumeHandoffDiagnosis } from './evolution-handoff.ts'
+import { evolutionEnabled } from './handoff-rules.ts'
 import { buildReviewPack, reviewRef } from './tools/task-review-pack.ts'
 
 /** The preset the review agent mounts (`$DSH_HOME/.agent-presets/singularity-reviewer/`). */
@@ -389,10 +393,16 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
     if (plan.kind === 'reuse') return { kind: 'reuse' as const, attempt: plan.attempt, recovered }
     if (plan.kind === 'in-flight') return { kind: 'in-flight' as const, attempt: plan.attempt, recovered }
     await admission.claim(request)
+    const attempts = await readReviewAgentAttempts(storeId)
     const pack = buildReviewPack({
       snapshot: current,
       source,
-      attempts: await readReviewAgentAttempts(storeId),
+      attempts,
+      handoff: {
+        enabled: evolutionEnabled(ctx),
+        attempts,
+        budget: { used: await countReviewAgentRuns(storeId), max: reviewAgentBudget() },
+      },
     })
     const prompt = [
       'You are a Singularity review agent. Explain the review source below: what happened, why, and what — if anything — should change.',
@@ -545,6 +555,19 @@ export async function runReviewAgentAttempt(input: ReviewAttemptInput): Promise<
       }
     }
     await settleAttempt('recorded')
+    // The hand-off (A6): a diagnosis that carries suggestions is what the
+    // evolution plane consumes, and this is the one place that knows the record
+    // just became durable. Nothing is awaited — the review's answer does not
+    // depend on a coordinator being started, and a hand-off that cannot start
+    // stays readable as the pending hand-off it is.
+    if (diagnosis.proposals.length > 0) {
+      void consumeHandoffDiagnosis(ctx, storeId, diagnosis.diagnosisId).catch((error: unknown) => {
+        const logger = (ctx as { logger?: (name: string) => { warn(format: string): void } }).logger
+        logger?.('singularity-agent').warn(
+          `evolution hand-off: ${diagnosis.diagnosisId} could not be consumed (${error instanceof Error ? error.message : String(error)})`,
+        )
+      })
+    }
     return {
       kind: 'recorded' as const,
       sessionId: reviewerSessionId,

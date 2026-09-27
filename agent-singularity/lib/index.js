@@ -1,3 +1,4 @@
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Context, Service } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
@@ -5,8 +6,7 @@ import { TOOL_LABELS, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, optionalSer
 import { APPLYABLE_TARGET_TYPES, EVOLUTION_DECISIONS, EvolutionService, applyTargets, modelSelectionOf, renderProviderRoles } from "@dangosys/dsh-singularity-evolution";
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
-import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, rootTaskStoreId } from "@dangosys/dsh-singularity-task";
+import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, canonicalize, rootTaskStoreId, sha256Hex } from "@dangosys/dsh-singularity-task";
 import { CONTEXT_OUTPUT_LIMIT_BYTES, ReviewerBindingError, openRootProposals } from "@dangosys/dsh-singularity-context";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import { defineTool } from "@deepseek-ai/dsh-tools";
@@ -39,12 +39,12 @@ var HitlService = class extends Service {
 		ctx.on("user-questions/request", async (request, next) => {
 			if (request.questions.length !== 1) return next();
 			const question = request.questions[0];
-			const text$31 = await this.enqueue(request.agent?.id ?? "unknown", "ask", question.question, request.signal);
-			if (text$31.kind !== "ask") throw new Error("hitl: expected ask answer");
+			const text$32 = await this.enqueue(request.agent?.id ?? "unknown", "ask", question.question, request.signal);
+			if (text$32.kind !== "ask") throw new Error("hitl: expected ask answer");
 			return { answers: [{
 				id: question.id,
 				selected: [],
-				custom: text$31.text
+				custom: text$32.text
 			}] };
 		}, { prepend: true });
 		ctx.on("approval/request", async (request) => {
@@ -68,16 +68,16 @@ var HitlService = class extends Service {
 		waiter.resolve(answer);
 		this.ctx.emit("hitl/change", this.list());
 	}
-	enqueue(sessionId$21, kind, prompt, callerSignal) {
+	enqueue(sessionId$22, kind, prompt, callerSignal) {
 		const signal = callerSignal === void 0 ? this.lifetime.signal : AbortSignal.any([callerSignal, this.lifetime.signal]);
 		signal.throwIfAborted();
-		if (typeof sessionId$21 !== "string" || sessionId$21.length === 0) throw new Error("hitl: missing session id");
+		if (typeof sessionId$22 !== "string" || sessionId$22.length === 0) throw new Error("hitl: missing session id");
 		const id = randomUUID();
 		const pending = {
 			id,
 			kind,
 			prompt,
-			sessionId: sessionId$21,
+			sessionId: sessionId$22,
 			createdAt: Date.now()
 		};
 		const abort = () => {
@@ -230,14 +230,14 @@ var EscalationService = class extends Service {
 		return escalations;
 	}
 	async load() {
-		let text$31;
+		let text$32;
 		try {
-			text$31 = await readFile(this.file, "utf8");
+			text$32 = await readFile(this.file, "utf8");
 		} catch (error) {
 			if (error.code === "ENOENT") return;
 			throw error;
 		}
-		const records = text$31.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
+		const records = text$32.split("\n").filter((line) => line.trim().length > 0).map((line, index) => {
 			try {
 				return JSON.parse(line);
 			} catch {
@@ -286,8 +286,8 @@ const ROOT_REVIEW_TOOL_NAME = "task_intake";
 */
 function ownerSessionOfStore(storeId) {
 	if (!storeId.startsWith(STORE_PREFIX$1)) return void 0;
-	const sessionId$21 = storeId.slice(5);
-	return sessionId$21.length > 0 && rootTaskStoreId(sessionId$21) === storeId ? sessionId$21 : void 0;
+	const sessionId$22 = storeId.slice(5);
+	return sessionId$22.length > 0 && rootTaskStoreId(sessionId$22) === storeId ? sessionId$22 : void 0;
 }
 /**
 * The decider identity the channel records: the approval surface of the owner
@@ -681,11 +681,11 @@ var ProposalReviewService = class extends Service {
 		}
 	}
 	/** The live agent behind one session, or `undefined` — an absent registry or a departed session is a state, not a throw. */
-	liveAgent(sessionId$21) {
+	liveAgent(sessionId$22) {
 		const holder = this.ctx;
 		const registry = (typeof holder.get === "function" ? holder.get("agents") : void 0) ?? holder.agents;
 		try {
-			return registry?.get?.(sessionId$21);
+			return registry?.get?.(sessionId$22);
 		} catch {
 			return;
 		}
@@ -762,9 +762,9 @@ function asLedgerRow(parsed, line) {
 	throw new Error(`review-agent-ledger: unrecognized row ${line} in ${reviewAgentLedgerFile()}`);
 }
 /** The rows one ledger file holds, as its non-empty lines. A corrupt line throws by name rather than undercounting. */
-function parseLedgerRows(text$31) {
+function parseLedgerRows(text$32) {
 	const rows = [];
-	text$31.split("\n").forEach((line, index) => {
+	text$32.split("\n").forEach((line, index) => {
 		if (line.trim().length === 0) return;
 		let parsed;
 		try {
@@ -778,14 +778,14 @@ function parseLedgerRows(text$31) {
 }
 /** Every ledger row, or `undefined` when the ledger has never been written (zero rows is a state, not a failure). */
 async function readLedgerRows() {
-	let text$31;
+	let text$32;
 	try {
-		text$31 = await readFile(reviewAgentLedgerFile(), "utf8");
+		text$32 = await readFile(reviewAgentLedgerFile(), "utf8");
 	} catch (error) {
 		if (error.code === "ENOENT") return void 0;
 		throw error;
 	}
-	return parseLedgerRows(text$31);
+	return parseLedgerRows(text$32);
 }
 /** A started fact, whatever version wrote it: the spend and the delegation. */
 function isStartedRow(row) {
@@ -801,9 +801,11 @@ function startedRowsOf(rows, rootStoreId) {
 }
 /**
 * The attempts one store's rows hold, in the order they were claimed: each
-* claim row is an attempt, its identity is the reviewer session it names, and
-* the started/settled rows that name the same session are its facts. A settled
+* claim row is an attempt, its identity is the session it names, and the
+* started/settled rows that name the same session are its facts. A settled
 * row that lands twice is the same fact written twice, so the first one holds.
+* A row without a role is a reviewer's — the only kind this file held before
+* the supervisor role was added.
 */
 function attemptsOf(rows, rootStoreId) {
 	const startedSessions = new Set(startedRowsOf(rows, rootStoreId).map((row) => row.sessionId));
@@ -814,12 +816,15 @@ function attemptsOf(rows, rootStoreId) {
 		at: row.at
 	});
 	return storeRows(rows, rootStoreId, (candidate) => candidate.formatVersion === 2 && candidate.kind === "claim").map((row) => ({
+		role: roleOf$1(row.role),
 		source: {
 			taskId: row.taskId,
 			runId: row.runId
 		},
 		requestKey: row.requestKey,
 		reason: row.reason,
+		...row.diagnosisId === void 0 ? {} : { diagnosisId: row.diagnosisId },
+		...row.handoffDigest === void 0 ? {} : { handoffDigest: row.handoffDigest },
 		sessionId: row.sessionId,
 		actor: row.actor,
 		at: row.at,
@@ -831,9 +836,17 @@ function attemptsOf(rows, rootStoreId) {
 function sameSource$1(left, right) {
 	return left.taskId === right.taskId && left.runId === right.runId;
 }
+/** The role a row or a request belongs to: an older row carries none and is a reviewer's. */
+function roleOf$1(role) {
+	return role === "supervisor" ? "supervisor" : "reviewer";
+}
+/** The attempts of one role among a store's attempts — the two roles never dedupe against each other. */
+function attemptsOfRole(attempts, role) {
+	return attempts.filter((attempt) => attempt.role === role);
+}
 /**
-* Decide one request against one store's attempts. Pure, so every branch is
-* testable and the admission's order is the order written here:
+* Decide one review request against one store's attempts. Pure, so every branch
+* is testable and the admission's order is the order written here:
 *
 * 1. the request's own attempt (same source, same key) — a repeat returns the
 *    same identity and never re-charges the budget, and a repeat with a
@@ -844,10 +857,13 @@ function sameSource$1(left, right) {
 *    attempt is a source's first attempt, so a later one names its key;
 * 4. the budget, read only here: an exhausted store refuses a *new* attempt and
 *    still answers (1) and (2).
+*
+* Only reviewer attempts take part: a supervisor row names a hand-off, not a
+* review source, and one role's attempt never dedupes against the other's.
 */
 function planReviewAttempt(input) {
 	const { request, budget } = input;
-	const mine = input.attempts.filter((attempt) => sameSource$1(attempt.source, request.source));
+	const mine = attemptsOfRole(input.attempts, "reviewer").filter((attempt) => sameSource$1(attempt.source, request.source));
 	const same = mine.find((attempt) => attempt.requestKey === request.requestKey);
 	if (same !== void 0) {
 		if (same.reason !== request.reason) return {
@@ -887,9 +903,81 @@ function planReviewAttempt(input) {
 	};
 }
 /**
+* Decide one hand-off's supervisor request (A6) against one store's attempts.
+*
+* A hand-off is deduped by its **diagnosis**, not by a source and not by a
+* caller's key: one diagnosis has at most one supervisor, and a repeat of the
+* request is answered with that supervisor's identity however long ago it was
+* started (plan §F.4: 重复消费/重启只返回同一 supervisor 身份). The order:
+*
+* 1. a claim of the same diagnosis under another hand-off digest is a conflict
+*    by name, before anything is answered from it: the digest is what the
+*    diagnosis promises about content, and an id carrying different suggestions
+*    is not the hand-off this ledger took up;
+* 2. an attempt that reached model input and is not settled **is** the hand-off's
+*    supervisor: the request is that attempt, in this process and after a restart
+*    alike — a coordination session is not a bounded job, and re-answering a
+*    repeat with a *new* session would be a second coordinator for one hand-off;
+* 3. an attempt that never reached model input — a claim the region settles
+*    `interrupted` when no process here is running it — is not an identity, and
+*    neither is a started attempt whose own terminal fact is `interrupted` (a
+*    spawn that failed after its started row was written): the hand-off is free
+*    for a fresh attempt, and the spend that did happen stays on the record;
+* 4. the allowance, read only here: an exhausted store refuses a *new*
+*    coordinator and still answers (2).
+*/
+function planSupervisorAttempt(input) {
+	const { request, budget } = input;
+	const mine = attemptsOfRole(input.attempts, "supervisor").filter((attempt) => attempt.diagnosisId === request.diagnosisId);
+	const conflicting = mine.find((attempt) => attempt.handoffDigest !== request.handoffDigest);
+	if (conflicting !== void 0) return {
+		kind: "refused",
+		code: "request-key-conflict",
+		attempt: conflicting,
+		attempts: mine,
+		budget
+	};
+	const takenUp = mine.filter((attempt) => attempt.started && attempt.settlement === void 0).at(-1);
+	if (takenUp !== void 0) return {
+		kind: "reuse",
+		attempt: takenUp
+	};
+	const open = mine.find((attempt) => attempt.settlement === void 0);
+	if (open !== void 0) return {
+		kind: "in-flight",
+		attempt: open
+	};
+	if (budget.used >= budget.max) return {
+		kind: "refused",
+		code: "budget-exhausted",
+		attempt: void 0,
+		attempts: mine,
+		budget
+	};
+	return {
+		kind: "start",
+		budget
+	};
+}
+/**
+* How many review agents this root store has already started, as the file reads
+* right now. A missing file reads as zero; a corrupt line throws rather than
+* silently undercounting.
+*
+* A display query only: it caches nothing, so it can never be the count an
+* admission decides on — that one is read inside the store's serial region
+* ({@link admitReviewAgent}) together with the claim it writes.
+*/
+async function countReviewAgentRuns(rootStoreId) {
+	return startedRowsOf(await readLedgerRows() ?? [], rootStoreId).length;
+}
+/**
 * Every attempt this root store's ledger holds, for a reader that renders the
 * state rather than deciding on it (`task_review_pack`). A display query: the
 * decision is always made inside the admission's serial region.
+*
+* Both roles are in the answer — the rows are one file — and a reader that
+* means one of them filters by {@link ReviewAgentAttempt.role}.
 */
 async function readReviewAgentAttempts(rootStoreId) {
 	return attemptsOf(await readLedgerRows() ?? [], rootStoreId);
@@ -914,14 +1002,18 @@ async function appendRow(row) {
 }
 /** The claim row one request becomes. */
 function claimRow(rootStoreId, request) {
+	const role = roleOf$1(request.role);
 	return {
 		formatVersion: 2,
 		kind: "claim",
+		...role === "reviewer" ? {} : { role },
 		rootStoreId,
 		taskId: request.source.taskId,
 		runId: request.source.runId,
 		requestKey: request.requestKey,
 		reason: request.reason,
+		...request.diagnosisId === void 0 ? {} : { diagnosisId: request.diagnosisId },
+		...request.handoffDigest === void 0 ? {} : { handoffDigest: request.handoffDigest },
 		sessionId: request.sessionId,
 		actor: request.actor,
 		at: (/* @__PURE__ */ new Date()).toISOString()
@@ -1009,6 +1101,13 @@ const liveAttempts = /* @__PURE__ */ new Set();
 * reviewer died be reviewed again. An attempt this process is really running is
 * left untouched and answered as in flight.
 *
+* A **started supervisor** attempt is never recovered: its started row is the
+* hand-off's terminal fact (the coordination session owns the hand-off from
+* there, and a coordinator is not a bounded job whose result a later read could
+* recover), so the recovery loop leaves it exactly as it is — after a restart
+* included. Only a supervisor *claim* that never reached model input is settled
+* `interrupted`, which is what frees a hand-off whose coordinator never started.
+*
 * `work` must not await another admission for the same store (that region waits
 * for this one) and must await every `claim`/`start` it calls before returning.
 *
@@ -1030,9 +1129,16 @@ async function admitReviewAgent(rootStoreId, work) {
 		return work({
 			started,
 			plan: async (request, hooks) => {
+				const requestRole = roleOf$1(request.role);
 				const recovered = [];
 				for (const attempt of attempts) {
-					if (!sameSource$1(attempt.source, request.source)) continue;
+					if (attempt.role !== requestRole) continue;
+					if (requestRole === "reviewer") {
+						if (!sameSource$1(attempt.source, request.source)) continue;
+					} else {
+						if (attempt.diagnosisId !== request.diagnosisId) continue;
+						if (attempt.started) continue;
+					}
 					if (attempt.settlement !== void 0) continue;
 					if (liveAttempts.has(attempt.sessionId) || claimedHere.has(attempt.sessionId)) continue;
 					const recorded = await hooks?.recorded?.(attempt) === true;
@@ -1054,7 +1160,7 @@ async function admitReviewAgent(rootStoreId, work) {
 					recovered.push(attempt);
 				}
 				return {
-					plan: planReviewAttempt({
+					plan: (requestRole === "supervisor" ? planSupervisorAttempt : planReviewAttempt)({
 						attempts,
 						request,
 						budget: {
@@ -1068,10 +1174,14 @@ async function admitReviewAgent(rootStoreId, work) {
 			claim: async (request) => {
 				await appendRow(claimRow(rootStoreId, request));
 				claimedHere.add(request.sessionId);
+				const role = roleOf$1(request.role);
 				attempts.push({
+					role,
 					source: request.source,
 					requestKey: request.requestKey,
 					reason: request.reason,
+					...request.diagnosisId === void 0 ? {} : { diagnosisId: request.diagnosisId },
+					...request.handoffDigest === void 0 ? {} : { handoffDigest: request.handoffDigest },
 					sessionId: request.sessionId,
 					actor: request.actor,
 					at: (/* @__PURE__ */ new Date()).toISOString(),
@@ -1107,11 +1217,15 @@ async function admitReviewAgent(rootStoreId, work) {
 /**
 * The one delegation a session is recorded under, as the context package's
 * reviewer binding source reads it (A2 §D): the started row's `sessionId` is the
-* review agent's own session, so the started rows naming it are its delegation.
-* A claim alone is not a delegation — the claim is an intent, and a session that
-* never reached model input was never delegated a read domain — so only rows
-* that record a start are read here.
+* coordination agent's own session, so the started rows naming it are its
+* delegation. A claim alone is not a delegation — the claim is an intent, and a
+* session that never reached model input was never delegated a read domain — so
+* only rows that record a start are read here.
 *
+* Both roles answer this read, and that is the point: a supervisor is delegated
+* into the same domain a reviewer is (the root store and the source task the
+* hand-off's Diagnosis is about), so the same row shape carries either
+* delegation. What tells them apart is the row's own field, not this reader.
 * One row is the record; several rows that disagree are a conflict the reader
 * may not pick between (a read domain chosen by file order is not an
 * authorization), and a ledger this process cannot read is `unreadable` — both
@@ -1119,14 +1233,14 @@ async function admitReviewAgent(rootStoreId, work) {
 * into "no delegation". Identical duplicate rows are one delegation written
 * twice, not a conflict.
 */
-async function readReviewerDelegation(sessionId$21) {
+async function readReviewerDelegation(sessionId$22) {
 	let rows;
 	try {
 		rows = await readLedgerRows();
 	} catch (error) {
 		throw new ReviewerBindingError("unreadable", `the reviewer ledger cannot be read: ${error instanceof Error ? error.message : String(error)}`);
 	}
-	const matches = (rows ?? []).filter(isStartedRow).filter((row) => row.sessionId === sessionId$21);
+	const matches = (rows ?? []).filter(isStartedRow).filter((row) => row.sessionId === sessionId$22);
 	if (matches.length === 0) return void 0;
 	const first = matches[0];
 	const record = {
@@ -1135,8 +1249,44 @@ async function readReviewerDelegation(sessionId$21) {
 		actor: first.actor,
 		at: first.at
 	};
-	if (matches.some((row) => row.rootStoreId !== record.rootStoreId || row.taskId !== record.taskId || row.actor !== record.actor)) throw new ReviewerBindingError("binding-conflict", `session "${sessionId$21}" is recorded under more than one reviewer delegation: ` + matches.map((row) => `${row.taskId} in ${row.rootStoreId} (by ${row.actor})`).join("; "));
+	if (matches.some((row) => row.rootStoreId !== record.rootStoreId || row.taskId !== record.taskId || row.actor !== record.actor)) throw new ReviewerBindingError("binding-conflict", `session "${sessionId$22}" is recorded under more than one reviewer delegation: ` + matches.map((row) => `${row.taskId} in ${row.rootStoreId} (by ${row.actor})`).join("; "));
 	return record;
+}
+/**
+* The supervisor delegation of one (session, diagnosis) pair, as the ledger holds
+* it, or `undefined` when no started row names both.
+*
+* The same discipline as {@link readReviewerDelegation}: only a started row is a
+* delegation (a claim alone is an intent), several rows that disagree are a
+* conflict the reader may not pick between, and a ledger this process cannot read
+* is `unreadable` — a session is never told it is not a supervisor because the
+* file holding the answer broke.
+*/
+async function readSupervisorDelegation(sessionId$22, diagnosisId) {
+	let rows;
+	try {
+		rows = await readLedgerRows();
+	} catch (error) {
+		throw new ReviewerBindingError("unreadable", `the supervisor ledger cannot be read: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	const startedSessions = new Set((rows ?? []).filter(isStartedRow).map((row) => row.sessionId));
+	const matches = (rows ?? []).filter((row) => row.formatVersion === 2 && row.kind === "claim").filter((row) => row.role === "supervisor" && row.diagnosisId === diagnosisId && row.sessionId === sessionId$22).filter((row) => startedSessions.has(row.sessionId));
+	const first = matches[0];
+	if (first === void 0) return void 0;
+	const record = {
+		rootStoreId: first.rootStoreId,
+		taskId: first.taskId,
+		actor: first.actor,
+		at: first.at,
+		sessionId: first.sessionId,
+		diagnosisId
+	};
+	if (matches.some((row) => row.rootStoreId !== record.rootStoreId || row.taskId !== record.taskId || row.actor !== record.actor)) throw new ReviewerBindingError("binding-conflict", `session "${sessionId$22}" is recorded under more than one supervisor delegation for diagnosis "${diagnosisId}": ` + matches.map((row) => `${row.taskId} in ${row.rootStoreId} (by ${row.actor})`).join("; "));
+	return record;
+}
+/** The delegation source the assembly injects into the evolution plane (A6): this deployment's ledger, as the narrow read door above. */
+function supervisorDelegationSource() {
+	return { read: readSupervisorDelegation };
 }
 /** The binding source the plugin registers into the context service: this deployment's ledger, as the narrow read door above. */
 function reviewerBindingSource() {
@@ -1144,12 +1294,542 @@ function reviewerBindingSource() {
 }
 
 //#endregion
+//#region src/handoff-rules.ts
+/**
+* The preset both coordination roles mount (A5's reviewer and A6's supervisor):
+* one persona for "a coordination node of this graph", whose whole tool surface
+* is the grant passed at spawn (`keepPresetTools: false`), never the preset.
+*/
+const COORDINATION_PRESET = "singularity-reviewer";
+/**
+* The supervisor's whole tool surface. Read-only plus the two entries the
+* hand-off is for: the evolution candidate chain (`propose` → `candidate` →
+* `prepare` → `replay` → `gate` → `list`) and `task_recover`. Absent by
+* construction, however the deployment is composed: `bash`, `write`, `edit`,
+* `jobs`, `subagent`, `graph_spawn`, `hitl_*` and — deliberately —
+* `evolution_decide`, `evolution_apply` and `evolution_rollback`: a promotion
+* stays a person's decision and a person's apply (§F.4: supervisor 不能自批).
+*/
+const SUPERVISOR_BASELINE = [
+	"task_recover",
+	"task_review_pack",
+	"task_read",
+	"task_status",
+	"context_read",
+	"capability_list",
+	"evolution_propose",
+	"evolution_candidate",
+	"evolution_prepare",
+	"evolution_replay",
+	"evolution_gate",
+	"evolution_list",
+	"read",
+	"glob",
+	"grep",
+	"skill"
+];
+/** The capability grant one supervisor is spawned with — the same shape a reviewer's has. */
+function supervisorGrant() {
+	return {
+		capabilities: [],
+		baseline: SUPERVISOR_BASELINE,
+		keepPresetTools: false
+	};
+}
+/** The target types whose suggestion this build can take up: a same-name skill update, or one whole capability row. */
+const SUPPORTED_HANDOFF_TARGETS = ["skill", "capability"];
+/**
+* Whether this deployment registered the evolution chain — the switch the whole
+* consumption turns into one question (agent-singularity's own
+* `ctx.singularityEvolution`). Read softly and read as **off** when the service is
+* absent: a composition that never turned the chain on must not be assembled as
+* if it had.
+*/
+function evolutionEnabled(ctx) {
+	try {
+		return ctx.get("singularityEvolution")?.enabled === true;
+	} catch {
+		return false;
+	}
+}
+/** The recorded mutation surfaces this build's Evolution ledger accepts, as `evolution_propose` validates them. */
+const PROPOSAL_TARGET_TYPES$1 = [
+	"skill",
+	"tool",
+	"capability",
+	"task_definition",
+	"decomposition_policy",
+	"agent_preset",
+	"workflow_policy",
+	"verifier",
+	"runtime_policy"
+];
+/**
+* The target-type rule one diagnosis's suggestions have to pass before a
+* coordinator is started, in the deployment's own words, or nothing when they do.
+*
+* Two refusals, both named and both leaving the hand-off pending: a name outside
+* the recorded vocabulary (`unsupported-target`), and a recorded name this build
+* cannot execute (`requires-new-authority`). A diagnosis may name several
+* suggestions: the *first* one this build cannot take up decides, because a
+* coordinator started for a hand-off it cannot act on would be a spawn that buys
+* nothing.
+*/
+function handoffTargetRefusal(diagnosis) {
+	for (const proposal of diagnosis.proposals) {
+		const targetType = proposal.targetType;
+		if (SUPPORTED_HANDOFF_TARGETS.includes(targetType)) continue;
+		if (!PROPOSAL_TARGET_TYPES$1.includes(targetType)) return {
+			code: "unsupported-target",
+			reason: `the suggestion's target type ${JSON.stringify(targetType)} is not an execution target this build records (recorded: ${PROPOSAL_TARGET_TYPES$1.join(", ")}), so no coordinator was started for it and the Diagnosis keeps its suggestion — an unknown target is refused by name, never guessed into a candidate`
+		};
+		return {
+			code: "requires-new-authority",
+			reason: `the suggestion targets "${targetType}", and this build executes exactly two candidate surfaces — a same-name update of an existing skill object and one whole capability row with an optional new execution skill; a new tool, a verifier implementation, a permission, a preset or a runtime policy would need an authorization this harness refuses by name, so no coordinator was started and the Diagnosis keeps its suggestion`
+		};
+	}
+}
+/**
+* The refusals decided before anything else is read — no suggestions at all, the
+* chain being off, and a suggestion this build cannot execute — as the one
+* `undefined | {code, reason}` both {@link handoffDecision} and the consumption
+* entry start from.
+*/
+function handoffPreflight(input) {
+	if (input.diagnosis.proposals.length === 0) return {
+		code: "no-suggestions",
+		reason: "the conclusion carries no suggestion, so there is no hand-off to take up"
+	};
+	if (!input.enabled) return {
+		code: "evolution-off",
+		reason: "the evolution chain is off in this deployment, so no coordinator exists to open a candidate for it — the Diagnosis stays a recorded hand-off, readable here and in the review pack, and turning the chain on is what takes it up"
+	};
+	return handoffTargetRefusal(input.diagnosis);
+}
+/**
+* What the deployment would do with one diagnosis's hand-off right now, from the
+* switch, the diagnosis, the ledger's attempts and the store's allowance. Pure.
+*
+* A started supervisor answers first — it is the hand-off's fact, whatever the
+* allowance reads afterwards and however long ago it started; a started attempt
+* whose own terminal fact is `interrupted` is not one (a spawn that failed after
+* its started row was written leaves the hand-off pending, with the spend on the
+* record). Then the refusals that need nothing else (no suggestions, an
+* unsupported target, the chain being off), then a claim another call is starting
+* right now, then the allowance.
+*/
+function handoffDecision(input) {
+	const attempts = input.attempts.filter((attempt) => attempt.role === "supervisor" && attempt.diagnosisId === input.diagnosis.diagnosisId);
+	const started = attempts.filter((attempt) => attempt.started && attempt.settlement === void 0).at(-1);
+	if (started !== void 0) return {
+		kind: "started",
+		sessionId: started.sessionId,
+		at: started.at
+	};
+	const preflight = handoffPreflight(input);
+	if (preflight !== void 0) return {
+		kind: "stopped",
+		code: preflight.code,
+		reason: preflight.reason
+	};
+	const open = attempts.find((attempt) => attempt.settlement === void 0);
+	if (open !== void 0) return {
+		kind: "in-flight",
+		sessionId: open.sessionId
+	};
+	if (input.budget.used >= input.budget.max) return {
+		kind: "stopped",
+		code: "budget-exhausted",
+		reason: `the store's coordination allowance is spent (${input.budget.used}/${input.budget.max}), and a supervisor is a run of that same allowance — nothing was started and the hand-off stays pending; a deployment raises the allowance, no count is reset`
+	};
+	return { kind: "start" };
+}
+/**
+* The hand-off state as it is reported to a reader of the review pack, or nothing
+* when the diagnosis carries no suggestions (a normal completion stays a
+* conclusion and gets no mark). A5's build wrote this line as a hard-coded
+* `pending`; here it reports what the deployment really did with the hand-off.
+*/
+function handoffStateLine(input) {
+	if (input.diagnosis.proposals.length === 0) return void 0;
+	const decision = handoffDecision(input);
+	switch (decision.kind) {
+		case "started": return `taken up — this hand-off is delegated to supervisor session ${decision.sessionId} (started ${decision.at}); that coordinator owns the candidate it may open, and a person still decides the promotion`;
+		case "in-flight": return `being taken up right now by supervisor session ${decision.sessionId} — nothing new is started for it`;
+		case "stopped": return `pending — ${decision.reason}`;
+		case "start": return "pending — no supervisor is delegated to this hand-off yet; the deployment takes it up when it consumes it";
+	}
+}
+/**
+* One hand-off's content identity: what the claim promises about the diagnosis it
+* was started for. A store's diagnoses are immutable per id, so a disagreement
+* here means the id is being reused for something else — and that is refused by
+* name rather than silently answered with the first supervisor.
+*/
+function supervisorHandoffDigest(storeId, diagnosis) {
+	return sha256Hex(canonicalize({
+		storeId,
+		diagnosisId: diagnosis.diagnosisId,
+		taskId: diagnosis.taskId,
+		proposals: diagnosis.proposals.map((proposal) => ({
+			targetType: proposal.targetType,
+			targetId: proposal.targetId,
+			rationale: proposal.rationale
+		}))
+	}));
+}
+/**
+* The run one diagnosis is about, as its own `reviewRefs` name it
+* (`<taskId>#<runId>`, or `<taskId>#no-run` for the failure that had none). A
+* diagnosis that names no review of its own task leaves the run `null`: which run
+* a failure is, is the store's fact, and every entry that acts on it re-checks it
+* (`task-runtime/src/recovery.ts`), so nothing is guessed here.
+*/
+function diagnosisRunRef(diagnosis) {
+	for (const ref of diagnosis.reviewRefs) {
+		const separator = ref.lastIndexOf("#");
+		if (separator < 0) continue;
+		if (ref.slice(0, separator) !== diagnosis.taskId) continue;
+		const runId = ref.slice(separator + 1);
+		return runId === "no-run" ? null : runId;
+	}
+	return null;
+}
+/** The hand-off's source: the task and run the Diagnosis is about — the delegation's own fields. */
+function handoffSourceOf(diagnosis) {
+	return {
+		taskId: diagnosis.taskId,
+		runId: diagnosisRunRef(diagnosis)
+	};
+}
+/** The ref a reader uses for one source (`<taskId>#<runId>`, or `<taskId>#no-run`). */
+function handoffSourceRef(source) {
+	return `${source.taskId}#${source.runId ?? "no-run"}`;
+}
+/**
+* The supervisor's first request: which hand-off it is taking up, what the source
+* really is, and what it is expected to do with it.
+*
+* Everything in it is a fact read from the store or the diagnosis, never a
+* permission: the coordinator's authority is its grant and its ledger row, and
+* this text only tells it what it was delegated.
+*/
+function supervisorPrompt(input) {
+	const { diagnosis } = input;
+	return [
+		"You are the Singularity supervisor: the coordination agent a recorded Diagnosis was handed to. You do not run the goal, and you do not decide promotions — a person does.",
+		`The hand-off is diagnosis ${diagnosis.diagnosisId} about task ${diagnosis.taskId} (source ${input.sourceRef}, whose review settled ${input.sourceOutcome}).`,
+		`Its recorded observation: ${diagnosis.observedFailure}`,
+		`Its recorded conclusion: ${diagnosis.localizedCause}`,
+		"Its recorded suggestions:",
+		...diagnosis.proposals.map((proposal) => `- ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`),
+		"",
+		"Your job, in this order:",
+		"1. Read the facts yourself: task_review_pack for the exact source, task_read/task_status for the task and its siblings, context_read for the sessions and evidence the pack cites.",
+		"2. Decide what kind of gap this is. A capability or skill gap is closed by a candidate: evolution_propose (when no proposal names it yet), then evolution_candidate — ONE whole capability row plus an optional new execution skill, or a same-name update of an existing skill — evolution_prepare, evolution_replay for the two-sided experiment, and evolution_gate. A person decides and applies; you never call evolution_decide, evolution_apply or evolution_rollback, for yourself or for anyone.",
+		`3. A pure artifact gap — a product that was never produced — needs no proposal and no approval: it needs a new attempt at the failed goal. Once the capability a recovery depends on is in the applied table, call task_recover with { sourceDiagnosisId: "${diagnosis.diagnosisId}", requestKey: "<a key of yours>" } and the runtime opens one new root run, judged by the original acceptance criteria. One key names one attempt, and a repeat of the same key returns that attempt instead of starting another.`,
+		"4. Not every suggestion is executable: a successful source is not recoverable, and a target type this build has no candidate for stays a recorded suggestion. Say what stopped you in your own words — nothing you write changes production, and no candidate executes anything by itself.",
+		"",
+		"You have no shell, no file write and no spawn, and no tool outside the list you were granted."
+	].join("\n");
+}
+
+//#endregion
+//#region src/evolution-handoff.ts
+/**
+* The graph's root session and its live agent for one root store, or `undefined`
+* when this process does not hold the root live. The store is **placed** through
+* the registry (`graphs.list()` and each graph's own root session), never derived
+* from the id's text: a store no graph owns is one this deployment must not spawn
+* a coordinator for.
+*/
+async function handoffDelegatorOf(ctx, storeId) {
+	const graphs = optionalService(ctx, "graphs");
+	const registry = optionalService(ctx, "agents");
+	let rootSessionId;
+	try {
+		for (const graph of await graphs?.list() ?? []) {
+			const candidate = String(graph.rootSessionId);
+			if (rootTaskStoreId(candidate) === storeId) {
+				rootSessionId = candidate;
+				break;
+			}
+		}
+	} catch {
+		return;
+	}
+	if (rootSessionId === void 0) return void 0;
+	const agent = registry?.get(rootSessionId);
+	return agent === void 0 ? void 0 : {
+		sessionId: rootSessionId,
+		agent
+	};
+}
+/**
+* Consume one hand-off: decide (switch, suggestions, allowance), and — when
+* nothing stands in the way — spawn its supervisor, under the same admission
+* region and the same ledger a review attempt uses.
+*
+* The order inside the region is A5's own: decide, claim (durable before any
+* handle exists), spawn with the started row written by `beforePrompt` — so the
+* delegation is durable *and read back* before the coordinator's first model
+* input, and a store's second consumption cannot slip a claim in between the read
+* and the write. Nothing here waits for the coordinator: its started row is the
+* hand-off's terminal fact, so the call answers as soon as the session exists.
+*/
+async function startSupervisorHandoff(ctx, input) {
+	const { storeId, diagnosis, delegator } = input;
+	const preflight = handoffPreflight({
+		enabled: evolutionEnabled(ctx),
+		diagnosis
+	});
+	if (preflight !== void 0) return {
+		diagnosisId: diagnosis.diagnosisId,
+		result: "stopped",
+		code: preflight.code,
+		reason: preflight.reason
+	};
+	const source = handoffSourceOf(diagnosis);
+	const supervisorSessionId = SessionId(randomUUID());
+	const request = {
+		role: "supervisor",
+		source,
+		requestKey: null,
+		reason: null,
+		diagnosisId: diagnosis.diagnosisId,
+		handoffDigest: supervisorHandoffDigest(storeId, diagnosis),
+		actor: delegator.sessionId,
+		sessionId: supervisorSessionId
+	};
+	return await admitReviewAgent(storeId, async (admission) => {
+		const { plan } = await admission.plan(request);
+		if (plan.kind === "refused") {
+			const reason = plan.code === "budget-exhausted" ? `the store's coordination allowance is spent (${plan.budget.used}/${plan.budget.max}) — nothing was started and the hand-off stays pending` : `diagnosis ${diagnosis.diagnosisId} already has a supervisor claim with another hand-off content (session ${plan.attempt?.sessionId ?? "unknown"}); one diagnosis is not two hand-offs, so nothing was started`;
+			const code = plan.code === "budget-exhausted" ? "budget-exhausted" : "handoff-conflict";
+			return {
+				diagnosisId: diagnosis.diagnosisId,
+				result: "stopped",
+				code,
+				reason
+			};
+		}
+		if (plan.kind === "reuse") return {
+			diagnosisId: diagnosis.diagnosisId,
+			result: "existing",
+			sessionId: plan.attempt.sessionId
+		};
+		if (plan.kind === "in-flight") return {
+			diagnosisId: diagnosis.diagnosisId,
+			result: "in-flight",
+			sessionId: plan.attempt.sessionId
+		};
+		await admission.claim(request);
+		const prompt = supervisorPrompt({
+			diagnosis,
+			sourceOutcome: input.sourceOutcome,
+			sourceRef: input.sourceRef
+		});
+		let spawnFailure;
+		if (await ctx.agentRuntime.spawn(delegator.agent, {
+			sessionId: supervisorSessionId,
+			name: `supervisor for ${diagnosis.diagnosisId}`,
+			prompt: [{
+				type: "text",
+				text: prompt
+			}],
+			agentPreset: input.agentPreset ?? COORDINATION_PRESET,
+			grant: supervisorGrant(),
+			beforePrompt: async () => {
+				await admission.start({
+					taskId: source.taskId,
+					sessionId: supervisorSessionId,
+					actor: delegator.sessionId
+				});
+				const back = await readReviewerDelegation(supervisorSessionId);
+				if (back === void 0 || back.rootStoreId !== storeId || back.taskId !== source.taskId) throw new Error(`evolution hand-off: the delegation of supervisor session "${supervisorSessionId}" could not be read back from the ledger (expected task ${source.taskId} in ${storeId}); no model input was sent`);
+			},
+			...input.signal === void 0 ? {} : { signal: input.signal }
+		}).catch((error) => {
+			spawnFailure = error instanceof Error ? error.message : String(error);
+		}) === void 0) {
+			await settleReviewAgentAttempt({
+				rootStoreId: storeId,
+				taskId: source.taskId,
+				sessionId: supervisorSessionId,
+				status: "interrupted",
+				note: `the supervisor could not be spawned: ${spawnFailure ?? "unknown error"}`
+			}).catch(() => void 0);
+			return {
+				diagnosisId: diagnosis.diagnosisId,
+				result: "failed",
+				reason: spawnFailure ?? "unknown error"
+			};
+		}
+		return {
+			diagnosisId: diagnosis.diagnosisId,
+			result: "started",
+			sessionId: supervisorSessionId
+		};
+	});
+}
+/**
+* Every pending hand-off of one store, consumed in the order the diagnoses were
+* written. A diagnosis that carries suggestions is a hand-off; a conclusion
+* without suggestions is not touched.
+*
+* Never throws for the work it does: a store it cannot read, a hand-off it cannot
+* start and a spawn that failed all come back as entries (and as log lines when a
+* `log` is given), because every caller of this scan is a trigger — a recorded
+* diagnosis, an activation — that must not take a store down with a coordinator.
+*/
+async function consumePendingHandoffs(ctx, storeId, options = {}) {
+	const { log } = options;
+	let snapshot;
+	try {
+		snapshot = await ctx.task.snapshotIn(storeId);
+	} catch (error) {
+		const skipped = `the store could not be read (${error instanceof Error ? error.message : String(error)}); no hand-off was consumed`;
+		log?.(`evolution hand-off: store ${storeId} — ${skipped}`);
+		return {
+			storeId,
+			consumptions: [],
+			skipped
+		};
+	}
+	const pending = snapshot.diagnoses.filter((diagnosis) => diagnosis.proposals.length > 0);
+	if (pending.length === 0) return {
+		storeId,
+		consumptions: []
+	};
+	const delegator = await handoffDelegatorOf(ctx, storeId);
+	if (delegator === void 0) {
+		const skipped = "the graph's root session for this store is not live, so no supervisor could be started";
+		for (const diagnosis of pending) log?.(`evolution hand-off: ${diagnosis.diagnosisId} pending — ${skipped}`);
+		return {
+			storeId,
+			skipped,
+			consumptions: pending.map((diagnosis) => ({
+				diagnosisId: diagnosis.diagnosisId,
+				result: "stopped",
+				code: "evolution-off",
+				reason: skipped
+			}))
+		};
+	}
+	const consumptions = [];
+	for (const diagnosis of pending) {
+		const source = handoffSourceOf(diagnosis);
+		const review = snapshot.reviews.find((item) => item.taskId === source.taskId && (item.runId ?? null) === source.runId);
+		let consumption;
+		try {
+			consumption = await startSupervisorHandoff(ctx, {
+				storeId,
+				diagnosis,
+				delegator,
+				sourceRef: handoffSourceRef(source),
+				sourceOutcome: review?.outcome ?? "no review record"
+			});
+		} catch (error) {
+			consumption = {
+				diagnosisId: diagnosis.diagnosisId,
+				result: "failed",
+				reason: error instanceof Error ? error.message : String(error)
+			};
+		}
+		consumptions.push(consumption);
+		log?.(`evolution hand-off: ${renderConsumption(consumption)}`);
+	}
+	return {
+		storeId,
+		consumptions
+	};
+}
+/**
+* Consume one store's hand-off for one diagnosis, if it is pending — the moment
+* the reviewer that recorded it is the caller (the record just became durable,
+* and no event exists for a store's diagnosis). The store is read here rather
+* than trusted from the caller: a diagnosis the store does not hold is reported
+* by name and nothing is started.
+*/
+async function consumeHandoffDiagnosis(ctx, storeId, diagnosisId, options = {}) {
+	let snapshot;
+	try {
+		snapshot = await ctx.task.snapshotIn(storeId);
+	} catch (error) {
+		options.log?.(`evolution hand-off: store ${storeId} could not be read (${error instanceof Error ? error.message : String(error)})`);
+		return;
+	}
+	const diagnosis = snapshot.diagnoses.find((item) => item.diagnosisId === diagnosisId);
+	if (diagnosis === void 0) {
+		options.log?.(`evolution hand-off: store ${storeId} holds no diagnosis "${diagnosisId}"; nothing was started`);
+		return;
+	}
+	const delegator = await handoffDelegatorOf(ctx, storeId);
+	if (delegator === void 0) {
+		options.log?.(`evolution hand-off: ${diagnosisId} pending — the graph's root session is not live, so no supervisor was started`);
+		return;
+	}
+	const source = handoffSourceOf(diagnosis);
+	const review = snapshot.reviews.find((item) => item.taskId === source.taskId && (item.runId ?? null) === source.runId);
+	const consumption = await startSupervisorHandoff(ctx, {
+		storeId,
+		diagnosis,
+		delegator,
+		sourceRef: handoffSourceRef(source),
+		sourceOutcome: review?.outcome ?? "no review record"
+	});
+	options.log?.(`evolution hand-off: ${renderConsumption(consumption)}`);
+	return consumption;
+}
+/** One consumption as a scan line, naming the session or the reason — never a credential and never a path. */
+function renderConsumption(consumption) {
+	switch (consumption.result) {
+		case "started": return `diagnosis ${consumption.diagnosisId} — supervisor session ${consumption.sessionId} started`;
+		case "existing": return `diagnosis ${consumption.diagnosisId} — already delegated to supervisor session ${consumption.sessionId}; nothing started`;
+		case "in-flight": return `diagnosis ${consumption.diagnosisId} — supervisor session ${consumption.sessionId} is being started right now; nothing started`;
+		case "stopped": return `diagnosis ${consumption.diagnosisId} pending (${consumption.code}) — ${consumption.reason}`;
+		case "failed": return `diagnosis ${consumption.diagnosisId} — the supervisor could not be started: ${consumption.reason}`;
+	}
+}
+/** The warning channel the plugin has, when the deployment mounted a logger. */
+function softWarn$1(ctx) {
+	const logger = ctx.logger;
+	return (line) => logger?.("singularity-agent").warn(line);
+}
+/**
+* Install the hand-off trigger of this deployment: a graph that is explicitly
+* activated scans its store for pending hand-offs — what a process that booted
+* over a store with a pending hand-off does, and what a repeat consumption after
+* a restart answers from the ledger. The other moment — a diagnosis with
+* suggestions becoming durable — is reported by the attempt that recorded it
+* (`review-agent-run.ts`): no event exists for a store's diagnosis record, and the
+* run that wrote it is the only place that knows.
+*
+* The listener does its work off the caller's path: it starts the scan and
+* returns immediately, and a scan that fails is reported on the log rather than
+* thrown into the activation that woke it.
+* @returns a disposer that removes the listener.
+*/
+function installSupervisorHandoffTrigger(ctx, options = {}) {
+	const log = options.log ?? softWarn$1(ctx);
+	const background = (work) => {
+		work().catch((error) => {
+			log(`evolution hand-off: the scan could not run (${error instanceof Error ? error.message : String(error)})`);
+		});
+	};
+	const dispose = ctx.on("graphs/selected", (graph) => {
+		background(async () => await consumePendingHandoffs(ctx, rootTaskStoreId(graph.rootSessionId), { log }));
+	});
+	return () => dispose();
+}
+
+//#endregion
 //#region src/tools/task-review-pack.ts
-const text$30 = (value) => [{
+const text$31 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$20(exec) {
+function sessionId$21(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_review_pack: missing agent id");
 	return id;
@@ -1171,15 +1851,19 @@ function latestReview$1(snapshot, taskId) {
 	return [...snapshot.reviews].reverse().find((item) => item.taskId === taskId);
 }
 /**
-* The ledger state of one source: every attempt the store holds for it, in the
-* order they were claimed — the default attempt (`null` key) and each explicit
-* one — with how each ended. This is what a reader checks before asking for a
-* review: an attempt that is still open is the one a new call would return
+* The ledger state of one source: every **review** attempt the store holds for
+* it, in the order they were claimed — the default attempt (`null` key) and each
+* explicit one — with how each ended. This is what a reader checks before asking
+* for a review: an attempt that is still open is the one a new call would return
 * instead of starting another, and a new review of an already-reviewed source
 * needs an explicit `requestKey`.
+*
+* Supervisor rows carry a source too (the hand-off's), so they are filtered out
+* here: they are not review attempts of this source, and what a reader of a pack
+* learns about a hand-off comes from the diagnosis line below.
 */
 function renderAttempts(attempts, source) {
-	const mine = attempts.filter((attempt) => attempt.source.taskId === source.taskId && attempt.source.runId === source.runId);
+	const mine = attempts.filter((attempt) => attempt.role === "reviewer" && attempt.source.taskId === source.taskId && attempt.source.runId === source.runId);
 	if (mine.length === 0) return ["review attempts (0): none — no review agent has been started for this source"];
 	return [`review attempts (${mine.length}):`, ...mine.map((attempt) => {
 		const label = attempt.requestKey === null ? "default attempt" : `requestKey "${attempt.requestKey}"`;
@@ -1278,30 +1962,29 @@ function renderReview(review) {
 	return lines;
 }
 /**
-* How far one diagnosis's suggestions have been taken up (A5 §3, plan F.3): a
-* diagnosis that carries **proposals** is the A6 handoff candidate, and no A6
-* candidate loop is assembled in this build — so the pack reports it as
-* **pending**: recorded, addressed to nobody yet, and not an open candidate.
+* How far one diagnosis's suggestions have been taken up (A5 §3, plan F.4): a
+* diagnosis that carries **proposals** is the A6 hand-off, and this line reports
+* what the deployment really did with it — the supervisor it was delegated to,
+* the coordinator being started right now, or the named reason nothing was opened
+* (the evolution chain off, a suggestion this build has no executor for, the
+* store's allowance spent, or nothing having asked yet).
 *
-* The mark follows from the record alone, which is why it is written here and
-* not derived from a switch: nothing in this build consumes a handoff, so
-* there is no second state to report. A conclusion *without* proposals is not a
-* handoff and gets no mark (a normal completion stays a conclusion), and an
-* interrupted attempt has no diagnosis at all, so it can never reach this line.
-* When an A6 consumer is assembled, this is the line it replaces with what it
-* really did with the candidate.
+* The answer is `handoffStateLine` (over `handoffDecision`) — the very function
+* the consumption entry acts on — so the pack cannot drift from what a consumer
+* would do. A conclusion
+* *without* proposals is not a hand-off and gets no mark (a normal completion
+* stays a conclusion), and an interrupted attempt has no diagnosis at all, so it
+* can never reach this line.
 */
-function handoffMark(diagnosis) {
-	if (diagnosis.proposals.length === 0) return void 0;
-	return "pending — this diagnosis carries suggestions and no A6 candidate loop is enabled in this build: nothing has been opened for it, and reading it here takes nothing up";
+function handoffMark(diagnosis, handoff) {
+	return handoffStateLine({
+		enabled: handoff.enabled,
+		diagnosis,
+		attempts: handoff.attempts,
+		budget: handoff.budget
+	});
 }
-/**
-* One diagnosis, with its agent judgements kept visually apart from the
-* mechanical facts above: the facts say what was observed, a judgement says
-* what an agent concluded, and the header names the session so the two are
-* never read as one table.
-*/
-function renderDiagnosis(diagnosis) {
+function renderDiagnosis(diagnosis, handoff) {
 	const producer = diagnosis.producedBy === void 0 ? "" : diagnosis.producedBy.kind === "agent" && diagnosis.producedBy.sessionId !== void 0 ? ` [agent ${diagnosis.producedBy.sessionId}]` : ` [${diagnosis.producedBy.kind}]`;
 	const lines = [`- ${diagnosis.diagnosisId} [${diagnosis.confidence}] ${diagnosis.localizedCause}${producer}`];
 	if (diagnosis.judgements !== void 0 && diagnosis.judgements.length > 0) {
@@ -1310,8 +1993,8 @@ function renderDiagnosis(diagnosis) {
 		for (const judgement of diagnosis.judgements) lines.push(`    ${judgement.dimension}: ${judgement.verdict} — ${judgement.rationale} refs [${judgement.evidenceRefs.join(", ")}]`);
 	}
 	for (const proposal of diagnosis.proposals) lines.push(`  proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`);
-	const handoff = handoffMark(diagnosis);
-	if (handoff !== void 0) lines.push(`  handoff: ${handoff}`);
+	const handoffText = handoffMark(diagnosis, handoff);
+	if (handoffText !== void 0) lines.push(`  handoff: ${handoffText}`);
 	return lines;
 }
 /**
@@ -1356,7 +2039,7 @@ function renderBindings(snapshot, taskId) {
 * @throws when the source's task is not in the snapshot.
 */
 function buildReviewPack(input) {
-	const { snapshot, source, attempts } = input;
+	const { snapshot, source, attempts, handoff } = input;
 	const { taskId } = source;
 	const task = snapshot.tasks.find((item) => item.taskId === taskId);
 	if (task === void 0) throw new Error(`task_review_pack: unknown task "${taskId}"`);
@@ -1385,13 +2068,13 @@ function buildReviewPack(input) {
 		lines.push(`- ${child.taskId} [${child.status}]: ${reviewSummary(snapshot, child.taskId)}`);
 	}
 	lines.push(`diagnoses (${diagnoses.length}):`);
-	for (const diagnosis of diagnoses) lines.push(...renderDiagnosis(diagnosis));
+	for (const diagnosis of diagnoses) lines.push(...renderDiagnosis(diagnosis, handoff));
 	return lines.join("\n");
 }
 function defineTaskReviewPackTool(ctx) {
 	return defineTool({
 		name: "task_review_pack",
-		description: "Read-only. Assemble the diagnosis input pack for ONE exact review source — a task and the run under review, or runId null for a review that carries no run (a task blocked before it started). The pack names the task itself, all its review records in full (criteria, log tail, blockers, the session each review came from), the review attempts the ledger holds for this source and how each ended, the dimensions whose conclusion the fact table does not carry, one-line review summaries of its children and parent, the dependency edges touching it, and its diagnoses with any agent judgements — each diagnosis that carries suggestions marked as a handoff nothing has taken up yet. It reports the facts only: whether a review agent runs is decided elsewhere (a failed review is accepted on its own; an explicit call names its source). Local evidence plus parent/children summaries — no ancestry replay (guide §2.7.5). Feed this to task_diagnose, or to task_review_agent when a judgement is needed.",
+		description: "Read-only. Assemble the diagnosis input pack for ONE exact review source — a task and the run under review, or runId null for a review that carries no run (a task blocked before it started). The pack names the task itself, all its review records in full (criteria, log tail, blockers, the session each review came from), the review attempts the ledger holds for this source and how each ended, the dimensions whose conclusion the fact table does not carry, one-line review summaries of its children and parent, the dependency edges touching it, and its diagnoses with any agent judgements — each diagnosis that carries suggestions marked with its hand-off state (the supervisor it was delegated to, the coordinator being started, or the named reason nothing was opened: the chain off, an unsupported target, or the allowance spent). It reports the facts only: whether a review agent runs is decided elsewhere (a failed review is accepted on its own; an explicit call names its source). Local evidence plus parent/children summaries — no ancestry replay (guide §2.7.5). Feed this to task_diagnose, or to task_review_agent when a judgement is needed.",
 		parameters: {
 			taskId: {
 				type: "string",
@@ -1406,10 +2089,10 @@ function defineTaskReviewPackTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$30(v)
+			render: (_a, v) => text$31(v)
 		},
 		execute: async (args, exec) => {
-			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(sessionId$20(exec))).rootSessionId);
+			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(sessionId$21(exec))).rootSessionId);
 			const source = {
 				taskId: args.taskId,
 				runId: args.runId
@@ -1418,10 +2101,19 @@ function defineTaskReviewPackTool(ctx) {
 			if (!snapshot.tasks.some((task) => task.taskId === args.taskId)) throw new Error(`task_review_pack: unknown task "${args.taskId}" in store ${storeId}`);
 			if (args.runId !== null && !snapshot.runs.some((run) => run.runId === args.runId && run.taskId === args.taskId)) return `task_review_pack: run "${args.runId}" is not a run of task "${args.taskId}"; nothing to pack`;
 			if (reviewForSource(snapshot, source) === void 0) return `task_review_pack: no review record for source ${reviewRef(source)} in store ${storeId}; nothing to pack`;
+			const attempts = await readReviewAgentAttempts(storeId);
 			return buildReviewPack({
 				snapshot,
 				source,
-				attempts: await readReviewAgentAttempts(storeId)
+				attempts,
+				handoff: {
+					enabled: evolutionEnabled(ctx),
+					attempts,
+					budget: {
+						used: await countReviewAgentRuns(storeId),
+						max: reviewAgentBudget()
+					}
+				}
 			});
 		}
 	});
@@ -1612,8 +2304,8 @@ function lastAssistantText(events) {
 	return content.length === 0 ? void 0 : content;
 }
 /** The diagnosis one attempt recorded, as the store holds it (the id is the attempt's session). */
-function recordedDiagnosis(snapshot, sessionId$21) {
-	return snapshot.diagnoses.find((diagnosis) => diagnosis.diagnosisId === `review-agent-${sessionId$21}`);
+function recordedDiagnosis(snapshot, sessionId$22) {
+	return snapshot.diagnoses.find((diagnosis) => diagnosis.diagnosisId === `review-agent-${sessionId$22}`);
 }
 /**
 * Run one review attempt for one source: the admission's serial region (plan,
@@ -1656,10 +2348,19 @@ async function runReviewAgentAttempt(input) {
 			recovered
 		};
 		await admission.claim(request);
+		const attempts = await readReviewAgentAttempts(storeId);
 		const pack = buildReviewPack({
 			snapshot: current,
 			source,
-			attempts: await readReviewAgentAttempts(storeId)
+			attempts,
+			handoff: {
+				enabled: evolutionEnabled(ctx),
+				attempts,
+				budget: {
+					used: await countReviewAgentRuns(storeId),
+					max: reviewAgentBudget()
+				}
+			}
 		});
 		const prompt = [
 			"You are a Singularity review agent. Explain the review source below: what happened, why, and what — if anything — should change.",
@@ -1801,6 +2502,10 @@ async function runReviewAgentAttempt(input) {
 			};
 		}
 		await settleAttempt("recorded");
+		if (diagnosis.proposals.length > 0) consumeHandoffDiagnosis(ctx, storeId, diagnosis.diagnosisId).catch((error) => {
+			const logger = ctx.logger;
+			logger?.("singularity-agent").warn(`evolution hand-off: ${diagnosis.diagnosisId} could not be consumed (${error instanceof Error ? error.message : String(error)})`);
+		});
 		return {
 			kind: "recorded",
 			sessionId: reviewerSessionId,
@@ -1852,11 +2557,11 @@ function failedSourcesOf(snapshot) {
 }
 /** The relay of the store's root session, when this process holds it live. */
 function rootAgentOf(ctx, storeId) {
-	const sessionId$21 = rootSessionOfStore(storeId);
-	if (sessionId$21 === void 0) return void 0;
-	const agent = optionalService(ctx, "agents")?.get(sessionId$21);
+	const sessionId$22 = rootSessionOfStore(storeId);
+	if (sessionId$22 === void 0) return void 0;
+	const agent = optionalService(ctx, "agents")?.get(sessionId$22);
 	return agent === void 0 ? void 0 : {
-		sessionId: sessionId$21,
+		sessionId: sessionId$22,
 		agent
 	};
 }
@@ -2053,7 +2758,7 @@ function installReviewAgentAutoTrigger(ctx, options = {}) {
 
 //#endregion
 //#region src/tools/approve.ts
-const text$29 = (value) => [{
+const text$30 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2068,7 +2773,7 @@ function defineApproveTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$29(v)
+			render: (_a, v) => text$30(v)
 		},
 		execute: async (args, exec) => {
 			if (args.prompt.trim().length === 0) throw new Error("hitl_approve: prompt is empty");
@@ -2092,7 +2797,7 @@ function defineApproveTool(ctx) {
 
 //#endregion
 //#region src/tools/ask.ts
-const text$28 = (value) => [{
+const text$29 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2108,7 +2813,7 @@ function defineAskTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$28(v)
+			render: (_a, v) => text$29(v)
 		},
 		execute: async (args, exec) => {
 			if (args.prompt.trim().length === 0) throw new Error("hitl_ask: prompt is empty");
@@ -2164,7 +2869,7 @@ function undeclaredParameters(args, declared, toolName) {
 
 //#endregion
 //#region src/tools/budget-extend.ts
-const text$27 = (value) => [{
+const text$28 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2175,7 +2880,7 @@ const DECLARED_PARAMETERS = [
 	"deadlineAt"
 ];
 const DIMENSIONS = ["maxRuns", "deadlineAt"];
-function sessionId$19(exec) {
+function sessionId$20(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_budget_extend: missing agent id");
 	return id;
@@ -2254,12 +2959,12 @@ function defineTaskBudgetExtendTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$27(v)
+			render: (_a, v) => text$28(v)
 		},
 		execute: async (args, exec) => {
 			const undeclared$3 = undeclaredParameters(args, DECLARED_PARAMETERS, "task_budget_extend");
 			if (undeclared$3 !== void 0) return undeclared$3;
-			const caller = sessionId$19(exec);
+			const caller = sessionId$20(exec);
 			let result;
 			try {
 				result = await ctx.taskRuntime.extendRootBudget(caller, {
@@ -2333,7 +3038,7 @@ function defineRootBudgetApproval(ctx) {
 
 //#endregion
 //#region src/tools/capability-list.ts
-const text$26 = (value) => [{
+const text$27 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2392,7 +3097,7 @@ function defineCapabilityListTool(ctx) {
 		parameters: {},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$26(v)
+			render: (_a, v) => text$27(v)
 		},
 		execute: async (_args, exec) => {
 			const capabilities = ctx.taskRuntime.listCapabilities();
@@ -2455,7 +3160,7 @@ function adaptRead(tool, result) {
 
 //#endregion
 //#region src/tools/context-read.ts
-const text$25 = (value) => [{
+const text$26 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -2532,7 +3237,7 @@ function defineContextReadTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$25(v)
+			render: (_a, v) => text$26(v)
 		},
 		execute: async (args, exec) => {
 			const refused = undeclared$2(args);
@@ -2550,11 +3255,11 @@ function defineContextReadTool(ctx) {
 
 //#endregion
 //#region src/tools/escalate.ts
-const text$24 = (value) => [{
+const text$25 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$18(exec) {
+function sessionId$19(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("escalate: missing agent id");
 	return id;
@@ -2627,7 +3332,7 @@ function defineEscalateTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$24(v)
+			render: (_a, v) => text$25(v)
 		},
 		execute: async (args, exec) => {
 			if (args.list === true) {
@@ -2635,7 +3340,7 @@ function defineEscalateTool(ctx) {
 				if (escalations.length === 0) return "escalations: none recorded";
 				return [`escalations (${escalations.length}):`, ...escalations.map(renderEscalation)].join("\n");
 			}
-			const caller = sessionId$18(exec);
+			const caller = sessionId$19(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("escalate: missing agent");
 			const missing = ELEMENTS.filter((element) => {
@@ -2712,11 +3417,11 @@ function recoveryNote(recovered) {
 
 //#endregion
 //#region src/tools/evolution-apply.ts
-const text$23 = (value) => [{
+const text$24 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$17(exec) {
+function sessionId$18(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_apply: missing agent id");
 	return id;
@@ -2745,10 +3450,10 @@ function defineEvolutionApplyTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$23(v)
+			render: (_a, v) => text$24(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$17(exec);
+			const caller = sessionId$18(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("evolution_apply: missing agent");
 			let proposal;
@@ -2818,11 +3523,11 @@ function defineEvolutionApplyTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-candidate.ts
-const text$22 = (value) => [{
+const text$23 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$16(exec) {
+function sessionId$17(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_candidate: missing agent id");
 	return id;
@@ -2830,7 +3535,7 @@ function sessionId$16(exec) {
 function defineEvolutionCandidateTool(ctx) {
 	return defineTool({
 		name: "evolution_candidate",
-		description: "Claim a proposed EvolutionProposal into validation (status: candidate) by recording the complete version set it aligns to (e.g. taskDefinition / skill / toolProfile / agentPreset / verifier / runtimePolicy versions). Bookkeeping for the branch model only: no branch is created and nothing is executed or changed. This build admits one candidate lifecycle — a same-name improvement of an existing skill as a whole loadable object: the mutation { name, content } carries the full replacement SKILL.md text and nothing else, because `content` is the whole new body rather than a diff, no sidecar patch and no resource is accepted, and an unknown mutation field is refused by name. When that skill declares an execution provider, evolution_prepare derives the candidate's SKILL.contract.json from the production declaration with only content.skillMdSha256 recomputed, so a content update can never move a capability, a required tool, a verifier or a port. The candidate must then pass evolution_prepare (sandbox materialization) and evolution_replay (the two-sided experiment) before evolution_gate. A proposal of any other target type is refused by name and stays a record — evolution_propose may still record such a suggestion, but a suggestion never becomes a candidate.",
+		description: "Claim a proposed EvolutionProposal into validation (status: candidate) by recording the complete version set it aligns to (e.g. taskDefinition / skill / capabilityTable / agentPreset / verifier / runtimePolicy versions). Bookkeeping for the branch model only: no branch is created and nothing is executed or changed. This build admits two candidate lifecycles, both shaped by the proposal's target type: (1) a same-name improvement of an existing skill as a whole loadable object — the mutation { name, content } carries the full replacement SKILL.md text and nothing else, because `content` is the whole new body rather than a diff, no sidecar patch and no resource is accepted; evolution_prepare derives the SKILL.contract.json from the production declaration with only content.skillMdSha256 recomputed, so a content update can never move a capability, a required tool, a verifier or a port. (2) one whole capability row, with an optional new execution skill — the mutation { rows, skill? }, where `rows` holds exactly one row ({ skills, tools?, preset?, permission?, mcpServers? }: no field is inherited from the row it replaces) and `skill`, when given, is { name, content, sidecar } for a NEW execution object (SKILL.md plus the existing SKILL.contract.json protocol, resources: [], granting that row, judged by a registered verifier). The new row may not grant a tool or mount a server this deployment has not already authorized, and may not move the preset or permission a worker runs under; improving an existing skill is the same-name path, never a new name. Unknown mutation fields are refused by name, and so is a proposal of any other target type — it stays a record, because evolution_propose may record a suggestion no executor exists for. Either candidate must then pass evolution_prepare (sandbox materialization) and evolution_replay (the two-sided experiment) before evolution_gate.",
 		parameters: {
 			proposalId: {
 				type: "string",
@@ -2844,18 +3549,50 @@ function defineEvolutionCandidateTool(ctx) {
 				description: "Complete version set the candidate aligns to: name → version string, at least one entry"
 			},
 			mutation: {
-				type: "object",
-				additionalProperties: true,
+				oneOf: [{
+					type: "object",
+					additionalProperties: false,
+					description: "A skill candidate: the existing skill's name and the full replacement SKILL.md text this candidate is materialized from and evaluated on. The object's SKILL.contract.json, when it has one, is derived from production at evolution_prepare with only content.skillMdSha256 recomputed.",
+					properties: {
+						name: {
+							type: "string",
+							required: true,
+							description: "The existing skill's name (a single safe path segment)"
+						},
+						content: {
+							type: "string",
+							required: true,
+							description: "The whole replacement SKILL.md text (frontmatter included)"
+						}
+					}
+				}, {
+					type: "object",
+					additionalProperties: false,
+					description: "A capability candidate: exactly one capability row, whole, plus optionally one NEW execution skill the row grants.",
+					properties: {
+						rows: {
+							type: "object",
+							additionalProperties: true,
+							required: true,
+							description: "Exactly one entry — the row name mapped to its whole configuration { skills: [names, at least one], tools?: [labels], preset?, permission?, mcpServers?: [names] }. No field is inherited from the row it replaces: a tool or server the table does not already authorize, and a preset or permission different from the row being replaced, are refused by name."
+						},
+						skill: {
+							type: "object",
+							additionalProperties: true,
+							description: "The optional new execution skill this row grants: { name, content, sidecar } — a name no discovery finds, the whole SKILL.md text, and its SKILL.contract.json declaration (type \"execution\", resources: [], capabilities including this row, a registered verifier). A renamed copy of an existing production object is refused."
+						}
+					}
+				}],
 				required: true,
-				description: "The structured patch, required: { name, content } — the existing skill's name and the full replacement SKILL.md text this candidate is materialized from and evaluated on. Nothing else is submitted here: the object's SKILL.contract.json, when it has one, is derived from production at evolution_prepare, and an unknown mutation field is refused by name."
+				description: "The structured patch, required, shaped by the proposal's target type: { name, content } for a skill proposal, or { rows, skill? } for a capability proposal. An unknown mutation field is refused by name."
 			}
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$22(v)
+			render: (_a, v) => text$23(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$16(exec);
+			const caller = sessionId$17(exec);
 			const versions = args.versionSet;
 			try {
 				const proposal = await ctx.evolution.candidate(args.proposalId, versions, caller, args.mutation);
@@ -2870,11 +3607,11 @@ function defineEvolutionCandidateTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-decide.ts
-const text$21 = (value) => [{
+const text$22 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$15(exec) {
+function sessionId$16(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_decide: missing agent id");
 	return id;
@@ -2902,10 +3639,10 @@ function defineEvolutionDecideTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$21(v)
+			render: (_a, v) => text$22(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$15(exec);
+			const caller = sessionId$16(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("evolution_decide: missing agent");
 			let proposal;
@@ -2955,11 +3692,11 @@ function defineEvolutionDecideTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-gate.ts
-const text$20 = (value) => [{
+const text$21 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$14(exec) {
+function sessionId$15(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_gate: missing agent id");
 	return id;
@@ -3013,10 +3750,10 @@ function defineEvolutionGateTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$20(v)
+			render: (_a, v) => text$21(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$14(exec);
+			const caller = sessionId$15(exec);
 			let evidenceIds = /* @__PURE__ */ new Set();
 			try {
 				const graph = await ctx.graphs.graphForSession(caller);
@@ -3045,11 +3782,11 @@ function defineEvolutionGateTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-list.ts
-const text$19 = (value) => [{
+const text$20 = (value) => [{
 	type: "text",
 	text: value
 }];
-const TARGET_TYPES$1 = [
+const TARGET_TYPES = [
 	"skill",
 	"tool",
 	"capability",
@@ -3080,7 +3817,7 @@ function defineEvolutionListTool(ctx) {
 			},
 			targetType: {
 				type: "string",
-				enum: TARGET_TYPES$1,
+				enum: TARGET_TYPES,
 				description: "Only proposals pointing at this mutation surface"
 			},
 			targetId: {
@@ -3090,7 +3827,7 @@ function defineEvolutionListTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$19(v)
+			render: (_a, v) => text$20(v)
 		},
 		execute: async (args) => {
 			const proposals = await ctx.evolution.list({
@@ -3128,11 +3865,11 @@ function defineEvolutionListTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-prepare.ts
-const text$18 = (value) => [{
+const text$19 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$13(exec) {
+function sessionId$14(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_prepare: missing agent id");
 	return id;
@@ -3148,10 +3885,10 @@ function defineEvolutionPrepareTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$18(v)
+			render: (_a, v) => text$19(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$13(exec);
+			const caller = sessionId$14(exec);
 			try {
 				const prepared = await ctx.evolution.prepare(args.proposalId, caller);
 				const view = prepared.prepared;
@@ -3173,7 +3910,7 @@ function defineEvolutionPrepareTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-propose.ts
-const text$17 = (value) => [{
+const text$18 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3182,9 +3919,10 @@ const text$17 = (value) => [{
 * not the diagnosis's (A5): a `DiagnosisProposal.targetType` is an open name,
 * and this is where a suggestion is checked before it is transcribed into a
 * proposal. What can actually be *executed* is narrower still
-* (`APPLYABLE_TARGET_TYPES` in the evolution package).
+* (`APPLYABLE_TARGET_TYPES` in the evolution package, and the hand-off
+* consumption in `evolution-handoff.ts`).
 */
-const TARGET_TYPES = [
+const PROPOSAL_TARGET_TYPES = [
 	"skill",
 	"tool",
 	"capability",
@@ -3195,11 +3933,11 @@ const TARGET_TYPES = [
 	"verifier",
 	"runtime_policy"
 ];
-const TARGET_TYPE_SET = new Set(TARGET_TYPES);
+const TARGET_TYPE_SET = new Set(PROPOSAL_TARGET_TYPES);
 function isProposalTargetType(value) {
 	return typeof value === "string" && TARGET_TYPE_SET.has(value);
 }
-function sessionId$12(exec) {
+function sessionId$13(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_propose: missing agent id");
 	return id;
@@ -3232,7 +3970,7 @@ function defineEvolutionProposeTool(ctx) {
 			},
 			targetType: {
 				type: "string",
-				enum: TARGET_TYPES,
+				enum: PROPOSAL_TARGET_TYPES,
 				description: "The mutation surface the proposal points at (required unless fromDiagnosis)"
 			},
 			targetId: {
@@ -3268,10 +4006,10 @@ function defineEvolutionProposeTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$17(v)
+			render: (_a, v) => text$18(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$12(exec);
+			const caller = sessionId$13(exec);
 			let targetType = args.targetType;
 			let targetId = args.targetId;
 			let rationale = args.rationale;
@@ -3286,10 +4024,10 @@ function defineEvolutionProposeTool(ctx) {
 				targetType = proposal.targetType;
 				targetId = proposal.targetId;
 				rationale = proposal.rationale;
-				if (!isProposalTargetType(targetType)) throw new Error(`evolution_propose: diagnosis "${diagnosis.diagnosisId}" proposal #${args.fromDiagnosis.proposalIndex} names targetType "${String(targetType)}", which this build cannot execute; it stays a recorded suggestion (recorded target types: ${TARGET_TYPES.join(" / ")})`);
+				if (!isProposalTargetType(targetType)) throw new Error(`evolution_propose: diagnosis "${diagnosis.diagnosisId}" proposal #${args.fromDiagnosis.proposalIndex} names targetType "${String(targetType)}", which this build cannot execute; it stays a recorded suggestion (recorded target types: ${PROPOSAL_TARGET_TYPES.join(" / ")})`);
 				sourceRefs.unshift(`diagnosis:${diagnosis.diagnosisId}`);
 			} else if (targetType === void 0 || targetId === void 0 || rationale === void 0) throw new Error("evolution_propose: targetType, targetId and rationale are required without fromDiagnosis");
-			if (!isProposalTargetType(targetType)) throw new Error(`evolution_propose: targetType must be one of ${TARGET_TYPES.join(" / ")}, got "${String(targetType)}"`);
+			if (!isProposalTargetType(targetType)) throw new Error(`evolution_propose: targetType must be one of ${PROPOSAL_TARGET_TYPES.join(" / ")}, got "${String(targetType)}"`);
 			try {
 				const proposal = await ctx.evolution.propose({
 					proposalId: args.proposalId,
@@ -3317,11 +4055,11 @@ function defineEvolutionProposeTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-replay.ts
-const text$16 = (value) => [{
+const text$17 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$11(exec) {
+function sessionId$12(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_replay: missing agent id");
 	return id;
@@ -3410,25 +4148,33 @@ function renderExperimentCriterionDiff(baseline, candidate) {
 * be a new run of *this* experiment in the first line that describes the sides:
 * §F.2's whole point is that the historical record locates a case and is never
 * the comparison's baseline, so the report is rendered without that vocabulary
-* at all.
+* at all. The candidate side is named by what the proposal *is*: a skill object's
+* identity, or the capability row (and, when it carries one, the new skill) a
+* capability candidate installs.
 */
 function renderExperiment(result, targetId) {
 	const { report } = result;
 	const ceiling = report.frozen.budget.maxTokens;
 	const budget = ceiling === void 0 ? "no maxTokens ceiling declared" : `maxTokens ${ceiling}`;
 	const baseline = report.frozen.productionBaseline;
+	const candidate = report.frozen.candidate;
+	const capability = report.frozen.capability;
+	const skillIdentity = candidate === void 0 ? void 0 : `${candidate.contract === void 0 ? "guidance" : "execution"} sha256 ${candidate.sha256}${candidate.contract === void 0 ? "" : ` sidecar sha256 ${candidate.contract.sha256}`}`;
+	const candidateIdentity = capability !== void 0 ? `capability row "${capability.row.name}" sha256 ${capability.row.digest} (the table held ${capability.baseline === null ? "no such row" : `row sha256 ${capability.baseline.digest}`})${skillIdentity === void 0 ? "" : ` and a new skill, ${skillIdentity}`}` : skillIdentity;
+	if (candidateIdentity === void 0) throw new Error(`experiment ${result.experimentId} carries neither a skill object identity nor a capability row — a report without a candidate identity is not one this build evaluated, and its record is read back through evolution_list`);
+	const baselineIdentity = capability === void 0 ? `production baseline ${baseline?.sha256 ?? "not recorded"}${baseline?.contract === void 0 ? "" : ` sidecar sha256 ${baseline.contract.sha256}`}` : `row this candidate moves: ${capability.baseline === null ? "none (a new row)" : `sha256 ${capability.baseline.digest}`}`;
 	return [
-		`proposal ${report.proposalId} [experiment] skill ${targetId} — verdict: ${report.verdict}`,
+		`proposal ${report.proposalId} [experiment] ${capability === void 0 ? "skill" : "capability"} ${targetId} — verdict: ${report.verdict}`,
 		`samples (${report.samples.length}):`,
 		...report.samples.map((sample) => `  ${sample.taskId} [${sample.role}] baseline ${sample.baseline.outcome} → candidate ${sample.candidate.outcome} (${renderExperimentCriterionDiff(sample.baseline.criteria, sample.candidate.criteria)}) — ${sample.verdict}`),
-		"every side above is a new run this experiment started — the baseline under the production configuration (the production object, whose frozen identity is read again at every promotion gate), the candidate on the prepared object's bytes — the prepared `SKILL.md` and, for an execution skill, the sidecar derived from production; the sample's historical record only locates the case",
+		"every side above is a new run this experiment started — the baseline under the production configuration (the production object, or the production table for a capability sample, whose frozen identity is read again at every promotion gate), the candidate on the prepared object's bytes (the prepared `SKILL.md`, the sidecar derived from production for an execution skill, and, for a capability candidate, the frozen row the candidate overlay mounts); the sample's historical record only locates the case",
 		`report: ${result.reportPath}`,
-		`experiment ${result.experimentId} (repetition ${report.frozen.repetition}, frozen ${report.frozenDigest}); candidate ${report.frozen.candidate.contract === void 0 ? "guidance" : "execution"} sha256 ${report.frozen.candidate.sha256}${report.frozen.candidate.contract === void 0 ? "" : ` sidecar sha256 ${report.frozen.candidate.contract.sha256}`}; production baseline sha256 ${baseline?.sha256 ?? "not recorded"}${baseline?.contract === void 0 ? "" : ` sidecar sha256 ${baseline.contract.sha256}`}; model ${report.frozen.model.label}; budget ${budget}; snapshot ${report.frozen.snapshot.digest}; comparer ${report.frozen.comparerVersion}`,
+		`experiment ${result.experimentId} (repetition ${report.frozen.repetition}, frozen ${report.frozenDigest}); candidate ${candidateIdentity}; ` + baselineIdentity + `; model ${report.frozen.model.label}; budget ${budget}; snapshot ${report.frozen.snapshot.digest}; comparer ${report.frozen.comparerVersion}`,
 		"next: evolution_gate (cite the report path in regressionEvidenceRefs)"
 	].join("\n");
 }
-/** The experiment one skill call runs: the derived samples, the caller's frozen input, and the model selection it runs under. */
-async function runSkillExperiment(ctx, args, caller, signal) {
+/** The experiment one call runs: the derived samples, the caller's frozen input, and the model selection it runs under. */
+async function runExperimentFor(ctx, args, caller, signal) {
 	let snapshot;
 	try {
 		const graph = await ctx.graphs.graphForSession(caller);
@@ -3448,12 +4194,12 @@ async function runSkillExperiment(ctx, args, caller, signal) {
 function defineEvolutionReplayTool(ctx) {
 	return defineTool({
 		name: "evolution_replay",
-		description: "Evaluate a prepared skill candidate — an existing skill's whole object, `SKILL.md` and, for an execution skill, the `SKILL.contract.json` beside it — with the two-sided experiment. Every named task is run twice — a new baseline run under the production configuration (the production object) and a new candidate run on the prepared bytes — each in its own workspace built from the caller session's env workspace (the frozen input snapshot), all under one frozen identity (samples, snapshot digest, candidate content, model, budget, comparer). Sample roles are derived from the store's history: a task whose latest review is failed is the observed failure, a verified one is an observed regression, and holdoutTaskIds are the held-out cases; a call with no failed sample, or with an empty holdout, is refused — the experiment requires both. The historical record locates each case and is never a baseline. This is the only evaluation this build has: a proposal targeting anything but a skill replacement is refused by name. Writes the report under sandbox/<proposalId>/ and records the ledger entries; cite the report path in evolution_gate's regressionEvidenceRefs. Repeating the same call reuses the settled runs — it never re-runs or overwrites one; a higher `repetition` freezes a new experiment.",
+		description: "Evaluate a prepared candidate — a **skill** candidate (an existing skill's whole object: `SKILL.md` and, for an execution skill, the `SKILL.contract.json` beside it) or a **capability** candidate (one whole capability row plus the new execution skill it grants, when it carries one) — with the two-sided experiment. Every named task is run twice — a new baseline run under the production configuration (the production object; for a capability sample, the production table offered the same case through the runtime's ordinary admission, so a sample the table cannot admit is recorded as that real refusal, with no invented run) and a new candidate run on the prepared bytes (the prepared `SKILL.md`, and for a capability candidate the frozen row its overlay mounts) — each in its own workspace built from the caller session's env workspace (the frozen input snapshot), all under one frozen identity (samples, snapshot digest, candidate content, model, budget, comparer). Sample roles are derived from the store's history: a task whose latest review is failed is the observed failure, a verified one is an observed regression, and holdoutTaskIds are the held-out cases; a call with no failed sample, or with an empty holdout, is refused — the experiment requires both. The historical record locates each case and is never a baseline. This is the only evaluation this build has: a proposal targeting anything but a skill replacement or a capability candidate is refused by name. Writes the report under sandbox/<proposalId>/ and records the ledger entries; cite the report path in evolution_gate's regressionEvidenceRefs. Repeating the same call reuses the settled runs — it never re-runs or overwrites one; a higher `repetition` freezes a new experiment.",
 		parameters: {
 			proposalId: {
 				type: "string",
 				required: true,
-				description: "Prepared skill candidate to evaluate"
+				description: "Prepared candidate to evaluate: a skill or capability candidate"
 			},
 			taskIds: {
 				type: "array",
@@ -3488,16 +4234,16 @@ function defineEvolutionReplayTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$16(v)
+			render: (_a, v) => text$17(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$11(exec);
+			const caller = sessionId$12(exec);
 			const taskIds = args.taskIds.map((id) => String(id));
 			const holdoutTaskIds = (args.holdoutTaskIds ?? []).map((id) => String(id));
 			try {
 				const proposal = await ctx.evolution.get(args.proposalId);
-				if (proposal.targetType !== "skill") throw new Error(`proposal ${proposal.proposalId} targets "${proposal.targetType}" — this tool evaluates a prepared skill object candidate only: a new baseline run on the production object and a new candidate run on the prepared object, each loaded whole (the SKILL.md, and the SKILL.contract.json beside it when the skill declares an execution provider). No other target type has an evaluator in this build, so its proposal stays a record`);
-				return renderExperiment(await runSkillExperiment(ctx, {
+				if (proposal.targetType !== "skill" && proposal.targetType !== "capability") throw new Error(`proposal ${proposal.proposalId} targets "${proposal.targetType}" — this tool evaluates a prepared **skill** candidate (a new baseline run on the production object and a new candidate run on the prepared object, each loaded whole: the SKILL.md, and the SKILL.contract.json beside it when the skill declares an execution provider) or a prepared **capability** candidate (the same two-sided run, the candidate side mounting the frozen capability row and its new skill; a baseline the production table cannot admit is recorded as the runtime's own refusal, never as an invented run). No other target type has an evaluator in this build, so its proposal stays a record`);
+				return renderExperiment(await runExperimentFor(ctx, {
 					proposalId: args.proposalId,
 					taskIds,
 					holdoutTaskIds,
@@ -3513,11 +4259,11 @@ function defineEvolutionReplayTool(ctx) {
 
 //#endregion
 //#region src/tools/evolution-rollback.ts
-const text$15 = (value) => [{
+const text$16 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$10(exec) {
+function sessionId$11(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("evolution_rollback: missing agent id");
 	return id;
@@ -3542,10 +4288,10 @@ function defineEvolutionRollbackTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$15(v)
+			render: (_a, v) => text$16(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$10(exec);
+			const caller = sessionId$11(exec);
 			const agent = exec.agent;
 			if (agent === void 0) throw new Error("evolution_rollback: missing agent");
 			let proposal;
@@ -3602,7 +4348,7 @@ function defineEvolutionRollbackTool(ctx) {
 
 //#endregion
 //#region src/tools/mark-ready.ts
-const text$14 = (value) => [{
+const text$15 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3613,12 +4359,12 @@ function defineMarkReadyTool(ctx) {
 		parameters: {},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$14(v)
+			render: (_a, v) => text$15(v)
 		},
 		execute: async (_args, exec) => {
-			const sessionId$21 = exec.agent?.id;
-			if (sessionId$21 === void 0) throw new Error("graph_mark_ready: missing agent id");
-			const graph = await ctx.graphs.graphForSession(sessionId$21);
+			const sessionId$22 = exec.agent?.id;
+			if (sessionId$22 === void 0) throw new Error("graph_mark_ready: missing agent id");
+			const graph = await ctx.graphs.graphForSession(sessionId$22);
 			await ctx.graphs.markReady(graph.id);
 			return `graph ${graph.id} ready`;
 		}
@@ -3703,7 +4449,7 @@ function questionCall(exec, tool) {
 
 //#endregion
 //#region src/tools/task-answer.ts
-const text$13 = (value) => [{
+const text$14 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3774,7 +4520,7 @@ function defineTaskAnswerTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$13(v)
+			render: (_a, v) => text$14(v)
 		},
 		execute: async (args, exec) => {
 			const refused = undeclared$1(args);
@@ -3798,7 +4544,7 @@ function defineTaskAnswerTool(ctx) {
 
 //#endregion
 //#region src/tools/task-ask-parent.ts
-const text$12 = (value) => [{
+const text$13 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -3869,7 +4615,7 @@ function defineTaskAskParentTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$12(v)
+			render: (_a, v) => text$13(v)
 		},
 		execute: async (args, exec) => {
 			const refused = undeclared(args);
@@ -3892,16 +4638,16 @@ function defineTaskAskParentTool(ctx) {
 
 //#endregion
 //#region src/tools/task-cancel.ts
-const text$11 = (value) => [{
+const text$12 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$9(exec) {
+function sessionId$10(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_cancel: missing agent id");
 	return id;
 }
-function renderOutcome$1(outcome) {
+function renderOutcome$2(outcome) {
 	const run = outcome.runId === void 0 ? "" : ` run ${outcome.runId}`;
 	const evidence = outcome.evidenceId === void 0 ? "" : ` evidence ${outcome.evidenceId}`;
 	return `- ${outcome.taskId}: ${outcome.status}${run}${evidence}`;
@@ -3916,10 +4662,10 @@ function defineTaskCancelTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$11(v)
+			render: (_a, v) => text$12(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$9(exec);
+			const caller = sessionId$10(exec);
 			const { storeId, run } = await ctx.taskRuntime.runForSession(caller);
 			if (run.executionPhase !== "waiting_children" || run.batchId === void 0) return `task_cancel: no batch is in flight for run "${run.runId}" (${run.status}${run.executionPhase === void 0 ? ", no coordination phase recorded" : `, phase ${run.executionPhase}`}); nothing was changed`;
 			const batchId = run.batchId;
@@ -3929,18 +4675,18 @@ function defineTaskCancelTool(ctx) {
 			} catch (error) {
 				return `task_cancel rejected: ${error instanceof Error ? error.message : String(error)}`;
 			}
-			return [`cancelled batch ${batchId}${args.reason === void 0 ? "" : ` (${args.reason})`}:`, ...outcomes.map(renderOutcome$1)].join("\n");
+			return [`cancelled batch ${batchId}${args.reason === void 0 ? "" : ` (${args.reason})`}:`, ...outcomes.map(renderOutcome$2)].join("\n");
 		}
 	});
 }
 
 //#endregion
 //#region src/tools/task-decompose.ts
-const text$10 = (value) => [{
+const text$11 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$8(exec) {
+function sessionId$9(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_decompose: missing agent id");
 	return id;
@@ -4105,10 +4851,10 @@ function defineTaskDecomposeTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$10(v)
+			render: (_a, v) => text$11(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$8(exec);
+			const caller = sessionId$9(exec);
 			const { storeId, task, run } = await ctx.taskRuntime.runForSession(caller);
 			const { requestKey, supersedes,...spec } = args;
 			const callId = typeof exec.callId === "string" && exec.callId.length > 0 ? String(exec.callId) : void 0;
@@ -4191,7 +4937,7 @@ async function pendingText$1(ctx, storeId, taskId, proposalId, detail) {
 
 //#endregion
 //#region src/tools/task-diagnose.ts
-const text$9 = (value) => [{
+const text$10 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -4226,7 +4972,7 @@ function toProposals(value) {
 		};
 	});
 }
-function sessionId$7(exec) {
+function sessionId$8(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_diagnose: missing agent id");
 	return id;
@@ -4314,10 +5060,10 @@ function defineTaskDiagnoseTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$9(v)
+			render: (_a, v) => text$10(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$7(exec);
+			const caller = sessionId$8(exec);
 			const storeId = rootTaskStoreId((await ctx.graphs.graphForSession(caller)).rootSessionId);
 			const diagnosis = {
 				diagnosisId: args.diagnosisId,
@@ -4348,11 +5094,11 @@ function defineTaskDiagnoseTool(ctx) {
 
 //#endregion
 //#region src/tools/task-intake.ts
-const text$8 = (value) => [{
+const text$9 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$6(exec) {
+function sessionId$7(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_intake: missing agent id");
 	return id;
@@ -4580,10 +5326,10 @@ function defineTaskIntakeTool(ctx) {
 		},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$8(v)
+			render: (_a, v) => text$9(v)
 		},
 		execute: async (args, exec) => {
-			const caller = sessionId$6(exec);
+			const caller = sessionId$7(exec);
 			const resolution = await ctx.singularityContext.resolveCaller(caller);
 			if (resolution.kind === "unbound") return [`task_intake rejected: ${resolution.detail}`, "Nothing was read and nothing was written."].join("\n");
 			if (resolution.kind !== "root") return [
@@ -4660,11 +5406,11 @@ async function pendingText(ctx, storeId, proposalId, detail) {
 
 //#endregion
 //#region src/tools/task-proposal-cancel.ts
-const text$7 = (value) => [{
+const text$8 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$5(exec) {
+function sessionId$6(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_proposal_cancel: missing agent id");
 	return id;
@@ -4680,12 +5426,12 @@ function defineTaskProposalCancelTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$7(v)
+			render: (_a, v) => text$8(v)
 		},
 		execute: async (args, exec) => {
 			const undeclared$3 = undeclaredParameters(args, ["proposalId"], "task_proposal_cancel");
 			if (undeclared$3 !== void 0) return undeclared$3;
-			const caller = sessionId$5(exec);
+			const caller = sessionId$6(exec);
 			const { storeId } = await ctx.taskRuntime.runForSession(caller);
 			try {
 				return [`${(await ctx.taskRuntime.cancelProposal(storeId, args.proposalId, caller)).detail}`, "The record is kept: a cancelled proposal is a fact, and a revision is a new proposal with its own request key."].join("\n");
@@ -4699,19 +5445,19 @@ function defineTaskProposalCancelTool(ctx) {
 //#endregion
 //#region src/tools/proposal-store.ts
 /** The store one proposal call belongs to; see the module doc. */
-async function proposalStoreFor(ctx, sessionId$21) {
-	const resolution = await ctx.singularityContext.resolveCaller(sessionId$21);
+async function proposalStoreFor(ctx, sessionId$22) {
+	const resolution = await ctx.singularityContext.resolveCaller(sessionId$22);
 	if (resolution.kind === "worker" || resolution.kind === "root") return resolution.storeId;
-	throw new Error(`task-runtime: no task run is bound to session "${sessionId$21}"`);
+	throw new Error(`task-runtime: no task run is bound to session "${sessionId$22}"`);
 }
 
 //#endregion
 //#region src/tools/task-proposal-continue.ts
-const text$6 = (value) => [{
+const text$7 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$4(exec) {
+function sessionId$5(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_proposal_continue: missing agent id");
 	return id;
@@ -4768,12 +5514,12 @@ function defineTaskProposalContinueTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$6(v)
+			render: (_a, v) => text$7(v)
 		},
 		execute: async (args, exec) => {
 			const undeclared$3 = undeclaredParameters(args, ["proposalId"], "task_proposal_continue");
 			if (undeclared$3 !== void 0) return undeclared$3;
-			const caller = sessionId$4(exec);
+			const caller = sessionId$5(exec);
 			let continuation;
 			try {
 				const storeId = await proposalStoreFor(ctx, caller);
@@ -4788,11 +5534,11 @@ function defineTaskProposalContinueTool(ctx) {
 
 //#endregion
 //#region src/tools/task-proposal-read.ts
-const text$5 = (value) => [{
+const text$6 = (value) => [{
 	type: "text",
 	text: value
 }];
-function sessionId$3(exec) {
+function sessionId$4(exec) {
 	const id = exec.agent?.id;
 	if (typeof id !== "string" || id.length === 0) throw new Error("task_proposal_read: missing agent id");
 	return id;
@@ -4889,12 +5635,12 @@ function defineTaskProposalReadTool(ctx) {
 		} },
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$5(v)
+			render: (_a, v) => text$6(v)
 		},
 		execute: async (args, exec) => {
 			const undeclared$3 = undeclaredParameters(args, ["proposalId"], "task_proposal_read");
 			if (undeclared$3 !== void 0) return undeclared$3;
-			const caller = sessionId$3(exec);
+			const caller = sessionId$4(exec);
 			try {
 				const storeId = await proposalStoreFor(ctx, caller);
 				return renderProposal(await ctx.taskRuntime.proposalIn(storeId, args.proposalId));
@@ -4907,7 +5653,7 @@ function defineTaskProposalReadTool(ctx) {
 
 //#endregion
 //#region src/tools/task-read.ts
-const text$4 = (value) => [{
+const text$5 = (value) => [{
 	type: "text",
 	text: value
 }];
@@ -4918,11 +5664,69 @@ function defineTaskReadTool(ctx) {
 		parameters: {},
 		output: {
 			schema: { type: "string" },
-			render: (_a, v) => text$4(v)
+			render: (_a, v) => text$5(v)
 		},
 		execute: async (_args, exec) => {
 			const caller = callerSessionId(exec, "task_read");
 			return adaptRead("task_read", await ctx.singularityContext.taskRead(caller, exec.signal));
+		}
+	});
+}
+
+//#endregion
+//#region src/tools/task-recover.ts
+const text$4 = (value) => [{
+	type: "text",
+	text: value
+}];
+function sessionId$3(exec) {
+	const id = exec.agent?.id;
+	if (typeof id !== "string" || id.length === 0) throw new Error("task_recover: missing agent id");
+	return id;
+}
+/** What one answer says: the attempt, the run it opened or already had, and what the coordination checked. */
+function renderOutcome$1(outcome) {
+	return [
+		`task_recover: ${outcome.attempt === "started" ? "a new attempt was opened" : "this key already named an attempt"} for diagnosis ${outcome.sourceDiagnosisId} — run ${outcome.runId} (session ${outcome.sessionId}) is ${outcome.status}`,
+		`hand-off: delegated by session ${outcome.handoff.actor} to supervisor ${outcome.handoff.sessionId}`,
+		...outcome.coordination.map((line) => `- ${line}`),
+		outcome.reusedMembers.length === 0 ? "the attempt re-runs the work; no already-verified sibling was cited" : `the attempt reads ${outcome.reusedMembers.length} already-verified sibling member(s) at its leading positions`,
+		"the original acceptance criteria judge the new attempt, the old failure stays readable, and the store total it spends is the same one"
+	].join("\n");
+}
+function defineTaskRecoverTool(ctx) {
+	return defineTool({
+		name: "task_recover",
+		description: "Open a new attempt at a failed root goal (a new root Run/Session in the same store), for ONE recorded Diagnosis of that same store. Available to the trusted supervisor coordination session a hand-off was delegated to and to no one else: the caller is read from the live session and checked against the delegation the deployment recorded, so a root, a worker, a reviewer or another graph's supervisor cannot use it, and no authorization is ever passed as an argument. Every rule is re-checked below this tool: the evolution plane verifies that a capability change this diagnosis stands on is approved and applied (an unapproved, undecided or rolled-back capability means nothing is opened), and the task runtime re-reads the store's own facts — the failed source, the original contract and criteria, the providers the attempt needs now, the ceilings in force and the attempt's own idempotency — before it writes. A successful source is never recovered (a \"faster or cheaper\" suggestion has no frozen comparator in this build), an in-flight run is never hot-swapped, and a second key while an attempt of the same diagnosis is in flight is refused by name. Repeating the same call returns the attempt that key already names instead of starting another; a pure artifact gap needs no proposal and no approval.",
+		parameters: {
+			sourceDiagnosisId: {
+				type: "string",
+				required: true,
+				description: "The recorded Diagnosis this attempt is for"
+			},
+			requestKey: {
+				type: "string",
+				required: true,
+				description: "Non-empty key of this attempt: one key names one attempt, and a repeat of it returns that attempt"
+			}
+		},
+		output: {
+			schema: { type: "string" },
+			render: (_a, v) => text$4(v)
+		},
+		execute: async (args, exec) => {
+			const caller = sessionId$3(exec);
+			try {
+				return renderOutcome$1(await ctx.evolution.coordinateRecovery({
+					sourceDiagnosisId: args.sourceDiagnosisId,
+					requestKey: args.requestKey
+				}, {
+					sessionId: caller,
+					signal: exec.signal
+				}));
+			} catch (error) {
+				return `task_recover rejected: ${error instanceof Error ? error.message : String(error)}`;
+			}
 		}
 	});
 }
@@ -5306,13 +6110,16 @@ var SingularityAgent = class extends Service {
 		ctx.plugin(HitlService);
 		this.evolution = new EvolutionService(ctx, {
 			repoRoot: REPO_ROOT,
-			modelSelection: () => deploymentModelSelection(ctx)
+			modelSelection: () => deploymentModelSelection(ctx),
+			supervisorDelegation: supervisorDelegationSource().read,
+			capabilityConfig: join(REPO_ROOT, "config.yml")
 		});
 		new EscalationService(ctx);
 		new ProposalReviewService(ctx);
 		new EvolutionExposure(ctx, evolution === "on");
 		ctx.effect(() => ctx.singularityContext.registerReviewerBindingSource(reviewerBindingSource()), "singularityAgent: reviewer binding source");
 		ctx.effect(() => installReviewAgentAutoTrigger(ctx), "singularityAgent: review agent auto trigger");
+		ctx.effect(() => installSupervisorHandoffTrigger(ctx), "singularityAgent: supervisor hand-off trigger");
 		ctx.effect(() => ctx.taskRuntime.registerRootBudgetApproval(defineRootBudgetApproval(ctx)), "singularityAgent: root budget approval");
 		ctx.tools.register(defineMarkReadyTool(ctx));
 		ctx.tools.register(defineSpawnTool(ctx));
@@ -5334,6 +6141,7 @@ var SingularityAgent = class extends Service {
 		ctx.tools.register(defineTaskVerifyTool(ctx));
 		ctx.tools.register(defineTaskReviewPackTool(ctx));
 		ctx.tools.register(defineTaskReviewAgentTool(ctx));
+		ctx.tools.register(defineTaskRecoverTool(ctx));
 		ctx.tools.register(defineTaskBudgetExtendTool(ctx));
 		ctx.tools.register(defineTaskDiagnoseTool(ctx));
 		if (evolution === "on") {

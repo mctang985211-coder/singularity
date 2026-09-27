@@ -14,14 +14,16 @@ export function defineEvolutionPrepareTool(ctx: Context) {
   return defineTool({
     name: 'evolution_prepare',
     description:
-      "Materialize a skill candidate's structured mutation into the proposal sandbox (status: prepared). What is prepared is " +
-      'the complete object the candidate improves: a guidance skill is its `SKILL.md` alone, and an execution skill is ' +
+      "Materialize a candidate's structured mutation into the proposal sandbox (status: prepared). A skill candidate is prepared " +
+      'as the complete object it improves: a guidance skill is its `SKILL.md` alone, and an execution skill is ' +
       '`SKILL.md` plus the `SKILL.contract.json` beside it, derived from the production declaration with only ' +
-      'content.skillMdSha256 recomputed — the model never submits a sidecar. One verified read of the production object ' +
+      'content.skillMdSha256 recomputed — the model never submits a sidecar. A capability candidate (A6) is prepared as its whole ' +
+      'row, plus the new execution skill that row grants when it carries one; the baseline a later apply compares against is then ' +
+      'the row the registry held. One verified read of the production target ' +
       'comes first — it yields both the champion/ snapshot and the baseline identity a later apply compares against — and a ' +
       'target that is not there, or is not the loadable object its files claim (a defective declaration, an undeclared ' +
       'file), is refused by name before any sandbox or ledger write, never prepared against nothing. A knowledge sidecar, an ' +
-      'object declaring resources and a non-skill proposal are refused by name too, and production fixes the shape: this ' +
+      'object declaring resources and a proposal of any other kind are refused by name too, and production fixes the shape: this ' +
       'path cannot add a `SKILL.contract.json` to a skill that has none, and it never changes the object\'s role. Writes go ' +
       'only to the proposal sandbox ' +
       '(<ledger root>/sandbox/<proposalId>/: `skills/<name>/SKILL.md` — plus `skills/<name>/SKILL.contract.json` for an ' +
@@ -36,9 +38,29 @@ export function defineEvolutionPrepareTool(ctx: Context) {
       try {
         const prepared = await ctx.evolution.prepare(args.proposalId, caller)
         const view = prepared.prepared!
-        // The fold admits one prepared shape: a materialized skill prepare that
-        // carries both content identities (P2/P3), so the render reads the
-        // champion and the production baseline straight off the record.
+        if (view.capabilityRow !== undefined) {
+          // The A6 arm: one capability row, plus the new execution skill when the
+          // candidate carries one. The production baseline this arm compares
+          // against is the *row* the registry held, so there is no skill
+          // baseline to read (a capability prepare records `null` there).
+          const rowBaseline = view.capabilityBaseline ?? null
+          return [
+            `proposal ${prepared.proposalId} [prepared] sandbox: ${ctx.evolution.root}/${view.sandbox}`,
+            ...view.files.map(file => `  wrote ${file}`),
+            `candidate row: ${view.capabilityRow.name} sha256:${view.capabilityRow.digest.slice(0, 12)}…`,
+            rowBaseline === null
+              ? 'registry baseline: the table held no such row, so this candidate adds it'
+              : `registry baseline: row sha256:${rowBaseline.digest.slice(0, 12)}… (an apply refuses if the registry row changed since this read)`,
+            view.skillContent === undefined
+              ? 'candidate object: the row alone — no new skill object is materialized'
+              : 'candidate object: a new execution provider (SKILL.md + SKILL.contract.json) the row grants, judged by a registered ' +
+                'verifier with resources: []',
+            'sandbox only — production was not touched; next: evolution_replay (the two-sided experiment), then evolution_gate',
+          ].join('\n')
+        }
+        // The skill arm: the fold admits one prepared shape, a materialized skill
+        // prepare that carries both content identities (P2/P3), so the render reads
+        // the champion and the production baseline straight off the record.
         const baseline = view.skillBaseline!
         return [
           `proposal ${prepared.proposalId} [prepared] sandbox: ${ctx.evolution.root}/${view.sandbox}`,

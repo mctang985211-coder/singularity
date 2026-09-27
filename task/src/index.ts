@@ -427,13 +427,33 @@ export class TaskService extends Service {
     await this.commitIn(storeId, [event('DependencyAdded', { taskId: edge.to, actor, payload: { edge } })])
   }
 
-  async startRunIn(storeId: string, run: TaskRun, actor: string): Promise<void> {
+  /**
+   * One run starts on a task that may run — a first run, or a new attempt at a
+   * task that failed (`TaskRetried`, then `TaskStarted`, in one commit).
+   *
+   * `options.manifest` records the capability manifest the run starts under for
+   * its own task, in the same commit: a recovery attempt re-resolves its rows
+   * against what the deployment holds *now* (a capability applied after the
+   * first attempt failed is part of what the new attempt is for), and the store
+   * is where the resume path rebuilds a run's authorization from. Omitted — the
+   * ordinary case — the manifest the task was admitted with stands, which is the
+   * only manifest there was.
+   */
+  async startRunIn(
+    storeId: string,
+    run: TaskRun,
+    actor: string,
+    options: { manifest?: CapabilityManifest } = {},
+  ): Promise<void> {
     const store = this.requireStore(storeId)
     await store.ready
     await store.writes
     const task = store.state.snapshot().tasks.find(item => item.taskId === run.taskId)
     const events: TaskEvent[] = []
     if (task?.status === 'failed') events.push(event('TaskRetried', { taskId: run.taskId, actor, payload: {} }))
+    if (options.manifest !== undefined) {
+      events.push(event('CapabilityResolved', { taskId: run.taskId, actor, payload: { manifest: options.manifest } }))
+    }
     events.push(event('TaskStarted', { taskId: run.taskId, runId: run.runId, sessionId: run.sessionId, actor, payload: { run } }))
     await this.commitIn(storeId, events)
   }

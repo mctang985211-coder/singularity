@@ -14,14 +14,15 @@ const text = (value: string) => [{ type: 'text' as const, text: value }]
  * not the diagnosis's (A5): a `DiagnosisProposal.targetType` is an open name,
  * and this is where a suggestion is checked before it is transcribed into a
  * proposal. What can actually be *executed* is narrower still
- * (`APPLYABLE_TARGET_TYPES` in the evolution package).
+ * (`APPLYABLE_TARGET_TYPES` in the evolution package, and the hand-off
+ * consumption in `evolution-handoff.ts`).
  */
-const TARGET_TYPES: readonly ProposalTargetType[] = [
+export const PROPOSAL_TARGET_TYPES: readonly ProposalTargetType[] = [
   'skill', 'tool', 'capability', 'task_definition', 'decomposition_policy',
   'agent_preset', 'workflow_policy', 'verifier', 'runtime_policy',
 ]
 
-const TARGET_TYPE_SET: ReadonlySet<string> = new Set<string>(TARGET_TYPES)
+const TARGET_TYPE_SET: ReadonlySet<string> = new Set<string>(PROPOSAL_TARGET_TYPES)
 
 function isProposalTargetType(value: unknown): value is ProposalTargetType {
   return typeof value === 'string' && TARGET_TYPE_SET.has(value)
@@ -55,7 +56,7 @@ export function defineEvolutionProposeTool(ctx: Context) {
         description: 'Evolution level (L1 execution adaptation / L2 capability / L3 workflow / L4 harness); every level goes through human review, with no exemption',
       },
       baseVersion: { type: 'string', required: true, description: 'Version of the target this proposal starts from' },
-      targetType: { type: 'string', enum: TARGET_TYPES, description: 'The mutation surface the proposal points at (required unless fromDiagnosis)' },
+      targetType: { type: 'string', enum: PROPOSAL_TARGET_TYPES, description: 'The mutation surface the proposal points at (required unless fromDiagnosis)' },
       targetId: { type: 'string', description: 'Name of the concrete target (required unless fromDiagnosis)' },
       rationale: { type: 'string', description: 'Why this change would address the diagnosed cause (required unless fromDiagnosis)' },
       sourceRefs: { type: 'array', items: { type: 'string' }, description: 'Sources this proposal rests on (diagnosisId / reviewRef / evidenceId)' },
@@ -101,7 +102,7 @@ export function defineEvolutionProposeTool(ctx: Context) {
           throw new Error(
             `evolution_propose: diagnosis "${diagnosis.diagnosisId}" proposal #${args.fromDiagnosis.proposalIndex} names ` +
             `targetType "${String(targetType)}", which this build cannot execute; it stays a recorded suggestion ` +
-            `(recorded target types: ${TARGET_TYPES.join(' / ')})`,
+            `(recorded target types: ${PROPOSAL_TARGET_TYPES.join(' / ')})`,
           )
         }
         sourceRefs.unshift(`diagnosis:${diagnosis.diagnosisId}`)
@@ -109,7 +110,7 @@ export function defineEvolutionProposeTool(ctx: Context) {
         throw new Error('evolution_propose: targetType, targetId and rationale are required without fromDiagnosis')
       }
       if (!isProposalTargetType(targetType)) {
-        throw new Error(`evolution_propose: targetType must be one of ${TARGET_TYPES.join(' / ')}, got "${String(targetType)}"`)
+        throw new Error(`evolution_propose: targetType must be one of ${PROPOSAL_TARGET_TYPES.join(' / ')}, got "${String(targetType)}"`)
       }
       try {
         const proposal = await ctx.evolution.propose(

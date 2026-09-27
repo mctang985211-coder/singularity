@@ -603,8 +603,8 @@ function failureReason(unmet: readonly UnmetCriterion[]): string {
   return `mandatory criteria not satisfied: ${unmet.map(item => `${item.criterionId} ${item.detail}`).join(', ')}`
 }
 
-/** One required artifact reference no store evidence satisfies yet. */
-interface MissingArtifact {
+/** One required artifact reference no store evidence satisfies yet. Exported with its readers (the spawn gate and the submission gate). */
+export interface MissingArtifact {
   criterionId: string
   ref: string
   /**
@@ -614,48 +614,6 @@ interface MissingArtifact {
    * so a reader knows what would close the gap.
    */
   requirement: 'requires' | 'accepts'
-}
-
-/**
- * The artifact references (per criterion) that no store evidence satisfies yet.
- * A reference matches an evidence id, an artifact kind, or an artifact id — the
- * three spellings a contract can name a product by. Judged at spawn time, never
- * at admission: existence needs the store snapshot.
- *
- * The two declarations differ in what "satisfied" means (P4, KISS §5.1):
- * `requiresArtifact` names a **verified reference product** — the producing run
- * must sit in the verified terminal state and its bundle must carry a passing
- * verdict, so a failed or still-running run's same-named product never closes
- * the gap — while `acceptsArtifact` names a **raw input** whose mere existence
- * in the store is the requirement.
- */
-function missingRequiredArtifacts(
-  criteria: readonly AcceptanceCriterion[],
-  snapshot: TaskSnapshot,
-): MissingArtifact[] {
-  const present = new Set<string>()
-  const verified = new Set<string>()
-  for (const item of snapshot.evidence) {
-    const run = snapshot.runs.find(candidate => candidate.runId === item.taskRunId)
-    const refs = [item.evidenceId, ...item.artifacts.flatMap(artifact => [artifact.kind, artifact.artifactId])]
-    for (const ref of refs) present.add(ref)
-    if (run?.status === 'verified' && item.verifierResults.some(result => result.status === 'pass')) {
-      for (const ref of refs) verified.add(ref)
-    }
-  }
-  return criteria.flatMap(criterion => [
-    ...(criterion.requiresArtifact ?? [])
-      .filter(ref => !verified.has(ref))
-      .map(ref => ({ criterionId: criterion.criterionId, ref, requirement: 'requires' as const })),
-    ...(criterion.acceptsArtifact ?? [])
-      .filter(ref => !present.has(ref))
-      .map(ref => ({ criterionId: criterion.criterionId, ref, requirement: 'accepts' as const })),
-  ])
-}
-
-function missingArtifactReason(missing: readonly MissingArtifact[]): string {
-  return `missing required artifacts: ${missing.map(item =>
-    `${item.ref} (criterion ${item.criterionId}${item.requirement === 'accepts' ? '; raw input, any run state' : ''})`).join(', ')}`
 }
 
 /**
@@ -703,6 +661,103 @@ async function authorizedGrant(env: OrchestrateEnv, manifest: CapabilityManifest
  */
 function skillRootsForRun(overlayRoots: readonly string[], binding: RunProviderBinding | undefined): string[] {
   return [...overlayRoots, ...(binding?.snapshotRoot === undefined ? [] : [binding.snapshotRoot])]
+}
+
+/** What one task worker's spawn needs: the session it becomes, and the content it runs against. */
+export interface TaskWorkerSpawn {
+  readonly sessionId: string
+  readonly name: string
+  /** The manifest the worker's grant is built from — the run's own resolved rows, not the task's recorded ones. */
+  readonly manifest: CapabilityManifest
+  /** The run's content binding, so the worker's skill layer registers the admitted snapshot. */
+  readonly providerBinding?: RunProviderBinding
+  readonly agentPreset?: string
+  /**
+   * The checkout the worker starts in, when it is not the parent session's own
+   * (the ordinary case: the child inherits its parent's cwd). A recovery
+   * attempt names the tree's checkout here, because its parent is the
+   * coordinator's session rather than the run it continues.
+   */
+  readonly cwd?: string
+  readonly signal?: AbortSignal
+}
+
+/**
+ * Spawn one task worker (A2 §1.2, A6 §F.4): the composition every spawn builds
+ * — the deployment's preset, the capability grant the manifest authorizes, the
+ * strictest declared permission preset, the worker policy — for a caller other
+ * than a batch round. The batch round builds the same request inline because it
+ * already holds the pieces; the recovery entry (a new root attempt's worker) is
+ * the second caller, and it must not build a composition of its own that could
+ * drift from what a batch child runs under.
+ *
+ * What it deliberately does not do: claim a workspace, write an event or decide
+ * a budget. Those belong to the caller's own order, and the admission rules
+ * that gate them are the store's. A throw here is the spawn's own failure —
+ * `env.spawn` refusing, a dangling preset, an unmountable permission, a grant
+ * whose MCP server has no env binding — and each is named.
+ */
+export async function spawnTaskWorker(env: OrchestrateEnv, request: TaskWorkerSpawn): Promise<AgentHandle> {
+  await assertPresetUsable(env, request.manifest, request.agentPreset)
+  const permissionPreset = permissionFor(env, request.manifest)
+  const grant = await authorizedGrant(env, request.manifest, skillRootsForRun([], request.providerBinding))
+  return await env.spawn({
+    sessionId: request.sessionId,
+    name: request.name,
+    taskWorker: true,
+    grant,
+    ...(request.agentPreset === undefined ? {} : { agentPreset: request.agentPreset }),
+    ...(permissionPreset === undefined ? {} : { permissionPreset }),
+    ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
+    ...(request.signal === undefined ? {} : { signal: request.signal }),
+  })
+}
+
+/**
+ * The artifact references (per criterion) that no store evidence satisfies yet.
+ * A reference matches an evidence id, an artifact kind, or an artifact id — the
+ * three spellings a contract can name a product by. Judged at spawn time, never
+ * at admission: existence needs the store snapshot.
+ *
+ * The two declarations differ in what "satisfied" means (P4, KISS §5.1):
+ * `requiresArtifact` names a **verified reference product** — the producing run
+ * must sit in the verified terminal state and its bundle must carry a passing
+ * verdict, so a failed or still-running run's same-named product never closes
+ * the gap — while `acceptsArtifact` names a **raw input** whose mere existence
+ * in the store is the requirement.
+ *
+ * Exported for the second reader (A6 §F.4): a root hands its own result in only
+ * when its contract's declared references are satisfied, and the same
+ * derivation — not a second, weaker one — answers that.
+ */
+export function missingRequiredArtifacts(
+  criteria: readonly AcceptanceCriterion[],
+  snapshot: TaskSnapshot,
+): MissingArtifact[] {
+  const present = new Set<string>()
+  const verified = new Set<string>()
+  for (const item of snapshot.evidence) {
+    const run = snapshot.runs.find(candidate => candidate.runId === item.taskRunId)
+    const refs = [item.evidenceId, ...item.artifacts.flatMap(artifact => [artifact.kind, artifact.artifactId])]
+    for (const ref of refs) present.add(ref)
+    if (run?.status === 'verified' && item.verifierResults.some(result => result.status === 'pass')) {
+      for (const ref of refs) verified.add(ref)
+    }
+  }
+  return criteria.flatMap(criterion => [
+    ...(criterion.requiresArtifact ?? [])
+      .filter(ref => !verified.has(ref))
+      .map(ref => ({ criterionId: criterion.criterionId, ref, requirement: 'requires' as const })),
+    ...(criterion.acceptsArtifact ?? [])
+      .filter(ref => !present.has(ref))
+      .map(ref => ({ criterionId: criterion.criterionId, ref, requirement: 'accepts' as const })),
+  ])
+}
+
+/** The one-line reason a set of missing references carries, shared by the spawn gate and the submission gate. */
+export function missingArtifactReason(missing: readonly MissingArtifact[]): string {
+  return `missing required artifacts: ${missing.map(item =>
+    `${item.ref} (criterion ${item.criterionId}${item.requirement === 'accepts' ? '; raw input, any run state' : ''})`).join(', ')}`
 }
 
 /**

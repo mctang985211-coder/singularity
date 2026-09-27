@@ -6,8 +6,10 @@ import type {} from '@dangosys/dsh-singularity-graphs'
 import type {} from '@dangosys/dsh-singularity-task'
 import type { Diagnosis, ReviewDimensions, ReviewMetrics, ReviewRecord, TaskId, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
-import { readReviewAgentAttempts } from '../review-agent-ledger.ts'
+import { countReviewAgentRuns, readReviewAgentAttempts, reviewAgentBudget } from '../review-agent-ledger.ts'
 import type { ReviewAgentAttempt, ReviewAgentSource } from '../review-agent-ledger.ts'
+import { evolutionEnabled, handoffStateLine } from '../handoff-rules.ts'
+import type { HandoffFacts } from '../handoff-rules.ts'
 import { renderJudgementDimensions } from './review-escalation.ts'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
@@ -38,15 +40,19 @@ function latestReview(snapshot: TaskSnapshot, taskId: TaskId): ReviewRecord | un
 }
 
 /**
- * The ledger state of one source: every attempt the store holds for it, in the
- * order they were claimed — the default attempt (`null` key) and each explicit
- * one — with how each ended. This is what a reader checks before asking for a
- * review: an attempt that is still open is the one a new call would return
+ * The ledger state of one source: every **review** attempt the store holds for
+ * it, in the order they were claimed — the default attempt (`null` key) and each
+ * explicit one — with how each ended. This is what a reader checks before asking
+ * for a review: an attempt that is still open is the one a new call would return
  * instead of starting another, and a new review of an already-reviewed source
  * needs an explicit `requestKey`.
+ *
+ * Supervisor rows carry a source too (the hand-off's), so they are filtered out
+ * here: they are not review attempts of this source, and what a reader of a pack
+ * learns about a hand-off comes from the diagnosis line below.
  */
 function renderAttempts(attempts: readonly ReviewAgentAttempt[], source: ReviewAgentSource): string[] {
-  const mine = attempts.filter(attempt => attempt.source.taskId === source.taskId && attempt.source.runId === source.runId)
+  const mine = attempts.filter(attempt => attempt.role === 'reviewer' && attempt.source.taskId === source.taskId && attempt.source.runId === source.runId)
   if (mine.length === 0) {
     return ['review attempts (0): none — no review agent has been started for this source']
   }
@@ -177,32 +183,30 @@ function renderReview(review: ReviewRecord): string[] {
 }
 
 /**
- * How far one diagnosis's suggestions have been taken up (A5 §3, plan F.3): a
- * diagnosis that carries **proposals** is the A6 handoff candidate, and no A6
- * candidate loop is assembled in this build — so the pack reports it as
- * **pending**: recorded, addressed to nobody yet, and not an open candidate.
+ * How far one diagnosis's suggestions have been taken up (A5 §3, plan F.4): a
+ * diagnosis that carries **proposals** is the A6 hand-off, and this line reports
+ * what the deployment really did with it — the supervisor it was delegated to,
+ * the coordinator being started right now, or the named reason nothing was opened
+ * (the evolution chain off, a suggestion this build has no executor for, the
+ * store's allowance spent, or nothing having asked yet).
  *
- * The mark follows from the record alone, which is why it is written here and
- * not derived from a switch: nothing in this build consumes a handoff, so
- * there is no second state to report. A conclusion *without* proposals is not a
- * handoff and gets no mark (a normal completion stays a conclusion), and an
- * interrupted attempt has no diagnosis at all, so it can never reach this line.
- * When an A6 consumer is assembled, this is the line it replaces with what it
- * really did with the candidate.
+ * The answer is `handoffStateLine` (over `handoffDecision`) — the very function
+ * the consumption entry acts on — so the pack cannot drift from what a consumer
+ * would do. A conclusion
+ * *without* proposals is not a hand-off and gets no mark (a normal completion
+ * stays a conclusion), and an interrupted attempt has no diagnosis at all, so it
+ * can never reach this line.
  */
-function handoffMark(diagnosis: Diagnosis): string | undefined {
-  if (diagnosis.proposals.length === 0) return undefined
-  return 'pending — this diagnosis carries suggestions and no A6 candidate loop is enabled in this build: ' +
-    'nothing has been opened for it, and reading it here takes nothing up'
+function handoffMark(diagnosis: Diagnosis, handoff: HandoffFacts): string | undefined {
+  return handoffStateLine({
+    enabled: handoff.enabled,
+    diagnosis,
+    attempts: handoff.attempts,
+    budget: handoff.budget,
+  })
 }
 
-/**
- * One diagnosis, with its agent judgements kept visually apart from the
- * mechanical facts above: the facts say what was observed, a judgement says
- * what an agent concluded, and the header names the session so the two are
- * never read as one table.
- */
-function renderDiagnosis(diagnosis: Diagnosis): string[] {
+function renderDiagnosis(diagnosis: Diagnosis, handoff: HandoffFacts): string[] {
   const producer = diagnosis.producedBy === undefined
     ? ''
     : diagnosis.producedBy.kind === 'agent' && diagnosis.producedBy.sessionId !== undefined
@@ -219,8 +223,8 @@ function renderDiagnosis(diagnosis: Diagnosis): string[] {
     }
   }
   for (const proposal of diagnosis.proposals) lines.push(`  proposal ${proposal.targetType} ${proposal.targetId}: ${proposal.rationale}`)
-  const handoff = handoffMark(diagnosis)
-  if (handoff !== undefined) lines.push(`  handoff: ${handoff}`)
+  const handoffText = handoffMark(diagnosis, handoff)
+  if (handoffText !== undefined) lines.push(`  handoff: ${handoffText}`)
   return lines
 }
 
@@ -263,8 +267,10 @@ export interface ReviewPackInput {
   readonly snapshot: TaskSnapshot
   /** The review source the pack is for: the task and its run, or the no-run case. */
   readonly source: ReviewAgentSource
-  /** The store's review attempts, as the ledger holds them (`readReviewAgentAttempts`). */
+  /** The store's coordination attempts, as the ledger holds them (`readReviewAgentAttempts`). */
   readonly attempts: readonly ReviewAgentAttempt[]
+  /** What this deployment would do with each diagnosis's hand-off (A6). */
+  readonly handoff: HandoffFacts
 }
 
 /**
@@ -282,7 +288,7 @@ export interface ReviewPackInput {
  * @throws when the source's task is not in the snapshot.
  */
 export function buildReviewPack(input: ReviewPackInput): string {
-  const { snapshot, source, attempts } = input
+  const { snapshot, source, attempts, handoff } = input
   const { taskId } = source
   const task = snapshot.tasks.find(item => item.taskId === taskId)
   if (task === undefined) throw new Error(`task_review_pack: unknown task "${taskId}"`)
@@ -313,7 +319,7 @@ export function buildReviewPack(input: ReviewPackInput): string {
     lines.push(`- ${child.taskId} [${child.status}]: ${reviewSummary(snapshot, child.taskId)}`)
   }
   lines.push(`diagnoses (${diagnoses.length}):`)
-  for (const diagnosis of diagnoses) lines.push(...renderDiagnosis(diagnosis))
+  for (const diagnosis of diagnoses) lines.push(...renderDiagnosis(diagnosis, handoff))
   return lines.join('\n')
 }
 
@@ -326,8 +332,9 @@ export function defineTaskReviewPackTool(ctx: Context) {
       'itself, all its review records in full (criteria, log tail, blockers, the session each review came from), the ' +
       'review attempts the ledger holds for this source and how each ended, the dimensions whose conclusion the ' +
       'fact table does not carry, one-line review summaries of its children and parent, the dependency edges touching ' +
-      'it, and its diagnoses with any agent judgements — each diagnosis that carries suggestions marked as a handoff ' +
-      'nothing has taken up yet. It reports the facts only: whether a review agent runs is ' +
+      'it, and its diagnoses with any agent judgements — each diagnosis that carries suggestions marked with its ' +
+      'hand-off state (the supervisor it was delegated to, the coordinator being started, or the named reason nothing ' +
+      'was opened: the chain off, an unsupported target, or the allowance spent). It reports the facts only: whether a review agent runs is ' +
       'decided elsewhere (a failed review is accepted on its own; an explicit call names its source). ' +
       'Local evidence plus parent/children summaries — no ancestry replay (guide §2.7.5). Feed this to task_diagnose, or ' +
       'to task_review_agent when a judgement is needed.',
@@ -355,7 +362,16 @@ export function defineTaskReviewPackTool(ctx: Context) {
         return `task_review_pack: no review record for source ${reviewRef(source)} in store ${storeId}; nothing to pack`
       }
       const attempts = await readReviewAgentAttempts(storeId)
-      return buildReviewPack({ snapshot, source, attempts })
+      return buildReviewPack({
+        snapshot,
+        source,
+        attempts,
+        handoff: {
+          enabled: evolutionEnabled(ctx),
+          attempts,
+          budget: { used: await countReviewAgentRuns(storeId), max: reviewAgentBudget() },
+        },
+      })
     },
   })
 }

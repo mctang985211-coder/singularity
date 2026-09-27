@@ -498,7 +498,7 @@ export async function recordPromotionExperiment(
         kind: 'experiment_sample',
         proposalId,
         experimentId,
-        preparedContentDigest: preparedContentDigestOf(candidate),
+        preparedContentDigest: preparedContentDigestOf({ candidate }),
         sampleTaskId: sample.taskId,
         side,
         repetition: 0,

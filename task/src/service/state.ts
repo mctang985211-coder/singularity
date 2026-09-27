@@ -54,6 +54,7 @@ import type {
   ReviewRecord,
   RunId,
   RunProviderBinding,
+  RunRecovery,
   RunStatus,
   SubmissionRecord,
   TaskEvent,
@@ -606,11 +607,123 @@ export class TaskState {
     if (run.status !== 'running') throw new Error(`task: run "${run.runId}" must start in status "running"`)
     if (typeof run.sessionId !== 'string' || run.sessionId.length === 0) throw new Error(`task: run "${run.runId}" session id must be non-empty`)
     if (run.providerBinding !== undefined) this.assertProviderBinding(run.runId, run.providerBinding)
+    if (run.recovery !== undefined) this.assertRunRecovery(taskId, run.recovery)
     this.assertBirthPhase(run)
     if (run.parentRunId !== undefined) this.run(run.parentRunId)
     this.assertTransition(taskId, ['admitted', 'ready'], 'running')
     this.value = { ...this.value, runs: [...this.value.runs, copy(run)] }
     this.updateTask(taskId, { status: 'running', runIds: [...this.task(taskId).runIds, run.runId] })
+  }
+
+  /**
+   * The recovery attempt a run carries (A6, plan §F.4), judged by the reducer as
+   * the last gate — the entry re-checks the same facts against policy (the
+   * source's failure, the diagnosis, the limits, the capability rows), and this
+   * accepts only a record the *store* can hold: a root task's own new attempt,
+   * whose cited diagnosis this store already holds for that task, whose pinned
+   * siblings are its own verified children with the evidence they claim, and
+   * whose positions are the run's leading ones.
+   *
+   * Why the store re-checks what the entry already did: a run record is written
+   * by whoever calls `startRunIn`, and a record that *reads* as a reuse of
+   * evidence that does not exist would be believed by every later reader (the
+   * composite judge reads exactly this). The rules here are the ones the store's
+   * own snapshot can answer; the ones that need policy (was the source failing,
+   * was the capability applied, is a ceiling in the way) stay at the entry.
+   */
+  private assertRunRecovery(taskId: TaskId, recovery: RunRecovery): void {
+    const where = `task: run recovery of "${taskId}"`
+    for (const [name, value] of [['source diagnosis id', recovery.sourceDiagnosisId], ['request key', recovery.requestKey], ['requested at', recovery.requestedAt]] as const) {
+      if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`${where} requires a non-empty ${name}`)
+    }
+    if (recovery.sourceRunId !== undefined && (typeof recovery.sourceRunId !== 'string' || recovery.sourceRunId.length === 0)) {
+      throw new Error(`${where} source run id must be a non-empty string when present`)
+    }
+    const task = this.task(taskId)
+    if (task.parentTaskId !== undefined) {
+      throw new Error(`${where} names task "${taskId}", which has a parent; a recovery attempt is opened for the store's own root task`)
+    }
+    if (!this.value.diagnoses.some(diagnosis => diagnosis.diagnosisId === recovery.sourceDiagnosisId && diagnosis.taskId === taskId)) {
+      throw new Error(
+        `${where} cites diagnosis "${recovery.sourceDiagnosisId}", which this store holds no record of for task "${taskId}"; ` +
+        'a recovery is asked for by a diagnosis of the failing task and by nothing else',
+      )
+    }
+    if (recovery.sourceRunId !== undefined) {
+      const source = this.value.runs.find(run => run.runId === recovery.sourceRunId)
+      if (source === undefined) throw new Error(`${where} cites unknown run "${recovery.sourceRunId}"`)
+      if (source.taskId !== taskId) {
+        throw new Error(`${where} cites run "${recovery.sourceRunId}", which belongs to task "${source.taskId}", not "${taskId}"`)
+      }
+    }
+    const reused = recovery.reusedMembers
+    if (!Array.isArray(reused)) throw new Error(`${where} reused members must be an array`)
+    reused.forEach((member, position) => {
+      const at = `${where} reused member ${position}`
+      if (!isRecord(member)) throw new Error(`${at} must be an object`)
+      if (member.childIndex !== position) {
+        throw new Error(
+          `${at} declares childIndex ${JSON.stringify(member.childIndex)}; a reused member occupies its own position in the sequence ` +
+          `(${position}), because the store reads the pinned siblings first and the admitted members after them`,
+        )
+      }
+      const sibling = this.value.tasks.find(candidate => candidate.taskId === member.taskId)
+      if (sibling === undefined) throw new Error(`${at} cites unknown task "${String(member.taskId)}"`)
+      if (sibling.parentTaskId !== taskId) {
+        throw new Error(`${at} cites task "${sibling.taskId}", which is not a child of "${taskId}"; only a sibling of the failed attempt can be reused`)
+      }
+      if (sibling.status !== 'verified') {
+        throw new Error(`${at} cites task "${sibling.taskId}", which is ${sibling.status}, not verified; only evidence of a passed sibling is reusable`)
+      }
+      const source = this.value.runs.find(run => run.runId === member.sourceRunId)
+      if (source === undefined) throw new Error(`${at} cites unknown run "${String(member.sourceRunId)}"`)
+      if (source.taskId !== sibling.taskId) {
+        throw new Error(`${at} cites run "${source.runId}", which belongs to task "${source.taskId}", not "${sibling.taskId}"`)
+      }
+      if (source.status !== 'verified') {
+        throw new Error(`${at} cites run "${source.runId}", which is ${source.status}; a reused member reads the evidence of a verified run`)
+      }
+      const bundle = this.value.evidence.find(item => item.evidenceId === member.evidenceId)
+      if (bundle === undefined) throw new Error(`${at} cites unknown evidence "${String(member.evidenceId)}"`)
+      if (bundle.taskRunId !== source.runId || bundle.taskId !== sibling.taskId) {
+        throw new Error(
+          `${at} cites evidence "${bundle.evidenceId}", which belongs to task "${bundle.taskId}"/run "${bundle.taskRunId}", ` +
+          `not to "${sibling.taskId}"/"${source.runId}"`,
+        )
+      }
+      const named = new Set(bundle.artifacts.flatMap(artifact => [artifact.artifactId, artifact.kind]))
+      for (const reference of member.artifactRefs ?? []) {
+        if (!named.has(reference)) {
+          throw new Error(`${at} cites artifact "${String(reference)}", which the evidence "${bundle.evidenceId}" does not hold (by artifact id or kind)`)
+        }
+      }
+      if (member.criterionId !== undefined) {
+        const criterion = sibling.acceptanceCriteria.find(item => item.criterionId === member.criterionId)
+        if (criterion === undefined) {
+          throw new Error(`${at} names criterion "${member.criterionId}", which the sibling "${sibling.taskId}" does not declare`)
+        }
+        const verdict = bundle.verifierResults.find(item => item.criterionId === member.criterionId)
+        if (verdict?.status !== 'pass') {
+          throw new Error(
+            `${at} names criterion "${member.criterionId}" of sibling "${sibling.taskId}", whose verified evidence carries ` +
+            `${verdict === undefined ? 'no verdict' : `a "${verdict.status}" verdict`}; only a passing verdict is reusable`,
+          )
+        }
+      }
+      const declaredInputs = new Set(sibling.acceptanceCriteria.flatMap(criterion => [
+        ...(criterion.requiresArtifact ?? []),
+        ...(criterion.acceptsArtifact ?? []),
+        ...(criterion.protectedInputs ?? []).map(input => input.path),
+      ]))
+      for (const reference of member.inputRefs ?? []) {
+        if (!declaredInputs.has(reference)) {
+          throw new Error(
+            `${at} cites input "${String(reference)}", which the sibling "${sibling.taskId}" does not declare ` +
+            '(requiresArtifact, acceptsArtifact or protectedInputs)',
+          )
+        }
+      }
+    })
   }
 
   private block(taskId: TaskId, runId: RunId | undefined): void {

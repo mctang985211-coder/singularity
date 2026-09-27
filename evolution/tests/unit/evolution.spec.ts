@@ -612,19 +612,40 @@ describe('evolution tools', () => {
     expect((await svc.get('s1')).status).toBe('prepared')
   })
 
-  it('evolution_candidate refuses a non-skill proposal by name, recording nothing', async () => {
+  it('evolution_candidate refuses a mutation of the shape this build does not write, recording nothing', async () => {
     const svc = await service()
     const { ctx } = toolCtx(svc)
     await defineEvolutionProposeTool(ctx).execute({ ...proposal }, exec('root-1'))
     const before = await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')
-    const refused = (await defineEvolutionCandidateTool(ctx).execute(
+    // The model surface names the two candidate mutations this build admits — a
+    // same-name skill replacement ({ name, content }) and a whole capability row
+    // ({ rows, skill? }) — so the old bookkeeping mutation matches neither branch
+    // and is refused at the call, before the ledger is reached.
+    await expect(defineEvolutionCandidateTool(ctx).execute(
       { proposalId: 'p1', versionSet: VERSION_SET, mutation: { baseVersion: 'v3', definition: { objective: 'x' } } },
       exec('root-1'),
-    )) as string
-    expect(refused).toContain('evolution_candidate rejected:')
-    expect(refused).toContain('cannot become a candidate in this build')
+    )).rejects.toThrow(/mutation.*must match exactly one oneOf branch/)
     expect(await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')).toBe(before)
     expect((await svc.get('p1')).status).toBe('proposed')
+  })
+
+  it('evolution_candidate takes a capability mutation of the one-whole-row shape through the model surface', async () => {
+    const svc = await service()
+    const { ctx } = toolCtx(svc)
+    await defineEvolutionProposeTool(ctx).execute({ ...capabilityProposal }, exec('root-1'))
+    const accepted = (await defineEvolutionCandidateTool(ctx).execute(
+      {
+        proposalId: 'c1',
+        versionSet: { capabilityTable: 'config.yml#doc1' },
+        mutation: { rows: { research: { skills: ['verify'], tools: ['filesystem'] } } },
+      },
+      exec('root-1'),
+    )) as string
+    expect(accepted).toContain('[candidate]')
+    expect(accepted).toContain('evolution_prepare')
+    const stored = await svc.get('c1')
+    expect(stored.status).toBe('candidate')
+    expect(stored.mutation).toEqual({ rows: { research: { skills: ['verify'], tools: ['filesystem'] } } })
   })
 
   it('evolution_gate rejects evidence refs unknown to the task store and the disk', async () => {
@@ -828,12 +849,12 @@ describe('EvolutionService mutation schemas', () => {
  * targetType as a suggestion, but a recorded suggestion never becomes a
  * candidate: the first durable write is refused by name, so no non-skill
  * proposal reaches a sandbox, an experiment or a promotion in this build
- * (§F.2; A6 introduces the capability evaluation). Non-skill proposals stay
+ * (§F.2; A6 adds the capability lifecycle beside it, with its own rules and its
+ * own gate — `capability-candidate.spec.ts`). Every other proposal stays
  * `proposed` forever, which is the expected end state.
  */
-describe('EvolutionService candidate admission is skill-only (S4-E 收尾)', () => {
+describe('EvolutionService candidate admission (S4-E 收尾, A6)', () => {
   it.each([
-    ['capability', capabilityProposal, capabilityMutation],
     ['agent_preset', presetProposal, { presetId: 'bb-verify', files: [{ path: 'preset.yml', content: 'x' }] }],
     ['task_definition', proposal, { baseVersion: 'v3', definition: { objective: 'new' } }],
   ] as const)('refuses a %s candidate by name, before the first ledger write', async (targetType, input, mutation) => {
@@ -1592,7 +1613,7 @@ describe('evolution_replay tool', () => {
     expect(replayTask).not.toHaveBeenCalled()
   })
 
-  it('refuses a non-skill proposal by name: no run, no sandbox and no ledger write', async () => {
+  it('refuses a capability proposal that was never prepared: no run, no sandbox and no ledger write', async () => {
     const svc = await service()
     const replayTask = vi.fn(async () => ({ ...replayOutcome }))
     const { ctx } = replayToolCtx(svc, replayTask)
@@ -1600,12 +1621,16 @@ describe('evolution_replay tool', () => {
     await defineEvolutionProposeTool(ctx).execute({ ...capabilityProposal }, exec('root-1'))
     const before = await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')
 
-    const refused = (await tool.execute({ proposalId: 'c1', taskIds: ['t-champ'] }, exec('root-1'))) as string
+    // A capability candidate is evaluable here since A6 — and only once it is
+    // prepared, because the two-sided experiment mounts the row and the new skill
+    // prepare froze. An unprepared proposal never reaches a run.
+    const refused = (await tool.execute({ proposalId: 'c1', taskIds: ['t-champ'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))) as string
     expect(refused).toContain('evolution_replay rejected:')
-    expect(refused).toContain('"capability"')
-    expect(refused).toMatch(/prepared skill object candidate only/)
-    // A refused call runs nothing and writes nothing: the tool is the model's
-    // entry, so a target type with no evaluator must not reach the experiment.
+    // The capability target type is no longer what this tool refuses: what it
+    // refuses here is the sample derivation, which happens before anything is
+    // read from the ledger — the fixture store holds no failed case to reproduce.
+    expect(refused).toMatch(/none of taskIds has a failed latest review/)
+    expect(refused).not.toMatch(/prepared skill object candidate only/)
     expect(replayTask).not.toHaveBeenCalled()
     expect(existsSync(join(svc.root, 'sandbox'))).toBe(false)
     expect(await readFile(join(svc.root, 'proposals.jsonl'), 'utf8')).toBe(before)
@@ -2212,12 +2237,13 @@ describe('EvolutionService apply/rollback production writes', () => {
 
   it('refuses a hand-written lifecycle of another target type at its first line', async () => {
     const { svc, root } = await serviceWithProduction()
-    // The fold admits exactly what the current entries write: a skill
-    // candidate and nothing else. A hand-written capability lifecycle — the
-    // shape a ledger written before this build holds, with the bookkeeping
+    // The fold admits exactly what the current entries write: a skill candidate
+    // or a capability candidate, each in the shape its own lifecycle records. A
+    // hand-written capability lifecycle of the shape a ledger written before
+    // this build holds — the old `{ name, entry }` mutation and the bookkeeping
     // prepare that shape carried — is refused at load, at the candidate line,
-    // before anything is read from it. No live entry can produce it: this
-    // build's `candidate` admits a skill candidate only.
+    // before anything is read from it: no live entry can produce it, since this
+    // build's `candidate` admits the one-whole-row shape only.
     await svc.propose(capabilityProposal, 'root-1')
     await appendFile(
       join(root, 'proposals.jsonl'),
@@ -2231,11 +2257,11 @@ describe('EvolutionService apply/rollback production writes', () => {
     )
     const verbatim = await readFile(join(root, 'proposals.jsonl'), 'utf8')
     const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root })
-    await expect(reopened.list()).rejects.toThrow('targets "capability"')
-    await expect(reopened.get('c1')).rejects.toThrow('targets "capability"')
+    await expect(reopened.list()).rejects.toThrow('capability-row-invalid')
+    await expect(reopened.get('c1')).rejects.toThrow('capability-row-invalid')
     // Nothing was read out of it and nothing was written beside it: the refused
     // file keeps its bytes, and the state machine is never reached.
-    await expect(reopened.rollback('c1', 'root-1', 'approval:call-2')).rejects.toThrow('targets "capability"')
+    await expect(reopened.rollback('c1', 'root-1', 'approval:call-2')).rejects.toThrow('capability-row-invalid')
     expect(await readFile(join(root, 'proposals.jsonl'), 'utf8')).toBe(verbatim)
   })
 })
@@ -3192,38 +3218,37 @@ function skillCandidateDirectory(root: string, proposalId = 's1', name = 'verify
 }
 
 /**
- * The capability promotion path this describe used to exercise is gone: this
- * build's evaluator is the two-sided experiment for a single-file skill
- * replacement, so a capability row has no evaluator and its PROMOTE is refused
- * by name (§F.2 EVAL-4). What used to be the promotion-time provider check for a
- * replaced row lives on where it still has real consumers — `TaskRuntime`'s
- * registry mirror (`applyCapabilityRow`) and the admission pre-check — and is
- * covered by `task-runtime/tests/unit/capability.spec.ts` and
- * `tests/integration/provider-promotion.spec.ts`.
+ * The capability lifecycle a ledger written before this build holds — the old
+ * `{ name, entry }` mutation with the bookkeeping prepare that shape carried —
+ * is refused at the fold, at its candidate line: this build's capability
+ * candidate is one whole row plus an optional new execution skill
+ * (`capability-candidate.spec.ts`), so the old shape is a mutation no live entry
+ * writes and no fold admits. The refusal reaches the tools the same way, and
+ * nothing is read out of the file to decide it.
  */
-describe('capability promotion has no evaluator (EVAL-4)', () => {
+describe('a capability lifecycle written in the old shape is refused at the fold', () => {
   it('refuses a hand-written gated capability lifecycle at the entry, writing nothing', async () => {
     const { svc, configFile } = await serviceWithProduction()
     const before = await readFile(configFile, 'utf8')
     await capabilityGatedLedger(svc, 'c2')
     const forged = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root: svc.root, skillRoot: svc.skillRoot })
 
-    // The fold admits what the live entries write, and this build's `candidate`
-    // admits a skill candidate only: a capability lifecycle cannot be folded
-    // from a file either, so no `gated` capability proposal exists to decide.
-    await expect(forged.list()).rejects.toThrow('targets "capability"')
-    await expect(forged.get('c2')).rejects.toThrow('targets "capability"')
-    await expect(forged.decide('c2', 'PROMOTE', 'root-1', 'approval:call-0')).rejects.toThrow('targets "capability"')
+    // The fold admits what the live entries write: a capability lifecycle in a
+    // shape no live entry produces cannot be folded from a file either, so no
+    // `gated` capability proposal exists to decide.
+    await expect(forged.list()).rejects.toThrow('capability-row-invalid')
+    await expect(forged.get('c2')).rejects.toThrow('capability-row-invalid')
+    await expect(forged.decide('c2', 'PROMOTE', 'root-1', 'approval:call-0')).rejects.toThrow('capability-row-invalid')
 
     // Through the tools the same refusal reaches the caller, still without a
     // human being asked for a proposal that cannot be promoted.
     const { ctx, approval } = toolCtx(forged)
     const viaDecideTool = (await defineEvolutionDecideTool(ctx).execute({ proposalId: 'c2', decision: 'PROMOTE' }, exec('root-1'))) as string
     expect(viaDecideTool).toContain('evolution_decide rejected:')
-    expect(viaDecideTool).toContain('targets "capability"')
+    expect(viaDecideTool).toContain('capability-row-invalid')
     const viaApplyTool = (await defineEvolutionApplyTool(ctx).execute({ proposalId: 'c2' }, exec('root-1'))) as string
     expect(viaApplyTool).toContain('evolution_apply rejected:')
-    expect(viaApplyTool).toContain('targets "capability"')
+    expect(viaApplyTool).toContain('capability-row-invalid')
     expect(approval.request).not.toHaveBeenCalled()
 
     // Nothing was read out of the refused file and config.yml is byte-identical
@@ -3248,13 +3273,13 @@ describe('capability promotion has no evaluator (EVAL-4)', () => {
     const before = await readFile(configFile, 'utf8')
     const reopened = reopenLike(svc, { modelSelection: () => FIXTURE_SELECTION, root: svc.root, skillRoot: svc.skillRoot })
 
-    await expect(reopened.list()).rejects.toThrow('targets "capability"')
-    await expect(reopened.get('c2')).rejects.toThrow('targets "capability"')
-    await expect(reopened.apply('c2', 'root-1', 'approval:call-1')).rejects.toThrow('targets "capability"')
+    await expect(reopened.list()).rejects.toThrow('capability-row-invalid')
+    await expect(reopened.get('c2')).rejects.toThrow('capability-row-invalid')
+    await expect(reopened.apply('c2', 'root-1', 'approval:call-1')).rejects.toThrow('capability-row-invalid')
     const { ctx, approval } = toolCtx(reopened)
     const viaApplyTool = (await defineEvolutionApplyTool(ctx).execute({ proposalId: 'c2' }, exec('root-1'))) as string
     expect(viaApplyTool).toContain('evolution_apply rejected:')
-    expect(viaApplyTool).toContain('targets "capability"')
+    expect(viaApplyTool).toContain('capability-row-invalid')
     expect(approval.request).not.toHaveBeenCalled()
     expect(await readFile(configFile, 'utf8')).toBe(before)
   })

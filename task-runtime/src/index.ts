@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -30,7 +30,9 @@ import type {
   ReviewTokenUsage,
   RootProposalIdentity,
   RunId,
+  RunMemberReuse,
   RunProviderBinding,
+  RunRecovery,
   RunStatus,
   SubmissionRecord,
   TaskBudgetExtension,
@@ -59,6 +61,7 @@ import {
   batchIdFor,
   budgetExtensionRequestDigest,
   canonicalBudgetInstant,
+  canonicalize,
   describeBudgetExtension,
   blockingQuestionsOf,
   contractDigest,
@@ -93,9 +96,12 @@ import {
   deriveChildOutcomes,
   driveBatch,
   owedBatchResults,
+  missingArtifactReason,
+  missingRequiredArtifacts,
   resumeAdoptedWorker,
   runReplayTask,
   settleRunFromRuntime,
+  spawnTaskWorker,
   settleSubmittedRun,
   VerifierUnavailableError,
   escalationHint,
@@ -106,6 +112,7 @@ import {
   type BatchResultMessage,
   type BudgetConfig,
   type ChildOutcome,
+  type MissingArtifact,
   type OrchestrateEnv,
   type ReplayOverlay,
   type ReplayRunOutcome,
@@ -131,6 +138,16 @@ import {
   type QuestionCoordinationDeps,
   type QuestionReconcileReport,
 } from './question.ts'
+import {
+  inFlightRecoveryAttempt,
+  recoveryAttemptDigest,
+  recoveryAttemptWithKey,
+  recoveryRequestDefects,
+  requestAttemptDigest,
+  reuseDefects,
+  storedReuse,
+} from './recovery.ts'
+import type { ReuseContext, RootRecoveryRequest, RootRecoveryReuse } from './recovery.ts'
 import { WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, describeOwner, normalizeWorkspacePath, releaseLayer } from './workspace.ts'
 import { drainSession } from './gate.ts'
 import type { WorkspaceOwner } from './workspace.ts'
@@ -242,10 +259,27 @@ export {
   SKILL_SIDECAR_FILE,
   serializeSkillSidecar,
   sidecarWithSkillMd,
+  skillContractDefects,
   skillContractDigest,
   skillContentDigest,
 } from './skill-contract.ts'
+export type { SkillContractDefect, SkillContractDefectCode } from './skill-contract.ts'
 export type { VerifiedWalk } from './verified-read.ts'
+export type {
+  ReuseContext,
+  RootRecoveryReuse,
+  RootRecoveryRequest,
+} from './recovery.ts'
+export {
+  inFlightRecoveryAttempt,
+  recoveryAttemptDigest,
+  recoveryAttemptsOf,
+  recoveryAttemptWithKey,
+  recoveryRequestDefects,
+  requestAttemptDigest,
+  reuseDefects,
+  storedReuse,
+} from './recovery.ts'
 export { readVerifiedFile, walkVerified } from './verified-read.ts'
 export type {
   RunBindingRead,
@@ -1596,6 +1630,44 @@ function ceilingsOf(budget: ResolvedRootBudget): RootBudgetCeilings {
   }
 }
 
+/**
+ * The caller of one recovery attempt: the host composition layer's coordination
+ * session (plan §F.4 — the tool adapter and evolution's coordinator call this
+ * entry; the entry is never itself a model tool). The session must have a live
+ * agent, because the new attempt's Session is spawned from it — the same
+ * parentage a batch child's spawn has — and a caller without one is refused
+ * before anything is written.
+ */
+export interface RootRecoveryCaller {
+  readonly sessionId: string
+  readonly signal?: AbortSignal
+}
+
+/**
+ * What one recovery call answers (plan §F.4): the attempt — the new root run and
+ * its Session — whether this call opened it or the key already named it, and the
+ * siblings it reads instead of re-running.
+ *
+ * `status` is the attempt run's own status as the store holds it when the call
+ * answers: `running` for an attempt this call opened and spawned, and whatever
+ * it settled as when the same key is asked again (the record answers; nothing is
+ * rewritten).
+ */
+export interface RootRecoveryOutcome {
+  /** `started` — this call opened the attempt; `existing` — the key already named it and nothing was written. */
+  readonly attempt: 'started' | 'existing'
+  readonly storeId: string
+  readonly sourceTaskId: TaskId
+  readonly sourceDiagnosisId: string
+  readonly requestKey: string
+  readonly runId: RunId
+  readonly sessionId: string
+  readonly status: RunStatus
+  /** The verified siblings the attempt reads at its leading positions, in position order. */
+  readonly reusedMembers: readonly RunMemberReuse[]
+  readonly detail: string
+}
+
 export class TaskRuntime extends Service {
   static inject = ['task', 'agentRuntime', 'graphs']
   static Config: z<Config> = ConfigSchema
@@ -1995,15 +2067,31 @@ export class TaskRuntime extends Service {
    * (guide §2.4, S1-C item 3). A removal needs no such check: it grants
    * nothing, and refusing a rollback would strand a deployment on a row it is
    * trying to undo.
+   *
+   * `options.commitTargets` is for the one caller that is itself the commit
+   * installing the row (A6): a capability commit writes a **new** skill's files
+   * and then registers the row that grants them, while its own `commit_intent`
+   * is still open — and the pre-check above refuses any provider whose directory
+   * an open intent touches, which would be the very provider this call is
+   * registering. The caller therefore names its own in-flight file set, and only
+   * the directories those targets live in are exempt from that one refusal:
+   * every *other* open intent still refuses the row by name, and the row is
+   * still judged by the whole admission pre-check, so a caller that named a
+   * foreign target would only weaken its own gate. A production deployment never
+   * passes it.
    */
-  async applyCapabilityRow(name: string, entry: CapabilityConfig | null): Promise<void> {
+  async applyCapabilityRow(
+    name: string,
+    entry: CapabilityConfig | null,
+    options: { commitTargets?: readonly string[] } = {},
+  ): Promise<void> {
     if (entry === null) {
       const rest = { ...this.config.capabilities }
       delete rest[name]
       this.config.capabilities = rest
       return
     }
-    await this.assertReplacementRow(name, entry)
+    await this.assertReplacementRow(name, entry, options)
     this.config.capabilities = { ...this.config.capabilities, [name]: structuredClone(entry) }
   }
 
@@ -2012,10 +2100,26 @@ export class TaskRuntime extends Service {
    * read after this write, judged by the admission pre-check itself. Throws with
    * every refusal named (capability, skill, defect code, detail) — and writes
    * nothing, which is what makes the caller's table unchanged.
+   *
+   * `options.commitTargets` exempts the in-flight files of the commit this call
+   * belongs to from the pre-check's open-intent gate only (see
+   * {@link applyCapabilityRow}); the ledger view handed to the pre-check is the
+   * deployment's own, with exactly those targets' directories filtered out.
    */
-  private async assertReplacementRow(name: string, entry: CapabilityConfig): Promise<void> {
+  private async assertReplacementRow(
+    name: string,
+    entry: CapabilityConfig,
+    options: { commitTargets?: readonly string[] } = {},
+  ): Promise<void> {
     const verifierRefs = await this.registeredVerifierIds()
-    const commitLedger = this.softService<EvolutionCommitLedger>('evolution')
+    const ledger = this.softService<EvolutionCommitLedger>('evolution')
+    const owned = new Set((options.commitTargets ?? []).map(target => dirname(resolve(target))))
+    const commitLedger = ledger === undefined || owned.size === 0
+      ? ledger
+      : {
+          openIntentTargets: async () => (await ledger.openIntentTargets?.() ?? [])
+            .filter(target => !owned.has(dirname(resolve(target)))),
+        }
     const { refusals } = await precheckReplacedCapabilityRow({
       name,
       entry,
@@ -3034,6 +3138,454 @@ export class TaskRuntime extends Service {
       )
     }
     return { storeId, rootTaskId: budget.rootTaskId, answeredFromRecord: false, record: stored }
+  }
+
+  /**
+   * The execution-recovery entry (A6, plan §F.4): one failed root task's **new
+   * attempt** — a new root Run/Session in the same store, opened now, driven by
+   * the ordinary chain afterwards.
+   *
+   * What this entry is, and what it is not. It is the runtime's own door, called
+   * by the host composition layer (the tool adapter → evolution's coordinator →
+   * here), never a model tool by itself, and it re-checks *its own* rules from
+   * the store rather than trusting a caller: it never imports evolution, never
+   * reads a promotion ledger, and has no parameter that could stand for a
+   * person's approval. "The capability change was approved and applied" is
+   * answered by the store and the effective table — the source's required rows
+   * resolve now and their providers pass the ordinary pre-check — and nothing
+   * else.
+   *
+   * The order, and why each step is where it is:
+   *
+   * 1. **the request's closed shape**, before the store is opened: an unknown
+   *    field is refused by name, so a caller cannot smuggle a decision in.
+   * 2. **the caller**: a live coordination session, because the new attempt's
+   *    Session is spawned from it. A caller without one is refused before
+   *    anything is written.
+   * 3. **the store's facts, re-checked here**: the source task is this store's
+   *    own root; the named source run is a failed run of it (or the failure had
+   *    no run); its contract and acceptance criteria are the ones the store
+   *    holds; the diagnosis is a record of this store naming this task; the
+   *    required capability rows resolve *now* and their providers pass the
+   *    ordinary pre-check; the K4 ceilings in force allow one more run; and the
+   *    task is in a failing terminal state (a `failed` task, or a `blocked` one
+   *    that never ran).
+   * 4. **idempotency and mutual exclusion**, from the attempt records: the same
+   *    key with the same content answers from the record; the same key with
+   *    other content is refused; a diagnosis with an attempt still in flight is
+   *    refused under a different key — by name, before the source's own status
+   *    is read — in this process and after a restart alike (the attempt is the
+   *    run, and the run's status is the fact).
+   * 5. **the reuse citations**, each resolved against the failed run's own
+   *    members and the original acceptance map. A citation that does not resolve
+   *    is refused with every affected item named, before anything is written.
+   * 6. **the write**: one commit starts the run (`TaskRetried` + `TaskStarted`,
+   *    carrying the attempt record and the run's re-resolved manifest). The
+   *    attempt is durable at that instant, so a crash between here and the spawn
+   *    leaves an attempt a same-key retry answers with the same run — never a
+   *    second one.
+   * 7. **the spawn**: the attempt's worker, composed exactly as a batch child's
+   *    (the deployment's preset, the capability grant, the worker policy) over
+   *    the checkout the source's tree works in. A spawn that fails settles the
+   *    attempt's run `failed` with the cause named — the record stands, and the
+   *    attempt is over.
+   *
+   * Nothing of the old attempt is touched: its run, its evidence, its review and
+   * its task's history stay exactly as they were, and no in-flight run is
+   * hot-swapped. The new attempt's own submission is judged by the original
+   * immutable acceptance criteria, and its batches count against the same store
+   * total the first attempt did — the ceiling is read from the store, never
+   * reset.
+   */
+  async recoverRootTask(
+    storeId: string,
+    request: RootRecoveryRequest,
+    caller: RootRecoveryCaller,
+  ): Promise<RootRecoveryOutcome> {
+    const defects = recoveryRequestDefects(request)
+    if (defects.length > 0) {
+      throw new Error(`task-runtime: the recovery request was refused:\n- ${defects.join('\n- ')}`)
+    }
+    if (typeof caller?.sessionId !== 'string' || caller.sessionId.trim().length === 0) {
+      throw new Error('task-runtime: a recovery attempt is opened for the session that asks for it: pass a non-empty caller session id')
+    }
+    if (this.agentOrUndefined(caller.sessionId) === undefined) {
+      throw new Error(
+        `task-runtime: caller session "${caller.sessionId}" has no live agent, so the new attempt's Session cannot be spawned from it; ` +
+        'nothing was written and no run was started',
+      )
+    }
+    await this.assertRecoveryReady(storeId, 'a recovery attempt')
+    return await this.serializeRootIntake(storeId, () => this.recoverRootTaskOnce(storeId, request, caller))
+  }
+
+  /** One recovery attempt, inside the store's own serialization — see {@link recoverRootTask} for the order. */
+  private async recoverRootTaskOnce(
+    storeId: string,
+    request: RootRecoveryRequest,
+    caller: RootRecoveryCaller,
+  ): Promise<RootRecoveryOutcome> {
+    const sourceTaskId = request.sourceTaskId
+    const snapshot = await this.ctx.task.snapshotIn(storeId)
+    const source = snapshot.tasks.find(task => task.taskId === sourceTaskId)
+    if (source === undefined) {
+      throw new Error(
+        `task-runtime: store "${storeId}" holds no task "${sourceTaskId}", so there is nothing to recover; ` +
+        'a recovery is asked of the store that owns the failed task',
+      )
+    }
+    if (source.parentTaskId !== undefined) {
+      throw new Error(
+        `task-runtime: task "${sourceTaskId}" is a child of "${source.parentTaskId}"; a recovery attempt is opened for the store's own root task, ` +
+        'and a child is re-run by a batch of its parent instead',
+      )
+    }
+    const answered = this.recoveryAttemptForRequest(snapshot, request)
+    if (answered !== undefined) return answered
+    const diagnosis = (snapshot.diagnoses ?? []).find(item => item.diagnosisId === request.sourceDiagnosisId)
+    if (diagnosis === undefined) {
+      throw new Error(
+        `task-runtime: store "${storeId}" holds no diagnosis "${request.sourceDiagnosisId}"; a recovery is asked for by a diagnosis of this store ` +
+        'and by nothing else, so this hand-off names no fact here',
+      )
+    }
+    if (diagnosis.taskId !== sourceTaskId) {
+      throw new Error(
+        `task-runtime: diagnosis "${request.sourceDiagnosisId}" is about task "${diagnosis.taskId}", not the named source "${sourceTaskId}"; ` +
+        'the hand-off and the store disagree about which task failed, and nothing was written',
+      )
+    }
+    const inFlight = inFlightRecoveryAttempt(snapshot, sourceTaskId, request.sourceDiagnosisId)
+    if (inFlight !== undefined) {
+      throw new Error(
+        `task-runtime: diagnosis "${request.sourceDiagnosisId}" already has a recovery attempt in flight (run "${inFlight.runId}", ` +
+        `session "${inFlight.sessionId}", key "${inFlight.recovery?.requestKey ?? 'unknown'}"); key "${request.requestKey}" starts nothing — ` +
+        'an attempt ends when its run settles, and a new key may be asked for after that',
+      )
+    }
+    if (source.status === 'verified') {
+      throw new Error(
+        `task-runtime: root task "${sourceTaskId}" is verified — a successful source is not recoverable, and nothing was written; ` +
+        'an improvement on a succeeded goal needs a new intake under its own contract, not a recovery of this one',
+      )
+    }
+    if (source.status === 'running' || source.status === 'verifying') {
+      throw new Error(
+        `task-runtime: root task "${sourceTaskId}" is ${source.status}: an attempt is in flight, and a recovery does not hot-swap a live run`,
+      )
+    }
+    if (source.status !== 'failed' && source.status !== 'blocked') {
+      throw new Error(
+        `task-runtime: root task "${sourceTaskId}" is ${source.status}; a recovery attempt is opened for a failed task ` +
+        '(a `failed` task, or a `blocked` one that never ran), and this is not one',
+      )
+    }
+    const sourceRun = this.recoverySourceRun(source, request, snapshot)
+    this.assertRecoveryContract(source)
+    const declarations = request.reuses ?? []
+    const reuseReasons = reuseDefects(declarations, {
+      source,
+      ...(sourceRun === undefined ? {} : { sourceRun }),
+      sourceMembers: sourceRun === undefined ? [] : runMemberTaskIds(sourceRun),
+      snapshot,
+    })
+    if (reuseReasons.length > 0) {
+      throw new Error(
+        `task-runtime: the recovery of "${sourceTaskId}" was refused; the declared reuse does not resolve:\n- ${reuseReasons.join('\n- ')}`,
+      );
+    }
+    const manifest = this.resolveCapabilities(source.requestedCapabilities)
+    if (manifest.missing.length > 0) {
+      throw new Error(
+        `task-runtime: the recovery of "${sourceTaskId}" was refused: the capability gap this attempt is for is still open ` +
+        `([${manifest.missing.join(', ')}] resolve to no row in this deployment's table); apply the row that closes it, and the recovery ` +
+        're-reads what the deployment holds then — nothing was written',
+      )
+    }
+    const rootSessionId = sourceRun?.sessionId ?? this.recoverySessionFor(snapshot, storeId)
+    const envPath = await this.envPathForSession(rootSessionId)
+    const precheck = await this.providerPrecheck(Object.keys(manifest.capabilities), {
+      ...(envPath === undefined ? {} : { cwd: envPath }),
+    })
+    const refusals = providerRefusals(precheck)
+    if (refusals.length > 0) {
+      throw new Error(
+        `task-runtime: the recovery of "${sourceTaskId}" was refused by the provider pre-check:\n- ${refusals.join('\n- ')}`,
+      )
+    }
+    const budget = resolveRootBudget(snapshot, this.config.rootBudget ?? {})
+    if (!budget.ok) {
+      if (hasRootLimits(this.config.rootBudget)) {
+        throw new Error(`task-runtime: the recovery of "${sourceTaskId}" was refused: the root budget cannot be resolved: ${budget.reason}`)
+      }
+    } else {
+      const verdict = checkRunStart(snapshot, budget)
+      if (!verdict.allowed) {
+        throw new Error(
+          `task-runtime: the recovery of "${sourceTaskId}" was refused by the root budget: ${verdict.reason}; ` +
+          'the ceiling is not raised by this entry and no count is reset — a person raises it through the budget-extension entry',
+        )
+      }
+    }
+    return await this.startRecoveryAttempt({
+      storeId,
+      source,
+      request,
+      declarations,
+      manifest,
+      precheck,
+      rootSessionId,
+      actor: caller.sessionId,
+      ...(caller.signal === undefined ? {} : { signal: caller.signal }),
+    })
+  }
+
+  /**
+   * The attempt one request is already answered by — and the refusal one key
+   * bound to other content earns.
+   *
+   * The two questions are asked of the same records, in this order: the key
+   * first (a retry of the same request is answered from the run it named, in
+   * this process and after a restart alike), then the content the key is bound
+   * to. A key already bound to another attempt of the same diagnosis is refused
+   * by name: a key is a promise about content, and re-using it is how a caller
+   * would try to make one attempt mean two.
+   */
+  private recoveryAttemptForRequest(snapshot: TaskSnapshot, request: RootRecoveryRequest): RootRecoveryOutcome | undefined {
+    const existing = recoveryAttemptWithKey(snapshot, request.sourceTaskId, request.requestKey)
+    if (existing === undefined) return undefined
+    const stored = existing.recovery as RunRecovery
+    const digest = recoveryAttemptDigest(stored)
+    const wanted = requestAttemptDigest(request)
+    if (digest !== wanted) {
+      throw new Error(
+        `task-runtime: request key "${request.requestKey}" already names a recovery attempt of "${request.sourceTaskId}" ` +
+        `(run "${existing.runId}", session "${existing.sessionId}", content ${digest}); this request's content is ${wanted} — ` +
+        'one key names one attempt, and a different request is a different key',
+      )
+    }
+    return {
+      attempt: 'existing',
+      storeId: snapshot.id,
+      sourceTaskId: request.sourceTaskId,
+      sourceDiagnosisId: stored.sourceDiagnosisId,
+      requestKey: stored.requestKey,
+      runId: existing.runId,
+      sessionId: existing.sessionId,
+      status: existing.status,
+      reusedMembers: stored.reusedMembers.map(member => ({ ...member, artifactRefs: [...member.artifactRefs], inputRefs: [...member.inputRefs] })),
+      detail:
+        `request key "${stored.requestKey}" already named this recovery attempt: run "${existing.runId}" is ${existing.status}` +
+        `${existing.finishedAt === undefined ? '' : ` (finished ${existing.finishedAt})`}; nothing was written`,
+    }
+  }
+
+  /**
+   * The failed run one request names, or `undefined` when the failure had none.
+   * A named run must be this task's and must be failed; a request that names
+   * none is only honest for a task that has no run in flight — a blocked task
+   * that never started, or a failure whose run is already terminal — because a
+   * running run means an attempt is in flight rather than a failure to recover.
+   */
+  private recoverySourceRun(source: TaskInstance, request: RootRecoveryRequest, snapshot: TaskSnapshot): TaskRun | undefined {
+    if (request.sourceRunId !== null) {
+      const run = snapshot.runs.find(candidate => candidate.runId === request.sourceRunId)
+      if (run === undefined) {
+        throw new Error(`task-runtime: store "${snapshot.id}" holds no run "${request.sourceRunId}"; the named source attempt does not exist`)
+      }
+      if (run.taskId !== source.taskId) {
+        throw new Error(
+          `task-runtime: run "${run.runId}" belongs to task "${run.taskId}", not to the named source "${source.taskId}"; nothing was written`,
+        )
+      }
+      if (run.status !== 'failed') {
+        throw new Error(
+          `task-runtime: source run "${run.runId}" is ${run.status}; a recovery recovers a *failed* attempt ` +
+          '(its run settled `failed`), and this run is not one',
+        )
+      }
+      return run
+    }
+    const running = snapshot.runs.filter(run => run.taskId === source.taskId && run.status === 'running')
+    if (running.length > 0) {
+      throw new Error(
+        `task-runtime: the request names no source run, but task "${source.taskId}" holds a run in flight (${running.map(run => run.runId).join(', ')}); ` +
+        'a failure without a run is a task that never started, not one an attempt is running for',
+      )
+    }
+    return undefined
+  }
+
+  /**
+   * The contract and acceptance criteria the attempt must be judged by, re-read
+   * here rather than taken from a caller: the store's own record is the original
+   * goal, and the projection fields must still agree with it. Nothing is
+   * rewritten — the store refuses a contract edit outright — but "the original
+   * contract and acceptance are unchanged" is the runtime's own pre-check
+   * (plan §F.4: 两层的直接调用入口各自重检), and a record whose goal and
+   * criteria disagree is refused before an attempt is bound to it.
+   *
+   * A task with no contract — one created before contracts existed — has no
+   * original acceptance a reuse could bind to and is refused by name.
+   */
+  private assertRecoveryContract(source: TaskInstance): void {
+    const contract = source.contract
+    if (contract === undefined) {
+      throw new Error(
+        `task-runtime: task "${source.taskId}" carries no contract, so its original acceptance cannot be read; ` +
+        'a recovery binds its reuse to that acceptance, and nothing is guessed for a task that has none',
+      )
+    }
+    const disagreement = contract.objective !== source.objective
+      ? 'its objective'
+      : canonicalize(contract.acceptanceCriteria) !== canonicalize(source.acceptanceCriteria)
+        ? 'its acceptance criteria'
+        : canonicalize(contract.requiredCapabilities) !== canonicalize(source.requestedCapabilities)
+          ? 'its required capabilities'
+          : undefined
+    if (disagreement !== undefined) {
+      throw new Error(
+        `task-runtime: task "${source.taskId}"'s contract and its projection disagree on ${disagreement}; ` +
+        'the original contract and acceptance criteria have to be one record before an attempt can be bound to them',
+      )
+    }
+    if (source.acceptanceCriteria.length === 0) {
+      throw new Error(`task-runtime: task "${source.taskId}" declares no acceptance criterion, so there is nothing the new attempt could be judged by`)
+    }
+  }
+
+  /**
+   * The write: claim the checkout, bind the attempt's content, start the run
+   * (with its record), register what only this process can hold, and spawn the
+   * worker. Every failure that happens after the commit settles the run `failed`
+   * with the cause named — an attempt nobody can drive is over, not a run left
+   * `running` forever.
+   */
+  private async startRecoveryAttempt(input: {
+    storeId: string
+    source: TaskInstance
+    request: RootRecoveryRequest
+    declarations: readonly RootRecoveryReuse[]
+    manifest: CapabilityManifest
+    precheck: ProviderPrecheck
+    rootSessionId: string
+    /** The calling session, recorded as the actor of the attempt's own writes. */
+    actor: string
+    signal?: AbortSignal
+  }): Promise<RootRecoveryOutcome> {
+    const { storeId, source, request, declarations, manifest, rootSessionId, actor } = input
+    const runId: RunId = `r-${randomUUID()}`
+    const sessionId = `s-${randomUUID()}`
+    const reusedMembers = declarations.map(storedReuse)
+    const recovery: RunRecovery = {
+      sourceDiagnosisId: request.sourceDiagnosisId,
+      requestKey: request.requestKey,
+      ...(request.sourceRunId === null ? {} : { sourceRunId: request.sourceRunId }),
+      requestedAt: now(),
+      reusedMembers,
+    }
+    // The preset the worker will be mounted on, resolved once: the run records it
+    // so a resume rebuilds the same composition rather than the deployment's
+    // default.
+    const preset = resolvePreset(manifest, this.config.defaultPreset)
+    const workspacePath = await this.workspacePathForSession(rootSessionId)
+    let claimed: WorkspaceOwner | undefined
+    if (workspacePath !== undefined && this.workspaces !== undefined) {
+      await this.workspaces.claim(workspacePath, { kind: 'run', storeId, taskId: source.taskId, runId, since: now() })
+      claimed = this.workspaces.ownerOf(workspacePath)
+    }
+    let binding: RunProviderBinding | undefined
+    try {
+      binding = await bindRunProviders({
+        storeId,
+        runId,
+        manifest,
+        providers: input.precheck,
+        table: this.config.capabilities,
+        root: this.config.runBindingRoot,
+      })
+      const run: TaskRun = {
+        runId,
+        taskId: source.taskId,
+        sessionId,
+        capabilitySnapshot: capabilitySnapshot(manifest),
+        ...(preset === undefined ? {} : { agentPreset: preset }),
+        ...(binding === undefined ? {} : { providerBinding: binding }),
+        // Born active, exactly as a first attempt is (§1.1): the new attempt
+        // decides its own work — it may decompose, and it must submit.
+        executionPhase: 'active',
+        recovery,
+        artifacts: [],
+        verifierResults: [],
+        status: 'running',
+        startedAt: now(),
+      }
+      await this.ctx.task.startRunIn(storeId, run, actor, { manifest })
+      this.sessions.set(sessionId, { storeId, taskId: source.taskId, runId })
+      this.startedSessions.add(sessionId)
+      this.executionGate.setPhase(sessionId, 'active')
+      if (workspacePath !== undefined) this.sessionWorkspaces.set(sessionId, workspacePath)
+    } catch (error) {
+      if (workspacePath !== undefined && claimed !== undefined) {
+        await this.workspaces?.release(workspacePath, claimed).catch(cause => {
+          this.warn(`workspace ${workspacePath} could not be released after a refused attempt (${cause instanceof Error ? cause.message : String(cause)})`)
+        })
+      }
+      throw error
+    }
+    // From here the attempt is a durable fact. A spawn that fails is settled on
+    // the run, never left as a running attempt nothing drives.
+    //
+    // The orchestration's viewpoint is the *caller's* session — its live agent is
+    // what parents the spawn, exactly as a batch's round parents its children —
+    // and the checkout it names is the tree's own: the new attempt does the same
+    // work in the same directory the failed one did, never wherever the
+    // coordinator happens to sit.
+    try {
+      await spawnTaskWorker(await this.orchestrateEnv(actor, actor, workspacePath), {
+        sessionId,
+        name: `recovery of ${source.objective.trim().replace(/\s+/g, ' ').slice(0, 32) || source.taskId}`,
+        manifest,
+        ...(binding === undefined ? {} : { providerBinding: binding }),
+        ...(preset === undefined ? {} : { agentPreset: preset }),
+        ...(workspacePath === undefined ? {} : { cwd: workspacePath }),
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+      })
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      const env = await this.orchestrateEnv(actor, actor, workspacePath)
+      const failed = await this.ctx.task.snapshotIn(storeId).catch(() => undefined)
+      const run = failed?.runs.find(item => item.runId === runId)
+      if (run !== undefined && run.status === 'running') {
+        await settleRunFromRuntime(env, storeId, run, 'failed', `the recovery attempt's worker could not be spawned: ${reason}`)
+      }
+      if (workspacePath !== undefined && claimed !== undefined) {
+        await this.workspaces?.release(workspacePath, claimed).catch(cause => {
+          this.warn(`workspace ${workspacePath} could not be released after a failed spawn (${cause instanceof Error ? cause.message : String(cause)})`)
+        })
+      }
+      throw new Error(
+        `task-runtime: the recovery attempt of "${source.taskId}" was opened (run "${runId}", session "${sessionId}") but its worker could not be ` +
+        `spawned: ${reason}; the attempt's run was settled failed with this cause, and a new attempt needs a new request key`,
+      )
+    }
+    const stored = (await this.ctx.task.snapshotIn(storeId)).runs.find(item => item.runId === runId)
+    return {
+      attempt: 'started',
+      storeId,
+      sourceTaskId: source.taskId,
+      sourceDiagnosisId: request.sourceDiagnosisId,
+      requestKey: request.requestKey,
+      runId,
+      sessionId,
+      status: stored?.status ?? 'running',
+      reusedMembers,
+      detail:
+        `a recovery attempt of "${source.taskId}" was opened: run "${runId}" in session "${sessionId}" under diagnosis ` +
+        `"${request.sourceDiagnosisId}", key "${request.requestKey}"` +
+        `${reusedMembers.length === 0 ? '' : `, reading ${reusedMembers.length} already verified sibling member(s) at its leading positions`}; ` +
+        'the original acceptance criteria judge it, and the store total it spends is the same one',
+    }
   }
 
   /**
@@ -5952,6 +6504,33 @@ export class TaskRuntime extends Service {
         '(needs recovery: cancel this task tree and re-create it)',
       )
     }
+    // A run hands its result in only when the references its own contract
+    // declares are satisfied (A6 §F.4: "根最终提交必须检查产物已满足"). The
+    // check is the ordinary gate's own derivation — a `requiresArtifact`
+    // reference needs a verified reference product, an `acceptsArtifact` one
+    // needs existence — read against the store right now, so a run whose
+    // producer was blocked, failed or never admitted cannot be closed by a
+    // submission that ignores it. A refused submission records the gap as an
+    // obligation, exactly where the spawn gate records the same finding, and
+    // starts nothing.
+    const store = await this.ctx.task.snapshotIn(storeId)
+    const missingArtifacts = missingRequiredArtifacts(task.acceptanceCriteria, store)
+    if (missingArtifacts.length > 0) {
+      for (const missing of missingArtifacts) {
+        await this.ctx.task.recordObligationIn(storeId, {
+          obligationId: `o-${randomUUID()}`,
+          goal: `artifact/evidence "${missing.ref}" required by task "${task.taskId}" criterion ${missing.criterionId} does not exist in the task store${missing.requirement === 'requires' ? ' as a verified reference product' : ''}`,
+          criterion: missing.requirement === 'requires'
+            ? `the task store holds evidence or an artifact named "${missing.ref}" (evidence id, artifact kind, or artifact id) produced by a verified run carrying a passing verdict`
+            : `the task store holds evidence or an artifact named "${missing.ref}" (evidence id, artifact kind, or artifact id)`,
+          sourceTaskId: task.taskId,
+        }, callerSessionId)
+      }
+      throw new Error(
+        `task-runtime: the submission of run "${run.runId}" was refused: ${missingArtifactReason(missingArtifacts)}; ` +
+        'the result is not handed in while the contract\'s own references are unsatisfied — produce or run what closes the gap, then submit',
+      )
+    }
     const submission: SubmissionRecord = {
       summary: spec.summary,
       evidenceRefs: [...(spec.evidenceRefs ?? [])],
@@ -6327,6 +6906,8 @@ export class TaskRuntime extends Service {
     const waiting: TaskRun[] = []
     /** The delegated parents whose batches ended before the crash (K1 §2, §5): `active` non-root runs holding accumulated batches. */
     const returnedParents: TaskRun[] = []
+    /** The recovery attempts nobody in this process holds (A6 §F.4): `active` runs carrying a `recovery` record. */
+    const recoveryAttempts: TaskRun[] = []
     const questionResumes: QuestionResumeReport[] = []
 
     for (const run of ordered) {
@@ -6391,6 +6972,19 @@ export class TaskRuntime extends Service {
       // historical tree) — so the store's own naming is what decides
       // (`rootTaskStoreId`, the mapping the store was opened under).
       if (rootTaskStoreId(run.sessionId) === storeId) continue
+      // A **recovery attempt** nobody in this process holds (A6 §F.4): a new
+      // attempt at the store's root task, opened with its own new Session, whose
+      // worker has not been brought back. It is not an abandoned worker — the
+      // attempt's identity and the reuse it was bound to are on the run — so it
+      // comes back as the same Run and the same Session instead of being
+      // cancelled: the store's rule is that a same-key retry answers with the
+      // attempt the key already named, and a cancelled run would answer with a
+      // dead one. Its content binding is re-read above like any other run's, and
+      // the workspace gate below has to be ours before its Session is resumed.
+      if (run.recovery !== undefined) {
+        recoveryAttempts.push(run)
+        continue
+      }
       // A **delegated parent** that got its execution back (K1 §2, §5): the run is
       // `active` and its accumulated batches are all ended, which is exactly the
       // state `waiting_children → active` persists — and the parent is non-root, so
@@ -6456,7 +7050,7 @@ export class TaskRuntime extends Service {
       await this.reconcileSessionJobs(run.sessionId)
     }
 
-    if (waiting.length > 0 || returnedParents.length > 0) {
+    if (waiting.length > 0 || returnedParents.length > 0 || recoveryAttempts.length > 0) {
       // Before a single child is started again, the checkout must be this
       // process's to write into (§3.4): a marker a live process holds refuses the
       // restart, and the parents fail naming that holder rather than racing it.
@@ -6486,6 +7080,17 @@ export class TaskRuntime extends Service {
             )
             await this.reconcileSessionJobs(run.sessionId)
           }
+          for (const run of recoveryAttempts) {
+            await settleRunFromRuntime(
+              env,
+              storeId,
+              run,
+              'failed',
+              `recovery refused to bring the attempt of "${run.taskId}" ("${run.runId}") back into its checkout: ` +
+              `the workspace cannot be taken over for recovery: ${adoption.reason}`,
+            )
+            await this.reconcileSessionJobs(run.sessionId)
+          }
           adoptable = false
         } else {
           await this.rebuildWorkspaceOwnership(storeId)
@@ -6512,6 +7117,27 @@ export class TaskRuntime extends Service {
               run,
               'failed',
               `recovery refused to continue run "${run.runId}": its child batches ended (${batches}) and its Session ` +
+              `"${run.sessionId}" could not be brought back under its own identity: ${attempt.reason}`,
+            )
+            await this.reconcileSessionJobs(run.sessionId)
+          }
+        }
+        // The recovery attempts (A6 §F.4) come back the same way, and for the
+        // same reason: the attempt's identity is the run, a same-key retry has to
+        // answer with it, and the work it owes — its own batches, its own
+        // submission — is still ahead of it. A Session that cannot be brought
+        // back settles the run failed by name: an attempt nobody can drive is
+        // over, and a new key may ask again.
+        for (const run of recoveryAttempts) {
+          const attempt = await resumeAdoptedWorker(env, storeId, run)
+          this.recordWorkerResume(storeId, run, attempt, questionResumes, `an attempt of "${run.taskId}" has not been brought back yet`)
+          if (attempt.status === 'refused') {
+            await settleRunFromRuntime(
+              env,
+              storeId,
+              run,
+              'failed',
+              `recovery refused to continue the attempt of "${run.taskId}" ("${run.runId}"): its Session ` +
               `"${run.sessionId}" could not be brought back under its own identity: ${attempt.reason}`,
             )
             await this.reconcileSessionJobs(run.sessionId)

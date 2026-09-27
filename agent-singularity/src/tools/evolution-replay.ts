@@ -1,18 +1,24 @@
 /**
- * `evolution_replay` (guide §2.7.6, W15 / S4-E §F.2): evaluate a prepared skill
- * candidate — an existing skill's whole loadable object, `SKILL.md` plus the
- * `SKILL.contract.json` when it declares an execution provider — with the
- * two-sided experiment.
+ * `evolution_replay` (guide §2.7.6, W15 / S4-E §F.2): evaluate a prepared
+ * candidate with the two-sided experiment — a **skill** candidate (an existing
+ * skill's whole loadable object: `SKILL.md` plus the `SKILL.contract.json` when
+ * it declares an execution provider) or a **capability** candidate (one whole
+ * capability row plus, when it carries one, the new execution skill the row
+ * grants; A6).
  *
- * One evaluation path: a **skill** candidate that improves an existing skill
- * under its own name ({@link ExperimentSpec}) — every sample runs the baseline
- * and the candidate as *new* runs of this graph, each in its own workspace
- * built from one frozen snapshot. The sample roles are derived from the store's
- * own history here rather than taken from the caller (§F.2): the caller names
- * tasks, the ledger's latest review calls each one an observed failure, an
- * observed regression or a holdout. Any other target type is refused by name —
- * this build evaluates skill replacements only, and a capability, agent_preset
- * or task_definition proposal stays the record `evolution_propose` wrote.
+ * One evaluation path ({@link ExperimentSpec}): every sample runs the baseline
+ * and the candidate as *new* runs of this graph, each in its own workspace built
+ * from one frozen snapshot. The sample roles are derived from the store's own
+ * history here rather than taken from the caller (§F.2): the caller names tasks,
+ * the ledger's latest review calls each one an observed failure, an observed
+ * regression or a holdout. What the two sides are differs by candidate kind and
+ * is the plane's own decision: a skill candidate's baseline is a new run on the
+ * production object, and a capability candidate's baseline is offered the same
+ * production configuration through the runtime's ordinary admission — a sample
+ * whose configuration cannot admit it is recorded as the real `not-admitted`
+ * refusal, with no invented Run. Any other target type is refused by name: a
+ * tool, verifier, agent_preset or task_definition proposal stays the record
+ * `evolution_propose` wrote.
  *
  * What this adapter supplies beyond the call's own arguments: the caller
  * session (from the live call), the input snapshot both experiment workspaces
@@ -174,36 +180,56 @@ function renderExperimentCriterionDiff(baseline: readonly ExperimentCriterionDet
  * be a new run of *this* experiment in the first line that describes the sides:
  * §F.2's whole point is that the historical record locates a case and is never
  * the comparison's baseline, so the report is rendered without that vocabulary
- * at all.
+ * at all. The candidate side is named by what the proposal *is*: a skill object's
+ * identity, or the capability row (and, when it carries one, the new skill) a
+ * capability candidate installs.
  */
 function renderExperiment(result: ExperimentResult, targetId: string): string {
   const { report } = result
   const ceiling = report.frozen.budget.maxTokens
   const budget = ceiling === undefined ? 'no maxTokens ceiling declared' : `maxTokens ${ceiling}`
   const baseline = report.frozen.productionBaseline
+  const candidate = report.frozen.candidate
+  const capability = report.frozen.capability
+  const skillIdentity = candidate === undefined
+    ? undefined
+    : `${candidate.contract === undefined ? 'guidance' : 'execution'} sha256 ${candidate.sha256}` +
+      `${candidate.contract === undefined ? '' : ` sidecar sha256 ${candidate.contract.sha256}`}`
+  const candidateIdentity = capability !== undefined
+    ? `capability row "${capability.row.name}" sha256 ${capability.row.digest}` +
+      ` (the table held ${capability.baseline === null ? 'no such row' : `row sha256 ${capability.baseline.digest}`})` +
+      `${skillIdentity === undefined ? '' : ` and a new skill, ${skillIdentity}`}`
+    : skillIdentity
+  if (candidateIdentity === undefined) {
+    throw new Error(
+      `experiment ${result.experimentId} carries neither a skill object identity nor a capability row — a report without a candidate ` +
+      'identity is not one this build evaluated, and its record is read back through evolution_list',
+    )
+  }
+  const baselineIdentity = capability === undefined
+    ? `production baseline ${baseline?.sha256 ?? 'not recorded'}${baseline?.contract === undefined ? '' : ` sidecar sha256 ${baseline.contract.sha256}`}`
+    : `row this candidate moves: ${capability.baseline === null ? 'none (a new row)' : `sha256 ${capability.baseline.digest}`}`
   return [
-    `proposal ${report.proposalId} [experiment] skill ${targetId} — verdict: ${report.verdict}`,
+    `proposal ${report.proposalId} [experiment] ${capability === undefined ? 'skill' : 'capability'} ${targetId} — verdict: ${report.verdict}`,
     `samples (${report.samples.length}):`,
     ...report.samples.map(sample =>
       `  ${sample.taskId} [${sample.role}] baseline ${sample.baseline.outcome} → candidate ${sample.candidate.outcome} ` +
       `(${renderExperimentCriterionDiff(sample.baseline.criteria, sample.candidate.criteria)}) — ${sample.verdict}`),
     'every side above is a new run this experiment started — the baseline under the production configuration (the production ' +
-    'object, whose frozen identity is read again at every promotion gate), the candidate on the prepared object\'s bytes — the ' +
-    'prepared `SKILL.md` and, for an execution skill, the sidecar derived from production; the sample\'s historical record only ' +
+    'object, or the production table for a capability sample, whose frozen identity is read again at every promotion gate), the ' +
+    "candidate on the prepared object's bytes (the prepared `SKILL.md`, the sidecar derived from production for an execution " +
+    'skill, and, for a capability candidate, the frozen row the candidate overlay mounts); the sample\'s historical record only ' +
     'locates the case',
     `report: ${result.reportPath}`,
-    `experiment ${result.experimentId} (repetition ${report.frozen.repetition}, frozen ${report.frozenDigest}); ` +
-    `candidate ${report.frozen.candidate.contract === undefined ? 'guidance' : 'execution'} sha256 ${report.frozen.candidate.sha256}` +
-    `${report.frozen.candidate.contract === undefined ? '' : ` sidecar sha256 ${report.frozen.candidate.contract.sha256}`}; ` +
-    `production baseline sha256 ${baseline?.sha256 ?? 'not recorded'}` +
-    `${baseline?.contract === undefined ? '' : ` sidecar sha256 ${baseline.contract.sha256}`}; ` +
-    `model ${report.frozen.model.label}; budget ${budget}; snapshot ${report.frozen.snapshot.digest}; comparer ${report.frozen.comparerVersion}`,
+    `experiment ${result.experimentId} (repetition ${report.frozen.repetition}, frozen ${report.frozenDigest}); candidate ${candidateIdentity}; ` +
+    baselineIdentity +
+    `; model ${report.frozen.model.label}; budget ${budget}; snapshot ${report.frozen.snapshot.digest}; comparer ${report.frozen.comparerVersion}`,
     'next: evolution_gate (cite the report path in regressionEvidenceRefs)',
   ].join('\n')
 }
 
-/** The experiment one skill call runs: the derived samples, the caller's frozen input, and the model selection it runs under. */
-async function runSkillExperiment(
+/** The experiment one call runs: the derived samples, the caller's frozen input, and the model selection it runs under. */
+async function runExperimentFor(
   ctx: Context,
   args: { proposalId: string; taskIds: readonly string[]; holdoutTaskIds: readonly string[]; repetition?: number; budget?: ExperimentBudget },
   caller: SessionId,
@@ -230,20 +256,23 @@ export function defineEvolutionReplayTool(ctx: Context) {
   return defineTool({
     name: 'evolution_replay',
     description:
-      'Evaluate a prepared skill candidate — an existing skill\'s whole object, `SKILL.md` and, for an execution skill, the ' +
-      '`SKILL.contract.json` beside it — with the two-sided experiment. Every named task is run twice — a new ' +
-      'baseline run under the production configuration (the production object) and a new candidate run on the prepared bytes — ' +
-      'each in its own workspace ' +
-      'built from the caller session\'s env workspace (the frozen input snapshot), all under one frozen identity (samples, ' +
-      'snapshot digest, candidate content, model, budget, comparer). Sample roles are derived from the store\'s history: a task ' +
-      'whose latest review is failed is the observed failure, a verified one is an observed regression, and holdoutTaskIds are ' +
-      'the held-out cases; a call with no failed sample, or with an empty holdout, is refused — the experiment requires both. ' +
-      'The historical record locates each case and is never a baseline. This is the only evaluation this build has: a proposal ' +
-      'targeting anything but a skill replacement is refused by name. Writes the report under sandbox/<proposalId>/ ' +
-      'and records the ledger entries; cite the report path in evolution_gate\'s regressionEvidenceRefs. Repeating the same call ' +
-      'reuses the settled runs — it never re-runs or overwrites one; a higher `repetition` freezes a new experiment.',
+      'Evaluate a prepared candidate — a **skill** candidate (an existing skill\'s whole object: `SKILL.md` and, for an ' +
+      'execution skill, the `SKILL.contract.json` beside it) or a **capability** candidate (one whole capability row plus the ' +
+      'new execution skill it grants, when it carries one) — with the two-sided experiment. Every named task is run twice — a ' +
+      'new baseline run under the production configuration (the production object; for a capability sample, the production table ' +
+      'offered the same case through the runtime\'s ordinary admission, so a sample the table cannot admit is recorded as that ' +
+      'real refusal, with no invented run) and a new candidate run on the prepared bytes (the prepared `SKILL.md`, and for a ' +
+      'capability candidate the frozen row its overlay mounts) — each in its own workspace built from the caller session\'s env ' +
+      'workspace (the frozen input snapshot), all under one frozen identity (samples, snapshot digest, candidate content, model, ' +
+      'budget, comparer). Sample roles are derived from the store\'s history: a task whose latest review is failed is the ' +
+      'observed failure, a verified one is an observed regression, and holdoutTaskIds are the held-out cases; a call with no ' +
+      'failed sample, or with an empty holdout, is refused — the experiment requires both. The historical record locates each ' +
+      'case and is never a baseline. This is the only evaluation this build has: a proposal targeting anything but a skill ' +
+      'replacement or a capability candidate is refused by name. Writes the report under sandbox/<proposalId>/ and records the ' +
+      'ledger entries; cite the report path in evolution_gate\'s regressionEvidenceRefs. Repeating the same call reuses the ' +
+      'settled runs — it never re-runs or overwrites one; a higher `repetition` freezes a new experiment.',
     parameters: {
-      proposalId: { type: 'string', required: true, description: 'Prepared skill candidate to evaluate' },
+      proposalId: { type: 'string', required: true, description: 'Prepared candidate to evaluate: a skill or capability candidate' },
       taskIds: {
         type: 'array',
         items: { type: 'string' },
@@ -285,15 +314,17 @@ export function defineEvolutionReplayTool(ctx: Context) {
       const holdoutTaskIds = ((args.holdoutTaskIds as unknown[] | undefined) ?? []).map(id => String(id))
       try {
         const proposal = await ctx.evolution.get(args.proposalId)
-        if (proposal.targetType !== 'skill') {
+        if (proposal.targetType !== 'skill' && proposal.targetType !== 'capability') {
           throw new Error(
-            `proposal ${proposal.proposalId} targets "${proposal.targetType}" — this tool evaluates a prepared skill object ` +
-            'candidate only: a new baseline run on the production object and a new candidate run on the prepared object, each ' +
-            'loaded whole (the SKILL.md, and the SKILL.contract.json beside it when the skill declares an execution provider). ' +
-            'No other target type has an evaluator in this build, so its proposal stays a record',
+            `proposal ${proposal.proposalId} targets "${proposal.targetType}" — this tool evaluates a prepared **skill** candidate ` +
+            '(a new baseline run on the production object and a new candidate run on the prepared object, each loaded whole: the ' +
+            'SKILL.md, and the SKILL.contract.json beside it when the skill declares an execution provider) or a prepared ' +
+            '**capability** candidate (the same two-sided run, the candidate side mounting the frozen capability row and its new ' +
+            "skill; a baseline the production table cannot admit is recorded as the runtime's own refusal, never as an invented " +
+            'run). No other target type has an evaluator in this build, so its proposal stays a record',
           )
         }
-        const result = await runSkillExperiment(ctx, {
+        const result = await runExperimentFor(ctx, {
           proposalId: args.proposalId,
           taskIds,
           holdoutTaskIds,

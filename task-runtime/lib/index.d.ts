@@ -1,7 +1,7 @@
 import { Context, Service } from "@deepseek-ai/cordis";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import z from "@deepseek-ai/schemastery";
-import { AcceptanceCriterion, AdmissionContext, ArtifactRef, BudgetExtensionProposal, CapabilityManifest, ChildEvidenceRef, DecompositionAdmission, DecompositionIdentity, DependencyEdge, EvidenceBundle, ExecutionPhase, Obligation, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAsk, QuestionMessageRef, QuestionRecord, ReviewCriterion, ReviewOutcome, ReviewTokenUsage, ReviewToolCall, RunId, RunProviderBinding, RunSkillBinding, RunStatus, TaskBudgetExtension, TaskContract, TaskContractVersion, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalDecisionOutcome, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalStatus, TaskProposalVerifierIdentity, TaskRun, TaskService, TaskSnapshot, VerificationMode } from "@dangosys/dsh-singularity-task";
+import { AcceptanceCriterion, AdmissionContext, ArtifactRef, BudgetExtensionProposal, CapabilityManifest, ChildEvidenceRef, DecompositionAdmission, DecompositionIdentity, DependencyEdge, EvidenceBundle, ExecutionPhase, Obligation, ProtectedInputRef, QuestionAnswer, QuestionAnswerRecord, QuestionAsk, QuestionMessageRef, QuestionRecord, ReviewCriterion, ReviewOutcome, ReviewTokenUsage, ReviewToolCall, RunId, RunMemberReuse, RunProviderBinding, RunRecovery, RunSkillBinding, RunStatus, TaskBudgetExtension, TaskContract, TaskContractVersion, TaskHandoff, TaskId, TaskInstance, TaskProposal, TaskProposalDecisionOutcome, TaskProposalPolicy, TaskProposalReviewContext, TaskProposalStatus, TaskProposalVerifierIdentity, TaskRun, TaskService, TaskSnapshot, VerificationMode } from "@dangosys/dsh-singularity-task";
 import { AgentMessageIntent, AgentOptions, McpServerSpec, MessageDeliveryReport, MessageDeliveryStatus, SessionOwnLog, ToolCallBody, ToolCallRef, WorkerGrant } from "@dangosys/dsh-singularity-agent-runtime";
 import { AgentHandle } from "@deepseek-ai/dsh-agent";
 
@@ -254,6 +254,19 @@ declare function resolvePermission(manifest: CapabilityManifest, resolveSpec: (n
  * contract — so it can neither be the in-flight writer the drain waits for nor a
  * second door into a stopped tree's work. Denying it here would leave K4's one
  * entry shut.
+ *
+ * `task_recover` (A6) belongs here for the same reason, one step further: it is
+ * the entry that opens a failed tree's **new attempt**, and the session that may
+ * call it is the supervisor the hand-off was delegated to — a coordination
+ * session with no run of its own, so no phase ever gates it in the first place,
+ * and a tree that has stopped is exactly the tree a recovery exists for. What
+ * makes it safe in this list is what it is not: it is never on a root's
+ * allow-list (no root prompt names it), the caller is checked against the
+ * deployment's own delegation ledger, the capability a recovery depends on must
+ * already be approved and applied, and the runtime re-checks the store's facts,
+ * its ceilings and the attempt's idempotency before any run is written. It is
+ * not a second way into a stopped run's work: the old run stays terminal, and
+ * the one thing it creates is a *new* run the ordinary chain drives.
  *
  * The two question tools (A4 §F.1) are coordination in the plainest sense: a
  * child asking its direct parent is the one effect still admitted while its own
@@ -620,6 +633,24 @@ type SkillSidecar = ExecutionSkillSidecar | KnowledgeSkillSidecar;
  * carries); everything else is a shape defect inside the declared field set.
  */
 type SkillContractDefectCode = 'sidecar-unknown-version' | 'sidecar-unknown-field' | 'sidecar-shape';
+/** One reason a declared sidecar is not acceptable, with the kind of problem named. */
+interface SkillContractDefect {
+  code: SkillContractDefectCode;
+  /** The readable reason, naming the field and the vocabulary it was checked against. */
+  reason: string;
+}
+/**
+ * Every reason one declared sidecar is not acceptable, in field order — never
+ * just the first, so one refusal names everything wrong with the declaration.
+ *
+ * Purely declaration-level: the version, the closed field set of the declared
+ * type, the shape of every field, and the internal consistency of the content
+ * identity. It reads no files, so it cannot tell whether the digests are true —
+ * that comparison needs the skill directory and lives in the loader. The
+ * returned defects are values, not throws: a caller refusing a sidecar reports
+ * all of them and writes nothing.
+ */
+declare function skillContractDefects(value: unknown): SkillContractDefect[];
 /**
  * The identity of a whole sidecar: SHA-256 over {@link canonicalize} of the
  * declared data, so key order and `undefined`-valued keys do not move it while
@@ -2678,6 +2709,124 @@ declare function applyStoreQuestionBlocking(gate: ExecutionGate, snapshot: TaskS
  */
 declare function pendingCoordinationOf(snapshot: TaskSnapshot, runId: RunId): readonly QuestionRecord[];
 //#endregion
+//#region src/recovery.d.ts
+/**
+ * One already verified sibling the new attempt reads at one of its leading
+ * positions (plan §F.4, "已通过兄弟证据复用"): a citation of the task, the run
+ * that verified it, the evidence bundle and the input/product references the
+ * citation rests on.
+ *
+ * Every field is an identity the store can be asked about, because that is what
+ * the refusal has to name when one of them does not resolve. Positions are the
+ * run's leading slots (`0, 1, …` in declaration order), which is what
+ * {@link RunMemberReuse} pins.
+ */
+interface RootRecoveryReuse {
+  /** The position in the attempt's member sequence this citation fills; must be its own index in the list. */
+  childIndex: number;
+  /** The verified sibling task, a child of the source root task. */
+  taskId: TaskId;
+  /** The sibling's own verified run — the one whose evidence is cited. */
+  sourceRunId: RunId;
+  /** The evidence bundle under that run. */
+  evidenceId: string;
+  /** The criterion the citation narrows to, when the original acceptance map names one for this position. */
+  criterionId?: string;
+  /** Artifacts the citation names (artifact id or kind), all present in the cited bundle. */
+  artifactRefs?: readonly string[];
+  /** Input references the citation names, from the sibling's own declared input vocabulary. */
+  inputRefs?: readonly string[];
+}
+/**
+ * One recovery request, as the host composition layer hands it to the runtime
+ * (plan §F.4: the tool and evolution's coordinator call this entry, and each
+ * layer re-checks its own rules).
+ *
+ * The four identity fields are required and are the whole subject: *which* task
+ * failed, *which* of its runs the failure is (or `null` when it had none — a
+ * rejected admission, a blocked task), *which* diagnosis asks for the attempt,
+ * and the caller's key. `reuses` is the optional second half: the siblings the
+ * attempt reads instead of re-running, and nothing else about the work — what
+ * to build and how is the new attempt's own proposals' business.
+ */
+interface RootRecoveryRequest {
+  sourceTaskId: TaskId;
+  /** The failed run of the source task, or `null` when the failure had no run. */
+  sourceRunId: RunId | null;
+  /** The diagnosis this recovery is asked for; it must be a record of this store naming this task. */
+  sourceDiagnosisId: string;
+  /** The caller's request key: one key names one attempt of one diagnosis. */
+  requestKey: string;
+  /** The verified siblings the new attempt reads at its leading positions, in position order. */
+  reuses?: readonly RootRecoveryReuse[];
+}
+/**
+ * Every reason one request cannot be a recovery request at all: an unknown
+ * field (a caller may not smuggle a decision in), a missing or empty identity,
+ * a `reuses` member that is not a declaration. Structural only — whether the
+ * named task, run or diagnosis exists is the store's answer, asked after this
+ * (and answered as a refusal of its own).
+ */
+declare function recoveryRequestDefects(request: unknown): string[];
+/** The runs of one source task that are recovery attempts, in start order (which is the store's run order). */
+declare function recoveryAttemptsOf(snapshot: TaskSnapshot, sourceTaskId: TaskId): TaskRun[];
+/** The attempt one request key names on a source task, or `undefined`. */
+declare function recoveryAttemptWithKey(snapshot: TaskSnapshot, sourceTaskId: TaskId, requestKey: string): TaskRun | undefined;
+/**
+ * The attempt one diagnosis already has whose run has not settled, or
+ * `undefined` — the mutual exclusion one diagnosis's recovery has (plan §F.4:
+ * "无在途恢复尝试"). "In flight" is the run's own status and nothing else: a
+ * run that is still `running` is an attempt still being made, and every
+ * terminal status — verified, failed, cancelled, blocked — releases the
+ * diagnosis for another key.
+ */
+declare function inFlightRecoveryAttempt(snapshot: TaskSnapshot, sourceTaskId: TaskId, sourceDiagnosisId: string): TaskRun | undefined;
+/**
+ * What makes two attempts under one key the *same* attempt: the content the key
+ * is bound to — the source run it recovers and the reuse it declares. A retry
+ * of the same request reproduces this digest and is answered from the record; a
+ * different content under the same key is a refusal by name (the rule every
+ * request key in this runtime follows).
+ */
+declare function recoveryAttemptDigest(recovery: Pick<RunRecovery, 'sourceRunId' | 'reusedMembers'>): string;
+/** The request's own content identity, derived from the same fields the stored attempt carries. */
+declare function requestAttemptDigest(request: RootRecoveryRequest): string;
+/** What a reuse declaration is judged against: the source task, its contract's map, and the failed attempt's own members. */
+interface ReuseContext {
+  /** The source root task the attempt is opened for. */
+  readonly source: TaskInstance;
+  /** The failed run the attempt recovers, when the failure had one. */
+  readonly sourceRun?: TaskRun;
+  /** The members that failed run read, in position order — what `childIndex` names. */
+  readonly sourceMembers: readonly TaskId[];
+  readonly snapshot: TaskSnapshot;
+}
+/**
+ * Every reason the declared reuse cannot be a binding of the original
+ * acceptance map — the "invalid reference" refusal, with the affected item
+ * named per reason (plan §F.4: "无效引用拒绝并列出受影响项").
+ *
+ * Three questions, in the order a reader checks them:
+ *
+ * 1. **Does the position exist in the failed attempt?** The cited sibling must
+ *    be the member the failed run reads at that very position (`childIndex`),
+ *    which is what "the same position" means. A source that failed without a
+ *    run — a rejected admission, a blocked task — has no member sequence to
+ *    read positions from, so a reuse of it is refused by name rather than
+ *    bound to a position nobody can check.
+ * 2. **Does the citation resolve?** The sibling, its verified run, the bundle,
+ *    the criterion's passing verdict, the artifacts and the declared inputs —
+ *    {@link citationDefects}.
+ * 3. **Does it agree with the original acceptance map?** Where the map names
+ *    this position, the criterion it narrows to is the criterion the binding
+ *    carries: a declaration that names nothing there, or names another
+ *    criterion, is refused — the map is immutable and the attempt binds to it,
+ *    never around it.
+ */
+declare function reuseDefects(declarations: readonly RootRecoveryReuse[], context: ReuseContext): string[];
+/** The stored form of one declaration: the closed record the run carries. */
+declare function storedReuse(declaration: RootRecoveryReuse): RunMemberReuse;
+//#endregion
 //#region src/admission.d.ts
 /** Parent task plus the decomposition policy its caller grants it. */
 interface AdmissionParent extends TaskInstance {
@@ -4041,6 +4190,42 @@ interface RootBudgetExtensionResult {
   readonly answeredFromRecord: boolean;
   readonly record: TaskBudgetExtension;
 }
+/**
+ * The caller of one recovery attempt: the host composition layer's coordination
+ * session (plan §F.4 — the tool adapter and evolution's coordinator call this
+ * entry; the entry is never itself a model tool). The session must have a live
+ * agent, because the new attempt's Session is spawned from it — the same
+ * parentage a batch child's spawn has — and a caller without one is refused
+ * before anything is written.
+ */
+interface RootRecoveryCaller {
+  readonly sessionId: string;
+  readonly signal?: AbortSignal;
+}
+/**
+ * What one recovery call answers (plan §F.4): the attempt — the new root run and
+ * its Session — whether this call opened it or the key already named it, and the
+ * siblings it reads instead of re-running.
+ *
+ * `status` is the attempt run's own status as the store holds it when the call
+ * answers: `running` for an attempt this call opened and spawned, and whatever
+ * it settled as when the same key is asked again (the record answers; nothing is
+ * rewritten).
+ */
+interface RootRecoveryOutcome {
+  /** `started` — this call opened the attempt; `existing` — the key already named it and nothing was written. */
+  readonly attempt: 'started' | 'existing';
+  readonly storeId: string;
+  readonly sourceTaskId: TaskId;
+  readonly sourceDiagnosisId: string;
+  readonly requestKey: string;
+  readonly runId: RunId;
+  readonly sessionId: string;
+  readonly status: RunStatus;
+  /** The verified siblings the attempt reads at its leading positions, in position order. */
+  readonly reusedMembers: readonly RunMemberReuse[];
+  readonly detail: string;
+}
 declare class TaskRuntime extends Service {
   static inject: string[];
   static Config: z<Config>;
@@ -4280,13 +4465,32 @@ declare class TaskRuntime extends Service {
    * (guide §2.4, S1-C item 3). A removal needs no such check: it grants
    * nothing, and refusing a rollback would strand a deployment on a row it is
    * trying to undo.
+   *
+   * `options.commitTargets` is for the one caller that is itself the commit
+   * installing the row (A6): a capability commit writes a **new** skill's files
+   * and then registers the row that grants them, while its own `commit_intent`
+   * is still open — and the pre-check above refuses any provider whose directory
+   * an open intent touches, which would be the very provider this call is
+   * registering. The caller therefore names its own in-flight file set, and only
+   * the directories those targets live in are exempt from that one refusal:
+   * every *other* open intent still refuses the row by name, and the row is
+   * still judged by the whole admission pre-check, so a caller that named a
+   * foreign target would only weaken its own gate. A production deployment never
+   * passes it.
    */
-  applyCapabilityRow(name: string, entry: CapabilityConfig | null): Promise<void>;
+  applyCapabilityRow(name: string, entry: CapabilityConfig | null, options?: {
+    commitTargets?: readonly string[];
+  }): Promise<void>;
   /**
    * The replacement check behind {@link applyCapabilityRow}: the row as it will
    * read after this write, judged by the admission pre-check itself. Throws with
    * every refusal named (capability, skill, defect code, detail) — and writes
    * nothing, which is what makes the caller's table unchanged.
+   *
+   * `options.commitTargets` exempts the in-flight files of the commit this call
+   * belongs to from the pre-check's open-intent gate only (see
+   * {@link applyCapabilityRow}); the ledger view handed to the pre-check is the
+   * deployment's own, with exactly those targets' directories filtered out.
    */
   private assertReplacementRow;
   /**
@@ -4733,6 +4937,107 @@ declare class TaskRuntime extends Service {
    * @returns the store, the root task and the record the store holds — with `answeredFromRecord` when the answer is a record the store already held.
    */
   extendRootBudget(sessionId: string, host: RootBudgetExtensionHost, request: RootBudgetExtensionRequest): Promise<RootBudgetExtensionResult>;
+  /**
+   * The execution-recovery entry (A6, plan §F.4): one failed root task's **new
+   * attempt** — a new root Run/Session in the same store, opened now, driven by
+   * the ordinary chain afterwards.
+   *
+   * What this entry is, and what it is not. It is the runtime's own door, called
+   * by the host composition layer (the tool adapter → evolution's coordinator →
+   * here), never a model tool by itself, and it re-checks *its own* rules from
+   * the store rather than trusting a caller: it never imports evolution, never
+   * reads a promotion ledger, and has no parameter that could stand for a
+   * person's approval. "The capability change was approved and applied" is
+   * answered by the store and the effective table — the source's required rows
+   * resolve now and their providers pass the ordinary pre-check — and nothing
+   * else.
+   *
+   * The order, and why each step is where it is:
+   *
+   * 1. **the request's closed shape**, before the store is opened: an unknown
+   *    field is refused by name, so a caller cannot smuggle a decision in.
+   * 2. **the caller**: a live coordination session, because the new attempt's
+   *    Session is spawned from it. A caller without one is refused before
+   *    anything is written.
+   * 3. **the store's facts, re-checked here**: the source task is this store's
+   *    own root; the named source run is a failed run of it (or the failure had
+   *    no run); its contract and acceptance criteria are the ones the store
+   *    holds; the diagnosis is a record of this store naming this task; the
+   *    required capability rows resolve *now* and their providers pass the
+   *    ordinary pre-check; the K4 ceilings in force allow one more run; and the
+   *    task is in a failing terminal state (a `failed` task, or a `blocked` one
+   *    that never ran).
+   * 4. **idempotency and mutual exclusion**, from the attempt records: the same
+   *    key with the same content answers from the record; the same key with
+   *    other content is refused; a diagnosis with an attempt still in flight is
+   *    refused under a different key — by name, before the source's own status
+   *    is read — in this process and after a restart alike (the attempt is the
+   *    run, and the run's status is the fact).
+   * 5. **the reuse citations**, each resolved against the failed run's own
+   *    members and the original acceptance map. A citation that does not resolve
+   *    is refused with every affected item named, before anything is written.
+   * 6. **the write**: one commit starts the run (`TaskRetried` + `TaskStarted`,
+   *    carrying the attempt record and the run's re-resolved manifest). The
+   *    attempt is durable at that instant, so a crash between here and the spawn
+   *    leaves an attempt a same-key retry answers with the same run — never a
+   *    second one.
+   * 7. **the spawn**: the attempt's worker, composed exactly as a batch child's
+   *    (the deployment's preset, the capability grant, the worker policy) over
+   *    the checkout the source's tree works in. A spawn that fails settles the
+   *    attempt's run `failed` with the cause named — the record stands, and the
+   *    attempt is over.
+   *
+   * Nothing of the old attempt is touched: its run, its evidence, its review and
+   * its task's history stay exactly as they were, and no in-flight run is
+   * hot-swapped. The new attempt's own submission is judged by the original
+   * immutable acceptance criteria, and its batches count against the same store
+   * total the first attempt did — the ceiling is read from the store, never
+   * reset.
+   */
+  recoverRootTask(storeId: string, request: RootRecoveryRequest, caller: RootRecoveryCaller): Promise<RootRecoveryOutcome>;
+  /** One recovery attempt, inside the store's own serialization — see {@link recoverRootTask} for the order. */
+  private recoverRootTaskOnce;
+  /**
+   * The attempt one request is already answered by — and the refusal one key
+   * bound to other content earns.
+   *
+   * The two questions are asked of the same records, in this order: the key
+   * first (a retry of the same request is answered from the run it named, in
+   * this process and after a restart alike), then the content the key is bound
+   * to. A key already bound to another attempt of the same diagnosis is refused
+   * by name: a key is a promise about content, and re-using it is how a caller
+   * would try to make one attempt mean two.
+   */
+  private recoveryAttemptForRequest;
+  /**
+   * The failed run one request names, or `undefined` when the failure had none.
+   * A named run must be this task's and must be failed; a request that names
+   * none is only honest for a task that has no run in flight — a blocked task
+   * that never started, or a failure whose run is already terminal — because a
+   * running run means an attempt is in flight rather than a failure to recover.
+   */
+  private recoverySourceRun;
+  /**
+   * The contract and acceptance criteria the attempt must be judged by, re-read
+   * here rather than taken from a caller: the store's own record is the original
+   * goal, and the projection fields must still agree with it. Nothing is
+   * rewritten — the store refuses a contract edit outright — but "the original
+   * contract and acceptance are unchanged" is the runtime's own pre-check
+   * (plan §F.4: 两层的直接调用入口各自重检), and a record whose goal and
+   * criteria disagree is refused before an attempt is bound to it.
+   *
+   * A task with no contract — one created before contracts existed — has no
+   * original acceptance a reuse could bind to and is refused by name.
+   */
+  private assertRecoveryContract;
+  /**
+   * The write: claim the checkout, bind the attempt's content, start the run
+   * (with its record), register what only this process can hold, and spawn the
+   * worker. Every failure that happens after the commit settles the run `failed`
+   * with the cause named — an attempt nobody can drive is over, not a run left
+   * `running` forever.
+   */
+  private startRecoveryAttempt;
   /**
    * The store one budget-extension call works on, its root session established —
    * the one place this entry's trust and reading rules live.
@@ -6218,4 +6523,4 @@ declare class TaskRuntime extends Service {
   private agentOrUndefined;
 }
 //#endregion
-export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AdoptedWorkerResume, type AdoptedWorkerResumeRequest, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BatchResultDeliveryStatus, type BatchResultMessage, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, CommitReconcileOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, type EvolutionCommitLedger, ExecutionGate, type ExecutionProviderVerdict, type ExecutionSkillSidecar, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type KnowledgeSkillSidecar, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type OwedBatchResult, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, QuestionResumeReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, RootBudgetApproval, RootBudgetApprovalAsk, RootBudgetApprovalDecision, type RootBudgetCeilings, type RootBudgetConfig, RootBudgetExtensionHost, RootBudgetExtensionRequest, RootBudgetExtensionResult, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type RuntimeSettlementEnv, SKILL_SIDECAR_FILE, type SessionObservation, type SkillContentIdentity, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillResourceIdentity, type SkillSidecar, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type TerminalReviewFact, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDigest, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AdoptedWorkerResume, type AdoptedWorkerResumeRequest, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BatchResultDeliveryStatus, type BatchResultMessage, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, CommitReconcileOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, type EvolutionCommitLedger, ExecutionGate, type ExecutionProviderVerdict, type ExecutionSkillSidecar, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type KnowledgeSkillSidecar, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type OwedBatchResult, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, QuestionResumeReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReuseContext, type ReviewContextInput, RootAdoption, RootBudgetApproval, RootBudgetApprovalAsk, RootBudgetApprovalDecision, type RootBudgetCeilings, type RootBudgetConfig, RootBudgetExtensionHost, RootBudgetExtensionRequest, RootBudgetExtensionResult, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, RootRecoveryCaller, RootRecoveryOutcome, type RootRecoveryRequest, type RootRecoveryReuse, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type RuntimeSettlementEnv, SKILL_SIDECAR_FILE, type SessionObservation, type SkillContentIdentity, type SkillContractDefect, type SkillContractDefectCode, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillResourceIdentity, type SkillSidecar, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type TerminalReviewFact, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, inFlightRecoveryAttempt, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, recoveryAttemptDigest, recoveryAttemptWithKey, recoveryAttemptsOf, recoveryRequestDefects, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, requestAttemptDigest, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reuseDefects, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDefects, skillContractDigest, skillSearchRoots, skillValidationContext, storedReuse, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

@@ -21,5 +21,6 @@
 export * from './evolution.ts'
 export * from './experiment.ts'
 export * from './replay.ts'
+export * from './capability-candidate.ts'
 
 export { default } from './evolution.ts'

@@ -84,9 +84,18 @@
  * re-check of the candidate (P2) and the production baseline (P3), and the two
  * human approvals stay where they are (the service's `apply` and the tools).
  *
- * EVAL-4 lives here too: only a `skill` proposal has an evaluator in this build.
- * Every other target type is refused by name — a historical report is not
- * upgraded into new evidence, and a type with no evaluator gets no promotion.
+ * The capability gate lives here too (A6, §F.4 "评估/应用必须同组补齐"): a
+ * capability candidate is promoted on the same kind of evidence — a completed
+ * two-sided experiment, its report, and the runs behind it — read through the
+ * capability side's own frozen identities. Where a capability sample's
+ * production baseline could not be admitted at all, its baseline side is the
+ * runtime's own `not-admitted` refusal instead of a run, and the candidate side
+ * still has to be a real run that passed the frozen judge.
+ *
+ * EVAL-4 lives here too: this build has an evaluator for a `skill` proposal and
+ * for a `capability` one, and nothing else. Every other target type is refused
+ * by name — a historical report is not upgraded into new evidence, and a type
+ * with no evaluator gets no promotion.
  * @module dsh-singularity-evolution/promotion
  */
 
@@ -97,6 +106,13 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { SKILL_SIDECAR_FILE, skillContentDigest } from '@dangosys/dsh-singularity-task-runtime'
 import type { ReviewCriterion, ReviewRecord, RunProviderBinding, TaskInstance, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import type { EvolutionProposal } from './evolution.ts'
+import {
+  assertCapabilityCandidateAdmissible,
+  capabilityRefusal,
+  capabilityRowDigest,
+  readPreparedCapability,
+} from './capability-candidate.ts'
+import type { CapabilityRow, CapabilityRowIdentity, CapabilityStoreView } from './capability-candidate.ts'
 import { experimentLineage, evidenceRefsOf } from './experiment.ts'
 import type { ExperimentView } from './experiment.ts'
 import { buildExperimentReport } from './experiment.ts'
@@ -106,13 +122,15 @@ import type {
   ExperimentSide,
   ExperimentSideDetail,
   ExperimentVerdict,
+  FrozenCapabilityRow,
+  FrozenCapabilitySide,
   FrozenCriterion,
   FrozenProviderIdentity,
   FrozenSample,
   ModelSelection,
   SkillContentIdentity,
 } from './replay.ts'
-import { assertExperimentReport, digestOf, protectedInputsDigest } from './replay.ts'
+import { assertExperimentReport, canonicalJson, digestOf, protectedInputsDigest } from './replay.ts'
 
 /**
  * Whether two object identities are the same identity, member by member (K3):
@@ -189,17 +207,18 @@ function sha256Hex(bytes: Buffer | string): string {
 
 /**
  * The refusal every other target type gets: no evaluator, no promotion. This
- * build evaluates a replacement of an existing skill object's bytes;
- * capability, agent_preset, task_definition, the bookkeeping-only types and L4
- * have no evidence this gate could read, so no record of one is reused to
- * promote it (§F.2: "没有支持的评估器就拒绝新晋升"). Their records stay
- * readable.
+ * build evaluates a replacement of an existing skill object's bytes and — since
+ * A6 — one capability row with the new execution skill it grants;
+ * agent_preset, task_definition, the bookkeeping-only types and L4 have no
+ * evidence this gate could read, so no record of one is reused to promote it
+ * (§F.2: "没有支持的评估器就拒绝新晋升"). Their records stay readable.
  */
 export function noEvaluatorRefusal(proposal: EvolutionProposal): Error {
   return new Error(
     `evolution: proposal "${proposal.proposalId}" targets "${proposal.targetType}", which has no evaluator in this build — ` +
-    'the two-sided experiment (§F.2) evaluates a replacement of an existing skill object only, and a promotion ' +
-    'without supported evaluation evidence is refused rather than granted from an older record.',
+    'the two-sided experiment (§F.2) evaluates a replacement of an existing skill object, and a capability candidate (A6) is measured by ' +
+    'the same experiment against its own overlay, so no other target type has evidence a promotion may read and an older record is ' +
+    'never upgraded into new evidence.',
   )
 }
 
@@ -698,7 +717,14 @@ async function assertSideProviderBinding(input: {
 }): Promise<void> {
   const { sample, detail, run, frozen, where } = input
   if (detail.outcome === 'interrupted') return
-  const expected: FrozenProviderIdentity = sample.provider
+  const expected: FrozenProviderIdentity | undefined = sample.provider
+  const improved = frozen.candidate
+  if (expected === undefined || improved === undefined) {
+    throw new Error(
+      `evolution: the experiment report's ${where} cites a run, but the frozen sample records no production provider identity or no ` +
+      'candidate object to check it against — a skill experiment freezes both before its sides run',
+    )
+  }
   const binding: RunProviderBinding | undefined = run.providerBinding
   if (binding === undefined) {
     throw new Error(
@@ -772,7 +798,7 @@ async function assertSideProviderBinding(input: {
         'promoted as something the experiment never evaluated',
       )
     }
-    if (name !== frozen.candidate.name) {
+    if (name !== improved.name) {
       // Every other provider: one production identity, both sides.
       if ((bound.contractDigest ?? null) !== expectedSkill.contractDigest) {
         throw new Error(
@@ -794,7 +820,7 @@ async function assertSideProviderBinding(input: {
     // frozen object *that side* ran, so the candidate's moved declaration
     // digest and rewritten content digest are the expected difference — and
     // anything else is a refusal that names the side.
-    const sideObject = detail.side === 'candidate' ? frozen.candidate : frozen.productionBaseline
+    const sideObject = detail.side === 'candidate' ? improved : frozen.productionBaseline
     if (sideObject === undefined) {
       throw new Error(
         `evolution: run "${run.runId}" of the ${where} bound the improved skill "${name}", but the frozen block records no ` +
@@ -826,18 +852,18 @@ async function assertSideProviderBinding(input: {
   // The promoted skill's own bytes: read from the snapshot the run bound, so the
   // check is against what the run really loaded, not against what it recorded —
   // both files of the object, exactly as the freeze identified them (K3).
-  const target = boundSkills.get(frozen.candidate.name)
+  const target = boundSkills.get(improved.name)
   if (target !== undefined) {
-    const sideObject = detail.side === 'candidate' ? frozen.candidate : frozen.productionBaseline
+    const sideObject = detail.side === 'candidate' ? improved : frozen.productionBaseline
     if (sideObject === undefined) {
       throw new Error(
-        `evolution: run "${run.runId}" of the ${where} bound the improved skill "${frozen.candidate.name}" but the frozen block ` +
+        `evolution: run "${run.runId}" of the ${where} bound the improved skill "${improved.name}" but the frozen block ` +
         'records no production baseline — the bytes the baseline side loaded cannot be re-proved',
       )
     }
     if (binding.snapshotRoot === undefined) {
       throw new Error(
-        `evolution: run "${run.runId}" of the ${where} bound skill "${frozen.candidate.name}" but records no snapshot root — ` +
+        `evolution: run "${run.runId}" of the ${where} bound skill "${improved.name}" but records no snapshot root — ` +
         'the bytes it loaded cannot be re-read, so the frozen content identity cannot be compared',
       )
     }
@@ -850,7 +876,7 @@ async function assertSideProviderBinding(input: {
     for (const frozenFile of frozenFiles) {
       const bytes = await readSideSnapshotFile({
         snapshotRoot: binding.snapshotRoot,
-        name: frozen.candidate.name,
+        name: improved.name,
         file: frozenFile.file,
         where,
         runId: run.runId,
@@ -859,7 +885,7 @@ async function assertSideProviderBinding(input: {
       const digest = sha256Hex(bytes)
       if (digest !== frozenFile.sha256) {
         throw new Error(
-          `evolution: run "${run.runId}" of the ${where} bound skill "${frozen.candidate.name}" whose ${frozenFile.file} hashes to ` +
+          `evolution: run "${run.runId}" of the ${where} bound skill "${improved.name}" whose ${frozenFile.file} hashes to ` +
           `${digest}, but the experiment froze ${frozenFile.sha256} for the ${detail.side} side — the bytes this side ran are not the ` +
           'frozen ones',
         )
@@ -867,7 +893,7 @@ async function assertSideProviderBinding(input: {
     }
     if (detail.side === 'candidate' && sideObject.sha256 === frozen.productionBaseline?.sha256) {
       throw new Error(
-        `evolution: the candidate side of the ${where} loaded the production bytes ("${frozen.candidate.name}" hashes to ` +
+        `evolution: the candidate side of the ${where} loaded the production bytes ("${improved.name}" hashes to ` +
         `${sideObject.sha256}, the frozen production baseline) — the candidate was never really run, so the comparison proves nothing`,
       )
     }
@@ -918,6 +944,7 @@ async function readSideSnapshotFile(input: {
  */
 function assertSidesAgree(
   frozen: ExperimentReport['frozen'],
+  improved: SkillContentIdentity,
   baseline: { run: TaskRun; binding: RunProviderBinding },
   candidate: { run: TaskRun; binding: RunProviderBinding },
   where: string,
@@ -930,7 +957,7 @@ function assertSidesAgree(
       .map(skill => ({
         name: skill.name,
         role: skill.role,
-        ...(skill.name === frozen.candidate.name
+        ...(skill.name === improved.name
           ? {}
           : { contractDigest: skill.contractDigest ?? null, contentDigest: skill.contentDigest }),
       })),
@@ -1039,23 +1066,16 @@ function assertExperimentCostWithinBudget(report: ExperimentReport): void {
 }
 
 /**
- * The whole skill promotion gate, as reads. Returns the experiment it validated
- * so the caller can report the id, the report and the path; throws a named
- * refusal for the first condition that does not hold, having written nothing.
+ * The evidence both promotion gates read first (S4-E §F.2, A6): the proposal's
+ * newest two-sided experiment, its report recomputed from the ledger's own
+ * records, and the report file on disk — which must be exactly those bytes and
+ * must pass its own schema. An incomplete experiment has no report, and a file
+ * edited after the experiment is not the experiment's report.
  */
-export async function assertSkillPromotionEvidence(
+async function experimentEvidence(
   sources: SkillPromotionSources,
   proposal: EvolutionProposal,
-): Promise<SkillPromotionEvidence> {
-  const prepared = proposal.prepared
-  const candidate = prepared?.skillContent
-  if (candidate === undefined) {
-    throw new Error(
-      `evolution: skill proposal "${proposal.proposalId}" records no candidate content identity — it was prepared before ` +
-      'content binding; propose a new candidate and evaluate it (prepare records the SHA-256 of the materialized SKILL.md)',
-    )
-  }
-  // 1. The newest experiment, complete.
+): Promise<{ view: ExperimentView; report: ExperimentReport }> {
   const [experiment] = await sources.experiments(proposal.proposalId)
   if (experiment === undefined) throw noExperimentRefusal(proposal)
   let report: ExperimentReport
@@ -1067,7 +1087,6 @@ export async function assertSkillPromotionEvidence(
       `resume experiment ${experiment.experimentId} (evolution_replay) or freeze a new one`,
     )
   }
-  // 3. The report file is the report these records recompute to.
   const reportPath = experiment.report
   let content: string
   try {
@@ -1094,26 +1113,55 @@ export async function assertSkillPromotionEvidence(
       'own records, never from an edited file',
     )
   }
+  return { view: experiment, report }
+}
+
+/**
+ * The whole skill promotion gate, as reads. Returns the experiment it validated
+ * so the caller can report the id, the report and the path; throws a named
+ * refusal for the first condition that does not hold, having written nothing.
+ */
+export async function assertSkillPromotionEvidence(
+  sources: SkillPromotionSources,
+  proposal: EvolutionProposal,
+): Promise<SkillPromotionEvidence> {
+  const prepared = proposal.prepared
+  const candidate = prepared?.skillContent
+  if (candidate === undefined) {
+    throw new Error(
+      `evolution: skill proposal "${proposal.proposalId}" records no candidate content identity — it was prepared before ` +
+      'content binding; propose a new candidate and evaluate it (prepare records the SHA-256 of the materialized SKILL.md)',
+    )
+  }
+  // 1.-3. The newest experiment, complete, with the report file that is its own records.
+  const { view, report } = await experimentEvidence(sources, proposal)
+  const experiment = view
   // 2. The frozen identities are the ones this proposal would promote —
   // member by member, the whole object each (K3): name, `SKILL.md` digest, and
   // when the object carries an execution sidecar, the sidecar's exact-byte
   // digest and canonical declaration digest. An object that changed shape or
   // declaration is not the object the experiment evaluated.
   const frozen = report.frozen
-  if (!sameIdentity(frozen.candidate, candidate)) {
+  if (frozen.capability !== undefined) {
     throw new Error(
-      `evolution: the experiment froze candidate ${identityLabel(frozen.candidate)} but proposal ` +
+      `evolution: experiment "${experiment.experimentId}" froze a capability candidate, but proposal "${proposal.proposalId}" is a skill ` +
+      'candidate — the evidence belongs to another kind of candidate, so nothing is promoted from it',
+    )
+  }
+  if (frozen.candidate === undefined || !sameIdentity(frozen.candidate, candidate)) {
+    throw new Error(
+      `evolution: the experiment froze candidate ${frozen.candidate === undefined ? '(none)' : identityLabel(frozen.candidate)} but proposal ` +
       `"${proposal.proposalId}" now prepares ${identityLabel(candidate)} — the evidence belongs to different candidate ` +
       'bytes; propose a new candidate and evaluate it',
     )
   }
   const baseline = prepared?.skillBaseline
   const frozenBaseline = frozen.productionBaseline
-  if (baseline === undefined || frozenBaseline === undefined || !sameIdentity(frozenBaseline, baseline)) {
+  if (baseline == null || frozenBaseline === undefined || !sameIdentity(frozenBaseline, baseline)) {
     throw new Error(
       `evolution: the experiment's frozen production baseline (${frozenBaseline === undefined ? 'none' : identityLabel(frozenBaseline)}) ` +
       `is not the baseline prepare recorded for proposal "${proposal.proposalId}" ` +
-      `(${baseline === undefined ? 'none' : identityLabel(baseline)}) — the candidate was evaluated against another production state`,
+      `(${baseline == null ? 'none' : identityLabel(baseline)}) — the candidate was evaluated against another production state`,
     )
   }
   // 4-5. Every side, and every sample's inputs and judge, re-read from the store.
@@ -1165,7 +1213,7 @@ export async function assertSkillPromotionEvidence(
       if (run.providerBinding !== undefined) sideRuns[side] = { run, binding: run.providerBinding }
     }
     if (sideRuns.baseline !== undefined && sideRuns.candidate !== undefined) {
-      assertSidesAgree(frozen, sideRuns.baseline, sideRuns.candidate, `sample "${sample.taskId}"`)
+      assertSidesAgree(frozen, candidate, sideRuns.baseline, sideRuns.candidate, `sample "${sample.taskId}"`)
     }
     await assertSampleInputsIntact({ sample: frozenSample, snapshot, productionWorkspace: frozen.snapshot.sourceDir })
   }
@@ -1197,7 +1245,7 @@ export async function assertSkillPromotionEvidence(
       `${VERDICT_REFUSALS[report.verdict]}:\n${sampleVerdictLines(report.samples).map(line => `- ${line}`).join('\n')}`,
     )
   }
-  return { experimentId: experiment.experimentId, report, reportPath }
+  return { experimentId: view.experimentId, report, reportPath: view.report }
 }
 
 /** The frozen sample one report sample was compared under. */
@@ -1205,4 +1253,526 @@ function frozenSampleOf(report: ExperimentReport, taskId: string): FrozenSample 
   const sample = report.frozen.samples.find(item => item.taskId === taskId)
   if (sample === undefined) throw new Error(`evolution: the experiment report holds no frozen sample "${taskId}"`)
   return sample
+}
+
+/* -------------------------------------------------------------------------- *
+ * A6: the capability promotion gate.
+ * -------------------------------------------------------------------------- */
+
+/** What a capability promotion proved, for the caller to report. */
+export interface CapabilityPromotionEvidence {
+  readonly rowName: string
+  readonly rowDigest: string
+  /** The new execution skill the candidate installs, when it carries one. */
+  readonly newSkill?: string
+  /** The completed two-sided capability experiment the promotion rests on. */
+  readonly experimentId: string
+  readonly report: ExperimentReport
+  readonly reportPath: string
+}
+
+/**
+ * The store a capability gate reads, resolved by the caller from its own
+ * context: the capability registry the candidate would land in, plus the
+ * experiment evidence reads the skill gate already resolves — the ledger's
+ * experiment family, the task store its runs live in, the live judge
+ * vocabulary, this deployment's selection and its session logs. One interface,
+ * so a capability promotion reads the same facts a skill promotion does.
+ */
+export interface CapabilityPromotionSources extends SkillPromotionSources {
+  /**
+   * The store as it stands right now — the effective capability table, the
+   * registered verifier vocabulary (absent when the deployment cannot list it,
+   * fail-closed) and every root discovery searches. It is read again at every
+   * gate, so a table, a verifier registry or a production skill that moved since
+   * prepare is refused by name rather than evaluated against a stale view.
+   */
+  store(): Promise<CapabilityStoreView>
+  /**
+   * The row's own admission pre-check refusals (`precheckReplacedCapabilityRow`),
+   * with the candidate's sandbox skill root in front of production discovery so
+   * the skill this candidate installs is judged from the bytes prepare froze.
+   * Empty means every skill the row declares is a loadable provider.
+   */
+  rowRefusals(row: CapabilityRow, sandboxSkillRoot: string | undefined): Promise<readonly string[]>
+}
+
+/**
+ * Whether one frozen capability identity is the row the candidate prepared: the
+ * whole row member by member, and the digest of its canonical bytes. A row that
+ * moved — a skill added, a tool dropped, a policy key that appeared — is another
+ * row, whatever the name says.
+ */
+function sameCapabilityRow(left: FrozenCapabilityRow, right: CapabilityRowIdentity): boolean {
+  return left.name === right.name && left.digest === right.digest && canonicalJson(left.entry) === canonicalJson(right.entry)
+}
+
+/**
+ * Whether one recorded admission refusal is the refusal the experiment froze for
+ * that sample (A6): the same admission rule, the same required rows and the same
+ * rows the table did not hold. The runtime's own words are the record's, so they
+ * are compared as what they are — a text produced at run time — while the
+ * machine-readable half must be exactly the frozen one.
+ */
+function assertAdmissionMatchesFrozen(input: {
+  sample: FrozenSample
+  detail: ExperimentSideDetail
+  where: string
+  proposalId: string
+}): void {
+  const { sample, detail, where, proposalId } = input
+  const frozen = sample.admission
+  const recorded = detail.admission
+  if (frozen === undefined) {
+    throw new Error(
+      `evolution: the experiment report's ${where} is not-admitted, but the frozen sample records no production refusal — a side ` +
+      'that never ran needs the admission identity frozen before the experiment ran',
+    )
+  }
+  if (recorded === undefined) {
+    throw new Error(`evolution: the experiment report's ${where} is not-admitted without recording the runtime's own refusal`)
+  }
+  if (recorded.source !== frozen.source) {
+    throw new Error(
+      `evolution: the experiment report's ${where} records an admission refusal from "${recorded.source}", but the experiment froze ` +
+      `"${frozen.source}" — the side the evidence describes is not the side the experiment refused`,
+    )
+  }
+  const same = (left: readonly string[], right: readonly string[]): boolean =>
+    [...left].sort().join(', ') === [...right].sort().join(', ')
+  if (!same(recorded.required, frozen.required) || !same(recorded.missing, frozen.missing)) {
+    throw new Error(
+      `evolution: the experiment report's ${where} records an admission refusal over rows [${recorded.required.join(', ')}] ` +
+      `(missing: [${recorded.missing.join(', ')}]), but the frozen refusal is over [${frozen.required.join(', ')}] ` +
+      `(missing: [${frozen.missing.join(', ')}]) — the record and the frozen admission identity disagree about what was refused`,
+    )
+  }
+  if (recorded.proposalId !== proposalId) {
+    throw new Error(
+      `evolution: the experiment report's ${where} belongs the admission refusal to proposal "${recorded.proposalId}", not the ` +
+      `proposal this promotion reads ("${proposalId}") — the gap a refusal stands for must be this candidate's own`,
+    )
+  }
+  if (recorded.sourceRefs.length === 0) {
+    throw new Error(`evolution: the experiment report's ${where} names no source refs for the refusal — the gap it stands for is untraceable`)
+  }
+}
+
+/**
+ * Whether one side's run binding is the identity the capability experiment froze
+ * for that side (A6): the capability rows in play, the registry revision, the
+ * MCP servers (with a resolved template each), the preset, and every resolved
+ * provider's role, declaration digest and content digest. Both sides are
+ * compared against the identity frozen *for them* — the production configuration
+ * for a baseline side, the candidate overlay for the candidate side — because a
+ * capability candidate legitimately changes what its own side resolves (it adds
+ * a row and, usually, a provider), and that difference is exactly what the
+ * overlay is for.
+ *
+ * The candidate side's new skill is then re-proved from the run's own snapshot:
+ * what that side really loaded must hash to the frozen object's identity, so a
+ * binding that merely records the right values is not enough.
+ */
+async function assertCapabilitySideBinding(input: {
+  sample: FrozenSample
+  detail: ExperimentSideDetail
+  run: TaskRun
+  frozen: ExperimentReport['frozen']
+  where: string
+}): Promise<void> {
+  const { sample, detail, run, frozen, where } = input
+  const expected: FrozenCapabilitySide | undefined = detail.side === 'candidate' ? sample.candidateProvider : sample.provider
+  if (expected === undefined) {
+    throw new Error(
+      `evolution: the experiment report's ${where} has no frozen provider identity for its ${detail.side} side — a capability sample ` +
+      'freezes one for each side before it runs, and a side the freeze does not describe cannot be read as evidence',
+    )
+  }
+  const binding: RunProviderBinding | undefined = run.providerBinding
+  if (binding === undefined) {
+    throw new Error(
+      `evolution: run "${run.runId}" of the ${where} records no provider binding — which rows, servers and skills it resolved ` +
+      'against cannot be re-read, so the frozen provider identity cannot be compared and the promotion is refused',
+    )
+  }
+  const rows = [...binding.capabilities].sort()
+  if (rows.join(', ') !== [...expected.capabilities].sort().join(', ')) {
+    throw new Error(
+      `evolution: run "${run.runId}" of the ${where} bound capabilities [${rows.join(', ') || 'none'}] but the experiment froze ` +
+      `[${expected.capabilities.join(', ') || 'none'}] for the ${detail.side} side — the rows this side ran under are not the frozen ones`,
+    )
+  }
+  if (binding.registryRevision !== expected.registryRevision) {
+    throw new Error(
+      `evolution: run "${run.runId}" of the ${where} bound registry revision ${binding.registryRevision}, but the experiment froze ` +
+      `${expected.registryRevision} for the ${detail.side} side — a row, a tool label or a provider contract moved since the freeze, ` +
+      `so the ${detail.side} side did not run under the configuration the experiment froze for it`,
+    )
+  }
+  const servers = [...binding.mcpServers].map(server => server.serverName).sort()
+  if (servers.join(', ') !== [...expected.mcpServers].sort().join(', ')) {
+    throw new Error(
+      `evolution: run "${run.runId}" of the ${where} bound MCP servers [${servers.join(', ') || 'none'}] but the experiment froze ` +
+      `[${expected.mcpServers.join(', ') || 'none'}] — the granted server plane moved since the freeze`,
+    )
+  }
+  for (const server of binding.mcpServers) {
+    if (server.templateDigest === null) {
+      throw new Error(
+        `evolution: run "${run.runId}" of the ${where} bound MCP server "${server.serverName}" with no resolvable template — the run ` +
+        'recorded no identity for the server it was granted, so the frozen server plane cannot be compared',
+      )
+    }
+  }
+  if (expected.preset !== null && run.agentPreset !== expected.preset) {
+    throw new Error(
+      `evolution: run "${run.runId}" of the ${where} ran under agent preset ${run.agentPreset === undefined ? '(none)' : `"${run.agentPreset}"`}, ` +
+      `but the frozen provider identity declares "${expected.preset}" — the preset plane this side ran under is not the frozen one`,
+    )
+  }
+  const frozenSkills = new Map(expected.skills.map(skill => [skill.name, skill]))
+  const boundSkills = new Map(binding.skills.map(skill => [skill.name, skill]))
+  for (const name of boundSkills.keys()) {
+    if (!frozenSkills.has(name)) {
+      throw new Error(
+        `evolution: run "${run.runId}" of the ${where} bound skill "${name}", which the frozen provider identity does not resolve ` +
+        `(frozen: ${expected.skills.map(skill => skill.name).join(', ') || 'none'}) — content the freeze never admitted reached this run`,
+      )
+    }
+  }
+  for (const [name, frozenSkill] of frozenSkills) {
+    const bound = boundSkills.get(name)
+    if (bound === undefined) {
+      throw new Error(
+        `evolution: run "${run.runId}" of the ${where} bound no skill "${name}", which the frozen provider identity resolves — the ` +
+        'run under this side did not load content the freeze named',
+      )
+    }
+    if (bound.role !== frozenSkill.role || (bound.contractDigest ?? null) !== frozenSkill.contractDigest
+      || bound.contentDigest !== frozenSkill.contentDigest) {
+      throw new Error(
+        `evolution: run "${run.runId}" of the ${where} bound skill "${name}" as ${bound.role} declaration ` +
+        `${bound.contractDigest ?? '(none)'} content ${bound.contentDigest}, but the frozen identity is ${frozenSkill.role} declaration ` +
+        `${frozenSkill.contractDigest ?? '(none)'} content ${frozenSkill.contentDigest} — the provider this side loaded is not the one the ` +
+        'experiment froze for it',
+      )
+    }
+  }
+  const candidate = frozen.candidate
+  if (candidate === undefined || detail.side !== 'candidate') return
+  const frozenFiles: readonly { file: string; sha256: string }[] = [
+    { file: 'SKILL.md', sha256: candidate.sha256 },
+    ...(candidate.contract === undefined ? [] : [{ file: SKILL_SIDECAR_FILE, sha256: candidate.contract.sha256 }]),
+  ]
+  if (binding.snapshotRoot === undefined) {
+    throw new Error(
+      `evolution: run "${run.runId}" of the ${where} bound the new skill "${candidate.name}" but records no snapshot root — the bytes ` +
+      'it loaded cannot be re-read, so the frozen content identity cannot be compared',
+    )
+  }
+  for (const frozenFile of frozenFiles) {
+    const bytes = await readSideSnapshotFile({
+      snapshotRoot: binding.snapshotRoot,
+      name: candidate.name,
+      file: frozenFile.file,
+      where,
+      runId: run.runId,
+      side: detail.side,
+    })
+    const digest = sha256Hex(bytes)
+    if (digest !== frozenFile.sha256) {
+      throw new Error(
+        `evolution: run "${run.runId}" of the ${where} bound the new skill "${candidate.name}" whose ${frozenFile.file} hashes to ` +
+        `${digest}, but the experiment froze ${frozenFile.sha256} — the bytes this side ran are not the frozen ones`,
+      )
+    }
+  }
+}
+
+/**
+ * The capability promotion gate (A6 §F.4 "候选支持范围固定" and
+ * "评估/应用必须同组补齐"): what a PROMOTE of a capability candidate must be able
+ * to prove before a human is asked. Every check is a read, and every failure is
+ * a named refusal that writes nothing:
+ *
+ * 1. the candidate is a materialized capability prepare (a frozen row, and the
+ *    new skill's files when it carries one), re-read from the sandbox and
+ *    verified against the identities prepare recorded;
+ * 2. the store's row still reads as the baseline prepare captured — a row that
+ *    moved between prepare and promotion is a conflict, not a candidate;
+ * 3. every rule the candidate itself must satisfy still holds against the store
+ *    as it stands now: no tool the store has not authorized, no preset /
+ *    permission / server change, a verifier that is registered and versioned, a
+ *    new skill name that is still free and still not a rename of an existing
+ *    object (`assertCapabilityCandidateAdmissible`);
+ * 4. every skill the row declares — the candidate's own new one, discovered from
+ *    the sandbox, and any existing ones the row grants — is a loadable provider
+ *    under the same pre-check admission runs;
+ * 5. **the evaluation evidence**: the proposal's newest two-sided experiment,
+ *    complete, whose report file is the report its own records recompute to, and
+ *    whose frozen identity is this candidate — the row, the row it moves, the
+ *    gap it came from and, when it carries one, the new skill object;
+ * 6. **the baseline the evidence records**: every sample's baseline side is
+ *    either the frozen production refusal (A6: `not-admitted`, no Task, no Run,
+ *    the refusal the freeze recorded — never a failed run standing in for it) or
+ *    a real run of this experiment that bound the frozen production identity;
+ * 7. **the candidate really ran and passed**: the candidate side of every sample
+ *    is a run of this experiment's own lineage, settled `verified`, with every
+ *    criterion the frozen judge decided reported `pass` — admission passing is
+ *    not a fix, so the run, its review record and its evidence are all re-read
+ *    from the store and compared against the ledger;
+ * 8. **no regression and no degraded holdout**: the verdict must be the clean
+ *    `fixed` — a `fixed-with-regression`, `regressed`, `not-fixed`, `both-failed`
+ *    or `inconclusive` experiment is refused by name with its sample verdicts.
+ *
+ * Nothing here writes: the whole gate is reads. The production write, its own
+ * re-check of the candidate and the human approvals stay where they are (the
+ * service's `apply` and the tools).
+ */
+export async function assertCapabilityPromotionEvidence(
+  sources: CapabilityPromotionSources,
+  proposal: EvolutionProposal,
+): Promise<CapabilityPromotionEvidence> {
+  const prepared = await readPreparedCapability(sources.root, proposal)
+  const store = await sources.store()
+  const current = store.table[prepared.row.name] ?? null
+  const currentDigest = current === null ? null : capabilityRowDigest(current)
+  const baseline = proposal.prepared?.capabilityBaseline ?? null
+  const preparedDigest = baseline === null ? null : baseline.digest
+  if (currentDigest !== preparedDigest) {
+    throw capabilityRefusal(
+      'capability-registry-changed',
+      `the capability registry row "${prepared.row.name}" reads ${currentDigest ?? 'no row'}, not the state prepare recorded ` +
+      `(${preparedDigest ?? 'no row'}) — a row a third party moved is a conflict, so create a new candidate from the current registry ` +
+      'state and re-evaluate it; nothing was promoted',
+    )
+  }
+  await assertCapabilityCandidateAdmissible(
+    store,
+    { row: prepared.row, ...(prepared.skill === undefined ? {} : { skill: prepared.skill }) },
+    current,
+  )
+  const refusals = await sources.rowRefusals(prepared.row, prepared.skillRoot)
+  if (refusals.length > 0) {
+    throw capabilityRefusal(
+      'skill-candidate-invalid',
+      `capability candidate "${proposal.proposalId}" grants providers this deployment refuses:\n` +
+      `${refusals.map(line => `- ${line}`).join('\n')}`,
+    )
+  }
+  // The row as prepare recorded it: the identity the evidence must be about.
+  const preparedRow: CapabilityRowIdentity = { ...prepared.row, digest: proposal.prepared!.capabilityRow!.digest }
+  // 5-8. The evaluation evidence: the experiment the candidate was evaluated
+  // by, its report, and every fact that report rests on.
+  const { view, report } = await experimentEvidence(sources, proposal)
+  const frozen = report.frozen
+  const capability = frozen.capability
+  if (capability === undefined) {
+    throw capabilityRefusal(
+      'capability-evidence-absent',
+      `experiment "${view.experimentId}" froze a ${frozen.candidate === undefined ? 'candidate with no capability identity' : 'skill object identity'} ` +
+      `for proposal "${proposal.proposalId}", which is a capability candidate — the evidence belongs to another kind of candidate`,
+    )
+  }
+  if (!sameCapabilityRow(capability.row, preparedRow)) {
+    throw capabilityRefusal(
+      'capability-evidence-drifted',
+      `experiment "${view.experimentId}" froze row "${capability.row.name}" (${capability.row.digest}), but proposal ` +
+      `"${proposal.proposalId}" now prepares row "${prepared.row.name}" (${proposal.prepared!.capabilityRow!.digest}) — the evidence ` +
+      'belongs to different bytes; propose a new candidate and evaluate it',
+    )
+  }
+  const recordedBaseline = baseline
+  if ((capability.baseline === null) !== (recordedBaseline === null)) {
+    throw capabilityRefusal(
+      'capability-evidence-drifted',
+      `experiment "${view.experimentId}" froze ${capability.baseline === null ? 'no baseline row' : `baseline row ${capability.baseline.digest}`} , ` +
+      `but proposal "${proposal.proposalId}" was prepared against ` +
+      `${recordedBaseline === null ? 'no row' : `row ${recordedBaseline.digest}`} — the candidate was evaluated against another registry state`,
+    )
+  }
+  if (capability.baseline !== null && recordedBaseline !== null && !sameCapabilityRow(capability.baseline, recordedBaseline)) {
+    throw capabilityRefusal(
+      'capability-evidence-drifted',
+      `experiment "${view.experimentId}" froze baseline row ${capability.baseline.digest}, but prepare recorded ${recordedBaseline.digest} ` +
+      '— the row this candidate would roll back to is not the row the experiment evaluated against',
+    )
+  }
+  const preparedSkill = proposal.prepared?.skillContent
+  if ((frozen.candidate === undefined) !== (preparedSkill === undefined)) {
+    throw capabilityRefusal(
+      'capability-evidence-drifted',
+      `experiment "${view.experimentId}" froze ${frozen.candidate === undefined ? 'no new skill object' : `the new skill ${identityLabel(frozen.candidate)}`}, ` +
+      `but proposal "${proposal.proposalId}" prepares ${preparedSkill === undefined ? 'no new skill object' : identityLabel(preparedSkill)} — the ` +
+      'candidate the experiment evaluated is not the candidate this promotion would write',
+    )
+  }
+  if (frozen.candidate !== undefined && preparedSkill !== undefined && !sameIdentity(frozen.candidate, preparedSkill)) {
+    throw capabilityRefusal(
+      'capability-evidence-drifted',
+      `experiment "${view.experimentId}" froze candidate ${identityLabel(frozen.candidate)} but proposal "${proposal.proposalId}" now prepares ` +
+      `${identityLabel(preparedSkill)} — the evidence belongs to different candidate bytes; propose a new candidate and evaluate it`,
+    )
+  }
+  if (frozen.productionBaseline !== undefined) {
+    throw capabilityRefusal(
+      'capability-evidence-drifted',
+      `experiment "${view.experimentId}" froze a production skill baseline, which a capability candidate never has — its production baseline ` +
+      'is the registry row it moves',
+    )
+  }
+  const sourceRefs = [...(proposal.sourceRefs ?? [])]
+  if (canonicalJson([...capability.sourceRefs].sort()) !== canonicalJson([...sourceRefs].sort())) {
+    throw capabilityRefusal(
+      'capability-evidence-drifted',
+      `experiment "${view.experimentId}" froze the gap it came from as [${capability.sourceRefs.join(', ')}], but proposal ` +
+      `"${proposal.proposalId}" records [${sourceRefs.join(', ')}] — the refusal the evidence rests on belongs to another proposal`,
+    )
+  }
+  const storeId = view.storeId
+  if (storeId === undefined) {
+    throw capabilityRefusal(
+      'capability-evidence-absent',
+      `experiment "${view.experimentId}" records no task store, so the runs its sides cite cannot be re-read — run the two-sided ` +
+      'experiment again so its evidence names the store it ran in',
+    )
+  }
+  const snapshot = await sources.task.openStore(storeId)
+  const vocabulary = await sources.verifierVocabulary()
+  if (vocabulary === undefined) {
+    throw capabilityRefusal(
+      'capability-evidence-unverifiable',
+      'the verifier registry cannot be listed in this context, so the judges behind the experiment\'s verdicts cannot be re-checked — ' +
+      'the promotion is refused rather than granted on unverifiable evidence',
+    )
+  }
+  for (const sample of report.samples) {
+    const frozenSample = frozenSampleOf(report, sample.taskId)
+    const candidateLabel = `sample "${sample.taskId}" candidate side`
+    // 7. The candidate side: a real run, verified, every frozen criterion passed.
+    const candidateTask = assertSideEvidence({
+      sample: frozenSample,
+      detail: sample.candidate,
+      experimentId: view.experimentId,
+      snapshot,
+      where: candidateLabel,
+    })
+    assertJudgeUnchanged(frozenSample, sample.candidate, candidateLabel, vocabulary)
+    assertCostWithinDeclaredBudget(report, candidateLabel, sample.candidate)
+    if (sample.candidate.outcome !== 'verified') {
+      throw capabilityRefusal(
+        'capability-candidate-not-verified',
+        `the candidate side of ${candidateLabel} settled "${sample.candidate.outcome}" — a capability fix is a run that passed the ` +
+        'frozen acceptance, never an admission that merely went through; the promotion is refused',
+      )
+    }
+    const failed = sample.candidate.criteria.filter(criterion => criterion.verdict !== 'pass')
+    if (failed.length > 0) {
+      throw capabilityRefusal(
+        'capability-candidate-not-verified',
+        `the candidate side of ${candidateLabel} reports ${failed.map(criterion => `"${criterion.criterionId}" ${criterion.verdict}`).join(', ')} — ` +
+        'every frozen criterion must pass on the candidate side before the candidate may be promoted',
+      )
+    }
+    if (sample.candidate.initialDigest !== frozen.snapshot.digest) {
+      throw capabilityRefusal(
+        'capability-evidence-drifted',
+        `the candidate side of ${candidateLabel} ran from workspace digest ${sample.candidate.initialDigest}, not the frozen snapshot ` +
+        `${frozen.snapshot.digest} — both sides of a sample start from the same frozen input`,
+      )
+    }
+    await assertSideModelBinding({ sources, detail: sample.candidate, task: candidateTask, snapshot, selection: frozen.model, where: candidateLabel })
+    const candidateRun = sample.candidate.runId === undefined ? undefined : snapshot.runs.find(item => item.runId === sample.candidate.runId)
+    if (candidateRun === undefined) {
+      throw capabilityRefusal(
+        'capability-evidence-absent',
+        `the experiment report's ${candidateLabel} cites run "${String(sample.candidate.runId)}", which the store no longer holds — its ` +
+        'provider binding cannot be re-read, so the promotion is refused',
+      )
+    }
+    await assertCapabilitySideBinding({ sample: frozenSample, detail: sample.candidate, run: candidateRun, frozen, where: candidateLabel })
+    // 6. The baseline side: the frozen refusal, or a real run under production.
+    const baselineLabel = `sample "${sample.taskId}" baseline side`
+    if (frozenSample.admission !== undefined) {
+      if (sample.baseline.outcome !== 'not-admitted') {
+        throw capabilityRefusal(
+          'capability-baseline-not-refused',
+          `the experiment froze the production configuration's refusal of ${baselineLabel}, but the record settled ` +
+          `"${sample.baseline.outcome}" — the baseline the candidate is compared against is not the refusal the experiment proved`,
+        )
+      }
+      assertAdmissionMatchesFrozen({ sample: frozenSample, detail: sample.baseline, where: baselineLabel, proposalId: proposal.proposalId })
+      const lineage = experimentLineage(view.experimentId, sample.taskId, 'baseline')
+      const persisted = snapshot.tasks.find(item => item.objective.startsWith(`[${lineage}] `))
+      if (persisted !== undefined) {
+        throw capabilityRefusal(
+          'capability-baseline-not-refused',
+          `${baselineLabel} is recorded not-admitted, but the store holds replayed task "${persisted.taskId}" of this side's own lineage — ` +
+          'a refused side produced no run, and a failure run standing in its place is not evidence',
+        )
+      }
+    } else {
+      if (sample.baseline.outcome === 'not-admitted') {
+        throw capabilityRefusal(
+          'capability-baseline-not-refused',
+          `${baselineLabel} is recorded not-admitted, but the experiment froze the production configuration as admitting it — the record ` +
+          'and the frozen identity disagree about whether the baseline ran',
+        )
+      }
+      const baselineTask = assertSideEvidence({
+        sample: frozenSample,
+        detail: sample.baseline,
+        experimentId: view.experimentId,
+        snapshot,
+        where: baselineLabel,
+      })
+      assertJudgeUnchanged(frozenSample, sample.baseline, baselineLabel, vocabulary)
+      assertCostWithinDeclaredBudget(report, baselineLabel, sample.baseline)
+      if (sample.baseline.initialDigest !== frozen.snapshot.digest) {
+        throw capabilityRefusal(
+          'capability-evidence-drifted',
+          `the baseline side of ${baselineLabel} ran from workspace digest ${sample.baseline.initialDigest}, not the frozen snapshot ` +
+          `${frozen.snapshot.digest} — both sides of a sample start from the same frozen input`,
+        )
+      }
+      await assertSideModelBinding({ sources, detail: sample.baseline, task: baselineTask, snapshot, selection: frozen.model, where: baselineLabel })
+      const baselineRun = sample.baseline.runId === undefined ? undefined : snapshot.runs.find(item => item.runId === sample.baseline.runId)
+      if (baselineRun === undefined) {
+        throw capabilityRefusal(
+          'capability-evidence-absent',
+          `the experiment report's ${baselineLabel} cites run "${String(sample.baseline.runId)}", which the store no longer holds — its ` +
+          'provider binding cannot be re-read, so the promotion is refused',
+        )
+      }
+      await assertCapabilitySideBinding({ sample: frozenSample, detail: sample.baseline, run: baselineRun, frozen, where: baselineLabel })
+    }
+    await assertSampleInputsIntact({ sample: frozenSample, snapshot, productionWorkspace: frozen.snapshot.sourceDir })
+  }
+  assertExperimentCostWithinBudget(report)
+  const currentSelection = sources.modelSelection()
+  if (currentSelection.provider !== frozen.model.provider || currentSelection.model !== frozen.model.model
+    || currentSelection.reasoningEffort !== frozen.model.reasoningEffort || currentSelection.maxTokens !== frozen.model.maxTokens) {
+    throw capabilityRefusal(
+      'capability-evidence-drifted',
+      `the experiment froze model selection "${frozen.model.label}", but this deployment resolves "${currentSelection.label}" now — the runs ` +
+      'on record were not run under the selection this promotion would be judged against',
+    )
+  }
+  const degraded = report.samples.filter(sample => sample.verdict === 'regressed')
+  if (report.verdict !== 'fixed') {
+    throw capabilityRefusal(
+      'capability-not-fixed',
+      `the two-sided capability experiment "${view.experimentId}" did not show a clean fix — ` +
+      `${VERDICT_REFUSALS[report.verdict]}:\n${sampleVerdictLines(report.samples).map(line => `- ${line}`).join('\n')}` +
+      (degraded.length === 0 ? '' : ` — degraded sample(s): ${degraded.map(sample => sample.taskId).join(', ')}`),
+    )
+  }
+  return {
+    rowName: prepared.row.name,
+    rowDigest: proposal.prepared!.capabilityRow!.digest,
+    ...(prepared.skill === undefined ? {} : { newSkill: prepared.skill.name }),
+    experimentId: view.experimentId,
+    report,
+    reportPath: view.report,
+  }
 }

@@ -37,7 +37,12 @@ const EVOLUTION_TOOLS = [
   'evolution_list',
 ]
 
-/** The twenty-three tools every composition registers, whatever the switch says (`escalate` included). */
+/**
+ * The twenty-four tools every composition registers, whatever the switch says
+ * (`escalate` included, and `task_recover` — A6's recovery adapter, which is
+ * gated by the caller's own live session and the deployment's ledger rather
+ * than by the switch, and is deliberately absent from every root's allow-list).
+ */
 const ALWAYS_TOOLS = [
   'graph_mark_ready',
   'graph_spawn',
@@ -61,6 +66,7 @@ const ALWAYS_TOOLS = [
   'task_review_agent',
   'task_diagnose',
   'task_budget_extend',
+  'task_recover',
   'escalate',
 ]
 
@@ -120,7 +126,7 @@ afterEach(() => {
 })
 
 describe('SingularityAgent assembly', () => {
-  it('registers the twenty-two unconditional tools and no evolution tool on the shipped default', async () => {
+  it('registers the twenty-four unconditional tools and no evolution tool on the shipped default', async () => {
     const { tools } = await mount()
     expect(DEFAULT_EVOLUTION).toBe('off')
 
@@ -132,7 +138,7 @@ describe('SingularityAgent assembly', () => {
     expect([...tools.keys()].filter(name => name.startsWith('evolution_'))).toEqual([])
   })
 
-  it('registers all thirty-one tools when the deployment turns evolution on', async () => {
+  it('registers all thirty-three tools when the deployment turns evolution on', async () => {
     const { tools } = await mount({ evolution: 'on' })
     for (const name of [...ALWAYS_TOOLS, ...EVOLUTION_TOOLS]) expect(tools.has(name), name).toBe(true)
     expect(tools.size).toBe(ALWAYS_TOOLS.length + EVOLUTION_TOOLS.length)
@@ -239,25 +245,45 @@ describe('SingularityAgent assembly', () => {
     expect(JSON.stringify(replay.parameters)).not.toContain('wallTimeMs')
   })
 
-  it('declares the candidate mutation required on the model surface, in whole-object terms', async () => {
-    // `evolution_candidate` admits one shape: a same-name improvement of an
-    // existing skill, whose full replacement `SKILL.md` text the mutation
-    // carries. The model surface has to say so — the schema requires the
-    // mutation instead of leaving a mutation-less call to be refused after the
-    // fact, the mutation's own text says an execution skill's sidecar is derived
-    // rather than submitted, and a suggestion-only proposal is named as
-    // something that never becomes a candidate.
+  it('declares the candidate mutation required on the model surface, in whole-object and whole-row terms (A6)', async () => {
+    // `evolution_candidate` admits two shapes, and the model surface says which:
+    // a same-name improvement of an existing skill (the full replacement
+    // `SKILL.md` text, whose execution sidecar is *derived* at prepare rather
+    // than submitted) and — A6 — one whole capability row with an optional new
+    // execution skill. The mutation is required, the row carries its whole
+    // configuration rather than a patch, and a suggestion-only proposal is named
+    // as something that never becomes a candidate.
     const { tools } = await mount({ evolution: 'on' })
     const candidate = tools.get('evolution_candidate') as unknown as {
       description: string
-      parameters: { required: string[]; properties: Record<string, { description?: string }> }
+      parameters: {
+        required: string[]
+        properties: Record<string, {
+          description?: string
+          oneOf?: readonly {
+            required?: readonly string[]
+            properties?: Record<string, { description?: string }>
+          }[]
+        }>
+      }
     }
     expect(candidate.parameters.required).toContain('mutation')
     expect(candidate.parameters.required).toContain('versionSet')
-    expect(candidate.parameters.properties.mutation!.description).toContain('{ name, content }')
-    expect(candidate.parameters.properties.mutation!.description).toContain('derived from production at evolution_prepare')
-    expect(candidate.description).toContain('This build admits one candidate lifecycle')
-    expect(candidate.description).toContain('a suggestion never becomes a candidate')
+    const mutation = candidate.parameters.properties.mutation!
+    expect(mutation.description).toContain('{ name, content }')
+    expect(mutation.description).toContain('{ rows, skill? }')
+    const branches = mutation.oneOf ?? []
+    expect(branches).toHaveLength(2)
+    const skillBranch = branches[0]!
+    expect(skillBranch.required).toEqual(['name', 'content'])
+    expect(skillBranch.properties!.content!.description).toContain('SKILL.md')
+    const capabilityBranch = branches[1]!
+    expect(capabilityBranch.required).toEqual(['rows'])
+    expect(capabilityBranch.properties!.rows!.description).toContain('Exactly one entry')
+    expect(capabilityBranch.properties!.skill!.description).toContain('SKILL.contract.json')
+    expect(candidate.description).toContain('two candidate lifecycles')
+    expect(candidate.description).toContain('it stays a record')
+    expect(candidate.description).toContain('Unknown mutation fields are refused by name')
   })
 
   it('describes all nine evolution tools in whole-object terms, with no single-file claim left', async () => {

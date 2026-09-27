@@ -1005,7 +1005,7 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     )
   }
 
-  it.each(['capability', 'agent_preset', 'task_definition', 'workflow_policy'] as const)(
+  it.each(['agent_preset', 'task_definition', 'workflow_policy'] as const)(
     'refuses a %s PROMOTE with no evaluator, leaving the ledger and production untouched',
     async targetType => {
       const f = await fixture()
@@ -1016,16 +1016,27 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     },
   )
 
+  it('refuses a capability PROMOTE with nothing prepared, by name and with nothing written', async () => {
+    // A6 gives the capability candidate its own gate: the refusal is that there
+    // is no materialized row to judge, not that no evaluator exists. What it
+    // proves is unchanged — an unprepared proposal never reaches a decision.
+    const f = await fixture()
+    await f.svc.propose({ proposalId: 'x1', targetType: 'capability', targetId: 'x', baseVersion: 'v1', level: 'L2', rationale: 'the fixture row', sourceRefs: ['diagnosis:d1'] }, 'root-1')
+    const message = await refusal(f.svc.checkPromotion('x1'))
+    expect(message).toContain('capability-unprepared')
+    expect(await f.ledgerKinds()).not.toContain('decided')
+  })
+
   it('refuses a hand-written capability lifecycle at the entry, before decide or apply can read it', async () => {
     const f = await fixture()
     await capabilityGated(f.svc)
     const gated = await f.reopen()
 
-    // The candidate line of another target type never folds, so no `gated`
-    // capability proposal exists to decide.
-    expect(await refusal(gated.list())).toContain('targets "capability"')
+    // The candidate line of the old shape never folds, so no `gated` capability
+    // proposal exists to decide.
+    expect(await refusal(gated.list())).toContain('capability-row-invalid')
     const decideMessage = await refusal(gated.decide('c1', 'PROMOTE', 'root-1', 'approval:decide'))
-    expect(decideMessage).toContain('targets "capability"')
+    expect(decideMessage).toContain('capability-row-invalid')
     expect(await f.ledgerKinds()).not.toContain('decided')
 
     // A decided and an applied line on top of the same lifecycle change nothing:
@@ -1036,7 +1047,7 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     await writeFile(join(f.root, 'proposals.jsonl'), `${lines.map(line => JSON.stringify(line)).join('\n')}\n`)
     const reopened = await f.reopen()
     const applyMessage = await refusal(reopened.apply('c1', 'root-1', 'approval:apply'))
-    expect(applyMessage).toContain('targets "capability"')
+    expect(applyMessage).toContain('capability-row-invalid')
     expect(await f.ledgerKinds()).not.toContain('applied')
   })
 
@@ -1058,13 +1069,13 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     const before = await readFile(configFile, 'utf8')
 
     // The applied line is refused at load — at the candidate line above it, since
-    // the fold admits what the current entries write, and this build writes a
-    // single SKILL.md only.
+    // the fold admits what the current entries write, and this build writes the
+    // one-whole-row capability mutation only.
     const reopened = await f.reopen()
-    expect(await refusal(reopened.get('old1'))).toContain('targets "capability"')
-    expect(await refusal(reopened.list())).toContain('targets "capability"')
+    expect(await refusal(reopened.get('old1'))).toContain('capability-row-invalid')
+    expect(await refusal(reopened.list())).toContain('capability-row-invalid')
     expect(await readFile(configFile, 'utf8')).toBe(before)
-    expect(await refusal(reopened.checkPromotion('old1'))).toContain('targets "capability"')
+    expect(await refusal(reopened.checkPromotion('old1'))).toContain('capability-row-invalid')
     expect(await readFile(configFile, 'utf8')).toBe(before)
   })
 })
@@ -1191,7 +1202,7 @@ describe('skill promotion gate: the improved skill\'s complete object (K3)', () 
     // The frozen block records both revisions, and they differ by exactly the
     // improved skill's own declaration digest (the candidate's sidecar is
     // derived, so its declaration digest moved with the body).
-    const provider = f.frozen.samples[0]!.provider
+    const provider = f.frozen.samples[0]!.provider!
     expect(provider.candidateRegistryRevision).not.toBe(provider.registryRevision)
     f.runOf(FAIL_SAMPLE, 'candidate').providerBinding.registryRevision = provider.registryRevision
 
@@ -1300,7 +1311,7 @@ describe('skill promotion gate: the improved skill\'s complete object (K3)', () 
 
   it('keeps the guidance path exactly as it was: one file, no sidecar, production revision on both sides', async () => {
     const f = await fixture()
-    expect(f.frozen.samples[0]!.provider.candidateRegistryRevision).toBe(f.frozen.samples[0]!.provider.registryRevision)
+    expect(f.frozen.samples[0]!.provider!.candidateRegistryRevision).toBe(f.frozen.samples[0]!.provider!.registryRevision)
     expect(await refusal(f.svc.checkPromotion(PROPOSAL))).toBe('')
     await f.svc.gate(PROPOSAL, gateAnswers([f.reportPath]), 'root-1')
     await f.svc.decide(PROPOSAL, 'PROMOTE', 'root-1', 'approval:decide')

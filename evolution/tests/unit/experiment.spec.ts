@@ -572,7 +572,7 @@ describe('assertExperimentReport', () => {
   it('requires the frozen provider identity to record the candidate side\'s registry revision (K3)', () => {
     const report = reportFixture()
     const [sample] = report.frozen.samples
-    expect(sample!.provider.candidateRegistryRevision).toBe(HEX('4'))
+    expect(sample!.provider!.candidateRegistryRevision).toBe(HEX('4'))
 
     // The member is part of the identity, not an optional extra: a block without
     // it cannot say what the candidate side's run had to bind, so it is refused
@@ -698,7 +698,7 @@ describe('the experiment ledger family', () => {
     // The key member is the digest of the *whole* candidate identity (K3): a
     // record keyed by the `SKILL.md` digest alone is not this experiment's key,
     // because a candidate whose sidecar differs is a different experiment.
-    await expect(svc.recordExperimentSample({ ...base, preparedContentDigest: frozen.candidate.sha256 }))
+    await expect(svc.recordExperimentSample({ ...base, preparedContentDigest: frozen.candidate!.sha256 }))
       .rejects.toThrow(/candidate content identity that is not the experiment's own/)
     await expect(svc.recordExperimentSample({ ...base, repetition: 3 }))
       .rejects.toThrow(/repetition that is not the experiment's own/)
@@ -1107,11 +1107,14 @@ describe('the fold admits only the current lifecycle (S4-E 收尾)', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   }
 
-  it('refuses a candidate of another target type', async () => {
+  it('refuses a capability candidate written in the shape a ledger before this build holds', async () => {
+    // A6 admits a capability candidate, but only the one-whole-row shape its own
+    // lifecycle records: the old `{ name, entry }` mutation is a payload no live
+    // entry writes, and the fold refuses it exactly as `candidate` would.
     await refuses([
       proposed({ targetType: 'capability', targetId: 'research' }),
       candidate({ versionSet: { capability: '1' }, mutation: { name: 'research', entry: { preset: 'standard' } } }),
-    ], /targets "capability"/)
+    ], /capability-row-invalid/)
   })
 
   it('refuses a candidate that carries no mutation', async () => {

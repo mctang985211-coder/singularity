@@ -56,6 +56,7 @@ import type { ContentBlock, GenerateOptions, Message, StreamChunk } from '../../
 import SessionStore, { SessionId, SESSION_FORMAT_VERSION } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import type { SessionEvent, SessionHeader } from '../../../../thirdparty/deepseek-harness/packages/core/session/lib/index.js'
 import SessionProjectionRegistry from '../../../../thirdparty/deepseek-harness/packages/session/session-projection/lib/index.js'
+import SkillRegistry from '../../../../thirdparty/deepseek-harness/packages/skill/skill/lib/index.js'
 import SystemPrompt from '../../../../thirdparty/deepseek-harness/packages/core/system-prompt/lib/index.js'
 import ToolRuntime from '../../../../thirdparty/deepseek-harness/packages/core/tools/lib/index.js'
 import { AgentRegistry } from '../../../../thirdparty/deepseek-harness/packages/core/agent/lib/index.js'
@@ -69,7 +70,19 @@ import type { TaskEvent, TaskSnapshot } from '../../task/src/index.ts'
 import { AgentRuntime } from '../../agent-runtime/src/index.ts'
 import type { SpawnRequest } from '../../agent-runtime/src/types.ts'
 import { SingularityContextService } from '../../context/src/index.ts'
+import { EvolutionService, modelSelectionOf } from '../../evolution/src/index.ts'
 import { ProposalReviewService } from '../../agent-singularity/src/proposal-review.ts'
+import { supervisorDelegationSource } from '../../agent-singularity/src/review-agent-ledger.ts'
+import { defineTaskRecoverTool } from '../../agent-singularity/src/tools/task-recover.ts'
+import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
+import { defineEvolutionCandidateTool } from '../../agent-singularity/src/tools/evolution-candidate.ts'
+import { defineEvolutionDecideTool } from '../../agent-singularity/src/tools/evolution-decide.ts'
+import { defineEvolutionGateTool } from '../../agent-singularity/src/tools/evolution-gate.ts'
+import { defineEvolutionListTool } from '../../agent-singularity/src/tools/evolution-list.ts'
+import { defineEvolutionPrepareTool } from '../../agent-singularity/src/tools/evolution-prepare.ts'
+import { defineEvolutionProposeTool } from '../../agent-singularity/src/tools/evolution-propose.ts'
+import { defineEvolutionReplayTool } from '../../agent-singularity/src/tools/evolution-replay.ts'
+import { defineEvolutionRollbackTool } from '../../agent-singularity/src/tools/evolution-rollback.ts'
 import { defineCapabilityListTool } from '../../agent-singularity/src/tools/capability-list.ts'
 import { defineContextReadTool } from '../../agent-singularity/src/tools/context-read.ts'
 import { defineTaskAnswerTool } from '../../agent-singularity/src/tools/task-answer.ts'
@@ -119,11 +132,19 @@ export const OTHER_TOOLS = [
   'bash', 'read', 'write', 'edit', 'read_image', 'glob', 'grep', 'job_output', 'job_list', 'job_kill', 'ask_user_question',
   'web_fetch', 'subagent_fetchless', 'session_search', 'session_event_read', 'session_event_trace', 'session_trace',
   'task_ask_parent',
+  // The recovery adapter (A6): registered on the global plane like the rest of
+  // the task surface, and deliberately absent from every root's allow-list — a
+  // root prompt may not name it.
+  'task_recover',
 ]
 
 /** The tools this fixture registers for real; every other name is a stand-in. */
 const REAL_TOOLS = [
   'task_read', 'task_status', 'context_read', 'capability_list', 'task_intake', 'task_decompose', 'task_submit_result', 'task_cancel',
+  // The recovery adapter (A6): its subject is what the tool, the evolution entry
+  // and the runtime decide together, so a spec that mounts the evolution plane
+  // gets the deployment's own definition (see `options.evolution`).
+  'task_recover',
   'task_proposal_read', 'task_proposal_continue', 'task_proposal_cancel',
   'task_ask_parent', 'task_answer',
   // The review pair (K4): a spec that has to show the review chain really running
@@ -136,6 +157,17 @@ const REAL_TOOLS = [
 
 /** The two question tools a spec can keep as stand-ins while it drives the runtime entries itself (`questionTools: 'stand-in'`). */
 const QUESTION_TOOLS: readonly string[] = ['task_ask_parent', 'task_answer']
+
+/**
+ * The evolution plane's model-facing tools. They are stand-ins in a deployment
+ * that never mounted the plane, and the real definitions in one that did: the
+ * candidate chain a coordinator walks only means something when the calls really
+ * reach `ctx.evolution`.
+ */
+const EVOLUTION_TOOLS: readonly string[] = [
+  'evolution_propose', 'evolution_candidate', 'evolution_prepare', 'evolution_replay', 'evolution_gate',
+  'evolution_decide', 'evolution_apply', 'evolution_rollback', 'evolution_list',
+]
 
 /**
  * The arguments of one scripted tool call: fixed, or derived at request time
@@ -252,6 +284,14 @@ export interface ScriptedLoopOptions {
    * its `tool/call` citation behind.
    */
   readonly questionTools?: 'shipped' | 'stand-in'
+  /**
+   * Mount the **evolution plane** on this deployment (A6), as the assembly does:
+   * the real `EvolutionService` over `ledgerRoot`, its `ctx.evolution` service,
+   * the `singularityEvolution` exposure the hand-off consumption reads its switch
+   * from, and the real `task_recover` tool. Off by default: a deployment that
+   * never turned the chain on has no candidate surface and consumes no hand-off.
+   */
+  readonly evolution?: { readonly ledgerRoot: string; readonly capabilityConfig?: string }
   /**
    * How the approval seam answers one review ask. Defaults to answering every
    * ask `allowed-once` — an answerer that decides without a person. Returning
@@ -708,6 +748,12 @@ class ScriptedLoopImpl implements ScriptedLoop {
     await ctx.plugin(SystemPrompt, {})
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(AgentRegistry)
+    // The deployment's skill registry (`ctx.skills`), mounted with the evolution
+    // plane: a spawned worker whose spawn carries skill roots — a replayed run
+    // under a candidate overlay, the shape A6's experiment mounts — is refused by
+    // name without it. Only the chain's own arm mounts it, so a spec that mounts
+    // the skill plane itself keeps doing so.
+    if (this.options.evolution !== undefined) await ctx.plugin(SkillRegistry, {})
     ctx.effect(() => ctx.llm.registerAdapter([...(this.options.providers ?? ['mock'])], this.adapter))
     for (const header of this.roots) {
       this.log.set(header, {
@@ -831,8 +877,13 @@ class ScriptedLoopImpl implements ScriptedLoop {
       }))
     }
     const shippedQuestionTools = this.options.questionTools !== 'stand-in'
+    // The evolution plane's own nine tools are registered for real when the
+    // deployment mounts that plane (see the `evolution` arm below); until then
+    // the name stays a stand-in like every other tool this fixture does not run.
+    const evolutionTools = new Set(EVOLUTION_TOOLS)
     for (const name of [...ROOT_TOOLS, ...OTHER_TOOLS]) {
       if (REAL_TOOLS.includes(name) && (shippedQuestionTools || !QUESTION_TOOLS.includes(name))) continue
+      if (this.options.evolution !== undefined && evolutionTools.has(name)) continue
       register(name)
     }
     ctx.tools.register(defineTaskReadTool(ctx))
@@ -865,6 +916,42 @@ class ScriptedLoopImpl implements ScriptedLoop {
     // The budget tool (K4) as well: what it appends is a person's decision and
     // the store's own event, which only the real definition can produce.
     ctx.tools.register(defineTaskBudgetExtendTool(ctx))
+    // The recovery adapter and the evolution plane (A6), mounted together and
+    // only when the deployment says so: the tool's whole subject is what the
+    // evolution entry and the runtime decide about a hand-off, so a deployment
+    // without the chain has no such tool at all.
+    if (this.options.evolution !== undefined) {
+      const service = new EvolutionService(ctx, {
+        root: this.options.evolution.ledgerRoot,
+        skillRoot: join(this.home, 'skills'),
+        repoRoot: this.workspace,
+        modelSelection: () => modelSelectionOf(this.options.defaultSelection?.() ?? { provider: 'mock', model: 'mock' }),
+        supervisorDelegation: supervisorDelegationSource().read,
+        ...(this.options.evolution.capabilityConfig === undefined ? {} : { capabilityConfig: this.options.evolution.capabilityConfig }),
+      })
+      // The service registers itself (`ctx.evolution`) in its own constructor;
+      // the switch is what a sibling reads, and it is on for this deployment.
+      void service
+      ctx.provide('singularityEvolution', { enabled: true })
+      ctx.tools.register(defineTaskRecoverTool(ctx))
+      // The plane's own tools, registered for real for the same reason: a spec
+      // whose subject is the *chain a coordinator walks* has to reach the
+      // deployment's definitions — a stand-in that answers "fixture answer" would
+      // be a candidate chain nothing ever ran.
+      for (const tool of [
+        defineEvolutionProposeTool(ctx),
+        defineEvolutionCandidateTool(ctx),
+        defineEvolutionPrepareTool(ctx),
+        defineEvolutionReplayTool(ctx),
+        defineEvolutionGateTool(ctx),
+        defineEvolutionDecideTool(ctx),
+        defineEvolutionApplyTool(ctx),
+        defineEvolutionRollbackTool(ctx),
+        defineEvolutionListTool(ctx),
+      ]) {
+        ctx.tools.register(tool)
+      }
+    }
 
     // The dispatch record: every call the deployment ran through the registry,
     // deny included (a denied call reports a result too), in order.
