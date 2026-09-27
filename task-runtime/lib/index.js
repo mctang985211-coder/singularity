@@ -6804,6 +6804,35 @@ function ceilingsOf(budget) {
 		...budget.deadlineAt === void 0 ? {} : { deadlineAt: budget.deadlineAt }
 	};
 }
+/**
+* The binding one raise is approved under: a digest over the store the raise is
+* about and the request's own identity (its key and its totals).
+*
+* It is what ties a person's answer to exactly one question. The asking tool
+* writes the token into the approval card — so the person's decision is a
+* decision about these totals on this store — and the committing entry recomputes
+* it and reads the same token back out of the channel's record of the ask. An
+* approval of another store, of another request under the same call, or of
+* another tool's question therefore cannot be presented as this one's: the token
+* is not the caller's to choose.
+*/
+function budgetExtensionApprovalBinding(storeId, requestDigest) {
+	return sha256Hex(canonicalize({
+		storeId,
+		requestDigest
+	}));
+}
+/**
+* The refusal a request earns when a ceiling of the reading it was approved
+* against is not the ceiling in force — the dimension named, what the request
+* says it was read at (or that it names the dimension nowhere) and what stands
+* now. One wording for the dimensions a request raises and for the ones it
+* leaves alone, because the refusal is the same fact either way: a person
+* decided about a ceiling the tree is no longer under.
+*/
+function budgetDimensionMoved(dimension, read, inForce) {
+	return `${dimension} moved since this request was read: it was ${read === void 0 ? `read without a ${dimension} reading` : `read at ${String(read)}`} and it is ${String(inForce)} in force now, so approving this request would re-base a person’s decision on a value nobody approved; read the ceilings again and ask for the total you want`;
+}
 var TaskRuntime = class TaskRuntime extends Service {
 	static inject = [
 		"task",
@@ -7781,6 +7810,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 		const { storeId, snapshot, budget } = await this.budgetExtensionContext(sessionId);
 		const requestKey = typeof request?.requestKey === "string" ? request.requestKey : "";
 		const existing = requestKey.length === 0 ? void 0 : this.budgetExtensionIndex(snapshot).byRequestKey[requestKey];
+		const outcome = this.judgeBudgetExtension(request, ceilingsOf(budget), budget, existing);
 		return {
 			storeId,
 			rootTaskId: budget.rootTaskId,
@@ -7788,28 +7818,40 @@ var TaskRuntime = class TaskRuntime extends Service {
 			configured: budget.configured,
 			effective: ceilingsOf(budget),
 			runsUsed: snapshot.runs.length,
-			outcome: this.judgeBudgetExtension(request, ceilingsOf(budget), budget, existing)
+			outcome,
+			...outcome.kind === "proposed" ? { approvalBinding: budgetExtensionApprovalBinding(storeId, outcome.proposal.requestDigest) } : {}
 		};
 	}
 	/**
 	* Records one approved budget extension (K4) and answers with the record the
 	* store holds.
 	*
-	* **What makes it a grant is the reference, not the request.** The caller
-	* hands back the reading the query reported ({@link RootBudgetExtensionCommit.baseline})
-	* and the approval channel's own fact (`approvalRef`); an empty reference is
-	* refused, and nothing here can tell a person's decision from a model's
-	* summary of one — that is why the entry takes the reference and never a
-	* boolean, a reason or an `approved` flag, and why the record keeps it for a
-	* reader that later asks who approved a raise.
+	* **What makes it a grant is the channel's own record, not the caller's
+	* word.** The caller hands back the reading the query reported
+	* ({@link RootBudgetExtensionCommit.baseline}) and the tool call it believes a
+	* person was asked about (`callId`); the entry then reads that call's ask and
+	* decision out of the caller session's own log — the pair the DSH approval
+	* channel appends when it really puts a question to a person. Two facts have
+	* to hold there for the commit to be a grant: the ask names this tool and this
+	* call and carries this request's approval binding (the person read that
+	* binding on the card they decided), and its decision is `allowed-once`. A
+	* caller that hands back a string the channel never wrote — a made-up id, a
+	* call of its own naming, an approval of another store, another request or
+	* another tool — is refused here, and nothing reaches the store. The reference
+	* the record keeps is the channel's own `ApprovalRequestId`, read back from
+	* that record.
 	*
 	* **Where the serialization is.** The rules are judged once here, against the
 	* reading handed back, and then again by the store's reducer, inside its single
-	* write queue: the dimension the request raises has to still be at the value
-	* the person saw. Two grants approved against the same reading therefore cannot
-	* both stand — the second is refused with nothing written, and its approver is
-	* told that the tree moved rather than that the grant was applied to a value
-	* nobody approved.
+	* write queue: *every* dimension the request was read at has to still be at the
+	* value the person saw — the dimension it raises and the ones it leaves alone.
+	* Two grants approved against the same reading therefore cannot both stand,
+	* whichever dimension each one moves: the second is refused with nothing
+	* written, and its approver is told that the tree moved rather than that the
+	* grant was applied to a ceiling nobody read. A request the store already holds
+	* under the same key and content is answered from the record by the same serial
+	* region, which is what keeps a retry from appending a second copy of one
+	* decision.
 	*
 	* **What an extension is not.** It is a record of a decision, not work: it
 	* starts no run, resumes none, un-settles none, creates no task, child or
@@ -7822,22 +7864,69 @@ var TaskRuntime = class TaskRuntime extends Service {
 	*/
 	async extendRootBudget(sessionId, commit) {
 		const { storeId, snapshot, budget } = await this.budgetExtensionContext(sessionId);
-		if (typeof commit?.approvalRef !== "string" || commit.approvalRef.length === 0) throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: the commit carries no approval reference (a non-empty \`approval:<callId>\` from the channel that asked the person); this service records a grant, it never makes one`);
 		const requestKey = typeof commit?.requestKey === "string" ? commit.requestKey : "";
 		const existing = requestKey.length === 0 ? void 0 : this.budgetExtensionIndex(snapshot).byRequestKey[requestKey];
 		const baseline = typeof commit.baseline === "object" && commit.baseline !== null ? commit.baseline : {};
 		const outcome = this.judgeBudgetExtension(commit, baseline, budget, existing);
 		if (outcome.kind === "refused") throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: ${outcome.reason}`);
 		if (outcome.kind === "recorded") return outcome.record;
+		if (typeof commit?.callId !== "string" || commit.callId.length === 0) throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: the commit names no tool call (a non-empty \`callId\`, the call the approval channel was asked about); this service records a decision the channel made, it never makes one`);
+		const approvalRef = await this.budgetApproval(sessionId, storeId, commit.callId, outcome.proposal.requestDigest);
 		const claim = {
 			...outcome.proposal,
-			approvalRef: commit.approvalRef,
+			baseline: { ...baseline },
+			approvalRef,
 			requestedBy: sessionId
 		};
 		await this.ctx.task.recordBudgetExtensionIn(storeId, budget.rootTaskId, claim, sessionId);
 		const stored = this.budgetExtensionIndex(await this.ctx.task.snapshotIn(storeId)).byRequestKey[claim.requestKey];
 		if (stored === void 0) throw new Error(`task-runtime: budget extension "${claim.requestKey}" was committed to store "${storeId}" but the store does not hold it; a committed extension is a durable fact, and this is not one`);
 		return stored;
+	}
+	/**
+	* The approval one commit stands on, read back out of the caller session's own
+	* log — the `approval/asked` + `approval/decided` pair the DSH approval service
+	* writes when it puts a question to a person, and writes nowhere else.
+	*
+	* The ask has to name this tool, this call and this request's binding (the
+	* token the draft handed the asking tool, which is what the person read on the
+	* card), and the decision that pairs with it has to be `allowed-once`; anything
+	* else — no ask, an ask for another call, another store's or another request's
+	* binding, a separate tool's approval, a rejection, a cancellation, an
+	* unanswered question — is refused by name. The log is read through the
+	* session-query service in its live-preferred form (the same read the review
+	* evidence uses), so a caller session this process holds answers from its own
+	* live log; a deployment without the reader, a session with no log and a log
+	* the reader refuses all end in the same refusal, because an approval that
+	* cannot be read is not one this entry may assume.
+	* @param sessionId - the caller session whose log the channel recorded the ask in.
+	* @param storeId - the store the raise is about, as this session derives it.
+	* @param callId - the tool call the caller says the person was asked about.
+	* @param requestDigest - the request identity the committer is about to record.
+	* @returns the channel's own reference for the approval (`approval:<ApprovalRequestId>`).
+	* @throws when the caller's log holds no such allowed ask.
+	*/
+	async budgetApproval(sessionId, storeId, callId, requestDigest) {
+		const binding = budgetExtensionApprovalBinding(storeId, requestDigest);
+		const events = await this.sessionEvents(sessionId);
+		if (events === void 0) throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: the approval channel's record of this session cannot be read (this deployment mounts no session-query reader, or the session has no readable log), so whether a person approved this request cannot be established`);
+		const asks = /* @__PURE__ */ new Set();
+		for (const event of events) {
+			if (event.type !== "approval/asked") continue;
+			const asked = event.data;
+			if (asked.toolName !== "task_budget_extend") continue;
+			if (typeof asked.callId !== "string" || asked.callId !== callId) continue;
+			if (typeof asked.reason !== "string" || !asked.reason.includes(binding)) continue;
+			if (typeof asked.id !== "string" || asked.id.length === 0) continue;
+			asks.add(asked.id);
+		}
+		if (asks.size === 0) throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: the approval channel's record holds no ask of task_budget_extend for call "${callId}" carrying this request's binding (${binding}); only an approval the channel itself recorded — this store, this request, this call — raises a ceiling`);
+		for (const event of events) {
+			if (event.type !== "approval/decided") continue;
+			if (typeof event.data.id !== "string" || !asks.has(event.data.id)) continue;
+			if (event.data.outcome === "allowed-once") return `approval:${event.data.id}`;
+		}
+		throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: the approval channel recorded no allowed decision for call "${callId}" (the question carrying this request's binding is unanswered, cancelled or refused); this service records a grant, it never makes one`);
 	}
 	/**
 	* The store one budget-extension call works on, its root session established —
@@ -7897,9 +7986,10 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* dimension, values that denote something), then the store's answer for the key
 	* — a repeat of a recorded request is *answered* from the record before any
 	* bound is judged, so a key whose totals were approved can be retried after the
-	* tree moved on and still be idempotent — and only then the bounds: the
-	* dimension has to be bounded at all, the reading handed back has to be the one
-	* in force, and the total has to be a raise.
+	* tree moved on and still be idempotent — and only then the bounds, judged
+	* dimension by dimension over the *whole* reading: each ceiling has to be
+	* bounded if the request names it, the value handed back for it has to be the
+	* one in force, and a named total has to be a raise of it.
 	*/
 	judgeBudgetExtension(request, baseline, budget, existing) {
 		if (typeof request !== "object" || request === null) return {
@@ -7939,15 +8029,19 @@ var TaskRuntime = class TaskRuntime extends Service {
 				reason: `request key "${requestKey}" is already bound to ${describeBudgetExtension(existing)} (identity ${existing.requestDigest}); one key names one request, and different totals under it are a new request under a new key`
 			};
 		}
-		const maxRuns = this.judgeBudgetRaise("maxRuns", request.maxRuns, budget.maxRuns, baseline.maxRuns);
-		if (!maxRuns.ok) return {
+		const maxRuns = this.judgeBudgetDimension("maxRuns", request.maxRuns, budget.maxRuns, baseline.maxRuns);
+		if (!maxRuns.ok && request.maxRuns !== void 0) return {
 			kind: "refused",
 			reason: maxRuns.reason
 		};
-		const deadlineAt = this.judgeBudgetRaise("deadlineAt", deadline, budget.deadlineAt, baseline.deadlineAt);
+		const deadlineAt = this.judgeBudgetDimension("deadlineAt", deadline, budget.deadlineAt, baseline.deadlineAt);
 		if (!deadlineAt.ok) return {
 			kind: "refused",
 			reason: deadlineAt.reason
+		};
+		if (!maxRuns.ok) return {
+			kind: "refused",
+			reason: maxRuns.reason
 		};
 		return {
 			kind: "proposed",
@@ -7960,19 +8054,41 @@ var TaskRuntime = class TaskRuntime extends Service {
 		};
 	}
 	/**
-	* One dimension's raise, or the reason there is none. `requested` is what the
-	* request asks for (already canonical for an instant), `inForce` is the ceiling
-	* the store is under now and `read` is what the request says was in force when
-	* it was read.
+	* One dimension, judged from the two things the request carries about it: what
+	* it asks for (when it names it at all) and the value its reading says was in
+	* force. `requested` is already canonical for an instant, `inForce` is the
+	* ceiling the store is under now, and `read` is what the caller handed back.
 	*
-	* The three refusals are the whole rule of K4's raise: a dimension nobody
-	* bounded is not raised (an unset ceiling is unlimited, and naming it would
-	* invent a limit), the reading has to be the value in force (so an approval
-	* cannot be re-based on a ceiling that moved under it), and the total asked for
-	* has to be above it (a ceiling is the whole approved total and only moves up).
+	* A dimension the request does *not* name is judged exactly as strictly as one
+	* it does: a grant is approved against the whole ceiling the person was shown,
+	* so a request read when another dimension was at a value that has since moved
+	* is refused even though its raise does not touch that dimension. That check is
+	* what makes two requests read at one ceiling mutually exclusive — one raising
+	* the run count and one the deadline would otherwise both stand, leaving the
+	* tree under a pair of ceilings neither approver ever saw. The store re-runs
+	* the same comparison inside its own serial region
+	* (`TaskService.recordBudgetExtensionIn`), which is where the decision between
+	* two racing commits is really made.
+	*
+	* The refusals, in the order a reading of them deserves: a named dimension the
+	* deployment leaves unbounded (an unset ceiling is unlimited, and naming it
+	* would invent a limit), a bounded dimension the reading does not name or does
+	* not agree with (either way the person's decision would be re-based on a value
+	* nobody approved), and a named total that does not raise the value in force.
 	*/
-	judgeBudgetRaise(dimension, requested, inForce, read) {
-		if (requested === void 0) return { ok: true };
+	judgeBudgetDimension(dimension, requested, inForce, read) {
+		if (requested === void 0) {
+			if (inForce === void 0) return { ok: true };
+			if (read === void 0) return {
+				ok: false,
+				reason: `${dimension} is ${String(inForce)} in force and this request was read without it: a grant is approved against the whole ceiling the person saw, so a reading that leaves a bounded dimension out cannot be recognised as the one in force — read the ceilings again and hand the reading back whole`
+			};
+			if (read !== inForce) return {
+				ok: false,
+				reason: budgetDimensionMoved(dimension, read, inForce)
+			};
+			return { ok: true };
+		}
 		if (inForce === void 0) return {
 			ok: false,
 			reason: `this tree sets no ${dimension} ceiling (the deployment configures none, and no extension has raised one), so there is nothing to raise: an unbounded dimension needs no grant, and a grant for it would turn an unlimited tree into a limited one`
@@ -7983,7 +8099,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 		};
 		if (read !== inForce) return {
 			ok: false,
-			reason: `${dimension} moved since this request was read: it was read at ${String(read)} and it is ${String(inForce)} in force now, so approving this request would re-base a person’s decision on a value nobody approved; read the ceilings again and ask for the total you want`
+			reason: budgetDimensionMoved(dimension, read, inForce)
 		};
 		if (typeof inForce === "number" && typeof requested === "number") {
 			if (requested <= inForce) return {
@@ -11746,4 +11862,4 @@ var TaskRuntime = class TaskRuntime extends Service {
 var src_default = TaskRuntime;
 
 //#endregion
-export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, PROPOSAL_REQUEST_KEY_PREFIX, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDigest, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, PROPOSAL_REQUEST_KEY_PREFIX, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, budgetExtensionApprovalBinding, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDigest, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

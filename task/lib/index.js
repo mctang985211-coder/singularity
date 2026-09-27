@@ -294,8 +294,11 @@ const BUDGET_EXTENSION_CLAIM_FIELDS = [
 	"maxRuns",
 	"deadlineAt",
 	"approvalRef",
-	"requestedBy"
+	"requestedBy",
+	"baseline"
 ];
+/** The closed field set of a reading: a dimension nobody read must not enter a claim either. */
+const BUDGET_EXTENSION_BASELINE_FIELDS = ["maxRuns", "deadlineAt"];
 /** One store's extension index with nothing in it; what a store without extensions answers. */
 function emptyBudgetExtensionIndex() {
 	return {
@@ -341,6 +344,16 @@ function canonicalBudgetInstant(value) {
 /** One extension's raises in one phrase, for a refusal that has to say what a request key already holds. */
 function describeBudgetExtension(extension) {
 	return `a budget extension raising ${[...extension.maxRuns === void 0 ? [] : [`maxRuns ${extension.maxRuns.previous} → ${extension.maxRuns.next}`], ...extension.deadlineAt === void 0 ? [] : [`deadline ${extension.deadlineAt.previous} → ${extension.deadlineAt.next}`]].join(" and ")}`;
+}
+/**
+* One dimension's reading in one phrase, for a refusal that has to say what a
+* request was read at: the value it was read at, or the fact that it names the
+* dimension nowhere. The two are told apart because both are refusals to re-base
+* a person's decision — a reading at a stale value and a reading that leaves a
+* bounded dimension out — and neither is a reason to invent the missing one.
+*/
+function describeBudgetReading(dimension, value) {
+	return value === void 0 ? `was read without a ${dimension} reading` : `was read at ${dimension} ${String(value)}`;
 }
 /**
 * Folds the store's extensions into the ceilings they leave in force: each
@@ -1419,24 +1432,33 @@ var TaskState = class TaskState {
 	* delegated worker, another session's tree and a child task are each refused by
 	* name, so one store's budget is only ever moved by facts about that store.
 	*
-	* The chain: a dimension keeps the `next` of the last extension that moved it,
-	* and an extension that moves it again has to state *that* value as its
-	* `previous`. A record written against an older reading is refused rather than
-	* re-based on the newer one, so two grants approved against the same reading
-	* cannot both stand — the entry's serial re-read, inside the store's single
-	* write queue, is what decides between them.
+	* The chain, and the whole reading it was approved against: a dimension keeps
+	* the `next` of the last extension that moved it, and an extension that moves
+	* it again has to state *that* value as its `previous`. Every dimension the
+	* claim was read at is then checked against the ceiling in force — the ones it
+	* raises *and the ones it leaves alone* — so a request read before another
+	* grant moved anything is refused by name here even when the dimension it
+	* raises is untouched. That is what makes two grants approved against the same
+	* reading mutually exclusive instead of additive: one raising `maxRuns` and one
+	* moving the deadline would otherwise leave the tree under a pair of ceilings
+	* nobody was shown. A record written against an older reading is refused rather
+	* than re-based on the newer one, and the entry's serial re-read, inside the
+	* store's single write queue, is where that decision is made.
 	*
-	* The first raise of a dimension states `previous` as the ceiling the
+	* The first raise of a dimension states its reading as the ceiling the
 	* deployment itself configures, which this reducer cannot recompute (the
 	* configuration is not in the store, and deliberately so: the initial ceilings
 	* stay derived from the root's start and the deployment's config). What it does
 	* instead is make the chain authoritative from that point on — no ceiling is
-	* ever derived from a grant, and a later grant can only continue what an
-	* earlier one left.
+	* ever derived from a grant, a later grant can only continue what an earlier
+	* one left, and from the first grant on, every dimension the store has moved
+	* has to appear in the next reading.
 	*
-	* Idempotency is by request key and content: a repeat of a recorded request
-	* applies nothing, and the same key at different content is refused by name
-	* instead of being added to the record.
+	* Idempotency is by request key and content, and it is checked before the
+	* reading: a repeat of a recorded request applies nothing (the ceilings have
+	* moved since, by definition, and the repeat is not a second grant), and the
+	* same key at different content is refused by name instead of being added to
+	* the record.
 	*/
 	extendBudget(taskId, sessionId, claim, timestamp) {
 		if (!isRecord(claim)) throw new Error("task: a budget extension must be an object");
@@ -1450,16 +1472,23 @@ var TaskState = class TaskState {
 		if (rootTaskStoreId(claim.requestedBy) !== this.value.id) throw new Error(`task: budget extension "${requestKey}" names session "${claim.requestedBy}", which is not the root session of store "${this.value.id}" (rootTaskStoreId derives the store from its root session, and "sg-t-${claim.requestedBy}" is not this store); the tree's budget belongs to the session that accepted it, and a worker never raises its own`);
 		if (this.task(taskId).parentTaskId !== void 0) throw new Error(`task: budget extension "${requestKey}" names task "${taskId}", which is not the store's root task; the tree's budget is the root's`);
 		if (claim.maxRuns === void 0 && claim.deadlineAt === void 0) throw new Error(`task: budget extension "${requestKey}" raises nothing: it must name maxRuns, deadlineAt, or both`);
+		const reading = claim.baseline;
+		if (!isRecord(reading)) throw new Error(`task: budget extension "${requestKey}" carries no reading of the ceilings it was approved against (a \`baseline\`); a grant is approved against the whole ceiling the person was shown, and a record without that reading cannot be checked against the ceiling in force`);
+		for (const key of Object.keys(reading)) if (!BUDGET_EXTENSION_BASELINE_FIELDS.includes(key)) throw new Error(`task: budget extension "${requestKey}" was read at "${key}", which is not a dimension of the tree's budget; an unread field must not enter the record`);
+		if (reading.maxRuns !== void 0 && (!Number.isInteger(reading.maxRuns) || reading.maxRuns < 1)) throw new Error(`task: budget extension "${requestKey}" was read at maxRuns ${JSON.stringify(reading.maxRuns)}; a run ceiling reading is a positive whole number of runs`);
+		if (reading.deadlineAt !== void 0 && canonicalBudgetInstant(reading.deadlineAt) !== reading.deadlineAt) throw new Error(`task: budget extension "${requestKey}" was read at deadline ${JSON.stringify(reading.deadlineAt)}; a deadline reading is an absolute instant in canonical UTC form (\`new Date(ms).toISOString()\`)`);
 		if (claim.maxRuns !== void 0) {
 			const { previous, next } = claim.maxRuns;
 			if (!Number.isInteger(previous) || previous < 1 || !Number.isInteger(next) || next < 1) throw new Error(`task: budget extension "${requestKey}" records maxRuns ${previous} → ${next}; a run ceiling is a positive whole number of runs`);
 			if (next <= previous) throw new Error(`task: budget extension "${requestKey}" records maxRuns ${previous} → ${next}; a ceiling is the whole approved total and only ever moves up`);
+			if (reading.maxRuns !== previous) throw new Error(`task: budget extension "${requestKey}" raises maxRuns from ${previous} but ${describeBudgetReading("maxRuns", reading.maxRuns)}; a raise and the reading it was approved against name the same ceiling`);
 		}
 		if (claim.deadlineAt !== void 0) {
 			const previous = canonicalBudgetInstant(claim.deadlineAt.previous);
 			const next = canonicalBudgetInstant(claim.deadlineAt.next);
 			if (previous === void 0 || previous !== claim.deadlineAt.previous || next === void 0 || next !== claim.deadlineAt.next) throw new Error(`task: budget extension "${requestKey}" records the deadline pair ${JSON.stringify(claim.deadlineAt)}; both ends are absolute instants in canonical UTC form (\`new Date(ms).toISOString()\`), never local time or a duration`);
 			if (Date.parse(next) <= Date.parse(previous)) throw new Error(`task: budget extension "${requestKey}" records deadline ${previous} → ${next}; a deadline only ever moves later`);
+			if (reading.deadlineAt !== previous) throw new Error(`task: budget extension "${requestKey}" moves the deadline from ${previous} but ${describeBudgetReading("deadlineAt", reading.deadlineAt)}; a raise and the reading it was approved against name the same ceiling`);
 		}
 		const digest = budgetExtensionRequestDigest({
 			requestKey,
@@ -1474,8 +1503,8 @@ var TaskState = class TaskState {
 			throw new Error(`task: budget extension request key "${requestKey}" is already bound to ${describeBudgetExtension(existing)} (identity ${existing.requestDigest}); one key names one request, and different content under it is a new key rather than a second grant`);
 		}
 		const inForce = approvedBudgetCeilings(index.all);
-		if (claim.maxRuns !== void 0 && inForce.maxRuns !== void 0 && claim.maxRuns.previous !== inForce.maxRuns) throw new Error(`task: budget extension "${requestKey}" was written against maxRuns ${claim.maxRuns.previous}, but the ceiling in force here is ${inForce.maxRuns}; the tree's ceiling moved since this request was read, so committing it would re-base an approval on a value nobody approved — read the ceiling again and ask for the difference`);
-		if (claim.deadlineAt !== void 0 && inForce.deadlineAt !== void 0 && claim.deadlineAt.previous !== inForce.deadlineAt) throw new Error(`task: budget extension "${requestKey}" was written against deadline ${claim.deadlineAt.previous}, but the deadline in force here is ${inForce.deadlineAt}; the tree's deadline moved since this request was read, so committing it would re-base an approval on a value nobody approved — read the deadline again and ask for the difference`);
+		if (inForce.maxRuns !== void 0 && reading.maxRuns !== inForce.maxRuns) throw new Error(`task: budget extension "${requestKey}" ${describeBudgetReading("maxRuns", reading.maxRuns)}, but the ceiling in force here is ${inForce.maxRuns}; the tree's ceiling moved since this request was read, so committing it would re-base an approval on a value nobody approved — read the whole ceiling again and ask for the difference`);
+		if (inForce.deadlineAt !== void 0 && reading.deadlineAt !== inForce.deadlineAt) throw new Error(`task: budget extension "${requestKey}" ${describeBudgetReading("deadlineAt", reading.deadlineAt)}, but the deadline in force here is ${inForce.deadlineAt}; the tree's deadline moved since this request was read, so committing it would re-base an approval on a value nobody approved — read the whole ceiling again and ask for the difference`);
 		if (!nonEmpty(timestamp)) throw new Error(`task: budget extension "${requestKey}" has no recorded time on its event`);
 		const record = {
 			requestKey,
@@ -1490,6 +1519,10 @@ var TaskState = class TaskState {
 			} },
 			approvalRef: claim.approvalRef,
 			requestedBy: claim.requestedBy,
+			baseline: {
+				...reading.maxRuns === void 0 ? {} : { maxRuns: reading.maxRuns },
+				...reading.deadlineAt === void 0 ? {} : { deadlineAt: reading.deadlineAt }
+			},
 			recordedAt: timestamp
 		};
 		this.value = {
@@ -2793,39 +2826,42 @@ var TaskService = class extends Service {
 		})]);
 	}
 	/**
-	* Records one approved budget extension (K4), and answers a repeat of a stored
-	* request from the record instead of appending a second fact.
+	* Records one approved budget extension (K4), or answers a repeat of one the
+	* store already holds.
 	*
 	* The envelope carries the tree's root task and the root session that asked,
-	* and the claim carries the raise itself, its identity and the approving
-	* channel's reference. The reducer is the gate for every rule — the root-session
-	* and root-task binding, the shape of each pair, the identity of the content,
-	* one key names one extension, and a dimension an earlier extension already
-	* moved has to be asked for from the value *that* extension left.
+	* and the claim carries the raise itself, its whole reading, its identity and
+	* the approving channel's reference. The reducer is the gate for every rule —
+	* the root-session and root-task binding, the shape of each pair and of the
+	* reading, the identity of the content, one key names one extension, and every
+	* dimension the claim was read at has to still be the ceiling in force, the
+	* ones it raises and the ones it leaves alone.
 	*
-	* The idempotency read here is the same shape every other entry keeps
-	* ({@link askParentQuestionIn}): the store's current state, taken after the
-	* write queue has drained, and a key+identity match answered from the record
-	* with nothing written. It is not the serialization point — the reducer's own
-	* check is, inside the commit — so a caller that lost a race may still reach
-	* the commit, where the second write applies nothing and the state stays
-	* exactly what the first one made it.
+	* **Where the idempotency read is.** Inside the store's single write queue,
+	* with the append it decides: the key is looked up on the state the batch would
+	* be applied to, and a request the store already holds — same key, same
+	* identity — is answered there and writes nothing. It has to be inside: a check
+	* taken before the queue lets two callers that raced the same request both
+	* reach the append, and the reducer's own answer to a repeat is to apply
+	* nothing *and still be appended*, which would leave one decision written
+	* twice in the log. The reducer's check stays as the gate for every other
+	* writer (a replay, a hand-written event, an entry that commits directly): this
+	* entry short-circuits the append, the reducer refuses a duplicate's content.
 	*/
 	async recordBudgetExtensionIn(storeId, rootTaskId, claim, actor) {
-		const store = this.requireStore(storeId);
-		await store.ready;
-		await store.writes;
-		const stored = store.state.snapshot().budgetExtensions?.byRequestKey[claim.requestKey];
-		if (stored !== void 0) {
-			if (stored.requestDigest !== claim.requestDigest) throw new Error(`task: budget extension request key "${claim.requestKey}" is already bound to ${describeBudgetExtension(stored)} (identity ${stored.requestDigest}); one key names one request, and different content under it is a new key rather than a second grant`);
-			return;
-		}
-		await this.commitIn(storeId, [event("TaskBudgetExtended", {
-			taskId: rootTaskId,
-			sessionId: claim.requestedBy,
-			actor,
-			payload: { extension: claim }
-		})]);
+		await this.serialIn(storeId, async (state) => {
+			const stored = state.snapshot().budgetExtensions?.byRequestKey[claim.requestKey];
+			if (stored !== void 0) {
+				if (stored.requestDigest !== claim.requestDigest) throw new Error(`task: budget extension request key "${claim.requestKey}" is already bound to ${describeBudgetExtension(stored)} (identity ${stored.requestDigest}); one key names one request, and different content under it is a new key rather than a second grant`);
+				return;
+			}
+			await this.appendIn(storeId, state, [event("TaskBudgetExtended", {
+				taskId: rootTaskId,
+				sessionId: claim.requestedBy,
+				actor,
+				payload: { extension: claim }
+			})]);
+		});
 	}
 	async recordHandoffIn(storeId, handoff, actor) {
 		await this.commitIn(storeId, [event("HandoffCreated", {
@@ -2836,27 +2872,55 @@ var TaskService = class extends Service {
 			payload: { handoff }
 		})]);
 	}
-	async commitIn(storeId, events) {
-		if (events.length === 0) throw new Error("task: cannot commit an empty event batch");
+	/**
+	* Runs `work` inside the store's single write queue and answers what it
+	* returned. The queue is the store's one serial region: every commit chains
+	* onto it, so work scheduled here sees exactly the state the write before it
+	* left, and nothing can interleave between the decision it makes and the
+	* append it makes. `work` must not call an entry that chains onto the same
+	* queue — it would wait for itself.
+	*/
+	async serialIn(storeId, work) {
 		const store = this.requireStore(storeId);
 		const run = store.writes.then(async () => {
 			await store.ready;
-			const next = store.state.clone();
-			for (const item of events) next.apply(item);
-			const records = events.map((item, index) => ({
-				type: "task/event",
-				seq: SessionSeq(store.nextSeq + index),
-				time: Date.now(),
-				data: compact(item),
-				ignorable: true
-			}));
-			await store.handle.append(records);
-			store.state = next;
-			store.nextSeq += records.length;
-			this.ctx.emit("task/change", store.state.snapshot());
+			return await work(store.state);
 		});
 		store.writes = run.then(() => void 0, () => void 0);
-		await run;
+		return await run;
+	}
+	/**
+	* Applies one batch and appends it to the store's log — the append half of a
+	* commit, for work already inside the write queue ({@link serialIn}).
+	*
+	* The clone is where the reducer's gates run: a batch the state refuses is
+	* never appended and the store is left exactly as it was found. Nothing here
+	* decides *whether* a batch is worth appending — an event whose reducer
+	* applies nothing is still a recorded fact for some kinds — which is why an
+	* entry that needs "no second event for a repeat" answers the repeat before
+	* calling this, inside the same serial region.
+	*/
+	async appendIn(storeId, state, events) {
+		const store = this.requireStore(storeId);
+		const next = state.clone();
+		for (const item of events) next.apply(item);
+		const records = events.map((item, index) => ({
+			type: "task/event",
+			seq: SessionSeq(store.nextSeq + index),
+			time: Date.now(),
+			data: compact(item),
+			ignorable: true
+		}));
+		await store.handle.append(records);
+		store.state = next;
+		store.nextSeq += records.length;
+		this.ctx.emit("task/change", store.state.snapshot());
+	}
+	async commitIn(storeId, events) {
+		if (events.length === 0) throw new Error("task: cannot commit an empty event batch");
+		await this.serialIn(storeId, async (state) => {
+			await this.appendIn(storeId, state, events);
+		});
 	}
 	/**
 	* The proposal one event names, read from the store before the commit so an
@@ -2947,4 +3011,4 @@ var TaskService = class extends Service {
 var src_default = TaskService;
 
 //#endregion
-export { BUDGET_EXTENSION_CLAIM_FIELDS, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskService, TaskState, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, src_default as default, describeBudgetExtension, emptyBudgetExtensionIndex, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberTaskIds, sha256Hex, taskProposalId };
+export { BUDGET_EXTENSION_BASELINE_FIELDS, BUDGET_EXTENSION_CLAIM_FIELDS, JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, ROOT_PROPOSAL_TASK_ID, TASK_CONTRACT_VERSION, TASK_PROPOSAL_DECISION_OUTCOMES, TASK_PROPOSAL_KINDS, TASK_PROPOSAL_PHASES, TASK_PROPOSAL_STATUSES, TaskService, TaskState, admissionContextDigest, answerIdOf, approvedBudgetCeilings, batchIdFor, blockingQuestionsOf, budgetExtensionRequestDigest, canonicalBudgetInstant, canonicalize, capabilityManifestDigest, contractDigest, decompositionDigest, src_default as default, describeBudgetExtension, describeBudgetReading, emptyBudgetExtensionIndex, openQuestionsOf, questionIdOf, questionOf, questionsAwaitingAnswerOf, reaches, reviewContextDigest, rootProposalDigest, rootProposalId, rootTaskStoreId, runMemberTaskIds, sha256Hex, taskProposalId };
