@@ -1,5 +1,7 @@
 # K3 交付记录：完整 Skill 改进单位（待验收）
 
+> 审查后返工（2026-09-27，两项可达缺陷）见[返工记录](2026-09-27-k3-rework-record.md)；本记录保留首轮交付证据。
+
 - 合同：[execution-prompts/12c-k3-skill-unit.md](../execution-prompts/12c-k3-skill-unit.md)；公共合同：execution-prompts/README.md。
 - 基线：Singularity `f823853`（K2 已验收，证据 [K2 审核](2026-09-27-k2-review.md)）、外层 `1d19c45f`；开工前两仓工作树干净（外层 thirdparty/deepseek-harness 未跟踪，保留未动）。
 - 交付：Singularity `9998026`（代码+测试+lib 产物）与本记录所在的文档提交（guide/计划/角色合同/持久化记录/本记录，见 git log）；外层指针提交见外层 git log。日期 2026-09-27。无真实模型费用、无推送、无部署。
