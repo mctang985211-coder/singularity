@@ -4,6 +4,8 @@ import {
   SKILL_SIDECAR_FILE,
   SUPPORTED_SKILL_RESOURCE_DIRS,
   isSupportedSkillResourcePath,
+  serializeSkillSidecar,
+  sidecarWithSkillMd,
   skillContentDigest,
   skillContractDefects,
   skillContractDigest,
@@ -348,5 +350,72 @@ describe('skill sidecar identity', () => {
         skillMdSha256: DIGEST_A,
         resources: [{ path: 'references/a.md', sha256: DIGEST_B }],
       }))
+  })
+})
+
+describe('skill sidecar rewriting and serialization (K3)', () => {
+  test('sidecarWithSkillMd replaces exactly content.skillMdSha256 and keeps every other field', () => {
+    const original = execution()
+    const rewritten = sidecarWithSkillMd(original, DIGEST_B)
+    expect(rewritten).toEqual({
+      ...original,
+      content: { skillMdSha256: DIGEST_B, resources: original.content.resources },
+    })
+    // Field by field, not just shape: capabilities, verifier, tools and ports
+    // survive a content update untouched, so the rewrite can never escalate a
+    // declaration while the bytes change.
+    expect(rewritten.content.resources).toEqual(original.content.resources)
+    expect(rewritten.type).toBe('execution')
+    const rewrittenExecution = rewritten as ExecutionSkillSidecar
+    expect(rewrittenExecution.capabilities).toEqual(original.capabilities)
+    expect(rewrittenExecution.requiredTools).toEqual(original.requiredTools)
+    expect(rewrittenExecution.verifier).toEqual(original.verifier)
+    expect(rewrittenExecution.inputs).toEqual(original.inputs)
+    // The original object is not mutated.
+    expect(original.content.skillMdSha256).toBe(DIGEST_A)
+
+    const knowledgeRewritten = sidecarWithSkillMd(knowledge(), DIGEST_B)
+    expect(knowledgeRewritten).toEqual({
+      ...knowledge(),
+      content: { skillMdSha256: DIGEST_B, resources: [] },
+    })
+    expect(knowledgeRewritten.type).toBe('knowledge')
+  })
+
+  test('sidecarWithSkillMd refuses a digest that is not a lowercase 64-character hex sha256', () => {
+    for (const bad of ['', 'nope', EXECUTION_SHA256.toUpperCase(), DIGEST_A.slice(0, 63), `${DIGEST_A}0`]) {
+      expect(() => sidecarWithSkillMd(execution(), bad)).toThrow(/skillMdSha256/)
+    }
+  })
+
+  test('serializeSkillSidecar is deterministic: one object is always one byte sequence', () => {
+    const first = serializeSkillSidecar(execution())
+    const second = serializeSkillSidecar(execution())
+    expect(first).toBe(second)
+    expect(first.endsWith('\n')).toBe(true)
+    expect(first).toBe(`${JSON.stringify(JSON.parse(first), null, 2)}\n`)
+    // Key order in memory does not move the bytes: the serialization is the
+    // canonical key order, not the insertion order.
+    const reordered = {
+      verifier: execution().verifier,
+      content: execution().content,
+      requiredTools: execution().requiredTools,
+      outputs: [],
+      inputs: execution().inputs,
+      precondition: execution().precondition,
+      capabilities: execution().capabilities,
+      type: 'execution',
+      contractVersion: 1,
+    } as ExecutionSkillSidecar
+    expect(serializeSkillSidecar(reordered)).toBe(first)
+    // The bytes parse back to the same declaration, and its digest is the
+    // sidecar's canonical identity.
+    const parsed = JSON.parse(first) as SkillSidecar
+    expect(parsed).toEqual(execution())
+    expect(skillContractDigest(parsed)).toBe(skillContractDigest(execution()))
+    // A different declaration is a different byte sequence.
+    expect(serializeSkillSidecar(execution({ requiredTools: ['bash', 'read', 'job_output'] }))).not.toBe(first)
+    expect(serializeSkillSidecar(sidecarWithSkillMd(execution(), DIGEST_B))).not.toBe(first)
+    expect(serializeSkillSidecar(knowledge()).startsWith('{\n  "content"')).toBe(true)
   })
 })

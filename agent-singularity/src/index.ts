@@ -275,7 +275,7 @@ export class SingularityAgent extends Service {
    * nine tools, and still keeps production consistent with its own ledger.
    *
    * A `blocked` intent is reported by name and does not fail the load: the intent
-   * stays open, the admission gate keeps refusing the provider whose target it
+   * stays open, the admission gate keeps refusing the provider whose directory it
    * names, and settling it (a retry of the apply/rollback, the next startup)
    * remains the way forward. A failure of the reconciliation itself is not
    * `blocked` and does fail the load, naming the cause: a deployment that cannot
@@ -296,7 +296,7 @@ export class SingularityAgent extends Service {
       if (outcome.result !== 'blocked') continue
       this.warn(
         `evolution: the commit intent "${outcome.intentId}" (${outcome.direction} of proposal "${outcome.proposalId}") targeting ` +
-        `${outcome.target} could not be settled — ${outcome.detail ?? 'no reason reported'}`,
+        `${outcome.targets.join(', ')} could not be settled — ${outcome.detail ?? 'no reason reported'}`,
       )
     }
   }

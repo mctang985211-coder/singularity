@@ -23,34 +23,45 @@ function manualGuidance(proposal: EvolutionProposal): string | null {
     return 'L4 harness evolution has no executor in evolution_apply: supervisor implementation and validation must precede human review through the harness change workflow'
   }
   if (!APPLYABLE_TARGET_TYPES.includes(proposal.targetType)) {
-    return `this build writes a single SKILL.md only, so a decided "${proposal.targetType}" proposal has no executor here — its ledger record stays readable and nothing writes it; the capability evaluation such a proposal would need belongs to A6, not to this build`
+    return `this build writes and restores the fixed file set of one skill object only (` +
+      `SKILL.md, plus the SKILL.contract.json of a skill that declares an execution provider), so a decided "${proposal.targetType}" ` +
+      'proposal has no executor here — its ledger record stays readable and nothing writes it; the capability evaluation such a ' +
+      'proposal would need belongs to A6, not to this build'
   }
   return null
 }
 
-/** How fast an applied skill takes effect, stated honestly in the output. */
+/** How an applied skill takes effect, stated honestly in the output. */
 function effectNote(): string {
-  return 'effective immediately — the skill filesystem watches the skill root, so the write is live'
+  return 'effective immediately — the skill filesystem watches the skill root, so the write is live; the skill directory is ' +
+    'admitted again now that its commit intent is closed, and a run already bound to the previous version keeps loading the ' +
+    'snapshot it was bound to'
 }
 
 export function defineEvolutionApplyTool(ctx: Context) {
   return defineTool({
     name: 'evolution_apply',
     description:
-      'Apply a PROMOTE-decided EvolutionProposal to production (status: applied). One target type: a single-file ' +
-      'SKILL.md replacement at L1–L3 with a materialized sandbox. Every other target type and L4 lack executors and are ' +
-      'refused with instructions. Always asks a human through the native approval seam first — a second gate after ' +
-      'evolution_decide — naming every production path it will write; a reject, cancel, or unavailable answerer writes ' +
-      'nothing and leaves the proposal decided. A skill apply additionally re-verifies the production baseline recorded ' +
-      'at prepare (the production SKILL.md must still be those exact bytes; one that changed or disappeared since prepare ' +
-      'refuses) before the human is asked and again after the grant, and refuses a stale candidate instead of overwriting a ' +
-      'production skill that changed. A skill candidate is promoted as one file: one carrying a SKILL.contract.json or any ' +
-      'resource is refused (the executor writes SKILL.md only, so such a candidate would be reported as a provider production ' +
-      'never received). The write is one commit: a durable commit intent — proposal, direction, this approval, the absolute ' +
-      'target, the content identity production must hold before and after, and the bytes to write again — is recorded ' +
-      'before production changes, the SKILL.md is then replaced atomically (a temp file in the same directory, fsynced and ' +
-      'renamed over the target; never truncated, never half-written), and only then is the completion recorded. A failure ' +
-      'at any stage leaves exactly one open intent rather than a half-committed file, and calling this tool again while ' +
+      'Apply a PROMOTE-decided EvolutionProposal to production (status: applied). One target type: a same-name improvement ' +
+      'of an existing skill object at L1–L3 with a materialized sandbox — the commit writes that object\'s fixed file set, ' +
+      'the `SKILL.md` and, for an execution skill, the `SKILL.contract.json` beside it. Every other target type and L4 lack ' +
+      'executors and are refused with instructions. Always asks a human through the native approval seam first — a second ' +
+      'gate after evolution_decide — naming every production path it will write; a reject, cancel, or unavailable answerer ' +
+      'writes nothing and leaves the proposal decided. A skill apply additionally re-verifies before the human is asked, and ' +
+      'again after the grant, the candidate\'s whole content identity and the production baseline recorded at prepare (the ' +
+      'production file set must still be those exact bytes — a sidecar that appeared where the baseline had none, changed or ' +
+      'disappeared refuses — so a stale candidate never overwrites a production skill that changed). The candidate sidecar ' +
+      'is never the model\'s text: it must equal the production declaration with only content.skillMdSha256 rewritten, so a ' +
+      'promotion cannot escalate requiredTools, swap a verifier, move capabilities or change the object\'s role; a candidate ' +
+      'directory carrying any other entry (a resource, a stray file) is refused by name rather than reported as a provider ' +
+      'production never received. The write is one commit: a durable commit intent — proposal, direction, this approval, ' +
+      'every production file with the content identity each must hold before and after the write, and the bytes to write ' +
+      'again — is recorded before production changes, then each file is replaced atomically (a temp file in the same ' +
+      'directory, fsynced and renamed over the target; never truncated, never half-written), and only after every rename ' +
+      'has been read back and the whole directory verified as one loadable object is the completion recorded. A failure ' +
+      'at any stage leaves exactly one open intent rather than a half-committed object (a directory holding the new ' +
+      '`SKILL.md` beside the old sidecar included), and the skill directory stays closed to new admission until that intent ' +
+      'is settled; calling this tool again while ' +
       'an intent is open settles it instead of starting a second write: no approval is asked again (the intent already ' +
       'binds the grant it was authorised by, and the promotion gate is not re-run because the recorded intent already ' +
       'names the approved content), and the answer reports the intent id and whether the commit was redone (production ' +

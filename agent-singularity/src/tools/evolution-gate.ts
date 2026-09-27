@@ -24,9 +24,11 @@ export function defineEvolutionGateTool(ctx: Context) {
       'All six answers are required, and the regression side must cite evidence ids (from this graph\'s task store) or ' +
       'file paths whose existence is checked — cited evidence is never executed. A skill candidate must pass ' +
       'evolution_prepare (sandbox materialization) and then evolution_replay (the two-sided experiment: a new baseline run ' +
-      'and a new candidate run per frozen sample), and its report path must be one of the regressionEvidenceRefs — the gate ' +
-      'refuses a skill candidate whose experiment is not complete. A proposal of any other target type cannot become a ' +
-      'candidate and has no gate to answer. Records the ledger entry only; nothing is promoted or changed. ' +
+      'and a new candidate run per frozen sample, the production object and the prepared object each loaded whole), and its ' +
+      'report path must be one of the regressionEvidenceRefs — the gate refuses a skill candidate whose experiment is not ' +
+      'complete. A proposal of any other target type cannot become a candidate and has no gate to answer. Records the ' +
+      'ledger entry only; nothing is promoted or changed, and evolution_decide re-checks the candidate\'s whole content ' +
+      'identity and its provider verdict before a PROMOTE can be recorded. ' +
       'Next step is evolution_decide, which always asks a human.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Candidate to gate' },

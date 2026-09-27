@@ -55,6 +55,14 @@ import { disposeRunStacks, startRunStack, type RunStack } from '../support/run-s
 const ROOT = 's-root' as SessionId
 const PROPOSAL = 'p1'
 const SKILL = 'experiment-fixture-skill'
+/**
+ * The capability row the fixture's samples request: one row granting the skill
+ * they evaluate, so the experiment's frozen provider list resolves the provider
+ * the candidate replaces — the entry the candidate side's registry revision
+ * substitutes (K3). A sample whose rows resolve no provider has no candidate
+ * revision to freeze, and the experiment refuses it before it runs.
+ */
+const ROW = 'experiment-fixture-row'
 /** The answer files a skill body tells its worker to write; the criteria are `test -f <file>`. */
 const ANSWER_FILES = ['fix.txt', 'keep.txt', 'holdout.txt']
 
@@ -165,7 +173,7 @@ async function writeSample(h: RunStack, storeId: string, input: {
     objective: input.objective,
     depth: 0,
     acceptanceCriteria: [input.acceptance],
-    requestedCapabilities: [],
+    requestedCapabilities: [ROW],
     decompositionStatus: 'leaf',
     status: 'created',
     runIds: [],
@@ -250,6 +258,7 @@ async function fixture(options: {
   let h!: RunStack
   h = await startRunStack({
     roots: [ROOT],
+    capabilities: { [ROW]: { skills: [SKILL] } },
     worker: (sessionId: SessionId, agent: Agent) => (options.worker ?? replayedWorker)(h, sessionId, agent),
   })
   const skillRoot = join(h.home, 'skills')
@@ -330,7 +339,7 @@ describe('S4-E: the two-sided skill experiment', () => {
     const result = await f.evolution.runExperiment(spec(f), ROOT, ROOT)
 
     // --- the report is the frozen experiment's, and its verdict is its own evidence ---
-    expect(result.report.formatVersion).toBe(2)
+    expect(result.report.formatVersion).toBe(3)
     expect(result.report.experimentId).toBe(result.experimentId)
     expect(result.report.verdict).toBe('fixed')
     expect(result.report.verdict).toBe(overallExperimentVerdict(result.report.samples))
@@ -404,11 +413,20 @@ describe('S4-E: the two-sided skill experiment', () => {
     }
 
     // --- the overlay is the deployment's own: the candidate spawn named the sandbox skills root ---
-    const overlays = f.h.spawns.flatMap(request => request.grant?.skillRoots ?? [])
-    expect(overlays).toHaveLength(2)
-    for (const overlay of overlays) {
-      expect(overlay).toBe(join(f.h.workspace, 'evolution', 'sandbox', PROPOSAL, 'skills'))
+    // Every side of every sample runs against a grant of its own: the sandbox
+    // overlay first for the candidate sides (it has to win a same-name collision
+    // — P2's semantics), and the run's own binding snapshot for all four — never
+    // production itself, so no worker reads bytes something could still move.
+    const sandboxOverlay = join(f.h.workspace, 'evolution', 'sandbox', PROPOSAL, 'skills')
+    const bindingRoot = join(f.h.home, 'singularity', 'run-bindings')
+    const grants = f.h.spawns.map(request => request.grant?.skillRoots ?? [])
+    expect(grants).toHaveLength(4)
+    for (const roots of grants) {
+      expect(roots.length).toBeGreaterThan(0)
+      for (const root of roots) expect(root === sandboxOverlay || root.startsWith(bindingRoot), root).toBe(true)
     }
+    expect(grants.filter(roots => roots[0] === sandboxOverlay)).toHaveLength(2)
+    expect(grants.filter(roots => roots.every(root => root !== sandboxOverlay))).toHaveLength(2)
 
     // --- the ledger holds the frozen experiment and one record per side, and nothing else ---
     const lines = await ledgerLines(f)
@@ -666,7 +684,7 @@ describe('S4-E: the two-sided skill experiment', () => {
       objective: `[${crashedLineage}] a run nobody settled`,
       depth: 0,
       acceptanceCriteria: [criterion('ac-keep', 'test -f keep.txt')],
-      requestedCapabilities: [],
+      requestedCapabilities: [ROW],
       decompositionStatus: 'leaf',
       status: 'created',
       runIds: [],

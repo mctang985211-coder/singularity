@@ -443,6 +443,47 @@ declare class ExecutionGate {
 //#endregion
 //#region src/skill-contract.d.ts
 /**
+ * The typed skill sidecar contract: the declaration that sits beside a skill's
+ * `SKILL.md` (`SKILL.contract.json`) and says what kind of skill it is, what it
+ * provides, and exactly which bytes it is.
+ *
+ * Why a sidecar exists at all (guide §2.4): DSH's `SKILL.md` carries both
+ * executable capability and domain knowledge, and the two need different
+ * guarantees. An execution skill must name the capabilities it serves, the real
+ * DSH tools it needs, and the registered verifier that judges its result, so a
+ * caller can refuse it *before* a run rather than discovering the gap at spawn.
+ * A knowledge skill has no execution verifier and must not pretend to have one:
+ * it declares where its content comes from, what it applies to, and how to
+ * check the content, and it never closes an execution gap.
+ *
+ * The identities here are content identities, on the same discipline as the
+ * task contract (`task/src/contract.ts`, still the one digest basis this
+ * module reuses): the digest covers exact bytes — no trim, no newline
+ * conversion — and a skill whose directory holds a file the declaration does
+ * not cover is not "mostly covered"; it is refused. A reader must never be
+ * able to summarize one file and silently miss another part of what a worker
+ * will read.
+ *
+ * This module owns the vocabulary, the shape rules and the one rewrite a
+ * same-name content update is (both pure): the filesystem load, the identity
+ * comparison against real bytes, and the unified pre-check live in
+ * `./sidecar.ts`, which consumes these definitions instead of restating them.
+ * {@link sidecarWithSkillMd} and {@link serializeSkillSidecar} are the pair a
+ * candidate's second file is produced with: the production declaration with
+ * exactly one digest moved, written as the deterministic bytes its identity
+ * covers — so what a promotion compares is the derivation, not a patch anybody
+ * submitted. It lives here, beside its only production consumers, as an
+ * internal module of the runtime's provider implementation (R3-1): a `TaskRun`
+ * records the content identity it used, and `task/src/types.ts` says so in
+ * prose without needing this vocabulary to be a task export.
+ * @module @dangosys/dsh-singularity-task-runtime/skill-contract
+ */
+/**
+ * The sidecar file, read as JSON, named exactly here so every producer and
+ * reader of a skill directory agrees on one spelling.
+ */
+declare const SKILL_SIDECAR_FILE = "SKILL.contract.json";
+/**
  * The sidecar contract version this build writes and reads. Like the task
  * contract's `TASK_CONTRACT_VERSION` it versions the data definition, not a
  * skill: a sidecar declaring a version this build does not know is refused
@@ -550,6 +591,49 @@ type SkillSidecar = ExecutionSkillSidecar | KnowledgeSkillSidecar;
  * carries); everything else is a shape defect inside the declared field set.
  */
 type SkillContractDefectCode = 'sidecar-unknown-version' | 'sidecar-unknown-field' | 'sidecar-shape';
+/**
+ * The identity of a whole sidecar: SHA-256 over {@link canonicalize} of the
+ * declared data, so key order and `undefined`-valued keys do not move it while
+ * any declared field does. Call it on a sidecar that passed
+ * {@link skillContractDefects}: an unvalidated object can carry fields this
+ * identity would then cover without a rule saying what they mean.
+ */
+declare function skillContractDigest(sidecar: SkillSidecar): string;
+/**
+ * The identity of one content identity: SHA-256 over {@link canonicalize} of the
+ * `SKILL.md` digest and the resource list. Separate from
+ * {@link skillContractDigest} so a caller can name the bytes (a run recording
+ * what it read) without claiming a sidecar it did not read.
+ */
+declare function skillContentDigest(content: SkillContentIdentity): string;
+/**
+ * The same declaration with one field replaced: `content.skillMdSha256`.
+ *
+ * A same-name improvement of an execution skill changes the `SKILL.md` and
+ * nothing else about the object (K3): the capabilities, precondition, ports,
+ * required tools, verifier and resources are the ones the production sidecar
+ * declared, so the candidate's sidecar is *derived* from the production one
+ * rather than authored — a content update that could also move a declaration
+ * would be an undeclared privilege change. Every other field is carried over
+ * item by item; the digest is checked first, because a value that is not a
+ * lowercase 64-character hex SHA-256 would produce a declaration no reader could
+ * verify and no writer should persist.
+ */
+declare function sidecarWithSkillMd(sidecar: SkillSidecar, skillMdSha256: string): SkillSidecar;
+/**
+ * The deterministic byte sequence of one declaration — what a file holds when
+ * this build writes a sidecar.
+ *
+ * Determinism is the point: {@link skillContractDigest} hashes the canonical
+ * key order, so the bytes on disk must be a function of the declaration alone,
+ * not of the order a caller happened to build its object in. Two calls with the
+ * same declaration produce the same string, and a reader can verify a file by
+ * parsing it and re-serializing: identical bytes mean the declaration did not
+ * move — which is exactly how the K3 derivation check compares a candidate's
+ * sidecar with the one re-derived from the champion's bytes. The shape is
+ * canonical keys, two-space indentation, one trailing newline.
+ */
+declare function serializeSkillSidecar(sidecar: SkillSidecar): string;
 //#endregion
 //#region src/sidecar.d.ts
 /** Every reason a provider is refused, named so a caller can act on the kind of problem. */
@@ -860,13 +944,17 @@ declare function unlistableVerifierRefusal(name: string, directory: string | und
  */
 interface EvolutionCommitLedger {
   /**
-   * The absolute production targets of every open commit intent, in ledger order
-   * (`EvolutionService.openIntentTargets`). A pure read: it writes nothing and
-   * never reconciles, so asking an admission question cannot settle a commit as
-   * a side effect. Optional because this is a structural read of a service this
-   * package does not own — a service that cannot answer it is refused by name
-   * rather than read as "no commit is open" (`commit-ledger-unreadable`,
-   * fail-closed).
+   * The absolute production file paths of every open commit intent, in ledger
+   * order (`EvolutionService.openIntentTargets`): for one K3 commit, the files
+   * the skill's directory holds — `SKILL.md`, and the `SKILL.contract.json`
+   * beside it when the skill has an execution sidecar. A pure read: it writes
+   * nothing and never reconciles, so asking an admission question cannot settle
+   * a commit as a side effect. The gate resolves each path to the directory that
+   * holds it and matches providers by that directory, because one intent covers
+   * the whole fixed file set together. Optional because this is a structural
+   * read of a service this package does not own — a service that cannot answer
+   * it is refused by name rather than read as "no commit is open"
+   * (`commit-ledger-unreadable`, fail-closed).
    */
   openIntentTargets?(): Promise<readonly string[]>;
 }
@@ -982,12 +1070,12 @@ declare function providerContentIdentities(capabilities: readonly CapabilityProv
  * viewpoint.
  *
  * The rules, in the order they are applied per skill: it must be discoverable
- * from the view's roots; its own `SKILL.md` must not be a target an evolution
- * commit left open (K2); the directory it resolves to must pass
- * {@link validateSkillProvider} against the table and the verifier vocabulary.
- * An execution sidecar is refused when the vocabulary is unknown
- * (`verifierRefs` absent) — the one case the phase-1 validator cannot judge,
- * because it would read an empty list as "nothing is registered".
+ * from the view's roots; no file of the directory it resolves into may be a
+ * target an evolution commit left open (K2, matched by directory since K3); the
+ * directory must pass {@link validateSkillProvider} against the table and the
+ * verifier vocabulary. An execution sidecar is refused when the vocabulary is
+ * unknown (`verifierRefs` absent) — the one case the phase-1 validator cannot
+ * judge, because it would read an empty list as "nothing is registered".
  *
  * Nothing is written and nothing is thrown: every refusal is a verdict, and
  * {@link providerRefusals} turns the refusals into the lines a caller reports
@@ -2995,7 +3083,8 @@ interface CommitReconcileOutcome {
   readonly intentId: string;
   readonly proposalId: string;
   readonly direction: string;
-  readonly target: string;
+  /** Every production file the intent committed, in intent order — one or two files of the skill object (K3). */
+  readonly targets: readonly string[];
   readonly result: 'completed-redone' | 'completed-written' | 'blocked';
   readonly detail?: string;
 }
@@ -5775,4 +5864,4 @@ declare class TaskRuntime extends Service {
   private agentOrUndefined;
 }
 //#endregion
-export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AdoptedWorkerResume, type AdoptedWorkerResumeRequest, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BatchResultDeliveryStatus, type BatchResultMessage, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, CommitReconcileOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, type EvolutionCommitLedger, ExecutionGate, type ExecutionProviderVerdict, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type OwedBatchResult, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, QuestionResumeReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, type SessionObservation, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { type AcceptedSkillProviderVerdict, type AdmissionChild, type AdmissionParent, type AdmissionVerdict, type AdoptedWorkerResume, type AdoptedWorkerResumeRequest, type AnsweredQuestionOutcome, type AskedQuestionOutcome, type BatchContext, type BatchResultDeliveryStatus, type BatchResultMessage, type BudgetConfig, type BudgetVerdict, COORDINATION_ALLOWED, type CapabilityConfig, CapabilityGap, type CapabilityGrants, type CapabilityProviderPrecheck, type CapabilityToolAnswer, type CapabilityToolQuery, type ChildOutcome, CommitReconcileOutcome, Config, CriterionSpec, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, DecomposeAdmissionResult, DecomposeChildSpec, DecomposeProposalOptions, DecomposeSpec, type DecompositionIdentityContext, DecompositionRefusal, DecompositionReviewRequest, type DrainOptions, type DrainResult, type EvolutionCommitLedger, ExecutionGate, type ExecutionProviderVerdict, type ExecutionSkillSidecar, type GateDecision, type GuidanceProviderVerdict, type HandoffInit, type InFlightCall, type JobsView, type JobsViewEntry, type KnowledgeProviderVerdict, type KnowledgeSkillSidecar, type LoadedSkillSidecar, MCP_SERVER_REGISTRY, type McpEnvBinding, type McpServerTemplate, type NormalizationContext, type NormalizationResult, type NormalizedBatch, type NormalizedChild, type ObligationCoverage, type ObligationTemplate, type ObligationTemplateFile, type OrchestrateEnv, type OwedBatchResult, PROPOSAL_REQUEST_KEY_PREFIX, type ParentAnswerCall, type ParentAskCall, type PendingQuestionMessage, type PendingQuestionMessages, type PermissionSpec, ProposalContinuation, ProposalDecisionResult, type ProposalRequestKeyContext, ProposalReviewChannel, ProposalReviewNotice, ProposalReviewRequest, ProposalReviewRequestBase, ProposalReviewTrigger, ProposalSubmission, ProviderLoadReport, type ProviderPrecheck, type ProviderPrecheckRequest, type QuestionCaller, type QuestionCoordinationDeps, type QuestionDelivery, type QuestionReconcileReport, QuestionResumeReport, RUN_BINDING_SKILLS_DIR, ReconcileReport, type RejectedProviderVerdict, type ReplayOverlay, type ReplayRunInit, type ReplayRunOutcome, type ReplayRunSignals, ReplayTaskOptions, type ResolvedProviderIdentity, type ResolvedRootBudget, type ReviewContextInput, RootAdoption, type RootBudgetConfig, type RootBudgetResolution, RootContractReviewRequest, RootContractSpec, RootIntakeOptions, RootIntakeResult, type RootNormalizationResult, type RootRequestKeyContext, type RunBindingRead, type RunBindingRequest, type RunBindingSkillRead, RunVerifier, RunWatcherUnavailableError, SKILL_SIDECAR_FILE, type SessionObservation, type SkillContentIdentity, type SkillDefect, type SkillDefectCode, type SkillDiscoveryView, type SkillProviderCandidate, type SkillProviderIdentity, type SkillProviderVerdict, type SkillResourceIdentity, type SkillSidecar, type SkillValidationContext, type SpawnChildRequest, StoreRecoveryStatus, TOOL_LABELS, TaskRuntime, TaskRuntime as default, type VerifiedWalk, VerifierUnavailableError, type VerifierVocabulary, type VerifyRunOptions, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, type WorkspaceAdoption, WorkspaceBusyError, type WorkspaceOwner, WorkspaceRegistry, type WorkspaceRegistryOptions, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDigest, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

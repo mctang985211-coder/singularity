@@ -1,12 +1,14 @@
 /**
- * `evolution_replay` (guide §2.7.6, W15 / S4-E §F.2): evaluate a prepared
- * single-file skill candidate with the two-sided experiment.
+ * `evolution_replay` (guide §2.7.6, W15 / S4-E §F.2): evaluate a prepared skill
+ * candidate — an existing skill's whole loadable object, `SKILL.md` plus the
+ * `SKILL.contract.json` when it declares an execution provider — with the
+ * two-sided experiment.
  *
- * One evaluation path: a **skill** candidate that replaces an existing
- * `SKILL.md` ({@link ExperimentSpec}) — every sample runs the baseline and the
- * candidate as *new* runs of this graph, each in its own workspace built from
- * one frozen snapshot. The sample roles are derived from the store's own
- * history here rather than taken from the caller (§F.2): the caller names
+ * One evaluation path: a **skill** candidate that improves an existing skill
+ * under its own name ({@link ExperimentSpec}) — every sample runs the baseline
+ * and the candidate as *new* runs of this graph, each in its own workspace
+ * built from one frozen snapshot. The sample roles are derived from the store's
+ * own history here rather than taken from the caller (§F.2): the caller names
  * tasks, the ledger's latest review calls each one an observed failure, an
  * observed regression or a holdout. Any other target type is refused by name —
  * this build evaluates skill replacements only, and a capability, agent_preset
@@ -185,11 +187,16 @@ function renderExperiment(result: ExperimentResult, targetId: string): string {
     ...report.samples.map(sample =>
       `  ${sample.taskId} [${sample.role}] baseline ${sample.baseline.outcome} → candidate ${sample.candidate.outcome} ` +
       `(${renderExperimentCriterionDiff(sample.baseline.criteria, sample.candidate.criteria)}) — ${sample.verdict}`),
-    'every side above is a new run this experiment started — the baseline under the production configuration, the candidate ' +
-    'on the prepared SKILL.md; the sample\'s historical record only locates the case',
+    'every side above is a new run this experiment started — the baseline under the production configuration (the production ' +
+    'object, whose frozen identity is read again at every promotion gate), the candidate on the prepared object\'s bytes — the ' +
+    'prepared `SKILL.md` and, for an execution skill, the sidecar derived from production; the sample\'s historical record only ' +
+    'locates the case',
     `report: ${result.reportPath}`,
     `experiment ${result.experimentId} (repetition ${report.frozen.repetition}, frozen ${report.frozenDigest}); ` +
-    `candidate sha256 ${report.frozen.candidate.sha256}; production baseline sha256 ${baseline?.sha256 ?? 'not recorded'}; ` +
+    `candidate ${report.frozen.candidate.contract === undefined ? 'guidance' : 'execution'} sha256 ${report.frozen.candidate.sha256}` +
+    `${report.frozen.candidate.contract === undefined ? '' : ` sidecar sha256 ${report.frozen.candidate.contract.sha256}`}; ` +
+    `production baseline sha256 ${baseline?.sha256 ?? 'not recorded'}` +
+    `${baseline?.contract === undefined ? '' : ` sidecar sha256 ${baseline.contract.sha256}`}; ` +
     `model ${report.frozen.model.label}; budget ${budget}; snapshot ${report.frozen.snapshot.digest}; comparer ${report.frozen.comparerVersion}`,
     'next: evolution_gate (cite the report path in regressionEvidenceRefs)',
   ].join('\n')
@@ -223,14 +230,16 @@ export function defineEvolutionReplayTool(ctx: Context) {
   return defineTool({
     name: 'evolution_replay',
     description:
-      'Evaluate a prepared single-file SKILL.md candidate with the two-sided experiment. Every named task is run twice — a new ' +
-      'baseline run under the production configuration and a new candidate run on the prepared bytes — each in its own workspace ' +
+      'Evaluate a prepared skill candidate — an existing skill\'s whole object, `SKILL.md` and, for an execution skill, the ' +
+      '`SKILL.contract.json` beside it — with the two-sided experiment. Every named task is run twice — a new ' +
+      'baseline run under the production configuration (the production object) and a new candidate run on the prepared bytes — ' +
+      'each in its own workspace ' +
       'built from the caller session\'s env workspace (the frozen input snapshot), all under one frozen identity (samples, ' +
       'snapshot digest, candidate content, model, budget, comparer). Sample roles are derived from the store\'s history: a task ' +
       'whose latest review is failed is the observed failure, a verified one is an observed regression, and holdoutTaskIds are ' +
       'the held-out cases; a call with no failed sample, or with an empty holdout, is refused — the experiment requires both. ' +
       'The historical record locates each case and is never a baseline. This is the only evaluation this build has: a proposal ' +
-      'targeting anything but a single-file skill replacement is refused by name. Writes the report under sandbox/<proposalId>/ ' +
+      'targeting anything but a skill replacement is refused by name. Writes the report under sandbox/<proposalId>/ ' +
       'and records the ledger entries; cite the report path in evolution_gate\'s regressionEvidenceRefs. Repeating the same call ' +
       'reuses the settled runs — it never re-runs or overwrites one; a higher `repetition` freezes a new experiment.',
     parameters: {
@@ -278,9 +287,10 @@ export function defineEvolutionReplayTool(ctx: Context) {
         const proposal = await ctx.evolution.get(args.proposalId)
         if (proposal.targetType !== 'skill') {
           throw new Error(
-            `proposal ${proposal.proposalId} targets "${proposal.targetType}" — this tool evaluates a prepared single-file ` +
-            'SKILL.md candidate only (a new baseline run and a new candidate run per frozen sample); no other target type has ' +
-            'an evaluator in this build, so its proposal stays a record',
+            `proposal ${proposal.proposalId} targets "${proposal.targetType}" — this tool evaluates a prepared skill object ` +
+            'candidate only: a new baseline run on the production object and a new candidate run on the prepared object, each ' +
+            'loaded whole (the SKILL.md, and the SKILL.contract.json beside it when the skill declares an execution provider). ' +
+            'No other target type has an evaluator in this build, so its proposal stays a record',
           )
         }
         const result = await runSkillExperiment(ctx, {

@@ -13,21 +13,37 @@ function sessionId(exec: ToolRunContext): string {
   return id
 }
 
+/**
+ * What a restored object means for production, stated honestly in the output:
+ * the skill root is watched, so the restored bytes are what the next admission
+ * loads, the directory is admitted again once its commit intent is closed, and a
+ * run already bound to the applied version keeps its own snapshot.
+ */
+function restoreNote(): string {
+  return 'the restored object is what the skill filesystem now serves and what the next admission loads, and the skill ' +
+    'directory is admitted again now that its commit intent is closed; a run already bound to the applied version keeps ' +
+    'loading the snapshot it was bound to'
+}
+
 export function defineEvolutionRollbackTool(ctx: Context) {
   return defineTool({
     name: 'evolution_rollback',
     description:
       'Roll back an applied EvolutionProposal (status: rolledback). Restores the champion snapshot taken at prepare — the ' +
-      'production SKILL.md of an applied single-file skill replacement, put back byte for byte. An applied record of any ' +
+      'production file set of the applied skill object (the `SKILL.md`, plus the `SKILL.contract.json` when it declares an ' +
+      'execution provider), put back byte for byte. An applied record of any ' +
       'other target type has no executor here and is refused. Always asks a human through the native approval seam first — ' +
       'reject / cancel / unavailable writes nothing and the proposal stays applied. Only an applied proposal can be rolled ' +
       'back; a rolled-back proposal keeps its full ledger history. The restore is one commit, in the same order as apply: ' +
-      'a durable commit intent (proposal, direction, this approval, the target, the content identity production must hold ' +
-      'before and after, and the champion snapshot as the recoverable bytes) is recorded before production changes, the ' +
-      'SKILL.md is replaced atomically, and only then is the completion recorded — so a failure at any stage leaves one ' +
-      'open intent and an intact file rather than a half-commit. A rollback restores this proposal\'s own baseline and ' +
+      'a durable commit intent (proposal, direction, this approval, every production file with the content identity each ' +
+      'must hold before and after the restore, and the champion snapshot as the recoverable bytes for each file) is ' +
+      'recorded before production changes, each file is then replaced atomically, and only after every file has been read ' +
+      'back and the whole directory verified as one loadable object is the completion recorded — so a failure at any stage ' +
+      'leaves one open intent and the skill directory closed to new admission rather than a half-commit. A rollback ' +
+      'restores this proposal\'s own baseline and ' +
       'refuses by name, with nothing written, a target that a later proposal (or any other writer) has changed since this ' +
-      'version was applied, and a champion snapshot that no longer hashes to the baseline recorded at prepare. Calling ' +
+      'version was applied (both files must still hold what this proposal applied), and a champion snapshot that no longer ' +
+      'hashes to the baseline recorded at prepare. Calling ' +
       'this tool again while an intent is open settles it instead of asking for a second approval: the answer reports the ' +
       'intent id and whether the write was redone or only its completion recorded.',
     parameters: {
@@ -56,6 +72,7 @@ export function defineEvolutionRollbackTool(ctx: Context) {
             ...renderOpenIntentRecovery(proposal.openIntent, recovered.recovered),
             'wrote production targets:',
             ...recovered.targets.map(target => `  - ${target}`),
+            restoreNote(),
           ].join('\n')
         } catch (error) {
           return `evolution_rollback rejected: ${error instanceof Error ? error.message : String(error)}`
@@ -66,7 +83,7 @@ export function defineEvolutionRollbackTool(ctx: Context) {
       }
       const targets = applyTargets(proposal, ctx.evolution)
       if (targets.length === 0) {
-        return `evolution_rollback rejected: proposal ${proposal.proposalId} targets "${proposal.targetType}" — this build writes and restores a single SKILL.md only, so there is no executor to roll back an applied record of another type`
+        return `evolution_rollback rejected: proposal ${proposal.proposalId} targets "${proposal.targetType}" — this build writes and restores the fixed file set of one skill object only (SKILL.md, plus the SKILL.contract.json of a skill that declares an execution provider), so there is no executor to roll back an applied record of another type`
       }
       const reason = [
         `Evolution rollback for proposal ${proposal.proposalId} (${proposal.level} ${proposal.targetType} ${proposal.targetId}, base ${proposal.baseVersion})`,
@@ -96,6 +113,7 @@ export function defineEvolutionRollbackTool(ctx: Context) {
           `proposal ${rolledback.proposal.proposalId} [rolledback] ${rolledback.proposal.level} ${rolledback.proposal.targetType} ${rolledback.proposal.targetId} — champion restored`,
           'wrote production targets:',
           ...rolledback.targets.map(target => `  - ${target}`),
+          restoreNote(),
           `human approval: approval:${exec.callId}`,
         ].join('\n')
       } catch (error) {

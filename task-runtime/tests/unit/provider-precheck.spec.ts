@@ -434,11 +434,14 @@ describe('the frontmatter name a discovered SKILL.md declares', () => {
 })
 
 /**
- * The evolution commit gate (K2-3): a production target an apply/rollback left
- * open is not loaded against until a reconciliation settles it. The ledger is
- * read once per pre-check, softly — a deployment with no evolution service has no
- * commit in flight and no gate — and the gate answers for the provider whose own
- * `SKILL.md` the intent targets and for nobody else.
+ * The evolution commit gate (K2-3): a production directory an apply/rollback left
+ * a target in is not loaded against until a reconciliation settles it. The ledger
+ * is read once per pre-check, softly — a deployment with no evolution service has
+ * no commit in flight and no gate — and the gate answers for the provider whose
+ * discovered directory holds a target and for nobody else. Since K3 the match is
+ * the directory, not one file name: one intent covers a skill directory's fixed
+ * file set together (`SKILL.md` plus its sidecar), so a target naming any file of
+ * it refuses the whole directory — a mixed version is not admissible either.
  */
 describe('the evolution commit gate', () => {
   /** A ledger that answers the one thing the pre-check asks it. */
@@ -446,7 +449,7 @@ describe('the evolution commit gate', () => {
     return { openIntentTargets }
   }
 
-  test('a skill whose SKILL.md an open intent targets is refused, and only that skill is affected', async () => {
+  test('a skill whose directory an open intent targets is refused, and only that skill is affected', async () => {
     const verifyDirectory = await install('verify')
     const ballDirectory = await install('ball-align')
     const read = vi.fn(async () => [join(verifyDirectory, 'SKILL.md')])
@@ -459,8 +462,11 @@ describe('the evolution commit gate', () => {
     expect(codes(refused)).toEqual(['commit-intent-open'])
     expect(refused.directory).toBe(verifyDirectory)
     const detail = refused.defects[0]!.detail
-    expect(detail).toContain(join(verifyDirectory, 'SKILL.md'))
+    // The refusal names the directory whose file set the intent covers, so an
+    // operator looks at the skill, not at one path inside it.
+    expect(detail).toContain(`a file of ${verifyDirectory}`)
     expect(detail).toContain('an apply or rollback')
+    expect(detail).toContain('SKILL.contract.json')
     expect(detail).toContain('reconciliation')
     // The refusal line names the capability, the skill and the directory the way
     // every other refusal does.
@@ -480,14 +486,18 @@ describe('the evolution commit gate', () => {
     expect(read).toHaveBeenCalledTimes(1)
   })
 
-  test('a target that is not a discovered provider\'s own SKILL.md blocks nothing', async () => {
+  test('an intent against another directory blocks nothing here', async () => {
+    // Only the directory the skill was *found* in decides: a target under a root
+    // this worker never resolved (a same-name skill elsewhere, another skill's
+    // files) leaves this provider exactly as it would be with no gate at all.
     await install('verify')
+    const other = await install('ball-align')
     const report = await precheck({
       capabilities: ['verify-ball-functional'],
       commitLedger: ledger(async () => [
         join(home, 'skills', 'verify', 'SKILL.md'),
-        join(home, 'skills', 'verify'),
-        join(home, 'skills', 'another-skill', 'SKILL.md'),
+        join(other, 'SKILL.md'),
+        join(other, 'SKILL.contract.json'),
       ]),
     })
 
@@ -495,13 +505,58 @@ describe('the evolution commit gate', () => {
     expect(verdict(report, 'verify-ball-functional', 'verify').valid).toBe(true)
   })
 
-  test('an undeclared directory the intent targets is still a target once discovery resolves it', async () => {
-    // The gate compares absolute paths, so a target written with a redundant
-    // separator or a `.` segment names the same file.
+  test('a target written with a redundant segment still resolves to the discovered directory', async () => {
+    // The gate resolves a target to the directory holding it, so a path written
+    // with a redundant separator or a `.` segment lands on the same directory as
+    // the one discovery found.
     const directory = await install('verify')
     const report = await precheck({
       capabilities: ['verify-ball-functional'],
       commitLedger: ledger(async () => [join(directory, '.', 'SKILL.md')]),
+    })
+
+    expect(codes(rejected(verdict(report, 'verify-ball-functional', 'verify')))).toEqual(['commit-intent-open'])
+  })
+
+  test('an intent that names only the sidecar still refuses the skill: the gate matches the directory (K3)', async () => {
+    // A K3 commit over an execution skill covers `SKILL.md` *and* the
+    // `SKILL.contract.json` beside it, and the ledger may report either path.
+    // A file-for-file match reads a sidecar target as "not this provider" and
+    // admits a directory an open commit owns — a mixed version.
+    const directory = await install('verify')
+    const report = await precheck({
+      capabilities: ['verify-ball-functional'],
+      commitLedger: ledger(async () => [join(directory, 'SKILL.contract.json')]),
+    })
+
+    const refused = rejected(verdict(report, 'verify-ball-functional', 'verify'))
+    expect(codes(refused)).toEqual(['commit-intent-open'])
+    expect(refused.directory).toBe(directory)
+    expect(refused.defects[0]!.detail).toContain(directory)
+  })
+
+  test('an intent naming both files of one directory refuses that skill once, for the directory they share', async () => {
+    const directory = await install('verify')
+    const report = await precheck({
+      capabilities: ['verify-ball-functional'],
+      commitLedger: ledger(async () => [join(directory, 'SKILL.md'), join(directory, 'SKILL.contract.json')]),
+    })
+
+    const refused = rejected(verdict(report, 'verify-ball-functional', 'verify'))
+    expect(codes(refused)).toEqual(['commit-intent-open'])
+    // One directory, one refusal: the two targets are one commit's fixed file
+    // set, not two reasons to refuse the same provider twice.
+    expect(refused.defects).toHaveLength(1)
+  })
+
+  test('any file path in the skill directory counts, whatever the file is called', async () => {
+    // The gate does not enumerate the names a commit may write: a target is
+    // resolved to the directory that holds it, so a path the ledger reports for
+    // this skill cannot slip past a name list that has not learned it yet.
+    const directory = await install('verify')
+    const report = await precheck({
+      capabilities: ['verify-ball-functional'],
+      commitLedger: ledger(async () => [join(directory, 'notes.md')]),
     })
 
     expect(codes(rejected(verdict(report, 'verify-ball-functional', 'verify')))).toEqual(['commit-intent-open'])

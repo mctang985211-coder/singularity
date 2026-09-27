@@ -54,6 +54,7 @@ import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EvolutionService } from '../../src/evolution.ts'
 import type { Config, GateAnswers, ProposeInput } from '../../src/evolution.ts'
+import { SKILL_SIDECAR_FILE } from '@dangosys/dsh-singularity-task-runtime'
 import { commitIntent, sha256Hex } from '../../src/commit.ts'
 import type { CommitHost, CommitRequest } from '../../src/commit.ts'
 import { buildExperimentReport, directoryDigest, experimentIdOf, experimentLineage, experimentReportPath } from '../../src/experiment.ts'
@@ -255,7 +256,7 @@ afterEach(() => {
  * ------------------------------------------------------------------------ */
 
 /** A production `SKILL.md` body every fixture starts from. */
-const PRODUCTION_BASELINE = '# production verify skill\n'
+const PRODUCTION_BODY = '# production verify skill'
 /** The candidate body every fixture commits. */
 const CANDIDATE_BODY = '# new verify skill\n\nwith a trailing newline'
 /** The production path one commit writes. */
@@ -350,6 +351,8 @@ function skillText(body: string, name = 'verify'): string {
 }
 
 const SKILL_CANDIDATE = skillText(CANDIDATE_BODY)
+/** The production object's bytes: loadable text, because prepare reads production through the loader (K3). */
+const PRODUCTION_BASELINE = skillText(PRODUCTION_BODY)
 
 const skillProposal: ProposeInput = {
   proposalId: 's1',
@@ -377,7 +380,14 @@ function gateAnswers(refs: string[]): GateAnswers {
 
 /** The provider identity the fixture's production configuration resolves to (no rows, no skills). */
 function fixtureProviderIdentity(): FrozenProviderIdentity {
-  return { capabilities: [], registryRevision: FIXTURE_REGISTRY_REVISION, mcpServers: [], preset: null, skills: [] }
+  return {
+    capabilities: [],
+    registryRevision: FIXTURE_REGISTRY_REVISION,
+    candidateRegistryRevision: FIXTURE_REGISTRY_REVISION,
+    mcpServers: [],
+    preset: null,
+    skills: [],
+  }
 }
 
 /** One side's run row, with the provider binding the gate compares to the frozen identity. */
@@ -477,7 +487,7 @@ async function recordSkillExperiment(svc: EvolutionService, proposalId = 's1'): 
   const reportPath = experimentReportPath(proposalId, experimentId)
   const at = '2026-09-26T00:00:00.000Z'
   await svc.recordExperimentStart({
-    formatVersion: 3,
+    formatVersion: 4,
     kind: 'experiment_started',
     proposalId,
     experimentId,
@@ -521,11 +531,11 @@ async function recordSkillExperiment(svc: EvolutionService, proposalId = 's1'): 
       rows.evidence.push({ evidenceId: `e-${runId}`, taskRunId: runId, taskId, artifacts: [], verifierResults: [], claims: [], generatedAt: at })
       rows.reviews.push({ taskId, runId, outcome: settlement, evidenceRefs: [`e-${runId}`], anomalies: [], criteria })
       await svc.recordExperimentSample({
-        formatVersion: 3,
+        formatVersion: 4,
         kind: 'experiment_sample',
         proposalId,
         experimentId,
-        preparedContentDigest: candidate.sha256,
+        preparedContentDigest: digestOf(candidate),
         sampleTaskId: entry.taskId,
         side,
         repetition: 0,
@@ -683,11 +693,14 @@ describe('K2 durability: the source, the intent line and the rename', () => {
       intentId: 's1/apply',
       proposalId: 's1',
       direction: 'apply',
-      source: CANDIDATE_SOURCE,
-      baselineSha256: sha256Of(PRODUCTION_BASELINE),
-      contentSha256: sha256Of(SKILL_CANDIDATE),
+      files: [{
+        target,
+        source: CANDIDATE_SOURCE,
+        baselineSha256: sha256Of(PRODUCTION_BASELINE),
+        contentSha256: sha256Of(SKILL_CANDIDATE),
+      }],
     })
-    expect(sha256Hex(await readFile(target))).toBe(intent.contentSha256)
+    expect(sha256Hex(await readFile(target))).toBe(intent.files[0].contentSha256)
   })
 
   it('makes a rollback\'s champion snapshot durable before its own intent', async () => {
@@ -888,7 +901,7 @@ describe('K2 durability: the source, the intent line and the rename', () => {
       intentId: 's1/apply',
       proposalId: 's1',
       direction: 'apply',
-      target,
+      targets: [target],
       result: 'completed-written',
     }])
     expect(await readFile(target, 'utf8')).toBe(SKILL_CANDIDATE)
@@ -1046,23 +1059,25 @@ describe('K2 durability: the source the intent would name', () => {
       proposalId: 's1',
       direction: 'apply',
       approvalRef: 'approval:call-1',
-      target: targetOf(skillRoot),
-      baselineSha256: sha256Of(PRODUCTION_BASELINE),
-      contentSha256: sha256Of(SKILL_CANDIDATE),
-      source,
+      files: [{
+        target: targetOf(skillRoot),
+        baselineSha256: sha256Of(PRODUCTION_BASELINE),
+        contentSha256: sha256Of(SKILL_CANDIDATE),
+        source,
+      }],
       actor: 'root-1',
     })
 
     // A real file, holding exactly the committed bytes — but outside the root
     // the intent resolves against: refused by name, before anything is read or
     // written.
-    const escaping = await refusalOf(commitIntent(host, request('../outside/SKILL.md'), bytes))
+    const escaping = await refusalOf(commitIntent(host, request('../outside/SKILL.md'), [bytes]))
     expect(escaping).toContain('../outside/SKILL.md')
     expect(escaping).toMatch(/is not inside the ledger root/)
     expect(escaping).toMatch(/nothing is written/)
 
     // And a source that *is* the root: a commit names bytes, never a directory.
-    const rootItself = await refusalOf(commitIntent(host, request('.'), bytes))
+    const rootItself = await refusalOf(commitIntent(host, request('.'), [bytes]))
     expect(rootItself).toMatch(/is not inside the ledger root/)
     expect(rootItself).toMatch(/nothing is written/)
 
@@ -1086,18 +1101,20 @@ describe('K2 durability: the source the intent would name', () => {
       proposalId: 's1',
       direction: 'apply',
       approvalRef: 'approval:call-1',
-      target: outside,
-      baselineSha256: sha256Of(PRODUCTION_BASELINE),
-      contentSha256: sha256Of(SKILL_CANDIDATE),
-      source: CANDIDATE_SOURCE,
+      files: [{
+        target: outside,
+        baselineSha256: sha256Of(PRODUCTION_BASELINE),
+        contentSha256: sha256Of(SKILL_CANDIDATE),
+        source: CANDIDATE_SOURCE,
+      }],
       actor: 'root-1',
     }
 
-    const message = await refusalOf(commitIntent(host, request, Buffer.from(SKILL_CANDIDATE, 'utf8')))
+    const message = await refusalOf(commitIntent(host, request, [Buffer.from(SKILL_CANDIDATE, 'utf8')]))
 
     expect(message).toContain(outside)
     expect(message).toMatch(/is not inside the production skill root/)
-    expect(message).toMatch(/writes one\s+SKILL\.md under that root and nothing else/)
+    expect(message).toMatch(/replaces the fixed file set of one skill object under that root/)
     expect(await readFile(outside, 'utf8')).toBe('# a stranger, not a production skill\n')
     expect(await readdir(dirname(outside))).toEqual(['SKILL.md'])
     expect(await readFile(join(root, 'proposals.jsonl'))).toEqual(before)
@@ -1114,16 +1131,18 @@ describe('K2 durability: the source the intent would name', () => {
     const ledger = join(root, 'proposals.jsonl')
     const lines = (await readFile(ledger, 'utf8')).trim().split('\n')
     lines.push(JSON.stringify({
-      formatVersion: 3,
+      formatVersion: 4,
       kind: 'commit_intent',
       intentId: 's1/apply',
       proposalId: 's1',
       direction: 'apply',
       approvalRef: 'approval:call-0',
-      target,
-      baselineSha256: sha256Of(PRODUCTION_BASELINE),
-      contentSha256: sha256Of(SKILL_CANDIDATE),
-      source: '../../outside/SKILL.md',
+      files: [{
+        target,
+        baselineSha256: sha256Of(PRODUCTION_BASELINE),
+        contentSha256: sha256Of(SKILL_CANDIDATE),
+        source: '../../outside/SKILL.md',
+      }],
       actor: 'root-1',
       at: '2026-09-26T00:00:05.000Z',
     }))
@@ -1133,7 +1152,7 @@ describe('K2 durability: the source the intent would name', () => {
     const outcomes = await reopened.reconcile()
 
     expect(outcomes).toHaveLength(1)
-    expect(outcomes[0]).toMatchObject({ intentId: 's1/apply', target, result: 'blocked' })
+    expect(outcomes[0]).toMatchObject({ intentId: 's1/apply', targets: [target], result: 'blocked' })
     expect(outcomes[0]!.detail).toMatch(/no longer readable as the bytes it committed/)
     expect(outcomes[0]!.detail).toContain('../../outside/SKILL.md')
     expect(await readFile(target, 'utf8')).toBe(PRODUCTION_BASELINE)
@@ -1193,7 +1212,7 @@ describe('K2 durability: the staging file, and a real fs failure', () => {
       intentId: 's1/apply',
       proposalId: 's1',
       direction: 'apply',
-      target,
+      targets: [target],
       result: 'completed-written',
     }])
 
@@ -1250,7 +1269,7 @@ describe('K2 durability: the staging file, and a real fs failure', () => {
       intentId: 's1/apply',
       proposalId: 's1',
       direction: 'apply',
-      target,
+      targets: [target],
       result: 'completed-written',
     }])
     expect(existsSync(stale)).toBe(false)
@@ -1299,5 +1318,361 @@ describe('K2 durability: the staging file, and a real fs failure', () => {
     expect(kinds.filter(kind => kind === 'commit_intent')).toHaveLength(1)
     expect(kinds.filter(kind => kind === 'applied')).toHaveLength(1)
     expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(SKILL_CANDIDATE)
+  })
+})
+
+/* ------------------------------------------------------------------------ *
+ * K3 durability: the commit covers the whole skill object — two files, two *
+ * sources, two renames, two directory fsyncs, one intent and one           *
+ * completion. The order and the named stops are the K2 discipline applied  *
+ * per file; the recovery finishes a pair the process died between.         *
+ * ------------------------------------------------------------------------ */
+
+/** The production sidecar path beside the `SKILL.md` one commit writes. */
+const sidecarTargetOf = (skillRoot: string) => join(skillRoot, 'verify', SKILL_SIDECAR_FILE)
+/** The second sandbox source a two-file commit names, relative to the ledger root. */
+const SIDECAR_CANDIDATE_SOURCE = 'sandbox/s1/skills/verify/SKILL.contract.json'
+const SIDECAR_CHAMPION_SOURCE = 'sandbox/s1/champion/skills/verify/SKILL.contract.json'
+
+/** The production declaration for one `SKILL.md` body: a valid execution sidecar, `resources: []`. */
+function declarationOf(skillMd: string): Record<string, unknown> {
+  return {
+    contractVersion: 1,
+    type: 'execution',
+    // `research` is a row the fixture registry holds and grants no tools, so the
+    // candidate's derived declaration is one the provider check accepts.
+    capabilities: ['research'],
+    precondition: 'the fixture skill is installed where discovery looks',
+    inputs: [],
+    outputs: [],
+    requiredTools: [],
+    verifier: { ref: 'command' },
+    content: { skillMdSha256: sha256Of(skillMd), resources: [] },
+  }
+}
+
+/** Install a production execution object: `SKILL.md` plus the sidecar that declares exactly those bytes. */
+async function productionObject(skillRoot: string, body: string): Promise<void> {
+  await mkdir(join(skillRoot, 'verify'), { recursive: true })
+  await writeFile(targetOf(skillRoot), body)
+  await writeFile(sidecarTargetOf(skillRoot), `${JSON.stringify(declarationOf(body), null, 2)}\n`)
+}
+
+/** A production execution fixture walked to decided(PROMOTE) through the service's own entries. */
+async function objectDecidedFixture() {
+  const dir = await mkdtemp(join(tmpdir(), 'evolution-durability-object-'))
+  const root = join(dir, 'evolution')
+  const skillRoot = join(dir, 'skills')
+  await productionObject(skillRoot, PRODUCTION_BASELINE)
+  const svc = new EvolutionService(fixtureCtx(), { ...FIXTURE_CONFIG, root, skillRoot })
+  await svc.propose(skillProposal, 'root-1')
+  await svc.candidate('s1', VERSION_SET, 'root-1', { name: 'verify', content: SKILL_CANDIDATE })
+  await svc.prepare('s1', 'root-1')
+  const { reportPath } = await recordSkillExperiment(svc, 's1')
+  await svc.gate('s1', gateAnswers([reportPath]), 'root-1')
+  await svc.decide('s1', 'PROMOTE', 'root-1', 'approval:call-0')
+  clearLayer()
+  return { svc, dir, root, skillRoot }
+}
+
+/** The derived candidate sidecar the sandbox must hold for the fixture's candidate body. */
+async function expectedCandidateSidecar(root: string): Promise<string> {
+  return (await readFile(join(root, SIDECAR_CANDIDATE_SOURCE), 'utf8'))
+}
+
+describe('K3 durability: two files, two sources, one intent', () => {
+  it('fsyncs both sources — each file and its directory chain — before the intent line', async () => {
+    const { svc, root, skillRoot } = await objectDecidedFixture()
+    const ledger = join(root, 'proposals.jsonl')
+
+    await svc.apply('s1', 'root-1', 'approval:call-1')
+
+    for (const source of [CANDIDATE_SOURCE, SIDECAR_CANDIDATE_SOURCE]) {
+      const abs = join(root, source)
+      const fileSync = opIndex(op => op.op === 'fsync' && op.path === abs)
+      const lineWrite = opIndex(op => op.op === 'write' && op.path === ledger)
+      expect(fileSync, `no fsync of ${source}\n${opLog()}`).toBeGreaterThanOrEqual(0)
+      expect(lineWrite, `the intent line write is missing\n${opLog()}`).toBeGreaterThan(fileSync)
+      for (const directory of sourceDirectories(root, abs)) {
+        const directorySync = opIndex(op => op.op === 'fsync' && op.path === directory, fileSync)
+        expect(directorySync, `no fsync of ${directory} after ${source}\n${opLog()}`).toBeGreaterThan(fileSync)
+        expect(directorySync, `the chain of ${source} is not durable before the intent\n${opLog()}`).toBeLessThan(lineWrite)
+      }
+    }
+    // Both files are in place and the pair is the derived one.
+    expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(SKILL_CANDIDATE)
+    expect(await readFile(sidecarTargetOf(skillRoot), 'utf8')).toBe(await expectedCandidateSidecar(root))
+  })
+
+  it('writes, renames and fsyncs the two files in intent order, after the intent line', async () => {
+    const { svc, root, skillRoot } = await objectDecidedFixture()
+    const skillTarget = targetOf(skillRoot)
+    const sidecarTarget = sidecarTargetOf(skillRoot)
+    const ledger = join(root, 'proposals.jsonl')
+
+    await svc.apply('s1', 'root-1', 'approval:call-1')
+
+    const intentLine = opIndex(op => op.op === 'write' && op.path === ledger)
+    const skillRename = opIndex(op => op.op === 'rename' && op.path === skillTarget)
+    const skillDirectory = opIndex(op => op.op === 'fsync' && op.path === dirname(skillTarget))
+    const sidecarRename = opIndex(op => op.op === 'rename' && op.path === sidecarTarget)
+    const sidecarDirectory = opIndex(op => op.op === 'fsync' && op.path === dirname(sidecarTarget), sidecarRename)
+    // The intent is on disk before anything moves, the pair moves in the order
+    // the intent lists it, and each rename is made durable before the next file
+    // is staged.
+    expect(intentLine).toBeGreaterThanOrEqual(0)
+    expect(skillRename).toBeGreaterThan(intentLine)
+    expect(skillDirectory).toBeGreaterThan(skillRename)
+    expect(sidecarRename).toBeGreaterThan(skillDirectory)
+    expect(sidecarDirectory).toBeGreaterThan(sidecarRename)
+    expect(opLog()).not.toBe('')
+  })
+
+  it('stops by name when the second file\u2019s source drifted before the intent, writing nothing', async () => {
+    const { svc, root, skillRoot } = await objectDecidedFixture()
+    const ledger = join(root, 'proposals.jsonl')
+    const before = await readFile(ledger)
+    const productionSidecar = await readFile(sidecarTargetOf(skillRoot), 'utf8')
+    const sidecarBytes = await readFile(join(root, SIDECAR_CANDIDATE_SOURCE))
+    // The request is built from the digests the sandbox held, then the second
+    // source is replaced: the bytes the intent would name are no longer the
+    // bytes the commit verified, so the whole pair stops before a line is
+    // recorded or a file is written.
+    const host = commitHostOf(svc)
+    const request: CommitRequest = {
+      proposalId: 's1',
+      direction: 'apply',
+      approvalRef: 'approval:call-1',
+      files: [
+        { target: targetOf(skillRoot), baselineSha256: sha256Of(PRODUCTION_BASELINE), contentSha256: sha256Of(SKILL_CANDIDATE), source: CANDIDATE_SOURCE },
+        { target: sidecarTargetOf(skillRoot), baselineSha256: sha256Of(productionSidecar), contentSha256: sha256Hex(sidecarBytes), source: SIDECAR_CANDIDATE_SOURCE },
+      ],
+      actor: 'root-1',
+    }
+    await writeFile(join(root, SIDECAR_CANDIDATE_SOURCE), '# a sidecar nobody recorded\n')
+
+    const message = await refusalOf(commitIntent(host, request, [Buffer.from(SKILL_CANDIDATE, 'utf8'), sidecarBytes]))
+
+    expect(message).toContain(SIDECAR_CANDIDATE_SOURCE)
+    expect(message).toMatch(/does not hold the bytes its commit recorded/)
+    expect(message).toMatch(/no line is recorded and nothing is written/)
+    expect(await readFile(ledger)).toEqual(before)
+    expect(await ledgerKinds(root)).not.toContain('commit_intent')
+    expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(PRODUCTION_BASELINE)
+    // The sidecar is untouched: the commit stopped before it staged anything.
+    expect(await readFile(sidecarTargetOf(skillRoot), 'utf8')).toBe(productionSidecar)
+  })
+
+  it('refuses a commit whose second source is not durable before the intent, naming the file', async () => {
+    const { svc, root, skillRoot } = await objectDecidedFixture()
+    const ledger = join(root, 'proposals.jsonl')
+    const before = await readFile(ledger)
+
+    failOn('fsync', join(root, SIDECAR_CANDIDATE_SOURCE), 'simulated sidecar source fsync failure')
+    const message = await refusalOf(svc.apply('s1', 'root-1', 'approval:call-1'))
+
+    expect(message).toMatch(/simulated sidecar source fsync failure/)
+    expect(message).toContain(SIDECAR_CANDIDATE_SOURCE)
+    expect(await readFile(ledger)).toEqual(before)
+    expect(await ledgerKinds(root)).not.toContain('commit_intent')
+    expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(PRODUCTION_BASELINE)
+  })
+
+  it('stops by name when the second file\u2019s rename fails, leaving a mixed pair the recovery finishes', async () => {
+    const { svc, root, skillRoot } = await objectDecidedFixture()
+    const skillTarget = targetOf(skillRoot)
+    const sidecarTarget = sidecarTargetOf(skillRoot)
+    const beforeSidecar = await readFile(sidecarTarget)
+
+    failOn('rename', sidecarTarget, 'simulated sidecar rename failure')
+    const message = await refusalOf(svc.apply('s1', 'root-1', 'approval:call-1'))
+
+    expect(message).toMatch(/simulated sidecar rename failure/)
+    // The intent is open and nothing is recorded as settled: the SKILL.md moved,
+    // the sidecar did not — the mixed pair the ledger explains.
+    expect(await ledgerKinds(root)).toContain('commit_intent')
+    expect(await ledgerKinds(root)).not.toContain('applied')
+    expect(await readFile(skillTarget, 'utf8')).toBe(SKILL_CANDIDATE)
+    expect(await readFile(sidecarTarget)).toEqual(beforeSidecar)
+
+    clearLayer()
+    const outcomes = await svc.reconcile()
+    expect(outcomes.map(outcome => outcome.result)).toEqual(['completed-redone'])
+    expect(await readFile(sidecarTarget, 'utf8')).toBe(await expectedCandidateSidecar(root))
+    expect((await ledgerKinds(root)).filter(kind => kind === 'applied')).toHaveLength(1)
+  })
+
+  it('stops by name when the second file\u2019s directory cannot be fsynced after its rename', async () => {
+    const { svc, root, skillRoot } = await objectDecidedFixture()
+    const skillTarget = targetOf(skillRoot)
+    const sidecarTarget = sidecarTargetOf(skillRoot)
+    const directory = dirname(sidecarTarget)
+    // Arm the failure only once the first file has landed: the read-back of
+    // `SKILL.md` runs after its own rename, so arming there lands the rule on the
+    // *second* file's directory fsync — the same directory, the second time.
+    fsLayer.onRead = async () => {
+      if (fsLayer.ops.some(op => op.op === 'rename' && op.path === skillTarget)) {
+        failOn('fsync', directory, 'simulated sidecar directory fsync failure')
+      }
+    }
+
+    const message = await refusalOf(svc.apply('s1', 'root-1', 'approval:call-1'))
+
+    expect(message).toMatch(/simulated sidecar directory fsync failure/)
+    expect(message).toContain(directory)
+    expect(message).toMatch(/not\s+a settled commit|is not a settled commit/)
+    // No completion: the rename that may not be durable is not a settled commit.
+    expect(await ledgerKinds(root)).toContain('commit_intent')
+    expect(await ledgerKinds(root)).not.toContain('applied')
+    expect(await readFile(sidecarTarget, 'utf8')).toBe(await expectedCandidateSidecar(root))
+
+    clearLayer()
+    expect((await svc.reconcile()).map(outcome => outcome.result)).toEqual(['completed-written'])
+    expect((await ledgerKinds(root)).filter(kind => kind === 'applied')).toHaveLength(1)
+  })
+
+  it('records no completion when the whole-object verification refuses: the intent stays open', async () => {
+    const { svc, root, skillRoot } = await objectDecidedFixture()
+    const skillTarget = targetOf(skillRoot)
+    const sidecarTarget = sidecarTargetOf(skillRoot)
+    // After the second file is renamed and read back, the production sidecar
+    // disappears (a third party, injected at the read that precedes the whole
+    // object check): production is no longer one loadable object, so the
+    // completion must not be recorded.
+    fsLayer.onRead = async () => {
+      if (fsLayer.ops.some(op => op.op === 'rename' && op.path === sidecarTarget)) {
+        await rm(sidecarTarget, { force: true })
+      }
+    }
+
+    const message = await refusalOf(svc.apply('s1', 'root-1', 'approval:call-1'))
+
+    expect(message).toMatch(/not as the execution-provider its committed file set describes/)
+    expect(await ledgerKinds(root)).toContain('commit_intent')
+    expect(await ledgerKinds(root)).not.toContain('applied')
+    expect((await svc.get('s1')).openIntent?.intentId).toBe('s1/apply')
+
+    // The open intent is the record a recovery reads: the sidecar a third party
+    // removed is reported by name, nothing is overwritten and no completion lands.
+    clearLayer()
+    const [outcome] = await svc.reconcile()
+    expect(outcome!.result).toBe('blocked')
+    expect(outcome!.detail).toContain(sidecarTarget)
+    expect(outcome!.detail).toMatch(/is missing/)
+    expect(await ledgerKinds(root)).not.toContain('applied')
+  })
+
+  it('sweeps each file\u2019s own staging prefix and never another target\u2019s', async () => {
+    const { svc, root, skillRoot } = await objectDecidedFixture()
+    const directory = dirname(targetOf(skillRoot))
+    const skillStale = join(directory, '.SKILL.md.tmp-4242-deadbeef')
+    const sidecarStale = join(directory, `.${SKILL_SIDECAR_FILE}.tmp-4242-deadbeef`)
+    await writeFile(skillStale, '# a staging file of the first file\n')
+    await writeFile(sidecarStale, '# a staging file of the second file\n')
+
+    await svc.apply('s1', 'root-1', 'approval:call-1')
+
+    // Each file sweeps its own prefix, and only its own: a leftover of the same
+    // prefix is gone, and the directory holds the pair and nothing else.
+    expect(existsSync(skillStale)).toBe(false)
+    expect(existsSync(sidecarStale)).toBe(false)
+    expect((await readdir(directory)).sort()).toEqual(['SKILL.contract.json', 'SKILL.md'])
+    expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(SKILL_CANDIDATE)
+    expect(await readFile(sidecarTargetOf(skillRoot), 'utf8')).toBe(await expectedCandidateSidecar(root))
+  })
+
+  it('refuses a two-file intent whose sources or targets leave their roots, writing nothing', async () => {
+    const { svc, root, skillRoot } = await objectDecidedFixture()
+    const ledger = join(root, 'proposals.jsonl')
+    const before = await readFile(ledger)
+    const host = commitHostOf(svc)
+    const bytes = [Buffer.from(SKILL_CANDIDATE, 'utf8'), await readFile(join(root, SIDECAR_CANDIDATE_SOURCE))]
+    const productionSidecar = await readFile(sidecarTargetOf(skillRoot), 'utf8')
+    const request = (over: Partial<CommitRequest['files'][number]>): CommitRequest => ({
+      proposalId: 's1',
+      direction: 'apply',
+      approvalRef: 'approval:call-1',
+      files: [
+        {
+          target: targetOf(skillRoot),
+          baselineSha256: sha256Of(PRODUCTION_BASELINE),
+          contentSha256: sha256Of(SKILL_CANDIDATE),
+          source: CANDIDATE_SOURCE,
+        },
+        {
+          target: sidecarTargetOf(skillRoot),
+          baselineSha256: sha256Of(productionSidecar),
+          contentSha256: sha256Hex(bytes[1]!),
+          source: SIDECAR_CANDIDATE_SOURCE,
+          ...over,
+        },
+      ],
+      actor: 'root-1',
+    })
+
+    const escapingSource = await refusalOf(commitIntent(host, request({ source: '../outside/SKILL.contract.json' }), bytes))
+    expect(escapingSource).toContain('../outside/SKILL.contract.json')
+    expect(escapingSource).toMatch(/is not inside the ledger root/)
+
+    const escapingTarget = await refusalOf(commitIntent(host, request({ target: join('..', 'outside', SKILL_SIDECAR_FILE) }), bytes))
+    expect(escapingTarget).toMatch(/is not inside the production skill root/)
+
+    expect(await readFile(ledger)).toEqual(before)
+    expect(await ledgerKinds(root)).not.toContain('commit_intent')
+    expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(PRODUCTION_BASELINE)
+  })
+
+  it('refuses bytes that do not match the second file\u2019s recorded digest, writing nothing', async () => {
+    const { svc, root, skillRoot } = await objectDecidedFixture()
+    const ledger = join(root, 'proposals.jsonl')
+    const before = await readFile(ledger)
+    const host = commitHostOf(svc)
+    const skillBytes = Buffer.from(SKILL_CANDIDATE, 'utf8')
+    const sidecar = await readFile(sidecarTargetOf(skillRoot), 'utf8')
+    const request: CommitRequest = {
+      proposalId: 's1',
+      direction: 'apply',
+      approvalRef: 'approval:call-1',
+      files: [
+        { target: targetOf(skillRoot), baselineSha256: sha256Of(PRODUCTION_BASELINE), contentSha256: sha256Of(SKILL_CANDIDATE), source: CANDIDATE_SOURCE },
+        { target: sidecarTargetOf(skillRoot), baselineSha256: sha256Of(sidecar), contentSha256: sha256Of('# not the sidecar it claims'), source: SIDECAR_CANDIDATE_SOURCE },
+      ],
+      actor: 'root-1',
+    }
+
+    const message = await refusalOf(commitIntent(host, request, [skillBytes, await readFile(join(root, SIDECAR_CANDIDATE_SOURCE))]))
+
+    expect(message).toContain(sidecarTargetOf(skillRoot))
+    expect(message).toMatch(/not the content identity/)
+    expect(await readFile(ledger)).toEqual(before)
+    expect(await ledgerKinds(root)).not.toContain('commit_intent')
+    expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(PRODUCTION_BASELINE)
+  })
+
+  it('rolls the pair back only when both files still hold what the proposal applied', async () => {
+    const { svc, root, skillRoot } = await objectDecidedFixture()
+    await svc.apply('s1', 'root-1', 'approval:call-1')
+    const ledger = join(root, 'proposals.jsonl')
+    const before = await readFile(ledger)
+    await writeFile(sidecarTargetOf(skillRoot), '# a later writer moved the sidecar\n')
+
+    const message = await refusalOf(svc.rollback('s1', 'root-1', 'approval:call-2'))
+
+    expect(message).toContain(sidecarTargetOf(skillRoot))
+    expect(message).toContain('does not hold the content proposal "s1" applied')
+    expect(await readFile(ledger)).toEqual(before)
+    expect(await svc.openIntentTargets()).toEqual([])
+    expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(SKILL_CANDIDATE)
+
+    const rollbackIntent = await (async () => {
+      await writeFile(sidecarTargetOf(skillRoot), await expectedCandidateSidecar(root))
+      return svc.rollback('s1', 'root-1', 'approval:call-2')
+    })()
+    expect(rollbackIntent.targets).toEqual([targetOf(skillRoot), sidecarTargetOf(skillRoot)])
+    expect(await readFile(targetOf(skillRoot), 'utf8')).toBe(PRODUCTION_BASELINE)
+    const lines = await ledgerLinesOf(root)
+    expect(lines.filter(line => line.kind === 'rolledback')).toHaveLength(1)
+    const rollbackFiles = lines.find(line => line.kind === 'commit_intent' && line.direction === 'rollback')!.files as { source: string }[]
+    expect(rollbackFiles.map(file => file.source)).toEqual([CHAMPION_SOURCE, SIDECAR_CHAMPION_SOURCE])
   })
 })

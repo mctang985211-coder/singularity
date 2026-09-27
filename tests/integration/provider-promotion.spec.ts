@@ -10,6 +10,7 @@ import { EvolutionService, modelSelectionOf } from '../../evolution/src/index.ts
 import { defineEvolutionApplyTool } from '../../agent-singularity/src/tools/evolution-apply.ts'
 import { recordPromotionExperiment } from '../support/promotion-experiment.ts'
 import { defineEvolutionDecideTool } from '../../agent-singularity/src/tools/evolution-decide.ts'
+import { defineEvolutionPrepareTool } from '../../agent-singularity/src/tools/evolution-prepare.ts'
 import type { TaskEvent } from '../../task/src/index.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
 import type { CapabilityConfig, Config, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
@@ -35,8 +36,10 @@ import { personRequest } from '../../task-runtime/tests/support/person-request.t
  * 3. **capability replacement** (`TaskRuntime.applyCapabilityRow`) — the row's
  *    providers, discovered from the harness process's own roots, judged before
  *    the row becomes effective in the running table.
- * 4. **candidate promotion** (`EvolutionService.checkPromotion` on a skill
- *    candidate) — the candidate's own sandbox directory.
+ * 4. **the evolution lifecycle** — the production object the same-name candidate
+ *    replaces, and the candidate object derived from it: `checkPromotion` where
+ *    the shape can be frozen and re-derived, `evolution_prepare` where the loader
+ *    refuses it before a candidate can exist (K3).
  *
  * The evolution *capability* promotion entry is no longer one of them: S4-E
  * §F.2/EVAL-4 refuses a PROMOTE without an evaluator, so the row check's live
@@ -362,6 +365,53 @@ async function skillCandidateGated(h: Harness, content: string, proposalId = 's1
 }
 
 /**
+ * The evolution lifecycle's own answer for one illegal provider, installed as the
+ * production skill a same-name candidate replaces (K3): propose, candidate,
+ * prepare — and then the promotion check, which judges the candidate object the
+ * prepare derived from those bytes. Returns the first refusal's message, so the
+ * caller compares it with the other three entries' codes; a lifecycle that
+ * admitted the provider is this helper's own failure.
+ */
+async function lifecycleRefusal(
+  h: Harness,
+  content: string,
+  shape: (typeof ILLEGAL_SHAPES)[number],
+): Promise<{ entry: 'prepare' | 'promotion'; message: string }> {
+  const declaredName = 'declaredName' in shape ? shape.declaredName : SKILL
+  await writeSkillDirectory(join(h.skillRoot, SKILL), SKILL, content, shape.shape)
+  const svc = h.evolution
+  await svc.propose({
+    proposalId: 's1',
+    targetType: 'skill',
+    targetId: SKILL,
+    baseVersion: 'v1',
+    level: 'L2',
+    rationale: 'the fixture skill should carry newer wording',
+    sourceRefs: ['diagnosis:d1'],
+  }, ROOT_SESSION)
+  await svc.candidate('s1', { skill: 'v2' }, ROOT_SESSION, { name: SKILL, content: skillText('# the illegal provider, improved', declaredName) })
+  try {
+    await svc.prepare('s1', ROOT_SESSION)
+  } catch (error) {
+    return { entry: 'prepare', message: error instanceof Error ? error.message : String(error) }
+  }
+  // The object was frozen: walk the candidate to the state whose PROMOTE judges it,
+  // over a recorded experiment, so the refusal compared below is the promotion
+  // check's — the same entry a human's decision goes through.
+  const { reportPath } = await recordPromotionExperiment(promotionExperimentContextFor(h), svc, {
+    proposalId: 's1',
+    selection: modelSelectionOf({ provider: 'p', model: 'm' })!,
+  })
+  await svc.gate('s1', gateAnswers([reportPath]), ROOT_SESSION)
+  try {
+    await svc.checkPromotion('s1')
+  } catch (error) {
+    return { entry: 'promotion', message: error instanceof Error ? error.message : String(error) }
+  }
+  throw new Error(`the lifecycle admitted a provider with the defect "${shape.defect}"`)
+}
+
+/**
  * The store and scratch directory this hand-built harness offers the experiment
  * fixture: its own store, minted by the fixture, so the samples it cites are
  * never written into the store the runtime is admitting runs in.
@@ -400,9 +450,9 @@ function exec(sessionId: string) {
  * name, one whose declared resource identity is not the bytes on disk, and one
  * whose declaration is not a shape the contract reads.
  *
- * One directory name throughout (`SKILL`), for the row *and* for the candidate:
- * all four consumers then judge the same bytes under the same name, so the defect
- * they report cannot come from four different inputs.
+ * One directory name throughout (`SKILL`), for the row *and* for the skill the
+ * candidate replaces: all four consumers then judge the same bytes under the same
+ * name, so the defect they report cannot come from four different inputs.
  */
 const ILLEGAL_SHAPES = [
   {
@@ -480,38 +530,41 @@ describe('one illegal provider, one defect code, every entry that still judges i
     expect(capabilityRefusal).toContain(`capability "${ROW}"`)
     expect(capabilityRefusal).toContain(`${shape.defect}:`)
 
-    // 4. A candidate promotion: the candidate's own sandbox directory, holding the
-    //    same bytes under the name the row grants.
-    await skillCandidateGated(h, content)
-    await writeSkillDirectory(join(h.evolution.root, 'sandbox', 's1', 'skills', SKILL), SKILL, content, shape.shape)
-    let promotionRefusal = ''
-    try {
-      await h.evolution.checkPromotion('s1')
-    } catch (error) {
-      promotionRefusal = error instanceof Error ? error.message : String(error)
-    }
-    expect(promotionRefusal).toContain(`skill candidate "${SKILL}"`)
-    expect(promotionRefusal).toContain(`${shape.defect}:`)
+    // 4. The evolution lifecycle, over the same bytes installed as the production
+    //    skill the candidate replaces (K3). A same-name improvement freezes that
+    //    object and re-derives the candidate's sidecar from it, so the provider the
+    //    promotion judges *is* the bytes installed here — and the entry that judges
+    //    them names the same code: the promotion check for a shape the lifecycle
+    //    can freeze and re-derive, and `evolution_prepare` for the two shapes the
+    //    loader refuses outright (a provider with unsupported resources, and a
+    //    declaration the contract does not read), which therefore never become a
+    //    candidate at all.
+    const promotion = await lifecycleRefusal(h, content, shape)
+    expect(promotion.message).toContain(`${shape.defect}:`)
 
     // Four entries, one code — the property a per-entry check could not prove.
-    expect([admission, load.defects[0]!, capabilityRefusal, promotionRefusal].every(entry => entry.includes(`${shape.defect}:`))).toBe(true)
+    expect([admission, load.defects[0]!, capabilityRefusal, promotion.message].every(entry => entry.includes(`${shape.defect}:`))).toBe(true)
 
-    // The same refusal through the tool a human decision goes through: the skill
-    // candidate's defect is what `evolution_decide` reports — it runs the promotion
-    // check *before* it asks for approval, so a proposal that cannot be promoted
-    // never burns a sign-off.
+    // The same refusal through the tool a human decision goes through. A candidate
+    // the lifecycle could freeze is refused by `evolution_decide`, which runs the
+    // promotion check *before* it asks for approval — so a proposal that cannot be
+    // promoted never burns a sign-off. A shape the loader refuses never reaches
+    // that state, and the tool that judges it is `evolution_prepare` itself; both
+    // are driven here the way the loop dispatches them, and neither may ask.
     const toolCtx = { evolution: h.evolution, approval: h.approval, taskRuntime: h.runtime } as never
-    const decided = (await defineEvolutionDecideTool(toolCtx).execute({ proposalId: 's1', decision: 'PROMOTE' }, exec(ROOT_SESSION))) as string
-    expect(decided).toContain('evolution_decide rejected:')
-    expect(decided).toContain(`${shape.defect}:`)
+    const toolRefusal = promotion.entry === 'prepare'
+      ? (await defineEvolutionPrepareTool(toolCtx).execute({ proposalId: 's1' }, exec(ROOT_SESSION))) as string
+      : (await defineEvolutionDecideTool(toolCtx).execute({ proposalId: 's1', decision: 'PROMOTE' }, exec(ROOT_SESSION))) as string
+    expect(toolRefusal).toContain('rejected:')
+    expect(toolRefusal).toContain(`${shape.defect}:`)
     expect(h.approval.request).not.toHaveBeenCalled()
 
-    // None of the refusals had a side effect: no row written, no production skill,
-    // no applied record, no decision recorded, nothing spawned for the refused batch.
+    // None of the refusals had a side effect: no row written, no applied record,
+    // no decision recorded, nothing spawned for the refused batch — and the
+    // production directory still holds exactly the bytes this case installed,
+    // byte for byte.
     expect(await readFile(h.configFile, 'utf8')).toBe(CONFIG_FIXTURE)
-    // Production still holds exactly the fixture's own version: nothing the
-    // refusals touched was written.
-    expect(await readFile(join(h.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(skillText('# the production version', SKILL))
+    expect(await readFile(join(h.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(content)
     const ledger = (await readFile(join(h.evolution.root, 'proposals.jsonl'), 'utf8')).trim().split('\n')
       .map(line => (JSON.parse(line) as { kind: string }).kind)
     expect(ledger).not.toContain('applied')
@@ -584,7 +637,10 @@ describe('one illegal provider, one defect code, every entry that still judges i
     const approvalsBefore = h.approval.request.mock.calls.length
     const refusedDecide = (await defineEvolutionDecideTool(toolCtx).execute({ proposalId: 's3', decision: 'PROMOTE' }, exec(ROOT_SESSION))) as string
     expect(refusedDecide).toContain('evolution_decide rejected:')
-    expect(refusedDecide).toContain('single-file SKILL.md candidates only')
+    // The candidate's sandbox holds a file the frozen identity does not name: the
+    // shape boundary answers, because the executor promotes the fixed file set of
+    // one guidance object and the sidecar is not part of the object prepare froze.
+    expect(refusedDecide).toContain('exists in the sandbox, but the content identity recorded at prepare is guidance')
     expect(h.approval.request.mock.calls.length).toBe(approvalsBefore)
     expect((await h.evolution.get('s3')).status).toBe('gated')
     // production still holds exactly what was promoted, and nothing else.

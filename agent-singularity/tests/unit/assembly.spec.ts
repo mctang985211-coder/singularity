@@ -185,13 +185,14 @@ describe('SingularityAgent assembly', () => {
     expect(JSON.stringify(replay.parameters)).not.toContain('wallTimeMs')
   })
 
-  it('declares the candidate mutation required on the model surface, in skill-replacement terms', async () => {
-    // `evolution_candidate` admits one shape: a replacement of an existing
-    // single-file SKILL.md, whose full text the mutation carries. The model
-    // surface has to say so — the schema requires the mutation instead of
-    // leaving a mutation-less call to be refused after the fact, and a
-    // suggestion-only proposal is named as something that never becomes a
-    // candidate.
+  it('declares the candidate mutation required on the model surface, in whole-object terms', async () => {
+    // `evolution_candidate` admits one shape: a same-name improvement of an
+    // existing skill, whose full replacement `SKILL.md` text the mutation
+    // carries. The model surface has to say so — the schema requires the
+    // mutation instead of leaving a mutation-less call to be refused after the
+    // fact, the mutation's own text says an execution skill's sidecar is derived
+    // rather than submitted, and a suggestion-only proposal is named as
+    // something that never becomes a candidate.
     const { tools } = await mount({ evolution: 'on' })
     const candidate = tools.get('evolution_candidate') as unknown as {
       description: string
@@ -200,7 +201,31 @@ describe('SingularityAgent assembly', () => {
     expect(candidate.parameters.required).toContain('mutation')
     expect(candidate.parameters.required).toContain('versionSet')
     expect(candidate.parameters.properties.mutation!.description).toContain('{ name, content }')
-    expect(candidate.description).toContain('Only a single-file SKILL.md replacement can become a candidate in this build')
+    expect(candidate.parameters.properties.mutation!.description).toContain('derived from production at evolution_prepare')
+    expect(candidate.description).toContain('This build admits one candidate lifecycle')
     expect(candidate.description).toContain('a suggestion never becomes a candidate')
+  })
+
+  it('describes all nine evolution tools in whole-object terms, with no single-file claim left', async () => {
+    // K3-5: these descriptions are the model's only statement of what this build
+    // can do, and every one of them used to say "single-file" — a model reading
+    // that would look for a build that refuses to update an execution skill, or
+    // would try to submit a sidecar itself. The phrase is gone from all nine
+    // surfaces.
+    const { tools } = await mount({ evolution: 'on' })
+    for (const name of EVOLUTION_TOOLS) {
+      const tool = tools.get(name) as unknown as { description: string }
+      expect(tool.description, name).not.toMatch(/single-file|single file/i)
+    }
+    const apply = tools.get('evolution_apply') as unknown as { description: string }
+    expect(apply.description).toContain('the `SKILL.md` and, for an execution skill, the `SKILL.contract.json` beside it')
+    const rollback = tools.get('evolution_rollback') as unknown as { description: string }
+    expect(rollback.description).toContain('the `SKILL.md`, plus the `SKILL.contract.json` when it declares an')
+    const prepare = tools.get('evolution_prepare') as unknown as { description: string }
+    expect(prepare.description).toContain('the model never submits a sidecar')
+    const replay = tools.get('evolution_replay') as unknown as { description: string }
+    expect(replay.description).toContain('the `SKILL.contract.json` beside it')
+    const list = tools.get('evolution_list') as unknown as { description: string }
+    expect(list.description).toContain('every production file it commits')
   })
 })

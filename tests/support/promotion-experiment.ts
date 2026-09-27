@@ -13,13 +13,24 @@
  * real orchestration — the tool, the runtime, the spawn, the verifier — is proven
  * in `tests/integration/evolution-replay-experiment.spec.ts` and
  * `tests/integration/experiment-runner.spec.ts`.
+ *
+ * The frozen block is the whole object K3 freezes, and the two sides' run
+ * bindings are the ones the freeze expects: one capability row granting the skill
+ * under improvement, one provider entry per side, the runtime's own
+ * `registryRevision` for each side (the candidate's with the improved skill's own
+ * declaration digest substituted), and each side's run binding carrying a real
+ * snapshot of the bytes that side loaded — so the promotion gate re-proves the
+ * frozen object from those bytes exactly as it does for a live experiment.
  */
 
 import { createHash } from 'node:crypto'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { AcceptanceCriterion } from '../../task/src/index.ts'
 import { rootTaskStoreId } from '../../task/src/index.ts'
+import type { RunProviderBinding, RunSkillBinding } from '../../task/src/index.ts'
+import { SKILL_SIDECAR_FILE, registryRevision, skillContentDigest } from '../../task-runtime/src/index.ts'
+import type { CapabilityConfig } from '../../task-runtime/src/index.ts'
 import type { EvolutionService } from '../../evolution/src/index.ts'
 import {
   buildExperimentReport,
@@ -30,9 +41,19 @@ import {
   experimentLineage,
   experimentReportPath,
   frozenDigestOf,
+  preparedContentDigestOf,
   protectedInputsDigest,
 } from '../../evolution/src/index.ts'
-import type { ExperimentBudget, ExperimentSampleRecord, FrozenExperiment, FrozenProviderIdentity, FrozenSample, ModelSelection } from '../../evolution/src/index.ts'
+import type {
+  ExperimentBudget,
+  ExperimentSampleRecord,
+  FrozenExperiment,
+  FrozenProviderIdentity,
+  FrozenProviderSkill,
+  FrozenSample,
+  ModelSelection,
+  SkillContentIdentity,
+} from '../../evolution/src/index.ts'
 import type { RunStack } from './run-stack.ts'
 
 type Settlement = 'verified' | 'failed' | 'cancelled'
@@ -91,15 +112,104 @@ export interface PromotionExperimentOptions {
   protectedInput?: { path: string; bytes: string }
 }
 
-/** The registry revision this fixture's production configuration resolves to (frozen and bound alike). */
-const FIXTURE_REGISTRY_REVISION = 'r'.repeat(64)
+/**
+ * The capability row this fixture's samples request: one row granting the skill
+ * under improvement, so the frozen provider identity resolves exactly the
+ * provider the candidate replaces — the entry the candidate side's registry
+ * revision substitutes (K3). A sample whose rows resolve no provider has no
+ * candidate revision to freeze, and `evolution_replay` refuses it.
+ */
+const FIXTURE_ROW = 'promotion-fixture-row'
 
 /** The judge every sample criterion pins, as the deployment's own registry declares it. */
 const FIXTURE_JUDGE = { ref: 'command', version: '1' } as const
 
-/** The provider identity this fixture's production configuration resolves to (no rows, no skills). */
-function fixtureProviderIdentity(): FrozenProviderIdentity {
-  return { capabilities: [], registryRevision: FIXTURE_REGISTRY_REVISION, mcpServers: [], preset: null, skills: [] }
+/** The capability table this fixture's frozen identity is read over: the one row above, granting the improved skill. */
+function fixtureTable(name: string): Readonly<Record<string, CapabilityConfig>> {
+  return { [FIXTURE_ROW]: { skills: [name] } }
+}
+
+/** One object identity as the frozen provider list carries it; the sidecar's presence *is* the role. */
+function fixtureProviderSkill(identity: SkillContentIdentity): FrozenProviderSkill {
+  return {
+    name: identity.name,
+    role: identity.contract === undefined ? 'guidance' : 'execution-provider',
+    contractDigest: identity.contract?.contractDigest ?? null,
+    contentDigest: skillContentDigest({ skillMdSha256: identity.sha256, resources: [] }),
+  }
+}
+
+/**
+ * The provider identity this fixture's production configuration resolves to: the
+ * one row above, and the improved skill it grants, read in each of the two
+ * versions the experiment compares. Both registry revisions are the runtime's
+ * own `registryRevision` over that table — the production one over the
+ * production object, the candidate's over the same list with the improved
+ * skill's declaration digest substituted — exactly the pair `evolution_replay`
+ * freezes. A guidance object leaves both equal, because nothing about the list
+ * moves.
+ */
+function fixtureProviderIdentity(candidate: SkillContentIdentity, baseline: SkillContentIdentity): FrozenProviderIdentity {
+  const table = fixtureTable(candidate.name)
+  const production = [fixtureProviderSkill(baseline)]
+  return {
+    capabilities: [FIXTURE_ROW],
+    registryRevision: registryRevision(table, production),
+    candidateRegistryRevision: registryRevision(table, [fixtureProviderSkill(candidate)]),
+    mcpServers: [],
+    preset: null,
+    skills: production,
+  }
+}
+
+/** One side's run binding: the frozen row, that side's own revision, and the one skill the row grants. */
+function fixtureRunBinding(input: {
+  identity: SkillContentIdentity
+  registryRevision: string
+  snapshotRoot: string
+}): RunProviderBinding {
+  const skill = fixtureProviderSkill(input.identity)
+  const bound: RunSkillBinding = {
+    name: skill.name,
+    role: skill.role,
+    capabilities: [FIXTURE_ROW],
+    description: `${skill.name} fixture skill`,
+    contractDigest: skill.contractDigest,
+    contentDigest: skill.contentDigest,
+    uncovered: [],
+  }
+  return {
+    registryRevision: input.registryRevision,
+    capabilities: [FIXTURE_ROW],
+    skills: [bound],
+    mcpServers: [],
+    snapshotRoot: input.snapshotRoot,
+  }
+}
+
+/**
+ * Materialize one side's object where its run binding says it loaded it
+ * (`<snapshotRoot>/<name>/SKILL.md`, and the sidecar beside it when the object has
+ * one), copying the proposal's own materialized files byte for byte: the
+ * champion snapshot for a baseline side, the prepared sandbox for a candidate
+ * side. The promotion gate re-proves the frozen object from exactly these bytes,
+ * so a fixture that only recorded digests would stand on nothing.
+ */
+async function materializeSideObject(input: {
+  ledgerRoot: string
+  proposalId: string
+  name: string
+  side: 'baseline' | 'candidate'
+  snapshotRoot: string
+  identity: SkillContentIdentity
+}): Promise<void> {
+  const { ledgerRoot, proposalId, name, side, snapshotRoot, identity } = input
+  const from = join(ledgerRoot, 'sandbox', proposalId, side === 'candidate' ? 'skills' : 'champion/skills', name)
+  const to = join(snapshotRoot, name)
+  await mkdir(to, { recursive: true })
+  for (const file of ['SKILL.md', ...(identity.contract === undefined ? [] : [SKILL_SIDECAR_FILE])]) {
+    await writeFile(join(to, file), await readFile(join(from, file)))
+  }
 }
 
 /**
@@ -151,10 +261,11 @@ export async function recordPromotionExperiment(
   const baseline = proposal.prepared?.skillBaseline
   if (candidate === undefined || baseline === undefined) {
     throw new Error(
-      `the fixture can only record an experiment for a prepared skill candidate replacing an existing SKILL.md ` +
+      `the fixture can only record an experiment for a prepared skill candidate replacing an existing skill object ` +
       `(proposal "${proposalId}" has ${candidate === undefined ? 'no candidate identity' : 'no production baseline'})`,
     )
   }
+  const provider = fixtureProviderIdentity(candidate, baseline)
   const storeId = context.storeId
   // A store's own session is named after the store id (`TaskService.allocate`):
   // minting it (and opening the store) here is what keeps this fixture's rows in
@@ -195,7 +306,7 @@ export async function recordPromotionExperiment(
       objective: `${input.taskId} objective`,
       depth: 0,
       acceptanceCriteria: [acceptance],
-      requestedCapabilities: [],
+      requestedCapabilities: [FIXTURE_ROW],
       decompositionStatus: 'leaf',
       status: 'created',
       runIds: [],
@@ -239,7 +350,7 @@ export async function recordPromotionExperiment(
       contractDigest: digestOf({
         objective: `${input.taskId} objective`,
         acceptanceCriteria: [acceptance],
-        requiredCapabilities: [],
+        requiredCapabilities: [FIXTURE_ROW],
       }),
       criteria: [{
         criterionId: input.criterionId,
@@ -251,7 +362,7 @@ export async function recordPromotionExperiment(
         verifierAnchor: `registered verifier "${FIXTURE_JUDGE.ref}" declares version "${FIXTURE_JUDGE.version}"`,
       }],
       observed: { outcome: input.outcome, runId },
-      provider: fixtureProviderIdentity(),
+      provider,
     })
   }
   // Sample ids are scoped to the proposal: one fixture records several
@@ -264,8 +375,16 @@ export async function recordPromotionExperiment(
   const frozen: FrozenExperiment = {
     proposalId,
     repetition: 0,
-    candidate: { name: candidate.name, sha256: candidate.sha256 },
-    productionBaseline: { name: baseline.name, sha256: baseline.sha256 },
+    candidate: {
+      name: candidate.name,
+      sha256: candidate.sha256,
+      ...(candidate.contract === undefined ? {} : { contract: { ...candidate.contract } }),
+    },
+    productionBaseline: {
+      name: baseline.name,
+      sha256: baseline.sha256,
+      ...(baseline.contract === undefined ? {} : { contract: { ...baseline.contract } }),
+    },
     model: options.selection,
     budget: { ...(options.budget ?? {}) },
     samples,
@@ -278,7 +397,7 @@ export async function recordPromotionExperiment(
   const reportPath = experimentReportPath(proposalId, experimentId)
   const at = new Date().toISOString()
   await svc.recordExperimentStart({
-    formatVersion: 3,
+    formatVersion: 4,
     kind: 'experiment_started',
     proposalId,
     experimentId,
@@ -290,6 +409,9 @@ export async function recordPromotionExperiment(
     actor: 'tester',
     at,
   })
+  // The binding snapshot root each side's run records: one directory per side
+  // under this fixture's own scratch, holding the bytes that side loaded.
+  const bindingRoot = join(context.scratch, 'promotion-bindings', proposalId, experimentId)
   for (const sample of samples) {
     const settlements = sample.taskId === failSample
       ? { baseline: options.failure?.baseline ?? 'failed', candidate: options.failure?.candidate ?? 'verified' }
@@ -307,13 +429,22 @@ export async function recordPromotionExperiment(
         verifierId: FIXTURE_JUDGE.ref,
         verifierVersion: FIXTURE_JUDGE.version,
       }] as const
+      const snapshotRoot = join(bindingRoot, sample.taskId, side, 'skills')
+      await materializeSideObject({
+        ledgerRoot: svc.root,
+        proposalId,
+        name: candidate.name,
+        side,
+        snapshotRoot,
+        identity: side === 'candidate' ? candidate : baseline,
+      })
       await context.task.createTaskIn(storeId, {
         taskId,
         definitionRef: { taskType: 'root', version: 1 },
         objective: `[${lineage}] ${sample.taskId}`,
         depth: 0,
         acceptanceCriteria: [],
-        requestedCapabilities: [],
+        requestedCapabilities: [FIXTURE_ROW],
         decompositionStatus: 'leaf',
         status: 'created',
         runIds: [],
@@ -329,7 +460,14 @@ export async function recordPromotionExperiment(
         verifierResults: [],
         status: 'running',
         startedAt: at,
-        providerBinding: { registryRevision: FIXTURE_REGISTRY_REVISION, capabilities: [], skills: [], mcpServers: [] },
+        providerBinding: fixtureRunBinding({
+          identity: side === 'candidate' ? candidate : baseline,
+          // Each side binds its own expectation: the production revision for the
+          // baseline, the one that absorbs the improved skill's moved declaration
+          // for the candidate (K3).
+          registryRevision: side === 'candidate' ? provider.candidateRegistryRevision : provider.registryRevision,
+          snapshotRoot,
+        }),
       }, 'tester')
       await writeSideSession(context, `s-${runId}`, options.selection)
       if (settlement !== 'cancelled') {
@@ -356,11 +494,11 @@ export async function recordPromotionExperiment(
         }, 'tester')
       }
       const record: ExperimentSampleRecord = {
-        formatVersion: 3,
+        formatVersion: 4,
         kind: 'experiment_sample',
         proposalId,
         experimentId,
-        preparedContentDigest: candidate.sha256,
+        preparedContentDigest: preparedContentDigestOf(candidate),
         sampleTaskId: sample.taskId,
         side,
         repetition: 0,

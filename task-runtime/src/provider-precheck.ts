@@ -38,14 +38,17 @@
  *
  * One more source of refusal, added by K2: a production target an evolution
  * commit left open. The ledger is read softly (`commitLedger`, absent when the
- * deployment mounts no evolution plane), and a provider whose own `SKILL.md` is
+ * deployment mounts no evolution plane), and a provider whose directory holds
  * such a target is refused by name until a reconciliation settles that commit —
  * production may not hold the version the ledger describes, and nothing may load
- * against it. The read is `EvolutionService.openIntentTargets`: pure, so an
- * admission question never settles a commit as a side effect. A ledger that
- * cannot be read at all refuses every skill candidate (fail-closed), because
- * "no commit is open" is exactly the claim such a ledger cannot be trusted to
- * make.
+ * against it. The match is the directory, not the file (K3): one intent covers
+ * the fixed file set of a skill directory together, so a target naming either
+ * file — or any other path in it — refuses the whole directory rather than
+ * admitting a mixed version. The read is
+ * `EvolutionService.openIntentTargets`: pure, so an admission question never
+ * settles a commit as a side effect. A ledger that cannot be read at all refuses
+ * every skill candidate (fail-closed), because "no commit is open" is exactly
+ * the claim such a ledger cannot be trusted to make.
  * @module @dangosys/dsh-singularity-task-runtime/provider-precheck
  */
 
@@ -191,23 +194,27 @@ export function unlistableVerifierRefusal(name: string, directory: string | unde
  */
 export interface EvolutionCommitLedger {
   /**
-   * The absolute production targets of every open commit intent, in ledger order
-   * (`EvolutionService.openIntentTargets`). A pure read: it writes nothing and
-   * never reconciles, so asking an admission question cannot settle a commit as
-   * a side effect. Optional because this is a structural read of a service this
-   * package does not own — a service that cannot answer it is refused by name
-   * rather than read as "no commit is open" (`commit-ledger-unreadable`,
-   * fail-closed).
+   * The absolute production file paths of every open commit intent, in ledger
+   * order (`EvolutionService.openIntentTargets`): for one K3 commit, the files
+   * the skill's directory holds — `SKILL.md`, and the `SKILL.contract.json`
+   * beside it when the skill has an execution sidecar. A pure read: it writes
+   * nothing and never reconciles, so asking an admission question cannot settle
+   * a commit as a side effect. The gate resolves each path to the directory that
+   * holds it and matches providers by that directory, because one intent covers
+   * the whole fixed file set together. Optional because this is a structural
+   * read of a service this package does not own — a service that cannot answer
+   * it is refused by name rather than read as "no commit is open"
+   * (`commit-ledger-unreadable`, fail-closed).
    */
   openIntentTargets?(): Promise<readonly string[]>
 }
 
 /**
- * What one pre-check read from the evolution ledger: the targets a commit left
- * open, or why that read could not be made.
+ * What one pre-check read from the evolution ledger: the directory each open
+ * commit target lies in, or why that read could not be made.
  */
 interface CommitGate {
-  /** The resolved absolute targets of the open commit intents; empty when the read failed. */
+  /** The absolute directory every open commit target resolved into; empty when the read failed. */
   readonly openTargets: ReadonlySet<string>
   /**
    * Why the ledger could not be read at all, or absent when it was. Every skill
@@ -222,6 +229,11 @@ interface CommitGate {
  * this deployment offers no evolution service at all — no commit can be in
  * flight, so no gate is applied. A ledger that cannot be read answers a gate
  * that refuses by name instead.
+ *
+ * Every target is kept as the directory that holds it, never as the file path:
+ * the gate matches providers by directory ({@link commitRefusalFor}), so a
+ * ledger naming the sidecar of a two-file commit lands on the same entry as one
+ * naming its `SKILL.md`.
  */
 async function readCommitGate(ledger: EvolutionCommitLedger | undefined): Promise<CommitGate | undefined> {
   if (ledger === undefined) return undefined
@@ -230,7 +242,7 @@ async function readCommitGate(ledger: EvolutionCommitLedger | undefined): Promis
   }
   try {
     const targets = await ledger.openIntentTargets()
-    return { openTargets: new Set(targets.map(target => resolve(target))) }
+    return { openTargets: new Set(targets.map(target => dirname(resolve(target)))) }
   } catch (error) {
     return {
       openTargets: new Set(),
@@ -240,13 +252,17 @@ async function readCommitGate(ledger: EvolutionCommitLedger | undefined): Promis
 }
 
 /**
- * The refusal of a provider whose own `SKILL.md` a commit left open (K2-3): the
- * intent is the record that a production write is underway and its completion
- * has not been recorded, so production may not be what the ledger says it is —
- * the provider is refused until a reconciliation settles that commit, and every
- * other provider in the same pre-check is judged exactly as before.
+ * The refusal of a provider whose directory a commit left open (K2-3, matched by
+ * directory since K3): the intent is the record that a production write is
+ * underway and its completion has not been recorded, so production may not be
+ * what the ledger says it is. One intent covers a skill directory's fixed file
+ * set together, so a target naming any one of those files refuses the directory
+ * as a whole — the version standing beside it may be the other half of a mixed
+ * pair, which is not admissible either. The provider stays refused until a
+ * reconciliation settles that commit, and every other provider in the same
+ * pre-check is judged exactly as before.
  */
-function openCommitRefusal(name: string, directory: string, target: string): RejectedProviderVerdict {
+function openCommitRefusal(name: string, directory: string): RejectedProviderVerdict {
   return {
     valid: false,
     name,
@@ -254,9 +270,12 @@ function openCommitRefusal(name: string, directory: string, target: string): Rej
     defects: [
       defect(
         'commit-intent-open',
-        `skill "${name}" is the target of an open evolution commit intent: an apply or rollback of ${target} persisted its intent and ` +
-        'its completion was never recorded, so production may not hold the version the ledger describes; the provider is refused until ' +
-        'a reconciliation settles that commit (the deployment reconciles at startup, or an apply/rollback retry settles it)',
+        `skill "${name}" is the target of an open evolution commit intent: a file of ${directory} was named by an apply or rollback, ` +
+        'its intent was persisted and its completion was never recorded, so production may not hold the version the ledger describes. ' +
+        'One intent covers the fixed file set of that directory together (`SKILL.md`, plus the `SKILL.contract.json` beside it when ' +
+        'the skill has one), so a directory holding any file under an open intent is refused whole rather than admitted as a mixed ' +
+        'version: the provider stays refused until a reconciliation settles that commit (the deployment reconciles at startup, or an ' +
+        'apply/rollback retry settles it)',
       ),
     ],
   }
@@ -396,16 +415,24 @@ function defect(code: SkillDefect['code'], detail: string): SkillDefect {
 
 /**
  * The refusal one skill candidate gets from the commit gate, or `undefined` when
- * the gate has nothing to say about it: only the provider whose own `SKILL.md`
- * is a target an open commit names is refused, and every other candidate in the
- * same pre-check is judged exactly as it would be without the gate.
+ * the gate has nothing to say about it: only a provider whose discovered
+ * directory holds a file an open commit names is refused, and every other
+ * candidate in the same pre-check is judged exactly as it would be without the
+ * gate.
+ *
+ * The comparison is by directory, not by file (K3): one commit intent covers the
+ * fixed file set of a skill directory together (`SKILL.md`, and the
+ * `SKILL.contract.json` beside it when the skill has one), so a ledger naming
+ * either file marks the same directory as owned by an unsettled commit. Matching
+ * file paths would admit a directory whenever the ledger reported the one file
+ * this check did not look at.
  */
 function commitRefusalFor(gate: CommitGate | undefined, name: string, directory: string): RejectedProviderVerdict | undefined {
   if (gate === undefined) return undefined
   const skillFile = resolve(join(directory, 'SKILL.md'))
   if (gate.unreadable !== undefined) return unreadableCommitLedgerRefusal(name, directory, skillFile, gate.unreadable)
-  if (!gate.openTargets.has(skillFile)) return undefined
-  return openCommitRefusal(name, directory, skillFile)
+  if (!gate.openTargets.has(resolve(directory))) return undefined
+  return openCommitRefusal(name, directory)
 }
 
 /** The search-failure refusal: the skill name and the roots, which no phase-1 validator can know. */
@@ -452,12 +479,12 @@ export function providerContentIdentities(capabilities: readonly CapabilityProvi
  * viewpoint.
  *
  * The rules, in the order they are applied per skill: it must be discoverable
- * from the view's roots; its own `SKILL.md` must not be a target an evolution
- * commit left open (K2); the directory it resolves to must pass
- * {@link validateSkillProvider} against the table and the verifier vocabulary.
- * An execution sidecar is refused when the vocabulary is unknown
- * (`verifierRefs` absent) — the one case the phase-1 validator cannot judge,
- * because it would read an empty list as "nothing is registered".
+ * from the view's roots; no file of the directory it resolves into may be a
+ * target an evolution commit left open (K2, matched by directory since K3); the
+ * directory must pass {@link validateSkillProvider} against the table and the
+ * verifier vocabulary. An execution sidecar is refused when the vocabulary is
+ * unknown (`verifierRefs` absent) — the one case the phase-1 validator cannot
+ * judge, because it would read an empty list as "nothing is registered".
  *
  * Nothing is written and nothing is thrown: every refusal is a verdict, and
  * {@link providerRefusals} turns the refusals into the lines a caller reports
@@ -481,9 +508,10 @@ export async function precheckProviders(request: ProviderPrecheckRequest): Promi
         continue
       }
       const directory = dirname(file)
-      // K2-3: a commit that left its intent behind owns this target until a
-      // reconciliation settles it. The gate answers before the validator runs,
-      // and it answers for this provider only.
+      // K2-3: a commit that left its intent behind owns this directory — the
+      // whole fixed file set of the skill — until a reconciliation settles it.
+      // The gate answers before the validator runs, and it answers for this
+      // provider only.
       const commitRefusal = commitRefusalFor(commitGate, name, directory)
       if (commitRefusal !== undefined) {
         skills.push(commitRefusal)

@@ -1416,6 +1416,45 @@ function skillContractDigest(sidecar) {
 function skillContentDigest(content) {
 	return sha256Hex(canonicalize(content));
 }
+/**
+* The same declaration with one field replaced: `content.skillMdSha256`.
+*
+* A same-name improvement of an execution skill changes the `SKILL.md` and
+* nothing else about the object (K3): the capabilities, precondition, ports,
+* required tools, verifier and resources are the ones the production sidecar
+* declared, so the candidate's sidecar is *derived* from the production one
+* rather than authored — a content update that could also move a declaration
+* would be an undeclared privilege change. Every other field is carried over
+* item by item; the digest is checked first, because a value that is not a
+* lowercase 64-character hex SHA-256 would produce a declaration no reader could
+* verify and no writer should persist.
+*/
+function sidecarWithSkillMd(sidecar, skillMdSha256) {
+	if (!/^[0-9a-f]{64}$/.test(skillMdSha256)) throw new Error(`skill-contract: cannot replace sidecar content.skillMdSha256 with ${JSON.stringify(skillMdSha256)} — a content identity is a lowercase 64-character hex SHA-256, and a rewritten sidecar is a declaration a loader will have to verify against real bytes`);
+	return {
+		...sidecar,
+		content: {
+			...sidecar.content,
+			skillMdSha256
+		}
+	};
+}
+/**
+* The deterministic byte sequence of one declaration — what a file holds when
+* this build writes a sidecar.
+*
+* Determinism is the point: {@link skillContractDigest} hashes the canonical
+* key order, so the bytes on disk must be a function of the declaration alone,
+* not of the order a caller happened to build its object in. Two calls with the
+* same declaration produce the same string, and a reader can verify a file by
+* parsing it and re-serializing: identical bytes mean the declaration did not
+* move — which is exactly how the K3 derivation check compares a candidate's
+* sidecar with the one re-derived from the champion's bytes. The shape is
+* canonical keys, two-space indentation, one trailing newline.
+*/
+function serializeSkillSidecar(sidecar) {
+	return `${JSON.stringify(JSON.parse(canonicalize(sidecar)), null, 2)}\n`;
+}
 
 //#endregion
 //#region src/verified-read.ts
@@ -2065,6 +2104,11 @@ function unlistableVerifierRefusal(name, directory, ref) {
 * this deployment offers no evolution service at all — no commit can be in
 * flight, so no gate is applied. A ledger that cannot be read answers a gate
 * that refuses by name instead.
+*
+* Every target is kept as the directory that holds it, never as the file path:
+* the gate matches providers by directory ({@link commitRefusalFor}), so a
+* ledger naming the sidecar of a two-file commit lands on the same entry as one
+* naming its `SKILL.md`.
 */
 async function readCommitGate(ledger) {
 	if (ledger === void 0) return void 0;
@@ -2074,7 +2118,7 @@ async function readCommitGate(ledger) {
 	};
 	try {
 		const targets = await ledger.openIntentTargets();
-		return { openTargets: new Set(targets.map((target) => resolve(target))) };
+		return { openTargets: new Set(targets.map((target) => dirname(resolve(target)))) };
 	} catch (error) {
 		return {
 			openTargets: /* @__PURE__ */ new Set(),
@@ -2083,18 +2127,22 @@ async function readCommitGate(ledger) {
 	}
 }
 /**
-* The refusal of a provider whose own `SKILL.md` a commit left open (K2-3): the
-* intent is the record that a production write is underway and its completion
-* has not been recorded, so production may not be what the ledger says it is —
-* the provider is refused until a reconciliation settles that commit, and every
-* other provider in the same pre-check is judged exactly as before.
+* The refusal of a provider whose directory a commit left open (K2-3, matched by
+* directory since K3): the intent is the record that a production write is
+* underway and its completion has not been recorded, so production may not be
+* what the ledger says it is. One intent covers a skill directory's fixed file
+* set together, so a target naming any one of those files refuses the directory
+* as a whole — the version standing beside it may be the other half of a mixed
+* pair, which is not admissible either. The provider stays refused until a
+* reconciliation settles that commit, and every other provider in the same
+* pre-check is judged exactly as before.
 */
-function openCommitRefusal(name, directory, target) {
+function openCommitRefusal(name, directory) {
 	return {
 		valid: false,
 		name,
 		directory,
-		defects: [defect("commit-intent-open", `skill "${name}" is the target of an open evolution commit intent: an apply or rollback of ${target} persisted its intent and its completion was never recorded, so production may not hold the version the ledger describes; the provider is refused until a reconciliation settles that commit (the deployment reconciles at startup, or an apply/rollback retry settles it)`)]
+		defects: [defect("commit-intent-open", `skill "${name}" is the target of an open evolution commit intent: a file of ${directory} was named by an apply or rollback, its intent was persisted and its completion was never recorded, so production may not hold the version the ledger describes. One intent covers the fixed file set of that directory together (\`SKILL.md\`, plus the \`SKILL.contract.json\` beside it when the skill has one), so a directory holding any file under an open intent is refused whole rather than admitted as a mixed version: the provider stays refused until a reconciliation settles that commit (the deployment reconciles at startup, or an apply/rollback retry settles it)`)]
 	};
 }
 /**
@@ -2128,16 +2176,24 @@ function defect(code, detail) {
 }
 /**
 * The refusal one skill candidate gets from the commit gate, or `undefined` when
-* the gate has nothing to say about it: only the provider whose own `SKILL.md`
-* is a target an open commit names is refused, and every other candidate in the
-* same pre-check is judged exactly as it would be without the gate.
+* the gate has nothing to say about it: only a provider whose discovered
+* directory holds a file an open commit names is refused, and every other
+* candidate in the same pre-check is judged exactly as it would be without the
+* gate.
+*
+* The comparison is by directory, not by file (K3): one commit intent covers the
+* fixed file set of a skill directory together (`SKILL.md`, and the
+* `SKILL.contract.json` beside it when the skill has one), so a ledger naming
+* either file marks the same directory as owned by an unsettled commit. Matching
+* file paths would admit a directory whenever the ledger reported the one file
+* this check did not look at.
 */
 function commitRefusalFor(gate, name, directory) {
 	if (gate === void 0) return void 0;
 	const skillFile = resolve(join(directory, "SKILL.md"));
 	if (gate.unreadable !== void 0) return unreadableCommitLedgerRefusal(name, directory, skillFile, gate.unreadable);
-	if (!gate.openTargets.has(skillFile)) return void 0;
-	return openCommitRefusal(name, directory, skillFile);
+	if (!gate.openTargets.has(resolve(directory))) return void 0;
+	return openCommitRefusal(name, directory);
 }
 /** The search-failure refusal: the skill name and the roots, which no phase-1 validator can know. */
 function undiscovered(name, roots) {
@@ -2180,12 +2236,12 @@ function providerContentIdentities(capabilities) {
 * viewpoint.
 *
 * The rules, in the order they are applied per skill: it must be discoverable
-* from the view's roots; its own `SKILL.md` must not be a target an evolution
-* commit left open (K2); the directory it resolves to must pass
-* {@link validateSkillProvider} against the table and the verifier vocabulary.
-* An execution sidecar is refused when the vocabulary is unknown
-* (`verifierRefs` absent) — the one case the phase-1 validator cannot judge,
-* because it would read an empty list as "nothing is registered".
+* from the view's roots; no file of the directory it resolves into may be a
+* target an evolution commit left open (K2, matched by directory since K3); the
+* directory must pass {@link validateSkillProvider} against the table and the
+* verifier vocabulary. An execution sidecar is refused when the vocabulary is
+* unknown (`verifierRefs` absent) — the one case the phase-1 validator cannot
+* judge, because it would read an empty list as "nothing is registered".
 *
 * Nothing is written and nothing is thrown: every refusal is a verdict, and
 * {@link providerRefusals} turns the refusals into the lines a caller reports
@@ -7203,7 +7259,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 		}
 		for (const outcome of outcomes) {
 			if (outcome.result !== "blocked") continue;
-			this.warn(`evolution: the commit intent "${outcome.intentId}" (${outcome.direction} of proposal "${outcome.proposalId}") targeting ${outcome.target} could not be settled — ${outcome.detail ?? "no reason reported"}`);
+			this.warn(`evolution: the commit intent "${outcome.intentId}" (${outcome.direction} of proposal "${outcome.proposalId}") targeting ${outcome.targets.join(", ")} could not be settled — ${outcome.detail ?? "no reason reported"}`);
 		}
 	}
 	/** {@link adoptRoot}'s own pass, as one barrier body: the adoption in the order it always ran. */
@@ -11350,4 +11406,4 @@ var TaskRuntime = class TaskRuntime extends Service {
 var src_default = TaskRuntime;
 
 //#endregion
-export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, PROPOSAL_REQUEST_KEY_PREFIX, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, settleRunFromRuntime, settleSubmittedRun, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };
+export { COORDINATION_ALLOWED, DEFAULT_ALLOW_RUNTIME_DECOMPOSITION, DEFAULT_BUDGET, DEFAULT_CAPABILITIES, DEFAULT_GENERATED_TASK_REVIEW, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_DEPTH, DEFAULT_NO_PROGRESS_ROUNDS, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_WRITE_DRAIN_TIMEOUT_MS, ExecutionGate, MCP_SERVER_REGISTRY, PROPOSAL_REQUEST_KEY_PREFIX, RUN_BINDING_SKILLS_DIR, RunWatcherUnavailableError, SKILL_SIDECAR_FILE, TOOL_LABELS, TaskRuntime, VerifierUnavailableError, WORKER_BASELINE_LABELS, WORKER_BASELINE_TOOLS, WORKSPACE_OWNERS_DIR, WorkspaceBusyError, WorkspaceRegistry, answerMessageIdOf, answerParentQuestion, applyStoreQuestionBlocking, askParentQuestion, assertRootBudgetConfig, batchEndMessageId, batchEndMessageText, bindRunProviders, blockUnstartedChildren, buildHandoff, capabilityToolQuery, checkBatchAdmission, checkDecomposition, checkObligationCoverage, checkRunStart, contractDefects, countSubtreeFacts, decompositionIdentity, src_default as default, defaultRunBindingRoot, deriveChildOutcomes, driveBatch, escalationHint, executionProviders, findRepoRoot, fixCriteriaProtectedInputs, fixProtectedInputs, fixSpecProtectedInputs, hasRootLimits, independentAcceptanceDefects, isOpenProposal, loadObligationTemplates, loadSkillSidecar, manifestMcpServers, normalizeDecomposition, normalizeRootContract, normalizeWorkspacePath, openProposalOf, optionalService, owedBatchResults, parseCallArguments, parseObligationTemplates, pendingCoordinationOf, pendingQuestionMessages, precheckProviders, precheckReplacedCapabilityRow, proposalRequestKey, protectedInputDefects, providerContentIdentities, providerDefectLines, providerRefusals, questionMessageIdOf, readProcessStartTime, readRunBinding, readVerifiedFile, reconcileQuestionDeliveries, registeredVerifierIds, registeredVerifierVocabulary, registryRevision, resolveCapabilities, resolveMcpServerSpecs, resolvePermission, resolveRootBudget, resolveToolLabels, resumeAdoptedWorker, reviewContextDelta, reviewContextOf, rootIndependenceDefects, rootProposalRequestKey, runDeadlineMs, runReplayTask, serializeSkillSidecar, settleRunFromRuntime, settleSubmittedRun, sidecarWithSkillMd, skillContentDigest, skillContractDigest, skillSearchRoots, skillValidationContext, unlistableVerifierRefusal, validateSkillProvider, verifierIdentitiesOf, walkVerified, workerBaseline };

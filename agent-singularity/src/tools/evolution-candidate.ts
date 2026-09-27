@@ -16,11 +16,16 @@ export function defineEvolutionCandidateTool(ctx: Context) {
     description:
       'Claim a proposed EvolutionProposal into validation (status: candidate) by recording the complete version set it ' +
       'aligns to (e.g. taskDefinition / skill / toolProfile / agentPreset / verifier / runtimePolicy versions). Bookkeeping ' +
-      'for the branch model only: no branch is created and nothing is executed or changed. Only a single-file SKILL.md ' +
-      'replacement can become a candidate in this build: the mutation { name, content } carries the full SKILL.md text, and ' +
-      'the candidate must then pass evolution_prepare (sandbox materialization) and evolution_replay (the two-sided ' +
-      'experiment) before evolution_gate. A proposal of any other target type is refused by name and stays a record — ' +
-      'evolution_propose may still record such a suggestion, but a suggestion never becomes a candidate.',
+      'for the branch model only: no branch is created and nothing is executed or changed. This build admits one candidate ' +
+      'lifecycle — a same-name improvement of an existing skill as a whole loadable object: the mutation { name, content } ' +
+      'carries the full replacement SKILL.md text and nothing else, because `content` is the whole new body rather than a ' +
+      'diff, no sidecar patch and no resource is accepted, and an unknown mutation field is refused by name. When that ' +
+      "skill declares an execution provider, evolution_prepare derives the candidate's SKILL.contract.json from the " +
+      'production declaration with only content.skillMdSha256 recomputed, so a content update can never move a capability, ' +
+      'a required tool, a verifier or a port. The candidate must then pass evolution_prepare (sandbox materialization) and ' +
+      'evolution_replay (the two-sided experiment) before evolution_gate. A proposal of any other target type is refused ' +
+      'by name and stays a record — evolution_propose may still record such a suggestion, but a suggestion never becomes a ' +
+      'candidate.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Proposal to move into candidate' },
       versionSet: {
@@ -34,8 +39,10 @@ export function defineEvolutionCandidateTool(ctx: Context) {
         additionalProperties: true,
         required: true,
         description:
-          'The structured patch, required: { name, content } — the skill name and the full replacement SKILL.md text this ' +
-          'candidate is materialized from and evaluated on.',
+          'The structured patch, required: { name, content } — the existing skill\'s name and the full replacement ' +
+          'SKILL.md text this candidate is materialized from and evaluated on. Nothing else is submitted here: the object\'s ' +
+          'SKILL.contract.json, when it has one, is derived from production at evolution_prepare, and an unknown mutation ' +
+          'field is refused by name.',
       },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => text(v) },

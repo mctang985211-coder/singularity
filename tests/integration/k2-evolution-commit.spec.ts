@@ -166,8 +166,17 @@ function productionPath(h: RunStack, name: string = SKILL): string {
   return join(h.home, 'skills', name, 'SKILL.md')
 }
 
+/**
+ * The production skill *directory* a commit's file set lives in — the unit the
+ * per-target commit gate and the admission gate both match on (one intent covers
+ * a skill's files together, so either file names the directory).
+ */
+function productionDirectory(h: RunStack, name: string = SKILL): string {
+  return join(h.home, 'skills', name)
+}
+
 /** The evolution plane of one boot, over the shared ledger root and the production skill root. */
-function evolutionOf(h: RunStack, commitProbe?: (stage: CommitStage) => void): EvolutionService {
+function evolutionOf(h: RunStack, commitProbe?: (stage: CommitStage, target?: string) => void): EvolutionService {
   return new EvolutionService(h.ctx, {
     root: ledgerRoot(h),
     skillRoot: join(h.home, 'skills'),
@@ -181,7 +190,9 @@ function evolutionOf(h: RunStack, commitProbe?: (stage: CommitStage) => void): E
 /**
  * The in-process seam, and nothing more than that: `arm` names the one durable
  * stage the probe throws at, so the intent stays open and no later stage of that
- * commit runs. The throw is *not* a process exit: it unwinds through this
+ * commit runs. A `write-*` stage fires once per file of the object and carries
+ * that file's target; the guidance objects this spec commits are one file, so
+ * one firing each. The throw is *not* a process exit: it unwinds through this
  * process's own stack, `writeFileAtomic`'s `catch` removes the staging file it
  * had written, and the instance that threw is still there to be used again — see
  * the "a throw is not an exit" case below. The real exit is the other thing:
@@ -189,13 +200,13 @@ function evolutionOf(h: RunStack, commitProbe?: (stage: CommitStage) => void): E
  * {@link forcedExit} asserts that signal, the dead pid and what only a real death
  * can leave on disk.
  */
-function throwingProbe(): { probe: (stage: CommitStage) => void; arm: (stage: CommitStage) => void; stages: CommitStage[] } {
+function throwingProbe(): { probe: (stage: CommitStage, target?: string) => void; arm: (stage: CommitStage) => void; stages: CommitStage[] } {
   const stages: CommitStage[] = []
   let armed: CommitStage | undefined
   return {
     stages,
     arm: stage => { armed = stage },
-    probe: stage => {
+    probe: (stage, _target) => {
       stages.push(stage)
       if (stage !== armed) return
       armed = undefined
@@ -338,6 +349,18 @@ async function ledgerBytes(h: RunStack): Promise<string> {
 
 function kindsOf(lines: readonly Record<string, unknown>[]): string[] {
   return lines.map(line => String(line.kind))
+}
+
+/**
+ * One file of a commit intent's own line, as the intent records it (K3): the
+ * absolute target, the digest production must hold before and after that file,
+ * and the recoverable source under the ledger root. The guidance objects this
+ * spec commits are one file, so index 0 is the object.
+ */
+function intentFile(intent: Record<string, unknown>, index = 0): { target: string; baselineSha256: string; contentSha256: string; source: string } {
+  const files = intent.files as readonly { target: string; baselineSha256: string; contentSha256: string; source: string }[] | undefined
+  if (files === undefined || files.length <= index) throw new Error(`the intent line names no file ${index}: ${JSON.stringify(intent)}`)
+  return files[index]!
 }
 
 /** Every staging file left beside one production target (a commit removes its own, always). */
@@ -516,10 +539,14 @@ describe('K2-2: a commit interrupted between two durable writes is settled by th
       proposalId: P1,
       direction: 'apply',
       approvalRef: 'approval:k2-apply',
-      target,
-      baselineSha256: sha256Of(skillText(V0, SKILL)),
-      contentSha256: sha256Of(skillText(V1, SKILL)),
-      source: `sandbox/${P1}/skills/${SKILL}/SKILL.md`,
+      // The object's fixed file set, in commit order: guidance is one file, so
+      // the intent names exactly the `SKILL.md` this commit replaces.
+      files: [{
+        target,
+        baselineSha256: sha256Of(skillText(V0, SKILL)),
+        contentSha256: sha256Of(skillText(V1, SKILL)),
+        source: `sandbox/${P1}/skills/${SKILL}/SKILL.md`,
+      }],
     })
     expect(await productionBytes(h1)).toBe(stage === 'write-renamed' ? skillText(V1, SKILL) : skillText(V0, SKILL))
     // …and it is one of the two complete versions the intent names — never a third, half-written state.
@@ -607,10 +634,12 @@ describe('K2-2: a commit interrupted between two durable writes is settled by th
       proposalId: P1,
       direction: 'rollback',
       approvalRef: 'approval:k2-rollback',
-      target,
-      baselineSha256: sha256Of(skillText(V1, SKILL)),
-      contentSha256: sha256Of(skillText(V0, SKILL)),
-      source: `sandbox/${P1}/champion/skills/${SKILL}/SKILL.md`,
+      files: [{
+        target,
+        baselineSha256: sha256Of(skillText(V1, SKILL)),
+        contentSha256: sha256Of(skillText(V0, SKILL)),
+        source: `sandbox/${P1}/champion/skills/${SKILL}/SKILL.md`,
+      }],
     })
     expect(await productionBytes(h1)).toBe(stage === 'write-renamed' ? skillText(V0, SKILL) : skillText(V1, SKILL))
     // …and it is one of the two complete versions the intent names — never a third, half-written state.
@@ -708,10 +737,12 @@ describe.skipIf(EXIT_WINDOW !== undefined)('K2-2 (real exit): the process that c
       proposalId: P1,
       direction: 'apply',
       approvalRef: 'approval:k2-apply',
-      target,
-      baselineSha256: sha256Of(skillText(V0, SKILL)),
-      contentSha256: sha256Of(skillText(V1, SKILL)),
-      source: `sandbox/${P1}/skills/${SKILL}/SKILL.md`,
+      files: [{
+        target,
+        baselineSha256: sha256Of(skillText(V0, SKILL)),
+        contentSha256: sha256Of(skillText(V1, SKILL)),
+        source: `sandbox/${P1}/skills/${SKILL}/SKILL.md`,
+      }],
     })
     // Production is one of the two complete versions the intent names — never a
     // third, half-written state — and which one is the window: the old version until
@@ -763,7 +794,7 @@ describe.skipIf(EXIT_WINDOW !== undefined)('K2-2 (real exit): the process that c
       // 补做: production still held the version before the commit, so the host redid
       // the write — production now holds the intent's own content identity, whole …
       expect(await productionBytes(h2)).toBe(skillText(V1, SKILL))
-      expect(sha256Of(await productionBytes(h2))).toBe(intent.contentSha256)
+      expect(sha256Of(await productionBytes(h2))).toBe(intentFile(intent).contentSha256)
     }
     // … and the staging file the real death left beside the target is gone: the
     // settlement swept the stale leftover of the target it was installing over.
@@ -803,10 +834,12 @@ describe.skipIf(EXIT_WINDOW !== undefined)('K2-2 (real exit): the process that c
       proposalId: P1,
       direction: 'rollback',
       approvalRef: 'approval:k2-rollback',
-      target,
-      baselineSha256: sha256Of(skillText(V1, SKILL)),
-      contentSha256: sha256Of(skillText(V0, SKILL)),
-      source: `sandbox/${P1}/champion/skills/${SKILL}/SKILL.md`,
+      files: [{
+        target,
+        baselineSha256: sha256Of(skillText(V1, SKILL)),
+        contentSha256: sha256Of(skillText(V0, SKILL)),
+        source: `sandbox/${P1}/champion/skills/${SKILL}/SKILL.md`,
+      }],
     })
     expect(await productionBytes(h1)).toBe(window === 'write-renamed' ? skillText(V0, SKILL) : skillText(V1, SKILL))
     expect([sha256Of(skillText(V1, SKILL)), sha256Of(skillText(V0, SKILL))])
@@ -844,7 +877,7 @@ describe.skipIf(EXIT_WINDOW !== undefined)('K2-2 (real exit): the process that c
       // 补做: production still held the applied version, so the rollback was redone
       // and the baseline it names is what production holds now.
       expect(await productionBytes(h2)).toBe(skillText(V0, SKILL))
-      expect(sha256Of(await productionBytes(h2))).toBe(intent.contentSha256)
+      expect(sha256Of(await productionBytes(h2))).toBe(intentFile(intent).contentSha256)
     }
     expect(await stagingFiles(h2)).toEqual([])
 
@@ -878,7 +911,7 @@ describe.skipIf(EXIT_WINDOW !== undefined)('K2-2 (real exit): the process that c
       intentId: `${P1}/apply`,
       proposalId: P1,
       direction: 'apply',
-      target: productionPath(h),
+      targets: [productionPath(h)],
       result: 'completed-redone',
     })
     expect(await productionBytes(h)).toBe(skillText(V1, SKILL))
@@ -1047,13 +1080,17 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
     expect(adoption.adopted).toBe(false)
     expect(warnings.join('\n')).toContain(`${P1}/apply`)
     expect(warnings.join('\n')).toContain('could not be settled')
+    // The warning names the actual production targets the intent committed (K3:
+    // the outcome carries `targets`, and the barrier must print them — a
+    // `targeting undefined` log is the defect this assertion pins).
+    expect(warnings.join('\n')).toContain(target)
     expect(warnings.join('\n')).toContain('a third party changed it')
 
     // Named blocked, with production exactly as the third party left it, the intent
     // still open and no line written.
     const outcomes = await reopened.reconcile()
     expect(outcomes).toHaveLength(1)
-    expect(outcomes[0]).toMatchObject({ intentId: `${P1}/apply`, proposalId: P1, direction: 'apply', target, result: 'blocked' })
+    expect(outcomes[0]).toMatchObject({ intentId: `${P1}/apply`, proposalId: P1, direction: 'apply', targets: [target], result: 'blocked' })
     expect(outcomes[0]!.detail).toMatch(/a third party changed it/)
     expect(outcomes[0]!.detail).toMatch(/the intent stays open/)
     expect(await productionBytes(h2)).toBe(thirdParty)
@@ -1151,9 +1188,11 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
 
     // P2's commit is refused by name before it can move the target: a byte and a
     // line of its own are what it would otherwise add while P1's intent stands.
+    // The gate names the production *directory* the intent touches (K3), because
+    // one intent covers a skill's fixed file set together.
     const refusal = await svc.apply(P2, ROOT_A, 'approval:k2-apply')
       .then(() => '', (error: unknown) => (error instanceof Error ? error.message : String(error)))
-    expect(refusal).toContain(target)
+    expect(refusal).toContain(productionDirectory(h))
     expect(refusal).toContain(`${P1}/apply`)
     expect(refusal).toContain(`proposal "${P1}"`)
     expect(refusal).toContain("another proposal's unsettled intent")
@@ -1172,7 +1211,7 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
     const answered = await h.call(h.rootAgent(ROOT_A), 'evolution_apply', { proposalId: P2 })
     expect(answered.isError, answered.text).toBe(false)
     expect(answered.text).toContain('evolution_apply rejected:')
-    expect(answered.text).toContain(target)
+    expect(answered.text).toContain(productionDirectory(h))
     expect(answered.text).toContain(`${P1}/apply`)
     expect(answered.text).toContain("another proposal's unsettled intent")
     expect(answered.text).toContain('nothing was written and no commit intent was recorded')
@@ -1197,7 +1236,7 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
       intentId: `${P1}/apply`,
       proposalId: P1,
       direction: 'apply',
-      target,
+      targets: [target],
       result: 'completed-redone',
     })
     expect(await productionBytes(h)).toBe(skillText(V1, SKILL))
@@ -1255,7 +1294,7 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
     // its own to overwrite. Refused by name, no byte, no line.
     const refusal = await svc.rollback(P1, ROOT_A, 'approval:k2-rollback')
       .then(() => '', (error: unknown) => (error instanceof Error ? error.message : String(error)))
-    expect(refusal).toContain(target)
+    expect(refusal).toContain(productionDirectory(h))
     expect(refusal).toContain(`${P2}/apply`)
     expect(refusal).toContain(`proposal "${P2}"`)
     expect(refusal).toContain("another proposal's unsettled intent")
@@ -1274,7 +1313,7 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
       intentId: `${P2}/apply`,
       proposalId: P2,
       direction: 'apply',
-      target,
+      targets: [target],
       result: 'completed-redone',
     })
     expect(await productionBytes(h)).toBe(skillText(V2, SKILL))
@@ -1302,7 +1341,7 @@ describe('K2-4: a tampered target and two proposals competing for one target', (
 })
 
 describe('K2-5: a reopened instance rolls an applied proposal back through the real tool', () => {
-  it('rolls back over a formatVersion 3 ledger the reopened process read from disk', async () => {
+  it('rolls back over a formatVersion 4 ledger the reopened process read from disk', async () => {
     const directory = await sharedDirectory()
     const h1 = await startRunStack({ workspace: directory, roots: [ROOT_A], capabilities: { ...TABLE }, tools: true })
     await writeGuidanceSkill(join(h1.home, 'skills'), SKILL, V0)
@@ -1318,7 +1357,7 @@ describe('K2-5: a reopened instance rolls an applied proposal back through the r
     const reopened = evolutionOf(h2)
     const lines = await ledgerLines(h2)
     expect(lines.length).toBeGreaterThan(0)
-    expect(lines.every(line => line.formatVersion === 3)).toBe(true)
+    expect(lines.every(line => line.formatVersion === 4)).toBe(true)
     expect(kindsOf(lines).slice(-2)).toEqual(['commit_intent', 'applied'])
     expect((await reopened.get(P1)).status).toBe('applied')
     expect((await reopened.get(P1)).openIntent).toBeUndefined()
@@ -1341,7 +1380,7 @@ describe('K2-5: a reopened instance rolls an applied proposal back through the r
       targets: [target],
     })
     expect(String(rolledback.approvalRef)).toMatch(/^approval:/)
-    expect(settled.every(line => line.formatVersion === 3)).toBe(true)
+    expect(settled.every(line => line.formatVersion === 4)).toBe(true)
     expect((await reopened.get(P1)).status).toBe('rolledback')
     expect(await reopened.openIntentTargets()).toEqual([])
 

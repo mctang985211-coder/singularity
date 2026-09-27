@@ -19,8 +19,13 @@ export function defineEvolutionDecideTool(ctx: Context) {
       'Close a gated EvolutionProposal with a human decision (status: decided). Always asks a human through the native ' +
       'approval seam first — every level L1–L4, no exemption — and records the decision (PROMOTE / REJECT / ' +
       'KEEP_FOR_FURTHER_RESEARCH) only after an explicit approve. A reject, cancel, or unavailable answerer records ' +
-      'nothing and leaves the proposal gated. A recorded PROMOTE still applies nothing by itself: the change takes ' +
-      'effect only through evolution_apply, which asks the human a second time.',
+      'nothing and leaves the proposal gated. A PROMOTE is checked before the human is asked: the candidate\'s whole ' +
+      'content identity (the `SKILL.md` bytes, plus the derived sidecar and its declaration digest when the object declares ' +
+      'an execution provider), its provider verdict (role, registered verifier, granted tools) and the completed two-sided ' +
+      'experiment must still hold, and a skill object is the only target type this build can promote — the object may not ' +
+      'change role, weaken its verifier or grow a capability through a content update. A recorded PROMOTE still applies ' +
+      'nothing by itself: the change takes effect only through evolution_apply, which asks the human a second time, names ' +
+      'every production file it writes, and leaves a run already bound to the previous version on its own snapshot.',
     parameters: {
       proposalId: { type: 'string', required: true, description: 'Gated proposal to decide' },
       decision: { type: 'string', required: true, enum: EVOLUTION_DECISIONS, description: 'Decision to record after human approval' },

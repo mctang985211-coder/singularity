@@ -1,18 +1,29 @@
 /**
  * Evolution admission track (guide §2.7.6/§2.7.7): an append-only ledger of
  * EvolutionProposals with the state machine proposed → candidate → prepared →
- * gated → decided. Every candidate carries a structured mutation — this build's
- * one candidate is a single-file `SKILL.md` replacement — and `prepared` is the
- * one state it admits: evolution_prepare reads the production `SKILL.md` it
- * replaces once, before any write, and materializes the mutation into the
- * per-proposal sandbox (`<root>/sandbox/<proposalId>/`) plus a champion snapshot
- * of those same bytes. A prepare whose production target is not there has
- * nothing to replace and is refused before any sandbox or ledger write. A
+ * gated → decided. Every candidate carries a structured mutation, and `prepared`
+ * is the one state it admits: evolution_prepare reads the production skill
+ * object it replaces once, before any write, and materializes the mutation into
+ * the per-proposal sandbox (`<root>/sandbox/<proposalId>/`) plus a champion
+ * snapshot of those same bytes. A prepare whose production target is not there
+ * has nothing to replace and is refused before any sandbox or ledger write. A
  * **skill** candidate — the only candidate this build admits — is then evaluated
  * by the two-sided experiment of §F.2 (`evolution_replay`), recorded in the
  * ledger's experiment family and re-read by the promotion gate; the experiment
  * is evidence, not a lifecycle transition, so a skill proposal gates from
  * prepared.
+ *
+ * The unit a candidate replaces is a whole skill **object** (K3), and an object
+ * is a fixed shape: guidance is one file (`SKILL.md`), and an execution provider
+ * is two (`SKILL.md` plus the `SKILL.contract.json` beside it), with
+ * `content.resources` empty. Everything else is refused by name at prepare —
+ * a knowledge sidecar, declared resources, a broken declaration, a directory
+ * whose bytes do not match what it declares — because a candidate that silently
+ * drops a file would not be the object production is asked to load. An execution
+ * object's sidecar is never authored by the model: the model submits the new
+ * `SKILL.md` text, and the sidecar is the production declaration with exactly
+ * `content.skillMdSha256` replaced, so a content update can never move a
+ * capability, a required tool, a verifier or a port.
  *
  * `evolution_propose` and a Diagnosis may still record any targetType as a
  * suggestion, but a suggestion never becomes a candidate: `candidate` refuses
@@ -22,77 +33,89 @@
  *
  * Only a **skill** PROMOTE is promotable in this build: `checkPromotion` refuses
  * every other target type by name, because this build's evaluator — the
- * two-sided experiment — evaluates a replacement of an existing single-file
- * `SKILL.md` and nothing else (§F.2: "没有支持的评估器就拒绝新晋升"; a historical
+ * two-sided experiment — evaluates a replacement of an existing loadable skill
+ * object and nothing else (§F.2: "没有支持的评估器就拒绝新晋升"; a historical
  * report is never upgraded into new evidence).
  *
- * The ledger is one format, `formatVersion: 3` (K2): every line a current
+ * The ledger is one format, `formatVersion: 4` (K3): every line a current
  * entry writes carries it, {@link EvolutionService} refuses a v1, a v2, an
  * unversioned or a mixed ledger at load, naming the line and the version it saw,
  * and every write door — the append funnel and the experiment start — refuses a
  * record declaring anything else before a byte changes. There is no dual-format
  * reader, no online migration and no fallback helper: an older ledger is archived
  * by the operator and a new one started (the persistence contract's own deployment
- * step), never migrated or read beside v3 lines.
+ * step), never migrated or read beside v4 lines.
  *
- * PROMOTE takes effect through `evolution_apply` (W16): the candidate's
- * `SKILL.md` is copied from the sandbox into production — decided → applied →
- * (optionally) rolledback — each transition only after its own human approval
- * granted through the native approval seam (done by the tools, not here). L4
- * proposals and every non-skill target type never apply: the ledger records
- * their suggestions without granting an executor in this build.
+ * PROMOTE takes effect through `evolution_apply` (W16): the candidate object is
+ * copied from the sandbox into production — decided → applied → (optionally)
+ * rolledback — each transition only after its own human approval granted through
+ * the native approval seam (done by the tools, not here). L4 proposals and every
+ * non-skill target type never apply: the ledger records their suggestions
+ * without granting an executor in this build.
  *
  * A production write is one **commit** (K2), and the commit is durable before it
  * is effective: an `apply`/`rollback` persists a `commit_intent` line binding the
- * proposal, the direction, the human grant, the absolute target, the content
- * identity production must hold before and after, and a recoverable byte source
- * under the ledger root; then the target is replaced atomically (a same-directory
- * temp file, fsynced and renamed over it — never truncated); then, once the
- * rename has been read back and verified, the completion line
+ * proposal, the direction, the human grant, and the object's **whole fixed file
+ * set** — every absolute target, the content identity production must hold before
+ * and after that file, and a recoverable byte source under the ledger root; then
+ * each target is replaced atomically (a same-directory temp file, fsynced and
+ * renamed over it — never truncated), in the intent's own order; then, once every
+ * rename has been read back and the whole directory has been verified as one
+ * loadable object carrying this direction's identity, the completion line
  * (`applied`/`rolledback`, carrying the same `intentId`) closes the intent at the
- * fold. Each of those facts is durable before the next one depends on it: the
+ * fold. Each of those facts is durable before the next one depends on it: every
  * source is confined to the ledger root, re-verified and fsynced (the file and
- * the directory holding it) *before* the intent that names it is appended, and
+ * the directories holding it) *before* the intent that names it is appended, and
  * every ledger line — the intent, the completion and every lifecycle record —
  * goes through the service's one durable append (write, `fsync` the file,
  * `fsync` the directories that hold it), because a line that can be lost while
  * the write it justified survives is exactly the ledger a recovery cannot
  * reconcile. A completion with no matching open intent is refused, so the intent
- * cannot be skipped, and a crash between any two of those writes leaves exactly
- * one open intent for {@link EvolutionService.reconcile} — the explicit startup
- * or resume entry — to settle: the same operation is redone when production still
- * holds the pre-commit state, only the completion is recorded when production
- * already holds the committed content, and anything else (a source that is gone,
- * a target a third party rewrote or removed) stops by name with the intent left
- * open and nothing overwritten. Reconciliations and fresh commits share one
- * serial queue inside the service (single-process deployment: no distributed
- * lock, no background retry queue); because that queue spans one process only,
- * a fresh commit additionally refuses by name any production target another
- * proposal's open intent names, so it never moves a target out from under an
- * unfinished one. {@link EvolutionService.openIntentTargets} is the pure read a
- * loader or admission gate uses to see which production targets a commit still
- * has open.
+ * cannot be skipped, and a crash between any two of those writes — including
+ * between the two files of one object, where production holds a `SKILL.md` its
+ * on-disk declaration no longer covers — leaves exactly one open intent for
+ * {@link EvolutionService.reconcile} — the explicit startup or resume entry — to
+ * settle: the same operation is redone when production still holds the pre-commit
+ * state, the files already carrying the committed content have their durability
+ * re-established, only the completion is recorded when production already holds
+ * the committed content everywhere, and anything else (a source that is gone, a
+ * file a third party rewrote or removed) stops by name with the intent left open
+ * and nothing overwritten. Reconciliations and fresh commits share one serial
+ * queue inside the service (single-process deployment: no distributed lock, no
+ * background retry queue); because that queue spans one process only, a fresh
+ * commit additionally refuses by name any production *directory* another
+ * proposal's open intent touches — one intent covers a directory's fixed file set
+ * together, so a target naming either file refuses the whole object — and never
+ * moves a target out from under an unfinished one.
+ * {@link EvolutionService.openIntentTargets} is the pure read a loader or
+ * admission gate uses to see which production files a commit still has open (all
+ * files of every open intent, flattened).
  *
- * Single-file skill candidates additionally carry a content identity (P2):
- * prepare records the SHA-256 of the exact bytes of the materialized
- * `skills/<name>/SKILL.md`, the experiment's frozen block must carry the same
- * identity, and the experiment's pre-run check, every promotion gate, and the
- * apply write re-read and re-verify that file — so the chain cannot validate
- * one file's content and apply another's. Identity is not functional correctness,
- * and it binds skill candidates only.
+ * Skill candidates additionally carry a content identity (P2) of the whole
+ * object: prepare records the SHA-256 of the exact bytes of the materialized
+ * `skills/<name>/SKILL.md` — plus, when the object has an execution sidecar, the
+ * exact-byte SHA-256 and the canonical `contractDigest` of the materialized
+ * `skills/<name>/SKILL.contract.json` — the experiment's frozen block must carry
+ * the same identity, and the experiment's pre-run check, every promotion gate,
+ * and the apply write re-read and re-verify those files, including that the
+ * sidecar is present exactly when the identity says it is — so the chain cannot
+ * validate one file's content and apply another's, and cannot validate a
+ * guidance object and install an execution one. Identity is not functional
+ * correctness, and it binds skill candidates only.
  *
  * A skill promotion additionally pins the production baseline (P3): prepare
- * records the SHA-256 of the production `skills/<name>/SKILL.md` from the same
- * single read that produced the champion snapshot, and the apply seams
- * (the tool's pre-approval precheck and the service entry immediately before
- * the production write) re-read that file and refuse unless it still matches.
- * A candidate prepared against a production skill that has since changed,
- * disappeared, changed type, or moved behind a symbolic link is a conflict:
- * nothing is written, no `applied` record is taken, and the caller is pointed
- * at a new candidate evaluated against the new production state. The guarantee
- * covers serial single-process calls and external changes between two calls —
- * it is not a cross-process lock and does not make apply atomic against a
- * writer that writes concurrently with it.
+ * records the identity of the production object — both files, from the same
+ * single read that produced the champion snapshot — and the apply seams (the
+ * tool's pre-approval precheck and the service entry immediately before the
+ * production write) re-read those files and refuse unless they still match, a
+ * sidecar that appeared where the baseline had none included. A candidate
+ * prepared against a production object that has since changed, disappeared,
+ * changed type, or moved behind a symbolic link is a conflict: nothing is
+ * written, no `applied` record is taken, and the caller is pointed at a new
+ * candidate evaluated against the new production state. The guarantee covers
+ * serial single-process calls and external changes between two calls — it is not
+ * a cross-process lock and does not make apply atomic against a writer that
+ * writes concurrently with it.
  *
  * Every promotion also passes the unified provider pre-check (S1-C item 3):
  * `checkPromotion` — the one precheck `evolution_decide`, `evolution_apply`
@@ -105,7 +128,13 @@
  * knowledge or guidance provider is recorded as exactly that. The roles are
  * reported to the reviewer (`renderProviderRoles`) and carried on
  * {@link ApplyOutcome.providers}; nothing about them is persisted, and the
- * execution closure itself stays a property of the capability table.
+ * execution closure itself stays a property of the capability table. Beside the
+ * validator, the same precheck holds the candidate to the shape the prepared
+ * identity fixed — exactly `SKILL.md`, plus `SKILL.contract.json` when and only
+ * when the object has an execution sidecar — and re-derives the sidecar from the
+ * champion's own bytes plus the candidate `SKILL.md` digest, so a declaration
+ * that moved under the candidate's feet (an escalated `requiredTools`, a
+ * different verifier) is refused by name rather than promoted.
  *
  * The evidence gate beside it (`assertSkillPromotionEvidence`, §F.2) re-reads
  * the proposal's newest experiment: a completed two-sided experiment whose
@@ -115,22 +144,21 @@
  * and whose cost is known whenever the frozen budget declares a ceiling. All of
  * it is reads, and every condition is a named refusal.
  *
- * What a skill promotion promotes is one file: the commit writes the
- * candidate's `SKILL.md`, so a candidate whose sandbox directory carries
- * anything else — a `SKILL.contract.json`, a `references/` or `scripts/` tree,
- * any other entry — is refused by name at the same precheck. That is a stated
- * boundary of this executor, not a defect hidden behind it: the alternative
- * would be a promotion that reports an execution-provider role, or a content
- * identity covering files, for content production never receives. Multi-file
- * skill candidates need an executor that writes them; until then they are
- * refused before a human is asked.
+ * What a skill promotion promotes is that fixed file set and nothing else: the
+ * commit writes the candidate's `SKILL.md` and, for an execution object, the
+ * derived `SKILL.contract.json`; a sandbox directory carrying any other entry —
+ * a `references/` or `scripts/` tree, a stray file — is refused by name at the
+ * same precheck. That is a stated boundary of this executor, not a defect hidden
+ * behind it: resources are outside this ticket, so an object that needs them is
+ * refused before a human is asked rather than promoted with its resources
+ * silently dropped.
  * @module dsh-singularity-evolution
  */
 
 import { mkdir, open, readFile, readdir, writeFile } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { existsSync, type Dirent } from 'node:fs'
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ProposalTargetType } from '@dangosys/dsh-singularity-task'
@@ -141,6 +169,10 @@ import {
   readVerifiedFile,
   registeredVerifierIds,
   registeredVerifierVocabulary,
+  serializeSkillSidecar,
+  sidecarWithSkillMd,
+  SKILL_SIDECAR_FILE,
+  skillContractDigest,
   unlistableVerifierRefusal,
   validateSkillProvider,
   walkVerified,
@@ -149,13 +181,15 @@ import type {
   CapabilityToolQuery,
   SkillProviderCandidate,
   SkillProviderVerdict,
+  SkillSidecar,
 } from '@dangosys/dsh-singularity-task-runtime'
 import type { CapabilityConfig } from '@dangosys/dsh-singularity-task-runtime'
 import type { SkillContentIdentity } from './replay.ts'
 import { canonicalJson, modelSelectionOf } from './replay.ts'
 import type { ModelSelection } from './replay.ts'
-import type { CommitHost, CommitRequest, CommitStage, ReconcileOutcome } from './commit.ts'
+import type { CommitFile, CommitHost, CommitRequest, CommitStage, ReconcileOutcome } from './commit.ts'
 import { commitIntent, reconcileIntent, sha256Hex, syncDirectory } from './commit.ts'
+
 import type {
   ExperimentKey,
   ExperimentResult,
@@ -210,7 +244,13 @@ function applyable(proposal: EvolutionProposal): boolean {
   )
 }
 
-/** skill mutation: the full SKILL.md text for `<skills root>/<name>/SKILL.md`. */
+/**
+ * The skill mutation: the full `SKILL.md` text for
+ * `<skills root>/<name>/SKILL.md`. It is the whole input a candidate may submit
+ * — the object's other fixed file, when it has one, is derived from production
+ * at prepare rather than authored here, so a mutation can only ever change the
+ * text a worker reads and never the declaration that authorises it.
+ */
 export interface SkillMutation {
   name: string
   content: string
@@ -218,7 +258,7 @@ export interface SkillMutation {
 
 /**
  * The champion snapshot of one prepared proposal. `captured` is the only state
- * there is: this build replaces an existing production `SKILL.md`, so a target
+ * there is: this build replaces an existing production skill object, so a target
  * that is not there has nothing to prepare from and is refused before any
  * sandbox write, and every `prepared` record the fold admits carries the
  * snapshot's state. The bookkeeping-only prepare (`none` — nothing materialized,
@@ -233,14 +273,20 @@ export interface PreparedView {
   sandbox: string | null
   mechanical: boolean
   champion: ChampionState
-  /** The content identity recorded for the materialized candidate `SKILL.md` (P2) — every prepare records it. */
+  /**
+   * The content identity recorded for the materialized candidate object (P2) —
+   * the `SKILL.md`, plus the derived `SKILL.contract.json` when the object
+   * carries an execution sidecar. Every prepare records it.
+   */
   skillContent?: SkillContentIdentity
   /**
-   * The content identity of the production `skills/<name>/SKILL.md` as it stood
-   * at prepare (P3) — from the same single read that produced the champion
-   * snapshot, so snapshot and digest can never disagree. Every prepare records
-   * it; a captured champion without it cannot prove its baseline and refuses a
-   * new apply.
+   * The content identity of the production object as it stood at prepare (P3) —
+   * the same files, read once before anything was written, so the champion
+   * snapshot and the identity can never describe two different reads. Every
+   * prepare records it; a captured champion without it cannot prove its baseline
+   * and refuses a new apply. Its `contract` presence matches `skillContent`'s:
+   * the object's shape is fixed at prepare, and a record whose two halves
+   * disagree describes a role change no prepare performs.
    */
   skillBaseline?: SkillContentIdentity
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
@@ -277,15 +323,15 @@ export interface GateAnswers {
 }
 
 /**
- * One immutable ledger line, `formatVersion: 3` throughout (K2). A state
+ * One immutable ledger line, `formatVersion: 4` throughout (K3). A state
  * migration appends a new record; nothing is ever rewritten in place. The
  * version is the whole ledger's, not one line's: a line declaring anything but
- * 3 — or declaring nothing — makes the ledger refuse to load, and no entry here
+ * 4 — or declaring nothing — makes the ledger refuse to load, and no entry here
  * writes one.
  */
 export type EvolutionRecord =
   | {
-      formatVersion: 3
+      formatVersion: 4
       kind: 'proposed'
       proposalId: string
       targetType: ProposalTargetType
@@ -298,7 +344,7 @@ export type EvolutionRecord =
       at: string
     }
   | {
-      formatVersion: 3
+      formatVersion: 4
       kind: 'candidate'
       proposalId: string
       /** Complete version set the candidate aligns to (branch-model bookkeeping; this build creates no real branch). */
@@ -306,18 +352,18 @@ export type EvolutionRecord =
       /**
        * The structured patch description, shaped by the proposal's targetType
        * (see the *Mutation interfaces) and always recorded: this build's
-       * candidate is a single-file `SKILL.md` replacement, so a candidate that
-       * carries nothing to materialize and evaluate would be a flow going
-       * nowhere. Every line `candidate` writes holds one; a line written before
-       * that rule (or by hand) folds to a candidate with no next state,
-       * because `prepared` is the one transition a candidate admits.
+       * candidate is a `SKILL.md` replacement of an existing skill object, so a
+       * candidate that carries nothing to materialize and evaluate would be a
+       * flow going nowhere. Every line `candidate` writes holds one; a line
+       * written before that rule (or by hand) folds to a candidate with no next
+       * state, because `prepared` is the one transition a candidate admits.
        */
       mutation: unknown
       actor: string
       at: string
     }
   | {
-      formatVersion: 3
+      formatVersion: 4
       kind: 'prepared'
       proposalId: string
       /**
@@ -349,9 +395,9 @@ export type EvolutionRecord =
       actor: string
       at: string
     }
-  | { formatVersion: 3; kind: 'gated'; proposalId: string; gate: GateAnswers; actor: string; at: string }
+  | { formatVersion: 4; kind: 'gated'; proposalId: string; gate: GateAnswers; actor: string; at: string }
   | {
-      formatVersion: 3
+      formatVersion: 4
       kind: 'decided'
       proposalId: string
       decision: EvolutionDecision
@@ -367,10 +413,10 @@ export type EvolutionRecord =
       at: string
     }
   | {
-      formatVersion: 3
+      formatVersion: 4
       kind: 'applied'
       proposalId: string
-      /** Production write targets, for audit (absolute paths). */
+      /** Production write targets, in commit order — the whole file set of the object this apply wrote (absolute paths). */
       targets: string[]
       /** Human-review evidence: the approval call id of the evolution_apply request that granted this write. */
       approvalRef: string
@@ -384,10 +430,10 @@ export type EvolutionRecord =
       at: string
     }
   | {
-      formatVersion: 3
+      formatVersion: 4
       kind: 'rolledback'
       proposalId: string
-      /** Production write targets of the rollback (restored champion or deleted product), for audit. */
+      /** Production write targets of the rollback (restored champion file set), in commit order, for audit. */
       targets: string[]
       /** Human-review evidence: the approval call id of the evolution_rollback request that granted this write. */
       approvalRef: string
@@ -403,7 +449,7 @@ export type EvolutionRecord =
    * identity and its per-sample runs. These lines are not lifecycle transitions
    * — an experiment does not move a proposal's status — so the proposal fold
    * leaves them alone and {@link foldExperiments} folds them. Their records
-   * carry the ledger's own `formatVersion: 3` as well; the experiment *report*
+   * carry the ledger's own `formatVersion: 4` as well; the experiment *report*
    * at `experiment-report.json` has its own, separate version field.
    */
   | ExperimentStartedRecord
@@ -418,12 +464,13 @@ export type CommitDirection = 'apply' | 'rollback'
  * completion line that names the same `intentId`.
  *
  * It carries everything a recovery needs without trusting memory: which
- * proposal and direction, which human grant, the absolute production target, the
- * digest production must hold before the write (`baselineSha256`) and the digest
- * it must hold after (`contentSha256`), and the bytes to write again as a path
- * relative to the ledger root (`source`) — the candidate file for an apply, the
- * champion snapshot for a rollback. The id is derived, not chosen:
- * `<proposalId>/<direction>`.
+ * proposal and direction, which human grant, and the object's **whole fixed file
+ * set** ({@link CommitFile}, one or two entries, in commit order) — for every
+ * file its absolute production target, the digest that file must hold before the
+ * write (`baselineSha256`), the digest it must hold after (`contentSha256`), and
+ * the bytes to write again as a path relative to the ledger root (`source`: the
+ * candidate file for an apply, the champion snapshot for a rollback). The id is
+ * derived, not chosen: `<proposalId>/<direction>`.
  *
  * The line is not a lifecycle transition: it does not move the proposal's
  * status, so the proposal fold records it as {@link EvolutionProposal.openIntent}
@@ -431,8 +478,8 @@ export type CommitDirection = 'apply' | 'rollback'
  * and only one of them can close it (see the fold's admission rules).
  */
 export interface CommitIntentRecord {
-  /** The `proposals.jsonl` format version — the ledger is one format, `formatVersion: 3` (K2). */
-  formatVersion: 3
+  /** The `proposals.jsonl` format version — the ledger is one format, `formatVersion: 4` (K3). */
+  formatVersion: 4
   kind: 'commit_intent'
   /** `<proposalId>/<direction>` — the derived id the completion line must repeat. */
   intentId: string
@@ -440,14 +487,8 @@ export interface CommitIntentRecord {
   direction: CommitDirection
   /** The human grant that authorised this commit (`approval:<callId>`), recorded on the completion as well. */
   approvalRef: string
-  /** The absolute production path this commit replaces. */
-  target: string
-  /** The digest production must hold before the write — the state a reconciliation redoes the write from. */
-  baselineSha256: string
-  /** The digest production must hold after the write. */
-  contentSha256: string
-  /** The recoverable bytes, relative to the ledger root. */
-  source: string
+  /** The object's fixed files, in commit order — `SKILL.md` first, the `SKILL.contract.json` second when the object carries an execution sidecar. */
+  files: CommitFile[]
   actor: string
   at: string
 }
@@ -458,10 +499,8 @@ export interface CommitIntentView {
   proposalId: string
   direction: CommitDirection
   approvalRef: string
-  target: string
-  baselineSha256: string
-  contentSha256: string
-  source: string
+  /** The object's fixed files, in commit order; one or two entries (see {@link CommitIntentRecord.files}). */
+  files: CommitFile[]
   actor: string
   at: string
 }
@@ -659,20 +698,25 @@ export interface Config {
    */
   modelSelection?: () => ModelSelection | undefined
   /**
-   * The typed test seam of the commit path (K2): it fires at each durable stage
-   * of one commit — after the `commit_intent` line is on disk, after the new
-   * bytes are staged and fsynced beside the production target but before the
-   * rename, and after the rename has been read back and verified. Throwing from
-   * it aborts the commit exactly where it stands: the intent stays open and no
-   * later stage runs. That throw is an ordinary in-process exception, **not** a
-   * process exit — `writeFileAtomic`'s own `catch` still removes the staging file
-   * and the process keeps running — so it is a window-injection seam, and the
-   * real exit (a killed process at one of those stages) is proven by the
-   * nested-child cases in `tests/integration/k2-evolution-commit.spec.ts`. A
-   * production deployment never sets it; there is no other way to observe or
-   * interrupt a commit.
+   * The typed test seam of the commit path (K2, per-file since K3): it fires at
+   * each durable stage of one commit — after the `commit_intent` line is on disk
+   * (`intent-recorded`); after the new bytes of one file are staged and fsynced
+   * beside its production target but before the rename, and after that rename
+   * has been read back and verified (`write-staged` / `write-renamed`, each
+   * carrying the file's target, so a caller can open the window *between* the
+   * two files of one object as well as inside one file's write); and after every
+   * file is written and the whole object has passed the service's own
+   * loadability-and-identity re-read, with only the completion line left
+   * (`commit-verified`). Throwing from it aborts the commit exactly where it
+   * stands: the intent stays open and no later stage runs. That throw is an
+   * ordinary in-process exception, **not** a process exit — `writeFileAtomic`'s
+   * own `catch` still removes the staging file it had written and the process
+   * keeps running — so it is a window-injection seam, and the real exit (a
+   * killed process at one of those stages) is proven by the nested-child cases
+   * in `tests/integration/k2-evolution-commit.spec.ts`. A production deployment
+   * never sets it; there is no other way to observe or interrupt a commit.
    */
-  commitProbe?: (stage: CommitStage) => void
+  commitProbe?: (stage: CommitStage, target?: string) => void
 }
 
 function nonEmpty(value: unknown, field: string): string {
@@ -750,20 +794,62 @@ async function readProductionSkill(skillRoot: string, relative: string): Promise
   return { bytes, sha256: sha256Hex(bytes) }
 }
 
-/** The production path of one skill's single file, as the executor writes and reads it. */
+/** The production path of one skill object's `SKILL.md`, as the executor writes and reads it. */
 function productionSkillRelative(name: string): string {
   return join(name, 'SKILL.md')
 }
 
+/** The production path of one skill object's sidecar file, beside the `SKILL.md`. */
+function productionSidecarRelative(name: string): string {
+  return join(name, SKILL_SIDECAR_FILE)
+}
+
+/**
+ * One skill object's declared sidecar, parsed from the exact bytes that were
+ * read — the same bytes its identity covers. Callers only reach this with bytes
+ * the loader has already accepted as a text JSON declaration, so the parse is a
+ * reading of what was verified, not a second guess at it.
+ */
+function loadedSidecar(bytes: Buffer): SkillSidecar {
+  return JSON.parse(bytes.toString('utf8')) as SkillSidecar
+}
+
+/**
+ * The candidate sidecar of one execution object: the production declaration with
+ * exactly `content.skillMdSha256` replaced by the candidate `SKILL.md` digest,
+ * serialized deterministically. This is the one place a candidate object gains
+ * its second file, and it is a *derivation*, never an authored patch: the
+ * capabilities, ports, required tools, verifier and (empty) resource list are
+ * the production object's, so a content update cannot escalate a declaration —
+ * the derivation consistency check at promotion re-derives the same bytes from
+ * the champion snapshot and refuses any candidate whose sidecar disagrees.
+ */
+function candidateSidecar(production: SkillSidecar, skillMdSha256: string): string {
+  return serializeSkillSidecar(sidecarWithSkillMd(production, skillMdSha256))
+}
+
+/**
+ * Fold a sidecar's declared data into a {@link SkillContractIdentity}: the exact
+ * bytes' SHA-256 and the canonical declaration digest a registry revision and a
+ * run binding use. Both come from the same bytes, so an identity is never
+ * assembled from two different reads.
+ */
+function contractIdentityOf(bytes: Buffer): { sha256: string; contractDigest: string } {
+  return { sha256: sha256Hex(bytes), contractDigest: skillContractDigest(loadedSidecar(bytes)) }
+}
+
 /**
  * Validate a candidate's mutation. This build has exactly one candidate
- * mutation — the single-file `SKILL.md` replacement of §F.2 — so the schema is
- * the skill one and the only callers are the paths that already admitted a
- * skill candidate (the write path and the fold, which refuses a candidate of
- * any other target type first). A mutation of another target type has no
- * schema here, and is named rather than silently accepted: the old schemas
- * (agent_preset, capability, task_definition) and the bookkeeping-only default
- * belonged to a lifecycle this build no longer has.
+ * mutation — the `SKILL.md` text replacing an existing skill object's own
+ * (§F.2) — so the schema is the skill one and the only callers are the paths
+ * that already admitted a skill candidate (the write path and the fold, which
+ * refuses a candidate of any other target type first). A mutation of another
+ * target type has no schema here, and is named rather than silently accepted:
+ * the old schemas (agent_preset, capability, task_definition) and the
+ * bookkeeping-only default belonged to a lifecycle this build no longer has.
+ * The unknown key check is the "no sidecar patch" rule: the model submits
+ * `{ name, content }` and nothing else, and a sidecar is derived at prepare
+ * rather than accepted here.
  */
 function validateMutation(
   targetType: ProposalTargetType,
@@ -772,8 +858,8 @@ function validateMutation(
   if (!isRecord(mutation)) throw new Error('evolution: mutation must be an object')
   if (targetType !== 'skill') {
     throw new Error(
-      `evolution: a "${targetType}" mutation has no schema in this build — the only candidate lifecycle here is a single-file ` +
-      'SKILL.md replacement, and every other target type is a recorded proposal',
+      `evolution: a "${targetType}" mutation has no schema in this build — the only candidate lifecycle here is a ` +
+      'SKILL.md replacement of an existing skill object, and every other target type is a recorded proposal',
     )
   }
   assertOnlyKeys(mutation, ['name', 'content'], 'skill mutation')
@@ -822,10 +908,10 @@ function validateGateAnswers(answers: unknown): void {
 
 /**
  * The state machine. A candidate is a mutation — this build's candidate is a
- * single-file `SKILL.md` replacement — so a candidate has exactly one next
- * state: `prepared` (sandbox materialization). There is no mutation-less
- * candidate and no direct candidate → gated arc: a proposal with nothing to
- * evaluate is a recorded proposal, not a flow.
+ * `SKILL.md` replacement of an existing skill object — so a candidate has
+ * exactly one next state: `prepared` (sandbox materialization). There is no
+ * mutation-less candidate and no direct candidate → gated arc: a proposal with
+ * nothing to evaluate is a recorded proposal, not a flow.
  *
  * A prepared **skill** candidate gates straight from prepared: its evaluation is
  * the two-sided experiment (§F.2), which is recorded in the ledger's experiment
@@ -874,82 +960,72 @@ function assertTransition(current: EvolutionProposal, kind: EvolutionStatus): vo
 /**
  * The production write targets of an apply (and its matching rollback), for
  * the approval reason and the audit record — the human sees exactly what a
- * grant will touch. One file: the candidate's `SKILL.md`, which is what this
- * build's executor writes and restores.
+ * grant will touch. The object's fixed file set: the candidate's `SKILL.md`,
+ * plus the `SKILL.contract.json` beside it when the prepared object carries an
+ * execution sidecar — one or two paths, in commit order.
  */
 export function applyTargets(
   proposal: EvolutionProposal,
   roots: { skillRoot: string },
 ): string[] {
   if (proposal.targetType !== 'skill') return []
-  return [join(roots.skillRoot, (proposal.mutation as SkillMutation).name, 'SKILL.md')]
-}
-
-/**
- * The entries of a candidate's own directory beyond the one file the skill
- * executor writes — `SKILL.md`'s siblings, a directory read as `name/`, sorted.
- * Empty for a single-file candidate, and also for a directory that cannot be
- * listed: a candidate with nothing there is then refused by the validator with
- * the defect its absence deserves (`skill-missing`), not by this boundary.
- */
-async function unsupportedCandidateEntries(directory: string): Promise<string[]> {
-  let entries
-  try {
-    entries = await readdir(directory, { withFileTypes: true })
-  } catch {
-    return []
+  const name = (proposal.mutation as SkillMutation).name
+  const files = [join(roots.skillRoot, name, 'SKILL.md')]
+  if (proposal.prepared?.skillContent?.contract !== undefined) {
+    files.push(join(roots.skillRoot, name, SKILL_SIDECAR_FILE))
   }
-  return entries
-    .filter(entry => entry.name !== 'SKILL.md')
-    .map(entry => (entry.isDirectory() ? `${entry.name}/` : entry.name))
-    .sort()
+  return files
 }
 
 /**
- * One format, one check (K2): every line this ledger reads, folds or writes
- * declares `formatVersion: 3`, and nothing else — no v1, no v2, no missing
- * version, no mix. The same refusal guards all three doors the record type
- * cannot guard on its own: the load (per line, naming the file and the line),
- * the {@link EvolutionService.append} funnel every lifecycle, commit and sample
- * write goes through, and {@link EvolutionService.recordExperimentStart}, which
- * folds the experiment family first and then appends through the same durable
- * append that funnel uses. A record that declares anything else is refused
- * before it is folded or written, and the caller's step is the persistence
- * contract's: archive the old ledger and start a new one.
+ * One format, one check (K3): every line this ledger reads, folds or writes
+ * declares `formatVersion: 4`, and nothing else — no v1, no v2, no v3, no
+ * missing version, no mix. The same refusal guards all three doors the record
+ * type cannot guard on its own: the load (per line, naming the file and the
+ * line), the {@link EvolutionService.append} funnel every lifecycle, commit and
+ * sample write goes through, and
+ * {@link EvolutionService.recordExperimentStart}, which folds the experiment
+ * family first and then appends through the same durable append that funnel
+ * uses. A record that declares anything else is refused before it is folded or
+ * written, and the caller's step is the persistence contract's: archive the old
+ * ledger and start a new one.
  *
- * The version moved with the commit mechanism: a v2 ledger has no
- * `commit_intent` lines and its completions carry no `intentId`, so a write to
- * such a ledger could not be reconciled — reading one is refused instead of
- * appending beside it.
+ * The version moved with the object a commit covers: a v3 ledger records one
+ * file per intent (`target`, `baselineSha256`, `contentSha256`, `source`) and a
+ * prepare's identity without a sidecar half, so it cannot describe a two-file
+ * commit and a write beside it could not be reconciled — reading one is refused
+ * instead of appending beside it.
  *
  * `position` names the line or the record in the operator's own vocabulary
  * (e.g. `ledger line 3 in /…/proposals.jsonl`), so the message points at the
  * bytes that are wrong rather than at the entry that noticed them.
  */
 function assertLedgerFormatVersion(record: { formatVersion?: unknown }, position: string): void {
-  if (record.formatVersion === 3) return
+  if (record.formatVersion === 4) return
   throw new Error(
     `evolution: ${position} declares formatVersion ${JSON.stringify(record.formatVersion ?? null)} — ` +
-    'this build reads and writes formatVersion 3 only, so a v1, a v2, an unversioned or a mixed ledger is refused before any new ' +
-    'record is appended (archive the old ledger and start a new one; no migration, no dual-format read and no older-record reader ' +
-    'is offered, because a v2 ledger carries no commit intent for a production write to be reconciled against)',
+    'this build reads and writes formatVersion 4 only, so a v1, a v2, a v3, an unversioned or a mixed ledger is refused before any ' +
+    'new record is appended (archive the old ledger and start a new one; no migration, no dual-format read and no older-record reader ' +
+    'is offered, because a ledger written before v4 records one file per commit intent and no sidecar half in a prepare identity, so ' +
+    'a two-file commit against it could not be reconciled)',
   )
 }
 
 /**
  * Commit-intent payload validation, shared by the write path ({@link
  * EvolutionService.apply} / {@link EvolutionService.rollback} through
- * `commit.ts`) and the fold: every field a recovery needs is present, both
- * content identities are real SHA-256 hex, and the direction is one of the two
- * the commit path has. A hand-forged line fails exactly as a live append would.
+ * `commit.ts`) and the fold: every field a recovery needs is present, the file
+ * set has the fixed shape of one skill object (one or two entries, in commit
+ * order: `SKILL.md` first, the `SKILL.contract.json` of the same directory
+ * second when there is one), every digest is real SHA-256 hex, every target is
+ * absolute, and the direction is one of the two the commit path has. A
+ * hand-forged line fails exactly as a live append would.
  */
 function validateCommitIntent(record: CommitIntentRecord): void {
   const nonEmptyFields = [
     ['proposalId', record.proposalId],
     ['intentId', record.intentId],
     ['approvalRef', record.approvalRef],
-    ['target', record.target],
-    ['source', record.source],
     ['actor', record.actor],
     ['at', record.at],
   ] as const
@@ -957,7 +1033,7 @@ function validateCommitIntent(record: CommitIntentRecord): void {
     if (typeof value !== 'string' || value.trim().length === 0) {
       throw new Error(
         `evolution: commit_intent record for proposal "${String(record.proposalId)}" has no ${field} — an intent names the proposal, ` +
-        'the direction, the human approval, the production target, both content identities, the bytes to write again and its actor, ' +
+        'the direction, the human approval, the fixed file set it commits, the bytes to write again for every file and its actor, ' +
         'so a line missing any of them cannot be reconciled',
       )
     }
@@ -968,19 +1044,88 @@ function validateCommitIntent(record: CommitIntentRecord): void {
       '— a commit intent is "apply" or "rollback"',
     )
   }
-  for (const [field, value] of [['baselineSha256', record.baselineSha256], ['contentSha256', record.contentSha256]] as const) {
-    if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) {
+  const files = record.files
+  if (!Array.isArray(files) || files.length === 0 || files.length > 2) {
+    throw new Error(
+      `evolution: commit_intent record for proposal "${record.proposalId}" names ${Array.isArray(files) ? `${files.length} file(s)` : 'no file list'} ` +
+      '— one skill object is a fixed file set of one or two files: SKILL.md, and SKILL.contract.json when the object carries an ' +
+      'execution sidecar',
+    )
+  }
+  files.forEach((file, index) => {
+    const at = `commit_intent record for proposal "${record.proposalId}" file ${index}`
+    if (!isRecord(file)) {
+      throw new Error(`evolution: ${at} is not an object carrying target, baselineSha256, contentSha256, source`)
+    }
+    for (const [field, value] of [['target', file.target], ['source', file.source]] as const) {
+      if (typeof value !== 'string' || value.trim().length === 0) {
+        throw new Error(`evolution: ${at} has no ${field} — every file names its absolute production path and its recoverable source`)
+      }
+    }
+    for (const [field, value] of [['baselineSha256', file.baselineSha256], ['contentSha256', file.contentSha256]] as const) {
+      if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) {
+        throw new Error(
+          `evolution: ${at} has no valid ${field} (${JSON.stringify(value ?? null)}) — an intent binds, for every file, the exact ` +
+          'bytes production must hold before the write and the exact bytes it must hold after',
+        )
+      }
+    }
+    if (file.target !== resolve(file.target)) {
       throw new Error(
-        `evolution: commit_intent record for proposal "${record.proposalId}" has no valid ${field} (${JSON.stringify(value ?? null)}) — ` +
-        'an intent binds the exact bytes production must hold before the write and the exact bytes it must hold after',
+        `evolution: ${at} names target "${file.target}" — an intent names the absolute production paths it commits`,
       )
     }
-  }
-  if (record.target !== resolve(record.target)) {
+    if (basename(file.target) !== (index === 0 ? 'SKILL.md' : SKILL_SIDECAR_FILE)) {
+      throw new Error(
+        `evolution: ${at} names target "${file.target}" — the file set of one skill object is ordered and fixed: SKILL.md first, ` +
+        `and, when the object carries an execution sidecar, ${SKILL_SIDECAR_FILE} second`,
+      )
+    }
+    if (index > 0 && dirname(file.target) !== dirname(files[0]!.target)) {
+      throw new Error(
+        `evolution: ${at} names target "${file.target}" beside "${files[0]!.target}" — the files of one skill object live in one ` +
+        'directory, the one a loader reads whole',
+      )
+    }
+  })
+}
+
+/**
+ * One half of a prepared record's frozen identity, validated and normalized: the
+ * skill name, the `SKILL.md` digest, and — when, and only when, the object
+ * carries an execution sidecar — the sidecar's exact-byte digest and canonical
+ * declaration digest. Shared by the write path's shape (its producer is
+ * `prepare`) and the fold, so a hand-forged line fails exactly as a live append
+ * would.
+ *
+ * `field` is the record's own member name (`skillContent` / `skillBaseline`),
+ * which is also what the refusal names — the operator reads the line, not this
+ * function.
+ */
+function preparedIdentity(value: unknown, field: string, proposalId: string): SkillContentIdentity {
+  const at = `prepared record for "${proposalId}"`
+  if (!isRecord(value) || typeof value.name !== 'string' || value.name.length === 0
+    || typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256)) {
     throw new Error(
-      `evolution: commit_intent record for proposal "${record.proposalId}" names target "${record.target}" — an intent names the ` +
-      'absolute production path it commits',
+      `evolution: ${at} has no valid ${field} identity — every prepare records the content identity of the object's files ` +
+      `(${field === 'skillContent'
+        ? 'the materialized candidate SKILL.md'
+        : 'the production SKILL.md it read before materializing the candidate'})`,
     )
+  }
+  const contract = value.contract
+  if (contract === undefined) return { name: value.name, sha256: value.sha256 }
+  if (!isRecord(contract) || typeof contract.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(contract.sha256)
+    || typeof contract.contractDigest !== 'string' || !/^[a-f0-9]{64}$/.test(contract.contractDigest)) {
+    throw new Error(
+      `evolution: ${at} ${field}.contract must be { sha256, contractDigest } with both lowercase 64-character hex digests — an ` +
+      'object with an execution sidecar records that file by its exact bytes and by the declaration identity a registry revision absorbs',
+    )
+  }
+  return {
+    name: value.name,
+    sha256: value.sha256,
+    contract: { sha256: contract.sha256, contractDigest: contract.contractDigest },
   }
 }
 
@@ -1004,7 +1149,7 @@ export class EvolutionService extends Service {
   /** The injected model-selection resolver, if the assembly wired one (see {@link Config.modelSelection}). */
   private readonly resolveModelSelection?: () => ModelSelection | undefined
   /** The commit path's typed test seam, if this instance was built with one (see {@link Config.commitProbe}). */
-  private readonly commitProbe?: (stage: CommitStage) => void
+  private readonly commitProbe?: (stage: CommitStage, target?: string) => void
   private records: EvolutionRecord[] = []
   private readonly loaded: Promise<void>
   private writes: Promise<void> = Promise.resolve()
@@ -1072,7 +1217,7 @@ export class EvolutionService extends Service {
 
   async propose(input: ProposeInput, actor: string): Promise<EvolutionProposal> {
     const record: EvolutionRecord = {
-      formatVersion: 3,
+      formatVersion: 4,
       kind: 'proposed',
       proposalId: nonEmpty(input.proposalId, 'proposalId'),
       targetType: input.targetType,
@@ -1117,15 +1262,15 @@ export class EvolutionService extends Service {
     if (current.targetType !== 'skill') {
       throw new Error(
         `evolution: proposal "${proposalId}" targets "${current.targetType}", which cannot become a candidate in this build — ` +
-        'the only candidate lifecycle here is a single-file SKILL.md replacement (evolution_prepare → the two-sided experiment ' +
-        'evolution_replay → evolution_gate → evolution_apply), and no other target type has an evaluator until A6 introduces ' +
-        'one, so its proposal stays a recorded proposal',
+        'the only candidate lifecycle here is a SKILL.md replacement of an existing skill object (evolution_prepare → the two-sided ' +
+        'experiment evolution_replay → evolution_gate → evolution_apply), and no other target type has an evaluator until A6 ' +
+        'introduces one, so its proposal stays a recorded proposal',
       )
     }
     validateVersionSet(versionSet)
     validateMutation(current.targetType, mutation)
     await this.append({
-      formatVersion: 3,
+      formatVersion: 4,
       kind: 'candidate',
       proposalId,
       versionSet: { ...versionSet },
@@ -1137,21 +1282,39 @@ export class EvolutionService extends Service {
   }
 
   /**
-   * Move candidate → prepared: confirm the production `SKILL.md` this candidate
-   * replaces, materialize the skill mutation into `<root>/sandbox/<proposalId>/`
-   * and snapshot those same champion bytes under `champion/` — the anchor for
-   * the experiment's baseline and for rollback.
+   * Move candidate → prepared: confirm the production skill **object** this
+   * candidate replaces, materialize the mutation into
+   * `<root>/sandbox/<proposalId>/` and snapshot those same production bytes
+   * under `champion/` — the anchor for the experiment's baseline and for
+   * rollback.
    *
-   * The production read comes first, before any sandbox or ledger write: this
-   * build replaces an existing single-file `SKILL.md`, so a target that is not
-   * there has nothing to prepare, and a prepare that found none writes nothing
-   * at all. That one read yields both the snapshot and `skillBaseline` (P3),
-   * the digest the later apply compares the production target against.
+   * The production read comes first, before any sandbox or ledger write, and it
+   * is one verified read of the whole directory (`loadSkillSidecar`, the same
+   * loader a worker's provider check uses), so the object is frozen as it really
+   * is. A production directory with no readable `SKILL.md` has nothing to
+   * replace and is refused before anything is written. Anything else that makes
+   * the directory *not* the object it claims — a declaration that does not match
+   * the bytes, a file no sidecar names, an unreadable or unsupported entry —
+   * carries loader defects and is refused by name, because a candidate built
+   * from a directory nobody could describe would let a file disappear between
+   * prepare and apply. A knowledge sidecar and an execution sidecar with
+   * declared resources are refused too: this ticket's object is guidance or an
+   * execution provider with `resources: []`.
    *
-   * The candidate also records `skillContent` (P2): the name plus the SHA-256 of
-   * the exact bytes of the file that was actually materialized (read back from
-   * disk, never re-rendered from the mutation string), so the experiment, the
-   * gates, and apply can verify this exact content later.
+   * What is materialized is the object's fixed file set. Guidance is the
+   * candidate `SKILL.md` and the champion `SKILL.md`. An execution object also
+   * gets the candidate's `SKILL.contract.json` — the production declaration with
+   * only `content.skillMdSha256` rewritten to the candidate's bytes, serialized
+   * deterministically — and the production sidecar's exact bytes under
+   * `champion/`.
+   *
+   * The candidate and the baseline each record a full content identity
+   * (`skillContent` P2 / `skillBaseline` P3): the name, the SHA-256 of the exact
+   * bytes of every materialized file (read back from disk, never re-rendered
+   * from the mutation string), and — for an execution object — the file digest
+   * and canonical digest of its sidecar. The two identities' shapes agree by
+   * construction, so the fold can treat a disagreement as a role change it must
+   * refuse.
    */
   async prepare(proposalId: string, actor: string): Promise<EvolutionProposal> {
     const current = await this.assertNext(proposalId, 'prepared')
@@ -1163,28 +1326,79 @@ export class EvolutionService extends Service {
     validateMutation(current.targetType, mutation)
     assertSegment(proposalId, 'proposalId')
     const { name } = mutation as unknown as SkillMutation
-    // P3: one verified read of the production file, before anything is
-    // written, yields the snapshot and the baseline digest together. A
-    // production path that is a symlink or not a regular file fails here
-    // instead of being followed, and a missing target is refused by name
-    // rather than prepared against nothing.
-    const production = await readProductionSkill(this.skillRoot, productionSkillRelative(name))
-    if (production === null) {
+    const directory = join(this.skillRoot, name)
+    // P3: one verified read of the production object, before anything is
+    // written, yields the champion snapshot and the baseline identity together.
+    // A production path that is a symlink or not a regular file fails inside the
+    // loader; a missing directory or `SKILL.md` is refused by name here rather
+    // than prepared against nothing.
+    const loaded = await loadSkillSidecar(directory)
+    if (loaded.content === undefined) {
       throw new Error(
-        `evolution: the production skill "${join(this.skillRoot, name, 'SKILL.md')}" does not exist, so proposal ` +
-        `"${proposalId}" has nothing to replace — this build prepares and promotes a replacement of an existing single-file ` +
-        'SKILL.md only; a new skill cannot be evaluated or promoted by this path',
+        `evolution: the production skill "${join(directory, 'SKILL.md')}" does not exist, so proposal ` +
+        `"${proposalId}" has nothing to replace — this build prepares and promotes a replacement of an existing loadable skill ` +
+        'object only; a new skill cannot be evaluated or promoted by this path',
+      )
+    }
+    if (loaded.defects.length > 0) {
+      const defects = loaded.defects.map(item => `${item.code}: ${item.detail}`).join('; ')
+      throw new Error(
+        `evolution: the production skill "${directory}" is not the loadable object its files claim — ${defects}; this build freezes ` +
+        'a complete object (SKILL.md, and the SKILL.contract.json it declares when the object has one), and a directory a loader ' +
+        'refuses cannot be the baseline a candidate must reproduce: nothing was written',
+      )
+    }
+    if (loaded.sidecar?.type === 'knowledge') {
+      throw new Error(
+        `evolution: the production skill "${directory}" carries a knowledge sidecar, and a same-name improvement of a knowledge skill ` +
+        'is refused by name in this build — the object this executor promotes is guidance (no sidecar) or an execution provider ' +
+        '(SKILL.md plus SKILL.contract.json with no resources), so nothing was written',
+      )
+    }
+    if (loaded.sidecar !== undefined && loaded.sidecar.content.resources.length > 0) {
+      throw new Error(
+        `evolution: the production skill "${directory}" declares ${loaded.sidecar.content.resources.length} resource(s) ` +
+        `(${loaded.sidecar.content.resources.map(resource => JSON.stringify(resource.path)).join(', ')}), and this build promotes an ` +
+        'object whose content identity covers SKILL.md alone — resources need an executor that writes them, so nothing was written',
+      )
+    }
+    // The bytes the object is frozen from: read once, through the same
+    // walk-verified read the rest of the plane uses, and checked against the
+    // loader's own verdict — so the snapshot, the recorded identity and the
+    // declaration that was validated all describe one read of one object.
+    const productionSkillMd = await readVerifiedFile(this.skillRoot, productionSkillRelative(name))
+    if (sha256Hex(productionSkillMd) !== loaded.content.skillMdSha256) {
+      throw new Error(
+        `evolution: the production skill "${join(directory, 'SKILL.md')}" changed while proposal "${proposalId}" was being prepared ` +
+        '(its bytes no longer hash to the digest the loader had just validated) — freezing a second read would record a baseline ' +
+        'nothing checked, so nothing was written',
+      )
+    }
+    const productionSidecar = loaded.sidecar === undefined
+      ? undefined
+      : await readVerifiedFile(this.skillRoot, productionSidecarRelative(name))
+    if (productionSidecar !== undefined && skillContractDigest(loadedSidecar(productionSidecar)) !== skillContractDigest(loaded.sidecar!)) {
+      throw new Error(
+        `evolution: the production skill "${join(directory, SKILL_SIDECAR_FILE)}" changed while proposal "${proposalId}" was being ` +
+        'prepared (its declaration is no longer the one the loader had just validated) — nothing was written',
       )
     }
     const dir = join(this.root, 'sandbox', proposalId)
-    const written = await this.materialize(dir, mutation, production)
+    const written = await this.materialize(dir, mutation, {
+      skillMd: productionSkillMd,
+      ...(productionSidecar === undefined ? {} : { sidecar: productionSidecar }),
+    })
     const sandbox = `sandbox/${proposalId}`
+    const candidateSkillMd = await readVerifiedFile(this.root, `${sandbox}/skills/${name}/SKILL.md`)
     const skillContent: SkillContentIdentity = {
       name,
-      sha256: sha256Hex(await readVerifiedFile(this.root, `${sandbox}/skills/${name}/SKILL.md`)),
+      sha256: sha256Hex(candidateSkillMd),
+      ...(loaded.sidecar === undefined
+        ? {}
+        : { contract: contractIdentityOf(await readVerifiedFile(this.root, `${sandbox}/skills/${name}/${SKILL_SIDECAR_FILE}`)) }),
     }
     await this.append({
-      formatVersion: 3,
+      formatVersion: 4,
       kind: 'prepared',
       proposalId,
       sandbox,
@@ -1253,7 +1467,7 @@ export class EvolutionService extends Service {
       }
     }
     await this.append({
-      formatVersion: 3,
+      formatVersion: 4,
       kind: 'gated',
       proposalId,
       gate: { ...answers, regressionEvidenceRefs: [...answers.regressionEvidenceRefs] },
@@ -1280,7 +1494,7 @@ export class EvolutionService extends Service {
     if (note !== undefined) nonEmpty(note, 'note')
     if (decision === 'PROMOTE') await this.checkPromotion(proposalId)
     await this.append({
-      formatVersion: 3,
+      formatVersion: 4,
       kind: 'decided',
       proposalId,
       decision,
@@ -1298,38 +1512,40 @@ export class EvolutionService extends Service {
    * skill mutation at L1–L3 (the state machine itself refuses anything else —
    * every other target type has no executor in this build); the caller (the
    * evolution_apply tool) must hold a human grant from `ctx.approval.request`
-   * first, exactly as for decide. The sandbox `SKILL.md` replaces the production
-   * one (the champion snapshot covers that file only, so the write is
-   * file-level, never a directory delete).
+   * first, exactly as for decide. The candidate object's fixed file set
+   * replaces production's — `SKILL.md` and, when the object carries an execution
+   * sidecar, the derived `SKILL.contract.json` (the champion snapshot covers
+   * those files only, so the write is file-level, never a directory delete).
    *
    * The commit order is the recovery rule (K2): the `commit_intent` line is
-   * persisted first — proposal, direction, this approval, the absolute target,
-   * the content identity production must hold before (`prepared.skillBaseline`
-   * P3) and after (`prepared.skillContent` P2), and the sandbox candidate as the
-   * recoverable source — then the target is replaced atomically, then the
-   * `applied` record closes the intent. A failure at any stage leaves the intent
-   * open and nothing half-written: the production file is one complete version or
-   * the other, and {@link reconcile} (or a retry of this call) settles the intent
-   * from what production actually holds. Nothing here trusts a promise or a
-   * caller-supplied "approved".
+   * persisted first — proposal, direction, this approval, every target of the
+   * object's file set, the content identities production must hold before
+   * (`prepared.skillBaseline` P3) and after (`prepared.skillContent` P2) for
+   * each file, and the sandbox candidate files as the recoverable sources — then
+   * each file is replaced atomically, then the `applied` record closes the
+   * intent. A failure at any stage leaves the intent open and nothing
+   * half-written: every production file is one complete version or the other,
+   * and {@link reconcile} (or a retry of this call) settles the intent from what
+   * production actually holds — including the window where only the first file
+   * was replaced. Nothing here trusts a promise or a caller-supplied "approved".
    *
    * A skill apply re-verifies the production baseline (P3) after the human
-   * grant and before the intent is recorded: the production target must still be
-   * the one prepare recorded. A direct service call therefore cannot bypass the
-   * check the tool already ran before asking for approval.
+   * grant and before the intent is recorded: the production object must still be
+   * the one prepare recorded, both files. A direct service call therefore cannot
+   * bypass the check the tool already ran before asking for approval.
    *
-   * A fresh commit also refuses, before that baseline check, a production target
-   * another proposal's open commit intent names
+   * A fresh commit also refuses, before that baseline check, a production
+   * **directory** another proposal's open commit intent touches
    * ({@link assertTargetUncommitted}): the serial queue spans one process, and
-   * without the per-target gate the second of two proposals prepared against the
+   * without the per-object gate the second of two proposals prepared against the
    * same bytes would read the version the first is still committing over, pass
    * its own baseline check and move the target.
    *
    * The promotion check (S1-C item 3) runs here too, before the intent is
-   * recorded: a candidate whose provider role changed while the human was
-   * deciding (a sidecar that appeared in the sandbox, a verifier that was
-   * unregistered) is refused here, so no entry can write something a later
-   * admission would have refused.
+   * recorded: a candidate whose provider role or file shape changed while the
+   * human was deciding (a sidecar that appeared in or vanished from the sandbox,
+   * a declaration that moved, a verifier that was unregistered) is refused here,
+   * so no entry can write something a later admission would have refused.
    *
    * When this proposal already has an open intent — the process died before the
    * completion landed — this call does not ask for another approval and does not
@@ -1352,17 +1568,19 @@ export class EvolutionService extends Service {
           )
         }
         const recovered = await this.settleOpenIntent(open)
-        return { targets: [open.target], recovered, proposal: await this.get(proposalId) }
+        return { targets: open.files.map(file => file.target), recovered, proposal: await this.get(proposalId) }
       }
       this.assertTargetUncommitted(proposal)
       const promotion = await this.checkPromotion(proposalId)
       await this.checkProductionBaseline(proposalId)
-      // P2: read the candidate once, verify the digest prepare recorded, and
-      // commit exactly those verified bytes. A source replaced mid-apply cannot
-      // reach production unverified — the whole commit refuses instead.
-      const bytes = await this.readVerifiedSkillCandidate(proposal)
-      await commitIntent(this.commitHost(), this.commitRequest(proposal, 'apply', actor, approvalRef), bytes)
-      return { targets: [this.commitTarget(proposal)], providers: promotion.providers, proposal: await this.get(proposalId) }
+      // P2: read the candidate object once, verify every digest prepare
+      // recorded, and commit exactly those verified bytes. A source replaced
+      // mid-apply cannot reach production unverified — the whole commit refuses
+      // instead.
+      const candidate = await this.readVerifiedSkillCandidate(proposal)
+      const request = this.commitRequest(proposal, 'apply', actor, approvalRef)
+      await commitIntent(this.commitHost(), request, [candidate.skillMd, ...(candidate.sidecar === undefined ? [] : [candidate.sidecar])])
+      return { targets: request.files.map(file => file.target), providers: promotion.providers, proposal: await this.get(proposalId) }
     })
   }
 
@@ -1460,19 +1678,29 @@ export class EvolutionService extends Service {
   }
 
   /**
-   * The candidate skill's provider verdict, taken from the directory the
-   * promotion would write — plus the executor boundary this promotion cannot
-   * cross.
+   * The candidate object's provider verdict, taken from the directory the
+   * promotion would write — plus the two boundaries this promotion cannot cross.
    *
-   * The boundary: the commit promotes a **single `SKILL.md`**, so a
-   * candidate whose directory carries anything else (`SKILL.contract.json`, a
-   * `references/` or `scripts/` tree, any other file) is refused here by name.
-   * The executor is not being extended to multi-file candidates; what is being
-   * refused is the promotion of a candidate whose declaration or resources
-   * production would never receive — a promotion that reported an
-   * `execution-provider` role (or a content identity covering files nobody
-   * wrote) for content that does not exist is exactly the false record this
-   * refusal prevents.
+   * The shape boundary (K3): the commit promotes the **fixed file set of one
+   * skill object** — `SKILL.md`, plus the `SKILL.contract.json` beside it when
+   * and only when the prepared identity says the object has an execution
+   * sidecar. So a candidate directory that carries anything else (`references/`,
+   * `scripts/`, a stray file) is refused by name, and so is a directory whose
+   * file set does not match the frozen shape in either direction: a sidecar that
+   * appeared where the identity records none, or one that is missing where the
+   * identity records it. The role must agree with that shape too — two files
+   * load as an execution provider, one file as guidance — so a candidate that
+   * turned into the other kind of object is refused here rather than promoted as
+   * something the frozen experiment never evaluated.
+   *
+   * The derivation boundary: for an execution object the candidate sidecar is
+   * not the model's to write. It is re-derived here from the champion snapshot's
+   * own sidecar bytes and the candidate `SKILL.md` digest, and compared with the
+   * sandbox sidecar byte for byte (and by canonical digest) — so an escalated
+   * `requiredTools`, a swapped verifier or any other declaration change between
+   * prepare and promotion is refused by name. The champion side is checked too:
+   * its bytes must still hash to the baseline identity's sidecar digest, or the
+   * derivation would be built on bytes the prepare never recorded.
    *
    * Both the shape and the declaration are named when both are wrong: the
    * validator's own defects stay in the message with their codes, so this entry
@@ -1481,25 +1709,89 @@ export class EvolutionService extends Service {
    */
   private async assertSkillCandidateProvider(proposal: EvolutionProposal): Promise<PromotionProvider> {
     const sandbox = proposal.prepared?.sandbox
+    const identity = proposal.prepared?.skillContent
+    const baseline = proposal.prepared?.skillBaseline
     const { name } = proposal.mutation as unknown as SkillMutation
-    if (sandbox == null) {
-      throw new Error(`evolution: proposal "${proposal.proposalId}" names no sandbox; the candidate's provider role cannot be judged`)
+    if (sandbox == null || identity === undefined) {
+      throw new Error(`evolution: proposal "${proposal.proposalId}" names no sandbox or no candidate identity; the candidate's provider role cannot be judged`)
     }
     const directory = resolveWithin(this.root, `${sandbox}/skills/${name}`)
-    const unsupported = await unsupportedCandidateEntries(directory)
-    const verdict = await this.providerVerdict({ name, directory })
-    const defects = verdict.valid ? '' : verdict.defects.map(item => `${item.code}: ${item.detail}`).join('; ')
-    if (unsupported.length > 0) {
+    const expectedFiles = identity.contract === undefined ? ['SKILL.md'] : ['SKILL.md', SKILL_SIDECAR_FILE]
+    let entries: Dirent[]
+    try {
+      entries = await readdir(directory, { withFileTypes: true })
+    } catch {
+      // A directory that cannot be listed is the validator's to refuse, with
+      // the defect its absence deserves (`skill-missing`), not this boundary's.
+      entries = []
+    }
+    const present = entries.map(entry => (entry.isDirectory() ? `${entry.name}/` : entry.name)).sort()
+    const unexpected = present.filter(entry => !expectedFiles.includes(entry))
+    const missing = expectedFiles.filter(file => !present.includes(file))
+    if (unexpected.length > 0 || missing.length > 0) {
+      const parts = [
+        unexpected.length === 0 ? undefined : `carries ${unexpected.map(entry => JSON.stringify(entry)).join(', ')}`,
+        missing.length === 0 ? undefined : `is missing ${missing.map(entry => JSON.stringify(entry)).join(', ')}`,
+      ].filter((part): part is string => part !== undefined)
       throw new Error(
-        `evolution: skill candidate "${name}" at ${directory} carries ${unsupported.map(entry => JSON.stringify(entry)).join(', ')} — ` +
-        'the skill executor promotes single-file SKILL.md candidates only, so a sidecar or resource this promotion would not write is ' +
-        `refused rather than silently dropped${verdict.valid ? '' : `; the declared provider is unusable too — ${defects}`}`,
+        `evolution: skill candidate "${name}" at ${directory} ${parts.join(' and ')} — one skill object is a fixed file set ` +
+        `(${expectedFiles.map(file => JSON.stringify(file)).join(', ')}, the shape prepare froze), so a candidate whose files moved ` +
+        'is refused rather than promoted as an object the frozen evidence never described',
       )
     }
+    const verdict = await this.providerVerdict({ name, directory })
+    const defects = verdict.valid ? '' : verdict.defects.map(item => `${item.code}: ${item.detail}`).join('; ')
     if (!verdict.valid) {
       throw new Error(
         `evolution: skill candidate "${name}" at ${directory} is not a usable provider — ${defects}; ` +
         'a promotion writes only a skill a worker could load and, when it claims execution, only one whose verifier and tools the deployment can grant',
+      )
+    }
+    if (identity.contract === undefined) {
+      if (verdict.role !== 'guidance') {
+        throw new Error(
+          `evolution: skill candidate "${name}" at ${directory} loads as ${verdict.role}, but the object prepare froze is guidance ` +
+          '(no sidecar) — a candidate that changed roles is not the object the experiment evaluated, so the promotion is refused',
+        )
+      }
+      return promotionProviderOf(verdict)
+    }
+    if (verdict.role !== 'execution-provider') {
+      throw new Error(
+        `evolution: skill candidate "${name}" at ${directory} loads as ${verdict.role}, but the object prepare froze carries an ` +
+        'execution sidecar — a candidate that changed roles is not the object the experiment evaluated, so the promotion is refused',
+      )
+    }
+    const contract = identity.contract
+    const championSidecar = await readVerifiedFile(this.root, `${sandbox}/champion/skills/${name}/${SKILL_SIDECAR_FILE}`)
+    if (baseline?.contract === undefined || sha256Hex(championSidecar) !== baseline.contract.sha256) {
+      throw new Error(
+        `evolution: the champion snapshot of proposal "${proposal.proposalId}" no longer holds the sidecar bytes prepare recorded ` +
+        `(sha256 ${sha256Hex(championSidecar)} != ${baseline?.contract?.sha256 ?? 'none recorded'}) — the candidate sidecar is derived ` +
+        'from those bytes, so a snapshot that moved cannot be the declaration this promotion would install',
+      )
+    }
+    const candidate = await readVerifiedFile(this.root, `${sandbox}/skills/${name}/SKILL.md`)
+    if (sha256Hex(candidate) !== identity.sha256) {
+      throw new Error(
+        `evolution: skill candidate "${sandbox}/skills/${name}/SKILL.md" no longer matches the content identity recorded at prepare ` +
+        `(sha256 ${sha256Hex(candidate)} != ${identity.sha256}) — propose a new candidate and re-evaluate it; recorded identities are never re-digested`,
+      )
+    }
+    const expectedSidecar = candidateSidecar(loadedSidecar(championSidecar), identity.sha256)
+    const sandboxSidecar = await readVerifiedFile(this.root, `${sandbox}/skills/${name}/${SKILL_SIDECAR_FILE}`)
+    const sandboxText = sandboxSidecar.toString('utf8')
+    if (sandboxText !== expectedSidecar || sha256Hex(sandboxSidecar) !== contract.sha256) {
+      throw new Error(
+        `evolution: the candidate sidecar of skill "${name}" is not the declaration derived from production — the production object ` +
+        '(the champion snapshot) with only content.skillMdSha256 rewritten to the candidate SKILL.md digest; a content update may not ' +
+        'move capabilities, required tools, verifier or any other declaration field, so the promotion is refused',
+      )
+    }
+    if (verdict.contractDigest !== contract.contractDigest) {
+      throw new Error(
+        `evolution: the candidate sidecar of skill "${name}" loads to declaration digest ${verdict.contractDigest}, not the ` +
+        `${contract.contractDigest} prepared and recorded — a declaration the record does not name is not one this promotion may install`,
       )
     }
     return promotionProviderOf(verdict)
@@ -1565,15 +1857,16 @@ export class EvolutionService extends Service {
   }
 
   /**
-   * Read a prepared skill candidate's materialized bytes and verify them
-   * against the content identity recorded at prepare (P2). The one read path
-   * every stage shares: the experiment's pre-run check, every promotion gate,
-   * and the apply write.
-   * Throws — never silently re-digests — when the candidate file is missing,
-   * is not a regular file, its path crosses a symbolic link, or its bytes no
-   * longer match the recorded digest.
+   * Read a prepared skill candidate's materialized object and verify it against
+   * the content identity recorded at prepare (P2): the `SKILL.md` bytes, plus
+   * the sidecar bytes when and only when the identity records a sidecar. The one
+   * read path every stage shares: the experiment's pre-run check, every promotion
+   * gate, and the apply write. Throws — never silently re-digests — when a
+   * recorded file is missing, is not a regular file, its path crosses a symbolic
+   * link, its bytes no longer match the recorded digest, or the sidecar's
+   * presence does not match the recorded shape.
    */
-  async readSkillCandidate(proposalId: string): Promise<Buffer> {
+  async readSkillCandidate(proposalId: string): Promise<{ skillMd: Buffer; sidecar?: Buffer }> {
     return this.readVerifiedSkillCandidate(await this.get(proposalId))
   }
 
@@ -1585,11 +1878,15 @@ export class EvolutionService extends Service {
    * cannot bypass it. Nothing here writes, merges, or overwrites — a conflict
    * only throws.
    *
-   * The prepare-time baseline is a real regular file whose bytes still hash to
-   * the digest prepare recorded. A file that changed, disappeared, changed type
+   * The prepare-time baseline is a real, complete object: its `SKILL.md` bytes
+   * still hash to the recorded digest, and — when the baseline records a
+   * sidecar — the production `SKILL.contract.json` is there with exactly the
+   * bytes prepare recorded. A missing file, a file that changed, changed type
    * (now a directory), or sits behind a symbolic link (the file itself or an
-   * ancestor) is a conflict. Only `targetType: skill` carries a baseline; every
-   * other targetType passes untouched.
+   * ancestor) is a conflict, and so is a sidecar that appeared beside a baseline
+   * that had none: the shape production would be loaded in has changed, which is
+   * a third party's edit like any other. Only `targetType: skill` carries a
+   * baseline; every other targetType passes untouched.
    */
   async checkProductionBaseline(proposalId: string): Promise<void> {
     await this.assertProductionBaseline(await this.get(proposalId))
@@ -1604,6 +1901,14 @@ export class EvolutionService extends Service {
     const guidance =
       'create a new candidate from the current production state and re-evaluate it; ' +
       'an apply never overwrites a production skill it cannot verify'
+    const identity = prepared.skillBaseline
+    if (identity === undefined) {
+      // The fold requires the baseline on every prepared record, so this branch
+      // is a belt for the view's optional field rather than a reachable state.
+      throw new Error(
+        `evolution: skill proposal "${proposal.proposalId}" records no production baseline identity — ${guidance}`,
+      )
+    }
     let current: { bytes: Buffer; sha256: string } | null
     try {
       current = await readProductionSkill(this.skillRoot, productionSkillRelative(name))
@@ -1611,14 +1916,6 @@ export class EvolutionService extends Service {
       throw new Error(
         `evolution: the production skill "${target}" is no longer a readable regular file ` +
         `(${(error as Error).message.replace(/^evolution: /, '')}) — ${guidance}`,
-      )
-    }
-    const identity = prepared.skillBaseline
-    if (identity === undefined) {
-      // The fold requires the baseline on every prepared record, so this branch
-      // is a belt for the view's optional field rather than a reachable state.
-      throw new Error(
-        `evolution: skill proposal "${proposal.proposalId}" records no production baseline identity — ${guidance}`,
       )
     }
     if (current === null) {
@@ -1632,9 +1929,40 @@ export class EvolutionService extends Service {
         `(sha256 ${current.sha256} != ${identity.sha256}) — ${guidance}`,
       )
     }
+    let sidecar: { bytes: Buffer; sha256: string } | null
+    try {
+      sidecar = await readProductionSkill(this.skillRoot, productionSidecarRelative(name))
+    } catch (error) {
+      throw new Error(
+        `evolution: the production sidecar "${this.skillRoot}/${name}/${SKILL_SIDECAR_FILE}" is no longer a readable regular file ` +
+        `(${(error as Error).message.replace(/^evolution: /, '')}) — ${guidance}`,
+      )
+    }
+    if (identity.contract !== undefined) {
+      if (sidecar === null) {
+        throw new Error(
+          `evolution: the production sidecar "${this.skillRoot}/${name}/${SKILL_SIDECAR_FILE}" recorded at prepare ` +
+          `(sha256 ${identity.contract.sha256}) no longer exists — ${guidance}`,
+        )
+      }
+      if (sidecar.sha256 !== identity.contract.sha256) {
+        throw new Error(
+          `evolution: the production sidecar "${this.skillRoot}/${name}/${SKILL_SIDECAR_FILE}" changed since prepare ` +
+          `(sha256 ${sidecar.sha256} != ${identity.contract.sha256}) — ${guidance}`,
+        )
+      }
+      return
+    }
+    if (sidecar !== null) {
+      throw new Error(
+        `evolution: the production skill "${name}" now carries a ${SKILL_SIDECAR_FILE} the baseline prepare recorded did not have ` +
+        `(sha256 ${sidecar.sha256}) — the object production would load is not the object the candidate was prepared and evaluated ` +
+        `against; ${guidance}`,
+      )
+    }
   }
 
-  private async readVerifiedSkillCandidate(proposal: EvolutionProposal): Promise<Buffer> {
+  private async readVerifiedSkillCandidate(proposal: EvolutionProposal): Promise<{ skillMd: Buffer; sidecar?: Buffer }> {
     if (proposal.targetType !== 'skill') {
       throw new Error(`evolution: candidate content identity binds skill proposals only, not "${proposal.targetType}"`)
     }
@@ -1645,44 +1973,79 @@ export class EvolutionService extends Service {
       // belt for the view's optional fields rather than a reachable state.
       throw new Error(
         `evolution: skill proposal "${proposal.proposalId}" carries no recorded candidate content identity — ` +
-        'propose a new candidate and re-evaluate it (prepare records the SHA-256 of the materialized SKILL.md)',
+        'propose a new candidate and re-evaluate it (prepare records the SHA-256 of the materialized files)',
       )
     }
     const rel = `${sandbox}/skills/${identity.name}/SKILL.md`
-    const bytes = await readVerifiedFile(this.root, rel)
-    const digest = sha256Hex(bytes)
+    const skillMd = await readVerifiedFile(this.root, rel)
+    const digest = sha256Hex(skillMd)
     if (digest !== identity.sha256) {
       throw new Error(
         `evolution: skill candidate "${rel}" no longer matches the content identity recorded at prepare ` +
         `(sha256 ${digest} != ${identity.sha256}) — propose a new candidate and re-evaluate it; recorded identities are never re-digested`,
       )
     }
-    return bytes
+    const sidecarRel = `${sandbox}/skills/${identity.name}/${SKILL_SIDECAR_FILE}`
+    let sidecar: Buffer | undefined
+    try {
+      sidecar = await readVerifiedFile(this.root, sidecarRel)
+    } catch (error) {
+      const reason = (error as Error).message.replace(/^verified-read: /, '')
+      if (identity.contract === undefined) {
+        // The identity records guidance: the read itself is the probe for the
+        // shape. "Missing" is the right shape; anything else (a symlink, a
+        // directory in the file's place) is an entry the guidance object never had.
+        if (/is missing under/.test((error as Error).message)) return { skillMd }
+        throw new Error(
+          `evolution: skill candidate "${sidecarRel}" is present but cannot be read as a real file (${reason}), while the content ` +
+          'identity recorded at prepare is guidance (no sidecar) — propose a new candidate and re-evaluate it',
+        )
+      }
+      throw new Error(
+        `evolution: skill candidate "${sidecarRel}" recorded at prepare (sha256 ${identity.contract.sha256}) cannot be read as a real ` +
+        `file (${reason}) — propose a new candidate and re-evaluate it`,
+      )
+    }
+    if (identity.contract === undefined) {
+      throw new Error(
+        `evolution: skill candidate "${sidecarRel}" exists in the sandbox, but the content identity recorded at prepare is guidance ` +
+        '(no sidecar) — the candidate is no longer the object the experiment evaluated: propose a new candidate and re-evaluate it',
+      )
+    }
+    const sidecarDigest = sha256Hex(sidecar)
+    if (sidecarDigest !== identity.contract.sha256) {
+      throw new Error(
+        `evolution: skill candidate "${sidecarRel}" no longer matches the content identity recorded at prepare ` +
+        `(sha256 ${sidecarDigest} != ${identity.contract.sha256}) — propose a new candidate and re-evaluate it; recorded identities are never re-digested`,
+      )
+    }
+    return { skillMd, sidecar }
   }
 
   /**
-   * Move applied → rolledback: undo the apply by restoring the champion
-   * `SKILL.md` snapshot taken at prepare, as one commit — the same intent →
-   * atomic write → completion order as apply, so an interrupted rollback is
-   * recoverable the same way. A record of another target type has no executor
-   * here: this build writes and restores a single `SKILL.md` only, and an
-   * applied capability row or preset directory is refused by name rather than
-   * touched. Same approval discipline as apply: the tool asks a human first, the
-   * service only executes and records.
+   * Move applied → rolledback: undo the apply by restoring the champion snapshot
+   * taken at prepare, as one commit — the same intent → atomic write →
+   * completion order as apply, so an interrupted rollback is recoverable the
+   * same way, including between the two files of one object. A record of another
+   * target type has no executor here: this build writes and restores the fixed
+   * file set of one skill object only, and an applied capability row or preset
+   * directory is refused by name rather than touched. Same approval discipline
+   * as apply: the tool asks a human first, the service only executes and records.
    *
    * A rollback restores *this* proposal's baseline and nothing else, so both
-   * ends are re-verified before the intent is recorded: production must still
-   * carry exactly the content this proposal applied (`prepared.skillContent`,
-   * P2), and the champion snapshot must still hash to the baseline prepare
-   * recorded (`prepared.skillBaseline`, P3). A target a later proposal — or any
-   * other writer — changed since is refused by name with nothing written, and so
-   * is a snapshot that can no longer reproduce the bytes it captured: neither
-   * may be papered over by restoring an old version on top of a newer one.
+   * ends are re-verified per file before the intent is recorded: every
+   * production file must still carry exactly the content this proposal applied
+   * (`prepared.skillContent`, P2), and every champion snapshot file must still
+   * hash to the baseline prepare recorded (`prepared.skillBaseline`, P3). A file
+   * a later proposal — or any other writer — changed since is refused by name
+   * with nothing written, and so is a snapshot that can no longer reproduce the
+   * bytes it captured: neither may be papered over by restoring an old version
+   * on top of a newer one.
    *
    * As in {@link apply}, an open intent of this proposal is settled rather than
    * duplicated, and the result reports the recovery; an open intent of another
-   * proposal that names the same target refuses this rollback by name before
-   * anything is read or written ({@link assertTargetUncommitted}).
+   * proposal that commits the same skill directory refuses this rollback by name
+   * before anything is read or written ({@link assertTargetUncommitted}).
    */
   async rollback(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome> {
     await this.assertNext(proposalId, 'rolledback')
@@ -1698,32 +2061,48 @@ export class EvolutionService extends Service {
           )
         }
         const recovered = await this.settleOpenIntent(open)
-        return { targets: [open.target], recovered, proposal: await this.get(proposalId) }
+        return { targets: open.files.map(file => file.target), recovered, proposal: await this.get(proposalId) }
       }
       this.assertTargetUncommitted(proposal)
       const request = this.commitRequest(proposal, 'rollback', actor, approvalRef)
       const prepared = proposal.prepared!
-      const identity = prepared.skillContent!
-      const current = await readProductionSkill(this.skillRoot, productionSkillRelative((proposal.mutation as SkillMutation).name))
-      if (current === null || current.sha256 !== identity.sha256) {
-        throw new Error(
-          `evolution: the production skill "${request.target}" does not hold the content proposal "${proposalId}" applied ` +
-          `(sha256 ${current?.sha256 ?? 'missing'} != ${identity.sha256}) — a rollback restores the baseline of the version this ` +
-          'proposal applied, and a target another writer (or a later proposal) changed is left exactly as it is: nothing was written ' +
-          'and no commit intent was recorded',
-        )
+      const applied = prepared.skillContent!
+      const name = (proposal.mutation as SkillMutation).name
+      // Both files the proposal applied must still be exactly what it applied,
+      // and both champion files must still hash to the baseline prepare
+      // recorded — for an execution object that is two files per end. A target
+      // another writer (or a later proposal) changed is left exactly as it is;
+      // a snapshot that can no longer reproduce the bytes it captured is
+      // refused too. Either way nothing is written and no intent is recorded.
+      for (const [index, file] of request.files.entries()) {
+        const relative = index === 0 ? productionSkillRelative(name) : productionSidecarRelative(name)
+        const expected = index === 0 ? applied.sha256 : applied.contract!.sha256
+        const current = await readProductionSkill(this.skillRoot, relative)
+        if (current === null || current.sha256 !== expected) {
+          throw new Error(
+            `evolution: the production file "${file.target}" does not hold the content proposal "${proposalId}" applied ` +
+            `(sha256 ${current?.sha256 ?? 'missing'} != ${expected}) — a rollback restores the baseline of the object this proposal ` +
+            'applied, and a file another writer (or a later proposal) changed is left exactly as it is: nothing was written and no ' +
+            'commit intent was recorded',
+          )
+        }
       }
-      const champion = await readVerifiedFile(this.root, request.source)
-      const digest = sha256Hex(champion)
-      if (digest !== prepared.skillBaseline!.sha256) {
-        throw new Error(
-          `evolution: the champion snapshot "${request.source}" of proposal "${proposalId}" no longer hashes to the production ` +
-          `baseline recorded at prepare (sha256 ${digest} != ${prepared.skillBaseline!.sha256}) — the snapshot cannot restore the ` +
-          'bytes it captured: nothing was written and no commit intent was recorded',
-        )
+      const championFiles: Buffer[] = []
+      for (const [index, file] of request.files.entries()) {
+        const expected = index === 0 ? prepared.skillBaseline!.sha256 : prepared.skillBaseline!.contract!.sha256
+        const snapshot = await readVerifiedFile(this.root, file.source)
+        const digest = sha256Hex(snapshot)
+        if (digest !== expected) {
+          throw new Error(
+            `evolution: the champion snapshot "${file.source}" of proposal "${proposalId}" no longer hashes to the production ` +
+            `baseline recorded at prepare (sha256 ${digest} != ${expected}) — the snapshot cannot restore the bytes it captured: ` +
+            'nothing was written and no commit intent was recorded',
+          )
+        }
+        championFiles.push(snapshot)
       }
-      await commitIntent(this.commitHost(), request, champion)
-      return { targets: [request.target], proposal: await this.get(proposalId) }
+      await commitIntent(this.commitHost(), request, championFiles)
+      return { targets: request.files.map(file => file.target), proposal: await this.get(proposalId) }
     })
   }
 
@@ -1770,7 +2149,7 @@ export class EvolutionService extends Service {
    */
   async openIntentTargets(): Promise<readonly string[]> {
     await this.loaded
-    return this.openIntents(this.fold(this.records)).map(intent => intent.target)
+    return this.openIntents(this.fold(this.records)).flatMap(intent => intent.files.map(file => file.target))
   }
 
   /** Every commit intent still open, in ledger order — one per proposal at most, validated by the fold. */
@@ -1802,12 +2181,14 @@ export class EvolutionService extends Service {
 
   /**
    * The commit request one apply/rollback binds, read off the prepared record
-   * the proposal already carries: the absolute target (the same path
-   * {@link applyTargets} names to the human), the content identity production
-   * must hold before and after, and the recoverable source under the ledger
-   * root. `apply` commits the candidate over the recorded baseline; `rollback`
-   * commits the champion snapshot over the content the apply installed — the two
-   * digests swap, and nothing else about the two directions differs.
+   * the proposal already carries: every file of the object's fixed set with its
+   * absolute target (the same paths {@link applyTargets} names to the human), the
+   * content identity production must hold before and after that file, and the
+   * recoverable source under the ledger root. `apply` commits the candidate files
+   * over the recorded baseline; `rollback` commits the champion snapshot files
+   * over the content the apply installed — the two identities swap per file, and
+   * nothing else about the two directions differs. The order is the object's:
+   * `SKILL.md` first, the sidecar second when there is one.
    */
   private commitRequest(
     proposal: EvolutionProposal,
@@ -1817,8 +2198,8 @@ export class EvolutionService extends Service {
   ): CommitRequest {
     if (proposal.targetType !== 'skill') {
       throw new Error(
-        `evolution: proposal "${proposal.proposalId}" targets "${proposal.targetType}" — this build writes and restores a single ` +
-        `SKILL.md only, so there is no executor to ${direction} an applied ${proposal.targetType} record`,
+        `evolution: proposal "${proposal.proposalId}" targets "${proposal.targetType}" — this build writes and restores the fixed ` +
+        `file set of one skill object only, so there is no executor to ${direction} an applied ${proposal.targetType} record`,
       )
     }
     const prepared = proposal.prepared
@@ -1838,63 +2219,97 @@ export class EvolutionService extends Service {
         `mutation names "${name}" — the commit cannot write one skill's verified bytes onto another skill's target`,
       )
     }
-    return direction === 'apply'
+    const contentContract = content.contract
+    const baselineContract = baseline.contract
+    if ((contentContract === undefined) !== (baselineContract === undefined)) {
+      throw new Error(
+        `evolution: proposal "${proposal.proposalId}" records a candidate object and a production baseline of different shapes ` +
+        `(${contentContract === undefined ? 'guidance' : 'execution'} vs ${baselineContract === undefined ? 'guidance' : 'execution'}) ` +
+        '— a commit moves one object between two versions of the same shape',
+      )
+    }
+    const targets = this.commitTargets(proposal)
+    const skillMd: CommitFile = direction === 'apply'
       ? {
-          proposalId: proposal.proposalId,
-          direction,
-          approvalRef,
-          target: this.commitTarget(proposal),
+          target: targets[0]!,
           baselineSha256: baseline.sha256,
           contentSha256: content.sha256,
           source: `${prepared.sandbox}/skills/${name}/SKILL.md`,
-          actor,
         }
       : {
-          proposalId: proposal.proposalId,
-          direction,
-          approvalRef,
-          target: this.commitTarget(proposal),
+          target: targets[0]!,
           baselineSha256: content.sha256,
           contentSha256: baseline.sha256,
           source: `${prepared.sandbox}/champion/skills/${name}/SKILL.md`,
-          actor,
         }
-  }
-
-  /** The one production path a commit of this proposal may write: `<skillRoot>/<name>/SKILL.md`, confined to the skill root. */
-  private commitTarget(proposal: EvolutionProposal): string {
-    return resolveWithin(this.skillRoot, productionSkillRelative((proposal.mutation as SkillMutation).name))
+    const files: CommitFile[] = [skillMd]
+    if (contentContract !== undefined && baselineContract !== undefined) {
+      files.push(direction === 'apply'
+        ? {
+            target: targets[1]!,
+            baselineSha256: baselineContract.sha256,
+            contentSha256: contentContract.sha256,
+            source: `${prepared.sandbox}/skills/${name}/${SKILL_SIDECAR_FILE}`,
+          }
+        : {
+            target: targets[1]!,
+            baselineSha256: contentContract.sha256,
+            contentSha256: baselineContract.sha256,
+            source: `${prepared.sandbox}/champion/skills/${name}/${SKILL_SIDECAR_FILE}`,
+          })
+    }
+    return { proposalId: proposal.proposalId, direction, approvalRef, files, actor }
   }
 
   /**
-   * A fresh commit of `proposal` refuses, by name, a production target another
-   * proposal's open commit intent names. {@link commitExclusive} serializes one
-   * process's commits and nothing else, so a second commit queued behind an
-   * unfinished first one would read the pre-commit bytes, pass its own baseline
-   * check and move the target, leaving the first intent with no commit path left
-   * to settle it: `blocked` by name, its target refused by admission until
-   * something restores the bytes that intent names as its baseline. The
-   * per-target gate is what stops that. It is in-process, per production target
-   * and under the deployment's existing single-writer constraint — not a
-   * distributed lock, not a queue and not a retry loop; the intent is settled
-   * first, by {@link reconcile} or by a retry of the proposal that owns it.
+   * The production paths a commit of this proposal may write: the object's fixed
+   * file set under `<skillRoot>/<name>/` — `SKILL.md` always, and the
+   * `SKILL.contract.json` beside it when the prepared identity records an
+   * execution sidecar — each confined to the skill root, in commit order.
+   */
+  private commitTargets(proposal: EvolutionProposal): string[] {
+    const name = (proposal.mutation as SkillMutation).name
+    const targets = [resolveWithin(this.skillRoot, productionSkillRelative(name))]
+    if (proposal.prepared?.skillContent?.contract !== undefined) {
+      targets.push(resolveWithin(this.skillRoot, productionSidecarRelative(name)))
+    }
+    return targets
+  }
+
+  /**
+   * A fresh commit of `proposal` refuses, by name, a production **directory**
+   * another proposal's open commit intent touches. {@link commitExclusive}
+   * serializes one process's commits and nothing else, so a second commit queued
+   * behind an unfinished first one would read the pre-commit bytes, pass its own
+   * baseline check and move the target, leaving the first intent with no commit
+   * path left to settle it: `blocked` by name, its target refused by admission
+   * until something restores the bytes that intent names as its baseline. The
+   * per-object gate is what stops that; it matches on the directory that holds
+   * the files, because one intent covers a skill's fixed file set together — a
+   * second proposal prepared against the same skill is blocked by whichever file
+   * of the other intent this proposal's file set shares a directory with. It is
+   * in-process, per production object and under the deployment's existing
+   * single-writer constraint — not a distributed lock, not a queue and not a
+   * retry loop; the intent is settled first, by {@link reconcile} or by a retry
+   * of the proposal that owns it.
    *
-   * Only a materialized skill mutation has a commit target this build may write:
+   * Only a materialized skill mutation has commit targets this build may write:
    * every other proposal keeps the named refusal its own entry produces
    * ({@link checkPromotion}, {@link commitRequest}).
    */
   private assertTargetUncommitted(proposal: EvolutionProposal): void {
     if (proposal.targetType !== 'skill' || proposal.mutation === undefined) return
-    const target = this.commitTarget(proposal)
+    const directories = new Set(this.commitTargets(proposal).map(target => dirname(target)))
     for (const other of this.fold(this.records).values()) {
       const intent = other.openIntent
       if (intent === undefined || other.proposalId === proposal.proposalId) continue
-      if (resolve(intent.target) !== target) continue
+      const shared = intent.files.map(file => dirname(resolve(file.target))).find(directory => directories.has(directory))
+      if (shared === undefined) continue
       throw new Error(
         `evolution: the open commit intent "${intent.intentId}" of proposal "${other.proposalId}" (direction ` +
-        `"${intent.direction}") names the production target "${target}" — proposal "${proposal.proposalId}" does not commit over ` +
-        "another proposal's unsettled intent; settle that intent first (reconcile, or a retry of the proposal that owns it): " +
-        'nothing was written and no commit intent was recorded',
+        `"${intent.direction}") commits the production skill directory "${shared}" — proposal "${proposal.proposalId}" does not ` +
+        "commit over another proposal's unsettled intent; settle that intent first (reconcile, or a retry of the proposal that owns " +
+        'it): nothing was written and no commit intent was recorded',
       )
     }
   }
@@ -1904,8 +2319,10 @@ export class EvolutionService extends Service {
    * target and a source resolve against, the service's own verified reads — P2
    * for a candidate, the walk-verified production read, the ledger-root read for
    * a snapshot — the append funnel every line goes through (format check, staged
-   * fold, serialized write), and the probe seam. The commit path owns the order;
-   * the service owns what may be read and what a line must say.
+   * fold, serialized write), the whole-object verification that closes a commit,
+   * and the probe seam. The commit path owns the order; the service owns what
+   * may be read, what a line must say, and what "production is the object this
+   * direction promised" means.
    */
   private commitHost(): CommitHost {
     return {
@@ -1924,7 +2341,92 @@ export class EvolutionService extends Service {
         return bytes
       },
       readProduction: relative => readProductionSkill(this.skillRoot, relative),
-      probe: stage => this.commitProbe?.(stage),
+      verifyCommitted: intent => this.verifyCommitted(intent),
+      probe: (stage, target) => this.commitProbe?.(stage, target),
+    }
+  }
+
+  /**
+   * The whole-object verification a commit runs after its last file is written
+   * and before the completion is recorded — in a fresh commit and in every
+   * reconciliation branch that records one.
+   *
+   * It reads production the way a loader does (`loadSkillSidecar` through the
+   * same {@link providerVerdict} every promotion uses, so the verdict carries
+   * the verifier vocabulary and the capability table this deployment really
+   * has) and requires that the directory *is* one loadable object carrying the
+   * identity this direction promised:
+   *
+   * - the verdict is valid — no defect of any kind: a `SKILL.md` a declaration
+   *   does not cover, a declaration the bytes do not match, a file nobody
+   *   declares, a file set the shape rules refuse;
+   * - the role matches the file set the intent committed: two files load as an
+   *   execution provider, one file as guidance (a knowledge verdict is
+   *   impossible here, and would be refused by the same comparison);
+   * - `SKILL.md` carries the digest the first file's record named;
+   * - with two files, the production sidecar's exact bytes hash to the second
+   *   file's record, and the loaded declaration digest is the one the direction
+   *   promised — for an apply the candidate identity prepare recorded, for a
+   *   rollback the production baseline it recorded. This is also what makes the
+   *   completion a statement about the registry: `contractDigest` is exactly the
+   *   identity a registry revision absorbs, so by the time the completion line
+   *   is written, the registry's own view of the skill is already the new object.
+   *
+   * A throw is a named refusal: the intent stays open, no completion is
+   * recorded, and the caller and the next reconciliation both see the same
+   * refusal rather than a settled commit a loader would not accept. It never
+   * writes: this check reads production as it stands.
+   */
+  private async verifyCommitted(intent: CommitIntentView): Promise<void> {
+    const skillMd = intent.files[0]!
+    const directory = dirname(skillMd.target)
+    const name = basename(directory)
+    const twoFiles = intent.files.length === 2
+    const verdict = await this.providerVerdict({ name, directory })
+    const defects = verdict.valid ? '' : verdict.defects.map(item => `${item.code}: ${item.detail}`).join('; ')
+    if (!verdict.valid) {
+      throw new Error(
+        `evolution: the production skill object "${directory}" does not load after the ${intent.direction} of proposal ` +
+        `"${intent.proposalId}" — ${defects}; the commit intent stays open and no completion is recorded, because production is ` +
+        'neither the state before the commit nor a loadable object',
+      )
+    }
+    const expectedRole = twoFiles ? 'execution-provider' : 'guidance'
+    if (verdict.role !== expectedRole) {
+      throw new Error(
+        `evolution: the production skill object "${directory}" loads as ${verdict.role} after the ${intent.direction} of proposal ` +
+        `"${intent.proposalId}", not as the ${expectedRole} its committed file set describes — the commit intent stays open and no ` +
+        'completion is recorded',
+      )
+    }
+    if (verdict.content.skillMdSha256 !== skillMd.contentSha256) {
+      throw new Error(
+        `evolution: the production file "${skillMd.target}" does not carry the committed content after the ${intent.direction} of ` +
+        `proposal "${intent.proposalId}" (sha256 ${verdict.content.skillMdSha256} != ${skillMd.contentSha256}) — the commit intent ` +
+        'stays open and no completion is recorded',
+      )
+    }
+    if (!twoFiles) return
+    if (verdict.role !== 'execution-provider') return
+    const sidecarFile = intent.files[1]!
+    const sidecar = await readVerifiedFile(this.skillRoot, productionSidecarRelative(name))
+    const sidecarDigest = sha256Hex(sidecar)
+    if (sidecarDigest !== sidecarFile.contentSha256) {
+      throw new Error(
+        `evolution: the production file "${sidecarFile.target}" does not carry the committed content after the ${intent.direction} of ` +
+        `proposal "${intent.proposalId}" (sha256 ${sidecarDigest} != ${sidecarFile.contentSha256}) — the commit intent stays open and ` +
+        'no completion is recorded',
+      )
+    }
+    const proposal = await this.get(intent.proposalId)
+    const promised = intent.direction === 'apply' ? proposal.prepared?.skillContent : proposal.prepared?.skillBaseline
+    if (promised?.contract === undefined || verdict.contractDigest !== promised.contract.contractDigest) {
+      throw new Error(
+        `evolution: the production skill "${name}" loads to declaration digest ${verdict.contractDigest} after the ${intent.direction} ` +
+        `of proposal "${intent.proposalId}", not the ${promised?.contract?.contractDigest ?? 'identity without a sidecar half'} this ` +
+        'direction recorded — the commit intent stays open and no completion is recorded, because the object a registry would absorb ' +
+        'is not the one the proposal promised',
+      )
     }
   }
 
@@ -1987,18 +2489,20 @@ export class EvolutionService extends Service {
   }
 
   /**
-   * Write the skill mutation into the sandbox dir `dir`, then the champion
-   * snapshot from the production bytes the caller already read (P3: one read,
-   * before anything was written — those bytes become the snapshot and the
-   * recorded `skillBaseline` digest together, so the two can never describe two
-   * different reads of the production file). Every path goes through
-   * `resolveWithin`, so a write can never land outside the sandbox; the
-   * production skill root is read-only here.
+   * Write the candidate object into the sandbox dir `dir`, then the champion
+   * snapshot from the production bytes the caller already read (P3: one read of
+   * the production files, before anything was written — those bytes become the
+   * snapshot and the recorded `skillBaseline` identity together, so the two can
+   * never describe two different reads). The candidate's sidecar, when the
+   * object has one, is *derived* here ({@link candidateSidecar}) and not taken
+   * from the mutation: the model submits `SKILL.md` text and nothing else. Every
+   * path goes through `resolveWithin`, so a write can never land outside the
+   * sandbox; the production skill root is read-only here.
    */
   private async materialize(
     dir: string,
     mutation: Record<string, unknown>,
-    production: { bytes: Buffer; sha256: string },
+    production: { skillMd: Buffer; sidecar?: Buffer },
   ): Promise<{ files: string[]; skillBaseline: SkillContentIdentity }> {
     const files: string[] = []
     const write = async (rel: string, content: string | Buffer): Promise<void> => {
@@ -2008,11 +2512,28 @@ export class EvolutionService extends Service {
       files.push(rel)
     }
     // This build materializes a skill candidate and nothing else: `candidate`
-    // admits no other target type, so there is no other arm to take.
+    // admits no other target type, so there is no other arm to take. The
+    // candidate's file set is written first, then the champion's, so the
+    // recorded `files` list reads candidate-first.
     const { name, content } = mutation as unknown as SkillMutation
-    await write(`skills/${name}/SKILL.md`, content)
-    await write(`champion/skills/${name}/SKILL.md`, production.bytes)
-    return { files, skillBaseline: { name, sha256: production.sha256 } }
+    const candidateMd = Buffer.from(content, 'utf8')
+    await write(`skills/${name}/SKILL.md`, candidateMd)
+    if (production.sidecar !== undefined) {
+      await write(`skills/${name}/${SKILL_SIDECAR_FILE}`, candidateSidecar(loadedSidecar(production.sidecar), sha256Hex(candidateMd)))
+    }
+    await write(`champion/skills/${name}/SKILL.md`, production.skillMd)
+    if (production.sidecar !== undefined) {
+      await write(`champion/skills/${name}/${SKILL_SIDECAR_FILE}`, production.sidecar)
+      return {
+        files,
+        skillBaseline: {
+          name,
+          sha256: sha256Hex(production.skillMd),
+          contract: contractIdentityOf(production.sidecar),
+        },
+      }
+    }
+    return { files, skillBaseline: { name, sha256: sha256Hex(production.skillMd) } }
   }
 
   /**
@@ -2034,10 +2555,11 @@ export class EvolutionService extends Service {
    * ledger line is judged against the *other* lines around it: a `commit_intent`
    * is admitted only for a proposal in the state its direction commits (`apply`
    * from decided, `rollback` from applied), only with the derived id
-   * `<proposalId>/<direction>`, and only when the proposal has no other open
-   * intent; an `applied`/`rolledback` completion is admitted only when it closes
-   * the open intent of its own direction — same id, same approval, that exact
-   * target — and it closes it. So a completion cannot be recorded without its
+   * `<proposalId>/<direction>`, only with a well-formed fixed file set, and only
+   * when the proposal has no other open intent; an `applied`/`rolledback`
+   * completion is admitted only when it closes the open intent of its own
+   * direction — same id, same approval, that exact file set in the intent's own
+   * order — and it closes it. So a completion cannot be recorded without its
    * intent, cannot borrow another approval or another target, and cannot be
    * recorded twice: the second line has nothing left to close.
    *
@@ -2057,10 +2579,7 @@ export class EvolutionService extends Service {
           proposalId: record.proposalId,
           direction: record.direction,
           approvalRef: record.approvalRef,
-          target: record.target,
-          baselineSha256: record.baselineSha256,
-          contentSha256: record.contentSha256,
-          source: record.source,
+          files: record.files.map(file => ({ ...file })),
           actor: record.actor,
           at: record.at,
         }
@@ -2114,7 +2633,7 @@ export class EvolutionService extends Service {
           if (current.targetType !== 'skill') {
             throw new Error(
               `evolution: candidate record for "${record.proposalId}" targets "${current.targetType}" — this build's candidate ` +
-              'lifecycle is a single-file SKILL.md replacement only, and no other target type has an evaluator here',
+              'lifecycle is a SKILL.md replacement of an existing skill object, and no other target type has an evaluator here',
             )
           }
           validateVersionSet(record.versionSet)
@@ -2133,7 +2652,7 @@ export class EvolutionService extends Service {
             throw new Error(
               `evolution: prepared record for "${record.proposalId}" is not a materialized skill prepare ` +
               `(mechanical=${String(record.mechanical)}, champion=${JSON.stringify(record.champion ?? null)}, ` +
-              `sandbox=${JSON.stringify(record.sandbox ?? null)}) — this build prepares a single-file SKILL.md replacement only`,
+              `sandbox=${JSON.stringify(record.sandbox ?? null)}) — this build prepares a replacement of one skill object only`,
             )
           }
           if (!Array.isArray(record.files) || record.files.some(file => typeof file !== 'string')) {
@@ -2142,29 +2661,29 @@ export class EvolutionService extends Service {
           // P2/P3, required (S4-E 收尾): a prepare without the candidate's
           // content identity or without the production baseline it read is a
           // prepare whose evidence cannot be re-proved, and no entry here writes
-          // one.
-          const skillContent = record.skillContent
-          if (!isRecord(skillContent) || typeof skillContent.name !== 'string' || skillContent.name.length === 0
-            || typeof skillContent.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(skillContent.sha256)) {
+          // one. Each identity is the whole object's since K3: the SKILL.md
+          // digest, plus — exactly when the object has an execution sidecar —
+          // the sidecar's exact-byte digest and its canonical declaration digest.
+          const skillContent = preparedIdentity(record.skillContent, 'skillContent', record.proposalId)
+          const skillBaseline = preparedIdentity(record.skillBaseline, 'skillBaseline', record.proposalId)
+          // The object's shape is fixed at prepare: one half with a sidecar and
+          // the other without describes a role change between candidate and
+          // production that no prepare performs, so the record is refused rather
+          // than folded into a commit that could only write one of the two.
+          if ((skillContent.contract === undefined) !== (skillBaseline.contract === undefined)) {
             throw new Error(
-              `evolution: prepared record for "${record.proposalId}" has no valid skillContent identity — every prepare records the ` +
-              'content identity of the materialized candidate SKILL.md',
-            )
-          }
-          const skillBaseline = record.skillBaseline
-          if (!isRecord(skillBaseline) || typeof skillBaseline.name !== 'string' || skillBaseline.name.length === 0
-            || typeof skillBaseline.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(skillBaseline.sha256)) {
-            throw new Error(
-              `evolution: prepared record for "${record.proposalId}" has no valid skillBaseline identity — every prepare records the ` +
-              'production baseline it read before materializing the candidate',
+              `evolution: prepared record for "${record.proposalId}" mixes object shapes — its candidate identity is ` +
+              `${skillContent.contract === undefined ? 'guidance (no sidecar)' : 'an execution object (with a sidecar)'} while its ` +
+              `production baseline is ${skillBaseline.contract === undefined ? 'guidance (no sidecar)' : 'an execution object (with a sidecar)'} ` +
+              '— one prepare freezes one object, so a candidate that changed roles is refused at the fold',
             )
           }
           current.prepared = {
             sandbox: record.sandbox,
             mechanical: true,
             champion: 'captured',
-            skillContent: { name: skillContent.name, sha256: skillContent.sha256 },
-            skillBaseline: { name: skillBaseline.name, sha256: skillBaseline.sha256 },
+            skillContent,
+            skillBaseline,
             files: [...record.files],
           }
           break
@@ -2229,11 +2748,12 @@ export class EvolutionService extends Service {
               'written for the grant the commit was authorised by, never a second one',
             )
           }
-          if (record.targets.length !== 1 || record.targets[0] !== open.target) {
+          const expectedTargets = open.files.map(file => file.target)
+          if (record.targets.length !== expectedTargets.length || record.targets.some((target, index) => target !== expectedTargets[index])) {
             throw new Error(
               `evolution: ${record.kind} record for "${record.proposalId}" names targets ${JSON.stringify(record.targets)}, but the ` +
-              `open intent "${open.intentId}" commits ${JSON.stringify([open.target])} — a completion records the exact target its ` +
-              'intent committed',
+              `open intent "${open.intentId}" commits ${JSON.stringify(expectedTargets)} — a completion records the exact file set its ` +
+              'intent committed, in the intent\'s own order',
             )
           }
           current[record.kind] = { targets: [...record.targets], approvalRef: record.approvalRef }
@@ -2262,7 +2782,7 @@ export class EvolutionService extends Service {
         throw new Error(`evolution: corrupt ledger line ${index + 1} in ${this.file}`)
       }
     })
-    // One format, one check (K2): the ledger is `formatVersion: 3`, and every
+    // One format, one check (K2): the ledger is `formatVersion: 4`, and every
     // line must say so. A v1, a v2, an unversioned or a mixed ledger is refused
     // here — at load, before any entry can append — naming the line and the
     // version it saw. There is no dual-format read, no online migration and no

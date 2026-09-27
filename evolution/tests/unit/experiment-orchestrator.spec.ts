@@ -20,6 +20,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { ReviewCriterion, ReviewRecord, TaskInstance, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import type { ReplayRunOutcome, ReplayTaskOptions } from '@dangosys/dsh-singularity-task-runtime'
+import { registryRevision, skillContentDigest } from '@dangosys/dsh-singularity-task-runtime'
 import type { EvolutionProposal } from '../../src/evolution.ts'
 import type {
   ExperimentLedger,
@@ -29,8 +30,8 @@ import type {
   ExperimentView,
 } from '../../src/experiment.ts'
 import { directoryDigest, experimentLineage, resumeExperiment, runExperiment } from '../../src/experiment.ts'
-import type { ExperimentBudget, FrozenExperiment } from '../../src/replay.ts'
-import { foldExperiments, frozenDigestOf, modelSelectionOf } from '../../src/index.ts'
+import type { ExperimentBudget, FrozenExperiment, SkillContentIdentity } from '../../src/replay.ts'
+import { digestOf, foldExperiments, frozenDigestOf, modelSelectionOf } from '../../src/index.ts'
 
 const PROPOSAL = 'p1'
 const SKILL = 'fixture-skill'
@@ -61,6 +62,15 @@ async function world(options: {
   sampleJudge?: string | null
   /** The judge vocabulary the freeze reads. Default `command@1`; `null` for a deployment that cannot list its registry. */
   vocabulary?: { ids: string[]; versions: Record<string, string> } | null
+  /**
+   * What the stub provider pre-check resolves for the samples' rows (K3): the
+   * fixture skill with the declaration digest the production configuration holds
+   * (`null`, the default, is guidance), or `unlisted` for a row that resolves no
+   * skill at all.
+   */
+  provider?: { contractDigest?: string | null; unlisted?: boolean }
+  /** The content identity the prepared proposal records for the candidate (default: the guidance object of the fixture bytes). */
+  candidate?: SkillContentIdentity
 } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'experiment-orchestrator-'))
   const snapshotDir = join(root, 'snapshot')
@@ -71,6 +81,23 @@ async function world(options: {
   const sandbox = join(ledgerRoot, 'sandbox', PROPOSAL)
   await mkdir(join(sandbox, 'skills', SKILL), { recursive: true })
   await writeFile(join(sandbox, 'skills', SKILL, 'SKILL.md'), CANDIDATE_BYTES, 'utf8')
+  const candidate: SkillContentIdentity = options.candidate ?? { name: SKILL, sha256: digestOfBytes(CANDIDATE_BYTES) }
+
+  // The production configuration the stub pre-check reads: one row granting the
+  // fixture skill, whose declaration digest is what the candidate's is
+  // substituted by when the freeze derives the candidate side's revision (K3).
+  const capability = 'research'
+  const providerContract = options.provider?.contractDigest ?? null
+  const unlisted = options.provider?.unlisted === true
+  const table = { [capability]: { skills: unlisted ? [] : [SKILL], preset: 'standard' } }
+  const providerIdentities = unlisted ? [] : [{ name: SKILL, contractDigest: providerContract }]
+  const skillVerdict = {
+    valid: true,
+    name: SKILL,
+    role: providerContract === null ? 'guidance' : 'execution-provider',
+    contractDigest: providerContract,
+    contentDigest: skillContentDigest({ skillMdSha256: digestOfBytes(CANDIDATE_BYTES), resources: [] }),
+  }
 
   const proposal = {
     proposalId: PROPOSAL,
@@ -85,7 +112,7 @@ async function world(options: {
       sandbox: `sandbox/${PROPOSAL}`,
       mechanical: true,
       champion: 'captured',
-      skillContent: { name: SKILL, sha256: digestOfBytes(CANDIDATE_BYTES) },
+      skillContent: candidate,
       skillBaseline: { name: SKILL, sha256: 'b'.repeat(64) },
       files: [`skills/${SKILL}/SKILL.md`],
     },
@@ -122,7 +149,7 @@ async function world(options: {
         command: input.command,
         ...(options.sampleJudge === null ? {} : { verifierRef: options.sampleJudge ?? 'command' }),
       }],
-      requestedCapabilities: [],
+      requestedCapabilities: [capability],
       decompositionStatus: 'leaf',
       status: input.outcome,
       runIds: [input.runId],
@@ -170,7 +197,7 @@ async function world(options: {
   const ledger: ExperimentLedger = {
     root: ledgerRoot,
     get: async () => proposal,
-    readSkillCandidate: async () => Buffer.from(CANDIDATE_BYTES, 'utf8'),
+    readSkillCandidate: async () => ({ skillMd: Buffer.from(CANDIDATE_BYTES, 'utf8') }),
     experiment: async (experimentId: string) => {
       const view = folded().get(experimentId)
       if (view === undefined) throw new Error(`evolution: unknown experiment "${experimentId}"`)
@@ -196,8 +223,11 @@ async function world(options: {
       ? undefined
       : options.vocabulary ?? { ids: ['command'], versions: { command: '1' } }),
     taskRuntime: {
-      capabilityProviderReport: async () => ({ capabilities: [], revision: 'stub-revision' }),
-      listCapabilities: () => ({}),
+      capabilityProviderReport: async () => ({
+        capabilities: unlisted ? [] : [{ capability, skills: [skillVerdict] }],
+        revision: registryRevision(table, providerIdentities),
+      }),
+      listCapabilities: () => table,
       replayTask: async (_storeId: string, championTaskId: string, taskOptions: ReplayTaskOptions): Promise<ReplayRunOutcome> => {
         counter += 1
         const scriptedOutcome = scripted.shift() ?? { outcome: 'verified' as const }
@@ -271,6 +301,11 @@ async function world(options: {
     runs,
     reviews,
     proposal,
+    /** The production capability table the stub pre-check read (K3: the freeze derives the candidate revision from it). */
+    table,
+    /** The fixture skill's declaration digest in that table (`null` for guidance), as the freeze read it. */
+    providerContract,
+    capability,
     spec: (overrides: { selection?: { provider: string; model: string }; repetition?: number; budget?: ExperimentBudget } = {}) => ({
       proposalId: PROPOSAL,
       samples: [
@@ -659,6 +694,123 @@ describe('the two-sided orchestrator', () => {
     expect(message).toContain('declares no version')
     expect(w.records).toHaveLength(0)
     expect(w.calls).toHaveLength(0)
+    await rm(w.root, { recursive: true, force: true })
+  })
+
+  it('freezes the candidate side\'s registry revision by substituting the improved skill\'s own declaration digest (K3)', async () => {
+    const productionContract = 'd'.repeat(64)
+    const candidateContract = 'c'.repeat(64)
+    const w = await world({
+      provider: { contractDigest: productionContract },
+      candidate: {
+        name: SKILL,
+        sha256: digestOfBytes(CANDIDATE_BYTES),
+        contract: { sha256: 'e'.repeat(64), contractDigest: candidateContract },
+      },
+    })
+    const result = await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
+
+    // Both revisions are the runtime's own pure function over the same table and
+    // provider list; they differ in exactly one substituted digest — the skill
+    // this experiment replaces, whose candidate declaration is what its side
+    // really binds.
+    const production = registryRevision(w.table, [{ name: SKILL, contractDigest: productionContract }])
+    const candidateSide = registryRevision(w.table, [{ name: SKILL, contractDigest: candidateContract }])
+    expect(result.report.frozen.samples[0]!.provider.registryRevision).toBe(production)
+    expect(result.report.frozen.samples[0]!.provider.candidateRegistryRevision).toBe(candidateSide)
+    expect(candidateSide).not.toBe(production)
+    expect(result.report.frozen.samples[0]!.provider.candidateRegistryRevision).not.toBe(
+      result.report.frozen.samples[0]!.provider.registryRevision,
+    )
+    // Every sample carries it (the block is frozen per sample), and the ledger's
+    // own record is what the report was recomputed from.
+    for (const sample of result.report.frozen.samples) {
+      expect(sample.provider.candidateRegistryRevision).toBe(candidateSide)
+    }
+    const started = w.records.find(record => record.kind === 'experiment_started')
+    expect(started?.frozen.samples[0]!.provider.candidateRegistryRevision).toBe(candidateSide)
+    await rm(w.root, { recursive: true, force: true })
+  })
+
+  it('freezes the production revision for both sides when the candidate is guidance — nothing is substituted', async () => {
+    const w = await world()
+    const result = await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
+    for (const sample of result.report.frozen.samples) {
+      expect(sample.provider.candidateRegistryRevision).toBe(sample.provider.registryRevision)
+    }
+    await rm(w.root, { recursive: true, force: true })
+  })
+
+  it('refuses to freeze a sample whose rows do not resolve the skill the experiment replaces', async () => {
+    const w = await world({ provider: { unlisted: true } })
+    const message = await refusal(runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' }))
+    expect(message).toContain(`resolves no provider named "${SKILL}"`)
+    expect(message).toContain('refused before it runs')
+    expect(w.records).toHaveLength(0)
+    expect(w.calls).toHaveLength(0)
+    await rm(w.root, { recursive: true, force: true })
+  })
+
+  it('names the complete candidate object in the frozen overlay, sidecar included (K3)', async () => {
+    const w = await world({
+      provider: { contractDigest: 'd'.repeat(64) },
+      candidate: {
+        name: SKILL,
+        sha256: digestOfBytes(CANDIDATE_BYTES),
+        contract: { sha256: 'e'.repeat(64), contractDigest: 'c'.repeat(64) },
+      },
+    })
+    const result = await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
+    const overlay = result.report.frozen.overlay.candidate
+    expect(overlay).toContain(`extraSkillRoots: [sandbox/${PROPOSAL}/skills]`)
+    expect(overlay).toContain(`"${SKILL}"`)
+    expect(overlay).toContain('SKILL.md')
+    expect(overlay).toContain('SKILL.contract.json')
+    expect(overlay).toContain('complete candidate object')
+    expect(result.report.frozen.overlay.baseline).toContain('production configuration')
+
+    // A guidance candidate names its one file and says there is no sidecar — the
+    // honest description of the object, never a two-file claim it cannot make.
+    const guidance = await world()
+    const single = await runExperiment(guidance.sources, { spec: guidance.spec(), caller: CALLER, actor: 'root-1' })
+    expect(single.report.frozen.overlay.candidate).toContain('complete candidate object')
+    expect(single.report.frozen.overlay.candidate).toContain('no sidecar')
+    expect(single.report.frozen.overlay.candidate).not.toContain('SKILL.contract.json')
+    await rm(w.root, { recursive: true, force: true })
+    await rm(guidance.root, { recursive: true, force: true })
+  })
+
+  it('treats a candidate whose sidecar moved as a different experiment, keyed by the complete identity (K3)', async () => {
+    const w = await world({
+      provider: { contractDigest: 'd'.repeat(64) },
+      candidate: {
+        name: SKILL,
+        sha256: digestOfBytes(CANDIDATE_BYTES),
+        contract: { sha256: 'e'.repeat(64), contractDigest: '1'.repeat(64) },
+      },
+    })
+    const first = await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
+    expect(w.calls).toHaveLength(4)
+    expect(first.report.frozen.candidate.contract!.contractDigest).toBe('1'.repeat(64))
+
+    // The same proposal, the same specification — but the candidate now carries
+    // a different sidecar, so it is another object: its own frozen experiment,
+    // its own keys, its own runs. The `SKILL.md` digest alone is unchanged.
+    w.proposal.prepared!.skillContent = {
+      name: SKILL,
+      sha256: digestOfBytes(CANDIDATE_BYTES),
+      contract: { sha256: '2'.repeat(64), contractDigest: '3'.repeat(64) },
+    }
+    const second = await runExperiment(w.sources, { spec: w.spec(), caller: CALLER, actor: 'root-1' })
+    expect(w.calls).toHaveLength(8)
+    expect(second.experimentId).not.toBe(first.experimentId)
+    const records = w.records.filter((record): record is ExperimentSampleRecord =>
+      record.kind === 'experiment_sample' && record.experimentId === second.experimentId)
+    expect(records).toHaveLength(4)
+    for (const record of records) {
+      expect(record.preparedContentDigest).toBe(digestOf(second.report.frozen.candidate))
+      expect(record.preparedContentDigest).not.toBe(second.report.frozen.candidate.sha256)
+    }
     await rm(w.root, { recursive: true, force: true })
   })
 

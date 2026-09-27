@@ -40,7 +40,7 @@ function sha256Of(text: string): string {
 /** A loadable ledger of a skill proposal walked to decided(PROMOTE), plus the lines handed in. */
 function ledgerLines(home: string, extra: readonly Record<string, unknown>[]): Record<string, unknown>[] {
   const target = join(home, 'skills', SKILL, 'SKILL.md')
-  const common = { formatVersion: 3, proposalId: PROPOSAL_ID, actor: 'root-1' }
+  const common = { formatVersion: 4, proposalId: PROPOSAL_ID, actor: 'root-1' }
   return [
     {
       ...common, kind: 'proposed', targetType: 'skill', targetId: SKILL, baseVersion: 'v1', level: 'L2',
@@ -71,10 +71,13 @@ function ledgerLines(home: string, extra: readonly Record<string, unknown>[]): R
     },
     { ...common, kind: 'decided', decision: 'PROMOTE', approvalRef: 'approval:decide', at: '2026-09-27T00:00:04.000Z' },
     {
-      formatVersion: 3, kind: 'commit_intent', intentId: `${PROPOSAL_ID}/apply`, proposalId: PROPOSAL_ID, direction: 'apply',
-      approvalRef: 'approval:call-7', target,
-      baselineSha256: sha256Of(BASELINE), contentSha256: sha256Of(CANDIDATE),
-      source: `sandbox/${PROPOSAL_ID}/skills/${SKILL}/SKILL.md`, actor: 'root-1', at: '2026-09-27T00:00:05.000Z',
+      formatVersion: 4, kind: 'commit_intent', intentId: `${PROPOSAL_ID}/apply`, proposalId: PROPOSAL_ID, direction: 'apply',
+      approvalRef: 'approval:call-7',
+      files: [{
+        target, baselineSha256: sha256Of(BASELINE), contentSha256: sha256Of(CANDIDATE),
+        source: `sandbox/${PROPOSAL_ID}/skills/${SKILL}/SKILL.md`,
+      }],
+      actor: 'root-1', at: '2026-09-27T00:00:05.000Z',
     },
     ...extra,
   ]
@@ -214,7 +217,7 @@ describe('SingularityAgent startup reconciliation', () => {
 
     const complete = await mount({
       ledger: home => ledgerLines(home, [{
-        formatVersion: 3, kind: 'applied', proposalId: PROPOSAL_ID, targets: [join(home, 'skills', SKILL, 'SKILL.md')],
+        formatVersion: 4, kind: 'applied', proposalId: PROPOSAL_ID, targets: [join(home, 'skills', SKILL, 'SKILL.md')],
         approvalRef: 'approval:call-7', intentId: `${PROPOSAL_ID}/apply`, actor: 'root-1', at: '2026-09-27T00:00:06.000Z',
       }]),
       production: CANDIDATE,

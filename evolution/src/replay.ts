@@ -11,7 +11,7 @@
  * claim those rules make; whether that suffices for promotion is {@link
  * overallExperimentVerdict} and the human gate's call.
  *
- * A v2 report is the whole experiment: both sides are **new runs** of the same
+ * A v3 report is the whole experiment: both sides are **new runs** of the same
  * frozen sample, each in its own workspace built from one frozen input
  * snapshot, and the historical record only locates the case
  * ({@link FrozenSample.observed}) — it is never a baseline. The report carries
@@ -21,7 +21,14 @@
  * so any reader can recompute it. {@link assertExperimentReport} does exactly
  * that and refuses a report whose verdicts do not match its own evidence.
  *
- * One comparer serves the @2 report: {@link compareReplaySides} compares a
+ * The version is the schema's own: v3 froze the improved skill's complete
+ * content identity into the block (`frozen.candidate` / `productionBaseline`
+ * with their sidecars) and recorded both sides' expected provider identities —
+ * the candidate side's registry revision as its own member. A report from
+ * another build is refused by name, never read with this build's field
+ * semantics.
+ *
+ * One comparer serves the @3 report: {@link compareReplaySides} compares a
  * baseline side with a candidate side and answers in {@link SideRelation},
  * which {@link compareExperimentSides} reduces to the sample verdict. The v1
  * `replayed` ledger vocabulary it used to be named after is gone with the v1
@@ -51,17 +58,42 @@ export interface ReplayCriterionSummary {
 }
 
 /**
- * The content identity of a single-file skill candidate (P2): the skill name
- * plus the SHA-256 of the exact bytes of the materialized `SKILL.md`. Recorded
- * at prepare, carried by the experiment's frozen block, and re-verified by the
+ * The identity of one skill object's sidecar file (K3): the exact bytes of
+ * `SKILL.contract.json` as the object carries them, and the normalized identity
+ * a registry revision and a run binding use. Both are needed and neither implies
+ * the other: the byte digest is what a commit writes and re-verifies, and the
+ * canonical digest is what a run's own binding records — a re-serialization that
+ * preserves the declaration moves the first and not the second, which is exactly
+ * the difference the commit path relies on.
+ */
+export interface SkillContractIdentity {
+  /** SHA-256 over the exact `SKILL.contract.json` bytes. */
+  sha256: string
+  /** `skillContractDigest` of the sidecar — the normalized identity a registry revision and a run binding use. */
+  contractDigest: string
+}
+
+/**
+ * The content identity of one skill object (P2): the skill name, the SHA-256 of
+ * the exact `SKILL.md` bytes, and — exactly when the object carries an execution
+ * sidecar — the identity of the `SKILL.contract.json` beside it. Recorded at
+ * prepare, carried by the experiment's frozen block, and re-verified by the
  * experiment's pre-run check, at every promotion gate, and on the apply write —
- * so the chain can never validate one file's content and apply another's.
+ * so the chain can never validate one object's content and apply another's, and
+ * a two-file object's two files are frozen together.
+ *
+ * A guidance object — a skill with no sidecar — is a complete object with one
+ * file, which is why `contract` is absent rather than empty: presence *is* the
+ * shape, and the presence of `contract` must agree between the candidate
+ * identity and the production baseline it was prepared against.
  */
 export interface SkillContentIdentity {
   /** The skill name the mutation targets (`mutation.name`, the proposal's targetId). */
   name: string
-  /** Lowercase SHA-256 hex over the exact file bytes — no trim, no newline conversion. */
+  /** Lowercase SHA-256 hex over the exact `SKILL.md` file bytes — no trim, no newline conversion. */
   sha256: string
+  /** Present exactly when the object carries an execution sidecar; see {@link SkillContractIdentity}. */
+  contract?: SkillContractIdentity
 }
 
 /** One side of one task's comparison: an outcome and the criterion verdicts the run reported. */
@@ -124,10 +156,10 @@ export function compareReplaySides(
 }
 
 /**
- * The comparer a v2 report names, and the only one this build can re-check:
+ * The comparer a report names, and the only one this build can re-check:
  * the verdict rules of {@link compareExperimentSides} and
- * {@link overallExperimentVerdict}. A report naming anything else is refused
- * by {@link assertExperimentReport} instead of being re-derived with rules this
+ * {@link overallExperimentVerdict}. A report naming anything else is refused by
+ * {@link assertExperimentReport} instead of being re-derived with rules this
  * build does not have.
  */
 export const EXPERIMENT_COMPARER_VERSION = 'experiment-comparer@2'
@@ -237,7 +269,7 @@ export type ExperimentCost =
   | { status: 'reported'; metrics: ReviewMetrics }
   | { status: 'unknown'; reason: string }
 
-/** One criterion's verdict on one side, with the verifier that decided it (v1's report dropped the verifier identity; v2 keeps it). */
+/** One criterion's verdict on one side, with the verifier that decided it (v1's report dropped the verifier identity; every generation since keeps it). */
 export interface ExperimentCriterionDetail {
   criterionId: string
   verdict: 'pass' | 'fail' | 'inconclusive'
@@ -410,21 +442,39 @@ export interface FrozenProviderSkill {
  * fixed before the first run (S4-E §Q3): the capability rows the sample's
  * required capabilities resolve to, the registry revision the runtime's own
  * pre-check produces for them, the MCP servers those rows grant, the preset they
- * declare, and every skill their providers resolved to. The candidate side's
- * binding is compared against the same baseline with exactly one substituted
- * entry — the promoted skill's own content — which is the overlay difference
- * this ticket approved.
+ * declare, and every skill their providers resolved to.
+ *
+ * The candidate side's binding is compared against the same identity with
+ * exactly one substituted entry — the promoted skill's own content, which is the
+ * overlay difference this ticket approved. That entry is not a member of this
+ * shape, so the identity a candidate side must bind is recorded beside the
+ * production one as {@link FrozenProviderIdentity.candidateRegistryRevision}:
+ * the registry revision recomputed with the improved skill's own declaration
+ * digest replaced by the candidate's. Both are frozen for every sample, guidance
+ * candidates included (where the substitution changes nothing and the two
+ * revisions are equal) — one shape, no conditional member.
  */
 export interface FrozenProviderIdentity {
   /** The capability rows in play, sorted (the sample's required capabilities as the table holds them). */
   capabilities: string[]
   /**
    * The registry revision the runtime's own pre-check produces for those rows
-   * over the production table at freeze. Every side's run binding must carry it:
-   * a capability row, a tool label or a declared contract that moved since the
-   * freeze moves it too.
+   * over the production table at freeze. The **baseline** side's run binding must
+   * carry it: a capability row, a tool label or a declared contract that moved
+   * since the freeze moves it too.
    */
   registryRevision: string
+  /**
+   * The registry revision the **candidate** side's run binding must carry: the
+   * same revision over the same table and provider list with the improved
+   * skill's declaration digest replaced by the candidate object's
+   * (`null` for a guidance candidate) — the one substitution the candidate
+   * overlay produces. An execution candidate rewrites the sidecar's
+   * `content.skillMdSha256`, so its declaration digest moves and the revision
+   * that absorbs it moves with it; both sides' values are pinned separately
+   * rather than one being derived from the other at promotion time.
+   */
+  candidateRegistryRevision: string
   /** The MCP server names those rows grant, sorted. Every side must bind exactly these, with a resolved template. */
   mcpServers: string[]
   /**
@@ -474,9 +524,9 @@ export interface FrozenExperiment {
    * which is what lets a sample be run again without ever overwriting a record.
    */
   repetition: number
-  /** The candidate content identity the candidate side runs against (the prepared `SKILL.md`). */
+  /** The candidate object's content identity the candidate side runs against (the prepared `SKILL.md`, plus the derived sidecar when the object has one). */
   candidate: SkillContentIdentity
-  /** The production baseline the candidate replaces, when prepare captured one (a replacement, not a new skill). */
+  /** The production baseline the candidate object replaces, when prepare captured one (a replacement, not a new skill). */
   productionBaseline?: SkillContentIdentity
   /**
    * The model selection every run of this experiment is placed under (S4-E
@@ -491,13 +541,19 @@ export interface FrozenExperiment {
   snapshot: { sourceDir: string; digest: string }
   /** The comparer that produced the report's verdicts. */
   comparerVersion: string
-  /** What each side runs under, in words: the candidate's overlay, and the baseline's absence of one. */
+  /**
+   * What each side runs under, in words: the candidate's overlay and the
+   * baseline's absence of one. The candidate's line names the *complete object*
+   * the sandbox's skills root is loaded from (K3) — the prepared `SKILL.md` and,
+   * for an execution object, the derived `SKILL.contract.json` beside it — so a
+   * reader is never told a two-file candidate is one file.
+   */
   overlay: { baseline: string; candidate: string }
 }
 
 /** One experiment's report: the frozen identity, every sample's two sides, and the verdict recomputable from them. */
 export interface ExperimentReport {
-  formatVersion: 2
+  formatVersion: 3
   proposalId: string
   experimentId: string
   /**
@@ -547,8 +603,8 @@ export function protectedInputsDigest(inputs: readonly { path: string; sha256: s
 
 /**
  * The comparison-relevant half of one side: exactly what the v1 comparer reads
- * (the outcome and the criterion verdicts), so the v2 verdict is the v1 rules
- * applied to this experiment's evidence and nothing else. An
+ * (the outcome and the criterion verdicts), so the experiment's verdict is the
+ * v1 rules applied to this experiment's evidence and nothing else. An
  * {@link ExperimentSideDetail} is assignable to it.
  */
 export interface ExperimentSideComparison {
@@ -639,7 +695,16 @@ function isHex64(value: unknown): boolean {
 
 function assertIdentity(value: unknown, field: string): asserts value is SkillContentIdentity {
   if (!isRecord(value) || typeof value.name !== 'string' || value.name.length === 0 || !isHex64(value.sha256)) {
-    throw new Error(`evolution: experiment report ${field} must be a content identity { name, sha256 }`)
+    throw new Error(`evolution: experiment report ${field} must be a content identity { name, sha256, contract? }`)
+  }
+  if (value.contract !== undefined) {
+    const contract = value.contract
+    if (!isRecord(contract) || !isHex64(contract.sha256) || !isHex64(contract.contractDigest)) {
+      throw new Error(
+        `evolution: experiment report ${field}.contract must be { sha256, contractDigest } with both a SHA-256 hex — a frozen object ` +
+        'with an execution sidecar names that file by its exact bytes and by the canonical declaration identity together',
+      )
+    }
   }
 }
 
@@ -768,6 +833,13 @@ function assertFrozenProviderIdentity(value: unknown, field: string): asserts va
   }
   if (typeof value.registryRevision !== 'string' || value.registryRevision.length === 0) {
     throw new Error(`evolution: experiment report ${field}.registryRevision must be the revision the runtime's pre-check produced`)
+  }
+  if (typeof value.candidateRegistryRevision !== 'string' || value.candidateRegistryRevision.length === 0) {
+    throw new Error(
+      `evolution: experiment report ${field}.candidateRegistryRevision must be the revision the candidate side's run has to bind ` +
+      '— the production revision over the same rows with the improved skill\'s own declaration digest substituted; a block that ' +
+      'records only the production value cannot say what the candidate side was compared against',
+    )
   }
   if (!Array.isArray(value.mcpServers) || value.mcpServers.some(item => typeof item !== 'string' || item.length === 0)) {
     throw new Error(`evolution: experiment report ${field}.mcpServers must be an array of MCP server names`)
@@ -923,7 +995,7 @@ function assertSideDetail(value: unknown, field: string, sampleTaskId: string, o
 }
 
 /**
- * Validate a v2 report against itself — and further than a shape check: every
+ * Validate a v3 report against itself — and further than a shape check: every
  * verdict the report carries must equal the one its own details recompute
  * (`compareExperimentSides` per sample,
  * `overallExperimentVerdict` overall), and the frozen block must hash to the
@@ -939,7 +1011,13 @@ function assertSideDetail(value: unknown, field: string, sampleTaskId: string, o
  */
 export function assertExperimentReport(report: unknown): asserts report is ExperimentReport {
   if (!isRecord(report)) throw new Error('evolution: experiment report must be an object')
-  if (report.formatVersion !== 2) throw new Error('evolution: experiment report formatVersion must be 2')
+  if (report.formatVersion !== 3) {
+    throw new Error(
+      `evolution: experiment report formatVersion must be 3 — got ${JSON.stringify(report.formatVersion)}; this build writes and ` +
+      'reads one report schema, the one whose frozen block carries the improved skill\'s complete content identity and both sides\' ' +
+      'provider identities, and a report from another build is refused by name rather than read with fields it does not have',
+    )
+  }
   if (typeof report.proposalId !== 'string' || report.proposalId.length === 0) {
     throw new Error('evolution: experiment report.proposalId must be a non-empty string')
   }

@@ -23,11 +23,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { registryRevision, serializeSkillSidecar, SKILL_SIDECAR_FILE, skillContentDigest } from '@dangosys/dsh-singularity-task-runtime'
 import { EvolutionService } from '../../src/evolution.ts'
 import type { EvolutionProposal, GateAnswers } from '../../src/evolution.ts'
 import type { ExperimentSampleRecord, ExperimentStartedRecord, ExperimentView } from '../../src/experiment.ts'
 import { buildExperimentReport, directoryDigest, experimentIdOf, experimentLineage, experimentReportPath } from '../../src/experiment.ts'
-import type { ExperimentBudget, FrozenExperiment, FrozenProviderIdentity, FrozenSample, ModelSelection, SkillContentIdentity } from '../../src/replay.ts'
+import type { ExperimentBudget, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, ModelSelection, SkillContentIdentity } from '../../src/replay.ts'
 import { digestOf, EXPERIMENT_COMPARER_VERSION, frozenDigestOf, modelSelectionOf, protectedInputsDigest } from '../../src/replay.ts'
 
 const PROPOSAL = 's1'
@@ -43,7 +44,8 @@ const MODEL_LABEL = `${MODEL_PROVIDER}/${MODEL}`
 const REGISTRY_REVISION = 'r'.repeat(64)
 const VERIFIER_VERSION = '1'
 const CANDIDATE = skillText('# the fixed body\n')
-const PRODUCTION = '# the production body\n'
+/** The production object's bytes: loadable text, because prepare reads production through the loader (K3). */
+const PRODUCTION = skillText('# the production body\n')
 
 /** One structured selection of this fixture's route. */
 function selectionOf(model = MODEL): ModelSelection {
@@ -74,9 +76,43 @@ function requestHeader(selection: ModelSelection, seq: number): SessionEvent {
   } as unknown as SessionEvent
 }
 
-/** The provider identity this fixture's production configuration resolves to (no rows, no skills). */
-function providerIdentity(): FrozenProviderIdentity {
-  return { capabilities: [], registryRevision: REGISTRY_REVISION, mcpServers: [], preset: null, skills: [] }
+/** The provider identity this fixture's production configuration resolves to (K3: one row granting one skill, or none). */
+function providerIdentity(input: {
+  skills: FrozenProviderSkill[]
+  registryRevision: string
+  candidateRegistryRevision: string
+  capabilities: string[]
+}): FrozenProviderIdentity {
+  return {
+    capabilities: input.capabilities,
+    registryRevision: input.registryRevision,
+    candidateRegistryRevision: input.candidateRegistryRevision,
+    mcpServers: [],
+    preset: null,
+    skills: input.skills,
+  }
+}
+
+/** The fixture's one capability row: it grants the skill the candidate replaces. */
+const ROW = 'research'
+
+/**
+ * The production object's declaration (K3): an execution sidecar whose content
+ * identity names the production `SKILL.md` bytes — what a production two-file
+ * skill holds, and what `prepare` derives the candidate's sidecar from.
+ */
+function productionContract(skillMd: string): string {
+  return serializeSkillSidecar({
+    contractVersion: 1,
+    type: 'execution',
+    capabilities: [ROW],
+    precondition: 'the fixture case is the one this provider serves',
+    inputs: [],
+    outputs: [],
+    requiredTools: [],
+    verifier: { ref: 'command' },
+    content: { skillMdSha256: sha256(skillMd), resources: [] },
+  })
 }
 
 function skillText(body: string, name = SKILL): string {
@@ -133,6 +169,13 @@ interface FixtureOptions {
   frozenJudge?: { ref: string; version?: string }
   /** The version the sides' own verdicts carry (default: the frozen one) — the re-registered-judge arm. */
   sideJudgeVersion?: string
+  /**
+   * The object shape the production skill has (K3). `guidance` — the default —
+   * is one `SKILL.md`; `execution` adds a real `SKILL.contract.json`, so the
+   * candidate `prepare` materializes is a two-file object and every side's run
+   * binding and run snapshot carry both files.
+   */
+  object?: 'guidance' | 'execution'
 }
 
 interface Rows {
@@ -151,8 +194,11 @@ async function fixture(options: FixtureOptions = {}) {
   const root = join(dir, 'evolution')
   const skillRoot = join(dir, 'skills')
   const workspace = join(root, 'env')
+  const execution = options.object === 'execution'
   await mkdir(join(skillRoot, SKILL), { recursive: true })
   await writeFile(join(skillRoot, SKILL, 'SKILL.md'), PRODUCTION)
+  const productionSidecar = execution ? productionContract(PRODUCTION) : undefined
+  if (productionSidecar !== undefined) await writeFile(join(skillRoot, SKILL, SKILL_SIDECAR_FILE), productionSidecar)
   await mkdir(workspace, { recursive: true })
   await writeFile(join(workspace, 'input.txt'), 'the frozen input\n')
   const protectedInput = options.protectedInput ?? { path: 'threshold.txt', bytes: '42\n' }
@@ -163,7 +209,7 @@ async function fixture(options: FixtureOptions = {}) {
   const ctx = {
     reflect: { provide: () => {} },
     effect: () => {},
-    taskRuntime: { listCapabilities: () => ({ research: { preset: 'standard' } }) },
+    taskRuntime: { listCapabilities: () => ({ [ROW]: { skills: [SKILL], preset: 'standard' } }) },
     task: { openStore: async () => ({ tasks: rows.tasks, runs: rows.runs, reviews: rows.reviews, evidence: rows.evidence, diagnoses: [], obligations: [] }) },
     verifier: {
       ready: async () => {},
@@ -195,6 +241,33 @@ async function fixture(options: FixtureOptions = {}) {
   await svc.candidate(PROPOSAL, { skill: 'v2' }, 'root-1', { name: SKILL, content: CANDIDATE })
   const prepared = await svc.prepare(PROPOSAL, 'root-1')
 
+  // --- the candidate and production objects, as the freeze reads them (K3) ---
+  const candidateIdentity = prepared.prepared!.skillContent!
+  const baselineIdentity = prepared.prepared!.skillBaseline!
+  const candidateSidecar = candidateIdentity.contract === undefined
+    ? undefined
+    : await readFile(join(root, 'sandbox', PROPOSAL, 'skills', SKILL, SKILL_SIDECAR_FILE))
+  // One row granting the skill; the two revisions differ in exactly the entry
+  // the candidate replaces — the runtime's own `registryRevision` over the same
+  // table, with that skill's declaration digest substituted.
+  const table = { [ROW]: { skills: [SKILL], preset: 'standard' } }
+  const providerSkills: FrozenProviderSkill[] = execution
+    ? [{
+      name: SKILL,
+      role: 'execution-provider',
+      contractDigest: baselineIdentity.contract!.contractDigest,
+      contentDigest: skillContentDigest({ skillMdSha256: baselineIdentity.sha256, resources: [] }),
+    }]
+    : []
+  const productionRevision = execution
+    ? registryRevision(table, [{ name: SKILL, contractDigest: baselineIdentity.contract!.contractDigest }])
+    : REGISTRY_REVISION
+  const candidateRevision = execution
+    ? registryRevision(table, [{ name: SKILL, contractDigest: candidateIdentity.contract!.contractDigest }])
+    : REGISTRY_REVISION
+  const skillSnapshotRoot = (sampleTaskId: string, side: 'baseline' | 'candidate'): string =>
+    join(root, 'run-snapshots', sampleTaskId, side)
+
   // --- the samples, as the store holds their historical contracts -----------
   // The judge every criterion is frozen with (S4-E §Q3): the registered
   // `command` verifier at the version this deployment declares.
@@ -218,7 +291,7 @@ async function fixture(options: FixtureOptions = {}) {
       objective: `${input.taskId} objective`,
       depth: 1,
       acceptanceCriteria,
-      requestedCapabilities: [],
+      requestedCapabilities: execution ? [ROW] : [],
       decompositionStatus: 'leaf',
       status: input.outcome,
       runIds: [`r-history-${input.taskId}`],
@@ -235,7 +308,11 @@ async function fixture(options: FixtureOptions = {}) {
     samples.push({
       taskId: input.taskId,
       role: input.role,
-      contractDigest: digestOf({ objective: `${input.taskId} objective`, acceptanceCriteria, requiredCapabilities: [] }),
+      contractDigest: digestOf({
+        objective: `${input.taskId} objective`,
+        acceptanceCriteria,
+        requiredCapabilities: execution ? [ROW] : [],
+      }),
       criteria: [{
         criterionId: input.criterionId,
         verificationMode: 'deterministic',
@@ -246,7 +323,12 @@ async function fixture(options: FixtureOptions = {}) {
         verifierAnchor: `registered verifier "${judge.ref}" declares version "${judge.version}"`,
       }],
       observed: { outcome: input.outcome, runId: `r-history-${input.taskId}` },
-      provider: providerIdentity(),
+      provider: providerIdentity({
+        skills: providerSkills,
+        registryRevision: productionRevision,
+        candidateRegistryRevision: candidateRevision,
+        capabilities: execution ? [ROW] : [],
+      }),
     })
   }
   addSample({
@@ -281,13 +363,25 @@ async function fixture(options: FixtureOptions = {}) {
 
   // --- the four settled sides, as the store would hold them ----------------
   const sides = { failure: options.failure ?? {}, holdout: options.holdout ?? {}, regression: options.regression ?? {} } as const
-  const settle = (sample: FrozenSample, side: 'baseline' | 'candidate', outcome: Settlement) => {
+  const settle = async (sample: FrozenSample, side: 'baseline' | 'candidate', outcome: Settlement) => {
     const lineage = experimentLineage(experimentId, sample.taskId, side)
     const taskId = `t-${sample.taskId}-${side}`
     const runId = `r-${sample.taskId}-${side}`
     const criterionId = sample.criteria[0]!.criterionId
     const verdict = outcome === 'verified' ? 'pass' : outcome === 'failed' ? 'fail' : 'inconclusive'
     const at = '2026-09-26T00:00:00.000Z'
+    // The run's own snapshot: the object this side really loaded. The candidate
+    // side holds the prepared bytes, the baseline side the production ones, and
+    // the binding below is written from the same identities — so the fixture is
+    // exactly the shape a real two-file run records (K3).
+    const sideIdentity = side === 'candidate' ? candidateIdentity : baselineIdentity
+    const sideSidecar = side === 'candidate' ? candidateSidecar : productionSidecar === undefined ? undefined : Buffer.from(productionSidecar, 'utf8')
+    const snapshotRoot = skillSnapshotRoot(sample.taskId, side)
+    if (execution) {
+      await mkdir(join(snapshotRoot, SKILL), { recursive: true })
+      await writeFile(join(snapshotRoot, SKILL, 'SKILL.md'), side === 'candidate' ? CANDIDATE : PRODUCTION)
+      await writeFile(join(snapshotRoot, SKILL, SKILL_SIDECAR_FILE), sideSidecar!)
+    }
     rows.tasks.push({
       taskId,
       definitionRef: { taskType: 'subtask', version: 1 },
@@ -295,7 +389,7 @@ async function fixture(options: FixtureOptions = {}) {
       objective: `[${lineage}] ${sample.taskId}`,
       depth: 1,
       acceptanceCriteria: [{ criterionId, description: 'works', verificationMode: 'deterministic', requiredEvidence: [], mandatory: true, command: sample.criteria[0]!.command }],
-      requestedCapabilities: [],
+      requestedCapabilities: execution ? [ROW] : [],
       decompositionStatus: 'leaf',
       status: outcome,
       runIds: [runId],
@@ -307,11 +401,23 @@ async function fixture(options: FixtureOptions = {}) {
       sessionId: `s-${runId}`,
       status: outcome,
       startedAt: '2026-09-26T00:00:00.000Z',
+      ...(execution ? { agentPreset: 'standard' } : {}),
       providerBinding: {
-        registryRevision: REGISTRY_REVISION,
-        capabilities: [],
-        skills: [],
+        registryRevision: side === 'candidate' ? candidateRevision : productionRevision,
+        capabilities: execution ? [ROW] : [],
+        skills: execution
+          ? [{
+            name: SKILL,
+            role: 'execution-provider',
+            capabilities: [ROW],
+            description: 'gate fixture skill',
+            contractDigest: sideIdentity.contract!.contractDigest,
+            contentDigest: skillContentDigest({ skillMdSha256: sideIdentity.sha256, resources: [] }),
+            uncovered: [],
+          }]
+          : [],
         mcpServers: [],
+        ...(execution ? { snapshotRoot } : {}),
       },
     })
     sessions.set(`s-${runId}`, [requestHeader(frozen.model, 1)])
@@ -331,11 +437,11 @@ async function fixture(options: FixtureOptions = {}) {
       }],
     })
     const record: ExperimentSampleRecord = {
-      formatVersion: 3,
+      formatVersion: 4,
       kind: 'experiment_sample',
       proposalId: PROPOSAL,
       experimentId,
-      preparedContentDigest: frozen.candidate.sha256,
+      preparedContentDigest: digestOf(frozen.candidate),
       sampleTaskId: sample.taskId,
       side,
       repetition: 0,
@@ -362,7 +468,7 @@ async function fixture(options: FixtureOptions = {}) {
   }
 
   const started: ExperimentStartedRecord = {
-    formatVersion: 3,
+    formatVersion: 4,
     kind: 'experiment_started',
     proposalId: PROPOSAL,
     experimentId,
@@ -377,8 +483,8 @@ async function fixture(options: FixtureOptions = {}) {
   const records: ExperimentSampleRecord[] = []
   for (const sample of samples) {
     const spec = sample.taskId === FAIL_SAMPLE ? sides.failure : sample.taskId === HOLDOUT_SAMPLE ? sides.holdout : sides.regression
-    records.push(settle(sample, 'baseline', spec.baseline ?? (sample.taskId === FAIL_SAMPLE ? 'failed' : 'verified')))
-    records.push(settle(sample, 'candidate', spec.candidate ?? (sample.taskId === FAIL_SAMPLE ? 'verified' : 'verified')))
+    records.push(await settle(sample, 'baseline', spec.baseline ?? (sample.taskId === FAIL_SAMPLE ? 'failed' : 'verified')))
+    records.push(await settle(sample, 'candidate', spec.candidate ?? (sample.taskId === FAIL_SAMPLE ? 'verified' : 'verified')))
   }
   await svc.recordExperimentStart(started)
   for (const record of records) await svc.recordExperimentSample(record)
@@ -406,6 +512,17 @@ async function fixture(options: FixtureOptions = {}) {
 
   return {
     svc, reopen, root, skillRoot, workspace, rows, sessions, reportPath, experimentId, frozen, prepared: prepared.prepared!,
+    execution,
+    candidateIdentity,
+    baselineIdentity,
+    candidateSidecar,
+    skillSnapshotRoot,
+    /** The candidate side's run binding, as the store holds it — the shape a tamper case rewrites. */
+    runOf(sampleTaskId: string, side: 'baseline' | 'candidate'): Record<string, any> {
+      const run = rows.runs.find(item => item.runId === `r-${sampleTaskId}-${side}`)
+      if (run === undefined) throw new Error(`the fixture holds no run r-${sampleTaskId}-${side}`)
+      return run
+    },
     /** Read the report back from disk, parse it, mutate it, and write it again. */
     async tamperReport(mutate: (report: Record<string, any>) => void) {
       const parsed = JSON.parse(await readFile(reportAbs, 'utf8'))
@@ -766,7 +883,7 @@ describe('skill promotion gate: the completed experiment is the evidence (EVAL-2
       // refuses by name: no entry lets this experiment reach production.
       await f.tamperLedger(lines => {
         lines.push({
-          formatVersion: 3, kind: 'decided', proposalId: PROPOSAL, decision: 'PROMOTE',
+          formatVersion: 4, kind: 'decided', proposalId: PROPOSAL, decision: 'PROMOTE',
           approvalRef: 'approval:decide', actor: 'root-1', at: '2026-09-26T00:00:00.000Z',
         })
       })
@@ -881,9 +998,9 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     await appendFile(
       join(svc.root, 'proposals.jsonl'),
       [
-        { formatVersion: 3, kind: 'candidate', proposalId: id, versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-26T00:00:01.000Z' },
-        { formatVersion: 3, kind: 'prepared', proposalId: id, sandbox: null, mechanical: false, champion: 'none', files: [], actor: 'root-1', at: '2026-09-26T00:00:02.000Z' },
-        { formatVersion: 3, kind: 'gated', proposalId: id, gate: gateAnswers([`sandbox/${id}/replay-report.json`]), actor: 'root-1', at: '2026-09-26T00:00:04.000Z' },
+        { formatVersion: 4, kind: 'candidate', proposalId: id, versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-26T00:00:01.000Z' },
+        { formatVersion: 4, kind: 'prepared', proposalId: id, sandbox: null, mechanical: false, champion: 'none', files: [], actor: 'root-1', at: '2026-09-26T00:00:02.000Z' },
+        { formatVersion: 4, kind: 'gated', proposalId: id, gate: gateAnswers([`sandbox/${id}/replay-report.json`]), actor: 'root-1', at: '2026-09-26T00:00:04.000Z' },
       ].map(line => JSON.stringify(line)).join('\n') + '\n',
     )
   }
@@ -915,7 +1032,7 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     // the refusal still lands at the candidate line, before the write and before
     // any approval this test does not grant.
     const lines = (await readFile(join(f.root, 'proposals.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as Record<string, any>)
-    lines.push({ formatVersion: 3, kind: 'decided', proposalId: 'c1', decision: 'PROMOTE', approvalRef: 'approval:legacy', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' })
+    lines.push({ formatVersion: 4, kind: 'decided', proposalId: 'c1', decision: 'PROMOTE', approvalRef: 'approval:legacy', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' })
     await writeFile(join(f.root, 'proposals.jsonl'), `${lines.map(line => JSON.stringify(line)).join('\n')}\n`)
     const reopened = await f.reopen()
     const applyMessage = await refusal(reopened.apply('c1', 'root-1', 'approval:apply'))
@@ -931,12 +1048,12 @@ describe('skill promotion gate: the other target types have no evaluator (EVAL-4
     const configFile = join(f.root, 'config.yml')
     await writeFile(configFile, ['- id: task-runtime', '  config:', '    capabilities:', '      research: { preset: changed }', '', '---', 'api:', '  upstream: https://example.invalid', ''].join('\n'))
     await writeFile(join(f.root, 'proposals.jsonl'), [
-      { formatVersion: 3, kind: 'proposed', proposalId: 'old1', targetType: 'capability', targetId: 'research', baseVersion: 'v1', level: 'L2', rationale: 'the recorded suggestion', sourceRefs: ['diagnosis:d0'], actor: 'root-1', at: '2026-09-20T00:00:00.000Z' },
-      { formatVersion: 3, kind: 'candidate', proposalId: 'old1', versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
-      { formatVersion: 3, kind: 'prepared', proposalId: 'old1', sandbox: null, mechanical: false, champion: 'none', files: [], actor: 'root-1', at: '2026-09-20T00:00:02.000Z' },
-      { formatVersion: 3, kind: 'gated', proposalId: 'old1', gate: gateAnswers(['sandbox/old1/replay-report.json']), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
-      { formatVersion: 3, kind: 'decided', proposalId: 'old1', decision: 'PROMOTE', approvalRef: 'approval:decide', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' },
-      { formatVersion: 3, kind: 'applied', proposalId: 'old1', targets: [`${configFile} — document 1 task-runtime capabilities row "research"`], approvalRef: 'approval:apply', actor: 'root-1', at: '2026-09-20T00:00:06.000Z' },
+      { formatVersion: 4, kind: 'proposed', proposalId: 'old1', targetType: 'capability', targetId: 'research', baseVersion: 'v1', level: 'L2', rationale: 'the recorded suggestion', sourceRefs: ['diagnosis:d0'], actor: 'root-1', at: '2026-09-20T00:00:00.000Z' },
+      { formatVersion: 4, kind: 'candidate', proposalId: 'old1', versionSet: { capabilityTable: 'config.yml#doc1' }, mutation: { name: 'research', entry: { preset: 'standard' } }, actor: 'root-1', at: '2026-09-20T00:00:01.000Z' },
+      { formatVersion: 4, kind: 'prepared', proposalId: 'old1', sandbox: null, mechanical: false, champion: 'none', files: [], actor: 'root-1', at: '2026-09-20T00:00:02.000Z' },
+      { formatVersion: 4, kind: 'gated', proposalId: 'old1', gate: gateAnswers(['sandbox/old1/replay-report.json']), actor: 'root-1', at: '2026-09-20T00:00:04.000Z' },
+      { formatVersion: 4, kind: 'decided', proposalId: 'old1', decision: 'PROMOTE', approvalRef: 'approval:decide', actor: 'root-1', at: '2026-09-20T00:00:05.000Z' },
+      { formatVersion: 4, kind: 'applied', proposalId: 'old1', targets: [`${configFile} — document 1 task-runtime capabilities row "research"`], approvalRef: 'approval:apply', actor: 'root-1', at: '2026-09-20T00:00:06.000Z' },
     ].map(line => JSON.stringify(line)).join('\n') + '\n')
     const before = await readFile(configFile, 'utf8')
 
@@ -1033,5 +1150,162 @@ describe('Q1: the frozen budget bounds the whole experiment, and the gate reads 
     // stays the honest observation it is — recorded, never zeroed, never refused.
     const f = await fixture({ metrics: { toolCalls: { calls: 3, failures: 0 } } })
     expect(await refusal(f.svc.checkPromotion(PROPOSAL))).toBe('')
+  })
+})
+
+/**
+ * K3: the improved skill's complete object. A candidate for an existing
+ * execution skill is a two-file object — the prepared `SKILL.md` plus the
+ * `SKILL.contract.json` derived from production with only
+ * `content.skillMdSha256` rewritten — and every stage compares the same complete
+ * content identity: the frozen block carries each side's expected registry
+ * revision and object, the gate compares each side against its own side's
+ * expectation, and it re-proves the bytes the run itself loaded from the run's
+ * snapshot. The legal differences between the two sides (the improved skill's
+ * own content digest, its declaration digest, and the registry revision that
+ * absorbs that digest) are pinned per side; nothing else may differ.
+ */
+describe('skill promotion gate: the improved skill\'s complete object (K3)', () => {
+  it('lets a two-file candidate through the whole chain, writing and restoring both files', async () => {
+    const f = await fixture({ object: 'execution' })
+    const check = await f.svc.checkPromotion(PROPOSAL)
+    expect(check.providers).toMatchObject([{ name: SKILL, role: 'execution-provider' }])
+
+    await f.svc.gate(PROPOSAL, gateAnswers([f.reportPath]), 'root-1')
+    await f.svc.decide(PROPOSAL, 'PROMOTE', 'root-1', 'approval:decide')
+    const applied = await f.svc.apply(PROPOSAL, 'root-1', 'approval:apply')
+    expect(applied.proposal.status).toBe('applied')
+    expect(applied.targets).toHaveLength(2)
+    // Both files reached production byte for byte: the candidate body and the
+    // declaration derived from the production sidecar.
+    expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(CANDIDATE)
+    expect(await readFile(join(f.skillRoot, SKILL, SKILL_SIDECAR_FILE))).toEqual(f.candidateSidecar!)
+
+    await f.svc.rollback(PROPOSAL, 'root-1', 'approval:rollback')
+    expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(PRODUCTION)
+    expect(await readFile(join(f.skillRoot, SKILL, SKILL_SIDECAR_FILE), 'utf8')).toBe(productionContract(PRODUCTION))
+  })
+
+  it('refuses a candidate side that bound the production registry revision instead of the frozen candidate one', async () => {
+    const f = await fixture({ object: 'execution' })
+    // The frozen block records both revisions, and they differ by exactly the
+    // improved skill's own declaration digest (the candidate's sidecar is
+    // derived, so its declaration digest moved with the body).
+    const provider = f.frozen.samples[0]!.provider
+    expect(provider.candidateRegistryRevision).not.toBe(provider.registryRevision)
+    f.runOf(FAIL_SAMPLE, 'candidate').providerBinding.registryRevision = provider.registryRevision
+
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain('bound registry revision')
+    expect(message).toContain('candidate side')
+    expect(message).toContain(provider.candidateRegistryRevision)
+    expect(await f.ledgerKinds()).not.toContain('decided')
+  })
+
+  it('refuses a candidate side whose binding carries the production declaration digest', async () => {
+    const f = await fixture({ object: 'execution' })
+    f.runOf(FAIL_SAMPLE, 'candidate').providerBinding.skills[0].contractDigest = f.baselineIdentity.contract!.contractDigest
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain(`bound skill "${SKILL}" declaration`)
+    expect(message).toContain('candidate side')
+    expect(message).toContain(f.candidateIdentity.contract!.contractDigest)
+  })
+
+  it('refuses a side that bound the improved skill in another role, on either side', async () => {
+    for (const side of ['baseline', 'candidate'] as const) {
+      const f = await fixture({ object: 'execution' })
+      f.runOf(FAIL_SAMPLE, side).providerBinding.skills[0].role = 'guidance'
+      const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+      expect(message).toContain(`bound skill "${SKILL}" as guidance`)
+      expect(message).toContain('froze it as execution-provider')
+      expect(await f.ledgerKinds()).not.toContain('decided')
+    }
+  })
+
+  it('refuses a candidate side whose content digest is not the frozen candidate content', async () => {
+    const f = await fixture({ object: 'execution' })
+    f.runOf(FAIL_SAMPLE, 'candidate').providerBinding.skills[0].contentDigest = 'a'.repeat(64)
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain(`bound skill "${SKILL}" content`)
+    expect(message).toContain('candidate side')
+    expect(message).toContain(f.candidateIdentity.sha256)
+  })
+
+  it('refuses a candidate run whose own snapshot holds a rewritten sidecar', async () => {
+    const f = await fixture({ object: 'execution' })
+    // The durable bytes the run really loaded, not the binding it recorded: a
+    // sidecar rewritten after the experiment is not the declaration this side ran.
+    await writeFile(join(f.skillSnapshotRoot(FAIL_SAMPLE, 'candidate'), SKILL, SKILL_SIDECAR_FILE), '{"type":"execution"}\n')
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain('SKILL.contract.json')
+    expect(message).toContain('candidate side')
+    expect(message).toContain(f.candidateIdentity.contract!.sha256)
+    expect(await f.ledgerKinds()).not.toContain('decided')
+  })
+
+  it('refuses a candidate run whose snapshot lost its sidecar', async () => {
+    const f = await fixture({ object: 'execution' })
+    await rm(join(f.skillSnapshotRoot(FAIL_SAMPLE, 'candidate'), SKILL, SKILL_SIDECAR_FILE))
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain('SKILL.contract.json')
+    expect(message).toContain('cannot be read')
+  })
+
+  it('refuses a baseline side whose run snapshot holds the candidate bytes', async () => {
+    const f = await fixture({ object: 'execution' })
+    await writeFile(join(f.skillSnapshotRoot(FAIL_SAMPLE, 'baseline'), SKILL, 'SKILL.md'), CANDIDATE)
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain('baseline side')
+    expect(message).toContain(f.baselineIdentity.sha256)
+    expect(message).toContain('the bytes this side ran are not the frozen ones')
+  })
+
+  it('refuses a candidate run whose snapshot is the production object itself', async () => {
+    const f = await fixture({ object: 'execution' })
+    // Both files swapped for the production pair: the binding still claims the
+    // candidate, and the bytes prove it never ran.
+    await writeFile(join(f.skillSnapshotRoot(FAIL_SAMPLE, 'candidate'), SKILL, 'SKILL.md'), PRODUCTION)
+    await writeFile(join(f.skillSnapshotRoot(FAIL_SAMPLE, 'candidate'), SKILL, SKILL_SIDECAR_FILE), productionContract(PRODUCTION))
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain(f.candidateIdentity.sha256)
+    expect(message).toContain('candidate side')
+  })
+
+  it('refuses a candidate sidecar rewritten in the sandbox after the experiment, writing nothing', async () => {
+    const f = await fixture({ object: 'execution' })
+    await writeFile(join(f.root, 'sandbox', PROPOSAL, 'skills', SKILL, SKILL_SIDECAR_FILE), '{"contractVersion":1,"type":"execution"}\n')
+    const message = await refusal(f.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain('no longer matches the content identity recorded at prepare')
+    expect(message).toContain(SKILL_SIDECAR_FILE)
+    expect(await f.ledgerKinds()).not.toContain('decided')
+  })
+
+  it('refuses a frozen candidate whose sidecar identity is not the prepared object\'s', async () => {
+    const f = await fixture({ object: 'execution' })
+    // The frozen block names the candidate the proposal did not prepare: same
+    // `SKILL.md` bytes, another declaration — two different objects, and the
+    // evidence belongs to the other one (K3, member by member).
+    const other = await fixture({
+      object: 'execution',
+      candidateIdentity: {
+        name: SKILL,
+        sha256: f.candidateIdentity.sha256,
+        contract: { ...f.candidateIdentity.contract!, contractDigest: '9'.repeat(64) },
+      },
+    })
+    const message = await refusal(other.svc.checkPromotion(PROPOSAL))
+    expect(message).toContain('the evidence belongs to different candidate bytes')
+    expect(message).toContain(f.candidateIdentity.contract!.contractDigest)
+  })
+
+  it('keeps the guidance path exactly as it was: one file, no sidecar, production revision on both sides', async () => {
+    const f = await fixture()
+    expect(f.frozen.samples[0]!.provider.candidateRegistryRevision).toBe(f.frozen.samples[0]!.provider.registryRevision)
+    expect(await refusal(f.svc.checkPromotion(PROPOSAL))).toBe('')
+    await f.svc.gate(PROPOSAL, gateAnswers([f.reportPath]), 'root-1')
+    await f.svc.decide(PROPOSAL, 'PROMOTE', 'root-1', 'approval:decide')
+    expect((await f.svc.apply(PROPOSAL, 'root-1', 'approval:apply')).proposal.status).toBe('applied')
+    expect(await readFile(join(f.skillRoot, SKILL, 'SKILL.md'), 'utf8')).toBe(CANDIDATE)
+    expect(existsSync(join(f.skillRoot, SKILL, SKILL_SIDECAR_FILE))).toBe(false)
   })
 })

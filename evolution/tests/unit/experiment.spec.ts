@@ -100,6 +100,7 @@ function frozenSample(overrides: Partial<FrozenSample> = {}): FrozenSample {
     provider: {
       capabilities: [],
       registryRevision: HEX('4'),
+      candidateRegistryRevision: HEX('4'),
       mcpServers: [],
       preset: null,
       skills: [],
@@ -178,7 +179,7 @@ function reportFixture(overrides: Record<string, unknown> = {}) {
     },
   ]
   return {
-    formatVersion: 2,
+    formatVersion: 3,
     proposalId: 'p1',
     experimentId: 'e1',
     at: '2026-09-26T00:00:00.000Z',
@@ -194,7 +195,7 @@ function startedRecord(frozen: FrozenExperiment, overrides: Partial<ExperimentSt
   const frozenDigest = frozenDigestOf(frozen)
   const experimentId = experimentIdOf(frozen.proposalId, frozenDigest)
   return {
-    formatVersion: 3,
+    formatVersion: 4,
     kind: 'experiment_started',
     proposalId: frozen.proposalId,
     experimentId,
@@ -554,10 +555,39 @@ describe('assertExperimentReport', () => {
     expect(() => assertExperimentReport(noReason)).toThrow(/must say why the cost is unknown/)
   })
 
-  it('keeps v1 out of it: a v2 report is not a v1 report, whatever it carries', () => {
+  it('refuses a report from another build by version, naming the one it saw (K3: the report is v3)', () => {
     const report = reportFixture()
-    expect(report.formatVersion).toBe(2)
-    expect(() => assertExperimentReport({ ...report, formatVersion: 1 })).toThrow(/formatVersion must be 2/)
+    expect(report.formatVersion).toBe(3)
+    // The report grew a frozen provider identity carrying both sides' registry
+    // revisions, so a v2 report is a different schema: it is refused by name
+    // rather than read with the fields this build expects. The v1 shape the
+    // pre-rework build wrote is refused the same way.
+    for (const version of [2, 1]) {
+      const older = { ...report, formatVersion: version }
+      expect(() => assertExperimentReport(older)).toThrow(/formatVersion must be 3/)
+      expect(() => assertExperimentReport(older)).toThrow(new RegExp(`got ${version}`))
+    }
+  })
+
+  it('requires the frozen provider identity to record the candidate side\'s registry revision (K3)', () => {
+    const report = reportFixture()
+    const [sample] = report.frozen.samples
+    expect(sample!.provider.candidateRegistryRevision).toBe(HEX('4'))
+
+    // The member is part of the identity, not an optional extra: a block without
+    // it cannot say what the candidate side's run had to bind, so it is refused
+    // rather than compared against the production value.
+    const withoutMember = reportFixture()
+    const provider = { ...withoutMember.frozen.samples[0]!.provider } as Record<string, unknown>
+    delete provider.candidateRegistryRevision
+    withoutMember.frozen = frozenFixture({
+      samples: [
+        { ...frozenSample(), provider } as unknown as FrozenSample,
+        frozenSample({ taskId: 't-holdout', role: 'holdout', observed: { outcome: 'verified', runId: 'r-holdout' } }),
+      ],
+    })
+    withoutMember.frozenDigest = frozenDigestOf(withoutMember.frozen)
+    expect(() => assertExperimentReport(withoutMember)).toThrow(/candidateRegistryRevision/)
   })
 })
 
@@ -605,11 +635,11 @@ describe('the experiment ledger family', () => {
     await svc.recordExperimentStart(started)
     const key = experimentSampleKeyOf({ proposalId: frozen.proposalId, frozen }, 't-failure', 'baseline')
     const record: ExperimentSampleRecord = {
-      formatVersion: 3,
+      formatVersion: 4,
       kind: 'experiment_sample',
       proposalId: frozen.proposalId,
       experimentId: started.experimentId,
-      preparedContentDigest: frozen.candidate.sha256,
+      preparedContentDigest: digestOf(frozen.candidate),
       sampleTaskId: 't-failure',
       side: 'baseline',
       repetition: 0,
@@ -646,11 +676,11 @@ describe('the experiment ledger family', () => {
     const started = startedRecord(frozen)
     await svc.recordExperimentStart(started)
     const base: ExperimentSampleRecord = {
-      formatVersion: 3,
+      formatVersion: 4,
       kind: 'experiment_sample',
       proposalId: frozen.proposalId,
       experimentId: started.experimentId,
-      preparedContentDigest: frozen.candidate.sha256,
+      preparedContentDigest: digestOf(frozen.candidate),
       sampleTaskId: 't-failure',
       side: 'baseline',
       repetition: 0,
@@ -665,6 +695,11 @@ describe('the experiment ledger family', () => {
     }
     await expect(svc.recordExperimentSample({ ...base, preparedContentDigest: HEX('9') }))
       .rejects.toThrow(/candidate content identity that is not the experiment's own/)
+    // The key member is the digest of the *whole* candidate identity (K3): a
+    // record keyed by the `SKILL.md` digest alone is not this experiment's key,
+    // because a candidate whose sidecar differs is a different experiment.
+    await expect(svc.recordExperimentSample({ ...base, preparedContentDigest: frozen.candidate.sha256 }))
+      .rejects.toThrow(/candidate content identity that is not the experiment's own/)
     await expect(svc.recordExperimentSample({ ...base, repetition: 3 }))
       .rejects.toThrow(/repetition that is not the experiment's own/)
     await expect(svc.recordExperimentSample({ ...base, sampleTaskId: 't-unknown' }))
@@ -673,6 +708,52 @@ describe('the experiment ledger family', () => {
       .rejects.toThrow(/must carry the frozen digest its workspace was built from/)
     // Nothing was written by any of the refusals.
     expect((await svc.experiment(started.experimentId)).samples).toHaveLength(0)
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('keys a sample by the complete candidate identity, so the sidecar is part of the key (K3)', async () => {
+    const { svc, root } = await service()
+    const guidance = frozenFixture()
+    const execution = frozenFixture({
+      candidate: { name: CANDIDATE.name, sha256: CANDIDATE.sha256, contract: { sha256: HEX('5'), contractDigest: HEX('6') } },
+    })
+    const keyOf = (frozen: FrozenExperiment) =>
+      experimentSampleKeyOf({ proposalId: frozen.proposalId, frozen }, 't-failure', 'candidate')
+    // Same `SKILL.md` bytes, two objects: the sidecar decides which experiment a
+    // sample side belongs to, so the key covers the whole identity and never the
+    // file digest alone.
+    expect(keyOf(guidance).preparedContentDigest).toBe(digestOf(CANDIDATE))
+    expect(keyOf(guidance).preparedContentDigest).not.toBe(CANDIDATE.sha256)
+    expect(keyOf(execution).preparedContentDigest).toBe(digestOf(execution.candidate))
+    expect(keyOf(execution).preparedContentDigest).not.toBe(keyOf(guidance).preparedContentDigest)
+    expect(experimentSampleKey(keyOf(execution))).not.toBe(experimentSampleKey(keyOf(guidance)))
+
+    // And the ledger holds the line to it: the execution experiment refuses the
+    // guidance-keyed record by name, and takes its own.
+    const started = startedRecord(execution)
+    await svc.recordExperimentStart(started)
+    const record: ExperimentSampleRecord = {
+      formatVersion: 4,
+      kind: 'experiment_sample',
+      proposalId: execution.proposalId,
+      experimentId: started.experimentId,
+      preparedContentDigest: digestOf(execution.candidate),
+      sampleTaskId: 't-failure',
+      side: 'candidate',
+      repetition: 0,
+      outcome: 'verified',
+      evidenceRefs: [],
+      criteria: [],
+      workspace: '/tmp/ws',
+      initialDigest: execution.snapshot.digest,
+      cost: { status: 'unknown', reason: 'the fixture reports no metrics' },
+      actor: 'root-1',
+      at: '2026-09-26T00:00:00.000Z',
+    }
+    await expect(svc.recordExperimentSample({ ...record, preparedContentDigest: digestOf(CANDIDATE) }))
+      .rejects.toThrow(/candidate content identity that is not the experiment's own/)
+    await svc.recordExperimentSample(record)
+    expect((await svc.experiment(started.experimentId)).samples).toHaveLength(1)
     await rm(root, { recursive: true, force: true })
   })
 
@@ -736,11 +817,11 @@ describe('the experiment ledger family', () => {
     const frozen = frozenFixture()
     const started = startedRecord(frozen)
     const record = (sampleTaskId: string, sampleSide: ExperimentSide, outcome: ExperimentSampleRecord['outcome']): ExperimentSampleRecord => ({
-      formatVersion: 3,
+      formatVersion: 4,
       kind: 'experiment_sample',
       proposalId: frozen.proposalId,
       experimentId: started.experimentId,
-      preparedContentDigest: frozen.candidate.sha256,
+      preparedContentDigest: digestOf(frozen.candidate),
       sampleTaskId,
       side: sampleSide,
       repetition: 0,
@@ -778,7 +859,7 @@ describe('the experiment ledger family', () => {
     // The baseline reproduced the historical failure and the candidate passed:
     // a clean fix, with the holdout maintained.
     expect(report.verdict).toBe('fixed')
-    expect(report.formatVersion).toBe(2)
+    expect(report.formatVersion).toBe(3)
     expect(report.samples[0]!.verdict).toBe('fixed')
     expect(report.samples[1]!.verdict).toBe('maintained')
     expect(report.frozenDigest).toBe(started.frozenDigest)
@@ -832,7 +913,7 @@ describe('the experiment ledger family', () => {
   it('folds a hand-written proposal beside the experiment family, each by its own rules', async () => {
     const root = await mkdtemp(join(tmpdir(), 'experiment-ledger-'))
     const line = JSON.stringify({
-      formatVersion: 3,
+      formatVersion: 4,
       kind: 'proposed',
       proposalId: 'p-old',
       targetType: 'skill',
@@ -860,11 +941,17 @@ describe('the experiment ledger family', () => {
   it('keys one sample side by every member the plan fixes, so no two runs can share a key', () => {
     const view = { proposalId: 'p1', frozen: frozenFixture() }
     const key = experimentSampleKeyOf(view, 't-failure', 'baseline')
-    expect(experimentSampleKey(key)).toBe(['p1', CANDIDATE.sha256, 't-failure', 'baseline', '0'].join('\0'))
+    // The content member is the digest of the complete candidate identity (K3),
+    // never the bare `SKILL.md` digest: a candidate whose sidecar differs is a
+    // different object and therefore a different key.
+    expect(experimentSampleKey(key)).toBe(['p1', digestOf(CANDIDATE), 't-failure', 'baseline', '0'].join('\0'))
+    expect(experimentSampleKey(key)).not.toContain(CANDIDATE.sha256)
     expect(experimentSampleKey(experimentSampleKeyOf(view, 't-failure', 'candidate'))).not.toBe(experimentSampleKey(key))
     expect(experimentSampleKey(experimentSampleKeyOf(view, 't-holdout', 'baseline'))).not.toBe(experimentSampleKey(key))
     expect(experimentSampleKey(experimentSampleKeyOf({ ...view, frozen: frozenFixture({ repetition: 1 }) }, 't-failure', 'baseline')))
       .not.toBe(experimentSampleKey(key))
+    const execution = { proposalId: 'p1', frozen: frozenFixture({ candidate: { ...CANDIDATE, contract: { sha256: HEX('5'), contractDigest: HEX('6') } } }) }
+    expect(experimentSampleKey(experimentSampleKeyOf(execution, 't-failure', 'baseline'))).not.toBe(experimentSampleKey(key))
   })
 })
 
@@ -904,14 +991,14 @@ describe('the candidate and prepare refusals (S4-E 收尾)', () => {
  * The write boundary and the fold: what the ledger accepts, and where.
  *
  * The independent review's counterexamples (S4-E 收尾): the ledger reads and
- * writes one format — `formatVersion: 3` — and the fold admits only the
+ * writes one format — `formatVersion: 4` — and the fold admits only the
  * lifecycle this build's entries write. Each case below takes the entry
  * directly, the shape a forged call or a stale caller takes, and pins that the
  * refusal lands before the first byte changes and leaves the ledger a fresh
  * service can still read.
  * ------------------------------------------------------------------------ */
 
-describe('the ledger write boundary is formatVersion 3 (S4-E 收尾)', () => {
+describe('the ledger write boundary is formatVersion 4 (K3)', () => {
   it('refuses a direct experiment start that declares an old version, before the append', async () => {
     const { svc, root } = await service()
     try {
@@ -919,7 +1006,7 @@ describe('the ledger write boundary is formatVersion 3 (S4-E 收尾)', () => {
       const err = await svc.recordExperimentStart({ ...startedRecord(frozenFixture()), formatVersion: 1 } as never).then(() => undefined, e => e)
       expect.soft(err, 'an old-version start must throw before append').toBeInstanceOf(Error)
       expect.soft(String((err as Error).message), 'the refusal must name the version it saw and the version this build writes')
-        .toMatch(/formatVersion 1[\s\S]*formatVersion 3/)
+        .toMatch(/formatVersion 1[\s\S]*formatVersion 4/)
       expect.soft(await readFile(svc.file, 'utf8'), 'ledger bytes must stay unchanged').toBe(before)
       await expect.soft(new EvolutionService(fixtureCtx(), { root }).list(), 'the ledger must remain readable').resolves.toBeDefined()
     } finally { await rm(root, { recursive: true, force: true }) }
@@ -963,7 +1050,7 @@ describe('the ledger write boundary is formatVersion 3 (S4-E 收尾)', () => {
       const before=await readFile(svc.file,'utf8')
       const err=await svc.recordExperimentSample({
         formatVersion:1, kind:'experiment_sample', proposalId:'p1', experimentId:started.experimentId,
-        preparedContentDigest:frozen.candidate.sha256, sampleTaskId:'t-failure', side:'baseline', repetition:0,
+        preparedContentDigest:digestOf(frozen.candidate), sampleTaskId:'t-failure', side:'baseline', repetition:0,
         taskId:'t-replay', runId:'r-replay', outcome:'failed', reviewRef:'t-replay#r-replay', evidenceRefs:['e-1'],
         criteria:[{criterionId:'ac1',verdict:'fail'}],workspace:'/tmp/ws',initialDigest:frozen.snapshot.digest,
         cost:{status:'unknown',reason:'review fixture'}, actor:'root-1',at:'2026-09-26T00:00:00.000Z'
@@ -977,7 +1064,7 @@ describe('the ledger write boundary is formatVersion 3 (S4-E 收尾)', () => {
 })
 
 describe('the fold admits only the current lifecycle (S4-E 收尾)', () => {
-  const common = { formatVersion: 3, proposalId: 'p1', actor: 'root-1', at: '2026-09-26T00:00:00.000Z' }
+  const common = { formatVersion: 4, proposalId: 'p1', actor: 'root-1', at: '2026-09-26T00:00:00.000Z' }
   const proposed = (over: Record<string, unknown> = {}) => ({
     ...common, kind: 'proposed', targetType: 'skill', targetId: 'fixture-skill', baseVersion: 'v1', level: 'L2',
     rationale: 'the fixture proposal', sourceRefs: ['diagnosis:d1'], ...over,

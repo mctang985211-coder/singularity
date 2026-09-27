@@ -32,7 +32,7 @@ import { defineEvolutionRollbackTool } from '../../src/tools/evolution-rollback.
 const PROPOSAL_ID = 's1'
 const SKILL = 'verify'
 
-/** The one file each commit replaces, and the two versions production can hold. */
+/** The file each commit replaces first, and the two versions production can hold. */
 const TARGET = (skillRoot: string) => join(skillRoot, SKILL, 'SKILL.md')
 const CANDIDATE = skillText('# the candidate version\n')
 const BASELINE = skillText('# the production version\n')
@@ -62,50 +62,96 @@ function gateAnswers(refs: readonly string[]) {
 
 const AT = (seconds: number) => `2026-09-27T00:00:${String(seconds).padStart(2, '0')}.000Z`
 
-/** The lifecycle lines every fixture starts from: a skill proposal walked to decided(PROMOTE). */
-function decidedLines(): Record<string, unknown>[] {
-  const common = { formatVersion: 3, proposalId: PROPOSAL_ID, actor: 'root-1' }
+/** The ledger lines of the second file an execution object carries — the two shapes a K3 intent can commit. */
+const SIDECAR_TARGET = '/placeholder-sidecar'
+const SIDECAR_SHA256 = sha256Of('the sidecar bytes of this fixture object')
+const SIDECAR_CONTRACT_DIGEST = sha256Of('the declaration this fixture object loads to')
+
+/**
+ * The lifecycle lines every fixture starts from: a skill proposal walked to decided(PROMOTE).
+ * `execution` forges the two-file object (`SKILL.md` plus `SKILL.contract.json`); the
+ * default is the one-file guidance object.
+ */
+function decidedLines(execution = false): Record<string, unknown>[] {
+  const common = { formatVersion: 4, proposalId: PROPOSAL_ID, actor: 'root-1' }
   return [
     {
       ...common, kind: 'proposed', targetType: 'skill', targetId: SKILL, baseVersion: 'v1', level: 'L2',
       rationale: 'the skill never mentions the empty-input fixture', sourceRefs: ['diagnosis:d1'], at: AT(0),
     },
     { ...common, kind: 'candidate', versionSet: { skill: 'v2' }, mutation: { name: SKILL, content: CANDIDATE }, at: AT(1) },
-    {
-      ...common, kind: 'prepared', sandbox: `sandbox/${PROPOSAL_ID}`, mechanical: true, champion: 'captured',
-      skillContent: { name: SKILL, sha256: sha256Of(CANDIDATE) },
-      skillBaseline: { name: SKILL, sha256: sha256Of(BASELINE) },
-      files: [`skills/${SKILL}/SKILL.md`, `champion/skills/${SKILL}/SKILL.md`], at: AT(2),
-    },
+    execution
+      ? {
+          ...common, kind: 'prepared', sandbox: `sandbox/${PROPOSAL_ID}`, mechanical: true, champion: 'captured',
+          skillContent: {
+            name: SKILL, sha256: sha256Of(CANDIDATE),
+            contract: { sha256: SIDECAR_SHA256, contractDigest: SIDECAR_CONTRACT_DIGEST },
+          },
+          skillBaseline: {
+            name: SKILL, sha256: sha256Of(BASELINE),
+            contract: { sha256: SIDECAR_SHA256, contractDigest: SIDECAR_CONTRACT_DIGEST },
+          },
+          files: [
+            `skills/${SKILL}/SKILL.md`, `skills/${SKILL}/SKILL.contract.json`,
+            `champion/skills/${SKILL}/SKILL.md`, `champion/skills/${SKILL}/SKILL.contract.json`,
+          ],
+          at: AT(2),
+        }
+      : {
+          ...common, kind: 'prepared', sandbox: `sandbox/${PROPOSAL_ID}`, mechanical: true, champion: 'captured',
+          skillContent: { name: SKILL, sha256: sha256Of(CANDIDATE) },
+          skillBaseline: { name: SKILL, sha256: sha256Of(BASELINE) },
+          files: [`skills/${SKILL}/SKILL.md`, `champion/skills/${SKILL}/SKILL.md`], at: AT(2),
+        },
     { ...common, kind: 'gated', gate: gateAnswers([`sandbox/${PROPOSAL_ID}/replay-report.json`]), at: AT(3) },
     { ...common, kind: 'decided', decision: 'PROMOTE', approvalRef: 'approval:decide', at: AT(4) },
   ]
 }
 
-/** One `commit_intent` line, as the commit path writes it. */
-function intentLine(direction: 'apply' | 'rollback', approvalRef: string): Record<string, unknown> {
+/** One `commit_intent` line, as the commit path writes it: one file, or two for an execution object. */
+function intentLine(direction: 'apply' | 'rollback', approvalRef: string, execution = false): Record<string, unknown> {
+  const swap = (file: string) => (direction === 'apply'
+    ? { baselineSha256: sha256Of(BASELINE), contentSha256: sha256Of(CANDIDATE), source: `sandbox/${PROPOSAL_ID}/skills/${SKILL}/${file}` }
+    : { baselineSha256: sha256Of(CANDIDATE), contentSha256: sha256Of(BASELINE), source: `sandbox/${PROPOSAL_ID}/champion/skills/${SKILL}/${file}` })
   return {
-    formatVersion: 3, kind: 'commit_intent', intentId: `${PROPOSAL_ID}/${direction}`, proposalId: PROPOSAL_ID, direction,
-    approvalRef, target: '/placeholder',
-    baselineSha256: direction === 'apply' ? sha256Of(BASELINE) : sha256Of(CANDIDATE),
-    contentSha256: direction === 'apply' ? sha256Of(CANDIDATE) : sha256Of(BASELINE),
-    source: direction === 'apply' ? `sandbox/${PROPOSAL_ID}/skills/${SKILL}/SKILL.md` : `sandbox/${PROPOSAL_ID}/champion/skills/${SKILL}/SKILL.md`,
+    formatVersion: 4, kind: 'commit_intent', intentId: `${PROPOSAL_ID}/${direction}`, proposalId: PROPOSAL_ID, direction,
+    approvalRef,
+    files: [
+      { target: '/placeholder', ...swap('SKILL.md') },
+      ...(execution ? [{ target: SIDECAR_TARGET, ...swap('SKILL.contract.json') }] : []),
+    ],
     actor: 'root-1', at: AT(5),
   }
 }
 
 /** The completion that closes {@link intentLine}. */
-function completionLine(direction: 'apply' | 'rollback', approvalRef: string): Record<string, unknown> {
+function completionLine(direction: 'apply' | 'rollback', approvalRef: string, execution = false): Record<string, unknown> {
   return {
-    formatVersion: 3, kind: direction === 'apply' ? 'applied' : 'rolledback', proposalId: PROPOSAL_ID,
-    targets: ['/placeholder'], approvalRef, intentId: `${PROPOSAL_ID}/${direction}`, actor: 'root-1', at: AT(6),
+    formatVersion: 4, kind: direction === 'apply' ? 'applied' : 'rolledback', proposalId: PROPOSAL_ID,
+    targets: ['/placeholder', ...(execution ? [SIDECAR_TARGET] : [])], approvalRef, intentId: `${PROPOSAL_ID}/${direction}`,
+    actor: 'root-1', at: AT(6),
   }
 }
 
 /** Every `target`/`targets` member of a forged line, re-pointed at the fixture's own skill root. */
 function retarget(lines: readonly Record<string, unknown>[], skillRoot: string): Record<string, unknown>[] {
-  const target = TARGET(skillRoot)
-  return lines.map(line => ('targets' in line ? { ...line, targets: [target] } : line.target === '/placeholder' ? { ...line, target } : line))
+  const paths: Record<string, string> = {
+    '/placeholder': TARGET(skillRoot),
+    [SIDECAR_TARGET]: join(skillRoot, SKILL, 'SKILL.contract.json'),
+  }
+  return lines.map(line => {
+    if ('targets' in line) {
+      return { ...line, targets: (line.targets as string[]).map(target => paths[target] ?? target) }
+    }
+    // A `prepared` line lists the sandbox paths the prepare wrote (strings); a
+    // `commit_intent` line lists one file object per production file.
+    const files = line.files as unknown
+    if (!Array.isArray(files) || files.some(file => typeof file !== 'object' || file === null)) return line
+    return {
+      ...line,
+      files: (files as Record<string, unknown>[]).map(file => ({ ...file, target: paths[String(file.target)] ?? file.target })),
+    }
+  })
 }
 
 const workspaces: string[] = []
@@ -191,8 +237,8 @@ function exec(sessionId = 'root-1') {
 }
 
 /** The apply-side fixture: production holds the baseline, and one apply intent is open. */
-function openApplyIntent(): Record<string, unknown>[] {
-  return [...decidedLines(), intentLine('apply', 'approval:call-7')]
+function openApplyIntent(execution = false): Record<string, unknown>[] {
+  return [...decidedLines(execution), intentLine('apply', 'approval:call-7', execution)]
 }
 
 describe('evolution_apply against an open commit intent', () => {
@@ -383,15 +429,30 @@ describe('evolution_list', () => {
     const listed = (await defineEvolutionListTool(h.ctx).execute({})) as string
     expect(listed).toContain(`${PROPOSAL_ID} [decided PROMOTE] L2 skill ${SKILL} (base v1)`)
     expect(listed).toContain(
-      `  open commit intent: ${PROPOSAL_ID}/apply (apply) target ${TARGET(h.skillRoot)} recorded ${AT(5)}`,
+      `  open commit intent: ${PROPOSAL_ID}/apply (apply) recorded ${AT(5)} — production targets [${TARGET(h.skillRoot)}]`,
     )
     expect(listed).toContain('a production write is underway and its completion has not been recorded')
+    expect(listed).toContain('the skill directory stays closed to new admission')
 
     // A query is a query: the ledger bytes, the sandbox, production and the
     // intent are all exactly as they were.
     expect(await readFile(join(h.root, 'proposals.jsonl'), 'utf8')).toBe(before)
     expect(await readFile(TARGET(h.skillRoot), 'utf8')).toBe(BASELINE)
     expect((await h.svc.get(PROPOSAL_ID)).openIntent?.intentId).toBe(`${PROPOSAL_ID}/apply`)
+  })
+
+  it('renders every production file of an execution object\'s open intent', async () => {
+    // A K3 object carries two files and the intent that commits it names both: a
+    // listing that showed one path would hide half of a production write, and the
+    // prepared block has to say which object the sandbox holds.
+    const h = await fixture({ lines: openApplyIntent(true) })
+    const sidecar = join(h.skillRoot, SKILL, 'SKILL.contract.json')
+
+    const listed = (await defineEvolutionListTool(h.ctx).execute({})) as string
+    expect(listed).toContain(`  open commit intent: ${PROPOSAL_ID}/apply (apply) recorded ${AT(5)} — production targets [${TARGET(h.skillRoot)}, ${sidecar}]`)
+    expect(listed).toContain('execution provider (SKILL.md + SKILL.contract.json)')
+    expect(listed).toContain('(4 files, execution provider')
+    expect((await h.svc.get(PROPOSAL_ID)).openIntent?.files.map(file => file.target)).toEqual([TARGET(h.skillRoot), sidecar])
   })
 
   it('says nothing about an intent once the commit is complete', async () => {

@@ -15,11 +15,12 @@ export function defineEvolutionListTool(ctx: Context) {
     description:
       'Read-only. List EvolutionProposals in the evolution ledger, optionally filtered by status / targetType / targetId, ' +
       'each with its derived history (proposed → candidate → prepared → gated → decided → applied → rolledback for an ' +
-      'applied single-file skill replacement; a non-skill proposal stays proposed — this build admits a skill candidate ' +
-      'only). The ledger records proposals, sandbox materializations, human decisions, human-approved ' +
+      'applied skill object — one file for a guidance skill, `SKILL.md` plus `SKILL.contract.json` for an execution one; a ' +
+      'non-skill proposal stays proposed — this build admits a skill candidate only). The ledger records proposals, sandbox ' +
+      'materializations, human decisions, human-approved ' +
       'applies/rollbacks, and the commit intent behind each production write: a proposal whose commit was interrupted ' +
-      'reports that intent — its id, direction, production target and when it was recorded — and stays in the status its ' +
-      'lifecycle had reached, until a reconciliation or a retry of the apply/rollback settles it.',
+      'reports that intent — its id, direction, every production file it commits and when it was recorded — and stays in ' +
+      'the status its lifecycle had reached, until a reconciliation or a retry of the apply/rollback settles it.',
     parameters: {
       status: { type: 'string', enum: ['proposed', 'candidate', 'prepared', 'gated', 'decided', 'applied', 'rolledback'], description: 'Only proposals in this status' },
       targetType: { type: 'string', enum: TARGET_TYPES, description: 'Only proposals pointing at this mutation surface' },
@@ -48,8 +49,11 @@ export function defineEvolutionListTool(ctx: Context) {
         if (proposal.prepared !== undefined) {
           const view = proposal.prepared
           // The fold admits only a materialized skill prepare with both identities.
+          const shape = view.skillContent!.contract === undefined
+            ? 'guidance (SKILL.md)'
+            : 'execution provider (SKILL.md + SKILL.contract.json)'
           lines.push(
-            `  sandbox: ${ctx.evolution.root}/${view.sandbox!} (${view.files.length} files, champion snapshot captured, ` +
+            `  sandbox: ${ctx.evolution.root}/${view.sandbox!} (${view.files.length} files, ${shape}, champion snapshot captured, ` +
             `candidate content ${view.skillContent!.name} sha256:${view.skillContent!.sha256.slice(0, 12)}…, ` +
             `production baseline ${view.skillBaseline!.name} sha256:${view.skillBaseline!.sha256.slice(0, 12)}…)`,
           )
@@ -60,9 +64,10 @@ export function defineEvolutionListTool(ctx: Context) {
         if (proposal.openIntent !== undefined) {
           const intent = proposal.openIntent
           lines.push(
-            `  open commit intent: ${intent.intentId} (${intent.direction}) target ${intent.target} recorded ${intent.at} — ` +
-            'a production write is underway and its completion has not been recorded; a reconciliation (a restart, or a retry of ' +
-            'the apply/rollback) settles it before anything loads against that target',
+            `  open commit intent: ${intent.intentId} (${intent.direction}) recorded ${intent.at} — production targets ` +
+            `[${intent.files.map(file => file.target).join(', ')}]`,
+            '  a production write is underway and its completion has not been recorded: the skill directory stays closed to new ' +
+            'admission until a reconciliation (a restart, or a retry of the apply/rollback) settles it',
           )
         }
         if (proposal.applied !== undefined) {

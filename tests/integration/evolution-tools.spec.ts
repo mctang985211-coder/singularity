@@ -140,11 +140,15 @@ function exec(sessionId: string) {
  * A loadable `SKILL.md` for a promotion test: the frontmatter `readSkillFile`
  * requires, plus the body a test is about. The promotion checks hold a candidate
  * to the same validator admission uses (S1-C item 3), so a candidate no worker
- * could load is refused.
+ * could load is refused — and the same is true of the *production* object
+ * `evolution_prepare` freezes, which is why every case below installs one.
  */
 function skillText(body: string, name = 'verify'): string {
   return `---\nname: ${name}\ndescription: candidate skill for a promotion test\n---\n\n${body}`
 }
+
+/** The production version every promotion case replaces: one loadable guidance object. */
+const PRODUCTION_SKILL = skillText('# old verify skill')
 
 it('drives evolution_propose and evolution_list through the plugin context onto the ledger', async () => {
   const { tools, home } = await mountAgent()
@@ -301,7 +305,7 @@ it('refuses a tampered skill candidate through the plugin, leaving production an
   try {
     const championDir = join(home, 'skills', 'verify')
     await mkdir(championDir, { recursive: true })
-    await writeFile(join(championDir, 'SKILL.md'), '# old verify skill\n')
+    await writeFile(join(championDir, 'SKILL.md'), PRODUCTION_SKILL)
 
     const propose = tools.get('evolution_propose')!
     const candidate = tools.get('evolution_candidate')!
@@ -334,7 +338,7 @@ it('refuses a tampered skill candidate through the plugin, leaving production an
     const rejected = await replay.execute({ proposalId: 'p-skill-2', taskIds: ['t-fail'], holdoutTaskIds: ['t-holdout'] }, exec('root-1'))
     expect(rejected).toContain('evolution_replay rejected:')
     expect(rejected).toContain('no longer matches the content identity')
-    expect(await readFile(join(championDir, 'SKILL.md'), 'utf8')).toBe('# old verify skill\n')
+    expect(await readFile(join(championDir, 'SKILL.md'), 'utf8')).toBe(PRODUCTION_SKILL)
     // nothing ran and nothing was recorded: the two-sided experiment re-verifies
     // the candidate before its first run, and no experiment line reached the ledger
     expect(replayTask).not.toHaveBeenCalled()
@@ -351,7 +355,7 @@ it('refuses a skill call the two-sided experiment cannot honour, without running
   try {
     const championDir = join(home, 'skills', 'verify')
     await mkdir(championDir, { recursive: true })
-    await writeFile(join(championDir, 'SKILL.md'), '# old verify skill\n')
+    await writeFile(join(championDir, 'SKILL.md'), PRODUCTION_SKILL)
 
     const propose = tools.get('evolution_propose')!
     const candidate = tools.get('evolution_candidate')!
@@ -378,7 +382,7 @@ it('refuses a skill call the two-sided experiment cannot honour, without running
     const preparedRecord = JSON.parse((await readFile(join(home, 'evolution', 'proposals.jsonl'), 'utf8')).trim().split('\n').at(-1)!)
     expect(preparedRecord.skillBaseline).toEqual({
       name: 'verify',
-      sha256: createHash('sha256').update('# old verify skill\n').digest('hex'),
+      sha256: createHash('sha256').update(PRODUCTION_SKILL, 'utf8').digest('hex'),
     })
 
     // A skill candidate is evaluated by a two-sided experiment, so the call must
@@ -402,7 +406,7 @@ it('refuses a skill gate without an experiment through the tools, leaving the le
   try {
     const championDir = join(home, 'skills', 'verify')
     await mkdir(championDir, { recursive: true })
-    await writeFile(join(championDir, 'SKILL.md'), '# old verify skill\n')
+    await writeFile(join(championDir, 'SKILL.md'), PRODUCTION_SKILL)
 
     const propose = tools.get('evolution_propose')!
     const candidate = tools.get('evolution_candidate')!

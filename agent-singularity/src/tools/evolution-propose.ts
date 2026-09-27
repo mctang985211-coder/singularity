@@ -31,10 +31,12 @@ export function defineEvolutionProposeTool(ctx: Context) {
     name: 'evolution_propose',
     description:
       'Register an EvolutionProposal in the evolution ledger (status: proposed). Pure bookkeeping: nothing here executes ' +
-      'or changes production. This build has one promotion path — a proposal that replaces an existing single-file SKILL.md ' +
-      'goes through evolution_candidate (carrying the full replacement text), evolution_prepare, evolution_replay (the ' +
-      'two-sided experiment), evolution_gate, and a human-approved evolution_decide plus evolution_apply. Every other target ' +
-      'type stays a recorded suggestion and is never opened as a candidate, so it is never evaluated and never promoted. ' +
+      'or changes production. This build has one promotion path — a proposal that improves an existing skill under its own ' +
+      'name (the whole loadable object: `SKILL.md`, plus the `SKILL.contract.json` beside it when the skill declares an ' +
+      'execution provider) goes through evolution_candidate (carrying the full replacement text), evolution_prepare, ' +
+      'evolution_replay (the two-sided experiment), evolution_gate, and a human-approved evolution_decide plus ' +
+      'evolution_apply. Every other target type stays a recorded suggestion and is never opened as a candidate, so it is ' +
+      'never evaluated and never promoted. ' +
       'Fill targetType/targetId/rationale manually, or pass fromDiagnosis to transcribe one proposal out of a recorded ' +
       'diagnosis (task_diagnose). baseVersion, level, and at least one sourceRef (diagnosisId / reviewRef / evidenceId) are required.',
     parameters: {
@@ -104,10 +106,12 @@ export function defineEvolutionProposeTool(ctx: Context) {
         )
         const skillReplacement =
           'ledger entry only — nothing was executed or changed; next: evolution_candidate, carrying the full replacement ' +
-          "text of the existing skill's SKILL.md"
+          "text of the existing skill's SKILL.md — the only input a candidate submits, because an execution skill's " +
+          'SKILL.contract.json is derived from production at evolution_prepare (only its content.skillMdSha256 is ' +
+          'recomputed, so a content update cannot move a capability, a required tool or a verifier)'
         const recordedSuggestion =
           `ledger entry only — nothing was executed or changed; this build executes one promotion path only — replacing an ` +
-          `existing single-file SKILL.md — so a "${proposal.targetType}" proposal stays a recorded suggestion: it cannot become ` +
+          `existing skill object under its own name — so a "${proposal.targetType}" proposal stays a recorded suggestion: it cannot become ` +
           'a candidate, is never evaluated, and is never promoted'
         return [
           `proposal ${proposal.proposalId} registered [proposed] ${proposal.level} ${proposal.targetType} ${proposal.targetId} (base ${proposal.baseVersion})`,

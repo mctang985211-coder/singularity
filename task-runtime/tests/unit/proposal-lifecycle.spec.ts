@@ -2365,11 +2365,15 @@ describe('the recovery barrier reconciles an open production commit first', () =
       order.push('reconcile')
       return [
         {
-          intentId: 's1/apply', proposalId: 's1', direction: 'apply', target: '/production/skills/verify/SKILL.md',
+          intentId: 's1/apply', proposalId: 's1', direction: 'apply',
+          targets: ['/production/skills/verify/SKILL.md'],
           result: 'completed-redone',
         },
         {
-          intentId: 's2/apply', proposalId: 's2', direction: 'apply', target: '/production/skills/other/SKILL.md',
+          // The real K3 shape: every file the intent committed, in intent order —
+          // the warning must name them, not a field the outcome does not carry.
+          intentId: 's2/apply', proposalId: 's2', direction: 'apply',
+          targets: ['/production/skills/other/SKILL.md', '/production/skills/other/SKILL.contract.json'],
           result: 'blocked', detail: 'the production target holds a version no commit of this proposal wrote',
         },
       ]
@@ -2386,7 +2390,7 @@ describe('the recovery barrier reconciles an open production commit first', () =
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toContain('"s2/apply"')
     expect(warnings[0]).toContain('apply of proposal "s2"')
-    expect(warnings[0]).toContain('/production/skills/other/SKILL.md')
+    expect(warnings[0]).toContain('/production/skills/other/SKILL.md, /production/skills/other/SKILL.contract.json')
     expect(warnings[0]).toContain('the production target holds a version no commit of this proposal wrote')
   })
 

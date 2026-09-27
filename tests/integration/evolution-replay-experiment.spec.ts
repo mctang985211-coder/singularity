@@ -64,6 +64,14 @@ const PROPOSAL = 'p1'
 const PRESET_PROPOSAL = 'p-preset'
 const SKILL = 'replay-fixture-skill'
 const PRESET = 'replay-fixture-preset'
+/**
+ * The capability row the fixture's samples request: one row granting the skill
+ * they evaluate, so the experiment's frozen provider list resolves the provider
+ * the candidate replaces — the entry the candidate side's registry revision
+ * substitutes (K3). A sample whose rows resolve no provider has no candidate
+ * revision to freeze, and the experiment refuses it before it runs.
+ */
+const ROW = 'replay-fixture-row'
 /** The answer files a skill body tells its worker to write; the samples' criteria are `test -f <file>`. */
 const ANSWER_FILES = ['fix.txt', 'keep.txt', 'holdout.txt']
 const BUDGET = { maxTokens: 5_000, note: 'the fixture budget' }
@@ -181,7 +189,7 @@ async function writeSample(h: RunStack, storeId: string, input: {
     objective: input.objective,
     depth: 0,
     acceptanceCriteria: [input.acceptance],
-    requestedCapabilities: [],
+    requestedCapabilities: [ROW],
     decompositionStatus: 'leaf',
     status: 'created',
     runIds: [],
@@ -251,6 +259,7 @@ async function fixture(options: { candidateBody?: string; skipSamples?: boolean 
   let h!: RunStack
   h = await startRunStack({
     roots: [ROOT],
+    capabilities: { [ROW]: { skills: [SKILL] } },
     worker: (sessionId: SessionId, agent: Agent) => replayedWorker(h, sessionId, agent),
   })
   const skillRoot = join(h.home, 'skills')
@@ -379,7 +388,7 @@ describe('S4-E: evolution_replay evaluates a skill candidate as the two-sided ex
 
     // --- the report on disk is the report the answer rendered ---
     const report = await reportOnDisk(f, reportPath)
-    expect(report.formatVersion).toBe(2)
+    expect(report.formatVersion).toBe(3)
     expect(report.experimentId).toBe(experimentId)
     expect(report.verdict).toBe('fixed')
     expect(report.verdict).toBe(overallExperimentVerdict(report.samples))
@@ -606,10 +615,11 @@ describe('S4-E: evolution_replay evaluates a skill candidate as the two-sided ex
     const linesBefore = await ledgerLines(f)
     const answer = await f.replay({ proposalId: PRESET_PROPOSAL, taskIds: ['t-fix'], holdoutTaskIds: ['t-holdout'] })
     // The model-facing entry refuses by name: this build evaluates a prepared
-    // single-file skill candidate only, and the proposal stays a record.
+    // skill *object* candidate only — one file or two, whole — and the proposal
+    // stays a record.
     expect(answer).toContain('evolution_replay rejected:')
     expect(answer).toContain(`"agent_preset"`)
-    expect(answer).toMatch(/single-file SKILL\.md candidate/)
+    expect(answer).toContain('this tool evaluates a prepared skill object candidate only')
     expect((await f.evolution.get(PRESET_PROPOSAL)).status).toBe('proposed')
     // Nothing ran and nothing was written: no run, no spawn, no ledger line, no
     // experiment and no report.
@@ -720,20 +730,22 @@ describe('S4-E: the promotion gate promotes a fixed skill candidate end to end',
       approvalRef: expect.stringMatching(/^approval:/),
       intentId: `${PROPOSAL}/rollback`,
     })
-    // Each intent names the same grant and target its completion closes, so the
-    // two lines of one commit cannot describe different operations.
+    // Each intent names the same grant and the same file set its completion
+    // closes, so the two lines of one commit cannot describe different
+    // operations: a guidance object is one file, and the intent names it.
     const intents = lines.filter(line => line.kind === 'commit_intent')
     expect(intents).toHaveLength(2)
+    for (const intent of intents) {
+      expect((intent.files as readonly { target: string }[]).map(file => file.target)).toEqual([production])
+    }
     expect(intents[0]).toMatchObject({
       proposalId: PROPOSAL,
       direction: 'apply',
-      target: production,
       approvalRef: (lines.filter(line => line.kind === 'applied')[0] as { approvalRef: string }).approvalRef,
     })
     expect(intents[1]).toMatchObject({
       proposalId: PROPOSAL,
       direction: 'rollback',
-      target: production,
       approvalRef: (lines.filter(line => line.kind === 'rolledback')[0] as { approvalRef: string }).approvalRef,
     })
     // Nothing rewrote an earlier line: a skill candidate never takes `replayed`.

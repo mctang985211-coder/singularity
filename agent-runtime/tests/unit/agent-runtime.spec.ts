@@ -591,15 +591,21 @@ describe('AgentRuntime root lifecycle', () => {
     expect(restrict).toHaveBeenCalledWith({ allow: ROOT_TOOLS_OPEN })
     const prompt = promptTextOf(section)
     expect(prompt).toContain('To carry a diagnosed fix into the evolution track')
-    // S4-E §F.2: a skill candidate is evaluated by the two-sided experiment, and
-    // only a single-file skill replacement is promotable in this build.
+    // S4-E §F.2, kept by K3: a skill candidate is evaluated by the two-sided
+    // experiment, and only a skill object is promotable in this build.
     expect(prompt).toContain('a new baseline run under the production configuration and a new candidate run on the prepared bytes')
-    expect(prompt).toContain('promotes single-file skill replacements only')
+    expect(prompt).toContain('only a skill object whose role, verifier and capability set are unchanged may be promoted')
     expect(prompt).toContain('evolution_list reads the ledger')
-    // S4-E 收尾: the protocol names the single-file skill path and nothing else.
-    // The v1 candidate-vs-champion chain is not a request this prompt may send —
-    // an agent that cannot see it cannot keep asking for it.
-    expect(prompt).toContain('evolution_candidate for a replacement of an existing single-file SKILL.md')
+    // K3 收尾 (K3-5): the protocol names the whole skill object this build
+    // improves — the model submits the replacement `SKILL.md` text and the
+    // execution sidecar is derived at prepare — together with the boundaries
+    // that still hold, and no reader of it may think a single file is all this
+    // build can update. The v1 candidate-vs-champion chain is not a request this
+    // prompt may send — an agent that cannot see it cannot keep asking for it.
+    expect(prompt).toContain('evolution_candidate for a same-name improvement of an existing skill object')
+    expect(prompt).toContain("an execution skill's SKILL.contract.json is derived from production at evolution_prepare")
+    expect(prompt).toContain('a knowledge sidecar, declared resources, a role change or a new provider is refused as a candidate')
+    expect(prompt).not.toMatch(/single-file|single file/i)
     expect(prompt).not.toContain('candidate vs champion')
     expect(prompt).not.toContain('candidate-vs-champion')
     expect(prompt).not.toContain('v1 replay')

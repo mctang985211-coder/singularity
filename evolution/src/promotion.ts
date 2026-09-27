@@ -1,6 +1,7 @@
 /**
  * The skill promotion gate (S4-E §F.2, EVAL-2/EVAL-3/EVAL-4): what a PROMOTE of a
- * single-file skill candidate must be able to prove before a human is asked.
+ * skill candidate — a whole object, one file or two — must be able to prove
+ * before a human is asked.
  *
  * The v1 gate read a candidate-vs-champion replay report. This gate reads the
  * two-sided experiment instead — and re-reads it, rather than trusting it:
@@ -9,10 +10,12 @@
  *    settled record per frozen sample and side. An experiment that stopped
  *    half-way is not evidence; the refusal names the sides the ledger is missing.
  * 2. **The identity prepare recorded.** The experiment's frozen candidate must be
- *    the prepared `SKILL.md` this proposal would write, and its frozen
- *    `productionBaseline` the baseline prepare captured (P3). The caller
- *    re-verifies the candidate's bytes (P2) as well; this check is what ties the
- *    frozen block to that file.
+ *    the prepared object this proposal would write — the whole thing, member by
+ *    member: the `SKILL.md` digest, and the sidecar's exact-byte and canonical
+ *    declaration digests when the object carries an execution sidecar — and its
+ *    frozen `productionBaseline` the complete baseline prepare captured (P3). The
+ *    caller re-verifies the candidate's bytes (P2) as well; this check is what
+ *    ties the frozen block to those files.
  * 3. **The report is its records.** The report file's bytes must equal the report
  *    `buildExperimentReport(view)` recomputes from the ledger, and the report must
  *    pass its own schema assertion. A file edited after the experiment — a verdict
@@ -49,11 +52,17 @@
  *    came back.
  * 8. **The provider identity the sides bound is the frozen one** (§Q3). Each
  *    side's run binding — its capability rows, registry revision, MCP servers,
- *    preset and resolved skills — must be the identity the freeze read from the
- *    production configuration, and the promoted skill's bytes are the one
- *    allowed difference: the baseline side's bound snapshot must hold the frozen
- *    production `SKILL.md`, the candidate side's the frozen candidate's. Apart
- *    from that difference the two sides must agree.
+ *    preset and resolved skills — must be the identity the freeze read, compared
+ *    *per side*: the baseline side against the production revision and the
+ *    production object, the candidate side against the frozen candidate
+ *    revision and the frozen candidate object. The promoted skill's own content
+ *    is the one allowed difference, and it is re-proved from the bytes the run
+ *    itself loaded: the side's snapshot must hold the frozen object's
+ *    `SKILL.md` — and, when that object carries an execution sidecar, its
+ *    `SKILL.contract.json` too. The role is *not* allowed to move on either
+ *    side: the frozen production role is the one both sides must keep. Apart
+ *    from the promoted skill's own two digests and the candidate revision that
+ *    absorbs them, the two sides must agree.
  * 9. **The verdict.** Only `fixed` is promotable. `fixed-with-regression`,
  *    `regressed`, `not-fixed`, `both-failed` and `inconclusive` each get their own
  *    named refusal, so "the failure is not fixed", "a holdout degraded" and "the
@@ -85,6 +94,7 @@ import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { SKILL_SIDECAR_FILE, skillContentDigest } from '@dangosys/dsh-singularity-task-runtime'
 import type { ReviewCriterion, ReviewRecord, RunProviderBinding, TaskInstance, TaskRun, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import type { EvolutionProposal } from './evolution.ts'
 import { experimentLineage, evidenceRefsOf } from './experiment.ts'
@@ -93,14 +103,38 @@ import { buildExperimentReport } from './experiment.ts'
 import type {
   ExperimentReport,
   ExperimentSampleComparison,
+  ExperimentSide,
   ExperimentSideDetail,
   ExperimentVerdict,
   FrozenCriterion,
   FrozenProviderIdentity,
   FrozenSample,
   ModelSelection,
+  SkillContentIdentity,
 } from './replay.ts'
 import { assertExperimentReport, digestOf, protectedInputsDigest } from './replay.ts'
+
+/**
+ * Whether two object identities are the same identity, member by member (K3):
+ * the name, the `SKILL.md` digest, and — exactly when the object carries an
+ * execution sidecar — the sidecar's exact-byte digest and its canonical
+ * declaration digest. Presence itself is compared, so a guidance identity never
+ * equals an execution one even if both digests happen to sound similar.
+ */
+function sameIdentity(left: SkillContentIdentity, right: SkillContentIdentity): boolean {
+  if (left.name !== right.name || left.sha256 !== right.sha256) return false
+  if ((left.contract === undefined) !== (right.contract === undefined)) return false
+  if (left.contract === undefined || right.contract === undefined) return true
+  return left.contract.sha256 === right.contract.sha256 && left.contract.contractDigest === right.contract.contractDigest
+}
+
+/** One identity as a refusal names it, sidecar half included. */
+function identityLabel(identity: SkillContentIdentity): string {
+  const base = `${identity.name}@${identity.sha256}`
+  return identity.contract === undefined
+    ? base
+    : `${base} + ${identity.contract.sha256} (declaration ${identity.contract.contractDigest})`
+}
 
 /** The task store as the gate reads it back: the runs, reviews and evidence an experiment's sides cite. */
 export interface PromotionStoreReads {
@@ -155,7 +189,7 @@ function sha256Hex(bytes: Buffer | string): string {
 
 /**
  * The refusal every other target type gets: no evaluator, no promotion. This
- * build evaluates a replacement of an existing single-file `SKILL.md`;
+ * build evaluates a replacement of an existing skill object's bytes;
  * capability, agent_preset, task_definition, the bookkeeping-only types and L4
  * have no evidence this gate could read, so no record of one is reused to
  * promote it (§F.2: "没有支持的评估器就拒绝新晋升"). Their records stay
@@ -164,7 +198,7 @@ function sha256Hex(bytes: Buffer | string): string {
 export function noEvaluatorRefusal(proposal: EvolutionProposal): Error {
   return new Error(
     `evolution: proposal "${proposal.proposalId}" targets "${proposal.targetType}", which has no evaluator in this build — ` +
-    'the two-sided experiment (§F.2) evaluates a replacement of an existing single-file SKILL.md only, and a promotion ' +
+    'the two-sided experiment (§F.2) evaluates a replacement of an existing skill object only, and a promotion ' +
     'without supported evaluation evidence is refused rather than granted from an older record.',
   )
 }
@@ -638,10 +672,22 @@ async function assertSideModelBinding(input: {
  * for the sample (S4-E §Q3): the capability rows, the registry revision, the MCP
  * servers (with a resolved template each) and every resolved skill's identity.
  *
- * The promoted skill's *content* is the one difference the frozen block allows,
- * and it is checked against the bytes the run actually bound: the side's
- * snapshot must hold the frozen `SKILL.md` — the production baseline's bytes for
- * the baseline side, the candidate's for the candidate side.
+ * The improved skill's own **content** is the one difference the frozen block
+ * allows, and it is checked *per side* against the frozen object that side was
+ * supposed to run (K3): the baseline side against `frozen.productionBaseline`,
+ * the candidate side against `frozen.candidate` — each object's own declaration
+ * digest and the content digest of its own bytes, plus the registry revision the
+ * freeze recorded for that side (`registryRevision` for production,
+ * `candidateRegistryRevision` for the candidate, which absorbs the improved
+ * skill's moved declaration). Every other skill is compared against the single
+ * production value, on both sides.
+ *
+ * The bytes are then re-proved from the run's own snapshot: what that side's
+ * worker really loaded has to hash to the frozen object's two digests, so a
+ * binding that merely *records* the right values is not enough. A role change is
+ * refused here on both sides — the frozen production role is the one the
+ * provider must keep — and a candidate whose bytes are the production bytes is
+ * refused as a candidate that never really ran.
  */
 async function assertSideProviderBinding(input: {
   sample: FrozenSample
@@ -667,11 +713,16 @@ async function assertSideProviderBinding(input: {
       `[${expected.capabilities.join(', ') || 'none'}] — the rows this side ran under are not the frozen production configuration's`,
     )
   }
-  if (binding.registryRevision !== expected.registryRevision) {
+  const expectedRevision = detail.side === 'candidate' ? expected.candidateRegistryRevision : expected.registryRevision
+  if (binding.registryRevision !== expectedRevision) {
+    const expectation = detail.side === 'candidate'
+      ? "the frozen provider list with the improved skill's own candidate declaration substituted"
+      : 'the production configuration as it stood at the freeze'
     throw new Error(
       `evolution: run "${run.runId}" of the ${where} bound registry revision ${binding.registryRevision}, but the experiment froze ` +
-      `${expected.registryRevision} — a capability row, a tool label or a declared provider contract moved since the freeze, so the ` +
-      'side did not run under the frozen production configuration',
+      `${expectedRevision} for the ${detail.side} side — a capability row, a tool label or a declared provider contract moved since ` +
+      `the freeze, so the ${detail.side} side did not run under the configuration the experiment froze for it (its expectation is ` +
+      `${expectation}, the revision that absorbs those declarations)`,
     )
   }
   const servers = [...binding.mcpServers].map(server => server.serverName).sort()
@@ -713,21 +764,25 @@ async function assertSideProviderBinding(input: {
         '— the run under this side did not load content the freeze named',
       )
     }
-    if (bound.role !== expectedSkill.role || (bound.contractDigest ?? null) !== expectedSkill.contractDigest) {
+    if (bound.role !== expectedSkill.role) {
       throw new Error(
-        `evolution: run "${run.runId}" of the ${where} bound skill "${name}" as ${bound.role}` +
-        `${bound.contractDigest === null ? '' : ` (contract ${bound.contractDigest})`}, but the frozen identity is ` +
-        `${expectedSkill.role}${expectedSkill.contractDigest === null ? '' : ` (contract ${expectedSkill.contractDigest})`} — the ` +
-        'provider this side loaded is not the one the experiment froze',
+        `evolution: run "${run.runId}" of the ${where} bound skill "${name}" as ${bound.role}, but the experiment froze it as ` +
+        `${expectedSkill.role} — the role production resolved is the role both sides must keep (the frozen candidate replaced that ` +
+        "object's bytes, never its kind); a candidate that turned the provider into another kind of object is refused rather than " +
+        'promoted as something the experiment never evaluated',
       )
     }
-    if (name === frozen.candidate.name) {
-      // The promoted skill's own content is the one difference the frozen block
-      // allows: the baseline side must bind exactly the production identity the
-      // freeze read, and the candidate side's bytes are read off its snapshot
-      // below (the candidate's content is not the production content, so its
-      // recorded digest is not compared to the frozen one).
-      if (detail.side === 'baseline' && bound.contentDigest !== expectedSkill.contentDigest) {
+    if (name !== frozen.candidate.name) {
+      // Every other provider: one production identity, both sides.
+      if ((bound.contractDigest ?? null) !== expectedSkill.contractDigest) {
+        throw new Error(
+          `evolution: run "${run.runId}" of the ${where} bound skill "${name}" declaration ` +
+          `${bound.contractDigest === null ? '(none)' : bound.contractDigest}, but the frozen identity is ` +
+          `${expectedSkill.contractDigest === null ? '(none)' : expectedSkill.contractDigest} — the provider this side loaded is not ` +
+          'the one the experiment froze',
+        )
+      }
+      if (bound.contentDigest !== expectedSkill.contentDigest) {
         throw new Error(
           `evolution: run "${run.runId}" of the ${where} bound skill "${name}" content ${bound.contentDigest}, but the production ` +
           `configuration's content at freeze was ${expectedSkill.contentDigest} — the bytes this side loaded moved since the freeze`,
@@ -735,51 +790,113 @@ async function assertSideProviderBinding(input: {
       }
       continue
     }
-    if (bound.contentDigest !== expectedSkill.contentDigest) {
+    // The promoted skill's own content: each side is compared against the
+    // frozen object *that side* ran, so the candidate's moved declaration
+    // digest and rewritten content digest are the expected difference — and
+    // anything else is a refusal that names the side.
+    const sideObject = detail.side === 'candidate' ? frozen.candidate : frozen.productionBaseline
+    if (sideObject === undefined) {
       throw new Error(
-        `evolution: run "${run.runId}" of the ${where} bound skill "${name}" content ${bound.contentDigest}, but the production ` +
-        `configuration's content at freeze was ${expectedSkill.contentDigest} — the bytes this side loaded moved since the freeze`,
+        `evolution: run "${run.runId}" of the ${where} bound the improved skill "${name}", but the frozen block records no ` +
+        'production baseline to compare the baseline side\'s object against — the evidence predates the two-file baseline and is ' +
+        'refused rather than promoted against a shape nobody froze',
+      )
+    }
+    const expectedContract = sideObject.contract?.contractDigest ?? null
+    // The object's own bytes as the run's binding records them: this build's
+    // object declares no resources (prepare refuses one), so the identity is the
+    // `SKILL.md` bytes and the same `skillContentDigest` the loader computes.
+    const expectedContentDigest = skillContentDigest({ skillMdSha256: sideObject.sha256, resources: [] })
+    if ((bound.contractDigest ?? null) !== expectedContract) {
+      throw new Error(
+        `evolution: run "${run.runId}" of the ${where} bound skill "${name}" declaration ` +
+        `${bound.contractDigest === null ? '(none)' : bound.contractDigest}, but the ${detail.side} side's frozen object declares ` +
+        `${expectedContract === null ? '(none)' : expectedContract} (${identityLabel(sideObject)}) — the promoted skill's own sidecar is ` +
+        'the one difference the candidate overlay is there to produce, and each side must bind the declaration of the object it loaded',
+      )
+    }
+    if (bound.contentDigest !== expectedContentDigest) {
+      throw new Error(
+        `evolution: run "${run.runId}" of the ${where} bound skill "${name}" content ${bound.contentDigest}, but the ${detail.side} ` +
+        `side's frozen object hashes to ${sideObject.sha256} (content digest ${expectedContentDigest}) — the content this side loaded ` +
+        'is not the frozen one',
       )
     }
   }
   // The promoted skill's own bytes: read from the snapshot the run bound, so the
-  // check is against what the run really loaded, not against what it recorded.
+  // check is against what the run really loaded, not against what it recorded —
+  // both files of the object, exactly as the freeze identified them (K3).
   const target = boundSkills.get(frozen.candidate.name)
   if (target !== undefined) {
-    const expectedBytes = detail.side === 'candidate'
-      ? frozen.candidate.sha256
-      : frozen.productionBaseline?.sha256
-    if (expectedBytes !== undefined) {
-      if (binding.snapshotRoot === undefined) {
-        throw new Error(
-          `evolution: run "${run.runId}" of the ${where} bound skill "${frozen.candidate.name}" but records no snapshot root — ` +
-          'the bytes it loaded cannot be re-read, so the frozen content identity cannot be compared',
-        )
-      }
-      let bytes: Buffer
-      try {
-        bytes = await readFile(join(binding.snapshotRoot, frozen.candidate.name, 'SKILL.md'))
-      } catch (error) {
-        throw new Error(
-          `evolution: the content run "${run.runId}" of the ${where} was bound to cannot be read ` +
-          `(${error instanceof Error ? error.message : String(error)}) — the promoted skill's frozen bytes cannot be re-proved, so ` +
-          'the promotion is refused',
-        )
-      }
+    const sideObject = detail.side === 'candidate' ? frozen.candidate : frozen.productionBaseline
+    if (sideObject === undefined) {
+      throw new Error(
+        `evolution: run "${run.runId}" of the ${where} bound the improved skill "${frozen.candidate.name}" but the frozen block ` +
+        'records no production baseline — the bytes the baseline side loaded cannot be re-proved',
+      )
+    }
+    if (binding.snapshotRoot === undefined) {
+      throw new Error(
+        `evolution: run "${run.runId}" of the ${where} bound skill "${frozen.candidate.name}" but records no snapshot root — ` +
+        'the bytes it loaded cannot be re-read, so the frozen content identity cannot be compared',
+      )
+    }
+    const frozenFiles: readonly { file: string; sha256: string }[] = [
+      { file: 'SKILL.md', sha256: sideObject.sha256 },
+      ...(sideObject.contract === undefined
+        ? []
+        : [{ file: SKILL_SIDECAR_FILE, sha256: sideObject.contract.sha256 }]),
+    ]
+    for (const frozenFile of frozenFiles) {
+      const bytes = await readSideSnapshotFile({
+        snapshotRoot: binding.snapshotRoot,
+        name: frozen.candidate.name,
+        file: frozenFile.file,
+        where,
+        runId: run.runId,
+        side: detail.side,
+      })
       const digest = sha256Hex(bytes)
-      if (digest !== expectedBytes) {
+      if (digest !== frozenFile.sha256) {
         throw new Error(
-          `evolution: run "${run.runId}" of the ${where} bound skill "${frozen.candidate.name}" whose SKILL.md hashes to ${digest}, ` +
-          `but the experiment froze ${expectedBytes} for the ${detail.side} side — the bytes this side ran are not the frozen ones`,
-        )
-      }
-      if (detail.side === 'candidate' && digest === frozen.productionBaseline?.sha256) {
-        throw new Error(
-          `evolution: the candidate side of the ${where} loaded the production bytes ("${frozen.candidate.name}" hashes to ` +
-          `${digest}, the frozen production baseline) — the candidate was never really run, so the comparison proves nothing`,
+          `evolution: run "${run.runId}" of the ${where} bound skill "${frozen.candidate.name}" whose ${frozenFile.file} hashes to ` +
+          `${digest}, but the experiment froze ${frozenFile.sha256} for the ${detail.side} side — the bytes this side ran are not the ` +
+          'frozen ones',
         )
       }
     }
+    if (detail.side === 'candidate' && sideObject.sha256 === frozen.productionBaseline?.sha256) {
+      throw new Error(
+        `evolution: the candidate side of the ${where} loaded the production bytes ("${frozen.candidate.name}" hashes to ` +
+        `${sideObject.sha256}, the frozen production baseline) — the candidate was never really run, so the comparison proves nothing`,
+      )
+    }
+  }
+}
+
+/**
+ * One frozen file of the improved skill, read where the run really loaded it:
+ * `<snapshotRoot>/<name>/<file>`. A snapshot that no longer holds the file is a
+ * named refusal (the bytes cannot be re-proved), never a comparison against the
+ * record the run made of itself.
+ */
+async function readSideSnapshotFile(input: {
+  snapshotRoot: string
+  name: string
+  file: string
+  where: string
+  runId: string
+  side: ExperimentSide
+}): Promise<Buffer> {
+  const { snapshotRoot, name, file, where, runId, side } = input
+  try {
+    return await readFile(join(snapshotRoot, name, file))
+  } catch (error) {
+    throw new Error(
+      `evolution: the ${file} of skill "${name}" at the content run "${runId}" of the ${where} was bound to cannot be read ` +
+      `(${error instanceof Error ? error.message : String(error)}) — the ${side} side's frozen bytes cannot be re-proved from the ` +
+      'snapshot its run recorded, so the promotion is refused',
+    )
   }
 }
 
@@ -787,8 +904,17 @@ async function assertSideProviderBinding(input: {
  * Whether the two sides' bindings agree everywhere the frozen block allows
  * agreement and nowhere else (S4-E §Q3): every field of the run binding and the
  * run's preset must match between the baseline and the candidate side, except
- * the promoted skill's own content digest — the one difference the experiment's
- * overlay is supposed to produce.
+ * the promoted skill's own content digest and declaration digest — the two
+ * differences the experiment's overlay is supposed to produce, each of which is
+ * already pinned per side by {@link assertSideProviderBinding}.
+ *
+ * The two registry revisions are not compared here either, for the same reason:
+ * the candidate's legitimately differs (it absorbs the improved skill's moved
+ * declaration digest), and both values are pinned separately — production for
+ * one side, candidate for the other — so "the sides agree" is not the claim that
+ * holds them; the frozen block is. Everything else (the capability rows, the
+ * granted servers, the preset, and every other skill's role, declaration and
+ * content) has one frozen value and must be identical on both sides.
  */
 function assertSidesAgree(
   frozen: ExperimentReport['frozen'],
@@ -798,23 +924,23 @@ function assertSidesAgree(
 ): void {
   const comparable = (binding: RunProviderBinding) => ({
     capabilities: [...binding.capabilities].sort(),
-    registryRevision: binding.registryRevision,
     mcpServers: [...binding.mcpServers].sort((left, right) => (left.serverName < right.serverName ? -1 : left.serverName > right.serverName ? 1 : 0)),
     skills: [...binding.skills]
       .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
       .map(skill => ({
         name: skill.name,
         role: skill.role,
-        contractDigest: skill.contractDigest ?? null,
-        ...(skill.name === frozen.candidate.name ? {} : { contentDigest: skill.contentDigest }),
+        ...(skill.name === frozen.candidate.name
+          ? {}
+          : { contractDigest: skill.contractDigest ?? null, contentDigest: skill.contentDigest }),
       })),
   })
   const left = JSON.stringify(comparable(baseline.binding))
   const right = JSON.stringify(comparable(candidate.binding))
   if (left !== right) {
     throw new Error(
-      `evolution: the two sides of ${where} did not bind the same provider identity — apart from the promoted skill's own content, ` +
-      `which the candidate overlay is what changes, every field must agree:\n- baseline: ${left}\n- candidate: ${right}`,
+      `evolution: the two sides of ${where} did not bind the same provider identity — apart from the promoted skill's own content ` +
+      `and declaration, which the candidate overlay is what changes, every field must agree:\n- baseline: ${left}\n- candidate: ${right}`,
     )
   }
   if (baseline.run.agentPreset !== candidate.run.agentPreset) {
@@ -968,22 +1094,26 @@ export async function assertSkillPromotionEvidence(
       'own records, never from an edited file',
     )
   }
-  // 2. The frozen identities are the ones this proposal would promote.
+  // 2. The frozen identities are the ones this proposal would promote —
+  // member by member, the whole object each (K3): name, `SKILL.md` digest, and
+  // when the object carries an execution sidecar, the sidecar's exact-byte
+  // digest and canonical declaration digest. An object that changed shape or
+  // declaration is not the object the experiment evaluated.
   const frozen = report.frozen
-  if (frozen.candidate.name !== candidate.name || frozen.candidate.sha256 !== candidate.sha256) {
+  if (!sameIdentity(frozen.candidate, candidate)) {
     throw new Error(
-      `evolution: the experiment froze candidate ${frozen.candidate.name}@${frozen.candidate.sha256} but proposal ` +
-      `"${proposal.proposalId}" now prepares ${candidate.name}@${candidate.sha256} — the evidence belongs to different candidate ` +
+      `evolution: the experiment froze candidate ${identityLabel(frozen.candidate)} but proposal ` +
+      `"${proposal.proposalId}" now prepares ${identityLabel(candidate)} — the evidence belongs to different candidate ` +
       'bytes; propose a new candidate and evaluate it',
     )
   }
   const baseline = prepared?.skillBaseline
-  if (baseline === undefined || frozen.productionBaseline?.name !== baseline.name
-    || frozen.productionBaseline?.sha256 !== baseline.sha256) {
+  const frozenBaseline = frozen.productionBaseline
+  if (baseline === undefined || frozenBaseline === undefined || !sameIdentity(frozenBaseline, baseline)) {
     throw new Error(
-      `evolution: the experiment's frozen production baseline (${frozen.productionBaseline?.name ?? 'none'}@` +
-      `${frozen.productionBaseline?.sha256 ?? 'none'}) is not the baseline prepare recorded for proposal "${proposal.proposalId}" ` +
-      `(${baseline?.name ?? 'none'}@${baseline?.sha256 ?? 'none'}) — the candidate was evaluated against another production state`,
+      `evolution: the experiment's frozen production baseline (${frozenBaseline === undefined ? 'none' : identityLabel(frozenBaseline)}) ` +
+      `is not the baseline prepare recorded for proposal "${proposal.proposalId}" ` +
+      `(${baseline === undefined ? 'none' : identityLabel(baseline)}) — the candidate was evaluated against another production state`,
     )
   }
   // 4-5. Every side, and every sample's inputs and judge, re-read from the store.

@@ -22,17 +22,41 @@ interface ReplayCriterionSummary {
   exitCode?: number;
 }
 /**
- * The content identity of a single-file skill candidate (P2): the skill name
- * plus the SHA-256 of the exact bytes of the materialized `SKILL.md`. Recorded
- * at prepare, carried by the experiment's frozen block, and re-verified by the
+ * The identity of one skill object's sidecar file (K3): the exact bytes of
+ * `SKILL.contract.json` as the object carries them, and the normalized identity
+ * a registry revision and a run binding use. Both are needed and neither implies
+ * the other: the byte digest is what a commit writes and re-verifies, and the
+ * canonical digest is what a run's own binding records — a re-serialization that
+ * preserves the declaration moves the first and not the second, which is exactly
+ * the difference the commit path relies on.
+ */
+interface SkillContractIdentity {
+  /** SHA-256 over the exact `SKILL.contract.json` bytes. */
+  sha256: string;
+  /** `skillContractDigest` of the sidecar — the normalized identity a registry revision and a run binding use. */
+  contractDigest: string;
+}
+/**
+ * The content identity of one skill object (P2): the skill name, the SHA-256 of
+ * the exact `SKILL.md` bytes, and — exactly when the object carries an execution
+ * sidecar — the identity of the `SKILL.contract.json` beside it. Recorded at
+ * prepare, carried by the experiment's frozen block, and re-verified by the
  * experiment's pre-run check, at every promotion gate, and on the apply write —
- * so the chain can never validate one file's content and apply another's.
+ * so the chain can never validate one object's content and apply another's, and
+ * a two-file object's two files are frozen together.
+ *
+ * A guidance object — a skill with no sidecar — is a complete object with one
+ * file, which is why `contract` is absent rather than empty: presence *is* the
+ * shape, and the presence of `contract` must agree between the candidate
+ * identity and the production baseline it was prepared against.
  */
 interface SkillContentIdentity {
   /** The skill name the mutation targets (`mutation.name`, the proposal's targetId). */
   name: string;
-  /** Lowercase SHA-256 hex over the exact file bytes — no trim, no newline conversion. */
+  /** Lowercase SHA-256 hex over the exact `SKILL.md` file bytes — no trim, no newline conversion. */
   sha256: string;
+  /** Present exactly when the object carries an execution sidecar; see {@link SkillContractIdentity}. */
+  contract?: SkillContractIdentity;
 }
 /** One side of one task's comparison: an outcome and the criterion verdicts the run reported. */
 interface ReplaySideSummary {
@@ -61,10 +85,10 @@ declare function compareReplaySides(champion: ReplaySideSummary, candidate: Repl
   relation: SideRelation;
 };
 /**
- * The comparer a v2 report names, and the only one this build can re-check:
+ * The comparer a report names, and the only one this build can re-check:
  * the verdict rules of {@link compareExperimentSides} and
- * {@link overallExperimentVerdict}. A report naming anything else is refused
- * by {@link assertExperimentReport} instead of being re-derived with rules this
+ * {@link overallExperimentVerdict}. A report naming anything else is refused by
+ * {@link assertExperimentReport} instead of being re-derived with rules this
  * build does not have.
  */
 declare const EXPERIMENT_COMPARER_VERSION = "experiment-comparer@2";
@@ -166,7 +190,7 @@ type ExperimentCost = {
   status: 'unknown';
   reason: string;
 };
-/** One criterion's verdict on one side, with the verifier that decided it (v1's report dropped the verifier identity; v2 keeps it). */
+/** One criterion's verdict on one side, with the verifier that decided it (v1's report dropped the verifier identity; every generation since keeps it). */
 interface ExperimentCriterionDetail {
   criterionId: string;
   verdict: 'pass' | 'fail' | 'inconclusive';
@@ -312,21 +336,39 @@ interface FrozenProviderSkill {
  * fixed before the first run (S4-E §Q3): the capability rows the sample's
  * required capabilities resolve to, the registry revision the runtime's own
  * pre-check produces for them, the MCP servers those rows grant, the preset they
- * declare, and every skill their providers resolved to. The candidate side's
- * binding is compared against the same baseline with exactly one substituted
- * entry — the promoted skill's own content — which is the overlay difference
- * this ticket approved.
+ * declare, and every skill their providers resolved to.
+ *
+ * The candidate side's binding is compared against the same identity with
+ * exactly one substituted entry — the promoted skill's own content, which is the
+ * overlay difference this ticket approved. That entry is not a member of this
+ * shape, so the identity a candidate side must bind is recorded beside the
+ * production one as {@link FrozenProviderIdentity.candidateRegistryRevision}:
+ * the registry revision recomputed with the improved skill's own declaration
+ * digest replaced by the candidate's. Both are frozen for every sample, guidance
+ * candidates included (where the substitution changes nothing and the two
+ * revisions are equal) — one shape, no conditional member.
  */
 interface FrozenProviderIdentity {
   /** The capability rows in play, sorted (the sample's required capabilities as the table holds them). */
   capabilities: string[];
   /**
    * The registry revision the runtime's own pre-check produces for those rows
-   * over the production table at freeze. Every side's run binding must carry it:
-   * a capability row, a tool label or a declared contract that moved since the
-   * freeze moves it too.
+   * over the production table at freeze. The **baseline** side's run binding must
+   * carry it: a capability row, a tool label or a declared contract that moved
+   * since the freeze moves it too.
    */
   registryRevision: string;
+  /**
+   * The registry revision the **candidate** side's run binding must carry: the
+   * same revision over the same table and provider list with the improved
+   * skill's declaration digest replaced by the candidate object's
+   * (`null` for a guidance candidate) — the one substitution the candidate
+   * overlay produces. An execution candidate rewrites the sidecar's
+   * `content.skillMdSha256`, so its declaration digest moves and the revision
+   * that absorbs it moves with it; both sides' values are pinned separately
+   * rather than one being derived from the other at promotion time.
+   */
+  candidateRegistryRevision: string;
   /** The MCP server names those rows grant, sorted. Every side must bind exactly these, with a resolved template. */
   mcpServers: string[];
   /**
@@ -377,9 +419,9 @@ interface FrozenExperiment {
    * which is what lets a sample be run again without ever overwriting a record.
    */
   repetition: number;
-  /** The candidate content identity the candidate side runs against (the prepared `SKILL.md`). */
+  /** The candidate object's content identity the candidate side runs against (the prepared `SKILL.md`, plus the derived sidecar when the object has one). */
   candidate: SkillContentIdentity;
-  /** The production baseline the candidate replaces, when prepare captured one (a replacement, not a new skill). */
+  /** The production baseline the candidate object replaces, when prepare captured one (a replacement, not a new skill). */
   productionBaseline?: SkillContentIdentity;
   /**
    * The model selection every run of this experiment is placed under (S4-E
@@ -397,7 +439,13 @@ interface FrozenExperiment {
   };
   /** The comparer that produced the report's verdicts. */
   comparerVersion: string;
-  /** What each side runs under, in words: the candidate's overlay, and the baseline's absence of one. */
+  /**
+   * What each side runs under, in words: the candidate's overlay and the
+   * baseline's absence of one. The candidate's line names the *complete object*
+   * the sandbox's skills root is loaded from (K3) — the prepared `SKILL.md` and,
+   * for an execution object, the derived `SKILL.contract.json` beside it — so a
+   * reader is never told a two-file candidate is one file.
+   */
   overlay: {
     baseline: string;
     candidate: string;
@@ -405,7 +453,7 @@ interface FrozenExperiment {
 }
 /** One experiment's report: the frozen identity, every sample's two sides, and the verdict recomputable from them. */
 interface ExperimentReport {
-  formatVersion: 2;
+  formatVersion: 3;
   proposalId: string;
   experimentId: string;
   /**
@@ -437,8 +485,8 @@ declare function protectedInputsDigest(inputs: readonly {
 }[]): string;
 /**
  * The comparison-relevant half of one side: exactly what the v1 comparer reads
- * (the outcome and the criterion verdicts), so the v2 verdict is the v1 rules
- * applied to this experiment's evidence and nothing else. An
+ * (the outcome and the criterion verdicts), so the experiment's verdict is the
+ * v1 rules applied to this experiment's evidence and nothing else. An
  * {@link ExperimentSideDetail} is assignable to it.
  */
 interface ExperimentSideComparison {
@@ -478,7 +526,7 @@ declare function overallExperimentVerdict(samples: readonly Pick<ExperimentSampl
  */
 declare function assertFrozenExperiment(value: unknown): asserts value is FrozenExperiment;
 /**
- * Validate a v2 report against itself — and further than a shape check: every
+ * Validate a v3 report against itself — and further than a shape check: every
  * verdict the report carries must equal the one its own details recompute
  * (`compareExperimentSides` per sample,
  * `overallExperimentVerdict` overall), and the frozen block must hash to the
@@ -503,21 +551,46 @@ declare function assertExperimentReport(report: unknown): asserts report is Expe
  * and `finally` run, and the process lives on). A *real* exit at one of these
  * stages is a killed process, which no throw can stand in for — see the real-exit
  * cases in `tests/integration/k2-evolution-commit.spec.ts`.
+ *
+ * The `write-*` stages fire once per file and carry that file's target, so a
+ * caller can open a window between the two files of one object as precisely as
+ * inside one file's write. `commit-verified` is the last window: every file is
+ * written and read back, and the whole object passed
+ * {@link CommitHost.verifyCommitted} — the completion line is the only step left.
  */
-type CommitStage = 'intent-recorded' | 'write-staged' | 'write-renamed';
+type CommitStage = 'intent-recorded' | 'write-staged' | 'write-renamed' | 'commit-verified';
+/**
+ * One file of one commit: where it goes, what production must hold before the
+ * write, what it must hold after, and the bytes to write again if this process
+ * dies mid-commit. A K3 commit carries the fixed file set of one skill object —
+ * `SKILL.md` always, `SKILL.contract.json` second when the object has an
+ * execution sidecar — and the files are ordered: the `SKILL.md` first, so a
+ * recovery that has to write the pair again writes the pair in the order a
+ * loader would read it.
+ */
+interface CommitFile {
+  /** Absolute production path this commit replaces. */
+  readonly target: string;
+  /** The digest this file must hold before the write — the state a reconciliation redoes the write from. */
+  readonly baselineSha256: string;
+  /** The digest this file must hold after the write; always the digest of the bytes being committed. */
+  readonly contentSha256: string;
+  /** The recoverable bytes for this file, relative to the ledger root. */
+  readonly source: string;
+}
 /** What one reconciliation of an open intent settled to. */
 interface ReconcileOutcome {
   intentId: string;
   proposalId: string;
   direction: CommitDirection;
-  /** The absolute production target the intent committed. */
-  target: string;
+  /** The absolute production targets the intent committed, in intent order — the whole fixed file set. */
+  targets: readonly string[];
   /**
    * `completed-redone`: production still held the pre-commit state, so the same
-   * write was redone and the completion recorded. `completed-written`:
-   * production already held the committed content, so only the completion was
-   * recorded. `blocked`: neither state was found (or the source is gone) — the
-   * intent stays open and nothing was written.
+   * writes were redone and the completion recorded. `completed-written`:
+   * production already held the committed content in every file, so only the
+   * completion was recorded. `blocked`: a file holds neither state (or a source
+   * is gone) — the intent stays open and nothing was written.
    */
   result: 'completed-redone' | 'completed-written' | 'blocked';
   /** The named reason, present on `blocked`: what a human must settle before this commit can proceed. */
@@ -574,7 +647,13 @@ interface ExperimentRequest {
  */
 interface ExperimentKey {
   proposalId: string;
-  /** The prepared candidate's content identity (P2's digest of the materialized `SKILL.md`). */
+  /**
+   * The digest of the prepared candidate's **complete** content identity (K3):
+   * the name, the `SKILL.md` digest, and the sidecar's exact-byte and canonical
+   * digests when the object has one. Two candidates whose sidecars differ are
+   * two different objects, so they are two different keys — a re-serialized or
+   * rewritten declaration can never reuse the run that evaluated another one.
+   */
   preparedContentDigest: string;
   sampleTaskId: string;
   side: ExperimentSide;
@@ -582,8 +661,8 @@ interface ExperimentKey {
 }
 /** One `experiment_started` ledger line: the frozen experiment, recorded before the first run. */
 interface ExperimentStartedRecord {
-  /** The `proposals.jsonl` format version, not the report's — the ledger is one format, `formatVersion: 3` (K2). */
-  formatVersion: 3;
+  /** The `proposals.jsonl` format version, not the report's — the ledger is one format, `formatVersion: 4` (K3). */
+  formatVersion: 4;
   kind: 'experiment_started';
   proposalId: string;
   experimentId: string;
@@ -610,12 +689,16 @@ interface ExperimentStartedRecord {
  * under the same key.
  */
 interface ExperimentSampleRecord {
-  /** The `proposals.jsonl` format version, not the report's — the ledger is one format, `formatVersion: 3` (K2). */
-  formatVersion: 3;
+  /** The `proposals.jsonl` format version, not the report's — the ledger is one format, `formatVersion: 4` (K3). */
+  formatVersion: 4;
   kind: 'experiment_sample';
   proposalId: string;
   experimentId: string;
-  /** Key part: the candidate content identity this run went through. */
+  /**
+   * Key part: the digest of the complete candidate content identity this run
+   * went through (K3) — `SKILL.md`, and the sidecar's two digests when the
+   * object has one.
+   */
   preparedContentDigest: string;
   sampleTaskId: string;
   side: ExperimentSide;
@@ -649,6 +732,15 @@ interface ExperimentSampleRecord {
   at: string;
 }
 type ExperimentRecord = ExperimentStartedRecord | ExperimentSampleRecord;
+/**
+ * The idempotency key's content member (K3): the digest of the candidate's
+ * **complete** content identity — {@link digestOf} of the identity `prepare`
+ * recorded, so the name, the `SKILL.md` bytes and, when the object has an
+ * execution sidecar, the sidecar's exact bytes and canonical declaration are all
+ * part of the key. Two candidates that differ in any of them are two objects,
+ * and a key spent on one is never reused for the other.
+ */
+declare function preparedContentDigestOf(candidate: SkillContentIdentity): string;
 /** True for a record of the experiment family — the lines the proposal fold must leave alone. */
 declare function isExperimentRecord(record: {
   kind: string;
@@ -677,8 +769,15 @@ interface ExperimentLedger {
   /** Absolute ledger directory; the sandbox, the workspaces and the report live under it. */
   readonly root: string;
   get(proposalId: string): Promise<EvolutionProposal>;
-  /** Read the prepared candidate's bytes and verify them against the identity recorded at prepare (P2); throws otherwise. */
-  readSkillCandidate(proposalId: string): Promise<Buffer>;
+  /**
+   * Read the prepared candidate object's files — `SKILL.md`, and the sidecar
+   * when and only when the recorded identity has one — and verify them against
+   * that identity (P2); throws otherwise.
+   */
+  readSkillCandidate(proposalId: string): Promise<{
+    skillMd: Buffer;
+    sidecar?: Buffer;
+  }>;
   /** One experiment's folded view; throws on an unknown id. */
   experiment(experimentId: string): Promise<ExperimentView>;
   /**
@@ -792,7 +891,7 @@ interface VerifierVocabularyView {
 /** The key one frozen sample's side has under one experiment. */
 declare function experimentSampleKeyOf(view: Pick<ExperimentView, 'proposalId' | 'frozen'>, sampleTaskId: string, side: ExperimentSide): ExperimentKey;
 /**
- * Build the v2 report from the ledger records alone — the same records always
+ * Build the v3 report from the ledger records alone — the same records always
  * give the same report, its `at` included. An experiment missing a side has no
  * report: an incomplete comparison is not evidence, and saying so is the honest
  * answer.
@@ -865,14 +964,20 @@ declare const EVOLUTION_DECISIONS: readonly EvolutionDecision[];
  * task_definition were written by an older build and are not written here.
  */
 declare const APPLYABLE_TARGET_TYPES: readonly ProposalTargetType[];
-/** skill mutation: the full SKILL.md text for `<skills root>/<name>/SKILL.md`. */
+/**
+ * The skill mutation: the full `SKILL.md` text for
+ * `<skills root>/<name>/SKILL.md`. It is the whole input a candidate may submit
+ * — the object's other fixed file, when it has one, is derived from production
+ * at prepare rather than authored here, so a mutation can only ever change the
+ * text a worker reads and never the declaration that authorises it.
+ */
 interface SkillMutation {
   name: string;
   content: string;
 }
 /**
  * The champion snapshot of one prepared proposal. `captured` is the only state
- * there is: this build replaces an existing production `SKILL.md`, so a target
+ * there is: this build replaces an existing production skill object, so a target
  * that is not there has nothing to prepare from and is refused before any
  * sandbox write, and every `prepared` record the fold admits carries the
  * snapshot's state. The bookkeeping-only prepare (`none` — nothing materialized,
@@ -886,14 +991,20 @@ interface PreparedView {
   sandbox: string | null;
   mechanical: boolean;
   champion: ChampionState;
-  /** The content identity recorded for the materialized candidate `SKILL.md` (P2) — every prepare records it. */
+  /**
+   * The content identity recorded for the materialized candidate object (P2) —
+   * the `SKILL.md`, plus the derived `SKILL.contract.json` when the object
+   * carries an execution sidecar. Every prepare records it.
+   */
   skillContent?: SkillContentIdentity;
   /**
-   * The content identity of the production `skills/<name>/SKILL.md` as it stood
-   * at prepare (P3) — from the same single read that produced the champion
-   * snapshot, so snapshot and digest can never disagree. Every prepare records
-   * it; a captured champion without it cannot prove its baseline and refuses a
-   * new apply.
+   * The content identity of the production object as it stood at prepare (P3) —
+   * the same files, read once before anything was written, so the champion
+   * snapshot and the identity can never describe two different reads. Every
+   * prepare records it; a captured champion without it cannot prove its baseline
+   * and refuses a new apply. Its `contract` presence matches `skillContent`'s:
+   * the object's shape is fixed at prepare, and a record whose two halves
+   * disagree describes a role change no prepare performs.
    */
   skillBaseline?: SkillContentIdentity;
   /** Materialized files relative to the sandbox dir — candidate files first, champion snapshot files after. */
@@ -928,14 +1039,14 @@ interface GateAnswers {
   regressionEvidenceRefs: string[];
 }
 /**
- * One immutable ledger line, `formatVersion: 3` throughout (K2). A state
+ * One immutable ledger line, `formatVersion: 4` throughout (K3). A state
  * migration appends a new record; nothing is ever rewritten in place. The
  * version is the whole ledger's, not one line's: a line declaring anything but
- * 3 — or declaring nothing — makes the ledger refuse to load, and no entry here
+ * 4 — or declaring nothing — makes the ledger refuse to load, and no entry here
  * writes one.
  */
 type EvolutionRecord = {
-  formatVersion: 3;
+  formatVersion: 4;
   kind: 'proposed';
   proposalId: string;
   targetType: ProposalTargetType;
@@ -947,7 +1058,7 @@ type EvolutionRecord = {
   actor: string;
   at: string;
 } | {
-  formatVersion: 3;
+  formatVersion: 4;
   kind: 'candidate';
   proposalId: string;
   /** Complete version set the candidate aligns to (branch-model bookkeeping; this build creates no real branch). */
@@ -955,17 +1066,17 @@ type EvolutionRecord = {
   /**
    * The structured patch description, shaped by the proposal's targetType
    * (see the *Mutation interfaces) and always recorded: this build's
-   * candidate is a single-file `SKILL.md` replacement, so a candidate that
-   * carries nothing to materialize and evaluate would be a flow going
-   * nowhere. Every line `candidate` writes holds one; a line written before
-   * that rule (or by hand) folds to a candidate with no next state,
-   * because `prepared` is the one transition a candidate admits.
+   * candidate is a `SKILL.md` replacement of an existing skill object, so a
+   * candidate that carries nothing to materialize and evaluate would be a
+   * flow going nowhere. Every line `candidate` writes holds one; a line
+   * written before that rule (or by hand) folds to a candidate with no next
+   * state, because `prepared` is the one transition a candidate admits.
    */
   mutation: unknown;
   actor: string;
   at: string;
 } | {
-  formatVersion: 3;
+  formatVersion: 4;
   kind: 'prepared';
   proposalId: string;
   /**
@@ -997,14 +1108,14 @@ type EvolutionRecord = {
   actor: string;
   at: string;
 } | {
-  formatVersion: 3;
+  formatVersion: 4;
   kind: 'gated';
   proposalId: string;
   gate: GateAnswers;
   actor: string;
   at: string;
 } | {
-  formatVersion: 3;
+  formatVersion: 4;
   kind: 'decided';
   proposalId: string;
   decision: EvolutionDecision;
@@ -1019,10 +1130,10 @@ type EvolutionRecord = {
   actor: string;
   at: string;
 } | {
-  formatVersion: 3;
+  formatVersion: 4;
   kind: 'applied';
   proposalId: string;
-  /** Production write targets, for audit (absolute paths). */
+  /** Production write targets, in commit order — the whole file set of the object this apply wrote (absolute paths). */
   targets: string[];
   /** Human-review evidence: the approval call id of the evolution_apply request that granted this write. */
   approvalRef: string;
@@ -1035,10 +1146,10 @@ type EvolutionRecord = {
   actor: string;
   at: string;
 } | {
-  formatVersion: 3;
+  formatVersion: 4;
   kind: 'rolledback';
   proposalId: string;
-  /** Production write targets of the rollback (restored champion or deleted product), for audit. */
+  /** Production write targets of the rollback (restored champion file set), in commit order, for audit. */
   targets: string[];
   /** Human-review evidence: the approval call id of the evolution_rollback request that granted this write. */
   approvalRef: string;
@@ -1053,7 +1164,7 @@ type EvolutionRecord = {
  * identity and its per-sample runs. These lines are not lifecycle transitions
  * — an experiment does not move a proposal's status — so the proposal fold
  * leaves them alone and {@link foldExperiments} folds them. Their records
- * carry the ledger's own `formatVersion: 3` as well; the experiment *report*
+ * carry the ledger's own `formatVersion: 4` as well; the experiment *report*
  * at `experiment-report.json` has its own, separate version field.
  */ | ExperimentStartedRecord | ExperimentSampleRecord;
 /** Which way one commit moves a production target. */
@@ -1064,12 +1175,13 @@ type CommitDirection = 'apply' | 'rollback';
  * completion line that names the same `intentId`.
  *
  * It carries everything a recovery needs without trusting memory: which
- * proposal and direction, which human grant, the absolute production target, the
- * digest production must hold before the write (`baselineSha256`) and the digest
- * it must hold after (`contentSha256`), and the bytes to write again as a path
- * relative to the ledger root (`source`) — the candidate file for an apply, the
- * champion snapshot for a rollback. The id is derived, not chosen:
- * `<proposalId>/<direction>`.
+ * proposal and direction, which human grant, and the object's **whole fixed file
+ * set** ({@link CommitFile}, one or two entries, in commit order) — for every
+ * file its absolute production target, the digest that file must hold before the
+ * write (`baselineSha256`), the digest it must hold after (`contentSha256`), and
+ * the bytes to write again as a path relative to the ledger root (`source`: the
+ * candidate file for an apply, the champion snapshot for a rollback). The id is
+ * derived, not chosen: `<proposalId>/<direction>`.
  *
  * The line is not a lifecycle transition: it does not move the proposal's
  * status, so the proposal fold records it as {@link EvolutionProposal.openIntent}
@@ -1077,8 +1189,8 @@ type CommitDirection = 'apply' | 'rollback';
  * and only one of them can close it (see the fold's admission rules).
  */
 interface CommitIntentRecord {
-  /** The `proposals.jsonl` format version — the ledger is one format, `formatVersion: 3` (K2). */
-  formatVersion: 3;
+  /** The `proposals.jsonl` format version — the ledger is one format, `formatVersion: 4` (K3). */
+  formatVersion: 4;
   kind: 'commit_intent';
   /** `<proposalId>/<direction>` — the derived id the completion line must repeat. */
   intentId: string;
@@ -1086,14 +1198,8 @@ interface CommitIntentRecord {
   direction: CommitDirection;
   /** The human grant that authorised this commit (`approval:<callId>`), recorded on the completion as well. */
   approvalRef: string;
-  /** The absolute production path this commit replaces. */
-  target: string;
-  /** The digest production must hold before the write — the state a reconciliation redoes the write from. */
-  baselineSha256: string;
-  /** The digest production must hold after the write. */
-  contentSha256: string;
-  /** The recoverable bytes, relative to the ledger root. */
-  source: string;
+  /** The object's fixed files, in commit order — `SKILL.md` first, the `SKILL.contract.json` second when the object carries an execution sidecar. */
+  files: CommitFile[];
   actor: string;
   at: string;
 }
@@ -1103,10 +1209,8 @@ interface CommitIntentView {
   proposalId: string;
   direction: CommitDirection;
   approvalRef: string;
-  target: string;
-  baselineSha256: string;
-  contentSha256: string;
-  source: string;
+  /** The object's fixed files, in commit order; one or two entries (see {@link CommitIntentRecord.files}). */
+  files: CommitFile[];
   actor: string;
   at: string;
 }
@@ -1273,26 +1377,32 @@ interface Config {
    */
   modelSelection?: () => ModelSelection | undefined;
   /**
-   * The typed test seam of the commit path (K2): it fires at each durable stage
-   * of one commit — after the `commit_intent` line is on disk, after the new
-   * bytes are staged and fsynced beside the production target but before the
-   * rename, and after the rename has been read back and verified. Throwing from
-   * it aborts the commit exactly where it stands: the intent stays open and no
-   * later stage runs. That throw is an ordinary in-process exception, **not** a
-   * process exit — `writeFileAtomic`'s own `catch` still removes the staging file
-   * and the process keeps running — so it is a window-injection seam, and the
-   * real exit (a killed process at one of those stages) is proven by the
-   * nested-child cases in `tests/integration/k2-evolution-commit.spec.ts`. A
-   * production deployment never sets it; there is no other way to observe or
-   * interrupt a commit.
+   * The typed test seam of the commit path (K2, per-file since K3): it fires at
+   * each durable stage of one commit — after the `commit_intent` line is on disk
+   * (`intent-recorded`); after the new bytes of one file are staged and fsynced
+   * beside its production target but before the rename, and after that rename
+   * has been read back and verified (`write-staged` / `write-renamed`, each
+   * carrying the file's target, so a caller can open the window *between* the
+   * two files of one object as well as inside one file's write); and after every
+   * file is written and the whole object has passed the service's own
+   * loadability-and-identity re-read, with only the completion line left
+   * (`commit-verified`). Throwing from it aborts the commit exactly where it
+   * stands: the intent stays open and no later stage runs. That throw is an
+   * ordinary in-process exception, **not** a process exit — `writeFileAtomic`'s
+   * own `catch` still removes the staging file it had written and the process
+   * keeps running — so it is a window-injection seam, and the real exit (a
+   * killed process at one of those stages) is proven by the nested-child cases
+   * in `tests/integration/k2-evolution-commit.spec.ts`. A production deployment
+   * never sets it; there is no other way to observe or interrupt a commit.
    */
-  commitProbe?: (stage: CommitStage) => void;
+  commitProbe?: (stage: CommitStage, target?: string) => void;
 }
 /**
  * The production write targets of an apply (and its matching rollback), for
  * the approval reason and the audit record — the human sees exactly what a
- * grant will touch. One file: the candidate's `SKILL.md`, which is what this
- * build's executor writes and restores.
+ * grant will touch. The object's fixed file set: the candidate's `SKILL.md`,
+ * plus the `SKILL.contract.json` beside it when the prepared object carries an
+ * execution sidecar — one or two paths, in commit order.
  */
 declare function applyTargets(proposal: EvolutionProposal, roots: {
   skillRoot: string;
@@ -1355,21 +1465,39 @@ declare class EvolutionService extends Service {
    */
   candidate(proposalId: string, versionSet: Record<string, string>, actor: string, mutation: unknown): Promise<EvolutionProposal>;
   /**
-   * Move candidate → prepared: confirm the production `SKILL.md` this candidate
-   * replaces, materialize the skill mutation into `<root>/sandbox/<proposalId>/`
-   * and snapshot those same champion bytes under `champion/` — the anchor for
-   * the experiment's baseline and for rollback.
+   * Move candidate → prepared: confirm the production skill **object** this
+   * candidate replaces, materialize the mutation into
+   * `<root>/sandbox/<proposalId>/` and snapshot those same production bytes
+   * under `champion/` — the anchor for the experiment's baseline and for
+   * rollback.
    *
-   * The production read comes first, before any sandbox or ledger write: this
-   * build replaces an existing single-file `SKILL.md`, so a target that is not
-   * there has nothing to prepare, and a prepare that found none writes nothing
-   * at all. That one read yields both the snapshot and `skillBaseline` (P3),
-   * the digest the later apply compares the production target against.
+   * The production read comes first, before any sandbox or ledger write, and it
+   * is one verified read of the whole directory (`loadSkillSidecar`, the same
+   * loader a worker's provider check uses), so the object is frozen as it really
+   * is. A production directory with no readable `SKILL.md` has nothing to
+   * replace and is refused before anything is written. Anything else that makes
+   * the directory *not* the object it claims — a declaration that does not match
+   * the bytes, a file no sidecar names, an unreadable or unsupported entry —
+   * carries loader defects and is refused by name, because a candidate built
+   * from a directory nobody could describe would let a file disappear between
+   * prepare and apply. A knowledge sidecar and an execution sidecar with
+   * declared resources are refused too: this ticket's object is guidance or an
+   * execution provider with `resources: []`.
    *
-   * The candidate also records `skillContent` (P2): the name plus the SHA-256 of
-   * the exact bytes of the file that was actually materialized (read back from
-   * disk, never re-rendered from the mutation string), so the experiment, the
-   * gates, and apply can verify this exact content later.
+   * What is materialized is the object's fixed file set. Guidance is the
+   * candidate `SKILL.md` and the champion `SKILL.md`. An execution object also
+   * gets the candidate's `SKILL.contract.json` — the production declaration with
+   * only `content.skillMdSha256` rewritten to the candidate's bytes, serialized
+   * deterministically — and the production sidecar's exact bytes under
+   * `champion/`.
+   *
+   * The candidate and the baseline each record a full content identity
+   * (`skillContent` P2 / `skillBaseline` P3): the name, the SHA-256 of the exact
+   * bytes of every materialized file (read back from disk, never re-rendered
+   * from the mutation string), and — for an execution object — the file digest
+   * and canonical digest of its sidecar. The two identities' shapes agree by
+   * construction, so the fold can treat a disagreement as a role change it must
+   * refuse.
    */
   prepare(proposalId: string, actor: string): Promise<EvolutionProposal>;
   /**
@@ -1396,38 +1524,40 @@ declare class EvolutionService extends Service {
    * skill mutation at L1–L3 (the state machine itself refuses anything else —
    * every other target type has no executor in this build); the caller (the
    * evolution_apply tool) must hold a human grant from `ctx.approval.request`
-   * first, exactly as for decide. The sandbox `SKILL.md` replaces the production
-   * one (the champion snapshot covers that file only, so the write is
-   * file-level, never a directory delete).
+   * first, exactly as for decide. The candidate object's fixed file set
+   * replaces production's — `SKILL.md` and, when the object carries an execution
+   * sidecar, the derived `SKILL.contract.json` (the champion snapshot covers
+   * those files only, so the write is file-level, never a directory delete).
    *
    * The commit order is the recovery rule (K2): the `commit_intent` line is
-   * persisted first — proposal, direction, this approval, the absolute target,
-   * the content identity production must hold before (`prepared.skillBaseline`
-   * P3) and after (`prepared.skillContent` P2), and the sandbox candidate as the
-   * recoverable source — then the target is replaced atomically, then the
-   * `applied` record closes the intent. A failure at any stage leaves the intent
-   * open and nothing half-written: the production file is one complete version or
-   * the other, and {@link reconcile} (or a retry of this call) settles the intent
-   * from what production actually holds. Nothing here trusts a promise or a
-   * caller-supplied "approved".
+   * persisted first — proposal, direction, this approval, every target of the
+   * object's file set, the content identities production must hold before
+   * (`prepared.skillBaseline` P3) and after (`prepared.skillContent` P2) for
+   * each file, and the sandbox candidate files as the recoverable sources — then
+   * each file is replaced atomically, then the `applied` record closes the
+   * intent. A failure at any stage leaves the intent open and nothing
+   * half-written: every production file is one complete version or the other,
+   * and {@link reconcile} (or a retry of this call) settles the intent from what
+   * production actually holds — including the window where only the first file
+   * was replaced. Nothing here trusts a promise or a caller-supplied "approved".
    *
    * A skill apply re-verifies the production baseline (P3) after the human
-   * grant and before the intent is recorded: the production target must still be
-   * the one prepare recorded. A direct service call therefore cannot bypass the
-   * check the tool already ran before asking for approval.
+   * grant and before the intent is recorded: the production object must still be
+   * the one prepare recorded, both files. A direct service call therefore cannot
+   * bypass the check the tool already ran before asking for approval.
    *
-   * A fresh commit also refuses, before that baseline check, a production target
-   * another proposal's open commit intent names
+   * A fresh commit also refuses, before that baseline check, a production
+   * **directory** another proposal's open commit intent touches
    * ({@link assertTargetUncommitted}): the serial queue spans one process, and
-   * without the per-target gate the second of two proposals prepared against the
+   * without the per-object gate the second of two proposals prepared against the
    * same bytes would read the version the first is still committing over, pass
    * its own baseline check and move the target.
    *
    * The promotion check (S1-C item 3) runs here too, before the intent is
-   * recorded: a candidate whose provider role changed while the human was
-   * deciding (a sidecar that appeared in the sandbox, a verifier that was
-   * unregistered) is refused here, so no entry can write something a later
-   * admission would have refused.
+   * recorded: a candidate whose provider role or file shape changed while the
+   * human was deciding (a sidecar that appeared in or vanished from the sandbox,
+   * a declaration that moved, a verifier that was unregistered) is refused here,
+   * so no entry can write something a later admission would have refused.
    *
    * When this proposal already has an open intent — the process died before the
    * completion landed — this call does not ask for another approval and does not
@@ -1487,19 +1617,29 @@ declare class EvolutionService extends Service {
    */
   private sessionLog;
   /**
-   * The candidate skill's provider verdict, taken from the directory the
-   * promotion would write — plus the executor boundary this promotion cannot
-   * cross.
+   * The candidate object's provider verdict, taken from the directory the
+   * promotion would write — plus the two boundaries this promotion cannot cross.
    *
-   * The boundary: the commit promotes a **single `SKILL.md`**, so a
-   * candidate whose directory carries anything else (`SKILL.contract.json`, a
-   * `references/` or `scripts/` tree, any other file) is refused here by name.
-   * The executor is not being extended to multi-file candidates; what is being
-   * refused is the promotion of a candidate whose declaration or resources
-   * production would never receive — a promotion that reported an
-   * `execution-provider` role (or a content identity covering files nobody
-   * wrote) for content that does not exist is exactly the false record this
-   * refusal prevents.
+   * The shape boundary (K3): the commit promotes the **fixed file set of one
+   * skill object** — `SKILL.md`, plus the `SKILL.contract.json` beside it when
+   * and only when the prepared identity says the object has an execution
+   * sidecar. So a candidate directory that carries anything else (`references/`,
+   * `scripts/`, a stray file) is refused by name, and so is a directory whose
+   * file set does not match the frozen shape in either direction: a sidecar that
+   * appeared where the identity records none, or one that is missing where the
+   * identity records it. The role must agree with that shape too — two files
+   * load as an execution provider, one file as guidance — so a candidate that
+   * turned into the other kind of object is refused here rather than promoted as
+   * something the frozen experiment never evaluated.
+   *
+   * The derivation boundary: for an execution object the candidate sidecar is
+   * not the model's to write. It is re-derived here from the champion snapshot's
+   * own sidecar bytes and the candidate `SKILL.md` digest, and compared with the
+   * sandbox sidecar byte for byte (and by canonical digest) — so an escalated
+   * `requiredTools`, a swapped verifier or any other declaration change between
+   * prepare and promotion is refused by name. The champion side is checked too:
+   * its bytes must still hash to the baseline identity's sidecar digest, or the
+   * derivation would be built on bytes the prepare never recorded.
    *
    * Both the shape and the declaration are named when both are wrong: the
    * validator's own defects stay in the message with their codes, so this entry
@@ -1536,15 +1676,19 @@ declare class EvolutionService extends Service {
   /** The effective capability table, or `undefined` when this context cannot read one (no task-runtime service). */
   private effectiveCapabilities;
   /**
-   * Read a prepared skill candidate's materialized bytes and verify them
-   * against the content identity recorded at prepare (P2). The one read path
-   * every stage shares: the experiment's pre-run check, every promotion gate,
-   * and the apply write.
-   * Throws — never silently re-digests — when the candidate file is missing,
-   * is not a regular file, its path crosses a symbolic link, or its bytes no
-   * longer match the recorded digest.
+   * Read a prepared skill candidate's materialized object and verify it against
+   * the content identity recorded at prepare (P2): the `SKILL.md` bytes, plus
+   * the sidecar bytes when and only when the identity records a sidecar. The one
+   * read path every stage shares: the experiment's pre-run check, every promotion
+   * gate, and the apply write. Throws — never silently re-digests — when a
+   * recorded file is missing, is not a regular file, its path crosses a symbolic
+   * link, its bytes no longer match the recorded digest, or the sidecar's
+   * presence does not match the recorded shape.
    */
-  readSkillCandidate(proposalId: string): Promise<Buffer>;
+  readSkillCandidate(proposalId: string): Promise<{
+    skillMd: Buffer;
+    sidecar?: Buffer;
+  }>;
   /**
    * The production-baseline check (P3), on the apply seams only: the
    * evolution_apply tool runs it before asking a human, and `apply` runs it
@@ -1553,38 +1697,43 @@ declare class EvolutionService extends Service {
    * cannot bypass it. Nothing here writes, merges, or overwrites — a conflict
    * only throws.
    *
-   * The prepare-time baseline is a real regular file whose bytes still hash to
-   * the digest prepare recorded. A file that changed, disappeared, changed type
+   * The prepare-time baseline is a real, complete object: its `SKILL.md` bytes
+   * still hash to the recorded digest, and — when the baseline records a
+   * sidecar — the production `SKILL.contract.json` is there with exactly the
+   * bytes prepare recorded. A missing file, a file that changed, changed type
    * (now a directory), or sits behind a symbolic link (the file itself or an
-   * ancestor) is a conflict. Only `targetType: skill` carries a baseline; every
-   * other targetType passes untouched.
+   * ancestor) is a conflict, and so is a sidecar that appeared beside a baseline
+   * that had none: the shape production would be loaded in has changed, which is
+   * a third party's edit like any other. Only `targetType: skill` carries a
+   * baseline; every other targetType passes untouched.
    */
   checkProductionBaseline(proposalId: string): Promise<void>;
   private assertProductionBaseline;
   private readVerifiedSkillCandidate;
   /**
-   * Move applied → rolledback: undo the apply by restoring the champion
-   * `SKILL.md` snapshot taken at prepare, as one commit — the same intent →
-   * atomic write → completion order as apply, so an interrupted rollback is
-   * recoverable the same way. A record of another target type has no executor
-   * here: this build writes and restores a single `SKILL.md` only, and an
-   * applied capability row or preset directory is refused by name rather than
-   * touched. Same approval discipline as apply: the tool asks a human first, the
-   * service only executes and records.
+   * Move applied → rolledback: undo the apply by restoring the champion snapshot
+   * taken at prepare, as one commit — the same intent → atomic write →
+   * completion order as apply, so an interrupted rollback is recoverable the
+   * same way, including between the two files of one object. A record of another
+   * target type has no executor here: this build writes and restores the fixed
+   * file set of one skill object only, and an applied capability row or preset
+   * directory is refused by name rather than touched. Same approval discipline
+   * as apply: the tool asks a human first, the service only executes and records.
    *
    * A rollback restores *this* proposal's baseline and nothing else, so both
-   * ends are re-verified before the intent is recorded: production must still
-   * carry exactly the content this proposal applied (`prepared.skillContent`,
-   * P2), and the champion snapshot must still hash to the baseline prepare
-   * recorded (`prepared.skillBaseline`, P3). A target a later proposal — or any
-   * other writer — changed since is refused by name with nothing written, and so
-   * is a snapshot that can no longer reproduce the bytes it captured: neither
-   * may be papered over by restoring an old version on top of a newer one.
+   * ends are re-verified per file before the intent is recorded: every
+   * production file must still carry exactly the content this proposal applied
+   * (`prepared.skillContent`, P2), and every champion snapshot file must still
+   * hash to the baseline prepare recorded (`prepared.skillBaseline`, P3). A file
+   * a later proposal — or any other writer — changed since is refused by name
+   * with nothing written, and so is a snapshot that can no longer reproduce the
+   * bytes it captured: neither may be papered over by restoring an old version
+   * on top of a newer one.
    *
    * As in {@link apply}, an open intent of this proposal is settled rather than
    * duplicated, and the result reports the recovery; an open intent of another
-   * proposal that names the same target refuses this rollback by name before
-   * anything is read or written ({@link assertTargetUncommitted}).
+   * proposal that commits the same skill directory refuses this rollback by name
+   * before anything is read or written ({@link assertTargetUncommitted}).
    */
   rollback(proposalId: string, actor: string, approvalRef: string): Promise<ApplyOutcome>;
   /**
@@ -1626,30 +1775,41 @@ declare class EvolutionService extends Service {
   private settleOpenIntent;
   /**
    * The commit request one apply/rollback binds, read off the prepared record
-   * the proposal already carries: the absolute target (the same path
-   * {@link applyTargets} names to the human), the content identity production
-   * must hold before and after, and the recoverable source under the ledger
-   * root. `apply` commits the candidate over the recorded baseline; `rollback`
-   * commits the champion snapshot over the content the apply installed — the two
-   * digests swap, and nothing else about the two directions differs.
+   * the proposal already carries: every file of the object's fixed set with its
+   * absolute target (the same paths {@link applyTargets} names to the human), the
+   * content identity production must hold before and after that file, and the
+   * recoverable source under the ledger root. `apply` commits the candidate files
+   * over the recorded baseline; `rollback` commits the champion snapshot files
+   * over the content the apply installed — the two identities swap per file, and
+   * nothing else about the two directions differs. The order is the object's:
+   * `SKILL.md` first, the sidecar second when there is one.
    */
   private commitRequest;
-  /** The one production path a commit of this proposal may write: `<skillRoot>/<name>/SKILL.md`, confined to the skill root. */
-  private commitTarget;
   /**
-   * A fresh commit of `proposal` refuses, by name, a production target another
-   * proposal's open commit intent names. {@link commitExclusive} serializes one
-   * process's commits and nothing else, so a second commit queued behind an
-   * unfinished first one would read the pre-commit bytes, pass its own baseline
-   * check and move the target, leaving the first intent with no commit path left
-   * to settle it: `blocked` by name, its target refused by admission until
-   * something restores the bytes that intent names as its baseline. The
-   * per-target gate is what stops that. It is in-process, per production target
-   * and under the deployment's existing single-writer constraint — not a
-   * distributed lock, not a queue and not a retry loop; the intent is settled
-   * first, by {@link reconcile} or by a retry of the proposal that owns it.
+   * The production paths a commit of this proposal may write: the object's fixed
+   * file set under `<skillRoot>/<name>/` — `SKILL.md` always, and the
+   * `SKILL.contract.json` beside it when the prepared identity records an
+   * execution sidecar — each confined to the skill root, in commit order.
+   */
+  private commitTargets;
+  /**
+   * A fresh commit of `proposal` refuses, by name, a production **directory**
+   * another proposal's open commit intent touches. {@link commitExclusive}
+   * serializes one process's commits and nothing else, so a second commit queued
+   * behind an unfinished first one would read the pre-commit bytes, pass its own
+   * baseline check and move the target, leaving the first intent with no commit
+   * path left to settle it: `blocked` by name, its target refused by admission
+   * until something restores the bytes that intent names as its baseline. The
+   * per-object gate is what stops that; it matches on the directory that holds
+   * the files, because one intent covers a skill's fixed file set together — a
+   * second proposal prepared against the same skill is blocked by whichever file
+   * of the other intent this proposal's file set shares a directory with. It is
+   * in-process, per production object and under the deployment's existing
+   * single-writer constraint — not a distributed lock, not a queue and not a
+   * retry loop; the intent is settled first, by {@link reconcile} or by a retry
+   * of the proposal that owns it.
    *
-   * Only a materialized skill mutation has a commit target this build may write:
+   * Only a materialized skill mutation has commit targets this build may write:
    * every other proposal keeps the named refusal its own entry produces
    * ({@link checkPromotion}, {@link commitRequest}).
    */
@@ -1659,10 +1819,44 @@ declare class EvolutionService extends Service {
    * target and a source resolve against, the service's own verified reads — P2
    * for a candidate, the walk-verified production read, the ledger-root read for
    * a snapshot — the append funnel every line goes through (format check, staged
-   * fold, serialized write), and the probe seam. The commit path owns the order;
-   * the service owns what may be read and what a line must say.
+   * fold, serialized write), the whole-object verification that closes a commit,
+   * and the probe seam. The commit path owns the order; the service owns what
+   * may be read, what a line must say, and what "production is the object this
+   * direction promised" means.
    */
   private commitHost;
+  /**
+   * The whole-object verification a commit runs after its last file is written
+   * and before the completion is recorded — in a fresh commit and in every
+   * reconciliation branch that records one.
+   *
+   * It reads production the way a loader does (`loadSkillSidecar` through the
+   * same {@link providerVerdict} every promotion uses, so the verdict carries
+   * the verifier vocabulary and the capability table this deployment really
+   * has) and requires that the directory *is* one loadable object carrying the
+   * identity this direction promised:
+   *
+   * - the verdict is valid — no defect of any kind: a `SKILL.md` a declaration
+   *   does not cover, a declaration the bytes do not match, a file nobody
+   *   declares, a file set the shape rules refuse;
+   * - the role matches the file set the intent committed: two files load as an
+   *   execution provider, one file as guidance (a knowledge verdict is
+   *   impossible here, and would be refused by the same comparison);
+   * - `SKILL.md` carries the digest the first file's record named;
+   * - with two files, the production sidecar's exact bytes hash to the second
+   *   file's record, and the loaded declaration digest is the one the direction
+   *   promised — for an apply the candidate identity prepare recorded, for a
+   *   rollback the production baseline it recorded. This is also what makes the
+   *   completion a statement about the registry: `contractDigest` is exactly the
+   *   identity a registry revision absorbs, so by the time the completion line
+   *   is written, the registry's own view of the skill is already the new object.
+   *
+   * A throw is a named refusal: the intent stays open, no completion is
+   * recorded, and the caller and the next reconciliation both see the same
+   * refusal rather than a settled commit a loader would not accept. It never
+   * writes: this check reads production as it stands.
+   */
+  private verifyCommitted;
   /**
    * Serialize one commit — its intent, its production write and its completion —
    * behind every commit already running or queued, and behind every write the
@@ -1688,13 +1882,15 @@ declare class EvolutionService extends Service {
    */
   private assertNext;
   /**
-   * Write the skill mutation into the sandbox dir `dir`, then the champion
-   * snapshot from the production bytes the caller already read (P3: one read,
-   * before anything was written — those bytes become the snapshot and the
-   * recorded `skillBaseline` digest together, so the two can never describe two
-   * different reads of the production file). Every path goes through
-   * `resolveWithin`, so a write can never land outside the sandbox; the
-   * production skill root is read-only here.
+   * Write the candidate object into the sandbox dir `dir`, then the champion
+   * snapshot from the production bytes the caller already read (P3: one read of
+   * the production files, before anything was written — those bytes become the
+   * snapshot and the recorded `skillBaseline` identity together, so the two can
+   * never describe two different reads). The candidate's sidecar, when the
+   * object has one, is *derived* here ({@link candidateSidecar}) and not taken
+   * from the mutation: the model submits `SKILL.md` text and nothing else. Every
+   * path goes through `resolveWithin`, so a write can never land outside the
+   * sandbox; the production skill root is read-only here.
    */
   private materialize;
   /**
@@ -1716,10 +1912,11 @@ declare class EvolutionService extends Service {
    * ledger line is judged against the *other* lines around it: a `commit_intent`
    * is admitted only for a proposal in the state its direction commits (`apply`
    * from decided, `rollback` from applied), only with the derived id
-   * `<proposalId>/<direction>`, and only when the proposal has no other open
-   * intent; an `applied`/`rolledback` completion is admitted only when it closes
-   * the open intent of its own direction — same id, same approval, that exact
-   * target — and it closes it. So a completion cannot be recorded without its
+   * `<proposalId>/<direction>`, only with a well-formed fixed file set, and only
+   * when the proposal has no other open intent; an `applied`/`rolledback`
+   * completion is admitted only when it closes the open intent of its own
+   * direction — same id, same approval, that exact file set in the intent's own
+   * order — and it closes it. So a completion cannot be recorded without its
    * intent, cannot borrow another approval or another target, and cannot be
    * recorded twice: the second line has nothing left to close.
    *
@@ -1844,4 +2041,4 @@ declare class EvolutionService extends Service {
   private experimentSources;
 }
 //#endregion
-export { APPLYABLE_TARGET_TYPES, ApplyOutcome, ApplyView, ChampionState, CommitDirection, CommitIntentRecord, CommitIntentView, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCriterion, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, GateAnswers, ListFilter, ModelSelection, PrecheckSkillVerdict, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, ProviderPrecheckView, ReplayCriterionDiff, ReplayCriterionSummary, ReplaySideSummary, SideRelation, SkillContentIdentity, SkillMutation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, overallExperimentVerdict, protectedInputsDigest, renderProviderRoles, resumeExperiment, runExperiment };
+export { APPLYABLE_TARGET_TYPES, ApplyOutcome, ApplyView, ChampionState, CommitDirection, CommitIntentRecord, CommitIntentView, Config, EVOLUTION_DECISIONS, EVOLUTION_LEVELS, EXPERIMENT_COMPARER_VERSION, EXPERIMENT_OUTCOMES, EXPERIMENT_SAMPLE_ROLES, EXPERIMENT_SAMPLE_VERDICTS, EXPERIMENT_SIDES, EXPERIMENT_VERDICTS, EvolutionDecision, EvolutionLevel, EvolutionProposal, EvolutionRecord, EvolutionService, EvolutionService as default, EvolutionStatus, ExperimentBudget, ExperimentCost, ExperimentCriterionDetail, ExperimentKey, ExperimentLedger, ExperimentOutcome, ExperimentRecord, ExperimentReport, ExperimentRequest, ExperimentResult, ExperimentSampleComparison, ExperimentSampleRecord, ExperimentSampleRole, ExperimentSampleSpec, ExperimentSampleVerdict, ExperimentSide, ExperimentSideComparison, ExperimentSideDetail, ExperimentSources, ExperimentSpec, ExperimentStartedRecord, ExperimentVerdict, ExperimentView, FrozenCriterion, FrozenExperiment, FrozenProviderIdentity, FrozenProviderSkill, FrozenSample, GateAnswers, ListFilter, ModelSelection, PrecheckSkillVerdict, PreparedView, PromotionCheck, PromotionProvider, ProposeInput, ProviderPrecheckView, ReplayCriterionDiff, ReplayCriterionSummary, ReplaySideSummary, SideRelation, SkillContentIdentity, SkillContractIdentity, SkillMutation, VerifierVocabularyView, agentOptionsOf, applyTargets, assertExperimentReport, assertExperimentStartRecord, assertFrozenExperiment, buildExperimentReport, canonicalJson, compareExperimentSides, compareReplaySides, digestOf, directoryDigest, evidenceRefsOf, experimentIdOf, experimentLineage, experimentReportPath, experimentSampleKey, experimentSampleKeyOf, experimentSampleLabel, foldExperiments, frozenDigestOf, isExperimentRecord, modelSelectionOf, overallExperimentVerdict, preparedContentDigestOf, protectedInputsDigest, renderProviderRoles, resumeExperiment, runExperiment };

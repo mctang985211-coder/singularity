@@ -1,6 +1,7 @@
 /**
  * The two-sided skill experiment (§F.2): the one evaluation this plane runs for
- * a candidate that replaces an existing single-file `SKILL.md`.
+ * a candidate that replaces an existing skill object (`SKILL.md`, plus the
+ * `SKILL.contract.json` beside it when the object carries an execution sidecar).
  *
  * The v1 replay compared a candidate against a historical record. This module
  * runs the comparison the plan actually asks for: for every frozen sample, one
@@ -22,7 +23,11 @@
  *   content privately into each side, and refuses a link that escapes the
  *   snapshot, loops or names something unreadable before any run starts;
  * - `frozen.candidate` / `frozen.productionBaseline` — the content identity of
- *   the bytes the candidate side runs and of the production skill it replaces;
+ *   the **complete object** the candidate side runs and of the production skill
+ *   it replaces: the `SKILL.md` bytes, plus the `SKILL.contract.json`'s exact
+ *   bytes and canonical declaration when the object carries an execution sidecar
+ *   (K3). A guidance object is complete with one file, and presence *is* the
+ *   shape;
  * - `frozen.model` and `frozen.budget` — the deployment's structured model
  *   selection and the caller's budget, both fixed before the first side. The
  *   selection is handed to every run verbatim as its `agentOptions` (S4-E §Q3),
@@ -42,14 +47,16 @@
  * - each sample's `frozen.samples[i].provider` — the provider identity the
  *   production baseline side of that sample must bind, read before anything runs
  *   through the runtime's own pre-check (rows, registry revision, MCP servers,
- *   preset and every resolved skill). The candidate side is compared against it
- *   with the promoted skill's own content substituted — the one difference the
- *   overlay is there to produce — and each side's criterion judge is frozen with
- *   its `verifierRef` and the version the registry declared then. A criterion
- *   that pins no ref, names one the registry does not hold, or pins one whose
- *   version the registry does not declare is refused here, before a ledger line
- *   and before a run: ordinary tasks keep mode dispatch, an experiment's judge
- *   must be nameable before it starts;
+ *   preset and every resolved skill), and the registry revision the candidate
+ *   side must bind beside it: the same rows and provider list with the improved
+ *   skill's declaration digest replaced by the candidate object's own. The two
+ *   revisions are frozen separately, because an execution candidate's derived
+ *   sidecar moves that skill's declaration and the revision absorbs it. Each
+ *   side's criterion judge is frozen with its `verifierRef` and the version the
+ *   registry declared then; a criterion that pins no ref, names one the registry
+ *   does not hold, or pins one whose version the registry does not declare is
+ *   refused here, before a ledger line and before a run: ordinary tasks keep mode
+ *   dispatch, an experiment's judge must be nameable before it starts;
  * - `frozen.comparerVersion` and `frozen.overlay` — how the verdicts are
  *   computed and what each side ran under.
  * `frozenDigest` covers the block, and the experiment id derives from it: a
@@ -64,8 +71,10 @@
  * production configuration, and the candidate side runs the prepared bytes.
  *
  * Idempotency (§F.2). One sample side is keyed by `(proposalId,
- * preparedContentDigest, sampleTaskId, side, repetition)` and the ledger holds
- * at most one record per key:
+ * preparedContentDigest, sampleTaskId, side, repetition)` — the content member
+ * being the digest of the candidate's complete identity (K3), so two objects
+ * that differ in their sidecar are two keys — and the ledger holds at most one
+ * record per key:
  * - a recorded key is reused — no run, no new spend, and the record is never
  *   overwritten; a call that reaches an existing key under a different frozen
  *   experiment is refused by name (a new experiment needs a higher repetition);
@@ -97,6 +106,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { rootTaskStoreId } from '@dangosys/dsh-singularity-task'
 import type { AcceptanceCriterion, ReviewCriterion, ReviewRecord, TaskInstance, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import type { CapabilityConfig, ReplayRunOutcome, ReplayTaskOptions } from '@dangosys/dsh-singularity-task-runtime'
+import { registryRevision } from '@dangosys/dsh-singularity-task-runtime'
 import type { EvolutionProposal } from './evolution.ts'
 import type {
   ExperimentBudget,
@@ -179,7 +189,13 @@ export interface ExperimentRequest {
  */
 export interface ExperimentKey {
   proposalId: string
-  /** The prepared candidate's content identity (P2's digest of the materialized `SKILL.md`). */
+  /**
+   * The digest of the prepared candidate's **complete** content identity (K3):
+   * the name, the `SKILL.md` digest, and the sidecar's exact-byte and canonical
+   * digests when the object has one. Two candidates whose sidecars differ are
+   * two different objects, so they are two different keys — a re-serialized or
+   * rewritten declaration can never reuse the run that evaluated another one.
+   */
   preparedContentDigest: string
   sampleTaskId: string
   side: ExperimentSide
@@ -188,8 +204,8 @@ export interface ExperimentKey {
 
 /** One `experiment_started` ledger line: the frozen experiment, recorded before the first run. */
 export interface ExperimentStartedRecord {
-  /** The `proposals.jsonl` format version, not the report's — the ledger is one format, `formatVersion: 3` (K2). */
-  formatVersion: 3
+  /** The `proposals.jsonl` format version, not the report's — the ledger is one format, `formatVersion: 4` (K3). */
+  formatVersion: 4
   kind: 'experiment_started'
   proposalId: string
   experimentId: string
@@ -217,12 +233,16 @@ export interface ExperimentStartedRecord {
  * under the same key.
  */
 export interface ExperimentSampleRecord {
-  /** The `proposals.jsonl` format version, not the report's — the ledger is one format, `formatVersion: 3` (K2). */
-  formatVersion: 3
+  /** The `proposals.jsonl` format version, not the report's — the ledger is one format, `formatVersion: 4` (K3). */
+  formatVersion: 4
   kind: 'experiment_sample'
   proposalId: string
   experimentId: string
-  /** Key part: the candidate content identity this run went through. */
+  /**
+   * Key part: the digest of the complete candidate content identity this run
+   * went through (K3) — `SKILL.md`, and the sidecar's two digests when the
+   * object has one.
+   */
   preparedContentDigest: string
   sampleTaskId: string
   side: ExperimentSide
@@ -258,6 +278,18 @@ export interface ExperimentSampleRecord {
 
 export type ExperimentRecord = ExperimentStartedRecord | ExperimentSampleRecord
 
+/**
+ * The idempotency key's content member (K3): the digest of the candidate's
+ * **complete** content identity — {@link digestOf} of the identity `prepare`
+ * recorded, so the name, the `SKILL.md` bytes and, when the object has an
+ * execution sidecar, the sidecar's exact bytes and canonical declaration are all
+ * part of the key. Two candidates that differ in any of them are two objects,
+ * and a key spent on one is never reused for the other.
+ */
+export function preparedContentDigestOf(candidate: SkillContentIdentity): string {
+  return digestOf(candidate)
+}
+
 /** True for a record of the experiment family — the lines the proposal fold must leave alone. */
 export function isExperimentRecord(record: { kind: string }): record is ExperimentRecord {
   return record.kind === 'experiment_started' || record.kind === 'experiment_sample'
@@ -288,8 +320,12 @@ export interface ExperimentLedger {
   /** Absolute ledger directory; the sandbox, the workspaces and the report live under it. */
   readonly root: string
   get(proposalId: string): Promise<EvolutionProposal>
-  /** Read the prepared candidate's bytes and verify them against the identity recorded at prepare (P2); throws otherwise. */
-  readSkillCandidate(proposalId: string): Promise<Buffer>
+  /**
+   * Read the prepared candidate object's files — `SKILL.md`, and the sidecar
+   * when and only when the recorded identity has one — and verify them against
+   * that identity (P2); throws otherwise.
+   */
+  readSkillCandidate(proposalId: string): Promise<{ skillMd: Buffer; sidecar?: Buffer }>
   /** One experiment's folded view; throws on an unknown id. */
   experiment(experimentId: string): Promise<ExperimentView>
   /**
@@ -492,11 +528,12 @@ function criterionDetail(criterion: ReviewCriterion): ExperimentSideDetail['crit
 }
 
 /**
- * The proposal this experiment may evaluate, and the candidate bytes it runs
+ * The proposal this experiment may evaluate, and the candidate object it runs
  * against. A skill candidate only: this plane's two-sided experiment replaces an
- * existing single-file `SKILL.md`, and every other target type either has no such
- * evaluation (A6's capability candidates) or none at all. The candidate's bytes
- * are re-verified here (P2) before anything runs.
+ * existing skill object's bytes, and every other target type either has no such
+ * evaluation (A6's capability candidates) or none at all. The candidate's files
+ * are re-verified here (P2) before anything runs — the `SKILL.md` alone for
+ * guidance, both files when the object carries an execution sidecar.
  */
 async function experimentCandidate(
   sources: ExperimentSources,
@@ -648,6 +685,13 @@ function frozenCriterionOf(criterion: AcceptanceCriterion, where: string, vocabu
  * pre-check's revision is the runtime's own conclusion, not a guess this plane
  * makes.
  *
+ * The candidate side's expectation is frozen beside it (K3): with the improved
+ * skill's declaration digest substituted by the candidate object's own
+ * ({@link candidateRegistryRevisionOf}), the same pure function the runtime
+ * itself uses. The substituting entry must be in the resolved list — the skill
+ * this experiment replaces is what its rows grant — so a list that does not hold
+ * it is a named refusal, not a revision derived over half a configuration.
+ *
  * Refused by name when the deployment cannot answer (no runtime pre-check, a
  * row the table does not hold, a refused provider, conflicting presets): a
  * sample whose provider identity cannot be fixed is not an experiment this
@@ -658,9 +702,11 @@ async function frozenProviderIdentity(input: {
   caller: SessionId
   sampleTaskId: string
   required: readonly string[]
+  /** The candidate object this experiment prepares to promote: what its side's registry revision substitutes. */
+  candidate: SkillContentIdentity
   where: string
 }): Promise<FrozenProviderIdentity> {
-  const { sources, caller, sampleTaskId, required, where } = input
+  const { sources, caller, required, candidate, where } = input
   const table = sources.taskRuntime.listCapabilities?.()
   if (table === undefined) {
     throw new Error(
@@ -727,10 +773,54 @@ async function frozenProviderIdentity(input: {
   return {
     capabilities: rows,
     registryRevision: precheck.revision,
+    candidateRegistryRevision: candidateRegistryRevisionOf({ table, skills, candidate, where }),
     mcpServers,
     preset: declaredPresets.size === 0 ? null : [...declaredPresets][0]!,
     skills,
   }
+}
+
+/**
+ * The registry revision the **candidate** side of one sample must bind (K3):
+ * the runtime's own {@link registryRevision} over the same capability table and
+ * the same resolved provider list, with the improved skill's declaration digest
+ * replaced by the candidate object's own (`null` for a guidance candidate —
+ * which leaves the revision equal to the production one, because nothing about
+ * the list changed).
+ *
+ * This is the one substitution the candidate overlay is supposed to produce: an
+ * execution candidate's sidecar rewrites `content.skillMdSha256`, its canonical
+ * declaration digest moves with the body, and the revision that folds every
+ * provider's declaration absorbs that. Recomputing it here — rather than
+ * letting a promotion derive it — is what makes the value a *frozen
+ * expectation* both sides are compared against separately.
+ *
+ * A provider list that does not hold the improved skill is refused by name: the
+ * list is what the substitution is defined over, and the experiment is refused
+ * before it runs rather than frozen with a revision nobody can re-derive.
+ */
+function candidateRegistryRevisionOf(input: {
+  table: Readonly<Record<string, CapabilityConfig>>
+  skills: readonly FrozenProviderSkill[]
+  candidate: SkillContentIdentity
+  where: string
+}): string {
+  const { table, skills, candidate, where } = input
+  if (!skills.some(skill => skill.name === candidate.name)) {
+    throw new Error(
+      `${where} resolves no provider named "${candidate.name}", the skill this experiment replaces — the candidate side's registry ` +
+      'revision is the frozen provider list with that skill\'s declaration digest substituted, so a list that does not hold it cannot ' +
+      'say what the candidate side resolves to; the experiment is refused before it runs',
+    )
+  }
+  const candidateDigest = candidate.contract?.contractDigest ?? null
+  return registryRevision(
+    table,
+    skills.map(skill => ({
+      name: skill.name,
+      contractDigest: skill.name === candidate.name ? candidateDigest : skill.contractDigest,
+    })),
+  )
 }
 
 /** Freeze one sample from its store record: what the case is, the acceptance the replay mirrors into both sides, and the provider identity. */
@@ -762,7 +852,26 @@ function frozenSampleOf(
   }
 }
 
-/** Build the frozen identity block (§F.2), then check it against the schema the report and the ledger share. */
+/** One content identity as a frozen block carries it: the whole object's identity, copied member by member (never shared). */
+function frozenIdentityOf(identity: SkillContentIdentity): SkillContentIdentity {
+  return {
+    name: identity.name,
+    sha256: identity.sha256,
+    ...(identity.contract === undefined
+      ? {}
+      : { contract: { sha256: identity.contract.sha256, contractDigest: identity.contract.contractDigest } }),
+  }
+}
+
+/**
+ * Build the frozen identity block (§F.2), then check it against the schema the
+ * report and the ledger share. The candidate and production-baseline identities
+ * are frozen whole (K3): the `SKILL.md` digest and, when the object carries an
+ * execution sidecar, the sidecar's exact-byte digest and canonical declaration
+ * digest — so a promotion can compare the evidence's object with prepare's
+ * member by member, and an object that changed shape cannot borrow the other
+ * shape's diff.
+ */
 function freezeExperiment(input: {
   proposalId: string
   spec: ExperimentSpec
@@ -775,8 +884,8 @@ function freezeExperiment(input: {
   const frozen: FrozenExperiment = {
     proposalId: input.proposalId,
     repetition: input.spec.repetition,
-    candidate: { name: input.candidate.name, sha256: input.candidate.sha256 },
-    ...(input.productionBaseline === undefined ? {} : { productionBaseline: { ...input.productionBaseline } }),
+    candidate: frozenIdentityOf(input.candidate),
+    ...(input.productionBaseline === undefined ? {} : { productionBaseline: frozenIdentityOf(input.productionBaseline) }),
     model: {
       provider: input.spec.model.provider,
       model: input.spec.model.model,
@@ -790,7 +899,12 @@ function freezeExperiment(input: {
     comparerVersion: EXPERIMENT_COMPARER_VERSION,
     overlay: {
       baseline: 'none — the baseline runs under the production configuration',
-      candidate: `extraSkillRoots: [${input.sandbox}/skills]`,
+      candidate:
+        `extraSkillRoots: [${input.sandbox}/skills] — the complete candidate object: ` +
+        `${input.candidate.contract === undefined
+          ? `the guidance object "${input.candidate.name}" (SKILL.md alone, no sidecar)`
+          : `the execution object "${input.candidate.name}" (SKILL.md plus the derived SKILL.contract.json)`}, ` +
+        'loaded whole through the runtime\'s own discovery',
     },
   }
   assertFrozenExperiment(frozen)
@@ -899,11 +1013,11 @@ function sampleRecord(input: {
   actor: string
 }): ExperimentSampleRecord {
   return {
-    formatVersion: 3,
+    formatVersion: 4,
     kind: 'experiment_sample',
     proposalId: input.view.proposalId,
     experimentId: input.view.experimentId,
-    preparedContentDigest: input.view.frozen.candidate.sha256,
+    preparedContentDigest: preparedContentDigestOf(input.view.frozen.candidate),
     sampleTaskId: input.sample.taskId,
     side: input.side,
     repetition: input.view.frozen.repetition,
@@ -999,7 +1113,7 @@ function sideDetailOf(view: ExperimentView, sample: FrozenSample, side: Experime
 export function experimentSampleKeyOf(view: Pick<ExperimentView, 'proposalId' | 'frozen'>, sampleTaskId: string, side: ExperimentSide): ExperimentKey {
   return {
     proposalId: view.proposalId,
-    preparedContentDigest: view.frozen.candidate.sha256,
+    preparedContentDigest: preparedContentDigestOf(view.frozen.candidate),
     sampleTaskId,
     side,
     repetition: view.frozen.repetition,
@@ -1007,7 +1121,7 @@ export function experimentSampleKeyOf(view: Pick<ExperimentView, 'proposalId' | 
 }
 
 /**
- * Build the v2 report from the ledger records alone — the same records always
+ * Build the v3 report from the ledger records alone — the same records always
  * give the same report, its `at` included. An experiment missing a side has no
  * report: an incomplete comparison is not evidence, and saying so is the honest
  * answer.
@@ -1033,7 +1147,7 @@ export function buildExperimentReport(view: ExperimentView): ExperimentReport {
   })
   const at = [view.at, ...view.samples.map(record => record.at)].reduce((left, right) => (left > right ? left : right))
   const report: ExperimentReport = {
-    formatVersion: 2,
+    formatVersion: 3,
     proposalId: view.proposalId,
     experimentId: view.experimentId,
     at,
@@ -1154,6 +1268,7 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
       caller,
       sampleTaskId: sample.taskId,
       required: task.requestedCapabilities,
+      candidate,
       where: `sample "${sample.taskId}"`,
     })
     samples.push(frozenSampleOf(sample, task, review, provider, vocabulary))
@@ -1194,7 +1309,7 @@ export async function runExperiment(sources: ExperimentSources, request: Experim
   }
 
   await sources.evolution.recordExperimentStart({
-    formatVersion: 3,
+    formatVersion: 4,
     kind: 'experiment_started',
     proposalId: spec.proposalId,
     experimentId,
@@ -1441,7 +1556,7 @@ function assertExperimentSample(record: ExperimentSampleRecord, view: Experiment
     throw new Error(`evolution: ${field} names unknown experiment "${record.experimentId}"`)
   }
   if (view.proposalId !== record.proposalId) throw new Error(`evolution: ${field} names a different proposal than its experiment`)
-  if (record.preparedContentDigest !== view.frozen.candidate.sha256) {
+  if (record.preparedContentDigest !== preparedContentDigestOf(view.frozen.candidate)) {
     throw new Error(`evolution: ${field} names a candidate content identity that is not the experiment's own`)
   }
   if (record.repetition !== view.frozen.repetition) {

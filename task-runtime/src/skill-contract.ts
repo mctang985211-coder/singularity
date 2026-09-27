@@ -20,10 +20,15 @@
  * able to summarize one file and silently miss another part of what a worker
  * will read.
  *
- * This module owns the vocabulary and the shape rules only (both are pure): the
- * filesystem load, the identity comparison against real bytes, and the unified
- * pre-check live in `./sidecar.ts`, which consumes these definitions instead of
- * restating them. It lives here, beside its only production consumers, as an
+ * This module owns the vocabulary, the shape rules and the one rewrite a
+ * same-name content update is (both pure): the filesystem load, the identity
+ * comparison against real bytes, and the unified pre-check live in
+ * `./sidecar.ts`, which consumes these definitions instead of restating them.
+ * {@link sidecarWithSkillMd} and {@link serializeSkillSidecar} are the pair a
+ * candidate's second file is produced with: the production declaration with
+ * exactly one digest moved, written as the deterministic bytes its identity
+ * covers — so what a promotion compares is the derivation, not a patch anybody
+ * submitted. It lives here, beside its only production consumers, as an
  * internal module of the runtime's provider implementation (R3-1): a `TaskRun`
  * records the content identity it used, and `task/src/types.ts` says so in
  * prose without needing this vocabulary to be a task export.
@@ -427,4 +432,44 @@ export function skillContractDigest(sidecar: SkillSidecar): string {
  */
 export function skillContentDigest(content: SkillContentIdentity): string {
   return sha256Hex(canonicalize(content))
+}
+
+/**
+ * The same declaration with one field replaced: `content.skillMdSha256`.
+ *
+ * A same-name improvement of an execution skill changes the `SKILL.md` and
+ * nothing else about the object (K3): the capabilities, precondition, ports,
+ * required tools, verifier and resources are the ones the production sidecar
+ * declared, so the candidate's sidecar is *derived* from the production one
+ * rather than authored — a content update that could also move a declaration
+ * would be an undeclared privilege change. Every other field is carried over
+ * item by item; the digest is checked first, because a value that is not a
+ * lowercase 64-character hex SHA-256 would produce a declaration no reader could
+ * verify and no writer should persist.
+ */
+export function sidecarWithSkillMd(sidecar: SkillSidecar, skillMdSha256: string): SkillSidecar {
+  if (!/^[0-9a-f]{64}$/.test(skillMdSha256)) {
+    throw new Error(
+      `skill-contract: cannot replace sidecar content.skillMdSha256 with ${JSON.stringify(skillMdSha256)} — a content identity is a ` +
+      'lowercase 64-character hex SHA-256, and a rewritten sidecar is a declaration a loader will have to verify against real bytes',
+    )
+  }
+  return { ...sidecar, content: { ...sidecar.content, skillMdSha256 } }
+}
+
+/**
+ * The deterministic byte sequence of one declaration — what a file holds when
+ * this build writes a sidecar.
+ *
+ * Determinism is the point: {@link skillContractDigest} hashes the canonical
+ * key order, so the bytes on disk must be a function of the declaration alone,
+ * not of the order a caller happened to build its object in. Two calls with the
+ * same declaration produce the same string, and a reader can verify a file by
+ * parsing it and re-serializing: identical bytes mean the declaration did not
+ * move — which is exactly how the K3 derivation check compares a candidate's
+ * sidecar with the one re-derived from the champion's bytes. The shape is
+ * canonical keys, two-space indentation, one trailing newline.
+ */
+export function serializeSkillSidecar(sidecar: SkillSidecar): string {
+  return `${JSON.stringify(JSON.parse(canonicalize(sidecar)), null, 2)}\n`
 }

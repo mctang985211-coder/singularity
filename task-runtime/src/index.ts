@@ -222,6 +222,20 @@ export {
   skillValidationContext,
   validateSkillProvider,
 } from './sidecar.ts'
+export type {
+  ExecutionSkillSidecar,
+  KnowledgeSkillSidecar,
+  SkillContentIdentity,
+  SkillResourceIdentity,
+  SkillSidecar,
+} from './skill-contract.ts'
+export {
+  SKILL_SIDECAR_FILE,
+  serializeSkillSidecar,
+  sidecarWithSkillMd,
+  skillContractDigest,
+  skillContentDigest,
+} from './skill-contract.ts'
 export type { VerifiedWalk } from './verified-read.ts'
 export { readVerifiedFile, walkVerified } from './verified-read.ts'
 export type {
@@ -366,7 +380,8 @@ export interface CommitReconcileOutcome {
   readonly intentId: string
   readonly proposalId: string
   readonly direction: string
-  readonly target: string
+  /** Every production file the intent committed, in intent order — one or two files of the skill object (K3). */
+  readonly targets: readonly string[]
   readonly result: 'completed-redone' | 'completed-written' | 'blocked'
   readonly detail?: string
 }
@@ -2087,7 +2102,7 @@ export class TaskRuntime extends Service {
       if (outcome.result !== 'blocked') continue
       this.warn(
         `evolution: the commit intent "${outcome.intentId}" (${outcome.direction} of proposal "${outcome.proposalId}") targeting ` +
-        `${outcome.target} could not be settled — ${outcome.detail ?? 'no reason reported'}`,
+        `${outcome.targets.join(', ')} could not be settled — ${outcome.detail ?? 'no reason reported'}`,
       )
     }
   }
