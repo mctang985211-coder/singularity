@@ -214,7 +214,7 @@ answer 校验真实父身份、question 状态、对应 run 和契约；回答�
 
 ### 7.4 时间、循环与故障
 
-K4 已交付（待验收）：根协调会话经人审追加现有执行总上限（`task_budget_extend`，只升已配置维度），旧用量/起点不重置；reviewer 用自身次数/watchdog，不继承业务根截止。普通/replay/恢复消费同一有效根限额（`resolveRootBudget` 叠加持久 `TaskBudgetExtended` 批准值），完整合同见 [K4](execution-prompts/12d-k4-review-budget.md)。
+K4 当前代码未验收，以下为冻结目标：根协调会话经人审追加现有执行总上限（`task_budget_extend`，只升已配置维度），旧用量/起点不重置；reviewer 用自身次数/watchdog，不继承业务根截止。普通/replay/恢复消费同一有效根限额（`resolveRootBudget` 叠加持久 `TaskBudgetExtended` 批准值），完整合同见 [K4](execution-prompts/12d-k4-review-budget.md)。
 
 问答复用原 Run wallTime、根截止和无进展停止规则，不新增提问次数预算；重复按 requestKey 幂等，不以字符串相似度合并。已知阻塞不计空转提醒。未回答不是失败答案，wallTime 按原 startedAt 继续计入等待，截止取消协调并保留问题。已知问答等待的 Run 在重启后须能恢复同一 Session/阻塞，不能沿“在途未提交全部取消”分支处理；无法确认写入已停止时具名失败。
 

@@ -5,6 +5,8 @@ kind: persistence-change
 
 # 2026-09-27-k4-budget-extension
 
+> 历史交付记录：对应 `f670e83` 的审批日志/摘要授权方案已被独立审核判返工，`25af727` 为中止现场，均未验收。当前实施合同见 [K4 精简方案](../execution-prompts/12d-k4-review-budget.md)；下文有关 `budgetExtensionDraft`、日志回查及原生审批 ID 的叙述不能作为下一轮施工依据。预算事实的格式决定待新实现确认后更新。
+
 ## Summary
 
 Adds the approved-budget-extension surface to the `task/event` root: one new kind (`TaskBudgetExtended`), the types behind it (`TaskBudgetExtension`, `TaskBudgetExtensionClaim`, `BudgetExtensionBaseline`, `BudgetExtensionProposal`, `BudgetRaise`, `TaskBudgetExtensionIndex`, `BudgetExtensionRequest`, `ApprovedBudgetCeilings`), the derivation vocabulary (`budgetExtensionRequestDigest`, `canonicalBudgetInstant`, `approvedBudgetCeilings`, `emptyBudgetExtensionIndex`, `describeBudgetExtension`, `describeBudgetReading`), a `budgetExtensions` member on `TaskSnapshot` (all extensions in record order, indexed by request key) and one `TaskService` entry (`recordBudgetExtensionIn`).

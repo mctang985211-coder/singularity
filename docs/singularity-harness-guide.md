@@ -1,17 +1,15 @@
 # Singularity Harness 工作指南
 
-最新审核（2026-09-27）：K4 `f670e83` 复审仍判返工：审批绑定未包含批准时的整份预算基线，审批理由的摘要子串匹配可误认另一请求；reviewer 计数双计交错待复现。详见[审核记录](history/2026-09-27-k4-review.md)。A5 未派发。
+当前状态（2026-09-27）：**K1～K3 已验收；K4 返工中止，待按精简合同重做；A5/A6 未派发。** `f670e83` 复审未通过（审批绑定及 reviewer 计数问题，见[审核记录](history/2026-09-27-k4-review.md)）；`25af727` 仅保存中止现场，不算交付。下一次 K4 按[唯一合同](execution-prompts/12d-k4-review-budget.md)删除审批接力和计数缓存，不继续沿旧实现叠校验。
 
-当前审核结论（2026-09-27）：**K4 返工已交付、待独立审核；A5 未派发**。返工闭合：扩额提交只认审批渠道写入会话日志的审计对（callId+摘要绑定，删除自填字符串）、提交在 store 写队列内串行重检整份基线读、同 key 并发恰一次落账、reviewer 额度取用为进程内原子预留（含过期计数读收口）；独立 integration 超时经定向与全量多轮重跑未复现（偶发，公共检查全绿下复核）。详见 [K4 独立审核](history/2026-09-27-k4-review.md) 与[交付记录](history/2026-09-27-k4-delivery-record.md)。下述 K4 交付行为保持待验证，不据实现者全绿报告宣称已验收。
-
-当前进度（2026-09-27）：R1/R2/R3、A2+A1、A4、S4-E 的原范围验收记录保留。整体复盘确认四处架构问题，依次派 K1 → K2 → K3 → K4，再继续 A5 → A6。**K1 已验收**（[交付记录](history/2026-09-27-k1-delivery-record.md) + [返工记录](history/2026-09-27-k1-rework-record.md)，§5.18；2026-09-27 返工闭合交还顺序、批次成员事实与跨 graph/接管失败两条真实入口证据），[独立审核](history/2026-09-27-k1-review.md)已通过。**K2 已验收**（§5.19；[交付记录](history/2026-09-27-k2-delivery-record.md) + [独立审核](history/2026-09-27-k2-review.md)）。**K3 已验收**（§5.20；[交付记录](history/2026-09-27-k3-delivery-record.md) + [返工记录](history/2026-09-27-k3-rework-record.md)）：Skill 改进单位扩为完整对象——指导型仅 SKILL.md，执行型带 sidecar 时为 SKILL.md + SKILL.contract.json 两个固定文件（resources=[]）；候选 sidecar 由生产派生、只重算 `content.skillMdSha256`，不借内容更新提权；冻结/报告/晋升门/apply 复检比较同一完整身份；apply/rollback 经同一提交协议逐文件原子替换、记完成前做完整对象可加载复检；ledger 切换 formatVersion 4，实验报告 formatVersion 3。**K4 返工已交付、待验收**（§5.21；[交付记录](history/2026-09-27-k4-delivery-record.md)）：复盘与执行预算分离——终态/截止根可经 gate 窄入口调 `task_review_agent` 复盘（reviewer 只受自身每 store 额度与单次 watchdog 约束，取用为进程内原子预留），唯一扩额工具 `task_budget_extend` 经 DSH 人审追加已配置维度的总上限（提交只认渠道记录的 callId+绑定摘要），Task store 持久 `TaskBudgetExtended` 事实（store+requestKey 幂等、同 key 并发恰一次、串行重检整份基线读），有效限额由唯一解析器供准入/driver/watchdog/replay 全路径消费，旧用量不清零。A5/A6 未实施。状态以[唯一执行表](2026-09-20-vrtc-code-change-plan.md)为准。
+当前进度（2026-09-27）：R1/R2/R3、A2+A1、A4、S4-E 的原范围验收记录保留。整体复盘确认四处架构问题，依次派 K1 → K2 → K3 → K4，再继续 A5 → A6。**K1 已验收**（[交付记录](history/2026-09-27-k1-delivery-record.md) + [返工记录](history/2026-09-27-k1-rework-record.md)，§5.18；2026-09-27 返工闭合交还顺序、批次成员事实与跨 graph/接管失败两条真实入口证据），[独立审核](history/2026-09-27-k1-review.md)已通过。**K2 已验收**（§5.19；[交付记录](history/2026-09-27-k2-delivery-record.md) + [独立审核](history/2026-09-27-k2-review.md)）。**K3 已验收**（§5.20；[交付记录](history/2026-09-27-k3-delivery-record.md) + [返工记录](history/2026-09-27-k3-rework-record.md)）：Skill 改进单位扩为完整对象——指导型仅 SKILL.md，执行型带 sidecar 时为 SKILL.md + SKILL.contract.json 两个固定文件（resources=[]）；候选 sidecar 由生产派生、只重算 `content.skillMdSha256`，不借内容更新提权；冻结/报告/晋升门/apply 复检比较同一完整身份；apply/rollback 经同一提交协议逐文件原子替换、记完成前做完整对象可加载复检；ledger 切换 formatVersion 4，实验报告 formatVersion 3。**K4 返工中止，待按精简合同重做**（§5.21）：保留复盘独立额度、可信人审追加总上限、持久幂等和完整基线重检；改为同次调用完成审批/提交，reviewer 只读持久 started 计数。A5/A6 未实施。状态以[唯一执行表](2026-09-20-vrtc-code-change-plan.md)为准。
 
 | 已确认的问题 | 修正合同与唯一所有者 |
 |---|---|
 | ~~分解一次、子全终态即自动提交父，限制正常探索~~（K1 已验收） | [K1](execution-prompts/12a-k1-exploration.md)：runtime 交还父执行权，Run 内多批次、父主动提交；Task 保留事实（§5.18） |
 | ~~生产写入先于应用账本，崩溃后无正常对账路径~~（K2 已验收） | [K2](execution-prompts/12b-k2-evolution-commit.md)：evolution 持久意图、原子替换、恢复与准入阻断（§5.19；同日返工补账本/来源持久化与真实进程退出证据；复审返工补同目标未结意图闸） |
 | ~~执行型 Skill 带 sidecar，但候选只能改正文~~（K3 已验收） | [K3](execution-prompts/12c-k3-skill-unit.md)：evolution 按完整支持对象评估/应用，runtime 复用校验（§5.20） |
-| ~~原根截止同时封死事后学习与下一次尝试~~（K4 返工已交付，待验收） | [K4](execution-prompts/12d-k4-review-budget.md)：reviewer 用自身额度/超时，runtime 支持经人审追加执行总上限，旧用量不重置（§5.21） |
+| 原根截止同时封死事后学习与下一次尝试（K4 待精简重做） | [K4](execution-prompts/12d-k4-review-budget.md)：reviewer 用自身额度/超时，runtime 支持经人审追加执行总上限，旧用量不重置（§5.21） |
 
 A5 保持**失败自动、成功按需，共用诊断链**，待 K4 验收才派发。允许无需改进、证据不足、空建议；不做成功价值分类器。具体入口与 REV-1～REV-5 见[计划 F.3](2026-09-20-vrtc-code-change-plan.md)。正常任务内调整方法归 K1，修改共享能力才进入 Evolution；旧记录和下文落地事实不能作为保留已判错误规则的理由。
 
@@ -481,17 +479,16 @@ A3 已交付非阻塞批次、执行相位、工作区写入归属、显式提�
 - **测试锚**：`evolution/tests/unit/evolution.spec.ts` K3 段（两文件 prepare/冻结、拒绝面、指导型未声明文件拒绝、P2/P3 完整对象漂移、伪造账本推导检查直测、champion sidecar 篡改、四窗口×apply/rollback 崩溃对账、目录不可列→blocked）；`evolution/tests/unit/{commit-durability,ledger-version,skill-promotion-gate,experiment,experiment-orchestrator}.spec.ts`；`task-runtime/tests/unit/{provider-precheck,skill-contract,proposal-lifecycle}.spec.ts`；`agent-singularity/tests/unit/{assembly,evolution-commit-tools,startup-reconcile}.spec.ts`；`tests/integration/k3-skill-unit.spec.ts`（K3-1～K3-5 全链：真实注册执行型 skill 旧败新过、九工具两次人审、两文件崩溃窗口+SIGKILL 真实退出子集、篡改/竞争/混合版本不准入；返工新增：指导型生产目录未声明文件 prepare 拒绝、指导型/执行型目录漂移的新鲜 rollback 与恢复重试写前拒绝）；`k2-evolution-commit.spec.ts` 等既有集成回归适配通过。
 - **边界**（均为合同明确排除或既有约束，非本票缺陷）：其他资源、knowledge sidecar、角色转换、新增 provider、变更 verifier/capabilities/requiredTools 仍具名拒绝（A6 只增加 capability 行与新 provider，见计划 F.4）；单进程部署约束同 K2（无分布式锁）；真实模型效果实验不属本票，机制通过不声称技能已自主变好；`packages/singularity/tests/` 无 tsconfig 覆盖是既有状况。prepare 拒收词表外条目、提交写前闸按 1/2 文件区分容忍面（1 文件容忍词表外条目，2 文件不容忍）是 loader 语义的直接推论：guidance 无声明可点名，执行型声明的身份必须点名每个文件；两处差异见返工记录。
 
-### 5.21 K4：复盘与执行预算分离（2026-09-27 返工已交付，待验收）
+### 5.21 K4：复盘与执行预算分离（2026-09-27 待精简重做）
 
-修正「原根截止同时封死事后学习与下一次尝试」。完整合同 [K4 prompt](execution-prompts/12d-k4-review-budget.md)，逐项验收证据、反例与删除清单见[交付记录](history/2026-09-27-k4-delivery-record.md)（含 2026-09-27 返工段）。
+`f670e83` 公共检查通过，但独立审查发现审批可错配和 reviewer 双计交错，未验收。增量返工已中止；现场保存于 `25af727`，不作为通过证据。原交付与失败证据保留在[审核记录](history/2026-09-27-k4-review.md)。
 
-- **复盘不继承业务根截止**：`task_review_agent` 进入 gate 协调清单（`task-runtime/src/gate.ts`），终态/截止且 maxRuns 用尽的根会话仍可发起只读复盘；reviewer 调用链只核对自身每 store 次数额度（默认 1，`review-agent-ledger.ts` JSONL，重启不清零；取用为进程内原子预留 claim——并发只放行一个、过期计数读不放行第二个、spawn/append 失败归还、超时保持已消耗）与单次 watchdog，角色/读取域/真实来源校验不变，spawn 只写 graph `agent/add`+`edge/add`，无假业务 Run。触发策略与精确源协议仍待 A5 替换（latestReview 选源保留）。
-- **唯一扩额入口 `task_budget_extend({requestKey, maxRuns?, deadlineAt?})`**（`agent-singularity/src/tools/budget-extend.ts`）：只在 root 工具面（worker/reviewer 面无），gate 全相位放行终态亦可调用；schema 闭集无批准字段，至少一维。流程：`budgetExtensionDraft` 零写查询（store、配置/有效上限、累计用量、已有记录或拟议值、以及本次请求的 approval binding）→ 同 key 同内容直接回已有记录（不再审批）→ 新请求经 DSH 人审展示 store/原总上限/累计用量/拟改后总上限与该 binding（`approval:<ApprovalRequestId>` 由人审渠道写入会话日志的 `approval/asked`+`approval/decided`）→ `extendRootBudget` 只接收调用身份 `callId`，从调用者会话日志重算 binding 并核对渠道记录（同一工具、同一 call、同一 binding 且 decided 为 `allowed-once`）后才落库，记录保存渠道签发的 `ApprovalRequestId`。maxRuns 是批准后总 Run 数正整数、deadlineAt 是绝对 UTC；只升已配置维度（未配置=无限，传该维即拒），拒绝/取消零预算事件零新 Run，公开直调自填字符串一律具名拒绝零写。
-- **持久事实（task）**：`TaskBudgetExtended` 事件（`task/src/budget.ts`）保存 requestKey、内容 digest、各维 previous/next、调用方读到的整份基线读数 `baseline`、批准引用与来源会话；`TaskSnapshot.budgetExtensions` 为唯一事实源。reducer 以 store+requestKey 幂等（同内容零效果、异内容具名拒绝零写；查重与串行重检同在 store 写队列内，并发同 key 恰一条事件与一个结果），并按维对整份已读基线与当前有效上限串行比较——同一基线两个批准（含跨维度）只有一个能提交，不隐式重算。持久化决策 `same-version`（[记录](persistence-changes/2026-09-27-k4-budget-extension.md)）。
-- **有效限额单一解析**：`resolveRootBudget` 每维取最后批准的绝对上限、无扩额用配置解析值，同时输出 configured 与有效值；批次准入/子 Run 启动/replay/在飞 watchdog/批次收尾五个消费点全部经此解析器，无硬读配置原值的残留路径。重启从事件重建，不按 now 重算 deadline、不回退旧上限、不清零用量；per-Run 自身 wallTime 不被扩额重置，终态 Run 不重开，在飞者仅按新读数更新根约束。扩额不唤活终态、不恢复业务写、不自动启动工作；replay 是本票执行消费者（批准前过期即拒、批准后可启动、仍沿原 verifier）。
-- **测试锚**：`tests/integration/k4-review-after-deadline.spec.ts`、`k4-review-ledger-restart.spec.ts`、`agent-singularity/tests/unit/review-agent.spec.ts`（K4-1，含并发/过期读）；`agent-singularity/tests/unit/budget-extend.spec.ts`、`task-runtime/tests/unit/budget-extension.spec.ts`、`tests/integration/k4-budget-extend.spec.ts`（K4-2）；`tests/integration/k4-budget-reopen.spec.ts`、`k4-budget-consumers.spec.ts`、`task/tests/unit/budget-extensions.spec.ts`（K4-3/4）；`task-runtime/tests/unit/{root-budget,orchestrate,gate}.spec.ts`。
-- **边界**（合同明确排除或信任模型界定）：自动扫描/精确源协议、requestKey 去重属 A5；`task_recover`/supervisor 属 A6；reviewer 超时证据为既有单测（`review-agent.spec.ts`）；drain 不把 `task_review_agent` 计为在途写（其效果仅一条 Diagnosis，与早已放行的 `task_diagnose` 同形）；审批信任锚是调用者会话日志的渠道审计对（进程内可写该日志的代码属宿主信任域，模型面不可达）；reviewer claim 为进程内（跨进程由 session 持久化租约排除）；store 内部原语 `recordBudgetExtensionIn` 不是授权边界（唯一生产调用方是 `extendRootBudget`）。
+目标及施工细节只维护在 [K4 合同](execution-prompts/12d-k4-review-budget.md)：
 
+- `agent-singularity` 装配现有 DSH 人审；runtime 在一次扩额调用中冻结整份基线、等待实际批准、串行重检并提交。删除日志回查、文本摘要授权及公开批准后 commit；批准来源只供审计。
+- reviewer 在 ledger 现有每 store 串行入口内重读持久 started、核算次数并启动，等待输出在队列外。删除计数缓存与额度预留；已落 started 即耗一次，重启不清零。
+- Task 仅保存预算事实与幂等；有效限额仍由唯一解析器供准入/driver/watchdog/replay 消费。根扩额不重置旧用量/per-Run 限时、不复活终态或自动启动。
+- A5 后续沿同一受理入口接来源去重/恢复 claim；claim 不另计额度。A5/A6 尚未实施，必须等待 K4 独立验收。
 
 ## 6. 文档维护
 
