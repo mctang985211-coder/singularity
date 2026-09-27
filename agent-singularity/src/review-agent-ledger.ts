@@ -1,6 +1,8 @@
 /**
  * The review-agent ledger: how many review agents one root task store has
- * started, so the escalation budget guardrail survives process restarts.
+ * started, so the escalation budget guardrail survives process restarts. The
+ * count is durable; taking it is a claim ({@link reserveReviewAgentRun}), so two
+ * executions that read the same count cannot both start a review agent.
  *
  * This is deliberately NOT a task-store event. The task store records what
  * happened to tasks; a review agent is a runtime act of the root agent, and
@@ -84,6 +86,64 @@ export async function countReviewAgentRuns(rootStoreId: string): Promise<number>
     if (record.rootStoreId === rootStoreId) count += 1
   })
   return count
+}
+
+/**
+ * Admitted review agents whose row is not in the ledger yet, per budget — a
+ * ledger file and a root store. The count is an asynchronously read file, so it
+ * cannot see a review agent that is still inside its spawn: between the count
+ * and the row there is a whole spawn, and anything reading the count in that
+ * window would be told zero. This map is what that window is closed with
+ * (K4-1): the claim stands in for the row until the row exists.
+ */
+const claims = new Map<string, number>()
+
+function claimKey(rootStoreId: string): string {
+  return `${reviewAgentLedgerFile()}\u0000${rootStoreId}`
+}
+
+/** Review agents admitted for this store in this process that have no ledger row yet. */
+export function pendingReviewAgentRuns(rootStoreId: string): number {
+  return claims.get(claimKey(rootStoreId)) ?? 0
+}
+
+/** One admitted review agent's claim on its store's allowance, until a row replaces it. */
+export interface ReviewAgentReservation {
+  /** The append succeeded: the ledger carries this run now, so the claim retires into it. */
+  commit(): void
+  /** No row was written (the spawn or the append failed): the allowance is unspent again. */
+  release(): void
+}
+
+/**
+ * Claim one review agent against a root store's allowance — the check and the
+ * claim in one synchronous step, so two executions cannot both pass it. The
+ * effective usage is `used`, which the caller has just read from the ledger,
+ * plus the claims already in flight; it must stay below `max`.
+ *
+ * A caller must not await between reading the count and calling this: an await
+ * in that gap is exactly the race this closes, because the second execution
+ * reads the same count while the first is still spawning.
+ *
+ * @param rootStoreId - the root task store the allowance belongs to.
+ * @param max - the per-store cap (see {@link reviewAgentBudget}).
+ * @param used - the rows the ledger holds for this store.
+ * @returns the claim, or `undefined` when the allowance is spent.
+ */
+export function reserveReviewAgentRun(rootStoreId: string, max: number, used: number): ReviewAgentReservation | undefined {
+  const key = claimKey(rootStoreId)
+  const inFlight = claims.get(key) ?? 0
+  if (used + inFlight >= max) return undefined
+  claims.set(key, inFlight + 1)
+  let settled = false
+  const retire = () => {
+    if (settled) return
+    settled = true
+    const left = (claims.get(key) ?? 1) - 1
+    if (left > 0) claims.set(key, left)
+    else claims.delete(key)
+  }
+  return { commit: retire, release: retire }
 }
 
 /** Append one started review agent. */

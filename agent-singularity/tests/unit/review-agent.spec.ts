@@ -6,7 +6,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { resolveGrant } from '../../../agent-runtime/src/grants.ts'
-import { appendReviewAgentRun, readReviewerDelegation } from '../../src/review-agent-ledger.ts'
+import { appendReviewAgentRun, countReviewAgentRuns, readReviewerDelegation } from '../../src/review-agent-ledger.ts'
 import {
   REVIEWER_BASELINE,
   REVIEWER_PRESET,
@@ -186,6 +186,29 @@ function fixtureWithBeforePrompt(handleValue: unknown) {
     await request.beforePrompt?.()
     return handleValue
   })
+}
+
+/**
+ * A spawn that runs `beforePrompt` (the runtime's contract above) and holds the
+ * first reviewer to arrive until `expect` reviewers have — the second execution
+ * only reaches its spawn if the gate admitted it — or for a grace window when it
+ * turns out to be the only one. The interleaving between two executions is then
+ * the test's, not the scheduler's.
+ */
+function rendezvousSpawn(expect: number) {
+  let arrivals = 0
+  const enough = Promise.withResolvers<void>()
+  return async (...args: unknown[]) => {
+    arrivals += 1
+    if (arrivals < expect) {
+      await Promise.race([enough.promise, new Promise(resolve => { setTimeout(resolve, 100) })])
+    } else {
+      enough.resolve()
+    }
+    const request = args[1] as { beforePrompt?: () => Promise<void> }
+    await request.beforePrompt?.()
+    return handle(REPLY)
+  }
 }
 
 const exec = { agent: { id: 'root-1' }, signal: new AbortController().signal }
@@ -386,5 +409,115 @@ describe('task_review_agent', () => {
     expect(recordDiagnosisIn).not.toHaveBeenCalled()
     expect(result).toContain('spawn failed')
     expect(result).toContain('singularity-reviewer')
+  })
+
+  /**
+   * The allowance is a claim, not a read (K4-1 rework).
+   *
+   * The count the gate rests on comes from a file, so the read is asynchronous:
+   * two executions can both read the same count before either has written the
+   * row that would have told the other one no. The ledger therefore has to
+   * claim the run — synchronously, at the moment of the read. These cases pin
+   * the claim and its whole lifetime: the interleaving that would otherwise
+   * admit two reviewers, the claim composing with the cap rather than
+   * serializing the store, the two paths that give it back (a spawn or an
+   * append that wrote no row), and the path that retires it into the row it
+   * became — a reviewer that timed out stays spent without holding the store's
+   * next call hostage.
+   */
+  test('two executions that read the same count admit exactly one reviewer', async () => {
+    // The interleaving K4-1 names: both executions read the persisted count
+    // (zero — there is no ledger yet) before either wrote its row.
+    const { ctx, spawn, recordDiagnosisIn } = fixture(undefined, rendezvousSpawn(2))
+    const tool = defineTaskReviewAgentTool(ctx)
+    const call = () => tool.execute({ taskId: 't1' }, exec as never) as Promise<string>
+    const results = await Promise.all([call(), call()])
+
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
+    expect(recordDiagnosisIn).toHaveBeenCalledOnce()
+    const refused = results.filter(result => result.includes('budget exhausted'))
+    expect(refused).toHaveLength(1)
+    expect(refused[0]).toContain('no review agent spawned')
+    // The refusal reports the effective usage — the persisted row plus the run
+    // already admitted — not the count that was read before the claim.
+    expect(refused[0]).toContain('1/1')
+    expect(refused[0]).toContain('sg-t-root-1')
+    expect(results.filter(result => result.includes('judged task'))).toHaveLength(1)
+  })
+
+  test('two allowances admit two reviewers and refuse the third', async () => {
+    // The claim composes with the cap instead of holding the store: at two
+    // allowances two concurrent calls are both admitted, and the call whose
+    // effective usage is already two is the one refused.
+    process.env.SINGULARITY_REVIEW_AGENT_BUDGET = '2'
+    const { ctx, spawn, recordDiagnosisIn } = fixture(undefined, rendezvousSpawn(2))
+    const tool = defineTaskReviewAgentTool(ctx)
+    const call = () => tool.execute({ taskId: 't1' }, exec as never) as Promise<string>
+    const results = await Promise.all([call(), call(), call()])
+
+    expect(spawn).toHaveBeenCalledTimes(2)
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(2)
+    expect(recordDiagnosisIn).toHaveBeenCalledTimes(2)
+    const refused = results.filter(result => result.includes('budget exhausted'))
+    expect(refused).toHaveLength(1)
+    expect(refused[0]).toContain('no review agent spawned')
+    expect(refused[0]).toContain('2/2')
+  })
+
+  test('a spawn that wrote no row gives the claim back', async () => {
+    let attempts = 0
+    const { ctx, recordDiagnosisIn } = fixture(handle(REPLY), async (...args: unknown[]) => {
+      attempts += 1
+      if (attempts === 1) throw new Error('agent-presets: preset "singularity-reviewer" not found')
+      await (args[1] as { beforePrompt?: () => Promise<void> }).beforePrompt?.()
+      return handle(REPLY)
+    })
+    const tool = defineTaskReviewAgentTool(ctx)
+
+    const first = (await tool.execute({ taskId: 't1' }, exec as never)) as string
+    expect(first).toContain('spawn failed')
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(0)
+    // The store's one allowance is still there: a claim that never became a row
+    // is not a spent run.
+    const second = (await tool.execute({ taskId: 't1' }, exec as never)) as string
+    expect(second).toContain('judged task')
+    expect(recordDiagnosisIn).toHaveBeenCalledOnce()
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
+  })
+
+  test('an append that wrote no row gives the claim back with the failure', async () => {
+    chmodSync(ledgerDir, 0o500)
+    const { ctx } = fixtureWithBeforePrompt(handle(REPLY))
+    const tool = defineTaskReviewAgentTool(ctx)
+
+    const first = (await tool.execute({ taskId: 't1' }, exec as never)) as string
+    expect(first).toContain('spawn failed')
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(0)
+    chmodSync(ledgerDir, 0o700)
+    const second = (await tool.execute({ taskId: 't1' }, exec as never)) as string
+    expect(second).toContain('judged task')
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
+  })
+
+  test('a reviewer that timed out stays spent, and holds no second claim', async () => {
+    // Two allowances, so the second call is admitted exactly when the first
+    // call's claim retired into its ledger row: a claim left pending by the
+    // timeout path would read as two spent and refuse it.
+    process.env.SINGULARITY_REVIEW_AGENT_BUDGET = '2'
+    let attempts = 0
+    const { ctx } = fixture(handle(REPLY), async (...args: unknown[]) => {
+      attempts += 1
+      await (args[1] as { beforePrompt?: () => Promise<void> }).beforePrompt?.()
+      return attempts === 1 ? handle(undefined, { hang: true }) : handle(REPLY)
+    })
+    const tool = defineTaskReviewAgentTool(ctx)
+
+    const first = (await tool.execute({ taskId: 't1', timeoutMs: 5 }, exec as never)) as string
+    expect(first).toContain('timed out')
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
+    const second = (await tool.execute({ taskId: 't1' }, exec as never)) as string
+    expect(second).toContain('judged task')
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(2)
   })
 })

@@ -34,7 +34,7 @@ import type { WorkerGrant } from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-task'
 import type { Diagnosis, DiagnosisConfidence, JudgementVerdict, ReviewJudgement, TaskId, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, rootTaskStoreId } from '@dangosys/dsh-singularity-task'
-import { appendReviewAgentRun, countReviewAgentRuns, readReviewerDelegation, reviewAgentBudget } from '../review-agent-ledger.ts'
+import { appendReviewAgentRun, countReviewAgentRuns, pendingReviewAgentRuns, readReviewerDelegation, reserveReviewAgentRun, reviewAgentBudget } from '../review-agent-ledger.ts'
 import { computeEscalation } from './review-escalation.ts'
 import { buildReviewPack, latestReview, reviewRef } from './task-review-pack.ts'
 
@@ -208,11 +208,20 @@ export function defineTaskReviewAgentTool(ctx: Context) {
       }
       const max = reviewAgentBudget()
       const used = await countReviewAgentRuns(storeId)
-      const escalation = computeEscalation(snapshot, args.taskId, { used, max })
-      if (escalation.suppressed.length > 0) {
-        return `task_review_agent: budget exhausted (${used}/${max}) for store ${storeId}; suppressed ${escalation.suppressed.join(', ')} — no review agent spawned`
+      // The claim is the gate (K4-1): one synchronous step right after the
+      // count, so a second execution reading that same count is refused instead
+      // of spawning a second reviewer. Every path that does not reach a ledger
+      // row gives the claim back.
+      const reservation = reserveReviewAgentRun(storeId, max, used)
+      if (reservation === undefined) {
+        const spent = used + pendingReviewAgentRuns(storeId)
+        const escalation = computeEscalation(snapshot, args.taskId, { used: spent, max })
+        const withheld = escalation.suppressed.length > 0 ? `; suppressed ${escalation.suppressed.join(', ')}` : ''
+        return `task_review_agent: budget exhausted (${spent}/${max}) for store ${storeId}${withheld} — no review agent spawned`
       }
+      const escalation = computeEscalation(snapshot, args.taskId, { used, max })
       if (!escalation.required) {
+        reservation.release()
         return `task_review_agent: escalation is not required for task ${args.taskId} (budget ${used}/${max}); no review agent spawned`
       }
       const timeoutMs = Number.isFinite(args.timeoutMs) && (args.timeoutMs as number) > 0
@@ -250,6 +259,9 @@ export function defineTaskReviewAgentTool(ctx: Context) {
         // marked failed, and the reviewer got zero model input.
         beforePrompt: async () => {
           await appendReviewAgentRun({ rootStoreId: storeId, taskId: args.taskId, sessionId: reviewerSessionId, actor: caller })
+          // The row exists, so the allowance is spent whether or not the spawn
+          // survives the read-back below: the claim retires into the row.
+          reservation.commit()
           const back = await readReviewerDelegation(reviewerSessionId)
           if (back === undefined || back.rootStoreId !== storeId || back.taskId !== args.taskId) {
             throw new Error(
@@ -263,7 +275,13 @@ export function defineTaskReviewAgentTool(ctx: Context) {
         spawnFailure = error instanceof Error ? error.message : String(error)
         return undefined
       })
-      if (handle === undefined) return `task_review_agent: spawn failed: ${spawnFailure ?? 'unknown error'}`
+      if (handle === undefined) {
+        // A spawn that failed before its row was written never spent the
+        // allowance; one that failed after it did — the commit already said so,
+        // and a written row is spent whatever happens next.
+        reservation.release()
+        return `task_review_agent: spawn failed: ${spawnFailure ?? 'unknown error'}`
+      }
 
       const cancel = () => handle.agent.cancel({ kind: 'parent' })
       exec.signal.addEventListener('abort', cancel, { once: true })
