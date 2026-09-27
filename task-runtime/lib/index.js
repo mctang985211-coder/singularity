@@ -7834,7 +7834,11 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* entry never makes a person's decision for them. An approval that refuses is
 	* reported with the reason it gave; one that allows proceeds, and the
 	* reference it returns is kept in the record as the audit reference of the
-	* question — never as a credential anything here would accept.
+	* question — never as a credential anything here would accept. A refusal
+	* that arrives after the identical request was recorded under its key is
+	* answered with the store's record instead: the store is re-read once there,
+	* nothing is appended, and a record of other content is refused by the key's
+	* binding.
 	*
 	* **Where the serialization is.** The claim goes to the store through
 	* `TaskService.recordBudgetExtensionIn`, unchanged, whose serial region
@@ -7857,7 +7861,7 @@ var TaskRuntime = class TaskRuntime extends Service {
 	* @param sessionId - the root coordination session of the tree whose budget is raised.
 	* @param host - the host execution the tool call runs under, carried untouched to the approval.
 	* @param request - the key and the totals the tree should be bounded by, and nothing else.
-	* @returns the store, the root task and the record the store holds — with `answeredFromRecord` when no question was asked.
+	* @returns the store, the root task and the record the store holds — with `answeredFromRecord` when the answer is a record the store already held.
 	*/
 	async extendRootBudget(sessionId, host, request) {
 		if ((typeof host === "object" && host !== null && typeof host.callId === "string" ? host.callId : "").length === 0) throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: the host execution names no call (a non-empty \`callId\`, the host's own identity for the call this request's question is asked under); the question is asked under the host’s call, and nothing else can address an answer to this request`);
@@ -7890,7 +7894,19 @@ var TaskRuntime = class TaskRuntime extends Service {
 			proposal: judgement.proposal,
 			host
 		});
-		if (decision.kind === "refused") throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: the request was not approved (${decision.reason}); the ceilings are unchanged and no run started`);
+		if (decision.kind === "refused") {
+			const recorded = this.budgetExtensionIndex(await this.ctx.task.snapshotIn(storeId)).byRequestKey[judgement.proposal.requestKey];
+			if (recorded !== void 0) {
+				if (recorded.requestDigest === judgement.proposal.requestDigest) return {
+					storeId,
+					rootTaskId: budget.rootTaskId,
+					answeredFromRecord: true,
+					record: recorded
+				};
+				throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: request key "${judgement.proposal.requestKey}" is already bound to ${describeBudgetExtension(recorded)} (identity ${recorded.requestDigest}); one key names one request, and different totals under it are a new request under a new key`);
+			}
+			throw new Error(`task-runtime: the budget of session "${sessionId}" was not extended: the request was not approved (${decision.reason}); the ceilings are unchanged and no run started`);
+		}
 		const claim = {
 			...judgement.proposal,
 			baseline: { ...effective },

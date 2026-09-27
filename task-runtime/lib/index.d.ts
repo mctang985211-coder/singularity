@@ -4008,7 +4008,7 @@ type RootBudgetApproval = (ask: RootBudgetApprovalAsk) => Promise<RootBudgetAppr
 interface RootBudgetExtensionResult {
   readonly storeId: string;
   readonly rootTaskId: TaskId;
-  /** True when the store already held this request and answered from the record: no question was asked and nothing was written. */
+  /** True when the answer is a record the store already held rather than one this call committed: nothing was written and no grant was taken. */
   readonly answeredFromRecord: boolean;
   readonly record: TaskBudgetExtension;
 }
@@ -4635,7 +4635,11 @@ declare class TaskRuntime extends Service {
    * entry never makes a person's decision for them. An approval that refuses is
    * reported with the reason it gave; one that allows proceeds, and the
    * reference it returns is kept in the record as the audit reference of the
-   * question — never as a credential anything here would accept.
+   * question — never as a credential anything here would accept. A refusal
+   * that arrives after the identical request was recorded under its key is
+   * answered with the store's record instead: the store is re-read once there,
+   * nothing is appended, and a record of other content is refused by the key's
+   * binding.
    *
    * **Where the serialization is.** The claim goes to the store through
    * `TaskService.recordBudgetExtensionIn`, unchanged, whose serial region
@@ -4658,7 +4662,7 @@ declare class TaskRuntime extends Service {
    * @param sessionId - the root coordination session of the tree whose budget is raised.
    * @param host - the host execution the tool call runs under, carried untouched to the approval.
    * @param request - the key and the totals the tree should be bounded by, and nothing else.
-   * @returns the store, the root task and the record the store holds — with `answeredFromRecord` when no question was asked.
+   * @returns the store, the root task and the record the store holds — with `answeredFromRecord` when the answer is a record the store already held.
    */
   extendRootBudget(sessionId: string, host: RootBudgetExtensionHost, request: RootBudgetExtensionRequest): Promise<RootBudgetExtensionResult>;
   /**
