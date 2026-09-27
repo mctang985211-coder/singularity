@@ -97,9 +97,10 @@ import type { ExecutionPhase } from '@dangosys/dsh-singularity-task'
  *
  * `task_budget_extend` (K4) is the one entry here that appends a store fact, and
  * that is deliberate: the fact it appends is a *person's* decision about the
- * tree's own ceiling, which only the approval channel produces (an empty
- * reference is refused by the committing entry, so the tool cannot invent one).
- * It belongs in this list for exactly the reason `task_review_pack` does — the
+ * tree's own ceiling, which only the approval channel produces (the store still
+ * refuses an empty reference, and the reference is now minted by the assembly
+ * from the host call the question was asked under, not read back from a session
+ * log). It belongs in this list for exactly the reason `task_review_pack` does — the
  * caller is the root coordination session of a tree that has stopped, and a tree
  * that spent its allowance is precisely the tree whose owner has to be able to
  * ask for more ("终态亦可调用"). What the gate protects is untouched by a

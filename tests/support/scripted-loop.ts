@@ -23,7 +23,11 @@
  *   *record* an answer leaves — the channel's own request id and its
  *   `approval/asked` + `approval/decided` pair — mounts the deployment's real
  *   `ApprovalService` instead ({@link ScriptedLoopOptions.approvalService}),
- *   with the same desk as its answerer.
+ *   with the same desk as its answerer. The runtime's own budget approval (K4)
+ *   is installed on that seam from the deployment's `defineRootBudgetApproval`
+ *   at mount, so a scripted root that calls `task_budget_extend` puts the same
+ *   question to the same desk a review does. The desk indexes those asks
+ *   ({@link ScriptedReview.budgetAsks}) beside the review ones.
  *
  * Everything else is the deployment's own: `LlmRuntime`, `SessionStore`,
  * `SessionProjectionRegistry`, `SystemPrompt`, `ToolRuntime`, `AgentRegistry`,
@@ -81,7 +85,7 @@ import { defineTaskStatusTool } from '../../agent-singularity/src/tools/task-sta
 import { defineTaskSubmitResultTool } from '../../agent-singularity/src/tools/task-submit-result.ts'
 import type { CapabilityConfig, Config, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
-import { defineTaskBudgetExtendTool } from '../../agent-singularity/src/tools/budget-extend.ts'
+import { defineRootBudgetApproval, defineTaskBudgetExtendTool } from '../../agent-singularity/src/tools/budget-extend.ts'
 import { defineTaskReviewAgentTool } from '../../agent-singularity/src/tools/review-agent.ts'
 import { defineTaskReviewPackTool } from '../../agent-singularity/src/tools/task-review-pack.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
@@ -280,7 +284,7 @@ export interface ScriptedLoopOptions {
 export interface ScriptedReviewAsk {
   /** The owner session the review was shown in — the channel's own routing. */
   readonly sessionId: string
-  /** The tool the ask names: `task_decompose` for a batch, `task_intake` for a root contract (A0 §1.3, stage C's rendering). */
+  /** The tool the ask names: `task_decompose` for a batch, `task_intake` for a root contract (A0 §1.3, stage C's rendering), `task_budget_extend` for a raise of the tree's own ceilings (K4). */
   readonly toolName: string
   /** The rendered review material: the whole batch, the limits and the identity a decision would bind. */
   readonly reason: string
@@ -291,6 +295,13 @@ const BATCH_REVIEW_TOOL = 'task_decompose'
 
 /** The name the channel gives a root contract review ask (`proposal-review.ts:ROOT_REVIEW_TOOL_NAME`). */
 const ROOT_REVIEW_TOOL = 'task_intake'
+
+/**
+ * The name the deployment's channel gives a budget-extension ask
+ * (`tools/budget-extend.ts:defineRootBudgetApproval`): the one human question a
+ * root's raise of its own ceilings is put through.
+ */
+const BUDGET_EXTEND_TOOL = 'task_budget_extend'
 
 /**
  * The human seam of this deployment (T2/T3 §5–§6): the real review channel
@@ -312,12 +323,21 @@ export interface ScriptedReview {
   readonly batchAsks: readonly ScriptedReviewAsk[]
   /** Every ask about a **root contract** ({@link ROOT_REVIEW_TOOL}), in ask order. */
   readonly rootAsks: readonly ScriptedReviewAsk[]
+  /**
+   * Every ask about a **budget extension** ({@link BUDGET_EXTEND_TOOL}), in ask
+   * order — the question the runtime puts to a person on behalf of a root that
+   * wants its ceilings raised (K4). A case about what that question does reads
+   * and answers budget asks rather than counting the setup's own.
+   */
+  readonly budgetAsks: readonly ScriptedReviewAsk[]
   /** Answer one held ask (ask order). An ask that has no answer held is refused by name. */
   answer(index: number, outcome: ApprovalOutcome): void
   /** Answer the `index`-th **batch** ask. An index no batch ask holds is refused by name. */
   answerBatch(index: number, outcome: ApprovalOutcome): void
   /** Answer the `index`-th **root contract** ask. An index no root ask holds is refused by name. */
   answerRoot(index: number, outcome: ApprovalOutcome): void
+  /** Answer the `index`-th **budget-extension** ask. An index no budget ask holds is refused by name. */
+  answerBudget(index: number, outcome: ApprovalOutcome): void
   /** How many asks were made and not answered yet. */
   pending(): number
 }
@@ -600,12 +620,20 @@ class ReviewDesk implements ScriptedReview {
     return this.asks.filter(ask => ask.toolName === ROOT_REVIEW_TOOL)
   }
 
+  get budgetAsks(): readonly ScriptedReviewAsk[] {
+    return this.asks.filter(ask => ask.toolName === BUDGET_EXTEND_TOOL)
+  }
+
   answerBatch(index: number, outcome: ApprovalOutcome): void {
     this.answer(this.indexOfAsk(this.batchAsks, index, 'batch'), outcome)
   }
 
   answerRoot(index: number, outcome: ApprovalOutcome): void {
     this.answer(this.indexOfAsk(this.rootAsks, index, 'root contract'), outcome)
+  }
+
+  answerBudget(index: number, outcome: ApprovalOutcome): void {
+    this.answer(this.indexOfAsk(this.budgetAsks, index, 'budget extension'), outcome)
   }
 
   /** The ask's position in the raw list a subject-scoped index names, refused by name when that ask does not exist. */
@@ -880,6 +908,17 @@ class ScriptedLoopImpl implements ScriptedLoop {
       runBindingRoot: join(this.home, 'singularity', 'run-bindings'),
     } as Config)
     this.runtime = ctx.get('taskRuntime') as TaskRuntime
+    // The one approval a budget extension is granted through (K4), installed the
+    // way the deployment's assembly installs it: the runtime asks this callback
+    // alone, and the callback puts the card to the person through the approval
+    // seam mounted above (the real `ApprovalService` when the spec names
+    // `'native'`, the desk's own stand-in otherwise). Without it the runtime
+    // refuses a new request by name, so a scripted root's real
+    // `task_budget_extend` call would end in that refusal instead of a question.
+    ctx.effect(
+      () => this.runtime.registerRootBudgetApproval(defineRootBudgetApproval(ctx)),
+      'scripted-loop: root budget approval',
+    )
     // The read core and the prompt assembly (A2): mounted where the deployment's
     // bundle mounts it — after the runtime it observes, before the agent plane it
     // serves — so every model request this fixture runs is assembled with the

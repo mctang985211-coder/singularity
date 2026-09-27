@@ -809,126 +809,8 @@ function reviewAgentBudget() {
 	const parsed = raw === void 0 || raw.length === 0 ? NaN : Number(raw);
 	return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : REVIEW_AGENT_BUDGET_DEFAULT;
 }
-/**
-* How many review agents this root store has already started. A missing file
-* reads as zero; a corrupt line throws rather than silently undercounting.
-*/
-async function countReviewAgentRuns(rootStoreId) {
-	let text$31;
-	try {
-		text$31 = await readFile(reviewAgentLedgerFile(), "utf8");
-	} catch (error) {
-		if (error.code === "ENOENT") return 0;
-		throw error;
-	}
-	let count = 0;
-	text$31.split("\n").forEach((line, index) => {
-		if (line.trim().length === 0) return;
-		let record;
-		try {
-			record = JSON.parse(line);
-		} catch {
-			throw new Error(`review-agent-ledger: corrupt line ${index + 1} in ${reviewAgentLedgerFile()}`);
-		}
-		if (record.rootStoreId === rootStoreId) count += 1;
-	});
-	const key = budgetKey(rootStoreId);
-	persistedRows.set(key, Math.max(knownRows(key), count));
-	return count;
-}
-/**
-* Rows this process knows the ledger holds, per budget — a ledger file and a
-* root store. A count is a snapshot of the file taken before the claim that
-* follows it, and a run that appends in between leaves that snapshot claiming
-* the allowance of a row that now exists. This map is raised by every append
-* this process writes and seeded upward by every count, so it never runs
-* backwards and a snapshot that lost that race cannot spend a row twice (K4-1).
-*/
-const persistedRows = /* @__PURE__ */ new Map();
-/**
-* Admitted review agents whose row is not in the ledger yet, per budget — a
-* ledger file and a root store. The count is an asynchronously read file, so it
-* cannot see a review agent that is still inside its spawn: between the count
-* and the row there is a whole spawn, and anything reading the count in that
-* window would be told zero. This map is what that window is closed with
-* (K4-1): the claim stands in for the row until the row exists.
-*/
-const claims = /* @__PURE__ */ new Map();
-/** The budget one count, claim, or append belongs to. */
-function budgetKey(rootStoreId) {
-	return `${reviewAgentLedgerFile()}\u0000${rootStoreId}`;
-}
-/** The rows known for one budget key, without resolving the key again. */
-function knownRows(key) {
-	return persistedRows.get(key) ?? 0;
-}
-/**
-* The allowance one root store has spent, as of right now: the rows this process
-* knows the ledger holds — the higher of the count a caller read and the appends
-* written since — plus the runs admitted with no row yet. It is never below the
-* persisted rows, which is what keeps a count that a concurrent append overtook
-* from spending the same row's allowance twice.
-*/
-function effectiveReviewAgentRuns(rootStoreId, used) {
-	const key = budgetKey(rootStoreId);
-	return Math.max(used, knownRows(key)) + (claims.get(key) ?? 0);
-}
-/**
-* Claim one review agent against a root store's allowance — the check and the
-* claim in one synchronous step, so two executions cannot both pass it. The
-* effective usage is {@link effectiveReviewAgentRuns}: what this process knows
-* the ledger holds plus the claims in flight, so neither a second execution that
-* read the same count nor a count overtaken by a concurrent append can admit a
-* reviewer the allowance has no room for.
-*
-* A caller must not await between reading the count and calling this, or the
-* second execution reads the same count while the first is still spawning.
-*
-* @param rootStoreId - the root task store the allowance belongs to.
-* @param max - the per-store cap (see {@link reviewAgentBudget}).
-* @param used - the count the caller just read from the ledger.
-* @returns the claim, or `undefined` when the allowance is spent.
-*/
-function reserveReviewAgentRun(rootStoreId, max, used) {
-	const key = budgetKey(rootStoreId);
-	if (effectiveReviewAgentRuns(rootStoreId, used) >= max) return void 0;
-	const inFlight = claims.get(key) ?? 0;
-	claims.set(key, inFlight + 1);
-	let settled = false;
-	const retire = () => {
-		if (settled) return;
-		settled = true;
-		const left = (claims.get(key) ?? 1) - 1;
-		if (left > 0) claims.set(key, left);
-		else claims.delete(key);
-	};
-	return {
-		commit: retire,
-		release: retire
-	};
-}
-/** Append one started review agent. */
-async function appendReviewAgentRun(record) {
-	const file = reviewAgentLedgerFile();
-	await mkdir(dirname(file), { recursive: true });
-	const line = {
-		formatVersion: 1,
-		...record,
-		at: (/* @__PURE__ */ new Date()).toISOString()
-	};
-	await appendFile(file, `${JSON.stringify(line)}\n`, "utf8");
-	const key = budgetKey(record.rootStoreId);
-	persistedRows.set(key, knownRows(key) + 1);
-}
-/** Every ledger row, or `undefined` when the ledger has never been written (zero rows is a state, not a failure). */
-async function readLedgerRows() {
-	let text$31;
-	try {
-		text$31 = await readFile(reviewAgentLedgerFile(), "utf8");
-	} catch (error) {
-		if (error.code === "ENOENT") return void 0;
-		throw error;
-	}
+/** The rows one ledger file holds, as its non-empty lines. A corrupt line throws by name rather than undercounting. */
+function parseLedgerRows(text$31) {
 	const rows = [];
 	text$31.split("\n").forEach((line, index) => {
 		if (line.trim().length === 0) return;
@@ -939,6 +821,94 @@ async function readLedgerRows() {
 		}
 	});
 	return rows;
+}
+/** Every ledger row, or `undefined` when the ledger has never been written (zero rows is a state, not a failure). */
+async function readLedgerRows() {
+	let text$31;
+	try {
+		text$31 = await readFile(reviewAgentLedgerFile(), "utf8");
+	} catch (error) {
+		if (error.code === "ENOENT") return void 0;
+		throw error;
+	}
+	return parseLedgerRows(text$31);
+}
+/**
+* How many review agents this root store has already started, as the file reads
+* right now. A missing file reads as zero; a corrupt line throws rather than
+* silently undercounting.
+*
+* A display query only: it caches nothing, so it can never be the count an
+* admission decides on — that one is read inside the store's serial region
+* ({@link admitReviewAgent}) together with the row it writes.
+*/
+async function countReviewAgentRuns(rootStoreId) {
+	return (await readLedgerRows() ?? []).filter((row) => row.rootStoreId === rootStoreId).length;
+}
+/** The budget one admission belongs to: a ledger file and a root store. */
+function budgetKey(rootStoreId) {
+	return `${reviewAgentLedgerFile()}\u0000${rootStoreId}`;
+}
+/**
+* The serial regions, one promise chain per budget key. A region is the only
+* place a row is counted, decided on, or written, so the count an admission
+* decides with and the row it writes cannot have another admission in between
+* them (K4-1). The chain's tail is settled either way, so a failed region
+* cannot wedge the key's next admission.
+*/
+const regions = /* @__PURE__ */ new Map();
+/** Append one started review agent's row. Only {@link admitReviewAgent} writes, and only inside its region. */
+async function appendStartedRow(rootStoreId, record) {
+	const file = reviewAgentLedgerFile();
+	await mkdir(dirname(file), { recursive: true });
+	const line = {
+		formatVersion: 1,
+		rootStoreId,
+		taskId: record.taskId,
+		sessionId: record.sessionId,
+		actor: record.actor,
+		at: (/* @__PURE__ */ new Date()).toISOString()
+	};
+	await appendFile(file, `${JSON.stringify(line)}\n`, "utf8");
+}
+/**
+* Run one review-agent admission inside the ledger's serial region for a store.
+*
+* One region per (ledger file, root store): inside it the whole ledger file is
+* read and this store's rows counted, then `work` runs with that count and a
+* `start` that appends this run's row to the same file — the durable started
+* fact — and the region ends when `work` returns or throws. Nothing else is
+* serialized: waiting for the reviewer's output, its watchdog, and recording
+* its Diagnosis happen after `work` returned, outside the region, in the
+* caller.
+*
+* The consequence to rely on: two admissions for one store cannot interleave
+* their count-and-write, so the second one reads the count the first left
+* behind instead of a file that has not caught up yet. A `start` that fails
+* writes no row and spends nothing, and the failed region does not wedge the
+* key.
+*
+* `work` must not await another admission for the same store (that region waits
+* for this one) and must await every `start` it calls before returning.
+*
+* @param rootStoreId - the root task store the budget belongs to.
+* @param work - the admission decision and the spawn, given the store's count and its write door.
+* @returns whatever `work` returned, once the region has ended.
+*/
+async function admitReviewAgent(rootStoreId, work) {
+	const key = budgetKey(rootStoreId);
+	const result = (regions.get(key) ?? Promise.resolve()).then(async () => {
+		return work({
+			started: (await readLedgerRows() ?? []).filter((row) => row.rootStoreId === rootStoreId).length,
+			start: (record) => appendStartedRow(rootStoreId, record)
+		});
+	});
+	const tail = result.then(() => void 0, () => void 0);
+	regions.set(key, tail);
+	tail.then(() => {
+		if (regions.get(key) === tail) regions.delete(key);
+	});
+	return result;
 }
 /**
 * The one delegation a session is recorded under, as the context package's
@@ -1125,37 +1095,35 @@ function raiseLines(proposal) {
 }
 /**
 * The card a person decides from (K4): the store and the tree the raise belongs
-* to, the request's own identity and the binding this decision is recorded
-* under, the runs the store already holds, each ceiling as it stands now — the
-* approved total in force and the deployment's own configuration beside it —
-* and, for the dimensions this request names, the total that approving would put
-* in place.
+* to, the request's own key and identity, the runs the store already holds, each
+* of the two ceilings as it stands now — the approved total in force first, the
+* ceiling this deployment configures beside it in parentheses — and, for the
+* dimensions this request names, the total approving would put in place.
 *
 * The usage is on the card because the ceiling is what is being moved and the
 * count is what it is measured against: a raise from 10 to 20 when 18 runs exist
 * is two runs of headroom, and a person who is not told that is deciding blind.
-* The binding is on it because the decision is read back by it: the runtime
-* records a raise only against an ask that carries this token, so the approval
-* a person gives here is an approval of these totals on this store and of
-* nothing else.
+* There is no binding on it and no token standing in for one: the decision is not
+* read back out of anything a caller could quote — the callback that renders this
+* card is the one the runtime asks, and what it is told is what gets recorded.
 */
-function renderAsk(draft, proposal, binding) {
+function renderAsk(ask) {
+	const proposal = ask.proposal;
 	return [
-		`Budget extension of the tree in store "${draft.storeId}" — root task ${draft.rootTaskId}, asked by its root coordination session ${draft.rootSessionId}.`,
+		`Budget extension of the tree in store "${ask.storeId}" — root task ${ask.rootTaskId}, asked by its root coordination session ${ask.rootSessionId}.`,
 		`request key "${proposal.requestKey}" (identity ${proposal.requestDigest})`,
-		`approval binding: ${binding} — what this decision is recorded under: these totals, on this store, for this call`,
-		`runs the store already holds: ${draft.runsUsed} — an approved total replaces the ceiling, never this count`,
+		`runs the store already holds: ${ask.runsUsed} — an approved total replaces the ceiling, never this count`,
 		"ceilings now (the approved total in force first, the ceiling this deployment configures in parentheses):",
 		...DIMENSIONS.map((dimension) => {
 			const raise = raiseOf(proposal, dimension);
-			const now = `${dimension}: ${inForce(draft.effective[dimension])} in force (deployment configures ${inForce(draft.configured[dimension])})`;
+			const now = `${dimension}: ${inForce(ask.effective[dimension])} in force (deployment configures ${inForce(ask.configured[dimension])})`;
 			return raise === void 0 ? `- ${now} — this request does not name it` : `- ${now} → approves a total of ${String(raise.next)}`;
 		}),
 		"approving records ONE budget-extension event on this store: the tree keeps its runs, its tasks and its history, no run starts or resumes, nothing is re-opened, and the approved total becomes the ceiling every later admission reads.",
 		"rejecting or cancelling records nothing and changes no ceiling."
 	].join("\n");
 }
-/** The record as both the approved and the already-recorded answer print it: the raises, and the channel's own reference they were granted under. */
+/** The record as both the approved and the already-recorded answer print it: the raises, and the audit reference they were recorded under. */
 function renderRecord(record) {
 	return [...raiseLines(record), `approval on the record: ${record.approvalRef} — asked by ${record.requestedBy} at ${record.recordedAt}`];
 }
@@ -1186,11 +1154,12 @@ function defineTaskBudgetExtendTool(ctx) {
 			const undeclared$3 = undeclaredParameters(args, DECLARED_PARAMETERS, "task_budget_extend");
 			if (undeclared$3 !== void 0) return undeclared$3;
 			const caller = sessionId$20(exec);
-			const agent = exec.agent;
-			if (agent === void 0) throw new Error("task_budget_extend: missing agent");
-			let draft;
+			let result;
 			try {
-				draft = await ctx.taskRuntime.budgetExtensionDraft(caller, {
+				result = await ctx.taskRuntime.extendRootBudget(caller, {
+					callId: exec.callId,
+					execution: exec
+				}, {
 					requestKey: args.requestKey,
 					...args.maxRuns === void 0 ? {} : { maxRuns: args.maxRuns },
 					...args.deadlineAt === void 0 ? {} : { deadlineAt: args.deadlineAt }
@@ -1198,38 +1167,62 @@ function defineTaskBudgetExtendTool(ctx) {
 			} catch (error) {
 				return `task_budget_extend rejected: ${error instanceof Error ? error.message : String(error)}`;
 			}
-			if (draft.outcome.kind === "refused") return `task_budget_extend refused: ${draft.outcome.reason}; no human was asked and nothing was written`;
-			if (draft.outcome.kind === "recorded") return [`task_budget_extend: request key "${draft.outcome.record.requestKey}" is already recorded on store "${draft.storeId}" — answered from the record; no human was asked and nothing was appended.`, ...renderRecord(draft.outcome.record)].join("\n");
-			const proposal = draft.outcome.proposal;
-			const binding = draft.approvalBinding;
-			if (binding === void 0) throw new Error("task_budget_extend: the runtime proposed a raise without the approval binding it would be recorded under");
-			const outcome = await ctx.approval.request({
-				agent,
-				toolName: "task_budget_extend",
-				callId: exec.callId,
-				reason: renderAsk(draft, proposal, binding),
-				signal: exec.signal
-			});
-			if (outcome !== "allowed-once") return `task_budget_extend: no extension recorded — ${outcome === "rejected" ? "the human rejected it" : outcome === "cancelled" ? "the request was cancelled before the human decided" : "no approval answerer available"}; the ceilings are unchanged and no run started or resumed`;
-			try {
-				const record = await ctx.taskRuntime.extendRootBudget(caller, {
-					requestKey: proposal.requestKey,
-					...proposal.maxRuns === void 0 ? {} : { maxRuns: proposal.maxRuns.next },
-					...proposal.deadlineAt === void 0 ? {} : { deadlineAt: proposal.deadlineAt.next },
-					baseline: draft.effective,
-					callId: exec.callId
-				});
-				return [
-					`task_budget_extend: approved and recorded on store "${draft.storeId}" (root task ${draft.rootTaskId})`,
-					`request key "${record.requestKey}" (identity ${record.requestDigest})`,
-					...renderRecord(record),
-					"no run started, none resumed, no task changed and no terminal run re-opened; the runs already counted still count against the approved total."
-				].join("\n");
-			} catch (error) {
-				return `task_budget_extend rejected: ${error instanceof Error ? error.message : String(error)}`;
-			}
+			if (result.answeredFromRecord) return [`task_budget_extend: request key "${result.record.requestKey}" is already recorded on store "${result.storeId}" (root task ${result.rootTaskId}) — answered from the record; no human was asked and nothing was appended.`, ...renderRecord(result.record)].join("\n");
+			return [
+				`task_budget_extend: approved and recorded on store "${result.storeId}" (root task ${result.rootTaskId})`,
+				`request key "${result.record.requestKey}" (identity ${result.record.requestDigest})`,
+				...renderRecord(result.record),
+				"no run started, none resumed, no task changed and no terminal run re-opened; the runs already counted still count against the approved total."
+			].join("\n");
 		}
 	});
+}
+/**
+* The one approval a budget extension is granted through: the callback the
+* assembly installs on the runtime once, and the only place a person's answer to
+* `task_budget_extend` exists.
+*
+* The question goes through the native DSH approval seam the deployment already
+* runs for every other human decision, under the host's own call id: the card is
+* the ask's reason, the host execution's agent is who is asked — and whose
+* session log the channel's `approval/asked` + `approval/decided` pair is
+* written to — and the host execution's own signal is what withdraws the
+* question. Only the channel's `'allowed-once'` allows a raise, and the reference
+* it answers with is `approval:<callId>`: the host's identity for the call the
+* question was asked under, an audit reference and never a credential.
+*
+* A person who says no, a question withdrawn before they could answer it, and a
+* deployment with nobody to ask are one shape here — `refused` — because they
+* mean the same thing to the tree: the ceiling stays where it is. A channel that
+* throws is deliberately left to propagate (the runtime's caller reports it as a
+* rejection) so a failure of the channel can never read as an approval.
+*/
+function defineRootBudgetApproval(ctx) {
+	return async (ask) => {
+		const execution = ask.host.execution;
+		const host = typeof execution === "object" && execution !== null ? execution : void 0;
+		const agent = host?.agent;
+		if (agent === void 0) return {
+			kind: "refused",
+			reason: "the host execution names no agent, so there is nobody to put the question to"
+		};
+		const callId = ask.host.callId;
+		const outcome = await ctx.approval.request({
+			agent,
+			toolName: "task_budget_extend",
+			callId,
+			reason: renderAsk(ask),
+			signal: host?.signal
+		});
+		if (outcome === "allowed-once") return {
+			kind: "allowed",
+			reference: `approval:${String(callId)}`
+		};
+		return {
+			kind: "refused",
+			reason: outcome === "rejected" ? "the human rejected it" : outcome === "cancelled" ? "the question was cancelled before the human answered it" : "no approval answerer was available to put the question to a person"
+		};
+	};
 }
 
 //#endregion
@@ -4199,71 +4192,77 @@ function defineTaskReviewAgentTool(ctx) {
 			if (snapshot.tasks.find((item) => item.taskId === args.taskId) === void 0) return `task_review_agent: unknown task "${args.taskId}"`;
 			const review = latestReview(snapshot, args.taskId);
 			if (review === void 0) return `task_review_agent: task ${args.taskId} has no review record; nothing to judge`;
-			const max = reviewAgentBudget();
-			const used = await countReviewAgentRuns(storeId);
-			const reservation = reserveReviewAgentRun(storeId, max, used);
-			if (reservation === void 0) {
-				const spent = effectiveReviewAgentRuns(storeId, used);
-				const escalation$1 = computeEscalation(snapshot, args.taskId, {
-					used: spent,
+			const outcome = await admitReviewAgent(storeId, async (admission) => {
+				const used = admission.started;
+				const max = reviewAgentBudget();
+				const current = await ctx.task.snapshotIn(storeId);
+				const escalation$1 = computeEscalation(current, args.taskId, {
+					used,
 					max
 				});
-				return `task_review_agent: budget exhausted (${spent}/${max}) for store ${storeId}${escalation$1.suppressed.length > 0 ? `; suppressed ${escalation$1.suppressed.join(", ")}` : ""} — no review agent spawned`;
-			}
-			const escalation = computeEscalation(snapshot, args.taskId, {
-				used,
-				max
+				if (used >= max) return {
+					kind: "refused",
+					text: `task_review_agent: budget exhausted (${used}/${max}) for store ${storeId}${escalation$1.suppressed.length > 0 ? `; suppressed ${escalation$1.suppressed.join(", ")}` : ""} — no review agent spawned`
+				};
+				if (!escalation$1.required) return {
+					kind: "refused",
+					text: `task_review_agent: escalation is not required for task ${args.taskId} (budget ${used}/${max}); no review agent spawned`
+				};
+				const timeoutMs$1 = Number.isFinite(args.timeoutMs) && args.timeoutMs > 0 ? Math.floor(args.timeoutMs) : REVIEW_AGENT_TIMEOUT_MS;
+				const ref$1 = reviewRef(review);
+				const pack = buildReviewPack(current, args.taskId, escalation$1);
+				const prompt = [
+					"You are a Singularity review agent. Judge six dimensions of the task below from the review pack, and nothing else.",
+					"Do not score. Do not modify anything. Cite only refs printed in the pack (evidence ids, review refs like `task#run`, or session ids).",
+					"When the pack does not settle a dimension, return verdict \"unknown\" — never guess.",
+					"Return EXACTLY one fenced json block, no prose around it:",
+					"```json",
+					"{\"judgements\":[{\"dimension\":\"task_specification\",\"verdict\":\"adequate|inadequate|unknown\",\"evidenceRefs\":[\"...\"],\"rationale\":\"...\"}]}",
+					"```",
+					`Include all six dimensions exactly once: ${JUDGED_DIMENSIONS.join(", ")}.`,
+					"",
+					"--- review pack ---",
+					pack
+				].join("\n");
+				const reviewerSessionId$1 = SessionId(randomUUID());
+				let spawnFailure;
+				const handle$1 = await ctx.agentRuntime.spawn(exec.agent, {
+					sessionId: reviewerSessionId$1,
+					name: `review ${args.taskId}`,
+					prompt: [{
+						type: "text",
+						text: prompt
+					}],
+					agentPreset: REVIEWER_PRESET,
+					grant: reviewerGrant(),
+					beforePrompt: async () => {
+						await admission.start({
+							taskId: args.taskId,
+							sessionId: reviewerSessionId$1,
+							actor: caller
+						});
+						const back = await readReviewerDelegation(reviewerSessionId$1);
+						if (back === void 0 || back.rootStoreId !== storeId || back.taskId !== args.taskId) throw new Error(`task_review_agent: the delegation of reviewer session "${reviewerSessionId$1}" could not be read back from the ledger (expected task ${args.taskId} in ${storeId}); no model input was sent`);
+					},
+					signal: exec.signal
+				}).catch((error) => {
+					spawnFailure = error instanceof Error ? error.message : String(error);
+				});
+				if (handle$1 === void 0) return {
+					kind: "refused",
+					text: `task_review_agent: spawn failed: ${spawnFailure ?? "unknown error"}`
+				};
+				return {
+					kind: "spawned",
+					handle: handle$1,
+					escalation: escalation$1,
+					ref: ref$1,
+					timeoutMs: timeoutMs$1,
+					reviewerSessionId: reviewerSessionId$1
+				};
 			});
-			if (!escalation.required) {
-				reservation.release();
-				return `task_review_agent: escalation is not required for task ${args.taskId} (budget ${used}/${max}); no review agent spawned`;
-			}
-			const timeoutMs = Number.isFinite(args.timeoutMs) && args.timeoutMs > 0 ? Math.floor(args.timeoutMs) : REVIEW_AGENT_TIMEOUT_MS;
-			const ref = reviewRef(review);
-			const pack = buildReviewPack(snapshot, args.taskId, escalation);
-			const prompt = [
-				"You are a Singularity review agent. Judge six dimensions of the task below from the review pack, and nothing else.",
-				"Do not score. Do not modify anything. Cite only refs printed in the pack (evidence ids, review refs like `task#run`, or session ids).",
-				"When the pack does not settle a dimension, return verdict \"unknown\" — never guess.",
-				"Return EXACTLY one fenced json block, no prose around it:",
-				"```json",
-				"{\"judgements\":[{\"dimension\":\"task_specification\",\"verdict\":\"adequate|inadequate|unknown\",\"evidenceRefs\":[\"...\"],\"rationale\":\"...\"}]}",
-				"```",
-				`Include all six dimensions exactly once: ${JUDGED_DIMENSIONS.join(", ")}.`,
-				"",
-				"--- review pack ---",
-				pack
-			].join("\n");
-			const reviewerSessionId = SessionId(randomUUID());
-			let spawnFailure;
-			const handle = await ctx.agentRuntime.spawn(exec.agent, {
-				sessionId: reviewerSessionId,
-				name: `review ${args.taskId}`,
-				prompt: [{
-					type: "text",
-					text: prompt
-				}],
-				agentPreset: REVIEWER_PRESET,
-				grant: reviewerGrant(),
-				beforePrompt: async () => {
-					await appendReviewAgentRun({
-						rootStoreId: storeId,
-						taskId: args.taskId,
-						sessionId: reviewerSessionId,
-						actor: caller
-					});
-					reservation.commit();
-					const back = await readReviewerDelegation(reviewerSessionId);
-					if (back === void 0 || back.rootStoreId !== storeId || back.taskId !== args.taskId) throw new Error(`task_review_agent: the delegation of reviewer session "${reviewerSessionId}" could not be read back from the ledger (expected task ${args.taskId} in ${storeId}); no model input was sent`);
-				},
-				signal: exec.signal
-			}).catch((error) => {
-				spawnFailure = error instanceof Error ? error.message : String(error);
-			});
-			if (handle === void 0) {
-				reservation.release();
-				return `task_review_agent: spawn failed: ${spawnFailure ?? "unknown error"}`;
-			}
+			if (outcome.kind === "refused") return outcome.text;
+			const { handle, escalation, ref, timeoutMs, reviewerSessionId } = outcome;
 			const cancel = () => handle.agent.cancel({ kind: "parent" });
 			exec.signal.addEventListener("abort", cancel, { once: true });
 			let timer;
@@ -4275,10 +4274,10 @@ function defineTaskReviewAgentTool(ctx) {
 				}, timeoutMs);
 			});
 			const idle = handle.agent.whenIdle().then(() => "idle").catch(() => "failed");
-			const outcome = await Promise.race([idle, deadline]);
+			const reviewOutcome = await Promise.race([idle, deadline]);
 			if (timer !== void 0) clearTimeout(timer);
 			exec.signal.removeEventListener("abort", cancel);
-			if (outcome === "timeout") handle.agent.cancel({ kind: "parent" });
+			if (reviewOutcome === "timeout") handle.agent.cancel({ kind: "parent" });
 			const reply = timedOut ? void 0 : lastAssistantText(handle.agent.session.snapshotEvents());
 			const parsed = timedOut ? void 0 : parseReviewerJudgements(reply);
 			const judgements = normalizeJudgements(parsed, ref, timedOut ? `review agent timed out after ${timeoutMs}ms with no judgement` : "no judgement returned for this dimension");
@@ -4557,6 +4556,7 @@ var SingularityAgent = class extends Service {
 		new ProposalReviewService(ctx);
 		new EvolutionExposure(ctx, evolution === "on");
 		ctx.effect(() => ctx.singularityContext.registerReviewerBindingSource(reviewerBindingSource()), "singularityAgent: reviewer binding source");
+		ctx.effect(() => ctx.taskRuntime.registerRootBudgetApproval(defineRootBudgetApproval(ctx)), "singularityAgent: root budget approval");
 		ctx.tools.register(defineMarkReadyTool(ctx));
 		ctx.tools.register(defineSpawnTool(ctx));
 		ctx.tools.register(defineAskTool(ctx));

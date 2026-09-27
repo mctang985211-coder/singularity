@@ -1,26 +1,29 @@
 /**
- * `task_budget_extend`: ask a person to raise the tree's own execution ceilings,
- * and hand the runtime the identity of the call they answered (K4).
+ * `task_budget_extend`: the card a person decides from, and the host identity the
+ * question was asked under (K4).
  *
  * Why a tool and not a service entry: the decision is a person's, and the
  * workspace's rule for a person's decision is the native approval seam — the ask,
  * its rendering and the channel's own `approval/asked` + `approval/decided` audit
- * are the tool plane's. The runtime owns everything else
- * (`TaskRuntime.budgetExtensionDraft` / `extendRootBudget`): which session may
- * ask, what the store configures, what is in force, what the request would
- * become, whether the reading it was approved against is still the one in force,
- * and — the K4-2 rule — whether the approval the caller points at is one the
- * channel itself recorded. This file therefore adds exactly two things: a card a
- * human can decide from, and the identity of the call the question was put under.
+ * are the tool plane's. Everything else is the runtime's
+ * (`TaskRuntime.extendRootBudget`, plus the callback
+ * `TaskRuntime.registerRootBudgetApproval` holds): which session may ask, what
+ * the store configures, what is in force, what the request would become, whether
+ * the key is already answered, and whether this deployment has anyone to ask at
+ * all. This file therefore adds exactly two things: a card a human can decide
+ * from ({@link renderAsk}) and the callback the assembly installs once
+ * ({@link defineRootBudgetApproval}), which puts that card through the native
+ * channel and answers the runtime with the channel's own decision.
  *
- * Why the call and never a reference: the committing entry takes no approval
- * string at all. It takes the tool call's identity, reads that call's ask and
- * decision back out of the caller session's own log (where the approval service
- * writes them and nowhere else), and records the `ApprovalRequestId` the channel
- * minted. There is no parameter of this tool — and no field of the commit — that
- * a model or a direct caller could fill with something that stands in for an
- * approval; an argument undeclared here is refused by name rather than dropped
- * ({@link undeclaredParameters}).
+ * Why one call and never a reference: the tool hands the runtime the request and
+ * the host execution it runs under, and nothing else — no binding, no digest, no
+ * approval reference, no callId argument — because those are exactly the fields a
+ * caller could use to go around the person. The request key is the idempotency
+ * key and is never read as authorization; an argument undeclared here is refused
+ * by name rather than dropped ({@link undeclaredParameters}). The reference the
+ * store keeps is `approval:<callId>` — the host's own identity for the call the
+ * question was asked under — and it is an audit reference, never a credential:
+ * nothing in the runtime would accept it as one.
  *
  * What an extension is not, said on the card because the person is deciding it:
  * the raise moves ceilings. It starts no run, resumes none, re-opens no task,
@@ -37,7 +40,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type { BudgetExtensionProposal, TaskBudgetExtension } from '@dangosys/dsh-singularity-task'
-import type { RootBudgetExtensionDraft } from '@dangosys/dsh-singularity-task-runtime'
+import type {
+  RootBudgetApproval,
+  RootBudgetApprovalAsk,
+  RootBudgetExtensionResult,
+} from '@dangosys/dsh-singularity-task-runtime'
 import { undeclaredParameters } from './proposal-parameters.ts'
 
 const text = (value: string) => [{ type: 'text' as const, text: value }]
@@ -79,30 +86,28 @@ function raiseLines(proposal: BudgetExtensionProposal): string[] {
 
 /**
  * The card a person decides from (K4): the store and the tree the raise belongs
- * to, the request's own identity and the binding this decision is recorded
- * under, the runs the store already holds, each ceiling as it stands now — the
- * approved total in force and the deployment's own configuration beside it —
- * and, for the dimensions this request names, the total that approving would put
- * in place.
+ * to, the request's own key and identity, the runs the store already holds, each
+ * of the two ceilings as it stands now — the approved total in force first, the
+ * ceiling this deployment configures beside it in parentheses — and, for the
+ * dimensions this request names, the total approving would put in place.
  *
  * The usage is on the card because the ceiling is what is being moved and the
  * count is what it is measured against: a raise from 10 to 20 when 18 runs exist
  * is two runs of headroom, and a person who is not told that is deciding blind.
- * The binding is on it because the decision is read back by it: the runtime
- * records a raise only against an ask that carries this token, so the approval
- * a person gives here is an approval of these totals on this store and of
- * nothing else.
+ * There is no binding on it and no token standing in for one: the decision is not
+ * read back out of anything a caller could quote — the callback that renders this
+ * card is the one the runtime asks, and what it is told is what gets recorded.
  */
-function renderAsk(draft: RootBudgetExtensionDraft, proposal: BudgetExtensionProposal, binding: string): string {
+function renderAsk(ask: RootBudgetApprovalAsk): string {
+  const proposal = ask.proposal
   return [
-    `Budget extension of the tree in store "${draft.storeId}" — root task ${draft.rootTaskId}, asked by its root coordination session ${draft.rootSessionId}.`,
+    `Budget extension of the tree in store "${ask.storeId}" — root task ${ask.rootTaskId}, asked by its root coordination session ${ask.rootSessionId}.`,
     `request key "${proposal.requestKey}" (identity ${proposal.requestDigest})`,
-    `approval binding: ${binding} — what this decision is recorded under: these totals, on this store, for this call`,
-    `runs the store already holds: ${draft.runsUsed} — an approved total replaces the ceiling, never this count`,
+    `runs the store already holds: ${ask.runsUsed} — an approved total replaces the ceiling, never this count`,
     'ceilings now (the approved total in force first, the ceiling this deployment configures in parentheses):',
     ...DIMENSIONS.map(dimension => {
       const raise = raiseOf(proposal, dimension)
-      const now = `${dimension}: ${inForce(draft.effective[dimension])} in force (deployment configures ${inForce(draft.configured[dimension])})`
+      const now = `${dimension}: ${inForce(ask.effective[dimension])} in force (deployment configures ${inForce(ask.configured[dimension])})`
       return raise === undefined
         ? `- ${now} — this request does not name it`
         : `- ${now} → approves a total of ${String(raise.next)}`
@@ -112,7 +117,7 @@ function renderAsk(draft: RootBudgetExtensionDraft, proposal: BudgetExtensionPro
   ].join('\n')
 }
 
-/** The record as both the approved and the already-recorded answer print it: the raises, and the channel's own reference they were granted under. */
+/** The record as both the approved and the already-recorded answer print it: the raises, and the audit reference they were recorded under. */
 function renderRecord(record: TaskBudgetExtension): string[] {
   return [
     ...raiseLines(record),
@@ -155,15 +160,18 @@ export function defineTaskBudgetExtendTool(ctx: Context) {
       const undeclared = undeclaredParameters(args, DECLARED_PARAMETERS, 'task_budget_extend')
       if (undeclared !== undefined) return undeclared
       const caller = sessionId(exec)
-      const agent = exec.agent
-      if (agent === undefined) throw new Error('task_budget_extend: missing agent')
 
-      // The query first, and it writes nothing: every shape rule, bound and
-      // staleness check is the runtime's, applied against the store's own facts,
-      // so a request that could never run is refused before a person is asked.
-      let draft: RootBudgetExtensionDraft
+      // One call, and the whole decision inside it: the runtime validates the
+      // root identity, derives the store, answers a repeat from the record,
+      // freezes the complete reading, asks the approval this assembly installed
+      // (`defineRootBudgetApproval`) and commits only an actual
+      // `allowed-once`. This tool hands over the request and the host execution
+      // the call runs under — no reading, no call id argument, no reference —
+      // and never asks the channel itself: a throw here is the answer, not
+      // something to retry around.
+      let result: RootBudgetExtensionResult
       try {
-        draft = await ctx.taskRuntime.budgetExtensionDraft(caller, {
+        result = await ctx.taskRuntime.extendRootBudget(caller, { callId: exec.callId, execution: exec }, {
           requestKey: args.requestKey,
           ...(args.maxRuns === undefined ? {} : { maxRuns: args.maxRuns }),
           ...(args.deadlineAt === undefined ? {} : { deadlineAt: args.deadlineAt }),
@@ -171,60 +179,71 @@ export function defineTaskBudgetExtendTool(ctx: Context) {
       } catch (error) {
         return `task_budget_extend rejected: ${error instanceof Error ? error.message : String(error)}`
       }
-      if (draft.outcome.kind === 'refused') {
-        return `task_budget_extend refused: ${draft.outcome.reason}; no human was asked and nothing was written`
-      }
-      if (draft.outcome.kind === 'recorded') {
+
+      if (result.answeredFromRecord) {
         return [
-          `task_budget_extend: request key "${draft.outcome.record.requestKey}" is already recorded on store "${draft.storeId}" — answered from the record; no human was asked and nothing was appended.`,
-          ...renderRecord(draft.outcome.record),
+          `task_budget_extend: request key "${result.record.requestKey}" is already recorded on store "${result.storeId}" (root task ${result.rootTaskId}) — ` +
+          'answered from the record; no human was asked and nothing was appended.',
+          ...renderRecord(result.record),
         ].join('\n')
       }
-
-      const proposal = draft.outcome.proposal
-      const binding = draft.approvalBinding
-      if (binding === undefined) {
-        throw new Error('task_budget_extend: the runtime proposed a raise without the approval binding it would be recorded under')
-      }
-      const outcome = await ctx.approval.request({
-        agent,
-        toolName: 'task_budget_extend',
-        callId: exec.callId,
-        reason: renderAsk(draft, proposal, binding),
-        signal: exec.signal,
-      })
-      if (outcome !== 'allowed-once') {
-        const why = outcome === 'rejected'
-          ? 'the human rejected it'
-          : outcome === 'cancelled'
-            ? 'the request was cancelled before the human decided'
-            : 'no approval answerer available'
-        return `task_budget_extend: no extension recorded — ${why}; the ceilings are unchanged and no run started or resumed`
-      }
-
-      // The approved totals exactly as the card showed them, the reading the
-      // query reported, and the identity of this very call: the committing entry
-      // re-judges all of it, reads this call's ask and decision back out of the
-      // channel's record of this session, and writes only if the channel's own
-      // decision for this binding was `allowed-once`. A ceiling that moved
-      // between the ask and the answer is refused rather than re-based.
-      try {
-        const record = await ctx.taskRuntime.extendRootBudget(caller, {
-          requestKey: proposal.requestKey,
-          ...(proposal.maxRuns === undefined ? {} : { maxRuns: proposal.maxRuns.next }),
-          ...(proposal.deadlineAt === undefined ? {} : { deadlineAt: proposal.deadlineAt.next }),
-          baseline: draft.effective,
-          callId: exec.callId,
-        })
-        return [
-          `task_budget_extend: approved and recorded on store "${draft.storeId}" (root task ${draft.rootTaskId})`,
-          `request key "${record.requestKey}" (identity ${record.requestDigest})`,
-          ...renderRecord(record),
-          'no run started, none resumed, no task changed and no terminal run re-opened; the runs already counted still count against the approved total.',
-        ].join('\n')
-      } catch (error) {
-        return `task_budget_extend rejected: ${error instanceof Error ? error.message : String(error)}`
-      }
+      return [
+        `task_budget_extend: approved and recorded on store "${result.storeId}" (root task ${result.rootTaskId})`,
+        `request key "${result.record.requestKey}" (identity ${result.record.requestDigest})`,
+        ...renderRecord(result.record),
+        'no run started, none resumed, no task changed and no terminal run re-opened; the runs already counted still count against the approved total.',
+      ].join('\n')
     },
   })
+}
+
+/**
+ * The one approval a budget extension is granted through: the callback the
+ * assembly installs on the runtime once, and the only place a person's answer to
+ * `task_budget_extend` exists.
+ *
+ * The question goes through the native DSH approval seam the deployment already
+ * runs for every other human decision, under the host's own call id: the card is
+ * the ask's reason, the host execution's agent is who is asked — and whose
+ * session log the channel's `approval/asked` + `approval/decided` pair is
+ * written to — and the host execution's own signal is what withdraws the
+ * question. Only the channel's `'allowed-once'` allows a raise, and the reference
+ * it answers with is `approval:<callId>`: the host's identity for the call the
+ * question was asked under, an audit reference and never a credential.
+ *
+ * A person who says no, a question withdrawn before they could answer it, and a
+ * deployment with nobody to ask are one shape here — `refused` — because they
+ * mean the same thing to the tree: the ceiling stays where it is. A channel that
+ * throws is deliberately left to propagate (the runtime's caller reports it as a
+ * rejection) so a failure of the channel can never read as an approval.
+ */
+export function defineRootBudgetApproval(ctx: Context): RootBudgetApproval {
+  return async ask => {
+    const execution = ask.host.execution
+    const host = typeof execution === 'object' && execution !== null ? execution as Partial<ToolRunContext> : undefined
+    const agent = host?.agent
+    if (agent === undefined) {
+      return { kind: 'refused', reason: 'the host execution names no agent, so there is nobody to put the question to' }
+    }
+    // The call the question is asked under, in the type the channel's request
+    // carries it in: the runtime already validated this string as the non-empty
+    // identity of the host execution, and the reference minted below is the very
+    // same string, so the brand is an annotation rather than a fact to
+    // re-establish.
+    const callId = ask.host.callId as ToolRunContext['callId']
+    const outcome = await ctx.approval.request({
+      agent,
+      toolName: 'task_budget_extend',
+      callId,
+      reason: renderAsk(ask),
+      signal: host?.signal,
+    })
+    if (outcome === 'allowed-once') return { kind: 'allowed', reference: `approval:${String(callId)}` }
+    const why = outcome === 'rejected'
+      ? 'the human rejected it'
+      : outcome === 'cancelled'
+        ? 'the question was cancelled before the human answered it'
+        : 'no approval answerer was available to put the question to a person'
+    return { kind: 'refused', reason: why }
+  }
 }

@@ -17,10 +17,11 @@
  * what it was *read* at is the other half of the same decision. Two requests can
  * name different dimensions of one reading — one the run count, one the deadline
  * — and the reason they cannot both stand is the dimension each of them leaves
- * alone, which no pair of either record states. So the reading travels with the
- * claim and is re-checked, dimension by dimension, inside the store's serial
- * region; a request whose reading no longer matches a ceiling the store can
- * measure is refused by name, with nothing written.
+ * alone, which no pair of either record states. So the runtime that asks the
+ * person freezes that reading itself and the reading travels with the claim,
+ * re-checked dimension by dimension inside the store's serial region; a request
+ * whose reading no longer matches a ceiling the store can measure is refused by
+ * name, with nothing written.
  *
  * Why the *previous* value is not an identity input: it is a reading, not a
  * request. The identity of an extension is the key plus the totals it asks for
@@ -76,10 +77,11 @@ export interface BudgetExtensionProposal {
 
 /**
  * The ceilings one request was read at: what was in force, dimension by
- * dimension, when the caller read them and the person decided.
+ * dimension, when the runtime froze them for the question and the person
+ * decided.
  *
  * The reading is the *whole* ceiling, never only the dimension a request names.
- * It has to travel into the store with the claim, because the store's serial
+ * It travels into the store with the claim, because the store's serial
  * re-check is what makes two grants approved against one reading mutually
  * exclusive: a request that raises `maxRuns` and one that moves the deadline,
  * approved from the same reading, would otherwise both stand and leave the tree
@@ -98,12 +100,20 @@ export interface BudgetExtensionBaseline {
 }
 
 /**
- * One extension as it is submitted: the proposal, the whole reading it was
- * approved against, and whose request it is. `approvalRef` is the reference the
- * runtime read back out of the approval channel's own record of the ask (that
- * channel's `ApprovalRequestId`, as `approval:<id>`) and is never derived here:
- * an empty one is refused by the reducer, so a record that stands is a record a
- * channel stood behind.
+ * One extension as it is submitted: the proposal, the whole reading the runtime
+ * froze when it asked, and whose request it is.
+ *
+ * The reading is the runtime's: the entry that puts the question to a person
+ * freezes the ceilings in force itself and hands no reading back for a caller to
+ * re-supply, so what travels here is the one value the card showed — and it is
+ * re-checked, whole, inside the store's serial region. `approvalRef` is the
+ * audit reference of the call that question was asked under
+ * (`approval:<callId>`, the host's own identity for the call): the store keeps it
+ * to say which question a record answers, so the decision can be found in DSH's
+ * own approval record. It is never a credential — no entry accepts it in place
+ * of a decision, and an empty one is refused by the reducer — and the store
+ * cannot verify it either: it records a decision taken outside itself, and this
+ * field is the audit trail, not the authorization.
  */
 export interface TaskBudgetExtensionClaim extends BudgetExtensionProposal {
   readonly approvalRef: string

@@ -1140,8 +1140,10 @@ export class TaskState {
    * The chain, and the whole reading it was approved against: a dimension keeps
    * the `next` of the last extension that moved it, and an extension that moves
    * it again has to state *that* value as its `previous`. Every dimension the
-   * claim was read at is then checked against the ceiling in force — the ones it
-   * raises *and the ones it leaves alone* — so a request read before another
+   * claim was read at — the reading the runtime froze when it asked the person,
+   * which travels with the claim and is never re-derived here — is then checked
+   * against the ceiling in force, the ones it raises *and the ones it leaves
+   * alone*, so a request read before another
    * grant moved anything is refused by name here even when the dimension it
    * raises is untouched. That is what makes two grants approved against the same
    * reading mutually exclusive instead of additive: one raising `maxRuns` and one
@@ -1174,6 +1176,12 @@ export class TaskState {
         throw new Error(`task: budget extension "${requestKey}" carries "${key}", which is not part of an extension; an unread field must not enter the record`)
       }
     }
+    // The reference is required, never verified: the store cannot tell a genuine
+    // `approvalRef` from any other non-empty string, because the decision was
+    // taken outside it. It is the audit pointer that says which question this
+    // record answers; the authorization was the runtime entry's and the installed
+    // approval's to obtain, and what this reducer gates is the asking session and
+    // root task above, and the whole reading below.
     if (!nonEmpty(claim.approvalRef)) {
       throw new Error(`task: budget extension "${requestKey}" requires a non-empty approval reference; a raise nobody approved is not recorded`)
     }

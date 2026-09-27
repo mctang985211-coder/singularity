@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { REVIEWER_BASELINE } from '../../agent-singularity/src/tools/review-agent.ts'
-import { appendReviewAgentRun, readReviewerDelegation } from '../../agent-singularity/src/review-agent-ledger.ts'
+import { admitReviewAgent, readReviewerDelegation } from '../../agent-singularity/src/review-agent-ledger.ts'
 import { disposeScriptedLoops, startScriptedLoop, type ScriptEntry, type ScriptedLoop } from '../support/scripted-loop.ts'
 
 /**
@@ -265,13 +265,10 @@ describe('a tree stopped at its budget still takes a read-only postmortem (K4)',
     ])
     // The ledger the deployment reads, spent: one review agent already started
     // for this root store (the row an earlier call — this process's or another's
-    // — wrote). The allowance's default is one per store.
-    await appendReviewAgentRun({
-      rootStoreId: stop.storeId,
-      taskId: 'an-earlier-task',
-      sessionId: 's-earlier-review',
-      actor: String(ROOT),
-    })
+    // — wrote, through the admission that owns the write). The allowance's
+    // default is one per store.
+    await admitReviewAgent(stop.storeId, admission =>
+      admission.start({ taskId: 'an-earlier-task', sessionId: 's-earlier-review', actor: String(ROOT) }))
     const spawnsBefore = stop.h.spawns.length
     const graphBefore = stop.h.graphCommits.length
 

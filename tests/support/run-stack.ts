@@ -22,7 +22,10 @@
  *   these specs need and a single-root fixture cannot express.
  * - `approval`/`userQuestions` — the human seams, answered 'allowed-once' so a
  *   tool path can run; a spec that cares about *not* burning an approval asserts
- *   on the spy.
+ *   on the spy. The budget extension's own question (K4) has no answerer here by
+ *   default — the runtime refuses a new request by name — and a case that raises
+ *   a ceiling installs the scripted person {@link ScriptedBudgetApproval} on the
+ *   runtime, which is also what it reads the ask back out of.
  *
  * Everything a spec asserts is read back from a durable surface: the store's own
  * events and snapshot, the run binding the store holds, the bytes on disk, or the
@@ -63,7 +66,7 @@ import { defineTaskStatusTool } from '../../agent-singularity/src/tools/task-sta
 import { defineTaskSubmitResultTool } from '../../agent-singularity/src/tools/task-submit-result.ts'
 import { TaskService, rootTaskStoreId } from '../../task/src/index.ts'
 import type { TaskEvent, TaskSnapshot } from '../../task/src/index.ts'
-import type { CapabilityConfig, Config, RootContractSpec } from '../../task-runtime/src/index.ts'
+import type { CapabilityConfig, Config, RootBudgetApproval, RootBudgetApprovalAsk, RootBudgetApprovalDecision, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { TaskRuntime } from '../../task-runtime/src/index.ts'
 import { VerifierRegistry } from '../../verifier/src/index.ts'
 import { graphRegistry, sessionQueryReads } from './context-plane.ts'
@@ -201,6 +204,60 @@ export interface RunStack {
 export interface ToolCallResult {
   readonly isError: boolean
   readonly text: string
+}
+
+/**
+ * The person a budget extension is put to, scripted (K4): the runtime consults
+ * exactly one approval (`TaskRuntime.registerRootBudgetApproval`), so a case that
+ * drives `extendRootBudget` installs this on the stack's runtime and reads back
+ * what the question was about.
+ *
+ * The deployment's own callback — the DSH approval channel, the rendered card and
+ * its `approval/asked` + `approval/decided` audit pair — runs end to end in
+ * `tests/integration/k4-budget-extend.spec.ts`. The cases built on this file are
+ * about the store's durable fact and the entries that consume the ceiling it
+ * moves, so the person here is scripted; the ask it was shown is the spec's
+ * evidence, and the reference it answers with is the host's own call identity the
+ * way the real callback's is (`approval:<callId>`).
+ */
+export class ScriptedBudgetApproval {
+  /** Every ask the runtime put to this person, in ask order. */
+  readonly asks: RootBudgetApprovalAsk[] = []
+  private readonly waiting: ((decision: RootBudgetApprovalDecision) => void)[] = []
+
+  /**
+   * @param hold - keep every ask open until {@link allow}, so a case can assert
+   * what the tree looks like while the person makes up their mind; `false`
+   * answers `allowed-once` at once, under the host the question came with.
+   */
+  constructor(private readonly hold: boolean) {}
+
+  readonly approval: RootBudgetApproval = async ask => {
+    this.asks.push(ask)
+    const decision: RootBudgetApprovalDecision = { kind: 'allowed', reference: `approval:${ask.host.callId}` }
+    if (!this.hold) return decision
+    return await new Promise<RootBudgetApprovalDecision>(resolve => { this.waiting.push(resolve) })
+  }
+
+  /** Install this person on a stack's runtime — the one approval its entry consults. */
+  install(h: RunStack): void {
+    h.runtime.registerRootBudgetApproval(this.approval)
+  }
+
+  /**
+   * Answer every ask that is waiting right now with `allowed-once`, in ask order
+   * — the person deciding. Answers are taken from the host each question came
+   * with, so what a case asserts of the record is the identity the runtime was
+   * asked under and not an identity minted here.
+   */
+  allow(): void {
+    const waiting = this.waiting.splice(0)
+    if (waiting.length === 0) throw new Error('no budget-extension ask is waiting for an answer')
+    waiting.forEach((resolve, index) => {
+      const ask = this.asks[this.asks.length - waiting.length + index]!
+      resolve({ kind: 'allowed', reference: `approval:${ask.host.callId}` })
+    })
+  }
 }
 
 /** The stacks in play, so a spec's `afterEach` can dispose whatever a failed test left behind. */

@@ -148,10 +148,11 @@ declare function decompositionDigest(identity: DecompositionIdentity): string;
  * what it was *read* at is the other half of the same decision. Two requests can
  * name different dimensions of one reading — one the run count, one the deadline
  * — and the reason they cannot both stand is the dimension each of them leaves
- * alone, which no pair of either record states. So the reading travels with the
- * claim and is re-checked, dimension by dimension, inside the store's serial
- * region; a request whose reading no longer matches a ceiling the store can
- * measure is refused by name, with nothing written.
+ * alone, which no pair of either record states. So the runtime that asks the
+ * person freezes that reading itself and the reading travels with the claim,
+ * re-checked dimension by dimension inside the store's serial region; a request
+ * whose reading no longer matches a ceiling the store can measure is refused by
+ * name, with nothing written.
  *
  * Why the *previous* value is not an identity input: it is a reading, not a
  * request. The identity of an extension is the key plus the totals it asks for
@@ -201,10 +202,11 @@ interface BudgetExtensionProposal {
 }
 /**
  * The ceilings one request was read at: what was in force, dimension by
- * dimension, when the caller read them and the person decided.
+ * dimension, when the runtime froze them for the question and the person
+ * decided.
  *
  * The reading is the *whole* ceiling, never only the dimension a request names.
- * It has to travel into the store with the claim, because the store's serial
+ * It travels into the store with the claim, because the store's serial
  * re-check is what makes two grants approved against one reading mutually
  * exclusive: a request that raises `maxRuns` and one that moves the deadline,
  * approved from the same reading, would otherwise both stand and leave the tree
@@ -222,12 +224,20 @@ interface BudgetExtensionBaseline {
   readonly deadlineAt?: string;
 }
 /**
- * One extension as it is submitted: the proposal, the whole reading it was
- * approved against, and whose request it is. `approvalRef` is the reference the
- * runtime read back out of the approval channel's own record of the ask (that
- * channel's `ApprovalRequestId`, as `approval:<id>`) and is never derived here:
- * an empty one is refused by the reducer, so a record that stands is a record a
- * channel stood behind.
+ * One extension as it is submitted: the proposal, the whole reading the runtime
+ * froze when it asked, and whose request it is.
+ *
+ * The reading is the runtime's: the entry that puts the question to a person
+ * freezes the ceilings in force itself and hands no reading back for a caller to
+ * re-supply, so what travels here is the one value the card showed — and it is
+ * re-checked, whole, inside the store's serial region. `approvalRef` is the
+ * audit reference of the call that question was asked under
+ * (`approval:<callId>`, the host's own identity for the call): the store keeps it
+ * to say which question a record answers, so the decision can be found in DSH's
+ * own approval record. It is never a credential — no entry accepts it in place
+ * of a decision, and an empty one is refused by the reducer — and the store
+ * cannot verify it either: it records a decision taken outside itself, and this
+ * field is the audit trail, not the authorization.
  */
 interface TaskBudgetExtensionClaim extends BudgetExtensionProposal {
   readonly approvalRef: string;
@@ -2663,8 +2673,10 @@ declare class TaskState {
    * The chain, and the whole reading it was approved against: a dimension keeps
    * the `next` of the last extension that moved it, and an extension that moves
    * it again has to state *that* value as its `previous`. Every dimension the
-   * claim was read at is then checked against the ceiling in force — the ones it
-   * raises *and the ones it leaves alone* — so a request read before another
+   * claim was read at — the reading the runtime froze when it asked the person,
+   * which travels with the claim and is never re-derived here — is then checked
+   * against the ceiling in force, the ones it raises *and the ones it leaves
+   * alone*, so a request read before another
    * grant moved anything is refused by name here even when the dimension it
    * raises is untouched. That is what makes two grants approved against the same
    * reading mutually exclusive instead of additive: one raising `maxRuns` and one
@@ -3145,12 +3157,14 @@ declare class TaskService extends Service {
    * store already holds.
    *
    * The envelope carries the tree's root task and the root session that asked,
-   * and the claim carries the raise itself, its whole reading, its identity and
-   * the approving channel's reference. The reducer is the gate for every rule —
-   * the root-session and root-task binding, the shape of each pair and of the
-   * reading, the identity of the content, one key names one extension, and every
-   * dimension the claim was read at has to still be the ceiling in force, the
-   * ones it raises and the ones it leaves alone.
+   * and the claim carries the raise itself, the whole reading the runtime froze
+   * when it put the question to a person, the request's identity and the audit
+   * reference of the call that question was asked under (never a credential
+   * anything here would accept in place of a decision). The reducer is the gate
+   * for every rule — the root-session and root-task binding, the shape of each
+   * pair and of the reading, the identity of the content, one key names one
+   * extension, and every dimension the claim was read at has to still be the
+   * ceiling in force, the ones it raises and the ones it leaves alone.
    *
    * **Where the idempotency read is.** Inside the store's single write queue,
    * with the append it decides: the key is looked up on the state the batch would
@@ -3162,6 +3176,17 @@ declare class TaskService extends Service {
    * twice in the log. The reducer's check stays as the gate for every other
    * writer (a replay, a hand-written event, an entry that commits directly): this
    * entry short-circuits the append, the reducer refuses a duplicate's content.
+   *
+   * **What this entry does not verify.** The decision it records was taken
+   * outside the store: the caller is in-process, and `approvalRef` is an audit
+   * reference the store keeps so the question can be found in DSH's own approval
+   * record — the store cannot verify it, and a second source of authority is
+   * what this contract forbids. This entry is a recording primitive of the
+   * in-process plane, not an authorization boundary: what authorizes a raise is
+   * the runtime entry that put the question and the approval the assembly
+   * installed, and what is enforced here is the identity of the content (one key
+   * names one request) together with, in the reducer, the asking session and root
+   * task the claim names and the whole-reading re-check.
    */
   recordBudgetExtensionIn(storeId: string, rootTaskId: TaskId, claim: TaskBudgetExtensionClaim, actor: string): Promise<void>;
   recordHandoffIn(storeId: string, handoff: TaskHandoff, actor: string): Promise<void>;

@@ -103,6 +103,9 @@ async function mountAgent() {
       replayTask,
       applyCapabilityRow: vi.fn(),
       workspacePathFor: async () => workspace,
+      // The plugin installs its root-budget approval (K4) on the runtime at
+      // construction; nothing this spec drives asks for one.
+      registerRootBudgetApproval: () => () => {},
     }],
     // The read core the root-agent plugin injects (A2). This spec's subjects are
     // the evolution ledger and the approval seam, and every tool it drives is an

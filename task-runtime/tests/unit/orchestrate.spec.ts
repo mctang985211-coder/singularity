@@ -11,7 +11,7 @@ import { sha256Hex } from '../../../task/src/contract.ts'
 import { CompositeVerifier } from '../../../verifier/src/composite-verifier.ts'
 import { requestedSession } from '../support/person-request.ts'
 import { pinSkillHome, releaseSkillHomes } from '../support/skill-roots.ts'
-import type { Config, DecomposeSpec, ChildOutcome, OrchestrateEnv, RootBudgetExtensionDraft, RootContractSpec } from '../../src/index.ts'
+import type { Config, DecomposeSpec, ChildOutcome, OrchestrateEnv, RootContractSpec } from '../../src/index.ts'
 import { WorkspaceBusyError, normalizeDecomposition } from '../../src/index.ts'
 import type { WorkspaceOwner, WorkspaceRegistry } from '../../src/index.ts'
 import {
@@ -352,43 +352,6 @@ function harness(
 }
 
 type Harness = ReturnType<typeof harness>
-
-/**
- * One person's decision on a budget raise, recorded the way the DSH approval
- * service records it: a service-issued `ApprovalRequestId`, the `approval/asked`
- * naming the tool call with the card as its reason, and the `approval/decided`
- * that pairs with it — written into the root session's own log, which is where
- * the committing entry reads a grant back out of. The session-query read the
- * runtime performs answers with that log.
- *
- * This harness replaces the human seam (nothing asks here: the K4 cases drive
- * the runtime's own entries), so a case whose subject is what a *consumer* does
- * with an approved ceiling records the decision itself, in the service's own
- * shape. The real service, the real tool and the real ask run end to end in
- * `agent-singularity/tests/unit/budget-extend.spec.ts` and
- * `tests/integration/k4-budget-extend.spec.ts`.
- * @param h - the harness whose root session log is the record's surface.
- * @param reading - the draft the decision is about, whose binding it must carry.
- * @param callId - the tool-call identity the decision is bound to.
- * @returns the identity the commit has to present.
- */
-function channelGrant(h: Harness, reading: RootBudgetExtensionDraft, callId: string): string {
-  const stored = h.sessions.get(ROOT_SESSION) ?? { header: { id: ROOT_SESSION } as SessionHeader, events: [] }
-  h.sessions.set(ROOT_SESSION, stored)
-  const id = randomUUID()
-  stored.events.push(
-    { type: 'approval/asked', time: Date.now(), data: { id, toolName: 'task_budget_extend', callId, reason: `approval binding: ${String(reading.approvalBinding)}` } } as unknown as SessionEvent,
-    { type: 'approval/decided', time: Date.now(), data: { id, outcome: 'allowed-once' } } as unknown as SessionEvent,
-  )
-  h.ctx.sessionQuery = {
-    readSession: async (sessionId: string) => ({
-      session: { id: sessionId },
-      inheritedEventCount: 0,
-      events: sessionId === ROOT_SESSION ? stored.events : [],
-    }),
-  }
-  return callId
-}
 
 function childSpec(objective: string, overrides: Record<string, unknown> = {}) {
   return {
@@ -4274,17 +4237,11 @@ describe('A3 coordination', () => {
       expect(snapshot.runs.filter(run => run.taskId !== taskId)).toHaveLength(1)
     })
 
-    // The root coordination session's own grant, through the real entries.
+    // The root coordination session's own grant, through the real entry and the
+    // approval channel a deployment installs for it.
     const extended = new Date(Date.now() + 30_000).toISOString()
-    const reading = await h.runtime.budgetExtensionDraft(ROOT_SESSION, { requestKey: 'k-more-time', deadlineAt: extended })
-    if (reading.outcome.kind !== 'proposed') throw new Error(`the grant was not proposed: ${JSON.stringify(reading.outcome)}`)
-    channelGrant(h, reading, 'call-grant')
-    await h.runtime.extendRootBudget(ROOT_SESSION, {
-      requestKey: 'k-more-time',
-      deadlineAt: extended,
-      baseline: reading.effective,
-      callId: 'call-grant',
-    })
+    h.runtime.registerRootBudgetApproval(async () => ({ kind: 'allowed', reference: 'approval:call-grant' }))
+    await h.runtime.extendRootBudget(ROOT_SESSION, { callId: 'call-grant', execution: {} }, { requestKey: 'k-more-time', deadlineAt: extended })
 
     // Let the *original* deadline pass with the worker still working: a one-shot
     // timer would have cancelled it here.
@@ -4344,15 +4301,8 @@ describe('A3 coordination', () => {
 
     // The root coordination session's own grant, while the child waits.
     const extended = new Date(Date.now() + 30_000).toISOString()
-    const reading = await h.runtime.budgetExtensionDraft(ROOT_SESSION, { requestKey: 'k-more-time', deadlineAt: extended })
-    if (reading.outcome.kind !== 'proposed') throw new Error(`the grant was not proposed: ${JSON.stringify(reading.outcome)}`)
-    channelGrant(h, reading, 'call-grant')
-    await h.runtime.extendRootBudget(ROOT_SESSION, {
-      requestKey: 'k-more-time',
-      deadlineAt: extended,
-      baseline: reading.effective,
-      callId: 'call-grant',
-    })
+    h.runtime.registerRootBudgetApproval(async () => ({ kind: 'allowed', reference: 'approval:call-grant' }))
+    await h.runtime.extendRootBudget(ROOT_SESSION, { callId: 'call-grant', execution: {} }, { requestKey: 'k-more-time', deadlineAt: extended })
 
     // Let the *configured* deadline pass with the wait parked: a timer armed
     // before the grant would have cancelled the child here.
@@ -4401,15 +4351,8 @@ describe('A3 coordination', () => {
     // The person raises the tree's deadline — later than the one the deployment
     // configures against the root's own start — while the child is still working.
     const extended = new Date(Date.parse(childStartedAt) + 900_000).toISOString()
-    const granted = await h.runtime.budgetExtensionDraft(ROOT_SESSION, { requestKey: 'k-more-time', deadlineAt: extended })
-    if (granted.outcome.kind !== 'proposed') throw new Error(`the grant was not proposed: ${JSON.stringify(granted.outcome)}`)
-    channelGrant(h, granted, 'call-grant')
-    await h.runtime.extendRootBudget(ROOT_SESSION, {
-      requestKey: 'k-more-time',
-      deadlineAt: extended,
-      baseline: granted.effective,
-      callId: 'call-grant',
-    })
+    h.runtime.registerRootBudgetApproval(async () => ({ kind: 'allowed', reference: 'approval:call-grant' }))
+    await h.runtime.extendRootBudget(ROOT_SESSION, { callId: 'call-grant', execution: {} }, { requestKey: 'k-more-time', deadlineAt: extended })
 
     // The child is stopped by its own wall time all the same, and its own review
     // says which bound ran out.

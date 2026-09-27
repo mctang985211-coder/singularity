@@ -34,7 +34,7 @@ import type { WorkerGrant } from '@dangosys/dsh-singularity-agent-runtime'
 import type {} from '@dangosys/dsh-singularity-task'
 import type { Diagnosis, DiagnosisConfidence, JudgementVerdict, ReviewJudgement, TaskId, TaskSnapshot } from '@dangosys/dsh-singularity-task'
 import { JUDGED_DIMENSIONS, JUDGEMENT_VERDICTS, rootTaskStoreId } from '@dangosys/dsh-singularity-task'
-import { appendReviewAgentRun, countReviewAgentRuns, effectiveReviewAgentRuns, readReviewerDelegation, reserveReviewAgentRun, reviewAgentBudget } from '../review-agent-ledger.ts'
+import { admitReviewAgent, readReviewerDelegation, reviewAgentBudget } from '../review-agent-ledger.ts'
 import { computeEscalation } from './review-escalation.ts'
 import { buildReviewPack, latestReview, reviewRef } from './task-review-pack.ts'
 
@@ -206,84 +206,84 @@ export function defineTaskReviewAgentTool(ctx: Context) {
       if (review === undefined) {
         return `task_review_agent: task ${args.taskId} has no review record; nothing to judge`
       }
-      const max = reviewAgentBudget()
-      const used = await countReviewAgentRuns(storeId)
-      // The claim is the gate (K4-1): one synchronous step right after the
-      // count, so a second execution reading that same count is refused instead
-      // of spawning a second reviewer. Every path that does not reach a ledger
-      // row gives the claim back.
-      const reservation = reserveReviewAgentRun(storeId, max, used)
-      if (reservation === undefined) {
-        // The same effective usage the claim refused on — the count read above
-        // may be older than the row a concurrent run has appended since.
-        const spent = effectiveReviewAgentRuns(storeId, used)
-        const escalation = computeEscalation(snapshot, args.taskId, { used: spent, max })
-        const withheld = escalation.suppressed.length > 0 ? `; suppressed ${escalation.suppressed.join(', ')}` : ''
-        return `task_review_agent: budget exhausted (${spent}/${max}) for store ${storeId}${withheld} — no review agent spawned`
-      }
-      const escalation = computeEscalation(snapshot, args.taskId, { used, max })
-      if (!escalation.required) {
-        reservation.release()
-        return `task_review_agent: escalation is not required for task ${args.taskId} (budget ${used}/${max}); no review agent spawned`
-      }
-      const timeoutMs = Number.isFinite(args.timeoutMs) && (args.timeoutMs as number) > 0
-        ? Math.floor(args.timeoutMs as number)
-        : REVIEW_AGENT_TIMEOUT_MS
-      const ref = reviewRef(review)
-      const pack = buildReviewPack(snapshot, args.taskId, escalation)
-      const prompt = [
-        'You are a Singularity review agent. Judge six dimensions of the task below from the review pack, and nothing else.',
-        'Do not score. Do not modify anything. Cite only refs printed in the pack (evidence ids, review refs like `task#run`, or session ids).',
-        'When the pack does not settle a dimension, return verdict "unknown" — never guess.',
-        'Return EXACTLY one fenced json block, no prose around it:',
-        '```json',
-        '{"judgements":[{"dimension":"task_specification","verdict":"adequate|inadequate|unknown","evidenceRefs":["..."],"rationale":"..."}]}',
-        '```',
-        `Include all six dimensions exactly once: ${JUDGED_DIMENSIONS.join(', ')}.`,
-        '',
-        '--- review pack ---',
-        pack,
-      ].join('\n')
+      // The whole admission decision — the durable count, the trigger judged on
+      // the state that count belongs to, and the run's row — happens inside the
+      // store's serial region (K4-1). Two executions cannot interleave their
+      // count-and-write, so the second one reads what the first left behind;
+      // the row is durable before the handle leaves the region. Nothing that
+      // waits for the reviewer is in the region.
+      const outcome = await admitReviewAgent(storeId, async admission => {
+        const used = admission.started
+        const max = reviewAgentBudget()
+        const current: TaskSnapshot = await ctx.task.snapshotIn(storeId)
+        const escalation = computeEscalation(current, args.taskId, { used, max })
+        if (used >= max) {
+          const withheld = escalation.suppressed.length > 0 ? `; suppressed ${escalation.suppressed.join(', ')}` : ''
+          return { kind: 'refused' as const, text: `task_review_agent: budget exhausted (${used}/${max}) for store ${storeId}${withheld} — no review agent spawned` }
+        }
+        if (!escalation.required) {
+          return { kind: 'refused' as const, text: `task_review_agent: escalation is not required for task ${args.taskId} (budget ${used}/${max}); no review agent spawned` }
+        }
+        const timeoutMs = Number.isFinite(args.timeoutMs) && (args.timeoutMs as number) > 0
+          ? Math.floor(args.timeoutMs as number)
+          : REVIEW_AGENT_TIMEOUT_MS
+        const ref = reviewRef(review)
+        const pack = buildReviewPack(current, args.taskId, escalation)
+        const prompt = [
+          'You are a Singularity review agent. Judge six dimensions of the task below from the review pack, and nothing else.',
+          'Do not score. Do not modify anything. Cite only refs printed in the pack (evidence ids, review refs like `task#run`, or session ids).',
+          'When the pack does not settle a dimension, return verdict "unknown" — never guess.',
+          'Return EXACTLY one fenced json block, no prose around it:',
+          '```json',
+          '{"judgements":[{"dimension":"task_specification","verdict":"adequate|inadequate|unknown","evidenceRefs":["..."],"rationale":"..."}]}',
+          '```',
+          `Include all six dimensions exactly once: ${JUDGED_DIMENSIONS.join(', ')}.`,
+          '',
+          '--- review pack ---',
+          pack,
+        ].join('\n')
 
-      const reviewerSessionId = SessionId(randomUUID())
-      let spawnFailure: string | undefined
-      const handle = await ctx.agentRuntime.spawn(exec.agent!, {
-        sessionId: reviewerSessionId,
-        name: `review ${args.taskId}`,
-        prompt: [{ type: 'text', text: prompt }],
-        agentPreset: REVIEWER_PRESET,
-        grant: reviewerGrant(),
-        // The delegation ledger is written between "the reviewer is a published
-        // graph member" and "its first model input" (A2 §D): the context
-        // assembly verifies the delegation from this ledger, so it must be
-        // durable — written AND read back — before any model request exists. A
-        // failure here fails the spawn: the handle is disposed, the node is
-        // marked failed, and the reviewer got zero model input.
-        beforePrompt: async () => {
-          await appendReviewAgentRun({ rootStoreId: storeId, taskId: args.taskId, sessionId: reviewerSessionId, actor: caller })
-          // The row exists, so the allowance is spent whether or not the spawn
-          // survives the read-back below: the claim retires into the row.
-          reservation.commit()
-          const back = await readReviewerDelegation(reviewerSessionId)
-          if (back === undefined || back.rootStoreId !== storeId || back.taskId !== args.taskId) {
-            throw new Error(
-              `task_review_agent: the delegation of reviewer session "${reviewerSessionId}" could not be read back from the ledger ` +
-              `(expected task ${args.taskId} in ${storeId}); no model input was sent`,
-            )
-          }
-        },
-        signal: exec.signal,
-      }).catch((error: unknown) => {
-        spawnFailure = error instanceof Error ? error.message : String(error)
-        return undefined
+        const reviewerSessionId = SessionId(randomUUID())
+        let spawnFailure: string | undefined
+        const handle = await ctx.agentRuntime.spawn(exec.agent!, {
+          sessionId: reviewerSessionId,
+          name: `review ${args.taskId}`,
+          prompt: [{ type: 'text', text: prompt }],
+          agentPreset: REVIEWER_PRESET,
+          grant: reviewerGrant(),
+          // The delegation ledger is written between "the reviewer is a published
+          // graph member" and "its first model input" (A2 §D): the context
+          // assembly verifies the delegation from this ledger, so it must be
+          // durable — written AND read back — before any model request exists. A
+          // failure here fails the spawn: the handle is disposed, the node is
+          // marked failed, and the reviewer got zero model input.
+          beforePrompt: async () => {
+            await admission.start({ taskId: args.taskId, sessionId: reviewerSessionId, actor: caller })
+            // The row is durable, so this run is spent whether or not the spawn
+            // survives the read-back below — and whether or not the reviewer
+            // ever answers.
+            const back = await readReviewerDelegation(reviewerSessionId)
+            if (back === undefined || back.rootStoreId !== storeId || back.taskId !== args.taskId) {
+              throw new Error(
+                `task_review_agent: the delegation of reviewer session "${reviewerSessionId}" could not be read back from the ledger ` +
+                `(expected task ${args.taskId} in ${storeId}); no model input was sent`,
+              )
+            }
+          },
+          signal: exec.signal,
+        }).catch((error: unknown) => {
+          spawnFailure = error instanceof Error ? error.message : String(error)
+          return undefined
+        })
+        if (handle === undefined) {
+          // A spawn that failed before its row was written wrote no row and
+          // spent nothing; one that failed after it spent exactly that one row.
+          return { kind: 'refused' as const, text: `task_review_agent: spawn failed: ${spawnFailure ?? 'unknown error'}` }
+        }
+        return { kind: 'spawned' as const, handle, escalation, ref, timeoutMs, reviewerSessionId }
       })
-      if (handle === undefined) {
-        // A spawn that failed before its row was written never spent the
-        // allowance; one that failed after it did — the commit already said so,
-        // and a written row is spent whatever happens next.
-        reservation.release()
-        return `task_review_agent: spawn failed: ${spawnFailure ?? 'unknown error'}`
-      }
+      if (outcome.kind === 'refused') return outcome.text
+      const { handle, escalation, ref, timeoutMs, reviewerSessionId } = outcome
 
       const cancel = () => handle.agent.cancel({ kind: 'parent' })
       exec.signal.addEventListener('abort', cancel, { once: true })
@@ -299,10 +299,10 @@ export function defineTaskReviewAgentTool(ctx: Context) {
       // read (likely absent) and the judgement degrades to `unknown` rather
       // than throwing out of the tool.
       const idle = handle.agent.whenIdle().then(() => 'idle' as const).catch(() => 'failed' as const)
-      const outcome = await Promise.race([idle, deadline])
+      const reviewOutcome = await Promise.race([idle, deadline])
       if (timer !== undefined) clearTimeout(timer)
       exec.signal.removeEventListener('abort', cancel)
-      if (outcome === 'timeout') handle.agent.cancel({ kind: 'parent' })
+      if (reviewOutcome === 'timeout') handle.agent.cancel({ kind: 'parent' })
 
       const reply = timedOut ? undefined : lastAssistantText(handle.agent.session.snapshotEvents())
       const parsed = timedOut ? undefined : parseReviewerJudgements(reply)

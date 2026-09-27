@@ -20,7 +20,7 @@ import { ProposalReviewService } from './proposal-review.ts'
 import { reviewerBindingSource } from './review-agent-ledger.ts'
 import { defineApproveTool } from './tools/approve.ts'
 import { defineAskTool } from './tools/ask.ts'
-import { defineTaskBudgetExtendTool } from './tools/budget-extend.ts'
+import { defineRootBudgetApproval, defineTaskBudgetExtendTool } from './tools/budget-extend.ts'
 import { defineCapabilityListTool } from './tools/capability-list.ts'
 import { defineContextReadTool } from './tools/context-read.ts'
 import { defineEscalateTool } from './tools/escalate.ts'
@@ -217,6 +217,16 @@ export class SingularityAgent extends Service {
       () => ctx.singularityContext.registerReviewerBindingSource(reviewerBindingSource()),
       'singularityAgent: reviewer binding source',
     )
+    // The one approval a budget extension can be granted through (K4): the
+    // runtime asks it alone — for the one request that is not already recorded —
+    // and only an actual `allowed-once` from the DSH approval channel lets a
+    // raise be committed. Installed once for this assembly and removed with it,
+    // so a deployment without this plugin has no approval to answer with and the
+    // runtime refuses a new request by name rather than assuming a decision.
+    ctx.effect(
+      () => ctx.taskRuntime.registerRootBudgetApproval(defineRootBudgetApproval(ctx)),
+      'singularityAgent: root budget approval',
+    )
     ctx.tools.register(defineMarkReadyTool(ctx))
     ctx.tools.register(defineSpawnTool(ctx))
     ctx.tools.register(defineAskTool(ctx))
@@ -249,8 +259,9 @@ export class SingularityAgent extends Service {
     // Asking a person to raise this tree's ceilings (K4): registered like the
     // rest of the task surface — who may reach it (a graph's root coordination
     // session, derived from the session in the runtime) and what a call may say
-    // (the totals, never an approval — that is the channel's fact) are decided
-    // by the caller's binding, the store and the approval seam, not by a
+    // (the totals, never an approval) are decided by the runtime and the store,
+    // and the one decision that grants a raise is the approval channel's, asked
+    // once by the runtime through the callback installed above — not by a
     // registration switch.
     ctx.tools.register(defineTaskBudgetExtendTool(ctx))
     ctx.tools.register(defineTaskDiagnoseTool(ctx))

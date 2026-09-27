@@ -1,11 +1,10 @@
-import { randomUUID } from 'node:crypto'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { EvidenceBundle, TaskSnapshot, VerificationResult } from '../../task/src/index.ts'
 import { ROOT_PROPOSAL_TASK_ID, rootTaskStoreId } from '../../task/src/index.ts'
-import type { Config, DecomposeSpec, RootBudgetExtensionDraft, RootContractSpec } from '../../task-runtime/src/index.ts'
+import type { Config, DecomposeSpec, RootContractSpec, TaskRuntime } from '../../task-runtime/src/index.ts'
 import { resolveRootBudget } from '../../task-runtime/src/index.ts'
-import { disposeRunStacks, startRunStack, type RunStack } from '../support/run-stack.ts'
+import { disposeRunStacks, ScriptedBudgetApproval, startRunStack, type RunStack } from '../support/run-stack.ts'
 
 /**
  * K4-2/K4-3/K4-4 on the *consumers* of an approved ceiling: the entries that
@@ -28,17 +27,35 @@ import { disposeRunStacks, startRunStack, type RunStack } from '../support/run-s
  *    refused again, because the runs already recorded still count. A ceiling that
  *    had been reset (or read as a fresh allowance) would admit more.
  * 3. **Two grants against one reading.** Two commits, each approved against the
- *    same reading, are issued together: the store's own write queue decides, one
- *    stands, and the other is refused with nothing written — the raise is not
- *    re-based on the first grant's result.
+ *    same reading the runtime froze for it, are issued together: the store's own
+ *    write queue decides, one stands, and the other is refused with nothing
+ *    written — the raise is not re-based on the first grant's result.
  *
  * The store, the runtime entries, the real verifier, the real agent plane and the
  * checkpoint ownership are the deployment's own (run-stack); what the fixture
- * replaces is the model loop, as every A3/K1 spec here does.
+ * replaces is the model loop, as every A3/K1 spec here does. The person each
+ * request is put to is scripted ({@link ScriptedBudgetApproval}): the deployment's
+ * real callback and channel run end to end in `k4-budget-extend.spec.ts`, and
+ * these cases are about the entries that *consume* a ceiling a person approved.
+ *
+ * What the person's approval is *not*, here: a read the caller could perform for
+ * itself. There is no query entry and no commit a caller can hand a reading to —
+ * the entry freezes the reading, asks the installed approval, and the store
+ * re-checks the frozen reading inside its own write queue.
  */
 
 const ROOT = 's-root' as SessionId
 const STORE = rootTaskStoreId(String(ROOT))
+
+/**
+ * The host execution one request is asked under: the host's own identity for the
+ * call, and a host execution the runtime carries untouched to the approval. Each
+ * call names its own, as two tool calls would.
+ */
+const host = (callId: string) => ({
+  callId,
+  execution: { agent: { id: String(ROOT) }, signal: new AbortController().signal },
+})
 
 afterEach(async () => {
   await disposeRunStacks()
@@ -89,41 +106,6 @@ function runOf(snapshot: TaskSnapshot, runId: string) {
   return run
 }
 
-/** The intended target the deployment's own tool renders, in the one thing the committing entry reads back out of it: the binding. */
-function cardOf(reading: RootBudgetExtensionDraft): string {
-  return `Budget extension of the tree in store "${reading.storeId}" — approval binding: ${String(reading.approvalBinding)}`
-}
-
-/**
- * One person's decision, recorded the way the deployment's approval service
- * records it: a fresh service-issued `ApprovalRequestId`, the `approval/asked`
- * naming the tool call with the card as its reason, and the `approval/decided`
- * that pairs with it — written into the root session's own log, which is what
- * the committing entry reads a grant back out of.
- *
- * This fixture replaces the human seam with a stand-in (its `approval.request`
- * answers `allowed-once` without recording anything), so a case whose subject is
- * a *consumer* of an approved ceiling writes the record here, in the service's
- * own shape, instead of asking through a service that no longer exists to
- * record it. The real service, the real tool and the real ask run end to end in
- * `k4-budget-extend.spec.ts`; what these cases are about starts after that.
- * @param h - the stack whose root session log is the record's surface.
- * @param reading - the draft the decision is about, whose binding it must carry.
- * @returns the tool-call identity the commit has to present.
- */
-async function personApproves(h: RunStack, reading: RootBudgetExtensionDraft, callId: string): Promise<string> {
-  const persistence = h.ctx.get('sessionPersistence') as unknown as {
-    open(id: SessionId): Promise<{ append(events: readonly unknown[]): Promise<void> }>
-  }
-  const id = randomUUID()
-  const handle = await persistence.open(ROOT)
-  await handle.append([
-    { type: 'approval/asked', time: Date.now(), data: { id, toolName: 'task_budget_extend', callId, reason: cardOf(reading) } },
-    { type: 'approval/decided', time: Date.now(), data: { id, outcome: 'allowed-once' } },
-  ])
-  return callId
-}
-
 describe('K4-2/K4-4: an expired tree’s entries read the ceiling a person approved', () => {
   it('refuses the replay past the deadline, starts it once a person raises it, and runs it along the champion’s own verifier', async () => {
     const limits = budget({ wallTimeMs: 800, maxRuns: 6 })
@@ -153,25 +135,36 @@ describe('K4-2/K4-4: an expired tree’s entries read the ceiling a person appro
     expect(await h.snapshot(STORE)).toEqual(before)
     expect(eventKinds(h)).toEqual(beforeEvents)
 
-    // The person's approval, recorded by the channel: the query reports both
-    // ceilings and writes nothing, and the commit records the raise it was asked.
+    // The person is asked about this request, and the question holds the whole
+    // ceiling: the approved total in force first (maxRuns 6, untouched by this
+    // request) and the deadline this deployment configures beside the instant the
+    // approval would put in place, with the runs already used. Nothing is written
+    // while they think — the ask is held on the scripted person, and the tree the
+    // replay was refused by is exactly what it was.
     const extended = new Date(Date.now() + 30_000).toISOString()
-    const reading = await h.runtime.budgetExtensionDraft(String(ROOT), { requestKey: 'k-more-time', deadlineAt: extended })
-    expect(reading.outcome.kind).toBe('proposed')
-    expect(reading.effective.maxRuns).toBe(6)
-    expect(reading.configured.deadlineAt).toBe(effectiveCeiling(before, limits).deadlineAt)
+    const person = new ScriptedBudgetApproval(true)
+    person.install(h)
+    const pending = h.runtime.extendRootBudget(String(ROOT), host('call-k4-deadline'), { requestKey: 'k-more-time', deadlineAt: extended })
+    await vi.waitFor(() => expect(person.asks).toHaveLength(1))
+    const ask = person.asks[0]!
+    expect(ask.storeId).toBe(STORE)
+    expect(ask.effective.maxRuns).toBe(6)
+    expect(ask.effective.deadlineAt).toBe(effectiveCeiling(before, limits).deadlineAt)
+    expect(ask.configured.deadlineAt).toBe(effectiveCeiling(before, limits).deadlineAt)
+    expect(ask.runsUsed).toBe(before.runs.length)
+    expect(ask.proposal.deadlineAt).toEqual({ previous: ask.effective.deadlineAt, next: extended })
     expect(await h.snapshot(STORE)).toEqual(before)
+    expect(eventKinds(h)).toEqual(beforeEvents)
 
+    // The person answers, and the commit records the raise they were asked: one
+    // event and one ceiling, under the call the question was asked under.
     const commitBefore = await h.snapshot(STORE)
     const commitEvents = eventKinds(h)
-    await personApproves(h, reading, 'call-k4-deadline')
-    const record = await h.runtime.extendRootBudget(String(ROOT), {
-      requestKey: 'k-more-time',
-      deadlineAt: extended,
-      baseline: reading.effective,
-      callId: 'call-k4-deadline',
-    })
-    expect(record.deadlineAt).toEqual({ previous: reading.configured.deadlineAt, next: extended })
+    person.allow()
+    const record = await pending
+    expect(record.answeredFromRecord).toBe(false)
+    expect(record.record.approvalRef).toBe('approval:call-k4-deadline')
+    expect(record.record.deadlineAt).toEqual({ previous: ask.configured.deadlineAt, next: extended })
     // The commit is one event and one ceiling: nothing the tree already held
     // moved — runs, tasks, edges, evidence and reviews are byte-identical, and
     // the only new event is the extension itself.
@@ -180,7 +173,7 @@ describe('K4-2/K4-4: an expired tree’s entries read the ceiling a person appro
     expect(eventKinds(h).slice(commitEvents.length)).toEqual(['TaskBudgetExtended'])
     const raised = effectiveCeiling(granted, limits)
     expect(raised.deadlineAt).toBe(extended)
-    expect(raised.configured.deadlineAt).toBe(reading.configured.deadlineAt)
+    expect(raised.configured.deadlineAt).toBe(ask.configured.deadlineAt)
     expect(raised.maxRuns).toBe(6)
 
     // The replay the refusal named now starts — and runs the champion's own
@@ -252,19 +245,19 @@ describe('K4-2/K4-4: an expired tree’s entries read the ceiling a person appro
     expect(replayRefusal?.message).toContain('already holds 2')
     expect(await h.snapshot(STORE)).toEqual(afterBatchRefusal)
 
-    // The person approves two more runs, as a whole total.
-    const reading = await h.runtime.budgetExtensionDraft(String(ROOT), { requestKey: 'k-two-more', maxRuns: 4 })
-    expect(reading.outcome.kind).toBe('proposed')
-    expect(reading.effective).toEqual({ maxRuns: 2 })
-    expect(reading.configured).toEqual({ maxRuns: 2 })
-    expect(reading.runsUsed).toBe(2)
-    await personApproves(h, reading, 'call-k4-runs')
-    await h.runtime.extendRootBudget(String(ROOT), {
-      requestKey: 'k-two-more',
-      maxRuns: 4,
-      baseline: reading.effective,
-      callId: 'call-k4-runs',
-    })
+    // The person approves two more runs, as a whole total: the ask holds the
+    // reading in force — the configured total, which is also the approved one,
+    // and the two runs already counted — and the approval itself records one
+    // event, nothing else.
+    const person = new ScriptedBudgetApproval(false)
+    person.install(h)
+    const raise = await h.runtime.extendRootBudget(String(ROOT), host('call-k4-runs'), { requestKey: 'k-two-more', maxRuns: 4 })
+    expect(person.asks).toHaveLength(1)
+    expect(person.asks[0]!.effective).toEqual({ maxRuns: 2 })
+    expect(person.asks[0]!.configured).toEqual({ maxRuns: 2 })
+    expect(person.asks[0]!.runsUsed).toBe(2)
+    expect(raise.answeredFromRecord).toBe(false)
+    expect(raise.record.maxRuns).toEqual({ previous: 2, next: 4 })
     expect(effectiveCeiling(await h.snapshot(STORE), limits).maxRuns).toBe(4)
 
     // Exactly what the approved total says: the refused replay starts, and the
@@ -313,33 +306,43 @@ describe('K4-2/K4-4: an expired tree’s entries read the ceiling a person appro
     const h = await startRunStack({ roots: [ROOT], rootBudget: limits })
     await h.root(ROOT, ROOT_CONTRACT)
     // Two requests, one reading: the shape of two people deciding about the same
-    // tree, or one retry racing another caller. Both name the same baseline, and
-    // both were approved by a person on their own call.
-    const reading = await h.runtime.budgetExtensionDraft(String(ROOT), { requestKey: 'k-a', maxRuns: 8 })
-    expect(reading.effective).toEqual({ maxRuns: 4 })
-    const other = await h.runtime.budgetExtensionDraft(String(ROOT), { requestKey: 'k-b', maxRuns: 10 })
-    await personApproves(h, reading, 'call-a')
-    await personApproves(h, other, 'call-b')
+    // tree, or one retry racing another caller. Both are asked under their own
+    // call, and the person holds both questions — which is what makes the two
+    // grants sit on one reading: each entry freezes the ceiling in force *before*
+    // it asks, so neither has been answered yet when the other one froze the same
+    // numbers. There is no reading a caller supplies and no query to run: the
+    // reading the store re-checks is the one each entry froze for itself.
+    const person = new ScriptedBudgetApproval(true)
+    person.install(h)
     const before = await h.snapshot(STORE)
     const beforeEvents = eventKinds(h)
-    const grants = await Promise.allSettled([
-      h.runtime.extendRootBudget(String(ROOT), { requestKey: 'k-a', maxRuns: 8, baseline: reading.effective, callId: 'call-a' }),
-      h.runtime.extendRootBudget(String(ROOT), { requestKey: 'k-b', maxRuns: 10, baseline: other.effective, callId: 'call-b' }),
-    ])
+    const racing = [
+      h.runtime.extendRootBudget(String(ROOT), host('call-a'), { requestKey: 'k-a', maxRuns: 8 }),
+      h.runtime.extendRootBudget(String(ROOT), host('call-b'), { requestKey: 'k-b', maxRuns: 10 }),
+    ]
+    await vi.waitFor(() => expect(person.asks).toHaveLength(2))
+    expect(person.asks.map(ask => ask.effective)).toEqual([{ maxRuns: 4 }, { maxRuns: 4 }])
+    expect(person.asks.map(ask => ask.proposal.requestKey).sort()).toEqual(['k-a', 'k-b'])
+
+    // Both grants are approved against that one reading and committed together:
+    // the store's own write queue decides.
+    person.allow()
+    const grants = await Promise.allSettled(racing)
     const fulfilled = grants.filter(settled => settled.status === 'fulfilled')
     const rejected = grants.filter(settled => settled.status === 'rejected')
     expect(fulfilled).toHaveLength(1)
     expect(rejected).toHaveLength(1)
-    // The loser is told the ceiling moved under it — the store's serial re-check
-    // or the entry's own re-read, whichever read it reached.
+    // The loser is told the ceiling moved under it — the reading it was approved
+    // against is no longer the ceiling in force, so its commit is refused rather
+    // than re-based on the winner's result.
     const reason = (rejected[0] as PromiseRejectedResult).reason as Error
     expect(reason.message).toMatch(/moved since this request was read|the ceiling in force here is/)
 
     // Exactly one extension stands, and it is the one whose commit won.
     const after = await h.snapshot(STORE)
-    const winner = (fulfilled[0] as PromiseFulfilledResult<{ requestKey: string; maxRuns?: { next: number } }>).value
-    expect(after.budgetExtensions?.all.map(entry => entry.requestKey)).toEqual([winner.requestKey])
-    expect(effectiveCeiling(after, limits).maxRuns).toBe(winner.maxRuns?.next)
+    const winner = (fulfilled[0] as PromiseFulfilledResult<Awaited<ReturnType<TaskRuntime['extendRootBudget']>>>).value
+    expect(after.budgetExtensions?.all.map(entry => entry.requestKey)).toEqual([winner.record.requestKey])
+    expect(effectiveCeiling(after, limits).maxRuns).toBe(winner.record.maxRuns?.next)
     expect(eventKinds(h).slice(beforeEvents.length)).toEqual(['TaskBudgetExtended'])
     expect({ ...after, budgetExtensions: before.budgetExtensions }).toEqual(before)
   }, 60_000)

@@ -140,7 +140,7 @@ async function mount(options: {
     ['graphs', {}],
     ['agentRuntime', {}],
     ['task', {}],
-    ['taskRuntime', {}],
+    ['taskRuntime', { registerRootBudgetApproval: () => () => {} }],
     ['singularityContext', { registerReviewerBindingSource: () => () => {} }],
     ['userQuestions', {}],
     ['approval', { request: vi.fn(async () => 'allowed-once') }],

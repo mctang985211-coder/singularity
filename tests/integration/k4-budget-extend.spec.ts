@@ -14,11 +14,15 @@ import { disposeScriptedLoops, startScriptedLoop, type ScriptEntry, type Scripte
  *    run allowance is terminal in every sense, and the gate closes writes for
  *    exactly that reason. `task_budget_extend` has to run anyway: the root
  *    session that spent its budget is the caller K4 exists for. The call is not
- *    a late call, it records one durable fact, and the ceiling every admission
- *    reads moves with it.
+ *    a late call, it records one durable fact — under the *call's own* identity,
+ *    `approval:<callId>`, which is an audit reference and never the channel's
+ *    fresh uuid or a credential — and the ceiling every admission reads moves
+ *    with it.
  * 2. **The person is asked, and nothing happens before they answer.** The call
  *    is in flight while the ask waits on the desk: the store holds no extension,
- *    no run starts, no node appears. Only the approval moves anything.
+ *    no run starts, no node appears. The card names the store, both ceilings,
+ *    the runs used and the totals, and carries no approval binding — nothing on
+ *    it stands in for the person's answer. Only the approval moves anything.
  * 3. **A rejection or a cancellation writes nothing.** Same store, same runs,
  *    same ceilings — the call ends with a refusal and an unchanged tree.
  * 4. **A repeated request is answered from the record.** The same key with the
@@ -29,8 +33,10 @@ import { disposeScriptedLoops, startScriptedLoop, type ScriptEntry, type Scripte
  *
  * Everything but the model's answers is the deployment's own: the real
  * `TaskRuntime` (its gate is registered through `ctx.plugin`), the real
- * `task_budget_extend` definition, the real store, and the review desk as the
- * person — the fixture holds an ask until the spec answers it.
+ * `task_budget_extend` definition, the deployment's own root-budget approval
+ * (installed on the runtime at mount from `defineRootBudgetApproval`), the real
+ * store, and the review desk as the person — the fixture holds an ask until the
+ * spec answers it.
  */
 
 const ROOT = 's-root' as SessionId
@@ -157,9 +163,9 @@ async function stopTreeAtItsDeadline(
   return state as StoppedTree
 }
 
-/** The budget-extension asks this deployment made, in ask order. */
-function extensionAsks(h: ScriptedLoop) {
-  return h.review.asks.filter(ask => ask.toolName === 'task_budget_extend')
+/** The budget-extension asks this deployment made, in ask order — the desk's own index of them. */
+function extensionAsks(h: ScriptedLoop): readonly ScriptedReviewAsk[] {
+  return h.review.budgetAsks
 }
 
 /**
@@ -188,10 +194,9 @@ async function extensionAsk(h: ScriptedLoop, ordinal: number): Promise<ScriptedR
   return extensionAsks(h)[ordinal]!
 }
 
-/** Answer the `ordinal`-th ask — the person deciding. */
+/** Answer the `ordinal`-th ask — the person deciding, through the desk's own budget-ask index. */
 function decide(h: ScriptedLoop, ordinal: number, outcome: ApprovalOutcome): void {
-  const ask = extensionAsks(h)[ordinal]!
-  h.review.answer(h.review.asks.indexOf(ask), outcome)
+  h.review.answerBudget(ordinal, outcome)
 }
 
 /** Wait for the `ordinal`-th `task_budget_extend` call of this run to report its result. */
@@ -226,15 +231,21 @@ describe('a tree stopped at its budget can still be extended by a person (K4)', 
     expect((await h.snapshot(storeId)).budgetExtensions?.all).toEqual([])
     expect((await h.snapshot(storeId)).runs).toHaveLength(before.runs.length)
 
-    // The card a person decides from: which store and tree, the ceiling in force
-    // beside the one the deployment configured, the runs already used, the total
-    // this approval would put in place, and what an approval does not do.
+    // The card a person decides from: which store and tree, the whole ceiling in
+    // force (both dimensions, the one this request names *and* the one it leaves
+    // alone) beside the ceiling the deployment configured, the runs already used,
+    // the total this approval would put in place, and what an approval does not
+    // do. The one thing it does not carry is a binding: the decision is the
+    // channel's own answer, and nothing on the card stands in for it.
     expect(ask.reason).toContain(`store "${storeId}"`)
     expect(ask.reason).toContain(`root task ${stop.rootTaskId}`)
     expect(ask.reason).toContain(`root coordination session ${String(ROOT)}`)
     expect(ask.reason).toContain('request key "k-more-runs"')
     expect(ask.reason).toContain(`runs the store already holds: ${TREE_RUNS}`)
     expect(ask.reason).toContain(`maxRuns: ${TREE_RUNS} in force (deployment configures ${TREE_RUNS}) → approves a total of 4`)
+    expect(ask.reason).toContain('deadlineAt: ')
+    expect(ask.reason).toContain('— this request does not name it')
+    expect(ask.reason).not.toContain('approval binding')
     expect(ask.reason).toContain('approving records ONE budget-extension event')
     expect(ask.reason).toContain('no run starts or resumes')
 
@@ -247,29 +258,37 @@ describe('a tree stopped at its budget can still be extended by a person (K4)', 
     expect(first.result?.text).toContain(`approved and recorded on store "${storeId}"`)
     expect(first.result?.text).toContain('- maxRuns: 2 → 4')
 
-    // The approval the record stands on is the channel's own: the ask and its
-    // decision on the root session's log, the same `ApprovalRequestId`, and the
-    // card — the ask's reason — carrying the binding the runtime recomputed.
+    // The approval the record stands on is the channel's own audit: the ask and
+    // its decision on the root session's log, the same `ApprovalRequestId`. The
+    // call the question was asked under is the host's own — the tool call this
+    // ran as — and the record's reference is that identity, never the channel's
+    // fresh uuid: `approval:<callId>` is an audit reference of the call, and the
+    // channel's own id is not something anything here reads back.
     const audit = h.eventsOf(ROOT).filter(event => event.type === 'approval/asked' || event.type === 'approval/decided')
       .map(event => event.data as { id: string; toolName?: string; callId?: string; reason?: string; outcome?: string })
     const asked = audit.find(entry => entry.toolName === 'task_budget_extend')
     const decided = audit.find(entry => entry.outcome !== undefined)
     expect(asked?.callId).toBe(first.callId)
-    expect(asked?.reason).toContain('approval binding: ')
+    expect(asked?.reason).not.toContain('approval binding')
     expect(decided).toEqual({ id: asked?.id, outcome: 'allowed-once' })
-    expect(first.result?.text).toContain(`approval on the record: approval:${String(asked?.id)}`)
-    expect(first.result?.text).not.toContain(`approval:${String(first.callId)}`)
+    expect(first.result?.text).toContain(`approval on the record: approval:${String(first.callId)}`)
+    expect(first.result?.text).not.toContain(`approval:${String(asked?.id)}`)
 
-    // The durable fact is the store's: one extension, one event, the channel's
-    // own reference, the root session that asked, and the raises as approved.
+    // The durable fact is the store's: one extension, one event, the call's own
+    // reference, the root session that asked, and the raises as approved.
     const granted = await h.snapshot(storeId)
     expect(granted.budgetExtensions?.all).toHaveLength(1)
+    // And the store's own log holds exactly one such fact: the approval appended
+    // one event and nothing else.
+    const budgetEvents = h.eventsOf(storeId).flatMap(event =>
+      event.type === 'task/event' ? [(event.data as unknown as { kind: string }).kind] : [])
+    expect(budgetEvents.filter(kind => kind === 'TaskBudgetExtended')).toHaveLength(1)
     expect(granted.budgetExtensions?.byRequestKey['k-more-runs']).toMatchObject({
       requestKey: 'k-more-runs',
       maxRuns: { previous: TREE_RUNS, next: 4 },
       requestedBy: String(ROOT),
     })
-    expect(granted.budgetExtensions?.byRequestKey['k-more-runs']?.approvalRef).toBe(`approval:${String(asked?.id)}`)
+    expect(granted.budgetExtensions?.byRequestKey['k-more-runs']?.approvalRef).toBe(`approval:${String(first.callId)}`)
     // The ceiling every admission, driver and watchdog path resolves is now the
     // approved total — read through the deployment's own resolver.
     const resolution = resolveRootBudget(granted, ROOT_BUDGET)
@@ -333,9 +352,9 @@ describe('a tree stopped at its budget can still be extended by a person (K4)', 
       const call = await extensionCall(h, 0)
 
       expect(call.result?.isError).toBe(false)
-      expect(call.result?.text).toContain('no extension recorded')
+      expect(call.result?.text).toContain('task_budget_extend rejected')
       expect(call.result?.text).toContain('the ceilings are unchanged')
-      expect(call.result?.text).toContain(outcome === 'rejected' ? 'the human rejected it' : 'the request was cancelled before the human decided')
+      expect(call.result?.text).toContain(outcome === 'rejected' ? 'the human rejected it' : 'the question was cancelled before the human answered it')
 
       // Zero budget facts, zero runs, zero nodes: the tree is exactly what it
       // was before the call, with the allowance still spent.

@@ -1435,8 +1435,10 @@ var TaskState = class TaskState {
 	* The chain, and the whole reading it was approved against: a dimension keeps
 	* the `next` of the last extension that moved it, and an extension that moves
 	* it again has to state *that* value as its `previous`. Every dimension the
-	* claim was read at is then checked against the ceiling in force — the ones it
-	* raises *and the ones it leaves alone* — so a request read before another
+	* claim was read at — the reading the runtime froze when it asked the person,
+	* which travels with the claim and is never re-derived here — is then checked
+	* against the ceiling in force, the ones it raises *and the ones it leaves
+	* alone*, so a request read before another
 	* grant moved anything is refused by name here even when the dimension it
 	* raises is untouched. That is what makes two grants approved against the same
 	* reading mutually exclusive instead of additive: one raising `maxRuns` and one
@@ -2830,12 +2832,14 @@ var TaskService = class extends Service {
 	* store already holds.
 	*
 	* The envelope carries the tree's root task and the root session that asked,
-	* and the claim carries the raise itself, its whole reading, its identity and
-	* the approving channel's reference. The reducer is the gate for every rule —
-	* the root-session and root-task binding, the shape of each pair and of the
-	* reading, the identity of the content, one key names one extension, and every
-	* dimension the claim was read at has to still be the ceiling in force, the
-	* ones it raises and the ones it leaves alone.
+	* and the claim carries the raise itself, the whole reading the runtime froze
+	* when it put the question to a person, the request's identity and the audit
+	* reference of the call that question was asked under (never a credential
+	* anything here would accept in place of a decision). The reducer is the gate
+	* for every rule — the root-session and root-task binding, the shape of each
+	* pair and of the reading, the identity of the content, one key names one
+	* extension, and every dimension the claim was read at has to still be the
+	* ceiling in force, the ones it raises and the ones it leaves alone.
 	*
 	* **Where the idempotency read is.** Inside the store's single write queue,
 	* with the append it decides: the key is looked up on the state the batch would
@@ -2847,6 +2851,17 @@ var TaskService = class extends Service {
 	* twice in the log. The reducer's check stays as the gate for every other
 	* writer (a replay, a hand-written event, an entry that commits directly): this
 	* entry short-circuits the append, the reducer refuses a duplicate's content.
+	*
+	* **What this entry does not verify.** The decision it records was taken
+	* outside the store: the caller is in-process, and `approvalRef` is an audit
+	* reference the store keeps so the question can be found in DSH's own approval
+	* record — the store cannot verify it, and a second source of authority is
+	* what this contract forbids. This entry is a recording primitive of the
+	* in-process plane, not an authorization boundary: what authorizes a raise is
+	* the runtime entry that put the question and the approval the assembly
+	* installed, and what is enforced here is the identity of the content (one key
+	* names one request) together with, in the reducer, the asking session and root
+	* task the claim names and the whole-reading re-check.
 	*/
 	async recordBudgetExtensionIn(storeId, rootTaskId, claim, actor) {
 		await this.serialIn(storeId, async (state) => {

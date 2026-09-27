@@ -169,7 +169,10 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   // is the real registration, and the grant filter runs over it.
   ctx.provide('graphs', { graphForSession: async () => ({ id: 'g1', envId: 'env1', rootSessionId: ROOT_SESSION }) } as never)
   ctx.provide('task', {} as never)
-  ctx.provide('taskRuntime', {} as never)
+  // The one call the plugin makes on the runtime at construction — installing
+  // its root-budget approval (K4) — accepted and forgotten: no case here asks
+  // for a budget extension.
+  ctx.provide('taskRuntime', { registerRootBudgetApproval: () => () => {} } as never)
   // The read core the root-agent plugin injects (A2). No tool this spec drives
   // reads context — its subjects are the tool surface and the grant filter, both
   // of which are the deployment's own registration — so this sibling provides the

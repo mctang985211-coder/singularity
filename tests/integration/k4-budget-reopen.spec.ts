@@ -1,16 +1,17 @@
-import { randomUUID } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { TaskSnapshot } from '../../task/src/index.ts'
 import { rootTaskStoreId } from '../../task/src/index.ts'
-import type { Config, DecomposeSpec, RootBudgetExtensionDraft, RootContractSpec } from '../../task-runtime/src/index.ts'
+import type { Config, DecomposeSpec, RootContractSpec } from '../../task-runtime/src/index.ts'
 import { resolveRootBudget } from '../../task-runtime/src/index.ts'
 import {
   disposeRunStacks,
   exportSessionLogs,
   replaySessionLogs,
+  ScriptedBudgetApproval,
   startRunStack,
   type RunStack,
 } from '../support/run-stack.ts'
@@ -21,19 +22,31 @@ import {
  *
  * What each case pins:
  *
- * 1. **A request read in one process, committed in the next.** The query writes
- *    nothing, so the approval a person gave before the process ended still rests
- *    on the same reading afterwards — and the commit stands. Two restarts later
- *    the same key is answered from the record: no second approval, no second
- *    event, the same ceiling. What survives with it: the usage (the runs already
- *    counted), the deadline (an absolute instant, never re-derived from the
- *    restart) and the deployment's own number beside the approved one.
+ * 1. **The person is asked, and the raise is the store's.** The ask holds the
+ *    whole reading in force, the usage and the raise, and *nothing* is written
+ *    while it waits; the answer records one event under the host's own call id,
+ *    and the fact travels into the next process with the store. What survives
+ *    with it: the usage (the runs already counted), the deadline (an absolute
+ *    instant, never re-derived from the restart) and the deployment's own number
+ *    beside the approved one.
  * 2. **A reopened store’s replay reads the approved total.** The tree spent its
  *    configured allowance before the restart, so the replay is refused then; the
  *    person raises the total; the next process adopts the store through the
  *    deployment's own recovery door and the replay runs — the run the configured
  *    ceiling could never have paid for — and the approved total is what refuses
  *    the next one.
+ * 3. **A recorded request asks nobody, in any process.** The retry travels
+ *    through a runtime with no answer to give (the scripted person below is
+ *    installed, and never consulted), is answered from the record, and appends
+ *    nothing.
+ *
+ * The person is scripted (`ScriptedBudgetApproval`): the deployment's real
+ * callback — the DSH channel, the rendered card and its `approval/asked` +
+ * `approval/decided` audit pair — runs end to end in `k4-budget-extend.spec.ts`,
+ * and what these cases are about is the store's durable fact. A person created
+ * with `hold` is one nobody has answered yet, which is how a case asserts what
+ * the tree looks like while somebody thinks; the plain one answers `allowed-once`
+ * at once, under the host's own call identity.
  *
  * The reopen is a second process image over one directory (`run-stack`'s own
  * `workspace` plus its session-log handover, the K2 pattern): a new `Context`,
@@ -47,6 +60,12 @@ const ROOT = 's-root' as SessionId
 const STORE = rootTaskStoreId(String(ROOT))
 /** The file one process hands the next its whole session log through. */
 const HANDOVER = 'sessions.json'
+
+/**
+ * The host execution one request is asked under: the host's own identity for the
+ * call, and a host execution the runtime carries untouched to the approval.
+ */
+const HOST = { callId: 'call-k4-reopen', execution: { agent: { id: String(ROOT) }, signal: new AbortController().signal } }
 
 const directories: string[] = []
 
@@ -112,42 +131,8 @@ async function runFirstBatch(h: RunStack, root: { taskId: string; runId: string 
   return first.childTaskIds[0]!
 }
 
-/**
- * One person's decision, recorded the way the deployment's approval service
- * records it — a fresh service-issued `ApprovalRequestId`, the `approval/asked`
- * naming the tool call with the card as its reason, and the `approval/decided`
- * that pairs with it — written into the root session's own log, which is where
- * the committing entry reads a grant back out of.
- *
- * This fixture replaces the human seam with a stand-in that answers without
- * recording anything, so a case whose subject is what an approval *means* across
- * a reopen writes the record here, in the service's own shape. The real service,
- * the real tool and the real ask run end to end in `k4-budget-extend.spec.ts`.
- * What matters here is that the record travels with the session log the next
- * process replays, because that is what a person's decision is.
- * @param h - the stack whose root session log is the record's surface.
- * @param reading - the draft the decision is about, whose binding it must carry.
- * @returns the tool-call identity the commit has to present.
- */
-async function personApproves(h: RunStack, reading: RootBudgetExtensionDraft, callId: string): Promise<string> {
-  const persistence = h.ctx.get('sessionPersistence') as unknown as {
-    open(id: SessionId): Promise<{ append(events: readonly unknown[]): Promise<void> }>
-  }
-  const id = randomUUID()
-  const handle = await persistence.open(ROOT)
-  await handle.append([
-    {
-      type: 'approval/asked',
-      time: Date.now(),
-      data: { id, toolName: 'task_budget_extend', callId, reason: `Budget extension of the tree in store "${reading.storeId}" — approval binding: ${String(reading.approvalBinding)}` },
-    },
-    { type: 'approval/decided', time: Date.now(), data: { id, outcome: 'allowed-once' } },
-  ])
-  return callId
-}
-
 describe('K4-3: the approved ceiling is the store’s fact, across a reopen', () => {
-  it('commits a request read before the restart, answers the retry from the record, and moves neither usage nor the clock', async () => {
+  it('records the raise a person approved, survives two restarts, and answers the retry from the record without a second approval', async () => {
     const limits: Config['rootBudget'] = { wallTimeMs: 60_000, maxRuns: 4 }
     const directory = sharedDirectory()
     const h1 = await startRunStack({ workspace: directory, roots: [ROOT], rootBudget: limits })
@@ -156,31 +141,62 @@ describe('K4-3: the approved ceiling is the store’s fact, across a reopen', ()
     const openedWith = await h1.snapshot(STORE)
     expect(openedWith.runs).toHaveLength(2)
 
-    // The person is asked about this request, and the query itself writes
-    // nothing: the store holds no extension and its log is what it was.
+    // The person is asked about this request, and the question holds everything
+    // the decision needs: the store, the whole reading in force beside the
+    // deployment's own, the usage and the raise. Nothing is written while they
+    // think — the ask is held on this scripted person, the store holds no
+    // extension, and its log is what it was.
+    const person = new ScriptedBudgetApproval(true)
+    person.install(h1)
     const approved = { requestKey: 'k-more-room', maxRuns: 6, deadlineAt: new Date(Date.now() + 1_800_000).toISOString() }
-    const reading = await h1.runtime.budgetExtensionDraft(String(ROOT), approved)
-    expect(reading.outcome.kind).toBe('proposed')
-    expect(reading.effective).toEqual({ maxRuns: 4, deadlineAt: effectiveCeiling(openedWith, limits).deadlineAt })
-    expect(reading.runsUsed).toBe(2)
+    const pending = h1.runtime.extendRootBudget(String(ROOT), HOST, approved)
+    await vi.waitFor(() => expect(person.asks).toHaveLength(1))
+    const ask = person.asks[0]!
+    expect(ask.storeId).toBe(STORE)
+    expect(ask.rootSessionId).toBe(String(ROOT))
+    expect(ask.effective).toEqual({ maxRuns: 4, deadlineAt: effectiveCeiling(openedWith, limits).deadlineAt })
+    expect(ask.configured).toEqual({ maxRuns: 4, deadlineAt: effectiveCeiling(openedWith, limits).deadlineAt })
+    expect(ask.runsUsed).toBe(2)
+    expect(ask.proposal).toMatchObject({
+      requestKey: 'k-more-room',
+      maxRuns: { previous: 4, next: 6 },
+      deadlineAt: { previous: effectiveCeiling(openedWith, limits).deadlineAt, next: approved.deadlineAt },
+    })
+    expect(ask.host.callId).toBe(HOST.callId)
+    expect((await h1.snapshot(STORE)).budgetExtensions?.all).toEqual([])
     expect(await h1.snapshot(STORE)).toEqual(openedWith)
 
-    // The process ends after the person's answer: the approval travels as the
-    // decision the channel recorded on the session's own log, and the request is
-    // still the same request.
-    await personApproves(h1, reading, 'call-k4-reopen')
+    // The person answers: the raise is one event on this store, under the call
+    // the question was asked under, and nothing else of the tree moved.
+    const beforeCommit = eventKinds(h1)
+    person.allow()
+    const committed = await pending
+    expect(committed.storeId).toBe(STORE)
+    expect(committed.rootTaskId).toBe(root.taskId)
+    expect(committed.answeredFromRecord).toBe(false)
+    expect(committed.record.maxRuns).toEqual({ previous: 4, next: 6 })
+    expect(committed.record.deadlineAt).toEqual({ previous: effectiveCeiling(openedWith, limits).deadlineAt, next: approved.deadlineAt })
+    expect(committed.record.approvalRef).toBe(`approval:${HOST.callId}`)
+    expect(eventKinds(h1).slice(beforeCommit.length)).toEqual(['TaskBudgetExtended'])
+    expect((await h1.snapshot(STORE)).runs.map(run => run.runId)).toEqual(openedWith.runs.map(run => run.runId))
+
+    // The next process reads the same fact from the carried log: the record, the
+    // usage it was measured against, and the ceiling it left in force. The
+    // retry travels through a runtime whose person is never consulted — the
+    // record answers it — and appends nothing.
     const { h: h2, opened: reopened } = await reopen(h1, directory, limits)
-    expect(reopened.budgetExtensions?.all).toEqual([])
+    expect(reopened.budgetExtensions?.all).toHaveLength(1)
+    expect(reopened.budgetExtensions?.byRequestKey['k-more-room']).toEqual(committed.record)
     expect(reopened.runs.map(run => run.runId)).toEqual(openedWith.runs.map(run => run.runId))
-    const beforeCommit = eventKinds(h2)
-    const record = await h2.runtime.extendRootBudget(String(ROOT), {
-      ...approved,
-      baseline: reading.effective,
-      callId: 'call-k4-reopen',
-    })
-    expect(record.maxRuns).toEqual({ previous: 4, next: 6 })
-    expect(record.deadlineAt).toEqual({ previous: reading.effective.deadlineAt, next: approved.deadlineAt })
-    expect(eventKinds(h2).slice(beforeCommit.length)).toEqual(['TaskBudgetExtended'])
+    const never = new ScriptedBudgetApproval(true)
+    never.install(h2)
+    const beforeRetry = eventKinds(h2)
+    const retried = await h2.runtime.extendRootBudget(String(ROOT), HOST, approved)
+    expect(retried.answeredFromRecord).toBe(true)
+    expect(retried.record).toEqual(committed.record)
+    expect(never.asks).toEqual([])
+    expect(eventKinds(h2)).toEqual(beforeRetry)
+    expect(await h2.snapshot(STORE)).toEqual(reopened)
 
     // The usage and the tree's own start are untouched, and the approved
     // deadline is the instant that was approved — not a window re-measured from
@@ -193,29 +209,23 @@ describe('K4-3: the approved ceiling is the store’s fact, across a reopen', ()
     expect(raised.acceptedAt).toBe(openedWith.runs.find(run => run.sessionId === String(ROOT))!.startedAt)
     expect(raised.configured).toEqual({ maxRuns: 4, deadlineAt: effectiveCeiling(openedWith, limits).deadlineAt })
 
-    // One restart later the same request is answered from the record: no second
-    // approval, no second event, and the ceiling is where the person left it.
+    // One restart later the same request is still answered from the record: no
+    // second approval, no second event, and the ceiling is where the person left
+    // it. Nothing about the answer needs the process that recorded it.
     const { h: h3, opened: afterRestart } = await reopen(h2, directory, limits)
     expect(afterRestart.budgetExtensions?.all).toHaveLength(1)
+    const neverAgain = new ScriptedBudgetApproval(true)
+    neverAgain.install(h3)
     const eventsBeforeRetry = eventKinds(h3)
-    const retried = await h3.runtime.extendRootBudget(String(ROOT), {
-      ...approved,
-      baseline: reading.effective,
-      callId: 'call-k4-reopen',
-    })
-    expect(retried).toEqual(record)
+    const retriedAgain = await h3.runtime.extendRootBudget(String(ROOT), HOST, approved)
+    expect(retriedAgain.answeredFromRecord).toBe(true)
+    expect(retriedAgain.record).toEqual(committed.record)
+    expect(neverAgain.asks).toEqual([])
     expect(eventKinds(h3)).toEqual(eventsBeforeRetry)
     expect(await h3.snapshot(STORE)).toEqual(afterRestart)
     const stillRaised = effectiveCeiling(await h3.snapshot(STORE), limits)
     expect(stillRaised.maxRuns).toBe(6)
     expect(stillRaised.deadlineAt).toBe(approved.deadlineAt)
-    // The query in the third process reports the same two numbers and the same
-    // request key already recorded.
-    const reported = await h3.runtime.budgetExtensionDraft(String(ROOT), approved)
-    expect(reported.outcome.kind).toBe('recorded')
-    expect(reported.effective).toEqual({ maxRuns: 6, deadlineAt: approved.deadlineAt })
-    expect(reported.configured).toEqual({ maxRuns: 4, deadlineAt: reading.effective.deadlineAt })
-    expect(reported.runsUsed).toBe(2)
   }, 60_000)
 
   it('lets a reopened store’s replay run on the approved total the configured one had spent', async () => {
@@ -233,17 +243,26 @@ describe('K4-3: the approved ceiling is the store’s fact, across a reopen', ()
       .rejects.toThrow(/allows 2 run\(s\)[\s\S]*already holds 2/)
     expect(await h1.snapshot(STORE)).toEqual(spent)
 
-    // The person raises the total, and then the process image ends.
-    const reading = await h1.runtime.budgetExtensionDraft(String(ROOT), { requestKey: 'k-replay-room', maxRuns: 4 })
-    expect(reading.effective).toEqual({ maxRuns: 2 })
-    await personApproves(h1, reading, 'call-k4-replay')
-    await h1.runtime.extendRootBudget(String(ROOT), {
-      requestKey: 'k-replay-room',
-      maxRuns: 4,
-      baseline: reading.effective,
-      callId: 'call-k4-replay',
-    })
+    // The person raises the total — a raise the reopened process will read back
+    // as the ceiling in force — and then the process image ends.
+    const person = new ScriptedBudgetApproval(false)
+    person.install(h1)
+    const raise = await h1.runtime.extendRootBudget(String(ROOT), HOST, { requestKey: 'k-replay-room', maxRuns: 4 })
+    expect(person.asks).toHaveLength(1)
+    expect(person.asks[0]!.effective).toEqual({ maxRuns: 2 })
+    expect(raise.answeredFromRecord).toBe(false)
+    expect(raise.record.maxRuns).toEqual({ previous: 2, next: 4 })
+    expect(effectiveCeiling(await h1.snapshot(STORE), limits).maxRuns).toBe(4)
     const { h: h2, opened } = await reopen(h1, directory, limits)
+
+    // The reopened process asks nobody: the record answers the same request, so
+    // the raise this process executes under is the fact the previous one left.
+    const never = new ScriptedBudgetApproval(true)
+    never.install(h2)
+    const retried = await h2.runtime.extendRootBudget(String(ROOT), HOST, { requestKey: 'k-replay-room', maxRuns: 4 })
+    expect(retried.answeredFromRecord).toBe(true)
+    expect(retried.record).toEqual(raise.record)
+    expect(never.asks).toEqual([])
 
     // The reopened process takes the store over through the deployment's own
     // recovery door, and the barrier says the store is ready to execute against.
@@ -256,6 +275,7 @@ describe('K4-3: the approved ceiling is the store’s fact, across a reopen', ()
     expect(reopened.runs).toHaveLength(2)
     expect(effectiveCeiling(reopened, limits)).toMatchObject({ maxRuns: 4, configured: { maxRuns: 2 } })
     expect(opened.budgetExtensions?.all).toHaveLength(1)
+    expect(opened.budgetExtensions?.byRequestKey['k-replay-room']).toEqual(raise.record)
 
     // The replay the configured total refused runs here: two of the four runs
     // were already spent before the restart, and the approved total is what pays

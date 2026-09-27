@@ -77,9 +77,12 @@ function stub(name: string, value: object) {
 /**
  * Mounts the plugin on a real context: the dependencies it injects are siblings
  * of its own, and the tool registry is the deployment's (here, a map that keeps
- * what the plugin registered).
+ * what the plugin registered). `taskRuntime` is the one dependency this
+ * composition registers a callback on at construction — the root-budget approval
+ * (K4) — so its default here accepts and forgets one, and a case that cares
+ * about the installation passes its own recorder.
  */
-async function mount(config?: Config) {
+async function mount(config?: Config, taskRuntime: object = { registerRootBudgetApproval: () => () => {} }) {
   const home = await mkdtemp(join(tmpdir(), 'singularity-assembly-'))
   vi.stubEnv('DSH_HOME', home)
   const tools = new Map<string, { name: string }>()
@@ -94,7 +97,7 @@ async function mount(config?: Config) {
     ['graphs', {}],
     ['agentRuntime', {}],
     ['task', {}],
-    ['taskRuntime', {}],
+    ['taskRuntime', taskRuntime],
     ['singularityContext', { registerReviewerBindingSource: () => () => {} }],
     ['userQuestions', {}],
     ['approval', { request: vi.fn(async () => 'allowed-once') }],
@@ -155,6 +158,49 @@ describe('SingularityAgent assembly', () => {
     const on = await mount({ evolution: 'on' })
     expect(read(on.ctx)).toBe(true)
     await on.ctx.fiber.dispose()
+  })
+
+  it('installs the root-budget approval on the runtime at construction, and uninstalls it with the plugin', async () => {
+    // The one approval a budget extension can be granted through (K4) is wired
+    // here, once: the runtime asks this callback for a person's decision and
+    // commits only an actual `allowed-once`. It is registered through the
+    // plugin's own effect, so unmounting this assembly takes the approval away
+    // with it — a runtime left holding it would keep answering for a composition
+    // that no longer exists.
+    let installed: unknown
+    const registered: unknown[] = []
+    const { ctx } = await mount(undefined, {
+      registerRootBudgetApproval: (approval: unknown) => {
+        registered.push(approval)
+        installed = approval
+        return () => { if (installed === approval) installed = undefined }
+      },
+    })
+
+    expect(registered).toHaveLength(1)
+    expect(typeof registered[0]).toBe('function')
+
+    // And it is the budget-extension callback, not any function: driving it puts
+    // the card through the approval channel this deployment assembled, under the
+    // host execution's own call, and answers the runtime with the grant that
+    // channel's `allowed-once` means.
+    const approval = ctx.get('approval') as unknown as { request: ReturnType<typeof vi.fn> }
+    const decision = await (registered[0] as (ask: unknown) => Promise<unknown>)({
+      storeId: 'sg-t-root-session',
+      rootTaskId: 'root',
+      rootSessionId: 'root-session',
+      configured: { maxRuns: 10 },
+      effective: { maxRuns: 10 },
+      runsUsed: 3,
+      proposal: { requestKey: 'k-1', requestDigest: 'd'.repeat(64), maxRuns: { previous: 10, next: 20 } },
+      host: { callId: 'call-1', execution: { agent: { id: 'root-session' }, callId: 'call-1' } },
+    })
+    expect(decision).toEqual({ kind: 'allowed', reference: 'approval:call-1' })
+    expect(approval.request).toHaveBeenCalledTimes(1)
+    expect(approval.request.mock.calls[0]![0]).toMatchObject({ toolName: 'task_budget_extend', callId: 'call-1' })
+
+    await ctx.fiber.dispose()
+    expect(installed).toBeUndefined()
   })
 
   it('hands the evolution ledger the harness repo root, so its default roots stay where they were', async () => {

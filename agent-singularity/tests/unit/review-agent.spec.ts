@@ -7,13 +7,12 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { resolveGrant } from '../../../agent-runtime/src/grants.ts'
 import {
-  appendReviewAgentRun,
+  admitReviewAgent,
   countReviewAgentRuns,
-  effectiveReviewAgentRuns,
   readReviewerDelegation,
-  reserveReviewAgentRun,
   reviewAgentLedgerFile,
 } from '../../src/review-agent-ledger.ts'
+import type { ReviewAgentRunStart } from '../../src/review-agent-ledger.ts'
 import {
   REVIEWER_BASELINE,
   REVIEWER_PRESET,
@@ -26,10 +25,10 @@ import {
  * The controlled `node:fs/promises` behind the ledger cases (K4-1). `appendFile`
  * really writes its bytes, but the promise the ledger awaits settles only when
  * the test releases it, so the window between "the row is readable" and "the
- * append has finished its bookkeeping" is the test's to hold open instead of
- * the scheduler's. `mkdir` and `readFile` pass straight through (a read is only
- * reported, so a test can tell the count has read the ledger), and so does every
- * unarmed append — the rest of this spec sees the real filesystem.
+ * append has finished" is the test's to hold open instead of the scheduler's.
+ * `mkdir` and `readFile` pass straight through (a read is only reported, so a
+ * test can tell the count has read the ledger), and so does every unarmed
+ * append — the rest of this spec sees the real filesystem.
  */
 const ledgerFs = vi.hoisted(() => {
   interface ArmedAppend {
@@ -252,9 +251,14 @@ function handle(reply: string | undefined, options: { hang?: boolean } = {}) {
 function fixture(handleValue: unknown, spawnImpl?: () => Promise<unknown>) {
   const spawn = vi.fn(spawnImpl ?? (async () => handleValue))
   const recordDiagnosisIn = vi.fn(async () => {})
+  const snapshot = structuredClone(store)
   const ctx = {
     graphs: { graphForSession: async (_sessionId: string) => graph },
-    task: { openStore: async (_storeId: string) => structuredClone(store), recordDiagnosisIn },
+    task: {
+      openStore: async (_storeId: string) => structuredClone(snapshot),
+      snapshotIn: async (_storeId: string) => structuredClone(snapshot),
+      recordDiagnosisIn,
+    },
     agentRuntime: { spawn },
   }
   return { ctx: ctx as unknown as Context, spawn, recordDiagnosisIn }
@@ -274,30 +278,30 @@ function fixtureWithBeforePrompt(handleValue: unknown) {
   })
 }
 
-/**
- * A spawn that runs `beforePrompt` (the runtime's contract above) and holds the
- * first reviewer to arrive until `expect` reviewers have — the second execution
- * only reaches its spawn if the gate admitted it — or for a grace window when it
- * turns out to be the only one. The interleaving between two executions is then
- * the test's, not the scheduler's.
- */
-function rendezvousSpawn(expect: number) {
-  let arrivals = 0
-  const enough = Promise.withResolvers<void>()
-  return async (...args: unknown[]) => {
-    arrivals += 1
-    if (arrivals < expect) {
-      await Promise.race([enough.promise, new Promise(resolve => { setTimeout(resolve, 100) })])
-    } else {
-      enough.resolve()
-    }
-    const request = args[1] as { beforePrompt?: () => Promise<void> }
-    await request.beforePrompt?.()
-    return handle(REPLY)
+const exec = { agent: { id: 'root-1' }, signal: new AbortController().signal }
+
+/** The root store the tool's graph resolves to. */
+const ROOT_STORE = 'sg-t-root-1'
+
+/** One run as the tool submits it: the ledger owns the store id, the version and the time. */
+const row = (sessionId: string): ReviewAgentRunStart => ({ taskId: 't1', sessionId, actor: 'root-1' })
+
+/** The ledger as the real filesystem holds it — read directly, not through the mocked module. */
+function ledgerText(): string {
+  try {
+    return readFileSync(reviewAgentLedgerFile(), 'utf8')
+  } catch {
+    return ''
   }
 }
 
-const exec = { agent: { id: 'root-1' }, signal: new AbortController().signal }
+/** The ledger's rows as they are really on disk. */
+function ledgerRows(): Record<string, unknown>[] {
+  return ledgerText()
+    .split('\n')
+    .filter(line => line.trim().length > 0)
+    .map(line => JSON.parse(line) as Record<string, unknown>)
+}
 
 let ledgerDir: string
 let previousLedger: string | undefined
@@ -325,7 +329,7 @@ const REPLY = '```json\n'
   + '\n```'
 
 describe('the ledger as the reviewer binding source (A2)', () => {
-  const row = (overrides: Record<string, string> = {}) => ({
+  const entry = (overrides: Record<string, string> = {}) => ({
     formatVersion: 1,
     rootStoreId: 'sg-t-root',
     taskId: 't1',
@@ -336,7 +340,7 @@ describe('the ledger as the reviewer binding source (A2)', () => {
   })
 
   test('answers one delegation for one session, and treats identical rows as the same one written twice', async () => {
-    writeFileSync(join(ledgerDir, 'agents.jsonl'), `${JSON.stringify(row())}\n${JSON.stringify(row())}\n`)
+    writeFileSync(join(ledgerDir, 'agents.jsonl'), `${JSON.stringify(entry())}\n${JSON.stringify(entry())}\n`)
     expect(await readReviewerDelegation('s-review')).toMatchObject({ rootStoreId: 'sg-t-root', taskId: 't1', actor: 'root-1' })
     expect(await readReviewerDelegation('s-other')).toBeUndefined()
     // A ledger that was never written is a state, not a failure.
@@ -346,8 +350,8 @@ describe('the ledger as the reviewer binding source (A2)', () => {
 
   test('refuses to pick between conflicting rows, naming the conflict rather than the file order', async () => {
     writeFileSync(join(ledgerDir, 'agents.jsonl'), [
-      JSON.stringify(row()),
-      JSON.stringify(row({ taskId: 't2', rootStoreId: 'sg-t-other' })),
+      JSON.stringify(entry()),
+      JSON.stringify(entry({ taskId: 't2', rootStoreId: 'sg-t-other' })),
       '',
     ].join('\n'))
     await expect(readReviewerDelegation('s-review')).rejects.toMatchObject({
@@ -362,80 +366,177 @@ describe('the ledger as the reviewer binding source (A2)', () => {
   })
 })
 
-describe('the ledger file operations (K4-1)', () => {
-  const rootStoreId = 'sg-t-root-1'
-  const record = (sessionId: string) => ({ rootStoreId, taskId: 't1', sessionId, actor: 'root-1' })
-
-  /** The ledger as the real filesystem holds it — read around the mocked module, not through it. */
-  function ledgerText(): string {
-    try {
-      return readFileSync(reviewAgentLedgerFile(), 'utf8')
-    } catch {
-      return ''
-    }
-  }
-
-  test('a row readable before its append resolves is counted once, not twice (K4-1)', async () => {
-    // The interleaving the defect needs: the row is on disk, the append that
-    // wrote it has not yet raised the process's known rows, and a second reader
-    // counts the file in exactly that window.
-    process.env.SINGULARITY_REVIEW_AGENT_BUDGET = '2'
-    const held = ledgerFs.holdNextAppend()
-    const appending = appendReviewAgentRun(record('s-concurrent'))
-    await held.written
-    for (let attempt = 0; attempt < 200 && !ledgerText().includes('"s-concurrent"'); attempt += 1) {
-      await new Promise(resolve => setTimeout(resolve, 5))
-    }
-    expect(ledgerText()).toContain('"s-concurrent"')
-
-    const read = ledgerFs.nextLedgerRead()
-    const counting = countReviewAgentRuns(rootStoreId)
-    // The count reads the file right away — unless the ledger serialized it
-    // behind the append, which is what the release below then lets through.
-    await Promise.race([read, new Promise(resolve => setTimeout(resolve, 250))])
-    held.release()
-    expect(await counting).toBe(1)
-    await appending
-
-    // One row on the file, so one spent allowance — never two.
-    expect(await countReviewAgentRuns(rootStoreId)).toBe(1)
-    expect(effectiveReviewAgentRuns(rootStoreId, 1)).toBe(1)
-    const second = reserveReviewAgentRun(rootStoreId, 2, 1)
-    expect(second).toBeDefined()
-    second?.release()
+/**
+ * The K4-1 model these cases pin: one durable count per store — the rows the
+ * file holds — counted inside one serial region per (ledger file, store), with
+ * the run's row written inside that same region. No cache and no reservation
+ * stands in for the row, so a row that is readable before its append has
+ * resolved is still exactly one spent run, a failed append spends nothing and
+ * leaves no row, and a restart counts the file alone. Every conclusion here is
+ * read back from the file on disk, never from what an admission returned.
+ */
+describe('the review-agent admission (K4-1)', () => {
+  /** One admission exactly as the tool decides it: read the count, check the cap, then write the row. */
+  const attempt = (max: number, sessionId: string) => admitReviewAgent(ROOT_STORE, async admission => {
+    if (admission.started >= max) return 'refused'
+    await admission.start(row(sessionId))
+    return 'admitted'
   })
 
-  test('an append that fails spends nothing and does not wedge the budget queue', async () => {
-    process.env.SINGULARITY_REVIEW_AGENT_BUDGET = '2'
+  test('two concurrent admissions for one store admit exactly one run', async () => {
+    const countsSeen: number[] = []
+    const contender = (sessionId: string) => admitReviewAgent(ROOT_STORE, async admission => {
+      countsSeen.push(admission.started)
+      if (admission.started >= 1) return 'refused'
+      await admission.start(row(sessionId))
+      return 'admitted'
+    })
+    const results = await Promise.all([contender('s-a'), contender('s-b')])
+
+    // The second admission read the count the first one left behind…
+    expect(countsSeen).toEqual([0, 1])
+    expect(results.filter(result => result === 'admitted')).toHaveLength(1)
+    expect(results.filter(result => result === 'refused')).toHaveLength(1)
+    // …so exactly one row is on the file, whoever wrote it.
+    const rows = ledgerRows()
+    expect(rows).toHaveLength(1)
+    expect(['s-a', 's-b']).toContain(rows[0]!.sessionId)
+    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
+  })
+
+  test('with the cap at two and one row on the file, exactly one more admission lands', async () => {
+    expect(await attempt(1, 's-existing')).toBe('admitted')
+    expect(ledgerRows()).toHaveLength(1)
+
+    const results = await Promise.all([attempt(2, 's-x'), attempt(2, 's-y')])
+    expect(results.filter(result => result === 'admitted')).toHaveLength(1)
+    expect(results.filter(result => result === 'refused')).toHaveLength(1)
+    // Two rows for two runs — the third admission wrote nothing.
+    expect(ledgerRows()).toHaveLength(2)
+    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(2)
+    expect(await attempt(2, 's-z')).toBe('refused')
+    expect(ledgerRows()).toHaveLength(2)
+  })
+
+  test("another store's rows are not this store's count", async () => {
+    await admitReviewAgent('sg-t-other', admission => admission.start(row('s-other-store')))
+    expect(await countReviewAgentRuns('sg-t-other')).toBe(1)
+    // This store's own allowance is untouched — and its own region is its own.
+    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(0)
+    expect(await attempt(1, 's-this-store')).toBe('admitted')
+    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
+    expect(ledgerRows()).toHaveLength(2)
+  })
+
+  test('a row readable before its append resolves spends one run, not two', async () => {
+    // The interleaving the rejected implementation double-counted: the row's
+    // bytes are on the file while the append that wrote them has not resolved,
+    // so a count reads a row the writing admission has not yet "finished".
+    const held = ledgerFs.holdNextAppend()
+    const countsSeen: number[] = []
+    const first = admitReviewAgent(ROOT_STORE, async admission => {
+      countsSeen.push(admission.started)
+      await admission.start(row('s-first'))
+      return 'first'
+    })
+    await held.written
+    for (let attempt = 0; attempt < 200 && !ledgerText().includes('"s-first"'); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    expect(ledgerText()).toContain('"s-first"')
+
+    // A display count inside that window reports the one row the file holds.
+    const read = ledgerFs.nextLedgerRead()
+    const counting = countReviewAgentRuns(ROOT_STORE)
+    await read
+    expect(await counting).toBe(1)
+
+    // A second admission queues behind the open region: it cannot read the
+    // file (and so cannot count the row) until the first region has ended, so
+    // what it reads is the count the first one left behind — never the pre-row
+    // zero, never a doubled two.
+    const second = admitReviewAgent(ROOT_STORE, async admission => {
+      countsSeen.push(admission.started)
+      return admission.started
+    })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(countsSeen).toEqual([0])
+    held.release()
+    expect(await first).toBe('first')
+    expect(await second).toBe(1)
+    expect(countsSeen).toEqual([0, 1])
+
+    // One row is one spent run: the room a cap of two leaves is still there.
+    expect(ledgerRows()).toHaveLength(1)
+    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
+    const room = await admitReviewAgent(ROOT_STORE, async admission => {
+      const started = admission.started
+      if (started >= 2) return { started, admitted: false }
+      await admission.start(row('s-third'))
+      return { started, admitted: true }
+    })
+    expect(room).toEqual({ started: 1, admitted: true })
+    expect(ledgerRows()).toHaveLength(2)
+    // …and now the room is gone: two rows, two runs.
+    expect(await admitReviewAgent(ROOT_STORE, async admission => admission.started)).toBe(2)
+    expect(ledgerRows()).toHaveLength(2)
+  })
+
+  test('an append that fails writes no row, spends nothing, and leaves the store usable', async () => {
     ledgerFs.failNextAppend(new Error('EACCES: permission denied, open agents.jsonl'))
-    await expect(appendReviewAgentRun(record('s-failed'))).rejects.toThrow('EACCES')
+    await expect(admitReviewAgent(ROOT_STORE, admission => admission.start(row('s-failed')))).rejects.toThrow('EACCES')
 
     // Nothing was written, so nothing was spent and nothing has to be undone.
     expect(ledgerText()).toBe('')
-    expect(await countReviewAgentRuns(rootStoreId)).toBe(0)
-    expect(effectiveReviewAgentRuns(rootStoreId, 0)).toBe(0)
-    const claim = reserveReviewAgentRun(rootStoreId, 1, 0)
-    expect(claim).toBeDefined()
-    claim?.release()
+    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(0)
 
-    // The failure left the queue usable: the next append runs and counts.
-    await appendReviewAgentRun(record('s-after'))
-    expect(await countReviewAgentRuns(rootStoreId)).toBe(1)
-    expect(effectiveReviewAgentRuns(rootStoreId, 1)).toBe(1)
+    // The failed region did not wedge the store's key: the next admission runs
+    // and counts from the file it finds.
+    const started = await admitReviewAgent(ROOT_STORE, async admission => {
+      await admission.start(row('s-after'))
+      return admission.started
+    })
+    expect(started).toBe(0)
+    expect(ledgerRows()).toHaveLength(1)
+    expect(await countReviewAgentRuns(ROOT_STORE)).toBe(1)
   })
 
-  test('a fresh import derives the count from the file alone, counting each row once', async () => {
+  test('a fresh import derives the count from the file alone, with no in-process carry-over', async () => {
     // What a process restart sees: the file, no module state (K4-1).
-    await appendReviewAgentRun(record('s-restart'))
+    expect(await attempt(1, 's-restart')).toBe('admitted')
     vi.resetModules()
     const restarted = await import('../../src/review-agent-ledger.ts')
 
-    expect(await restarted.countReviewAgentRuns(rootStoreId)).toBe(1)
-    expect(restarted.effectiveReviewAgentRuns(rootStoreId, 1)).toBe(1)
-    expect(restarted.reserveReviewAgentRun(rootStoreId, 1, 1)).toBeUndefined()
-    const room = restarted.reserveReviewAgentRun(rootStoreId, 2, 1)
-    expect(room).toBeDefined()
-    room?.release()
+    expect(await restarted.countReviewAgentRuns(ROOT_STORE)).toBe(1)
+    // The row written before the restart is spent for the fresh module too: it
+    // reads the count where the admission reads it, and the store is out of room.
+    const seen = await restarted.admitReviewAgent(ROOT_STORE, async admission => {
+      if (admission.started >= 1) return `refused:${admission.started}`
+      await admission.start(row('s-after-restart'))
+      return 'admitted'
+    })
+    expect(seen).toBe('refused:1')
+    expect(ledgerRows()).toHaveLength(1)
+  })
+
+  test('the row an admission wrote answers the delegation read-back, in the shape the record declares', async () => {
+    const started = await admitReviewAgent(ROOT_STORE, async admission => {
+      await admission.start(row('s-delegated'))
+      return admission.started
+    })
+    expect(started).toBe(0)
+    expect(await readReviewerDelegation('s-delegated')).toMatchObject({
+      rootStoreId: ROOT_STORE,
+      taskId: 't1',
+      actor: 'root-1',
+    })
+    expect(await readReviewerDelegation('s-other')).toBeUndefined()
+
+    const rows = ledgerRows()
+    expect(rows).toHaveLength(1)
+    expect(Object.keys(rows[0]!).sort()).toEqual(['actor', 'at', 'formatVersion', 'rootStoreId', 'sessionId', 'taskId'])
+    expect(rows[0]).toMatchObject({ formatVersion: 1, rootStoreId: ROOT_STORE, taskId: 't1', sessionId: 's-delegated', actor: 'root-1' })
+    expect(Date.parse(String(rows[0]!.at))).not.toBeNaN()
   })
 })
 
@@ -458,6 +559,7 @@ describe('task_review_agent', () => {
     // — durable before any model input, so the context assembly can verify it.
     const delegation = await readReviewerDelegation(request.sessionId as string)
     expect(delegation).toMatchObject({ rootStoreId: 'sg-t-root-1', taskId: 't1', actor: 'root-1' })
+    expect(ledgerRows()).toHaveLength(1)
 
     expect(recordDiagnosisIn).toHaveBeenCalledOnce()
     const [storeId, diagnosis] = recordDiagnosisIn.mock.calls[0] as [string, Record<string, unknown>]
@@ -483,9 +585,9 @@ describe('task_review_agent', () => {
   })
 
   test('a beforePrompt failure (the ledger cannot be confirmed) fails the spawn with zero model input and records nothing', async () => {
-    // An unwritable ledger directory: the budget read still answers (missing
-    // file counts zero), but the append inside beforePrompt fails, and the
-    // runtime's contract turns that into a failed spawn before any model input.
+    // An unwritable ledger directory: the count still answers (missing file
+    // counts zero), but the append inside beforePrompt fails, and the runtime's
+    // contract turns that into a failed spawn before any model input.
     chmodSync(ledgerDir, 0o500)
     const { ctx, spawn, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(REPLY))
     const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1' }, exec as never)) as string
@@ -493,6 +595,7 @@ describe('task_review_agent', () => {
     expect(spawn).toHaveBeenCalledOnce()
     expect(result).toContain('spawn failed')
     expect(recordDiagnosisIn).not.toHaveBeenCalled()
+    expect(ledgerText()).toBe('')
   })
 
   test('a timed-out reviewer is cancelled and its judgement recorded unknown', async () => {
@@ -534,20 +637,28 @@ describe('task_review_agent', () => {
     const spawn = vi.fn()
     const ctx = {
       graphs: { graphForSession: async () => graph },
-      task: { openStore: async () => clean, recordDiagnosisIn: vi.fn() },
+      task: {
+        openStore: async () => structuredClone(clean),
+        snapshotIn: async () => structuredClone(clean),
+        recordDiagnosisIn: vi.fn(),
+      },
       agentRuntime: { spawn },
     } as unknown as Context
     const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1' }, exec as never)) as string
     expect(spawn).not.toHaveBeenCalled()
     expect(result).toContain('escalation is not required')
+    expect(ledgerText()).toBe('')
   })
 
   test('does not spawn when the per-store budget is spent', async () => {
-    await appendReviewAgentRun({ rootStoreId: 'sg-t-root-1', taskId: 't1', sessionId: 's-old', actor: 'root-1' })
+    // A row an earlier call (this process's or another's) wrote is the whole count.
+    await admitReviewAgent(ROOT_STORE, admission => admission.start(row('s-old')))
     const { ctx, spawn } = fixture(handle(REPLY))
     const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1' }, exec as never)) as string
     expect(spawn).not.toHaveBeenCalled()
     expect(result).toContain('budget exhausted')
+    expect(result).toContain('1/1')
+    expect(ledgerRows()).toHaveLength(1)
   })
 
   test('does not spawn for a task with no review record', async () => {
@@ -556,7 +667,7 @@ describe('task_review_agent', () => {
     const spawn = vi.fn()
     const ctx = {
       graphs: { graphForSession: async () => graph },
-      task: { openStore: async () => empty, recordDiagnosisIn: vi.fn() },
+      task: { openStore: async () => structuredClone(empty), snapshotIn: async () => structuredClone(empty), recordDiagnosisIn: vi.fn() },
       agentRuntime: { spawn },
     } as unknown as Context
     const result = (await defineTaskReviewAgentTool(ctx).execute({ taskId: 't1' }, exec as never)) as string
@@ -575,78 +686,51 @@ describe('task_review_agent', () => {
   })
 
   /**
-   * The allowance is a claim, not a read (K4-1 rework).
+   * The durable row is the whole admission (K4-1 rework).
    *
-   * The count the gate rests on comes from a file, so the read is asynchronous:
-   * two executions can both read the same count before either has written the
-   * row that would have told the other one no. The ledger therefore has to
-   * claim the run — synchronously, at the moment of the read. These cases pin
-   * the claim and its whole lifetime: the interleaving that would otherwise
-   * admit two reviewers, the claim composing with the cap rather than
-   * serializing the store, the two paths that give it back (a spawn or an
-   * append that wrote no row), and the path that retires it into the row it
-   * became — a reviewer that timed out stays spent without holding the store's
-   * next call hostage.
+   * The count is the rows the file holds, read inside the store's serial region
+   * and written inside the same one: two executions cannot interleave their
+   * count-and-write, so exactly one reviewer is admitted per allowance. Nothing
+   * refunds a run: a spawn that never wrote a row spent nothing, and one that
+   * failed — or timed out — after its row was written spent exactly one.
    */
-  test('two executions that read the same count admit exactly one reviewer', async () => {
-    // The interleaving K4-1 names: both executions read the persisted count
-    // (zero — there is no ledger yet) before either wrote its row.
-    const { ctx, spawn, recordDiagnosisIn } = fixture(undefined, rendezvousSpawn(2))
+  test('two concurrent executions with one allowance admit exactly one reviewer (K4-1)', async () => {
+    const { ctx, spawn, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(REPLY))
     const tool = defineTaskReviewAgentTool(ctx)
     const call = () => tool.execute({ taskId: 't1' }, exec as never) as Promise<string>
     const results = await Promise.all([call(), call()])
 
     expect(spawn).toHaveBeenCalledOnce()
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
     expect(recordDiagnosisIn).toHaveBeenCalledOnce()
     const refused = results.filter(result => result.includes('budget exhausted'))
     expect(refused).toHaveLength(1)
     expect(refused[0]).toContain('no review agent spawned')
-    // The refusal reports the effective usage — the persisted row plus the run
-    // already admitted — not the count that was read before the claim.
     expect(refused[0]).toContain('1/1')
     expect(refused[0]).toContain('sg-t-root-1')
     expect(results.filter(result => result.includes('judged task'))).toHaveLength(1)
+    // One started run, read back from the file on disk.
+    expect(ledgerRows()).toHaveLength(1)
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
   })
 
   test('two allowances admit two reviewers and refuse the third', async () => {
-    // The claim composes with the cap instead of holding the store: at two
-    // allowances two concurrent calls are both admitted, and the call whose
-    // effective usage is already two is the one refused.
     process.env.SINGULARITY_REVIEW_AGENT_BUDGET = '2'
-    const { ctx, spawn, recordDiagnosisIn } = fixture(undefined, rendezvousSpawn(2))
+    const { ctx, spawn, recordDiagnosisIn } = fixtureWithBeforePrompt(handle(REPLY))
     const tool = defineTaskReviewAgentTool(ctx)
     const call = () => tool.execute({ taskId: 't1' }, exec as never) as Promise<string>
     const results = await Promise.all([call(), call(), call()])
 
     expect(spawn).toHaveBeenCalledTimes(2)
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(2)
     expect(recordDiagnosisIn).toHaveBeenCalledTimes(2)
     const refused = results.filter(result => result.includes('budget exhausted'))
     expect(refused).toHaveLength(1)
     expect(refused[0]).toContain('no review agent spawned')
     expect(refused[0]).toContain('2/2')
+    expect(ledgerRows()).toHaveLength(2)
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(2)
   })
 
-  test('a count overtaken by a concurrent append admits no second reviewer', async () => {
-    // The other end of the same window: the *read* is overtaken. This call read
-    // the count while the ledger was empty, and another run claimed, spawned,
-    // appended its row and retired its claim before the allowance was asked for
-    // — the zero the caller carries is a snapshot of a file that no longer says
-    // that. `task_review_agent` hands exactly this count to this call, so the
-    // decision cannot rest on it: what this process knows the ledger holds
-    // refuses the second reviewer.
-    const stale = await countReviewAgentRuns('sg-t-root-1')
-    expect(stale).toBe(0)
-    await appendReviewAgentRun({ rootStoreId: 'sg-t-root-1', taskId: 't1', sessionId: 's-other', actor: 'root-1' })
-    expect(reserveReviewAgentRun('sg-t-root-1', 1, stale)).toBeUndefined()
-    // Not a blanket refusal: the allowance that is really left is spendable.
-    const second = reserveReviewAgentRun('sg-t-root-1', 2, stale)
-    expect(second).toBeDefined()
-    second!.release()
-  })
-
-  test('a spawn that wrote no row gives the claim back', async () => {
+  test('a spawn that fails before its row was written spends nothing', async () => {
     let attempts = 0
     const { ctx, recordDiagnosisIn } = fixture(handle(REPLY), async (...args: unknown[]) => {
       attempts += 1
@@ -658,36 +742,58 @@ describe('task_review_agent', () => {
 
     const first = (await tool.execute({ taskId: 't1' }, exec as never)) as string
     expect(first).toContain('spawn failed')
+    expect(ledgerText()).toBe('')
     expect(await countReviewAgentRuns('sg-t-root-1')).toBe(0)
-    // The store's one allowance is still there: a claim that never became a row
-    // is not a spent run.
+
+    // The store's one allowance is untouched: a later call still starts a reviewer.
     const second = (await tool.execute({ taskId: 't1' }, exec as never)) as string
     expect(second).toContain('judged task')
     expect(recordDiagnosisIn).toHaveBeenCalledOnce()
+    expect(ledgerRows()).toHaveLength(1)
     expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
   })
 
-  test('an append that wrote no row gives the claim back with the failure', async () => {
+  test('a spawn whose ledger append failed leaves the store usable for the next call', async () => {
     chmodSync(ledgerDir, 0o500)
     const { ctx } = fixtureWithBeforePrompt(handle(REPLY))
     const tool = defineTaskReviewAgentTool(ctx)
 
     const first = (await tool.execute({ taskId: 't1' }, exec as never)) as string
     expect(first).toContain('spawn failed')
+    expect(ledgerText()).toBe('')
     expect(await countReviewAgentRuns('sg-t-root-1')).toBe(0)
+
     chmodSync(ledgerDir, 0o700)
     const second = (await tool.execute({ taskId: 't1' }, exec as never)) as string
     expect(second).toContain('judged task')
+    expect(ledgerRows()).toHaveLength(1)
     expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
   })
 
-  test('a reviewer that timed out stays spent, and holds no second claim', async () => {
-    // Two allowances, so the second call is admitted exactly when the first
-    // call's claim retired into its ledger row: a claim left pending by the
-    // timeout path would read as two spent and refuse it.
-    process.env.SINGULARITY_REVIEW_AGENT_BUDGET = '2'
+  test('a spawn that fails after its row was written spends exactly one run', async () => {
+    const { ctx, spawn, recordDiagnosisIn } = fixture(handle(REPLY), async (...args: unknown[]) => {
+      await (args[1] as { beforePrompt?: () => Promise<void> }).beforePrompt?.()
+      throw new Error('agent-runtime: the reviewer node failed to publish')
+    })
+    const tool = defineTaskReviewAgentTool(ctx)
+
+    const first = (await tool.execute({ taskId: 't1' }, exec as never)) as string
+    expect(first).toContain('spawn failed')
+    expect(recordDiagnosisIn).not.toHaveBeenCalled()
+    // The row is durable, so the run is spent — and nothing refunds it.
+    expect(ledgerRows()).toHaveLength(1)
+    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
+
+    const second = (await tool.execute({ taskId: 't1' }, exec as never)) as string
+    expect(second).toContain('budget exhausted')
+    expect(second).toContain('1/1')
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(ledgerRows()).toHaveLength(1)
+  })
+
+  test('a reviewer that timed out spends one run and refunds nothing', async () => {
     let attempts = 0
-    const { ctx } = fixture(handle(REPLY), async (...args: unknown[]) => {
+    const { ctx, spawn } = fixture(handle(REPLY), async (...args: unknown[]) => {
       attempts += 1
       await (args[1] as { beforePrompt?: () => Promise<void> }).beforePrompt?.()
       return attempts === 1 ? handle(undefined, { hang: true }) : handle(REPLY)
@@ -696,9 +802,12 @@ describe('task_review_agent', () => {
 
     const first = (await tool.execute({ taskId: 't1', timeoutMs: 5 }, exec as never)) as string
     expect(first).toContain('timed out')
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(1)
+    expect(ledgerRows()).toHaveLength(1)
+
     const second = (await tool.execute({ taskId: 't1' }, exec as never)) as string
-    expect(second).toContain('judged task')
-    expect(await countReviewAgentRuns('sg-t-root-1')).toBe(2)
+    expect(second).toContain('budget exhausted')
+    expect(second).toContain('1/1')
+    expect(spawn).toHaveBeenCalledOnce()
+    expect(ledgerRows()).toHaveLength(1)
   })
 })
