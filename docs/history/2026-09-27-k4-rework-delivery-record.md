@@ -33,13 +33,14 @@
 - `agent-singularity/src/tools/review-agent.ts`：预留/归还与 `count → reserve` 两步判定（改由串行区一次性判定）。
 - 保留（合同要求不得误删）：请求内容身份幂等、持久整份读数重检、零写展示查询 `countReviewAgentRuns`、store 侧事实形状。
 
-## 公共检查（最终树实测，全部 exit 0）
+## 公共检查（最终树实测）
 
-- `pnpm build`（`packages/singularity`）：exit 0；tracked `lib/` 随提交重建（`task-runtime/lib/{index.js,index.d.ts}`、`task/lib/{index.js,index.d.ts}`、`agent-singularity/lib/index.js`）。
+- `pnpm build`（`packages/singularity`）：exit 0，且在提交后的树上重建后 `git status` 仍为空（tracked `lib/` 与 `src/` 一致；`task-runtime/lib/{index.js,index.d.ts}`、`task/lib/{index.js,index.d.ts}`、`agent-singularity/lib/index.js` 随代码提交）。
 - `pnpm vitest run --project unit packages/singularity`：63 文件 / 1990 例通过，0 跳过。
-- `pnpm vitest run --project integration packages/singularity`：63 文件 / 506 通过 + 2 跳过（既有门控子例）；上一轮偶发的 `worker-contract.spec.ts:200` 超时本轮两度全量均未复现（8/8，约 5.2–5.8s）。
+- `pnpm vitest run --project integration packages/singularity`：63 文件 / 506 通过 + 2 跳过（既有门控子例）——本轮在该提交上共 7 次全量 integration，6 绿 1 红；红的那次失败在 `tests/integration/proposal-review.spec.ts:155`。
+- **既有偶发（非本票缺陷，未改超时/断言，沿用前例记录）**：`proposal-review.spec.ts:155` 的 `vi.waitFor` 用 vitest 默认 1s 超时（同文件同类断言用 20s；被等待的事实 `run.batchId` 由上一处 20s 门控等待后的 `admitBatchIn` 事件保证），63 文件并行满载时偶发超时；隔离重跑 3 次与 `--no-file-parallelism` 均全绿（15/15），`a4-question-cold-recovery.spec.ts:889`（裸断言、其孪生断言已在 `bb05f5a` 改为 20s waitFor）本轮未复现但同属未等待面。两文件都不在本票 diff 内，失败路径（proposal 准入/`runForSession`/A4 恢复）与本票改动逐 hunk 无交集（本票 `task`/`gate` 改动为纯注释）。上一轮偶发的 `worker-contract.spec.ts:200` 超时本轮未再出现（8/8，约 5.2–5.8s）。
 - `pnpm run verify-persistence`：OK，4 事件根匹配；`git diff --check`（两仓）干净；`agent-singularity``pnpm exec tsc --noEmit`：exit 0。
-- 独立复核（另一子代理，未复用交付测试）实跑同一组检查并自写 9 个探针（见下）。
+- 独立复核（另一子代理，未复用交付测试）实跑同一组检查并自写 9 个探针；K4-1～K4-5 结论与公开检查一致，另提出两点（继承可枚举字段、store 信任边界文档），已在交付前闭合与写明（见下）。
 
 ## 400 行以上文件处置
 
