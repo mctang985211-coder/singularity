@@ -18,7 +18,7 @@ A2 的入口已固定为 task_read、task_status(scope=related|graph)、context_
 
 R0 的 root 默认不挂载 `evolution_*`，不注入整条晋升协议；显式启用时按管理角色提供相应工具和必要说明。root 协调、reviewer 只读诊断、candidate builder 在 sandbox 实现，沿用现有 preset/scoped tools，不新增通用角色框架。进化未启用不能描述成“请人代写能力”；应如实报告当前能力边界。BB 等领域指导由部署的领域 Skill/preset 提供，通用 root 不内置。
 
-当前 S4-E 代码只支持单文件 Skill 的双侧修复实验；K2/K3 将修复提交并支持完整执行型 Skill，同票更新九工具与实际 root prompt，不能提前声称已支持；非 Skill 方向可记建议，旧 candidate/v1 replay 路径已删除，服务直调也在副作用前拒绝。A5 的成功按需复盘尚待实现，不代表已支持成功优化晋升；触发与执行资格分别见[计划 F.3/F.4](2026-09-20-vrtc-code-change-plan.md)。
+当前双侧修复实验与生产提交已支持已有 Skill 的完整对象同名改进（K2 提交可恢复已验收；K3 完整对象已交付待验收）：指导型仅 SKILL.md，执行型为 SKILL.md + 派生 sidecar（resources=[]，只重算内容摘要、不提权），九工具与实际 root prompt 已同票更新；非 Skill 方向可记建议，旧 candidate/v1 replay 路径已删除，服务直调也在副作用前拒绝。A5 的成功按需复盘尚待实现，不代表已支持成功优化晋升；触发与执行资格分别见[计划 F.3/F.4](2026-09-20-vrtc-code-change-plan.md)。
 
 **R0 落地事实（2026-09-23，已验收）**：装配开关是 `evolution: 'off' | 'on'`（默认 `off`，闭合 schema，未知值或未读成员构造期拒启）。off 的实际 composition：`agent-singularity` 注册 19 个常驻工具（含 `task_intake`、`escalate`），九个 `evolution_*` **不注册**（因此任何 agent 面都取不到，不靠权限检查劝阻），root allow-list 20 名（19 个 root 核心名 + `escalate`；核心名里的 `skill` 由 preset 平面挂载，不在常驻注册面），root prompt 无进化协议段；on：28 个常驻工具、allow-list 29 名，与 R0 之前逐名相同。allow-list 与 prompt 由同一布尔派生（`agent-runtime/src/index.ts:rootToolsFor` 消费 `ctx.singularityEvolution`，软读，缺失即 off），二者不可能互相矛盾；关闭只撤注册，不删账本、不降已有校验与授权规则。**BB 句子已从通用 root prompt 无条件移除**，领域指导归部署的领域 skill（本仓库的 `bb-pipeline` 等），通用角色文本不再内嵌领域内容。证据锚：`agent-singularity/tests/unit/assembly.spec.ts`（off = 19 常驻且零 `evolution_*`；on = 28）、`agent-runtime/tests/unit/agent-runtime.spec.ts`（`ROOT_TOOLS_CLOSED` 20 / `ROOT_TOOLS_OPEN` 29 与 prompt 同源）、`tests/integration/worker-grant.spec.ts`（off 组合下无 grant 的 worker 面不含任何 `evolution_*`）、`tests/integration/evolution-tools.spec.ts`（on 的既有回归）。
 
