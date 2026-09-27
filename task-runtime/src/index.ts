@@ -1550,8 +1550,9 @@ export interface RootBudgetExtensionDraft {
   readonly outcome: RootBudgetExtensionOutcome
   /**
    * The binding this request has to be approved under
-   * ({@link budgetExtensionApprovalBinding} over this store and the proposal's
-   * own identity), and the exact token the card has to carry for
+   * ({@link budgetExtensionApprovalBinding} over this store, the proposal's own
+   * identity and the complete reading reported as `effective` below — the one
+   * the card shows), and the exact token the card has to carry for
    * {@link TaskRuntime.extendRootBudget} to read an approval back: present
    * exactly when the outcome is a proposal, because a refused or already
    * recorded request is never asked about and has no approval to bind.
@@ -1622,18 +1623,27 @@ function ceilingsOf(budget: ResolvedRootBudget): RootBudgetCeilings {
 
 /**
  * The binding one raise is approved under: a digest over the store the raise is
- * about and the request's own identity (its key and its totals).
+ * about, the request's own identity (its key and its totals) and the complete
+ * reading the person was shown — every dimension the tree bounds, at the value
+ * it stood at when the card was rendered.
  *
  * It is what ties a person's answer to exactly one question. The asking tool
  * writes the token into the approval card — so the person's decision is a
- * decision about these totals on this store — and the committing entry recomputes
- * it and reads the same token back out of the channel's record of the ask. An
+ * decision about those totals, over that whole reading, on this store — and the
+ * committing entry recomputes it over the reading the commit itself hands back
+ * and reads the same token back out of the channel's record of the ask. An
  * approval of another store, of another request under the same call, or of
- * another tool's question therefore cannot be presented as this one's: the token
- * is not the caller's to choose.
+ * another tool's question therefore cannot be presented as this one's, and
+ * neither can a decision about an earlier reading: a commit that refills the
+ * reading with the value in force has to answer with a token nobody was shown,
+ * and the token is not the caller's to choose.
  */
-export function budgetExtensionApprovalBinding(storeId: string, requestDigest: string): string {
-  return sha256Hex(canonicalize({ storeId, requestDigest }))
+export function budgetExtensionApprovalBinding(
+  storeId: string,
+  requestDigest: string,
+  baseline: RootBudgetExtensionBaseline,
+): string {
+  return sha256Hex(canonicalize({ storeId, requestDigest, baseline }))
 }
 
 /**
@@ -2846,17 +2856,21 @@ export class TaskRuntime extends Service {
     const existing = requestKey.length === 0
       ? undefined
       : this.budgetExtensionIndex(snapshot).byRequestKey[requestKey]
-    const outcome = this.judgeBudgetExtension(request, ceilingsOf(budget), budget, existing)
+    // The one reading this draft reports, judges against and is approved under:
+    // the card the person reads is a card about *this* whole reading, so the
+    // token over it is the token the committing entry has to read back.
+    const effective = ceilingsOf(budget)
+    const outcome = this.judgeBudgetExtension(request, effective, budget, existing)
     return {
       storeId,
       rootTaskId: budget.rootTaskId,
       rootSessionId: sessionId,
       configured: budget.configured,
-      effective: ceilingsOf(budget),
+      effective,
       runsUsed: snapshot.runs.length,
       outcome,
       ...(outcome.kind === 'proposed'
-        ? { approvalBinding: budgetExtensionApprovalBinding(storeId, outcome.proposal.requestDigest) }
+        ? { approvalBinding: budgetExtensionApprovalBinding(storeId, outcome.proposal.requestDigest, effective) }
         : {}),
     }
   }
@@ -2872,11 +2886,13 @@ export class TaskRuntime extends Service {
    * decision out of the caller session's own log — the pair the DSH approval
    * channel appends when it really puts a question to a person. Two facts have
    * to hold there for the commit to be a grant: the ask names this tool and this
-   * call and carries this request's approval binding (the person read that
-   * binding on the card they decided), and its decision is `allowed-once`. A
-   * caller that hands back a string the channel never wrote — a made-up id, a
-   * call of its own naming, an approval of another store, another request or
-   * another tool — is refused here, and nothing reaches the store. The reference
+   * call and carries the approval binding *of the reading this commit hands
+   * back* — the binding the person read on the card they decided, over the whole
+   * reading the card showed — and its decision is `allowed-once`. A caller that
+   * hands back a string the channel never wrote — a made-up id, a call of its own
+   * naming, an approval of another store, another request or another tool, or a
+   * decision made about a reading the tree no longer stands under — is refused
+   * here, and nothing reaches the store. The reference
    * the record keeps is the channel's own `ApprovalRequestId`, read back from
    * that record.
    *
@@ -2919,7 +2935,13 @@ export class TaskRuntime extends Service {
         '(a non-empty `callId`, the call the approval channel was asked about); this service records a decision the channel made, it never makes one',
       )
     }
-    const approvalRef = await this.budgetApproval(sessionId, storeId, commit.callId, outcome.proposal.requestDigest)
+    const approvalRef = await this.budgetApproval(
+      sessionId,
+      storeId,
+      commit.callId,
+      outcome.proposal.requestDigest,
+      baseline,
+    )
     const claim: TaskBudgetExtensionClaim = {
       ...outcome.proposal,
       // The whole reading, as the caller handed it back and as the judge just
@@ -2949,10 +2971,11 @@ export class TaskRuntime extends Service {
    * log — the `approval/asked` + `approval/decided` pair the DSH approval service
    * writes when it puts a question to a person, and writes nowhere else.
    *
-   * The ask has to name this tool, this call and this request's binding (the
-   * token the draft handed the asking tool, which is what the person read on the
-   * card), and the decision that pairs with it has to be `allowed-once`; anything
-   * else — no ask, an ask for another call, another store's or another request's
+   * The ask has to name this tool, this call and the binding of the reading the
+   * commit *hands back* (the token the draft handed the asking tool over exactly
+   * that reading, which is what the person read on the card), and the decision
+   * that pairs with it has to be `allowed-once`; anything else — no ask, an ask
+   * for another call, another store's, another request's or another reading's
    * binding, a separate tool's approval, a rejection, a cancellation, an
    * unanswered question — is refused by name. The log is read through the
    * session-query service in its live-preferred form (the same read the review
@@ -2960,15 +2983,27 @@ export class TaskRuntime extends Service {
    * live log; a deployment without the reader, a session with no log and a log
    * the reader refuses all end in the same refusal, because an approval that
    * cannot be read is not one this entry may assume.
+   *
+   * The reading the binding is recomputed over is the caller's own `baseline`,
+   * never a value read here: a commit that refilled the reading with the value
+   * in force would otherwise ask this check to bless a decision about a reading
+   * the person never saw, and the check has to answer for what the card showed.
    * @param sessionId - the caller session whose log the channel recorded the ask in.
    * @param storeId - the store the raise is about, as this session derives it.
    * @param callId - the tool call the caller says the person was asked about.
    * @param requestDigest - the request identity the committer is about to record.
+   * @param baseline - the complete reading the commit hands back, as the judge just checked it.
    * @returns the channel's own reference for the approval (`approval:<ApprovalRequestId>`).
    * @throws when the caller's log holds no such allowed ask.
    */
-  private async budgetApproval(sessionId: string, storeId: string, callId: string, requestDigest: string): Promise<string> {
-    const binding = budgetExtensionApprovalBinding(storeId, requestDigest)
+  private async budgetApproval(
+    sessionId: string,
+    storeId: string,
+    callId: string,
+    requestDigest: string,
+    baseline: RootBudgetExtensionBaseline,
+  ): Promise<string> {
+    const binding = budgetExtensionApprovalBinding(storeId, requestDigest, baseline)
     const events = await this.sessionEvents(sessionId)
     if (events === undefined) {
       throw new Error(

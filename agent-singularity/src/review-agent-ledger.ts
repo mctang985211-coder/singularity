@@ -67,30 +67,32 @@ export function reviewAgentBudget(): number {
  * reads as zero; a corrupt line throws rather than silently undercounting.
  */
 export async function countReviewAgentRuns(rootStoreId: string): Promise<number> {
-  let text: string
-  try {
-    text = await readFile(reviewAgentLedgerFile(), 'utf8')
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0
-    throw error
-  }
-  let count = 0
-  text.split('\n').forEach((line, index) => {
-    if (line.trim().length === 0) return
-    let record: ReviewAgentLedgerRecord
-    try {
-      record = JSON.parse(line) as ReviewAgentLedgerRecord
-    } catch {
-      throw new Error(`review-agent-ledger: corrupt line ${index + 1} in ${reviewAgentLedgerFile()}`)
-    }
-    if (record.rootStoreId === rootStoreId) count += 1
-  })
-  // A count is a snapshot: seed this process's knowledge upward with it, never
-  // downward — an append that lands between the read and this line must not be
-  // undone by the older number.
   const key = budgetKey(rootStoreId)
-  persistedRows.set(key, Math.max(knownRows(key), count))
-  return count
+  return serializeLedgerFileOperation(key, async () => {
+    let text: string
+    try {
+      text = await readFile(reviewAgentLedgerFile(), 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0
+      throw error
+    }
+    let count = 0
+    text.split('\n').forEach((line, index) => {
+      if (line.trim().length === 0) return
+      let record: ReviewAgentLedgerRecord
+      try {
+        record = JSON.parse(line) as ReviewAgentLedgerRecord
+      } catch {
+        throw new Error(`review-agent-ledger: corrupt line ${index + 1} in ${reviewAgentLedgerFile()}`)
+      }
+      if (record.rootStoreId === rootStoreId) count += 1
+    })
+    // A count is a snapshot: seed this process's knowledge upward with it, never
+    // downward — an append that lands between the read and this line must not be
+    // undone by the older number.
+    persistedRows.set(key, Math.max(knownRows(key), count))
+    return count
+  })
 }
 
 /**
@@ -121,6 +123,33 @@ function budgetKey(rootStoreId: string): string {
 /** The rows known for one budget key, without resolving the key again. */
 function knownRows(key: string): number {
   return persistedRows.get(key) ?? 0
+}
+
+/**
+ * The ledger's file operations, one chain per budget (K4-1). A row is readable
+ * the instant `appendFile` writes it, but the append's bookkeeping — the
+ * `persistedRows` raise that tells this process the row exists — lands only when
+ * the append resolves; a count that reads the file in that window would seed
+ * itself from the row and then see the append raise the known rows for the very
+ * same row, spending one allowance twice. Serializing read+seed against
+ * mkdir+append+raise per budget key leaves no such window, and the chain's tail
+ * is settled either way, so a failed append cannot wedge the key's next count.
+ */
+const fileOperations = new Map<string, Promise<void>>()
+
+/** Run one ledger file operation after every operation already queued for the same budget. */
+function serializeLedgerFileOperation<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  const previous = fileOperations.get(key) ?? Promise.resolve()
+  const result = previous.then(operation)
+  const tail = result.then(
+    () => undefined,
+    () => undefined,
+  )
+  fileOperations.set(key, tail)
+  void tail.then(() => {
+    if (fileOperations.get(key) === tail) fileOperations.delete(key)
+  })
+  return result
 }
 
 /**
@@ -178,13 +207,17 @@ export function reserveReviewAgentRun(rootStoreId: string, max: number, used: nu
 /** Append one started review agent. */
 export async function appendReviewAgentRun(record: Omit<ReviewAgentLedgerRecord, 'formatVersion' | 'at'>): Promise<void> {
   const file = reviewAgentLedgerFile()
-  await mkdir(dirname(file), { recursive: true })
-  const line = { formatVersion: 1 as const, ...record, at: new Date().toISOString() }
-  await appendFile(file, `${JSON.stringify(line)}\n`, 'utf8')
-  // The row is durable: this process now knows the ledger holds one more for that
-  // store, so a count read before this instant cannot spend its allowance again.
   const key = budgetKey(record.rootStoreId)
-  persistedRows.set(key, knownRows(key) + 1)
+  return serializeLedgerFileOperation(key, async () => {
+    await mkdir(dirname(file), { recursive: true })
+    const line = { formatVersion: 1 as const, ...record, at: new Date().toISOString() }
+    await appendFile(file, `${JSON.stringify(line)}\n`, 'utf8')
+    // The row is durable: this process now knows the ledger holds one more for that
+    // store, so a count read before this instant cannot spend its allowance again —
+    // and the count that follows this append on the same key cannot seed itself
+    // from it first.
+    persistedRows.set(key, knownRows(key) + 1)
+  })
 }
 
 /** Every ledger row, or `undefined` when the ledger has never been written (zero rows is a state, not a failure). */

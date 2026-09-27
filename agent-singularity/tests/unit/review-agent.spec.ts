@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
@@ -6,7 +6,14 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { resolveGrant } from '../../../agent-runtime/src/grants.ts'
-import { appendReviewAgentRun, countReviewAgentRuns, readReviewerDelegation, reserveReviewAgentRun } from '../../src/review-agent-ledger.ts'
+import {
+  appendReviewAgentRun,
+  countReviewAgentRuns,
+  effectiveReviewAgentRuns,
+  readReviewerDelegation,
+  reserveReviewAgentRun,
+  reviewAgentLedgerFile,
+} from '../../src/review-agent-ledger.ts'
 import {
   REVIEWER_BASELINE,
   REVIEWER_PRESET,
@@ -14,6 +21,85 @@ import {
   normalizeJudgements,
   reviewerGrant,
 } from '../../src/tools/review-agent.ts'
+
+/**
+ * The controlled `node:fs/promises` behind the ledger cases (K4-1). `appendFile`
+ * really writes its bytes, but the promise the ledger awaits settles only when
+ * the test releases it, so the window between "the row is readable" and "the
+ * append has finished its bookkeeping" is the test's to hold open instead of
+ * the scheduler's. `mkdir` and `readFile` pass straight through (a read is only
+ * reported, so a test can tell the count has read the ledger), and so does every
+ * unarmed append — the rest of this spec sees the real filesystem.
+ */
+const ledgerFs = vi.hoisted(() => {
+  interface ArmedAppend {
+    written: Promise<void>
+    markWritten: () => void
+    done: Promise<void>
+    failure: Error | undefined
+  }
+  let armedAppend: ArmedAppend | undefined
+  let readSignal: (() => void) | undefined
+  return {
+    /** The next append writes for real, then waits for the test to release it. */
+    holdNextAppend() {
+      const written = Promise.withResolvers<void>()
+      const released = Promise.withResolvers<void>()
+      armedAppend = {
+        written: written.promise,
+        markWritten: () => written.resolve(),
+        done: released.promise,
+        failure: undefined,
+      }
+      return { written: written.promise, release: () => released.resolve() }
+    },
+    /** The next append fails without writing, the way an unwritable ledger directory does. */
+    failNextAppend(error: Error) {
+      armedAppend = {
+        written: Promise.resolve(),
+        markWritten: () => {},
+        done: Promise.resolve(),
+        failure: error,
+      }
+    },
+    takeArmedAppend() {
+      const armed = armedAppend
+      armedAppend = undefined
+      return armed
+    },
+    /** Resolves when the ledger file has really been read back, after the read completed. */
+    nextLedgerRead() {
+      const signal = Promise.withResolvers<void>()
+      readSignal = () => signal.resolve()
+      return signal.promise
+    },
+    reportLedgerRead() {
+      const signal = readSignal
+      readSignal = undefined
+      signal?.()
+    },
+  }
+})
+
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...actual,
+    appendFile: async (...args: Parameters<typeof actual.appendFile>) => {
+      const armed = ledgerFs.takeArmedAppend()
+      if (armed === undefined) return actual.appendFile(...args)
+      if (armed.failure !== undefined) throw armed.failure
+      await actual.appendFile(...args)
+      armed.markWritten()
+      await armed.done
+    },
+    readFile: async (...args: Parameters<typeof actual.readFile>) => {
+      const result = await actual.readFile(...args)
+      if (String(args[0]).endsWith('agents.jsonl')) ledgerFs.reportLedgerRead()
+      return result
+    },
+  }
+})
 
 const graph = { id: 'graph1', name: 'graph1', envId: 'project1', rootSessionId: 'root-1' }
 const store = {
@@ -273,6 +359,83 @@ describe('the ledger as the reviewer binding source (A2)', () => {
   test('reports a ledger this process cannot read as unreadable, never as "no delegation"', async () => {
     writeFileSync(join(ledgerDir, 'agents.jsonl'), '{not json}\n')
     await expect(readReviewerDelegation('s-review')).rejects.toMatchObject({ kind: 'unreadable' })
+  })
+})
+
+describe('the ledger file operations (K4-1)', () => {
+  const rootStoreId = 'sg-t-root-1'
+  const record = (sessionId: string) => ({ rootStoreId, taskId: 't1', sessionId, actor: 'root-1' })
+
+  /** The ledger as the real filesystem holds it — read around the mocked module, not through it. */
+  function ledgerText(): string {
+    try {
+      return readFileSync(reviewAgentLedgerFile(), 'utf8')
+    } catch {
+      return ''
+    }
+  }
+
+  test('a row readable before its append resolves is counted once, not twice (K4-1)', async () => {
+    // The interleaving the defect needs: the row is on disk, the append that
+    // wrote it has not yet raised the process's known rows, and a second reader
+    // counts the file in exactly that window.
+    process.env.SINGULARITY_REVIEW_AGENT_BUDGET = '2'
+    const held = ledgerFs.holdNextAppend()
+    const appending = appendReviewAgentRun(record('s-concurrent'))
+    await held.written
+    for (let attempt = 0; attempt < 200 && !ledgerText().includes('"s-concurrent"'); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    expect(ledgerText()).toContain('"s-concurrent"')
+
+    const read = ledgerFs.nextLedgerRead()
+    const counting = countReviewAgentRuns(rootStoreId)
+    // The count reads the file right away — unless the ledger serialized it
+    // behind the append, which is what the release below then lets through.
+    await Promise.race([read, new Promise(resolve => setTimeout(resolve, 250))])
+    held.release()
+    expect(await counting).toBe(1)
+    await appending
+
+    // One row on the file, so one spent allowance — never two.
+    expect(await countReviewAgentRuns(rootStoreId)).toBe(1)
+    expect(effectiveReviewAgentRuns(rootStoreId, 1)).toBe(1)
+    const second = reserveReviewAgentRun(rootStoreId, 2, 1)
+    expect(second).toBeDefined()
+    second?.release()
+  })
+
+  test('an append that fails spends nothing and does not wedge the budget queue', async () => {
+    process.env.SINGULARITY_REVIEW_AGENT_BUDGET = '2'
+    ledgerFs.failNextAppend(new Error('EACCES: permission denied, open agents.jsonl'))
+    await expect(appendReviewAgentRun(record('s-failed'))).rejects.toThrow('EACCES')
+
+    // Nothing was written, so nothing was spent and nothing has to be undone.
+    expect(ledgerText()).toBe('')
+    expect(await countReviewAgentRuns(rootStoreId)).toBe(0)
+    expect(effectiveReviewAgentRuns(rootStoreId, 0)).toBe(0)
+    const claim = reserveReviewAgentRun(rootStoreId, 1, 0)
+    expect(claim).toBeDefined()
+    claim?.release()
+
+    // The failure left the queue usable: the next append runs and counts.
+    await appendReviewAgentRun(record('s-after'))
+    expect(await countReviewAgentRuns(rootStoreId)).toBe(1)
+    expect(effectiveReviewAgentRuns(rootStoreId, 1)).toBe(1)
+  })
+
+  test('a fresh import derives the count from the file alone, counting each row once', async () => {
+    // What a process restart sees: the file, no module state (K4-1).
+    await appendReviewAgentRun(record('s-restart'))
+    vi.resetModules()
+    const restarted = await import('../../src/review-agent-ledger.ts')
+
+    expect(await restarted.countReviewAgentRuns(rootStoreId)).toBe(1)
+    expect(restarted.effectiveReviewAgentRuns(rootStoreId, 1)).toBe(1)
+    expect(restarted.reserveReviewAgentRun(rootStoreId, 1, 1)).toBeUndefined()
+    const room = restarted.reserveReviewAgentRun(rootStoreId, 2, 1)
+    expect(room).toBeDefined()
+    room?.release()
   })
 })
 

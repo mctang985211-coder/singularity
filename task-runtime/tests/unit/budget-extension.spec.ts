@@ -139,9 +139,10 @@ function cardOf(draft: RootBudgetExtensionDraft): string {
   return `Budget extension of store "${draft.storeId}" — approval binding: ${bindingOf(draft)}`
 }
 
-/** What one draft's own store-derived identity is, for a spec that wants to record a decision for another one. */
-function anotherStoresCard(proposal: { requestDigest: string }): string {
-  return `Budget extension of store "sg-t-somebody-else" — approval binding: ${budgetExtensionApprovalBinding('sg-t-somebody-else', proposal.requestDigest)}`
+/** What a card for this same request and reading on somebody else's store would carry: the store differs, nothing else. */
+function anotherStoresCard(reading: RootBudgetExtensionDraft): string {
+  const digest = proposed(reading.outcome).requestDigest
+  return `Budget extension of store "sg-t-somebody-else" — approval binding: ${budgetExtensionApprovalBinding('sg-t-somebody-else', digest, reading.effective)}`
 }
 
 function rootTask(): TaskInstance {
@@ -406,7 +407,7 @@ describe('extendRootBudget', () => {
 
     // An approval of *another store*: the binding covers the store the caller's
     // own session derives, so an ask about somebody else's tree is not this one.
-    recordDecision(h, ROOT_SESSION, { callId: 'call-other-store', reason: anotherStoresCard(proposed(reading.outcome)) })
+    recordDecision(h, ROOT_SESSION, { callId: 'call-other-store', reason: anotherStoresCard(reading) })
     expect(await refuse('call-other-store')).toContain('holds no ask of task_budget_extend')
 
     // An approval of *another request*: same call name, the request key or the
@@ -551,10 +552,45 @@ describe('extendRootBudget', () => {
     expect(snapshot.budgetExtensions?.all.map(entry => entry.requestKey)).toEqual(['k-a'])
     expect(effectiveMaxRuns(snapshot)).toBe(20)
 
-    // The same second request, re-read against the value in force, is a new
-    // request: it lands as its own total, never as the two raises added up.
-    await h.runtime.extendRootBudget(ROOT_SESSION, { ...second, baseline: { maxRuns: 20, deadlineAt: CONFIGURED_DEADLINE } })
-    expect(effectiveMaxRuns(await h.task.snapshotIn(STORE))).toBe(25)
+    // The same second request, handed back with its baseline refilled to the
+    // value the first grant put in force, cannot present the decision a person
+    // made about the reading its card showed: the approval binds the complete
+    // reading, so the refilled baseline is a reading nobody approved. The commit
+    // is refused — by the approval check, not by the store — and nothing is
+    // written for it.
+    const refilled = await h.runtime
+      .extendRootBudget(ROOT_SESSION, {
+        ...second,
+        baseline: { maxRuns: 20, deadlineAt: CONFIGURED_DEADLINE },
+      })
+      .then(
+        record => `the commit was accepted as ${JSON.stringify(record)}`,
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      )
+    expect(refilled).toContain('holds no ask of task_budget_extend')
+    expect(budgetEvents(h)).toEqual(['k-a'])
+    const unchanged = await h.task.snapshotIn(STORE)
+    expect(unchanged.budgetExtensions?.all.map(entry => entry.requestKey)).toEqual(['k-a'])
+    expect(effectiveMaxRuns(unchanged)).toBe(20)
+
+    // A decision about the reading now in force is a decision about a different
+    // question: a fresh query at that reading, and a decision recorded for *its*
+    // card under its own call, lands the raise the person was shown — as its own
+    // total, never as the two raises added up.
+    const reread = await draft(h, { requestKey: 'k-b', maxRuns: 25 })
+    expect(reread.effective).toEqual({ maxRuns: 20, deadlineAt: CONFIGURED_DEADLINE })
+    recordDecision(h, ROOT_SESSION, { callId: 'call-b-reread', reason: cardOf(reread) })
+    const recorded = await h.runtime.extendRootBudget(ROOT_SESSION, {
+      requestKey: 'k-b',
+      maxRuns: 25,
+      baseline: reread.effective,
+      callId: 'call-b-reread',
+    })
+    expect(recorded.maxRuns).toEqual({ previous: 20, next: 25 })
+    expect(budgetEvents(h)).toEqual(['k-a', 'k-b'])
+    const granted = await h.task.snapshotIn(STORE)
+    expect(granted.budgetExtensions?.all.map(entry => entry.requestKey)).toEqual(['k-a', 'k-b'])
+    expect(effectiveMaxRuns(granted)).toBe(25)
   })
 
   test('two grants approved against one reading, one raising each dimension, cannot both stand', async () => {
