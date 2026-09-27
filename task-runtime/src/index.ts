@@ -1554,7 +1554,14 @@ export type RootBudgetApproval = (ask: RootBudgetApprovalAsk) => Promise<RootBud
 export interface RootBudgetExtensionResult {
   readonly storeId: string
   readonly rootTaskId: TaskId
-  /** True when the store already held this request and answered from the record: no question was asked and nothing was written. */
+  /**
+   * True when the answer is the record the store already held rather than one
+   * this call committed: nothing was written and no grant was taken from this
+   * call. A repeat is answered this way before anybody is asked; a call whose
+   * question was already put is answered this way too when the identical request
+   * was recorded under its key while it waited, because the record is the answer
+   * either way.
+   */
   readonly answeredFromRecord: boolean
   readonly record: TaskBudgetExtension
 }
@@ -1591,6 +1598,22 @@ function ceilingsOf(budget: ResolvedRootBudget): RootBudgetCeilings {
     ...(budget.maxRuns === undefined ? {} : { maxRuns: budget.maxRuns }),
     ...(budget.deadlineAt === undefined ? {} : { deadlineAt: budget.deadlineAt }),
   }
+}
+
+/**
+ * The one wording of a key bound to a request that is not the one being made: the
+ * record's own description and content identity are named, because what the key
+ * holds is what the request would have to be. One wording because both places
+ * that meet the binding — the judgement, before anybody is asked, and the re-read
+ * of a refusal, once the question is out — say the same thing about the same
+ * fact, and a record of other totals is a fact about somebody else's request
+ * rather than an answer.
+ */
+function budgetExtensionBindingRefusal(requestKey: string, existing: TaskBudgetExtension): string {
+  return (
+    `request key "${requestKey}" is already bound to ${describeBudgetExtension(existing)} (identity ${existing.requestDigest}); ` +
+    'one key names one request, and different totals under it are a new request under a new key'
+  )
 }
 
 export class TaskRuntime extends Service {
@@ -2826,9 +2849,15 @@ export class TaskRuntime extends Service {
    * reading, the runs the store already holds, the proposal pairs and the host
    * execution untouched. With no approval installed it refuses by name: this
    * entry never makes a person's decision for them. An approval that refuses is
-   * reported with the reason it gave; one that allows proceeds, and the
-   * reference it returns is kept in the record as the audit reference of the
-   * question — never as a credential anything here would accept.
+   * reported with the reason it gave — unless the store recorded this exact
+   * request under this key while the question was out, and then the record is the
+   * answer: a refusal is an answer about the request the person was shown, and the
+   * identical request may be a durable fact by the time the answer arrives. The
+   * store is re-read once, there, for that window alone — the record returned as
+   * the record it is, nothing appended, no second grant, and a record of other
+   * content refused by the key's binding rather than returned. One that allows
+   * proceeds, and the reference it returns is kept in the record as the audit
+   * reference of the question — never as a credential anything here would accept.
    *
    * **Where the serialization is.** The claim goes to the store through
    * `TaskService.recordBudgetExtensionIn`, unchanged, whose serial region
@@ -2851,7 +2880,7 @@ export class TaskRuntime extends Service {
    * @param sessionId - the root coordination session of the tree whose budget is raised.
    * @param host - the host execution the tool call runs under, carried untouched to the approval.
    * @param request - the key and the totals the tree should be bounded by, and nothing else.
-   * @returns the store, the root task and the record the store holds — with `answeredFromRecord` when no question was asked.
+   * @returns the store, the root task and the record the store holds — with `answeredFromRecord` when the answer is a record the store already held rather than one this call committed.
    */
   async extendRootBudget(
     sessionId: string,
@@ -2923,6 +2952,28 @@ export class TaskRuntime extends Service {
       host,
     })
     if (decision.kind === 'refused') {
+      // The person's answer is about the request they were shown, but the ask and
+      // its answer are two instants, and a person is not the store's only writer:
+      // another caller's identical request can be committed under this key while
+      // this one waits at its question, and this answer then arrives about a
+      // request the store has since answered. The store is re-read once, here, for
+      // exactly that window — one read, never a retry: a record under this key
+      // whose content identity is this request's own is this request's answer
+      // already (the same fact, returned as the record it is, with nothing
+      // appended and no second grant), a record of other content is the key's
+      // binding named rather than somebody else's grant handed back, and no record
+      // at all leaves the person's refusal standing as the whole answer.
+      const index = this.budgetExtensionIndex(await this.ctx.task.snapshotIn(storeId))
+      const recorded = index.byRequestKey[judgement.proposal.requestKey]
+      if (recorded !== undefined) {
+        if (recorded.requestDigest === judgement.proposal.requestDigest) {
+          return { storeId, rootTaskId: budget.rootTaskId, answeredFromRecord: true, record: recorded }
+        }
+        throw new Error(
+          `task-runtime: the budget of session "${sessionId}" was not extended: ` +
+            budgetExtensionBindingRefusal(judgement.proposal.requestKey, recorded),
+        )
+      }
       throw new Error(
         `task-runtime: the budget of session "${sessionId}" was not extended: the request was not approved (${decision.reason}); ` +
         'the ceilings are unchanged and no run started',
@@ -3072,12 +3123,7 @@ export class TaskRuntime extends Service {
     })
     if (existing !== undefined) {
       if (existing.requestDigest === proposalDigest) return { kind: 'recorded', record: existing }
-      return {
-        kind: 'refused',
-        reason:
-          `request key "${requestKey}" is already bound to ${describeBudgetExtension(existing)} (identity ${existing.requestDigest}); ` +
-          'one key names one request, and different totals under it are a new request under a new key',
-      }
+      return { kind: 'refused', reason: budgetExtensionBindingRefusal(requestKey, existing) }
     }
     const maxRuns = this.judgeBudgetDimension('maxRuns', request.maxRuns, budget.maxRuns)
     if (!maxRuns.ok) return { kind: 'refused', reason: maxRuns.reason }

@@ -708,3 +708,148 @@ describe('extendRootBudget', () => {
     expect(approval).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * The audit's interleaving, frozen as an external result (K4-3): two callers put
+ * the same question — one key, one content — and the person answers them
+ * differently, `allowed` for the first and `refused` for the second. The first
+ * answer commits the record under that key; the second answer arrives when that
+ * record is already a fact of the store. The second caller's request is then one
+ * the store already holds, so the refusal is about a question the store has
+ * since answered: the call returns the first caller's record — the same fact,
+ * the same identity, nothing appended a second time — and never an error.
+ *
+ * The two calls are held at their questions so the interleaving is exact rather
+ * than timed: B's entry reads the store while A is still unanswered, which is
+ * what makes B judge the request on the reading A's grant has not yet moved.
+ *
+ * The control beside it is the other half of the rule: with no record under the
+ * key, a refusal is the whole answer — named, zero writes, zero runs. The
+ * regression this must not break — two keys frozen off one reading, exactly one
+ * grant — is already pinned by "two requests frozen off one reading cannot both
+ * stand: the store refuses the second, writing nothing" above.
+ */
+describe('extendRootBudget: one key whose question is answered after the same request was recorded', () => {
+  test('a refusal that lands after the identical request was recorded returns that record, not an error', async () => {
+    const h = harness({ config: { rootBudget: ROOT_BUDGET } })
+    await storeWithRoot(h, 3)
+    const before = await h.task.snapshotIn(STORE)
+    const asked: string[] = []
+    const waiting = new Map<string, (decision: RootBudgetApprovalDecision) => void>()
+    installApproval(h, async ask => {
+      asked.push(ask.host.callId)
+      return await new Promise<RootBudgetApprovalDecision>(resolve => {
+        waiting.set(ask.host.callId, resolve)
+      })
+    })
+
+    // A asks first and is held at the question: nothing is recorded while it waits.
+    const first = extend(h, { requestKey: 'k-once', maxRuns: 20 }, { host: host('call-a') })
+    await vi.waitFor(() => expect(asked).toEqual(['call-a']))
+
+    // B freezes its own reading and puts the same question — one key, one
+    // content — while A is still unanswered, so the record A goes on to commit
+    // is one B's own read cannot have seen.
+    const second = extend(h, { requestKey: 'k-once', maxRuns: 20 }, { host: host('call-b') })
+    await vi.waitFor(() => expect(asked).toEqual(['call-a', 'call-b']))
+
+    // A is allowed, and its claim is the record under this key.
+    waiting.get('call-a')!({ kind: 'allowed', reference: 'approval:call-a' })
+    const approved = await first
+    expect(approved.record.requestKey).toBe('k-once')
+    expect(approved.record.approvalRef).toBe('approval:call-a')
+    const storeRecord = (await h.task.snapshotIn(STORE)).budgetExtensions?.byRequestKey['k-once']
+    expect(storeRecord).toEqual(approved.record)
+    const committed = log(h)
+    const appended = taskEvents(h).length
+    expect(budgetEvents(h)).toEqual(['k-once'])
+
+    // B's answer is the refusal — what a cancelled ask leaves behind — and it
+    // arrives once the request it was asked about is a durable fact.
+    waiting.get('call-b')!({ kind: 'refused', reason: 'the caller withdrew the ask' })
+    const answer = await second
+
+    // The record, not the refusal: one request the store already holds is
+    // answered by the fact, and the answer is the identical one.
+    expect(answer.storeId).toBe(approved.storeId)
+    expect(answer.rootTaskId).toBe(approved.rootTaskId)
+    expect(answer.record).toEqual(approved.record)
+    expect(answer.record).toEqual(storeRecord)
+    expect(answer.record.recordedAt).toBe(approved.record.recordedAt)
+    expect(answer.record.requestDigest).toBe(approved.record.requestDigest)
+
+    // And nothing was written a second time: one event, one record, one ceiling, no run.
+    expect(log(h)).toBe(committed)
+    expect(taskEvents(h)).toHaveLength(appended)
+    expect(budgetEvents(h)).toEqual(['k-once'])
+    const after = await h.task.snapshotIn(STORE)
+    expect(after.budgetExtensions?.all).toEqual([approved.record])
+    expect(after.budgetExtensions?.byRequestKey['k-once']).toEqual(approved.record)
+    expect(after.runs).toHaveLength(before.runs.length)
+    expect(runFacts(after)).toEqual(runFacts(before))
+    expect(effectiveMaxRuns(after)).toBe(20)
+  })
+
+  test('a refusal with no record under the key stays a refusal: named, nothing written, no run started', async () => {
+    const h = harness({ config: { rootBudget: ROOT_BUDGET } })
+    await storeWithRoot(h, 3)
+    const before = await h.task.snapshotIn(STORE)
+    const committed = log(h)
+    const approval = installApproval(h, async () => ({ kind: 'refused', reason: 'the caller withdrew the ask' }))
+
+    // The identical request, with nothing recorded under its key: there is no
+    // fact for the refusal to give way to, and the person's answer stands.
+    const denied = await refusal(() => extend(h, { requestKey: 'k-once', maxRuns: 20 }, { host: host('call-b') }))
+
+    expect(denied).toContain('the request was not approved')
+    expect(denied).toContain('the caller withdrew the ask')
+    expect(denied).toContain('the ceilings are unchanged and no run started')
+    expect(approval).toHaveBeenCalledTimes(1)
+    expect(budgetEvents(h)).toEqual([])
+    expect(log(h)).toBe(committed)
+    const after = await h.task.snapshotIn(STORE)
+    expect(after.budgetExtensions?.all).toEqual([])
+    expect(after.runs).toHaveLength(before.runs.length)
+    expect(runFacts(after)).toEqual(runFacts(before))
+    expect(effectiveMaxRuns(after)).toBe(10)
+  })
+
+  test('a refusal whose key was recorded with other content is refused by the binding, not answered with it', async () => {
+    const h = harness({ config: { rootBudget: ROOT_BUDGET } })
+    await storeWithRoot(h, 3)
+    const asked: string[] = []
+    const waiting = new Map<string, (decision: RootBudgetApprovalDecision) => void>()
+    installApproval(h, async ask => {
+      asked.push(ask.host.callId)
+      return await new Promise<RootBudgetApprovalDecision>(resolve => {
+        waiting.set(ask.host.callId, resolve)
+      })
+    })
+
+    // Two requests under one key at *different* totals, each judged while the key
+    // held nothing: A asks for 20, B asks the same key for 25.
+    const first = extend(h, { requestKey: 'k-once', maxRuns: 20 }, { host: host('call-a') })
+    await vi.waitFor(() => expect(asked).toEqual(['call-a']))
+    const second = extend(h, { requestKey: 'k-once', maxRuns: 25 }, { host: host('call-b') })
+    await vi.waitFor(() => expect(asked).toEqual(['call-a', 'call-b']))
+
+    waiting.get('call-a')!({ kind: 'allowed', reference: 'approval:call-a' })
+    const approved = await first
+    const committed = log(h)
+    expect(budgetEvents(h)).toEqual(['k-once'])
+
+    // B's answer is a refusal, and the key now holds A's request — other content,
+    // other identity. What B gets is the binding named, with A's totals and
+    // identity in it: one key names one request, and a record of totals B never
+    // asked for is not B's answer.
+    waiting.get('call-b')!({ kind: 'refused', reason: 'the caller withdrew the ask' })
+    const denied = await refusal(() => second)
+    expect(denied).toContain('already bound to a budget extension raising maxRuns 10 → 20')
+    expect(denied).toContain(approved.record.requestDigest)
+    expect(log(h)).toBe(committed)
+    expect(budgetEvents(h)).toEqual(['k-once'])
+    const after = await h.task.snapshotIn(STORE)
+    expect(after.budgetExtensions?.all).toEqual([approved.record])
+    expect(effectiveMaxRuns(after)).toBe(20)
+  })
+})
