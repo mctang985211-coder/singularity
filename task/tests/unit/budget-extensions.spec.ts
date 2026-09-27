@@ -101,8 +101,9 @@ async function storeWithRoot(sessions = new Map<string, StoredSession>()) {
 
 /**
  * One claim as the runtime submits it: what the request asks for (the whole
- * approved totals), what each dimension was read at, and whose request it is.
- * The identity is derived here exactly as both writers derive it, so a test can
+ * approved totals), the reading it was approved against — every dimension the
+ * tree bounds, and the value each was read at — and whose request it is. The
+ * identity is derived here exactly as both writers derive it, so a test can
  * change one thing and leave the rest honest.
  */
 function claimFor(
@@ -113,6 +114,7 @@ function claimFor(
   return {
     requestKey: request.requestKey,
     requestDigest: overrides.requestDigest ?? budgetExtensionRequestDigest(request),
+    baseline: { ...baseline },
     ...(request.maxRuns === undefined ? {} : { maxRuns: { previous: baseline.maxRuns as number, next: request.maxRuns } }),
     ...(request.deadlineAt === undefined ? {} : { deadlineAt: { previous: baseline.deadlineAt as string, next: request.deadlineAt } }),
     approvalRef: overrides.approvalRef ?? 'approval:call-1',
@@ -183,6 +185,39 @@ describe('TaskBudgetExtended reducer', () => {
     expect(state.snapshot().budgetExtensions?.all).toHaveLength(1)
   })
 
+  test('commits one request committed twice at once as one fact and one event', async () => {
+    const h = await storeWithRoot()
+    const claim = claimFor(MORE_RUNS, { maxRuns: 10 })
+    const raced = await Promise.allSettled([
+      h.service.recordBudgetExtensionIn(STORE, 'root', claim, ROOT_SESSION),
+      h.service.recordBudgetExtensionIn(STORE, 'root', claim, ROOT_SESSION),
+    ])
+
+    // Both callers are answered, and they are answered with one fact: a caller
+    // that reaches the store's serial region behind another one finds the key
+    // already recorded there and appends nothing.
+    expect(raced.map(settled => settled.status)).toEqual(['fulfilled', 'fulfilled'])
+    expect(storeEvents(h).filter(item => item.kind === 'TaskBudgetExtended')).toHaveLength(1)
+    const snapshot = await h.service.snapshotIn(STORE)
+    expect(snapshot.budgetExtensions?.all).toHaveLength(1)
+    expect(snapshot.budgetExtensions?.byRequestKey['k-more-runs']?.maxRuns).toEqual({ previous: 10, next: 20 })
+  })
+
+  test('one key raced by two different requests: one fact, and the other refused by name', async () => {
+    const h = await storeWithRoot()
+    const raced = await Promise.allSettled([
+      h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(MORE_RUNS, { maxRuns: 10 }), ROOT_SESSION),
+      h.service.recordBudgetExtensionIn(STORE, 'root', claimFor({ requestKey: 'k-more-runs', maxRuns: 30 }, { maxRuns: 10 }), ROOT_SESSION),
+    ])
+    expect(raced.map(settled => settled.status)).toEqual(['fulfilled', 'rejected'])
+    const reason = (raced[1] as PromiseRejectedResult).reason as Error
+    expect(reason.message).toMatch(/already bound to a budget extension raising maxRuns 10 → 20/)
+    expect(storeEvents(h).filter(item => item.kind === 'TaskBudgetExtended')).toHaveLength(1)
+    // The loser wrote nothing: the winner's record is the store, and it is the
+    // only one — one key never names two requests, whichever one arrives first.
+    expect((await h.service.snapshotIn(STORE)).budgetExtensions?.all.map(entry => entry.maxRuns?.next)).toEqual([20])
+  })
+
   test('refuses the same key at different totals, writing nothing', async () => {
     const h = await storeWithRoot()
     await h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(MORE_RUNS, { maxRuns: 10 }), ROOT_SESSION)
@@ -195,7 +230,7 @@ describe('TaskBudgetExtended reducer', () => {
     expect(await h.service.snapshotIn(STORE)).toEqual(before)
   })
 
-  test('refuses a raise written against a ceiling that moved, writing nothing', async () => {
+  test('refuses a raise read at a ceiling that has since moved, writing nothing', async () => {
     const h = await storeWithRoot()
     await h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(MORE_RUNS, { maxRuns: 10 }), ROOT_SESSION)
 
@@ -203,7 +238,7 @@ describe('TaskBudgetExtended reducer', () => {
     // *original* reading (10) may not be committed: it would re-base a person's
     // decision on a value nobody approved.
     await expect(h.service.recordBudgetExtensionIn(STORE, 'root', claimFor({ requestKey: 'k-more-again', maxRuns: 30 }, { maxRuns: 10 }), ROOT_SESSION))
-      .rejects.toThrow(/was written against maxRuns 10, but the ceiling in force here is 20/)
+      .rejects.toThrow(/was read at maxRuns 10, but the ceiling in force here is 20/)
     expect((await h.service.snapshotIn(STORE)).budgetExtensions?.all).toHaveLength(1)
 
     // The same request chained onto the value in force is accepted, and it is the
@@ -280,12 +315,80 @@ describe('TaskBudgetExtended reducer', () => {
     expect((await h.service.snapshotIn(STORE)).budgetExtensions?.all).toEqual([])
   })
 
+  test('refuses a grant read before another one moved a dimension it does not raise, writing nothing', async () => {
+    const h = await storeWithRoot()
+    // One reading, two requests: the first raises maxRuns, the second moves the
+    // deadline, and each was approved against {maxRuns: 10, deadlineAt: T}. A
+    // person who approved the second never saw the run ceiling the first left.
+    const reading = { maxRuns: 10, deadlineAt: CONFIGURED_DEADLINE }
+    await h.service.recordBudgetExtensionIn(STORE, 'root', claimFor({ requestKey: 'k-runs', maxRuns: 20 }, reading), ROOT_SESSION)
+    const before = await h.service.snapshotIn(STORE)
+    const persisted = storeEvents(h).length
+
+    await expect(h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(
+      { requestKey: 'k-time', deadlineAt: APPROVED_DEADLINE },
+      reading,
+    ), ROOT_SESSION)).rejects.toThrow(/was read at maxRuns 10, but the ceiling in force here is 20/)
+    // A reading that leaves the dimension the tree has already moved out is
+    // refused too: the store can measure maxRuns from its own record, and a
+    // request read without it was read before that record.
+    await expect(h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(
+      { requestKey: 'k-time-2', deadlineAt: APPROVED_DEADLINE },
+      { deadlineAt: CONFIGURED_DEADLINE },
+    ), ROOT_SESSION)).rejects.toThrow(/was read without a maxRuns reading, but the ceiling in force here is 20/)
+    expect(storeEvents(h).length).toBe(persisted)
+    expect(await h.service.snapshotIn(STORE)).toEqual(before)
+
+    // The same request re-read at the whole ceiling the first grant left is a
+    // new request, and it lands as its own fact.
+    await h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(
+      { requestKey: 'k-time', deadlineAt: APPROVED_DEADLINE },
+      { ...reading, maxRuns: 20 },
+    ), ROOT_SESSION)
+    expect((await h.service.snapshotIn(STORE)).budgetExtensions?.all.map(entry => entry.requestKey)).toEqual(['k-runs', 'k-time'])
+  })
+
+  test('refuses a raise whose reading disagrees with the ceiling it moves from, writing nothing', async () => {
+    const h = await storeWithRoot()
+    await expect(h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(
+      MORE_RUNS,
+      { maxRuns: 10 },
+      { extra: { baseline: { maxRuns: 12 } } },
+    ), ROOT_SESSION)).rejects.toThrow(/raises maxRuns from 10 but was read at maxRuns 12/)
+    const withoutReading: TaskBudgetExtensionClaim = { ...claimFor(MORE_RUNS, { maxRuns: 10 }), baseline: {} }
+    await expect(h.service.recordBudgetExtensionIn(STORE, 'root', withoutReading, ROOT_SESSION))
+      .rejects.toThrow(/raises maxRuns from 10 but was read without a maxRuns reading/)
+    expect((await h.service.snapshotIn(STORE)).budgetExtensions?.all).toEqual([])
+  })
+
+  test('refuses a claim that carries no reading of the ceilings it was approved against', async () => {
+    const h = await storeWithRoot()
+    // The shape a pre-rework build of this ticket wrote: the raise and the
+    // approval, and no reading of what the tree was under. A grant the store
+    // cannot check dimension by dimension is not one it can enforce, so it is
+    // refused by name rather than assumed to be the dimension it happens to
+    // raise — the old "only the raised dimensions are checked" judgement is not
+    // kept as a fallback anywhere.
+    const withoutReading = { ...claimFor(MORE_RUNS, { maxRuns: 10 }) } as unknown as Record<string, unknown>
+    delete withoutReading.baseline
+    await expect(h.service.commitIn(STORE, [{
+      kind: 'TaskBudgetExtended',
+      taskId: 'root',
+      sessionId: ROOT_SESSION,
+      timestamp: NOW,
+      actor: 'test',
+      payload: { extension: withoutReading },
+      schemaVersion: 1,
+    } as TaskEvent])).rejects.toThrow(/carries no reading of the ceilings it was approved against/)
+    expect((await h.service.snapshotIn(STORE)).budgetExtensions?.all).toEqual([])
+  })
+
   test('replays to the same snapshot: the record is the log, and re-applying it changes nothing', async () => {
     const h = await storeWithRoot()
     await h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(MORE_RUNS, { maxRuns: 10 }), ROOT_SESSION)
     await h.service.recordBudgetExtensionIn(STORE, 'root', claimFor(
       { requestKey: 'k-later-deadline', deadlineAt: APPROVED_DEADLINE },
-      { deadlineAt: CONFIGURED_DEADLINE },
+      { maxRuns: 20, deadlineAt: CONFIGURED_DEADLINE },
     ), ROOT_SESSION)
 
     const live = await h.service.snapshotIn(STORE)

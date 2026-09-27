@@ -712,46 +712,49 @@ export class TaskService extends Service {
   }
 
   /**
-   * Records one approved budget extension (K4), and answers a repeat of a stored
-   * request from the record instead of appending a second fact.
+   * Records one approved budget extension (K4), or answers a repeat of one the
+   * store already holds.
    *
    * The envelope carries the tree's root task and the root session that asked,
-   * and the claim carries the raise itself, its identity and the approving
-   * channel's reference. The reducer is the gate for every rule — the root-session
-   * and root-task binding, the shape of each pair, the identity of the content,
-   * one key names one extension, and a dimension an earlier extension already
-   * moved has to be asked for from the value *that* extension left.
+   * and the claim carries the raise itself, its whole reading, its identity and
+   * the approving channel's reference. The reducer is the gate for every rule —
+   * the root-session and root-task binding, the shape of each pair and of the
+   * reading, the identity of the content, one key names one extension, and every
+   * dimension the claim was read at has to still be the ceiling in force, the
+   * ones it raises and the ones it leaves alone.
    *
-   * The idempotency read here is the same shape every other entry keeps
-   * ({@link askParentQuestionIn}): the store's current state, taken after the
-   * write queue has drained, and a key+identity match answered from the record
-   * with nothing written. It is not the serialization point — the reducer's own
-   * check is, inside the commit — so a caller that lost a race may still reach
-   * the commit, where the second write applies nothing and the state stays
-   * exactly what the first one made it.
+   * **Where the idempotency read is.** Inside the store's single write queue,
+   * with the append it decides: the key is looked up on the state the batch would
+   * be applied to, and a request the store already holds — same key, same
+   * identity — is answered there and writes nothing. It has to be inside: a check
+   * taken before the queue lets two callers that raced the same request both
+   * reach the append, and the reducer's own answer to a repeat is to apply
+   * nothing *and still be appended*, which would leave one decision written
+   * twice in the log. The reducer's check stays as the gate for every other
+   * writer (a replay, a hand-written event, an entry that commits directly): this
+   * entry short-circuits the append, the reducer refuses a duplicate's content.
    */
   async recordBudgetExtensionIn(storeId: string, rootTaskId: TaskId, claim: TaskBudgetExtensionClaim, actor: string): Promise<void> {
-    const store = this.requireStore(storeId)
-    await store.ready
-    await store.writes
-    const stored = store.state.snapshot().budgetExtensions?.byRequestKey[claim.requestKey]
-    if (stored !== undefined) {
-      if (stored.requestDigest !== claim.requestDigest) {
-        throw new Error(
-          `task: budget extension request key "${claim.requestKey}" is already bound to ${describeBudgetExtension(stored)} (identity ${stored.requestDigest}); ` +
-          'one key names one request, and different content under it is a new key rather than a second grant',
-        )
+    await this.serialIn(storeId, async state => {
+      const stored = state.snapshot().budgetExtensions?.byRequestKey[claim.requestKey]
+      if (stored !== undefined) {
+        if (stored.requestDigest !== claim.requestDigest) {
+          throw new Error(
+            `task: budget extension request key "${claim.requestKey}" is already bound to ${describeBudgetExtension(stored)} (identity ${stored.requestDigest}); ` +
+            'one key names one request, and different content under it is a new key rather than a second grant',
+          )
+        }
+        return
       }
-      return
-    }
-    await this.commitIn(storeId, [
-      event('TaskBudgetExtended', {
-        taskId: rootTaskId,
-        sessionId: claim.requestedBy,
-        actor,
-        payload: { extension: claim },
-      }),
-    ])
+      await this.appendIn(storeId, state, [
+        event('TaskBudgetExtended', {
+          taskId: rootTaskId,
+          sessionId: claim.requestedBy,
+          actor,
+          payload: { extension: claim },
+        }),
+      ])
+    })
   }
 
   async recordHandoffIn(storeId: string, handoff: TaskHandoff, actor: string): Promise<void> {
@@ -764,30 +767,58 @@ export class TaskService extends Service {
     })])
   }
 
-  async commitIn(storeId: string, events: readonly TaskEvent[]): Promise<void> {
-    if (events.length === 0) throw new Error('task: cannot commit an empty event batch')
+  /**
+   * Runs `work` inside the store's single write queue and answers what it
+   * returned. The queue is the store's one serial region: every commit chains
+   * onto it, so work scheduled here sees exactly the state the write before it
+   * left, and nothing can interleave between the decision it makes and the
+   * append it makes. `work` must not call an entry that chains onto the same
+   * queue — it would wait for itself.
+   */
+  private async serialIn<T>(storeId: string, work: (state: TaskState) => Promise<T> | T): Promise<T> {
     const store = this.requireStore(storeId)
     const run = store.writes.then(async () => {
       await store.ready
-      const next = store.state.clone()
-      for (const item of events) next.apply(item)
-      const records = events.map((item, index): StoredEvent => ({
-        type: 'task/event',
-        seq: SessionSeq(store.nextSeq + index),
-        time: Date.now(),
-        data: compact(item),
-        ignorable: true,
-      }))
-      await store.handle!.append(records)
-      store.state = next
-      store.nextSeq += records.length
-      this.ctx.emit('task/change', store.state.snapshot())
+      return await work(store.state)
     })
     store.writes = run.then(
       () => undefined,
       () => undefined,
     )
-    await run
+    return await run
+  }
+
+  /**
+   * Applies one batch and appends it to the store's log — the append half of a
+   * commit, for work already inside the write queue ({@link serialIn}).
+   *
+   * The clone is where the reducer's gates run: a batch the state refuses is
+   * never appended and the store is left exactly as it was found. Nothing here
+   * decides *whether* a batch is worth appending — an event whose reducer
+   * applies nothing is still a recorded fact for some kinds — which is why an
+   * entry that needs "no second event for a repeat" answers the repeat before
+   * calling this, inside the same serial region.
+   */
+  private async appendIn(storeId: string, state: TaskState, events: readonly TaskEvent[]): Promise<void> {
+    const store = this.requireStore(storeId)
+    const next = state.clone()
+    for (const item of events) next.apply(item)
+    const records = events.map((item, index): StoredEvent => ({
+      type: 'task/event',
+      seq: SessionSeq(store.nextSeq + index),
+      time: Date.now(),
+      data: compact(item),
+      ignorable: true,
+    }))
+    await store.handle!.append(records)
+    store.state = next
+    store.nextSeq += records.length
+    this.ctx.emit('task/change', store.state.snapshot())
+  }
+
+  async commitIn(storeId: string, events: readonly TaskEvent[]): Promise<void> {
+    if (events.length === 0) throw new Error('task: cannot commit an empty event batch')
+    await this.serialIn(storeId, async state => { await this.appendIn(storeId, state, events) })
   }
 
   /**

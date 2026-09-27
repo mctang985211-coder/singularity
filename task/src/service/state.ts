@@ -8,11 +8,13 @@ import {
   type TaskContract,
 } from '../contract.ts'
 import {
+  BUDGET_EXTENSION_BASELINE_FIELDS,
   BUDGET_EXTENSION_CLAIM_FIELDS,
   approvedBudgetCeilings,
   budgetExtensionRequestDigest,
   canonicalBudgetInstant,
   describeBudgetExtension,
+  describeBudgetReading,
   emptyBudgetExtensionIndex,
 } from '../budget.ts'
 import type { TaskBudgetExtension, TaskBudgetExtensionClaim, TaskBudgetExtensionIndex } from '../budget.ts'
@@ -1135,24 +1137,33 @@ export class TaskState {
    * delegated worker, another session's tree and a child task are each refused by
    * name, so one store's budget is only ever moved by facts about that store.
    *
-   * The chain: a dimension keeps the `next` of the last extension that moved it,
-   * and an extension that moves it again has to state *that* value as its
-   * `previous`. A record written against an older reading is refused rather than
-   * re-based on the newer one, so two grants approved against the same reading
-   * cannot both stand — the entry's serial re-read, inside the store's single
-   * write queue, is what decides between them.
+   * The chain, and the whole reading it was approved against: a dimension keeps
+   * the `next` of the last extension that moved it, and an extension that moves
+   * it again has to state *that* value as its `previous`. Every dimension the
+   * claim was read at is then checked against the ceiling in force — the ones it
+   * raises *and the ones it leaves alone* — so a request read before another
+   * grant moved anything is refused by name here even when the dimension it
+   * raises is untouched. That is what makes two grants approved against the same
+   * reading mutually exclusive instead of additive: one raising `maxRuns` and one
+   * moving the deadline would otherwise leave the tree under a pair of ceilings
+   * nobody was shown. A record written against an older reading is refused rather
+   * than re-based on the newer one, and the entry's serial re-read, inside the
+   * store's single write queue, is where that decision is made.
    *
-   * The first raise of a dimension states `previous` as the ceiling the
+   * The first raise of a dimension states its reading as the ceiling the
    * deployment itself configures, which this reducer cannot recompute (the
    * configuration is not in the store, and deliberately so: the initial ceilings
    * stay derived from the root's start and the deployment's config). What it does
    * instead is make the chain authoritative from that point on — no ceiling is
-   * ever derived from a grant, and a later grant can only continue what an
-   * earlier one left.
+   * ever derived from a grant, a later grant can only continue what an earlier
+   * one left, and from the first grant on, every dimension the store has moved
+   * has to appear in the next reading.
    *
-   * Idempotency is by request key and content: a repeat of a recorded request
-   * applies nothing, and the same key at different content is refused by name
-   * instead of being added to the record.
+   * Idempotency is by request key and content, and it is checked before the
+   * reading: a repeat of a recorded request applies nothing (the ceilings have
+   * moved since, by definition, and the repeat is not a second grant), and the
+   * same key at different content is refused by name instead of being added to
+   * the record.
    */
   private extendBudget(taskId: TaskId, sessionId: string | undefined, claim: TaskBudgetExtensionClaim, timestamp: string): void {
     if (!isRecord(claim)) throw new Error('task: a budget extension must be an object')
@@ -1186,6 +1197,32 @@ export class TaskState {
     if (claim.maxRuns === undefined && claim.deadlineAt === undefined) {
       throw new Error(`task: budget extension "${requestKey}" raises nothing: it must name maxRuns, deadlineAt, or both`)
     }
+    const reading = claim.baseline
+    if (!isRecord(reading)) {
+      throw new Error(
+        `task: budget extension "${requestKey}" carries no reading of the ceilings it was approved against (a \`baseline\`); ` +
+        'a grant is approved against the whole ceiling the person was shown, and a record without that reading cannot be checked against the ceiling in force',
+      )
+    }
+    for (const key of Object.keys(reading)) {
+      if (!BUDGET_EXTENSION_BASELINE_FIELDS.includes(key)) {
+        throw new Error(
+          `task: budget extension "${requestKey}" was read at "${key}", which is not a dimension of the tree's budget; ` +
+          'an unread field must not enter the record',
+        )
+      }
+    }
+    if (reading.maxRuns !== undefined && (!Number.isInteger(reading.maxRuns) || reading.maxRuns < 1)) {
+      throw new Error(
+        `task: budget extension "${requestKey}" was read at maxRuns ${JSON.stringify(reading.maxRuns)}; a run ceiling reading is a positive whole number of runs`,
+      )
+    }
+    if (reading.deadlineAt !== undefined && canonicalBudgetInstant(reading.deadlineAt) !== reading.deadlineAt) {
+      throw new Error(
+        `task: budget extension "${requestKey}" was read at deadline ${JSON.stringify(reading.deadlineAt)}; ` +
+        'a deadline reading is an absolute instant in canonical UTC form (`new Date(ms).toISOString()`)',
+      )
+    }
     if (claim.maxRuns !== undefined) {
       const { previous, next } = claim.maxRuns
       if (!Number.isInteger(previous) || previous < 1 || !Number.isInteger(next) || next < 1) {
@@ -1194,6 +1231,12 @@ export class TaskState {
       if (next <= previous) {
         throw new Error(
           `task: budget extension "${requestKey}" records maxRuns ${previous} → ${next}; a ceiling is the whole approved total and only ever moves up`,
+        )
+      }
+      if (reading.maxRuns !== previous) {
+        throw new Error(
+          `task: budget extension "${requestKey}" raises maxRuns from ${previous} but ${describeBudgetReading('maxRuns', reading.maxRuns)}; ` +
+          'a raise and the reading it was approved against name the same ceiling',
         )
       }
     }
@@ -1208,6 +1251,12 @@ export class TaskState {
       }
       if (Date.parse(next) <= Date.parse(previous)) {
         throw new Error(`task: budget extension "${requestKey}" records deadline ${previous} → ${next}; a deadline only ever moves later`)
+      }
+      if (reading.deadlineAt !== previous) {
+        throw new Error(
+          `task: budget extension "${requestKey}" moves the deadline from ${previous} but ${describeBudgetReading('deadlineAt', reading.deadlineAt)}; ` +
+          'a raise and the reading it was approved against name the same ceiling',
+        )
       }
     }
     const digest = budgetExtensionRequestDigest({
@@ -1224,7 +1273,10 @@ export class TaskState {
     const existing = index.byRequestKey[requestKey]
     if (existing !== undefined) {
       // A repeat of a recorded request is answered from the record: no second
-      // fact, no second effect, whatever the ceilings have moved to since.
+      // fact, no second effect, whatever the ceilings have moved to since. This
+      // is checked before the reading, because a repeat is not a grant that
+      // could be approved against anything — the ceilings it was read at have
+      // moved by definition, and that is what a repeat is.
       if (existing.requestDigest === claim.requestDigest) return
       throw new Error(
         `task: budget extension request key "${requestKey}" is already bound to ${describeBudgetExtension(existing)} (identity ${existing.requestDigest}); ` +
@@ -1232,18 +1284,23 @@ export class TaskState {
       )
     }
     const inForce = approvedBudgetCeilings(index.all)
-    if (claim.maxRuns !== undefined && inForce.maxRuns !== undefined && claim.maxRuns.previous !== inForce.maxRuns) {
+    // One comparison per dimension, over the whole reading — the dimensions the
+    // raise moves and the ones it leaves alone. The raise's own `previous` is
+    // the reading of the dimension it names (checked above), so a dimension this
+    // request moves cannot slip through this check either; what the two
+    // dimensions differ in is only whether anyone was asked to raise them.
+    if (inForce.maxRuns !== undefined && reading.maxRuns !== inForce.maxRuns) {
       throw new Error(
-        `task: budget extension "${requestKey}" was written against maxRuns ${claim.maxRuns.previous}, but the ceiling in force here is ${inForce.maxRuns}; ` +
+        `task: budget extension "${requestKey}" ${describeBudgetReading('maxRuns', reading.maxRuns)}, but the ceiling in force here is ${inForce.maxRuns}; ` +
         "the tree's ceiling moved since this request was read, so committing it would re-base an approval on a value nobody approved — " +
-        'read the ceiling again and ask for the difference',
+        'read the whole ceiling again and ask for the difference',
       )
     }
-    if (claim.deadlineAt !== undefined && inForce.deadlineAt !== undefined && claim.deadlineAt.previous !== inForce.deadlineAt) {
+    if (inForce.deadlineAt !== undefined && reading.deadlineAt !== inForce.deadlineAt) {
       throw new Error(
-        `task: budget extension "${requestKey}" was written against deadline ${claim.deadlineAt.previous}, but the deadline in force here is ${inForce.deadlineAt}; ` +
+        `task: budget extension "${requestKey}" ${describeBudgetReading('deadlineAt', reading.deadlineAt)}, but the deadline in force here is ${inForce.deadlineAt}; ` +
         "the tree's deadline moved since this request was read, so committing it would re-base an approval on a value nobody approved — " +
-        'read the deadline again and ask for the difference',
+        'read the whole ceiling again and ask for the difference',
       )
     }
     if (!nonEmpty(timestamp)) throw new Error(`task: budget extension "${requestKey}" has no recorded time on its event`)
@@ -1254,6 +1311,10 @@ export class TaskState {
       ...(claim.deadlineAt === undefined ? {} : { deadlineAt: { previous: claim.deadlineAt.previous, next: claim.deadlineAt.next } }),
       approvalRef: claim.approvalRef,
       requestedBy: claim.requestedBy,
+      baseline: {
+        ...(reading.maxRuns === undefined ? {} : { maxRuns: reading.maxRuns }),
+        ...(reading.deadlineAt === undefined ? {} : { deadlineAt: reading.deadlineAt }),
+      },
       recordedAt: timestamp,
     }
     this.value = {

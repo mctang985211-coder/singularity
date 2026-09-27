@@ -1514,14 +1514,20 @@ export interface RootBudgetExtensionRequest {
 
 /**
  * What the query reported as the reading a request stands on: each dimension's
- * ceiling *as it was read*, which the committing call has to hand back verbatim.
+ * ceiling *as it was read*, which the committing call has to hand back verbatim
+ * — every dimension the tree bounds, not only the one the request raises.
  *
  * This is the one value that travels through the human decision, and it travels
  * because the store's serial re-check needs it: the entry re-checks that each
  * dimension is still at the value the person saw approved, so a grant approved
  * against a reading that has since moved is refused instead of being silently
- * re-based on somebody else's result. A committing call that recomputes this
- * instead of passing it back is asking for a grant nobody approved.
+ * re-based on somebody else's result. That has to hold for the dimensions the
+ * request does not name as much as for the ones it does: two requests read at
+ * one ceiling — one raising the run count, one the deadline — would otherwise
+ * both stand and leave the tree under a pair of ceilings neither approver was
+ * shown. A committing call that recomputes this instead of passing it back is
+ * asking for a grant nobody approved, and one that names only part of it is
+ * refused where the tree bounds what it left out.
  */
 export interface RootBudgetExtensionBaseline {
   readonly maxRuns?: number
@@ -1628,6 +1634,22 @@ function ceilingsOf(budget: ResolvedRootBudget): RootBudgetCeilings {
  */
 export function budgetExtensionApprovalBinding(storeId: string, requestDigest: string): string {
   return sha256Hex(canonicalize({ storeId, requestDigest }))
+}
+
+/**
+ * The refusal a request earns when a ceiling of the reading it was approved
+ * against is not the ceiling in force — the dimension named, what the request
+ * says it was read at (or that it names the dimension nowhere) and what stands
+ * now. One wording for the dimensions a request raises and for the ones it
+ * leaves alone, because the refusal is the same fact either way: a person
+ * decided about a ceiling the tree is no longer under.
+ */
+function budgetDimensionMoved(dimension: 'maxRuns' | 'deadlineAt', read: number | string | undefined, inForce: number | string): string {
+  const from = read === undefined ? `read without a ${dimension} reading` : `read at ${String(read)}`
+  return (
+    `${dimension} moved since this request was read: it was ${from} and it is ${String(inForce)} in force now, ` +
+    'so approving this request would re-base a person\u2019s decision on a value nobody approved; read the ceilings again and ask for the total you want'
+  )
 }
 
 export class TaskRuntime extends Service {
@@ -2860,11 +2882,15 @@ export class TaskRuntime extends Service {
    *
    * **Where the serialization is.** The rules are judged once here, against the
    * reading handed back, and then again by the store's reducer, inside its single
-   * write queue: the dimension the request raises has to still be at the value
-   * the person saw. Two grants approved against the same reading therefore cannot
-   * both stand — the second is refused with nothing written, and its approver is
-   * told that the tree moved rather than that the grant was applied to a value
-   * nobody approved.
+   * write queue: *every* dimension the request was read at has to still be at the
+   * value the person saw — the dimension it raises and the ones it leaves alone.
+   * Two grants approved against the same reading therefore cannot both stand,
+   * whichever dimension each one moves: the second is refused with nothing
+   * written, and its approver is told that the tree moved rather than that the
+   * grant was applied to a ceiling nobody read. A request the store already holds
+   * under the same key and content is answered from the record by the same serial
+   * region, which is what keeps a retry from appending a second copy of one
+   * decision.
    *
    * **What an extension is not.** It is a record of a decision, not work: it
    * starts no run, resumes none, un-settles none, creates no task, child or
@@ -2896,6 +2922,14 @@ export class TaskRuntime extends Service {
     const approvalRef = await this.budgetApproval(sessionId, storeId, commit.callId, outcome.proposal.requestDigest)
     const claim: TaskBudgetExtensionClaim = {
       ...outcome.proposal,
+      // The whole reading, as the caller handed it back and as the judge just
+      // checked it against the ceilings in force: it travels with the claim
+      // because the store's own serial re-check re-runs that comparison, over
+      // every dimension the reading names — the ones this raise moves and the
+      // ones it leaves alone. What is passed on is the caller's reading, never
+      // a value recomputed here: a reading nobody handed back is not a reading
+      // anybody approved.
+      baseline: { ...baseline },
       approvalRef,
       requestedBy: sessionId,
     }
@@ -3044,9 +3078,10 @@ export class TaskRuntime extends Service {
    * dimension, values that denote something), then the store's answer for the key
    * — a repeat of a recorded request is *answered* from the record before any
    * bound is judged, so a key whose totals were approved can be retried after the
-   * tree moved on and still be idempotent — and only then the bounds: the
-   * dimension has to be bounded at all, the reading handed back has to be the one
-   * in force, and the total has to be a raise.
+   * tree moved on and still be idempotent — and only then the bounds, judged
+   * dimension by dimension over the *whole* reading: each ceiling has to be
+   * bounded if the request names it, the value handed back for it has to be the
+   * one in force, and a named total has to be a raise of it.
    */
   private judgeBudgetExtension(
     request: RootBudgetExtensionRequest,
@@ -3093,10 +3128,18 @@ export class TaskRuntime extends Service {
           'one key names one request, and different totals under it are a new request under a new key',
       }
     }
-    const maxRuns = this.judgeBudgetRaise('maxRuns', request.maxRuns, budget.maxRuns, baseline.maxRuns)
-    if (!maxRuns.ok) return { kind: 'refused', reason: maxRuns.reason }
-    const deadlineAt = this.judgeBudgetRaise('deadlineAt', deadline, budget.deadlineAt, baseline.deadlineAt)
+    // Judged in two passes over the same two dimensions: what the request asks
+    // for first, then the dimensions it leaves alone. A request that could never
+    // be a grant — a raise of a ceiling this deployment does not set, a total
+    // that is not a raise — is told *that*, rather than being sent back for a
+    // reading of a dimension it never mentioned; and a request whose own
+    // dimension is fine is still refused when the reading it was approved
+    // against no longer matches a ceiling the tree is under.
+    const maxRuns = this.judgeBudgetDimension('maxRuns', request.maxRuns, budget.maxRuns, baseline.maxRuns)
+    if (!maxRuns.ok && request.maxRuns !== undefined) return { kind: 'refused', reason: maxRuns.reason }
+    const deadlineAt = this.judgeBudgetDimension('deadlineAt', deadline, budget.deadlineAt, baseline.deadlineAt)
     if (!deadlineAt.ok) return { kind: 'refused', reason: deadlineAt.reason }
+    if (!maxRuns.ok) return { kind: 'refused', reason: maxRuns.reason }
     return {
       kind: 'proposed',
       proposal: {
@@ -3109,24 +3152,50 @@ export class TaskRuntime extends Service {
   }
 
   /**
-   * One dimension's raise, or the reason there is none. `requested` is what the
-   * request asks for (already canonical for an instant), `inForce` is the ceiling
-   * the store is under now and `read` is what the request says was in force when
-   * it was read.
+   * One dimension, judged from the two things the request carries about it: what
+   * it asks for (when it names it at all) and the value its reading says was in
+   * force. `requested` is already canonical for an instant, `inForce` is the
+   * ceiling the store is under now, and `read` is what the caller handed back.
    *
-   * The three refusals are the whole rule of K4's raise: a dimension nobody
-   * bounded is not raised (an unset ceiling is unlimited, and naming it would
-   * invent a limit), the reading has to be the value in force (so an approval
-   * cannot be re-based on a ceiling that moved under it), and the total asked for
-   * has to be above it (a ceiling is the whole approved total and only moves up).
+   * A dimension the request does *not* name is judged exactly as strictly as one
+   * it does: a grant is approved against the whole ceiling the person was shown,
+   * so a request read when another dimension was at a value that has since moved
+   * is refused even though its raise does not touch that dimension. That check is
+   * what makes two requests read at one ceiling mutually exclusive — one raising
+   * the run count and one the deadline would otherwise both stand, leaving the
+   * tree under a pair of ceilings neither approver ever saw. The store re-runs
+   * the same comparison inside its own serial region
+   * (`TaskService.recordBudgetExtensionIn`), which is where the decision between
+   * two racing commits is really made.
+   *
+   * The refusals, in the order a reading of them deserves: a named dimension the
+   * deployment leaves unbounded (an unset ceiling is unlimited, and naming it
+   * would invent a limit), a bounded dimension the reading does not name or does
+   * not agree with (either way the person's decision would be re-based on a value
+   * nobody approved), and a named total that does not raise the value in force.
    */
-  private judgeBudgetRaise<T extends number | string>(
+  private judgeBudgetDimension<T extends number | string>(
     dimension: 'maxRuns' | 'deadlineAt',
     requested: T | undefined,
     inForce: T | undefined,
     read: T | undefined,
   ): { readonly ok: true; readonly raise?: BudgetRaise<T> } | { readonly ok: false; readonly reason: string } {
-    if (requested === undefined) return { ok: true }
+    if (requested === undefined) {
+      // Nothing is raised here, and a dimension the tree does not bound has no
+      // reading to compare: an unlimited dimension is not a ceiling a decision
+      // can be based on.
+      if (inForce === undefined) return { ok: true }
+      if (read === undefined) {
+        return {
+          ok: false,
+          reason:
+            `${dimension} is ${String(inForce)} in force and this request was read without it: a grant is approved against the whole ceiling the person saw, ` +
+            'so a reading that leaves a bounded dimension out cannot be recognised as the one in force — read the ceilings again and hand the reading back whole',
+        }
+      }
+      if (read !== inForce) return { ok: false, reason: budgetDimensionMoved(dimension, read, inForce) }
+      return { ok: true }
+    }
     if (inForce === undefined) {
       return {
         ok: false,
@@ -3143,14 +3212,7 @@ export class TaskRuntime extends Service {
           'from a known value; read the ceilings again and hand the reading back verbatim',
       }
     }
-    if (read !== inForce) {
-      return {
-        ok: false,
-        reason:
-          `${dimension} moved since this request was read: it was read at ${String(read)} and it is ${String(inForce)} in force now, ` +
-          'so approving this request would re-base a person\u2019s decision on a value nobody approved; read the ceilings again and ask for the total you want',
-      }
-    }
+    if (read !== inForce) return { ok: false, reason: budgetDimensionMoved(dimension, read, inForce) }
     if (typeof inForce === 'number' && typeof requested === 'number') {
       if (requested <= inForce) {
         return {

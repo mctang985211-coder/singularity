@@ -197,6 +197,15 @@ function events(h: ReturnType<typeof harness>): SessionEvent[] {
   return [...h.sessions.values()].flatMap(stored => stored.events)
 }
 
+/** The request keys of the budget-extension events the log holds, in order — one entry per event, never one per record. */
+function budgetEvents(h: ReturnType<typeof harness>): string[] {
+  return events(h)
+    .filter(item => item.type === 'task/event')
+    .map(item => item.data as { kind?: string; payload?: { extension?: { requestKey?: string } } })
+    .filter(event => event.kind === 'TaskBudgetExtended')
+    .map(event => event.payload?.extension?.requestKey ?? '')
+}
+
 /** The run ceiling the store's facts leave in force, read through the one resolver that enforces it. */
 function effectiveMaxRuns(snapshot: TaskSnapshot): number | undefined {
   const resolution = resolveRootBudget(snapshot, ROOT_BUDGET as NonNullable<Config['rootBudget']>)
@@ -248,7 +257,7 @@ describe('budgetExtensionDraft', () => {
     await h.runtime.extendRootBudget(ROOT_SESSION, {
       requestKey: 'k-1',
       maxRuns: 20,
-      baseline: { maxRuns: 10 },
+      baseline: { maxRuns: 10, deadlineAt: CONFIGURED_DEADLINE },
       callId: 'call-1',
     })
 
@@ -438,7 +447,7 @@ describe('extendRootBudget', () => {
     await expect(h.runtime.extendRootBudget(ROOT_SESSION, {
       requestKey: 'k-empty',
       maxRuns: 20,
-      baseline: { maxRuns: 10 },
+      baseline: { maxRuns: 10, deadlineAt: CONFIGURED_DEADLINE },
       callId: '',
     })).rejects.toThrow(/names no tool call/)
 
@@ -467,7 +476,7 @@ describe('extendRootBudget', () => {
     await storeWithRoot(h, 2)
     const reading = await draft(h, { requestKey: 'k-runs', maxRuns: 20 })
     const approved = recordDecision(h, ROOT_SESSION, { callId: 'call-1', reason: cardOf(reading) })
-    const commit = { requestKey: 'k-runs', maxRuns: 20, baseline: { maxRuns: reading.effective.maxRuns as number }, callId: 'call-1' }
+    const commit = { requestKey: 'k-runs', maxRuns: 20, baseline: reading.effective, callId: 'call-1' }
     const first = await h.runtime.extendRootBudget(ROOT_SESSION, commit)
     const persisted = events(h).length
 
@@ -483,6 +492,7 @@ describe('extendRootBudget', () => {
       maxRuns: { previous: 10, next: 20 },
       approvalRef: `approval:${approved}`,
       requestedBy: ROOT_SESSION,
+      baseline: reading.effective,
     }, ROOT_SESSION)
     expect(events(h).length).toBe(persisted)
   })
@@ -532,8 +542,8 @@ describe('extendRootBudget', () => {
     const secondReading = await draft(h, { requestKey: 'k-b', maxRuns: 25 })
     recordDecision(h, ROOT_SESSION, { callId: 'call-a', reason: cardOf(firstReading) })
     recordDecision(h, ROOT_SESSION, { callId: 'call-b', reason: cardOf(secondReading) })
-    const first = { requestKey: 'k-a', maxRuns: 20, baseline: { maxRuns: 10 }, callId: 'call-a' }
-    const second = { requestKey: 'k-b', maxRuns: 25, baseline: { maxRuns: 10 }, callId: 'call-b' }
+    const first = { requestKey: 'k-a', maxRuns: 20, baseline: { maxRuns: 10, deadlineAt: CONFIGURED_DEADLINE }, callId: 'call-a' }
+    const second = { requestKey: 'k-b', maxRuns: 25, baseline: { maxRuns: 10, deadlineAt: CONFIGURED_DEADLINE }, callId: 'call-b' }
     await h.runtime.extendRootBudget(ROOT_SESSION, first)
     await expect(h.runtime.extendRootBudget(ROOT_SESSION, second))
       .rejects.toThrow(/maxRuns moved since this request was read: it was read at 10 and it is 20 in force now/)
@@ -543,8 +553,102 @@ describe('extendRootBudget', () => {
 
     // The same second request, re-read against the value in force, is a new
     // request: it lands as its own total, never as the two raises added up.
-    await h.runtime.extendRootBudget(ROOT_SESSION, { ...second, baseline: { maxRuns: 20 } })
+    await h.runtime.extendRootBudget(ROOT_SESSION, { ...second, baseline: { maxRuns: 20, deadlineAt: CONFIGURED_DEADLINE } })
     expect(effectiveMaxRuns(await h.task.snapshotIn(STORE))).toBe(25)
+  })
+
+  test('two grants approved against one reading, one raising each dimension, cannot both stand', async () => {
+    const h = harness({ config: { rootBudget: ROOT_BUDGET } })
+    await storeWithRoot(h, 3)
+    // The shape two people deciding about one tree produce: both read
+    // {maxRuns: 10, deadlineAt: CONFIGURED_DEADLINE} at the same moment, one asks
+    // for more runs and the other for a later deadline, and each names only the
+    // dimension it moves. The person who approved the deadline never read the
+    // run ceiling the first grant left behind.
+    const moreRuns = await draft(h, { requestKey: 'k-runs', maxRuns: 20 })
+    const moreTime = await draft(h, { requestKey: 'k-time', deadlineAt: APPROVED_DEADLINE })
+    expect(moreRuns.effective).toEqual({ deadlineAt: CONFIGURED_DEADLINE, maxRuns: 10 })
+    expect(moreTime.effective).toEqual({ deadlineAt: CONFIGURED_DEADLINE, maxRuns: 10 })
+    recordDecision(h, ROOT_SESSION, { callId: 'call-runs', reason: cardOf(moreRuns) })
+    recordDecision(h, ROOT_SESSION, { callId: 'call-time', reason: cardOf(moreTime) })
+
+    await h.runtime.extendRootBudget(ROOT_SESSION, {
+      requestKey: 'k-runs',
+      maxRuns: 20,
+      baseline: moreRuns.effective,
+      callId: 'call-runs',
+    })
+    const before = await h.task.snapshotIn(STORE)
+    await expect(h.runtime.extendRootBudget(ROOT_SESSION, {
+      requestKey: 'k-time',
+      deadlineAt: APPROVED_DEADLINE,
+      baseline: moreTime.effective,
+      callId: 'call-time',
+    })).rejects.toThrow(/moved since this request was read/)
+
+    const snapshot = await h.task.snapshotIn(STORE)
+    expect(snapshot.budgetExtensions?.all.map(entry => entry.requestKey)).toEqual(['k-runs'])
+    expect(budgetEvents(h)).toEqual(['k-runs'])
+    // Nothing but the one grant: no run, no task, no other fact moved.
+    expect({ ...snapshot, budgetExtensions: before.budgetExtensions }).toEqual(before)
+  })
+
+  test('a cross-dimension race on one reading lands one grant, refuses the other by name, and starts no run', async () => {
+    const h = harness({ config: { rootBudget: ROOT_BUDGET } })
+    await storeWithRoot(h, 3)
+    const moreRuns = await draft(h, { requestKey: 'k-runs', maxRuns: 20 })
+    const moreTime = await draft(h, { requestKey: 'k-time', deadlineAt: APPROVED_DEADLINE })
+    recordDecision(h, ROOT_SESSION, { callId: 'call-runs', reason: cardOf(moreRuns) })
+    recordDecision(h, ROOT_SESSION, { callId: 'call-time', reason: cardOf(moreTime) })
+    const before = await h.task.snapshotIn(STORE)
+    const persisted = events(h).length
+
+    // Both commits are in flight at once, both approved against the reading they
+    // were asked about: exactly one may stand, and the other has to be told that
+    // the ceiling it was read at moved — not that it was applied.
+    const raced = await Promise.allSettled([
+      h.runtime.extendRootBudget(ROOT_SESSION, {
+        requestKey: 'k-runs', maxRuns: 20, baseline: moreRuns.effective, callId: 'call-runs',
+      }),
+      h.runtime.extendRootBudget(ROOT_SESSION, {
+        requestKey: 'k-time', deadlineAt: APPROVED_DEADLINE, baseline: moreTime.effective, callId: 'call-time',
+      }),
+    ])
+    const fulfilled = raced.filter(settled => settled.status === 'fulfilled')
+    const rejected = raced.filter(settled => settled.status === 'rejected')
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    const reason = (rejected[0] as PromiseRejectedResult).reason as Error
+    expect(reason.message).toMatch(/moved since this request was read/)
+
+    const after = await h.task.snapshotIn(STORE)
+    expect(after.budgetExtensions?.all).toHaveLength(1)
+    expect(budgetEvents(h)).toHaveLength(1)
+    expect(events(h).length).toBe(persisted + 1)
+    expect(after.runs).toHaveLength(before.runs.length)
+    expect({ ...after, budgetExtensions: before.budgetExtensions }).toEqual(before)
+  })
+
+  test('one request committed twice at once lands one event, and answers both callers from the record', async () => {
+    const h = harness({ config: { rootBudget: ROOT_BUDGET } })
+    await storeWithRoot(h, 2)
+    const reading = await draft(h, { requestKey: 'k-once', maxRuns: 20 })
+    const approved = recordDecision(h, ROOT_SESSION, { callId: 'call-1', reason: cardOf(reading) })
+    const commit = { requestKey: 'k-once', maxRuns: 20, baseline: reading.effective, callId: 'call-1' }
+    const persisted = events(h).length
+
+    const raced = await Promise.allSettled([
+      h.runtime.extendRootBudget(ROOT_SESSION, commit),
+      h.runtime.extendRootBudget(ROOT_SESSION, commit),
+    ])
+    expect(raced.map(settled => settled.status)).toEqual(['fulfilled', 'fulfilled'])
+    const records = raced.map(settled => (settled as PromiseFulfilledResult<{ requestDigest: string; approvalRef: string }>).value)
+    expect(records[0]).toEqual(records[1])
+    expect(records[0]?.approvalRef).toBe(`approval:${approved}`)
+
+    expect(budgetEvents(h)).toEqual(['k-once'])
+    expect(events(h).length).toBe(persisted + 1)
+    expect((await h.task.snapshotIn(STORE)).budgetExtensions?.all).toHaveLength(1)
   })
 
   test('a raise survives a reopen of the store, and the deadline is not recomputed from the restart', async () => {
@@ -555,7 +659,7 @@ describe('extendRootBudget', () => {
     await first.runtime.extendRootBudget(ROOT_SESSION, {
       requestKey: 'k-more-time',
       deadlineAt: APPROVED_DEADLINE,
-      baseline: { deadlineAt: CONFIGURED_DEADLINE },
+      baseline: { maxRuns: 10, deadlineAt: CONFIGURED_DEADLINE },
       callId: 'call-1',
     })
     const before = await first.task.snapshotIn(STORE)

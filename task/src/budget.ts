@@ -12,6 +12,16 @@
  * value actually in force — which is what makes two grants approved against the
  * same reading mutually exclusive instead of additive.
  *
+ * Why the record keeps the whole reading ({@link BudgetExtensionBaseline}) and
+ * not only the dimensions it raises: the pairs say what one request moved, and
+ * what it was *read* at is the other half of the same decision. Two requests can
+ * name different dimensions of one reading — one the run count, one the deadline
+ * — and the reason they cannot both stand is the dimension each of them leaves
+ * alone, which no pair of either record states. So the reading travels with the
+ * claim and is re-checked, dimension by dimension, inside the store's serial
+ * region; a request whose reading no longer matches a ceiling the store can
+ * measure is refused by name, with nothing written.
+ *
  * Why the *previous* value is not an identity input: it is a reading, not a
  * request. The identity of an extension is the key plus the totals it asks for
  * ({@link budgetExtensionRequestDigest}), so a retry of the same request after a
@@ -65,8 +75,31 @@ export interface BudgetExtensionProposal {
 }
 
 /**
- * One extension as it is submitted: the proposal, plus whose request it is and
- * under which approval it was granted. `approvalRef` is the reference the
+ * The ceilings one request was read at: what was in force, dimension by
+ * dimension, when the caller read them and the person decided.
+ *
+ * The reading is the *whole* ceiling, never only the dimension a request names.
+ * It has to travel into the store with the claim, because the store's serial
+ * re-check is what makes two grants approved against one reading mutually
+ * exclusive: a request that raises `maxRuns` and one that moves the deadline,
+ * approved from the same reading, would otherwise both stand and leave the tree
+ * under a combination of ceilings — a run count with a deadline — that neither
+ * approver was ever shown. A dimension the reading leaves out is a reading the
+ * store cannot recognise as the ceiling in force, and it is refused rather than
+ * assumed, except where no extension has moved that dimension yet: the first
+ * raise of a dimension states the deployment's own configured value, which the
+ * store cannot recompute (the configuration is deliberately not in the store).
+ */
+export interface BudgetExtensionBaseline {
+  /** The run ceiling read, or absent when the reading does not name one. */
+  readonly maxRuns?: number
+  /** The deadline read, in the canonical form the resolver reports it. */
+  readonly deadlineAt?: string
+}
+
+/**
+ * One extension as it is submitted: the proposal, the whole reading it was
+ * approved against, and whose request it is. `approvalRef` is the reference the
  * runtime read back out of the approval channel's own record of the ask (that
  * channel's `ApprovalRequestId`, as `approval:<id>`) and is never derived here:
  * an empty one is refused by the reducer, so a record that stands is a record a
@@ -76,6 +109,8 @@ export interface TaskBudgetExtensionClaim extends BudgetExtensionProposal {
   readonly approvalRef: string
   /** The root coordination session that asked — the store's own root session. */
   readonly requestedBy: string
+  /** The ceilings this request was read at — every dimension the tree bounds, not only the ones it raises. */
+  readonly baseline: BudgetExtensionBaseline
 }
 
 /** One extension as the store holds it: the accepted claim, stamped with the event's own time. */
@@ -104,8 +139,11 @@ export interface TaskBudgetExtensionIndex {
 
 /** The closed field set of a submitted extension: an unread field must not enter the record. */
 export const BUDGET_EXTENSION_CLAIM_FIELDS: readonly string[] = [
-  'requestKey', 'requestDigest', 'maxRuns', 'deadlineAt', 'approvalRef', 'requestedBy',
+  'requestKey', 'requestDigest', 'maxRuns', 'deadlineAt', 'approvalRef', 'requestedBy', 'baseline',
 ]
+
+/** The closed field set of a reading: a dimension nobody read must not enter a claim either. */
+export const BUDGET_EXTENSION_BASELINE_FIELDS: readonly string[] = ['maxRuns', 'deadlineAt']
 
 /** One store's extension index with nothing in it; what a store without extensions answers. */
 export function emptyBudgetExtensionIndex(): TaskBudgetExtensionIndex {
@@ -157,6 +195,17 @@ export function describeBudgetExtension(extension: BudgetExtensionProposal): str
     ...(extension.deadlineAt === undefined ? [] : [`deadline ${extension.deadlineAt.previous} → ${extension.deadlineAt.next}`]),
   ]
   return `a budget extension raising ${raises.join(' and ')}`
+}
+
+/**
+ * One dimension's reading in one phrase, for a refusal that has to say what a
+ * request was read at: the value it was read at, or the fact that it names the
+ * dimension nowhere. The two are told apart because both are refusals to re-base
+ * a person's decision — a reading at a stale value and a reading that leaves a
+ * bounded dimension out — and neither is a reason to invent the missing one.
+ */
+export function describeBudgetReading(dimension: 'maxRuns' | 'deadlineAt', value: number | string | undefined): string {
+  return value === undefined ? `was read without a ${dimension} reading` : `was read at ${dimension} ${String(value)}`
 }
 
 /** The ceilings the approved extensions of `extensions` leave in force, per dimension each one moved. */
